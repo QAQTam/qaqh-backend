@@ -696,13 +696,13 @@ pub struct ContentUnavailable {
 | `kind` | 附加字段 | 含义 |
 |---|---|---|
 | `turn_interrupted` | `turn_id`, `last_fact_seq` | 闭合未完成 turn |
-| `turn_started` | `turn_id`, `input_id` | 恢复补写 durable input 的唯一 turn |
+| `turn_started` | `turn_id`, `input_id`, `mode` | 恢复补写 durable input 的唯一 turn |
 | `tool_indeterminate` | `call_id`, `execution_id` | 非幂等工具不确定 |
 | `tool_denied` | `call_id`, `error_code` | 无 intent 的 approval/policy 拒绝终态 |
 | `tool_replayed` | `call_id`, `execution_id`, `idempotency_key` | 幂等工具完成一次重放 |
 | `tool_reconciled` | `call_id`, `execution_id`, `evidence_ref` | 对账得出终态 |
 | `interaction_expired` | `interaction_id`, `reason` | 超时/重启/turn cancel 闭合 |
-| `subagent_finished` | `child_session_id`, `parent_call_id`, `status` | 恢复补写 child edge 终态 |
+| `subagent_finished` | `child_session_id`, `parent_call_id`, `status`, `result_ref`, `finished_at_ms`, `recovery_ref` | 恢复补写 child edge 终态 |
 | `upgrade_superseded` | `previous_recovery_id` | 已验证新 payload version，显式退出 read-only |
 | `commit_repaired` | `previous_commit_generation`, `committed_fact_seq`, `committed_offset` | 修复或重建 commit marker，使 high-water 可继续使用 |
 | `torn_tail_truncated` | `bytes`, `last_good_fact_seq` | 截断 torn tail |
@@ -712,7 +712,7 @@ pub struct ContentUnavailable {
 
 `RecoveryAction` 与 `RecoveryStep` 的映射规则：
 
-- `turn_interrupted`、`turn_started`、`tool_*`、`interaction_expired`、`subagent_finished`、`torn_tail_truncated` 必须分别映射到同名的 `RecoveryStep`。
+- `turn_interrupted`、`turn_started`、`tool_*`、`interaction_expired`、`subagent_finished`、`torn_tail_truncated` 必须分别映射到同名的 `RecoveryStep`；其字段集必须与对应 step 的 `data` 逐字段同构，新增或删除 step 字段时必须同步 action，禁止两处维护不同字段清单。
 - `upgrade_superseded` 与 `commit_repaired` 是显式“不产生 step”的 sidecar-only action；前者幂等键为 `(log_id, upgrade-fence.generation+1)`，后者为 `(log_id, previous_commit_generation)`，均不进入 `RecoveryPlan.steps` / `plan_hash`。
 - `projection_rebuilt` 是派生 projection 动作，不产生 canonical step。
 
@@ -1397,6 +1397,7 @@ pub struct EventsCommit {
 
 pub enum UpgradeState { ReadOnly, Writable }
 
+
 pub struct UpgradeFence {
     pub schema: String, // "qaqh.upgrade-fence/v1"
     pub log_id: LogId,
@@ -1420,6 +1421,8 @@ pub struct EventsPoison {
 ```
 
 `WriterFence.fencing_token` 以及 `AppendRejected.expected_token/presented_token` 在 CLI 与 JSON 中统一表示为无符号十进制字符串，格式为 `0|[1-9][0-9]*`，不得使用 JSON number。服务端解析为 `u128`，溢出必须拒绝；递增与相等比较必须基于解析后的数值，不得按字符串字典序比较。`generation_epoch` 仍按 JSON number 表示。
+
+`UpgradeState::Writable` 序列化为 `upgrade-fence.json.state=writable`，与 `RecoveryOutcome::Writable`（`SessionRecovered.outcome=writable`）是两个独立命名空间；规则 10/11 与 upgrade batch 表中的 `state=writable` 一律指前者。
 
 规则：
 
@@ -1952,7 +1955,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 | `TurnInterrupted` | `(turn_id, recovery_id)` | 已有则跳过 |
 | `ToolFinished` | `(call_id, recovery_id)` | 已有则跳过；不得写第二个终态 |
 | `InteractionExpired` | `(interaction_id, recovery_id)` | 已有则跳过 |
-| `SubagentFinished` | `(child_session_id)` | 已有则校验字段一致并跳过；不得写第二个 edge 终态 |
+| `SubagentFinished` | `(log_id, child_session_id, parent_call_id, recovery_id)` | 已有则校验字段一致并跳过；不得写第二个 edge 终态 |
 | `MoveTornTail` side effect | `(log_id, torn_tail_bytes_hash)` | 已移动则验证目标文件，不重复移动 |
 | `upgrade_superseded` | `(log_id, upgrade-fence.generation+1)` | 已有更高 generation 的 writable fence 时复用，不重复升级 |
 | `commit_repaired` | `(log_id, previous_commit_generation)` | 已修复同一代 marker 时验证 high-water/offset 后跳过 |
@@ -2266,7 +2269,7 @@ E2E 证据要求：
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
 | `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker | 2（committed fact + final SessionRecovered） | `outcome=commit_recovery_required`；不把 poison 后前缀当 canonical | 只重放 committed revision | none |
 | `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且无 poison/越界证据 | 2（原 committed fact + final writable SessionRecovered） | 先写 recovery evidence/audit，再安全重建 marker | committed revision 不重复 | none |
-+| `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复 | committed revision 不重复 | none |
+| `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复 | committed revision 不重复 | none |
 | `events-commit-marker-corrupt.jsonl` | marker 损坏或 `log_id` 不匹配，high-water 不可证 | 1（仅保留可证明的 committed prefix；不得追加业务 fact） | `outcome=commit_recovery_required` | 不发布/ack，不推进 clock | none |
 | `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO | 2（committed fact + final commit-repair marker） | `outcome=commit_recovery_required`，保持旧 high-water | 只重放 committed revision | none |
 | `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败 | 2（已 committed fact + final commit-repair marker） | 不发布/ack；repair 后 high-water 与 clock 一致 | 不越过 committed high-water | none |
