@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use qaqh_domain::ActivityState;
 use qaqh_domain::ControlCommand;
+use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
+use qaqh_session::actor::ConnectionId;
 use serde_json::{Value, json};
 
 use crate::{AgentRegistry, RingingHub};
@@ -94,6 +96,35 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .send_ringing(seed, env)
+    }
+
+    pub fn subscribe_channel(
+        &self,
+        seed: &str,
+        connection_id: &ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        self.registry()?
+            .subscribe_channel(seed, connection_id.clone(), channel)
+    }
+
+    pub fn unsubscribe_channel(
+        &self,
+        seed: &str,
+        connection_id: &ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        self.registry()?
+            .unsubscribe_channel(seed, connection_id.clone(), channel)
+    }
+
+    pub fn connection_closed(
+        &self,
+        seed: &str,
+        connection_id: &ConnectionId,
+    ) -> Result<usize, String> {
+        self.registry()?
+            .connection_closed(seed, connection_id.clone())
     }
 
     /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
