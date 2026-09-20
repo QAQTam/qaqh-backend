@@ -101,12 +101,13 @@ Gate：
 
 #### P2-2c ask/plan resolution
 
-状态：待开始。
+状态：已实现，PR 待创建；merge commit 待合入后回写。
 
 交付：
 
 - ask/plan resolution 在 legacy 校验成功后提交 actor。
 - rejected/expired resolution 直接闭合 interaction，不启动后续执行。
+- 重复 resolution 在 actor 已解决态 fail-closed，不重新调用 legacy handler。
 
 Gate：
 
