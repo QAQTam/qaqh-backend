@@ -39,7 +39,7 @@
 
 ### P2-1 `run_lap` 1:1 adapter 与统一生命周期入口
 
-状态：已实现，PR #199；merge commit 待合入后回写。
+状态：已完成，PR #199，merge `b7cd6b3`。
 
 已落地：
 
