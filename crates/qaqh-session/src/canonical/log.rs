@@ -12,7 +12,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::session_fact_v2::{EventId, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError};
+use crate::session_fact_v2::{
+    EventId, FactPayload, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError,
+};
 
 use super::reader::scan_committed_facts;
 use super::types::{
@@ -92,6 +94,7 @@ enum LogState {
     Writable,
     CommitRecoveryRequired(String),
     ReadOnlyUpgradeRequired(String),
+    Tombstone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +102,7 @@ struct CommittedPrefix {
     fact_seq: u64,
     offset: u64,
     last_event_id: Option<EventId>,
+    contains_tombstone: bool,
 }
 
 /// One session's canonical log. The struct does not hold the OS lock between
@@ -130,9 +134,10 @@ impl CanonicalLog {
         };
         let _guard = log.lock_exclusive()?;
         log.commit = log.load_or_initialize_commit()?;
-        log.reconcile_events_with_commit()?;
-        log.validate_committed_prefix()?;
-        if let Some(fence) = log.read_upgrade_fence()?
+        let contains_tombstone = log.validate_committed_prefix()?;
+        if contains_tombstone {
+            log.state = LogState::Tombstone;
+        } else if let Some(fence) = log.read_upgrade_fence()?
             && fence.state == UpgradeState::ReadOnly
         {
             log.state = LogState::ReadOnlyUpgradeRequired(format!(
@@ -153,6 +158,27 @@ impl CanonicalLog {
 
     pub fn committed(&self) -> &EventsCommit {
         &self.commit
+    }
+
+    pub fn recovery_state(&self) -> super::CanonicalRecoveryState {
+        match &self.state {
+            LogState::Writable => super::CanonicalRecoveryState {
+                outcome: crate::session_fact_v2::RecoveryOutcome::Writable,
+                reason: None,
+            },
+            LogState::CommitRecoveryRequired(reason) => super::CanonicalRecoveryState {
+                outcome: crate::session_fact_v2::RecoveryOutcome::CommitRecoveryRequired,
+                reason: Some(reason.clone()),
+            },
+            LogState::ReadOnlyUpgradeRequired(reason) => super::CanonicalRecoveryState {
+                outcome: crate::session_fact_v2::RecoveryOutcome::ReadOnlyUpgradeRequired,
+                reason: Some(reason.clone()),
+            },
+            LogState::Tombstone => super::CanonicalRecoveryState {
+                outcome: crate::session_fact_v2::RecoveryOutcome::Tombstone,
+                reason: None,
+            },
+        }
     }
 
     pub fn events_path(&self) -> PathBuf {
@@ -293,6 +319,7 @@ impl CanonicalLog {
 
         let mut encoded = serde_json::to_vec(&fact)?;
         encoded.push(b'\n');
+        let is_tombstone = matches!(fact.payload, FactPayload::SessionDeleted(_));
 
         let mut events = OpenOptions::new()
             .create(true)
@@ -328,6 +355,14 @@ impl CanonicalLog {
         {
             let message = format!("canonical append barrier failed: {error}");
             self.state = LogState::CommitRecoveryRequired(message.clone());
+            self.write_poison_after_fsync_failure(
+                &fence.writer_id,
+                committed_offset,
+                &encoded,
+                &message,
+                now_ms,
+            );
+            self.truncate_to_committed_offset();
             return Err(CanonicalError::CommitRecoveryRequired(message));
         }
         if let Err(error) = write_json_atomic(&self.commit_path(), &next_commit) {
@@ -336,7 +371,50 @@ impl CanonicalLog {
             return Err(CanonicalError::CommitRecoveryRequired(message));
         }
         self.commit = next_commit;
+        if is_tombstone {
+            self.state = LogState::Tombstone;
+        }
         Ok(fact)
+    }
+
+    fn write_poison_after_fsync_failure(
+        &self,
+        writer_id: &WriterId,
+        committed_offset: u64,
+        failed_bytes: &[u8],
+        error: &str,
+        now_ms: i64,
+    ) {
+        let poison = super::EventsPoison {
+            schema: super::EVENTS_POISON_SCHEMA.into(),
+            log_id: self.log_id.clone(),
+            writer_id: writer_id.clone(),
+            committed_fact_seq: self.commit.committed_fact_seq,
+            committed_offset,
+            failed_offset: committed_offset,
+            failed_bytes_hash: super::sha256_content_hash(failed_bytes),
+            error: error.to_owned(),
+            poisoned_at_ms: now_ms,
+        };
+        if let Err(error) = write_json_atomic(&self.poison_path(), &poison) {
+            log::error!(
+                "[qaqh-session] failed to write poison marker after fsync failure: {error}"
+            );
+        }
+    }
+
+    fn truncate_to_committed_offset(&self) {
+        let result = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.events_path())
+            .and_then(|events| {
+                events.set_len(self.commit.committed_offset)?;
+                events.sync_all()
+            });
+        if let Err(error) = result {
+            log::error!("[qaqh-session] failed to truncate events after fsync failure: {error}");
+        }
     }
 
     fn ensure_writable(&self) -> Result<(), CanonicalError> {
@@ -348,6 +426,9 @@ impl CanonicalLog {
             LogState::ReadOnlyUpgradeRequired(reason) => {
                 Err(CanonicalError::NotWritable(reason.clone()))
             }
+            LogState::Tombstone => Err(CanonicalError::NotWritable(
+                "session tombstone is terminal".into(),
+            )),
         }
     }
 
@@ -439,91 +520,29 @@ impl CanonicalLog {
     }
 
     fn load_or_initialize_commit(&self) -> Result<EventsCommit, CanonicalError> {
-        if self.poison_path().exists() {
-            return Err(CanonicalError::CommitRecoveryRequired(
-                "events poison marker is present".into(),
-            ));
-        }
-        match read_json::<EventsCommit>(&self.commit_path()) {
-            Ok(Some(marker)) => {
-                if marker.schema != EVENTS_COMMIT_SCHEMA {
-                    return Err(CanonicalError::CommitRecoveryRequired(format!(
-                        "unexpected commit marker schema {}",
-                        marker.schema
-                    )));
-                }
-                if marker.log_id != self.log_id {
-                    return Err(CanonicalError::CommitRecoveryRequired(
-                        "commit marker log_id does not match canonical log".into(),
-                    ));
-                }
-                if marker.committed_fact_seq > MAX_SAFE_FACT_SEQ {
-                    return Err(CanonicalError::CommitRecoveryRequired(
-                        "commit marker fact_seq exceeds safe integer range".into(),
-                    ));
-                }
-                Ok(marker)
-            }
-            Ok(None) => self.rebuild_missing_commit_marker(),
-            Err(CanonicalError::Json(error)) => Err(CanonicalError::CommitRecoveryRequired(
-                format!("commit marker is corrupt: {error}"),
-            )),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn rebuild_missing_commit_marker(&self) -> Result<EventsCommit, CanonicalError> {
-        let bytes = match fs::read(self.events_path()) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
-        let prefix = self.scan_complete_facts(&bytes)?;
-        let marker = EventsCommit {
-            schema: EVENTS_COMMIT_SCHEMA.into(),
-            log_id: self.log_id.clone(),
-            committed_fact_seq: prefix.fact_seq,
-            committed_offset: prefix.offset,
-            last_barrier_event_id: prefix.last_event_id,
-            commit_generation: 0,
-        };
-        write_json_atomic(&self.commit_path(), &marker)?;
-        log::warn!(
-            "[qaqh-session] rebuilt missing commit marker at fact_seq={} offset={}",
-            marker.committed_fact_seq,
-            marker.committed_offset
-        );
-        Ok(marker)
-    }
-
-    fn reconcile_events_with_commit(&self) -> Result<(), CanonicalError> {
-        let events_path = self.events_path();
-        let events = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&events_path)?;
-        let len = events.metadata()?.len();
-        if len < self.commit.committed_offset {
-            return Err(CanonicalError::CommitRecoveryRequired(format!(
-                "events.jsonl is shorter than committed offset: {len} < {}",
-                self.commit.committed_offset
-            )));
-        }
-        if len > self.commit.committed_offset {
-            events.set_len(self.commit.committed_offset)?;
-            events.sync_all()?;
+        let outcome = super::recovery_state::repair_commit_marker_unlocked(
+            &self.session_dir,
+            &self.session_id,
+            &self.log_id,
+        )?;
+        if outcome.marker_rebuilt {
             log::warn!(
-                "[qaqh-session] canonical log truncated uncommitted suffix: {} -> {}",
-                len,
-                self.commit.committed_offset
+                "[qaqh-session] rebuilt missing commit marker at fact_seq={} offset={}",
+                outcome.commit.committed_fact_seq,
+                outcome.commit.committed_offset
+            );
+        } else if outcome.commit_repaired {
+            log::warn!(
+                "[qaqh-session] repaired commit marker generation={} fact_seq={} offset={}",
+                outcome.commit.commit_generation,
+                outcome.commit.committed_fact_seq,
+                outcome.commit.committed_offset
             );
         }
-        Ok(())
+        Ok(outcome.commit)
     }
 
-    fn validate_committed_prefix(&self) -> Result<(), CanonicalError> {
+    fn validate_committed_prefix(&self) -> Result<bool, CanonicalError> {
         let committed_offset = self.commit.committed_offset;
         let file = File::open(self.events_path())?;
         let mut bytes = Vec::new();
@@ -548,13 +567,15 @@ impl CanonicalLog {
                 prefix.last_event_id
             )));
         }
-        Ok(())
+        Ok(prefix.contains_tombstone)
     }
 
     fn scan_complete_facts(&self, bytes: &[u8]) -> Result<CommittedPrefix, CanonicalError> {
         let mut last_event_id = None;
+        let mut contains_tombstone = false;
         let fact_seq = scan_committed_facts(bytes, &self.session_id, &self.log_id, |fact| {
             last_event_id = Some(fact.event_id.clone());
+            contains_tombstone |= matches!(fact.payload, FactPayload::SessionDeleted(_));
             Ok(())
         })?;
 
@@ -562,6 +583,7 @@ impl CanonicalLog {
             fact_seq,
             offset: bytes.len() as u64,
             last_event_id,
+            contains_tombstone,
         })
     }
 
