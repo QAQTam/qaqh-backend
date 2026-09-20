@@ -101,7 +101,7 @@ Gate：
 
 #### P2-2c ask/plan resolution
 
-状态：已实现，PR 待创建；merge commit 待合入后回写。
+状态：已实现，PR #211；merge commit 待合入后回写。
 
 交付：
 
