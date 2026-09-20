@@ -1,8 +1,8 @@
 # docs — 索引与归档状态
 
-> **索引日期**：2026-09-18（UTC+8）
-> **最后复核**：2026-09-19（docs 物理归档——方案 B 执行：31 份历史文档迁入 `archive/2026-09/`）
-> **基线**：`main` @ `2b472f2`
+> **索引日期**：2026-09-20（UTC+8）
+> **最后复核**：2026-09-20（新增 v2.0 总架构设计，纳入进行中活文档）
+> **基线**：`betav2` @ `5e0a9a9`
 > **本文件用途**：`docs/` 的唯一索引入口——**已完成什么、什么还在跑、归档去哪找**。
 > 目录职责与命名约定见 [`todo/README.md`](./todo/README.md) §6；各目录另有 `以yyyy-mm-dd-标题-*.md作为命名` 说明文件。
 
@@ -23,6 +23,7 @@
 | **09-19** | **审计账本 v2 落地**：JSONL 哈希链 + seq/单调时钟 + 授权决策链 + 对象 before/after 指纹 + 拒绝路径记账；双写 v1 CSV | [`spec/2026-09-19-审计账本v2-spec.md`](./spec/2026-09-19-审计账本v2-spec.md) |
 | **09-19** | **测试缺口盘点（v2.0 重构前）**：16 crate 测试资产清点 + 四个重构面（Ringing/TurnCore/Tool SDK/沙箱）缺口交叉比对 + P0/P1/P2 测试部署清单 | [`report/2026-09-19-测试缺口盘点-v2重构前-report.md`](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) |
 | **09-19** | **docs 物理归档（方案 B）**：§3 归档区 31 份历史文档（buglist 17 / report 11 / handoff 3）迁入 `archive/2026-09/`；`git mv` + 全量改链 + 链接校验同批完成 | [`archive/2026-09/`](./archive/2026-09/) |
+| **09-20** | **QAQH v2.0 总架构设计**：交叉 qaqh-backend / qaqh-tui-app / codex-main / grok-build，裁决 canonical fact、SessionActor、TurnCore、ToolRuntime、Policy/Sandbox、Ringing v2 与迁移验收 | [`plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) |
 
 ## 2. 已归档（2026-09-17，方案 A；2026-09-19 物理迁移）
 
@@ -115,12 +116,15 @@
 | spec | [2026-09-17-工具结果展示层契约-spec.md](./spec/2026-09-17-工具结果展示层契约-spec.md) | **已被 09-18 跨仓契约取代**，保留为量化证据与设计参照（悬空引用已修复） |
 | spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
 | spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
-| spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 冻结候选**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；待 #106 独立反证 |
+| spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 冻结候选，状态以 handoff §1 为唯一来源**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；D1-D41 已按 handoff §3 收口；用户已决定跳过 NPC 复审，待用户最终合并裁定 |
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
+| plan | [2026-09-19-qaqh-v2.0-前瞻设计-plan.md](./plan/2026-09-19-qaqh-v2.0-前瞻设计-plan.md) | **已被 09-20 总架构设计取代**；保留为方向输入与历史证据 |
+| plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构设计与开发计划（架构方向已收敛，P0 文档已收口，待用户合并裁定；状态以 handoff §1 为唯一来源）**：裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收；字段级阻断统一见 handoff §3 |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
-| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | **当前交接** |
+| handoff | [2026-09-20-qaqh-v2.0-首席架构师-handoff.md](./handoff/2026-09-20-qaqh-v2.0-首席架构师-handoff.md) | **当前唯一交接与阻断清单**：Codex 接手文档/schema；D1-D41 已闭环；用户已决定跳过 NPC 复审，待用户最终合并裁定；裁定前不得合并 #104；含工程侧可并行/必须等待边界 |
+| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | 上一轮交接（已完成） |
 | handoff | [2026-09-17-buglist复核九批次执行-handoff.md](./handoff/2026-09-17-buglist复核九批次执行-handoff.md) | 上一轮交接（已完成） |
 | report | [2026-09-12-exec与process工具设计评审-report.md](./report/2026-09-12-exec与process工具设计评审-report.md) | 被上述**未落地 plan** 的 §9 与 P6 引用 |
 | report | [2026-09-13-codex-exec设计对照与修订-report.md](./report/2026-09-13-codex-exec设计对照与修订-report.md) | 同上 |
