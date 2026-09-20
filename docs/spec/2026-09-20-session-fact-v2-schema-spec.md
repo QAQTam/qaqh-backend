@@ -1422,7 +1422,7 @@ pub struct EventsPoison {
 
 `WriterFence.fencing_token` 以及 `AppendRejected.expected_token/presented_token` 在 CLI 与 JSON 中统一表示为无符号十进制字符串，格式为 `0|[1-9][0-9]*`，不得使用 JSON number。服务端解析为 `u128`，溢出必须拒绝；递增与相等比较必须基于解析后的数值，不得按字符串字典序比较。`generation_epoch` 仍按 JSON number 表示。
 
-`EventsCommit.commit_generation` 从 `0` 开始，每次成功重写 `events.commit.json` 必须严格 `+1`；`commit_repaired.previous_commit_generation` 固定等于 repair 前的 `EventsCommit.commit_generation`，repair 后新 marker 的 generation 必须为 `previous_commit_generation + 1`。若 marker 缺失/损坏且无法恢复出 previous generation，则不得生成 `commit_repaired`，也不得伪造 `SessionRecovered { outcome=commit_recovery_required }`，只能保持 `CommitRecoveryRequired` runtime state；若 high-water 已可证明并能 durable 写入 recovery fact，则 final `SessionRecovered` 才允许记录该 outcome。
+`EventsCommit.commit_generation` 从 `0` 开始，每次成功重写 `events.commit.json` 必须严格 `+1`；`commit_repaired.previous_commit_generation` 固定等于 repair 前的 `EventsCommit.commit_generation`，repair 后新 marker 的 generation 必须为 `previous_commit_generation + 1`。若 marker 缺失/损坏且无法恢复出 previous generation，则不得生成 `commit_repaired`，也不得伪造 `SessionRecovered { outcome=commit_recovery_required }`，只能保持 `CommitRecoveryRequired` runtime state。若 `marker_missing_rebuildable=true`，该路径不生成 `commit_repaired`，只生成 `projection_rebuilt` action 并写 final `SessionRecovered { outcome=writable }`；若 high-water 已知且 repair 可 durable 写入 recovery fact，才允许生成 `commit_repaired` 并记录 `commit_recovery_required` 或 `writable`。
 
 `UpgradeState::Writable` 序列化为 `upgrade-fence.json.state=writable`，与 `RecoveryOutcome::Writable`（`SessionRecovered.outcome=writable`）是两个独立命名空间；规则 10/11 与 upgrade batch 表中的 `state=writable` 一律指前者。
 
@@ -1682,10 +1682,12 @@ GC 协议：
 
 ```text
 load events.jsonl
-  -> validate events.commit.json
+  -> inspect events.commit.json / events.poison.json
+  -> if marker missing: compute candidate_offset and marker_missing_rebuildable
+       -> true: rebuild marker as side effect, continue with outcome=writable
+       -> false: mark CommitRecoveryRequired and stop before append/publish/ack
   -> truncate anything beyond committed_offset
   -> validate envelope + schema on committed prefix
-  -> inspect events.poison.json
   -> find last complete line
   -> detect torn tail
   -> rebuild projections
@@ -1860,7 +1862,7 @@ canonical_json({
 | no-action | `SessionRecovered { outcome=writable, actions=[], torn_tail=false }` | 标准 batch key | 无 open 状态且无 torn/unknown/tombstone 时，创建一次闭合 batch |
 | unknown fact | `SessionRecovered { outcome=read_only_upgrade_required, actions=[], last_good_fact_seq=<unknown 前> }` | 标准 batch key | 不解释 unknown 及其后 fact；后续 load 复用同一 batch |
 | upgrade supersede | 先 durable 写 `upgrade-fence {generation+1,state=writable}`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }` | `(log_id, upgrade-fence.generation+1)` | sidecar-only batch；不进入 `RecoveryPlan.steps` / `plan_hash`；仅允许在已有 read-only marker 且 pre-recovery log 已变化时创建；旧 writer 不得写此 batch |
-| commit/poison repair | 先按 `events.commit.json` 验证/截断或重建 marker，再写 `SessionRecovered { outcome=writable 或 commit_recovery_required, actions=[commit_repaired] }`；无法证明 high-water 时不写业务 fact，只保持 `CommitRecoveryRequired` | `(log_id, previous_commit_generation)` | repair 成功且 high-water/clock 一致后回 writable；否则只允许 repair 路径，禁止发布/ack |
+| commit/poison repair | 先按 `events.commit.json` 验证/截断或重建 marker：若 `marker_missing_rebuildable=true`，actions=`[projection_rebuilt]`、outcome=`writable`；若 previous generation/high-water 已知，actions=`[commit_repaired]`、outcome=`writable` 或 `commit_recovery_required`；无法证明 high-water 时不写 business fact，只保持 runtime `CommitRecoveryRequired` | `(log_id, previous_commit_generation)`（仅 commit_repaired）；rebuild 路径用标准 batch key | repair 成功且 high-water/clock 一致后回 writable；否则只允许 repair 路径，禁止发布/ack |
 | tombstone | `SessionRecovered { outcome=tombstone, actions=[] }` | 标准 batch key | 不写其它 recovery fact，不执行物理清理 |
 
 其它恢复矩阵：
@@ -1965,7 +1967,8 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 | `SubagentFinished` | `(log_id, child_session_id, parent_call_id, recovery_id)` | 已有则校验字段一致并跳过；不得写第二个 edge 终态 |
 | `MoveTornTail` side effect | `(log_id, torn_tail_bytes_hash)` | 已移动则验证目标文件，不重复移动 |
 | `upgrade_superseded` | `(log_id, upgrade-fence.generation+1)` | 已有更高 generation 的 writable fence 时复用，不重复升级 |
-| `commit_repaired` | `(log_id, previous_commit_generation)` | 已修复同一代 marker 时验证 high-water/offset 后跳过 |
+| `commit_repaired` | `(log_id, previous_commit_generation)` | 仅当 previous generation 可证明时使用；已修复同一代 marker 时验证 high-water/offset 后跳过 |
+| `projection_rebuilt` | `(log_id, projection, through_fact_seq)` | marker 缺失但 `marker_missing_rebuildable=true` 时使用；不伪造 `previous_commit_generation` |
 
 `recovery_event_id` 在 plan 阶段预分配；同一 batch 的所有 recovery facts 共享该 ID。重复 load 只有在 batch key 或 pre-recovery log 改变时才生成新 `RecoveryRef`、新 `plan_hash` 和新 batch；不得按“每次 load”追加 `SessionRecovered`。
 
@@ -2276,11 +2279,11 @@ E2E 证据要求：
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
 | `recovery-tool-denied.jsonl` | ToolCallDeclared + InteractionResolved(rejected) + parent restart | 3（Declared + Resolved + denied Finished） | `terminal_status=denied`，`execution_id=None`，零执行 metrics；`actions=[tool_finished]` | control/timeline revision 各前进一次 | none |
 | `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker | 2（committed fact + final SessionRecovered） | `outcome=commit_recovery_required`；不把 poison 后前缀当 canonical | 只重放 committed revision | none |
-| `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且无 poison/越界证据 | 2（原 committed fact + final writable SessionRecovered） | 先写 recovery evidence/audit，再安全重建 marker | committed revision 不重复 | none |
-| `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复 | committed revision 不重复 | none |
+| `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且 `marker_missing_rebuildable=true` | 2（原 committed fact + final writable SessionRecovered） | 重建 marker 后恢复；`actions=[projection_rebuilt]`，不得伪造 `commit_repaired` | committed revision 不重复 | none |
+| `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复；`actions=[projection_rebuilt]` | committed revision 不重复 | none |
 | `events-commit-marker-corrupt.jsonl` | marker 损坏或 `log_id` 不匹配，high-water 不可证 | 1（仅保留可证明的 committed prefix；不写 final recovery fact） | runtime state=`CommitRecoveryRequired`；无 `SessionRecovered` | 不发布/ack，不推进 clock | none |
-| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO，旧 marker/high-water 可证明 | 2（committed fact + final `SessionRecovered {outcome=commit_recovery_required}`） | 保持旧 high-water；repair 前不可写 | 只重放 committed revision | none |
-| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败，旧 marker/high-water 可证明 | 2（已 committed fact + final `SessionRecovered {outcome=commit_recovery_required}`） | 不发布/ack；repair 后 high-water 与 clock 一致 | 不越过 committed high-water | none |
+| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO，旧 marker/high-water 可证明 | 2（committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 保持旧 high-water；repair 前不可写 | 只重放 committed revision | none |
+| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败，旧 marker/high-water 可证明 | 2（已 committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 不发布/ack；repair 后 high-water 与 clock 一致 | 不越过 committed high-water | none |
 | `recovery-tombstone.jsonl` | SessionCreated + SessionDeleted + load | 3（SessionCreated + SessionDeleted + final SessionRecovered） | `outcome=tombstone` | 不再前进 | none |
 | `compaction.jsonl` | facts + CompactionApplied | 2 | checkpoint 缺失可重建 | context revision 一致 | none |
 | `torn-tail.jsonl` | 完整 fact + 半行 | 2（完整 fact + final SessionRecovered） | `torn_tail=true` | 与截断后 rebuild 一致 | none |
