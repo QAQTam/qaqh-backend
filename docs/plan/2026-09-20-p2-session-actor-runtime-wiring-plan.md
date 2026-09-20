@@ -149,13 +149,45 @@ Gate：
 
 ### P2-3 取消 token 树与单一终态
 
-状态：待开始。
+状态：进行中；拆成 token tree 与 legacy 状态清理两个可验收切片。
 
 交付：
 
 - root turn 与 child work 使用统一 token tree。
 - cancel 只产生一个 `InterruptReason` 和一次 terminal。
 - 删除运行路径中的重复 `user_cancelled` 判定。
+
+Gate：
+
+- cancel-before-start、cancel-in-round、重复 cancel、完成与取消竞争全绿。
+- 任何 terminal 后不得再发布 round、tool start 或 pending interaction。
+
+#### P2-3a 取消 token tree 与子代理派生
+
+状态：实现中，issue #222。
+
+交付：
+
+- `CancelToken` 从单点 flag 升级为 parent/child tree；父取消同步并 latch 到所有后代，子取消不污染父或兄弟。
+- `arc()` 轮询面读取每个节点的 effective cancellation，覆盖 Gate SSE 与工具线程。
+- 子代理 spawn/respawn 从父会话 token 派生；registry 仍负责投递子代理取消命令以收口 terminal。
+
+Gate：
+
+- parent cancel -> child/grandchild 的 `is_set()` 与 `arc()` 立即可见。
+- child cancel 不影响 parent/sibling；child 不能清除从 live parent 继承的取消，parent clear 也不复活已取消的后代。
+- 父取消仍向已登记 child 投递命令，且不重新拉起已退出实例。
+
+非目标：本切片不删除 `Loop::user_cancelled`，也不把 `run_lap` 改成 SessionActor 唯一执行 owner。
+
+#### P2-3b 单一 InterruptReason 与删除重复 user_cancelled
+
+状态：待开始。
+
+交付：
+
+- cancel 的 producer 只登记一次原因，runtime 不再从 token/thread-local/boolean 多路推导。
+- 删除运行路径中的重复 `user_cancelled` 判定，保留行为契约测试。
 
 Gate：
 
