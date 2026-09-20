@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::effect::PersistOp;
+use crate::legacy_writer::LegacyWriterFacade;
 
 pub(crate) const WAL_FILE_NAME: &str = "messages.wal";
 
@@ -144,6 +145,7 @@ impl WalWriter {
     /// created, so finding op lines here means an unrecovered stale log: it is
     /// rotated to `messages.wal.stale-<ts>` instead of being appended after.
     pub fn open(session_dir: &Path) -> io::Result<Self> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         let path = session_dir.join(WAL_FILE_NAME);
         let scanned = scan_file(&path)?;
         let (next_seq, has_ops) = scanned.unwrap_or((1, false));
@@ -174,6 +176,7 @@ impl WalWriter {
     /// Append one op. Returns the assigned sequence number.
     /// `write` only — pair with [`Self::sync`] at the round boundary.
     pub fn log_op(&mut self, op: &PersistOp) -> io::Result<u64> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         let seq = self.next_seq;
         let line = serde_json::to_string(&WalLineWrite { seq, op })
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -193,6 +196,7 @@ impl WalWriter {
     /// applied to the archive). Atomic via temp + rename; a crash that loses
     /// the rename resurfaces the old ops, which replay dedupes idempotently.
     pub fn checkpoint(&mut self) -> io::Result<()> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         write_header(&self.path, self.next_seq)?;
         self.file = open_append(&self.path)?;
         Ok(())
@@ -601,12 +605,17 @@ impl WalSource {
         })
     }
 
+    #[allow(clippy::io_other_error)] // preserves the injected fault kind
     fn faulted(&self) -> io::Error {
         #[cfg(any(test, feature = "test-harness"))]
         let kind = self.fault.map_or(io::ErrorKind::Other, |plan| plan.kind);
         #[cfg(not(any(test, feature = "test-harness")))]
         let kind = io::ErrorKind::Other;
-        io::Error::new(kind, "injected WAL read fault")
+        if kind == io::ErrorKind::Other {
+            io::Error::other("injected WAL read fault")
+        } else {
+            io::Error::new(kind, "injected WAL read fault")
+        }
     }
 
     /// Start a new forward pass at `position` (rewind / restart).
@@ -760,6 +769,7 @@ fn is_header_line(line: &str) -> bool {
 ///
 /// `Ok(false)` means "not checkpointed", never "truncated anyway".
 pub fn checkpoint_file(session_dir: &Path) -> io::Result<bool> {
+    let _legacy_writer = LegacyWriterFacade::lock();
     let path = session_dir.join(WAL_FILE_NAME);
     match open_reader(session_dir)? {
         None => Ok(true),
