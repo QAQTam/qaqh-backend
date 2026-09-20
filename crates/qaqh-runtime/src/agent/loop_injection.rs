@@ -224,9 +224,13 @@ impl Loop {
                 let _scope = self
                     .paced_emitter
                     .enter_causation(Some(command_id.as_str()));
-                let outcome =
-                    self.input
-                        .handle_system_input(&mut ctx, &text, Some(command_id.as_str()));
+                let outcome = self.input.handle_system_input(
+                    &mut ctx,
+                    &mut self.session.turn,
+                    &command_id,
+                    &text,
+                    Some(command_id.as_str()),
+                );
                 let _ = ctx;
                 Some(outcome)
             }

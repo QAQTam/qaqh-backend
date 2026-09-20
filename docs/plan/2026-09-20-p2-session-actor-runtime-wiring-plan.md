@@ -66,18 +66,53 @@ Gate：
 
 ### P2-2 mailbox 全入口
 
+状态：进行中；按入口类型拆分，避免一次迁移全部 wire 语义。
+
+#### P2-2a 用户与系统输入准入
+
+状态：已实现，PR #204；merge commit 待合入后回写。
+
+交付：
+
+- 用户输入、goal 自动推进和 system injection 在写入消息存储前调用 `TurnActor::begin_input`。
+- 输入准入失败时发布 `input_rejected`，不得继续落盘或开新 turn。
+- `InputId` 使用上游 command identity，而不是从 `turn_id` 临时拼接。
+
+Gate：
+
+- 第二 active turn 在消息落盘前被拒绝。
+- 用户与系统输入路径没有绕过 `TurnActor` 的 turn start。
+- 原有输入、注入和 session lifecycle 测试保持通过。
+
+#### P2-2b interaction resolution
+
 状态：待开始。
 
 交付：
 
-- 用户输入、取消、审批结果、订阅请求和 session lifecycle 命令全部提交给 `SessionActor` mailbox。
-- 外部模块只发送 command，不直接修改 turn 状态。
+- permission、ask、plan resolution 在恢复 turn 前提交给 actor。
+- actor 记录 pending interaction 身份，并在同一串行点校验 first-answer-wins。
+- rejected/expired resolution 直接闭合 interaction，不启动后续执行。
+
+Gate：
+
+- 重复 resolution、迟到 resolution 和 cancel 竞争有契约测试。
+- terminal 后不得重放 pending modal。
+
+#### P2-2c subscription 与 lifecycle ingress
+
+状态：待开始。
+
+交付：
+
+- 逻辑订阅关系与 session lifecycle 命令提交给 `SessionActor` mailbox。
+- transport 只持有 socket/connection 映射，不维护第二份 session 订阅事实。
 - 明确 mailbox 满、shutdown 和迟到 command 的错误语义。
 
 Gate：
 
 - 所有 ingress 路径有顺序和幂等测试。
-- 没有旁路直接修改 active turn / terminal。
+- 没有旁路直接修改 active turn / terminal / subscription。
 - 订阅事件顺序与 canonical fact 提交顺序一致。
 
 ### P2-3 取消 token 树与单一终态

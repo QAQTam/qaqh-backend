@@ -242,6 +242,14 @@ impl TurnEngine {
         self.actor.observe_outcome(outcome)
     }
 
+    pub(crate) fn begin_input(
+        &mut self,
+        turn_id: &str,
+        input_id: &str,
+    ) -> Result<(), TurnActorError> {
+        self.actor.begin_input(turn_id, input_id)
+    }
+
     pub(crate) fn cancel_turn(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
         self.actor.cancel(turn_id)
     }
