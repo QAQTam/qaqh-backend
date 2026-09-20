@@ -1,5 +1,9 @@
 //! Rebuildable projection contract and canonical reader harness.
 
+mod meta;
+
+pub use meta::{SessionMetaProjection, SessionMetaSnapshot};
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
