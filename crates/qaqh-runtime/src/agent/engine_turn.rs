@@ -10,7 +10,7 @@ use qaqh_domain::AskAnswer;
 use qaqh_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
-use super::turn_actor::{InteractionAdmission, TurnActor, TurnActorError};
+use super::turn_actor::{InteractionAdmission, InteractionState, TurnActor, TurnActorError};
 use super::types::*;
 use crate::agent::turn_lap::admit as turn_admit;
 use crate::agent::turn_lap::backfill as turn_backfill;
@@ -256,6 +256,10 @@ impl TurnEngine {
         interaction_id: &str,
     ) -> InteractionAdmission {
         self.actor.admit_interaction_resolution(interaction_id)
+    }
+
+    pub(crate) fn interaction_state(&self, interaction_id: &str) -> InteractionState {
+        self.actor.interaction_state(interaction_id)
     }
 
     pub(crate) fn begin_input(
