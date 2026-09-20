@@ -3,6 +3,7 @@
 mod control;
 mod conversation;
 mod meta;
+mod replay;
 mod resource;
 mod set;
 mod timeline;
@@ -18,6 +19,10 @@ pub use conversation::{
     ConversationTurnState,
 };
 pub use meta::{SessionMetaProjection, SessionMetaSnapshot};
+pub use replay::{
+    ReplayOutcome, ReplayWindow, projection_event_id, projection_events_for_fact,
+    projection_stream_key, replay_reliable,
+};
 pub use resource::{GraphEdgeState, ResourceProjection, ResourceSnapshot, WorkspaceResourceState};
 pub use set::{ProjectionSet, ProjectionSetDelta, ProjectionSetSnapshot};
 pub use timeline::{
