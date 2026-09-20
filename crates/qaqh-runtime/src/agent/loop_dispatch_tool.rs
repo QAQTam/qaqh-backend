@@ -6,6 +6,7 @@ use super::loop_core::Loop;
 use super::types::*;
 
 use super::engine_tool::PermissionDisposition;
+use super::turn_actor::InteractionAdmission;
 use qaqh_domain::ToolCommand;
 
 impl Loop {
@@ -72,6 +73,27 @@ impl Loop {
                     }
                     PermissionDisposition::UiHandled => {}
                     PermissionDisposition::LlmResolved { call_id, admitted } => {
+                        match self.session.turn.admit_interaction_resolution(&call_id) {
+                            InteractionAdmission::Accepted { remaining } => {
+                                log::debug!(
+                                    "[PERMISSION] actor accepted {call_id}; {remaining} interaction(s) remain"
+                                );
+                            }
+                            InteractionAdmission::AlreadyResolved => {
+                                let _ = ctx;
+                                self.emit_operation_failed(
+                                    command_id,
+                                    qaqh_domain::ErrorScope::Tool,
+                                    "interaction_not_found",
+                                    "tool permission request was already resolved",
+                                );
+                                return;
+                            }
+                            InteractionAdmission::Unknown => {
+                                // Process-recovery or legacy state may predate the actor
+                                // registry; ToolEngine remains the authoritative validator.
+                            }
+                        }
                         let outcome = self.session.turn.handle_permission_resolved(
                             &mut ctx,
                             &mut self.session.tool,

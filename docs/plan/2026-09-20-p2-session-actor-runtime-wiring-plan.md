@@ -70,7 +70,7 @@ Gate：
 
 #### P2-2a 用户与系统输入准入
 
-状态：已实现，PR #204；merge commit 待合入后回写。
+状态：已完成，PR #204，merge `c199e64`。
 
 交付：
 
@@ -84,14 +84,28 @@ Gate：
 - 用户与系统输入路径没有绕过 `TurnActor` 的 turn start。
 - 原有输入、注入和 session lifecycle 测试保持通过。
 
-#### P2-2b interaction resolution
+#### P2-2b permission resolution
+
+状态：已实现，PR #207；merge commit 待合入后回写。
+
+交付：
+
+- `TurnActor` 在 `YieldToUser` 时登记 pending permission/ask/plan 身份。
+- permission resolution 经 ToolEngine 校验后提交 actor，重复 resolution 返回 `interaction_not_found`。
+- actor 保留 pending/remaining/resolved 集合，first-answer-wins；未知/恢复态继续走 legacy 校验。
+
+Gate：
+
+- 重复 permission resolution 和 partial resolution 有契约测试。
+- 原有 permission lifecycle 回归测试保持通过。
+
+#### P2-2c ask/plan resolution
 
 状态：待开始。
 
 交付：
 
-- permission、ask、plan resolution 在恢复 turn 前提交给 actor。
-- actor 记录 pending interaction 身份，并在同一串行点校验 first-answer-wins。
+- ask/plan resolution 在 legacy 校验成功后提交 actor。
 - rejected/expired resolution 直接闭合 interaction，不启动后续执行。
 
 Gate：
@@ -99,7 +113,7 @@ Gate：
 - 重复 resolution、迟到 resolution 和 cancel 竞争有契约测试。
 - terminal 后不得重放 pending modal。
 
-#### P2-2c subscription 与 lifecycle ingress
+#### P2-2d subscription 与 lifecycle ingress
 
 状态：待开始。
 
