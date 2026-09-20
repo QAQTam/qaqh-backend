@@ -13,9 +13,9 @@ use super::types::{
     ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind, InputPurpose,
     InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason, LogId,
     MAX_SAFE_FACT_SEQ, PolicyDecisionRef, ProjectionSlot, RecoveryAction, RecoveryOutcome,
-    RecoveryRef, ResourceId, ResourceKind, SessionId, SessionMetadataPatch, SideEffectClass,
-    SubagentTerminalStatus, TitleSource, ToolCallId, ToolError, ToolMetrics, ToolReplayCapability,
-    ToolTerminalStatus, TurnError, TurnId, TurnMode, TurnTerminal,
+    RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId, SessionMetadataPatch,
+    SideEffectClass, SubagentTerminalStatus, TitleSource, ToolCallId, ToolError, ToolMetrics,
+    ToolReplayCapability, ToolTerminalStatus, TurnError, TurnId, TurnMode, TurnTerminal,
 };
 use super::validation::ValidationError;
 
@@ -154,6 +154,75 @@ impl ProjectionEvent {
             }
         }
         Ok(())
+    }
+
+    pub fn reliable(
+        event_id: EventId,
+        source_fact: &SessionFact,
+        stream_key: StreamKey,
+        projection_slot: ProjectionSlot,
+        payload: ProjectionPayload,
+    ) -> Result<Self, ValidationError> {
+        let projection_index = projection_slot.as_u16();
+        let event = Self {
+            event_id,
+            source_fact_seq: source_fact.fact_seq,
+            source_event_id: source_fact.event_id.clone(),
+            stream_key,
+            delivery: Delivery::Reliable {
+                cursor: ReliableCursor {
+                    log_id: source_fact.log_id.clone(),
+                    fact_seq: source_fact.fact_seq,
+                    projection_index,
+                },
+            },
+            projection_slot: Some(projection_slot),
+            projection_index: Some(projection_index),
+            payload,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    pub fn replaceable(
+        event_id: EventId,
+        source_fact: &SessionFact,
+        stream_key: StreamKey,
+        revision: u64,
+        payload: ProjectionPayload,
+    ) -> Result<Self, ValidationError> {
+        let event = Self {
+            event_id,
+            source_fact_seq: source_fact.fact_seq,
+            source_event_id: source_fact.event_id.clone(),
+            stream_key,
+            delivery: Delivery::Replaceable { revision },
+            projection_slot: None,
+            projection_index: None,
+            payload,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    pub fn ephemeral(
+        event_id: EventId,
+        source_fact: &SessionFact,
+        stream_key: StreamKey,
+        payload: ProjectionPayload,
+    ) -> Result<Self, ValidationError> {
+        let event = Self {
+            event_id,
+            source_fact_seq: source_fact.fact_seq,
+            source_event_id: source_fact.event_id.clone(),
+            stream_key,
+            delivery: Delivery::Ephemeral,
+            projection_slot: None,
+            projection_index: None,
+            payload,
+        };
+        event.validate()?;
+        Ok(event)
     }
 }
 
