@@ -6,7 +6,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use qaqh_session::canonical::{
-    CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EventsCommit, WriterId,
+    CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_POISON_FILE,
+    EventsCommit, WriterId,
 };
 use qaqh_session::session_fact_v2::{EventId, LogId, SessionFact, SessionId};
 
@@ -25,7 +26,7 @@ fn log_id() -> LogId {
 fn fact(event_ordinal: u64) -> SessionFact {
     let mut fact: SessionFact =
         serde_json::from_str(ENVELOPE_FIXTURE.trim()).expect("parse envelope fixture");
-    fact.fact_seq = 0;
+    fact.fact_seq = event_ordinal;
     fact.event_id = EventId::new(format!("01J{event_ordinal:023}"));
     fact
 }
@@ -249,14 +250,71 @@ fn fact_identity_mismatch_is_rejected_without_writing() {
 }
 
 #[test]
-fn missing_marker_for_non_empty_log_fails_closed() {
+fn missing_marker_for_complete_log_is_rebuilt() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let line = serde_json::to_string(&fact(1)).expect("serialize fact");
+    let first = serde_json::to_string(&fact(1)).expect("serialize first fact");
+    let second = serde_json::to_string(&fact(2)).expect("serialize second fact");
+    let events = format!("{first}\n{second}\n");
+    fs::write(temp.path().join(EVENTS_FILE), &events).expect("write events");
+
+    let log = CanonicalLog::open(temp.path(), session_id(), log_id())
+        .expect("complete prefix is rebuildable");
+    let marker = read_commit(temp.path());
+    assert_eq!(marker.committed_fact_seq, 2);
+    assert_eq!(marker.committed_offset, events.len() as u64);
+    assert_eq!(marker.commit_generation, 0);
+    assert_eq!(
+        marker.last_barrier_event_id.as_ref().map(EventId::as_str),
+        Some("01J00000000000000000000002")
+    );
+    assert_eq!(log.committed(), &marker);
+}
+
+#[test]
+fn missing_marker_with_torn_tail_fails_closed_without_truncation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let first = serde_json::to_string(&fact(1)).expect("serialize first fact");
+    let original = format!("{first}\n{{\"partial\":");
+    fs::write(temp.path().join(EVENTS_FILE), &original).expect("write torn events");
+
+    let error = CanonicalLog::open(temp.path(), session_id(), log_id())
+        .expect_err("torn tail is not rebuildable");
+    assert!(matches!(error, CanonicalError::CommitRecoveryRequired(_)));
+    assert_eq!(
+        fs::read_to_string(temp.path().join(EVENTS_FILE)).expect("read events"),
+        original
+    );
+    assert!(!temp.path().join(EVENTS_COMMIT_FILE).exists());
+}
+
+#[test]
+fn missing_marker_with_wrong_identity_fails_closed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut wrong = fact(1);
+    wrong.log_id = LogId::new("0198f1a0-0000-7000-8000-000000000003");
+    let line = serde_json::to_string(&wrong).expect("serialize wrong fact");
     fs::write(temp.path().join(EVENTS_FILE), format!("{line}\n")).expect("write events");
 
     let error = CanonicalLog::open(temp.path(), session_id(), log_id())
-        .expect_err("missing marker must fail closed");
+        .expect_err("identity mismatch is not rebuildable");
+    assert!(matches!(
+        error,
+        CanonicalError::IdentityMismatch { field: "log_id" }
+    ));
+    assert!(!temp.path().join(EVENTS_COMMIT_FILE).exists());
+}
+
+#[test]
+fn poison_marker_blocks_commit_rebuild() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let line = serde_json::to_string(&fact(1)).expect("serialize fact");
+    fs::write(temp.path().join(EVENTS_FILE), format!("{line}\n")).expect("write events");
+    fs::write(temp.path().join(EVENTS_POISON_FILE), b"{}").expect("write poison");
+
+    let error = CanonicalLog::open(temp.path(), session_id(), log_id())
+        .expect_err("poison marker must fail closed");
     assert!(matches!(error, CanonicalError::CommitRecoveryRequired(_)));
+    assert!(!temp.path().join(EVENTS_COMMIT_FILE).exists());
 }
 
 #[test]
