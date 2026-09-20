@@ -6,6 +6,7 @@ pub mod canonical;
 pub mod grouping;
 pub mod manager;
 mod migrate;
+pub mod projection;
 pub mod session_fact_v2;
 pub mod session_meta;
 pub mod store;
