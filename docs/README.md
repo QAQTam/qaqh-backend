@@ -1,8 +1,8 @@
 # docs — 索引与归档状态
 
 > **索引日期**：2026-09-20（UTC+8）
-> **最后复核**：2026-09-20（v2 P0 已冻结并合并，canonical types 与测试追踪已落地）
-> **基线**：`betav2` @ `bef097c`
+> **最后复核**：2026-09-20（v2 P1 canonical storage 与 Gate v2 spec 补充）
+> **基线**：`betav2` @ `361995e`
 > **本文件用途**：`docs/` 的唯一索引入口——**已完成什么、什么还在跑、归档去哪找**。
 > 目录职责与命名约定见 [`todo/README.md`](./todo/README.md) §6；各目录另有 `以yyyy-mm-dd-标题-*.md作为命名` 说明文件。
 
@@ -25,6 +25,7 @@
 | **09-19** | **docs 物理归档（方案 B）**：§3 归档区 31 份历史文档（buglist 17 / report 11 / handoff 3）迁入 `archive/2026-09/`；`git mv` + 全量改链 + 链接校验同批完成 | [`archive/2026-09/`](./archive/2026-09/) |
 | **09-20** | **QAQH v2.0 总架构设计**：交叉 qaqh-backend / qaqh-tui-app / codex-main / grok-build，裁决 canonical fact、SessionActor、TurnCore、ToolRuntime、Policy/Sandbox、Ringing v2 与迁移验收 | [`plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) |
 | **09-20** | **v2 P0 实现资产**：canonical `session-fact/v2` 类型与 golden fixtures、消费者迁移盘点、I1-I18 Gate 追踪已合并；生产 canonical log 尚未实现 | [`spec/2026-09-20-session-fact-v2-schema-spec.md`](./spec/2026-09-20-session-fact-v2-schema-spec.md)、[`report/2026-09-20-v2-consumer-migration-inventory-report.md`](./report/2026-09-20-v2-consumer-migration-inventory-report.md)、[`report/2026-09-20-v2-p0-gate-traceability-report.md`](./report/2026-09-20-v2-p0-gate-traceability-report.md) |
+| **09-20** | **Gate v2 多协议 spec 补充**：把 plan §5.3 展开为 ProtocolAdapter、EndpointCapabilities、GateRequest/GateEvent/GateOutcome、迁移与 conformance contract | [`spec/2026-09-20-gate-v2多协议与provider适配-spec.md`](./spec/2026-09-20-gate-v2多协议与provider适配-spec.md) |
 
 ## 2. 已归档（2026-09-17，方案 A；2026-09-19 物理迁移）
 
@@ -118,6 +119,7 @@
 | spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
 | spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
 | spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 已冻结并合并**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；PR #115 已落地 canonical types 与 golden fixtures，生产 canonical log 仍待实现 |
+| spec | [2026-09-20-gate-v2多协议与provider适配-spec.md](./spec/2026-09-20-gate-v2多协议与provider适配-spec.md) | **P1 设计补充，待评审**：展开 plan §5.3 的 GateHost 边界，冻结 ProtocolAdapter、EndpointCapabilities、GateRequest/GateEvent/GateOutcome、迁移与 conformance 规则 |
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
 | plan | [2026-09-19-qaqh-v2.0-前瞻设计-plan.md](./plan/2026-09-19-qaqh-v2.0-前瞻设计-plan.md) | **已被 09-20 总架构设计取代**；保留为方向输入与历史证据 |
 | plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构与开发计划（已冻结并合并）**：PR #104 merge `84adf01`；裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收；后续实现按 P1-P6 拆分 |
