@@ -39,7 +39,14 @@
 
 ### P2-1 `run_lap` 1:1 adapter 与统一生命周期入口
 
-状态：待开始。
+状态：已实现，PR #199；merge commit 待合入后回写。
+
+已落地：
+
+- `qaqh-runtime` 新增 `TurnActor` adapter，将现有 `Outcome` 映射为 `SessionActor` / `TurnCore` 转换。
+- Start/RoundStarted/Suspend/Resume/Cancel/Finish 在统一 `apply_outcome` 边界校验。
+- 重复 terminal 幂等，冲突终态 fail-closed；cancel、stale suspension 与 superseded turn 接入 actor。
+- `run_lap` 内部逻辑、messages、timeline 和持久化顺序未改。
 
 交付：
 

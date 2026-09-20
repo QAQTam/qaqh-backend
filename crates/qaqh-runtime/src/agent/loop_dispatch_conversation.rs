@@ -101,6 +101,13 @@ impl Loop {
                 // T-1-3：记录取消**原因**——系统注入只在非用户取消态清除标记
                 // 并开回合（见 `Loop::inject` / `dispatch_injections_after_compact`）。
                 self.user_cancelled = true;
+                let actor_cancel = match turn_id.as_deref() {
+                    Some(turn_id) => self.session.turn.cancel_turn(turn_id),
+                    None => self.session.turn.cancel_active_turn(),
+                };
+                if let Err(error) = actor_cancel {
+                    log::error!("[CANCEL] SessionActor rejected cancellation: {error}");
+                }
                 // BUG-2026-09-13-08：取消不得留下「有 tool_use 无 tool_result」
                 // 的孤儿 step —— 下轮模型会重发同一 tool_use，已执行过的工具
                 // 被重复执行（挂起→批准→取消正是触发窗口）。
