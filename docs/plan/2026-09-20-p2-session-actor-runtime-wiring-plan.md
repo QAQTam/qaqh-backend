@@ -199,15 +199,17 @@ Gate：
 
 #### P2-3c 单一 InterruptReason producer
 
-状态：待开始。
+状态：实现中，issue #230。
 
 交付：
 
-- cancel 的 producer 只登记一次原因，runtime 不再从 token/thread-local/boolean 多路推导。
+- `TurnActor::cancel` / `cancel_active` 返回 `Interrupted { reason }`、`Idle` 或 `AlreadyTerminal`，`InterruptReason` 只由该转换产生。
+- `ConversationCancel` 在 actor 已 terminal 时不再补发 `ConversationCancelled`；运行中 token 取消只保留先到的 `TurnCompleted(cancelled)`。
 
 Gate：
 
 - cancel 只产生一个 `InterruptReason` 和一次 terminal。
+- cancel-during-gate 与重复 cancel 的同一 turn 只出现一个 terminal 事件。
 
 ### P2-4 loop 外移与 thread-local 清理
 

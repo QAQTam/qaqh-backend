@@ -6,6 +6,7 @@ use super::loop_core::Loop;
 use super::types::*;
 
 use super::injection::{Injection, InjectionPriority, InjectionSemantics, SUBAGENT_SOURCE};
+use super::turn_actor::TurnCancellation;
 use qaqh_domain::{ConversationCommand, DomainEvent};
 
 impl Loop {
@@ -101,9 +102,21 @@ impl Loop {
                     Some(turn_id) => self.session.turn.cancel_turn(turn_id),
                     None => self.session.turn.cancel_active_turn(),
                 };
-                if let Err(error) = actor_cancel {
-                    log::error!("[CANCEL] SessionActor rejected cancellation: {error}");
-                }
+                let actor_cancel_rejected = actor_cancel.is_err();
+                let emit_terminal = match actor_cancel {
+                    Ok(TurnCancellation::Interrupted { reason }) => {
+                        log::debug!(
+                            "[CANCEL] SessionActor interrupted active turn with {reason:?}"
+                        );
+                        true
+                    }
+                    Ok(TurnCancellation::Idle) => true,
+                    Ok(TurnCancellation::AlreadyTerminal) => false,
+                    Err(error) => {
+                        log::error!("[CANCEL] SessionActor rejected cancellation: {error}");
+                        true
+                    }
+                };
                 // BUG-2026-09-13-08：取消不得留下「有 tool_use 无 tool_result」
                 // 的孤儿 step —— 下轮模型会重发同一 tool_use，已执行过的工具
                 // 被重复执行（挂起→批准→取消正是触发窗口）。
@@ -126,10 +139,16 @@ impl Loop {
                     &self.session.agent.config.model,
                     &self.session.agent.config.reasoning_effort,
                 );
-                self.reset_all_engines();
-                self.paced_emitter.emit_domain(DomainEvent::Conversation(
-                    qaqh_domain::ConversationEvent::ConversationCancelled { turn_id },
-                ));
+                if actor_cancel_rejected {
+                    self.reset_all_engines();
+                } else {
+                    self.reset_all_engines_preserving_turn_terminal();
+                }
+                if emit_terminal {
+                    self.paced_emitter.emit_domain(DomainEvent::Conversation(
+                        qaqh_domain::ConversationEvent::ConversationCancelled { turn_id },
+                    ));
+                }
             }
             ConversationCommand::ConversationUndoTurn { turn_id } => {
                 // 与 legacy UndoTurn 语义对齐：活动回合被挂起（ask/权限/plan
