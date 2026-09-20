@@ -4,6 +4,7 @@ mod control;
 mod conversation;
 mod meta;
 mod resource;
+mod set;
 mod timeline;
 
 pub use control::{
@@ -18,6 +19,7 @@ pub use conversation::{
 };
 pub use meta::{SessionMetaProjection, SessionMetaSnapshot};
 pub use resource::{GraphEdgeState, ResourceProjection, ResourceSnapshot, WorkspaceResourceState};
+pub use set::{ProjectionSet, ProjectionSetDelta, ProjectionSetSnapshot};
 pub use timeline::{
     TimelineAssistantBlockState, TimelineCompactionState, TimelineEntry, TimelineEntryKind,
     TimelineInputState, TimelineProjection, TimelineSnapshot, TimelineToolCallState,
