@@ -372,6 +372,7 @@ impl AgentRegistry {
         let parent_seed = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
+        let parent_cancel = self.cancel_for_seed(&parent_seed);
         self.spawn_subagent_inprocess(
             seed,
             SubagentSpawnSpec {
@@ -381,6 +382,7 @@ impl AgentRegistry {
                 max_tokens,
                 ephemeral,
             },
+            parent_cancel,
         )?;
         if !parent_seed.is_empty() && parent_seed != seed {
             self.link_subagent(&parent_seed, seed);
@@ -392,6 +394,7 @@ impl AgentRegistry {
         &mut self,
         seed: &str,
         spec: SubagentSpawnSpec,
+        parent_cancel: Option<crate::agent::types::CancelToken>,
     ) -> Result<(), String> {
         if self.instances.contains_key(seed) {
             return Err(format!("agent already running for {seed}"));
@@ -409,6 +412,7 @@ impl AgentRegistry {
             cancel,
             writer_dead,
         } = channels;
+        let cancel = parent_cancel.map_or(cancel, |parent| parent.child());
         let cancel_for_sender = cancel.clone();
 
         let event_seed = seed.to_string();
@@ -637,12 +641,18 @@ impl AgentRegistry {
             .get(seed)
             .map(AgentInstance::kind_name)
             .unwrap_or(AgentKind::Session);
+        let parent_cancel = self
+            .subagent_parent
+            .get(seed)
+            .and_then(|parent| self.cancel_for_seed(parent));
         if let Some(dead) = self.instances.remove(seed) {
             dead.shutdown();
         }
         match kind {
             AgentKind::Session => self.get_or_spawn(seed)?,
-            AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(seed, spec)?,
+            AgentKind::Subagent(spec) => {
+                self.spawn_subagent_inprocess(seed, spec, parent_cancel)?
+            }
         }
         write(self.instances.get(seed).expect("respawned instance"))
     }
@@ -775,6 +785,16 @@ impl AgentRegistry {
         children
     }
 
+    fn cancel_for_seed(&self, seed: &str) -> Option<crate::agent::types::CancelToken> {
+        if seed.is_empty() {
+            return None;
+        }
+        self.instances.get(seed).map(|instance| {
+            let AgentTransport::InProcess { cancel, .. } = &instance.transport;
+            cancel.clone()
+        })
+    }
+
     /// T-1-4 测试/运维只读视图：父会话登记的子代理 seed。
     #[doc(hidden)]
     pub fn subagent_children(&self, parent: &str) -> Vec<String> {
@@ -814,12 +834,12 @@ impl AgentRegistry {
             );
             let delivered = match self.instances.get(&child) {
                 Some(AgentInstance {
-                    transport: AgentTransport::InProcess { cmd_tx, cancel },
+                    transport: AgentTransport::InProcess { cmd_tx, cancel: _ },
                     ..
                 }) => {
-                    // 与 `send_ringing` 的 interrupt 分支一致：先置 token，长
-                    // 在途的 gate/tool 工作立即观察到取消。
-                    cancel.set();
+                    // Token tree propagation already happened when the parent
+                    // token was set in `send_ringing`. This command is still
+                    // required to drain the child actor and emit its terminal.
                     cmd_tx
                         .send(crate::agent::types::WorkerCommand {
                             frame: env,
@@ -911,13 +931,19 @@ impl AgentRegistry {
         if self.shutting_down {
             return;
         }
-        let dead: Vec<(String, AgentKind)> = self
+        let dead: Vec<(String, AgentKind, Option<crate::agent::types::CancelToken>)> = self
             .instances
             .iter()
             .filter(|(_, instance)| instance.is_dead())
-            .map(|(seed, instance)| (seed.clone(), instance.kind_name()))
+            .map(|(seed, instance)| {
+                let parent_cancel = self
+                    .subagent_parent
+                    .get(seed)
+                    .and_then(|parent| self.cancel_for_seed(parent));
+                (seed.clone(), instance.kind_name(), parent_cancel)
+            })
             .collect();
-        for (seed, kind) in dead {
+        for (seed, kind, parent_cancel) in dead {
             // 退避：同一 seed 最近 1 秒内刚 spawn 过（例如刚拉起又立刻崩溃）
             // 则跳过本轮，避免无意义的重启风暴。
             if self
@@ -942,7 +968,9 @@ impl AgentRegistry {
             }
             let spawned = match kind {
                 AgentKind::Session => self.spawn(&seed, None),
-                AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(&seed, spec),
+                AgentKind::Subagent(spec) => {
+                    self.spawn_subagent_inprocess(&seed, spec, parent_cancel)
+                }
             };
             if let Err(error) = spawned {
                 log::error!("[AGENT:{seed}] respawn failed: {error}");
@@ -1332,6 +1360,95 @@ mod tests {
             registry.connection_closed("seed-registry", connection_id),
             Ok(0)
         );
+    }
+
+    #[test]
+    fn parent_cancel_uses_token_tree_and_still_delivers_child_terminal_command() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            directory.path().join("sessions"),
+            directory.path().join(".active_session"),
+        ));
+        let parent_cancel = crate::agent::types::CancelToken::new();
+        let child_cancel = parent_cancel.child();
+        let (parent_tx, parent_rx) = std::sync::mpsc::sync_channel(4);
+        let (child_tx, child_rx) = std::sync::mpsc::sync_channel(4);
+        let parent = AgentInstance {
+            seed: "parent-seed".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx: parent_tx,
+                cancel: parent_cancel.clone(),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let child = AgentInstance {
+            seed: "child-seed".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx: child_tx,
+                cancel: child_cancel.clone(),
+            },
+            kind: AgentKind::Subagent(SubagentSpawnSpec {
+                tools: Vec::new(),
+                model: None,
+                base_url: None,
+                max_tokens: None,
+                ephemeral: true,
+            }),
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let mut registry = AgentRegistry {
+            instances: HashMap::from([
+                ("parent-seed".into(), parent),
+                ("child-seed".into(), child),
+            ]),
+            activity: SessionActivityTracker::default(),
+            sessions,
+            hub: None,
+            shutting_down: false,
+            last_spawn: HashMap::new(),
+            subagent_parent: HashMap::new(),
+            subagent_children: HashMap::new(),
+        };
+        registry.link_subagent("parent-seed", "child-seed");
+        let cancel = qaqh_ringing::RingingWorkerCommandEnvelope::new(
+            "parent-seed",
+            "cancel-parent",
+            qaqh_ringing::RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
+            ),
+        );
+
+        registry
+            .send_ringing("parent-seed", &cancel)
+            .expect("cancel parent");
+
+        assert!(parent_cancel.is_set());
+        assert!(
+            child_cancel.is_set(),
+            "parent cancellation must propagate through the token tree"
+        );
+        assert!(
+            parent_rx.try_recv().is_ok(),
+            "parent cancel command must still be delivered"
+        );
+        let child_command = child_rx
+            .try_recv()
+            .expect("child terminal command must still be delivered");
+        assert!(matches!(
+            child_command.frame.command,
+            qaqh_ringing::RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None }
+            )
+        ));
+        qaqh_workspace::remove_session_cancel("parent-seed");
+        qaqh_workspace::remove_session_cancel("child-seed");
     }
 
     fn tool_finished(summary: String) -> qaqh_domain::DomainEvent {
