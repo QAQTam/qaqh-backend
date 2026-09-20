@@ -1,6 +1,6 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D16 收口并通过复审前不得标记为已冻结
+> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D20 收口并通过复审前不得标记为已冻结
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
 > **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
@@ -304,6 +304,7 @@ pub enum FactPayload {
 - `execution_id` 必须与同 call 的 `ToolIntent` 一致；只有 call 在 intent 之前结束的 `denied/cancelled` 终态才允许为 `None`，包括 policy deny、审批拒绝/过期，以及 `ToolCallDeclared` 后 policy 决策前崩溃的 recovery cancelled；同一无 intent recovery 路径产生的 `denied/approval_rejected` 也必须为 `None`。
 - `metrics.retry_count` 在 v2.0 固定为 0。实际执行过 handler 时，`started_at_ms` 取 handler 开始时间，`finished_at_ms` 取 handler 结束时间，字节计数取 typed output/progress 的真实值。
 - 无 handler 的 `denied`、审批拒绝与审批过期也必须写 metrics，规则固定为：`started_at_ms = finished_at_ms`，`retry_count=0`，`output_bytes=0`，`progress_bytes_total=0`。`finished_at_ms` 对 policy deny 取 `ToolCallDeclared` 后 actor 作出 deny 的 canonical `ToolFinished.finished_at_ms`，对 ask 拒绝取 `InteractionResolved.resolved_at_ms`，对 ask 过期取 `InteractionExpired.expired_at_ms`。
+- `recovery_ref` 只允许由 `RecoveryStep::ToolFinished` / recovery batch 生成的 `ToolFinished` 设置；正常 live execution、正常 deny/ask/cancel 路径必须为 `None`，不得借用该字段表达普通 provenance。
 - `ToolFinished` 是唯一 call 终态；`backgrounded` 也是终态，后续资源事件不得写第二个 `ToolFinished`。
 
 policy 生命周期是规范顺序，不允许由 handler 或 UI 自行改变：
@@ -672,7 +673,7 @@ pub struct ContentUnavailable {
 {"kind":"reconcile","probe_ref":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}
 ```
 
-`CommitRecoveryRequired` 是 recovery-only 状态。若无法在不越过 committed high-water 的前提下 durable append，则不得伪造 `SessionRecovered`，该状态通过 recovery/reset 面暴露；一旦 repair 能使 marker/high-water 可证明，最终 `SessionRecovered` 必须记录 `commit_recovery_required` 或 repair 后的 `writable`。
+`CommitRecoveryRequired` 是 recovery-only 状态。若无法在不越过 committed high-water 的前提下 durable append，则不得伪造 `SessionRecovered`，该状态通过 recovery/reset 面暴露；一旦 repair 能使 marker/high-water 可证明，最终 `SessionRecovered` 必须记录 `commit_recovery_required` 或 repair 后的 `writable`。该状态没有 `duration`/超时放行分支；只能由 repair 路径退出，repair 前不得 publish/ack 未提交前缀。
 
 `ToolTerminalStatus` 只在上面定义一次；下文出现的旧状态名只是兼容输入，不是第二套 canonical enum。`ContentUnavailable` 的 Rust 类型在此定义，其 canonical JSON 表达、持久化和 rebuild 规则统一见 §5.5。
 
@@ -1928,7 +1929,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 
 1. 若 canonical log 已有同 `call_id` 的 `ToolFinished`，返回该终态，不产生 recovery step。
 2. 若 call 有 `ToolIntent`，校验其唯一性以及 `call_id/execution_id`；同 call 多个 intent 时 fail-closed，不得伪造 completion。
-3. 若 call 没有 `ToolIntent` 但有 `ToolCallDeclared`，先检查 interaction：仍有 pending `InteractionRequested` 且未过期时不生成 `ToolFinished`，保留 call open，等待正常 resolution/expiry。若 `InteractionResolved(rejected)` 则构造 `denied/approval_rejected` 并产生对应 `tool_finished` action，若 `InteractionExpired` 则构造 `cancelled/approval_expired`；两者都不存在时构造 `cancelled/recovery_before_policy_decision`。无 intent 终态路径的 `execution_id=None`、`reconciled=false`、`output_ref=None`、`metrics` 为零执行 metrics，`finished_at_ms` 取对应 terminal fact 的 `ts_ms` 或 `ToolCallDeclared.ts_ms`。
+3. 若 call 没有 `ToolIntent` 但有 `ToolCallDeclared`，先检查 interaction：仍有 pending `InteractionRequested` 且未过期时不生成 `ToolFinished`，保留 call open，等待正常 resolution/expiry。若 `InteractionResolved(rejected)` 则构造 canonical `ToolFinished { terminal_status=denied, execution_id=None, metrics=<零执行>, error.code=approval_rejected }` 并产生对应 `tool_finished` action；若 `InteractionExpired` 则构造 `cancelled/approval_expired`；两者都不存在时构造 `cancelled/recovery_before_policy_decision`。无 intent 终态路径的 `execution_id=None`、`reconciled=false`、`output_ref=None`、`metrics` 为零执行 metrics，`finished_at_ms` 取对应 terminal fact 的 `ts_ms` 或 `ToolCallDeclared.ts_ms`。
 4. 若 call 既没有 `ToolIntent` 也没有 `ToolCallDeclared`，fail-closed，不得伪造 completion。
 5. `Reconcile` 读取 `probe_ref` 对应内容并解析为 `ToolProbeEvidence`；`schema`、`call_id`、`execution_id` 任一不匹配时视为无结论，而不是失败。
 6. canonical evidence 只接受与 call 明确关联的终态事实：`SubagentFinished.parent_call_id == call_id` 映射为 `completed -> succeeded`、`failed -> failed`、`cancelled -> cancelled`、`timed_out -> timed_out`。`WorkspaceResourceChanged.source_call_id` 只表示资源 revision，单独出现不能证明普通 tool 成功或失败。
@@ -1937,7 +1938,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 9. probe `succeeded/failed/partial` 与 canonical `SubagentFinished` 生成确定终态：`reconciled=true`；probe 终态设置 `evidence_ref=probe_ref`，canonical 终态设置 `evidence_fact_seq` 与 `evidence_event_id`，有 `result_ref` 时同时设置 `evidence_ref`。probe `partial` 只映射为 `partial`，并保留 probe 的 `output_ref/error/output_bytes/progress_bytes_total`。
 10. `succeeded` 必须有 `output_ref` 或显式允许空输出的 typed result；`partial` 必须有 `output_ref`；`failed` 必须有 `ToolError`。缺少必需 output/error 时降级为 `indeterminate`，不得凭空补 message 或摘要。
 11. `metrics.started_at_ms = ToolIntent.intent_at_ms`；无 intent 路径取 `ToolCallDeclared.ts_ms`。`finished_at_ms` 取 `max(intent_or_declared_at_ms, probe.observed_at_ms, canonical evidence fact.ts_ms, idempotent replay observed_at_ms)`；无任何观测时间时取 `intent_or_declared_at_ms`。`metrics.finished_at_ms = finished_at_ms`，`retry_count=0`；`output_bytes/progress_bytes_total` 取 evidence/typed result 的显式计数，canonical evidence 缺失计数时按 `output_ref` 的 ContentRecord byte length 计算，仍不可得则为 0。
-12. `RecoveryToolCompletion.execution_id` 在有 intent 时必须等于 intent 的 execution id，在无 intent 的 `ToolCallDeclared` 路径必须为 `None`；`recovery_ref` 必须等于当前 batch；`ToolFinished` canonical fact 的 `output_ref/error/recovery_ref/finished_at_ms/metrics` 全部由 completion 逐字段复制，不允许恢复时再补算。
+12. `RecoveryToolCompletion.execution_id` 在有 intent 时必须等于 intent 的 execution id，在无 intent 的 `ToolCallDeclared` 路径必须为 `None`；`recovery_ref` 必须等于当前 batch 的 `RecoveryRef`；`ToolFinished` canonical fact 的 `output_ref/error/recovery_ref/finished_at_ms/metrics` 全部由 completion 逐字段复制，不允许恢复时再补算。action-only 回执（如已 resolved/rejected 的 interaction）也复用同一 batch `RecoveryRef`，不得把 `SessionRecovered` 自身的 envelope `event_id` 当作新的 recovery identity。
 
 无 intent recovery 的 `ToolError.message` 分别固定为 `approval rejected`、`approval expired`、`recovery before policy decision`，`retryable=false`；不得写空 message。
 
@@ -2245,7 +2246,7 @@ E2E 证据要求：
 
 ### 10.1 Canonical fixtures
 
-每个 fixture 必须有独立 metadata sidecar，固定字段为 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision`、`content_unavailable`。下表给出 v2.0 必测集合；`fact_count` 指 canonical JSONL 总行数（包括不可解释的 unknown fact 和 final `SessionRecovered`），projection-only fixture 另列 `projection_events`。
+每个 fixture 必须有独立 metadata sidecar，固定字段为 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision`、`content_unavailable`，并可选扩展 `expected_turn_started_count`、`expected_turn_projection_count`。扩展字段口径固定为：前者计 canonical `TurnStarted` fact 数；后者只计 `Delivery::Reliable` 的 `turn_started` projection event，按 `stream_key` 去重后分别计数，不计 Replaceable/Ephemeral。下表给出 v2.0 必测集合；`fact_count` 指 canonical JSONL 总行数（包括不可解释的 unknown fact 和 final `SessionRecovered`），projection-only fixture 另列 `projection_events`。
 
 | Fixture | 内容 | expected fact count | terminal / 状态断言 | projection revision | ContentUnavailable |
 |---|---|---|---|---|---|
@@ -2273,6 +2274,7 @@ E2E 证据要求：
 | `recovery-input-admission.jsonl` | InputAccepted(input_purpose=trigger_turn) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | `expected_turn_started_count=1`；同一 input 只有一个 TurnStarted | conversation slot 0 与 control slot 2 各发布一次；slot 1 仅属 timeline，不参与本断言 | none |
 | `recovery-input-queue-only.jsonl` | InputAccepted(input_purpose=queue_only) + crash before TurnStarted | 2（InputAccepted + final SessionRecovered） | `expected_turn_started_count=0`；不补 `TurnStarted` | `expected_turn_projection_count=0`；InputAccepted 的 conversation/timeline revision 正常前进 | none |
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
+| `recovery-tool-denied.jsonl` | ToolCallDeclared + InteractionResolved(rejected) + parent restart | 3（Declared + Resolved + denied Finished） | `terminal_status=denied`，`execution_id=None`，零执行 metrics；`actions=[tool_finished]` | control/timeline revision 各前进一次 | none |
 | `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker | 2（committed fact + final SessionRecovered） | `outcome=commit_recovery_required`；不把 poison 后前缀当 canonical | 只重放 committed revision | none |
 | `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且无 poison/越界证据 | 2（原 committed fact + final writable SessionRecovered） | 先写 recovery evidence/audit，再安全重建 marker | committed revision 不重复 | none |
 | `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复 | committed revision 不重复 | none |
@@ -2331,7 +2333,7 @@ Tool intent/finish：
 Recovery：
 
 ```jsonl
-{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000006","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","outcome":"writable","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_finished","completion":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"indeterminate","output_ref":null,"error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false},"metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"finished_at_ms":1789830000040,"evidence_ref":null,"evidence_fact_seq":null,"evidence_event_id":null}}],"recovered_at_ms":1789830000050}}}
+{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000007","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","outcome":"writable","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_finished","completion":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"indeterminate","output_ref":null,"error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false},"metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"finished_at_ms":1789830000040,"evidence_ref":null,"evidence_fact_seq":null,"evidence_event_id":null}}],"recovered_at_ms":1789830000050}}}
 ```
 
 ### 10.2 必测命令
@@ -2368,7 +2370,7 @@ run_exact() {
 }
 ```
 
-每个 fixture 的精确断言必须读取 §10.1 metadata sidecar，逐项比较 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision` 和 `content_unavailable`；任何字段缺失、`None` 误写为空文本、或 `ContentUnavailable` 被替换为空内容都失败。
+每个 fixture 的精确断言必须读取 §10.1 metadata sidecar，逐项比较 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision`、`content_unavailable`；若存在 `expected_turn_started_count` / `expected_turn_projection_count`，必须按上述口径一并比较。任何字段缺失、`None` 误写为空文本、或 `ContentUnavailable` 被替换为空内容都失败。
 
 12 项 blocking finding 的逐项复现入口：
 
