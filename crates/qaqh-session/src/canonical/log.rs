@@ -256,19 +256,9 @@ impl CanonicalLog {
                 self.commit.committed_offset
             )));
         }
-        if let Err(error) = events
-            .write_all(&encoded)
-            .and_then(|()| events.flush())
-            .and_then(|()| events.sync_all())
-        {
-            let message = format!("canonical append barrier failed: {error}");
-            self.state = LogState::CommitRecoveryRequired(message.clone());
-            return Err(CanonicalError::CommitRecoveryRequired(message));
-        }
         let next_offset = committed_offset
             .checked_add(encoded.len() as u64)
             .ok_or(CanonicalError::FactSeqExhausted)?;
-
         let next_commit = EventsCommit {
             schema: EVENTS_COMMIT_SCHEMA.into(),
             log_id: self.log_id.clone(),
@@ -281,6 +271,15 @@ impl CanonicalLog {
                 .checked_add(1)
                 .ok_or(CanonicalError::FactSeqExhausted)?,
         };
+        if let Err(error) = events
+            .write_all(&encoded)
+            .and_then(|()| events.flush())
+            .and_then(|()| events.sync_all())
+        {
+            let message = format!("canonical append barrier failed: {error}");
+            self.state = LogState::CommitRecoveryRequired(message.clone());
+            return Err(CanonicalError::CommitRecoveryRequired(message));
+        }
         if let Err(error) = write_json_atomic(&self.commit_path(), &next_commit) {
             let message = error.to_string();
             self.state = LogState::CommitRecoveryRequired(message.clone());
