@@ -2,6 +2,7 @@
 //!
 //! Follows the same pattern as qaqh-workspace::ToolManager.
 
+pub mod actor;
 pub mod canonical;
 pub mod grouping;
 pub mod manager;
