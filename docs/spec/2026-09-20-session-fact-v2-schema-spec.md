@@ -1,6 +1,6 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D38 收口并通过复审前不得标记为已冻结
+> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D41 收口并通过复审前不得标记为已冻结
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
 > **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
@@ -295,6 +295,9 @@ pub enum FactPayload {
 | `error` | `Option<ToolError>` | 否 | skip none | 终态错误 |
 | `metrics` | `ToolMetrics` | 是 | — | 所有终态都必须可物化；无 handler 时使用下述零执行 metrics |
 | `reconciled` | `bool` | 是 | — | 是否经 reconciliation 得出 |
+| `evidence_ref` | `Option<ContentRef>` | 否 | skip none | probe/canonical evidence 内容引用 |
+| `evidence_fact_seq` | `Option<u64>` | 否 | skip none | canonical evidence fact seq |
+| `evidence_event_id` | `Option<EventId>` | 否 | skip none | canonical evidence event id |
 | `recovery_ref` | `Option<RecoveryRef>` | 否 | skip none | recovery 产生的终态必填 |
 | `finished_at_ms` | `i64` | 是 | — | 终态时间 |
 
@@ -699,7 +702,7 @@ pub struct ContentUnavailable {
 | `kind` | 附加字段 | 含义 |
 |---|---|---|
 | `turn_interrupted` | `turn_id`, `last_fact_seq` | 闭合未完成 turn |
-| `turn_started` | `turn_id`, `input_id`, `mode` | 恢复补写 durable input 的唯一 turn |
+| `turn_started` | `turn_id`, `input_id`, `mode`, `recovery_ref` | 恢复补写 durable input 的唯一 turn |
 | `tool_finished` | `completion: RecoveryToolCompletion` | 恢复补写唯一 `ToolFinished`；`terminal_status` 区分 indeterminate/replayed/reconciled/denied 等子语义 |
 | `interaction_expired` | `interaction_id`, `reason` | 超时/重启/turn cancel 闭合 |
 | `subagent_finished` | `child_session_id`, `child_log_id`, `terminal_fact_seq`, `terminal_event_id`, `parent_call_id`, `status`, `result_ref`, `finished_at_ms`, `recovery_ref` | 恢复补写 child edge 终态 |
@@ -1757,7 +1760,7 @@ pub struct RecoverySubagentCompletion {
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum RecoveryStep {
     MoveTornTail { from: String, to: String, bytes: u64, bytes_hash: ContentHash },
-    TurnStarted { turn_id: TurnId, input_id: InputId, mode: TurnMode },
+    TurnStarted { turn_id: TurnId, input_id: InputId, mode: TurnMode, recovery_ref: RecoveryRef },
     TurnInterrupted { turn_id: TurnId, last_fact_seq: u64 },
     ToolFinished { completion: RecoveryToolCompletion },
     InteractionExpired { interaction_id: InteractionId, reason: InteractionExpiryReason },
@@ -1944,7 +1947,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 9. probe `succeeded/failed/partial` 与 canonical `SubagentFinished` 生成确定终态：`reconciled=true`；probe 终态设置 `evidence_ref=probe_ref`，canonical 终态设置 `evidence_fact_seq` 与 `evidence_event_id`，有 `result_ref` 时同时设置 `evidence_ref`。probe `partial` 只映射为 `partial`，并保留 probe 的 `output_ref/error/output_bytes/progress_bytes_total`。
 10. `succeeded` 必须有 `output_ref` 或显式允许空输出的 typed result；`partial` 必须有 `output_ref`；`failed` 必须有 `ToolError`。缺少必需 output/error 时降级为 `indeterminate`，不得凭空补 message 或摘要。
 11. `metrics.started_at_ms = ToolIntent.intent_at_ms`；无 intent 路径取 `ToolCallDeclared.ts_ms`。`finished_at_ms` 取 `max(intent_or_declared_at_ms, probe.observed_at_ms, canonical evidence fact.ts_ms, idempotent replay observed_at_ms)`；无任何观测时间时取 `intent_or_declared_at_ms`。`metrics.finished_at_ms = finished_at_ms`，`retry_count=0`；`output_bytes/progress_bytes_total` 取 evidence/typed result 的显式计数，canonical evidence 缺失计数时按 `output_ref` 的 ContentRecord byte length 计算，仍不可得则为 0。
-12. `RecoveryToolCompletion.execution_id` 在有 intent 时必须等于 intent 的 execution id，在无 intent 的 `ToolCallDeclared` 路径必须为 `None`；`recovery_ref` 必须等于当前 batch 的 `RecoveryRef`；`ToolFinished` canonical fact 的 `output_ref/error/recovery_ref/finished_at_ms/metrics` 全部由 completion 逐字段复制，不允许恢复时再补算。action-only 回执（如已 resolved/rejected 的 interaction）也复用同一 batch `RecoveryRef`，不得把 `SessionRecovered` 自身的 envelope `event_id` 当作新的 recovery identity。
+12. `RecoveryToolCompletion.execution_id` 在有 intent 时必须等于 intent 的 execution id，在无 intent 的 `ToolCallDeclared` 路径必须为 `None`；`recovery_ref` 必须等于当前 batch 的 `RecoveryRef`；`ToolFinished` canonical fact 的 `output_ref/error/recovery_ref/finished_at_ms/metrics/reconciled/evidence_ref/evidence_fact_seq/evidence_event_id` 全部由 completion 逐字段复制，不允许恢复时再补算。action-only 回执（如已 resolved/rejected 的 interaction）也复用同一 batch `RecoveryRef`，不得把 `SessionRecovered` 自身的 envelope `event_id` 当作新的 recovery identity。
 
 无 intent recovery 的 `ToolError.message` 分别固定为 `approval rejected`、`approval expired`、`recovery before policy decision`，`retryable=false`；不得写空 message。
 
