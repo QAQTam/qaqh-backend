@@ -1,9 +1,9 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；D1-D41 已收口，用户已决定跳过 NPC 复审，PR #104 待用户合并裁定；裁定前不得标记为已冻结
+> **状态**：P0 已冻结并合并；PR #104 merge `84adf01` 完成 D1-D41 errata 收口；冻结只覆盖文档契约，不代表生产实现已完成
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
-> **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
+> **基线**：上位架构 merge `84adf01`；后续实现从 `betav2 @ 84adf01` 或更新的已冻结基线开始
 > **范围**：仅字段级契约、迁移与测试设计；本 spec 不修改生产 Rust 代码
 > **独立验收**：[#106](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/106)
 
