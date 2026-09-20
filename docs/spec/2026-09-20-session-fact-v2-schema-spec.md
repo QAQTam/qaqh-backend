@@ -1,6 +1,6 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D13 收口并通过复审前不得标记为已冻结
+> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D16 收口并通过复审前不得标记为已冻结
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
 > **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
@@ -697,10 +697,7 @@ pub struct ContentUnavailable {
 |---|---|---|
 | `turn_interrupted` | `turn_id`, `last_fact_seq` | 闭合未完成 turn |
 | `turn_started` | `turn_id`, `input_id`, `mode` | 恢复补写 durable input 的唯一 turn |
-| `tool_indeterminate` | `call_id`, `execution_id` | 非幂等工具不确定 |
-| `tool_denied` | `call_id`, `error_code` | 无 intent 的 approval/policy 拒绝终态 |
-| `tool_replayed` | `call_id`, `execution_id`, `idempotency_key` | 幂等工具完成一次重放 |
-| `tool_reconciled` | `call_id`, `execution_id`, `evidence_ref` | 对账得出终态 |
+| `tool_finished` | `completion: RecoveryToolCompletion` | 恢复补写唯一 `ToolFinished`；`terminal_status` 区分 indeterminate/replayed/reconciled/denied 等子语义 |
 | `interaction_expired` | `interaction_id`, `reason` | 超时/重启/turn cancel 闭合 |
 | `subagent_finished` | `child_session_id`, `child_log_id`, `terminal_fact_seq`, `terminal_event_id`, `parent_call_id`, `status`, `result_ref`, `finished_at_ms`, `recovery_ref` | 恢复补写 child edge 终态 |
 | `upgrade_superseded` | `previous_recovery_id` | 已验证新 payload version，显式退出 read-only |
@@ -708,11 +705,11 @@ pub struct ContentUnavailable {
 | `torn_tail_truncated` | `bytes`, `last_good_fact_seq` | 截断 torn tail |
 | `projection_rebuilt` | `projection`, `through_fact_seq` | 重建 derived projection |
 
-`tool_denied.error_code` 只能是 `approval_rejected` 或 `policy_denied`，且必须等于对应 `ToolFinished.error.code`。每个无 intent 的 `denied` recovery completion 必须在最终 `SessionRecovered.actions` 中产生恰好一个对应的 `tool_denied` action；该路径没有 `execution_id`，不得伪造执行身份。
+`tool_finished.completion.terminal_status=denied` 时，`error.code` 只能是 `approval_rejected` 或 `policy_denied`，且必须等于对应 `ToolFinished.error.code`。每个无 intent 的 denied recovery completion 必须在最终 `SessionRecovered.actions` 中产生恰好一个对应的 `tool_finished` action；该路径没有 `execution_id`，不得伪造执行身份。
 
 `RecoveryAction` 与 `RecoveryStep` 的映射规则：
 
-- `turn_interrupted`、`turn_started`、`tool_*`、`interaction_expired`、`subagent_finished`、`torn_tail_truncated` 必须分别映射到同名的 `RecoveryStep`；其字段集必须与对应 step 的 `data` 逐字段同构，新增或删除 step 字段时必须同步 action，禁止两处维护不同字段清单。
+- `turn_interrupted`、`turn_started`、`tool_finished`、`interaction_expired`、`subagent_finished`、`torn_tail_truncated` 必须分别映射到同名的 `RecoveryStep`；其字段集必须与对应 step 的 `data` 逐字段同构，新增或删除 step 字段时必须同步 action，禁止两处维护不同字段清单。`replayed` / `reconciled` / `indeterminate` / `denied` 只是 `RecoveryToolCompletion.terminal_status` 的子语义，不另设 action。
 - `upgrade_superseded` 与 `commit_repaired` 是显式“不产生 step”的 sidecar-only action；前者幂等键为 `(log_id, upgrade-fence.generation+1)`，后者为 `(log_id, previous_commit_generation)`，均不进入 `RecoveryPlan.steps` / `plan_hash`。
 - `projection_rebuilt` 是派生 projection 动作，不产生 canonical step。
 
@@ -1424,6 +1421,8 @@ pub struct EventsPoison {
 
 `WriterFence.fencing_token` 以及 `AppendRejected.expected_token/presented_token` 在 CLI 与 JSON 中统一表示为无符号十进制字符串，格式为 `0|[1-9][0-9]*`，不得使用 JSON number。服务端解析为 `u128`，溢出必须拒绝；递增与相等比较必须基于解析后的数值，不得按字符串字典序比较。`generation_epoch` 仍按 JSON number 表示。
 
+`EventsCommit.commit_generation` 从 `0` 开始，每次成功重写 `events.commit.json` 必须严格 `+1`；`commit_repaired.previous_commit_generation` 固定等于 repair 前的 `EventsCommit.commit_generation`，repair 后新 marker 的 generation 必须为 `previous_commit_generation + 1`。若 marker 缺失/损坏且无法恢复出 previous generation，则不得生成 `commit_repaired`，也不得伪造 `SessionRecovered { outcome=commit_recovery_required }`，只能保持 `CommitRecoveryRequired` runtime state；若 high-water 已可证明并能 durable 写入 recovery fact，则 final `SessionRecovered` 才允许记录该 outcome。
+
 `UpgradeState::Writable` 序列化为 `upgrade-fence.json.state=writable`，与 `RecoveryOutcome::Writable`（`SessionRecovered.outcome=writable`）是两个独立命名空间；规则 10/11 与 upgrade batch 表中的 `state=writable` 一律指前者。
 
 规则：
@@ -1870,7 +1869,7 @@ canonical_json({
 | `InputAccepted` 无 `TurnStarted`，`input_purpose=trigger_turn` | `TurnStarted`（按 `(log_id,input_id)` 派生唯一 turn） + final `SessionRecovered` | 恢复后可写 |
 | `InputAccepted` 无 `TurnStarted`，`input_purpose=queue_only` | 仅 final `SessionRecovered`；不得补 `TurnStarted` | 恢复后可写 |
 | `TurnStarted` 无终态 | `TurnInterrupted` + final `SessionRecovered` | 恢复后可写 |
-| `InteractionResolved(rejected)` 无 `ToolIntent`/`ToolFinished` | `ToolFinished { terminal_status=denied, execution_id=None, metrics=<零执行>, error.code=approval_rejected }` + final `SessionRecovered { actions=[tool_denied] }` | 恢复后可写 |
+| `InteractionResolved(rejected)` 无 `ToolIntent`/`ToolFinished` | `ToolFinished { terminal_status=denied, execution_id=None, metrics=<零执行>, error.code=approval_rejected }` + final `SessionRecovered { actions=[tool_finished] }` | 恢复后可写 |
 | `ToolCallDeclared` 无 `ToolIntent`/`ToolFinished` 且无 interaction 终态（policy 决策前崩溃） | `ToolFinished { terminal_status=cancelled, execution_id=None, metrics=<零执行>, error.code=recovery_before_policy_decision }` + final `SessionRecovered` | 恢复后可写 |
 | `ToolIntent` 无 `ToolFinished`，`NoReplay` | `ToolFinished { terminal_status=indeterminate, metrics=<零执行或已知执行 metrics> }` + final `SessionRecovered` | 恢复后可写 |
 | `ToolIntent` 无 `ToolFinished`，`IdempotentReplay` | 一次重放后的成功/失败 `ToolFinished` + final `SessionRecovered`；无法取得结果时写 `indeterminate` | 重放后写 |
@@ -1929,7 +1928,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 
 1. 若 canonical log 已有同 `call_id` 的 `ToolFinished`，返回该终态，不产生 recovery step。
 2. 若 call 有 `ToolIntent`，校验其唯一性以及 `call_id/execution_id`；同 call 多个 intent 时 fail-closed，不得伪造 completion。
-3. 若 call 没有 `ToolIntent` 但有 `ToolCallDeclared`，先检查 interaction：仍有 pending `InteractionRequested` 且未过期时不生成 `ToolFinished`，保留 call open，等待正常 resolution/expiry。若 `InteractionResolved(rejected)` 则构造 `denied/approval_rejected` 并产生对应 `tool_denied` action，若 `InteractionExpired` 则构造 `cancelled/approval_expired`；两者都不存在时构造 `cancelled/recovery_before_policy_decision`。无 intent 终态路径的 `execution_id=None`、`reconciled=false`、`output_ref=None`、`metrics` 为零执行 metrics，`finished_at_ms` 取对应 terminal fact 的 `ts_ms` 或 `ToolCallDeclared.ts_ms`。
+3. 若 call 没有 `ToolIntent` 但有 `ToolCallDeclared`，先检查 interaction：仍有 pending `InteractionRequested` 且未过期时不生成 `ToolFinished`，保留 call open，等待正常 resolution/expiry。若 `InteractionResolved(rejected)` 则构造 `denied/approval_rejected` 并产生对应 `tool_finished` action，若 `InteractionExpired` 则构造 `cancelled/approval_expired`；两者都不存在时构造 `cancelled/recovery_before_policy_decision`。无 intent 终态路径的 `execution_id=None`、`reconciled=false`、`output_ref=None`、`metrics` 为零执行 metrics，`finished_at_ms` 取对应 terminal fact 的 `ts_ms` 或 `ToolCallDeclared.ts_ms`。
 4. 若 call 既没有 `ToolIntent` 也没有 `ToolCallDeclared`，fail-closed，不得伪造 completion。
 5. `Reconcile` 读取 `probe_ref` 对应内容并解析为 `ToolProbeEvidence`；`schema`、`call_id`、`execution_id` 任一不匹配时视为无结论，而不是失败。
 6. canonical evidence 只接受与 call 明确关联的终态事实：`SubagentFinished.parent_call_id == call_id` 映射为 `completed -> succeeded`、`failed -> failed`、`cancelled -> cancelled`、`timed_out -> timed_out`。`WorkspaceResourceChanged.source_call_id` 只表示资源 revision，单独出现不能证明普通 tool 成功或失败。
@@ -2271,15 +2270,15 @@ E2E 证据要求：
 | `recovery-no-action.jsonl` | SessionCreated + 无 open 状态 + 首轮 load | 2（SessionCreated + final SessionRecovered） | `outcome=writable`, actions=[] | 可写后 revision 单调 | none |
 | `recovery-unknown-fact.jsonl` | 已知前缀 + unknown kind + 已知后缀 | 3（前缀 + unknown line + final SessionRecovered） | `outcome=read_only_upgrade_required` | 后缀不产生 revision | none |
 | `recovery-upgrade-supersede.jsonl` | read-only marker + 新 writer 理解全部 payload version | 2（旧 marker + writable supersede marker） | `outcome=writable`，actions=`upgrade_superseded` | 升级前 revision 不变，升级后恢复单调 | none |
-| `recovery-input-admission.jsonl` | InputAccepted(input_purpose=trigger_turn) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | 同一 input 只有一个 TurnStarted | `conversation.turn_started.revision` 等于 `TurnStarted.fact_seq` 且 slot 1 唯一 | none |
+| `recovery-input-admission.jsonl` | InputAccepted(input_purpose=trigger_turn) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | `expected_turn_started_count=1`；同一 input 只有一个 TurnStarted | conversation slot 0 与 control slot 2 各发布一次；slot 1 仅属 timeline，不参与本断言 | none |
 | `recovery-input-queue-only.jsonl` | InputAccepted(input_purpose=queue_only) + crash before TurnStarted | 2（InputAccepted + final SessionRecovered） | `expected_turn_started_count=0`；不补 `TurnStarted` | `expected_turn_projection_count=0`；InputAccepted 的 conversation/timeline revision 正常前进 | none |
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
 | `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker | 2（committed fact + final SessionRecovered） | `outcome=commit_recovery_required`；不把 poison 后前缀当 canonical | 只重放 committed revision | none |
 | `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且无 poison/越界证据 | 2（原 committed fact + final writable SessionRecovered） | 先写 recovery evidence/audit，再安全重建 marker | committed revision 不重复 | none |
 | `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复 | committed revision 不重复 | none |
-| `events-commit-marker-corrupt.jsonl` | marker 损坏或 `log_id` 不匹配，high-water 不可证 | 1（仅保留可证明的 committed prefix；不得追加业务 fact） | `outcome=commit_recovery_required` | 不发布/ack，不推进 clock | none |
-| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO | 2（committed fact + final commit-repair marker） | `outcome=commit_recovery_required`，保持旧 high-water | 只重放 committed revision | none |
-| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败 | 2（已 committed fact + final commit-repair marker） | 不发布/ack；repair 后 high-water 与 clock 一致 | 不越过 committed high-water | none |
+| `events-commit-marker-corrupt.jsonl` | marker 损坏或 `log_id` 不匹配，high-water 不可证 | 1（仅保留可证明的 committed prefix；不写 final recovery fact） | runtime state=`CommitRecoveryRequired`；无 `SessionRecovered` | 不发布/ack，不推进 clock | none |
+| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO，旧 marker/high-water 可证明 | 2（committed fact + final `SessionRecovered {outcome=commit_recovery_required}`） | 保持旧 high-water；repair 前不可写 | 只重放 committed revision | none |
+| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败，旧 marker/high-water 可证明 | 2（已 committed fact + final `SessionRecovered {outcome=commit_recovery_required}`） | 不发布/ack；repair 后 high-water 与 clock 一致 | 不越过 committed high-water | none |
 | `recovery-tombstone.jsonl` | SessionCreated + SessionDeleted + load | 3（SessionCreated + SessionDeleted + final SessionRecovered） | `outcome=tombstone` | 不再前进 | none |
 | `compaction.jsonl` | facts + CompactionApplied | 2 | checkpoint 缺失可重建 | context revision 一致 | none |
 | `torn-tail.jsonl` | 完整 fact + 半行 | 2（完整 fact + final SessionRecovered） | `torn_tail=true` | 与截断后 rebuild 一致 | none |
@@ -2332,7 +2331,7 @@ Tool intent/finish：
 Recovery：
 
 ```jsonl
-{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000006","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","outcome":"writable","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_indeterminate","call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000"}],"recovered_at_ms":1789830000050}}}
+{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000006","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","outcome":"writable","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_finished","completion":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"indeterminate","output_ref":null,"error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false},"metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"finished_at_ms":1789830000040,"evidence_ref":null,"evidence_fact_seq":null,"evidence_event_id":null}}],"recovered_at_ms":1789830000050}}}
 ```
 
 ### 10.2 必测命令
