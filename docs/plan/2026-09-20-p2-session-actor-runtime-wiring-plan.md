@@ -116,7 +116,7 @@ Gate：
 
 #### P2-2d-a SessionActor subscription registry
 
-状态：已实现，PR #215；merge commit 待合入后回写。
+状态：已完成，PR #215，merge `1afe17e`。
 
 交付：
 
