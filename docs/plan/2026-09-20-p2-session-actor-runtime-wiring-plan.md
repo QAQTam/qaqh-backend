@@ -1,0 +1,181 @@
+# QAQH v2.0 P2 SessionActor 运行时接线计划（2026-09-20）
+
+> 基线：`betav2 @ 1d062d9`
+> 上位计划：[`2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./2026-09-20-qaqh-v2.0-总架构设计-plan.md) §P2
+> 状态：进行中；本文件是 P2 运行时接线的执行清单与状态回写入口。
+> 原则：每个 PR 只完成一个可验收切片；未合入前不得把计划项描述成运行时已完成。
+
+## 1. 当前事实
+
+已完成：
+
+- `SessionActor` FIFO mailbox、容量和 shutdown 纯状态机。
+- `TurnCore` 的 Start/Round/Suspend/Resume/Cancel/Finish 状态转换。
+- 单 active turn、cancel 幂等、冲突终态 fail-closed 的单元契约测试。
+- 代码位置：`crates/qaqh-session/src/actor.rs`。
+
+尚未完成：
+
+- `SessionActor` 尚未被 daemon/runtime 生产路径持有；当前主要是 `qaqh-session` 内的独立模块。
+- 真实 turn 仍由 `crates/qaqh-runtime/src/agent/engine_turn.rs` 的 `run_lap` 直接控制。
+- 输入、取消、审批和订阅尚未统一经过 mailbox。
+- 取消状态仍存在 token、thread-local 与 `user_cancelled` 等多处语义。
+- compaction/title/liveness/session lifecycle 仍在 loop 路径内。
+- `SubagentSupervisor`、两阶段 spawn 恢复和 root `QuotaLedger` 尚未实现。
+
+结论：P2 只有纯状态机原型完成，不能描述成 SessionActor 已接管运行时。
+
+## 2. 不变量
+
+1. 每个 session 的 turn 状态只有一个 owner：`SessionActor`。
+2. `TurnCore` 保持纯状态机：不 await，不访问文件、网络、线程和锁。
+3. runtime I/O、工具和持久化只能存在于 adapter 或后续 `ToolRuntime` 边界。
+4. 同一 session 同一时刻最多一个 active turn。
+5. 一个 turn 只能发布一次终态；冲突终态 fail-closed。
+6. 迁移过程中先保持旧行为 1:1，再做所有权转移；不得用“顺手重构”扩大单个 PR 的语义面。
+7. P2 不以移除旧路径数量作为完成标准，以行为契约和唯一所有权作为完成标准。
+
+## 3. 执行顺序
+
+### P2-1 `run_lap` 1:1 adapter 与统一生命周期入口
+
+状态：待开始。
+
+交付：
+
+- 在 `qaqh-runtime` 增加显式 adapter，把现有 turn 生命周期映射为 `TurnCommand` / `TurnEffect`。
+- 保留 `run_lap` 作为内部执行器，首刀不改其对话、工具和持久化行为。
+- turn 的 Start、RoundStarted、Cancel、Finish 至少统一经过 `SessionActor`。
+- 将现有 `Outcome` 映射为统一终态，确保 terminal 只产生一次。
+- 增加契约测试：单 active turn、重复 cancel、重复 finish、正常完成与取消竞争。
+
+Gate：
+
+- 现有 turn/run_lap 行为测试保持通过。
+- runtime 不再存在多个 turn 生命周期入口。
+- terminal 幂等，冲突终态 fail-closed。
+- messages、timeline 和持久化顺序不变。
+- 本切片不清理 thread-local，不改工具执行路径。
+
+### P2-2 mailbox 全入口
+
+状态：待开始。
+
+交付：
+
+- 用户输入、取消、审批结果、订阅请求和 session lifecycle 命令全部提交给 `SessionActor` mailbox。
+- 外部模块只发送 command，不直接修改 turn 状态。
+- 明确 mailbox 满、shutdown 和迟到 command 的错误语义。
+
+Gate：
+
+- 所有 ingress 路径有顺序和幂等测试。
+- 没有旁路直接修改 active turn / terminal。
+- 订阅事件顺序与 canonical fact 提交顺序一致。
+
+### P2-3 取消 token 树与单一终态
+
+状态：待开始。
+
+交付：
+
+- root turn 与 child work 使用统一 token tree。
+- cancel 只产生一个 `InterruptReason` 和一次 terminal。
+- 删除运行路径中的重复 `user_cancelled` 判定。
+
+Gate：
+
+- cancel-before-start、cancel-in-round、重复 cancel、完成与取消竞争全绿。
+- 任何 terminal 后不得再发布 round、tool start 或 pending interaction。
+
+### P2-4 loop 外移与 thread-local 清理
+
+状态：待开始。
+
+交付：
+
+- compaction、title、liveness、session lifecycle 从 loop 主路径移出。
+- 通过显式上下文传递 workspace、sandbox、session 和 cancellation。
+- 清理运行路径对 thread-local workspace/sandbox 的依赖。
+
+Gate：
+
+- turn lifecycle、compaction、suspend/resume 行为契约全绿。
+- 同一输入在显式上下文和旧入口下产生等价事实/投影。
+- P3 开工前 `ToolCallContext` 所需字段已具备明确来源。
+
+### P2-5 `SubagentSupervisor`
+
+状态：待开始。
+
+交付：
+
+- daemon 级 supervisor 统一负责 parent/child cancel、join 和 edge 生命周期。
+- `registry.close` 不再以裸 unlink 代表 child 已终止。
+- 覆盖 parent panic、SessionDeleted、shutdown 和 spawn 竞态。
+
+Gate：
+
+- `parent_unload_waits_child_terminal_join` 必须通过。
+- 固定顺序：`child terminal -> parent SubagentFinished -> child join -> parent unload ack/tombstone`。
+- child 无 parent edge 时不得继续启动。
+
+### P2-6 两阶段 spawn 恢复与消息去重
+
+状态：待开始。
+
+交付：
+
+- edge/child log 双向孤儿恢复扫描。
+- inter-agent message 使用 `message_id/input_id` 去重。
+- 恢复不得伪造或重写 spawn edge。
+
+Gate：
+
+- spawn 前后崩溃、重复投递、孤儿 child 和重复 edge 场景全绿。
+- 恢复结果可从 canonical facts 重放。
+
+### P2-7 root `QuotaLedger`
+
+状态：待开始。
+
+交付：
+
+- 路径固定为 `{data_dir}/quota/{root_session_id}/ledger.jsonl`。
+- 由 root owner 持有 `quota.lock`，实现 reservation/reconciliation。
+- reservation durable ack 必须先于 spawn/content/tool 副作用。
+
+Gate：
+
+- quota 测试与 subagent terminal/join 顺序解耦判定。
+- crash 后 reservation 可恢复，不重复扣减或漏释放。
+- child writer fence 不错误覆盖 root quota lock 语义。
+
+## 4. P2 总体 Gate
+
+P2 只有同时满足以下条件才可标记完成：
+
+- turn lifecycle、cancel、suspend/resume、compaction 行为契约测试全绿。
+- 同一 session 最多一个 active turn。
+- terminal 只发布一次。
+- 输入、取消、审批和订阅不存在绕过 `SessionActor` 的状态写入。
+- child 终止、parent unload、join 的固定顺序通过故障注入。
+- quota reservation/reconciliation 与 child join 顺序独立验收。
+- 总计划、handoff 和本文件的实施状态已回写，且每项状态有对应 commit/PR 证据。
+
+## 5. 验证与回写
+
+每个 P2 PR 至少执行：
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+说明：
+
+- 全局 `cargo fmt --all -- --check` 若仍有历史基线漂移，只允许对新改文件执行 `rustfmt --check`，不得顺手格式化无关文件。
+- 云端 NPC 若因组织 CPU core-hours 配额失败，必须如实记录为外部阻断，不能描述为代码 CI 通过。
+- 每次合入后更新本文件对应条目的状态、PR 和 merge commit；复选框不得无证据勾选。
+- 任何范围变化先更新本文件，再开下一实现 issue，避免把 P2 剩余项遗忘在对话上下文里。
