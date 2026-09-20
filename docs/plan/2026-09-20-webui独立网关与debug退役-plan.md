@@ -1,7 +1,7 @@
 # WebUI 独立网关与 `/debug` 退役设计（草案）
 
 > 日期：2026-09-20
-> 基线：`betav2 @ 8e6b777`（PR #144 merge）
+> 基线：`betav2 @ da848ee`（PR #146 merge）
 > 状态：**草案待评审**。本文只冻结方向与安全边界，不代表已经实现。
 > 读者：daemon / runtime / client 维护者，WebUI 前端负责人，安全与发布负责人。
 > 关联报告：
@@ -123,13 +123,33 @@
 网关路由建议：
 
 ```text
-GET  /                        静态 SPA
-GET  /assets/*                静态资源
-GET  /__gateway/bootstrap.js  一次性 nonce
-POST /__gateway/session       nonce -> HttpOnly browser session
-GET  /ringing/*               代理到 daemon，注入 Bearer
-POST /ringing/*               代理到 daemon，注入 Bearer
+GET  /                                                  静态 SPA
+GET  /assets/*                                          静态资源
+GET  /__gateway/bootstrap.js                            一次性 nonce
+POST /__gateway/session                                 nonce -> HttpOnly browser session
+GET  /__gateway/sessions                                脱敏 session.list
+POST /__gateway/sessions/{seed}/attach                  显式 seed attach
+POST /__gateway/ringing/commands/{channel}              命令 allowlist
+GET  /__gateway/ringing/commands/{id}                   命令回执
+GET  /__gateway/ringing/content/{content_id}            内容读取
+POST /__gateway/ringing/content                         内容上传
+GET  /__gateway/ringing/events/{channel}                三频道 SSE
+GET  /__gateway/ringing/sessions/{seed}/bootstrap       bootstrap
+GET  /__gateway/ringing/sessions/{seed}/timeline        timeline 快照
+GET  /__gateway/ringing/sessions/{seed}/timeline/events timeline SSE
+POST /__gateway/ringing/service/{method}                service method allowlist
 ```
+
+禁止浏览器路由：
+
+```text
+/ringing/v1/clients/open
+/ringing/v1/leases/renew
+/control/v1/*
+/debug/*
+```
+
+网关不得笼统代理 `/ringing/*`；所有 daemon 端点必须逐条登记。
 
 daemon 路由建议：
 
@@ -168,7 +188,7 @@ daemon 路由建议：
 3. 网关签发一次性 nonce，TTL 短，限制并发与签发速率
 4. 浏览器 POST /__gateway/session { nonce }
 5. 网关校验 Origin + Host + Sec-Fetch-Site，兑换成浏览器会话
-6. 网关 Set-Cookie: HttpOnly; SameSite=Strict; Path=/ringing
+6. 网关 Set-Cookie: HttpOnly; SameSite=Strict; Path=/__gateway
 7. 浏览器 fetch / EventSource 携带 Cookie
 8. 网关校验 CSRF / Origin，再以 Bearer 访问 daemon
 ```
@@ -188,6 +208,151 @@ daemon 路由建议：
 | `workspace.delete` / 跨 workspace 操作 | 默认拒绝 |
 | `/control/v1/stop` / `stop-if-idle` | 拒绝 |
 | 任意方法名透传 | 拒绝；网关使用明确 allowlist |
+
+### 4.4 浏览器 session ↔ daemon lease 映射
+
+每个浏览器 session 独占一个由网关持有的 daemon lease。浏览器只看到网关 Cookie，
+看不到 `client_session_id`。
+
+```text
+browser_session_id (opaque, cookie)
+  -> gateway-owned client_instance_id
+  -> daemon client_session_id
+  -> 当前唯一 active seed
+```
+
+规则：
+
+- 浏览器 session 创建后，网关调用 `POST /ringing/v1/clients/open`。
+- 网关在所有命令、service、SSE 代理中同时注入 `Authorization: Bearer` 与
+  `x-qaqh-client-session-id`。
+- 网关按 daemon 返回的 `renew_interval_ms` 续租；续租失败时关闭该 session 的 SSE，
+  并让浏览器重新 bootstrap/session。
+- daemon epoch 改变后，旧 lease 与旧 SSE 全部失效。
+- 网关退出时清理浏览器 session 映射；daemon 侧 lease 由 TTL 自然过期。
+- 切换 seed 时，网关使用同一个 `client_instance_id` 重新 `open`，让 daemon 清理旧
+  lease 的 seed 归属，再 attach 新 seed；禁止同一浏览器 session 长期持有多个 seed。
+- 每个网关实例对活跃浏览器 session 与 daemon lease 数量设硬上限。
+
+### 4.5 discovery 信任边界
+
+- 网关只读取本机 `daemon.json`，不得接受浏览器传入 daemon endpoint/token。
+- 只接受回环 endpoint：`127.0.0.1`、`localhost`、`[::1]`。
+- 必须校验 pid 存活、endpoint 可达、`server_epoch`、协议版本与 build id。
+- 禁止调用 `ensure_daemon_running` / `launch_daemon_if_missing` 或任何静默拉起路径。
+- discovery 缺失、陈旧或轮换中一律 fail-closed，不自动降级到 LAN daemon。
+- `server --bind 0.0.0.0` 的 LAN daemon 不得被本地 WebUI 网关接管。
+
+### 4.6 seed 发现与切换
+
+首期浏览器只允许 attach 已有 seed：
+
+- `GET /__gateway/sessions` 返回网关脱敏后的 `session.list`，默认不返回 cwd、
+  workspace 绝对路径、模型名和内部配置。
+- `POST /__gateway/sessions/{seed}/attach` 是唯一 seed 切换入口，必须审计。
+- 网关校验 seed 存在于当前列表；attach 前轮换 lease，attach 后旧 seed 的 SSE 必须关闭。
+- `session.new` / `session.resume` 是否开放留作产品决策；首期默认拒绝。
+- 浏览器提交的 command envelope 中的 `seed` 必须被网关覆盖为当前 active seed；
+  浏览器不能指定其它 seed。
+
+### 4.7 命令与 service allowlist
+
+命令首期 allowlist：
+
+```text
+ConversationSendMessage
+ConversationCancel
+InteractionAskRespond
+InteractionAskDismiss
+PlanReviewRespond
+ToolPermissionRespond
+```
+
+命令默认拒绝：
+
+```text
+SessionCreate / SessionResume / SessionClose
+SessionArchive / SessionUnarchive / SessionDelete / SessionShutdown
+AgentReloadConfig / SetToolMode
+SkillsActivate / SkillsReload / SkillsOperation
+ToolInvoke
+ConversationUndoTurn / ConversationCompact
+```
+
+service method 首期 allowlist：
+
+```text
+daemon.version
+session.list              # 网关脱敏后返回
+session.meta
+session.activity
+session.dashboard
+session.get_activity
+workspace.get
+workspace.list
+fs.list / fs.read         # 绑定当前 seed workspace root
+todo.status / todo.list
+plan.read / plan.context_stats
+stats.token_usage
+git.diff / git.branch / git.branches / git.file_diff
+```
+
+service method 默认拒绝：
+
+```text
+config.save / config.set_permission_level / profile.*
+workspace.create / workspace.rename / workspace.delete
+workspace.move_session / workspace.detach
+todo.set
+git.switch_branch / git.commit
+skills.operation / skills.reload
+subagent.spawn
+session.set_tool_mode
+```
+
+`config.load` 不原样透传；若允许，必须定义独立脱敏读模型。
+
+### 4.8 审批 challenge 权威映射
+
+浏览器只提交：
+
+```json
+{ "challenge_id": "...", "decision": "approve|reject|submit", "payload": {} }
+```
+
+网关将其映射到现有协议：
+
+- ask / plan：`interaction_id`
+- tool permission：`tool_call_id` 或 canonical interaction id
+
+工具名、目标路径、风险等级、动作摘要和信任文件夹范围必须由 daemon / canonical state
+生成，前端只展示。challenge 必须绑定 seed、带 TTL、一次性，并拒绝重放；网关不得另造
+不可追溯的 challenge id。
+
+### 4.9 `/health` 与 `/activity`
+
+- `/health` 保持最小探活，不回显 token、token 长度或用户内容。
+- `/activity` 默认要求认证；若必须免鉴权，只能存在于回环且返回最小字段。
+- 网关只返回脱敏 activity 视图，不直接透传 daemon 原始响应。
+- LAN `server` 模式必须重新定义这两个端点的策略，不能沿用当前免鉴权行为。
+
+### 4.10 构建与进程边界
+
+- 网关优先实现为独立 crate/binary；若必须合并到 `qaqh-daemon`，至少使用 compile-time
+  feature，保证普通 `run` / `server` 构建不链接 WebUI embed 与静态资源。
+- 固定 `QAQH_DEBUG_RENDERER_DIR` 只允许存在于显式开发模式。
+- `qaqh-daemon webui` 仅是 UX 子命令，不得让普通 daemon 自动挂载网关。
+- `is_authorized` 改常量时间比较，属于实现前置项。
+
+### 4.11 Cookie 续期、CSRF 与多标签页
+
+- 浏览器 session 有独立 TTL，并与 daemon lease TTL 分开管理。
+- 续期请求必须校验 Origin / CSRF；续期失败时清理 Cookie 与服务端映射。
+- HTTP 回环模式不使用要求 `Secure` 的 `__Host-` cookie 前缀。
+- 首期建议一个浏览器 profile 共享一个 session 和一个 active seed；多标签页共享状态。
+  若产品要求标签页隔离，应改为每标签页独立 session id 与独立 daemon lease，不能只靠
+  前端内存区分。
+- logout、网关重启、daemon epoch 变化都必须使服务端 session 失效。
 
 ---
 
@@ -378,6 +543,8 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 | D-6 | WebUI 源码目录 | 建议仓库根 `webui/`，构建产物 `webui/out/renderer` |
 | D-7 | 浏览器会话是否允许 `fs.*` | 只允许当前 seed workspace 根 |
 | D-8 | 前端是否继续使用 Bun sidecar | 生产不用；仅开发/调试可选 |
+| D-9 | 多标签页是否共享浏览器 session / daemon lease | 首期共享；隔离需独立 session 与 lease |
+| D-10 | 是否开放 `session.new` / `session.resume` | 首期只 attach 已有 seed |
 
 ---
 
@@ -385,7 +552,8 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 
 - 本文不改变 Ringing V1 wire；浏览器网关只是 Ringing 的受限客户端。
 - 本文不改变 session canonical fact / projection 方向；新合入的
-  `SessionMetaProjection`、`ResourceProjection` 仍是 WebUI 的只读投影来源。
+  `SessionMetaProjection`、`ResourceProjection`、`ControlProjection` 仍是 WebUI 的
+  只读投影来源。
 - 本文要求浏览器消费 typed projection，不直接读存储布局。
 - 本文与 v2 总架构的 `Node transport` 边界一致：WebUI 是 transport 之上的客户端，
   不是 daemon 存储或 actor 的第二所有者。
