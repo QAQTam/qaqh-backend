@@ -1,6 +1,6 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D32 收口并通过复审前不得标记为已冻结
+> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D38 收口并通过复审前不得标记为已冻结
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
 > **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
@@ -1437,7 +1437,7 @@ pub struct EventsPoison {
 3. 正常续租只延长 `lease_expires_at_ms`，不得改变 `writer_id`、`generation_epoch`、`fencing_token`。
 4. epoch 切换（migration/cutover/rollback/恢复接管）必须递增 `generation_epoch` 并生成更大的 `fencing_token`；旧 epoch 的 fence 只用于审计。
 5. 每次 append 前必须在 `events.lock` 内比较调用方持有的 `(writer_id, generation_epoch, fencing_token)` 与当前 fence。任一不匹配、lease 已过期或 `log_id` 不匹配，返回 `AppendRejected { code="stale_writer", expected_token, presented_token, epoch }`，不得写 fact；锁内比较是最后一个原子裁决点。
-6. 旧 writer 收到 `stale_writer` 后必须停止所有 handler、取消未发布 projection、写 audit，并向上层返回 `ResetRequired { reason=StaleWriter }`；禁止用本地 retry 覆盖 fence。
+6. 旧 writer 收到 `stale_writer` 后必须停止所有 handler、取消未发布 projection、写 audit，并向上层返回 `ResetRequired { reason=StaleWriter }`；禁止用本地 retry 覆盖 fence。`AppendRejected.code="stale_writer"` 在 migration CLI 层映射为退出码 `E_STALE_WRITER`，两处是同一拒绝事实的不同表示。
 7. `events.jsonl` 的每次成功 barrier 都要记录内存 `committed_fact_seq/committed_offset`。barrier 成功后、发布 projection 或返回 durable ack 前，必须用 temp + fsync + rename + 父目录 fsync 更新 `events.commit.json`；commit marker 才是跨重启 committed high-water，`events.poison.json` 只是 EIO 证据。commit marker 更新失败时不得发布/ack，session 立即进入 `CommitRecoveryRequired`，只允许 recovery/repair 路径继续。
 8. `fsync` 返回 EIO 时，必须保持 `events.commit.json` 指向失败前的 committed offset，再尝试写 `events.poison.json` 并 `ftruncate` 回 committed offset + fsync；poison marker 写入或截断失败时 session 保持不可写并归入 `CommitRecoveryRequired`。启动时若 `events.commit.json` 缺失、损坏或 `log_id` 不匹配，执行序固定为：`(1) 扫描 events.jsonl 得到最后完整行的结束 offset candidate_offset`；`(2) 计算 marker_missing_rebuildable := (a) events.poison.json 不存在；(b) events.jsonl 无尾部半行，且 candidate_offset 之前没有 EIO 记录；(c) 最后完整行的 log_id 与目录身份/writer-fence.log_id 一致`；`(3) 若 marker_missing_rebuildable=false，进入 CommitRecoveryRequired 并停止`；`(4) 若为 true，截断到 candidate_offset、写 recovery evidence/audit 并重建 marker`；`(5) 再验证重建后的 committed prefix`。禁止在扫描 candidate_offset 之前按未知 committed_offset 做截断。若 `events.jsonl` 长度大于已确认的 committed offset，先截断到 committed offset，禁止把失败 segment 的完整前缀当作 canonical。
 9. 不允许 `events.lock` 在持锁期间被 unlink/replace；fence CAS 与 append 必须共同校验 `log_id`，锁 inode 变化视为 stale writer。
@@ -2140,7 +2140,7 @@ UNIQUE(legacy_identity, derived_ordinal, canonical_seq)
 1. **S0 只读观测**：旧 writer 为权威，canonical 只写 shadow。
 2. **S1 单 writer facade**：所有旧写路径经 facade，canonical 成为写入事实，旧源双写。
 3. **S2 读切换**：timeline/control 先读 projection；旧快照只作 fallback。
-4. **S3 写切换**：停止旧 writer，保留旧文件只读。S3 是自动 rollback barrier。
+4. **S3 写切换**：停止旧 writer，保留旧文件只读。S3 是自动 rollback barrier。S3 必须由 migration CLI 在 `events.lock` 内完成：撤销旧 writer ownership、递增 `generation_epoch`/`fencing_token` 并 CAS 写 `writer-fence.json`；旧 writer 的下一次 append 必须收到 `stale_writer`。
 5. **S4 删除 gate**：对账、replay、恢复、rollback 演练全绿后删除旧目录。
 
 ### 8.4 Rollback
