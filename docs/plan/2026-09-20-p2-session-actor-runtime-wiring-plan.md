@@ -20,7 +20,7 @@
 - 真实 turn 仍由 `crates/qaqh-runtime/src/agent/engine_turn.rs` 的 `run_lap` 直接控制。
 - 输入、取消、审批和订阅尚未统一经过 mailbox。
 - 取消状态仍存在 token 与 thread-local 两处语义；`Loop::user_cancelled`
-  重复布尔已在 P2-3b 删除。
+  重复布尔已删除。
 - compaction/title/liveness/session lifecycle 仍在 loop 路径内。
 - `SubagentSupervisor`、两阶段 spawn 恢复和 root `QuotaLedger` 尚未实现。
 
@@ -183,7 +183,7 @@ Gate：
 
 #### P2-3b 删除重复 user_cancelled，统一取消门
 
-状态：实现中，issue #226。
+状态：已完成，PR #227，merge `0d096c6`。
 
 交付：
 
