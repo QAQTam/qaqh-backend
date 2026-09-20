@@ -162,6 +162,68 @@ mod session_fact_v2 {
         use super::*;
 
         #[test]
+        fn recovery_completion_rejects_backgrounded() -> Result<(), Box<dyn std::error::Error>> {
+            let action: RecoveryAction = serde_json::from_str(
+                r#"{"kind":"tool_finished","completion":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"backgrounded","metrics":{"started_at_ms":1,"finished_at_ms":1,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000007","recovery_input_fingerprint":"sha256:8888888888888888888888888888888888888888888888888888888888888888"},"finished_at_ms":1}}"#,
+            )?;
+            assert!(matches!(
+                action.validate(),
+                Err(ValidationError::InvalidField {
+                    field: "terminal_status",
+                    ..
+                })
+            ));
+            Ok(())
+        }
+
+        #[test]
+        fn reconciled_requires_evidence() -> Result<(), Box<dyn std::error::Error>> {
+            let missing_evidence: FactPayload = serde_json::from_str(
+                r#"{"kind":"tool_finished","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"succeeded","metrics":{"started_at_ms":1,"finished_at_ms":1,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":true,"finished_at_ms":1}}"#,
+            )?;
+            assert!(matches!(
+                missing_evidence.validate(),
+                Err(ValidationError::InvalidField {
+                    field: "reconciled",
+                    ..
+                })
+            ));
+
+            let partial_pair: FactPayload = serde_json::from_str(
+                r#"{"kind":"tool_finished","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"succeeded","metrics":{"started_at_ms":1,"finished_at_ms":1,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":true,"evidence_fact_seq":1,"finished_at_ms":1}}"#,
+            )?;
+            assert!(matches!(
+                partial_pair.validate(),
+                Err(ValidationError::InvalidField {
+                    field: "evidence_fact_seq",
+                    ..
+                })
+            ));
+
+            let evidence_ref: FactPayload = serde_json::from_str(
+                r#"{"kind":"tool_finished","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"succeeded","metrics":{"started_at_ms":1,"finished_at_ms":1,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":true,"evidence_ref":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","finished_at_ms":1}}"#,
+            )?;
+            evidence_ref.validate()?;
+
+            let evidence_pair: FactPayload = serde_json::from_str(
+                r#"{"kind":"tool_finished","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"succeeded","metrics":{"started_at_ms":1,"finished_at_ms":1,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":true,"evidence_fact_seq":1,"evidence_event_id":"01J00000000000000000000007","finished_at_ms":1}}"#,
+            )?;
+            evidence_pair.validate()?;
+
+            let recovery_missing_evidence: RecoveryAction = serde_json::from_str(
+                r#"{"kind":"tool_finished","completion":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"succeeded","metrics":{"started_at_ms":1,"finished_at_ms":1,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":true,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000007","recovery_input_fingerprint":"sha256:8888888888888888888888888888888888888888888888888888888888888888"},"finished_at_ms":1}}"#,
+            )?;
+            assert!(matches!(
+                recovery_missing_evidence.validate(),
+                Err(ValidationError::InvalidField {
+                    field: "reconciled",
+                    ..
+                })
+            ));
+            Ok(())
+        }
+
+        #[test]
         fn envelope_invariants() -> Result<(), Box<dyn std::error::Error>> {
             let fact: SessionFact = serde_json::from_str(ENVELOPE_FIXTURE.trim())?;
             fact.validate()?;
