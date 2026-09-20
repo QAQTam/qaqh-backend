@@ -8,10 +8,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::session_fact_v2::{EventId, LogId, SessionId};
+use crate::session_fact_v2::{ContentHash, EventId, LogId, SessionId};
 
 pub const WRITER_FENCE_SCHEMA: &str = "qaqh.writer-fence/v1";
 pub const EVENTS_COMMIT_SCHEMA: &str = "qaqh.events-commit/v1";
+pub const EVENTS_POISON_SCHEMA: &str = "qaqh.events-poison/v1";
 
 mod u128_string {
     use serde::de::Error;
@@ -139,6 +140,19 @@ impl EventsCommit {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventsPoison {
+    pub schema: String,
+    pub log_id: LogId,
+    pub writer_id: WriterId,
+    pub committed_fact_seq: u64,
+    pub committed_offset: u64,
+    pub failed_offset: u64,
+    pub failed_bytes_hash: ContentHash,
+    pub error: String,
+    pub poisoned_at_ms: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +200,29 @@ mod tests {
                 "presented_token": "1006",
                 "epoch": 3
             })
+        );
+    }
+
+    #[test]
+    fn poison_marker_keeps_frozen_evidence_shape() {
+        let poison = EventsPoison {
+            schema: EVENTS_POISON_SCHEMA.into(),
+            log_id: LogId::new("0198f1a0-0000-7000-8000-000000000002"),
+            writer_id: WriterId::new("writer-a"),
+            committed_fact_seq: 7,
+            committed_offset: 4096,
+            failed_offset: 8192,
+            failed_bytes_hash: ContentHash::new(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            error: "fsync EIO".into(),
+            poisoned_at_ms: 1_789_830_000_000,
+        };
+        let encoded = serde_json::to_value(&poison).expect("serialize poison");
+        assert_eq!(encoded["schema"], EVENTS_POISON_SCHEMA);
+        assert_eq!(
+            serde_json::from_value::<EventsPoison>(encoded).expect("deserialize poison"),
+            poison
         );
     }
 }
