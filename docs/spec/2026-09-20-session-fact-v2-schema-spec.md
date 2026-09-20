@@ -1,6 +1,6 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D7 收口并通过复审前不得标记为已冻结
+> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D13 收口并通过复审前不得标记为已冻结
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
 > **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
@@ -702,7 +702,7 @@ pub struct ContentUnavailable {
 | `tool_replayed` | `call_id`, `execution_id`, `idempotency_key` | 幂等工具完成一次重放 |
 | `tool_reconciled` | `call_id`, `execution_id`, `evidence_ref` | 对账得出终态 |
 | `interaction_expired` | `interaction_id`, `reason` | 超时/重启/turn cancel 闭合 |
-| `subagent_finished` | `child_session_id`, `parent_call_id`, `status`, `result_ref`, `finished_at_ms`, `recovery_ref` | 恢复补写 child edge 终态 |
+| `subagent_finished` | `child_session_id`, `child_log_id`, `terminal_fact_seq`, `terminal_event_id`, `parent_call_id`, `status`, `result_ref`, `finished_at_ms`, `recovery_ref` | 恢复补写 child edge 终态 |
 | `upgrade_superseded` | `previous_recovery_id` | 已验证新 payload version，显式退出 read-only |
 | `commit_repaired` | `previous_commit_generation`, `committed_fact_seq`, `committed_offset` | 修复或重建 commit marker，使 high-water 可继续使用 |
 | `torn_tail_truncated` | `bytes`, `last_good_fact_seq` | 截断 torn tail |
@@ -735,7 +735,7 @@ pub struct ContentUnavailable {
 
 ```jsonl
 {"kind":"session_created","data":{"created_at_ms":1789830000000,"cwd":"/workspace","model":"deepseek-v4.1-flash","schema_caps":["reliable_replay","interaction_replay"]}}
-{"kind":"input_accepted","data":{"input_id":"input_01J00000000000000000000000","input_kind":"user_text","inline_text":"hello","attachments":[],"actor":{"kind":"user","id":"local"}}}
+{"kind":"input_accepted","data":{"input_id":"input_01J00000000000000000000000","input_kind":"user_text","input_purpose":"trigger_turn","inline_text":"hello","attachments":[],"actor":{"kind":"user","id":"local"}}}
 {"kind":"turn_started","data":{"turn_id":"turn_01J00000000000000000000000","input_id":"input_01J00000000000000000000000","mode":"normal"}}
 {"kind":"model_round_started","data":{"turn_id":"turn_01J00000000000000000000000","round":0,"request_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","context_revision":1}}
 {"kind":"assistant_block_sealed","data":{"turn_id":"turn_01J00000000000000000000000","block_id":"block_01J00000000000000000000000","kind":"answer","content_ref":"sha256:2222222222222222222222222222222222222222222222222222222222222222","model":"deepseek-v4.1-flash"}}
@@ -1220,6 +1220,8 @@ pub type ProjectionIndex = u16;
 
 该表的每一行都是规范性映射；`stream_key` 只能取表中 `channel:control`、`channel:conversation`、`channel:tool`，不得出现 `session` channel。新增 fact kind 或 slot 必须提升 `payload_version`，并新增行而不是改变旧行的 index。没有 delta 时可以不发布对应 `ProjectionEvent`，但 cursor 的 slot 解释保持不变。`delivery` 列的 `Reliable` 部分占用 canonical `projection_index`；`Replaceable`/`Ephemeral` 辅助流不占用 canonical index，且必须按 §3.3 回放规则处理。
 
+`input_purpose=queue_only` 的恢复不写 `TurnStarted` fact；因此它不发布 `turn_started` 的 conversation/control projection，也不推进该 slot 的 revision。§2.2 的“允许 0 个 projection=否”约束只适用于**已经存在的 fact**，不能把“没有 fact”解释成“该 fact 有零个 projection”。
+
 ### 4.2.1 Golden projection JSON 示例
 
 以下三个示例冻结 `ProjectionEvent`/`ProjectionPayload` 的 canonical JSON 形状。示例中的 UUID、ULID、hash 和 channel 值仅为 fixture 占位值。
@@ -1233,7 +1235,7 @@ pub type ProjectionIndex = u16;
 `InputAccepted -> conversation:input`（slot `0`）：
 
 ```json
-{"event_id":"01J00000000000000000000012","source_fact_seq":2,"source_event_id":"01J00000000000000000000002","stream_key":{"kind":"channel","data":"conversation"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":2,"projection_index":0}}},"projection_slot":"conversation","projection_index":0,"payload":{"kind":"conversation_delta","data":{"kind":"input_accepted","data":{"revision":1,"input_id":"input_01J00000000000000000000000","input_kind":"user_text","content":{"kind":"inline","data":{"text":"hello"}},"attachments":[],"actor":{"kind":"user","id":"local"}}}}}
+{"event_id":"01J00000000000000000000012","source_fact_seq":2,"source_event_id":"01J00000000000000000000002","stream_key":{"kind":"channel","data":"conversation"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":2,"projection_index":0}}},"projection_slot":"conversation","projection_index":0,"payload":{"kind":"conversation_delta","data":{"kind":"input_accepted","data":{"revision":1,"input_id":"input_01J00000000000000000000000","input_kind":"user_text","input_purpose":"trigger_turn","content":{"kind":"inline","data":{"text":"hello"}},"attachments":[],"actor":{"kind":"user","id":"local"}}}}}
 ```
 
 `ToolFinished -> timeline:tool_result`（slot `1`）：
@@ -1433,7 +1435,7 @@ pub struct EventsPoison {
 5. 每次 append 前比较调用方持有的 `(writer_id, generation_epoch, fencing_token)` 与当前 fence。任一不匹配、lease 已过期或 `log_id` 不匹配，返回 `AppendRejected { code="stale_writer", expected_token, presented_token, epoch }`，不得写 fact。
 6. 旧 writer 收到 `stale_writer` 后必须停止所有 handler、取消未发布 projection、写 audit，并向上层返回 `ResetRequired { reason=StaleWriter }`；禁止用本地 retry 覆盖 fence。
 7. `events.jsonl` 的每次成功 barrier 都要记录内存 `committed_fact_seq/committed_offset`。barrier 成功后、发布 projection 或返回 durable ack 前，必须用 temp + fsync + rename + 父目录 fsync 更新 `events.commit.json`；commit marker 才是跨重启 committed high-water，`events.poison.json` 只是 EIO 证据。commit marker 更新失败时不得发布/ack，session 立即进入 `CommitRecoveryRequired`，只允许 recovery/repair 路径继续。
-8. `fsync` 返回 EIO 时，必须保持 `events.commit.json` 指向失败前的 committed offset，再尝试写 `events.poison.json` 并 `ftruncate` 回 committed offset + fsync；poison marker 写入或截断失败时 session 保持不可写并归入 `CommitRecoveryRequired`。启动时若 `events.commit.json` 缺失、损坏或 `log_id` 不匹配：只有 JSONL 全部为完整行且没有 poison/超出 committed offset 的证据时，才允许写 recovery evidence/audit 并安全重建 marker；否则 session 进入 `CommitRecoveryRequired`。若 `events.jsonl` 长度大于 committed offset，先截断到 committed offset，禁止把失败 segment 的完整前缀当作 canonical。
+8. `fsync` 返回 EIO 时，必须保持 `events.commit.json` 指向失败前的 committed offset，再尝试写 `events.poison.json` 并 `ftruncate` 回 committed offset + fsync；poison marker 写入或截断失败时 session 保持不可写并归入 `CommitRecoveryRequired`。启动时若 `events.commit.json` 缺失、损坏或 `log_id` 不匹配：先扫描 `events.jsonl` 得到最后完整行的结束 offset `candidate_offset`，并定义 `marker_missing_rebuildable := (a) events.poison.json 不存在；(b) events.jsonl 无尾部半行，且 candidate_offset 之前没有 EIO 记录；(c) 最后完整行的 log_id 与目录身份/writer-fence.log_id 一致`。仅当 `marker_missing_rebuildable=true` 时，才允许写 recovery evidence/audit 并安全重建 marker；否则 session 进入 `CommitRecoveryRequired`。若 `events.jsonl` 长度大于已确认的 committed offset，先截断到 committed offset，禁止把失败 segment 的完整前缀当作 canonical。
 9. 不允许 `events.lock` 在持锁期间被 unlink/replace；fence CAS 与 append 必须共同校验 `log_id`，锁 inode 变化视为 stale writer。
 10. `upgrade-fence.json` 是版本无关的单调 sidecar；任何 writer 在写 unknown kind/version 的 read-only marker 前必须先校验它。若已存在更高 generation 的 `state=writable`，旧 writer 不得追加 read-only marker，只能返回 `ResetRequired { reason=UpgradeRequired }`。
 11. 升级 writer 只有在验证全部 payload version 后，才可按 `upgrade-fence generation + 1` 写 `state=writable`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }`；旧 writer 永远不得降低 generation 或把 writable 改回 read-only。
@@ -1735,6 +1737,9 @@ pub struct RecoveryToolCompletion {
 
 pub struct RecoverySubagentCompletion {
     pub child_session_id: SessionId,
+    pub child_log_id: LogId,
+    pub terminal_fact_seq: u64,
+    pub terminal_event_id: EventId,
     pub parent_call_id: ToolCallId,
     pub status: SubagentTerminalStatus,
     pub result_ref: Option<ContentRef>,
@@ -1796,7 +1801,7 @@ plan_hash = sha256(canonical_json({
 
 `recovery_input_fingerprint = sha256(canonical_json({log_id, last_good_fact_seq, sorted_open_ids, torn_tail_bytes_hash, child_terminal_digest}))`，同样不包含 `plan_hash` 或 `RecoveryIntent`。因此不存在 `RecoveryIntent(plan_hash)` 自引用。
 
-`child_terminal_digest` 的规范输入是 parent 当前开放 `SubagentSpawned` edge 对应 child log 的稳定终态证据数组，按 `child_session_id` 排序：`{child_session_id, child_log_id, terminal_fact_seq, terminal_event_id, status, parent_call_id, result_ref, finished_at_ms}`；child 尚未 terminal 时使用空数组的 sha256。该字段集必须与 `RecoverySubagentCompletion` 逐字段一一对应，新增 completion 字段时必须同步 digest。child terminal 证据变化必须产生新的 batch key，禁止复用已闭合的 parent recovery batch。
+`child_terminal_digest` 的规范输入是 parent 当前开放 `SubagentSpawned` edge 对应 child log 的稳定终态证据数组，按 `child_session_id` 排序：`{child_session_id, child_log_id, terminal_fact_seq, terminal_event_id, status, parent_call_id, result_ref, finished_at_ms}`；child 尚未 terminal 时使用空数组的 sha256。该字段集必须等于 `RecoverySubagentCompletion` 去掉 `recovery_ref` 后的字段集；`RecoveryAction::subagent_finished` 与 `RecoveryStep::SubagentFinished.completion` 则必须包含完整的 9 字段（含 `recovery_ref`）并逐字段同构。新增 completion 字段时必须同步 digest 与 action。child terminal 证据变化必须产生新的 batch key，禁止复用已闭合的 parent recovery batch。
 
 恢复批次协议：
 
@@ -1822,6 +1827,8 @@ pub struct RecoveryIntent {
     pub plan_hash: ContentHash,
 }
 ```
+
+`upgrade_superseded` 与 `commit_repaired` 是 sidecar-only action，不进入 `RecoveryIntent`/`RecoveryPlan`；前者的幂等键是 `(log_id, upgrade-fence.generation+1)`，后者是 `(log_id, previous_commit_generation)`，分别由 `upgrade-fence.json` 与 `events.commit.json` 自身携带并校验。
 
 `recovery_input_fingerprint` 的规范输入：
 
@@ -2265,7 +2272,7 @@ E2E 证据要求：
 | `recovery-unknown-fact.jsonl` | 已知前缀 + unknown kind + 已知后缀 | 3（前缀 + unknown line + final SessionRecovered） | `outcome=read_only_upgrade_required` | 后缀不产生 revision | none |
 | `recovery-upgrade-supersede.jsonl` | read-only marker + 新 writer 理解全部 payload version | 2（旧 marker + writable supersede marker） | `outcome=writable`，actions=`upgrade_superseded` | 升级前 revision 不变，升级后恢复单调 | none |
 | `recovery-input-admission.jsonl` | InputAccepted(input_purpose=trigger_turn) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | 同一 input 只有一个 TurnStarted | `conversation.turn_started.revision` 等于 `TurnStarted.fact_seq` 且 slot 1 唯一 | none |
-| `recovery-input-queue-only.jsonl` | InputAccepted(input_purpose=queue_only) + crash before TurnStarted | 2（InputAccepted + final SessionRecovered） | 不补 `TurnStarted` | queue-only 不推进 turn slot | none |
+| `recovery-input-queue-only.jsonl` | InputAccepted(input_purpose=queue_only) + crash before TurnStarted | 2（InputAccepted + final SessionRecovered） | `expected_turn_started_count=0`；不补 `TurnStarted` | `expected_turn_projection_count=0`；InputAccepted 的 conversation/timeline revision 正常前进 | none |
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
 | `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker | 2（committed fact + final SessionRecovered） | `outcome=commit_recovery_required`；不把 poison 后前缀当 canonical | 只重放 committed revision | none |
 | `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且无 poison/越界证据 | 2（原 committed fact + final writable SessionRecovered） | 先写 recovery evidence/audit，再安全重建 marker | committed revision 不重复 | none |
@@ -2311,7 +2318,7 @@ Replay capability/副作用/对账组合的四个规范单元必须全部有独�
 
 ```jsonl
 {"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":1,"event_id":"01J00000000000000000000001","ts_ms":1789830000000,"payload":{"kind":"session_created","data":{"created_at_ms":1789830000000,"cwd":"/workspace","model":"deepseek-v4.1-flash","schema_caps":["reliable_replay","interaction_replay"]}}}
-{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":2,"event_id":"01J00000000000000000000002","ts_ms":1789830000010,"causation_id":"01J00000000000000000000001","payload":{"kind":"input_accepted","data":{"input_id":"input_01J00000000000000000000000","input_kind":"user_text","inline_text":"hello","attachments":[],"actor":{"kind":"user","id":"local"}}}}
+{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":2,"event_id":"01J00000000000000000000002","ts_ms":1789830000010,"causation_id":"01J00000000000000000000001","payload":{"kind":"input_accepted","data":{"input_id":"input_01J00000000000000000000000","input_kind":"user_text","input_purpose":"trigger_turn","inline_text":"hello","attachments":[],"actor":{"kind":"user","id":"local"}}}}
 {"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":3,"event_id":"01J00000000000000000000003","ts_ms":1789830000020,"turn_id":"turn_01J00000000000000000000000","causation_id":"01J00000000000000000000002","payload":{"kind":"turn_started","data":{"turn_id":"turn_01J00000000000000000000000","input_id":"input_01J00000000000000000000000","mode":"normal"}}}
 ```
 
@@ -2331,6 +2338,8 @@ Recovery：
 ### 10.2 必测命令
 
 本阶段只冻结测试清单，不实现测试。后续 P1/P2 实现时应至少提供：
+
+> `qaqh-session` 当前已存在于 workspace，是 P1 的 landing package；如果后续把 canonical log 抽到 `qaqh-store`，必须在同一实现 PR 更新本节命令与 CI，不得留下失效包名。
 
 ```bash
 cargo test -p qaqh-session --test session_fact_v2 -- --exact session_fact_v2::envelope::roundtrip
@@ -2442,5 +2451,6 @@ B 在 #106 可直接反证：
 - 未运行 Rust 测试的原因（本阶段无生产代码）。
 - 独立评审人 @AnyBuddy。
 - 已知未决项及 owner/截止条件；P0 不允许存在无 owner 的未决项。
+- 验收映射必须覆盖 I1-I18；§9 的 I17（EventsCommit/CommitRecoveryRequired/clock）与 I18（root QuotaLedger/quota.lock）必须与 plan §12 和 fixture 清单同 ID、同包名、同断言。
 
 本 spec 的验收结论由 #106 独立反证报告给出；A 不得自行宣告“已通过独立评审”。
