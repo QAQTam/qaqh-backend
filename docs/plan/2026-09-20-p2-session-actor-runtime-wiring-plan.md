@@ -164,7 +164,7 @@ Gate：
 
 #### P2-3a 取消 token tree 与子代理派生
 
-状态：实现中，issue #222。
+状态：已完成，PR #223，merge `dc649f3`。
 
 交付：
 
