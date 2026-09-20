@@ -150,7 +150,7 @@ Gate：
 
 ### P2-3 取消 token 树与单一终态
 
-状态：进行中；拆成 token tree 与 legacy 状态清理两个可验收切片。
+状态：已完成，拆成 token tree、legacy 状态清理与单一终态三个可验收切片。
 
 交付：
 
@@ -199,7 +199,7 @@ Gate：
 
 #### P2-3c 单一 InterruptReason producer
 
-状态：实现中，issue #230。
+状态：已完成，PR #231，merge `e471f11`。
 
 交付：
 
