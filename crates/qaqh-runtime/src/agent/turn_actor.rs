@@ -400,7 +400,9 @@ impl TurnActor {
             .map_err(TurnActorError::Actor)?;
         match self.actor.step().map_err(TurnActorError::Actor)? {
             Some(SessionActorEffect::Turn(effect)) => Ok(effect),
-            Some(SessionActorEffect::Shutdown) | None => Err(TurnActorError::UnexpectedEffect),
+            Some(SessionActorEffect::Subscription(_))
+            | Some(SessionActorEffect::Shutdown)
+            | None => Err(TurnActorError::UnexpectedEffect),
         }
     }
 }
