@@ -65,6 +65,9 @@ pub enum CanonicalError {
     #[error("recovery intent conflict: {0}")]
     RecoveryIntentConflict(String),
 
+    #[error("replay window is invalid: {0}")]
+    InvalidReplayWindow(String),
+
     #[error("writer lease duration must be positive, got {0}")]
     InvalidLeaseDuration(i64),
 
