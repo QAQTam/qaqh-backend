@@ -3,9 +3,11 @@
 use qaqh_domain::RingingChannel;
 use qaqh_session::session_fact_v2::{
     AuditRef, ContentHash, ContentUnavailable, ContentUnavailableReason, ContentValue,
-    DeleteReason, Delivery, MetaDelta, ProjectionEvent, ProjectionPayload, ProjectionSlot,
-    ReliableCursor, StreamKey, ValidationError,
+    ControlDelta, DeleteReason, Delivery, EventId, MetaDelta, ProjectionEvent, ProjectionPayload,
+    ProjectionSlot, ReliableCursor, SessionFact, StreamKey, ValidationError,
 };
+
+const ENVELOPE_FIXTURE: &str = include_str!("fixtures/session_fact_v2/envelope.jsonl");
 
 const GOLDEN_CONTROL: &str = r#"{"event_id":"01J00000000000000000000011","source_fact_seq":1,"source_event_id":"01J00000000000000000000001","stream_key":{"kind":"channel","data":"control"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":1,"projection_index":2}}},"projection_slot":"control","projection_index":2,"payload":{"kind":"control_delta","data":{"kind":"session_created","data":{"revision":1,"session_id":"0198f1a0-0000-7000-8000-000000000001","cwd":"/workspace","model":"deepseek-v4.1-flash","schema_caps":["reliable_replay","interaction_replay"]}}}}"#;
 
@@ -19,6 +21,10 @@ fn cursor(fact_seq: u64, projection_index: u16) -> ReliableCursor {
         fact_seq,
         projection_index,
     }
+}
+
+fn source_fact() -> SessionFact {
+    serde_json::from_str(ENVELOPE_FIXTURE.trim()).expect("parse envelope fixture")
 }
 
 #[test]
@@ -98,6 +104,76 @@ fn delivery_json_shapes_are_distinguishable() {
         serde_json::to_value(Delivery::Ephemeral).expect("serialize ephemeral"),
         serde_json::json!("Ephemeral")
     );
+}
+
+#[test]
+fn projection_event_constructors_populate_and_validate_source_identity() {
+    let fact = source_fact();
+    let reliable = ProjectionEvent::reliable(
+        EventId::new("01J00000000000000000000021"),
+        &fact,
+        StreamKey::Channel(RingingChannel::Control),
+        ProjectionSlot::Control,
+        ProjectionPayload::ControlDelta(ControlDelta::SessionCreated {
+            revision: 1,
+            session_id: fact.session_id.clone(),
+            cwd: "/workspace".into(),
+            model: "deepseek-v4.1-flash".into(),
+            schema_caps: vec!["reliable_replay".into()],
+        }),
+    )
+    .expect("construct reliable projection event");
+    assert_eq!(reliable.source_fact_seq, fact.fact_seq);
+    assert_eq!(reliable.source_event_id, fact.event_id);
+    assert_eq!(
+        reliable.projection_index,
+        Some(ProjectionSlot::Control.as_u16())
+    );
+    assert_eq!(
+        reliable
+            .delivery
+            .reliable_cursor()
+            .expect("reliable cursor")
+            .log_id,
+        fact.log_id
+    );
+    reliable.validate().expect("reliable event validates");
+
+    let replaceable = ProjectionEvent::replaceable(
+        EventId::new("01J00000000000000000000022"),
+        &fact,
+        StreamKey::Channel(RingingChannel::Control),
+        7,
+        ProjectionPayload::AuditRef(AuditRef {
+            audit_seq: 1,
+            audit_hash: ContentHash::new(
+                "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            ),
+        }),
+    )
+    .expect("construct replaceable projection event");
+    assert!(matches!(
+        replaceable.delivery,
+        Delivery::Replaceable { revision: 7 }
+    ));
+    assert_eq!(replaceable.projection_slot, None);
+    assert_eq!(replaceable.projection_index, None);
+
+    let ephemeral = ProjectionEvent::ephemeral(
+        EventId::new("01J00000000000000000000023"),
+        &fact,
+        StreamKey::Channel(RingingChannel::Control),
+        ProjectionPayload::AuditRef(AuditRef {
+            audit_seq: 2,
+            audit_hash: ContentHash::new(
+                "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            ),
+        }),
+    )
+    .expect("construct ephemeral projection event");
+    assert!(matches!(ephemeral.delivery, Delivery::Ephemeral));
+    assert_eq!(ephemeral.projection_slot, None);
+    assert_eq!(ephemeral.projection_index, None);
 }
 
 #[test]
