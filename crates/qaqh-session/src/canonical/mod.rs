@@ -7,6 +7,7 @@ mod clock;
 mod log;
 mod reader;
 mod recovery;
+mod recovery_state;
 mod replay_window;
 mod store;
 mod types;
@@ -24,6 +25,9 @@ pub use recovery::{
     RecoveryIntentStatus, RecoveryIntentWriteOutcome, load_recovery_intent,
     persist_recovery_intent, recovery_input_fingerprint, recovery_intent_path,
     remove_recovery_intent_if_stale, sha256_content_hash,
+};
+pub use recovery_state::{
+    CanonicalRecoveryState, CommitRepairOutcome, inspect_recovery_state, repair_commit_marker,
 };
 pub use replay_window::{
     DEFAULT_REPLAY_WINDOW_RETENTION_MS, DEFAULT_SNAPSHOT_MAX_AGE_MS, DEFAULT_WINDOW_CAPACITY_BYTES,
