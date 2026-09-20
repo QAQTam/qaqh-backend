@@ -705,14 +705,14 @@ pub struct ContentUnavailable {
 | `subagent_finished` | `child_session_id`, `child_log_id`, `terminal_fact_seq`, `terminal_event_id`, `parent_call_id`, `status`, `result_ref`, `finished_at_ms`, `recovery_ref` | 恢复补写 child edge 终态 |
 | `upgrade_superseded` | `previous_recovery_id` | 已验证新 payload version，显式退出 read-only |
 | `commit_repaired` | `previous_commit_generation`, `committed_fact_seq`, `committed_offset` | 修复或重建 commit marker，使 high-water 可继续使用 |
-| `torn_tail_truncated` | `bytes`, `last_good_fact_seq` | 截断 torn tail |
+| `move_torn_tail` | `from`, `to`, `bytes`, `bytes_hash` | 保留并截断 torn tail |
 | `projection_rebuilt` | `projection`, `through_fact_seq` | 重建 derived projection |
 
 `tool_finished.completion.terminal_status=denied` 时，`error.code` 只能是 `approval_rejected` 或 `policy_denied`，且必须等于对应 `ToolFinished.error.code`。每个无 intent 的 denied recovery completion 必须在最终 `SessionRecovered.actions` 中产生恰好一个对应的 `tool_finished` action；该路径没有 `execution_id`，不得伪造执行身份。
 
 `RecoveryAction` 与 `RecoveryStep` 的映射规则：
 
-- `turn_interrupted`、`turn_started`、`tool_finished`、`interaction_expired`、`subagent_finished`、`torn_tail_truncated` 必须分别映射到同名的 `RecoveryStep`；其字段集必须与对应 step 的 `data` 逐字段同构，新增或删除 step 字段时必须同步 action，禁止两处维护不同字段清单。`replayed` / `reconciled` / `indeterminate` / `denied` 只是 `RecoveryToolCompletion.terminal_status` 的子语义，不另设 action。
+- `turn_interrupted`、`turn_started`、`tool_finished`、`interaction_expired`、`subagent_finished`、`move_torn_tail` 必须分别映射到同名的 `RecoveryStep`；其字段集必须与对应 step 的 `data` 逐字段同构，新增或删除 step 字段时必须同步 action，禁止两处维护不同字段清单。`replayed` / `reconciled` / `indeterminate` / `denied` 只是 `RecoveryToolCompletion.terminal_status` 的子语义，不另设 action。
 - `upgrade_superseded` 与 `commit_repaired` 是显式“不产生 step”的 sidecar-only action；前者幂等键为 `(log_id, upgrade-fence.generation+1)`，后者为 `(log_id, previous_commit_generation)`，均不进入 `RecoveryPlan.steps` / `plan_hash`。
 - `projection_rebuilt` 是派生 projection 动作，不产生 canonical step。
 
@@ -756,6 +756,8 @@ pub struct ContentUnavailable {
 {"kind":"subagent_spawned","data":{"child_session_id":"0198f1a0-0000-7000-8000-000000000003","parent_call_id":"call_01J00000000000000000000000","spawned_at_ms":1789830000080}}
 {"kind":"subagent_finished","data":{"child_session_id":"0198f1a0-0000-7000-8000-000000000003","parent_call_id":"call_01J00000000000000000000000","status":"completed","result_ref":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","finished_at_ms":1789830000090}}
 ```
+
+§2.6、§4.2.1、§10.1.1 的 `input_accepted` 示例统一使用 `input_purpose=trigger_turn`；`queue_only` 只允许出现在恢复 fixture，不得作为这三处 golden 的字段值。
 
 ---
 
@@ -1437,7 +1439,7 @@ pub struct EventsPoison {
 5. 每次 append 前必须在 `events.lock` 内比较调用方持有的 `(writer_id, generation_epoch, fencing_token)` 与当前 fence。任一不匹配、lease 已过期或 `log_id` 不匹配，返回 `AppendRejected { code="stale_writer", expected_token, presented_token, epoch }`，不得写 fact；锁内比较是最后一个原子裁决点。
 6. 旧 writer 收到 `stale_writer` 后必须停止所有 handler、取消未发布 projection、写 audit，并向上层返回 `ResetRequired { reason=StaleWriter }`；禁止用本地 retry 覆盖 fence。
 7. `events.jsonl` 的每次成功 barrier 都要记录内存 `committed_fact_seq/committed_offset`。barrier 成功后、发布 projection 或返回 durable ack 前，必须用 temp + fsync + rename + 父目录 fsync 更新 `events.commit.json`；commit marker 才是跨重启 committed high-water，`events.poison.json` 只是 EIO 证据。commit marker 更新失败时不得发布/ack，session 立即进入 `CommitRecoveryRequired`，只允许 recovery/repair 路径继续。
-8. `fsync` 返回 EIO 时，必须保持 `events.commit.json` 指向失败前的 committed offset，再尝试写 `events.poison.json` 并 `ftruncate` 回 committed offset + fsync；poison marker 写入或截断失败时 session 保持不可写并归入 `CommitRecoveryRequired`。启动时若 `events.commit.json` 缺失、损坏或 `log_id` 不匹配：先扫描 `events.jsonl` 得到最后完整行的结束 offset `candidate_offset`，并定义 `marker_missing_rebuildable := (a) events.poison.json 不存在；(b) events.jsonl 无尾部半行，且 candidate_offset 之前没有 EIO 记录；(c) 最后完整行的 log_id 与目录身份/writer-fence.log_id 一致`。仅当 `marker_missing_rebuildable=true` 时，才允许写 recovery evidence/audit 并安全重建 marker；否则 session 进入 `CommitRecoveryRequired`。若 `events.jsonl` 长度大于已确认的 committed offset，先截断到 committed offset，禁止把失败 segment 的完整前缀当作 canonical。
+8. `fsync` 返回 EIO 时，必须保持 `events.commit.json` 指向失败前的 committed offset，再尝试写 `events.poison.json` 并 `ftruncate` 回 committed offset + fsync；poison marker 写入或截断失败时 session 保持不可写并归入 `CommitRecoveryRequired`。启动时若 `events.commit.json` 缺失、损坏或 `log_id` 不匹配，执行序固定为：`(1) 扫描 events.jsonl 得到最后完整行的结束 offset candidate_offset`；`(2) 计算 marker_missing_rebuildable := (a) events.poison.json 不存在；(b) events.jsonl 无尾部半行，且 candidate_offset 之前没有 EIO 记录；(c) 最后完整行的 log_id 与目录身份/writer-fence.log_id 一致`；`(3) 若 marker_missing_rebuildable=false，进入 CommitRecoveryRequired 并停止`；`(4) 若为 true，截断到 candidate_offset、写 recovery evidence/audit 并重建 marker`；`(5) 再验证重建后的 committed prefix`。禁止在扫描 candidate_offset 之前按未知 committed_offset 做截断。若 `events.jsonl` 长度大于已确认的 committed offset，先截断到 committed offset，禁止把失败 segment 的完整前缀当作 canonical。
 9. 不允许 `events.lock` 在持锁期间被 unlink/replace；fence CAS 与 append 必须共同校验 `log_id`，锁 inode 变化视为 stale writer。
 10. `upgrade-fence.json` 是版本无关的单调 sidecar；任何 writer 在写 unknown kind/version 的 read-only marker 前必须先校验它。若已存在更高 generation 的 `state=writable`，旧 writer 不得追加 read-only marker，只能返回 `ResetRequired { reason=UpgradeRequired }`。
 11. 升级 writer 只有在验证全部 payload version 后，才可按 `upgrade-fence generation + 1` 写 `state=writable`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }`；旧 writer 永远不得降低 generation 或把 writable 改回 read-only。`upgrade_superseded.previous_recovery_id` 必须等于写 `generation+1` marker 前 `UpgradeFence.last_recovery_id`，且该相等关系必须与 marker 更新在同一批校验；否则 fail-closed，不得生成 action。
@@ -1864,7 +1866,7 @@ canonical_json({
 | no-action | `SessionRecovered { outcome=writable, actions=[], torn_tail=false }` | 标准 batch key | 无 open 状态且无 torn/unknown/tombstone 时，创建一次闭合 batch |
 | unknown fact | `SessionRecovered { outcome=read_only_upgrade_required, actions=[], last_good_fact_seq=<unknown 前> }` | 标准 batch key | 不解释 unknown 及其后 fact；后续 load 复用同一 batch |
 | upgrade supersede | 先 durable 写 `upgrade-fence {generation+1,state=writable}`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }` | `(log_id, upgrade-fence.generation+1)` | sidecar-only batch；不进入 `RecoveryPlan.steps` / `plan_hash`；仅允许在已有 read-only marker 且 pre-recovery log 已变化时创建；旧 writer 不得写此 batch |
-| commit/poison repair | 先按 `events.commit.json` 验证/截断或重建 marker：若 `marker_missing_rebuildable=true`，actions=`[projection_rebuilt]`、outcome=`writable`；若 previous generation/high-water 已知，actions=`[commit_repaired]`、outcome=`writable` 或 `commit_recovery_required`；无法证明 high-water 时不写 business fact，只保持 runtime `CommitRecoveryRequired` | `(log_id, previous_commit_generation)`（仅 commit_repaired）；rebuild 路径用标准 batch key | repair 成功且 high-water/clock 一致后回 writable；否则只允许 repair 路径，禁止发布/ack |
+| commit/poison repair | 先按 `events.commit.json` 验证/截断或重建 marker：若 `marker_missing_rebuildable=true`，actions=`[projection_rebuilt]`、outcome=`writable`；若 previous generation/high-water 已知，actions=`[commit_repaired]`、outcome=`writable` 或 `commit_recovery_required`；无法证明 high-water 时不写 business fact，只保持 runtime `CommitRecoveryRequired` | `(log_id, previous_commit_generation)`（仅 commit_repaired）；rebuild 路径用标准 batch key | repair durable 成功且 high-water/clock 一致后才回 writable；`commit_repaired` 与 `tool_finished` 是互斥 action，commit repair 永不生成 `tool_finished` |
 | tombstone | `SessionRecovered { outcome=tombstone, actions=[] }` | 标准 batch key | 不写其它 recovery fact，不执行物理清理 |
 
 其它恢复矩阵：
@@ -1967,7 +1969,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 | `ToolFinished` | `(call_id, recovery_id)` | 已有则跳过；不得写第二个终态 |
 | `InteractionExpired` | `(interaction_id, recovery_id)` | 已有则跳过 |
 | `SubagentFinished` | `(log_id, child_session_id, parent_call_id, recovery_id)` | 已有则校验字段一致并跳过；不得写第二个 edge 终态 |
-| `MoveTornTail` side effect | `(log_id, torn_tail_bytes_hash)` | 已移动则验证目标文件，不重复移动 |
+| `move_torn_tail` | `(log_id, bytes_hash)` | 已移动则验证目标文件，不重复移动 |
 | `upgrade_superseded` | `(log_id, upgrade-fence.generation+1)` | 已有更高 generation 的 writable fence 时复用，不重复升级 |
 | `commit_repaired` | `(log_id, previous_commit_generation)` | 仅当 previous generation 可证明时使用；已修复同一代 marker 时验证 high-water/offset 后跳过 |
 | `projection_rebuilt` | `(log_id, projection, through_fact_seq)` | marker 缺失但 `marker_missing_rebuildable=true` 时使用；不伪造 `previous_commit_generation` |
@@ -2008,6 +2010,7 @@ upgrade batch 的 closed 判据：若 `upgrade-fence.state=writable` 且 `genera
 - edge 无 child log 是完整性损坏，parent 必须进入 `read_only_upgrade_required`，不得伪造 child 或 `SubagentFinished`。
 - child log 无 edge 时，child 必须 tombstone/取消，禁止继续执行；child terminal 且 parent edge open 时，只能由 `RecoveryStep::SubagentFinished` 补齐。
 - v2.0 只冻结 edge + mailbox；graph scorer/role template 延后。
+- parent unload/delete/shutdown/panic 的完成条件固定为：每个 child 先进入 canonical terminal，再 durable 写 parent `SubagentFinished` edge，再由 `SubagentSupervisor` join child handle，最后才允许 parent unload ack、tombstone 或 shutdown 完成。顺序固定为 `child terminal -> parent SubagentFinished -> child join -> parent terminal`，不得只依据内存 child 数或 UI 状态。
 - child session 的 fact log 与 parent log 不互相复制。
 - child terminal 只从 child 的 committed high-water 读取，并按下表映射；`child_terminal_digest` 必须覆盖映射后的全部字段。
 - `SubagentFinished`（含 recovery 补齐路径）只写入 parent log 的 control/resource edge projection，不产生 conversation/timeline projection，也不得改变 child 的 chat 视图；child 终态只通过 child log 自身的事实变化体现。
@@ -2247,6 +2250,8 @@ E2E 证据要求：
 | I16 | SubagentSpawned/Finished + supervisor + child_terminal_digest | parent unload/delete/shutdown/panic 在 child 全部 terminal+join 前不完成；spawn 双向孤儿恢复；trigger-turn 重放不产生第二个 turn |
 | I17 | EventsCommit + CommitRecoveryRequired + clock | marker 失败/EIO/crash-before-rename 均只有一个恢复解释；clock 不越过 committed high-water |
 | I18 | root QuotaLedger + quota.lock | root 与全部 child 经同一 owner/lock 串行 reservation；child 生命周期不删账本；reconciliation 无超卖 |
+
+I17 的 canonical 文本固定为：同一 commit/poison 输入只能落入 `writable`、`commit_recovery_required` 或“runtime `CommitRecoveryRequired` 且不写 final fact”三者之一；三者互斥且由 `marker_missing_rebuildable`、previous generation/high-water 证据唯一决定。
 
 ---
 
