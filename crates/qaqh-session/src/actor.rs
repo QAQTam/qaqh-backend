@@ -3,8 +3,9 @@
 //! This slice owns command ordering and turn terminal semantics only. Runtime
 //! I/O, tools and persistence remain behind the caller's adapter boundary.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
+use qaqh_domain::RingingChannel;
 use thiserror::Error;
 
 use crate::session_fact_v2::{InputId, InterruptReason, TurnId, TurnMode, TurnTerminal};
@@ -249,15 +250,166 @@ impl TurnCore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionId(String);
+
+impl ConnectionId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ConnectionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionCommand {
+    Subscribe {
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+    },
+    Unsubscribe {
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+    },
+    ConnectionClosed {
+        connection_id: ConnectionId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionEffect {
+    Subscribed {
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+        changed: bool,
+    },
+    Unsubscribed {
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+        changed: bool,
+    },
+    ConnectionClosed {
+        connection_id: ConnectionId,
+        removed: usize,
+    },
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SubscriberRegistry {
+    channels_by_connection: BTreeMap<ConnectionId, Vec<RingingChannel>>,
+}
+
+impl SubscriberRegistry {
+    pub fn subscribe(&mut self, connection_id: ConnectionId, channel: RingingChannel) -> bool {
+        let channels = self
+            .channels_by_connection
+            .entry(connection_id)
+            .or_default();
+        if channels.contains(&channel) {
+            return false;
+        }
+        channels.push(channel);
+        channels.sort_by_key(|candidate| candidate.as_str());
+        true
+    }
+
+    pub fn unsubscribe(&mut self, connection_id: &ConnectionId, channel: RingingChannel) -> bool {
+        let Some(channels) = self.channels_by_connection.get_mut(connection_id) else {
+            return false;
+        };
+        let before = channels.len();
+        channels.retain(|candidate| *candidate != channel);
+        let changed = channels.len() != before;
+        if channels.is_empty() {
+            self.channels_by_connection.remove(connection_id);
+        }
+        changed
+    }
+
+    pub fn connection_closed(&mut self, connection_id: &ConnectionId) -> usize {
+        self.channels_by_connection
+            .remove(connection_id)
+            .map_or(0, |channels| channels.len())
+    }
+
+    pub fn is_subscribed(&self, connection_id: &ConnectionId, channel: RingingChannel) -> bool {
+        self.channels_by_connection
+            .get(connection_id)
+            .is_some_and(|channels| channels.contains(&channel))
+    }
+
+    pub fn channels_for(&self, connection_id: &ConnectionId) -> Option<&[RingingChannel]> {
+        self.channels_by_connection
+            .get(connection_id)
+            .map(Vec::as_slice)
+    }
+
+    pub fn connection_ids(&self) -> impl Iterator<Item = &ConnectionId> {
+        self.channels_by_connection.keys()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.channels_by_connection.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.channels_by_connection.len()
+    }
+
+    fn apply(&mut self, command: SubscriptionCommand) -> SubscriptionEffect {
+        match command {
+            SubscriptionCommand::Subscribe {
+                connection_id,
+                channel,
+            } => {
+                let changed = self.subscribe(connection_id.clone(), channel);
+                SubscriptionEffect::Subscribed {
+                    connection_id,
+                    channel,
+                    changed,
+                }
+            }
+            SubscriptionCommand::Unsubscribe {
+                connection_id,
+                channel,
+            } => {
+                let changed = self.unsubscribe(&connection_id, channel);
+                SubscriptionEffect::Unsubscribed {
+                    connection_id,
+                    channel,
+                    changed,
+                }
+            }
+            SubscriptionCommand::ConnectionClosed { connection_id } => {
+                let removed = self.connection_closed(&connection_id);
+                SubscriptionEffect::ConnectionClosed {
+                    connection_id,
+                    removed,
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionCommand {
     Turn(TurnCommand),
+    Subscription(SubscriptionCommand),
     Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionActorEffect {
     Turn(TurnEffect),
+    Subscription(SubscriptionEffect),
     Shutdown,
 }
 
@@ -274,6 +426,7 @@ pub enum SessionActorError {
 #[derive(Debug)]
 pub struct SessionActor {
     core: TurnCore,
+    subscribers: SubscriberRegistry,
     mailbox: VecDeque<SessionCommand>,
     capacity: usize,
     shut_down: bool,
@@ -283,6 +436,7 @@ impl SessionActor {
     pub fn new(capacity: usize) -> Self {
         Self {
             core: TurnCore::default(),
+            subscribers: SubscriberRegistry::default(),
             mailbox: VecDeque::new(),
             capacity: capacity.max(1),
             shut_down: false,
@@ -291,6 +445,10 @@ impl SessionActor {
 
     pub fn state(&self) -> &TurnCoreState {
         self.core.state()
+    }
+
+    pub fn subscribers(&self) -> &SubscriberRegistry {
+        &self.subscribers
     }
 
     pub fn submit(&mut self, command: SessionCommand) -> Result<(), SessionActorError> {
@@ -312,6 +470,9 @@ impl SessionActor {
             SessionCommand::Turn(command) => {
                 Ok(Some(SessionActorEffect::Turn(self.core.step(command)?)))
             }
+            SessionCommand::Subscription(command) => Ok(Some(SessionActorEffect::Subscription(
+                self.subscribers.apply(command),
+            ))),
             SessionCommand::Shutdown => {
                 self.shut_down = true;
                 Ok(Some(SessionActorEffect::Shutdown))

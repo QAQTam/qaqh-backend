@@ -114,13 +114,29 @@ Gate：
 - 重复 resolution、迟到 resolution 和 cancel 竞争有契约测试。
 - terminal 后不得重放 pending modal。
 
-#### P2-2d subscription 与 lifecycle ingress
+#### P2-2d-a SessionActor subscription registry
+
+状态：已实现，PR #215；merge commit 待合入后回写。
+
+交付：
+
+- `SessionActor` mailbox 增加 connection-scoped subscription command/effect。
+- `SubscriberRegistry` 成为逻辑订阅事实的唯一容器；transport 后续只保留 socket/connection 映射。
+- subscribe/unsubscribe/connection closed 与 turn 命令共享 FIFO 顺序，重复命令幂等。
+
+Gate：
+
+- 订阅命令与 turn 命令的顺序、mailbox full、shutdown 拒绝有契约测试。
+- connection close 清除该连接全部频道且不影响其它连接。
+- 本切片不把 daemon SSE receiver 映射迁入 worker actor。
+
+#### P2-2d-b daemon/SSE transport 与 lifecycle ingress
 
 状态：待开始。
 
 交付：
 
-- 逻辑订阅关系与 session lifecycle 命令提交给 `SessionActor` mailbox。
+- daemon/SSE transport 接入 `P2-2d-a` subscription registry，socket/receiver 只保留 connection 映射。
 - transport 只持有 socket/connection 映射，不维护第二份 session 订阅事实。
 - 明确 mailbox 满、shutdown 和迟到 command 的错误语义。
 
