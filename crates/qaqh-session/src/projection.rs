@@ -1,8 +1,10 @@
 //! Rebuildable projection contract and canonical reader harness.
 
 mod meta;
+mod resource;
 
 pub use meta::{SessionMetaProjection, SessionMetaSnapshot};
+pub use resource::{GraphEdgeState, ResourceProjection, ResourceSnapshot, WorkspaceResourceState};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
