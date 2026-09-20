@@ -3,7 +3,7 @@
 > **状态**：P0 已冻结并合并；PR #104 merge `84adf01` 完成 D1-D41 errata 收口；冻结只覆盖文档契约，不代表生产实现已完成
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
-> **基线**：上位架构 merge `84adf01`；后续实现从 `betav2 @ 84adf01` 或更新的已冻结基线开始
+> **基线**：上位架构 merge `84adf01`；当前实现基线为 `origin/betav2 @ bef097c`（2026-09-20）
 > **范围**：仅字段级契约、迁移与测试设计；本 spec 不修改生产 Rust 代码
 > **独立验收**：[#106](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/106)
 
@@ -534,6 +534,16 @@ pub struct RecoveryRef {
 pub struct ResourceId(pub String);
 pub struct ContentHash(pub String); // sha256:<64 lowercase hex>
 pub struct ContentRef(pub ContentHash);
+// 复用 `qaqh_types::UsageInfo`，不建立第二套 usage 类型。
+pub struct UsageInfo {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    pub prompt_cache_hit_tokens: u32,
+    pub prompt_cache_miss_tokens: u32,
+    pub reasoning_tokens: u32,
+    pub cache_usage_reported: Option<bool>,
+}
 
 pub enum SearchVisibility { Visible, Hidden }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2363,8 +2373,10 @@ Tool intent/finish：
 Recovery：
 
 ```jsonl
-{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000007","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","outcome":"writable","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_finished","completion":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"indeterminate","output_ref":null,"error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false},"metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"finished_at_ms":1789830000040,"evidence_ref":null,"evidence_fact_seq":null,"evidence_event_id":null}}],"recovered_at_ms":1789830000050}}}
+{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000007","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","outcome":"writable","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_finished","completion":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"indeterminate","error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false},"metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"finished_at_ms":1789830000040}}],"recovered_at_ms":1789830000050}}}
 ```
+
+`RecoveryToolCompletion` 的 golden 断言必须验证为 `None` 的 Option 字段完全不存在；本样例中的 `output_ref`、`evidence_ref`、`evidence_fact_seq`、`evidence_event_id` 均不得出现 `null` key。
 
 ### 10.2 必测命令
 
