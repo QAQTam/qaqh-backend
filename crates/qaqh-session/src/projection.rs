@@ -1,12 +1,19 @@
 //! Rebuildable projection contract and canonical reader harness.
 
 mod control;
+mod conversation;
 mod meta;
 mod resource;
 
 pub use control::{
     ControlInteractionResolution, ControlInteractionState, ControlProjection, ControlRoundState,
     ControlSnapshot, ControlSubagentState, ControlToolState,
+};
+pub use conversation::{
+    ConversationAssistantBlockState, ConversationCompactionState, ConversationContextEntry,
+    ConversationContextKind, ConversationInputState, ConversationProjection, ConversationSnapshot,
+    ConversationToolCallState, ConversationToolResultState, ConversationTurnOutcome,
+    ConversationTurnState,
 };
 pub use meta::{SessionMetaProjection, SessionMetaSnapshot};
 pub use resource::{GraphEdgeState, ResourceProjection, ResourceSnapshot, WorkspaceResourceState};
