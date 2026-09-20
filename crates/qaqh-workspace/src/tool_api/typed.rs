@@ -26,6 +26,7 @@ pub trait TypedTool: Send + Sync {
     ///
     /// - 可恢复失败 → [`ToolExecutionError::Recoverable`]；
     /// - 内部 fatal → [`ToolExecutionError::Fatal`]（不得伪装为可恢复）。
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen public boundary.
     fn run(
         &self,
         ctx: &ToolCallContext,
