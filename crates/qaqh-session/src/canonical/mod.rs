@@ -8,9 +8,9 @@ mod types;
 
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
-    WRITER_FENCE_FILE,
+    EVENTS_POISON_FILE, WRITER_FENCE_FILE,
 };
 pub use types::{
-    AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
-    WriterLease,
+    AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,
+    WRITER_FENCE_SCHEMA, WriterFence, WriterId, WriterLease,
 };
