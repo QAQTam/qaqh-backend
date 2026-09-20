@@ -23,6 +23,7 @@ use std::io::{BufRead as _, BufReader, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
 
 use qaqh_domain::{TimelineEntry, TimelineEvent, TimelineSnapshot};
+use qaqh_message::legacy_writer::LegacyWriterFacade;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +102,7 @@ impl TimelineStore {
         seed: &str,
         turn: &qaqh_domain::TimelineTurn,
     ) -> std::io::Result<()> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         self.ensure_offload_index(seed);
         let path = self.offload_path_for(seed);
         if let Some(parent) = path.parent() {
@@ -177,6 +179,7 @@ impl TimelineStore {
         snapshot: &TimelineSnapshot,
         journal: Vec<TimelineEntry>,
     ) -> std::io::Result<()> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         if let Some(&watermark) = self.persisted_watermarks.get(seed) {
             if watermark > snapshot.watermark {
                 return Ok(());
@@ -278,6 +281,7 @@ impl TimelineStore {
     /// - 超过 [`AUDIT_ROTATE_BYTES`] 时保留尾部一半后重写，使磁盘占用恒定。
     /// - 任何 I/O 失败仅记录日志，**绝不**影响事件路径（审计是旁路）。
     pub fn append_audit(&mut self, seed: &str, entries: &[TimelineEntry]) {
+        let _legacy_writer = LegacyWriterFacade::lock();
         if entries.is_empty() {
             return;
         }
