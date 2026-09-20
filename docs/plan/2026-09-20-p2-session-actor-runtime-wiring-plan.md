@@ -86,7 +86,7 @@ Gate：
 
 #### P2-2b permission resolution
 
-状态：已实现，PR #207；merge commit 待合入后回写。
+状态：已完成，PR #207，merge `a061a0d`。
 
 交付：
 
