@@ -83,8 +83,17 @@ const DIRTY_WAKE_THRESHOLD: usize = 8;
 
 // ───────────────────────── fsync 注入钩子 ─────────────────────────
 
+/// Which path requested the outbox fsync. Test hooks use this to distinguish
+/// the background flusher from an explicit [`flush_in`] barrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FsyncPhase {
+    Background,
+    Explicit,
+}
+
 /// Test-only hook invoked instead of the real `sync_all` on an outbox file.
-type FsyncHook = Box<dyn Fn(&Path) + Send + Sync>;
+type FsyncHook = Arc<dyn Fn(&Path, FsyncPhase) + Send + Sync>;
 
 static FSYNC_HOOK: Mutex<Option<FsyncHook>> = Mutex::new(None);
 
@@ -96,11 +105,14 @@ pub fn set_fsync_hook(hook: Option<FsyncHook>) {
     *FSYNC_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
 }
 
-fn sync_file(file: &File, path: &Path) -> std::io::Result<()> {
-    let hook = FSYNC_HOOK.lock().unwrap_or_else(|e| e.into_inner());
-    match hook.as_ref() {
+fn sync_file(file: &File, path: &Path, phase: FsyncPhase) -> std::io::Result<()> {
+    let hook = FSYNC_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match hook {
         Some(hook) => {
-            hook(path);
+            hook(path, phase);
             Ok(())
         }
         None => file.sync_all(),
@@ -190,11 +202,15 @@ fn flusher() -> &'static Arc<Flusher> {
 /// appended since the previous sync (that is the batching); callers must hold
 /// the session lock so the flusher can never overtake a concurrent append.
 /// Returns whether a sync was actually issued (`false` = nothing was pending).
-fn sync_locked(path: &Path, writer: &mut SessionWriter) -> std::io::Result<bool> {
+fn sync_locked(
+    path: &Path,
+    writer: &mut SessionWriter,
+    phase: FsyncPhase,
+) -> std::io::Result<bool> {
     if writer.unsynced == 0 {
         return Ok(false);
     }
-    sync_file(&writer.file, path)?;
+    sync_file(&writer.file, path, phase)?;
     writer.unsynced = 0;
     Ok(true)
 }
@@ -216,7 +232,10 @@ fn flush_round() {
         let shard = &shards()[shard_index(&path)];
         let mut guard = shard.writers.lock().unwrap_or_else(|e| e.into_inner());
         let (sync_result, generation) = match guard.get_mut(&path) {
-            Some(writer) => (sync_locked(&path, writer), Some(writer.generation)),
+            Some(writer) => (
+                sync_locked(&path, writer, FsyncPhase::Background),
+                Some(writer.generation),
+            ),
             None => (Ok(false), None),
         };
         drop(guard);
@@ -421,7 +440,7 @@ pub fn flush_in(session_dir: &Path) {
     let Some(writer) = guard.get_mut(&path) else {
         return;
     };
-    if let Err(error) = sync_locked(&path, writer) {
+    if let Err(error) = sync_locked(&path, writer, FsyncPhase::Explicit) {
         log::error!("tool_outbox: flush {} failed: {error}", path.display());
         return;
     }
