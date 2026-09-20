@@ -4,6 +4,12 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use qaqh_domain::RingingChannel;
+use qaqh_session::actor::{
+    ConnectionId, SessionActor, SessionActorEffect, SessionCommand, SubscriptionCommand,
+    SubscriptionEffect,
+};
+
 use crate::agent::SubagentSpawnSpec;
 use crate::{RingingHub, SessionActivityTracker};
 
@@ -238,6 +244,10 @@ pub struct AgentInstance {
     seed: String,
     transport: AgentTransport,
     kind: AgentKind,
+    /// P2-2d-b migration bridge: daemon-side logical subscription mailbox.
+    /// The worker `TurnActor` remains authoritative for turn state until the
+    /// actors are consolidated.
+    subscription_actor: SessionActor,
     /// Idle-unload liveness (shared with the Loop actor). `None` for legacy
     /// process workers — they are not idle-unload candidates.
     liveness: Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>>,
@@ -446,6 +456,7 @@ impl AgentRegistry {
                     cancel: cancel_for_sender,
                 },
                 kind: AgentKind::Subagent(spec),
+                subscription_actor: SessionActor::new(16),
                 liveness: None,
                 reader: Some(reader),
                 thread: Some(thread),
@@ -566,6 +577,7 @@ impl AgentRegistry {
                     cancel: cancel_for_sender,
                 },
                 kind: AgentKind::Session,
+                subscription_actor: SessionActor::new(16),
                 liveness: Some(liveness_for_registry),
                 reader: Some(reader),
                 thread: Some(thread),
@@ -651,6 +663,60 @@ impl AgentRegistry {
             }
         }
         failed
+    }
+
+    pub fn subscribe_channel(
+        &mut self,
+        seed: &str,
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        let instance = self
+            .instances
+            .get_mut(seed)
+            .ok_or_else(|| format!("session {seed} is not running"))?;
+        match instance.apply_subscription(SubscriptionCommand::Subscribe {
+            connection_id,
+            channel,
+        })? {
+            SubscriptionEffect::Subscribed { changed, .. } => Ok(changed),
+            effect => Err(format!("unexpected subscribe effect: {effect:?}")),
+        }
+    }
+
+    pub fn unsubscribe_channel(
+        &mut self,
+        seed: &str,
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        let instance = self
+            .instances
+            .get_mut(seed)
+            .ok_or_else(|| format!("session {seed} is not running"))?;
+        match instance.apply_subscription(SubscriptionCommand::Unsubscribe {
+            connection_id,
+            channel,
+        })? {
+            SubscriptionEffect::Unsubscribed { changed, .. } => Ok(changed),
+            effect => Err(format!("unexpected unsubscribe effect: {effect:?}")),
+        }
+    }
+
+    pub fn connection_closed(
+        &mut self,
+        seed: &str,
+        connection_id: ConnectionId,
+    ) -> Result<usize, String> {
+        let Some(instance) = self.instances.get_mut(seed) else {
+            return Ok(0);
+        };
+        match instance
+            .apply_subscription(SubscriptionCommand::ConnectionClosed { connection_id })?
+        {
+            SubscriptionEffect::ConnectionClosed { removed, .. } => Ok(removed),
+            effect => Err(format!("unexpected connection-close effect: {effect:?}")),
+        }
     }
 
     pub fn close(&mut self, seed: &str) {
@@ -911,6 +977,24 @@ impl AgentRegistry {
 }
 
 impl AgentInstance {
+    fn apply_subscription(
+        &mut self,
+        command: SubscriptionCommand,
+    ) -> Result<SubscriptionEffect, String> {
+        self.subscription_actor
+            .submit(SessionCommand::Subscription(command))
+            .map_err(|error| error.to_string())?;
+        match self
+            .subscription_actor
+            .step()
+            .map_err(|error| error.to_string())?
+        {
+            Some(SessionActorEffect::Subscription(effect)) => Ok(effect),
+            Some(effect) => Err(format!("unexpected subscription actor effect: {effect:?}")),
+            None => Err("subscription actor produced no effect".into()),
+        }
+    }
+
     fn is_dead(&self) -> bool {
         match &self.transport {
             AgentTransport::InProcess { .. } => self
@@ -928,6 +1012,8 @@ impl AgentInstance {
     }
 
     fn signal_shutdown(&mut self) {
+        let _ = self.subscription_actor.submit(SessionCommand::Shutdown);
+        let _ = self.subscription_actor.step();
         // 优雅关闭：agent 侧只识别 Ringing 帧（legacy Ui2Agent 已拆除）。
         let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
             self.seed.clone(),
@@ -1110,6 +1196,142 @@ mod tests {
     fn probe_output_missing_program_is_none() {
         let command = Command::new("qaqh-no-such-program-xyz");
         assert!(probe_output(command, Duration::from_millis(200)).is_none());
+    }
+
+    #[test]
+    fn subscription_actor_is_idempotent_and_shutdown_closes_ingress() {
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
+        let mut instance = AgentInstance {
+            seed: "seed-subscription".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx,
+                cancel: crate::agent::types::CancelToken::new(),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let connection_id = ConnectionId::new("connection-1");
+
+        assert_eq!(
+            instance.apply_subscription(SubscriptionCommand::Subscribe {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+            }),
+            Ok(SubscriptionEffect::Subscribed {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+                changed: true,
+            })
+        );
+        assert_eq!(
+            instance.apply_subscription(SubscriptionCommand::Subscribe {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+            }),
+            Ok(SubscriptionEffect::Subscribed {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+                changed: false,
+            })
+        );
+        assert_eq!(
+            instance.apply_subscription(SubscriptionCommand::ConnectionClosed {
+                connection_id: connection_id.clone(),
+            }),
+            Ok(SubscriptionEffect::ConnectionClosed {
+                connection_id: connection_id.clone(),
+                removed: 1,
+            })
+        );
+
+        instance.signal_shutdown();
+        assert!(
+            instance
+                .apply_subscription(SubscriptionCommand::Subscribe {
+                    connection_id,
+                    channel: RingingChannel::Tool,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn registry_subscription_ingress_is_connection_scoped_and_shutdown_is_terminal() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            directory.path().join("sessions"),
+            directory.path().join(".active_session"),
+        ));
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
+        let instance = AgentInstance {
+            seed: "seed-registry".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx,
+                cancel: crate::agent::types::CancelToken::new(),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let mut registry = AgentRegistry {
+            instances: HashMap::from([("seed-registry".into(), instance)]),
+            activity: SessionActivityTracker::default(),
+            sessions,
+            hub: None,
+            shutting_down: false,
+            last_spawn: HashMap::new(),
+            subagent_parent: HashMap::new(),
+            subagent_children: HashMap::new(),
+        };
+        let connection_id = ConnectionId::new("connection-registry");
+
+        assert_eq!(
+            registry.subscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Control
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.subscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Control
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            registry.unsubscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Control
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.subscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Tool
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.connection_closed("seed-registry", connection_id.clone()),
+            Ok(1)
+        );
+
+        registry.close("seed-registry");
+        assert_eq!(
+            registry.connection_closed("seed-registry", connection_id),
+            Ok(0)
+        );
     }
 
     fn tool_finished(summary: String) -> qaqh_domain::DomainEvent {
