@@ -10,6 +10,7 @@ use qaqh_domain::AskAnswer;
 use qaqh_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
+use super::turn_actor::{TurnActor, TurnActorError};
 use super::types::*;
 use crate::agent::turn_lap::admit as turn_admit;
 use crate::agent::turn_lap::backfill as turn_backfill;
@@ -193,6 +194,8 @@ pub(crate) fn hard_context_limit(cfg: &qaqh_config::Config) -> u64 {
 
 /// TurnEngine manages a single LLM turn lifecycle.
 pub struct TurnEngine {
+    /// Canonical lifecycle mirror for the existing `run_lap` execution path.
+    actor: TurnActor,
     /// If Some, a turn is suspended waiting for permission or ask_user.
     pub(crate) suspended: Option<TurnState>,
     /// Pending mid-stream resume for the next gate round.
@@ -214,6 +217,7 @@ impl Default for TurnEngine {
 impl TurnEngine {
     pub fn new() -> Self {
         Self {
+            actor: TurnActor::new(),
             suspended: None,
             continuation: None,
             continuation_count: 0,
@@ -232,6 +236,18 @@ impl TurnEngine {
 
     pub fn suspended_turn_id(&self) -> Option<&str> {
         self.suspended.as_ref().map(|state| state.turn_id.as_str())
+    }
+
+    pub(crate) fn observe_outcome(&mut self, outcome: &Outcome) -> Result<(), TurnActorError> {
+        self.actor.observe_outcome(outcome)
+    }
+
+    pub(crate) fn cancel_turn(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
+        self.actor.cancel(turn_id)
+    }
+
+    pub(crate) fn cancel_active_turn(&mut self) -> Result<(), TurnActorError> {
+        self.actor.cancel_active()
     }
 
     // ── Public API ──
@@ -291,6 +307,12 @@ impl TurnEngine {
         }
         log::warn!("[TURN] dropping suspension belonging to a replaced session");
         if let Some(saved) = self.suspended.take() {
+            if let Err(error) = self.actor.cancel(&saved.turn_id) {
+                log::error!(
+                    "[TURN] SessionActor rejected stale turn {}: {error}",
+                    saved.turn_id
+                );
+            }
             let tool_ids: HashSet<String> = saved.tool_call_order.iter().cloned().collect();
             seal_timeline_terminal_round(
                 ctx,
@@ -314,6 +336,12 @@ impl TurnEngine {
     /// 悬空 tool_use 由调用方用 remove_last_step_if_incomplete 清理。
     pub fn abort_suspended(&mut self, ctx: &mut RingContext) -> Option<String> {
         let saved = self.suspended.take()?;
+        if let Err(error) = self.actor.cancel(&saved.turn_id) {
+            log::error!(
+                "[TURN] SessionActor rejected superseded turn {}: {error}",
+                saved.turn_id
+            );
+        }
         log::warn!(
             "[TURN] aborting suspended turn {} (superseded by newer input)",
             saved.turn_id
@@ -1406,6 +1434,7 @@ impl TurnEngine {
 
     /// Reset all turn state (called on Cancel / new session).
     pub fn reset(&mut self) {
+        self.actor.reset();
         self.suspended = None;
         self.continuation = None;
         self.continuation_count = 0;
@@ -1413,9 +1442,15 @@ impl TurnEngine {
     }
 
     pub fn take_suspended_for_abort(&mut self) -> Option<(String, Option<UsageInfo>)> {
-        self.suspended
-            .take()
-            .map(|state| (state.turn_id, state.usage))
+        self.suspended.take().map(|state| {
+            if let Err(error) = self.actor.cancel(&state.turn_id) {
+                log::error!(
+                    "[TURN] SessionActor rejected aborted turn {}: {error}",
+                    state.turn_id
+                );
+            }
+            (state.turn_id, state.usage)
+        })
     }
 }
 
