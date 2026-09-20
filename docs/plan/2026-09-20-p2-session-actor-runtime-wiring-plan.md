@@ -132,13 +132,14 @@ Gate：
 
 #### P2-2d-b daemon/SSE transport 与 lifecycle ingress
 
-状态：待开始。
+状态：已实现，PR 待创建；merge commit 待合入后回写。
 
 交付：
 
 - daemon/SSE transport 接入 `P2-2d-a` subscription registry，socket/receiver 只保留 connection 映射。
 - transport 只持有 socket/connection 映射，不维护第二份 session 订阅事实。
 - 明确 mailbox 满、shutdown 和迟到 command 的错误语义。
+- AgentInstance shutdown 先关闭 subscription ingress；stream 结束或会话失活时按 connection 收口逻辑订阅。
 
 Gate：
 
