@@ -3,11 +3,70 @@
 //! 由 `loop_core.rs` 拆分（Phase 2-5）：`impl Loop` 跨文件块，对外 API 不变。
 
 use super::loop_core::Loop;
+use super::turn_actor::{InteractionAdmission, InteractionState};
 use super::types::*;
 
 use qaqh_domain::{ControlCommand, DomainEvent};
 
 impl Loop {
+    fn reject_already_resolved_interaction(
+        &mut self,
+        command_id: &str,
+        interaction_id: &str,
+        kind: &str,
+    ) -> bool {
+        if self.session.turn.interaction_state(interaction_id) != InteractionState::AlreadyResolved
+        {
+            return false;
+        }
+        self.emit_operation_failed(
+            command_id,
+            qaqh_domain::ErrorScope::Control,
+            "interaction_not_found",
+            &format!("{kind} interaction was already resolved"),
+        );
+        true
+    }
+
+    fn admit_legacy_interaction_resolution(
+        &mut self,
+        command_id: &str,
+        interaction_id: &str,
+        outcome: &Outcome,
+    ) -> bool {
+        // Handled means the legacy validator rejected the command. In that
+        // case the interaction must remain pending so a valid retry can win.
+        if matches!(outcome, Outcome::Handled) {
+            return true;
+        }
+        match self
+            .session
+            .turn
+            .admit_interaction_resolution(interaction_id)
+        {
+            InteractionAdmission::Accepted { remaining } => {
+                log::debug!(
+                    "[INTERACTION] actor accepted {interaction_id}; {remaining} interaction(s) remain"
+                );
+                true
+            }
+            InteractionAdmission::Unknown => {
+                // Process recovery or legacy state may predate the actor
+                // registry; the legacy handler remains authoritative.
+                true
+            }
+            InteractionAdmission::AlreadyResolved => {
+                self.emit_operation_failed(
+                    command_id,
+                    qaqh_domain::ErrorScope::Control,
+                    "interaction_not_found",
+                    "interaction was already resolved",
+                );
+                false
+            }
+        }
+    }
+
     pub(super) fn on_control(
         &mut self,
         command: ControlCommand,
@@ -142,6 +201,9 @@ impl Loop {
                 interaction_id,
                 answers,
             } => {
+                if self.reject_already_resolved_interaction(command_id, &interaction_id, "ask") {
+                    return;
+                }
                 // answers 已是 domain AskAnswer（Ringing 命令直接携带）。
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,
@@ -160,9 +222,16 @@ impl Loop {
                     &answers,
                 );
                 let _ = ctx;
+                if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
+                {
+                    return;
+                }
                 self.apply_outcome(outcome);
             }
             ControlCommand::InteractionAskDismiss { interaction_id } => {
+                if self.reject_already_resolved_interaction(command_id, &interaction_id, "ask") {
+                    return;
+                }
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,
                     emitter: &self.paced_emitter,
@@ -179,6 +248,10 @@ impl Loop {
                     &interaction_id,
                 );
                 let _ = ctx;
+                if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
+                {
+                    return;
+                }
                 self.apply_outcome(outcome);
             }
             ControlCommand::PlanReviewRespond {
@@ -187,6 +260,13 @@ impl Loop {
                 message,
                 autonomous,
             } => {
+                if self.reject_already_resolved_interaction(
+                    command_id,
+                    &interaction_id,
+                    "plan review",
+                ) {
+                    return;
+                }
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,
                     emitter: &self.paced_emitter,
@@ -206,6 +286,10 @@ impl Loop {
                     autonomous,
                 );
                 let _ = ctx;
+                if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
+                {
+                    return;
+                }
                 self.apply_outcome(outcome);
             }
         }

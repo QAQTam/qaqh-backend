@@ -25,6 +25,13 @@ pub(crate) enum InteractionAdmission {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InteractionState {
+    Pending,
+    AlreadyResolved,
+    Unknown,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TurnActorError {
     Actor(SessionActorError),
@@ -175,6 +182,16 @@ impl TurnActor {
             return InteractionAdmission::AlreadyResolved;
         }
         InteractionAdmission::Unknown
+    }
+
+    pub(crate) fn interaction_state(&self, interaction_id: &str) -> InteractionState {
+        if self.pending_interactions.contains(interaction_id) {
+            return InteractionState::Pending;
+        }
+        if self.resolved_interactions.contains(interaction_id) {
+            return InteractionState::AlreadyResolved;
+        }
+        InteractionState::Unknown
     }
 
     /// Record an explicit cancellation. Late cancellation of an idle or
@@ -393,7 +410,7 @@ mod tests {
     use qaqh_session::actor::TurnCoreState;
     use qaqh_session::session_fact_v2::TurnTerminal;
 
-    use super::{InteractionAdmission, TurnActor, TurnActorError};
+    use super::{InteractionAdmission, InteractionState, TurnActor, TurnActorError};
     use crate::agent::types::Outcome;
 
     fn continue_round(turn_id: &str, round_num: u32) -> Outcome {
@@ -565,6 +582,44 @@ mod tests {
             actor.admit_interaction_resolution("p2"),
             InteractionAdmission::Accepted { remaining: 0 }
         );
+    }
+
+    #[test]
+    fn interaction_state_tracks_ask_and_plan_until_terminal() {
+        let mut actor = TurnActor::new();
+        actor
+            .begin_input("t1", "input-1")
+            .expect("admit first input");
+        actor
+            .observe_outcome_with_interactions(
+                &Outcome::YieldToUser {
+                    turn_id: "t1".into(),
+                    reason: crate::agent::types::YieldReason::PlanReview,
+                },
+                &["ask-1".into(), "plan-1".into()],
+            )
+            .expect("suspend with ask and plan");
+
+        assert_eq!(actor.interaction_state("ask-1"), InteractionState::Pending);
+        assert_eq!(actor.interaction_state("plan-1"), InteractionState::Pending);
+        assert_eq!(
+            actor.admit_interaction_resolution("ask-1"),
+            InteractionAdmission::Accepted { remaining: 1 }
+        );
+        assert_eq!(
+            actor.interaction_state("ask-1"),
+            InteractionState::AlreadyResolved
+        );
+        assert_eq!(actor.interaction_state("plan-1"), InteractionState::Pending);
+
+        actor
+            .observe_outcome(&complete("t1"))
+            .expect("complete turn");
+        assert_eq!(
+            actor.interaction_state("ask-1"),
+            InteractionState::AlreadyResolved
+        );
+        assert_ne!(actor.interaction_state("plan-1"), InteractionState::Pending);
     }
 
     #[test]
