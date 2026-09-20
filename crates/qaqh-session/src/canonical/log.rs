@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::session_fact_v2::{MAX_SAFE_FACT_SEQ, SessionFact, ValidationError};
+use crate::session_fact_v2::{EventId, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError};
 
 use super::types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
@@ -23,6 +23,7 @@ pub const EVENTS_FILE: &str = "events.jsonl";
 pub const EVENTS_LOCK_FILE: &str = "events.lock";
 pub const WRITER_FENCE_FILE: &str = "writer-fence.json";
 pub const EVENTS_COMMIT_FILE: &str = "events.commit.json";
+pub const EVENTS_POISON_FILE: &str = "events.poison.json";
 
 #[derive(Debug, Error)]
 pub enum CanonicalError {
@@ -70,6 +71,13 @@ pub enum CanonicalError {
 enum LogState {
     Writable,
     CommitRecoveryRequired(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommittedPrefix {
+    fact_seq: u64,
+    offset: u64,
+    last_event_id: Option<EventId>,
 }
 
 /// One session's canonical log. The struct does not hold the OS lock between
@@ -124,6 +132,10 @@ impl CanonicalLog {
 
     pub fn commit_path(&self) -> PathBuf {
         self.session_dir.join(EVENTS_COMMIT_FILE)
+    }
+
+    pub fn poison_path(&self) -> PathBuf {
+        self.session_dir.join(EVENTS_POISON_FILE)
     }
 
     pub fn fence_path(&self) -> PathBuf {
@@ -368,6 +380,11 @@ impl CanonicalLog {
     }
 
     fn load_or_initialize_commit(&self) -> Result<EventsCommit, CanonicalError> {
+        if self.poison_path().exists() {
+            return Err(CanonicalError::CommitRecoveryRequired(
+                "events poison marker is present".into(),
+            ));
+        }
         match read_json::<EventsCommit>(&self.commit_path()) {
             Ok(Some(marker)) => {
                 if marker.schema != EVENTS_COMMIT_SCHEMA {
@@ -388,23 +405,36 @@ impl CanonicalLog {
                 }
                 Ok(marker)
             }
-            Ok(None) => {
-                let events_len = file_len(&self.events_path())?;
-                if events_len == 0 {
-                    let marker = EventsCommit::empty(self.log_id.clone());
-                    write_json_atomic(&self.commit_path(), &marker)?;
-                    Ok(marker)
-                } else {
-                    Err(CanonicalError::CommitRecoveryRequired(
-                        "commit marker is missing for a non-empty canonical log".into(),
-                    ))
-                }
-            }
+            Ok(None) => self.rebuild_missing_commit_marker(),
             Err(CanonicalError::Json(error)) => Err(CanonicalError::CommitRecoveryRequired(
                 format!("commit marker is corrupt: {error}"),
             )),
             Err(error) => Err(error),
         }
+    }
+
+    fn rebuild_missing_commit_marker(&self) -> Result<EventsCommit, CanonicalError> {
+        let bytes = match fs::read(self.events_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let prefix = self.scan_complete_facts(&bytes)?;
+        let marker = EventsCommit {
+            schema: EVENTS_COMMIT_SCHEMA.into(),
+            log_id: self.log_id.clone(),
+            committed_fact_seq: prefix.fact_seq,
+            committed_offset: prefix.offset,
+            last_barrier_event_id: prefix.last_event_id,
+            commit_generation: 0,
+        };
+        write_json_atomic(&self.commit_path(), &marker)?;
+        log::warn!(
+            "[qaqh-session] rebuilt missing commit marker at fact_seq={} offset={}",
+            marker.committed_fact_seq,
+            marker.committed_offset
+        );
+        Ok(marker)
     }
 
     fn reconcile_events_with_commit(&self) -> Result<(), CanonicalError> {
@@ -444,14 +474,41 @@ impl CanonicalLog {
                 "events.jsonl changed while validating committed prefix".into(),
             ));
         }
-        if committed_offset > 0 && bytes.last().copied() != Some(b'\n') {
+        let prefix = self.scan_complete_facts(&bytes)?;
+        if prefix.fact_seq != self.commit.committed_fact_seq
+            || prefix.offset != self.commit.committed_offset
+            || prefix.last_event_id != self.commit.last_barrier_event_id
+        {
+            return Err(CanonicalError::CommitRecoveryRequired(format!(
+                "commit marker does not match committed prefix: marker=({}, {}, {:?}), prefix=({}, {}, {:?})",
+                self.commit.committed_fact_seq,
+                self.commit.committed_offset,
+                self.commit.last_barrier_event_id,
+                prefix.fact_seq,
+                prefix.offset,
+                prefix.last_event_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn scan_complete_facts(&self, bytes: &[u8]) -> Result<CommittedPrefix, CanonicalError> {
+        if bytes.is_empty() {
+            return Ok(CommittedPrefix {
+                fact_seq: 0,
+                offset: 0,
+                last_event_id: None,
+            });
+        }
+        if bytes.last().copied() != Some(b'\n') {
             return Err(CanonicalError::CommitRecoveryRequired(
-                "committed offset does not end at a complete JSONL line".into(),
+                "canonical log has a torn tail".into(),
             ));
         }
 
         let mut position = 0usize;
         let mut expected_seq = 1u64;
+        let mut last_event_id = None;
         while position < bytes.len() {
             let remaining = &bytes[position..];
             let newline = remaining
@@ -474,13 +531,18 @@ impl CanonicalLog {
                 ))
             })?;
             self.verify_fact_identity(&fact)?;
-            fact.validate()?;
+            fact.validate().map_err(|error| {
+                CanonicalError::CommitRecoveryRequired(format!(
+                    "committed fact at offset {position} failed validation: {error}"
+                ))
+            })?;
             if fact.fact_seq != expected_seq {
                 return Err(CanonicalError::CommitRecoveryRequired(format!(
                     "committed fact_seq gap: expected {expected_seq}, got {}",
                     fact.fact_seq
                 )));
             }
+            last_event_id = Some(fact.event_id.clone());
             expected_seq = expected_seq
                 .checked_add(1)
                 .ok_or(CanonicalError::FactSeqExhausted)?;
@@ -488,14 +550,12 @@ impl CanonicalLog {
                 .checked_add(newline + 1)
                 .ok_or(CanonicalError::FactSeqExhausted)?;
         }
-        if expected_seq.saturating_sub(1) != self.commit.committed_fact_seq {
-            return Err(CanonicalError::CommitRecoveryRequired(format!(
-                "commit marker fact_seq {} does not match committed prefix {}",
-                self.commit.committed_fact_seq,
-                expected_seq.saturating_sub(1)
-            )));
-        }
-        Ok(())
+
+        Ok(CommittedPrefix {
+            fact_seq: expected_seq.saturating_sub(1),
+            offset: bytes.len() as u64,
+            last_event_id,
+        })
     }
 
     fn lock_exclusive(&self) -> Result<File, CanonicalError> {
@@ -508,14 +568,6 @@ impl CanonicalLog {
             .open(&path)?;
         file.lock()?;
         Ok(file)
-    }
-}
-
-fn file_len(path: &Path) -> Result<u64, CanonicalError> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
     }
 }
 
