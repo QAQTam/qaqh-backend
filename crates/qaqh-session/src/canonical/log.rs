@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::session_fact_v2::{EventId, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError};
 
+use super::reader::scan_committed_facts;
 use super::types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
     WriterLease,
@@ -65,6 +66,15 @@ pub enum CanonicalError {
 
     #[error("writer fence token is exhausted")]
     FenceTokenExhausted,
+
+    #[error(
+        "invalid canonical fact range {start_fact_seq}..={end_fact_seq} for committed high-water {committed_fact_seq}"
+    )]
+    InvalidFactRange {
+        start_fact_seq: u64,
+        end_fact_seq: u64,
+        committed_fact_seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,66 +503,14 @@ impl CanonicalLog {
     }
 
     fn scan_complete_facts(&self, bytes: &[u8]) -> Result<CommittedPrefix, CanonicalError> {
-        if bytes.is_empty() {
-            return Ok(CommittedPrefix {
-                fact_seq: 0,
-                offset: 0,
-                last_event_id: None,
-            });
-        }
-        if bytes.last().copied() != Some(b'\n') {
-            return Err(CanonicalError::CommitRecoveryRequired(
-                "canonical log has a torn tail".into(),
-            ));
-        }
-
-        let mut position = 0usize;
-        let mut expected_seq = 1u64;
         let mut last_event_id = None;
-        while position < bytes.len() {
-            let remaining = &bytes[position..];
-            let newline = remaining
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .ok_or_else(|| {
-                    CanonicalError::CommitRecoveryRequired(
-                        "committed prefix contains a torn JSONL line".into(),
-                    )
-                })?;
-            let line = &remaining[..newline];
-            if line.is_empty() {
-                return Err(CanonicalError::CommitRecoveryRequired(
-                    "committed prefix contains an empty JSONL line".into(),
-                ));
-            }
-            let fact: SessionFact = serde_json::from_slice(line).map_err(|error| {
-                CanonicalError::CommitRecoveryRequired(format!(
-                    "committed fact at offset {position} is invalid: {error}"
-                ))
-            })?;
-            self.verify_fact_identity(&fact)?;
-            fact.validate().map_err(|error| {
-                CanonicalError::CommitRecoveryRequired(format!(
-                    "committed fact at offset {position} failed validation: {error}"
-                ))
-            })?;
-            if fact.fact_seq != expected_seq {
-                return Err(CanonicalError::CommitRecoveryRequired(format!(
-                    "committed fact_seq gap: expected {expected_seq}, got {}",
-                    fact.fact_seq
-                )));
-            }
+        let fact_seq = scan_committed_facts(bytes, &self.session_id, &self.log_id, |fact| {
             last_event_id = Some(fact.event_id.clone());
-            expected_seq = expected_seq
-                .checked_add(1)
-                .ok_or(CanonicalError::FactSeqExhausted)?;
-            position = position
-                .checked_add(newline + 1)
-                .ok_or(CanonicalError::FactSeqExhausted)?;
-        }
+            Ok(())
+        })?;
 
         Ok(CommittedPrefix {
-            fact_seq: expected_seq.saturating_sub(1),
+            fact_seq,
             offset: bytes.len() as u64,
             last_event_id,
         })
