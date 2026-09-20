@@ -1,8 +1,8 @@
 # docs — 索引与归档状态
 
 > **索引日期**：2026-09-20（UTC+8）
-> **最后复核**：2026-09-20（v2 P1 canonical storage 与 Gate v2 spec 补充）
-> **基线**：`betav2` @ `361995e`
+> **最后复核**：2026-09-20（WebUI 独立网关设计草案）
+> **基线**：`betav2` @ `e93521c`
 > **本文件用途**：`docs/` 的唯一索引入口——**已完成什么、什么还在跑、归档去哪找**。
 > 目录职责与命名约定见 [`todo/README.md`](./todo/README.md) §6；各目录另有 `以yyyy-mm-dd-标题-*.md作为命名` 说明文件。
 
@@ -26,6 +26,7 @@
 | **09-20** | **QAQH v2.0 总架构设计**：交叉 qaqh-backend / qaqh-tui-app / codex-main / grok-build，裁决 canonical fact、SessionActor、TurnCore、ToolRuntime、Policy/Sandbox、Ringing v2 与迁移验收 | [`plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) |
 | **09-20** | **v2 P0 实现资产**：canonical `session-fact/v2` 类型与 golden fixtures、消费者迁移盘点、I1-I18 Gate 追踪已合并；生产 canonical log 尚未实现 | [`spec/2026-09-20-session-fact-v2-schema-spec.md`](./spec/2026-09-20-session-fact-v2-schema-spec.md)、[`report/2026-09-20-v2-consumer-migration-inventory-report.md`](./report/2026-09-20-v2-consumer-migration-inventory-report.md)、[`report/2026-09-20-v2-p0-gate-traceability-report.md`](./report/2026-09-20-v2-p0-gate-traceability-report.md) |
 | **09-20** | **Gate v2 多协议 spec 补充**：把 plan §5.3 展开为 ProtocolAdapter、EndpointCapabilities、GateRequest/GateEvent/GateOutcome、迁移与 conformance contract | [`spec/2026-09-20-gate-v2多协议与provider适配-spec.md`](./spec/2026-09-20-gate-v2多协议与provider适配-spec.md) |
+| **09-20** | **WebUI 独立网关设计草案**：默认关闭、显式 `webui` 子命令、临时回环网关、浏览器受限会话与 `/debug` 退役 | [`plan/2026-09-20-webui独立网关与debug退役-plan.md`](./plan/2026-09-20-webui独立网关与debug退役-plan.md) |
 
 ## 2. 已归档（2026-09-17，方案 A；2026-09-19 物理迁移）
 
@@ -123,6 +124,7 @@
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
 | plan | [2026-09-19-qaqh-v2.0-前瞻设计-plan.md](./plan/2026-09-19-qaqh-v2.0-前瞻设计-plan.md) | **已被 09-20 总架构设计取代**；保留为方向输入与历史证据 |
 | plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构与开发计划（已冻结并合并）**：PR #104 merge `84adf01`；裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收；后续实现按 P1-P6 拆分 |
+| plan | [2026-09-20-webui独立网关与debug退役-plan.md](./plan/2026-09-20-webui独立网关与debug退役-plan.md) | **草案待评审**：WebUI 默认不挂载，`qaqh-daemon webui` 才启动临时回环网关；浏览器使用受限 HttpOnly 会话，`/debug` 产品入口退役 |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
