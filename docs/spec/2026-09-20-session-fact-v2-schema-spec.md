@@ -1977,7 +1977,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 | `commit_repaired` | `(log_id, previous_commit_generation)` | 仅当 previous generation 可证明时使用；已修复同一代 marker 时验证 high-water/offset 后跳过 |
 | `projection_rebuilt` | `(log_id, projection, through_fact_seq)` | marker 缺失但 `marker_missing_rebuildable=true` 时使用；不伪造 `previous_commit_generation` |
 
-`recovery_event_id` 在 plan 阶段预分配；同一 batch 的所有 recovery facts 共享该 ID。重复 load 只有在 batch key 或 pre-recovery log 改变时才生成新 `RecoveryRef`、新 `plan_hash` 和新 batch；不得按“每次 load”追加 `SessionRecovered`。
+`recovery_event_id` 是 batch 级逻辑身份，必须在同一 batch 的所有 recovery facts 的 `recovery_ref` / `SessionRecovered.recovery_event_id` 中共享；它不要求等于任一 fact 的 envelope `event_id`，也不得把 `SessionRecovered` 自身的 envelope `event_id` 当作新的 batch identity。`recovery_event_id` 在 plan 阶段预分配；重复 load 只有在 batch key 或 pre-recovery log 改变时才生成新 `RecoveryRef`、新 `plan_hash` 和新 batch；不得按“每次 load”追加 `SessionRecovered`。
 
 upgrade batch 的 closed 判据：若 `upgrade-fence.state=writable` 且 `generation == 当前 UpgradeFence.generation`（即写入 `generation+1` 后的值；含 `generation+1` 已 durable、`SessionRecovered` 尚未写入的崩溃窗口），则该 batch 已由 sidecar 消费；重启只能补写缺失的 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }`，不得再次递增 generation、不得重复写 `upgrade_superseded`。`previous_recovery_id` 必须等于该 marker 的 `last_recovery_id`。
 
@@ -2256,9 +2256,10 @@ E2E 证据要求：
 
 I17 的 canonical 文本固定为：
 - `marker_missing_rebuildable=true` -> `writable` + `actions=[projection_rebuilt]`；
-- previous generation/high-water 可证且 repair durable，但尚未完成退出 -> `commit_recovery_required` + `actions=[commit_repaired]`；
+- previous generation/high-water 可证但 repair 尚未 durable -> `commit_recovery_required` + `actions=[commit_repaired]`，session 仍不可写；
+- previous generation/high-water 可证且 repair durable -> `writable` + `actions=[commit_repaired]`；
 - high-water 不可证 -> 不写 final fact，保持 runtime `CommitRecoveryRequired`。
-三者互斥，禁止再出现其它 `writable`/`commit_recovery_required` 组合。
+禁止其它组合。
 
 ---
 
@@ -2300,8 +2301,8 @@ I17 的 canonical 文本固定为：
 | `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且 `marker_missing_rebuildable=true` | 2（原 committed fact + final writable SessionRecovered） | 重建 marker 后恢复；`actions=[projection_rebuilt]`，不得伪造 `commit_repaired` | committed revision 不重复 | none |
 | `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复；`actions=[projection_rebuilt]` | committed revision 不重复 | none |
 | `events-commit-marker-corrupt.jsonl` | marker 损坏或 `log_id` 不匹配，high-water 不可证 | 1（仅保留可证明的 committed prefix；不写 final recovery fact） | runtime state=`CommitRecoveryRequired`；无 `SessionRecovered` | 不发布/ack，不推进 clock | none |
-| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO，旧 marker/high-water 可证明 | 2（committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 保持旧 high-water；repair 前不可写 | 只重放 committed revision | none |
-| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败，旧 marker/high-water 可证明 | 2（已 committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 不发布/ack；repair 后 high-water 与 clock 一致 | 不越过 committed high-water | none |
+| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO，旧 marker/high-water 可证明，repair 尚未 durable | 2（committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 保持旧 high-water；repair 未 durable 前不可写 | 只重放 committed revision | none |
+| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败，旧 marker/high-water 可证明，repair 尚未 durable | 2（已 committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 不发布/ack；repair durable 后回 writable | 不越过 committed high-water | none |
 | `recovery-tombstone.jsonl` | SessionCreated + SessionDeleted + load | 3（SessionCreated + SessionDeleted + final SessionRecovered） | `outcome=tombstone` | 不再前进 | none |
 | `compaction.jsonl` | facts + CompactionApplied | 2 | checkpoint 缺失可重建 | context revision 一致 | none |
 | `torn-tail.jsonl` | 完整 fact + 半行 | 2（完整 fact + final SessionRecovered） | `torn_tail=true` | 与截断后 rebuild 一致 | none |
