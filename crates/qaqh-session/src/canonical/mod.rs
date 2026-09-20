@@ -3,11 +3,15 @@
 //! The fact schema itself lives in [`crate::session_fact_v2`]. This module
 //! owns durable storage identity, writer fencing and commit high-water.
 
+mod clock;
 mod log;
 mod reader;
 mod store;
 mod types;
 
+pub use clock::{
+    CONTENT_CLOCK_FILE, CONTENT_CLOCK_SCHEMA, CONTENT_DIR, ContentClock, ContentClockRecord,
+};
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
     EVENTS_POISON_FILE, UPGRADE_FENCE_FILE, WRITER_FENCE_FILE,
