@@ -241,7 +241,7 @@ fn flush_is_joined_before_returning() {
 }
 
 /// 3. 显式 flush 必须携带显式 phase，并且调用 hook 时记录已经完成 append；
-/// 后台 flusher 的命中不能被当成显式屏障。
+///    后台 flusher 的命中不能被当成显式屏障。
 #[test]
 fn explicit_flush_is_distinct_from_background_flusher() {
     let root = temp_root("explicit-phase");
