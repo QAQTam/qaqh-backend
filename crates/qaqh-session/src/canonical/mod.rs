@@ -5,6 +5,7 @@
 
 mod log;
 mod reader;
+mod store;
 mod types;
 
 pub use log::{
@@ -12,6 +13,7 @@ pub use log::{
     EVENTS_POISON_FILE, WRITER_FENCE_FILE,
 };
 pub use reader::CommittedFactReader;
+pub use store::{AppendOutcome, CanonicalSessionStore};
 pub use types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,
     WRITER_FENCE_SCHEMA, WriterFence, WriterId, WriterLease,
