@@ -15,6 +15,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use qaqh_message::legacy_writer::LegacyWriterFacade;
 use qaqh_types::{Message, SessionMeta};
 
 use crate::store;
@@ -92,6 +93,7 @@ pub fn run(sessions_dir: &Path) {
 }
 
 fn migrate_one(dir: &Path, toml_path: &Path) -> Result<String, String> {
+    let _legacy_writer = LegacyWriterFacade::lock();
     let data = fs::read_to_string(toml_path).map_err(|e| format!("read: {e}"))?;
     let legacy: LegacySessionFile =
         toml::from_str(&data).map_err(|e| format!("parse TOML: {e}"))?;

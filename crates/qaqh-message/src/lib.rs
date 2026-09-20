@@ -5,6 +5,7 @@
 
 pub mod context_flow;
 pub mod effect;
+pub mod legacy_writer;
 pub mod store;
 pub mod wal;
 
