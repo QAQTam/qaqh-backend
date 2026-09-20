@@ -580,7 +580,7 @@ where
     }
 }
 
-fn write_json_atomic<T>(path: &Path, value: &T) -> Result<(), CanonicalError>
+pub(crate) fn write_json_atomic<T>(path: &Path, value: &T) -> Result<(), CanonicalError>
 where
     T: Serialize,
 {
