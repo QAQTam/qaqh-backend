@@ -139,9 +139,13 @@ impl Loop {
             let _scope = self
                 .paced_emitter
                 .enter_causation(Some(command_id.as_str()));
-            let outcome =
-                self.input
-                    .handle_system_input(&mut ctx, &text, Some(command_id.as_str()));
+            let outcome = self.input.handle_system_input(
+                &mut ctx,
+                &mut self.session.turn,
+                &command_id,
+                &text,
+                Some(command_id.as_str()),
+            );
             let _ = ctx;
             self.apply_outcome(outcome);
         }
@@ -445,6 +449,10 @@ impl Loop {
                                          完成此步骤后，调用 todo(action=\"set\", id=\"{}\", status=\"completed\", evidence=\"...\").",
                         item.id, item.title, item.description, item.id
                     );
+                    let input_id = format!(
+                        "goal-auto-advance:{}",
+                        self.session.agent.msg.context_revision()
+                    );
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,
@@ -457,7 +465,9 @@ impl Loop {
                     };
                     let next_outcome = self.input.handle_user_input(
                         &mut ctx,
+                        &mut self.session.turn,
                         qaqh_message::builtin::GOAL,
+                        &input_id,
                         &prompt,
                         vec![],
                     );
