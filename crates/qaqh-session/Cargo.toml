@@ -8,6 +8,7 @@ description = "QAQ-Harness session manager — singleton, list/load/save/active"
 default = []
 
 [dependencies]
+qaqh-domain = { path = "../qaqh-domain" }
 qaqh-message = { path = "../qaqh-message" }
 qaqh-types = { path = "../qaqh-types" }
 serde = { version = "1", features = ["derive"] }
