@@ -16,8 +16,8 @@ use crate::session_fact_v2::{EventId, MAX_SAFE_FACT_SEQ, SessionFact, Validation
 
 use super::reader::scan_committed_facts;
 use super::types::{
-    AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
-    WriterLease,
+    AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, UPGRADE_FENCE_SCHEMA, UpgradeFence,
+    UpgradeState, WRITER_FENCE_SCHEMA, WriterFence, WriterId, WriterLease,
 };
 
 pub const EVENTS_FILE: &str = "events.jsonl";
@@ -25,6 +25,7 @@ pub const EVENTS_LOCK_FILE: &str = "events.lock";
 pub const WRITER_FENCE_FILE: &str = "writer-fence.json";
 pub const EVENTS_COMMIT_FILE: &str = "events.commit.json";
 pub const EVENTS_POISON_FILE: &str = "events.poison.json";
+pub const UPGRADE_FENCE_FILE: &str = "upgrade-fence.json";
 
 #[derive(Debug, Error)]
 pub enum CanonicalError {
@@ -81,6 +82,7 @@ pub enum CanonicalError {
 enum LogState {
     Writable,
     CommitRecoveryRequired(String),
+    ReadOnlyUpgradeRequired(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +123,14 @@ impl CanonicalLog {
         log.commit = log.load_or_initialize_commit()?;
         log.reconcile_events_with_commit()?;
         log.validate_committed_prefix()?;
+        if let Some(fence) = log.read_upgrade_fence()?
+            && fence.state == UpgradeState::ReadOnly
+        {
+            log.state = LogState::ReadOnlyUpgradeRequired(format!(
+                "upgrade fence generation {} requires read-only",
+                fence.generation
+            ));
+        }
         Ok(log)
     }
 
@@ -152,9 +162,18 @@ impl CanonicalLog {
         self.session_dir.join(WRITER_FENCE_FILE)
     }
 
+    pub fn upgrade_fence_path(&self) -> PathBuf {
+        self.session_dir.join(UPGRADE_FENCE_FILE)
+    }
+
     pub fn writer_fence(&self) -> Result<Option<WriterFence>, CanonicalError> {
         let _guard = self.lock_exclusive()?;
         self.read_fence()
+    }
+
+    pub fn upgrade_fence(&self) -> Result<Option<UpgradeFence>, CanonicalError> {
+        let _guard = self.lock_exclusive()?;
+        self.read_upgrade_fence()
     }
 
     pub fn acquire_writer(
@@ -317,6 +336,9 @@ impl CanonicalLog {
             LogState::CommitRecoveryRequired(reason) => {
                 Err(CanonicalError::NotWritable(reason.clone()))
             }
+            LogState::ReadOnlyUpgradeRequired(reason) => {
+                Err(CanonicalError::NotWritable(reason.clone()))
+            }
         }
     }
 
@@ -387,6 +409,24 @@ impl CanonicalLog {
             Err(CanonicalError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn read_upgrade_fence(&self) -> Result<Option<UpgradeFence>, CanonicalError> {
+        let Some(fence) = read_json::<UpgradeFence>(&self.upgrade_fence_path())? else {
+            return Ok(None);
+        };
+        if fence.schema != UPGRADE_FENCE_SCHEMA {
+            return Err(CanonicalError::InvalidFence(format!(
+                "unexpected upgrade fence schema {}",
+                fence.schema
+            )));
+        }
+        if fence.log_id != self.log_id {
+            return Err(CanonicalError::IdentityMismatch {
+                field: "upgrade_fence.log_id",
+            });
+        }
+        Ok(Some(fence))
     }
 
     fn load_or_initialize_commit(&self) -> Result<EventsCommit, CanonicalError> {
