@@ -318,17 +318,20 @@ fn poison_marker_blocks_commit_rebuild() {
 }
 
 #[test]
-fn corrupt_marker_fails_closed() {
+fn corrupt_marker_is_rebuilt_when_prefix_is_complete() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::write(temp.path().join(EVENTS_COMMIT_FILE), b"{").expect("write corrupt marker");
 
-    let error = CanonicalLog::open(temp.path(), session_id(), log_id())
-        .expect_err("corrupt marker must fail closed");
-    assert!(matches!(error, CanonicalError::CommitRecoveryRequired(_)));
+    let log = CanonicalLog::open(temp.path(), session_id(), log_id())
+        .expect("complete empty prefix is rebuildable");
+    let marker = read_commit(temp.path());
+    assert_eq!(marker.committed_fact_seq, 0);
+    assert_eq!(marker.commit_generation, 0);
+    assert_eq!(log.committed(), &marker);
 }
 
 #[test]
-fn marker_log_id_mismatch_fails_closed() {
+fn marker_log_id_mismatch_is_rebuilt_when_prefix_is_complete() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _log = open(temp.path());
     let mut marker = read_commit(temp.path());
@@ -339,9 +342,12 @@ fn marker_log_id_mismatch_fails_closed() {
     )
     .expect("rewrite marker");
 
-    let error = CanonicalLog::open(temp.path(), session_id(), log_id())
-        .expect_err("marker identity mismatch must fail closed");
-    assert!(matches!(error, CanonicalError::CommitRecoveryRequired(_)));
+    let log = CanonicalLog::open(temp.path(), session_id(), log_id())
+        .expect("identity-mismatched empty marker is rebuildable");
+    let rebuilt = read_commit(temp.path());
+    assert_eq!(rebuilt.log_id, log_id());
+    assert_eq!(rebuilt.committed_fact_seq, 0);
+    assert_eq!(log.committed(), &rebuilt);
 }
 
 #[test]
@@ -371,6 +377,12 @@ fn open_truncates_an_uncommitted_suffix() {
             .len(),
         committed.committed_offset
     );
-    assert_eq!(read_commit(temp.path()), committed);
+    assert_eq!(
+        read_commit(temp.path()),
+        EventsCommit {
+            commit_generation: committed.commit_generation + 1,
+            ..committed
+        }
+    );
     assert_eq!(read_facts(temp.path()).len(), 1);
 }
