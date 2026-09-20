@@ -701,6 +701,56 @@ fn invalid_or_stale_responses_do_not_consume_the_active_ask() {
 }
 
 #[test]
+fn duplicate_ask_resolution_is_rejected_after_terminal_without_modal_replay() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    run_case(
+        vec![
+            tool_round(&[(
+                "duplicate-ask",
+                "ask",
+                json!({"question":"Pick A", "options":["A"], "allow_custom":false}),
+            )]),
+            final_round("finished"),
+        ],
+        2,
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("resolve once"));
+            expect_interaction_requested(receiver, "duplicate-ask");
+            send_cmd(
+                writer,
+                &seed,
+                cmd_ask_respond("duplicate-ask", &[("q1", "A")]),
+            );
+            expect_interaction_resolved(receiver, "duplicate-ask", AskResolution::Answered);
+
+            let events = collect_through_terminal(receiver);
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                RingingEvent::Control(ControlEvent::InteractionRequested { .. })
+            )));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+                    ))
+                    .count(),
+                1
+            );
+
+            send_cmd(
+                writer,
+                &seed,
+                cmd_ask_respond("duplicate-ask", &[("q1", "A")]),
+            );
+            expect_operation_failed(receiver, "interaction_not_found");
+            assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        },
+    );
+}
+
+#[test]
 fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     run_case(
