@@ -4,6 +4,7 @@ mod control;
 mod conversation;
 mod meta;
 mod resource;
+mod timeline;
 
 pub use control::{
     ControlInteractionResolution, ControlInteractionState, ControlProjection, ControlRoundState,
@@ -17,6 +18,11 @@ pub use conversation::{
 };
 pub use meta::{SessionMetaProjection, SessionMetaSnapshot};
 pub use resource::{GraphEdgeState, ResourceProjection, ResourceSnapshot, WorkspaceResourceState};
+pub use timeline::{
+    TimelineAssistantBlockState, TimelineCompactionState, TimelineEntry, TimelineEntryKind,
+    TimelineInputState, TimelineProjection, TimelineSnapshot, TimelineToolCallState,
+    TimelineToolResultState, TimelineTurnInterruptedState, TimelineTurnTerminalState,
+};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
