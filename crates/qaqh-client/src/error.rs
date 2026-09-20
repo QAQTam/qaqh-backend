@@ -1,6 +1,9 @@
 //! Error type shared across the client.
 
+use serde::Deserialize;
 use thiserror::Error;
+
+use crate::types::ReconnectReason;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -12,6 +15,11 @@ pub enum ClientError {
 
     #[error("transport error: {0}")]
     Transport(String),
+
+    /// 服务端以 `ringing.stream_terminated` 主动终止流。保留 code/skipped，
+    /// 避免重连状态只能从 Display 文本里反推终止原因。
+    #[error("server terminated stream ({code}); reconnecting")]
+    StreamTerminated { code: String, skipped: Option<u64> },
 
     #[error("protocol violation: {0}")]
     Protocol(String),
@@ -35,4 +43,54 @@ pub enum ClientError {
     Json(#[from] serde_json::Error),
 }
 
+impl ClientError {
+    pub(crate) fn stream_terminated(data: &str) -> Self {
+        #[derive(Deserialize)]
+        struct TerminatedPayload {
+            code: Option<String>,
+            skipped: Option<u64>,
+        }
+
+        let payload =
+            serde_json::from_str::<TerminatedPayload>(data).unwrap_or(TerminatedPayload {
+                code: None,
+                skipped: None,
+            });
+        Self::StreamTerminated {
+            code: payload.code.unwrap_or_else(|| "unknown".into()),
+            skipped: payload.skipped,
+        }
+    }
+
+    /// 返回服务端终止流的结构化原因；普通传输/协议错误返回 `None`。
+    pub fn reconnect_reason(&self) -> Option<ReconnectReason> {
+        match self {
+            Self::StreamTerminated { code, skipped } if code == "lagged" => Some(match skipped {
+                Some(skipped) => ReconnectReason::Lagged { skipped: *skipped },
+                None => ReconnectReason::StreamTerminated { code: code.clone() },
+            }),
+            Self::StreamTerminated { code, .. } => {
+                Some(ReconnectReason::StreamTerminated { code: code.clone() })
+            }
+            _ => None,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lagged_without_skipped_stays_structured() {
+        let error = ClientError::stream_terminated(r#"{"code":"lagged"}"#);
+        assert_eq!(
+            error.reconnect_reason(),
+            Some(ReconnectReason::StreamTerminated {
+                code: "lagged".into()
+            })
+        );
+    }
+}

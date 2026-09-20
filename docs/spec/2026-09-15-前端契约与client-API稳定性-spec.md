@@ -31,6 +31,17 @@
 这条政策**推翻**了本文早期几处「为旧版本留一手」的写法。判据：既然升级是整批做的，
 任何「另一个版本的对方」都不存在，兼容臂只会把**真正的形状错误**掩盖成默认值。
 
+### 0c. API 变更登记
+
+#### 2026-09-20 / issue #112：重连状态携带终止原因
+
+- 破坏性变更：`ChannelStatus::Reconnecting` 与 `TimelineStatus::Reconnecting`
+  新增必填字段 `reason: Option<ReconnectReason>`。
+- 新类型：`ReconnectReason::{Lagged { skipped }, StreamTerminated { code }}`。
+- 迁移：所有构造点和模式匹配必须同步增加 `reason`；普通断网传 `None`，
+  服务端主动终止流时由 `qaqh-client` 填入结构化原因。
+- 该变更不保留旧字段形状的兼容臂；前后端按本文总则同批次升级。
+
 ### 0b.1 由此**不再新增**的兼容臂
 
 `#[serde(other)]` 之类的未知取值兜底；为旧键名保留的 `alias`；snake_case ↔ camelCase

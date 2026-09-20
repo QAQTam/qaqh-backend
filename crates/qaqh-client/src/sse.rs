@@ -81,9 +81,11 @@ impl ChannelStream {
                     if *stop.borrow() {
                         return;
                     }
+                    let reason = err.reconnect_reason();
                     (self.handlers.on_status)(ChannelStatus::Reconnecting {
                         retry_ms,
                         last_cursor: self.cursor,
+                        reason,
                     });
                     log::warn!(
                         "[qaqh-client] SSE {} reconnect in {retry_ms}ms: {err}",
@@ -220,15 +222,9 @@ impl ChannelStream {
 
     fn dispatch(&mut self, frame: SseFrame, server_epoch: &str) -> Result<()> {
         // BUG-2026-09-12-11：服务端因事件缓冲溢出（Lagged）而终止流时发送的
-        // 终止帧——归一为传输错误，走退避重连（而不是被当成坏信封）。
+        // 终止帧——归一为结构化终止错误，走退避重连（而不是被当成坏信封）。
         if frame.event_type == "ringing.stream_terminated" {
-            let code = serde_json::from_str::<serde_json::Value>(frame.data.trim())
-                .ok()
-                .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
-                .unwrap_or_else(|| "unknown".into());
-            return Err(ClientError::Transport(format!(
-                "server terminated stream ({code}); reconnecting"
-            )));
+            return Err(ClientError::stream_terminated(frame.data.trim()));
         }
         if frame.event_type == "ringing.reset_required" {
             let reset: crate::types::ResetRequired = serde_json::from_str(frame.data.trim())
@@ -265,11 +261,12 @@ mod tests {
     //! SSE 终止帧归一（BUG-2026-09-12-11 遗留 / issue #35）。
     //!
     //! daemon 侧因 live 广播 `Lagged` 发出的 `ringing.stream_terminated`
-    //! 必须被**归一为 `Transport` 错误**（走退避重连），而不是被当成坏信封
-    //! 落成 `Protocol`——后者会让客户端在实现不变的情况下永远重连不上。
+    //! 必须被**归一为结构化 `StreamTerminated` 错误**（走退避重连），而不是
+    //! 被当成坏信封落成 `Protocol`——后者会让客户端在实现不变的情况下永远
+    //! 重连不上。
 
     use super::*;
-    use crate::types::Channel;
+    use crate::types::{Channel, ReconnectReason};
 
     fn stream() -> ChannelStream {
         ChannelStream::new(
@@ -297,9 +294,9 @@ mod tests {
         }
     }
 
-    /// daemon Lagged 终止帧 → Transport（可重连），不是 Protocol。
+    /// daemon Lagged 终止帧 → 结构化可重连原因，不是 Protocol。
     #[test]
-    fn lagged_termination_frame_normalizes_to_transport() {
+    fn lagged_termination_frame_carries_structured_reason() {
         let mut s = stream();
         let err = s
             .dispatch(
@@ -311,8 +308,18 @@ mod tests {
             )
             .expect_err("termination frame must end the stream");
         assert!(
-            matches!(err, ClientError::Transport(_)),
-            "must normalize to Transport: {err:?}"
+            matches!(
+                err,
+                ClientError::StreamTerminated {
+                    ref code,
+                    skipped: Some(7)
+                } if code == "lagged"
+            ),
+            "must retain structured termination: {err:?}"
+        );
+        assert_eq!(
+            err.reconnect_reason(),
+            Some(ReconnectReason::Lagged { skipped: 7 })
         );
         let msg = err.to_string();
         assert!(
@@ -321,14 +328,23 @@ mod tests {
         );
     }
 
-    /// 载荷缺 `code` 时退化为 unknown，仍按 Transport 处理（不得 panic）。
+    /// 载荷缺 `code` 时退化为 unknown，仍按可重连终止处理（不得 panic）。
     #[test]
-    fn termination_frame_without_code_still_transport() {
+    fn termination_frame_without_code_still_reconnects() {
         let mut s = stream();
         let err = s
             .dispatch(frame("ringing.stream_terminated", "{}"), "epoch-1")
             .expect_err("termination frame must end the stream");
-        assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
+        assert!(
+            matches!(err, ClientError::StreamTerminated { ref code, .. } if code == "unknown"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.reconnect_reason(),
+            Some(ReconnectReason::StreamTerminated {
+                code: "unknown".into()
+            })
+        );
         assert!(err.to_string().contains("unknown"), "{err}");
     }
 
@@ -398,7 +414,10 @@ mod tests {
                 "epoch-1",
             )
             .expect_err("must error");
-        assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
+        assert!(
+            matches!(err, ClientError::StreamTerminated { ref code, .. } if code == "unknown"),
+            "{err:?}"
+        );
         assert!(!err.to_string().contains("bad envelope"), "{err}");
     }
 }
