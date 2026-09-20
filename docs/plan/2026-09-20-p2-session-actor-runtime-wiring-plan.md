@@ -132,7 +132,7 @@ Gate：
 
 #### P2-2d-b daemon/SSE transport 与 lifecycle ingress
 
-状态：已实现，PR 待创建；merge commit 待合入后回写。
+状态：已实现，PR #219；merge commit 待合入后回写。
 
 交付：
 
