@@ -10,11 +10,12 @@ mod types;
 
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
-    EVENTS_POISON_FILE, WRITER_FENCE_FILE,
+    EVENTS_POISON_FILE, UPGRADE_FENCE_FILE, WRITER_FENCE_FILE,
 };
 pub use reader::CommittedFactReader;
 pub use store::{AppendOutcome, CanonicalSessionStore};
 pub use types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,
-    WRITER_FENCE_SCHEMA, WriterFence, WriterId, WriterLease,
+    UPGRADE_FENCE_SCHEMA, UpgradeFence, UpgradeState, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
+    WriterLease,
 };
