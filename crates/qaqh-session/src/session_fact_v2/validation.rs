@@ -532,6 +532,12 @@ fn validate_tool_finished(payload: &super::types::ToolFinished) -> Result<(), Va
     if let Some(evidence_event_id) = &payload.evidence_event_id {
         validate_ulid("evidence_event_id", evidence_event_id.as_str())?;
     }
+    validate_reconciled_evidence(
+        payload.reconciled,
+        payload.evidence_ref.as_ref(),
+        payload.evidence_fact_seq,
+        payload.evidence_event_id.as_ref(),
+    )?;
     if let Some(recovery_ref) = &payload.recovery_ref {
         validate_recovery_ref("recovery_ref", recovery_ref)?;
     }
@@ -541,6 +547,12 @@ fn validate_tool_finished(payload: &super::types::ToolFinished) -> Result<(), Va
 fn validate_recovery_tool_completion(
     completion: &RecoveryToolCompletion,
 ) -> Result<(), ValidationError> {
+    if completion.terminal_status == ToolTerminalStatus::Backgrounded {
+        return Err(ValidationError::InvalidField {
+            field: "terminal_status",
+            message: "backgrounded is not valid for recovery completion".to_owned(),
+        });
+    }
     validate_prefixed_ulid("call_id", completion.call_id.as_str(), "call_")?;
     if let Some(execution_id) = &completion.execution_id {
         validate_prefixed_ulid("execution_id", execution_id.as_str(), "exec_")?;
@@ -569,6 +581,34 @@ fn validate_recovery_tool_completion(
     }
     if let Some(evidence_event_id) = &completion.evidence_event_id {
         validate_ulid("evidence_event_id", evidence_event_id.as_str())?;
+    }
+    validate_reconciled_evidence(
+        completion.reconciled,
+        completion.evidence_ref.as_ref(),
+        completion.evidence_fact_seq,
+        completion.evidence_event_id.as_ref(),
+    )?;
+    Ok(())
+}
+
+fn validate_reconciled_evidence(
+    reconciled: bool,
+    evidence_ref: Option<&ContentRef>,
+    evidence_fact_seq: Option<u64>,
+    evidence_event_id: Option<&super::types::EventId>,
+) -> Result<(), ValidationError> {
+    if evidence_fact_seq.is_some() != evidence_event_id.is_some() {
+        return Err(ValidationError::InvalidField {
+            field: "evidence_fact_seq",
+            message: "evidence_fact_seq and evidence_event_id must be present together".to_owned(),
+        });
+    }
+    if reconciled && evidence_ref.is_none() && evidence_fact_seq.is_none() {
+        return Err(ValidationError::InvalidField {
+            field: "reconciled",
+            message: "true requires evidence_ref or evidence_fact_seq + evidence_event_id"
+                .to_owned(),
+        });
     }
     Ok(())
 }
