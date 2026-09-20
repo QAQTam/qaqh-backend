@@ -116,14 +116,14 @@
 | spec | [2026-09-17-工具结果展示层契约-spec.md](./spec/2026-09-17-工具结果展示层契约-spec.md) | **已被 09-18 跨仓契约取代**，保留为量化证据与设计参照（悬空引用已修复） |
 | spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
 | spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
-| spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 冻结候选，状态以 handoff §1 为唯一来源**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；D1-D41 已按 handoff §3 收口，待复审 |
+| spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 冻结候选，状态以 handoff §1 为唯一来源**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；D1-D41 已按 handoff §3 收口；用户已决定跳过 NPC 复审，待用户最终合并裁定 |
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
 | plan | [2026-09-19-qaqh-v2.0-前瞻设计-plan.md](./plan/2026-09-19-qaqh-v2.0-前瞻设计-plan.md) | **已被 09-20 总架构设计取代**；保留为方向输入与历史证据 |
-| plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构设计与开发计划（架构方向已收敛，P0 未冻结；状态以 handoff §1 为唯一来源）**：裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收；字段级阻断统一见 handoff §3 |
+| plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构设计与开发计划（架构方向已收敛，P0 文档已收口，待用户合并裁定；状态以 handoff §1 为唯一来源）**：裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收；字段级阻断统一见 handoff §3 |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
-| handoff | [2026-09-20-qaqh-v2.0-首席架构师-handoff.md](./handoff/2026-09-20-qaqh-v2.0-首席架构师-handoff.md) | **当前唯一交接与开放阻断清单**：Codex 接手文档/schema；D1-D41 未闭环前不得合并 #104；含工程侧可并行/必须等待边界 |
+| handoff | [2026-09-20-qaqh-v2.0-首席架构师-handoff.md](./handoff/2026-09-20-qaqh-v2.0-首席架构师-handoff.md) | **当前唯一交接与阻断清单**：Codex 接手文档/schema；D1-D41 已闭环；用户已决定跳过 NPC 复审，待用户最终合并裁定；裁定前不得合并 #104；含工程侧可并行/必须等待边界 |
 | handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | 上一轮交接（已完成） |
 | handoff | [2026-09-17-buglist复核九批次执行-handoff.md](./handoff/2026-09-17-buglist复核九批次执行-handoff.md) | 上一轮交接（已完成） |
 | report | [2026-09-12-exec与process工具设计评审-report.md](./report/2026-09-12-exec与process工具设计评审-report.md) | 被上述**未落地 plan** 的 §9 与 P6 引用 |

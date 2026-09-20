@@ -1,6 +1,6 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D41 收口并通过复审前不得标记为已冻结
+> **状态**：P0 冻结候选；D1-D41 已收口，用户已决定跳过 NPC 复审，PR #104 待用户合并裁定；裁定前不得标记为已冻结
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
 > **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
@@ -1691,7 +1691,7 @@ GC 协议：
 load events.jsonl
   -> inspect events.commit.json / events.poison.json
   -> if marker missing: compute candidate_offset and marker_missing_rebuildable
-       -> true: rebuild marker as side effect, continue with outcome=writable
+       -> true: rebuild marker as side effect, continue with outcome=writable, actions=[projection_rebuilt]
        -> false: mark CommitRecoveryRequired and stop before append/publish/ack
   -> truncate anything beyond committed_offset
   -> validate envelope + schema on committed prefix
@@ -1874,7 +1874,7 @@ canonical_json({
 | no-action | `SessionRecovered { outcome=writable, actions=[], torn_tail=false }` | 标准 batch key | 无 open 状态且无 torn/unknown/tombstone 时，创建一次闭合 batch |
 | unknown fact | `SessionRecovered { outcome=read_only_upgrade_required, actions=[], last_good_fact_seq=<unknown 前> }` | 标准 batch key | 不解释 unknown 及其后 fact；后续 load 复用同一 batch |
 | upgrade supersede | 先 durable 写 `upgrade-fence {generation+1,state=writable}`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }` | `(log_id, upgrade-fence.generation+1)` | sidecar-only batch；不进入 `RecoveryPlan.steps` / `plan_hash`；仅允许在已有 read-only marker 且 pre-recovery log 已变化时创建；旧 writer 不得写此 batch |
-| commit/poison repair | 先按 `events.commit.json` 验证/截断或重建 marker：若 `marker_missing_rebuildable=true`，actions=`[projection_rebuilt]`、outcome=`writable`；若 previous generation/high-water 已知，actions=`[commit_repaired]`、outcome=`writable` 或 `commit_recovery_required`；无法证明 high-water 时不写 business fact，只保持 runtime `CommitRecoveryRequired` | `(log_id, previous_commit_generation)`（仅 commit_repaired）；rebuild 路径用标准 batch key | repair durable 成功且 high-water/clock 一致后才回 writable；`commit_repaired` 与 `tool_finished` 是互斥 action，commit repair 永不生成 `tool_finished` |
+| commit/poison repair | 先按 `events.commit.json` 验证/截断或重建 marker：若 `marker_missing_rebuildable=true`，actions=`[projection_rebuilt]`、outcome=`writable`；若 previous generation/high-water 已知，actions=`[commit_repaired]`，其中 repair durable=false 时 outcome=`commit_recovery_required`，repair durable=true 且 high-water/clock 一致时 outcome=`writable`；无法证明 high-water 时不写 business fact，只保持 runtime `CommitRecoveryRequired` | `(log_id, previous_commit_generation)`（仅 commit_repaired）；rebuild 路径用标准 batch key | 仅 repair durable=true 且 high-water/clock 一致后可回 writable；`commit_repaired` 与 `tool_finished` 是互斥 action，commit repair 永不生成 `tool_finished` |
 | tombstone | `SessionRecovered { outcome=tombstone, actions=[] }` | 标准 batch key | 不写其它 recovery fact，不执行物理清理 |
 
 其它恢复矩阵：
@@ -2272,7 +2272,7 @@ I17 的 canonical 文本固定为：
 
 ### 10.1 Canonical fixtures
 
-每个 fixture 必须有独立 metadata sidecar，固定字段为 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision`、`content_unavailable`，并可选扩展 `expected_turn_started_count`、`expected_turn_projection_count`。扩展字段口径固定为：前者计 canonical `TurnStarted` fact 数；后者只计 `Delivery::Reliable` 的 `turn_started` projection event，按 `stream_key` 去重后分别计数，不计 Replaceable/Ephemeral。下表给出 v2.0 必测集合；`fact_count` 指 canonical JSONL 总行数（包括不可解释的 unknown fact 和 final `SessionRecovered`），projection-only fixture 另列 `projection_events`。
+每个 fixture 必须有独立 metadata sidecar，固定字段为 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision`、`content_unavailable`，并可选扩展 `expected_turn_started_count`、`expected_turn_projection_count`。`expected_projection_revision` 的类型固定为 JSON object：key 是 canonical `ProjectionSlot` 的 serde 名（`conversation`、`timeline`、`control`、`resources`、`meta`），value 是该 projection 最终状态的期望 `revision: u64`；缺少 key 表示该 slot 没有可发布的最终 revision，no-publish/ack fixture 必须写空 object `{}`，禁止写成 `null`、裸数字或按 `stream_key` 合并多个 slot。扩展字段口径固定为：前者计 canonical `TurnStarted` fact 数；后者只计 `Delivery::Reliable` 的 `turn_started` projection event，按 `stream_key` 去重后分别计数，不计 Replaceable/Ephemeral。下表给出 v2.0 必测集合；`fact_count` 指 canonical JSONL 总行数（包括不可解释的 unknown fact 和 final `SessionRecovered`），projection-only fixture 另列 `projection_events`。
 
 | Fixture | 内容 | expected fact count | terminal / 状态断言 | projection revision | ContentUnavailable |
 |---|---|---|---|---|---|
@@ -2302,12 +2302,13 @@ I17 的 canonical 文本固定为：
 | `recovery-input-queue-only.jsonl` | InputAccepted(input_purpose=queue_only) + crash before TurnStarted | 2（InputAccepted + final SessionRecovered） | `expected_turn_started_count=0`；不补 `TurnStarted` | `expected_turn_projection_count=0`；InputAccepted 的 conversation/timeline revision 正常前进 | none |
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
 | `recovery-tool-denied.jsonl` | ToolCallDeclared + InteractionResolved(rejected) + parent restart | 3（Declared + Resolved + denied Finished） | `terminal_status=denied`，`execution_id=None`，零执行 metrics；`actions=[tool_finished]` | control/timeline revision 各前进一次 | none |
-| `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker | 2（committed fact + final SessionRecovered） | `outcome=commit_recovery_required`；不把 poison 后前缀当 canonical | 只重放 committed revision | none |
+| `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker；repair durable=false | 2（committed fact + final SessionRecovered） | `outcome=commit_recovery_required`；不把 poison 后前缀当 canonical | 只重放 committed revision | none |
 | `events-commit-marker-missing.jsonl` | 完整 JSONL + marker 缺失且 `marker_missing_rebuildable=true` | 2（原 committed fact + final writable SessionRecovered） | 重建 marker 后恢复；`actions=[projection_rebuilt]`，不得伪造 `commit_repaired` | committed revision 不重复 | none |
 | `events-commit-crash-before-rename.jsonl` | marker temp 已 fsync，进程在 rename 前崩溃 | 2（原 committed fact + final writable SessionRecovered） | 不把 temp 当 canonical；从 JSONL + evidence 重建后恢复；`actions=[projection_rebuilt]` | committed revision 不重复 | none |
 | `events-commit-marker-corrupt.jsonl` | marker 损坏或 `log_id` 不匹配，high-water 不可证 | 1（仅保留可证明的 committed prefix；不写 final recovery fact） | runtime state=`CommitRecoveryRequired`；无 `SessionRecovered` | 不发布/ack，不推进 clock | none |
-| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO，旧 marker/high-water 可证明，repair 尚未 durable | 2（committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 保持旧 high-water；repair 未 durable 前不可写 | 只重放 committed revision | none |
-| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败，旧 marker/high-water 可证明，repair 尚未 durable | 2（已 committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 不发布/ack；repair durable 后回 writable | 不越过 committed high-water | none |
+| `events-commit-fsync-eio.jsonl` | fact fsync 返回 EIO，旧 marker/high-water 可证明，repair durable=false | 2（committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 保持旧 high-water；repair 未 durable 前不可写 | 只重放 committed revision | none |
+| `events-commit-marker-write-failure.jsonl` | fact fsync 成功但 marker rename/fsync 失败，旧 marker/high-water 可证明，repair durable=false | 2（已 committed fact + final `SessionRecovered {outcome=commit_recovery_required, actions=[commit_repaired]}`） | 不发布/ack；本 fixture 只覆盖 repair 尚未 durable 的恢复事实，不得据此发布 writable | 不越过 committed high-water | none |
+| `events-commit-repaired-durable.jsonl` | fact 已 committed，旧 marker/high-water 可证明，repair durable=true 且 high-water/clock 一致 | 2（committed fact + final `SessionRecovered {outcome=writable, actions=[commit_repaired]}`） | repair durable 后才回 writable；不得写 `projection_rebuilt` | 只重放 committed revision | none |
 | `recovery-tombstone.jsonl` | SessionCreated + SessionDeleted + load | 3（SessionCreated + SessionDeleted + final SessionRecovered） | `outcome=tombstone` | 不再前进 | none |
 | `compaction.jsonl` | facts + CompactionApplied | 2 | checkpoint 缺失可重建 | context revision 一致 | none |
 | `torn-tail.jsonl` | 完整 fact + 半行 | 2（完整 fact + final SessionRecovered） | `torn_tail=true` | 与截断后 rebuild 一致 | none |
@@ -2357,6 +2358,8 @@ Tool intent/finish：
 {"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":5,"event_id":"01J00000000000000000000005","ts_ms":1789830000040,"turn_id":"turn_01J00000000000000000000000","call_id":"call_01J00000000000000000000000","causation_id":"01J00000000000000000000004","payload":{"kind":"tool_finished","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"indeterminate","error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false},"metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"finished_at_ms":1789830000040}}}
 ```
 
+上块的 `fact_seq=5` 是 `fact_seq=4` 的 `ToolIntent` 在 crash 后由 recovery batch 补写的 canonical `ToolFinished`，不是 normal live execution；`recovery_ref` 只属于这次 recovery 补写。下块的 `fact_seq=6` 是同一 recovery batch 的 final `SessionRecovered`，`last_good_fact_seq=4` 表示它在 pre-recovery canonical log 上的观测边界。
+
 Recovery：
 
 ```jsonl
@@ -2397,7 +2400,7 @@ run_exact() {
 }
 ```
 
-每个 fixture 的精确断言必须读取 §10.1 metadata sidecar，逐项比较 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision`、`content_unavailable`；若存在 `expected_turn_started_count` / `expected_turn_projection_count`，必须按上述口径一并比较。任何字段缺失、`None` 误写为空文本、或 `ContentUnavailable` 被替换为空内容都失败。
+每个 fixture 的精确断言必须读取 §10.1 metadata sidecar，逐项比较 `expected_fact_count`、`expected_terminal_status`、`expected_projection_revision`、`content_unavailable`；`expected_projection_revision` 按 `ProjectionSlot` key 逐项比较，缺少 key 表示该 slot 没有可发布的最终 revision；若存在 `expected_turn_started_count` / `expected_turn_projection_count`，必须按上述口径一并比较。任何字段缺失、`None` 误写为空文本、或 `ContentUnavailable` 被替换为空内容都失败。
 
 12 项 blocking finding 的逐项复现入口：
 
