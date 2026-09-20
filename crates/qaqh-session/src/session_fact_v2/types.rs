@@ -84,6 +84,24 @@ impl ContentRef {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentUnavailableReason {
+    GarbageCollected,
+    Missing,
+    HashMismatch,
+    Offloaded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentUnavailable {
+    pub content_ref: ContentRef,
+    pub reason: ContentUnavailableReason,
+    pub observed_at_logical_ms: i64,
+    pub source_fact_seq: Option<u64>,
+    pub gc_event_seq: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactSchema {
     pub name: String,
@@ -598,6 +616,14 @@ pub enum SideEffectClass {
     Process,
     Network,
     External,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityState {
+    Idle,
+    Running,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
