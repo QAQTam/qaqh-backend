@@ -1,8 +1,9 @@
 //! SessionActor mailbox and TurnCore terminal contract.
 
+use qaqh_domain::RingingChannel;
 use qaqh_session::actor::{
-    SessionActor, SessionActorEffect, SessionActorError, TurnCommand, TurnCore, TurnCoreError,
-    TurnEffect,
+    ConnectionId, SessionActor, SessionActorEffect, SessionActorError, SubscriptionCommand,
+    SubscriptionEffect, TurnCommand, TurnCore, TurnCoreError, TurnEffect,
 };
 use qaqh_session::session_fact_v2::{InputId, TurnId, TurnMode, TurnTerminal};
 
@@ -171,6 +172,136 @@ fn shutdown_is_terminal_for_the_mailbox() {
     );
     assert_eq!(
         actor.submit(qaqh_session::actor::SessionCommand::Turn(start("t1"))),
+        Err(SessionActorError::Shutdown)
+    );
+}
+
+fn connection(value: &str) -> ConnectionId {
+    ConnectionId::new(value)
+}
+
+fn subscribe(connection_id: &str, channel: RingingChannel) -> SubscriptionCommand {
+    SubscriptionCommand::Subscribe {
+        connection_id: connection(connection_id),
+        channel,
+    }
+}
+
+#[test]
+fn subscription_commands_share_the_turn_mailbox_and_are_idempotent() {
+    let mut actor = SessionActor::new(8);
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Turn(start("t1")))
+        .expect("start");
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Subscription(
+            subscribe("connection-a", RingingChannel::Control),
+        ))
+        .expect("subscribe");
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Subscription(
+            subscribe("connection-a", RingingChannel::Control),
+        ))
+        .expect("duplicate subscribe");
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Subscription(
+            subscribe("connection-b", RingingChannel::Tool),
+        ))
+        .expect("second connection");
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Subscription(
+            SubscriptionCommand::Unsubscribe {
+                connection_id: connection("connection-a"),
+                channel: RingingChannel::Control,
+            },
+        ))
+        .expect("unsubscribe");
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Subscription(
+            SubscriptionCommand::ConnectionClosed {
+                connection_id: connection("connection-b"),
+            },
+        ))
+        .expect("close connection");
+
+    let effects = actor.drain().expect("drain");
+    assert!(matches!(
+        effects.as_slice(),
+        [
+            SessionActorEffect::Turn(TurnEffect::Started { .. }),
+            SessionActorEffect::Subscription(SubscriptionEffect::Subscribed { changed: true, .. }),
+            SessionActorEffect::Subscription(SubscriptionEffect::Subscribed { changed: false, .. }),
+            SessionActorEffect::Subscription(SubscriptionEffect::Subscribed { changed: true, .. }),
+            SessionActorEffect::Subscription(SubscriptionEffect::Unsubscribed {
+                changed: true,
+                ..
+            }),
+            SessionActorEffect::Subscription(SubscriptionEffect::ConnectionClosed {
+                removed: 1,
+                ..
+            }),
+        ]
+    ));
+    assert!(actor.subscribers().is_empty());
+}
+
+#[test]
+fn connection_close_is_scoped_and_idempotent() {
+    let mut actor = SessionActor::new(8);
+    for command in [
+        subscribe("connection-a", RingingChannel::Control),
+        subscribe("connection-a", RingingChannel::Tool),
+        subscribe("connection-b", RingingChannel::Conversation),
+        SubscriptionCommand::ConnectionClosed {
+            connection_id: connection("connection-a"),
+        },
+        SubscriptionCommand::ConnectionClosed {
+            connection_id: connection("connection-a"),
+        },
+    ] {
+        actor
+            .submit(qaqh_session::actor::SessionCommand::Subscription(command))
+            .expect("submit subscription command");
+    }
+    actor.drain().expect("drain");
+
+    assert!(
+        !actor
+            .subscribers()
+            .is_subscribed(&connection("connection-a"), RingingChannel::Control)
+    );
+    assert!(
+        actor
+            .subscribers()
+            .is_subscribed(&connection("connection-b"), RingingChannel::Conversation)
+    );
+    assert_eq!(actor.subscribers().len(), 1);
+}
+
+#[test]
+fn subscription_ingress_rejects_mailbox_full_and_post_shutdown() {
+    let mut actor = SessionActor::new(1);
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Subscription(
+            subscribe("connection-a", RingingChannel::Control),
+        ))
+        .expect("first subscription");
+    assert_eq!(
+        actor.submit(qaqh_session::actor::SessionCommand::Subscription(
+            subscribe("connection-b", RingingChannel::Tool),
+        )),
+        Err(SessionActorError::MailboxFull)
+    );
+    actor.drain().expect("drain");
+
+    actor
+        .submit(qaqh_session::actor::SessionCommand::Shutdown)
+        .expect("shutdown");
+    actor.drain().expect("drain shutdown");
+    assert_eq!(
+        actor.submit(qaqh_session::actor::SessionCommand::Subscription(
+            subscribe("connection-c", RingingChannel::Conversation),
+        )),
         Err(SessionActorError::Shutdown)
     );
 }
