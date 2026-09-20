@@ -4,11 +4,13 @@
 //! files, acquire writer locks, or mutate runtime state.
 
 mod projection;
+mod projection_event;
 mod types;
 mod validation;
 
 pub use projection::{
     END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex, projection_slots,
 };
+pub use projection_event::*;
 pub use types::*;
 pub use validation::ValidationError;
