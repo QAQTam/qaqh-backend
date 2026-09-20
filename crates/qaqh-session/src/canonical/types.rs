@@ -8,10 +8,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::session_fact_v2::{ContentHash, EventId, LogId, SessionId};
+use crate::session_fact_v2::{ContentHash, EventId, LogId, RecoveryId, SessionId};
 
 pub const WRITER_FENCE_SCHEMA: &str = "qaqh.writer-fence/v1";
 pub const EVENTS_COMMIT_SCHEMA: &str = "qaqh.events-commit/v1";
+pub const UPGRADE_FENCE_SCHEMA: &str = "qaqh.upgrade-fence/v1";
 pub const EVENTS_POISON_SCHEMA: &str = "qaqh.events-poison/v1";
 
 mod u128_string {
@@ -138,6 +139,23 @@ impl EventsCommit {
             commit_generation: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeState {
+    ReadOnly,
+    Writable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeFence {
+    pub schema: String,
+    pub log_id: LogId,
+    pub generation: u64,
+    pub state: UpgradeState,
+    pub last_recovery_id: Option<RecoveryId>,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
