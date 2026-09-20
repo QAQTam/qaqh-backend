@@ -2042,6 +2042,7 @@ version = "1.0.1"
 dependencies = [
  "hex",
  "log",
+ "qaqh-domain",
  "qaqh-message",
  "qaqh-types",
  "serde",
