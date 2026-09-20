@@ -19,7 +19,8 @@
 - `SessionActor` 尚未被 daemon/runtime 生产路径持有；当前主要是 `qaqh-session` 内的独立模块。
 - 真实 turn 仍由 `crates/qaqh-runtime/src/agent/engine_turn.rs` 的 `run_lap` 直接控制。
 - 输入、取消、审批和订阅尚未统一经过 mailbox。
-- 取消状态仍存在 token、thread-local 与 `user_cancelled` 等多处语义。
+- 取消状态仍存在 token 与 thread-local 两处语义；`Loop::user_cancelled`
+  重复布尔已在 P2-3b 删除。
 - compaction/title/liveness/session lifecycle 仍在 loop 路径内。
 - `SubagentSupervisor`、两阶段 spawn 恢复和 root `QuotaLedger` 尚未实现。
 
@@ -178,21 +179,35 @@ Gate：
 - child cancel 不影响 parent/sibling；child 不能清除从 live parent 继承的取消，parent clear 也不复活已取消的后代。
 - 父取消仍向已登记 child 投递命令，且不重新拉起已退出实例。
 
-非目标：本切片不删除 `Loop::user_cancelled`，也不把 `run_lap` 改成 SessionActor 唯一执行 owner。
+非目标：本切片未删除 `Loop::user_cancelled`，也不把 `run_lap` 改成 SessionActor 唯一执行 owner。
 
-#### P2-3b 单一 InterruptReason 与删除重复 user_cancelled
+#### P2-3b 删除重复 user_cancelled，统一取消门
+
+状态：实现中，issue #226。
+
+交付：
+
+- 删除 `Loop::user_cancelled` 字段及赋值/读取，系统注入与 compact 后注入统一读取 `CancelToken::is_set()`。
+- 用户输入、ToolInvoke、session switch 继续通过 `cancel.clear()` 复位取消门。
+
+Gate：
+
+- ConversationCancel 后系统注入只入队、不发布 `TurnStarted`。
+- 用户输入与 session switch 后取消门解除，系统注入恢复。
+- cancel-before-start、cancel-in-round、重复 cancel、完成与取消竞争全绿。
+- 任何 terminal 后不得再发布 round、tool start 或 pending interaction。
+
+#### P2-3c 单一 InterruptReason producer
 
 状态：待开始。
 
 交付：
 
 - cancel 的 producer 只登记一次原因，runtime 不再从 token/thread-local/boolean 多路推导。
-- 删除运行路径中的重复 `user_cancelled` 判定，保留行为契约测试。
 
 Gate：
 
-- cancel-before-start、cancel-in-round、重复 cancel、完成与取消竞争全绿。
-- 任何 terminal 后不得再发布 round、tool start 或 pending interaction。
+- cancel 只产生一个 `InterruptReason` 和一次 terminal。
 
 ### P2-4 loop 外移与 thread-local 清理
 
