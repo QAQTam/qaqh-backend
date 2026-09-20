@@ -375,6 +375,20 @@ impl Loop {
     /// - `YieldToUser` → do nothing, wait for PermissionResponse or UserInput
     /// - `Handled` / `Error` / `Shutdown` → straightforward
     pub(super) fn apply_outcome(&mut self, outcome: Outcome) {
+        if let Err(error) = self.session.turn.observe_outcome(&outcome) {
+            let message = error.to_string();
+            log::error!("[TURN] SessionActor rejected runtime transition: {message}");
+            self.emit_operation_failed(
+                "turn-actor-transition",
+                qaqh_domain::ErrorScope::Conversation,
+                "turn_actor_transition",
+                &message,
+            );
+            self.reset_all_engines();
+            self.phase = LoopPhase::Idle;
+            return;
+        }
+
         // G5：孤儿 tool_result 升级为领域事件——store 只记录，此处统一
         // 上报（覆盖所有执行路径），前端不再对"已授权执行却消失"零感知。
         let orphans = self.session.agent.msg.take_orphan_tool_results();
