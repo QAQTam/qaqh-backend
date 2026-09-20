@@ -292,6 +292,62 @@ impl CanonicalLog {
         })
     }
 
+    /// Rotate writer ownership during migration/cutover.
+    ///
+    /// This is the S3 CAS barrier: epoch and token must both advance, and the
+    /// previous writer's next append fails with `stale_writer`.
+    pub fn rotate_writer_fence(
+        &mut self,
+        writer_id: WriterId,
+        generation_epoch: u64,
+        fencing_token: u128,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<WriterLease, CanonicalError> {
+        if lease_duration_ms <= 0 {
+            return Err(CanonicalError::InvalidLeaseDuration(lease_duration_ms));
+        }
+        if writer_id.as_str().is_empty() || generation_epoch == 0 || fencing_token == 0 {
+            return Err(CanonicalError::InvalidFence(
+                "cutover writer identity must be non-zero".into(),
+            ));
+        }
+        let _guard = self.lock_exclusive()?;
+        self.ensure_writable()?;
+        if let Some(current) = self.read_fence()? {
+            self.validate_fence_identity(&current)?;
+            if generation_epoch <= current.generation_epoch
+                || fencing_token <= current.fencing_token
+            {
+                return Err(AppendRejected::stale_writer(
+                    current.fencing_token,
+                    fencing_token,
+                    current.generation_epoch,
+                )
+                .into());
+            }
+        }
+        let lease_expires_at_ms = now_ms.saturating_add(lease_duration_ms);
+        let fence = WriterFence {
+            schema: WRITER_FENCE_SCHEMA.into(),
+            session_id: self.session_id.clone(),
+            log_id: self.log_id.clone(),
+            writer_id: writer_id.clone(),
+            generation_epoch,
+            fencing_token,
+            acquired_at_ms: now_ms,
+            lease_expires_at_ms,
+        };
+        write_json_atomic(&self.fence_path(), &fence)?;
+        Ok(WriterLease {
+            writer_id,
+            log_id: self.log_id.clone(),
+            generation_epoch,
+            fencing_token,
+            lease_expires_at_ms,
+        })
+    }
+
     /// Append one fact and advance the durable commit marker.
     ///
     /// `fact.fact_seq` is assigned inside the writer critical section; callers
