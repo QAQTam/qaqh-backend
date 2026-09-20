@@ -370,19 +370,22 @@ fn concurrent_sessions_scale_end_to_end() {
     for handle in handles {
         handle.join().expect("append thread");
     }
-    let hits = hook.hits.load(Ordering::SeqCst);
+    let total_hits = hook.hits.load(Ordering::SeqCst);
+    let explicit_hits = hook.explicit_hits.load(Ordering::SeqCst);
     clear_hook();
 
     let records = SESSIONS * PER_SESSION;
+    // 后台 flusher 的轮次不属于显式 flush 屏障；上界只统计显式路径，避免
+    // 100ms 后台轮次把固定上界推高造成间歇失败。
     assert!(
-        hits <= SESSIONS * 8,
-        "fsync 次数 {hits} 过高（记录数 {records}；批量化后应为每会话每轮 ≤1 次，\
+        explicit_hits <= SESSIONS * 8,
+        "显式 fsync 次数 {explicit_hits} 过高（记录数 {records}；批量化后应为每会话每轮 ≤1 次，\
          pre-fix 每条一次 = {records}）——fsync 批量化或锁分片未生效"
     );
     // 反向保险：至少要真的发生过 flush（否则上界会被"零次"平凡满足）。
     assert!(
-        hits >= SESSIONS,
-        "fsync 次数 {hits} 少于会话数 {SESSIONS}——显式 flush 未对每个会话生效"
+        total_hits >= SESSIONS,
+        "fsync 次数 {total_hits} 少于会话数 {SESSIONS}——flush 未对每个会话生效"
     );
 
     for dir in &dirs {
