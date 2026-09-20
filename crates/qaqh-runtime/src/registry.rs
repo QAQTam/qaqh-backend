@@ -654,6 +654,14 @@ impl AgentRegistry {
     }
 
     pub fn close(&mut self, seed: &str) {
+        // Close descendants first: a parent actor may be waiting for a child
+        // result, so shutting the parent down before the child can deadlock the
+        // join. Recursive close also keeps the parent/child edge bookkeeping
+        // consistent (each child unlinks itself from its parent).
+        for child in self.children_of(seed) {
+            log::info!("[registry] closing child {child} before parent {seed}");
+            self.close(&child);
+        }
         if let Some(instance) = self.instances.remove(seed) {
             instance.shutdown();
         }
