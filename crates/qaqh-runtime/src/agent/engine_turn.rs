@@ -10,7 +10,9 @@ use qaqh_domain::AskAnswer;
 use qaqh_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
-use super::turn_actor::{InteractionAdmission, InteractionState, TurnActor, TurnActorError};
+use super::turn_actor::{
+    InteractionAdmission, InteractionState, TurnActor, TurnActorError, TurnCancellation,
+};
 use super::types::*;
 use crate::agent::turn_lap::admit as turn_admit;
 use crate::agent::turn_lap::backfill as turn_backfill;
@@ -270,11 +272,14 @@ impl TurnEngine {
         self.actor.begin_input(turn_id, input_id)
     }
 
-    pub(crate) fn cancel_turn(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
+    pub(crate) fn cancel_turn(
+        &mut self,
+        turn_id: &str,
+    ) -> Result<TurnCancellation, TurnActorError> {
         self.actor.cancel(turn_id)
     }
 
-    pub(crate) fn cancel_active_turn(&mut self) -> Result<(), TurnActorError> {
+    pub(crate) fn cancel_active_turn(&mut self) -> Result<TurnCancellation, TurnActorError> {
         self.actor.cancel_active()
     }
 
@@ -1476,6 +1481,13 @@ impl TurnEngine {
     /// Reset all turn state (called on Cancel / new session).
     pub fn reset(&mut self) {
         self.actor.reset();
+        self.reset_runtime_state();
+    }
+
+    /// Clear the active turn runtime without erasing the actor's terminal
+    /// result. Cancellation handlers use this so a later duplicate command can
+    /// observe `AlreadyTerminal` instead of republishing a terminal.
+    pub(crate) fn reset_runtime_state(&mut self) {
         self.suspended = None;
         self.continuation = None;
         self.continuation_count = 0;

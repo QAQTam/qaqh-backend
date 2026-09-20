@@ -344,8 +344,22 @@ impl Loop {
     /// suspended state or pending approvals. Stateless engines are
     /// no-ops. Stats accumulator is replaced with a fresh one.
     pub(super) fn reset_all_engines(&mut self) {
+        self.reset_all_engines_inner(true);
+    }
+
+    /// Reset every non-turn engine and clear turn runtime state, but keep the
+    /// actor terminal result available for duplicate cancel/terminal fencing.
+    pub(super) fn reset_all_engines_preserving_turn_terminal(&mut self) {
+        self.reset_all_engines_inner(false);
+    }
+
+    fn reset_all_engines_inner(&mut self, reset_turn_actor: bool) {
         // Session-level engines (hold mutable state)
-        self.session.turn.reset();
+        if reset_turn_actor {
+            self.session.turn.reset();
+        } else {
+            self.session.turn.reset_runtime_state();
+        }
         self.session.tool.clear_pending();
         self.session.stats = StatsCollector::new();
 
