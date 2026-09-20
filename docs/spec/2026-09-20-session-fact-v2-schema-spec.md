@@ -1,6 +1,6 @@
 # QAQH session-fact-v2 字段级 Schema、Cursor 与恢复契约
 
-> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D20 收口并通过复审前不得标记为已冻结
+> **状态**：P0 冻结候选；PR #104 `changes_requested`，D1-D27 收口并通过复审前不得标记为已冻结
 > **Issue**：[#105](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/105)
 > **上位架构**：[#103](https://cnb.cool/QAQ-Harness/qaqh-backend/-/issues/103) / PR [#104](https://cnb.cool/QAQ-Harness/qaqh-backend/-/pulls/104)
 > **基线**：PR #104 base `betav2 @ 5e0a9a9`；当前 head 以 handoff §1 为唯一来源
@@ -385,6 +385,8 @@ Resolved -> terminal
 Expired -> terminal
 ```
 
+turn cancel 与 resolution 的竞态固定由 actor 串行裁决：若 `InteractionResolved` 已提交，则 first-answer-wins，cancel 不得再写 `InteractionExpired`；若 resolution 尚未提交，cancel 必须在同一 transition 内先写 `InteractionExpired { reason=turn_cancelled }`，再写唯一 `ToolFinished { terminal_status=cancelled }`，最后写 `TurnFinished { terminal=cancelled }`。恢复重放必须保持该顺序。
+
 - 一个 interaction 只允许一个终态 fact。
 - Actor 串行化 resolution 与 expiry：先提交者获胜。
 - 若 `Resolved` 已提交，expiry job 不得再写 `Expired`。
@@ -673,7 +675,7 @@ pub struct ContentUnavailable {
 {"kind":"reconcile","probe_ref":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}
 ```
 
-`CommitRecoveryRequired` 是 recovery-only 状态。若无法在不越过 committed high-water 的前提下 durable append，则不得伪造 `SessionRecovered`，该状态通过 recovery/reset 面暴露；一旦 repair 能使 marker/high-water 可证明，最终 `SessionRecovered` 必须记录 `commit_recovery_required` 或 repair 后的 `writable`。该状态没有 `duration`/超时放行分支；只能由 repair 路径退出，repair 前不得 publish/ack 未提交前缀。
+`CommitRecoveryRequired` 是 recovery-only 状态。若无法在不越过 committed high-water 的前提下 durable append，则不得伪造 `SessionRecovered`，该状态通过 recovery/reset 面暴露；一旦 repair 能使 marker/high-water 可证明，最终 `SessionRecovered` 必须记录 `commit_recovery_required` 或 repair 后的 `writable`。该状态没有 `duration`/超时放行分支；只能由 repair 路径退出，repair 前不得 publish/ack 未提交前缀。`SessionRecovered { outcome=commit_recovery_required }` 只表示“已 durable 记录仍需 repair 的终态”，绝不授予 writable；只有 repair 完成并写 `outcome=writable` 后才可恢复写入。
 
 `ToolTerminalStatus` 只在上面定义一次；下文出现的旧状态名只是兼容输入，不是第二套 canonical enum。`ContentUnavailable` 的 Rust 类型在此定义，其 canonical JSON 表达、持久化和 rebuild 规则统一见 §5.5。
 
@@ -1428,17 +1430,17 @@ pub struct EventsPoison {
 
 规则：
 
-1. `writer-fence.json` 只存于 session 目录，使用 temp + fsync + rename + 父目录 fsync 更新；`events.lock` 只负责 OS 级互斥，不能替代 fence。
-2. 获取 writer 时必须在持有 `events.lock` 的前提下读取当前 fence，生成 `fencing_token > current.fencing_token` 且 `generation_epoch >= current.generation_epoch`，再 CAS 写入；token 相等视为拒绝。
+1. `events.lock` 是 session 内唯一 writer ownership 的原子裁决点；`writer-fence.json` 是持久化 ownership 元数据，用于 stale writer 诊断、epoch 切换与恢复接管，不能替代锁。fence 的读取、获取/续租 CAS、append、barrier 和 `events.commit.json` 更新必须全部在同一 `events.lock` 持锁临界区内完成。
+2. 获取 writer 时必须先持有 `events.lock`，再读取当前 fence，生成 `fencing_token > current.fencing_token` 且 `generation_epoch >= current.generation_epoch`，并在锁内 CAS 写入；token 相等视为拒绝。任何 writer 都不得在未持锁时获得或续租 ownership。
 3. 正常续租只延长 `lease_expires_at_ms`，不得改变 `writer_id`、`generation_epoch`、`fencing_token`。
 4. epoch 切换（migration/cutover/rollback/恢复接管）必须递增 `generation_epoch` 并生成更大的 `fencing_token`；旧 epoch 的 fence 只用于审计。
-5. 每次 append 前比较调用方持有的 `(writer_id, generation_epoch, fencing_token)` 与当前 fence。任一不匹配、lease 已过期或 `log_id` 不匹配，返回 `AppendRejected { code="stale_writer", expected_token, presented_token, epoch }`，不得写 fact。
+5. 每次 append 前必须在 `events.lock` 内比较调用方持有的 `(writer_id, generation_epoch, fencing_token)` 与当前 fence。任一不匹配、lease 已过期或 `log_id` 不匹配，返回 `AppendRejected { code="stale_writer", expected_token, presented_token, epoch }`，不得写 fact；锁内比较是最后一个原子裁决点。
 6. 旧 writer 收到 `stale_writer` 后必须停止所有 handler、取消未发布 projection、写 audit，并向上层返回 `ResetRequired { reason=StaleWriter }`；禁止用本地 retry 覆盖 fence。
 7. `events.jsonl` 的每次成功 barrier 都要记录内存 `committed_fact_seq/committed_offset`。barrier 成功后、发布 projection 或返回 durable ack 前，必须用 temp + fsync + rename + 父目录 fsync 更新 `events.commit.json`；commit marker 才是跨重启 committed high-water，`events.poison.json` 只是 EIO 证据。commit marker 更新失败时不得发布/ack，session 立即进入 `CommitRecoveryRequired`，只允许 recovery/repair 路径继续。
 8. `fsync` 返回 EIO 时，必须保持 `events.commit.json` 指向失败前的 committed offset，再尝试写 `events.poison.json` 并 `ftruncate` 回 committed offset + fsync；poison marker 写入或截断失败时 session 保持不可写并归入 `CommitRecoveryRequired`。启动时若 `events.commit.json` 缺失、损坏或 `log_id` 不匹配：先扫描 `events.jsonl` 得到最后完整行的结束 offset `candidate_offset`，并定义 `marker_missing_rebuildable := (a) events.poison.json 不存在；(b) events.jsonl 无尾部半行，且 candidate_offset 之前没有 EIO 记录；(c) 最后完整行的 log_id 与目录身份/writer-fence.log_id 一致`。仅当 `marker_missing_rebuildable=true` 时，才允许写 recovery evidence/audit 并安全重建 marker；否则 session 进入 `CommitRecoveryRequired`。若 `events.jsonl` 长度大于已确认的 committed offset，先截断到 committed offset，禁止把失败 segment 的完整前缀当作 canonical。
 9. 不允许 `events.lock` 在持锁期间被 unlink/replace；fence CAS 与 append 必须共同校验 `log_id`，锁 inode 变化视为 stale writer。
 10. `upgrade-fence.json` 是版本无关的单调 sidecar；任何 writer 在写 unknown kind/version 的 read-only marker 前必须先校验它。若已存在更高 generation 的 `state=writable`，旧 writer 不得追加 read-only marker，只能返回 `ResetRequired { reason=UpgradeRequired }`。
-11. 升级 writer 只有在验证全部 payload version 后，才可按 `upgrade-fence generation + 1` 写 `state=writable`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }`；旧 writer 永远不得降低 generation 或把 writable 改回 read-only。
+11. 升级 writer 只有在验证全部 payload version 后，才可按 `upgrade-fence generation + 1` 写 `state=writable`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }`；旧 writer 永远不得降低 generation 或把 writable 改回 read-only。`upgrade_superseded.previous_recovery_id` 必须等于写 `generation+1` marker 前 `UpgradeFence.last_recovery_id`，且该相等关系必须与 marker 更新在同一批校验；否则 fail-closed，不得生成 action。
 
 ### 5.3 Fsync 矩阵
 
@@ -1972,6 +1974,8 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 
 `recovery_event_id` 在 plan 阶段预分配；同一 batch 的所有 recovery facts 共享该 ID。重复 load 只有在 batch key 或 pre-recovery log 改变时才生成新 `RecoveryRef`、新 `plan_hash` 和新 batch；不得按“每次 load”追加 `SessionRecovered`。
 
+upgrade batch 的 closed 判据：若 `upgrade-fence.state=writable` 且 `generation == published_generation`（含 `generation+1` 已 durable、`SessionRecovered` 尚未写入的崩溃窗口），则该 batch 已由 sidecar 消费；重启只能补写缺失的 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }`，不得再次递增 generation、不得重复写 `upgrade_superseded`。`previous_recovery_id` 必须等于该 marker 的 `last_recovery_id`。
+
 ---
 
 ## 7. Metadata、生命周期与子代理
@@ -2006,6 +2010,7 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 - v2.0 只冻结 edge + mailbox；graph scorer/role template 延后。
 - child session 的 fact log 与 parent log 不互相复制。
 - child terminal 只从 child 的 committed high-water 读取，并按下表映射；`child_terminal_digest` 必须覆盖映射后的全部字段。
+- `SubagentFinished`（含 recovery 补齐路径）只写入 parent log 的 control/resource edge projection，不产生 conversation/timeline projection，也不得改变 child 的 chat 视图；child 终态只通过 child log 自身的事实变化体现。
 - `result_ref` 对 `completed` 取最后一个 `AssistantBlockSealed.content_ref`，其他状态为 `None`；`finished_at_ms` 取 `TurnFinished.finished_at_ms`，`TurnInterrupted` 取该 fact 的 envelope `ts_ms`。
 - `timed_out` 只能由 `TurnFinished { terminal=failed, error.code=subagent_timed_out }` 映射；`TurnFinished { terminal=cancelled }` 或 `TurnInterrupted` 映射为 `cancelled`。
 
@@ -2274,6 +2279,7 @@ E2E 证据要求：
 | `recovery-no-action.jsonl` | SessionCreated + 无 open 状态 + 首轮 load | 2（SessionCreated + final SessionRecovered） | `outcome=writable`, actions=[] | 可写后 revision 单调 | none |
 | `recovery-unknown-fact.jsonl` | 已知前缀 + unknown kind + 已知后缀 | 3（前缀 + unknown line + final SessionRecovered） | `outcome=read_only_upgrade_required` | 后缀不产生 revision | none |
 | `recovery-upgrade-supersede.jsonl` | read-only marker + 新 writer 理解全部 payload version | 2（旧 marker + writable supersede marker） | `outcome=writable`，actions=`upgrade_superseded` | 升级前 revision 不变，升级后恢复单调 | none |
+| `recovery-upgrade-supersede-crash.jsonl` | writable marker 已 durable，`SessionRecovered` 前崩溃 | 2（旧 marker + 补写 final SessionRecovered） | 不再次递增 generation；`previous_recovery_id == marker.last_recovery_id` | 升级后恢复单调，无第二个 action | none |
 | `recovery-input-admission.jsonl` | InputAccepted(input_purpose=trigger_turn) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | `expected_turn_started_count=1`；同一 input 只有一个 TurnStarted | conversation slot 0 与 control slot 2 各发布一次；slot 1 仅属 timeline，不参与本断言 | none |
 | `recovery-input-queue-only.jsonl` | InputAccepted(input_purpose=queue_only) + crash before TurnStarted | 2（InputAccepted + final SessionRecovered） | `expected_turn_started_count=0`；不补 `TurnStarted` | `expected_turn_projection_count=0`；InputAccepted 的 conversation/timeline revision 正常前进 | none |
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
