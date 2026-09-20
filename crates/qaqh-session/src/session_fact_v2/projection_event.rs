@@ -7,7 +7,7 @@ use qaqh_domain::RingingChannel;
 use qaqh_types::UsageInfo;
 use serde::{Deserialize, Serialize};
 
-use super::projection::{MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex};
+use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex};
 use super::types::{
     ActivityState, ActorRef, AssistantBlockKind, CheckpointId, ContentHash, ContentRef,
     ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind, InputPurpose,
@@ -44,6 +44,22 @@ impl ReliableCursor {
         Ok(())
     }
 
+    /// Snapshot cursors use `u16::MAX` as the `END_OF_FACT` sentinel.
+    pub fn validate_snapshot_cursor(&self) -> Result<(), ValidationError> {
+        if self.fact_seq == 0 || self.fact_seq > MAX_SAFE_FACT_SEQ {
+            return Err(ValidationError::InvalidFactSeq {
+                fact_seq: self.fact_seq,
+            });
+        }
+        if self.projection_index != END_OF_FACT {
+            return Err(ValidationError::InvalidField {
+                field: "projection_index",
+                message: "snapshot cursor projection_index must be END_OF_FACT".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Compare two cursors only when they belong to the same canonical log.
     pub fn is_after(&self, other: &Self) -> Result<bool, ValidationError> {
         self.validate()?;
@@ -72,6 +88,33 @@ impl Delivery {
             Self::Replaceable { .. } | Self::Ephemeral => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetReason {
+    CursorExpired,
+    LogIdMismatch,
+    UnknownFact,
+    UpgradeRequired,
+    ReplayOverflow,
+    V1EpochMismatch,
+    CrossSession,
+    SnapshotMissing,
+    SnapshotExpired,
+    SnapshotHashMismatch,
+    StaleWriter,
+    ContentQuotaExceeded,
+    PerConnectionOverflow,
+    ProgressBufferOverflow,
+    ActorMailboxOverflow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetRequired {
+    pub log_id: LogId,
+    pub snapshot_cursor: Option<ReliableCursor>,
+    pub reason: ResetReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
