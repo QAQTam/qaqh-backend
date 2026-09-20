@@ -194,11 +194,11 @@ impl Loop {
 
         match self.phase {
             LoopPhase::Idle => {
-                // T-1-3：用户显式取消后，系统注入不得清取消标记、不得开新回合
-                // ——那会把用户已取消的会话复活（新的 `TurnStart`）。注入改为
-                // 入总线排队，等用户重新输入（唯一复位点）后由 lap 边界落盘，
-                // 既不丢子代理结果，也不复活会话。
-                if self.user_cancelled {
+                // 取消门置位期间，系统注入不得清取消标记、不得开新回合——
+                // 那会把已取消的会话复活（新的 `TurnStart`）。注入改为入总线
+                // 排队，等用户动作（用户输入/ToolInvoke/会话切换）复位 token
+                // 后由 lap 边界落盘，既不丢子代理结果，也不复活会话。
+                if self.cancel.is_set() {
                     log::warn!(
                         "[INJECT] session is user-cancelled; system injection queued without opening a turn (command_id={command_id})"
                     );
@@ -332,7 +332,7 @@ impl Loop {
 
 #[cfg(test)]
 mod tests {
-    //! T-1-3：取消原因位（`user_cancelled`）的语义回归。
+    //! T-1-3：取消门（`CancelToken`）的语义回归。
     //!
     //! 未修复代码上 `system_injection_is_rejected_after_user_cancel` 红：
     //! 取消后的系统注入仍走 idle 分支 `handle_system_input`（清取消标记 +
@@ -406,8 +406,7 @@ mod tests {
         qaqh_workspace::runtime::set_context(SESSION, 4);
         let (mut lp, event_rx) = test_loop();
         cancel(&mut lp);
-        assert!(lp.user_cancelled, "ConversationCancel 必须置位取消原因位");
-        assert!(lp.cancel.is_set(), "取消 token 仍须置位");
+        assert!(lp.cancel.is_set(), "ConversationCancel 必须置位取消 token");
         // 取消自身会 emit ConversationCancelled；先确认事件通道确实可观测
         // （否则「没有 TurnStart」的断言会空转），再清空基线观察注入。
         let cancelled = drain_events(&event_rx);
@@ -441,8 +440,8 @@ mod tests {
             "取消后父会话不得再出现新的 TurnStart"
         );
         assert!(
-            lp.user_cancelled,
-            "系统注入不得清除取消原因位（清除只能由用户输入触发）"
+            lp.cancel.is_set(),
+            "系统注入不得清除取消 token（清除只能由用户动作触发）"
         );
         assert_eq!(
             lp.injection_bus.pending_len(),
@@ -458,11 +457,11 @@ mod tests {
     /// 输入文本命中合规过滤（`密码`）→ `handle_user_input` 提前返回
     /// `Handled`，不触发任何模型请求；本用例只观察复位与「不开回合」。
     #[test]
-    fn user_input_clears_user_cancelled() {
+    fn user_input_clears_cancellation_gate() {
         qaqh_workspace::runtime::set_context(SESSION, 4);
         let (mut lp, _event_rx) = test_loop();
         cancel(&mut lp);
-        assert!(lp.user_cancelled);
+        assert!(lp.cancel.is_set());
 
         lp.on_conversation(
             qaqh_domain::ConversationCommand::ConversationSendMessage {
@@ -476,8 +475,8 @@ mod tests {
         );
 
         assert!(
-            !lp.user_cancelled,
-            "用户输入必须解除取消原因位（否则系统注入永远被拒）"
+            !lp.cancel.is_set(),
+            "用户输入必须解除取消门（否则系统注入永远被拒）"
         );
         qaqh_workspace::remove_session_cancel(SESSION);
         qaqh_workspace::runtime::clear_context();
@@ -486,15 +485,15 @@ mod tests {
     /// 会话切换同样复位取消原因位：新会话/恢复的会话不是「用户取消」的
     /// 会话，否则一次取消会永久压制后续子代理结果注入。
     #[test]
-    fn session_switch_clears_user_cancelled() {
+    fn session_switch_clears_cancellation_gate() {
         qaqh_workspace::runtime::set_context(SESSION, 4);
         let (mut lp, _event_rx) = test_loop();
         cancel(&mut lp);
-        assert!(lp.user_cancelled);
+        assert!(lp.cancel.is_set());
 
         lp.prepare_session_switch();
 
-        assert!(!lp.user_cancelled, "会话切换必须复位取消原因位");
+        assert!(!lp.cancel.is_set(), "会话切换必须复位取消 token");
         qaqh_workspace::remove_session_cancel(SESSION);
         qaqh_workspace::runtime::clear_context();
     }
