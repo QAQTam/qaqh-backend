@@ -13,6 +13,8 @@
 - `SessionActor` FIFO mailbox、容量和 shutdown 纯状态机。
 - `TurnCore` 的 Start/Round/Suspend/Resume/Cancel/Finish 状态转换。
 - 单 active turn、cancel 幂等、冲突终态 fail-closed 的单元契约测试。
+- P2-4a 显式 runtime/turn context adapter 已落地；现有 thread-local 仍作为
+  等价来源保留。
 - 代码位置：`crates/qaqh-session/src/actor.rs`。
 
 尚未完成：
@@ -214,7 +216,7 @@ Gate：
 
 ### P2-4 loop 外移与 thread-local 清理
 
-状态：待开始。
+状态：进行中；P2-4a 已完成，P2-4b/P2-4c 待开始。
 
 交付：
 
@@ -227,6 +229,30 @@ Gate：
 - turn lifecycle、compaction、suspend/resume 行为契约全绿。
 - 同一输入在显式上下文和旧入口下产生等价事实/投影。
 - P3 开工前 `ToolCallContext` 所需字段已具备明确来源。
+
+#### P2-4a 显式 runtime/turn context adapter
+
+状态：已完成，issue #236 / PR #237，merge `ad01dea`。
+
+交付：
+
+- `qaqh-runtime` 新增 `agent::context`：`RuntimeContext` 显式承载 session、
+  workspace、sandbox、cancellation；`TurnContext` 在其上补 turn identity
+  与 round。
+- legacy adapter 在 `run_lap` 回合入口一次性快照现有 `RingContext` 与
+  actor thread-local，不改变状态所有权。
+- `run_lap` 的本轮取消门读取显式 context 中与 legacy 共享的
+  `CancelToken`。
+
+Gate：
+
+- legacy ambient -> explicit context 的 session/workspace/sandbox/cancel
+  等价性测试通过。
+- `cargo test -p qaqh-runtime`、`cargo test --workspace`、
+  `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+非目标：未迁移 compaction/title/liveness/session lifecycle，未删除现有
+thread-local 或 workspace/session cancel bridge。
 
 ### P2-5 `SubagentSupervisor`
 
