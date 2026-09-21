@@ -1450,6 +1450,7 @@ impl TurnEngine {
                 if let Some(outcome) = turn_admit::admit_and_dispatch(
                     ctx,
                     tool,
+                    &turn_context,
                     &turn_id,
                     round_num,
                     last_usage.clone(),
