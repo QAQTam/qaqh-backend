@@ -54,7 +54,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-use super::engine_compact::CompactMeta;
+use super::compaction_port::CompactionPort;
 use super::engine_input::InputEngine;
 use super::engine_misc::MiscEngine;
 use super::injection::InjectionBus;
@@ -188,10 +188,8 @@ pub struct Loop {
     pub(super) flow: qaqh_message::ContextFlow,
     /// Busy-turn injections waiting for the next lap boundary.
     pub(super) injection_bus: InjectionBus,
-    /// Pending compact result (set when compact is running in background).
-    pub(super) pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
-    pub(super) pending_compact_id: Option<String>,
-    pub(super) pending_compact_causation: Option<String>,
+    /// Background compaction task state.
+    pub(super) compaction: CompactionPort,
 
     /// Direct output emitter. The renderer performs frame-level coalescing.
     pub(super) paced_emitter: PacedEmitter,
@@ -245,9 +243,7 @@ impl Loop {
             misc: MiscEngine::new(),
             flow,
             injection_bus: InjectionBus::new(),
-            pending_compact_rx: None,
-            pending_compact_id: None,
-            pending_compact_causation: None,
+            compaction: CompactionPort::new(),
             paced_emitter,
             lifecycle,
             #[cfg(test)]
@@ -445,7 +441,7 @@ impl Loop {
             // Signal readiness at most once per truly idle period. A manual
             // compact runs in a background worker, but it still owns the
             // active context transaction until CompactEnd is applied.
-            if self.pending_compact_rx.is_none() && !self.ready_emitted {
+            if !self.compaction.is_running() && !self.ready_emitted {
                 self.ready_emitted = true;
             }
 
