@@ -98,7 +98,7 @@ impl Loop {
                             &mut ctx,
                             &mut self.session.tool,
                             &call_id,
-                            admitted,
+                            admitted.map(|admitted| *admitted),
                         );
                         let _ = ctx;
                         self.apply_outcome(outcome);

@@ -23,6 +23,23 @@ use qaqh_runtime::agent::turn_lap_test_api::execute_admitted_batch;
 use qaqh_runtime::agent::types::{Emitter, LoopPhase, PendingState, RingContext, StatsCollector};
 use qaqh_types::{ContentBlock, Message};
 
+fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
+    qaqh_workspace::runtime::ToolExecutionScope::capture(
+        qaqh_workspace::tool_api::ToolCallContext {
+            call_id: call_id.to_string(),
+            session_id: seed.to_string(),
+            workspace_root: std::path::PathBuf::from(qaqh_workspace::current_workspace()),
+            mode: qaqh_workspace::tool_api::AgentMode::Code,
+            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
+            timeout: Duration::ZERO,
+            cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
+            progress: None,
+            source: qaqh_workspace::tool_api::ToolCallSource::Model,
+        },
+    )
+}
+
 static SESSION_INIT: Once = Once::new();
 /// workspace / tool manager / outbox 均为进程级单例：本文件用例串行。
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -204,6 +221,7 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
                 admitted.push(qaqh_runtime::agent::types::AdmittedTool {
                     call_id: (*id).to_string(),
                     auth: Box::new(auth),
+                    scope: tool_scope(id, &agent.session.seed),
                 })
             }
             _ => panic!("call {index} ({id}) must be authorized"),

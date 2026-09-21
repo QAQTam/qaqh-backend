@@ -8,6 +8,7 @@
 //! The old code had two separate code paths; now they converge here.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use super::dashboard;
 use crate::agent::state::agent::PendingApproval;
@@ -185,15 +186,28 @@ impl ToolEngine {
             qaqh_lsp::sync_projection_now();
         }
 
-        match qaqh_workspace::authorize_call(
-            &ctx.agent.session.seed,
-            id,
-            &effective_name,
-            args,
+        let runtime = crate::agent::context::RuntimeContext::from_legacy_ambient(
+            ctx.agent.session.seed.clone(),
             ctx.agent.config.permission_level,
-        ) {
+            ctx.cancel.clone(),
+        );
+        let tool_context = runtime.tool_call_context(
+            id,
+            Duration::ZERO,
+            None,
+            qaqh_workspace::tool_api::ToolCallSource::User,
+        );
+        match qaqh_workspace::authorize_call_with_context(&effective_name, args, &tool_context) {
             qaqh_workspace::Admission::Authorized(authorized) => {
-                self.execute_and_emit(ctx, id, &effective_name, args, authorized, false);
+                self.execute_and_emit(
+                    ctx,
+                    id,
+                    &effective_name,
+                    args,
+                    authorized,
+                    false,
+                    tool_context,
+                );
             }
             qaqh_workspace::Admission::ApprovalRequired(challenge) => {
                 let cat_str = challenge.category().as_str().to_string();
@@ -326,6 +340,7 @@ impl ToolEngine {
         let tool_name = pending.challenge.tool_name().to_string();
         let is_llm = pending.is_llm_tool;
         let resources = pending.challenge.resources().to_vec();
+        let tool_context = pending.challenge.context().clone();
 
         match pending.challenge.approve(approved) {
             Ok(authorized) => {
@@ -337,15 +352,26 @@ impl ToolEngine {
                 if is_llm {
                     return PermissionDisposition::LlmResolved {
                         call_id: call_id.clone(),
-                        admitted: Some(AdmittedTool {
+                        admitted: Some(Box::new(AdmittedTool {
                             call_id,
                             auth: Box::new(authorized),
-                        }),
+                            scope: qaqh_workspace::runtime::ToolExecutionScope::capture(
+                                tool_context,
+                            ),
+                        })),
                     };
                 } else {
                     // UI tool: emit full result flow
                     let args = authorized.args().clone();
-                    self.execute_and_emit(ctx, &call_id, &tool_name, &args, authorized, true);
+                    self.execute_and_emit(
+                        ctx,
+                        &call_id,
+                        &tool_name,
+                        &args,
+                        authorized,
+                        true,
+                        tool_context,
+                    );
                 }
             }
             Err(qaqh_workspace::ApprovalError::Rejected) => {
@@ -406,6 +432,7 @@ impl ToolEngine {
         tools: &[qaqh_message::PendingTool],
         turn_id: &str,
         round_num: u32,
+        turn_context: &crate::agent::context::TurnContext,
     ) -> BatchAdmission {
         let mut authorized = Vec::new();
         let mut pending_permission_ids = Vec::new();
@@ -423,12 +450,16 @@ impl ToolEngine {
             // 权限准入 / prepare_req / handler 全部走内部注册 key（模型面名称
             // 与内部 key 恒等，历史投影已随 minimal:dsh 下线移除）。
             let effective_name = tool.name.as_str();
-            match qaqh_workspace::authorize_call(
-                &ctx.agent.session.seed,
-                &tool.id,
+            let tool_context = turn_context.runtime().tool_call_context(
+                tool.id.clone(),
+                Duration::ZERO,
+                None,
+                qaqh_workspace::tool_api::ToolCallSource::Model,
+            );
+            match qaqh_workspace::authorize_call_with_context(
                 effective_name,
                 &tool.args,
-                ctx.agent.config.permission_level,
+                &tool_context,
             ) {
                 qaqh_workspace::Admission::Authorized(auth) => {
                     if auth.tool_name() == "ask" {
@@ -469,6 +500,9 @@ impl ToolEngine {
                         authorized.push(AdmittedTool {
                             call_id: tool.id.clone(),
                             auth: Box::new(auth), // Box to reduce enum size
+                            scope: qaqh_workspace::runtime::ToolExecutionScope::capture(
+                                tool_context,
+                            ),
                         });
                     }
                 }
@@ -586,6 +620,7 @@ impl ToolEngine {
     // ═══════════════════════════════════════════════════
 
     /// Execute an authorized tool call and emit full result flow.
+    #[allow(clippy::too_many_arguments)]
     fn execute_and_emit(
         &mut self,
         ctx: &mut RingContext,
@@ -594,6 +629,7 @@ impl ToolEngine {
         args: &serde_json::Value,
         authorized: qaqh_workspace::AuthorizedToolCall,
         approved: bool,
+        tool_context: qaqh_workspace::tool_api::ToolCallContext,
     ) {
         let turn_id = format!("tc_{id}");
 
@@ -665,15 +701,17 @@ impl ToolEngine {
         // Spawn tool thread
         let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
         let tool_id = id.to_string();
-        // Tool workers run on spawned threads: carry the actor's per-actor tool
-        // scope so concurrent actors stay isolated.
-        let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
+        let execution_scope = qaqh_workspace::runtime::ToolExecutionScope::capture(tool_context);
         let handle = std::thread::Builder::new()
             .stack_size(4 * 1024 * 1024)
             .spawn(move || {
-                let _scope = actor_scope.install();
-                let result =
-                    qaqh_workspace::execution::execute_authorized(authorized, Some(progress_tx));
+                let context = execution_scope.context().clone();
+                let _scope = execution_scope.install();
+                let result = qaqh_workspace::execution::execute_authorized_with_context(
+                    authorized,
+                    context,
+                    Some(progress_tx),
+                );
                 (
                     tool_id,
                     result.result,
@@ -1002,7 +1040,7 @@ pub enum PermissionDisposition {
     UiHandled,
     LlmResolved {
         call_id: String,
-        admitted: Option<AdmittedTool>,
+        admitted: Option<Box<AdmittedTool>>,
     },
 }
 
