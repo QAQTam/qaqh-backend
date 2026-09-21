@@ -5,6 +5,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
+use super::compaction_port::CompactionPoll;
 use super::engine_compact::CompactMeta;
 use super::loop_core::Loop;
 use super::types::*;
@@ -12,17 +13,16 @@ use super::types::*;
 impl Loop {
     pub(super) fn finish_pending_compact(&mut self, status: qaqh_domain::CompactStatus) {
         self.session.agent.finish_manual_compact();
-        self.pending_compact_rx = None;
-        let Some(compact_id) = self.pending_compact_id.take() else {
-            self.pending_compact_causation = None;
+        let Some(pending) = self.compaction.take() else {
             return;
         };
-        let causation = self.pending_compact_causation.take();
-        let _scope = self.paced_emitter.enter_causation(causation.as_deref());
+        let _scope = self
+            .paced_emitter
+            .enter_causation(pending.causation.as_deref());
         self.paced_emitter
             .emit_domain(qaqh_domain::DomainEvent::Conversation(
                 qaqh_domain::ConversationEvent::CompactFinished {
-                    compact_id,
+                    compact_id: pending.compact_id,
                     status,
                     summary_chars: Some(0),
                     turns_compacted: Some(0),
@@ -34,60 +34,62 @@ impl Loop {
 
     /// Check if a background compact has completed and apply the result.
     pub(super) fn check_pending_compact(&mut self) {
-        if let Some(ref rx) = self.pending_compact_rx {
-            // G4：挂起/运行中不消费压缩结果——应用会折叠悬空 tool_use。
-            // 结果留在 channel 里，安全点（Idle 且无 suspension）再取。
-            if self.session.turn.is_suspended() || self.phase != LoopPhase::Idle {
-                return;
-            }
-            match rx.try_recv() {
-                Ok(meta) => {
-                    self.session.agent.finish_manual_compact();
-                    self.pending_compact_rx = None;
-                    let compact_id = self.pending_compact_id.take();
-                    let causation = self.pending_compact_causation.take();
-                    let _scope = self.paced_emitter.enter_causation(causation.as_deref());
-                    if compact_id.as_deref() != Some(meta.compact_id.as_str()) {
-                        log::warn!(
-                            "[COMPACT] pending/result id mismatch: pending={compact_id:?}, result={}",
-                            meta.compact_id
-                        );
-                    }
-                    {
-                        let mut ctx = RingContext {
-                            agent: &mut self.session.agent,
-                            emitter: &self.paced_emitter,
-                            cancel: &self.cancel,
-                            phase: &mut self.phase,
-                            pending: &mut self.pending,
-                            writer_dead: &self.writer_dead,
-                            stats: &mut self.session.stats,
-                            flow: &mut self.flow,
-                        };
-                        super::engine_compact::apply_result(&mut ctx, &meta);
-                    }
-                    // compact 完成且回到 idle：把 compact 期间入队的注入
-                    // 逐条开新 turn（替代旧 compact-defer 特判的派发点）。
-                    self.dispatch_injections_after_compact();
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Worker thread died without sending result.
-                    // Clear pending state and report error so frontend
-                    // doesn't stay stuck at the "compacting" animation.
-                    log::error!("[COMPACT] worker thread disconnected without result");
-                    self.pending_compact_rx = None;
-                    self.finish_pending_compact(qaqh_domain::CompactStatus::Failed);
-                    // 失败同时由 OperationFailed 暴露具体原因。
-                    self.emit_operation_failed(
-                        "compact-worker-crashed",
-                        qaqh_domain::ErrorScope::Conversation,
-                        "compact_worker_crashed",
-                        "Context compaction failed: worker thread crashed.",
+        // G4：挂起/运行中不消费压缩结果——应用会折叠悬空 tool_use。
+        // 结果留在 port 里，安全点（Idle 且无 suspension）再取。
+        if !self.compaction.is_running()
+            || self.session.turn.is_suspended()
+            || self.phase != LoopPhase::Idle
+        {
+            return;
+        }
+        match self.compaction.poll() {
+            CompactionPoll::Empty | CompactionPoll::Running => {}
+            CompactionPoll::Ready(meta) => {
+                let Some(pending) = self.compaction.take() else {
+                    log::error!("[COMPACT] result arrived without a pending task");
+                    return;
+                };
+                self.session.agent.finish_manual_compact();
+                let _scope = self
+                    .paced_emitter
+                    .enter_causation(pending.causation.as_deref());
+                if pending.compact_id != meta.compact_id {
+                    log::warn!(
+                        "[COMPACT] pending/result id mismatch: pending={}, result={}",
+                        pending.compact_id,
+                        meta.compact_id
                     );
                 }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // Still running — check again next loop iteration.
+                {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        flow: &mut self.flow,
+                    };
+                    super::engine_compact::apply_result(&mut ctx, &meta);
                 }
+                // compact 完成且回到 idle：把 compact 期间入队的注入
+                // 逐条开新 turn（替代旧 compact-defer 特判的派发点）。
+                self.dispatch_injections_after_compact();
+            }
+            CompactionPoll::Disconnected => {
+                // Worker thread died without sending result.
+                // Clear pending state and report error so frontend
+                // doesn't stay stuck at the "compacting" animation.
+                log::error!("[COMPACT] worker thread disconnected without result");
+                self.finish_pending_compact(qaqh_domain::CompactStatus::Failed);
+                // 失败同时由 OperationFailed 暴露具体原因。
+                self.emit_operation_failed(
+                    "compact-worker-crashed",
+                    qaqh_domain::ErrorScope::Conversation,
+                    "compact_worker_crashed",
+                    "Context compaction failed: worker thread crashed.",
+                );
             }
         }
     }
@@ -205,7 +207,7 @@ impl Loop {
                 "Context compaction is not allowed while a turn is running or suspended.".into(),
             );
         }
-        if self.pending_compact_rx.is_some() || self.session.agent.manual_compact_running() {
+        if self.compaction.is_running() || self.session.agent.manual_compact_running() {
             return Outcome::Error("Context compaction is already running.".into());
         }
         let compact = {
@@ -262,9 +264,7 @@ impl Loop {
                     let _ = tx.send(meta);
                 }) {
                 Ok(_) => {
-                    self.pending_compact_rx = Some(rx);
-                    self.pending_compact_id = Some(pending_compact_id);
-                    self.pending_compact_causation = causation;
+                    self.compaction.install(rx, pending_compact_id, causation);
                 }
                 Err(error) => {
                     log::error!("[COMPACT] failed to spawn worker: {error}");
