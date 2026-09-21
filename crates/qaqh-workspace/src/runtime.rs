@@ -64,6 +64,11 @@ pub fn set_mode(mode: u8) {
     AGENT_MODE.with(|slot| slot.set(mode));
 }
 
+/// Snapshot the current agent mode for an explicit runtime context.
+pub fn current_mode() -> u8 {
+    AGENT_MODE.with(|slot| slot.get())
+}
+
 /// Explicit tool-execution context (PR-3-2 / D5-G2): the caller (agent tool
 /// dispatch, CLI) assembles one per execution instead of
 /// mutating process/thread state first. Threaded through the execute path;
