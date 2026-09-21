@@ -41,6 +41,23 @@ use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
 use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
 
+fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
+    qaqh_workspace::runtime::ToolExecutionScope::capture(
+        qaqh_workspace::tool_api::ToolCallContext {
+            call_id: call_id.to_string(),
+            session_id: seed.to_string(),
+            workspace_root: std::path::PathBuf::from(qaqh_workspace::current_workspace()),
+            mode: qaqh_workspace::tool_api::AgentMode::Code,
+            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
+            timeout: Duration::ZERO,
+            cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
+            progress: None,
+            source: qaqh_workspace::tool_api::ToolCallSource::Model,
+        },
+    )
+}
+
 /// tool manager / workspace / 探针均为进程级状态：本文件用例串行。
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 /// 本进程独占的数据根（会话/outbox/审计落此）。
@@ -298,6 +315,7 @@ fn run_batch<F: FnOnce(&Path)>(
                 admitted.push(qaqh_runtime::agent::types::AdmittedTool {
                     call_id: (*call_id).to_string(),
                     auth: Box::new(auth),
+                    scope: tool_scope(call_id, &seed),
                 });
             }
             _ => panic!("call {call_id} ({tool}) must be authorized at level 4"),
