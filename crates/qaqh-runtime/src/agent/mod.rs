@@ -52,6 +52,7 @@ pub mod engine_tool;
 pub mod engine_turn;
 pub mod injection;
 pub mod input_guard;
+pub(crate) mod lifecycle_port;
 pub mod liveness;
 pub mod loop_core;
 pub mod loop_dispatch_control;
