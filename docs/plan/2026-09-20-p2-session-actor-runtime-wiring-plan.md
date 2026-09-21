@@ -13,8 +13,9 @@
 - `SessionActor` FIFO mailbox、容量和 shutdown 纯状态机。
 - `TurnCore` 的 Start/Round/Suspend/Resume/Cancel/Finish 状态转换。
 - 单 active turn、cancel 幂等、冲突终态 fail-closed 的单元契约测试。
-- P2-4a 显式 runtime/turn context adapter、P2-4b lifecycle port 与 P2-4c-a
-  compaction task port 已落地；现有 thread-local 仍作为等价来源保留。
+- P2-4a 显式 runtime/turn context adapter、P2-4b lifecycle port、P2-4c-a
+  compaction task port 与 P2-4c-b ToolCallContext 字段来源已落地；现有
+  thread-local 仍作为等价来源保留，生产路径尚未全部切换。
 - 代码位置：`crates/qaqh-session/src/actor.rs`。
 
 尚未完成：
@@ -24,7 +25,8 @@
 - 输入、取消、审批和订阅尚未统一经过 mailbox。
 - 取消状态仍存在 token 与 thread-local 两处语义；`Loop::user_cancelled`
   重复布尔已删除。
-- compaction/title/liveness/session lifecycle 仍在 loop 路径内。
+- compaction/title/liveness/session lifecycle 已收口到 port，但尚未由
+  SessionActor/task 异步执行；thread-local 清理仍待完成。
 - `SubagentSupervisor`、两阶段 spawn 恢复和 root `QuotaLedger` 尚未实现。
 
 结论：P2 只有纯状态机原型完成，不能描述成 SessionActor 已接管运行时。
@@ -216,7 +218,8 @@ Gate：
 
 ### P2-4 loop 外移与 thread-local 清理
 
-状态：进行中；P2-4a/P2-4b/P2-4c-a 已完成，P2-4c-b 待开始。
+状态：进行中；P2-4a/P2-4b/P2-4c-a/P2-4c-b 已完成；thread-local 清理与
+生产 task wiring 待后续。
 
 交付：
 
@@ -294,7 +297,30 @@ Gate：
 - `cargo test -p qaqh-runtime`、`cargo test --workspace`、
   `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
-非目标：未迁移 `ToolCallContext` 字段来源，未改 compact prompt/LLM/事件顺序。
+非目标：该切片未迁移 `ToolCallContext` 字段来源，未改 compact prompt/LLM/
+事件顺序。
+
+#### P2-4c-b ToolCallContext 显式字段来源
+
+状态：已完成，issue #248 / PR #249，merge `3b0babb`。
+
+交付：
+
+- `RuntimeContext` 增加 permission_level 与 agent mode 快照。
+- `RuntimeContext::tool_call_context` 从显式 context 构造
+  session/workspace/mode/permission/cancellation，call_id、timeout、
+  progress、source 由调用方显式传入。
+- `CancellationToken::from_shared_flag` 连接 runtime cancellation tree 与
+  显式工具上下文。
+
+Gate：
+
+- ToolCallContext 字段来源与取消共享测试通过。
+- `cargo test -p qaqh-runtime`、`cargo test --workspace`、
+  `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+非目标：本切片不接线生产工具执行路径，不删除 thread-local；P3 前仍须完成
+生产接线和 thread-local 清理。
 
 ### P2-5 `SubagentSupervisor`
 
