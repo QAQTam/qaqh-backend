@@ -218,8 +218,8 @@ Gate：
 
 ### P2-4 loop 外移与 thread-local 清理
 
-状态：进行中；P2-4a/P2-4b/P2-4c-a/P2-4c-b 已完成；thread-local 清理与
-生产 task wiring 待后续。
+状态：进行中；P2-4a/P2-4b/P2-4c-a/P2-4c-b/P2-4d 已完成；后续仅剩
+P2-5/P2-6/P2-7。
 
 交付：
 
@@ -321,6 +321,34 @@ Gate：
 
 非目标：本切片不接线生产工具执行路径，不删除 thread-local；P3 前仍须完成
 生产接线和 thread-local 清理。
+
+#### P2-4d 生产工具路径接入显式 ToolCallContext
+
+状态：已完成，issue #252 / PR #253，merge `b04f4ef`。
+
+交付：
+
+- `ToolCallContext` 增加 `SandboxMode`，由 `RuntimeContext` 显式注入。
+- model/UI/permission-resume 路径在调用边界构造上下文，并随
+  `AdmittedTool`/worker 传递。
+- 新增 `execute_authorized_with_context`；旧 `execute_authorized` 保留等价
+  legacy adapter。
+- 新增 `ToolExecutionScope`，只搬运仍需 thread-local 的 ToolManager /
+  fold policy；explicit context 是 workspace/session/mode/cancel/sandbox
+  的权威来源。
+- `LegacyToolAdapter` 执行期间安装显式上下文；生产 worker 不再直接捕获
+  `ActorToolScope`。
+
+Gate：
+
+- 显式上下文驱动 admission/execution 并恢复 ambient 的测试通过。
+- 显式 sandbox 控制 admission、显式 cancellation 在 dispatch 前生效、
+  legacy adapter ambient 恢复测试通过。
+- `cargo test -p qaqh-workspace`、`cargo test -p qaqh-runtime`、
+  `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`
+  通过。
+
+非目标：本切片保留 `ActorToolScope` 兼容类型；P2-5/P2-6/P2-7 仍待实现。
 
 ### P2-5 `SubagentSupervisor`
 
