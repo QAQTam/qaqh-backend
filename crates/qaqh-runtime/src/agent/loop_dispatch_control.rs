@@ -91,8 +91,8 @@ impl Loop {
                 // 否则旧会话的挂起 turn/tool.pending 会指向被整包替换
                 // 后的死 store，迟到 resume 直接打穿新会话。
                 self.prepare_session_switch();
-                self.session_eng
-                    .create(&mut self.session.agent, &self.cancel);
+                self.lifecycle
+                    .create_session(&mut self.session.agent, &self.cancel);
                 self.sync_emitter_seed();
                 self.paced_emitter.emit_domain(DomainEvent::Control(
                     qaqh_domain::ControlEvent::SessionStateChanged {
@@ -106,8 +106,8 @@ impl Loop {
             ControlCommand::SessionResume { seed } => {
                 self.prepare_session_switch();
                 if self
-                    .session_eng
-                    .resume(&mut self.session.agent, &seed, &self.cancel)
+                    .lifecycle
+                    .resume_session(&mut self.session.agent, &self.cancel, &seed)
                 {
                     self.sync_emitter_seed();
                     self.paced_emitter.emit_domain(DomainEvent::Control(
@@ -136,7 +136,7 @@ impl Loop {
                 self.emit_operation_completed(command_id, qaqh_domain::ErrorScope::Control);
             }
             ControlCommand::AgentReloadConfig => {
-                self.session_eng
+                self.lifecycle
                     .reload_config(&mut self.session.agent, &self.cancel);
                 self.emit_operation_completed(command_id, qaqh_domain::ErrorScope::Control);
             }

@@ -13,7 +13,7 @@
 //! │  │   ├─ stats: StatsCollector                        │
 //! │  │   ├─ turn: TurnEngine                             │
 //! │  │   └─ tool: ToolEngine                             │
-//! │  ├─ Engines: session_eng, input, misc（compact 已去壳为自由函数）│
+//! │  ├─ Engines: input, misc（compact 已去壳为自由函数）       │
 //! │  ├─ flow: ContextFlow（消息落盘/注入融合）            │
 //! │  ├─ injection_bus: 注入总线（idle 直派 / busy 入队）  │
 //! │  └─ paced_emitter: 事件节拍 + causation 作用域        │
@@ -57,8 +57,8 @@ use std::sync::mpsc;
 use super::engine_compact::CompactMeta;
 use super::engine_input::InputEngine;
 use super::engine_misc::MiscEngine;
-use super::engine_session::SessionEngine;
 use super::injection::InjectionBus;
+use super::lifecycle_port::{LifecyclePort, RuntimeLifecyclePort};
 use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::agent::state::agent::AgentState;
@@ -177,8 +177,6 @@ pub struct Loop {
     pub(super) session: SessionBundle,
 
     // ── Session-agnostic engines (process lifetime, no session state) ──
-    /// Session lifecycle: create, resume, reload config.
-    pub(super) session_eng: SessionEngine,
     /// User input handler: compliance guard, auto-create session.
     pub(super) input: InputEngine,
     /// Miscellaneous: undo, dashboard, mode.
@@ -198,9 +196,8 @@ pub struct Loop {
     /// Direct output emitter. The renderer performs frame-level coalescing.
     pub(super) paced_emitter: PacedEmitter,
 
-    /// Idle-unload liveness signal shared with the daemon registry. The Loop
-    /// is the producer (busy/activity/suspend), the registry is the consumer.
-    pub(super) liveness: std::sync::Arc<super::liveness::WorkerLiveness>,
+    /// Lifecycle boundary: liveness, session lifecycle and title task port.
+    pub(super) lifecycle: Box<dyn LifecyclePort>,
 
     /// Test-only panic injection seam: when set, dispatching a command whose
     /// `command_id` matches panics **on the dispatching thread** (same thread
@@ -232,6 +229,7 @@ impl Loop {
 
         let mut flow = qaqh_message::ContextFlow::new();
         qaqh_message::builtin::register_all(&mut flow);
+        let lifecycle: Box<dyn LifecyclePort> = Box::new(RuntimeLifecyclePort::new(liveness));
 
         Loop {
             cmd_rx,
@@ -243,7 +241,6 @@ impl Loop {
             writer_dead,
             ready_emitted: false,
             session: SessionBundle::new(agent),
-            session_eng: SessionEngine::new(),
             input: InputEngine::new(),
             misc: MiscEngine::new(),
             flow,
@@ -252,7 +249,7 @@ impl Loop {
             pending_compact_id: None,
             pending_compact_causation: None,
             paced_emitter,
-            liveness,
+            lifecycle,
             #[cfg(test)]
             panic_on_command_id: None,
         }
@@ -279,7 +276,7 @@ impl Loop {
     {
         // Idle-unload liveness: this dispatch counts as activity; the registry
         // must never unload while it is running.
-        self.liveness.set_busy(true);
+        self.lifecycle.dispatch_started();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             f(self);
         }));
@@ -331,10 +328,8 @@ impl Loop {
         // Liveness bookkeeping runs on both the success and panic-recovery
         // paths: a completed dispatch is activity, and a suspended turn
         // (unresolved ask / permission / plan) blocks idle unload.
-        self.liveness.set_busy(false);
-        self.liveness.touch();
-        self.liveness
-            .set_suspend_pending(self.session.turn.is_suspended());
+        self.lifecycle
+            .dispatch_finished(self.session.turn.is_suspended());
     }
 
     /// Reset all engines to clean idle state.
@@ -502,8 +497,8 @@ impl Loop {
 
         if let Some(seed) = resume_seed {
             if self
-                .session_eng
-                .resume(&mut self.session.agent, &seed, &self.cancel)
+                .lifecycle
+                .resume_session(&mut self.session.agent, &self.cancel, &seed)
             {
                 // init_session 已把 agent.session.seed 设为权威值（恢复成功
                 // 为原 seed，fallback 为新 seed）；此后 Ringing 事件必须携带它。
@@ -519,8 +514,8 @@ impl Loop {
                     },
                 ));
         } else if has_seed && !self.session.agent.session.from_resume {
-            self.session_eng
-                .create_with_seed(&mut self.session.agent, &self.cancel);
+            self.lifecycle
+                .create_session_with_seed(&mut self.session.agent, &self.cancel);
             self.sync_emitter_seed();
             let seed = self.session.agent.session.seed.clone();
             self.paced_emitter
