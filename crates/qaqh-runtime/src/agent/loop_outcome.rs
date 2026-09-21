@@ -423,6 +423,19 @@ impl Loop {
         }
         match outcome {
             Outcome::TurnComplete { turn_id, usage } => {
+                {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        flow: &mut self.flow,
+                    };
+                    self.lifecycle.turn_completed(&mut ctx);
+                }
                 self.session.agent.skills.complete_user_turn();
                 // Persist session state
                 self.session.flush();
