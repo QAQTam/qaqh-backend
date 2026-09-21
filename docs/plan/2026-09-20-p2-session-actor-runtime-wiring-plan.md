@@ -13,8 +13,8 @@
 - `SessionActor` FIFO mailbox、容量和 shutdown 纯状态机。
 - `TurnCore` 的 Start/Round/Suspend/Resume/Cancel/Finish 状态转换。
 - 单 active turn、cancel 幂等、冲突终态 fail-closed 的单元契约测试。
-- P2-4a 显式 runtime/turn context adapter 与 P2-4b lifecycle port 已落地；
-  现有 thread-local 仍作为等价来源保留。
+- P2-4a 显式 runtime/turn context adapter、P2-4b lifecycle port 与 P2-4c-a
+  compaction task port 已落地；现有 thread-local 仍作为等价来源保留。
 - 代码位置：`crates/qaqh-session/src/actor.rs`。
 
 尚未完成：
@@ -216,7 +216,7 @@ Gate：
 
 ### P2-4 loop 外移与 thread-local 清理
 
-状态：进行中；P2-4a/P2-4b 已完成，P2-4c 待开始。
+状态：进行中；P2-4a/P2-4b/P2-4c-a 已完成，P2-4c-b 待开始。
 
 交付：
 
@@ -274,6 +274,27 @@ Gate：
   `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
 非目标：未迁移 compaction，未删除 thread-local，未改消息/timeline/持久化顺序。
+
+#### P2-4c-a compaction task port
+
+状态：已完成，issue #244 / PR #245，merge `fe7d617`。
+
+交付：
+
+- `qaqh-runtime` 新增 `CompactionPort`，持有 background compaction 的
+  receiver、compact_id 与 causation。
+- `Loop` 删除 `pending_compact_rx/id/causation` 字段，统一通过 port
+  query/poll/take。
+- manual compact 的 start/check/finish 行为、apply_result 与 injection
+  派发顺序保持 1:1。
+
+Gate：
+
+- compaction port 的 empty/running/ready/disconnected/take 契约测试通过。
+- `cargo test -p qaqh-runtime`、`cargo test --workspace`、
+  `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+非目标：未迁移 `ToolCallContext` 字段来源，未改 compact prompt/LLM/事件顺序。
 
 ### P2-5 `SubagentSupervisor`
 
