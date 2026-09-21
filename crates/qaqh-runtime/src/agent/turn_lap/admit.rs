@@ -238,17 +238,18 @@ pub fn execute_admitted_batch(
                 .stack_size(4 * 1024 * 1024)
                 .spawn({
                     let auth = admitted.auth;
+                    let scope = admitted.scope;
                     let id = call_id.clone();
                     let outbox_seed = outbox_seed.clone();
                     let tool_label = auth.tool_name().to_string();
-                    // Tool workers run on spawned threads: reinstall the
-                    // actor thread's per-actor tool scope (context /
-                    // manager / mode / sandbox) so concurrent actors each
-                    // execute under their own tool state.
-                    let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
                     move || {
-                        let _scope = actor_scope.install();
-                        let result = qaqh_workspace::execution::execute_authorized(*auth, Some(tx));
+                        let context = scope.context().clone();
+                        let _scope = scope.install();
+                        let result = qaqh_workspace::execution::execute_authorized_with_context(
+                            *auth,
+                            context,
+                            Some(tx),
+                        );
                         crate::agent::tool_outbox::record(
                             &outbox_seed,
                             &id,
@@ -335,19 +336,19 @@ pub fn execute_admitted_batch(
             ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
         );
         let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        // Tool workers run on spawned threads: carry the actor's per-actor
-        // tool scope with them so concurrent actors stay isolated.
-        let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
         let handle = std::thread::Builder::new()
             .stack_size(4 * 1024 * 1024)
             .spawn({
+                let scope = admitted.scope;
                 let outbox_seed = outbox_seed.clone();
                 let cid = call_id.clone();
                 let tool_label = tool_name.clone();
                 move || {
-                    let _scope = actor_scope.install();
-                    let result = qaqh_workspace::execution::execute_authorized(
+                    let context = scope.context().clone();
+                    let _scope = scope.install();
+                    let result = qaqh_workspace::execution::execute_authorized_with_context(
                         *admitted.auth,
+                        context,
                         Some(progress_tx),
                     );
                     crate::agent::tool_outbox::record(
@@ -438,6 +439,7 @@ fn apply_ordered_skill_effects(
 pub(crate) fn admit_and_dispatch(
     ctx: &mut RingContext,
     tool: &mut ToolEngine,
+    turn_context: &crate::agent::context::TurnContext,
     turn_id: &str,
     round_num: u32,
     last_usage: Option<UsageInfo>,
@@ -530,7 +532,7 @@ pub(crate) fn admit_and_dispatch(
         .iter()
         .map(|index| pending[*index].id.clone())
         .collect();
-    let admission = tool.admit_batch(ctx, &pending, turn_id, round_num);
+    let admission = tool.admit_batch(ctx, &pending, turn_id, round_num, turn_context);
     if !admission.pending_permission_ids.is_empty()
         || !admission.pending_plans.is_empty()
         || admission.pending_todo_activation.is_some()
@@ -637,13 +639,18 @@ pub(crate) fn admit_and_dispatch(
                 .stack_size(4 * 1024 * 1024)
                 .spawn({
                     let auth = admitted.auth;
+                    let scope = admitted.scope;
                     let cid = call_id.clone();
                     let outbox_seed = outbox_seed.clone();
                     let tool_label = auth.tool_name().to_string();
-                    let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
                     move || {
-                        let _scope = actor_scope.install();
-                        let result = qaqh_workspace::execution::execute_authorized(*auth, Some(tx));
+                        let context = scope.context().clone();
+                        let _scope = scope.install();
+                        let result = qaqh_workspace::execution::execute_authorized_with_context(
+                            *auth,
+                            context,
+                            Some(tx),
+                        );
                         crate::agent::tool_outbox::record(
                             &outbox_seed,
                             &cid,
@@ -737,14 +744,18 @@ pub(crate) fn admit_and_dispatch(
             .stack_size(4 * 1024 * 1024)
             .spawn({
                 let auth = admitted.auth;
+                let scope = admitted.scope;
                 let outbox_seed = outbox_seed.clone();
                 let cid = call_id.clone();
                 let tool_label = auth.tool_name().to_string();
-                let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
                 move || {
-                    let _scope = actor_scope.install();
-                    let result =
-                        qaqh_workspace::execution::execute_authorized(*auth, Some(progress_tx));
+                    let context = scope.context().clone();
+                    let _scope = scope.install();
+                    let result = qaqh_workspace::execution::execute_authorized_with_context(
+                        *auth,
+                        context,
+                        Some(progress_tx),
+                    );
                     crate::agent::tool_outbox::record(
                         &outbox_seed,
                         &cid,

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use qaqh_workspace::permission::PermissionLevel;
 use qaqh_workspace::tool_api::{
-    AgentMode, CancellationToken, ProgressSink, ToolCallContext, ToolCallSource,
+    AgentMode, CancellationToken, ProgressSink, SandboxMode, ToolCallContext, ToolCallSource,
 };
 
 use super::types::{CancelToken, RingContext};
@@ -121,6 +121,10 @@ impl RuntimeContext {
             workspace_root: self.workspace_root.clone(),
             mode: self.mode,
             permission_level: PermissionLevel::from_u8(self.permission_level),
+            sandbox: match self.sandbox {
+                SandboxKind::Main => SandboxMode::Main,
+                SandboxKind::Subagent => SandboxMode::Subagent,
+            },
             timeout,
             cancellation: CancellationToken::from_shared_flag(self.cancellation.arc()),
             progress,
@@ -229,6 +233,7 @@ mod tests {
     #[test]
     fn tool_call_context_uses_explicit_runtime_sources() {
         qaqh_workspace::set_actor_context("/tmp/qaqh-p2-4c-b", "seed-tool");
+        qaqh_workspace::authorization::set_subagent_sandbox(true);
         qaqh_workspace::runtime::set_mode(1);
         let _guard = AmbientGuard;
 
@@ -247,6 +252,7 @@ mod tests {
         assert_eq!(tool_ctx.workspace_root, Path::new("/tmp/qaqh-p2-4c-b"));
         assert_eq!(tool_ctx.mode, AgentMode::Plan);
         assert_eq!(tool_ctx.permission_level, PermissionLevel::WorkspaceFree);
+        assert_eq!(tool_ctx.sandbox, SandboxMode::Subagent);
         assert_eq!(tool_ctx.timeout, Duration::from_secs(9));
         assert_eq!(tool_ctx.source, ToolCallSource::Model);
 

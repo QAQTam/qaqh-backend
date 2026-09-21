@@ -62,7 +62,7 @@ pub use manager::{
 // loop-side references stay `qaqh_workspace::X` without naming submodules.
 pub use authorization::{
     Admission, ApprovalError, AuthorizedToolCall, PermissionChallenge, ToolInvocation, admit,
-    authorize_call, trust_folder,
+    admit_with_context, authorize_call, authorize_call_with_context, trust_folder,
 };
 pub use permission::{
     PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory, TrustedFolderSet,
@@ -321,6 +321,10 @@ pub fn current_workspace() -> String {
 /// （execute 路径已绑定 runtime ctx 会话）写会话键控表；两者皆无（进程级
 /// 路径，如 daemon shutdown）写全局 flag。
 pub fn set_cancel(value: bool) {
+    if let Some(flag) = crate::runtime::explicit_cancel_flag() {
+        flag.store(value, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
     if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
         ACTOR_CANCEL.with(|slot| slot.set(value));
     } else if let Some(session) = bound_cancel_session() {
@@ -371,6 +375,9 @@ fn bound_cancel_session() -> Option<String> {
 
 /// Read the effective cancel flag: actor-local → session-keyed → process-wide.
 pub fn is_cancel() -> bool {
+    if let Some(cancelled) = crate::runtime::explicit_cancel_is_set() {
+        return cancelled;
+    }
     if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
         return ACTOR_CANCEL.with(|slot| slot.get());
     }
@@ -387,6 +394,9 @@ pub fn is_cancel() -> bool {
 /// 所有清零路径必须走这里，保证各层同步归零；会话表项只清本线程所属
 /// 会话，其它会话的取消状态不受影响（PR-3-4 隔离语义）。
 pub fn clear_cancel() {
+    if let Some(flag) = crate::runtime::explicit_cancel_flag() {
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
     ACTOR_CANCEL.with(|slot| slot.set(false));
     CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
     if let Some(session) = bound_cancel_session() {
