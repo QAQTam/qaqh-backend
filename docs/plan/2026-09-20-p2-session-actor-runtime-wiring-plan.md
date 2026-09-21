@@ -13,8 +13,8 @@
 - `SessionActor` FIFO mailbox、容量和 shutdown 纯状态机。
 - `TurnCore` 的 Start/Round/Suspend/Resume/Cancel/Finish 状态转换。
 - 单 active turn、cancel 幂等、冲突终态 fail-closed 的单元契约测试。
-- P2-4a 显式 runtime/turn context adapter 已落地；现有 thread-local 仍作为
-  等价来源保留。
+- P2-4a 显式 runtime/turn context adapter 与 P2-4b lifecycle port 已落地；
+  现有 thread-local 仍作为等价来源保留。
 - 代码位置：`crates/qaqh-session/src/actor.rs`。
 
 尚未完成：
@@ -216,7 +216,7 @@ Gate：
 
 ### P2-4 loop 外移与 thread-local 清理
 
-状态：进行中；P2-4a 已完成，P2-4b/P2-4c 待开始。
+状态：进行中；P2-4a/P2-4b 已完成，P2-4c 待开始。
 
 交付：
 
@@ -253,6 +253,27 @@ Gate：
 
 非目标：未迁移 compaction/title/liveness/session lifecycle，未删除现有
 thread-local 或 workspace/session cancel bridge。
+
+#### P2-4b lifecycle port
+
+状态：已完成，issue #240 / PR #241，merge `7f03c70`。
+
+交付：
+
+- `qaqh-runtime` 新增 `LifecyclePort` 与 `RuntimeLifecyclePort`，统一承接
+  dispatch liveness 记账、session create/resume/reload 和 turn title 触发。
+- `Loop` 不再直接持有 `SessionEngine` 或操作 `WorkerLiveness`。
+- title 从 `seal_timeline_terminal_round` 的 Completed 分支迁到
+  `Outcome::TurnComplete` 边界；fallback 写入保持一次性和冻结语义。
+
+Gate：
+
+- lifecycle port 的 busy/touch/suspend 记账与旧实现等价。
+- session create 契约和 title fallback 幂等回归测试通过。
+- `cargo test -p qaqh-runtime`、`cargo test --workspace`、
+  `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+非目标：未迁移 compaction，未删除 thread-local，未改消息/timeline/持久化顺序。
 
 ### P2-5 `SubagentSupervisor`
 
