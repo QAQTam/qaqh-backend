@@ -53,6 +53,14 @@ impl CancellationToken {
         Self::default()
     }
 
+    /// Build a token sharing an existing cancellation flag.
+    ///
+    /// This is the bridge used when a runtime-owned cancellation tree must be
+    /// projected into an explicit [`ToolCallContext`].
+    pub fn from_shared_flag(flag: Arc<AtomicBool>) -> Self {
+        Self { inner: flag }
+    }
+
     /// 置位取消（宿主调用；工具侧只读）。
     pub fn cancel(&self) {
         self.inner.store(true, Ordering::SeqCst);

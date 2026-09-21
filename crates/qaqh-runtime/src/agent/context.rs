@@ -6,6 +6,12 @@
 //! execution remain on the existing path for this slice.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use qaqh_workspace::permission::PermissionLevel;
+use qaqh_workspace::tool_api::{
+    AgentMode, CancellationToken, ProgressSink, ToolCallContext, ToolCallSource,
+};
 
 use super::types::{CancelToken, RingContext};
 
@@ -43,17 +49,28 @@ pub struct RuntimeContext {
     session_id: String,
     workspace_root: PathBuf,
     sandbox: SandboxKind,
+    permission_level: u8,
+    mode: AgentMode,
     cancellation: CancelToken,
 }
 
 impl RuntimeContext {
     /// Legacy adapter: snapshot the actor's current session/workspace/sandbox
     /// and pair them with the shared cancellation token.
-    pub fn from_legacy_ambient(session_id: impl Into<String>, cancellation: CancelToken) -> Self {
+    pub fn from_legacy_ambient(
+        session_id: impl Into<String>,
+        permission_level: u8,
+        cancellation: CancelToken,
+    ) -> Self {
         Self {
             session_id: session_id.into(),
             workspace_root: PathBuf::from(qaqh_workspace::current_workspace()),
             sandbox: SandboxKind::from_legacy(),
+            permission_level,
+            mode: match qaqh_workspace::runtime::current_mode() {
+                1 => AgentMode::Plan,
+                _ => AgentMode::Code,
+            },
             cancellation,
         }
     }
@@ -73,9 +90,42 @@ impl RuntimeContext {
         self.sandbox
     }
 
+    /// Effective permission level captured for this runtime.
+    pub fn permission_level(&self) -> u8 {
+        self.permission_level
+    }
+
+    /// Agent mode captured for this runtime.
+    pub fn mode(&self) -> AgentMode {
+        self.mode
+    }
+
     /// Cancellation token shared with the legacy ring.
     pub fn cancellation(&self) -> &CancelToken {
         &self.cancellation
+    }
+
+    /// Build the explicit tool-call context from runtime-owned fields.
+    ///
+    /// Call identity, timeout, progress, and source remain caller inputs.
+    pub fn tool_call_context(
+        &self,
+        call_id: impl Into<String>,
+        timeout: Duration,
+        progress: Option<ProgressSink>,
+        source: ToolCallSource,
+    ) -> ToolCallContext {
+        ToolCallContext {
+            call_id: call_id.into(),
+            session_id: self.session_id.clone(),
+            workspace_root: self.workspace_root.clone(),
+            mode: self.mode,
+            permission_level: PermissionLevel::from_u8(self.permission_level),
+            timeout,
+            cancellation: CancellationToken::from_shared_flag(self.cancellation.arc()),
+            progress,
+            source,
+        }
     }
 }
 
@@ -94,6 +144,7 @@ impl TurnContext {
         Self {
             runtime: RuntimeContext::from_legacy_ambient(
                 ctx.agent.session.seed.clone(),
+                ctx.agent.config.permission_level,
                 ctx.cancel.clone(),
             ),
             turn_id: turn_id.into(),
@@ -127,6 +178,7 @@ mod tests {
         fn drop(&mut self) {
             qaqh_workspace::clear_actor_context();
             qaqh_workspace::authorization::set_subagent_sandbox(false);
+            qaqh_workspace::runtime::set_mode(0);
         }
     }
 
@@ -134,14 +186,18 @@ mod tests {
     fn legacy_adapter_preserves_runtime_identity_workspace_sandbox_and_cancel() {
         qaqh_workspace::set_actor_context("/tmp/qaqh-p2-4a", "seed-236");
         qaqh_workspace::authorization::set_subagent_sandbox(true);
+        qaqh_workspace::runtime::set_mode(1);
         let _guard = AmbientGuard;
 
         let cancel = CancelToken::new();
-        let runtime = RuntimeContext::from_legacy_ambient("seed-236".to_string(), cancel.clone());
+        let runtime =
+            RuntimeContext::from_legacy_ambient("seed-236".to_string(), 3, cancel.clone());
 
         assert_eq!(runtime.session_id(), "seed-236");
         assert_eq!(runtime.workspace_root(), Path::new("/tmp/qaqh-p2-4a"));
         assert_eq!(runtime.sandbox(), SandboxKind::Subagent);
+        assert_eq!(runtime.permission_level(), 3);
+        assert_eq!(runtime.mode(), AgentMode::Plan);
         assert!(!runtime.cancellation().is_set());
 
         cancel.set();
@@ -157,7 +213,7 @@ mod tests {
         let _guard = AmbientGuard;
 
         let runtime =
-            RuntimeContext::from_legacy_ambient("seed-turn".to_string(), CancelToken::new());
+            RuntimeContext::from_legacy_ambient("seed-turn".to_string(), 4, CancelToken::new());
         let turn = TurnContext {
             runtime: runtime.clone(),
             turn_id: "turn-236".to_string(),
@@ -168,5 +224,36 @@ mod tests {
         assert_eq!(turn.runtime().workspace_root(), runtime.workspace_root());
         assert_eq!(turn.turn_id(), "turn-236");
         assert_eq!(turn.round_num(), 3);
+    }
+
+    #[test]
+    fn tool_call_context_uses_explicit_runtime_sources() {
+        qaqh_workspace::set_actor_context("/tmp/qaqh-p2-4c-b", "seed-tool");
+        qaqh_workspace::runtime::set_mode(1);
+        let _guard = AmbientGuard;
+
+        let cancel = CancelToken::new();
+        let runtime =
+            RuntimeContext::from_legacy_ambient("seed-tool".to_string(), 3, cancel.clone());
+        let tool_ctx = runtime.tool_call_context(
+            "call-248",
+            Duration::from_secs(9),
+            None,
+            ToolCallSource::Model,
+        );
+
+        assert_eq!(tool_ctx.call_id, "call-248");
+        assert_eq!(tool_ctx.session_id, "seed-tool");
+        assert_eq!(tool_ctx.workspace_root, Path::new("/tmp/qaqh-p2-4c-b"));
+        assert_eq!(tool_ctx.mode, AgentMode::Plan);
+        assert_eq!(tool_ctx.permission_level, PermissionLevel::WorkspaceFree);
+        assert_eq!(tool_ctx.timeout, Duration::from_secs(9));
+        assert_eq!(tool_ctx.source, ToolCallSource::Model);
+
+        cancel.set();
+        assert!(
+            tool_ctx.cancellation.is_cancelled(),
+            "tool cancellation must share the runtime token"
+        );
     }
 }
