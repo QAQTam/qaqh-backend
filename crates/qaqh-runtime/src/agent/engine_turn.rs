@@ -1157,6 +1157,8 @@ impl TurnEngine {
         round_num: u32,
         last_usage: Option<UsageInfo>,
     ) -> Outcome {
+        let turn_context =
+            crate::agent::context::TurnContext::from_legacy(ctx, turn_id.clone(), round_num);
         log::info!("[TURN] run_lap turn_id={} round_num={}", turn_id, round_num);
         // L1 round-boundary durability: everything the previous round (or the
         // turn's user message at round 0) enqueued reaches messages.jsonl
@@ -1193,7 +1195,7 @@ impl TurnEngine {
         // 单回合执行块：所有路径均 return（clippy::never_loop），无需循环。
         {
             // ── Interrupt check ──
-            if ctx.cancel.is_set() || qaqh_workspace::is_cancel() {
+            if turn_context.runtime().cancellation().is_set() || qaqh_workspace::is_cancel() {
                 ctx.emitter
                     .emit_timeline(qaqh_domain::TimelineIntent::TurnSealed {
                         turn_id: turn_id.clone(),
@@ -1243,7 +1245,7 @@ impl TurnEngine {
                 last_usage,
             );
 
-            if ctx.cancel.is_set() {
+            if turn_context.runtime().cancellation().is_set() {
                 seal_timeline_terminal_round(
                     ctx,
                     &turn_id,
@@ -1271,7 +1273,7 @@ impl TurnEngine {
                         .as_array()
                         .is_none_or(|calls| calls.is_empty());
                 if streamed_nothing
-                    && !ctx.cancel.is_set()
+                    && !turn_context.runtime().cancellation().is_set()
                     && self.context_overflow_recoveries < MAX_CONTEXT_OVERFLOW_RECOVERIES
                     && is_context_overflow_error(&message)
                 {
