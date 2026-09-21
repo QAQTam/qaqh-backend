@@ -324,6 +324,7 @@ impl ToolManager {
 
     /// Phase 1: validate, safety-check, register inflight. Returns a [`PreparedCall`]
     /// that can be executed without the manager lock.
+    #[cfg(test)]
     #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项
     pub(crate) fn prepare_req(
         &mut self,
@@ -333,6 +334,30 @@ impl ToolManager {
         args: serde_json::Value,
         timeout_secs: Option<u64>,
         progress_tx: Option<crate::ExecProgressSender>,
+    ) -> Result<PreparedCall, ToolExecReport> {
+        self.prepare_req_with_cancel(
+            id,
+            name,
+            action,
+            args,
+            timeout_secs,
+            progress_tx,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Phase 1 variant for a runtime-owned cancellation token.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项
+    pub(crate) fn prepare_req_with_cancel(
+        &mut self,
+        id: String,
+        name: &str,
+        action: &str,
+        args: serde_json::Value,
+        timeout_secs: Option<u64>,
+        progress_tx: Option<crate::ExecProgressSender>,
+        cancel_flag: Arc<AtomicBool>,
     ) -> Result<PreparedCall, ToolExecReport> {
         if let Some(ref allowed) = self.allowed
             && !allowed.contains(&name.to_string())
@@ -401,7 +426,6 @@ impl ToolManager {
         };
 
         let timeout_secs = timeout_secs.unwrap_or(route.default_timeout.as_secs());
-        let cancel_flag = Arc::new(AtomicBool::new(false));
         let skill_effects = Arc::new(Mutex::new(Vec::new()));
         let ctx = crate::ToolCallCtx {
             id: id.clone(),

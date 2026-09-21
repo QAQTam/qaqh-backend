@@ -140,6 +140,10 @@ impl LegacyToolAdapter {
     ) -> Result<LegacyCallOutcome, FatalToolError> {
         let progress = ctx.progress.as_ref().map(bridge_progress);
         let legacy_ctx = self.build_legacy_ctx(ctx, args, progress);
+        // Legacy handlers still read workspace/session/mode/sandbox/cancel via
+        // thread-local accessors. Install the explicit context as that
+        // compatibility view; the context remains the source of truth.
+        let _scope = crate::runtime::install_tool_call_context(ctx);
         // ToolCallCtx 克隆共享 skill_effects 单元；handler 消费一个克隆，
         // 本函数从原值取回副作用。
         let result = (self.handler.handler)(legacy_ctx.clone());
@@ -316,7 +320,7 @@ mod tests {
 
     use super::*;
     use crate::permission::{PermissionLevel, ToolCategory};
-    use crate::tool_api::context::{AgentMode, CancellationToken};
+    use crate::tool_api::context::{AgentMode, CancellationToken, SandboxMode};
     use crate::ToolRisk;
 
     fn legacy_handler(key: &str, handler: fn(ToolCallCtx) -> ToolResult) -> ToolHandler {
@@ -338,6 +342,7 @@ mod tests {
             workspace_root: std::path::PathBuf::from("/tmp/ws"),
             mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadFree,
+            sandbox: SandboxMode::Main,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress,
@@ -353,6 +358,16 @@ mod tests {
             .unwrap_or("")
             .to_owned();
         ToolResult::ok(text)
+    }
+
+    fn context_handler(_ctx: ToolCallCtx) -> ToolResult {
+        ToolResult::ok(format!(
+            "{}|{}|{}|{}",
+            crate::current_workspace(),
+            crate::current_session().unwrap_or_default(),
+            crate::runtime::current_mode(),
+            crate::authorization::is_subagent_sandbox(),
+        ))
     }
 
     fn diff_handler(_ctx: ToolCallCtx) -> ToolResult {
@@ -517,6 +532,34 @@ mod tests {
         assert!(outcome.error.is_none());
         assert_eq!(outcome.check_invariants(), Ok(()));
         assert!(call.effects.is_empty());
+    }
+
+    #[test]
+    fn execute_legacy_installs_explicit_context_for_handler() {
+        let adapter =
+            LegacyToolAdapter::new(legacy_handler("context", context_handler)).expect("adapter");
+        let mut ctx = test_ctx(None);
+        ctx.workspace_root = std::path::PathBuf::from("/tmp/qaqh-adapter-context");
+        ctx.session_id = "adapter-seed".to_string();
+        ctx.mode = AgentMode::Plan;
+        ctx.sandbox = SandboxMode::Subagent;
+        crate::set_actor_context("/tmp/qaqh-before-adapter", "before-seed");
+        crate::runtime::set_mode(2);
+        crate::authorization::set_subagent_sandbox(false);
+
+        let outcome = adapter
+            .execute_legacy(&ctx, serde_json::json!({}))
+            .expect("context probe");
+        assert_eq!(
+            outcome.outcome.model.text,
+            "/tmp/qaqh-adapter-context|adapter-seed|1|true"
+        );
+        assert_eq!(crate::current_session().as_deref(), Some("before-seed"));
+        assert_eq!(crate::current_workspace(), "/tmp/qaqh-before-adapter");
+        assert_eq!(crate::runtime::current_mode(), 2);
+        assert!(!crate::authorization::is_subagent_sandbox());
+        crate::clear_actor_context();
+        crate::runtime::set_mode(0);
     }
 
     #[test]

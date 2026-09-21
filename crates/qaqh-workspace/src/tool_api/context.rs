@@ -11,6 +11,18 @@ use std::time::Duration;
 use super::progress::ProgressSink;
 use crate::permission::PermissionLevel;
 
+/// Sandbox policy effective for one tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxMode {
+    /// Main session actor: normal permission/admission flow.
+    #[default]
+    Main,
+    /// Subagent actor: no interactive approval channel; workspace file
+    /// operations may auto-approve, while exec/net/cross-workspace calls are
+    /// denied.
+    Subagent,
+}
+
 /// 调用来源（09-19 补充稿 §4.2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCallSource {
@@ -90,6 +102,8 @@ pub struct ToolCallContext {
     pub mode: AgentMode,
     /// 生效权限档位。
     pub permission_level: PermissionLevel,
+    /// 生效沙箱模式。
+    pub sandbox: SandboxMode,
     /// 生效超时（调用方显式值覆盖 descriptor 默认值；构造后定稿）。
     pub timeout: Duration,
     /// 取消信号（只读）。
@@ -121,6 +135,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/ws"),
             mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadFree,
+            sandbox: SandboxMode::Main,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
