@@ -367,6 +367,9 @@ pub struct PendingTodoActivation {
 pub struct AdmittedTool {
     pub call_id: String,
     pub auth: Box<qaqh_workspace::AuthorizedToolCall>,
+    /// Explicit context captured at admission and carried across the worker
+    /// thread boundary.
+    pub scope: qaqh_workspace::runtime::ToolExecutionScope,
 }
 
 pub struct TurnState {

@@ -45,8 +45,8 @@ mod tests {
     use crate::ToolRisk;
     use crate::permission::ToolCategory;
     use crate::tool_api::{
-        AgentMode, CancellationToken, OutputBudget, ToolCapabilities, ToolExposure, ToolName,
-        ToolSource,
+        AgentMode, CancellationToken, OutputBudget, SandboxMode, ToolCapabilities, ToolExposure,
+        ToolName, ToolSource,
     };
 
     #[derive(Debug, Deserialize, JsonSchema)]
@@ -107,6 +107,7 @@ mod tests {
             workspace_root: std::path::PathBuf::from("/tmp/ws"),
             mode: AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::ReadFree,
+            sandbox: SandboxMode::Main,
             timeout: Duration::from_secs(10),
             cancellation: CancellationToken::new(),
             progress: None,
