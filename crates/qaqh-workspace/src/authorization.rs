@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::tool_api::{CancellationToken, SandboxMode, ToolCallContext, ToolCallSource};
+
 // 子代理沙箱标志（per-actor）：`run_actor` subagent 分支在 actor 线程上设置。
 //
 // 沙箱语义（方案 B）：子代理**没有用户审批通道**——
@@ -146,13 +148,11 @@ pub enum Admission {
 ///
 /// Approval consumes the challenge, making the grant single-use by type.
 pub struct PermissionChallenge {
-    session_id: String,
-    call_id: String,
+    context: ToolCallContext,
     tool_name: String,
     action: String,
     normalized_args: serde_json::Value,
     resources: Vec<PathBuf>,
-    workspace_root: PathBuf,
     reason: String,
     category: crate::permission::ToolCategory,
     risk: crate::permission::PermissionRisk,
@@ -164,21 +164,19 @@ pub struct PermissionChallenge {
 impl PermissionChallenge {
     fn new(
         invocation: ToolInvocation,
+        context: ToolCallContext,
         reason: String,
         resources: Vec<PathBuf>,
-        workspace_root: PathBuf,
         category: crate::permission::ToolCategory,
         risk: crate::permission::PermissionRisk,
         consequence: String,
     ) -> Self {
         Self {
-            session_id: invocation.session_id,
-            call_id: invocation.call_id,
+            context,
             tool_name: invocation.tool_name,
             action: invocation.action,
             normalized_args: invocation.args,
             resources,
-            workspace_root,
             reason,
             category,
             risk,
@@ -189,11 +187,11 @@ impl PermissionChallenge {
     }
 
     pub fn session_id(&self) -> &str {
-        &self.session_id
+        &self.context.session_id
     }
 
     pub fn call_id(&self) -> &str {
-        &self.call_id
+        &self.context.call_id
     }
 
     pub fn tool_name(&self) -> &str {
@@ -219,7 +217,12 @@ impl PermissionChallenge {
     }
 
     pub fn workspace_root(&self) -> &Path {
-        &self.workspace_root
+        &self.context.workspace_root
+    }
+
+    /// Explicit runtime context captured when the challenge was created.
+    pub fn context(&self) -> &ToolCallContext {
+        &self.context
     }
 
     pub fn reason(&self) -> &str {
@@ -257,9 +260,10 @@ impl PermissionChallenge {
         if self.is_expired(ttl) {
             return Err(ApprovalError::Expired);
         }
+        let context = self.context;
         let invocation = ToolInvocation {
-            session_id: self.session_id,
-            call_id: self.call_id,
+            session_id: context.session_id.clone(),
+            call_id: context.call_id.clone(),
             tool_name: self.tool_name,
             action: self.action,
             args: self.normalized_args,
@@ -268,7 +272,7 @@ impl PermissionChallenge {
         Ok(AuthorizedToolCall::new(
             invocation,
             self.resources,
-            self.workspace_root,
+            context.workspace_root,
             GrantKind::UserApproved,
         ))
     }
@@ -281,11 +285,51 @@ pub enum ApprovalError {
     MissingOrReplayed,
 }
 
+fn legacy_tool_call_context(
+    invocation: &ToolInvocation,
+    permission_level: u8,
+    workspace_root: &Path,
+) -> ToolCallContext {
+    let cancellation = CancellationToken::new();
+    if crate::is_cancel() {
+        cancellation.cancel();
+    }
+    ToolCallContext {
+        call_id: invocation.call_id.clone(),
+        session_id: invocation.session_id.clone(),
+        workspace_root: workspace_root.to_path_buf(),
+        mode: match crate::runtime::current_mode() {
+            1 => crate::tool_api::AgentMode::Plan,
+            _ => crate::tool_api::AgentMode::Code,
+        },
+        permission_level: crate::permission::PermissionLevel::from_u8(permission_level),
+        sandbox: if is_subagent_sandbox() {
+            SandboxMode::Subagent
+        } else {
+            SandboxMode::Main
+        },
+        timeout: Duration::ZERO,
+        cancellation,
+        progress: None,
+        source: ToolCallSource::Model,
+    }
+}
+
 /// Evaluate permission policy and bind the resulting proof to normalized resources.
 pub fn admit(
     invocation: ToolInvocation,
     permission_level: u8,
     workspace_root: &Path,
+    trusted_dirs: &HashSet<PathBuf>,
+) -> Admission {
+    let context = legacy_tool_call_context(&invocation, permission_level, workspace_root);
+    admit_with_context(invocation, &context, trusted_dirs)
+}
+
+/// Evaluate permission policy using an explicit runtime context.
+pub fn admit_with_context(
+    invocation: ToolInvocation,
+    context: &ToolCallContext,
     trusted_dirs: &HashSet<PathBuf>,
 ) -> Admission {
     // ── MCP 动态工具（D5 + S3，设计 §5.5）──
@@ -303,12 +347,13 @@ pub fn admit(
     // （防越狱）——原“沙箱零代码”依赖 needs_permission→AskUser 路径，
     // 而 D5 快路径绕过 needs_permission，故在此显式拦截（仅针对 mcp__ 前缀，
     // 不影响内置工具的沙箱语义）。
-    let level = crate::permission::PermissionLevel::from_u8(permission_level);
+    let level = context.permission_level;
+    let sandboxed = matches!(context.sandbox, SandboxMode::Subagent);
     if invocation
         .tool_name
         .starts_with(crate::manager::MCP_DYNAMIC_PREFIX)
     {
-        if is_subagent_sandbox() {
+        if sandboxed {
             return Admission::Denied(format!(
                 "subagent sandbox denied '{}': MCP tools are host-only",
                 invocation.tool_name
@@ -326,13 +371,13 @@ pub fn admit(
             return Admission::Authorized(AuthorizedToolCall::new(
                 invocation,
                 resources,
-                crate::permission::resolve_target_path(workspace_root.to_path_buf()),
+                crate::permission::resolve_target_path(context.workspace_root.clone()),
                 GrantKind::Auto,
             ));
         }
     }
 
-    let workspace_root = crate::permission::resolve_target_path(workspace_root.to_path_buf());
+    let workspace_root = crate::permission::resolve_target_path(context.workspace_root.clone());
     match crate::permission::needs_permission(
         level,
         &invocation.tool_name,
@@ -360,7 +405,7 @@ pub fn admit(
             risk,
             consequence,
         } => {
-            if is_subagent_sandbox() {
+            if sandboxed {
                 // 子代理沙箱：无审批通道，不产生弹窗事件。
                 let file_ops = matches!(
                     category,
@@ -388,11 +433,15 @@ pub fn admit(
                     ))
                 }
             } else {
+                let challenge_context = ToolCallContext {
+                    workspace_root: workspace_root.clone(),
+                    ..context.clone()
+                };
                 Admission::ApprovalRequired(PermissionChallenge::new(
                     invocation,
+                    challenge_context,
                     reason,
                     paths,
-                    workspace_root,
                     category,
                     risk,
                     consequence,
@@ -469,7 +518,31 @@ pub fn authorize_call(
             .unwrap_or(crate::permission::ToolCategory::Write),
     };
     let ws_root = effective_workspace_root();
-    admit(invocation, permission_level, &ws_root, &trusted_snapshot())
+    let context = legacy_tool_call_context(&invocation, permission_level, &ws_root);
+    admit_with_context(invocation, &context, &trusted_snapshot())
+}
+
+/// Single admission facade using the caller's explicit tool context.
+///
+/// `ToolCallContext` is the source of truth for session/workspace/permission/
+/// mode/sandbox. The context's call-specific fields (`timeout`, `progress`) are
+/// not consumed by admission; execution resolves them before invoking the
+/// handler.
+pub fn authorize_call_with_context(
+    tool_name: &str,
+    args: &serde_json::Value,
+    context: &ToolCallContext,
+) -> Admission {
+    let invocation = ToolInvocation {
+        session_id: context.session_id.clone(),
+        call_id: context.call_id.clone(),
+        tool_name: tool_name.to_string(),
+        action: String::new(),
+        args: args.clone(),
+        category: crate::runtime::lookup_category(tool_name)
+            .unwrap_or(crate::permission::ToolCategory::Write),
+    };
+    admit_with_context(invocation, context, &trusted_snapshot())
 }
 
 #[cfg(test)]
