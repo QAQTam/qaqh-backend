@@ -4,7 +4,7 @@
 //! `ToolHeader::Other` + `ToolBody::Text`，保持 H1 的「summary 禁止 JSON」。
 //! 框架会在运行后覆写 `metrics`（H4），因此这里只构造展示形态。
 
-use crate::tool_api::{PathOp, ToolBody, ToolDisplay, ToolHeader};
+use crate::tool_api::{PathOp, ToolBody, ToolDisplay, ToolHeader, ToolProjection};
 
 /// 解析工具输出的 JSON 信封；工具输出不是 JSON 时返回 `None`。
 fn json_view(output: &str) -> Option<serde_json::Value> {
@@ -292,8 +292,10 @@ pub(crate) fn project_todo_update(_args: &serde_json::Value, output: &str) -> To
     todo_display("todo", output)
 }
 
-pub(crate) fn project_todo_list(_args: &serde_json::Value, output: &str) -> ToolDisplay {
-    todo_display("todo", output)
+pub(crate) fn project_todo_list(args: &serde_json::Value, output: &str) -> ToolDisplay {
+    serde_json::from_str::<crate::todo::typed::TodoListOutput>(output)
+        .map(|typed| typed.display(args))
+        .unwrap_or_else(|_| todo_display("todo", output))
 }
 
 /// MCP 动态工具没有工具作者专属投影时的 canonical fallback。
@@ -560,6 +562,25 @@ mod tests {
         let display = project_todo_update(&json!({}), &output);
         assert_eq!(display.body, ToolBody::None);
         assert_eq!(display.summary.as_deref(), Some("Updated 3 todo(s)"));
+        assert!(!display.summary.as_deref().unwrap().starts_with('{'));
+    }
+
+    #[test]
+    fn todo_list_uses_typed_projection() {
+        let output = crate::todo::typed::TodoListOutput {
+            items: Vec::new(),
+            current_id: None,
+            counts: crate::todo::typed::TodoCounts {
+                idle: 1,
+                in_progress: 1,
+                completed: 0,
+                cancelled: 0,
+                total: 2,
+            },
+        };
+        let display = project_todo_list(&json!({}), &output.to_envelope_string().unwrap());
+        assert_eq!(display.body, ToolBody::None);
+        assert_eq!(display.summary.as_deref(), Some("2 task(s) · 1 in progress"));
         assert!(!display.summary.as_deref().unwrap().starts_with('{'));
     }
 

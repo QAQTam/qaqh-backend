@@ -5,6 +5,7 @@ use super::store::{load_todo, read_store, save_todo, todo_path};
 use serde_json::Value;
 
 use super::*;
+use crate::tool_api::ToolProjection;
 use std::ffi::OsString;
 
 #[test]
@@ -365,6 +366,29 @@ fn seed_parameterized_set_and_list_hit_explicit_seed() {
         let listed = parse(&todo_list_for(seed, &serde_json::json!({})));
         assert_eq!(listed["items"].as_array().unwrap().len(), 1);
         assert_eq!(listed["items"][0]["status"], "completed");
+    });
+}
+
+#[test]
+fn typed_todo_list_matches_wire_and_projection() {
+    with_isolated_todo(|seed| {
+        exec_todo_create(&serde_json::json!({"title": "typed list"}), false).unwrap();
+        let typed = super::typed::todo_list_for_typed(seed, &serde_json::json!({})).unwrap();
+        assert_eq!(typed.items.len(), 1);
+        assert_eq!(typed.counts.total, 1);
+        assert_eq!(
+            typed.display(&serde_json::json!({})).summary.as_deref(),
+            Some("1 task(s) · 0 in progress")
+        );
+
+        let value = super::typed::todo_list_value_for(
+            seed,
+            &serde_json::json!({"seed": seed, "status": "idle"}),
+        )
+        .unwrap();
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["items"][0]["title"], "typed list");
+        assert_eq!(value["counts"]["total"], 1);
     });
 }
 
