@@ -11,6 +11,7 @@ use qaqh_session::actor::{
 };
 
 use crate::agent::SubagentSpawnSpec;
+use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
 use crate::{RingingHub, SessionActivityTracker};
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
@@ -271,13 +272,8 @@ pub struct AgentRegistry {
     shutting_down: bool,
     /// 最近一次 spawn 时间（防崩溃-重启风暴：同一 seed 1 秒内不重复拉起）。
     last_spawn: HashMap<String, std::time::Instant>,
-    /// T-1-4：子代理 seed → 派生出它的父会话 seed（`spawn_subagent` 登记，
-    /// `close` 清理）。取消传播需要反向查询，故与 `subagent_children` 成对
-    /// 维护。
-    subagent_parent: HashMap<String, String>,
-    /// T-1-4：父会话 seed → 其子代理 seed 集合。父会话收到
-    /// `ConversationCancel` 时逐个取消（见 `cancel_subagent_children`）。
-    subagent_children: HashMap<String, std::collections::HashSet<String>>,
+    /// P2-5：daemon 级 parent/child edge 与 unload 顺序状态机。
+    supervisor: SubagentSupervisor,
 }
 
 impl AgentRegistry {
@@ -289,8 +285,7 @@ impl AgentRegistry {
             hub: None,
             shutting_down: false,
             last_spawn: HashMap::new(),
-            subagent_parent: HashMap::new(),
-            subagent_children: HashMap::new(),
+            supervisor: SubagentSupervisor::default(),
         }
     }
 
@@ -384,8 +379,12 @@ impl AgentRegistry {
             },
             parent_cancel,
         )?;
-        if !parent_seed.is_empty() && parent_seed != seed {
-            self.link_subagent(&parent_seed, seed);
+        if !parent_seed.is_empty()
+            && parent_seed != seed
+            && let Err(error) = self.link_subagent(&parent_seed, seed)
+        {
+            self.close(seed);
+            return Err(error);
         }
         Ok(())
     }
@@ -642,12 +641,11 @@ impl AgentRegistry {
             .map(AgentInstance::kind_name)
             .unwrap_or(AgentKind::Session);
         let parent_cancel = self
-            .subagent_parent
-            .get(seed)
+            .supervisor
+            .parent_of(seed)
+            .as_ref()
             .and_then(|parent| self.cancel_for_seed(parent));
-        if let Some(dead) = self.instances.remove(seed) {
-            dead.shutdown();
-        }
+        self.close(seed);
         match kind {
             AgentKind::Session => self.get_or_spawn(seed)?,
             AgentKind::Subagent(spec) => {
@@ -730,59 +728,58 @@ impl AgentRegistry {
     }
 
     pub fn close(&mut self, seed: &str) {
-        // Close descendants first: a parent actor may be waiting for a child
-        // result, so shutting the parent down before the child can deadlock the
-        // join. Recursive close also keeps the parent/child edge bookkeeping
-        // consistent (each child unlinks itself from its parent).
-        for child in self.children_of(seed) {
-            log::info!("[registry] closing child {child} before parent {seed}");
-            self.close(&child);
+        let descendants = self.supervisor.begin_unload(seed);
+        for child in descendants {
+            let parent = self.supervisor.parent_of(&child);
+            self.finish_for_unload(&child, parent.as_deref());
+            self.supervisor.unlink(&child);
         }
-        if let Some(instance) = self.instances.remove(seed) {
-            instance.shutdown();
+
+        let parent = self.supervisor.parent_of(seed);
+        self.finish_for_unload(seed, parent.as_deref());
+        self.supervisor.unlink(seed);
+        self.supervisor.parent_unload_ack(seed);
+    }
+
+    /// Signal, observe terminal, then join one worker. For a child, the parent
+    /// edge is closed before the join, which is the P2-5 ordering contract.
+    fn finish_for_unload(&mut self, seed: &str, parent: Option<&str>) {
+        if let Some(parent) = parent {
+            self.supervisor.cancel_sent(parent, seed);
         }
-        // T-1-4：会话/子代理关闭即摘除派生登记（等价于 hub 的 `forget_seed`
-        // 生命周期点）——父集合与反向指针都不随历史 seed 无界增长。
-        self.unlink_subagent(seed);
+        let Some(mut instance) = self.instances.remove(seed) else {
+            if let Some(parent) = parent {
+                self.supervisor.child_terminal(parent, seed);
+                self.supervisor.parent_subagent_finished(parent, seed);
+                self.supervisor.child_joined(parent, seed);
+            }
+            qaqh_workspace::remove_session_cancel(seed);
+            return;
+        };
+
+        instance.signal_shutdown();
+        if !instance.wait_until_stopped(seed) {
+            log::warn!("[registry] worker {seed} did not stop before join timeout");
+        }
+        if let Some(parent) = parent {
+            self.supervisor.child_terminal(parent, seed);
+            self.supervisor.parent_subagent_finished(parent, seed);
+        }
+        instance.finish_shutdown();
+        if let Some(parent) = parent {
+            self.supervisor.child_joined(parent, seed);
+        }
+        qaqh_workspace::remove_session_cancel(seed);
     }
 
     /// T-1-4：登记父会话 → 子代理的派生关系（幂等）。
-    fn link_subagent(&mut self, parent: &str, child: &str) {
-        self.subagent_parent
-            .insert(child.to_string(), parent.to_string());
-        self.subagent_children
-            .entry(parent.to_string())
-            .or_default()
-            .insert(child.to_string());
-    }
-
-    /// T-1-4：摘除某个 seed 的派生登记——作为父会话关闭时丢弃它的子集合；
-    /// 作为子代理关闭时从父集合中移除自身。
-    fn unlink_subagent(&mut self, seed: &str) {
-        if let Some(parent) = self.subagent_parent.remove(seed) {
-            let parent_now_empty = match self.subagent_children.get_mut(&parent) {
-                Some(children) => {
-                    children.remove(seed);
-                    children.is_empty()
-                }
-                None => false,
-            };
-            if parent_now_empty {
-                self.subagent_children.remove(&parent);
-            }
-        }
-        self.subagent_children.remove(seed);
+    fn link_subagent(&mut self, parent: &str, child: &str) -> Result<(), String> {
+        self.supervisor.link(parent, child)
     }
 
     /// T-1-4：父会话当前登记的子代理 seed（排序后返回，便于日志与测试）。
     fn children_of(&self, parent: &str) -> Vec<String> {
-        let mut children: Vec<String> = self
-            .subagent_children
-            .get(parent)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default();
-        children.sort();
-        children
+        self.supervisor.children_of(parent)
     }
 
     fn cancel_for_seed(&self, seed: &str) -> Option<crate::agent::types::CancelToken> {
@@ -801,6 +798,41 @@ impl AgentRegistry {
         self.children_of(parent)
     }
 
+    /// P2-5 测试/运维只读视图：parent/child 生命周期事件顺序。
+    #[doc(hidden)]
+    pub fn subagent_lifecycle_trace(&self) -> Vec<String> {
+        self.supervisor
+            .trace()
+            .iter()
+            .map(|event| match event {
+                LifecycleEvent::EdgeLinked { parent, child } => {
+                    format!("edge_linked:{parent}:{child}")
+                }
+                LifecycleEvent::EdgeUnlinked { parent, child } => {
+                    format!("edge_unlinked:{parent}:{child}")
+                }
+                LifecycleEvent::ParentUnloadRequested { parent } => {
+                    format!("parent_unload_requested:{parent}")
+                }
+                LifecycleEvent::ChildCancelSent { parent, child } => {
+                    format!("child_cancel_sent:{parent}:{child}")
+                }
+                LifecycleEvent::ChildTerminal { parent, child } => {
+                    format!("child_terminal:{parent}:{child}")
+                }
+                LifecycleEvent::ParentSubagentFinished { parent, child } => {
+                    format!("parent_subagent_finished:{parent}:{child}")
+                }
+                LifecycleEvent::ChildJoined { parent, child } => {
+                    format!("child_joined:{parent}:{child}")
+                }
+                LifecycleEvent::ParentUnloadAck { parent } => {
+                    format!("parent_unload_ack:{parent}")
+                }
+            })
+            .collect()
+    }
+
     /// T-1-4：把父会话的取消传播到它派生的全部子 seed（递归覆盖孙代）。
     ///
     /// 子代理的取消入口与父会话一致：会话键控取消标记（子 seed 在途工具在
@@ -814,6 +846,7 @@ impl AgentRegistry {
     fn cancel_subagent_children(&mut self, parent: &str) {
         let children = self.children_of(parent);
         for child in children {
+            self.supervisor.cancel_sent(parent, &child);
             qaqh_workspace::set_session_cancel(&child, true);
             if let Some(hub) = self.hub.as_ref() {
                 hub.mark_worker_dead(&child);
@@ -907,20 +940,31 @@ impl AgentRegistry {
 
     pub fn shutdown_all(&mut self) {
         self.shutting_down = true;
-        let mut instances: Vec<AgentInstance> = self
+        // Close roots through the supervisor so every child tree follows
+        // terminal -> edge finish -> join -> parent ack.
+        let mut roots: Vec<String> = self
+            .instances
+            .keys()
+            .filter(|seed| {
+                self.supervisor
+                    .parent_of(seed)
+                    .is_none_or(|parent| !self.instances.contains_key(&parent))
+            })
+            .cloned()
+            .collect();
+        roots.sort();
+        for seed in roots {
+            self.close(&seed);
+        }
+        // Defensive fallback for an instance whose edge state was already
+        // removed before shutdown.
+        let leftovers: Vec<AgentInstance> = self
             .instances
             .drain()
             .map(|(_, instance)| instance)
             .collect();
-        // Signal every worker before waiting on any of them. In-process actors
-        // run concurrently (per-actor thread-local state); signal all before
-        // joining any, so a busy actor is not left waiting on its channel while
-        // shut down.
-        for instance in &mut instances {
-            instance.signal_shutdown();
-        }
-        for mut instance in instances {
-            instance.finish_shutdown();
+        for instance in leftovers {
+            instance.shutdown();
         }
     }
 
@@ -935,10 +979,19 @@ impl AgentRegistry {
             .instances
             .iter()
             .filter(|(_, instance)| instance.is_dead())
+            .filter(|(seed, _)| {
+                self.supervisor.parent_of(seed).is_none_or(|parent| {
+                    !self
+                        .instances
+                        .get(&parent)
+                        .is_some_and(AgentInstance::is_dead)
+                })
+            })
             .map(|(seed, instance)| {
                 let parent_cancel = self
-                    .subagent_parent
-                    .get(seed)
+                    .supervisor
+                    .parent_of(seed)
+                    .as_ref()
                     .and_then(|parent| self.cancel_for_seed(parent));
                 (seed.clone(), instance.kind_name(), parent_cancel)
             })
@@ -954,9 +1007,12 @@ impl AgentRegistry {
                 log::warn!("[AGENT:{seed}] worker exited immediately after spawn; backing off");
                 continue;
             }
-            if let Some(instance) = self.instances.remove(&seed) {
-                instance.shutdown();
+            if !self.children_of(&seed).is_empty() {
+                log::warn!(
+                    "[AGENT:{seed}] dead parent detected; closing child tree before respawn"
+                );
             }
+            self.close(&seed);
             log::warn!("[AGENT:{seed}] in-process worker died; respawning");
             // B9/R2：先 seal 后 spawn——新 worker 线程一启动就可能发布
             // 新 ask/TurnOpened，晚于 spawn 的 force 收尾会误杀活交互。
@@ -988,6 +1044,13 @@ impl AgentRegistry {
 
     pub fn is_running(&self, seed: &str) -> bool {
         self.instances.contains_key(seed)
+    }
+
+    /// Test/ops hook: whether the worker's loop thread has exited without
+    /// having been reaped by `close` or `respawn_dead_agents`.
+    #[doc(hidden)]
+    pub fn worker_finished(&self, seed: &str) -> bool {
+        self.instances.get(seed).is_some_and(AgentInstance::is_dead)
     }
 
     /// 向所有存活 agent 广播同一 Ringing 命令。
@@ -1030,6 +1093,31 @@ impl AgentInstance {
                 .as_ref()
                 .is_some_and(std::thread::JoinHandle::is_finished),
         }
+    }
+
+    fn is_fully_stopped(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+            && self
+                .reader
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    fn wait_until_stopped(&self, seed: &str) -> bool {
+        const TERMINAL_WAIT: Duration = Duration::from_secs(30);
+        let deadline = Instant::now() + TERMINAL_WAIT;
+        while !self.is_fully_stopped() {
+            if Instant::now() >= deadline {
+                log::error!(
+                    "[registry] child {seed} terminal observation timed out after {TERMINAL_WAIT:?}"
+                );
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
     }
 
     fn kind_name(&self) -> AgentKind {
@@ -1313,8 +1401,7 @@ mod tests {
             hub: None,
             shutting_down: false,
             last_spawn: HashMap::new(),
-            subagent_parent: HashMap::new(),
-            subagent_children: HashMap::new(),
+            supervisor: SubagentSupervisor::default(),
         };
         let connection_id = ConnectionId::new("connection-registry");
 
@@ -1413,10 +1500,11 @@ mod tests {
             hub: None,
             shutting_down: false,
             last_spawn: HashMap::new(),
-            subagent_parent: HashMap::new(),
-            subagent_children: HashMap::new(),
+            supervisor: SubagentSupervisor::default(),
         };
-        registry.link_subagent("parent-seed", "child-seed");
+        registry
+            .link_subagent("parent-seed", "child-seed")
+            .expect("link subagent");
         let cancel = qaqh_ringing::RingingWorkerCommandEnvelope::new(
             "parent-seed",
             "cancel-parent",

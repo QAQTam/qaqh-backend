@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{
-    ControlEvent, ConversationCommand, ConversationEvent, DomainEvent, RingingChannel, SessionState,
+    ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, DomainEvent,
+    RingingChannel, SessionState,
 };
 use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 use qaqh_runtime::{AgentRegistry, RingingHub};
@@ -359,6 +360,171 @@ fn parent_close_cancels_and_joins_child_tree() {
 
     // Repeated close must stay idempotent after the whole tree is gone.
     registry.close(&parent);
+}
+
+/// P2-5 Gate：parent unload 必须等到 child terminal 先闭合 edge，再 join
+/// child，最后才对 parent unload ack。
+#[test]
+fn parent_unload_waits_child_terminal_join() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-parent-unload-order-test");
+    let parent = format!("sub-unload-parent-{}", std::process::id());
+    let child = format!("sub-unload-child-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-parent-unload-order-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(hub);
+
+    qaqh_workspace::runtime::clear_context();
+    registry.spawn_new(&parent).expect("spawn parent session");
+    spawn_linked_subagent(&mut registry, &parent, &child);
+
+    registry.close(&parent);
+
+    let trace = registry.subagent_lifecycle_trace();
+    let ordered: Vec<String> = trace
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.split(':').next(),
+                Some(
+                    "parent_unload_requested"
+                        | "child_cancel_sent"
+                        | "child_terminal"
+                        | "parent_subagent_finished"
+                        | "child_joined"
+                        | "parent_unload_ack"
+                )
+            )
+        })
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            format!("parent_unload_requested:{parent}"),
+            format!("child_cancel_sent:{parent}:{child}"),
+            format!("child_terminal:{parent}:{child}"),
+            format!("parent_subagent_finished:{parent}:{child}"),
+            format!("child_joined:{parent}:{child}"),
+            format!("parent_unload_ack:{parent}"),
+        ],
+        "parent unload must follow child terminal -> parent edge finish -> child join -> parent ack"
+    );
+    assert!(!registry.is_running(&parent));
+    assert!(!registry.is_running(&child));
+}
+
+/// P2-5：daemon shutdown 也走同一 child terminal -> edge finish -> join 顺序。
+#[test]
+fn shutdown_all_waits_child_terminal_join() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-shutdown-order-test");
+    let parent = format!("sub-shutdown-parent-{}", std::process::id());
+    let child = format!("sub-shutdown-child-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-shutdown-order-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(hub);
+
+    qaqh_workspace::runtime::clear_context();
+    registry.spawn_new(&parent).expect("spawn parent session");
+    spawn_linked_subagent(&mut registry, &parent, &child);
+
+    registry.shutdown_all();
+
+    let ordered: Vec<String> = registry
+        .subagent_lifecycle_trace()
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.split(':').next(),
+                Some(
+                    "parent_unload_requested"
+                        | "child_cancel_sent"
+                        | "child_terminal"
+                        | "parent_subagent_finished"
+                        | "child_joined"
+                        | "parent_unload_ack"
+                )
+            )
+        })
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            format!("parent_unload_requested:{parent}"),
+            format!("child_cancel_sent:{parent}:{child}"),
+            format!("child_terminal:{parent}:{child}"),
+            format!("parent_subagent_finished:{parent}:{child}"),
+            format!("child_joined:{parent}:{child}"),
+            format!("parent_unload_ack:{parent}"),
+        ],
+        "shutdown must use the same ordered child-tree teardown"
+    );
+    assert!(!registry.is_running(&parent));
+    assert!(!registry.is_running(&child));
+}
+
+/// P2-5：parent worker 已退出（panic/异常终止）时，respawn 前必须先关闭
+/// child tree，不能留下孤儿 child。
+#[test]
+fn dead_parent_closes_child_tree_before_respawn() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-dead-parent-test");
+    let parent = format!("sub-dead-parent-{}", std::process::id());
+    let child = format!("sub-dead-child-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-dead-parent-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(hub);
+
+    qaqh_workspace::runtime::clear_context();
+    registry.spawn_new(&parent).expect("spawn parent session");
+    spawn_linked_subagent(&mut registry, &parent, &child);
+
+    let shutdown = RingingWorkerCommandEnvelope::new(
+        parent.clone(),
+        "test-parent-exit",
+        RingingCommand::Control(ControlCommand::SessionShutdown),
+    );
+    registry
+        .send_ringing(&parent, &shutdown)
+        .expect("send parent shutdown");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !registry.worker_finished(&parent) {
+        assert!(
+            Instant::now() < deadline,
+            "parent worker must exit before respawn test"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // respawn_dead_agents has a 1s crash-loop backoff; keep this test honest
+    // about exercising the dead-parent path rather than the backoff branch.
+    std::thread::sleep(Duration::from_millis(1100));
+    registry.respawn_dead_agents();
+
+    assert!(registry.is_running(&parent), "parent must be respawned");
+    assert!(
+        !registry.is_running(&child),
+        "child tree must be closed before parent respawn"
+    );
+    let trace = registry.subagent_lifecycle_trace();
+    let child_terminal = trace
+        .iter()
+        .position(|event| event == &format!("child_terminal:{parent}:{child}"))
+        .expect("child terminal must be recorded");
+    let parent_finished = trace
+        .iter()
+        .position(|event| event == &format!("parent_subagent_finished:{parent}:{child}"))
+        .expect("parent edge finish must be recorded");
+    let child_joined = trace
+        .iter()
+        .position(|event| event == &format!("child_joined:{parent}:{child}"))
+        .expect("child join must be recorded");
+    assert!(
+        child_terminal < parent_finished && parent_finished < child_joined,
+        "dead parent teardown must preserve terminal -> edge finish -> join: {trace:?}"
+    );
+
+    registry.shutdown_all();
 }
 
 /// #114：idle unload 走同一 close 路径，父 session 卸载后 child 不得继续运行。
