@@ -105,10 +105,10 @@ cargo run -p qaqh-daemon -- server   # 局域网 headless 模式(远端壳直连
 cargo run -p qaqh-daemon -- status   # 读 daemon.json 探活
 cargo run -p qaqh-daemon -- stop
 
-# WebUI 构建(输出 webui/out/renderer,不入库)
-cd webui && bun install --frozen-lockfile && bun run typecheck && bun run build
+# WebUI 构建与安全回归(输出 webui/out/renderer,不入库)
+cd webui && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build
 
-# webUI 网关(先构建独立 binary;默认随机端口并打印实际地址)
+# WebUI 网关(先构建独立 binary;默认随机端口并打印实际地址)
 cargo build -p qaqh-webui-gateway
 cargo run -p qaqh-daemon -- webui
 # 固定端口必须显式指定:
