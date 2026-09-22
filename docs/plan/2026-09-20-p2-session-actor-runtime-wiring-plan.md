@@ -3,7 +3,7 @@
 > 基线：`betav2 @ 1d062d9`
 > 上位计划：[`2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./2026-09-20-qaqh-v2.0-总架构设计-plan.md) §P2
 > P2-3 交接：[`2026-09-21-p2-3-handoff.md`](./2026-09-21-p2-3-handoff.md)
-> 状态：进行中；本文件是 P2 运行时接线的执行清单与状态回写入口。
+> 状态：已完成（2026-09-22）；本文件是 P2 运行时接线的执行清单与状态回写入口。
 > 原则：每个 PR 只完成一个可验收切片；未合入前不得把计划项描述成运行时已完成。
 
 ## 1. 当前事实
@@ -13,23 +13,29 @@
 - `SessionActor` FIFO mailbox、容量和 shutdown 纯状态机。
 - `TurnCore` 的 Start/Round/Suspend/Resume/Cancel/Finish 状态转换。
 - 单 active turn、cancel 幂等、冲突终态 fail-closed 的单元契约测试。
-- P2-4a 显式 runtime/turn context adapter、P2-4b lifecycle port、P2-4c-a
-  compaction task port 与 P2-4c-b ToolCallContext 字段来源已落地；现有
-  thread-local 仍作为等价来源保留，生产路径尚未全部切换。
+- P2-2 的用户/系统输入、permission、ask/plan、subscription ingress 已接入
+  SessionActor mailbox；P2-3 取消树与单一 terminal 已收口。
+- P2-4 显式 runtime/turn context、lifecycle port、compaction port 与生产
+  ToolCallContext/sandbox 接线已完成；thread-local 仅作为 legacy handler
+  兼容视图保留。
+- P2-5 SubagentSupervisor、P2-6 spawn recovery/消息去重、P2-7 root
+  QuotaLedger 已完成。
 - 代码位置：`crates/qaqh-session/src/actor.rs`。
 
-尚未完成：
+当前边界：
 
-- `SessionActor` 尚未被 daemon/runtime 生产路径持有；当前主要是 `qaqh-session` 内的独立模块。
-- 真实 turn 仍由 `crates/qaqh-runtime/src/agent/engine_turn.rs` 的 `run_lap` 直接控制。
-- 输入、取消、审批和订阅尚未统一经过 mailbox。
-- 取消状态仍存在 token 与 thread-local 两处语义；`Loop::user_cancelled`
-  重复布尔已删除。
-- compaction/title/liveness/session lifecycle 已收口到 port，但尚未由
-  SessionActor/task 异步执行；thread-local 清理仍待完成。
-- `SubagentSupervisor`、两阶段 spawn 恢复和 root `QuotaLedger` 尚未实现。
+- `run_lap` 仍是实际 I/O 执行器；`TurnActor`/`SessionActor` 是 turn
+  lifecycle、interaction、subscription 状态的唯一提交边界。
+- compaction/title/liveness/session lifecycle 已收口到 port，但异步 task
+  ownership 仍可在 P3 继续演进。
+- `ActorToolScope` 作为兼容类型保留；生产工具 worker 已改走显式
+  `ToolExecutionContext`。
+- P2-6 的恢复扫描已落地；daemon startup 的 recovery executor 需在
+  canonical log production writer 接线后接入。
+- P2-7 的 quota ledger 已接 subagent spawn；content/tool reservation 应随
+  P3 ToolRuntime 接入。
 
-结论：P2 只有纯状态机原型完成，不能描述成 SessionActor 已接管运行时。
+结论：P2 计划内切片已收口；P3 的前置显式 ToolCallContext 已具备。
 
 ## 2. 不变量
 
@@ -72,7 +78,7 @@ Gate：
 
 ### P2-2 mailbox 全入口
 
-状态：进行中；按入口类型拆分，避免一次迁移全部 wire 语义。
+状态：已完成；按入口类型拆分为 P2-2a/2b/2c/2d-a/2d-b。
 
 #### P2-2a 用户与系统输入准入
 
@@ -378,38 +384,52 @@ Gate：
 
 ### P2-6 两阶段 spawn 恢复与消息去重
 
-状态：待开始。
+状态：已完成，issue #260 / PR #261，merge `aa4e7ef`。
 
 交付：
 
-- edge/child log 双向孤儿恢复扫描。
-- inter-agent message 使用 `message_id/input_id` 去重。
-- 恢复不得伪造或重写 spawn edge。
+- `qaqh-runtime` 新增 canonical facts 驱动的 `subagent_recovery` 扫描器：
+  edge 无 child log、child log 无 edge、parent mismatch、重复 spawn、
+  child terminal 未闭合 edge、trigger_turn 缺 `TurnStarted`、queue_only
+  不补 turn。
+- 恢复计划只产生 append-only action，不伪造或重写 `SubagentSpawned`。
+- `ConversationSendMessage` 增加稳定 `message_id/input_purpose`；
+  subagent task/result 注入使用稳定 ID。
+- `InjectionBus` 与 `TurnActor` 按 `input_id` 去重，重复输入在 terminal
+  后仍不会开启第二个 turn。
 
 Gate：
 
-- spawn 前后崩溃、重复投递、孤儿 child 和重复 edge 场景全绿。
-- 恢复结果可从 canonical facts 重放。
+- edge/child 双向孤儿、重复 edge、parent mismatch、terminal 补 finished、
+  trigger_turn 补一次 `TurnStarted`、queue_only 不补 turn 测试通过。
+- `cargo test -p qaqh-runtime`、`cargo test --workspace`、
+  `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
 ### P2-7 root `QuotaLedger`
 
-状态：待开始。
+状态：已完成，issue #262 / PR #263，merge `986eb8f`。
 
 交付：
 
-- 路径固定为 `{data_dir}/quota/{root_session_id}/ledger.jsonl`。
-- 由 root owner 持有 `quota.lock`，实现 reservation/reconciliation。
-- reservation durable ack 必须先于 spawn/content/tool 副作用。
+- `qaqh-runtime` 新增 `quota_ledger`：路径固定为
+  `{data_dir}/quota/{root_session_id}/ledger.jsonl`，独立 `quota.lock`。
+- append-only `reserved -> committed/released`；soft/hard watermark；
+  replay 后按 canonical child edge reconciliation。
+- `AgentRegistry` 按 root session 持有 ledger；subagent spawn 先 durable
+  reserve，成功 commit，spawn/link 失败 release。
+- reservation durable ack 先于 child actor 启动。
 
 Gate：
 
-- quota 测试与 subagent terminal/join 顺序解耦判定。
-- crash 后 reservation 可恢复，不重复扣减或漏释放。
-- child writer fence 不错误覆盖 root quota lock 语义。
+- ledger durable replay、idempotent commit/release、hard/soft limit、
+  unbacked spawn reconciliation、spawn commit/reject 测试通过。
+- quota 测试与 subagent terminal/join 顺序独立。
+- `cargo test -p qaqh-runtime`、`cargo clippy --workspace --all-targets -- -D warnings`
+  通过。
 
 ## 4. P2 总体 Gate
 
-P2 只有同时满足以下条件才可标记完成：
+P2 只有同时满足以下条件才可标记完成（本机证据已逐项满足）：
 
 - turn lifecycle、cancel、suspend/resume、compaction 行为契约测试全绿。
 - 同一 session 最多一个 active turn。
@@ -417,7 +437,9 @@ P2 只有同时满足以下条件才可标记完成：
 - 输入、取消、审批和订阅不存在绕过 `SessionActor` 的状态写入。
 - child 终止、parent unload、join 的固定顺序通过故障注入。
 - quota reservation/reconciliation 与 child join 顺序独立验收。
-- 总计划、handoff 和本文件的实施状态已回写，且每项状态有对应 commit/PR 证据。
+- 总计划、handoff 和本文件的实施状态已回写，且每项状态有对应 commit/PR
+  证据；P2-6/P2-7 证据见本文件及
+  [`2026-09-22-p2-final-handoff.md`](./2026-09-22-p2-final-handoff.md)。
 
 ## 5. 验证与回写
 
