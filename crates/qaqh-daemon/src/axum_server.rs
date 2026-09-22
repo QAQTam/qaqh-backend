@@ -3,7 +3,7 @@
 
 mod axum_impl;
 
-pub use axum_impl::{AppState, DebugNonceStore, build_router};
+pub use axum_impl::{AppState, build_router};
 
 #[cfg(test)]
 /// 进程级 SessionManager 初始化守卫。
@@ -82,7 +82,6 @@ mod sse_tests {
                 .clone(),
             token: TOKEN.into(),
             epoch: "lag-epoch".into(),
-            debug_nonces: std::sync::Arc::new(DebugNonceStore::new()),
             shutdown,
         }
     }
@@ -371,7 +370,6 @@ mod axum_tests {
             service,
             token: String::from("test-token"),
             epoch: String::from("test-epoch"),
-            debug_nonces: std::sync::Arc::new(DebugNonceStore::new()),
             shutdown,
         }
     }
@@ -388,10 +386,22 @@ mod axum_tests {
     }
 
     #[tokio::test]
+    async fn activity_requires_auth() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .uri("/activity")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn activity_exposes_has_active_work() {
         let app = build_router(test_state());
         let req = Request::builder()
             .uri("/activity")
+            .header("authorization", "Bearer test-token")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -681,32 +691,28 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// P0-3：桥脚本只下发一次性 nonce，绝不内联真实 token。
+    /// 普通 daemon Router 不挂载浏览器控制面；WebUI 只能走独立 `webui` 网关。
     #[tokio::test]
-    async fn debug_bridge_returns_nonce_not_token() {
+    async fn webui_routes_are_not_mounted() {
         let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "text/javascript; charset=utf-8"
-        );
-        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-        let txt = String::from_utf8_lossy(&body);
-        assert!(txt.contains("window.__QAQH_DEBUG__"));
-        assert!(txt.contains("nonce"));
-        assert!(
-            !txt.contains("test-token"),
-            "bridge must not inline the daemon token: {txt}"
-        );
+        for path in [
+            "/debug/",
+            "/debug/__qaqh_bridge__.js",
+            "/debug/__qaqh_token__",
+            "/ui/",
+            "/__gateway/bootstrap.js",
+        ] {
+            let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not be mounted on the daemon"
+            );
+        }
     }
 
-    /// `/health` 不再回显 `token_len`（凭据长度也是旁路信息）。
+    /// `/health` 不回显 `token_len`（凭据长度也是旁路信息）。
     #[tokio::test]
     async fn health_does_not_leak_token() {
         let app = build_router(test_state());
@@ -725,290 +731,6 @@ mod axum_tests {
         );
     }
 
-    /// nonce 一次性兑换：第一次成功、第二次（同 nonce）作废。
-    #[tokio::test]
-    async fn debug_token_exchange_is_one_time() {
-        let state = test_state();
-        let app = build_router(state);
-        // 1) 取桥脚本里的 nonce。
-        let bridge = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(bridge).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let txt = String::from_utf8_lossy(&body);
-        let nonce = txt
-            .split("\"nonce\":\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("bridge body must carry a nonce")
-            .to_string();
-
-        // 2) 兑换成功并拿到真实 token。
-        let exchange = |nonce: String| {
-            Request::builder()
-                .method("POST")
-                .uri("/debug/__qaqh_token__")
-                .header("host", "127.0.0.1")
-                .header("sec-fetch-site", "same-origin")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "nonce": nonce }).to_string(),
-                ))
-                .unwrap()
-        };
-        let resp = app.clone().oneshot(exchange(nonce.clone())).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("cache-control").map(|v| v.as_bytes()),
-            Some(b"no-store".as_slice()),
-            "token exchange must not be cacheable"
-        );
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["token"], serde_json::json!("test-token"));
-
-        // 3) 同一 nonce 再用一次 → 403。
-        let resp = app.oneshot(exchange(nonce)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    /// 跨站 `Sec-Fetch-Site` 的兑换请求必须被拒（DNS rebinding 兜底）。
-    #[tokio::test]
-    async fn debug_token_exchange_rejects_cross_site() {
-        let state = test_state();
-        let app = build_router(state);
-        let bridge = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(bridge).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let txt = String::from_utf8_lossy(&body);
-        let nonce = txt
-            .split("\"nonce\":\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("bridge body must carry a nonce")
-            .to_string();
-        let req = Request::builder()
-            .method("POST")
-            .uri("/debug/__qaqh_token__")
-            .header("host", "127.0.0.1")
-            .header("sec-fetch-site", "cross-site")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({ "nonce": nonce }).to_string(),
-            ))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn debug_rejects_traversal() {
-        let app = build_router(test_state());
-        // safe_join should reject traversal; we hit /debug/../outside
-        let req = Request::builder()
-            .uri("/debug/../outside")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        // axum normalizes path, but our safe_join will reject => 400
-        // If axum normalizes `..` to `/`, it may become 404; accept either 400 or 404
-        assert!(resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn debug_not_found_for_missing_file() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/debug/missing_file_xyz.txt")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn stop_requires_auth() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn stop_success() {
-        let state = test_state();
-        let app = build_router(state);
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop")
-            .header("authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn stop_if_idle_conflict_when_busy() {
-        // has_active_work is false in test (no agents), so should be OK, not conflict
-        // Just verify auth and basic path
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop-if-idle")
-            .header("authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        // In test, no active work, so 200; if busy would be 409
-        assert!(resp.status() == StatusCode::OK || resp.status() == StatusCode::CONFLICT);
-    }
-
-    #[tokio::test]
-    async fn debug_bridge_rejects_non_loopback() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn debug_bridge_allows_loopback() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    /// `/debug` 的 Host 白名单：伪造 Host（DNS rebinding 形态）必须 421。
-    #[tokio::test]
-    async fn debug_bridge_rejects_foreign_host() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "evil.example")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
-    }
-
-    /// 缺 Host 一律拒绝（fail-closed；hyper 的 HTTP/1.1 服务端恒会补 Host）。
-    #[tokio::test]
-    async fn debug_bridge_rejects_missing_host() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
-    }
-
-    /// 回环 Host 的白名单形态：localhost / IPv4 / IPv6 字面量（均可带端口）。
-    #[tokio::test]
-    async fn debug_bridge_allows_loopback_host_forms() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        for host in ["127.0.0.1:51325", "localhost:51325", "[::1]:51325"] {
-            let app = build_router(test_state());
-            let mut req = Request::builder()
-                .uri("/debug/__qaqh_bridge__.js")
-                .header("host", host)
-                .body(Body::empty())
-                .unwrap();
-            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                12345,
-            )));
-            let resp = app.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK, "host {host} must be allowed");
-        }
-    }
-
-    /// 跨源 no-cors 子资源加载必须在浏览器侧被拒：`<script src>` 拿不到 token。
-    #[tokio::test]
-    async fn debug_bridge_sets_corp_and_nosniff() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers()
-                .get("cross-origin-resource-policy")
-                .expect("CORP header"),
-            "same-origin"
-        );
-        assert_eq!(
-            resp.headers()
-                .get("x-content-type-options")
-                .expect("nosniff header"),
-            "nosniff"
-        );
-    }
-
-    /// Host 守卫只作用于 `/debug` 前缀：LAN 模式远端壳（自定义 Host）不受影响。
-    #[tokio::test]
-    async fn foreign_host_does_not_block_command_api() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop-if-idle")
-            .header("host", "192.168.1.50:51325")
-            .header("authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_ne!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
-    }
     /// BUG-2026-09-13-18：`limit=0` 时 handler 曾把 0 直通给 `paginate_turns`，
     /// `end == start` → 空页，但 `start > 0` 仍报 `has_more=true`，按 has_more
     /// 驱动的客户端翻页永远拿不到行、也永远停不下来。修复要求 limit 经
