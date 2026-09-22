@@ -10,12 +10,9 @@
 //! `todo_list_for`）保留全量能力：HTTP service 面与 CLI 直访不受工具形态
 //! 约束。
 
-use std::time::Duration;
-
 use serde_json::Value;
 
-use crate::permission::ToolCategory;
-use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk};
+use crate::{ToolCallCtx, ToolResult};
 
 use super::actions::{exec_todo_set, exec_todo_write};
 
@@ -116,7 +113,7 @@ pub fn handle_list(ctx: ToolCallCtx) -> ToolResult {
 // Schemas（单一职责：无 oneOf、无参数归属说明文字）
 // ═══════════════════════════════════════════════════════
 
-fn todo_write_schema() -> Value {
+pub(crate) fn todo_write_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -144,7 +141,7 @@ fn todo_write_schema() -> Value {
     })
 }
 
-fn todo_update_schema() -> Value {
+pub(crate) fn todo_update_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -157,7 +154,7 @@ fn todo_update_schema() -> Value {
     })
 }
 
-fn todo_list_schema() -> Value {
+pub(crate) fn todo_list_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -171,55 +168,13 @@ fn todo_list_schema() -> Value {
 // Registration
 // ═══════════════════════════════════════════════════════
 
-/// 拆分工具注册项（key/description/schema/handler/risk/category）。
-type SplitTool = (
-    &'static str,
-    &'static str,
-    Value,
-    fn(ToolCallCtx) -> ToolResult,
-    ToolRisk,
-    ToolCategory,
-);
-
 pub fn register(mgr: &mut crate::ToolManager) {
+    // Display 仍保留 fallback 注册；typed 执行路径优先使用 ToolResult.data
+    // 中的 canonical payload，旧 projector 只服务历史/legacy 回放。
     mgr.register_display("todo_write", crate::display::project_todo_write);
     mgr.register_display("todo_update", crate::display::project_todo_update);
     mgr.register_display("todo_list", crate::display::project_todo_list);
-    let tools: [SplitTool; 3] = [
-        (
-            "todo_write",
-            "Replace the whole task list (full-replace). Each item needs title+status; keep ids to preserve items; exactly one in_progress.",
-            todo_write_schema(),
-            handle_write,
-            ToolRisk::Write,
-            ToolCategory::Write,
-        ),
-        (
-            "todo_update",
-            "Set one task's status: {id, status, evidence?}. One task per call — loop for batches.",
-            todo_update_schema(),
-            handle_update,
-            ToolRisk::Write,
-            ToolCategory::Write,
-        ),
-        (
-            "todo_list",
-            "List session tasks; optional status filter. Read-only (allowed in plan mode).",
-            todo_list_schema(),
-            handle_list,
-            ToolRisk::ReadOnly,
-            ToolCategory::Read,
-        ),
-    ];
-    for (key, description, input_schema, handler, risk, category) in tools {
-        mgr.register(ToolHandler {
-            key: key.to_string(),
-            description,
-            input_schema,
-            handler,
-            risk,
-            category,
-            default_timeout: Duration::from_secs(15),
-        });
-    }
+    mgr.register_typed(super::typed::TodoWriteTool);
+    mgr.register_typed(super::typed::TodoUpdateTool);
+    mgr.register_typed(super::typed::TodoListTool);
 }

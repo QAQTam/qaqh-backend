@@ -62,4 +62,4 @@ pub use output::{
     ToolProjection, ToolStatus,
 };
 pub use progress::{ProgressSink, ProgressStream, ToolProgress};
-pub use typed::TypedTool;
+pub use typed::{TypedTool, TypedToolAdapter};
