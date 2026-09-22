@@ -636,10 +636,10 @@ mod tests {
         let mut mgr = crate::ToolManager::new();
         register(&mut mgr);
         let desc = mgr
-            .handlers
-            .get("apply_patch")
+            .lookup("apply_patch")
             .expect("apply_patch registered")
-            .description;
+            .description
+            .as_str();
         assert!(
             desc.contains("FIRST hit"),
             "description must warn that the first match wins: {desc}"
