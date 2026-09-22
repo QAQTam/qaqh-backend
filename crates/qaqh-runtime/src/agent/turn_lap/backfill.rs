@@ -66,18 +66,7 @@ pub(crate) fn emit_completed_tool_round(
             .map(|a| a.to_string())
             .unwrap_or_default();
         let content = result.model_text();
-        ToolEngine::emit_timeline_tool_result(
-            ctx,
-            turn_id,
-            round_num,
-            tc_id,
-            name,
-            &args,
-            content,
-            result.status,
-            &result.metrics,
-            result.diff.clone(),
-        );
+        ToolEngine::emit_timeline_tool_result(ctx, turn_id, round_num, tc_id, name, &args, result);
         // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
             qaqh_domain::ToolEvent::AuditRecorded {

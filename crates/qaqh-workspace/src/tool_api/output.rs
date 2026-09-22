@@ -135,6 +135,40 @@ impl ToolOutcome {
             _ => Ok(()),
         }
     }
+
+    /// 投影到迁移期 wire 容器 [`qaqh_types::ToolResult`]。
+    ///
+    /// 这是 typed runtime 与 v1 message/timeline 之间唯一的兼容出口：
+    /// canonical typed payload 进入 `ToolResult.data`，model/display/error
+    /// 分别沿用既有 wire 字段，旧 client 不需要理解 `ToolOutcome`。
+    pub fn to_tool_result(&self) -> qaqh_types::ToolResult {
+        let data = match &self.output {
+            ToolOutputValue::Empty => serde_json::json!({}),
+            ToolOutputValue::Text(text) => serde_json::json!({ "text": text }),
+            ToolOutputValue::Json(value) => value.clone(),
+            ToolOutputValue::ContentRef(reference) => {
+                serde_json::to_value(reference).unwrap_or_else(|_| serde_json::json!({}))
+            }
+        };
+        let mut result = qaqh_types::ToolResult::text(self.status, self.model.text.clone());
+        result.data = data;
+        result.images = self.images.clone();
+        result.diff = self.display.diff.clone();
+        result.error = self.error.as_ref().map(|error| qaqh_types::ToolError {
+            code: error.code.as_str().to_owned(),
+            message: error.detail.clone(),
+            retryable: error.retryable,
+            hint: error.hint.clone(),
+        });
+        result.metrics = qaqh_types::ToolResultMetrics {
+            elapsed_ms: Some(self.metrics.elapsed.as_millis() as u64),
+            output_bytes: self.metrics.output_bytes,
+            retry_count: self.metrics.retry_count,
+            effective_tool_name: self.metrics.effective_tool_name.clone(),
+            user_initiated: self.metrics.user_initiated,
+        };
+        result
+    }
 }
 
 #[cfg(test)]
@@ -177,7 +211,9 @@ mod tests {
             "成功状态带 error 违反不变量"
         );
         assert!(
-            outcome(ToolStatus::Partial, None).check_invariants().is_err(),
+            outcome(ToolStatus::Partial, None)
+                .check_invariants()
+                .is_err(),
             "失败状态缺 error 违反不变量"
         );
     }
@@ -194,6 +230,9 @@ mod tests {
 
         assert!(Empty.model_blocks().is_empty());
         assert_eq!(Empty.summary(), None);
-        assert_eq!(Empty.display(&serde_json::json!({})), ToolDisplay::default());
+        assert_eq!(
+            Empty.display(&serde_json::json!({})),
+            ToolDisplay::default()
+        );
     }
 }

@@ -298,6 +298,31 @@ pub(crate) fn project_todo_list(args: &serde_json::Value, output: &str) -> ToolD
         .unwrap_or_else(|_| todo_display("todo", output))
 }
 
+/// 从 typed runtime 写入 `ToolResult.data` 的 canonical payload 生成展示投影。
+///
+/// 仅识别已完成 typed 化的 todo 三件套；未命中时返回 `None`，调用方回退旧
+/// `ToolDisplayFn`。这保证 display 不再从 model JSON 字符串考古。
+pub(crate) fn project_typed_tool_display(
+    name: &str,
+    args: &serde_json::Value,
+    data: &serde_json::Value,
+) -> Option<ToolDisplay> {
+    match name {
+        "todo_write" => serde_json::from_value::<crate::todo::typed::TodoWriteOutput>(data.clone())
+            .ok()
+            .map(|output| output.display(args)),
+        "todo_update" => {
+            serde_json::from_value::<crate::todo::typed::TodoUpdateOutput>(data.clone())
+                .ok()
+                .map(|output| output.display(args))
+        }
+        "todo_list" => serde_json::from_value::<crate::todo::typed::TodoListOutput>(data.clone())
+            .ok()
+            .map(|output| output.display(args)),
+        _ => None,
+    }
+}
+
 /// MCP 动态工具没有工具作者专属投影时的 canonical fallback。
 ///
 /// `label` 必须是完整注册名，多个 MCP 工具同屏时标题/身份才可区分。
