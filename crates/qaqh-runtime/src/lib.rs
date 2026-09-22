@@ -5,6 +5,7 @@ mod host_impl;
 mod registry;
 pub mod ringing;
 mod service;
+mod subagent_supervisor;
 pub mod timeline;
 mod timeline_store;
 
