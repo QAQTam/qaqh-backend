@@ -1,18 +1,16 @@
-//! axum_impl — daemon HTTP 层（Ringing V1 + 服务面 + 调试/控制）。
+//! axum_impl — daemon HTTP 层（Ringing V1 + 服务面 + 控制）。
 //!
 //! 由单文件 `axum_server.rs` 拆分（Phase 2-4）：`mod axum_impl` 内联模块解体为
 //! 目录模块，对外 API 不变（`AppState` + `build_router`）。
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{
     Router,
     body::Bytes,
-    extract::{ConnectInfo, Path, Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{
@@ -42,7 +40,7 @@ use qaqh_runtime::ringing::hydrate_attachment_previews;
 pub mod auth;
 pub mod command;
 pub mod content;
-pub mod debug_control;
+pub mod control;
 pub mod service_api;
 pub mod sse;
 pub mod timeline_api;
@@ -53,12 +51,7 @@ pub(crate) use auth::{
 };
 pub(crate) use command::{handle_command, handle_command_status, handle_open, handle_renew};
 pub(crate) use content::{handle_content_get, handle_content_upload};
-pub use debug_control::DebugNonceStore;
-pub(crate) use debug_control::{
-    activity, debug_headers, handle_debug, handle_debug_bridge, handle_debug_index,
-    handle_debug_token, handle_stop, handle_stop_if_idle, health, host_guard, loopback_guard,
-    not_found,
-};
+pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
 pub(crate) use sse::{handle_events, handle_timeline_events};
 #[cfg(test)]
@@ -86,9 +79,6 @@ pub struct AppState {
     pub service: QaqhService,
     pub token: String,
     pub epoch: String,
-    /// Debug 桥一次性 nonce 存储（T-2-3）：桥脚本只下发 nonce，token 经
-    /// `POST /debug/__qaqh_token__` 一次性兑换。
-    pub debug_nonces: Arc<DebugNonceStore>,
     pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
@@ -158,18 +148,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/control/v1/stop", post(handle_stop))
         .route("/control/v1/stop-if-idle", post(handle_stop_if_idle))
-        .route("/debug/__qaqh_bridge__.js", get(handle_debug_bridge))
-        .route("/debug/__qaqh_token__", post(handle_debug_token))
-        .route("/debug", get(handle_debug_index))
-        .route("/debug/", get(handle_debug_index))
-        .route("/debug/{*path}", get(handle_debug))
         .fallback(not_found)
-        // 回环边界（对 /debug 前缀生效）：对端 IP + Host 白名单双检，
-        // 再由 debug_headers 给响应补 CORP/nosniff。中心层顺序：外→内为
-        // debug_headers → loopback_guard → host_guard。
-        .layer(axum::middleware::from_fn(host_guard))
-        .layer(axum::middleware::from_fn(loopback_guard))
-        .layer(axum::middleware::from_fn(debug_headers))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(MAX_CONNECTIONS))
         .layer(TraceLayer::new_for_http())
@@ -248,40 +227,5 @@ pub(crate) mod pure_tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn loopback_host_allowlist_accepts_local_forms_only() {
-        for host in [
-            "127.0.0.1",
-            "127.0.0.1:51325",
-            "localhost",
-            "LOCALHOST:51325",
-            " 127.0.0.1:1 ",
-            "[::1]",
-            "[::1]:51325",
-            "::1",
-        ] {
-            assert!(
-                debug_control::loopback_host_allowed(host),
-                "must allow {host:?}"
-            );
-        }
-        for host in [
-            "",
-            " ",
-            "evil.example",
-            "evil.example:51325",
-            "192.168.1.50:51325",
-            "127.0.0.1.evil.example",
-            "[::1",
-            "[::1]evil",
-            "[::2]:51325",
-        ] {
-            assert!(
-                !debug_control::loopback_host_allowed(host),
-                "must reject {host:?}"
-            );
-        }
     }
 }

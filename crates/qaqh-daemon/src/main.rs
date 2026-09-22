@@ -91,11 +91,28 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("webui") => {
+            // Explicit browser gateway mode. It is deliberately separate from
+            // `run`/`server`: the daemon itself never mounts WebUI routes.
+            let config =
+                match qaqh_webui_gateway::GatewayConfig::parse(&args[1..], env!("QAQH_BUILD_ID")) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        eprintln!("qaqh-daemon webui: {error}");
+                        std::process::exit(2);
+                    }
+                };
+            let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(error) = runtime.block_on(qaqh_webui_gateway::run(config)) {
+                eprintln!("qaqh-daemon webui: {error}");
+                std::process::exit(1);
+            }
+        }
         Some("todo") => std::process::exit(todo_cli(&args[1..])),
         Some("mcp") => std::process::exit(mcp_cli(&args[1..])),
         Some(command) => {
             eprintln!(
-                "unknown command: {command}; expected run, server, status, stop, todo, or mcp"
+                "unknown command: {command}; expected run, server, webui, status, stop, todo, or mcp"
             );
             std::process::exit(2);
         }
