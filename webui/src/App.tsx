@@ -475,7 +475,7 @@ const TopBar: Component = () => (
   <header id="topbar">
     <div class="brand"><span class="brand-mark" aria-hidden="true">Q</span>QAQ-Harness<span class="sub">Codex UI</span></div>
     <div class="status-cluster">
-      <span class="chip"><Dot state={lease() ? "open" : "err"} />lease <b>{lease() ? "ok" : "lost"}</b></span>
+      <span class="chip"><Dot state={lease() ? "open" : "err"} />gateway <b>{lease() ? "ready" : "lost"}</b></span>
       <span class="chip"><Dot state={activity() === "working" ? "busy" : activity() === "waiting_user" ? "warn" : "ok"} />{activity() ?? "—"}</span>
       <Show when={model()}>
         <span class="chip">{model()}</span>
