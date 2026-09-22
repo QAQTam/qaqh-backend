@@ -60,7 +60,7 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,17 个 workspace 成�
 客户端先 `POST /clients/open` 能力协商,获得 `client_instance_id / session_id / lease`;命令按 control/conversation/tool 三频道 POST,事件经对应频道 SSE 推送(batch 信封,16MB 帧上限);另有 per-session timeline SSE(快照页 + Last-Event-ID 断点续传)。鉴权三层:Bearer token + client-session lease + seed 所有权。worker 已收敛为 daemon 内线程,但保留完整 frame 边界语义,未来可无感切回子进程隔离。
 
 ### 多前端与 webUI 网关
-daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器一律以 Ringing V1 HTTP/SSE 接入,daemon 侧不存在任何第二前端协议。WebUI 默认关闭:普通 `qaqh-daemon run` / `server` 不挂载 `/debug`、`/ui`、nonce、静态资源或任何浏览器控制面。只有显式执行 `qaqh-daemon webui` 才会启动独立、临时、仅 `127.0.0.1` 的网关;网关读取本机 discovery 并持有 daemon Bearer,浏览器只能获得受限会话。Phase 1 当前交付的是进程/discovery/路由边界骨架,静态资源与浏览器会话在后续阶段接入。
+daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器一律以 Ringing V1 HTTP/SSE 接入,daemon 侧不存在任何第二前端协议。WebUI 默认关闭:普通 `qaqh-daemon run` / `server` 不挂载 `/debug`、`/ui`、nonce、静态资源或任何浏览器控制面。WebUI 源码在仓库根 `webui/`,构建产物由独立的 `qaqh-webui-gateway` binary 编译时嵌入;只有显式执行 `qaqh-daemon webui` 才会启动该网关。网关读取本机 discovery 并持有 daemon Bearer,浏览器只能获得受限会话。当前已入仓静态资源边界,浏览器 session/lease 仍按设计稿 Phase 3 接入。
 
 ### 会话与存储
 - seed 为 8 位 hex;磁盘布局 `sessions/index.json` + `sessions/{seed}/{meta.json, messages.jsonl, compact-context.json, todo.json}`,全部 temp+rename 原子写
@@ -93,6 +93,8 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 ```powershell
 # 构建(release,产出 daemon 二进制)
 just build-daemon
+# 构建 WebUI 网关 release(先构建 webui/out/renderer)
+just build-webui-gateway
 
 # 开发运行(headless daemon)
 just dev
@@ -103,7 +105,11 @@ cargo run -p qaqh-daemon -- server   # 局域网 headless 模式(远端壳直连
 cargo run -p qaqh-daemon -- status   # 读 daemon.json 探活
 cargo run -p qaqh-daemon -- stop
 
-# webUI 网关(显式启动;默认随机端口并打印实际地址)
+# WebUI 构建(输出 webui/out/renderer,不入库)
+cd webui && bun install --frozen-lockfile && bun run typecheck && bun run build
+
+# webUI 网关(先构建独立 binary;默认随机端口并打印实际地址)
+cargo build -p qaqh-webui-gateway
 cargo run -p qaqh-daemon -- webui
 # 固定端口必须显式指定:
 cargo run -p qaqh-daemon -- webui --port 41234

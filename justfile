@@ -20,6 +20,10 @@ default:
 build-daemon:
     cargo build --release -p qaqh-daemon
 
+# 编译 WebUI 网关（release；依赖 webui/out/renderer 构建产物）
+build-webui-gateway: web-build
+    cargo build --release -p qaqh-webui-gateway
+
 # ── 开发 ────────────────────────────────────────────
 
 # 启动 daemon（dev profile）
@@ -28,14 +32,19 @@ dev:
 
 # ── webUI（独立回环网关）───────────────────────────
 
-# 启动显式 webUI 网关。前置：daemon 已运行（just dev）。
-# Phase 1 输出安全占位页；后续阶段接入静态资源与浏览器会话。
+# 构建 WebUI 并启动显式回环网关。前置：daemon 已运行（just dev）。
+# 浏览器 session/lease 仍在 Phase 3 接入。
+web-build:
+    cd webui && bun install --frozen-lockfile && bun run typecheck && bun run build
+
 [unix]
-web:
+web: web-build
+    cargo build -p qaqh-webui-gateway
     cargo run -p qaqh-daemon -- webui
 
 [windows]
-web:
+web: web-build
+    cargo build -p qaqh-webui-gateway
     cargo run -p qaqh-daemon -- webui
 
 # ── 检查 & 测试 ─────────────────────────────────────
