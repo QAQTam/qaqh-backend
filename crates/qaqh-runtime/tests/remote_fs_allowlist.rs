@@ -51,6 +51,10 @@ fn list(path: &str) -> Result<serde_json::Value, String> {
     service().handle("fs.list", &json!({ "path": path }))
 }
 
+fn read_scoped(path: &str, seed: &str) -> Result<serde_json::Value, String> {
+    service().handle("fs.read", &json!({ "path": path, "scope_seed": seed }))
+}
+
 /// `meta.json`（会话持久态）必须被拒，且拒绝是白名单/边界错误而非 IO 失败。
 #[test]
 fn fs_read_rejects_meta_json() {
@@ -111,5 +115,36 @@ fn fs_read_rejects_dotdot_escape() {
 #[test]
 fn fs_read_rejects_arbitrary_absolute_path() {
     let error = read("/etc/hostname").expect_err("/etc/hostname must be rejected");
+    assert!(error.starts_with("FORBIDDEN"), "{error}");
+}
+
+/// WebUI 网关注入 `scope_seed` 后，读取必须同时落在该 seed 的 cwd 内。
+#[test]
+fn fs_read_scope_allows_only_active_seed_workspace() {
+    let file = workspace().join("hello.txt");
+    let value =
+        read_scoped(file.to_str().expect("utf8 file"), SEED).expect("active seed file must read");
+    assert_eq!(value["content"], json!("hi\n"));
+}
+
+/// 其它会话的 cwd 即使存在于全局 allowed_roots，也不能越过 active seed scope。
+#[test]
+fn fs_read_scope_rejects_other_session_workspace() {
+    let other_workspace =
+        std::env::temp_dir().join(format!("qaqh-fs-allowlist-other-{}", std::process::id()));
+    std::fs::create_dir_all(&other_workspace).expect("mkdir other workspace");
+    let other_file = other_workspace.join("secret.txt");
+    std::fs::write(&other_file, "other\n").expect("seed other file");
+    let other_seed = "fs-other-seed";
+    assert!(
+        qaqh_session::SessionManager::global().persist_new_session_if_absent_with(
+            other_seed,
+            Some(other_workspace.to_str().expect("utf8 other workspace")),
+            |_| true,
+        )
+    );
+
+    let error = read_scoped(other_file.to_str().expect("utf8 other file"), SEED)
+        .expect_err("cross-seed workspace read must be rejected");
     assert!(error.starts_with("FORBIDDEN"), "{error}");
 }

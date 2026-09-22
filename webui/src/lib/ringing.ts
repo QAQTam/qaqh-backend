@@ -1,173 +1,197 @@
 /**
- * Ringing V1 client for the browser.
+ * Browser-side gateway client.
  *
- * Owns: open → lease → renew → re-open, typed commands, service RPC, and SSE
- * URLs. Transport is the explicit loopback gateway; Phase 3 replaces the
- * legacy lease-header/query flow with the gateway-owned HttpOnly session.
+ * The browser never sees a daemon bearer token or daemon lease id. It exchanges
+ * the bootstrap nonce for an HttpOnly gateway session and keeps only the CSRF
+ * token in memory. All daemon calls go through the gateway's explicit routes.
  */
 import { RINGING_SCHEMA, RINGING_VERSION } from "./protocol";
 
-export type Lease = {
-  clientSessionId: string;
-  epoch: string;
-  ttlMs: number;
-  renewMs: number;
+export type GatewaySession = {
+  csrfToken: string;
+  expiresIn: number;
 };
 
 export type CommandChannel = "control" | "conversation" | "tool";
 
-export type Ack = { command_id: string; status: "accepted" | "rejected"; code?: string; message?: string };
+export type Ack = {
+  command_id: string;
+  status: "accepted" | "rejected";
+  code?: string;
+  message?: string;
+};
 
-const INSTANCE = `webui-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+type BootstrapState = {
+  nonce?: string;
+};
+
+function freshBootstrapNonce(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `/__gateway/bootstrap.js?cache=${crypto.randomUUID()}`;
+    script.async = false;
+    script.onload = () => {
+      script.remove();
+      const state = (window as unknown as { __QAQH_GATEWAY__?: BootstrapState })
+        .__QAQH_GATEWAY__;
+      if (!state?.nonce) {
+        reject(new Error("gateway bootstrap returned no nonce"));
+        return;
+      }
+      resolve(state.nonce);
+    };
+    script.onerror = () => {
+      script.remove();
+      reject(new Error("gateway bootstrap script failed"));
+    };
+    document.head.append(script);
+  });
+}
 
 export class Ringing {
-  /** Reactive-state hook: called after open/renew/failure so UI can mirror it. */
-  onLease: ((lease: Lease | null) => void) | null = null;
-  lease: Lease | null = null;
+  /** Reactive-state hook: called after gateway session bootstrap. */
+  onSession: ((session: GatewaySession | null) => void) | null = null;
+  session: GatewaySession | null = null;
   seed: string | null = null;
   error: string | null = null;
-  failures = 0;
 
-  private renewTimer: ReturnType<typeof setInterval> | null = null;
-  private lastRenewAt = 0;
-  private renewing = false;
+  private bootstrapping: Promise<GatewaySession> | null = null;
 
-  async open(seed?: string | null): Promise<Lease> {
-    const body: Record<string, unknown> = {
-      schema: RINGING_SCHEMA,
-      version: RINGING_VERSION,
-      client_instance_id: INSTANCE,
-    };
-    if (seed) body.attach_seed = seed;
-    const res = await fetch("/ringing/v1/clients/open", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+  async bootstrap(): Promise<GatewaySession> {
+    if (this.session) return this.session;
+    if (this.bootstrapping) return this.bootstrapping;
+    this.bootstrapping = this.bootstrapOnce().finally(() => {
+      this.bootstrapping = null;
     });
-    if (!res.ok) throw new Error(`open failed: HTTP ${res.status}`);
-    const parsed = (await res.json()) as Record<string, unknown>;
-    const clientSessionId = String(parsed.client_session_id ?? "");
-    const epoch = String(parsed.server_epoch ?? "");
-    if (!parsed.accepted || !clientSessionId || !epoch) throw new Error("open rejected by daemon");
-    this.lease = {
-      clientSessionId,
-      epoch,
-      ttlMs: Number(parsed.lease_ttl_ms ?? 30_000),
-      renewMs: Number(parsed.renew_interval_ms ?? 10_000),
+    return this.bootstrapping;
+  }
+
+  private async bootstrapOnce(): Promise<GatewaySession> {
+    const nonce = await freshBootstrapNonce();
+    const response = await fetch("/__gateway/session", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nonce }),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`gateway session failed: HTTP ${response.status}: ${text.slice(0, 200)}`);
+    }
+    const parsed = JSON.parse(text) as { csrf_token?: string; expires_in?: number };
+    if (!parsed.csrf_token) throw new Error("gateway session returned no CSRF token");
+    this.session = {
+      csrfToken: parsed.csrf_token,
+      expiresIn: Number(parsed.expires_in ?? 0),
     };
-    this.lastRenewAt = Date.now();
-    this.failures = 0;
     this.error = null;
-    this.onLease?.(this.lease);
-    return this.lease;
+    this.onSession?.(this.session);
+    return this.session;
   }
 
-  startRenew(): void {
-    if (this.renewTimer) return;
-    this.renewTimer = setInterval(() => void this.renewTick(), 2_000);
+  async logout(): Promise<void> {
+    if (!this.session) return;
+    await fetch("/__gateway/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "x-qaqh-csrf": this.session.csrfToken },
+    });
+    this.session = null;
+    this.onSession?.(null);
   }
 
-  stop(): void {
-    if (this.renewTimer) clearInterval(this.renewTimer);
-    this.renewTimer = null;
+  private async ensure(): Promise<void> {
+    if (!this.session) await this.bootstrap();
   }
 
-  private headers(): Record<string, string> {
-    return this.lease ? { "x-qaqh-client-session-id": this.lease.clientSessionId } : {};
-  }
-
-  private async renewTick(): Promise<void> {
-    if (this.renewing) return;
-    if (!this.lease) {
-      await this.open(this.seed).catch((e) => {
-        this.error = String(e instanceof Error ? e.message : e);
-      });
-      return;
+  private headers(init: RequestInit = {}): Record<string, string> {
+    const headers: Record<string, string> = {
+      ...(init.headers as Record<string, string> | undefined),
+    };
+    if (this.session && (init.method ?? "GET").toUpperCase() !== "GET") {
+      headers["x-qaqh-csrf"] = this.session.csrfToken;
     }
-    if (Date.now() - this.lastRenewAt < this.lease.renewMs) return;
-    this.renewing = true;
-    try {
-      const res = await fetch("/ringing/v1/leases/renew", {
-        method: "POST",
-        headers: this.headers(),
-      });
-      if (!res.ok) throw new Error(`renew HTTP ${res.status}`);
-      const body = (await res.json()) as { lease_ttl_ms?: number; renew_interval_ms?: number };
-      if (this.lease) {
-        this.lease.ttlMs = body.lease_ttl_ms ?? this.lease.ttlMs;
-        this.lease.renewMs = body.renew_interval_ms ?? this.lease.renewMs;
-      }
-      this.failures = 0;
-      this.error = null;
-    } catch (e) {
-      this.failures += 1;
-      this.error = String(e instanceof Error ? e.message : e);
-      if (this.failures >= 2) {
-        this.lease = null;
-        this.onLease?.(null);
-        await this.open(this.seed).catch((err) => {
-          this.error = String(err instanceof Error ? err.message : err);
-        });
-      }
-    } finally {
-      this.renewing = false;
-    }
+    return headers;
   }
 
-  /** Authenticated JSON call; re-opens the lease once on 401. */
+  /** Authenticated gateway JSON call; re-bootstraps once on 401. */
   async call<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
     await this.ensure();
-    const res = await fetch(path, { ...init, headers: { ...this.headers(), ...(init.headers ?? {}) } });
-    if (res.status === 401 && retry) {
-      this.lease = null;
-      await this.open(this.seed);
+    const response = await fetch(path, {
+      ...init,
+      credentials: "same-origin",
+      headers: this.headers(init),
+    });
+    if (response.status === 401 && retry) {
+      this.session = null;
+      await this.bootstrap();
       return this.call<T>(path, init, false);
     }
-    const text = await res.text();
-    if (!res.ok) throw new Error(`${init.method ?? "GET"} ${path} → ${res.status}: ${text.slice(0, 300)}`);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`${init.method ?? "GET"} ${path} → ${response.status}: ${text.slice(0, 300)}`);
+    }
     return (text ? JSON.parse(text) : null) as T;
   }
 
-  async ensure(seed?: string | null): Promise<void> {
-    const target = seed ?? this.seed;
-    if (!this.lease) await this.open(target);
-    else if (target && this.seed !== target) await this.open(target);
+  async sessions(): Promise<any[]> {
+    return this.call<any[]>("/__gateway/sessions");
   }
 
-  async command(channel: CommandChannel, command: Record<string, unknown>, seed?: string | null): Promise<Ack> {
+  async attach(seed: string): Promise<void> {
+    await this.call(`/__gateway/sessions/${encodeURIComponent(seed)}/attach`, {
+      method: "POST",
+    });
+    this.seed = seed;
+  }
+
+  async command(
+    channel: CommandChannel,
+    command: Record<string, unknown>,
+    seed?: string | null,
+  ): Promise<Ack> {
     const targetSeed = seed ?? this.seed;
-    await this.ensure(targetSeed);
+    if (!targetSeed) throw new Error("active seed required before command");
     const commandId = crypto.randomUUID();
     const envelope: Record<string, unknown> = {
       schema: RINGING_SCHEMA,
       version: RINGING_VERSION,
       channel,
       command_id: commandId,
-      client_instance_id: INSTANCE,
-      client_session_id: this.lease!.clientSessionId,
+      client_instance_id: "browser",
+      client_session_id: "gateway-owned",
+      seed: targetSeed,
       command,
     };
-    if (targetSeed) envelope.seed = targetSeed;
-    const res = await fetch(`/ringing/v1/commands/${channel}`, {
+    const response = await fetch(`/__gateway/ringing/commands/${channel}`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...this.headers() },
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
+        ...(this.session ? { "x-qaqh-csrf": this.session.csrfToken } : {}),
+      },
       body: JSON.stringify(envelope),
     });
-    const text = await res.text();
+    const text = await response.text();
     let ack: Ack;
     try {
       ack = text ? (JSON.parse(text) as Ack) : { command_id: commandId, status: "rejected" };
     } catch {
-      ack = { command_id: commandId, status: "rejected", code: `http_${res.status}`, message: text.slice(0, 200) };
+      ack = {
+        command_id: commandId,
+        status: "rejected",
+        code: `http_${response.status}`,
+        message: text.slice(0, 200),
+      };
     }
-    if (!res.ok || ack.status === "rejected") {
-      throw new Error(`command rejected (${ack.code ?? res.status}): ${ack.message ?? ""}`);
+    if (!response.ok || ack.status === "rejected") {
+      throw new Error(`command rejected (${ack.code ?? response.status}): ${ack.message ?? ""}`);
     }
     return ack;
   }
 
   rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    return this.call<T>(`/ringing/v1/service/${encodeURIComponent(method)}`, {
+    return this.call<T>(`/__gateway/ringing/service/${encodeURIComponent(method)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(params),
@@ -175,27 +199,19 @@ export class Ringing {
   }
 
   timelinePage(seed: string, query = ""): Promise<unknown> {
-    return this.call(`/ringing/v1/sessions/${encodeURIComponent(seed)}/timeline${query}`);
+    return this.call(`/__gateway/ringing/sessions/${encodeURIComponent(seed)}/timeline${query}`);
   }
 
-  bootstrap(seed: string): Promise<unknown> {
-    return this.call(`/ringing/v1/sessions/${encodeURIComponent(seed)}/bootstrap`);
+  bootstrapFor(seed: string): Promise<unknown> {
+    return this.call(`/__gateway/ringing/sessions/${encodeURIComponent(seed)}/bootstrap`);
   }
 
-  attach(seed: string): Promise<void> {
-    this.seed = seed;
-    return this.command("control", { channel: "control", type: "session_attach", seed }, seed).then(() => undefined);
-  }
-
-  /** TODO(Phase 3): remove the lease query once the gateway owns SSE identity. */
   sseUrl(kind: "control" | "conversation" | "tool"): string {
-    if (!this.lease) throw new Error("lease required before subscribing");
-    return `/ringing/v1/events/${kind}?__lease=${this.lease.clientSessionId}`;
+    return `/__gateway/ringing/events/${kind}`;
   }
 
   timelineSseUrl(seed: string): string {
-    if (!this.lease) throw new Error("lease required before subscribing");
-    return `/ringing/v1/sessions/${encodeURIComponent(seed)}/timeline/events?__lease=${this.lease.clientSessionId}`;
+    return `/__gateway/ringing/sessions/${encodeURIComponent(seed)}/timeline/events`;
   }
 }
 
