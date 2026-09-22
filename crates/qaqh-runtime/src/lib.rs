@@ -2,6 +2,7 @@ mod activity;
 mod actor;
 pub mod agent;
 mod host_impl;
+pub mod quota_ledger;
 mod registry;
 pub mod ringing;
 mod service;
