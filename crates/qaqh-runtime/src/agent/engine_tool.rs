@@ -11,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use super::dashboard;
+use super::tool_runtime::{ToolRunOutcome, ToolRuntime};
 use crate::agent::state::agent::PendingApproval;
 use qaqh_domain::{AskMode, AskQuestion};
 
@@ -698,40 +699,34 @@ impl ToolEngine {
                 },
             ));
 
-        // Spawn tool thread
-        let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        let tool_id = id.to_string();
-        let execution_scope = qaqh_workspace::runtime::ToolExecutionScope::capture(tool_context);
-        let handle = std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
-            .spawn(move || {
-                let context = execution_scope.context().clone();
-                let _scope = execution_scope.install();
-                let result = qaqh_workspace::execution::execute_authorized_with_context(
-                    authorized,
-                    context,
-                    Some(progress_tx),
-                );
+        // Spawn tool thread through the shared runtime boundary.
+        let run = ToolRuntime::run_authorized(
+            ctx,
+            self,
+            id.to_string(),
+            name.to_string(),
+            Box::new(authorized),
+            tool_context,
+            &turn_id,
+            0,
+        );
+        let (tid, mut result, code_delta, skill_effects) = match run.outcome {
+            ToolRunOutcome::Completed(result) => {
+                let result = *result;
                 (
-                    tool_id,
+                    run.call_id,
                     result.result,
                     result.code_delta,
                     result.skill_effects,
                 )
-            })
-            .expect("failed to spawn tool thread");
-
-        // Drain progress（tool_done 有界收尾，冻结事故 P0，见 drain_bounded）
-        self.drain_progress_external(ctx, progress_rx, &turn_id, 0, || handle.is_finished());
-
-        let (tid, mut result, code_delta, skill_effects) = handle.join().unwrap_or_else(|_| {
-            (
+            }
+            ToolRunOutcome::Panicked => (
                 id.to_string(),
                 qaqh_types::ToolResult::error("[ERROR] tool thread panicked"),
                 None,
                 Vec::new(),
-            )
-        });
+            ),
+        };
         // UI 直调路径：用户发起（权限批准后的续跑同属 UI 路径）。
         result.metrics.user_initiated = true;
         let output = result.model_text().to_string();

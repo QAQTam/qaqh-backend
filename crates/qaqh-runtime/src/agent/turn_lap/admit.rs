@@ -8,6 +8,7 @@ use qaqh_types::UsageInfo;
 
 use crate::agent::dashboard;
 use crate::agent::engine_tool::ToolEngine;
+use crate::agent::tool_runtime::{MAX_PARALLEL_TOOL_WORKERS, ToolRunOutcome, ToolRuntime};
 use crate::agent::turn_lap::gate::{abort_running_turn, seal_timeline_terminal_round};
 use crate::agent::types::*;
 
@@ -194,7 +195,6 @@ pub fn execute_admitted_batch(
     turn_id: &str,
     round_num: u32,
 ) -> bool {
-    const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
     // L3 outbox: execution facts are recorded inside the tool worker thread,
     // right after the tool returns, so a kill between "tool ran" and "result
     // persisted" is still distinguishable from "tool never ran".
@@ -217,67 +217,24 @@ pub fn execute_admitted_batch(
             let remaining = parallel
                 .iter()
                 .map(|item| item.call_id.clone())
-                .collect::<Vec<_>>();
+                .chain(serial.iter().map(|item| item.call_id.clone()));
             seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
             apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
             return false;
         }
         let batch_len = parallel.len().min(MAX_PARALLEL_TOOL_WORKERS);
         let batch: Vec<_> = parallel.drain(..batch_len).collect();
-        let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        let mut handles = Vec::new();
-        for admitted in batch {
-            let tx = progress_tx.clone();
+        for admitted in &batch {
             let call_id = admitted.call_id.clone();
             let tool_name = admitted.auth.tool_name().to_string();
             let tool_args = admitted.auth.args().clone();
             ToolEngine::emit_timeline_tool_running(
                 ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
             );
-            let handle = std::thread::Builder::new()
-                .stack_size(4 * 1024 * 1024)
-                .spawn({
-                    let auth = admitted.auth;
-                    let scope = admitted.scope;
-                    let id = call_id.clone();
-                    let outbox_seed = outbox_seed.clone();
-                    let tool_label = auth.tool_name().to_string();
-                    move || {
-                        let context = scope.context().clone();
-                        let _scope = scope.install();
-                        let result = qaqh_workspace::execution::execute_authorized_with_context(
-                            *auth,
-                            context,
-                            Some(tx),
-                        );
-                        crate::agent::tool_outbox::record(
-                            &outbox_seed,
-                            &id,
-                            &tool_label,
-                            result.success,
-                        );
-                        (
-                            id,
-                            result.content,
-                            result.success,
-                            result.result,
-                            result.code_delta,
-                            result.skill_effects,
-                        )
-                    }
-                })
-                .expect("tool thread spawn");
-            handles.push((call_id, tool_name, handle));
         }
-        drop(progress_tx);
-        tool.drain_progress_external(
-            ctx,
-            progress_rx,
-            turn_id,
-            round_num,
-            // 全部工具线程结束后有界收尾（冻结事故 P0，见 drain_bounded）
-            || handles.iter().all(|(_, _, h)| h.is_finished()),
-        );
+        let (progress_rx, runs) = ToolRuntime::spawn_batch(batch, outbox_seed.clone());
+        let cancelled = ctx.cancel.is_set();
+        let results = ToolRuntime::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
 
         // BUG-2026-09-13-08：取消不再丢弃已执行结果。
         //
@@ -285,22 +242,24 @@ pub fn execute_admitted_batch(
         // 「取消」只意味着不再等剩余项——已 join 出来的 canonical 结果必须
         // 照常回填，否则 store 留下 open tool_use，下轮模型重发 → 重复执行。
         // 剩余批（含仍在执行的项）在下方统一补取消终态。
-        let cancelled = ctx.cancel.is_set();
-        for (call_id, tool_name, handle) in handles {
-            match handle.join() {
-                Ok((_id, _content, _success, canonical_result, code_delta, skill_effects)) => {
+        for result in results {
+            let call_id = result.call_id;
+            let tool_name = result.tool_name;
+            match result.outcome {
+                ToolRunOutcome::Completed(result) => {
+                    let result = *result;
                     backfill_executed_result(
                         ctx,
                         &call_id,
                         &tool_name,
                         turn_id,
                         round_num,
-                        canonical_result,
-                        code_delta,
+                        result.result,
+                        result.code_delta,
                     );
-                    ordered_skill_effects.push((call_id.clone(), skill_effects));
+                    ordered_skill_effects.push((call_id.clone(), result.skill_effects));
                 }
-                Err(_) => ctx.agent.msg.push_tool_result_direct(
+                ToolRunOutcome::Panicked => ctx.agent.msg.push_tool_result_direct(
                     &call_id,
                     "[ERROR] tool thread panicked",
                     false,
@@ -329,65 +288,35 @@ pub fn execute_admitted_batch(
             apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
             return false;
         }
-        let call_id = admitted.call_id;
+        let call_id = admitted.call_id.clone();
         let tool_name = admitted.auth.tool_name().to_string();
         let tool_args = admitted.auth.args().clone();
         ToolEngine::emit_timeline_tool_running(
             ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
         );
-        let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        let handle = std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
-            .spawn({
-                let scope = admitted.scope;
-                let outbox_seed = outbox_seed.clone();
-                let cid = call_id.clone();
-                let tool_label = tool_name.clone();
-                move || {
-                    let context = scope.context().clone();
-                    let _scope = scope.install();
-                    let result = qaqh_workspace::execution::execute_authorized_with_context(
-                        *admitted.auth,
-                        context,
-                        Some(progress_tx),
-                    );
-                    crate::agent::tool_outbox::record(
-                        &outbox_seed,
-                        &cid,
-                        &tool_label,
-                        result.success,
-                    );
-                    (
-                        result.content,
-                        result.success,
+        let (progress_rx, runs) = ToolRuntime::spawn_batch(vec![admitted], outbox_seed.clone());
+        let results = ToolRuntime::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
+        for result in results {
+            match result.outcome {
+                ToolRunOutcome::Completed(result) => {
+                    let result = *result;
+                    backfill_executed_result(
+                        ctx,
+                        &call_id,
+                        &tool_name,
+                        turn_id,
+                        round_num,
                         result.result,
                         result.code_delta,
-                        result.skill_effects,
-                    )
+                    );
+                    ordered_skill_effects.push((call_id.clone(), result.skill_effects));
                 }
-            })
-            .expect("tool thread spawn");
-        tool.drain_progress_external(ctx, progress_rx, turn_id, round_num, || {
-            handle.is_finished()
-        });
-        match handle.join() {
-            Ok((_content, _success, canonical_result, code_delta, skill_effects)) => {
-                backfill_executed_result(
-                    ctx,
+                ToolRunOutcome::Panicked => ctx.agent.msg.push_tool_result_direct(
                     &call_id,
-                    &tool_name,
-                    turn_id,
-                    round_num,
-                    canonical_result,
-                    code_delta,
-                );
-                ordered_skill_effects.push((call_id.clone(), skill_effects));
+                    "[ERROR] tool thread panicked",
+                    false,
+                ),
             }
-            Err(_) => ctx.agent.msg.push_tool_result_direct(
-                &call_id,
-                "[ERROR] tool thread panicked",
-                false,
-            ),
         }
     }
 
@@ -521,7 +450,6 @@ pub(crate) fn admit_and_dispatch(
         round_num,
         pending.len()
     );
-    const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
     let write_pairs: Vec<(String, serde_json::Value)> = pending
         .iter()
         .map(|tool| (tool.name.clone(), tool.args.clone()))
@@ -607,229 +535,18 @@ pub(crate) fn admit_and_dispatch(
         });
     }
 
-    // ── Inline admitted-batch execution (verbatim from run_lap) ──
-    let outbox_seed = ctx.agent.session.seed.clone();
-    let mut ordered_skill_effects = Vec::new();
-    let (mut parallel_authorized, serial_authorized): (Vec<_>, Vec<_>) = admission
-        .authorized
-        .into_iter()
-        .partition(|admitted| !serial_call_ids.contains(&admitted.call_id));
-
-    // Execute independent tools in bounded parallel batches.
-    while !parallel_authorized.is_empty() {
-        // C1：批间取消检查（对齐串行路径）——取消后不再 spawn 新工具线程、
-        // 不再发 Running 事件；已入队批次由下方收割逻辑观察 cancelled。
-        if ctx.cancel.is_set() {
-            break;
-        }
-        let batch_len = parallel_authorized.len().min(MAX_PARALLEL_TOOL_WORKERS);
-        let batch: Vec<_> = parallel_authorized.drain(..batch_len).collect();
-        let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        let mut handles: Vec<(String, String, std::thread::JoinHandle<_>)> = Vec::new();
-
-        for admitted in batch {
-            let tx = progress_tx.clone();
-            let call_id = admitted.call_id.clone();
-            let tool_name = admitted.auth.tool_name().to_string();
-            let tool_args = admitted.auth.args().clone();
-            ToolEngine::emit_timeline_tool_running(
-                ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
-            );
-            let handle = std::thread::Builder::new()
-                .stack_size(4 * 1024 * 1024)
-                .spawn({
-                    let auth = admitted.auth;
-                    let scope = admitted.scope;
-                    let cid = call_id.clone();
-                    let outbox_seed = outbox_seed.clone();
-                    let tool_label = auth.tool_name().to_string();
-                    move || {
-                        let context = scope.context().clone();
-                        let _scope = scope.install();
-                        let result = qaqh_workspace::execution::execute_authorized_with_context(
-                            *auth,
-                            context,
-                            Some(tx),
-                        );
-                        crate::agent::tool_outbox::record(
-                            &outbox_seed,
-                            &cid,
-                            &tool_label,
-                            result.success,
-                        );
-                        (
-                            cid,
-                            result.content,
-                            result.success,
-                            result.result,
-                            result.code_delta,
-                            result.skill_effects,
-                        )
-                    }
-                })
-                .expect("tool thread spawn");
-            handles.push((call_id, tool_name, handle));
-        }
-        drop(progress_tx);
-
-        // Drain progress（全部工具线程结束后有界收尾，冻结事故 P0）
-        tool.drain_progress_external(ctx, progress_rx, turn_id, round_num, || {
-            handles.iter().all(|(_, _, h)| h.is_finished())
-        });
-
-        // Collect results（BUG-2026-09-13-08：取消不丢弃已执行结果）
-        for (call_id, tool_name, h) in handles {
-            match h.join() {
-                Ok((_cid, _content, _success, canonical_result, code_delta, skill_effects)) => {
-                    backfill_executed_result(
-                        ctx,
-                        &call_id,
-                        &tool_name,
-                        turn_id,
-                        round_num,
-                        canonical_result,
-                        code_delta,
-                    );
-                    ordered_skill_effects.push((call_id.clone(), skill_effects));
-                }
-                Err(_) => {
-                    ctx.agent.msg.push_tool_result_direct(
-                        &call_id,
-                        "[ERROR] tool thread panicked",
-                        false,
-                    );
-                }
-            }
-        }
-        if ctx.cancel.is_set() {
-            // 未起或未回填的剩余并行批补取消终态：保证每个 tool_use 恰有
-            // 一条 tool_result，否则 `abort_running_turn` 的
-            // remove_last_step_if_incomplete 会把含已执行结果的整体 step 丢掉。
-            let remaining = parallel_authorized
-                .iter()
-                .map(|item| item.call_id.clone())
-                .collect::<Vec<_>>();
-            seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
-            parallel_authorized.clear();
-            break;
-        }
-    }
-
-    // Execute later same-file writers exactly once, after the
-    // first writer from their conflict group has completed.
-    let mut serial_authorized = serial_authorized.into_iter();
-    while let Some(admitted) = serial_authorized.next() {
-        if ctx.cancel.is_set() {
-            let remaining = std::iter::once(admitted.call_id)
-                .chain(serial_authorized.by_ref().map(|admitted| admitted.call_id));
-            seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
-            apply_ordered_skill_effects(ctx, ordered_skill_effects, &tool_call_order);
-            return Some(finish_cancelled_round(
-                ctx,
-                turn_id,
-                round_num,
-                active_stream_block.as_ref(),
-                timeline_tools_open,
-                last_usage,
-            ));
-        }
-        let call_id = admitted.call_id;
-        let tool_name = admitted.auth.tool_name().to_string();
-        let tool_args = admitted.auth.args().clone();
-        ToolEngine::emit_timeline_tool_running(
-            ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
-        );
-        let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        let handle = std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
-            .spawn({
-                let auth = admitted.auth;
-                let scope = admitted.scope;
-                let outbox_seed = outbox_seed.clone();
-                let cid = call_id.clone();
-                let tool_label = auth.tool_name().to_string();
-                move || {
-                    let context = scope.context().clone();
-                    let _scope = scope.install();
-                    let result = qaqh_workspace::execution::execute_authorized_with_context(
-                        *auth,
-                        context,
-                        Some(progress_tx),
-                    );
-                    crate::agent::tool_outbox::record(
-                        &outbox_seed,
-                        &cid,
-                        &tool_label,
-                        result.success,
-                    );
-                    (
-                        result.content,
-                        result.success,
-                        result.result,
-                        result.code_delta,
-                        result.skill_effects,
-                    )
-                }
-            })
-            .expect("tool thread spawn");
-        tool.drain_progress_external(ctx, progress_rx, turn_id, round_num, || {
-            handle.is_finished()
-        });
-        match handle.join() {
-            Ok((_content, _success, canonical_result, code_delta, skill_effects)) => {
-                ctx.agent.msg.push_tool_result_canonical(
-                    &call_id,
-                    &canonical_result,
-                    &canonical_result.images,
-                );
-                ordered_skill_effects.push((call_id.clone(), skill_effects));
-                if let Some(ref delta) = code_delta {
-                    ctx.stats.push_delta(delta.clone());
-                    // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
-                    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                        qaqh_domain::ToolEvent::CodeChanged {
-                            tool_call_id: call_id.clone(),
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            lines_added: delta.lines_added,
-                            lines_removed: delta.lines_removed,
-                            files_created: delta.files_created,
-                            files_deleted: delta.files_deleted,
-                            file: delta.file.clone(),
-                        },
-                    ));
-                }
-                // Instant refresh for todo tools（与 execute_admitted_batch 保持一致）
-                if matches!(tool_name.as_str(), "todo") {
-                    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                        qaqh_domain::ControlEvent::DashboardUpdated {
-                            hp_connected: true,
-                            session_seed: ctx.agent.session.seed.clone(),
-                            tool_calls_total: 0,
-                            tool_failures: 0,
-                            current_phase: "single".into(),
-                            streaming: false,
-                        },
-                    ));
-                    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                        qaqh_domain::ControlEvent::DashboardSnapshot {
-                            snapshot: dashboard::build_snapshot(ctx.agent.session.seed.clone()),
-                        },
-                    ));
-                }
-            }
-            Err(_) => ctx.agent.msg.push_tool_result_direct(
-                &call_id,
-                "[ERROR] tool thread panicked",
-                false,
-            ),
-        }
-    }
-
-    if ctx.cancel.is_set() {
-        // 已执行结果已在上面回填。未起/未回填的项（并行批提前 break 时已清空）
-        // 补取消终态，再封本轮为 Cancelled —— 绝不丢弃已执行结果。
-        apply_ordered_skill_effects(ctx, ordered_skill_effects, &tool_call_order);
+    // Execute the authorized batch through the same runtime path as
+    // approved-resume batches. The helper owns ordering, progress, outbox,
+    // cancellation sealing, and skill-effect application.
+    if !execute_admitted_batch(
+        ctx,
+        tool,
+        admission.authorized,
+        &tool_call_order,
+        &serial_call_ids,
+        turn_id,
+        round_num,
+    ) {
         return Some(finish_cancelled_round(
             ctx,
             turn_id,
@@ -839,7 +556,6 @@ pub(crate) fn admit_and_dispatch(
             last_usage,
         ));
     }
-    apply_ordered_skill_effects(ctx, ordered_skill_effects, &tool_call_order);
 
     // Suspend before the next gate lap while any approval,
     // ask_user call, or plan review from this assistant round
