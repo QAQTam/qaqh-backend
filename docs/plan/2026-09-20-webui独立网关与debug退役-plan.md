@@ -1,9 +1,9 @@
-# WebUI 独立网关与 `/debug` 退役设计（Phase 3 完成 / Phase 4 待续）
+# WebUI 独立网关与 `/debug` 退役设计（Phase 4 已实现 / 待合入）
 
 > 日期：2026-09-20
-> 基线：远端 `betav2 @ b80028b`；实现栈基于 Phase 1 `88bf39b`、Phase 2
-> `0f8fdaa`、Phase 3 `8b9e611`。
-> 状态：**Phase 0–3 已完成；Phase 4 未开始；当前暂停。**
+> 基线：远端 `betav2 @ b80028b`；实现栈已 rebase 到 Phase 1 `c1aae88`、Phase 2
+> `e490f83`、Phase 3 `bf7fae2`。
+> 状态：**Phase 0–4 已实现并通过本地验证；Phase 4 PR #206 已创建，待按栈合入。**
 > 读者：daemon / runtime / client 维护者，WebUI 前端负责人，安全与发布负责人。
 > 关联报告：
 > - `docs/archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md`
@@ -13,19 +13,20 @@
 
 ---
 
-## 实施进度快照（2026-09-20 暂停点）
+## 实施进度快照（2026-09-20 Phase 4 实现点）
 
 ### PR 栈
 
 | 阶段 | PR | 分支 | head | base | 状态 |
 |---|---|---|---|---|---|
-| Phase 1：默认关闭与独立网关骨架 | #181 | `feat/180-webui-gateway-phase1` | `88bf39b` | `betav2` | open / mergeable |
-| Phase 2：WebUI 源码与资产边界 | #193 | `feat/193-webui-assets-phase2` | `0f8fdaa` | `feat/180-webui-gateway-phase1` | open / mergeable |
-| Phase 3：浏览器会话与受限代理 | #202 | `feat/194-webui-browser-session` | `8b9e611` | `feat/193-webui-assets-phase2` | open / mergeable |
+| Phase 1：默认关闭与独立网关骨架 | #181 | `feat/180-webui-gateway-phase1` | `c1aae88` | `betav2` | open / mergeable |
+| Phase 2：WebUI 源码与资产边界 | #193 | `feat/193-webui-assets-phase2` | `e490f83` | `feat/180-webui-gateway-phase1` | open / mergeable |
+| Phase 3：浏览器会话与受限代理 | #202 | `feat/194-webui-browser-session` | `bf7fae2` | `feat/193-webui-assets-phase2` | open / mergeable |
+| Phase 4：前端安全收口 | #206 | `feat/webui-phase4-security` | `4bff006` | `feat/194-webui-browser-session` | open / mergeable |
 
-三个 PR 尚未合并，远端 `betav2` 已前进到 `b80028b`。恢复工作时的第一步是重新
-fetch，并按 #181 → #193 → #202 的顺序 rebase/retarget，确认 `fs_git.rs`、
-`service.rs` 和 WebUI transport 没有与最新主线冲突。
+三条既有 PR 已按 `betav2 @ b80028b` 重新 fetch、无冲突 rebase 并 force-with-lease
+推送。Phase 4 必须保持 stacked 顺序合入：先合 #181，再 retarget/rebase #193，
+再 #202，最后 Phase 4。
 
 ### 已完成
 
@@ -38,32 +39,44 @@ fetch，并按 #181 → #193 → #202 的顺序 rebase/retarget，确认 `fs_git
   上限与续租、命令/service allowlist、active seed scope、`fs.*` 的 daemon
   侧 `scope_seed` 校验、命令/service/bootstrap/timeline/SSE 受限代理；
   前端移除 `open` / `renew` / `?__lease=` / 浏览器可见 Bearer。
+- Phase 4：markdown 链接/图片策略、无 inline-style CSP、模型输出注入回归测试、
+  daemon 最小 pending approval 投影、网关一次性 opaque challenge、审批重放/跨 seed
+  测试，以及前端移除未授权命令入口。
 
 ### 验证证据
 
-- `bun run typecheck` / `bun run build`：通过。
-- `cargo check --workspace` / `cargo test --workspace`：通过。
+- `bun run typecheck` / `bun run test` / `bun run build`：通过。
+- WebUI 安全回归：5 项通过，覆盖 `javascript:` / `data:` / `vbscript:` /
+  `file:` / `blob:`、大小写/百分号/HTML entity 绕过、跨源图片、原始 HTML、
+  `innerHTML` / `insertAdjacentHTML` / `document.write` / inline-style sink。
+- `cargo check -p qaqh-webui-gateway -p qaqh-daemon -p qaqh-runtime`：通过。
+- `cargo test -p qaqh-webui-gateway --lib`：17 项通过。
+- `cargo test -p qaqh-runtime --lib ringing::projection`：7 项通过。
+- `cargo test -p qaqh-daemon --bin qaqh-daemon ...`：pending approval 投影测试通过。
 - `cargo clippy -p qaqh-webui-gateway --all-targets --no-deps -- -D warnings`：通过。
 - `cargo clippy -p qaqh-daemon --no-deps -- -D warnings`：通过。
 - `cargo clippy -p qaqh-runtime --lib --no-deps -- -D warnings`：通过。
-- 端到端：nonce → session cookie → 脱敏 `session.list` → attach → timeline；
+- Phase 3 端到端：nonce → session cookie → 脱敏 `session.list` → attach → timeline；
   跨源交换 403；未授权 `SessionCreate` 403；SSE 经 Cookie 建流 200；
   attach 后跨续租窗口 session/timeline 仍可用。
-- 当前无残留 `qaqh-daemon` / `qaqh-webui-gateway` 进程，Phase 3 worktree clean。
 
 ### 平台阻塞
 
 CNB `npc-auto-review` 在 `Prepare` 阶段失败，原因始终是根组织 CPU core-hours
-不足，无法预冻结 5 分钟；不是编译、测试或代码失败。三个 PR 的代码验证均以本地
-workspace 命令和手工端到端为准。
+不足，无法预冻结 5 分钟；不是编译、测试或代码失败。PR 栈的代码验证均以本地
+workspace 命令、安全回归和 Phase 3 手工端到端为准。
 
-### Phase 4 未开始
+### Phase 4 实现结果
 
-- markdown URL scheme 白名单尚未实现。
-- 原始事件、tool output、diff 的安全渲染回归尚未补齐。
-- 审批卡片尚未完成服务端权威 challenge/风险/目标映射。
-- 网关 CSP 仍保留 `style-src 'unsafe-inline'`，必须在 Phase 4 移除或给出
-  前端不依赖内联样式的回归证明。
+- markdown 链接仅允许规范化后的 `http` / `https`，其余 scheme 保留文本但移除
+  `href`；外链统一带 `noopener noreferrer` 与 `no-referrer`。
+- 图片只允许网关同源；`data:`、跨源和主动 scheme 均不写入 `src`。
+- CSP 已移除 `style-src 'unsafe-inline'` 与 `img-src data:`，并显式禁止
+  `script-src-attr` / `style-src-attr`。
+- daemon 新增最小 pending approval 投影，不复制完整 bootstrap 历史。
+- 网关签发 5 分钟 TTL、一次性、seed 绑定的 opaque challenge；浏览器只提交
+  `challenge_id + decision + payload`，通用命令代理拒绝审批类命令。
+- 前端不再暴露新建/归档/删除会话、压缩和配置保存入口。
 
 ---
 
@@ -197,6 +210,8 @@ GET  /__gateway/bootstrap.js                            一次性 nonce
 POST /__gateway/session                                 nonce -> HttpOnly browser session
 GET  /__gateway/sessions                                脱敏 session.list
 POST /__gateway/sessions/{seed}/attach                  显式 seed attach
+POST /__gateway/approvals                               签发当前 pending challenge
+POST /__gateway/approvals/{challenge_id}                提交一次性审批决定
 POST /__gateway/ringing/commands/{channel}              命令 allowlist
 GET  /__gateway/ringing/commands/{id}                   命令回执
 GET  /__gateway/ringing/content/{content_id}            内容读取
@@ -423,6 +438,18 @@ UI workspace 注册表和数据根取并集，导致跨会话互相越界。实�
 状态派生，浏览器不得提交 seed。challenge 必须带 TTL、一次性，并拒绝重放；网关只做
 identity 映射，不得另造不可追溯的 challenge id。
 
+实现结果：
+
+- daemon 提供 `GET /ringing/v1/sessions/{seed}/approvals` 最小投影；它只返回
+  `pending_permission_details` 与 `pending_interaction`，不返回完整 bootstrap 历史。
+- 网关在内存中保存 `opaque challenge_id -> canonical interaction/tool-call id` 映射，
+  TTL 5 分钟，每 session 最多 16 个 pending challenge。
+- 浏览器只提交 `{ challenge_id, decision, payload }`；网关消费 challenge 后生成
+  带当前 lease 和 active seed 的 canonical 命令。
+- 通用 `/__gateway/ringing/commands/{channel}` 不再接受 ask / plan / permission
+  命令；它们只能走 challenge 端点。
+- challenge 已消费后即使 daemon 返回失败也不恢复，刷新后由新的 pending 状态重新签发。
+
 ### 4.9 `/health` 与 `/activity`
 
 - `/health` 保持最小探活，不回显 token、token 长度或用户内容。
@@ -474,8 +501,10 @@ identity 映射，不得另造不可追溯的 challenge id。
 Content-Security-Policy:
   default-src 'none';
   script-src 'self';
-  style-src 'self' 'unsafe-inline';
-  img-src 'self' data:;
+  script-src-attr 'none';
+  style-src 'self';
+  style-src-attr 'none';
+  img-src 'self';
   font-src 'self';
   connect-src 'self';
   frame-ancestors 'none';
@@ -490,8 +519,9 @@ X-Frame-Options: DENY
 Referrer-Policy: no-referrer
 ```
 
-`style-src 'unsafe-inline'` 仅在前端确实依赖内联样式时临时保留；移除该豁免必须列入
-§7.3 验收项，不能作为“后续优化”悬挂。
+Phase 4 已移除 `style-src 'unsafe-inline'` 与 `img-src data:`；WebUI 源码中的
+inline style 已改为 CSS class 或 `<progress>`，并由 `bun run test` 的静态回归
+检查阻止重新引入。
 
 ### 5.3 前端注入
 
@@ -573,12 +603,12 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 - 增加方法 allowlist 与 seed scope（已完成；`fs.*` 由 daemon 叠加
   `scope_seed` 组件级前缀校验）。
 
-### Phase 4：前端安全收口
+### Phase 4：前端安全收口（已完成，待合入）
 
-- markdown URL scheme 白名单。
-- CSP 与外链/图片策略。
-- 原始事件、tool output、diff 的安全渲染回归测试。
-- 审批卡片服务端权威化。
+- markdown URL scheme 白名单（已完成）。
+- CSP 与外链/图片策略（已完成，无 inline-style 豁免）。
+- 原始事件、tool output、diff 的安全渲染回归测试（已完成）。
+- 审批卡片服务端权威化（已完成：daemon pending 投影 + 网关 opaque challenge）。
 
 ### Phase 5：`/debug` 退役
 

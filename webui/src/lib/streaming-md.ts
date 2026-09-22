@@ -14,12 +14,18 @@
  */
 import {
   default_renderer,
+  HREF,
   parser,
   parser_end,
   parser_write,
+  SRC,
   type Any_Renderer,
+  type Attr,
+  type Default_Renderer_Data,
   type Parser,
+  type Renderer,
 } from "streaming-markdown";
+import { safeMarkdownHref, safeMarkdownImageSrc } from "./safe-url";
 
 export type StreamingStats = {
   chunks: number;
@@ -43,9 +49,52 @@ export type StreamingMarkdown = {
   stats: () => StreamingStats;
 };
 
+function safeRenderer(root: HTMLElement): Renderer<Default_Renderer_Data> {
+  const base = default_renderer(root);
+  const setAttr = (data: Default_Renderer_Data, type: Attr, value: string) => {
+    if (type === HREF) {
+      const node = data.nodes[data.index];
+      const href = safeMarkdownHref(value);
+      if (href) {
+        node.setAttribute("href", href);
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
+        node.setAttribute("referrerpolicy", "no-referrer");
+      } else {
+        node.removeAttribute("href");
+        node.setAttribute("aria-disabled", "true");
+        node.classList.add("md-link-blocked");
+      }
+      return;
+    }
+    if (type === SRC) {
+      const node = data.nodes[data.index];
+      const src = safeMarkdownImageSrc(value);
+      if (src) {
+        node.setAttribute("src", src);
+        node.setAttribute("referrerpolicy", "no-referrer");
+      } else {
+        node.removeAttribute("src");
+        node.setAttribute("alt", "blocked image");
+        node.classList.add("md-image-blocked");
+      }
+      return;
+    }
+    base.set_attr(data, type, value);
+  };
+
+  return {
+    data: base.data,
+    add_token: base.add_token,
+    end_token: base.end_token,
+    add_text: base.add_text,
+    set_attr: setAttr,
+  };
+}
+
 export function createStreamingMarkdown(host: HTMLElement): StreamingMarkdown {
   const element = host;
-  let renderer: Any_Renderer = default_renderer(element);
+  let renderer: Any_Renderer = safeRenderer(element);
   let parserInstance: Parser = parser(renderer);
 
   let pending: string[] = [];
@@ -102,7 +151,7 @@ export function createStreamingMarkdown(host: HTMLElement): StreamingMarkdown {
       scheduled = false;
       parser_end(parserInstance);
       element.replaceChildren();
-      renderer = default_renderer(element);
+      renderer = safeRenderer(element);
       parserInstance = parser(renderer);
       chunks = 0;
       parses = 0;

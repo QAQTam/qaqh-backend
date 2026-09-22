@@ -308,7 +308,7 @@ export const Settings: Component<{ onClose: () => void }> = (props) => {
               <h3>配置档案</h3>
               <div class="meta">当前：{draft.activeProfile || "（默认）"}</div>
               <div class="field-row">
-                <div class="field" style="flex:1">
+                <div class="field grow">
                   <input type="text" placeholder="档案名…" value={newProfile()} onInput={(e) => setNewProfile(e.currentTarget.value)} />
                 </div>
                 <button disabled={busy() || !newProfile().trim()} onClick={() => void saveCurrentProfile()}>保存当前为档案</button>
