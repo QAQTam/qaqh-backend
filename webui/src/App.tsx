@@ -10,12 +10,11 @@ import { createEffect, createSignal, For, Match, onSettled, Repeat, Show, Switch
 import type { ToolInfo, Turn } from "./lib/transcript";
 import { createStreamingMarkdown } from "./lib/streaming-md";
 import {
-  activeReasoningId, activity, attach, boot, bootError, cancelTurn, compact, context, createSession,
+  activeReasoningId, activity, attach, boot, bootError, cancelTurn, context,
   dismissAsk, lease, model, pendingInteraction, pendingPermission, ready, reasoningTail, renderers,
-  respondAsk, respondPlan, respondPermission, seed, sendMessage, sessionOp, sessions,
-  setSettingsOpen, settingsOpen, streams, transcript,
+  respondAsk, respondPlan, respondPermission, seed, sendMessage, sessions,
+  streams, transcript,
 } from "./state";
-import { Settings } from "./components/Settings";
 import { TodoTicker } from "./components/TodoTicker";
 import type { Block } from "./lib/transcript";
 
@@ -305,9 +304,9 @@ const ThinkingTicker: Component = () => {
 // ── interactions ────────────────────────────────────────────────────────────
 const PermissionCard: Component<{ data: any }> = (props) => {
   const [busy, setBusy] = createSignal(false);
-  const submit = (action: string) => {
+  const submit = (decision: "approve" | "reject" | "trust") => {
     setBusy(true);
-    void respondPermission(props.data.tool_call_id, action !== "deny", action === "trust")
+    void respondPermission(props.data.challenge_id, decision)
       .catch(() => setBusy(false));
   };
   return (
@@ -329,7 +328,7 @@ const PermissionCard: Component<{ data: any }> = (props) => {
       </Show>
       <div class="actions">
         <button class="primary" disabled={busy()} onClick={() => submit("approve")}>批准</button>
-        <button class="danger" disabled={busy()} onClick={() => submit("deny")}>拒绝</button>
+        <button class="danger" disabled={busy()} onClick={() => submit("reject")}>拒绝</button>
         <button disabled={busy()} onClick={() => submit("trust")}>批准并信任该文件夹</button>
       </div>
     </div>
@@ -393,9 +392,9 @@ const PlanCard: Component<{ data: any }> = (props) => {
     <div class="interaction">
       <h3>计划评审{props.data.event?.review_type ? ` · ${props.data.event.review_type}` : ""}</h3>
       <div class="plan-content">{props.data.event?.plan_content ?? "（缺少计划内容）"}</div>
-      <div class="actions" style="margin-top:8px">
-        <input type="text" placeholder="审批意见（可选）" value={message()} onInput={(e) => setMessage(e.currentTarget.value)} style="flex:1;min-width:180px" />
-        <label style="font-size:12px;display:flex;gap:5px;align-items:center">
+      <div class="actions plan-actions">
+        <input class="plan-message" type="text" placeholder="审批意见（可选）" value={message()} onInput={(e) => setMessage(e.currentTarget.value)} />
+        <label class="plan-autonomous">
           <input type="checkbox" checked={autonomous()} onInput={(e) => setAutonomous(e.currentTarget.checked)} />
           自主执行
         </label>
@@ -429,9 +428,6 @@ const SessionList: Component = () => (
   <aside id="sidebar">
     <div class="sidebar-head">
       <span>Chats</span>
-      <button title="新建会话" aria-label="新建会话" onClick={() => void createSession(prompt("新会话工作目录（留空 = daemon 默认）") ?? undefined)}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
-      </button>
     </div>
     <div id="session-list">
       <For each={sessions()}>
@@ -448,12 +444,6 @@ const SessionList: Component = () => (
               <Show when={session.running && !(session.seed === seed() && activity() === "working")}>
                 <span class="badge running">运行中</span>
               </Show>
-              <span class="ops">
-                <Show when={!session.archived} fallback={<button onClick={(e) => { e.stopPropagation(); void sessionOp("unarchive", String(session.seed)); }}>↺</button>}>
-                  <button onClick={(e) => { e.stopPropagation(); void sessionOp("archive", String(session.seed)); }}>⌫</button>
-                </Show>
-                <button onClick={(e) => { e.stopPropagation(); void sessionOp("delete", String(session.seed)); }}>×</button>
-              </span>
             </div>
             <div class="meta">
               <span>{String(session.seed).slice(0, 8)}</span>
@@ -491,7 +481,6 @@ const TopBar: Component = () => (
       </span>
     </div>
     <span class="chip mono">{seed() ? String(seed()).slice(0, 8) : "—"}</span>
-    <button id="btn-settings" title="设置" onClick={() => setSettingsOpen(true)}>⚙ 设置</button>
   </header>
 );
 
@@ -518,7 +507,6 @@ const Composer: Component = () => {
       />
       <div class="composer-actions">
         <button class="ghost" title="停止" onClick={() => void cancelTurn()}>停止</button>
-        <button class="ghost" onClick={() => void compact()}>压缩</button>
         <span class="spacer" />
         <button class="send" aria-label="发送" title="Enter 发送，Shift+Enter 换行" onClick={submit} disabled={!text().trim()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
       </div>
@@ -547,9 +535,6 @@ export default function App() {
               <Composer />
             </section>
           </div>
-          <Show when={settingsOpen()}>
-            <Settings onClose={() => setSettingsOpen(false)} />
-          </Show>
         </Show>
       </Show>
     </div>

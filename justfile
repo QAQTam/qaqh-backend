@@ -34,7 +34,7 @@ dev:
 
 # 构建 WebUI 并启动显式回环网关。前置：daemon 已运行（just dev）。
 web-build:
-    cd webui && bun install --frozen-lockfile && bun run typecheck && bun run build
+    cd webui && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build
 
 [unix]
 web: web-build

@@ -80,11 +80,12 @@ export const TodoTicker: Component = () => {
                   </span>
                   <button onClick={() => setExpanded(false)}>收起 ▾</button>
                 </div>
-                <div class="te-progress">
-                  <i
-                    style={`width:${value().counts.total ? (value().counts.completed / value().counts.total) * 100 : 0}%`}
-                  />
-                </div>
+                <progress
+                  class="te-progress-bar"
+                  value={value().counts.completed}
+                  max={Math.max(value().counts.total, 1)}
+                  aria-label={`已完成 ${value().counts.completed}/${value().counts.total}`}
+                />
                 <For each={list}>
                   {(item) => (
                     <div class={{ "te-item": true, current: currentId === item.id }}>

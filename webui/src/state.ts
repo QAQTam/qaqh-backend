@@ -21,7 +21,6 @@ export const renderers = new Map<string, StreamingMarkdown>();
 
 // ── reactive state ──────────────────────────────────────────────────────────
 export const [ready, setReady] = createSignal(false);
-export const [settingsOpen, setSettingsOpen] = createSignal(false);
 export const [bootError, setBootError] = createSignal<string | null>(null);
 export const [sessions, setSessions] = createSignal<any[]>([]);
 export const [seed, setSeed] = createSignal<string | null>(null);
@@ -194,6 +193,49 @@ function scheduleSessionsRefresh(): void {
   }, 800);
 }
 
+let approvalsTimer: ReturnType<typeof setTimeout> | null = null;
+let approvalsGeneration = 0;
+
+export async function refreshApprovals(): Promise<void> {
+  const generation = ++approvalsGeneration;
+  try {
+    const approvals = await ringing.approvals();
+    if (generation !== approvalsGeneration) return;
+    const permission = approvals.find((item) => item.kind === "tool_permission");
+    const interaction = approvals.find((item) => item.kind === "ask" || item.kind === "plan");
+    setPendingPermission(
+      permission
+        ? {
+            ...permission.details,
+            challenge_id: permission.challenge_id,
+            expires_in: permission.expires_in,
+            stub: false,
+          }
+        : null,
+    );
+    setPendingInteraction(
+      interaction
+        ? {
+            kind: interaction.kind,
+            id: interaction.challenge_id,
+            event: interaction.details,
+            expires_in: interaction.expires_in,
+          }
+        : null,
+    );
+  } catch {
+    // Approval refresh is best-effort; the next SSE transition retries it.
+  }
+}
+
+function scheduleApprovalsRefresh(): void {
+  if (approvalsTimer) return;
+  approvalsTimer = setTimeout(() => {
+    approvalsTimer = null;
+    void refreshApprovals();
+  }, 80);
+}
+
 function onControl(name: string, event: Record<string, any>): void {
   switch (name) {
     case "session_activity_changed":
@@ -204,14 +246,10 @@ function onControl(name: string, event: Record<string, any>): void {
       scheduleSessionsRefresh();
       break;
     case "interaction_requested":
-      if (!event.seed || event.seed === seed()) setPendingInteraction({ kind: "ask", id: event.interaction_id, event });
-      break;
     case "plan_review_requested":
-      if (!event.seed || event.seed === seed()) setPendingInteraction({ kind: "plan", id: event.interaction_id, event });
-      break;
     case "interaction_resolved":
     case "plan_review_resolved":
-      if (pendingInteraction()?.id === event.interaction_id) setPendingInteraction(null);
+      if (!event.seed || event.seed === seed()) scheduleApprovalsRefresh();
       break;
     case "dashboard_snapshot": {
       const snapshot = event.snapshot as Record<string, unknown> | undefined;
@@ -229,9 +267,8 @@ function onControl(name: string, event: Record<string, any>): void {
 
 function onTool(name: string, event: Record<string, any>): void {
   if (event.seed && event.seed !== seed()) return;
-  if (name === "tool_permission_requested") setPendingPermission({ ...event, stub: false });
-  if ((name === "tool_started" || name === "tool_finished") && pendingPermission()?.tool_call_id === event.tool_call_id) {
-    setPendingPermission(null);
+  if (name === "tool_permission_requested" || name === "tool_started" || name === "tool_finished") {
+    scheduleApprovalsRefresh();
   }
   // 旧投影的 todo 刷新信号：任何工具收尾都值得对一次账（todo.status 很轻）；
   // v2 落地后改由 TodoChanged 事件驱动，此启发式删除。
@@ -373,17 +410,13 @@ export async function attach(target: string): Promise<void> {
   try {
     const bootstrap = (await ringing.bootstrapFor(target)) as any;
     const control = bootstrap?.control?.state ?? {};
-    const tool = bootstrap?.tool?.state ?? {};
     const conversation = bootstrap?.conversation?.state ?? {};
     setActivity(control.activity ?? null);
-    if (control.pending_interaction) {
-      setPendingInteraction({ kind: control.pending_interaction.kind, id: control.pending_interaction.id, stub: true });
-    }
-    if (tool.pending_permission) setPendingPermission({ tool_call_id: tool.pending_permission, stub: true });
     void conversation;
   } catch {
     // bootstrap is best-effort state catch-up; the streams repair the rest
   }
+  void refreshApprovals();
 
   try {
     const page = (await ringing.timelinePage(target, "?limit=50")) as any;
@@ -461,69 +494,36 @@ export async function cancelTurn(): Promise<void> {
   await ringing.command("conversation", { channel: "conversation", type: "conversation_cancel" }, seed());
 }
 
-export async function compact(): Promise<void> {
-  if (!seed()) return;
-  await ringing.command("conversation", { channel: "conversation", type: "conversation_compact" }, seed());
-}
-
-export async function respondPermission(toolCallId: string, approved: boolean, trustFolder = false): Promise<void> {
-  await ringing.command(
-    "tool",
-    { channel: "tool", type: "tool_permission_respond", tool_call_id: toolCallId, approved, trust_folder: trustFolder },
-    seed(),
-  );
+export async function respondPermission(
+  challengeId: string,
+  decision: "approve" | "reject" | "trust",
+): Promise<void> {
+  await ringing.respondApproval(challengeId, decision);
   setPendingPermission(null);
 }
 
-export async function respondAsk(interactionId: string, answers: Array<{ question_id: string; answer: string }>): Promise<void> {
-  await ringing.command(
-    "control",
-    { channel: "control", type: "interaction_ask_respond", interaction_id: interactionId, answers },
-    seed(),
-  );
+export async function respondAsk(
+  challengeId: string,
+  answers: Array<{ question_id: string; answer: string }>,
+): Promise<void> {
+  await ringing.respondApproval(challengeId, "submit", { answers });
   setPendingInteraction(null);
 }
 
-export async function dismissAsk(interactionId: string): Promise<void> {
-  await ringing.command(
-    "control",
-    { channel: "control", type: "interaction_ask_dismiss", interaction_id: interactionId },
-    seed(),
-  );
+export async function dismissAsk(challengeId: string): Promise<void> {
+  await ringing.respondApproval(challengeId, "dismiss");
   setPendingInteraction(null);
 }
 
-export async function respondPlan(interactionId: string, approved: boolean, message?: string, autonomous = false): Promise<void> {
-  await ringing.command(
-    "control",
-    { channel: "control", type: "plan_review_respond", interaction_id: interactionId, approved, message: message ?? null, autonomous },
-    seed(),
-  );
+export async function respondPlan(
+  challengeId: string,
+  approved: boolean,
+  message?: string,
+  autonomous = false,
+): Promise<void> {
+  await ringing.respondApproval(challengeId, approved ? "approve" : "reject", {
+    message: message || null,
+    autonomous,
+  });
   setPendingInteraction(null);
-}
-
-export async function createSession(cwd?: string): Promise<void> {
-  await ringing.command(
-    "control",
-    { channel: "control", type: "session_create", close_current: false, custom_tools: [], ...(cwd ? { cwd } : {}) },
-    null,
-  );
-  for (let i = 0; i < 12; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    await refreshSessions();
-    const running = sessions().find((s) => s.running && !s.archived);
-    if (running && running.seed !== seed()) {
-      await attach(String(running.seed));
-      return;
-    }
-  }
-}
-
-export async function sessionOp(action: string, target: string): Promise<void> {
-  await ringing.command(
-    "control",
-    { channel: "control", type: `session_${action}`, seed: target },
-    target,
-  );
-  await refreshSessions();
 }

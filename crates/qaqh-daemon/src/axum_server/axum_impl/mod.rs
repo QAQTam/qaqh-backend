@@ -56,7 +56,9 @@ pub(crate) use service_api::handle_service;
 pub(crate) use sse::{handle_events, handle_timeline_events};
 #[cfg(test)]
 pub(crate) use sse::{parse_sse_cursor, parse_timeline_cursor};
-pub(crate) use timeline_api::{handle_bootstrap, handle_timeline_snapshot};
+pub(crate) use timeline_api::{
+    handle_bootstrap, handle_pending_approvals, handle_timeline_snapshot,
+};
 
 const RENEW_TTL_MS: u64 = 30_000;
 const RENEW_INTERVAL_MS: u64 = 10_000;
@@ -133,6 +135,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/ringing/v1/sessions/{seed}/bootstrap",
             get(handle_bootstrap),
+        )
+        .route(
+            "/ringing/v1/sessions/{seed}/approvals",
+            get(handle_pending_approvals),
         )
         .route(
             "/ringing/v1/sessions/{seed}/timeline",

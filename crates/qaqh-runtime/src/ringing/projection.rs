@@ -107,18 +107,38 @@ impl SnapshotProjector {
                         state["agent_lifecycle"] = serde_json::json!(s);
                         true
                     }
-                    CE::InteractionRequested { interaction_id, .. } => {
-                        state["pending_interaction"] =
-                            serde_json::json!({ "id": interaction_id, "kind": "ask" });
+                    CE::InteractionRequested {
+                        interaction_id,
+                        questions,
+                        ..
+                    } => {
+                        state["pending_interaction"] = serde_json::json!({
+                            "id": interaction_id,
+                            "kind": "ask",
+                            "details": { "questions": questions },
+                        });
                         true
                     }
                     CE::InteractionResolved { .. } => {
                         state["pending_interaction"] = serde_json::Value::Null;
                         true
                     }
-                    CE::PlanReviewRequested { interaction_id, .. } => {
-                        state["pending_interaction"] =
-                            serde_json::json!({ "id": interaction_id, "kind": "plan" });
+                    CE::PlanReviewRequested {
+                        interaction_id,
+                        plan_content,
+                        review_type,
+                        todo_items,
+                        ..
+                    } => {
+                        state["pending_interaction"] = serde_json::json!({
+                            "id": interaction_id,
+                            "kind": "plan",
+                            "details": {
+                                "plan_content": plan_content,
+                                "review_type": review_type,
+                                "todo_items": todo_items,
+                            },
+                        });
                         true
                     }
                     CE::PlanReviewResolved { .. } => {
@@ -206,13 +226,36 @@ impl SnapshotProjector {
             (RingingChannel::Tool, DomainEvent::Tool(te)) => {
                 use qaqh_domain::ToolEvent as TE;
                 match te {
-                    TE::ToolPermissionRequested { tool_call_id, .. } => {
+                    TE::ToolPermissionRequested {
+                        tool_call_id,
+                        tool_name,
+                        action_summary,
+                        reason,
+                        paths,
+                        category,
+                        level,
+                        risk,
+                        consequence,
+                        ..
+                    } => {
                         state["pending_permission"] = serde_json::json!(tool_call_id);
+                        state["pending_permission_details"] = serde_json::json!({
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "action_summary": action_summary,
+                            "reason": reason,
+                            "paths": paths,
+                            "category": category,
+                            "level": level,
+                            "risk": risk,
+                            "consequence": consequence,
+                        });
                         true
                     }
                     TE::ToolFinished { tool_call_id, .. } => {
                         state["last_finished"] = serde_json::json!(tool_call_id);
                         state["pending_permission"] = serde_json::Value::Null;
+                        state["pending_permission_details"] = serde_json::Value::Null;
                         // ToolStarted 写入的 running 必须在终态清除，否则 daemon
                         // 重启重放 journal 后 tool 快照永远携带陈旧 running 列表
                         // （异常中断时 ToolFinished 从未到达，孤儿 turn 的收尾
@@ -226,6 +269,10 @@ impl SnapshotProjector {
                         round_num,
                         ..
                     } => {
+                        // 一旦工具开始执行，审批请求已经被消费；bootstrap
+                        // 不得继续暴露可重放的 challenge 事实。
+                        state["pending_permission"] = serde_json::Value::Null;
+                        state["pending_permission_details"] = serde_json::Value::Null;
                         // 对象化：孤儿收尾（seal_orphan_channel_state）需要
                         // turn_id/round_num 才能发布完整 ToolFinished 终态。
                         state["running"] = serde_json::json!([{
@@ -277,6 +324,7 @@ mod tests {
         let snap = p.snapshot_for(RingingChannel::Control, "s", 42);
         assert_eq!(snap.state["session_state"], "created");
         assert_eq!(snap.state["pending_interaction"]["id"], "i1");
+        assert!(snap.state["pending_interaction"]["details"]["questions"].is_array());
         assert_eq!(snap.state_revision, 2);
     }
 
@@ -327,10 +375,13 @@ mod tests {
                 consequence: "run".into(),
             }),
         );
+        let pending = p.snapshot_for(RingingChannel::Tool, "s", 0);
+        assert_eq!(pending.state["pending_permission"], "c1");
         assert_eq!(
-            p.snapshot_for(RingingChannel::Tool, "s", 0).state["pending_permission"],
+            pending.state["pending_permission_details"]["tool_call_id"],
             "c1"
         );
+        assert_eq!(pending.state["pending_permission_details"]["risk"], "high");
         p.apply(
             RingingChannel::Tool,
             "s",
@@ -343,6 +394,10 @@ mod tests {
         );
         let snap = p.snapshot_for(RingingChannel::Tool, "s", 0);
         assert_eq!(snap.state["pending_permission"], serde_json::Value::Null);
+        assert_eq!(
+            snap.state["pending_permission_details"],
+            serde_json::Value::Null
+        );
         assert_eq!(snap.state["last_finished"], "c1");
     }
 
