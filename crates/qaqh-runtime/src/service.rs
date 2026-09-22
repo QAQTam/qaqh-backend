@@ -263,7 +263,8 @@ impl QaqhService {
             // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
             "fs.list" => {
                 let path = pstr(params, "path")?;
-                list_remote_directory(&self.sessions, &path)
+                let scope_seed = params.get("scope_seed").and_then(Value::as_str);
+                list_remote_directory(&self.sessions, &path, scope_seed)
             }
             "fs.read" => {
                 let path = pstr(params, "path")?;
@@ -271,7 +272,8 @@ impl QaqhService {
                     .get("max_bytes")
                     .and_then(Value::as_u64)
                     .unwrap_or(512 * 1024);
-                read_remote_file(&self.sessions, &path, max_bytes)
+                let scope_seed = params.get("scope_seed").and_then(Value::as_str);
+                read_remote_file(&self.sessions, &path, max_bytes, scope_seed)
             }
             "workspace.create" => {
                 let path = pstr(params, "path")?;

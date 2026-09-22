@@ -1,30 +1,45 @@
 //! Independent, loopback-only browser gateway for the QAQ-Harness WebUI.
 //!
-//! This crate intentionally has no daemon routes and no browser-visible bearer
-//! token. Phase 1 only establishes the process boundary and discovery gate;
-//! session exchange, static assets, and the restricted proxy surface are added
-//! in later phases.
+//! The browser never receives the daemon bearer token or a daemon lease id.
+//! It receives an opaque HttpOnly session cookie and a CSRF token; all daemon
+//! calls are made by this process after explicit origin, allowlist, and seed
+//! scope checks.
+
+mod daemon;
+mod security;
+mod session;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Router,
-    extract::{DefaultBodyLimit, Path as AxumPath},
-    http::{HeaderName, HeaderValue, StatusCode, Uri, header},
+    Json, Router,
+    body::{Body, Bytes},
+    extract::{ConnectInfo, DefaultBodyLimit, Path as AxumPath, State},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
+};
+use daemon::DaemonClient;
+use qaqh_domain::{ControlCommand, ConversationCommand, RingingChannel, ToolCommand};
+use qaqh_ringing::{
+    RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope,
 };
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
+use reqwest::Response as UpstreamResponse;
 use rust_embed::RustEmbed;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use session::{BrowserSession, NonceStore, SESSION_IDLE_TTL, SessionStore};
 use tokio::net::{TcpListener, TcpStream};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const CONNECT_ATTEMPTS: usize = 5;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
-const MAX_BODY_BYTES: usize = 64 * 1024;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(RustEmbed)]
 #[folder = "../../webui/out/renderer"]
@@ -72,6 +87,15 @@ impl GatewayConfig {
     }
 }
 
+#[derive(Clone)]
+struct GatewayState {
+    daemon: Arc<DaemonClient>,
+    nonces: Arc<NonceStore>,
+    sessions: Arc<SessionStore>,
+    allowed_hosts: Arc<Vec<String>>,
+    allowed_origins: Arc<Vec<String>>,
+}
+
 /// Start the browser gateway after validating the local daemon discovery
 /// record and proving that the discovered endpoint is reachable.
 pub async fn run(config: GatewayConfig) -> Result<(), String> {
@@ -84,6 +108,8 @@ pub async fn run(config: GatewayConfig) -> Result<(), String> {
     )?;
     let endpoint = parse_loopback_endpoint(&discovery.endpoint)?;
     ensure_reachable(&endpoint).await?;
+    let daemon = Arc::new(DaemonClient::new(&discovery)?);
+    daemon.verify_epoch().await?;
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port))
         .await
@@ -91,17 +117,41 @@ pub async fn run(config: GatewayConfig) -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|error| format!("resolve webui gateway address: {error}"))?;
+    let (allowed_hosts, allowed_origins) = browser_origins(address.port());
+    let state = GatewayState {
+        daemon,
+        nonces: Arc::new(NonceStore::new()),
+        sessions: Arc::new(SessionStore::new()),
+        allowed_hosts: Arc::new(allowed_hosts),
+        allowed_origins: Arc::new(allowed_origins),
+    };
     let url = format!("http://{address}");
     println!("qaqh-webui-gateway: listening on {url}");
     log::info!("[webui-gateway] listening on {url}");
 
-    let app = build_router();
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|error| format!("serve webui gateway: {error}"))?;
+    let app = build_router(state);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|error| format!("serve webui gateway: {error}"))?;
     log::info!("[webui-gateway] stopped");
     Ok(())
+}
+
+fn browser_origins(port: u16) -> (Vec<String>, Vec<String>) {
+    let hosts = vec![
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+    ];
+    let origins = hosts
+        .iter()
+        .map(|host| format!("http://{host}"))
+        .collect::<Vec<_>>();
+    (hosts, origins)
 }
 
 fn read_discovery(path: &Path) -> Result<DaemonDiscovery, String> {
@@ -205,16 +255,42 @@ async fn ensure_reachable(endpoint: &LoopbackEndpoint) -> Result<(), String> {
     Err("daemon discovery endpoint is not reachable".into())
 }
 
-/// Gateway router. It serves only the compiled WebUI asset tree; daemon API
-/// routes, nonce exchange, and control endpoints remain unmounted until later
-/// phases add them behind explicit allowlists.
-pub fn build_router() -> Router {
+fn build_router(state: GatewayState) -> Router {
     Router::new()
         .route("/", get(serve_index))
         .route("/assets/{*path}", get(serve_asset))
+        .route("/__gateway/bootstrap.js", get(bootstrap_js))
+        .route("/__gateway/session", post(create_session))
+        .route("/__gateway/logout", post(logout))
+        .route("/__gateway/sessions", get(list_sessions))
+        .route("/__gateway/sessions/{seed}/attach", post(attach_seed))
+        .route(
+            "/__gateway/ringing/commands/{channel}",
+            post(proxy_command).get(proxy_command_status),
+        )
+        .route(
+            "/__gateway/ringing/content/{content_id}",
+            get(proxy_content_get),
+        )
+        .route("/__gateway/ringing/content", post(proxy_content_upload))
+        .route("/__gateway/ringing/events/{channel}", get(proxy_events))
+        .route(
+            "/__gateway/ringing/sessions/{seed}/bootstrap",
+            get(proxy_bootstrap),
+        )
+        .route(
+            "/__gateway/ringing/sessions/{seed}/timeline",
+            get(proxy_timeline),
+        )
+        .route(
+            "/__gateway/ringing/sessions/{seed}/timeline/events",
+            get(proxy_timeline_events),
+        )
+        .route("/__gateway/ringing/service/{method}", post(proxy_service))
         .fallback(serve_spa)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(security_headers))
+        .with_state(state)
 }
 
 async fn serve_index() -> Response {
@@ -296,13 +372,735 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
+async fn bootstrap_js(
+    State(state): State<GatewayState>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = browser_request_allowed(&state, &headers, false) {
+        return response;
+    }
+    let nonce = match state.nonces.issue(address.ip()) {
+        Ok(nonce) => nonce,
+        Err(code) => return error_response(StatusCode::TOO_MANY_REQUESTS, code),
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        format!("window.__QAQH_GATEWAY__={{\"nonce\":\"{nonce}\"}};\n"),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct SessionRequest {
+    nonce: String,
+}
+
+async fn create_session(
+    State(state): State<GatewayState>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<SessionRequest>,
+) -> Response {
+    if let Err(response) = browser_request_allowed(&state, &headers, true) {
+        return response;
+    }
+    if let Err(code) = state.nonces.redeem(address.ip(), &request.nonce) {
+        let status = if code.ends_with("rate") {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::FORBIDDEN
+        };
+        return error_response(status, code);
+    }
+
+    let client_instance_id = format!("webui-gateway-{}", session::random_token());
+    let lease = match state.daemon.open(&client_instance_id).await {
+        Ok(lease) => lease,
+        Err(error) => {
+            log::warn!("[webui-gateway] open failed: {error}");
+            return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable");
+        }
+    };
+    let browser_session = BrowserSession::new(lease);
+    if state.sessions.insert(browser_session.clone()).is_err() {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "session_limit");
+    }
+    spawn_renewal(state.clone(), browser_session.clone());
+
+    let body = json!({
+        "csrf_token": browser_session.csrf_token(),
+        "expires_in": SESSION_IDLE_TTL.as_secs(),
+    });
+    let mut response = Json(body).into_response();
+    let cookie = security::session_cookie(browser_session.id(), SESSION_IDLE_TTL.as_secs());
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+}
+
+async fn logout(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !security::csrf_matches(&headers, session.csrf_token()) {
+        return error_response(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    state.sessions.remove(session.id());
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(value) = HeaderValue::from_str(&security::clear_session_cookie()) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+}
+
+async fn list_sessions(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    match fetch_sessions(&state, &session).await {
+        Ok(value) => Json(value).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn fetch_sessions(state: &GatewayState, session: &BrowserSession) -> Result<Value, Response> {
+    let lease = session.lease_snapshot();
+    let upstream = state
+        .daemon
+        .post_json("/ringing/v1/service/session.list", &lease, &json!({}))
+        .await
+        .map_err(|_| error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"))?;
+    if !upstream.status().is_success() {
+        return Err(forward_response(upstream).await);
+    }
+    let value: Value = upstream
+        .json()
+        .await
+        .map_err(|_| error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"))?;
+    Ok(sanitize_session_list(value))
+}
+
+fn sanitize_session_list(value: Value) -> Value {
+    let Some(entries) = value.as_array() else {
+        return json!([]);
+    };
+    let sanitized = entries
+        .iter()
+        .map(|entry| {
+            json!({
+                "seed": entry.get("seed").cloned().unwrap_or(Value::Null),
+                "title": entry.get("title").cloned().unwrap_or(Value::Null),
+                "created_at": entry.get("created_at").cloned().unwrap_or(Value::Null),
+                "updated_at": entry.get("updated_at").cloned().unwrap_or(Value::Null),
+                "message_count": entry.get("message_count").cloned().unwrap_or(Value::Null),
+                "turn_count": entry.get("turn_count").cloned().unwrap_or(Value::Null),
+                "running": entry.get("running").cloned().unwrap_or(Value::Bool(false)),
+                "archived": entry.get("archived").cloned().unwrap_or(Value::Bool(false)),
+                "ephemeral": entry.get("ephemeral").cloned().unwrap_or(Value::Bool(false)),
+            })
+        })
+        .collect::<Vec<_>>();
+    Value::Array(sanitized)
+}
+
+async fn attach_seed(
+    State(state): State<GatewayState>,
+    AxumPath(seed): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !security::csrf_matches(&headers, session.csrf_token()) {
+        return error_response(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if !session.allow_command() {
+        return error_response(StatusCode::TOO_MANY_REQUESTS, "command_rate_limited");
+    }
+    if !valid_seed(&seed) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_seed");
+    }
+
+    let client_instance_id = session.lease_snapshot().client_instance_id;
+    let lease = match state.daemon.open(&client_instance_id).await {
+        Ok(lease) => lease,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    session.replace_lease(lease.clone());
+    session.set_active_seed(None);
+
+    let command = RingingCommand::Control(ControlCommand::SessionAttach { seed: seed.clone() });
+    let envelope =
+        RingingCommandEnvelope::new(session::random_token(), client_instance_id, command)
+            .with_client_session_id(lease.client_session_id.clone())
+            .with_seed(seed.clone());
+    let body = match serde_json::to_value(envelope) {
+        Ok(body) => body,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed"),
+    };
+    let response = match state
+        .daemon
+        .post_json("/ringing/v1/commands/control", &lease, &body)
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    if !response.status().is_success() {
+        return forward_response(response).await;
+    }
+    let ack: RingingCommandAck = match response.json().await {
+        Ok(ack) => ack,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"),
+    };
+    if ack.status != RingingCommandAckStatus::Accepted {
+        return error_response(StatusCode::FORBIDDEN, "attach_rejected");
+    }
+    session.set_active_seed(Some(seed));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn proxy_command(
+    State(state): State<GatewayState>,
+    AxumPath(channel): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !security::csrf_matches(&headers, session.csrf_token()) {
+        return error_response(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if !session.allow_command() {
+        return error_response(StatusCode::TOO_MANY_REQUESTS, "command_rate_limited");
+    }
+    let Some(active_seed) = session.active_seed() else {
+        return error_response(StatusCode::CONFLICT, "no_active_seed");
+    };
+    let mut envelope: RingingCommandEnvelope = match serde_json::from_slice(&body) {
+        Ok(envelope) => envelope,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_envelope"),
+    };
+    let Some(expected_channel) = channel_from_path(&channel) else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_channel");
+    };
+    if envelope.channel != expected_channel || !command_allowed(&envelope.command) {
+        return error_response(StatusCode::FORBIDDEN, "command_not_allowed");
+    }
+    let lease = session.lease_snapshot();
+    envelope.client_instance_id = lease.client_instance_id.clone();
+    envelope.client_session_id = lease.client_session_id.clone();
+    envelope.seed = Some(active_seed);
+    if let Err(error) = envelope.validate() {
+        return error_response(StatusCode::BAD_REQUEST, error);
+    }
+    let body = match serde_json::to_value(envelope) {
+        Ok(body) => body,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed"),
+    };
+    let response = match state
+        .daemon
+        .post_json(&format!("/ringing/v1/commands/{channel}"), &lease, &body)
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    forward_response(response).await
+}
+
+async fn proxy_command_status(
+    State(state): State<GatewayState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !valid_opaque_id(&id) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_command_id");
+    }
+    let lease = session.lease_snapshot();
+    let response = match state
+        .daemon
+        .get(&format!("/ringing/v1/commands/{id}"), &lease)
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    forward_response(response).await
+}
+
+async fn proxy_content_get(
+    State(state): State<GatewayState>,
+    AxumPath(content_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !valid_opaque_id(&content_id) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_content_id");
+    }
+    let lease = session.lease_snapshot();
+    let response = match state
+        .daemon
+        .get(&format!("/ringing/v1/content/{content_id}"), &lease)
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    forward_response(response).await
+}
+
+async fn proxy_content_upload(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !security::csrf_matches(&headers, session.csrf_token()) {
+        return error_response(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    let lease = session.lease_snapshot();
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let response = match state
+        .daemon
+        .post_bytes("/ringing/v1/content", &lease, body.to_vec(), content_type)
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    forward_response(response).await
+}
+
+async fn proxy_events(
+    State(state): State<GatewayState>,
+    AxumPath(channel): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if channel_from_path(&channel).is_none() {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_channel");
+    }
+    if session.active_seed().is_none() {
+        return error_response(StatusCode::CONFLICT, "no_active_seed");
+    }
+    let lease = session.lease_snapshot();
+    let response = match state
+        .daemon
+        .get_stream(&format!("/ringing/v1/events/{channel}"), &lease, &headers)
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    stream_response(response)
+}
+
+async fn proxy_bootstrap(
+    State(state): State<GatewayState>,
+    AxumPath(seed): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_seeded_get(state, seed, headers, "bootstrap").await
+}
+
+async fn proxy_timeline(
+    State(state): State<GatewayState>,
+    AxumPath(seed): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_seeded_get(state, seed, headers, "timeline").await
+}
+
+async fn proxy_timeline_events(
+    State(state): State<GatewayState>,
+    AxumPath(seed): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if session.active_seed().as_deref() != Some(seed.as_str()) {
+        return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
+    }
+    let lease = session.lease_snapshot();
+    let response = match state
+        .daemon
+        .get_stream(
+            &format!(
+                "/ringing/v1/sessions/{}/timeline/events",
+                encode_path(&seed)
+            ),
+            &lease,
+            &headers,
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    stream_response(response)
+}
+
+async fn proxy_seeded_get(
+    state: GatewayState,
+    seed: String,
+    headers: HeaderMap,
+    suffix: &str,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if session.active_seed().as_deref() != Some(seed.as_str()) {
+        return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
+    }
+    let lease = session.lease_snapshot();
+    let path = if suffix == "bootstrap" {
+        format!("/ringing/v1/sessions/{}/bootstrap", encode_path(&seed))
+    } else {
+        format!("/ringing/v1/sessions/{}/timeline", encode_path(&seed))
+    };
+    let response = match state.daemon.get(&path, &lease).await {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    forward_response(response).await
+}
+
+async fn proxy_service(
+    State(state): State<GatewayState>,
+    AxumPath(method): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !security::csrf_matches(&headers, session.csrf_token()) {
+        return error_response(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if !session.allow_service() {
+        return error_response(StatusCode::TOO_MANY_REQUESTS, "service_rate_limited");
+    }
+    if method == "session.list" {
+        return match fetch_sessions(&state, &session).await {
+            Ok(value) => Json(value).into_response(),
+            Err(response) => response,
+        };
+    }
+    if !service_allowed(&method) {
+        return error_response(StatusCode::FORBIDDEN, "service_not_allowed");
+    }
+    let mut params: Value = if body.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_body"),
+        }
+    };
+    if service_requires_seed(&method) {
+        let Some(active_seed) = session.active_seed() else {
+            return error_response(StatusCode::CONFLICT, "no_active_seed");
+        };
+        if let Some(object) = params.as_object_mut() {
+            object.insert("seed".into(), Value::String(active_seed.clone()));
+            if method.starts_with("fs.") {
+                object.insert("scope_seed".into(), Value::String(active_seed));
+            }
+        } else {
+            params = json!({ "seed": active_seed });
+        }
+    }
+    let lease = session.lease_snapshot();
+    let response = match state
+        .daemon
+        .post_json(
+            &format!("/ringing/v1/service/{}", encode_path(&method)),
+            &lease,
+            &params,
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    if matches!(
+        method.as_str(),
+        "session.meta" | "workspace.get" | "workspace.list"
+    ) {
+        if !response.status().is_success() {
+            return forward_response(response).await;
+        }
+        return match response.json::<Value>().await {
+            Ok(value) => Json(sanitize_service_response(&method, value)).into_response(),
+            Err(_) => error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"),
+        };
+    }
+    forward_response(response).await
+}
+
+fn sanitize_service_response(method: &str, value: Value) -> Value {
+    match method {
+        "session.meta" => sanitize_session_meta(&value),
+        "workspace.get" => sanitize_workspace(&value),
+        "workspace.list" => Value::Array(
+            value
+                .as_array()
+                .map(|entries| entries.iter().map(sanitize_workspace).collect())
+                .unwrap_or_default(),
+        ),
+        _ => value,
+    }
+}
+
+fn sanitize_session_meta(value: &Value) -> Value {
+    json!({
+        "seed": value.get("seed").cloned().unwrap_or(Value::Null),
+        "title": value.get("title").cloned().unwrap_or(Value::Null),
+        "created_at": value.get("created_at").cloned().unwrap_or(Value::Null),
+        "updated_at": value.get("updated_at").cloned().unwrap_or(Value::Null),
+        "message_count": value.get("message_count").cloned().unwrap_or(Value::Null),
+        "turn_count": value.get("turn_count").cloned().unwrap_or(Value::Null),
+        "running": value.get("running").cloned().unwrap_or(Value::Bool(false)),
+        "archived": value.get("archived").cloned().unwrap_or(Value::Bool(false)),
+        "ephemeral": value.get("ephemeral").cloned().unwrap_or(Value::Bool(false)),
+    })
+}
+
+fn sanitize_workspace(value: &Value) -> Value {
+    json!({
+        "id": value.get("id").cloned().unwrap_or(Value::Null),
+        "title": value.get("title").cloned().unwrap_or(Value::Null),
+        "order": value.get("order").cloned().unwrap_or(Value::Null),
+        "missing_dir": value.get("missing_dir").cloned().unwrap_or(Value::Bool(false)),
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn authenticate(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    require_origin: bool,
+) -> Result<Arc<BrowserSession>, Response> {
+    browser_request_allowed(state, headers, require_origin)?;
+    let session_id = security::cookie_value(headers, security::SESSION_COOKIE)
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "session_required"))?;
+    let session = state
+        .sessions
+        .get(&session_id)
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "session_expired"))?;
+    session.touch();
+    Ok(session)
+}
+
+#[allow(clippy::result_large_err)]
+fn browser_request_allowed(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    require_origin: bool,
+) -> Result<(), Response> {
+    if !security::host_allowed(headers, &state.allowed_hosts) {
+        return Err(error_response(
+            StatusCode::MISDIRECTED_REQUEST,
+            "invalid_host",
+        ));
+    }
+    if !security::sec_fetch_site_allowed(headers) {
+        return Err(error_response(StatusCode::FORBIDDEN, "cross_site"));
+    }
+    if require_origin && !security::origin_allowed(headers, &state.allowed_origins) {
+        return Err(error_response(StatusCode::FORBIDDEN, "invalid_origin"));
+    }
+    Ok(())
+}
+
+fn spawn_renewal(state: GatewayState, session: Arc<BrowserSession>) {
+    tokio::spawn(async move {
+        let mut cancel = session.subscribe_cancel();
+        loop {
+            let lease = session.lease_snapshot();
+            if lease.server_epoch != state.daemon.epoch()
+                || lease.last_renew.elapsed() >= Duration::from_millis(lease.ttl_ms)
+            {
+                state.sessions.remove(session.id());
+                break;
+            }
+            let interval = Duration::from_millis((lease.renew_interval_ms / 2).max(1_000));
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            // A seed switch renegotiates the lease and replaces the old
+            // client_session_id. Never renew the stale snapshot; loop and pick
+            // up the new lease instead.
+            if session.lease_snapshot().client_session_id != lease.client_session_id {
+                continue;
+            }
+            if state.daemon.renew(&lease).await.is_err() {
+                state.sessions.remove(session.id());
+                break;
+            }
+            session.mark_renewed();
+        }
+    });
+}
+
+fn command_allowed(command: &RingingCommand) -> bool {
+    matches!(
+        command,
+        RingingCommand::Conversation(
+            ConversationCommand::ConversationSendMessage { .. }
+                | ConversationCommand::ConversationCancel { .. }
+        ) | RingingCommand::Control(
+            ControlCommand::InteractionAskRespond { .. }
+                | ControlCommand::InteractionAskDismiss { .. }
+                | ControlCommand::PlanReviewRespond { .. }
+        ) | RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
+    )
+}
+
+fn service_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        "daemon.version"
+            | "session.list"
+            | "session.meta"
+            | "session.activity"
+            | "session.dashboard"
+            | "session.get_activity"
+            | "workspace.get"
+            | "workspace.list"
+            | "fs.list"
+            | "fs.read"
+            | "todo.status"
+            | "todo.list"
+            | "plan.read"
+            | "plan.context_stats"
+            | "stats.token_usage"
+            | "git.diff"
+            | "git.branch"
+            | "git.branches"
+            | "git.file_diff"
+    )
+}
+
+fn service_requires_seed(method: &str) -> bool {
+    !matches!(
+        method,
+        "daemon.version" | "session.list" | "session.activity" | "workspace.list"
+    )
+}
+
+fn channel_from_path(channel: &str) -> Option<RingingChannel> {
+    match channel {
+        "control" => Some(RingingChannel::Control),
+        "conversation" => Some(RingingChannel::Conversation),
+        "tool" => Some(RingingChannel::Tool),
+        _ => None,
+    }
+}
+
+fn valid_seed(seed: &str) -> bool {
+    seed.len() == 8 && seed.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn valid_opaque_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn encode_path(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+fn error_response(status: StatusCode, code: &str) -> Response {
+    (status, Json(json!({ "code": code }))).into_response()
+}
+
+async fn forward_response(response: UpstreamResponse) -> Response {
+    let status = response.status();
+    let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_response_failed"),
+    };
+    let mut out = Response::builder()
+        .status(status)
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "proxy_failed"));
+    if let Some(content_type) = content_type {
+        out.headers_mut().insert(header::CONTENT_TYPE, content_type);
+    }
+    out
+}
+
+fn stream_response(response: UpstreamResponse) -> Response {
+    let status = response.status();
+    let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let mut out = Response::builder()
+        .status(status)
+        .body(Body::from_stream(response.bytes_stream()))
+        .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "proxy_failed"));
+    if let Some(content_type) = content_type {
+        out.headers_mut().insert(header::CONTENT_TYPE, content_type);
+    }
+    out
+}
+
 async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'",
         ),
     );
     headers.insert(
@@ -310,7 +1108,7 @@ async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
         HeaderValue::from_static("same-origin"),
     );
     headers.insert(
-        header::HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderName::from_static("cross-origin-resource-policy"),
         HeaderValue::from_static("same-origin"),
     );
     headers.insert(
@@ -376,6 +1174,17 @@ mod tests {
             build_id: "build-1".into(),
             channel: "dev".into(),
             executable: "qaqh-daemon".into(),
+        }
+    }
+
+    fn test_state() -> GatewayState {
+        let (hosts, origins) = browser_origins(41234);
+        GatewayState {
+            daemon: Arc::new(DaemonClient::new(&discovery("http://127.0.0.1:1")).unwrap()),
+            nonces: Arc::new(NonceStore::new()),
+            sessions: Arc::new(SessionStore::new()),
+            allowed_hosts: Arc::new(hosts),
+            allowed_origins: Arc::new(origins),
         }
     }
 
@@ -447,7 +1256,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_serves_assets_and_sets_security_headers() {
-        let app = build_router();
+        let app = build_router(test_state());
         let response = app
             .clone()
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -460,7 +1269,7 @@ mod tests {
                 .get(header::CONTENT_SECURITY_POLICY)
                 .and_then(|value| value.to_str().ok()),
             Some(
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
             )
         );
         assert_eq!(
@@ -474,7 +1283,7 @@ mod tests {
 
         for path in [
             "/debug/",
-            "/__gateway/bootstrap.js",
+            "/__gateway/unknown",
             "/assets/missing.js",
             "/assets/foo.map",
             "/assets/%2e%2e/index.html",
@@ -501,7 +1310,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_serves_hashed_assets_and_rejects_source_maps() {
-        let app = build_router();
+        let app = build_router(test_state());
         let asset = WebUi::iter()
             .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
             .expect("Vite build must emit a JavaScript asset");
@@ -522,5 +1331,85 @@ mod tests {
         assert!(!allowed_asset_path("assets/index.js.map"));
         assert!(!allowed_asset_path("assets/.hidden.js"));
         assert!(!allowed_asset_path("assets/../index.html"));
+    }
+
+    #[tokio::test]
+    async fn session_exchange_requires_nonce_and_origin() {
+        let state = test_state();
+        let app = build_router(state.clone());
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/__gateway/session")
+            .header("host", "127.0.0.1:41234")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"nonce":"missing"}"#))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let nonce = state.nonces.issue("127.0.0.1".parse().unwrap()).unwrap();
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/__gateway/session")
+            .header("host", "127.0.0.1:41234")
+            .header("origin", "http://127.0.0.1:41234")
+            .header("sec-fetch-site", "same-origin")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "nonce": nonce }).to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn command_and_service_allowlists_are_explicit() {
+        assert!(command_allowed(&RingingCommand::Conversation(
+            ConversationCommand::ConversationSendMessage {
+                text: "hi".into(),
+                images: Vec::new(),
+                attachments: None,
+                as_system: false,
+            }
+        )));
+        assert!(!command_allowed(&RingingCommand::Control(
+            ControlCommand::SessionCreate {
+                close_current: false,
+                cwd: None,
+                tool_mode: None,
+                custom_tools: Vec::new(),
+            }
+        )));
+        assert!(service_allowed("fs.read"));
+        assert!(!service_allowed("config.save"));
+        assert!(!service_allowed("workspace.delete"));
+    }
+
+    #[test]
+    fn sanitized_views_remove_paths_and_models() {
+        let session = sanitize_session_meta(&json!({
+            "seed": "0123abcd",
+            "title": "demo",
+            "cwd": "/home/secret",
+            "model": "internal-model",
+            "skills": { "entries": [] }
+        }));
+        assert!(session.get("cwd").is_none());
+        assert!(session.get("model").is_none());
+        assert!(session.get("skills").is_none());
+
+        let workspace = sanitize_workspace(&json!({
+            "id": "w1",
+            "title": "demo",
+            "path": "/home/secret",
+            "session_ids": ["0123abcd"]
+        }));
+        assert!(workspace.get("path").is_none());
+        assert!(workspace.get("session_ids").is_none());
     }
 }
