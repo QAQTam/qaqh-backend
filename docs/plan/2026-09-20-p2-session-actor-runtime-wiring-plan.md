@@ -224,8 +224,7 @@ Gate：
 
 ### P2-4 loop 外移与 thread-local 清理
 
-状态：进行中；P2-4a/P2-4b/P2-4c-a/P2-4c-b/P2-4d 已完成；后续仅剩
-P2-5/P2-6/P2-7。
+状态：已完成；P2-4a/P2-4b/P2-4c-a/P2-4c-b/P2-4d 均已落地。
 
 交付：
 
@@ -354,7 +353,7 @@ Gate：
   `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`
   通过。
 
-非目标：本切片保留 `ActorToolScope` 兼容类型；P2-5/P2-6/P2-7 仍待实现。
+非目标：本切片保留 `ActorToolScope` 兼容类型；后续 P2-5/P2-6/P2-7 已分别完成。
 
 ### P2-5 `SubagentSupervisor`
 
