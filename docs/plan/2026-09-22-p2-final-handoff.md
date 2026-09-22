@@ -2,7 +2,7 @@
 
 > 仓库：`/home/qaqtamsy/Projects/qaqh-backend`
 > 集成分支：`betav2`
-> 收口前 HEAD：`986eb8f`
+> 最终 HEAD：`6a08ce1`
 > 执行计划：[`2026-09-20-p2-session-actor-runtime-wiring-plan.md`](./2026-09-20-p2-session-actor-runtime-wiring-plan.md)
 > 总架构：[`2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./2026-09-20-qaqh-v2.0-总架构设计-plan.md)
 
@@ -14,6 +14,14 @@
 | P2-5 SubagentSupervisor | issue #256 / PR #257 | `69029ef` | parent/child edge、cancel、terminal、join、unload ack 顺序收口 |
 | P2-6 spawn recovery + dedup | issue #260 / PR #261 | `aa4e7ef` | canonical facts 恢复扫描、edge/child 双向孤儿分类、稳定 `message_id/input_id` 去重 |
 | P2-7 root QuotaLedger | issue #262 / PR #263 | `986eb8f` | 固定 ledger 路径、独立 `quota.lock`、reservation/reconciliation、spawn 前 durable reserve |
+
+状态回写证据：
+
+- P2-4d：issue #254 / PR #255 / merge `bd42fcc`
+- P2-5：issue #258 / PR #259 / merge `b19dc90`
+- P2-6/P2-7/P2 收口：issue #264 / PR #265 / merge `a2187d4`
+- P2-4 状态修正：issue #266 / PR #267 / merge `7f4bdcd`
+- 总架构状态同步：issue #268 / PR #269 / merge `6a08ce1`
 
 ## 2. 关键实现入口
 
@@ -38,7 +46,7 @@
 
 ## 3. 验证
 
-本轮最终验证命令：
+本轮最终验证命令均已在 `betav2 @ 6a08ce1` 通过：
 
 ```bash
 cargo test -p qaqh-workspace
