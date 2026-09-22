@@ -1581,6 +1581,8 @@ mod tests {
             text: "hi".into(),
             images: Vec::new(),
             attachments: None,
+            message_id: None,
+            input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
             as_system: true,
         });
         assert!(sanitize_command(&mut send));
