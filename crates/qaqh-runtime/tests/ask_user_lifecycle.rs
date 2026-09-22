@@ -126,6 +126,8 @@ fn cmd_user_input(text: &str) -> RingingCommand {
         text: text.into(),
         images: vec![],
         attachments: None,
+        message_id: None,
+        input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
         as_system: false,
     })
 }

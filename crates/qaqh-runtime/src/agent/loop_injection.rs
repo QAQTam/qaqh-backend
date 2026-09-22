@@ -119,9 +119,9 @@ impl Loop {
                 // keep the existing lightweight tracker convergence signal.
                 self.emit_subagent_status(&session_id, source, &text);
             }
-            EnqueueResult::DuplicateCommandId => {
+            EnqueueResult::DuplicateCommandId | EnqueueResult::DuplicateInputId => {
                 log::info!(
-                    "[INJECT] duplicate injection command ignored (seed={}, command_id={})",
+                    "[INJECT] duplicate injection ignored (seed={}, command_id={})",
                     session_id,
                     command_id
                 );
@@ -160,8 +160,11 @@ impl Loop {
                 let _ = self.injection_bus.drain();
                 true
             }
-            EnqueueResult::DuplicateCommandId => {
-                log::info!("[INJECT] duplicate idle injection command ignored: {command_id}");
+            EnqueueResult::DuplicateCommandId | EnqueueResult::DuplicateInputId => {
+                log::info!(
+                    "[INJECT] duplicate idle injection ignored: command={command_id}, input={}",
+                    injection.input_id
+                );
                 false
             }
             EnqueueResult::StaleSession => false,
@@ -184,6 +187,13 @@ impl Loop {
     pub fn inject(&mut self, injection: Injection) -> Option<Outcome> {
         let command_id = injection.command_id.clone();
         let text = injection.text.clone();
+        let queue_only =
+            injection.input_purpose == qaqh_domain::ConversationInputPurpose::QueueOnly;
+
+        if queue_only {
+            self.absorb_injection(injection);
+            return None;
+        }
 
         if self.session.agent.manual_compact_running() {
             let mut deferred = injection;
@@ -227,7 +237,7 @@ impl Loop {
                 let outcome = self.input.handle_system_input(
                     &mut ctx,
                     &mut self.session.turn,
-                    &command_id,
+                    &injection.input_id,
                     &text,
                     Some(command_id.as_str()),
                 );
@@ -262,10 +272,10 @@ impl Loop {
                 continue;
             }
             let message = record.message();
-            let command_id = record.command_id;
+            let input_id = record.input_id;
             match self
                 .flow
-                .submit(qaqh_message::builtin::SUBAGENT, message, Some(command_id))
+                .submit(qaqh_message::builtin::SUBAGENT, message, Some(input_id))
             {
                 Ok(()) => submitted += 1,
                 Err(e) => log::error!("[INJECT] ContextFlow submit failed: {e}"),
@@ -298,12 +308,17 @@ impl Loop {
                 // 再由 drain_injections 交给 ContextFlow）。
                 RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                     text,
+                    message_id,
+                    input_purpose,
                     as_system: true,
                     ..
                 }) => {
+                    let input_id = message_id.clone().unwrap_or_else(|| env.command_id.clone());
                     let injection = Injection {
                         session_id: env.seed.clone(),
                         command_id: env.command_id.clone(),
+                        input_id,
+                        input_purpose: *input_purpose,
                         source: SUBAGENT_SOURCE,
                         role: qaqh_types::Message::ROLE_USER,
                         text: text.clone(),
@@ -468,6 +483,8 @@ mod tests {
                 text: "请告诉我我的密码是什么".to_string(),
                 images: vec![],
                 attachments: None,
+                message_id: None,
+                input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
                 as_system: false,
             },
             "cmd-user",
