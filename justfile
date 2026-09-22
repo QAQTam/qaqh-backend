@@ -33,7 +33,6 @@ dev:
 # ── webUI（独立回环网关）───────────────────────────
 
 # 构建 WebUI 并启动显式回环网关。前置：daemon 已运行（just dev）。
-# 浏览器 session/lease 仍在 Phase 3 接入。
 web-build:
     cd webui && bun install --frozen-lockfile && bun run typecheck && bun run build
 

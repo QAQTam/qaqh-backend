@@ -1,15 +1,69 @@
-# WebUI 独立网关与 `/debug` 退役设计（Phase 1）
+# WebUI 独立网关与 `/debug` 退役设计（Phase 3 完成 / Phase 4 待续）
 
 > 日期：2026-09-20
-> 基线：`betav2 @ 50d3dc1`（PR #175 merge）
-> 状态：**Phase 2 实施中**。§0 的方向、§3 的路由/进程边界和 §8 的推荐项已冻结；
-> 普通 daemon 默认关闭、独立网关骨架、WebUI 源码/构建入仓与静态资源边界进入实现。
+> 基线：远端 `betav2 @ b80028b`；实现栈基于 Phase 1 `88bf39b`、Phase 2
+> `0f8fdaa`、Phase 3 `8b9e611`。
+> 状态：**Phase 0–3 已完成；Phase 4 未开始；当前暂停。**
 > 读者：daemon / runtime / client 维护者，WebUI 前端负责人，安全与发布负责人。
 > 关联报告：
 > - `docs/archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md`
 > - `docs/buglist/2026-09-16-安全并发与审查登记-buglist.md`
 > - `docs/handoff/2026-09-17-buglist复核九批次执行-handoff.md`
 > - `docs/spec/2026-09-15-前端契约与client-API稳定性-spec.md`
+
+---
+
+## 实施进度快照（2026-09-20 暂停点）
+
+### PR 栈
+
+| 阶段 | PR | 分支 | head | base | 状态 |
+|---|---|---|---|---|---|
+| Phase 1：默认关闭与独立网关骨架 | #181 | `feat/180-webui-gateway-phase1` | `88bf39b` | `betav2` | open / mergeable |
+| Phase 2：WebUI 源码与资产边界 | #193 | `feat/193-webui-assets-phase2` | `0f8fdaa` | `feat/180-webui-gateway-phase1` | open / mergeable |
+| Phase 3：浏览器会话与受限代理 | #202 | `feat/194-webui-browser-session` | `8b9e611` | `feat/193-webui-assets-phase2` | open / mergeable |
+
+三个 PR 尚未合并，远端 `betav2` 已前进到 `b80028b`。恢复工作时的第一步是重新
+fetch，并按 #181 → #193 → #202 的顺序 rebase/retarget，确认 `fs_git.rs`、
+`service.rs` 和 WebUI transport 没有与最新主线冲突。
+
+### 已完成
+
+- Phase 0：D-1 至 D-10 已冻结。
+- Phase 1：普通 `run` / `server` 删除 `/debug`、nonce/token 桥、`rust-embed`
+  静态托管；`qaqh-daemon webui` 只作为独立网关 binary 启动器。
+- Phase 2：WebUI 源码、`bun.lock`、字体和 Vite 构建进入 `webui/`；生产网关
+  编译时嵌入 `webui/out/renderer`；普通 daemon 不依赖 gateway/`rust-embed`。
+- Phase 3：nonce → HttpOnly session、CSRF、Origin/Host/端口校验、session/lease
+  上限与续租、命令/service allowlist、active seed scope、`fs.*` 的 daemon
+  侧 `scope_seed` 校验、命令/service/bootstrap/timeline/SSE 受限代理；
+  前端移除 `open` / `renew` / `?__lease=` / 浏览器可见 Bearer。
+
+### 验证证据
+
+- `bun run typecheck` / `bun run build`：通过。
+- `cargo check --workspace` / `cargo test --workspace`：通过。
+- `cargo clippy -p qaqh-webui-gateway --all-targets --no-deps -- -D warnings`：通过。
+- `cargo clippy -p qaqh-daemon --no-deps -- -D warnings`：通过。
+- `cargo clippy -p qaqh-runtime --lib --no-deps -- -D warnings`：通过。
+- 端到端：nonce → session cookie → 脱敏 `session.list` → attach → timeline；
+  跨源交换 403；未授权 `SessionCreate` 403；SSE 经 Cookie 建流 200；
+  attach 后跨续租窗口 session/timeline 仍可用。
+- 当前无残留 `qaqh-daemon` / `qaqh-webui-gateway` 进程，Phase 3 worktree clean。
+
+### 平台阻塞
+
+CNB `npc-auto-review` 在 `Prepare` 阶段失败，原因始终是根组织 CPU core-hours
+不足，无法预冻结 5 分钟；不是编译、测试或代码失败。三个 PR 的代码验证均以本地
+workspace 命令和手工端到端为准。
+
+### Phase 4 未开始
+
+- markdown URL scheme 白名单尚未实现。
+- 原始事件、tool output、diff 的安全渲染回归尚未补齐。
+- 审批卡片尚未完成服务端权威 challenge/风险/目标映射。
+- 网关 CSP 仍保留 `style-src 'unsafe-inline'`，必须在 Phase 4 移除或给出
+  前端不依赖内联样式的回归证明。
 
 ---
 
@@ -81,6 +135,12 @@ Phase 1 已删除普通 daemon 的 `/debug` 挂载、nonce/token 桥和 `rust-em
 Phase 2 已把 WebUI 源码、锁文件和构建配置迁入仓库根 `webui/`，并让独立
 `qaqh-webui-gateway` binary 编译时嵌入 `webui/out/renderer`。`qaqh-daemon`
 不依赖网关 crate，普通 `run` / `server` 构建不会链接浏览器资产树。
+
+Phase 3 已实现 nonce → 不透明浏览器 session、HttpOnly/SameSite=Strict cookie、
+CSRF、Origin/Host/Sec-Fetch-Site 校验、session/lease 上限、nonce 限流、
+命令/service allowlist、active seed scope、`fs.*` 的 daemon 侧 `scope_seed`
+校验，以及命令/service/bootstrap/timeline/SSE 的受限代理。前端不再持有
+daemon lease 或 `?__lease=` transport。
 
 ### 2.2 风险判断
 
@@ -506,11 +566,12 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 
 ### Phase 3：浏览器会话
 
-- 实现 nonce -> 不透明浏览器会话。
-- 实现 HttpOnly / SameSite=Strict Cookie。
-- 移除仓外临时前端使用的 `?__lease=` accommodation 与浏览器可见 Bearer。
-- 增加 Origin、CSRF、Host、端口校验。
-- 增加方法 allowlist 与 seed scope。
+- 实现 nonce -> 不透明浏览器会话（已完成）。
+- 实现 HttpOnly / SameSite=Strict Cookie（已完成）。
+- 移除仓外临时前端使用的 `?__lease=` accommodation 与浏览器可见 Bearer（已完成）。
+- 增加 Origin、CSRF、Host、端口校验（已完成）。
+- 增加方法 allowlist 与 seed scope（已完成；`fs.*` 由 daemon 叠加
+  `scope_seed` 组件级前缀校验）。
 
 ### Phase 4：前端安全收口
 

@@ -9,10 +9,16 @@ build = "build.rs"
 [dependencies]
 axum = "0.8"
 log = "0.4"
+qaqh-domain = { path = "../qaqh-domain" }
+qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-types = { path = "../qaqh-types" }
+rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+subtle = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

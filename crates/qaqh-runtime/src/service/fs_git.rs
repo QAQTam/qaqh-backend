@@ -46,11 +46,26 @@ pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<Path
 /// - 再把路径与每个允许根做**组件级**比较（`path_within_dir`），软链接经
 ///   `resolve_target_path` 解析、`..` 逃逸由 `normalize_lexically` 吃掉；
 /// - 任一根命中即放行；无一命中返回 `false`（fail-closed）。
-fn path_allowed(sessions: &qaqh_session::SessionManager, path: &Path) -> bool {
+fn path_allowed(
+    sessions: &qaqh_session::SessionManager,
+    path: &Path,
+    scope_seed: Option<&str>,
+) -> bool {
     if is_sensitive_session_path(path) {
         return false;
     }
     let normalized = normalize_lexically(&resolve_target_path(path.to_path_buf()));
+    if let Some(seed) = scope_seed {
+        let Some(cwd) = sessions.workspace_cwd(seed).filter(|cwd| !cwd.is_empty()) else {
+            return false;
+        };
+        let scoped_root = normalize_lexically(&resolve_target_path(PathBuf::from(
+            qaqh_session::grouping::repair_legacy_backslash_cwd(&cwd),
+        )));
+        if !path_within_dir(&normalized, &scoped_root) {
+            return false;
+        }
+    }
     allowed_roots(sessions).iter().any(|root| {
         let root = normalize_lexically(&resolve_target_path(root.clone()));
         path_within_dir(&normalized, &root)
@@ -69,12 +84,13 @@ fn forbidden(kind: &str, path: &str) -> String {
 pub(crate) fn list_remote_directory(
     sessions: &qaqh_session::SessionManager,
     path: &str,
+    scope_seed: Option<&str>,
 ) -> Result<Value, String> {
     let dir = std::path::Path::new(path);
     if !dir.is_absolute() {
         return Err("fs.list requires an absolute path".to_string());
     }
-    if !path_allowed(sessions, dir) {
+    if !path_allowed(sessions, dir, scope_seed) {
         return Err(forbidden("fs.list", path));
     }
     let mut entries: Vec<Value> = Vec::new();
@@ -136,12 +152,13 @@ pub(crate) fn read_remote_file(
     sessions: &qaqh_session::SessionManager,
     path: &str,
     max_bytes: u64,
+    scope_seed: Option<&str>,
 ) -> Result<Value, String> {
     let file_path = std::path::Path::new(path);
     if !file_path.is_absolute() {
         return Err("fs.read requires an absolute path".to_string());
     }
-    if !path_allowed(sessions, file_path) {
+    if !path_allowed(sessions, file_path, scope_seed) {
         return Err(forbidden("fs.read", path));
     }
     let meta = std::fs::metadata(file_path).map_err(|e| format!("fs.read {path}: {e}"))?;

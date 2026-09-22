@@ -18,5 +18,6 @@ bun run build
 
 - 这里没有 Bearer 注入桥，也不允许把 daemon token 写入浏览器代码。
 - 开发代理不得直接连接 daemon；浏览器只能访问显式启动的
-  `qaqh-webui-gateway` 同源面。
+  `qaqh-webui-gateway` 同源面，并使用网关签发的 HttpOnly session cookie
+  与短生命周期 CSRF token。
 - 模型输出、工具输出、timeline 和原始事件均按不可信输入处理。

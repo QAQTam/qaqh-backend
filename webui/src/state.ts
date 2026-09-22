@@ -4,7 +4,7 @@
  */
 import { createSignal } from "solid-js";
 import { createStore } from "solid-js";
-import { ringing, type Lease } from "./lib/ringing";
+import { ringing, type GatewaySession } from "./lib/ringing";
 import {
   applyEntry,
   emptyTranscript,
@@ -28,7 +28,7 @@ export const [seed, setSeed] = createSignal<string | null>(null);
 export const [activity, setActivity] = createSignal<string | null>(null);
 export const [model, setModel] = createSignal<string | null>(null);
 export const [context, setContext] = createSignal<{ used: number; limit: number }>({ used: 0, limit: 0 });
-export const [lease, setLease] = createSignal<Lease | null>(null);
+export const [lease, setLease] = createSignal<GatewaySession | null>(null);
 export const [streams, setStreams] = createSignal<Record<string, string>>({});
 export const [pendingPermission, setPendingPermission] = createSignal<any | null>(null);
 export const [pendingInteraction, setPendingInteraction] = createSignal<any | null>(null);
@@ -345,7 +345,7 @@ function closeStreams(): void {
 // ── actions ─────────────────────────────────────────────────────────────────
 export async function refreshSessions(): Promise<void> {
   try {
-    const list = await ringing.rpc<any[]>("session.list");
+    const list = await ringing.sessions();
     setSessions(Array.isArray(list) ? list : []);
   } catch (e) {
     setBootError(String(e instanceof Error ? e.message : e));
@@ -353,6 +353,7 @@ export async function refreshSessions(): Promise<void> {
 }
 
 export async function attach(target: string): Promise<void> {
+  closeStreams();
   renderers.clear();
   setTranscript(() => emptyTranscript());
   setActiveReasoningId(null);
@@ -366,10 +367,11 @@ export async function attach(target: string): Promise<void> {
     return;
   }
   setSeed(target);
+  connectChannels();
   connectTimeline(target);
 
   try {
-    const bootstrap = (await ringing.bootstrap(target)) as any;
+    const bootstrap = (await ringing.bootstrapFor(target)) as any;
     const control = bootstrap?.control?.state ?? {};
     const tool = bootstrap?.tool?.state ?? {};
     const conversation = bootstrap?.conversation?.state ?? {};
@@ -396,19 +398,19 @@ export async function attach(target: string): Promise<void> {
   void refreshSessions();
 }
 
-let lastLeaseId: string | null = null;
+let lastSessionToken: string | null = null;
 
-function onLeaseChanged(value: Lease | null): void {
+function onLeaseChanged(value: GatewaySession | null): void {
   setLease(value);
-  const id = value?.clientSessionId ?? null;
-  if (id !== lastLeaseId && lastLeaseId !== null && id !== null) {
-    // SSE URLs embed the lease id; a rotated lease invalidates every stream.
+  const token = value?.csrfToken ?? null;
+  if (token !== lastSessionToken && lastSessionToken !== null && token !== null) {
+    // A gateway session rotation invalidates all cookie-authenticated streams.
     closeStreams();
     connectChannels();
     const current = seed();
     if (current) connectTimeline(current);
   }
-  lastLeaseId = id;
+  lastSessionToken = token;
 }
 
 export function installDebugHooks(): void {
@@ -425,17 +427,15 @@ export function installDebugHooks(): void {
 }
 
 export async function boot(): Promise<void> {
-  ringing.onLease = onLeaseChanged;
+  ringing.onSession = onLeaseChanged;
   installDebugHooks();
   try {
-    await ringing.open();
-    ringing.startRenew();
+    await ringing.bootstrap();
     setReady(true);
   } catch (e) {
     setBootError(String(e instanceof Error ? e.message : e));
     return;
   }
-  connectChannels();
   await refreshSessions();
   setInterval(() => {
     if (activity() === "working") void refreshTodo();
