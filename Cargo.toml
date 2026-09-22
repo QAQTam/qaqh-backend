@@ -17,6 +17,7 @@ members = [
     "crates/qaqh-client",
     "crates/qaqh-mcp",
     "crates/qaqh-lsp",
+    "crates/qaqh-webui-gateway",
 ]
 
 [workspace.dependencies]

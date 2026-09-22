@@ -1,8 +1,9 @@
-# WebUI 独立网关与 `/debug` 退役设计（草案）
+# WebUI 独立网关与 `/debug` 退役设计（Phase 1）
 
 > 日期：2026-09-20
-> 基线：`betav2 @ e93521c`（PR #167 merge）
-> 状态：**草案待评审**。本文只冻结方向与安全边界，不代表已经实现。
+> 基线：`betav2 @ 50d3dc1`（PR #175 merge）
+> 状态：**Phase 1 实施中**。§0 的方向、§3 的路由/进程边界和 §8 的推荐项已冻结；
+> 普通 daemon 默认关闭与独立 `webui` 网关骨架进入实现。
 > 读者：daemon / runtime / client 维护者，WebUI 前端负责人，安全与发布负责人。
 > 关联报告：
 > - `docs/archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md`
@@ -53,7 +54,7 @@
 
 ## 2. 当前事实与风险
 
-### 2.1 当前实现事实
+### 2.1 设计启动时事实（Phase 1 已开始改变）
 
 - `run` / `server` 都会挂载 `/debug` 路由：
   `crates/qaqh-daemon/src/axum_server/axum_impl/mod.rs:161-165`。
@@ -72,6 +73,10 @@
   构建产物边界一起纳入，不能沿用仓外 sidecar 的隐式信任。
 - `/health`、`/activity` 不在 `/debug` 前缀下，不受 `/debug` 回环守卫约束：
   `crates/qaqh-daemon/src/axum_server/axum_impl/mod.rs:135-136`。
+
+Phase 1 已删除普通 daemon 的 `/debug` 挂载、nonce/token 桥和 `rust-embed`
+静态托管；`qaqh-daemon webui` 改为启动独立 `qaqh-webui-gateway`，只保留安全
+占位页，等待 Phase 2/3 接入构建产物与受限浏览器会话。
 
 ### 2.2 风险判断
 
@@ -480,10 +485,10 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 
 ### Phase 1：引入网关骨架
 
-- 在 `qaqh-daemon` 增加 `webui` 子命令。
-- 新增独立网关 crate/module，默认只监听回环。
-- 普通 `run` / `server` 不挂载任何 WebUI 路由。
-- 增加 discovery 读取、daemon 可达性检查、优雅退出。
+- 在 `qaqh-daemon` 增加 `webui` 子命令（已完成）。
+- 新增独立网关 crate/module，默认只监听回环（已完成，`crates/qaqh-webui-gateway`）。
+- 普通 `run` / `server` 不挂载任何 WebUI 路由（已完成）。
+- 增加 discovery 读取、daemon 可达性检查、优雅退出（已完成）。
 
 ### Phase 2：接入 WebUI 源码与构建
 
@@ -568,20 +573,22 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 
 ---
 
-## 8. 待评审决策
+## 8. 已冻结决策
+
+> 冻结日期：2026-09-20。以下均采用“推荐”列；后续实现若需改变，必须另开设计变更并重新评审。
 
 | ID | 决策 | 推荐 |
 |---|---|---|
-| D-1 | 独立网关进程 vs daemon 内临时路由 | 独立进程 |
-| D-2 | `webui` 子命令是否自动启动 daemon | 默认要求 daemon 已运行；显式参数才代启 |
-| D-3 | 默认端口 | 随机端口 + 打印 URL；固定端口必须显式 |
-| D-4 | 浏览器是否允许 `config.save` | 默认只读或脱敏；写配置需单独能力 |
-| D-5 | 是否保留诊断 `/debug` | 默认删除；必要时独立 `--diagnostics` |
-| D-6 | WebUI 源码目录 | 建议仓库根 `webui/`，构建产物 `webui/out/renderer` |
-| D-7 | 浏览器会话是否允许 `fs.*` | 只允许 active seed cwd，daemon 显式作用域校验 |
-| D-8 | 前端是否继续使用 Bun sidecar | 生产不用；仅开发/调试可选 |
-| D-9 | 多标签页是否共享浏览器 session / daemon lease | 首期共享；切 seed 会打断其它标签页，UI 必须提示 |
-| D-10 | 是否开放 `session.new` / `session.resume` | 首期只 attach 已有 seed |
+| D-1 | 独立网关进程 vs daemon 内临时路由 | **独立进程** |
+| D-2 | `webui` 子命令是否自动启动 daemon | **默认要求 daemon 已运行；首期不提供代启参数** |
+| D-3 | 默认端口 | **随机端口 + 打印 URL；固定端口必须显式 `--port`** |
+| D-4 | 浏览器是否允许 `config.save` | **默认拒绝；只允许独立脱敏读模型** |
+| D-5 | 是否保留诊断 `/debug` | **普通 daemon 删除；首期不提供诊断兼容路由** |
+| D-6 | WebUI 源码目录 | **仓库根 `webui/`，构建产物 `webui/out/renderer`** |
+| D-7 | 浏览器会话是否允许 `fs.*` | **只允许 active seed cwd，daemon 显式作用域校验** |
+| D-8 | 前端是否继续使用 Bun sidecar | **生产不用；仅开发/调试可选** |
+| D-9 | 多标签页是否共享浏览器 session / daemon lease | **首期共享；切 seed 会打断其它标签页，UI 必须提示** |
+| D-10 | 是否开放 `session.new` / `session.resume` | **首期只 attach 已有 seed** |
 
 ---
 
