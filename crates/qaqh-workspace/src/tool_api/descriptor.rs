@@ -205,7 +205,7 @@ impl ToolDescriptor {
                 field: "output_schema",
             });
         }
-        if self.default_timeout.is_zero() {
+        if self.default_timeout.is_zero() && !self.capabilities.interactive {
             return Err(DescriptorError::ZeroTimeout);
         }
         Ok(())

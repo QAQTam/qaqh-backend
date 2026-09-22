@@ -6,9 +6,8 @@ use std::collections::HashSet;
 
 use qaqh_types::UsageInfo;
 
-use crate::agent::dashboard;
 use crate::agent::engine_tool::ToolEngine;
-use crate::agent::tool_runtime::{MAX_PARALLEL_TOOL_WORKERS, ToolRunOutcome, ToolRuntime};
+use crate::agent::tool_runtime::ToolRuntime;
 use crate::agent::turn_lap::gate::{abort_running_turn, seal_timeline_terminal_round};
 use crate::agent::types::*;
 
@@ -41,98 +40,6 @@ fn occurrence_id() -> String {
             .unwrap_or(0),
     )
 }
-
-/// 取消收尾：保证**每个 tool_use 恰有一条 tool_result**。
-///
-/// BUG-2026-09-13-08：`abort_running_turn` 会调用
-/// `remove_last_step_if_incomplete()`，而该方法要求 step 全部 tool_use 都有
-/// 结果。取消时若把「已执行但未回填」的项和「根本没跑」的项一视同仁，整个
-/// step（含已执行结果）会被一起丢弃 → 下轮模型重发同一 tool_use，工具重复
-/// 执行。
-///
-/// 因此本函数只处理**确实不会再有结果**的 call_id：
-/// - 已在本轮回填过结果的（`msg.step_has_tool_result`）→ 跳过；
-/// - outbox 里有执行记录的（工具真的跑过，只是结果没等到）→ 跳过，
-///   由回填路径负责；
-/// - 其余（从未执行 / 取消点在 spawn 之前）→ 补 `Cancelled` 终态。
-///
-/// 返回补了终态的项数。
-fn seal_unexecuted_as_cancelled(
-    ctx: &mut RingContext,
-    call_ids: impl IntoIterator<Item = String>,
-    reason: &str,
-) -> usize {
-    let executed = crate::agent::tool_outbox::executed_call_ids(&ctx.agent.session.seed);
-    let mut sealed = 0;
-    for call_id in call_ids {
-        if ctx.agent.msg.step_has_tool_result(&call_id) || executed.contains(&call_id) {
-            continue;
-        }
-        ctx.agent.msg.push_tool_result_canonical(
-            &call_id,
-            &qaqh_types::ToolResult::cancelled(reason),
-            &[],
-        );
-        sealed += 1;
-    }
-    sealed
-}
-
-/// 回填一个已执行工具的结果，并发射其副作用（code delta / dashboard）。
-///
-/// 并行、串行与 `admit_and_dispatch` 三条路径的收尾完全同款——抽此一处
-/// 收敛，避免其中一条再次漂移出「取消即丢弃结果」的缺陷。
-fn backfill_executed_result(
-    ctx: &mut RingContext,
-    call_id: &str,
-    tool_name: &str,
-    turn_id: &str,
-    round_num: u32,
-    canonical_result: qaqh_types::ToolResult,
-    code_delta: Option<qaqh_domain::CodeDeltaRecord>,
-) {
-    ctx.agent
-        .msg
-        .push_tool_result_canonical(call_id, &canonical_result, &canonical_result.images);
-    if let Some(ref delta) = code_delta {
-        ctx.stats.push_delta(delta.clone());
-        // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-            qaqh_domain::ToolEvent::CodeChanged {
-                tool_call_id: call_id.to_string(),
-                turn_id: turn_id.to_string(),
-                round_num,
-                lines_added: delta.lines_added,
-                lines_removed: delta.lines_removed,
-                files_created: delta.files_created,
-                files_deleted: delta.files_deleted,
-                file: delta.file.clone(),
-            },
-        ));
-    }
-    // Instant refresh for todo tools
-    if matches!(tool_name, "todo") {
-        // Ringing 双发：DashboardUpdated（replaceable 覆盖）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-            qaqh_domain::ControlEvent::DashboardUpdated {
-                hp_connected: true,
-                session_seed: ctx.agent.session.seed.clone(),
-                tool_calls_total: 0,
-                tool_failures: 0,
-                current_phase: "single".into(),
-                streaming: false,
-            },
-        ));
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-            qaqh_domain::ControlEvent::DashboardSnapshot {
-                snapshot: dashboard::build_snapshot(ctx.agent.session.seed.clone()),
-            },
-        ));
-    }
-}
-
-/// 取消收尾的取消原因文案（进入模型上下文的 tool_result）。
-const CANCELLED_TOOL_RESULT: &str = "[CANCELLED] Tool was not executed (user interrupted).";
 
 /// 取消终态收尾：seal 本轮为 Cancelled 并 abort 当前 turn。
 #[allow(clippy::too_many_arguments)]
@@ -179,172 +86,27 @@ fn emit_active_ask(ctx: &mut RingContext, state: &TurnState) {
     }
 }
 
-// ── execute_admitted_batch (moved verbatim from engine_turn.rs) ──
+// ── execute_admitted_batch ──
 
-/// Execute a batch of already-authorized tools, partitioned by write conflicts.
-///
-/// Shared helper for `handle_permission_resolved` (deferred batch) and for
-/// future callers that need the same parallel/serial + progress + code_delta
-/// + skill-effects + dashboard logic. Verbatim from `TurnEngine::execute_admitted_batch`.
+/// Thin compatibility entry: scheduling/execution lives in [`ToolRuntime`].
 pub fn execute_admitted_batch(
     ctx: &mut RingContext,
     tool: &ToolEngine,
-    mut admitted: Vec<AdmittedTool>,
+    admitted: Vec<AdmittedTool>,
     tool_call_order: &[String],
     serial_call_ids: &HashSet<String>,
     turn_id: &str,
     round_num: u32,
 ) -> bool {
-    // L3 outbox: execution facts are recorded inside the tool worker thread,
-    // right after the tool returns, so a kill between "tool ran" and "result
-    // persisted" is still distinguishable from "tool never ran".
-    let outbox_seed = ctx.agent.session.seed.clone();
-    admitted.sort_by_key(|item| {
-        tool_call_order
-            .iter()
-            .position(|id| id == &item.call_id)
-            .unwrap_or(usize::MAX)
-    });
-    let mut ordered_skill_effects = Vec::new();
-    let (mut parallel, serial): (Vec<_>, Vec<_>) = admitted
-        .into_iter()
-        .partition(|item| !serial_call_ids.contains(&item.call_id));
-
-    while !parallel.is_empty() {
-        // 批间取消检查（对齐 `admit_and_dispatch` 的 C1）：取消已到达就不再
-        // spawn 新工具线程、不再发 Running 事件；剩余批由下方补取消终态。
-        if ctx.cancel.is_set() {
-            let remaining = parallel
-                .iter()
-                .map(|item| item.call_id.clone())
-                .chain(serial.iter().map(|item| item.call_id.clone()));
-            seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
-            apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-            return false;
-        }
-        let batch_len = parallel.len().min(MAX_PARALLEL_TOOL_WORKERS);
-        let batch: Vec<_> = parallel.drain(..batch_len).collect();
-        for admitted in &batch {
-            let call_id = admitted.call_id.clone();
-            let tool_name = admitted.auth.tool_name().to_string();
-            let tool_args = admitted.auth.args().clone();
-            ToolEngine::emit_timeline_tool_running(
-                ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
-            );
-        }
-        let (progress_rx, runs) = ToolRuntime::spawn_batch(batch, outbox_seed.clone());
-        let cancelled = ctx.cancel.is_set();
-        let results = ToolRuntime::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
-
-        // BUG-2026-09-13-08：取消不再丢弃已执行结果。
-        //
-        // 工具线程一旦 spawn 就真实执行（副作用已发生、outbox 已记录），
-        // 「取消」只意味着不再等剩余项——已 join 出来的 canonical 结果必须
-        // 照常回填，否则 store 留下 open tool_use，下轮模型重发 → 重复执行。
-        // 剩余批（含仍在执行的项）在下方统一补取消终态。
-        for result in results {
-            let call_id = result.call_id;
-            let tool_name = result.tool_name;
-            match result.outcome {
-                ToolRunOutcome::Completed(result) => {
-                    let result = *result;
-                    backfill_executed_result(
-                        ctx,
-                        &call_id,
-                        &tool_name,
-                        turn_id,
-                        round_num,
-                        result.result,
-                        result.code_delta,
-                    );
-                    ordered_skill_effects.push((call_id.clone(), result.skill_effects));
-                }
-                ToolRunOutcome::Panicked => ctx.agent.msg.push_tool_result_direct(
-                    &call_id,
-                    "[ERROR] tool thread panicked",
-                    false,
-                ),
-            }
-        }
-        if cancelled {
-            // 剩余并行批根本没起，或上面的项被回收时仍未落结果——统一补终态，
-            // 保证「每个 tool_use 恰有一条 tool_result」（见 seal_unexecuted_as_cancelled）。
-            let remaining = parallel.iter().map(|item| item.call_id.clone());
-            seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
-            parallel.clear();
-            break;
-        }
-    }
-
-    let mut serial = serial.into_iter();
-    while let Some(admitted) = serial.next() {
-        if ctx.cancel.is_set() {
-            // 串行路径取消：已收集的 skill_effects 照常应用，未执行的项（当前
-            // 这一项及其后全部）补取消终态。旧实现 `return false` 会丢弃已
-            // 收集的 skill_effects，并把未执行的 tool_use 留成 open。
-            let remaining = std::iter::once(admitted.call_id)
-                .chain(serial.by_ref().map(|admitted| admitted.call_id));
-            seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
-            apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-            return false;
-        }
-        let call_id = admitted.call_id.clone();
-        let tool_name = admitted.auth.tool_name().to_string();
-        let tool_args = admitted.auth.args().clone();
-        ToolEngine::emit_timeline_tool_running(
-            ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
-        );
-        let (progress_rx, runs) = ToolRuntime::spawn_batch(vec![admitted], outbox_seed.clone());
-        let results = ToolRuntime::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
-        for result in results {
-            match result.outcome {
-                ToolRunOutcome::Completed(result) => {
-                    let result = *result;
-                    backfill_executed_result(
-                        ctx,
-                        &call_id,
-                        &tool_name,
-                        turn_id,
-                        round_num,
-                        result.result,
-                        result.code_delta,
-                    );
-                    ordered_skill_effects.push((call_id.clone(), result.skill_effects));
-                }
-                ToolRunOutcome::Panicked => ctx.agent.msg.push_tool_result_direct(
-                    &call_id,
-                    "[ERROR] tool thread panicked",
-                    false,
-                ),
-            }
-        }
-    }
-
-    if ctx.cancel.is_set() {
-        // 串行循环收尾后仍可能落在取消态（最后一项 join 期间收到取消）：
-        // 结果已回填，这里只做终态兜底，绝不丢弃。
-        apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-        return false;
-    }
-    apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-    true
-}
-
-/// 按模型原始 tool_call_order 应用已收集的 skill effects。
-fn apply_ordered_skill_effects(
-    ctx: &mut RingContext,
-    mut ordered: Vec<(String, Vec<qaqh_workspace::ToolEffect>)>,
-    tool_call_order: &[String],
-) {
-    ordered.sort_by_key(|(call_id, _)| {
-        tool_call_order
-            .iter()
-            .position(|id| id == call_id)
-            .unwrap_or(usize::MAX)
-    });
-    for (_, effects) in ordered {
-        ctx.agent.apply_tool_effects(effects, ctx.flow);
-    }
+    ToolRuntime::execute_batch(
+        ctx,
+        tool,
+        admitted,
+        tool_call_order,
+        serial_call_ids,
+        turn_id,
+        round_num,
+    )
 }
 
 // ── Admit/dispatch for run_lap's !turn_completed first batch ──
@@ -450,16 +212,7 @@ pub(crate) fn admit_and_dispatch(
         round_num,
         pending.len()
     );
-    let write_pairs: Vec<(String, serde_json::Value)> = pending
-        .iter()
-        .map(|tool| (tool.name.clone(), tool.args.clone()))
-        .collect();
-    let (_serial_groups, serial_after) =
-        qaqh_workspace::conflict::resolve_write_conflicts(&write_pairs);
-    let serial_call_ids: HashSet<String> = serial_after
-        .iter()
-        .map(|index| pending[*index].id.clone())
-        .collect();
+    let serial_call_ids = ToolRuntime::serial_call_ids(&pending);
     let admission = tool.admit_batch(ctx, &pending, turn_id, round_num, turn_context);
     if !admission.pending_permission_ids.is_empty()
         || !admission.pending_plans.is_empty()
