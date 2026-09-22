@@ -9,7 +9,10 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use tokio::sync::watch;
+
+use crate::approval::{ApprovalChallenge, ApprovalKind, MAX_PENDING_APPROVALS};
 
 pub const NONCE_TTL: Duration = Duration::from_secs(60);
 pub const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
@@ -153,6 +156,7 @@ pub struct BrowserSession {
     last_seen: Mutex<Instant>,
     command_events: Mutex<VecDeque<Instant>>,
     service_events: Mutex<VecDeque<Instant>>,
+    approvals: Mutex<HashMap<String, ApprovalChallenge>>,
     cancel: watch::Sender<bool>,
 }
 
@@ -167,6 +171,7 @@ impl BrowserSession {
             last_seen: Mutex::new(Instant::now()),
             command_events: Mutex::new(VecDeque::new()),
             service_events: Mutex::new(VecDeque::new()),
+            approvals: Mutex::new(HashMap::new()),
             cancel,
         })
     }
@@ -188,6 +193,7 @@ impl BrowserSession {
 
     pub fn replace_lease(&self, lease: Lease) {
         *self.lease.lock().unwrap_or_else(|error| error.into_inner()) = lease;
+        self.clear_approvals();
     }
 
     pub fn mark_renewed(&self) {
@@ -217,6 +223,72 @@ impl BrowserSession {
             .active_seed
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = seed;
+        self.clear_approvals();
+    }
+
+    pub fn issue_approval(
+        &self,
+        seed: &str,
+        kind: ApprovalKind,
+        source_id: String,
+        details: Value,
+    ) -> Result<ApprovalChallenge, &'static str> {
+        let mut approvals = self
+            .approvals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cleanup_approvals(&mut approvals);
+        if let Some(existing) = approvals.values().find(|challenge| {
+            challenge.kind == kind && challenge.seed == seed && challenge.source_id == source_id
+        }) {
+            return Ok(existing.clone());
+        }
+        if approvals.len() >= MAX_PENDING_APPROVALS {
+            return Err("approval_limit");
+        }
+
+        let id = loop {
+            let candidate = random_token();
+            if !approvals.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let challenge = ApprovalChallenge {
+            id: id.clone(),
+            kind,
+            source_id,
+            seed: seed.to_string(),
+            details,
+            issued_at: Instant::now(),
+        };
+        approvals.insert(id, challenge.clone());
+        Ok(challenge)
+    }
+
+    /// Consume a challenge before any daemon call. A failed or rejected
+    /// command therefore cannot be retried with the same challenge.
+    pub fn consume_approval(
+        &self,
+        id: &str,
+        active_seed: &str,
+    ) -> Result<ApprovalChallenge, &'static str> {
+        let mut approvals = self
+            .approvals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cleanup_approvals(&mut approvals);
+        let challenge = approvals.remove(id).ok_or("approval_not_found")?;
+        if challenge.seed != active_seed {
+            return Err("approval_scope_violation");
+        }
+        Ok(challenge)
+    }
+
+    fn clear_approvals(&self) {
+        self.approvals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
     }
 
     pub fn touch(&self) {
@@ -286,6 +358,10 @@ impl SessionStore {
         }
         session
     }
+}
+
+fn cleanup_approvals(approvals: &mut HashMap<String, ApprovalChallenge>) {
+    approvals.retain(|_, challenge| !challenge.is_expired());
 }
 
 fn cleanup_sessions(sessions: &mut HashMap<String, Arc<BrowserSession>>) {

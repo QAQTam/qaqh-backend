@@ -5,6 +5,7 @@
 //! calls are made by this process after explicit origin, allowlist, and seed
 //! scope checks.
 
+mod approval;
 mod daemon;
 mod security;
 mod session;
@@ -14,6 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use approval::{ApprovalKind, ApprovalRequest, command_for};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -24,7 +26,7 @@ use axum::{
     routing::{get, post},
 };
 use daemon::DaemonClient;
-use qaqh_domain::{ControlCommand, ConversationCommand, RingingChannel, ToolCommand};
+use qaqh_domain::{ControlCommand, ConversationCommand, RingingChannel};
 use qaqh_ringing::{
     RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope,
 };
@@ -264,6 +266,8 @@ fn build_router(state: GatewayState) -> Router {
         .route("/__gateway/logout", post(logout))
         .route("/__gateway/sessions", get(list_sessions))
         .route("/__gateway/sessions/{seed}/attach", post(attach_seed))
+        .route("/__gateway/approvals", post(list_approvals))
+        .route("/__gateway/approvals/{id}", post(respond_approval))
         .route(
             "/__gateway/ringing/commands/{channel}",
             post(proxy_command).get(proxy_command_status),
@@ -569,6 +573,194 @@ async fn attach_seed(
     StatusCode::NO_CONTENT.into_response()
 }
 
+async fn list_approvals(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !security::csrf_matches(&headers, session.csrf_token()) {
+        return error_response(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if !session.allow_service() {
+        return error_response(StatusCode::TOO_MANY_REQUESTS, "service_rate_limited");
+    }
+    let Some(seed) = session.active_seed() else {
+        return error_response(StatusCode::CONFLICT, "no_active_seed");
+    };
+    let lease = session.lease_snapshot();
+    let response = match state
+        .daemon
+        .get(
+            &format!("/ringing/v1/sessions/{}/approvals", encode_path(&seed)),
+            &lease,
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    if !response.status().is_success() {
+        return forward_response(response).await;
+    }
+    let pending: Value = match response.json().await {
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"),
+    };
+    match issue_approval_views(&session, &seed, &pending) {
+        Ok(views) => Json(views).into_response(),
+        Err(code) => error_response(StatusCode::BAD_GATEWAY, code),
+    }
+}
+
+fn issue_approval_views(
+    session: &BrowserSession,
+    seed: &str,
+    pending: &Value,
+) -> Result<Vec<Value>, &'static str> {
+    let mut views = Vec::new();
+
+    if let Some(tool) = pending
+        .get("pending_permission")
+        .filter(|value| !value.is_null())
+    {
+        let source_id = tool
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .filter(|value| valid_daemon_id(value))
+            .ok_or("invalid_pending_permission")?;
+        let details = json!({
+            "tool_name": tool.get("tool_name").cloned().unwrap_or(Value::Null),
+            "action_summary": tool.get("action_summary").cloned().unwrap_or(Value::Null),
+            "reason": tool.get("reason").cloned().unwrap_or(Value::Null),
+            "paths": tool.get("paths").cloned().unwrap_or_else(|| json!([])),
+            "category": tool.get("category").cloned().unwrap_or(Value::Null),
+            "level": tool.get("level").cloned().unwrap_or(Value::Null),
+            "risk": tool.get("risk").cloned().unwrap_or(Value::Null),
+            "consequence": tool.get("consequence").cloned().unwrap_or(Value::Null),
+        });
+        let challenge = session
+            .issue_approval(
+                seed,
+                ApprovalKind::ToolPermission,
+                source_id.to_string(),
+                details,
+            )
+            .map_err(|_| "approval_limit")?;
+        views.push(challenge.view());
+    }
+
+    if let Some(interaction) = pending
+        .get("pending_interaction")
+        .filter(|value| !value.is_null())
+    {
+        let source_id = interaction
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| valid_daemon_id(value))
+            .ok_or("invalid_pending_interaction")?;
+        let kind = match interaction.get("kind").and_then(Value::as_str) {
+            Some("ask") => ApprovalKind::Ask,
+            Some("plan") => ApprovalKind::Plan,
+            _ => return Err("invalid_pending_interaction"),
+        };
+        let details = interaction
+            .get("details")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let challenge = session
+            .issue_approval(seed, kind, source_id.to_string(), details)
+            .map_err(|_| "approval_limit")?;
+        views.push(challenge.view());
+    }
+
+    Ok(views)
+}
+
+async fn respond_approval(
+    State(state): State<GatewayState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match authenticate(&state, &headers, true) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !security::csrf_matches(&headers, session.csrf_token()) {
+        return error_response(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if !session.allow_command() {
+        return error_response(StatusCode::TOO_MANY_REQUESTS, "command_rate_limited");
+    }
+    if !valid_opaque_id(&id) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_challenge_id");
+    }
+    if body.len() > 64 * 1024 {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, "approval_body_too_large");
+    }
+    let request: ApprovalRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_approval_body"),
+    };
+    let Some(active_seed) = session.active_seed() else {
+        return error_response(StatusCode::CONFLICT, "no_active_seed");
+    };
+    let challenge = match session.consume_approval(&id, &active_seed) {
+        Ok(challenge) => challenge,
+        Err(code) => {
+            let status = match code {
+                "approval_scope_violation" => StatusCode::FORBIDDEN,
+                "approval_not_found" => StatusCode::GONE,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            return error_response(status, code);
+        }
+    };
+    let command = match command_for(&challenge, &request) {
+        Ok(command) => command,
+        Err(code) => return error_response(StatusCode::BAD_REQUEST, code),
+    };
+    let channel = command.channel();
+    let lease = session.lease_snapshot();
+    let envelope = RingingCommandEnvelope::new(
+        session::random_token(),
+        lease.client_instance_id.clone(),
+        command,
+    )
+    .with_client_session_id(lease.client_session_id.clone())
+    .with_seed(active_seed);
+    if let Err(error) = envelope.validate() {
+        return error_response(StatusCode::BAD_REQUEST, error);
+    }
+    let body = match serde_json::to_value(envelope) {
+        Ok(body) => body,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed"),
+    };
+    let response = match state
+        .daemon
+        .post_json(
+            &format!("/ringing/v1/commands/{}", channel_path(channel)),
+            &lease,
+            &body,
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
+    };
+    if !response.status().is_success() {
+        return forward_response(response).await;
+    }
+    let ack: RingingCommandAck = match response.json().await {
+        Ok(ack) => ack,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"),
+    };
+    if ack.status != RingingCommandAckStatus::Accepted {
+        return error_response(StatusCode::CONFLICT, "approval_rejected");
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn proxy_command(
     State(state): State<GatewayState>,
     AxumPath(channel): AxumPath<String>,
@@ -595,7 +787,7 @@ async fn proxy_command(
     let Some(expected_channel) = channel_from_path(&channel) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid_channel");
     };
-    if envelope.channel != expected_channel || !command_allowed(&envelope.command) {
+    if envelope.channel != expected_channel || !sanitize_command(&mut envelope.command) {
         return error_response(StatusCode::FORBIDDEN, "command_not_allowed");
     }
     let lease = session.lease_snapshot();
@@ -981,18 +1173,22 @@ fn spawn_renewal(state: GatewayState, session: Arc<BrowserSession>) {
     });
 }
 
-fn command_allowed(command: &RingingCommand) -> bool {
-    matches!(
-        command,
-        RingingCommand::Conversation(
-            ConversationCommand::ConversationSendMessage { .. }
-                | ConversationCommand::ConversationCancel { .. }
-        ) | RingingCommand::Control(
-            ControlCommand::InteractionAskRespond { .. }
-                | ControlCommand::InteractionAskDismiss { .. }
-                | ControlCommand::PlanReviewRespond { .. }
-        ) | RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
-    )
+fn sanitize_command(command: &mut RingingCommand) -> bool {
+    // Approval commands are accepted only through `/__gateway/approvals/{id}`,
+    // where the browser must present a server-issued one-shot challenge.
+    match command {
+        RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+            as_system,
+            ..
+        }) => {
+            // System-role injection is an internal daemon capability, never a
+            // browser-selectable message option.
+            *as_system = false;
+            true
+        }
+        RingingCommand::Conversation(ConversationCommand::ConversationCancel { .. }) => true,
+        _ => false,
+    }
 }
 
 fn service_allowed(method: &str) -> bool {
@@ -1048,6 +1244,18 @@ fn valid_opaque_id(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
+fn valid_daemon_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+fn channel_path(channel: RingingChannel) -> &'static str {
+    match channel {
+        RingingChannel::Control => "control",
+        RingingChannel::Conversation => "conversation",
+        RingingChannel::Tool => "tool",
+    }
+}
+
 fn encode_path(value: &str) -> String {
     value
         .bytes()
@@ -1100,7 +1308,7 @@ async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'",
+            "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'",
         ),
     );
     headers.insert(
@@ -1269,7 +1477,7 @@ mod tests {
                 .get(header::CONTENT_SECURITY_POLICY)
                 .and_then(|value| value.to_str().ok()),
             Some(
-                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+                "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
             )
         );
         assert_eq!(
@@ -1369,25 +1577,92 @@ mod tests {
 
     #[test]
     fn command_and_service_allowlists_are_explicit() {
-        assert!(command_allowed(&RingingCommand::Conversation(
-            ConversationCommand::ConversationSendMessage {
-                text: "hi".into(),
-                images: Vec::new(),
-                attachments: None,
+        let mut send = RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+            text: "hi".into(),
+            images: Vec::new(),
+            attachments: None,
+            as_system: true,
+        });
+        assert!(sanitize_command(&mut send));
+        assert!(matches!(
+            send,
+            RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                 as_system: false,
-            }
-        )));
-        assert!(!command_allowed(&RingingCommand::Control(
-            ControlCommand::SessionCreate {
-                close_current: false,
-                cwd: None,
-                tool_mode: None,
-                custom_tools: Vec::new(),
-            }
-        )));
+                ..
+            })
+        ));
+
+        let mut create = RingingCommand::Control(ControlCommand::SessionCreate {
+            close_current: false,
+            cwd: None,
+            tool_mode: None,
+            custom_tools: Vec::new(),
+        });
+        assert!(!sanitize_command(&mut create));
+        let mut permission =
+            RingingCommand::Tool(qaqh_domain::ToolCommand::ToolPermissionRespond {
+                tool_call_id: "call-1".into(),
+                approved: true,
+                trust_folder: false,
+            });
+        assert!(!sanitize_command(&mut permission));
         assert!(service_allowed("fs.read"));
         assert!(!service_allowed("config.save"));
         assert!(!service_allowed("workspace.delete"));
+    }
+
+    #[test]
+    fn approvals_are_opaque_seed_bound_and_single_use() {
+        let session = BrowserSession::new(session::Lease::new(
+            "instance".into(),
+            "lease".into(),
+            "epoch".into(),
+            30_000,
+            10_000,
+        ));
+        let pending = json!({
+            "pending_permission": {
+                "tool_call_id": "canonical-tool-call",
+                "tool_name": "exec",
+                "action_summary": "run cargo test",
+                "reason": "requires approval",
+                "paths": ["/tmp/workspace"],
+                "category": "exec",
+                "level": 3,
+                "risk": "high",
+                "consequence": "executes a command"
+            },
+            "pending_interaction": {
+                "id": "canonical-ask",
+                "kind": "ask",
+                "details": { "questions": [] }
+            }
+        });
+        let views = issue_approval_views(&session, "0123abcd", &pending).unwrap();
+        assert_eq!(views.len(), 2);
+        let tool_view = views
+            .iter()
+            .find(|view| view["kind"] == "tool_permission")
+            .unwrap();
+        assert_ne!(tool_view["challenge_id"], "canonical-tool-call");
+        assert!(tool_view["details"].get("tool_call_id").is_none());
+
+        let challenge_id = tool_view["challenge_id"].as_str().unwrap();
+        let challenge = session.consume_approval(challenge_id, "0123abcd").unwrap();
+        assert_eq!(challenge.source_id, "canonical-tool-call");
+        assert_eq!(
+            session
+                .consume_approval(challenge_id, "0123abcd")
+                .unwrap_err(),
+            "approval_not_found"
+        );
+
+        let ask_view = views.iter().find(|view| view["kind"] == "ask").unwrap();
+        let ask_id = ask_view["challenge_id"].as_str().unwrap();
+        assert_eq!(
+            session.consume_approval(ask_id, "deadbeef").unwrap_err(),
+            "approval_scope_violation"
+        );
     }
 
     #[test]

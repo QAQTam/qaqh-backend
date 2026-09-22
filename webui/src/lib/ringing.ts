@@ -21,6 +21,15 @@ export type Ack = {
   message?: string;
 };
 
+export type ApprovalKind = "tool_permission" | "ask" | "plan";
+
+export type ApprovalView = {
+  challenge_id: string;
+  kind: ApprovalKind;
+  expires_in: number;
+  details: Record<string, any>;
+};
+
 type BootstrapState = {
   nonce?: string;
 };
@@ -143,6 +152,25 @@ export class Ringing {
       method: "POST",
     });
     this.seed = seed;
+  }
+
+  approvals(): Promise<ApprovalView[]> {
+    return this.call<ApprovalView[]>("/__gateway/approvals", { method: "POST" });
+  }
+
+  respondApproval(
+    challengeId: string,
+    decision: string,
+    payload: Record<string, unknown> = {},
+  ): Promise<null> {
+    return this.call<null>(
+      `/__gateway/approvals/${encodeURIComponent(challengeId)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision, payload }),
+      },
+    );
   }
 
   async command(
