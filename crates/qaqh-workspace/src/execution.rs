@@ -253,7 +253,7 @@ pub fn execute_authorized_with_context(
         .iter()
         .map(|path| (path.clone(), crate::file_state::last_hash(path)))
         .collect();
-    let mut tool_result = (prepared.handler_fn)(prepared.ctx.clone());
+    let mut tool_result = (prepared.legacy)(prepared.ctx.clone());
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
     crate::tool_side_fold::apply(&name, &mut tool_result);

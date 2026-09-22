@@ -1,8 +1,8 @@
 //! 内置工具能力迁移表（spec 补充稿 §3.4；plan「ToolCapabilities 迁移表」项）。
 //!
-//! **迁移期工件，尚未接线**：`ToolHandler` 目前没有 `capabilities` 字段。
-//! 接线时逐工具从本表搬入 `ToolHandler` / `ToolDescriptor.capabilities`，
-//! 随后删除本模块。
+//! **已接线（P3-2）**：`ToolManager::register` 在构造 `ToolDescriptor` 时从本表
+//! 注入 capabilities；执行调度仍暂用既有 conflict 算法，capabilities 切换调度
+//! 留到显式行为变更切片。后续可将本表并入各工具注册处并删除本模块。
 //!
 //! ## 取值规则（逐项核对，评审依据）
 //!
@@ -17,11 +17,8 @@
 //!   `false`（对齐 tool_outbox「已执行事实」语义）。
 //! - `workspace_bound`：触碰工作区文件的工具为 `true`（执行器须强制注入
 //!   workspace_root）；纯交互（ask）、会话内存（todo_*）、网络（web_fetch）为 `false`。
-//!
-//! ## 已知迁移项
-//!
-//! - `ask` 的 legacy `default_timeout` 为 `Duration::ZERO`（阻塞交互、无超时），
-//!   而 SDK `ToolDescriptor::validate` 拒绝零超时——接线前需决策（Q9，见 spec §11）。
+//! - `interactive`：`ask` 为 `true`，允许 descriptor 用零 `default_timeout`
+//!   表示“无默认超时”（Q9）。
 
 use std::time::Duration;
 
@@ -39,6 +36,7 @@ const READ_ONLY: ToolCapabilities = ToolCapabilities {
     cancel_grace: FAST_GRACE,
     idempotent: true,
     workspace_bound: true,
+    interactive: false,
 };
 
 /// 纯只读、非 workspace 绑定（会话内存 / 网络）。
@@ -48,6 +46,7 @@ const READ_ONLY_UNBOUND: ToolCapabilities = ToolCapabilities {
     cancel_grace: FAST_GRACE,
     idempotent: true,
     workspace_bound: false,
+    interactive: false,
 };
 
 /// 工作区变更（串行、非幂等、workspace 绑定）。
@@ -57,6 +56,7 @@ const MUTATING: ToolCapabilities = ToolCapabilities {
     cancel_grace: FAST_GRACE,
     idempotent: false,
     workspace_bound: true,
+    interactive: false,
 };
 
 /// 会话内存变更（串行、非幂等、非 workspace 绑定）。
@@ -66,6 +66,7 @@ const SESSION_MUTATING: ToolCapabilities = ToolCapabilities {
     cancel_grace: FAST_GRACE,
     idempotent: false,
     workspace_bound: false,
+    interactive: false,
 };
 
 /// 独占批次（派生进程组 / 批量重写）。
@@ -75,6 +76,7 @@ const EXCLUSIVE: ToolCapabilities = ToolCapabilities {
     cancel_grace: SLOW_GRACE,
     idempotent: false,
     workspace_bound: true,
+    interactive: false,
 };
 
 /// 阻塞交互（串行、非幂等、非 workspace 绑定）。
@@ -84,6 +86,7 @@ const INTERACTIVE: ToolCapabilities = ToolCapabilities {
     cancel_grace: FAST_GRACE,
     idempotent: false,
     workspace_bound: false,
+    interactive: true,
 };
 
 /// exec：独占 + 流式（唯一进度生产者）。
@@ -93,6 +96,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
     cancel_grace: SLOW_GRACE,
     idempotent: false,
     workspace_bound: true,
+    interactive: false,
 };
 
 /// 迁移表：19 项，顺序与注册表词表一致（`registration.rs` 的
@@ -271,6 +275,7 @@ mod tests {
         assert_eq!(ask.concurrency, Concurrency::Serial);
         assert!(!ask.idempotent);
         assert!(!ask.workspace_bound);
+        assert!(ask.interactive, "ask 必须显式声明交互，才能使用零默认超时");
 
         assert_eq!(
             builtin_capabilities("mcp__fs__read_file"),
