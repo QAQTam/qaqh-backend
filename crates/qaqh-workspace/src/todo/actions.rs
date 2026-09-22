@@ -10,8 +10,8 @@ use super::parse::{
     parse_write_items,
 };
 use super::store::{
-    count_status, normalize_current_id, read_store, read_store_for, status_name, todo_item_json,
-    write_store, write_store_for,
+    normalize_current_id, read_store, read_store_for, status_name, todo_item_json, write_store,
+    write_store_for,
 };
 
 // ═══════════════════════════════════════════════════════
@@ -437,36 +437,5 @@ pub(crate) fn exec_todo_list(args: &Value) -> Result<String, String> {
 
 /// Seed 参数化的 todo.list 直访变体（HTTP service 面 / CLI 用）。
 pub fn todo_list_for(seed: &str, args: &Value) -> Result<String, String> {
-    let store = read_store_for(seed)?;
-    let filter = args
-        .get("status")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            parse_status(value).ok_or_else(|| {
-                json_err_string(
-                    "INVALID_INPUT",
-                    format!("unknown status: {value}"),
-                    "Use idle, in_progress, completed, or cancelled.",
-                )
-            })
-        })
-        .transpose()?;
-    let items: Vec<&TodoItem> = store
-        .items
-        .iter()
-        .filter(|item| filter.as_ref().is_none_or(|status| item.status == *status))
-        .collect();
-
-    Ok(json_ok(serde_json::json!({
-        "items": items.into_iter().map(todo_item_json).collect::<Vec<_>>(),
-        "current_id": store.current_id,
-        "counts": {
-            "idle": count_status(&store, TodoStatus::Pending),
-            "in_progress": count_status(&store, TodoStatus::InProgress),
-            "completed": count_status(&store, TodoStatus::Completed),
-            "cancelled": count_status(&store, TodoStatus::Cancelled),
-            "total": store.items.len(),
-        }
-    })))
+    super::typed::todo_list_for_typed(seed, args)?.to_envelope_string()
 }
