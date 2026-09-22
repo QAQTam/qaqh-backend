@@ -11,19 +11,24 @@ use std::time::Duration;
 
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
-    http::{HeaderName, HeaderValue, StatusCode, header},
+    extract::{DefaultBodyLimit, Path as AxumPath},
+    http::{HeaderName, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
+use rust_embed::RustEmbed;
 use tokio::net::{TcpListener, TcpStream};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const CONNECT_ATTEMPTS: usize = 5;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_BODY_BYTES: usize = 64 * 1024;
+
+#[derive(RustEmbed)]
+#[folder = "../../webui/out/renderer"]
+struct WebUi;
 
 /// Configuration for the explicit `qaqh-daemon webui` command.
 ///
@@ -200,26 +205,95 @@ async fn ensure_reachable(endpoint: &LoopbackEndpoint) -> Result<(), String> {
     Err("daemon discovery endpoint is not reachable".into())
 }
 
-/// Phase 1 router. It exposes only a safe placeholder page and does not mount
-/// any daemon route, nonce exchange, static asset tree, or control endpoint.
+/// Gateway router. It serves only the compiled WebUI asset tree; daemon API
+/// routes, nonce exchange, and control endpoints remain unmounted until later
+/// phases add them behind explicit allowlists.
 pub fn build_router() -> Router {
     Router::new()
-        .route("/", get(gateway_index))
-        .fallback(not_found)
+        .route("/", get(serve_index))
+        .route("/assets/{*path}", get(serve_asset))
+        .fallback(serve_spa)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(security_headers))
 }
 
-async fn gateway_index() -> impl IntoResponse {
+async fn serve_index() -> Response {
+    embedded_response("index.html")
+}
+
+async fn serve_asset(AxumPath(path): AxumPath<String>) -> Response {
+    embedded_response(&format!("assets/{path}"))
+}
+
+async fn serve_spa(uri: Uri) -> Response {
+    let path = uri.path();
+    if is_reserved_path(path) || Path::new(path).extension().is_some() {
+        return not_found_response();
+    }
+    embedded_response("index.html")
+}
+
+fn not_found_response() -> Response {
+    (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+fn embedded_response(path: &str) -> Response {
+    if !allowed_asset_path(path) {
+        return not_found_response();
+    }
+    let Some(file) = WebUi::get(path) else {
+        return not_found_response();
+    };
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>QAQ Harness WebUI Gateway</title></head><body><h1>WebUI gateway</h1><p>网关骨架已启动；WebUI 静态资源和浏览器会话将在后续阶段接入。</p></body></html>",
+        [(header::CONTENT_TYPE, mime_for(path))],
+        file.data.into_owned(),
+    )
+        .into_response()
+}
+
+fn is_reserved_path(path: &str) -> bool {
+    ["/debug", "/__gateway", "/ringing", "/control", "/assets"]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
+fn allowed_asset_path(path: &str) -> bool {
+    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
+        return false;
+    }
+    if !path.split('/').all(|component| {
+        !component.is_empty()
+            && component != "."
+            && component != ".."
+            && !component.starts_with('.')
+    }) {
+        return false;
+    }
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("html" | "js" | "css" | "json" | "svg" | "png" | "ico" | "woff2" | "wasm")
     )
 }
 
-async fn not_found() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, "not found")
+fn mime_for(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
@@ -372,7 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_is_placeholder_only_and_sets_security_headers() {
+    async fn router_serves_assets_and_sets_security_headers() {
         let app = build_router();
         let response = app
             .clone()
@@ -398,15 +472,55 @@ mod tests {
             .unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("test-token"));
 
+        for path in [
+            "/debug/",
+            "/__gateway/bootstrap.js",
+            "/assets/missing.js",
+            "/assets/foo.map",
+            "/assets/%2e%2e/index.html",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/debug/")
+                    .uri("/settings")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn router_serves_hashed_assets_and_rejects_source_maps() {
+        let app = build_router();
+        let asset = WebUi::iter()
+            .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
+            .expect("Vite build must emit a JavaScript asset");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{asset}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/javascript; charset=utf-8"))
+        );
+        assert!(!allowed_asset_path("assets/index.js.map"));
+        assert!(!allowed_asset_path("assets/.hidden.js"));
+        assert!(!allowed_asset_path("assets/../index.html"));
     }
 }
