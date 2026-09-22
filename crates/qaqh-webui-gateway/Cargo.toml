@@ -1,0 +1,19 @@
+[package]
+name = "qaqh-webui-gateway"
+version.workspace = true
+edition.workspace = true
+description = "Loopback-only browser gateway for the QAQ-Harness WebUI"
+license.workspace = true
+
+[dependencies]
+axum = "0.8"
+log = "0.4"
+qaqh-types = { path = "../qaqh-types" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true
