@@ -66,6 +66,7 @@ pub mod prompt;
 pub(crate) mod spawn;
 pub mod state;
 pub mod tool_outbox;
+pub(crate) mod tool_runtime;
 pub(crate) mod turn_actor;
 pub(crate) mod turn_lap;
 
