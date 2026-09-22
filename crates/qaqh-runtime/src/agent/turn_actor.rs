@@ -5,7 +5,7 @@
 //! lifecycle transitions into the pure `TurnCore`, establishing one place to
 //! enforce active-turn and terminal invariants before later mailbox migration.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 
 use qaqh_session::actor::{
@@ -50,6 +50,9 @@ pub(crate) enum TurnActorError {
         current: u32,
         incoming: u32,
     },
+    DuplicateInput {
+        input_id: InputId,
+    },
     UnexpectedEffect,
 }
 
@@ -87,6 +90,9 @@ impl fmt::Display for TurnActorError {
                 formatter,
                 "turn {turn_id} cannot move from round {current} back to {incoming}"
             ),
+            Self::DuplicateInput { input_id } => {
+                write!(formatter, "input {input_id} was already accepted")
+            }
             Self::UnexpectedEffect => {
                 write!(formatter, "session actor returned an unexpected effect")
             }
@@ -114,6 +120,7 @@ pub(crate) struct TurnActor {
     actor: SessionActor,
     pending_interactions: BTreeSet<String>,
     resolved_interactions: BTreeSet<String>,
+    accepted_inputs: HashSet<InputId>,
 }
 
 impl Default for TurnActor {
@@ -128,6 +135,7 @@ impl TurnActor {
             actor: SessionActor::new(MAILBOX_CAPACITY),
             pending_interactions: BTreeSet::new(),
             resolved_interactions: BTreeSet::new(),
+            accepted_inputs: HashSet::new(),
         }
     }
 
@@ -141,7 +149,13 @@ impl TurnActor {
         turn_id: &str,
         input_id: &str,
     ) -> Result<(), TurnActorError> {
-        self.start_with_input(turn_id, input_id)
+        let input_id = InputId::new(input_id);
+        if self.accepted_inputs.contains(&input_id) {
+            return Err(TurnActorError::DuplicateInput { input_id });
+        }
+        self.start_with_input(turn_id, input_id.as_str())?;
+        self.remember_input(input_id);
+        Ok(())
     }
 
     /// Mirror one existing runtime outcome into the canonical turn state.
@@ -242,6 +256,7 @@ impl TurnActor {
         self.actor = SessionActor::new(MAILBOX_CAPACITY);
         self.pending_interactions.clear();
         self.resolved_interactions.clear();
+        self.accepted_inputs.clear();
     }
 
     fn start(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
@@ -270,6 +285,10 @@ impl TurnActor {
                 Ok(())
             }
         }
+    }
+
+    fn remember_input(&mut self, input_id: InputId) {
+        self.accepted_inputs.insert(input_id);
     }
 
     fn round_started(&mut self, turn_id: &str, round: u32) -> Result<(), TurnActorError> {
@@ -542,6 +561,25 @@ mod tests {
             error,
             TurnActorError::ActiveTurnConflict { active, incoming }
                 if active.as_str() == "t1" && incoming.as_str() == "t2"
+        ));
+    }
+
+    #[test]
+    fn accepted_input_id_is_durable_across_terminal() {
+        let mut actor = TurnActor::new();
+        actor
+            .begin_input("t1", "msg-stable-1")
+            .expect("first input");
+        actor
+            .observe_outcome(&complete("t1"))
+            .expect("complete first turn");
+        let error = actor
+            .begin_input("t2", "msg-stable-1")
+            .expect_err("same input id must not start a second turn");
+        assert!(matches!(
+            error,
+            TurnActorError::DuplicateInput { input_id }
+                if input_id.as_str() == "msg-stable-1"
         ));
     }
 

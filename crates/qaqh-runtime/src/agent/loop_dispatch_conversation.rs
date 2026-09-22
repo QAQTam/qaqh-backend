@@ -21,8 +21,11 @@ impl Loop {
                 text,
                 images,
                 attachments: _,
+                message_id,
+                input_purpose,
                 as_system,
             } => {
+                let input_id = message_id.as_deref().unwrap_or(command_id).to_string();
                 if as_system {
                     // 统一注入入口：时序决策（compact 进行中 / turn 运行
                     // 中 / idle）全部由 inject() 负责；compact 窗口不拒绝
@@ -31,6 +34,8 @@ impl Loop {
                     let injection = Injection {
                         session_id: session_id.to_string(),
                         command_id: command_id.to_string(),
+                        input_id,
+                        input_purpose,
                         source: SUBAGENT_SOURCE,
                         role: qaqh_types::Message::ROLE_USER,
                         text,
@@ -88,7 +93,7 @@ impl Loop {
                     &mut ctx,
                     &mut self.session.turn,
                     qaqh_message::builtin::USER,
-                    command_id,
+                    &input_id,
                     &text,
                     images,
                 );
