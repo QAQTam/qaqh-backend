@@ -129,20 +129,21 @@ impl ToolEngine {
         tool_call_id: &str,
         name: &str,
         args: &str,
-        output: &str,
-        status: qaqh_types::ToolStatus,
-        metrics: &qaqh_types::ToolResultMetrics,
-        diff: Option<String>,
+        result: &qaqh_types::ToolResult,
     ) {
+        let output = result.model_text();
+        let status = result.status;
         let failure = status.is_failure().then(|| qaqh_domain::TimelineFailure {
             code: "TOOL_EXECUTION_FAILED".into(),
             message: output.to_string(),
         });
         let mut display = serde_json::from_str::<serde_json::Value>(args)
             .ok()
-            .and_then(|args| qaqh_workspace::runtime::project_tool_display(name, &args, output));
+            .and_then(|args| {
+                qaqh_workspace::runtime::project_tool_display_from_result(name, &args, result)
+            });
         if let Some(display) = display.as_mut() {
-            crate::timeline::apply_result_metrics(display, metrics);
+            crate::timeline::apply_result_metrics(display, &result.metrics);
         }
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
@@ -155,7 +156,7 @@ impl ToolEngine {
                     qaqh_domain::TimelineToolState::from(status),
                     Some(args.to_string()),
                     Some(output.to_string()),
-                    diff,
+                    result.diff.clone(),
                     failure,
                     display,
                 ),
@@ -773,6 +774,11 @@ impl ToolEngine {
         // 展示平面 diff / metrics：先取出（ToolFinished 会 move 整个 result）。
         let display_diff = result.diff.clone();
         let result_metrics = result.metrics.clone();
+        let mut display =
+            qaqh_workspace::runtime::project_tool_display_from_result(name, args, &result);
+        if let Some(display) = display.as_mut() {
+            crate::timeline::apply_result_metrics(display, &result_metrics);
+        }
 
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
             qaqh_domain::ToolEvent::ToolFinished {
@@ -787,10 +793,6 @@ impl ToolEngine {
             code: "TOOL_EXECUTION_FAILED".into(),
             message: output.clone(),
         });
-        let mut display = qaqh_workspace::runtime::project_tool_display(name, args, &output);
-        if let Some(display) = display.as_mut() {
-            crate::timeline::apply_result_metrics(display, &result_metrics);
-        }
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
                 turn_id: turn_id.clone(),
@@ -917,18 +919,8 @@ impl ToolEngine {
                     )),
                 });
         }
-        Self::emit_timeline_tool_result(
-            ctx,
-            &turn_id,
-            0,
-            call_id,
-            tool_name,
-            args_json,
-            &output,
-            qaqh_types::ToolStatus::Error,
-            &qaqh_types::ToolResultMetrics::default(),
-            None,
-        );
+        let result = qaqh_types::ToolResult::error(output.clone());
+        Self::emit_timeline_tool_result(ctx, &turn_id, 0, call_id, tool_name, args_json, &result);
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
                 turn_id: turn_id.clone(),

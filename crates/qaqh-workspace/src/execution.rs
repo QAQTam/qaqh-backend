@@ -253,15 +253,37 @@ pub fn execute_authorized_with_context(
         .iter()
         .map(|path| (path.clone(), crate::file_state::last_hash(path)))
         .collect();
-    let mut tool_result = (prepared.legacy)(prepared.ctx.clone());
+    let (mut tool_result, skill_effects) = match prepared.executor.clone() {
+        crate::manager::PreparedExecutor::Legacy(legacy) => {
+            let result = legacy(prepared.ctx.clone());
+            let skill_effects = if name == "skills" && result.is_success() {
+                prepared.ctx.take_skill_effects()
+            } else {
+                Vec::new()
+            };
+            (result, skill_effects)
+        }
+        crate::manager::PreparedExecutor::Typed(erased) => match erased
+            .execute(context.clone(), args.clone())
+        {
+            Ok(outcome) => (outcome.to_tool_result(), Vec::new()),
+            Err(fatal) => {
+                log::error!(
+                    "typed tool '{}' returned fatal error {}: {}",
+                    name,
+                    fatal.code,
+                    fatal.message
+                );
+                (
+                    crate::ToolResult::error_with("TOOL_FATAL", "internal tool error", false, None),
+                    Vec::new(),
+                )
+            }
+        },
+    };
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
     crate::tool_side_fold::apply(&name, &mut tool_result);
-    let skill_effects = if name == "skills" && tool_result.is_success() {
-        prepared.ctx.take_skill_effects()
-    } else {
-        Vec::new()
-    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let success = tool_result.is_success();
     let mut canonical = tool_result.clone();
@@ -288,10 +310,7 @@ pub fn execute_authorized_with_context(
                 effective_tool_name,
                 user_initiated: false,
             };
-            let error_code = canonical
-                .error
-                .as_ref()
-                .map(|error| error.code.clone());
+            let error_code = canonical.error.as_ref().map(|error| error.code.clone());
             // 对象可追溯：路径 + before/after 内容指纹（file_state LF 规范
             // 视图 hash；未建立基线/新文件为 None）。
             let objects: Vec<crate::audit::v2::AuditObject> = report

@@ -164,6 +164,18 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         &ctx,
     );
     assert!(create.success, "create failed: {}", create.content);
+    assert_eq!(create.result.data["total"], 4);
+    assert_eq!(create.result.data["assigned"].as_array().unwrap().len(), 4);
+    let create_display = qaqh_workspace::runtime::project_tool_display_from_result(
+        "todo_write",
+        &serde_json::json!({}),
+        &create.result,
+    )
+    .expect("typed todo_write display");
+    assert_eq!(
+        create_display.summary.as_deref(),
+        Some("Plan updated: 4 item(s) (4 new).")
+    );
 
     let working = qaqh_workspace::execution::execute_with_context(
         "todo_update",
@@ -177,6 +189,17 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         working.success,
         "working update failed: {}",
         working.content
+    );
+    assert_eq!(working.result.data["item"]["status"], "in_progress");
+    assert_eq!(
+        qaqh_workspace::runtime::project_tool_display_from_result(
+            "todo_update",
+            &serde_json::json!({}),
+            &working.result,
+        )
+        .and_then(|display| display.summary)
+        .as_deref(),
+        Some("Todo T1 is now in_progress.")
     );
 
     let completed = qaqh_workspace::execution::execute_with_context(
@@ -226,6 +249,17 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(list_json["items"][1]["status"], "completed");
     assert_eq!(list_json["items"][1]["evidence"], "verified");
     assert_eq!(list_json["items"][3]["status"], "idle");
+    assert_eq!(list.result.data["counts"]["total"], 4);
+    assert_eq!(
+        qaqh_workspace::runtime::project_tool_display_from_result(
+            "todo_list",
+            &serde_json::json!({}),
+            &list.result,
+        )
+        .and_then(|display| display.summary)
+        .as_deref(),
+        Some("4 task(s) · 1 in progress")
+    );
 
     let status: serde_json::Value = serde_json::from_str(
         &qaqh_workspace::todo::todo_status_json("todo-contract").expect("status JSON"),
