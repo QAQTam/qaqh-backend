@@ -11,6 +11,7 @@ use qaqh_session::actor::{
 };
 
 use crate::agent::SubagentSpawnSpec;
+use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
 use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
 use crate::{RingingHub, SessionActivityTracker};
 
@@ -274,6 +275,9 @@ pub struct AgentRegistry {
     last_spawn: HashMap<String, std::time::Instant>,
     /// P2-5：daemon 级 parent/child edge 与 unload 顺序状态机。
     supervisor: SubagentSupervisor,
+    /// P2-7：root session tree 的 durable quota owner。
+    quota_ledgers: HashMap<String, QuotaLedger>,
+    quota_limits: QuotaLimits,
 }
 
 impl AgentRegistry {
@@ -286,6 +290,8 @@ impl AgentRegistry {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            quota_ledgers: HashMap::new(),
+            quota_limits: QuotaLimits::unlimited(),
         }
     }
 
@@ -367,8 +373,16 @@ impl AgentRegistry {
         let parent_seed = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
+        let root_seed = if parent_seed.is_empty() {
+            seed.to_string()
+        } else {
+            self.supervisor.root_of(&parent_seed)
+        };
+        // Durable reservation must exist before the child actor can perform
+        // any side effect.
+        let reservation = self.reserve_spawn(&root_seed, seed)?;
         let parent_cancel = self.cancel_for_seed(&parent_seed);
-        self.spawn_subagent_inprocess(
+        if let Err(error) = self.spawn_subagent_inprocess(
             seed,
             SubagentSpawnSpec {
                 tools: tools.to_vec(),
@@ -378,12 +392,33 @@ impl AgentRegistry {
                 ephemeral,
             },
             parent_cancel,
-        )?;
+        ) {
+            let _ = self.release_spawn(
+                &root_seed,
+                &reservation.reservation_id,
+                ReleaseReason::Cancelled,
+            );
+            return Err(error);
+        }
         if !parent_seed.is_empty()
             && parent_seed != seed
             && let Err(error) = self.link_subagent(&parent_seed, seed)
         {
             self.close(seed);
+            let _ = self.release_spawn(
+                &root_seed,
+                &reservation.reservation_id,
+                ReleaseReason::Cancelled,
+            );
+            return Err(error);
+        }
+        if let Err(error) = self.commit_spawn(&root_seed, &reservation.reservation_id) {
+            self.close(seed);
+            let _ = self.release_spawn(
+                &root_seed,
+                &reservation.reservation_id,
+                ReleaseReason::Reconciliation,
+            );
             return Err(error);
         }
         Ok(())
@@ -796,6 +831,54 @@ impl AgentRegistry {
     #[doc(hidden)]
     pub fn subagent_children(&self, parent: &str) -> Vec<String> {
         self.children_of(parent)
+    }
+
+    /// Set root-tree quota limits. Existing in-memory ledgers are dropped;
+    /// durable files remain and are replayed on next access.
+    pub fn set_quota_limits(&mut self, limits: QuotaLimits) {
+        self.quota_limits = limits;
+        self.quota_ledgers.clear();
+    }
+
+    /// P2-7 test/ops view for one root ledger.
+    #[doc(hidden)]
+    pub fn quota_snapshot(
+        &mut self,
+        root: &str,
+    ) -> Result<crate::quota_ledger::QuotaSnapshot, String> {
+        self.quota_ledger_mut(root)?.snapshot()
+    }
+
+    fn quota_ledger_mut(&mut self, root: &str) -> Result<&mut QuotaLedger, String> {
+        if !self.quota_ledgers.contains_key(root) {
+            let ledger = QuotaLedger::open(root, self.quota_limits)?;
+            self.quota_ledgers.insert(root.to_string(), ledger);
+        }
+        self.quota_ledgers
+            .get_mut(root)
+            .ok_or_else(|| format!("quota ledger for {root} missing after open"))
+    }
+
+    fn reserve_spawn(&mut self, root: &str, child: &str) -> Result<QuotaReservation, String> {
+        self.quota_ledger_mut(root)?.reserve(
+            QuotaKind::Spawn,
+            1,
+            format!("subagent-spawn:{child}"),
+            Some(child.to_string()),
+        )
+    }
+
+    fn commit_spawn(&mut self, root: &str, reservation_id: &str) -> Result<(), String> {
+        self.quota_ledger_mut(root)?.commit(reservation_id)
+    }
+
+    fn release_spawn(
+        &mut self,
+        root: &str,
+        reservation_id: &str,
+        reason: ReleaseReason,
+    ) -> Result<(), String> {
+        self.quota_ledger_mut(root)?.release(reservation_id, reason)
     }
 
     /// P2-5 测试/运维只读视图：parent/child 生命周期事件顺序。
@@ -1402,6 +1485,8 @@ mod tests {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            quota_ledgers: HashMap::new(),
+            quota_limits: QuotaLimits::unlimited(),
         };
         let connection_id = ConnectionId::new("connection-registry");
 
@@ -1501,6 +1586,8 @@ mod tests {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            quota_ledgers: HashMap::new(),
+            quota_limits: QuotaLimits::unlimited(),
         };
         registry
             .link_subagent("parent-seed", "child-seed")
