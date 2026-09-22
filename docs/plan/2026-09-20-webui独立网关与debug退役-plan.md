@@ -2,8 +2,8 @@
 
 > 日期：2026-09-20
 > 基线：`betav2 @ 50d3dc1`（PR #175 merge）
-> 状态：**Phase 1 实施中**。§0 的方向、§3 的路由/进程边界和 §8 的推荐项已冻结；
-> 普通 daemon 默认关闭与独立 `webui` 网关骨架进入实现。
+> 状态：**Phase 2 实施中**。§0 的方向、§3 的路由/进程边界和 §8 的推荐项已冻结；
+> 普通 daemon 默认关闭、独立网关骨架、WebUI 源码/构建入仓与静态资源边界进入实现。
 > 读者：daemon / runtime / client 维护者，WebUI 前端负责人，安全与发布负责人。
 > 关联报告：
 > - `docs/archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md`
@@ -77,6 +77,10 @@
 Phase 1 已删除普通 daemon 的 `/debug` 挂载、nonce/token 桥和 `rust-embed`
 静态托管；`qaqh-daemon webui` 改为启动独立 `qaqh-webui-gateway`，只保留安全
 占位页，等待 Phase 2/3 接入构建产物与受限浏览器会话。
+
+Phase 2 已把 WebUI 源码、锁文件和构建配置迁入仓库根 `webui/`，并让独立
+`qaqh-webui-gateway` binary 编译时嵌入 `webui/out/renderer`。`qaqh-daemon`
+不依赖网关 crate，普通 `run` / `server` 构建不会链接浏览器资产树。
 
 ### 2.2 风险判断
 
@@ -368,8 +372,9 @@ identity 映射，不得另造不可追溯的 challenge id。
 
 ### 4.10 构建与进程边界
 
-- 网关优先实现为独立 crate/binary；若必须合并到 `qaqh-daemon`，至少使用 compile-time
-  feature，保证普通 `run` / `server` 构建不链接 WebUI embed 与静态资源。
+- 网关优先实现为独立 crate/binary；当前已采用独立 `qaqh-webui-gateway`
+  binary，`qaqh-daemon` 只保留启动器，不依赖网关 crate，保证普通 `run` /
+  `server` 构建不链接 WebUI embed 与静态资源。
 - 固定 `QAQH_DEBUG_RENDERER_DIR` 只允许存在于显式开发模式。
 - `qaqh-daemon webui` 仅是 UX 子命令，不得让普通 daemon 自动挂载网关；若 discovery
   指向非回环 `server`，该子命令必须直接拒绝启动。
@@ -464,7 +469,8 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 
 ### 5.6 静态资源与构建
 
-- 生产只服务编译时嵌入的构建产物。
+- 生产只服务编译时嵌入的构建产物；release 构建在缺少
+  `webui/out/renderer/index.html` 时直接失败。
 - release 不允许 `QAQH_DEBUG_RENDERER_DIR` 指向任意目录。
 - 禁止目录列表、隐藏文件、source map 和任意扩展名。
 - 路径解析使用组件级白名单，并处理软链接逃逸。
@@ -492,10 +498,11 @@ WebUI 包含“批准 / 拒绝 / 信任文件夹”等按钮，属于安全边�
 
 ### Phase 2：接入 WebUI 源码与构建
 
-- 把临时 WebUI 源码迁入后端仓库的稳定目录。
-- 移除 Bun sidecar 作为生产路径；保留为可选开发工具。
-- 统一 `bun run build` 与 Rust embed/build.rs 路径。
-- 生产网关使用构建产物，开发模式可使用 `QAQH_WEBUI_DEV_DIR`。
+- 把临时 WebUI 源码迁入后端仓库的稳定目录（已完成，`webui/`）。
+- 移除 Bun sidecar 作为生产路径；保留为可选开发工具（已完成，`bridge.ts` 未入仓）。
+- 统一 `bun run build` 与 Rust embed/build.rs 路径（已完成）。
+- 生产网关使用构建产物，开发模式可使用 `QAQH_WEBUI_DEV_DIR`（生产路径已完成；
+  开发目录模式待后续按需接入）。
 
 ### Phase 3：浏览器会话
 

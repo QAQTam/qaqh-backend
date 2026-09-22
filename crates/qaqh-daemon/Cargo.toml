@@ -14,7 +14,6 @@ qaqh-runtime = { path = "../qaqh-runtime" }
 qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
-qaqh-webui-gateway = { path = "../qaqh-webui-gateway" }
 log = { version = "0.4", features = ["std"] }
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }

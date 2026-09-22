@@ -92,21 +92,10 @@ fn main() {
             }
         }
         Some("webui") => {
-            // Explicit browser gateway mode. It is deliberately separate from
-            // `run`/`server`: the daemon itself never mounts WebUI routes.
-            let config =
-                match qaqh_webui_gateway::GatewayConfig::parse(&args[1..], env!("QAQH_BUILD_ID")) {
-                    Ok(config) => config,
-                    Err(error) => {
-                        eprintln!("qaqh-daemon webui: {error}");
-                        std::process::exit(2);
-                    }
-                };
-            let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-            if let Err(error) = runtime.block_on(qaqh_webui_gateway::run(config)) {
-                eprintln!("qaqh-daemon webui: {error}");
-                std::process::exit(1);
-            }
+            // Thin launcher for the independent gateway binary. Keeping the
+            // gateway out of this crate guarantees `run`/`server` do not link
+            // the browser asset tree.
+            std::process::exit(run_webui_gateway(&args[1..]));
         }
         Some("todo") => std::process::exit(todo_cli(&args[1..])),
         Some("mcp") => std::process::exit(mcp_cli(&args[1..])),
@@ -115,6 +104,40 @@ fn main() {
                 "unknown command: {command}; expected run, server, webui, status, stop, todo, or mcp"
             );
             std::process::exit(2);
+        }
+    }
+}
+
+fn run_webui_gateway(args: &[String]) -> i32 {
+    let current = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("qaqh-daemon webui: resolve current executable: {error}");
+            return 1;
+        }
+    };
+    let Some(directory) = current.parent() else {
+        eprintln!("qaqh-daemon webui: current executable has no parent directory");
+        return 1;
+    };
+    let name = if cfg!(windows) {
+        "qaqh-webui-gateway.exe"
+    } else {
+        "qaqh-webui-gateway"
+    };
+    let binary = directory.join(name);
+    if !binary.is_file() {
+        eprintln!(
+            "qaqh-daemon webui: gateway binary not found at {}; build it with `cargo build -p qaqh-webui-gateway`",
+            binary.display()
+        );
+        return 1;
+    }
+    match std::process::Command::new(&binary).args(args).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("qaqh-daemon webui: launch {}: {error}", binary.display());
+            1
         }
     }
 }
