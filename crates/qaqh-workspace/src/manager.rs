@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::tool_api::{
     ErasedTool, LegacyToolAdapter, OutputBudget, ToolCapabilities, ToolDescriptor, ToolExposure,
-    ToolName, ToolSource,
+    ToolName, ToolSource, TypedTool, TypedToolAdapter,
 };
 use crate::{SafetyVerdict, ToolHandler, ToolRisk};
 
@@ -46,11 +46,12 @@ pub struct ToolStats {
 /// 迁移期 legacy 执行面：保留 `ToolResult` 语义，避免 registry 迁移改变 wire/审计行为。
 pub(crate) type LegacyExecutor = Arc<dyn Fn(crate::ToolCallCtx) -> crate::ToolResult + Send + Sync>;
 
-/// 统一注册项：`ErasedTool` 是描述/未来 typed 执行面，legacy 是当前生产执行面。
+/// 统一注册项：`ErasedTool` 是描述与 typed 执行面；legacy 仅保留给
+/// 尚未迁移的 v1 handler。typed 注册项的 `legacy` 为 `None`。
 pub(crate) struct RegisteredTool {
     pub(crate) descriptor: ToolDescriptor,
     pub(crate) erased: Arc<dyn ErasedTool>,
-    pub(crate) legacy: LegacyExecutor,
+    pub(crate) legacy: Option<LegacyExecutor>,
 }
 
 impl RegisteredTool {
@@ -192,12 +193,20 @@ pub struct DynamicTool {
 
 // ── Three-phase execution for parallel tool support ──
 
+/// 已准备调用的执行面。legacy 保留 `ToolCallCtx`/宿主 effects 语义；
+/// typed 直接进入 `ErasedTool`，由适配器负责投影。
+#[derive(Clone)]
+pub(crate) enum PreparedExecutor {
+    Legacy(LegacyExecutor),
+    Typed(Arc<dyn ErasedTool>),
+}
+
 /// Prepared tool call, ready for execution without holding the manager lock.
 pub(crate) struct PreparedCall {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) effective_tool_name: Option<String>,
-    pub(crate) legacy: LegacyExecutor,
+    pub(crate) executor: PreparedExecutor,
     pub(crate) ctx: crate::ToolCallCtx,
     pub(crate) audit_args: serde_json::Value,
 }
@@ -237,7 +246,29 @@ impl ToolManager {
             RegisteredTool {
                 descriptor,
                 erased: Arc::new(adapter),
-                legacy,
+                legacy: Some(legacy),
+            },
+        );
+    }
+
+    /// 注册新 typed 工具。描述符由工具实现提供，执行统一走 [`ErasedTool`]；
+    /// 迁移期不存在 legacy executor，因此不会经过 `ToolCallCtx` 兼容面。
+    pub fn register_typed<T>(&mut self, tool: T)
+    where
+        T: TypedTool + 'static,
+    {
+        let descriptor = tool.descriptor();
+        descriptor
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid typed tool descriptor: {error}"));
+        let key = descriptor.name.as_str().to_owned();
+        let adapter = TypedToolAdapter::new(tool);
+        self.builtins.insert(
+            key,
+            RegisteredTool {
+                descriptor,
+                erased: Arc::new(adapter),
+                legacy: None,
             },
         );
     }
@@ -301,7 +332,7 @@ impl ToolManager {
             RegisteredTool {
                 descriptor,
                 erased: Arc::new(adapter),
-                legacy,
+                legacy: Some(legacy),
             },
         );
         Ok(())
@@ -528,11 +559,16 @@ impl ToolManager {
             skill_effects,
         };
 
+        let executor = match tool.legacy.as_ref() {
+            Some(legacy) => PreparedExecutor::Legacy(legacy.clone()),
+            None => PreparedExecutor::Typed(tool.erased.clone()),
+        };
+
         Ok(PreparedCall {
             id,
             name: name.to_string(),
             effective_tool_name: descriptor.display_name.clone(),
-            legacy: tool.legacy.clone(),
+            executor,
             ctx,
             audit_args,
         })
@@ -892,7 +928,10 @@ mod tests {
             .map_err(|report| report.content)
             .expect("dynamic tool prepare should succeed");
         assert_eq!(prepared.effective_tool_name.as_deref(), Some("echo"));
-        let result = (prepared.legacy)(prepared.ctx.clone());
+        let result = match prepared.executor {
+            PreparedExecutor::Legacy(legacy) => legacy(prepared.ctx.clone()),
+            PreparedExecutor::Typed(_) => panic!("dynamic tool must stay on legacy bridge"),
+        };
         assert_eq!(result.model_text(), "mcp-dispatched");
 
         let report = match mgr.prepare_req(
