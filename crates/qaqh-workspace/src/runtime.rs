@@ -587,6 +587,16 @@ pub fn project_tool_display(
     with_manager(|manager| manager.project_display(name, args, output)).flatten()
 }
 
+/// 优先从 typed canonical payload 生成 display，失败时回退旧输出投影。
+pub fn project_tool_display_from_result(
+    name: &str,
+    args: &serde_json::Value,
+    result: &qaqh_types::ToolResult,
+) -> Option<crate::tool_api::ToolDisplay> {
+    crate::display::project_typed_tool_display(name, args, &result.data)
+        .or_else(|| project_tool_display(name, args, result.model_text()))
+}
+
 pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
     // 内置 + 动态（MCP）两层：S3 沙箱按 category 拒绝必须覆盖 MCP 工具。
     with_manager(|manager| manager.category_of(name)).flatten()
