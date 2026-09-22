@@ -475,6 +475,7 @@ async fn list_sessions(State(state): State<GatewayState>, headers: HeaderMap) ->
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn fetch_sessions(state: &GatewayState, session: &BrowserSession) -> Result<Value, Response> {
     let lease = session.lease_snapshot();
     let upstream = state
