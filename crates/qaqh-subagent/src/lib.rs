@@ -356,6 +356,8 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         text: task_text,
         images: vec![],
         attachments: None,
+        message_id: Some(format!("subagent-task:{seed}")),
+        input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
         as_system: false,
     });
     // 任务发送校验：Rejected/Err 意味着子 actor 未收到任务，立即失败，不要
@@ -589,6 +591,8 @@ fn collect_subagent_result(
                 ),
                 images: vec![],
                 attachments: None,
+                message_id: Some(format!("subagent-result:{seed}")),
+                input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
                 // 以 system 角色注入（而非 user）：模型可见但不等同于用户输入，
                 // 保留 [SUBAGENT ...] 标签供模型区分注入数据与系统指令。
                 as_system: true,

@@ -32,6 +32,10 @@ pub enum InjectionSemantics {
 pub struct Injection {
     pub session_id: String,
     pub command_id: String,
+    /// Stable inter-agent input identity used by the canonical input admission
+    /// path and by replay deduplication.
+    pub input_id: String,
+    pub input_purpose: qaqh_domain::ConversationInputPurpose,
     /// Source id (`SUBAGENT_SOURCE` today; future "system"/"mcp").
     pub source: &'static str,
     /// Role used for the persisted message shape (`Message::ROLE_USER`).
@@ -49,9 +53,12 @@ impl Injection {
         command_id: impl Into<String>,
         text: impl Into<String>,
     ) -> Self {
+        let command_id = command_id.into();
         Self {
             session_id: session_id.into(),
-            command_id: command_id.into(),
+            input_id: command_id.clone(),
+            command_id,
+            input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
             source: SUBAGENT_SOURCE,
             role: Message::ROLE_USER,
             text: text.into(),
@@ -78,6 +85,7 @@ impl Injection {
 pub enum EnqueueResult {
     Queued,
     DuplicateCommandId,
+    DuplicateInputId,
     StaleSession,
 }
 
@@ -87,6 +95,7 @@ pub struct InjectionBus {
     active_session: Option<String>,
     pending: VecDeque<Injection>,
     seen_command_ids: HashSet<String>,
+    seen_input_ids: HashSet<String>,
 }
 
 impl InjectionBus {
@@ -113,6 +122,7 @@ impl InjectionBus {
     pub fn clear(&mut self) {
         self.pending.clear();
         self.seen_command_ids.clear();
+        self.seen_input_ids.clear();
     }
 
     pub fn enqueue(&mut self, injection: Injection) -> EnqueueResult {
@@ -127,6 +137,10 @@ impl InjectionBus {
         }
         if !self.seen_command_ids.insert(injection.command_id.clone()) {
             return EnqueueResult::DuplicateCommandId;
+        }
+        if !injection.input_id.is_empty() && !self.seen_input_ids.insert(injection.input_id.clone())
+        {
+            return EnqueueResult::DuplicateInputId;
         }
         self.pending.push_back(injection);
         EnqueueResult::Queued
@@ -192,6 +206,24 @@ mod tests {
             bus.enqueue(injection("session-a", "cmd-1", "replay")),
             EnqueueResult::DuplicateCommandId
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_input_id_across_different_command_ids() {
+        let mut bus = InjectionBus::new();
+        bus.switch_session("session-a");
+
+        let first = Injection {
+            input_id: "msg-stable-1".into(),
+            ..injection("session-a", "cmd-1", "first")
+        };
+        let replay = Injection {
+            input_id: "msg-stable-1".into(),
+            ..injection("session-a", "cmd-2", "replay")
+        };
+        assert_eq!(bus.enqueue(first), EnqueueResult::Queued);
+        assert_eq!(bus.enqueue(replay), EnqueueResult::DuplicateInputId);
+        assert_eq!(bus.drain().len(), 1);
     }
 
     #[test]
