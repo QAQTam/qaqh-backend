@@ -352,19 +352,29 @@ Gate：
 
 ### P2-5 `SubagentSupervisor`
 
-状态：待开始。
+状态：已完成，issue #256 / PR #257，merge `69029ef`。
 
 交付：
 
-- daemon 级 supervisor 统一负责 parent/child cancel、join 和 edge 生命周期。
-- `registry.close` 不再以裸 unlink 代表 child 已终止。
-- 覆盖 parent panic、SessionDeleted、shutdown 和 spawn 竞态。
+- `qaqh-runtime` 新增 daemon 级 `SubagentSupervisor`，统一负责
+  parent/child link/unlink、children 查询、postorder unload 与生命周期 trace。
+- `registry.close`、`shutdown_all`、dead-parent respawn 统一经 supervisor
+  取消、观察 child terminal、记录 parent edge finish、join child，再完成
+  parent unload ack。
+- parent 取消/关闭/异常退出不再以移除 instance + 裸 unlink 代表 child
+  已终止。
+- link 冲突/成环 fail-closed，spawn 后 link 失败会立即关闭 child。
 
 Gate：
 
-- `parent_unload_waits_child_terminal_join` 必须通过。
-- 固定顺序：`child terminal -> parent SubagentFinished -> child join -> parent unload ack/tombstone`。
-- child 无 parent edge 时不得继续启动。
+- `parent_unload_waits_child_terminal_join` 通过。
+- 固定顺序：`child terminal -> parent SubagentFinished -> child join -> parent unload ack/tombstone` 通过。
+- `shutdown_all`、dead parent respawn、parent close/unload、childless close
+  回归测试通过。
+- `cargo test -p qaqh-runtime`、`cargo test --workspace`、
+  `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+非目标：canonical edge fact 持久化与双向恢复扫描留给 P2-6。
 
 ### P2-6 两阶段 spawn 恢复与消息去重
 
