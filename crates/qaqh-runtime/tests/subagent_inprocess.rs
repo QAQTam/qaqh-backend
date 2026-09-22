@@ -9,6 +9,7 @@ use qaqh_domain::{
     RingingChannel, SessionState,
 };
 use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
+use qaqh_runtime::quota_ledger::QuotaLimits;
 use qaqh_runtime::{AgentRegistry, RingingHub};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -582,4 +583,58 @@ fn childless_close_remains_working_and_idempotent() {
     assert!(!registry.is_running(&seed));
 
     registry.close(&seed);
+}
+
+/// P2-7：spawn 必须先取得 durable reservation，成功后提交。
+#[test]
+fn spawn_commits_quota_reservation() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-quota-commit-test");
+    let parent = format!("quota-parent-{}", std::process::id());
+    let child = format!("quota-child-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-quota-commit-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(hub);
+    registry.set_quota_limits(QuotaLimits::new(10, 10).expect("limits"));
+
+    qaqh_workspace::runtime::clear_context();
+    registry.spawn_new(&parent).expect("spawn parent session");
+    spawn_linked_subagent(&mut registry, &parent, &child);
+
+    let snapshot = registry.quota_snapshot(&parent).expect("quota snapshot");
+    assert_eq!(snapshot.held, 0);
+    assert_eq!(snapshot.committed, 1);
+    assert!(registry.is_running(&child));
+
+    registry.shutdown_all();
+}
+
+/// P2-7：hard limit 在 child actor 启动前拒绝 spawn，不留下半成品 child。
+#[test]
+fn spawn_rejected_before_side_effect_when_quota_exhausted() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-quota-reject-test");
+    let parent = format!("quota-reject-parent-{}", std::process::id());
+    let child = format!("quota-reject-child-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-quota-reject-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(hub);
+    registry.set_quota_limits(QuotaLimits::new(0, 0).expect("limits"));
+
+    qaqh_workspace::runtime::clear_context();
+    registry.spawn_new(&parent).expect("spawn parent session");
+    qaqh_workspace::runtime::set_context(&parent, 4);
+    let result = registry.spawn_subagent(&child, &[], None, None, None);
+    qaqh_workspace::runtime::clear_context();
+
+    assert!(result.is_err(), "hard quota must reject spawn");
+    assert!(
+        !registry.is_running(&child),
+        "rejected spawn must not leave a child actor"
+    );
+    let snapshot = registry.quota_snapshot(&parent).expect("quota snapshot");
+    assert_eq!(snapshot.held, 0);
+    assert_eq!(snapshot.committed, 0);
+
+    registry.shutdown_all();
 }
