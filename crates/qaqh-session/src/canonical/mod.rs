@@ -11,6 +11,7 @@ mod recovery;
 mod recovery_state;
 mod replay_window;
 mod store;
+mod tool_ledger;
 mod types;
 
 pub use clock::{
@@ -43,6 +44,7 @@ pub use replay_window::{
     recover_replay_window_manifest, replay_window_path,
 };
 pub use store::{AppendOutcome, CanonicalSessionStore};
+pub use tool_ledger::{ToolLedger, ToolLedgerEntry, ToolLedgerError, ToolRecoveryDisposition};
 pub use types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,
     UPGRADE_FENCE_SCHEMA, UpgradeFence, UpgradeState, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
