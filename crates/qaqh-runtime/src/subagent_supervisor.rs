@@ -120,6 +120,18 @@ impl SubagentSupervisor {
         self.parent_of.get(child).cloned()
     }
 
+    pub(crate) fn root_of(&self, seed: &str) -> String {
+        let mut current = seed.to_string();
+        let mut seen = HashSet::new();
+        while seen.insert(current.clone()) {
+            let Some(parent) = self.parent_of.get(&current) else {
+                break;
+            };
+            current = parent.clone();
+        }
+        current
+    }
+
     pub(crate) fn children_of(&self, parent: &str) -> Vec<String> {
         self.children_of
             .get(parent)
