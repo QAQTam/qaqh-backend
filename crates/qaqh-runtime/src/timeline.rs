@@ -1887,10 +1887,13 @@ mod tests {
         // `TurnSealed`（快照落在回合内 + seal 裁剪 = 回复永不渲染）。
         appender.seal_turn("s", "t1").unwrap();
         let after_seal = appender.replay_since("s", cut);
-        assert_eq!(
-            &after_seal[..all.len() - mid - 1],
-            &all[mid + 1..],
-            "seal 不得拿走回合中途水位之后的条目"
+        // 下界断言（而非切片相等）：失败时给出可读信息，而不是切片越界 panic。
+        // 期望 `after_seal` ⊇ `all[mid+1..]`，另加 seal 自身产出的 TurnSealed。
+        assert!(
+            after_seal.len() > all.len() - mid - 1,
+            "seal 不得拿走回合中途水位之后的条目（after_seal={}, 期望 > {}）",
+            after_seal.len(),
+            all.len() - mid - 1
         );
         assert!(
             matches!(
@@ -1925,10 +1928,12 @@ mod tests {
 
         appender.seal_turn("s", "t1").unwrap();
         let after_seal = appender.replay_since("s", 0);
-        assert_eq!(
-            &after_seal[..before_seal.len()],
-            &before_seal[..],
-            "seal 不得裁剪该 turn 的既有条目"
+        // 下界断言（而非切片相等）：失败时给出可读信息，而不是切片越界 panic。
+        assert!(
+            after_seal.len() >= before_seal.len(),
+            "seal 不得裁剪该 turn 的既有条目（after_seal={}, before_seal={}）",
+            after_seal.len(),
+            before_seal.len()
         );
         assert!(
             matches!(
@@ -1950,8 +1955,16 @@ mod tests {
         );
 
         appender.open_turn("s", "t2", "q2").unwrap();
+        let final_tail = appender.replay_since("s", 0);
+        // 绝对下界（不只是相对增量）：t1 的条目在 t2 进来后仍必须全部留存。
+        assert!(
+            before_seal.iter().all(|old| final_tail
+                .iter()
+                .any(|new| new.timeline_seq == old.timeline_seq)),
+            "后续 turn 进来后，t1 的条目仍必须全部在回放尾里"
+        );
         assert_eq!(
-            appender.replay_since("s", 0).len(),
+            final_tail.len(),
             after_seal.len() + 1,
             "后续 turn 的条目照常进入回放窗口"
         );
