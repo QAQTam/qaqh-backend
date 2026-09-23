@@ -173,7 +173,6 @@ pub(crate) async fn handle_command(
     let Some(expected) = parse_channel(&channel) else {
         return (StatusCode::NOT_FOUND, "unknown channel").into_response();
     };
-    state.test_hooks.apply_command_ack_fault(expected).await;
     let mut env: RingingCommandEnvelope = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -211,6 +210,10 @@ pub(crate) async fn handle_command(
             ),
         );
     }
+    state
+        .test_hooks
+        .apply_command_ack_fault(expected, &env.command)
+        .await;
     // unsupported ConversationLoadMore
     if matches!(
         &env.command,
@@ -264,7 +267,7 @@ pub(crate) async fn handle_command(
             ),
         );
     }
-    if let Some(fault) = state.test_hooks.interaction_fault() {
+    if let Some(fault) = state.test_hooks.take_interaction_fault(&env.command) {
         match fault {
             InteractionFault::PermissionDeny => {
                 if let qaqh_ringing::RingingCommand::Tool(
