@@ -11,14 +11,14 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::session_fact_v2::{
-    ContentRef, EventId, ExecutionId, FactPayload, FactSchema, RecoveryRef, SessionFact, SessionId,
-    ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability,
-    ToolTerminalStatus, TurnId,
+    ContentRef, EventId, ExecutionId, FactPayload, FactSchema, InteractionExpired, InteractionId,
+    InteractionResolved, RecoveryRef, SessionFact, SessionId, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 use super::{
     CanonicalError, CanonicalIdentityError, CanonicalSessionStore, CommittedFactReader, WriterId,
-    WriterLease,
+    WriterLease, generate_ulid,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -119,6 +119,9 @@ pub enum ToolLedgerError {
 
     #[error("tool call {call_id} has an intent and cannot finish without execution_id")]
     IntentPresentForExecutionlessTerminal { call_id: ToolCallId },
+
+    #[error("interaction {interaction_id} already has a conflicting terminal")]
+    InteractionTerminalConflict { interaction_id: InteractionId },
 }
 
 #[derive(Debug)]
@@ -128,6 +131,7 @@ pub struct ToolLedger {
     session_id: SessionId,
     log_id: crate::session_fact_v2::LogId,
     entries: HashMap<ToolCallId, ToolLedgerEntry>,
+    interaction_terminals: HashMap<InteractionId, SessionFact>,
 }
 
 impl ToolLedger {
@@ -157,8 +161,9 @@ impl ToolLedger {
         let log_id = store.log_id().clone();
         let reader = CommittedFactReader::open(&session_dir, session_id.clone(), log_id.clone())?;
         let mut entries = HashMap::new();
+        let mut interaction_terminals = HashMap::new();
         for fact in reader.read_all()? {
-            index_fact(&mut entries, fact)?;
+            index_fact(&mut entries, &mut interaction_terminals, fact)?;
         }
         Ok(Self {
             store,
@@ -166,6 +171,7 @@ impl ToolLedger {
             session_id,
             log_id,
             entries,
+            interaction_terminals,
         })
     }
 
@@ -259,6 +265,82 @@ impl ToolLedger {
         })
     }
 
+    pub fn interaction_terminal(&self, interaction_id: &InteractionId) -> Option<&SessionFact> {
+        self.interaction_terminals.get(interaction_id)
+    }
+
+    /// Append the first canonical resolution for an interaction.
+    ///
+    /// A repeated identical resolution is idempotent. Once a resolution or
+    /// expiry is committed, any conflicting terminal is rejected so the
+    /// canonical log preserves first-answer-wins.
+    pub fn append_interaction_resolved(
+        &mut self,
+        event_id: EventId,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+        payload: InteractionResolved,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let interaction_id = payload.interaction_id.clone();
+        if let Some(existing) = self.interaction_terminals.get(&interaction_id) {
+            if matches!(
+                &existing.payload,
+                FactPayload::InteractionResolved(existing) if existing == &payload
+            ) {
+                return Ok(existing.clone());
+            }
+            return Err(ToolLedgerError::InteractionTerminalConflict { interaction_id });
+        }
+
+        let fact = self.build_interaction_fact(
+            event_id,
+            turn_id,
+            call_id,
+            interaction_id.clone(),
+            FactPayload::InteractionResolved(payload),
+            now_ms,
+        );
+        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        self.interaction_terminals
+            .insert(interaction_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
+    /// Append the first canonical expiry for an interaction.
+    pub fn append_interaction_expired(
+        &mut self,
+        event_id: EventId,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+        payload: InteractionExpired,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let interaction_id = payload.interaction_id.clone();
+        if let Some(existing) = self.interaction_terminals.get(&interaction_id) {
+            if matches!(
+                &existing.payload,
+                FactPayload::InteractionExpired(existing) if existing == &payload
+            ) {
+                return Ok(existing.clone());
+            }
+            return Err(ToolLedgerError::InteractionTerminalConflict { interaction_id });
+        }
+
+        let fact = self.build_interaction_fact(
+            event_id,
+            turn_id,
+            call_id,
+            interaction_id.clone(),
+            FactPayload::InteractionExpired(payload),
+            now_ms,
+        );
+        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        self.interaction_terminals
+            .insert(interaction_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
     /// Seal one open non-replayable intent as part of a recovery batch.
     ///
     /// This is the recovery counterpart to the live execution path: the
@@ -314,6 +396,35 @@ impl ToolLedger {
                 })
             }
         }
+    }
+
+    /// Apply the recovery disposition to every open intent in call-id order.
+    ///
+    /// Non-replayable intents are sealed with one shared batch `RecoveryRef`.
+    /// Replay/reconcile intents remain open and are returned to the caller for
+    /// their dedicated recovery steps. The operation is idempotent across
+    /// repeated recovery executions.
+    pub fn recover_open_intents(
+        &mut self,
+        recovery_ref: RecoveryRef,
+        now_ms: i64,
+    ) -> Result<Vec<(ToolCallId, ToolRecoveryDisposition)>, ToolLedgerError> {
+        let call_ids: Vec<ToolCallId> = self
+            .open_intents()
+            .into_iter()
+            .filter_map(|entry| entry.intent().map(|intent| intent.call_id.clone()))
+            .collect();
+        let mut dispositions = Vec::with_capacity(call_ids.len());
+        for call_id in call_ids {
+            let disposition = self.seal_recovery_intent(
+                &call_id,
+                EventId::new(generate_ulid()),
+                recovery_ref.clone(),
+                now_ms,
+            )?;
+            dispositions.push((call_id, disposition));
+        }
+        Ok(dispositions)
     }
 
     /// Durably append the one intent for `payload.call_id`.
@@ -447,10 +558,35 @@ impl ToolLedger {
             payload,
         }
     }
+
+    fn build_interaction_fact(
+        &self,
+        event_id: EventId,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+        interaction_id: InteractionId,
+        payload: FactPayload,
+        now_ms: i64,
+    ) -> SessionFact {
+        SessionFact {
+            schema: FactSchema::v2(),
+            session_id: self.session_id.clone(),
+            log_id: self.log_id.clone(),
+            fact_seq: 0,
+            event_id,
+            ts_ms: now_ms,
+            causation_id: None,
+            turn_id,
+            call_id,
+            interaction_id: Some(interaction_id),
+            payload,
+        }
+    }
 }
 
 fn index_fact(
     entries: &mut HashMap<ToolCallId, ToolLedgerEntry>,
+    interaction_terminals: &mut HashMap<InteractionId, SessionFact>,
     fact: SessionFact,
 ) -> Result<(), ToolLedgerError> {
     match &fact.payload {
@@ -506,8 +642,34 @@ fn index_fact(
             }
             entry.finished = Some(fact);
         }
+        FactPayload::InteractionResolved(payload) => {
+            index_interaction_terminal(
+                interaction_terminals,
+                payload.interaction_id.clone(),
+                fact,
+            )?;
+        }
+        FactPayload::InteractionExpired(payload) => {
+            index_interaction_terminal(
+                interaction_terminals,
+                payload.interaction_id.clone(),
+                fact,
+            )?;
+        }
         _ => {}
     }
+    Ok(())
+}
+
+fn index_interaction_terminal(
+    interaction_terminals: &mut HashMap<InteractionId, SessionFact>,
+    interaction_id: InteractionId,
+    fact: SessionFact,
+) -> Result<(), ToolLedgerError> {
+    if interaction_terminals.contains_key(&interaction_id) {
+        return Err(ToolLedgerError::InteractionTerminalConflict { interaction_id });
+    }
+    interaction_terminals.insert(interaction_id, fact);
     Ok(())
 }
 

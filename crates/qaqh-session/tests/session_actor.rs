@@ -2,14 +2,16 @@
 
 use qaqh_domain::RingingChannel;
 use qaqh_session::actor::{
-    ConnectionId, SessionActor, SessionActorEffect, SessionActorError, SubscriptionCommand,
-    SubscriptionEffect, ToolAdmission, TurnCommand, TurnCore, TurnCoreError, TurnEffect,
+    ConnectionId, InteractionCancellation, SessionActor, SessionActorEffect, SessionActorError,
+    SubscriptionCommand, SubscriptionEffect, ToolAdmission, TurnCommand, TurnCore, TurnCoreError,
+    TurnEffect,
 };
 use qaqh_session::canonical::{ToolLedger, WriterId};
 use qaqh_session::session_fact_v2::{
-    ContentHash, EventId, ExecutionId, InputId, LogId, PolicyDecisionRef, SessionId,
-    SideEffectClass, ToolCallId, ToolFinished, ToolIntent, ToolIntentPolicyOutcome,
-    ToolReplayCapability, ToolTerminalStatus, TurnId, TurnMode, TurnTerminal,
+    ContentHash, EventId, ExecutionId, FactPayload, InputId, InteractionExpiryReason,
+    InteractionId, LogId, PolicyDecisionRef, SessionId, SideEffectClass, ToolCallId, ToolFinished,
+    ToolIntent, ToolIntentPolicyOutcome, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    TurnMode, TurnTerminal,
 };
 
 const NOW_MS: i64 = 1_789_830_000_000;
@@ -505,7 +507,14 @@ fn cancel_tool_batch_closes_turn_and_writes_executionless_cancelled() {
 
     let call = call_id(3);
     let appended = actor
-        .cancel_tool_batch(&mut ledger, &turn, &turn, vec![call.clone()], NOW_MS + 5)
+        .cancel_tool_batch(
+            &mut ledger,
+            &turn,
+            &turn,
+            vec![],
+            vec![call.clone()],
+            NOW_MS + 5,
+        )
         .expect("cancel batch");
     assert_eq!(appended, vec![call.clone()]);
     assert!(matches!(
@@ -523,9 +532,57 @@ fn cancel_tool_batch_closes_turn_and_writes_executionless_cancelled() {
     assert_eq!(finished.execution_id, None);
 
     let again = actor
-        .cancel_tool_batch(&mut ledger, &turn, &turn, vec![call.clone()], NOW_MS + 6)
+        .cancel_tool_batch(
+            &mut ledger,
+            &turn,
+            &turn,
+            vec![],
+            vec![call.clone()],
+            NOW_MS + 6,
+        )
         .expect("repeat cancel is idempotent");
     assert!(again.is_empty());
+}
+
+#[test]
+fn cancel_tool_batch_expires_interactions_before_cancelled_terminals() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+    let mut actor = SessionActor::new(4);
+    let turn = ledger_turn_id();
+    start_actor(&mut actor, turn.as_str());
+
+    let call = call_id(9);
+    let interaction = InteractionId::new("int_01J00000000000000000000009");
+    actor
+        .cancel_tool_batch(
+            &mut ledger,
+            &turn,
+            &turn,
+            vec![InteractionCancellation {
+                interaction_id: interaction.clone(),
+                call_id: Some(call.clone()),
+            }],
+            vec![call.clone()],
+            NOW_MS + 9,
+        )
+        .expect("cancel interaction and call");
+
+    let terminal = ledger
+        .interaction_terminal(&interaction)
+        .expect("interaction terminal");
+    assert!(matches!(
+        &terminal.payload,
+        FactPayload::InteractionExpired(payload)
+            if payload.reason == InteractionExpiryReason::TurnCancelled
+    ));
+    assert_eq!(
+        ledger
+            .get(&call)
+            .and_then(|entry| entry.finished())
+            .map(|finished| finished.terminal_status),
+        Some(ToolTerminalStatus::Cancelled)
+    );
 }
 
 #[test]
@@ -546,7 +603,14 @@ fn cancel_before_resume_admission_returns_terminal_and_never_appends_intent() {
 
     let call = call_id(4);
     actor
-        .cancel_tool_batch(&mut ledger, &turn, &turn, vec![call.clone()], NOW_MS + 7)
+        .cancel_tool_batch(
+            &mut ledger,
+            &turn,
+            &turn,
+            vec![],
+            vec![call.clone()],
+            NOW_MS + 7,
+        )
         .expect("cancel suspended turn");
     let admission = actor
         .admit_tool_intent(
