@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use qaqh_workspace::permission::PermissionLevel;
 use qaqh_workspace::tool_api::{
-    AgentMode, CancellationToken, ProgressSink, SandboxMode, ToolCallContext, ToolCallSource,
+    AgentMode, CancellationToken, ProgressSink, SandboxMode, SandboxSpec, ToolCallContext,
+    ToolCallSource,
 };
 
 use super::types::{CancelToken, RingContext};
@@ -125,6 +126,7 @@ impl RuntimeContext {
                 SandboxKind::Main => SandboxMode::Main,
                 SandboxKind::Subagent => SandboxMode::Subagent,
             },
+            sandbox_spec: SandboxSpec::workspace_write(self.workspace_root.clone()),
             timeout,
             cancellation: CancellationToken::from_shared_flag(self.cancellation.arc()),
             progress,
@@ -253,6 +255,10 @@ mod tests {
         assert_eq!(tool_ctx.mode, AgentMode::Plan);
         assert_eq!(tool_ctx.permission_level, PermissionLevel::WorkspaceFree);
         assert_eq!(tool_ctx.sandbox, SandboxMode::Subagent);
+        assert_eq!(
+            tool_ctx.sandbox_spec().writable_roots,
+            vec![PathBuf::from("/tmp/qaqh-p2-4c-b")]
+        );
         assert_eq!(tool_ctx.timeout, Duration::from_secs(9));
         assert_eq!(tool_ctx.source, ToolCallSource::Model);
 
