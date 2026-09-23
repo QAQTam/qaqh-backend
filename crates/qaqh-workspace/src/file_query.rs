@@ -514,10 +514,11 @@ pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
     let ctx = ToolCallContext {
         call_id: "read-test".to_string(),
         session_id: "read-test-session".to_string(),
-        workspace_root,
+        workspace_root: workspace_root.clone(),
         mode: crate::tool_api::AgentMode::Code,
         permission_level: crate::permission::PermissionLevel::ReadFree,
         sandbox: crate::tool_api::SandboxMode::Main,
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
         timeout: Duration::from_secs(15),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,

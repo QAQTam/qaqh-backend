@@ -850,6 +850,9 @@ mod tests {
             mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
+            sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
+                std::path::PathBuf::from("/tmp/workspace"),
+            ),
             timeout: Duration::from_secs(180),
             cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
             progress: None,

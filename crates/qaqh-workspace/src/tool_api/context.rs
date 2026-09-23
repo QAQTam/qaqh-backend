@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use super::progress::ProgressSink;
 use crate::permission::PermissionLevel;
+pub use qaqh_policy::SandboxSpec;
 
 /// Sandbox policy effective for one tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -104,6 +105,11 @@ pub struct ToolCallContext {
     pub permission_level: PermissionLevel,
     /// 生效沙箱模式。
     pub sandbox: SandboxMode,
+    /// Canonical sandbox policy for this call.
+    ///
+    /// This is resolved before execution and carried explicitly so runtime
+    /// intent hashing and the exec handler consume the same policy value.
+    pub sandbox_spec: SandboxSpec,
     /// 生效超时（调用方显式值覆盖 descriptor 默认值；构造后定稿）。
     pub timeout: Duration,
     /// 取消信号（只读）。
@@ -115,13 +121,9 @@ pub struct ToolCallContext {
 }
 
 impl ToolCallContext {
-    /// Canonical sandbox policy derived from this explicit call context.
-    ///
-    /// The first Linux cut uses workspace-write + network-deny. Keeping this
-    /// as a method avoids a second source of truth while the full policy
-    /// engine is still being extracted.
-    pub fn sandbox_spec(&self) -> qaqh_policy::SandboxSpec {
-        qaqh_policy::SandboxSpec::workspace_write(self.workspace_root.clone())
+    /// Canonical sandbox policy for this call.
+    pub fn sandbox_spec(&self) -> &SandboxSpec {
+        &self.sandbox_spec
     }
 }
 
@@ -147,6 +149,7 @@ mod tests {
             mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadFree,
             sandbox: SandboxMode::Main,
+            sandbox_spec: SandboxSpec::workspace_write(PathBuf::from("/tmp/ws")),
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
@@ -158,5 +161,25 @@ mod tests {
             ctx.sandbox_spec().writable_roots,
             vec![PathBuf::from("/tmp/ws")]
         );
+    }
+
+    #[test]
+    fn explicit_sandbox_spec_is_not_derived_from_workspace_root() {
+        let ctx = ToolCallContext {
+            call_id: "call_1".to_owned(),
+            session_id: "d9a1a320".to_owned(),
+            workspace_root: PathBuf::from("/tmp/ws"),
+            mode: AgentMode::Code,
+            permission_level: PermissionLevel::ReadFree,
+            sandbox: SandboxMode::Main,
+            sandbox_spec: SandboxSpec::disabled(),
+            timeout: Duration::from_secs(30),
+            cancellation: CancellationToken::new(),
+            progress: None,
+            source: ToolCallSource::Model,
+        };
+
+        assert!(!ctx.sandbox_spec().enabled);
+        assert!(ctx.sandbox_spec().writable_roots.is_empty());
     }
 }
