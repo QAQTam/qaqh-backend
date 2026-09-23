@@ -8,7 +8,9 @@
 //! - `content`：`RingingContentRef`（大内容外置引用）
 //! - `worker`：daemon ↔ agent worker 边界的 framed envelope
 //! - `capability`：客户端 open/能力协商（`Ringing_v1` 等）
-//! - `protocol`：线协议标识（`schema: "qaqh.Ringing"`, `version: 1`）
+//! - `protocol`：v1 线协议标识（`schema: "qaqh.Ringing"`, `version: 1`）
+//! - `v2`：并存的 Ringing v2 wire 契约（`/ringing/v2`、canonical cursor、
+//!   typed projection envelope、bootstrap/reset/driver/interaction）
 //!
 //! ## 架构硬规则
 //!
@@ -24,6 +26,7 @@ pub mod event;
 pub mod protocol;
 pub mod reset;
 pub mod snapshot;
+pub mod v2;
 pub mod worker;
 
 pub use capability::{ClientOpenRequest, ClientOpenResponse};
@@ -42,6 +45,7 @@ pub use protocol::{
 };
 pub use reset::RingingResetRequired;
 pub use snapshot::{RingingChannelSnapshot, RingingSessionBootstrap};
+pub use v2::*;
 pub use worker::{
     RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
 };

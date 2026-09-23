@@ -33,6 +33,14 @@ pub enum ClientError {
     #[error("HTTP {status}: {path}")]
     Http { status: u16, path: String },
 
+    /// Structured API error with a stable server-side `code`.
+    #[error("server error {status} ({code}): {message}")]
+    Api {
+        status: u16,
+        code: String,
+        message: String,
+    },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -59,6 +67,14 @@ impl ClientError {
         Self::StreamTerminated {
             code: payload.code.unwrap_or_else(|| "unknown".into()),
             skipped: payload.skipped,
+        }
+    }
+
+    /// Stable server error code, when the response carried one.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Api { code, .. } => Some(code),
+            _ => None,
         }
     }
 
