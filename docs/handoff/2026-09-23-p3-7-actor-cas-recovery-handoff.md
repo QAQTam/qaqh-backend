@@ -1,7 +1,7 @@
 # P3-7 SessionActor CAS 与 Recovery Provenance Handoff
 
 > 日期：2026-09-23
-> 状态：第一阶段实现完成，已在本地分支验证；继续挂在 PR #288 的 P3-6/P3-7 交付线上
+> 状态：P3-7 第一阶段与 recovery executor/outbox 对账已完成，已在本地分支验证；继续挂在 PR #288 的 P3-6/P3-7 交付线上
 > Base：`betav2`
 > Branch：`feat/p3-tool-ledger-production-wiring`
 
@@ -17,11 +17,19 @@
 4. crash recovery 补写 `ToolFinished::Indeterminate` 时的 canonical
    `recovery_ref` provenance 与 batch primitive。
 
-未在本切片完成：
+本切片后续追加完成：
 
-- Reconcile probe 的真正执行与 evidence 写入。
-- recovery executor 的完整 `SessionRecovered` batch driver。
-- `tool_outbox` 与 canonical ToolLedger 的最终退场策略。
+- Reconcile probe 的 durable evidence 闭合 primitive。
+- recovery executor：读取 `RecoveryIntent`、校验 open set、seal `NoReplay`、
+  在无 pending disposition 后写唯一 `SessionRecovered` 并清理 stale intent。
+- `tool_outbox` 与 canonical ToolLedger 的只读双写对账观测。
+- todo typed output 的 model/display/service 同源 gate。
+
+仍未完成：
+
+- 全量 typed output 迁移（skills/plan/process/subagent）。
+- 完整进程级 crash matrix/failpoint 门禁。
+- `tool_outbox` 最终退场策略（当前只做对账观测，不删除旧写）。
 
 ## 2. SessionActor CAS
 
@@ -120,11 +128,27 @@ cargo test --workspace
   - interaction request/terminal first-answer-wins 且 reopen 可重建；
   - recovery seal 携带 `RecoveryRef` 且重复执行幂等；
   - recovery batch 只 seal `NoReplay`，保留 replay/reconcile。
+- `crates/qaqh-session/tests/recovery_executor.rs`
+  - `NoReplay` 批量 seal 后写唯一 `SessionRecovered`；
+  - replay/reconcile pending 时不提前写 `SessionRecovered`；
+  - reconcile probe mismatch fail-closed；
+  - 未列入 recovery plan 的 open intent fail-closed；
+  - stale intent 清理不产生第二个 `SessionRecovered`。
+- `crates/qaqh-runtime/src/agent/state/lifecycle.rs` unit test
+  - session resume 前自动发现 open intent 并完成 canonical recovery。
+- `crates/qaqh-runtime/src/agent/tool_outbox.rs` unit test
+  - outbox 与 canonical ledger 的 matched/missing/status mismatch 对账。
+- `crates/qaqh-runtime/tests/tool_output_projection_equivalence.rs`
+  - todo typed output 的 model/display/service 同源。
+- `crates/qaqh-workspace/tests/tool_sdk_parity.rs`
+  - 19 个内置工具 descriptor 与 capability 表逐项一致，动态工具走默认回退。
 
 ## 6. 下一步
 
-1. 实现 Reconcile probe，写 evidence 后再闭合 call。
-2. 建 recovery executor：读取 `RecoveryIntent`，调用
-   `recover_open_intents`，最后写 `SessionRecovered`。
-3. 完成 `tool_outbox` 与 canonical ledger 对账，逐步退场旧 outbox。
-4. 补齐 P3 gate 的 crash matrix 与 display/model/resource/service 同源验收。
+1. 迁移 skills/plan/process/subagent 到 typed output，并删除对应 JSON
+   字符串错误路径。
+2. 把 crash matrix 从现有进程内故障注入升级为可重复的进程级 failpoint
+   门禁。
+3. 在 outbox 对账观测稳定后设计并执行旧 `tool_outbox` 退场，保留 canonical
+   ToolLedger 作为唯一终态事实源。
+4. 收口 display/model/resource/service 的全工具同源验收，完成 P3 gate。

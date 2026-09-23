@@ -580,7 +580,7 @@ impl ToolRuntime {
         ledger.ensure_lease(now, tool_ledger_lease_ms())?;
         let (terminal_status, error, output_bytes) = match outcome {
             ToolRunOutcome::Completed(result) => (
-                terminal_status(result.result.status),
+                terminal_status(&result.result),
                 canonical_tool_error(result.result.error.as_ref()),
                 result.content.len() as u64,
             ),
@@ -848,8 +848,15 @@ pub(crate) fn canonical_interaction_id(
     ))
 }
 
-fn terminal_status(status: qaqh_types::ToolStatus) -> ToolTerminalStatus {
-    match status {
+fn terminal_status(result: &qaqh_types::ToolResult) -> ToolTerminalStatus {
+    if result
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "TIMEOUT")
+    {
+        return ToolTerminalStatus::TimedOut;
+    }
+    match result.status {
         qaqh_types::ToolStatus::Ok => ToolTerminalStatus::Succeeded,
         qaqh_types::ToolStatus::Error => ToolTerminalStatus::Failed,
         qaqh_types::ToolStatus::Partial => ToolTerminalStatus::Partial,
@@ -1093,5 +1100,21 @@ fn apply_ordered_skill_effects(
     });
     for (_, effects) in ordered {
         ctx.agent.apply_tool_effects(effects, ctx.flow);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_error_maps_to_canonical_timed_out() {
+        let result =
+            qaqh_types::ToolResult::error_with("TIMEOUT", "tool timed out".to_string(), true, None);
+        assert_eq!(
+            terminal_status(&result),
+            ToolTerminalStatus::TimedOut,
+            "timeout must not collapse into generic failed"
+        );
     }
 }
