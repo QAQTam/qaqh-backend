@@ -6,7 +6,7 @@
 //! cancel/resume CAS remain a later slice.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -18,8 +18,8 @@ use crate::session_fact_v2::{
 };
 
 use super::{
-    CanonicalError, CanonicalIdentityError, CanonicalSessionStore, CommittedFactReader, WriterId,
-    WriterLease, generate_ulid,
+    AppendOutcome, CanonicalError, CanonicalIdentityError, CanonicalSessionStore,
+    CommittedFactReader, WriterId, WriterLease, generate_ulid,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -152,6 +152,7 @@ pub enum ToolLedgerError {
 pub struct ToolLedger {
     store: CanonicalSessionStore,
     lease: WriterLease,
+    session_dir: PathBuf,
     session_id: SessionId,
     log_id: crate::session_fact_v2::LogId,
     entries: HashMap<ToolCallId, ToolLedgerEntry>,
@@ -199,12 +200,23 @@ impl ToolLedger {
         Ok(Self {
             store,
             lease,
+            session_dir,
             session_id,
             log_id,
             entries,
             interaction_requests,
             interaction_terminals,
         })
+    }
+
+    fn append_and_publish(
+        &mut self,
+        fact: SessionFact,
+        now_ms: i64,
+    ) -> Result<AppendOutcome, ToolLedgerError> {
+        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        crate::projection::publish_projection(&self.session_dir, &outcome.fact, &outcome.events);
+        Ok(outcome)
     }
 
     pub fn session_id(&self) -> &SessionId {
@@ -340,7 +352,7 @@ impl ToolLedger {
             FactPayload::InteractionRequested(payload),
             now_ms,
         );
-        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        let outcome = self.append_and_publish(fact, now_ms)?;
         self.interaction_requests
             .insert(interaction_id, outcome.fact.clone());
         Ok(outcome.fact)
@@ -377,7 +389,7 @@ impl ToolLedger {
             FactPayload::InteractionResolved(payload),
             now_ms,
         );
-        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        let outcome = self.append_and_publish(fact, now_ms)?;
         self.interaction_terminals
             .insert(interaction_id, outcome.fact.clone());
         Ok(outcome.fact)
@@ -410,7 +422,7 @@ impl ToolLedger {
             FactPayload::InteractionExpired(payload),
             now_ms,
         );
-        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        let outcome = self.append_and_publish(fact, now_ms)?;
         self.interaction_terminals
             .insert(interaction_id, outcome.fact.clone());
         Ok(outcome.fact)
@@ -537,7 +549,7 @@ impl ToolLedger {
             interaction_id: None,
             payload: FactPayload::SessionRecovered(payload),
         };
-        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        let outcome = self.append_and_publish(fact, now_ms)?;
         Ok(outcome.fact)
     }
 
@@ -670,7 +682,7 @@ impl ToolLedger {
             FactPayload::ToolIntent(payload),
             now_ms,
         );
-        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        let outcome = self.append_and_publish(fact, now_ms)?;
         self.entries.entry(call_id).or_default().intent = Some(outcome.fact.clone());
         Ok(outcome.fact)
     }
@@ -733,7 +745,7 @@ impl ToolLedger {
             FactPayload::ToolFinished(payload),
             now_ms,
         );
-        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        let outcome = self.append_and_publish(fact, now_ms)?;
         self.entries.entry(call_id).or_default().finished = Some(outcome.fact.clone());
         Ok(outcome.fact)
     }

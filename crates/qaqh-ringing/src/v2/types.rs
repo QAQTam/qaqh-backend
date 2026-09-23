@@ -5,7 +5,7 @@
 //! `qaqh-client` binds the payload to its typed projection model.
 
 use qaqh_domain::RingingChannel;
-use qaqh_domain::state::{ControlState, ConversationState, ToolState};
+use qaqh_domain::state::ControlState;
 use serde::{Deserialize, Serialize};
 
 use crate::command::RingingCommand;
@@ -291,18 +291,18 @@ pub struct RingingV2ChannelSnapshot<S> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RingingV2Bootstrap {
+pub struct RingingV2Bootstrap<C, V, T> {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
     pub seed: String,
     pub snapshot_cursor: CursorToken,
-    pub control: RingingV2ChannelSnapshot<RingingV2ControlState>,
-    pub conversation: RingingV2ChannelSnapshot<ConversationState>,
-    pub tool: RingingV2ChannelSnapshot<ToolState>,
+    pub control: RingingV2ChannelSnapshot<C>,
+    pub conversation: RingingV2ChannelSnapshot<V>,
+    pub tool: RingingV2ChannelSnapshot<T>,
 }
 
-impl RingingV2Bootstrap {
+impl<C, V, T> RingingV2Bootstrap<C, V, T> {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.schema != RINGING_SCHEMA
             || self.version != RINGING_V2_VERSION
@@ -436,6 +436,7 @@ pub fn open_path() -> String {
 mod tests {
     use super::*;
     use qaqh_domain::ControlCommand;
+    use qaqh_domain::state::{ConversationState, ToolState};
 
     fn reliable_envelope() -> RingingV2EventEnvelope<serde_json::Value> {
         let cursor = CanonicalCursor::new("log-1", 42, 1);
@@ -565,7 +566,7 @@ mod tests {
                 "state": {}
             }
         });
-        let bootstrap: RingingV2Bootstrap =
+        let bootstrap: RingingV2Bootstrap<RingingV2ControlState, ConversationState, ToolState> =
             serde_json::from_value(value).expect("frozen bootstrap shape");
         bootstrap.validate().expect("valid bootstrap");
         assert_eq!(bootstrap.control.state.interactions.len(), 1);
