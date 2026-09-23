@@ -8,9 +8,17 @@
 > 输出收敛到 typed `TodoListOutput`。这两个类型与 workspace todo 面板使用的
 > `DashboardTask` **不是同一个语义面**。
 >
-> **分支事实**：本文描述的是 P3 分支
-> `feat/p3-tool-ledger-production-wiring @ 5c84724` 的落地后契约。当前
-> `betav2 @ 7248a5f` 仍是旧 `TodoItem` 形状，**P3 合并前不要按第 3 节改 TUI**。
+> **分支事实**：本文描述的是 **PR #288**
+> （`feat/p3-tool-ledger-production-wiring @ c1c60d2`）的落地后契约，不是
+> `betav2` 现状。当前 `betav2 @ 39a20a1` 仍是旧 `TodoItem` 形状，
+> **P3 合并前不要按第 3 节改 TUI**：此时 `qaqh-client` 根入口还没有
+> `PlanReviewItem` 这个名字，提前迁移只能越过 `qaqh-client` 去引
+> `qaqh-domain`，正好违反第 5 节的入口纪律。
+>
+> 复核锚点（`betav2` 上不可见，请按 PR 号看）：
+> `PlanReviewItem` 定义见 PR #288 的 `crates/qaqh-domain/src/event.rs`；
+> 根入口再导出见同一 PR 的 `crates/qaqh-client/src/lib.rs` 与
+> `crates/qaqh-client/src/types.rs`。
 > 上游需求：
 > [`TUI对后端的协作需求`](../../../qaqh-tui-app/docs/spec/2026-09-23-TUI对后端的协作需求-spec.md)
 > §5.1 / P1。
@@ -19,7 +27,7 @@
 
 | 消费面 | 权威类型/来源 | TUI 用途 |
 |---|---|---|
-| plan review 的待评审项 | `qaqh_client::PlanReviewItem`（P3 后由 `qaqh-client` 根入口再导出） | plan modal 里的 Todo 预览 |
+| plan review 的待评审项 | `qaqh_client::PlanReviewItem`（由 PR #288 在 `qaqh-client` 根入口再导出） | plan modal 里的 Todo 预览 |
 | workspace todo 面板 | `qaqh_client::DashboardTask`，来自 `session.dashboard`；失败时回退 `todo.status` JSON | 右侧/Workspace todo 列表 |
 | todo 工具的结构化输出 | backend 内部 `TodoListOutput` / `TodoItemView`（模块为 `pub(crate)`，不是公开路径） | 仅 backend canonical/model/display 投影，不是 TUI 公共入口 |
 
@@ -77,7 +85,9 @@ pub struct TodoItem {
 
 ## 3. TUI 迁移步骤
 
-P3 合并并发布新锚点后：
+P3 合并并发布新锚点后（前置条件：PR #288 已合入 `betav2`，且锚点里
+`crates/qaqh-client/src/lib.rs` / `types.rs` 已再导出 `PlanReviewItem`；
+这两处再导出是 #288 的一部分，不需要 TUI 侧另开 PR）：
 
 1. `src/app/session.rs`：
 
@@ -86,11 +96,12 @@ P3 合并并发布新锚点后：
    ```
 
 2. `ControlEvent::PlanReviewRequested { todo_items, .. }` 继续直接赋值；P3
-   的 `qaqh-client` 已从 crate root 再导出 `PlanReviewItem`。
+   的 `qaqh-client` 已从 crate root 再导出 `PlanReviewItem`（PR #288）。
 3. plan modal 渲染：
    - `item.title` 不变；
    - `item.complexity` 是 `String`，按字符串展示；不要用 `format!("{:?}")`，
-     否则会渲染成带引号的 `"small"`；
+     否则会渲染成带引号的 `"small"`；也不要对 `small` / `medium` / `large`
+     做穷举 `match`——该值域目前只是注释级约定，schema 里没有 enum 约束；
    - 删除对 `status` / `evidence` 的隐式依赖（当前 TUI 没有直接读取，迁移
      成本主要是类型名）。
 4. workspace todo 面板不改用 `PlanReviewItem`；继续消费 `DashboardTask`。
@@ -129,6 +140,21 @@ P3 的 service 面：
 输出侧 wire 值承诺为 `idle` / `in_progress` / `completed` / `cancelled`。
 输入侧 `TodoStatusView` 还接受 `pending` / `complete` / `canceled` 三个 alias；
 TUI 若只消费输出，不应依赖这些 alias。
+
+### 4.1 `evidence` 的可空语义（实测）
+
+`TodoItemView.evidence` 是 `Option<String>`，且没有 `skip_serializing_if`。
+serde 对该形状的行为（已用 `serde 1` + `serde_json 1` 最小用例实测）：
+
+| 场景 | 结果 |
+|---|---|
+| 反序列化 `"evidence": null` | `None`，**不报错** |
+| 反序列化时缺字段 | `None`，**不报错**（`Option` 字段隐式可选） |
+| 序列化 `None` | 输出 `"evidence": null` |
+
+所以上面示例里的 `"evidence": null` 是**合法 wire 值**，不是笔误。TUI 侧只要
+按 `Option<String>` 建模即可；唯一会踩的坑是把该字段建模成非可空 `String`
+——那时 `null` 才会解析失败。TUI 不需要、也不应该要求后端改 wire 形状。
 
 ## 5. 验收
 
