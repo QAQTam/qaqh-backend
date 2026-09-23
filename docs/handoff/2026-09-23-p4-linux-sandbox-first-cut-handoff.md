@@ -36,6 +36,9 @@ cargo test -p qaqh-sandbox -- --test-threads=1
   linux_sandbox::workspace_write_is_allowed_and_outside_write_is_denied PASS
   linux_sandbox::network_denial_blocks_tcp_socket_creation PASS
 
+cargo test -p qaqh-daemon --test sandbox_helper -- --test-threads=1
+  daemon_helper_denies_write_outside_workspace PASS
+
 cargo check --workspace --all-targets PASS
 cargo clippy --workspace --all-targets -- -D warnings PASS
 cargo test --workspace -- --test-threads=1 PASS
