@@ -454,6 +454,8 @@ impl TurnEngine {
         if !turn_admit::execute_admitted_batch(
             ctx,
             tool,
+            Some(&mut self.actor),
+            crate::agent::tool_runtime::ToolBatchOrigin::Resume,
             deferred_authorized,
             &saved.tool_call_order,
             &saved.serial_call_ids,
@@ -1450,6 +1452,7 @@ impl TurnEngine {
                 if let Some(outcome) = turn_admit::admit_and_dispatch(
                     ctx,
                     tool,
+                    &mut self.actor,
                     &turn_context,
                     &turn_id,
                     round_num,
