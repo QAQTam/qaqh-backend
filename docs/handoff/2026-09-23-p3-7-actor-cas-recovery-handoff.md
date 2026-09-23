@@ -27,7 +27,7 @@
 
 仍未完成：
 
-- typed output 剩余迁移（plan/process/subagent）。
+- typed output 剩余迁移（plan/subagent）。
 - `tool_outbox` 最终退场策略（当前只做对账观测，不删除旧写）。
 
 ## 2. SessionActor CAS
@@ -148,10 +148,13 @@ cargo test --workspace
 - `crates/qaqh-workspace/tests/skills_typed_output.rs`
   - `skills` typed activation 返回同一 output 派生的 model/display；
   - skill activation 作为可信 `ToolEffect` 进入宿主，不再从文本回解析。
+- `crates/qaqh-workspace/src/process_inspect.rs` unit tests
+  - `process` typed output model/display 同源；
+  - kill 的 `NO_OS_PID` / `NOT_FOUND` legacy error code 保持不变。
 
 ## 6. 下一步
 
-1. 迁移 plan/process/subagent 到 typed output，并删除对应 JSON
+1. 迁移 plan/subagent 到 typed output，并删除对应 JSON
    字符串错误路径。
 2. 在 outbox 对账观测稳定后设计并执行旧 `tool_outbox` 退场，保留 canonical
    ToolLedger 作为唯一终态事实源。
