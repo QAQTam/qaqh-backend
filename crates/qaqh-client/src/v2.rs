@@ -43,8 +43,17 @@ pub type ClientV2EventEnvelope = ClientV2Event;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClientV2ControlState {
-    #[serde(flatten)]
-    pub snapshot: qaqh_session::projection::ControlSnapshot,
+    pub session_id: Option<qaqh_session::session_fact_v2::SessionId>,
+    pub activity: qaqh_session::session_fact_v2::ActivityState,
+    pub current_turn_id: Option<qaqh_session::session_fact_v2::TurnId>,
+    pub current_call_id: Option<qaqh_session::session_fact_v2::ToolCallId>,
+    pub round: Option<qaqh_session::projection::ControlRoundState>,
+    pub tools: Vec<qaqh_session::projection::ControlToolState>,
+    pub subagents: Vec<qaqh_session::projection::ControlSubagentState>,
+    pub last_recovery: Option<qaqh_session::session_fact_v2::RecoveryOutcome>,
+    pub revision: u64,
+    pub last_fact_seq: u64,
+    pub interactions: Vec<ClientV2PendingInteraction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<ClientV2DriverState>,
 }
