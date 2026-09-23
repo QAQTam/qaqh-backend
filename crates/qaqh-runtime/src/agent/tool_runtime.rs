@@ -3,7 +3,7 @@
 //! P3-1 只收敛执行机制，不改变工具契约或事件语义：
 //! - 授权工具在 runtime 统一 spawn worker；
 //! - 进度通道统一在 runtime 排空；
-//! - outbox 记录与 join 归一统一在 runtime 完成；
+//! - canonical ToolIntent/ToolFinished 提交与 join 归一统一在 runtime 完成；
 //! - UI、LLM batch、approved-resume batch 不再各自复制这段逻辑。
 //!
 //! sandbox 不在本层实现。P4 只需在这个边界外包/注入 sandbox 执行器。
@@ -107,7 +107,7 @@ impl ToolRuntime {
     ///
     /// Owns the existing v1 scheduling/cancellation/backfill behavior. Callers
     /// provide the admitted batch and original model order; this method handles
-    /// parallel batching, serial tail, progress, outbox, cancellation sealing
+    /// parallel batching, serial tail, progress, ledger commit, cancellation sealing
     /// and ordered skill effects.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_batch(
@@ -122,10 +122,6 @@ impl ToolRuntime {
         round_num: u32,
     ) -> bool {
         let mut actor = actor;
-        // L3 outbox: execution facts are recorded inside the tool worker thread,
-        // right after the tool returns, so a kill between "tool ran" and "result
-        // persisted" is still distinguishable from "tool never ran".
-        let outbox_seed = ctx.agent.session.seed.clone();
         let mut admitted = Self::prepare_admitted(ctx, admitted, turn_id);
         admitted.sort_by_key(|(item, _)| {
             tool_call_order
@@ -162,14 +158,13 @@ impl ToolRuntime {
                 );
             }
             let actor_ref = actor.as_deref_mut();
-            let (progress_rx, runs) =
-                Self::spawn_batch(ctx, actor_ref, origin, batch, outbox_seed.clone(), turn_id);
+            let (progress_rx, runs) = Self::spawn_batch(ctx, actor_ref, origin, batch, turn_id);
             let cancelled = ctx.cancel.is_set();
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
 
             // BUG-2026-09-13-08：取消不再丢弃已执行结果。
             //
-            // 工具线程一旦 spawn 就真实执行（副作用已发生、outbox 已记录），
+            // 工具线程一旦 spawn 就真实执行（副作用可能已发生，且 ToolIntent 已 durable），
             // 「取消」只意味着不再等剩余项——已 join 出来的 canonical 结果必须
             // 照常回填，否则 store 留下 open tool_use，下轮模型重发 → 重复执行。
             // 剩余批（含仍在执行的项）在下方统一补取消终态。
@@ -246,14 +241,8 @@ impl ToolRuntime {
                 ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
             );
             let actor = actor.as_deref_mut();
-            let (progress_rx, runs) = Self::spawn_batch(
-                ctx,
-                actor,
-                origin,
-                vec![(admitted, mode)],
-                outbox_seed.clone(),
-                turn_id,
-            );
+            let (progress_rx, runs) =
+                Self::spawn_batch(ctx, actor, origin, vec![(admitted, mode)], turn_id);
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
             for result in results {
                 match result.outcome {
@@ -643,7 +632,6 @@ impl ToolRuntime {
         mut actor: Option<&mut TurnActor>,
         origin: ToolBatchOrigin,
         admitted: Vec<(AdmittedTool, ToolRunMode)>,
-        outbox_seed: String,
         wire_turn_id: &str,
     ) -> (Receiver<ExecProgressEvent>, Vec<ToolRun>) {
         let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
@@ -662,7 +650,6 @@ impl ToolRuntime {
                             admitted.auth,
                             admitted.scope,
                             tx,
-                            outbox_seed.clone(),
                             ledger,
                         )),
                         Err(message) => {
@@ -686,7 +673,6 @@ impl ToolRuntime {
                     admitted.auth,
                     admitted.scope,
                     tx,
-                    outbox_seed.clone(),
                     ledger,
                 )),
                 ToolRunMode::Blocked { message } => {
@@ -735,7 +721,6 @@ impl ToolRuntime {
             None,
             ToolBatchOrigin::Normal,
             vec![(admitted, mode)],
-            ctx.agent.session.seed.clone(),
             turn_id,
         );
         let run = runs
@@ -797,28 +782,18 @@ impl ToolRuntime {
         auth: Box<AuthorizedToolCall>,
         scope: ToolExecutionScope,
         progress_tx: qaqh_workspace::ExecProgressSender,
-        outbox_seed: String,
         ledger: Option<LedgerRun>,
     ) -> ToolRun {
-        let worker_call_id = call_id.clone();
-        let worker_tool_name = tool_name.clone();
         let handle = std::thread::Builder::new()
             .stack_size(4 * 1024 * 1024)
             .spawn(move || {
                 let context = scope.context().clone();
                 let _scope = scope.install();
-                let result = qaqh_workspace::execution::execute_authorized_with_context(
+                qaqh_workspace::execution::execute_authorized_with_context(
                     *auth,
                     context,
                     Some(progress_tx),
-                );
-                crate::agent::tool_outbox::record(
-                    &outbox_seed,
-                    &worker_call_id,
-                    &worker_tool_name,
-                    result.success,
-                );
-                result
+                )
             })
             .expect("tool thread spawn");
 
@@ -918,8 +893,8 @@ fn blocked_tool_exec_result(
 ///
 /// 因此本函数只处理确实不会再有结果的 call_id：
 /// - 已在本轮回填过结果的（`msg.step_has_tool_result`）→ 跳过；
-/// - outbox 里有执行记录的（工具真的跑过，只是结果没等到）→ 跳过，
-///   由回填路径负责；
+/// - canonical ledger 已有 intent 的（工具已准入，结果可能未等到）→ 跳过，
+///   由回填或 recovery 路径负责；
 /// - 其余（从未执行 / 取消点在 spawn 之前）→ 补 `Cancelled` 终态。
 ///
 /// 返回补了终态的项数。
@@ -930,11 +905,23 @@ fn seal_unexecuted_as_cancelled(
     reason: &str,
     wire_turn_id: &str,
 ) -> usize {
-    let executed = crate::agent::tool_outbox::executed_call_ids(&ctx.agent.session.seed);
+    let call_ids: Vec<String> = call_ids.into_iter().collect();
+    let started = match ctx.agent.tool_ledger_mut() {
+        Ok(Some(ledger)) => call_ids
+            .iter()
+            .filter(|call_id| ledger.get(&canonical_call_id(call_id)).is_some())
+            .cloned()
+            .collect::<HashSet<_>>(),
+        Ok(None) => HashSet::new(),
+        Err(error) => {
+            log::error!("[TOOL] canonical ledger unavailable during cancel sealing: {error}");
+            HashSet::new()
+        }
+    };
     let unexecuted: Vec<String> = call_ids
         .into_iter()
         .filter(|call_id| {
-            !ctx.agent.msg.step_has_tool_result(call_id) && !executed.contains(call_id)
+            !ctx.agent.msg.step_has_tool_result(call_id) && !started.contains(call_id)
         })
         .collect();
     for call_id in &unexecuted {
