@@ -40,11 +40,16 @@
   - 取消收尾从 in-memory ToolLedger 判断“已准入”，不再读 WAL；
   - 旧 WAL 只读兼容：仅在 canonical 无状态时作为历史会话 fallback，消息
     结果持久化后自动 prune。
+- typed display 上 wire：
+  - `ToolResult` 新增可选 canonical `display` payload；
+  - `ToolOutcome -> ToolResult` 写入完整 header/body/summary；
+  - live projection 与 timeline rebuild 都优先使用该 payload；
+  - 即使 model text 被破坏，typed 工具 display 也不再回退到 JSON 文本考古。
 
 仍未完成：
 
-- 部分 legacy 工具的文本 projector fallback；typed 工具执行不再依赖文本
-  解析，但 wire 尚未直接携带完整 typed display，故暂不能全量删除。
+- 尚未迁移为 `TypedTool` 的 legacy 工具仍依赖文本 projector；typed 工具
+  已完全脱离该路径。
 - 旧 `tool_outbox.wal` 的只读兼容代码可在兼容窗口结束后删除；当前保留
   是为了让升级前会话仍能恢复。
 
@@ -165,7 +170,14 @@ cargo test --workspace
   - 两个窗口均验证 `[RESTORE]` 由 canonical intent/terminal 修正，不依赖
     `tool_outbox.wal`。
 - `crates/qaqh-runtime/tests/tool_output_projection_equivalence.rs`
-  - todo typed output 的 model/display/service 同源。
+  - todo typed output 的 model/display/service 同源；
+  - `ToolResult.display` 携带 canonical display；
+  - model text 被破坏后 display 仍不依赖文本解析。
+- `crates/qaqh-runtime/src/ringing/timeline_rebuild.rs` unit test
+  - rebuild 优先使用归档中的 canonical display payload。
+- `crates/qaqh-types/src/tool_result.rs` unit test
+  - 旧 JSON 无 display 字段仍可反序列化；
+  - display payload serde round-trip。
 - `crates/qaqh-workspace/tests/tool_sdk_parity.rs`
   - 19 个内置工具 descriptor 与 capability 表逐项一致，动态工具走默认回退。
 - `crates/qaqh-workspace/tests/skills_typed_output.rs`
@@ -187,7 +199,7 @@ cargo test --workspace
 
 ## 6. 下一步
 
-1. 让 wire/display 直接携带 typed display（或保留 canonical payload 的完整
-   display 投影），随后删除剩余 legacy 文本 projector fallback。
+1. 逐步把剩余 legacy 工具迁移为 `TypedTool`，然后删除文本 projector
+   fallback；typed 工具已不再依赖该路径。
 2. 兼容窗口结束后删除 `tool_recovery` 中的旧 WAL 只读迁移分支。
 3. 运行全仓 P3 gate，更新 PR #288 并等待合并窗口。
