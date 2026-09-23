@@ -1,15 +1,23 @@
 use std::collections::HashSet;
 
-use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+use crate::ToolRisk;
+use crate::tool_api::{
+    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection, ToolSource, TypedTool,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NormalizedAskMode {
     Single,
     Batch,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedAskQuestion {
     pub id: String,
     pub question: String,
@@ -17,7 +25,7 @@ pub struct NormalizedAskQuestion {
     pub allow_custom: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedAsk {
     pub mode: NormalizedAskMode,
     pub questions: Vec<NormalizedAskQuestion>,
@@ -29,20 +37,20 @@ pub struct AskUserError {
     pub message: String,
 }
 
-pub fn normalize_ask_user(args: &serde_json::Value) -> Result<NormalizedAsk, AskUserError> {
+pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
     let raw_questions = match args.get("questions") {
-        Some(serde_json::Value::Array(questions)) => questions.clone(),
+        Some(Value::Array(questions)) => questions.clone(),
         Some(_) => {
             return Err(AskUserError {
                 code: "INVALID_QUESTIONS",
                 message: "questions must be an array".into(),
             });
         }
-        None => vec![serde_json::json!({
+        None => vec![json!({
             "id": "q1",
-            "question": args.get("question").and_then(serde_json::Value::as_str).unwrap_or(""),
-            "options": args.get("options").cloned().unwrap_or_else(|| serde_json::json!([])),
-            "allow_custom": args.get("allow_custom").and_then(serde_json::Value::as_bool).unwrap_or(true),
+            "question": args.get("question").and_then(Value::as_str).unwrap_or(""),
+            "options": args.get("options").cloned().unwrap_or_else(|| json!([])),
+            "allow_custom": args.get("allow_custom").and_then(Value::as_bool).unwrap_or(true),
         })],
     };
 
@@ -58,7 +66,7 @@ pub fn normalize_ask_user(args: &serde_json::Value) -> Result<NormalizedAsk, Ask
     for (index, raw) in raw_questions.iter().enumerate() {
         let question = raw
             .get("question")
-            .and_then(serde_json::Value::as_str)
+            .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
         if question.trim().is_empty() {
@@ -70,7 +78,7 @@ pub fn normalize_ask_user(args: &serde_json::Value) -> Result<NormalizedAsk, Ask
 
         let id = match raw.get("id") {
             None => format!("q{}", index + 1),
-            Some(serde_json::Value::String(id)) if !id.trim().is_empty() => id.clone(),
+            Some(Value::String(id)) if !id.trim().is_empty() => id.clone(),
             Some(_) => {
                 return Err(AskUserError {
                     code: "INVALID_QUESTION_ID",
@@ -87,7 +95,7 @@ pub fn normalize_ask_user(args: &serde_json::Value) -> Result<NormalizedAsk, Ask
 
         let options = match raw.get("options") {
             None => Vec::new(),
-            Some(serde_json::Value::Array(values)) => {
+            Some(Value::Array(values)) => {
                 let mut options = Vec::with_capacity(values.len());
                 for (option_index, value) in values.iter().enumerate() {
                     let Some(option) = value.as_str() else {
@@ -131,12 +139,12 @@ pub fn normalize_ask_user(args: &serde_json::Value) -> Result<NormalizedAsk, Ask
 
         let allow_custom = raw
             .get("allow_custom")
-            .and_then(serde_json::Value::as_bool)
+            .and_then(Value::as_bool)
             .unwrap_or(true);
         if options.is_empty() && !allow_custom {
             return Err(AskUserError {
                 code: "UNANSWERABLE_QUESTION",
-                message: format!("question {id} has no valid answer path"),
+                message: format!("question {id} has no options and disallows custom answers"),
             });
         }
 
@@ -156,74 +164,191 @@ pub fn normalize_ask_user(args: &serde_json::Value) -> Result<NormalizedAsk, Ask
     Ok(NormalizedAsk { mode, questions })
 }
 
-pub(super) fn exec_ask_user(args: &serde_json::Value) -> ToolResult {
-    match normalize_ask_user(args) {
-        Ok(ask) => ToolResult::ok(crate::json_ok(
-            serde_json::to_value(ask).expect("NormalizedAsk serializes"),
-        )),
-        Err(error) => crate::json_err(
-            error.code,
-            format!("ask: {}", error.message),
-            "Fix the ask arguments and retry.",
-        ),
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AskArgs {
+    #[serde(default)]
+    pub questions: Option<Value>,
+    #[serde(default)]
+    pub question: Option<Value>,
+    #[serde(default)]
+    pub options: Option<Value>,
+    #[serde(default)]
+    pub allow_custom: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AskOutput {
+    pub timeis: String,
+    pub status: String,
+    pub mode: NormalizedAskMode,
+    pub questions: Vec<NormalizedAskQuestion>,
+}
+
+impl ToolProjection for AskOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string()),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        let count = self.questions.len();
+        Some(format!(
+            "asked {count} question{}",
+            if count == 1 { "" } else { "s" }
+        ))
+    }
+
+    fn display(&self, _args: &Value) -> ToolDisplay {
+        ToolDisplay::new(
+            ToolHeader::Other {
+                label: "ask".to_string(),
+            },
+            ToolBody::None,
+        )
+        .with_summary(self.summary().unwrap_or_else(|| "ask".to_string()))
     }
 }
 
-handler!(handle_ask_user, exec_ask_user);
+pub struct AskTool;
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("ask", crate::display::project_ask);
-    mgr.register(ToolHandler {
-        key: "ask".to_string(),
-        description: "Ask user questions (Ringing interaction).",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "questions": {
-                    "type": "array",
-                    "description": "Questions",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "ID (auto if omitted)" },
-                            "question": { "type": "string", "description": "Question text" },
-                            "options": { "type": "array", "items": { "type": "string" }, "description": "Choices" },
-                            "allow_custom": { "type": "boolean", "description": "Allow custom", "default": true }
-                        },
-                        "required": ["question"]
-                    }
-                },
-                "question": {
-                    "type": "string",
-                    "description": "Single question (deprecated, use questions)"
-                },
-                "options": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Choices (deprecated)"
-                },
-                "allow_custom": {
-                    "type": "boolean",
-                    "description": "Allow custom (deprecated)",
-                    "default": true
+impl TypedTool for AskTool {
+    type Args = AskArgs;
+    type Output = AskOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("ask").expect("valid ask tool name"),
+            display_name: None,
+            description: "Ask user questions (Ringing interaction).".to_string(),
+            input_schema: ask_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(AskOutput))
+                .expect("ask output schema"),
+            category: crate::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: std::time::Duration::ZERO,
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("ask").unwrap_or_default(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(
+        &self,
+        _ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let mut raw = serde_json::Map::new();
+        if let Some(questions) = args.questions {
+            raw.insert("questions".to_string(), questions);
+        }
+        if let Some(question) = args.question {
+            raw.insert("question".to_string(), question);
+        }
+        if let Some(options) = args.options {
+            raw.insert("options".to_string(), options);
+        }
+        if let Some(allow_custom) = args.allow_custom {
+            raw.insert("allow_custom".to_string(), allow_custom);
+        }
+        let ask = normalize_ask_user(&Value::Object(raw)).map_err(|error| {
+            crate::file_mutate::mutation_error(
+                error.code,
+                format!("ask: {}", error.message),
+                Some("Fix the ask arguments and retry."),
+                json!({}),
+            )
+        })?;
+        Ok(AskOutput {
+            timeis: crate::now_utc8(),
+            status: "ok".to_string(),
+            mode: ask.mode,
+            questions: ask.questions,
+        })
+    }
+}
+
+fn ask_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "description": "Questions",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "ID (auto if omitted)" },
+                        "question": { "type": "string", "description": "Question text" },
+                        "options": { "type": "array", "items": { "type": "string" }, "description": "Choices" },
+                        "allow_custom": { "type": "boolean", "description": "Allow custom", "default": true }
+                    },
+                    "required": ["question"]
                 }
             },
-            "anyOf": [
-                { "required": ["questions"] },
-                { "required": ["question"] }
-            ],
-            "additionalProperties": false
-        }),
-        handler: handle_ask_user,
-        risk: ToolRisk::ReadOnly,
-        category: crate::permission::ToolCategory::Read,
-        default_timeout: std::time::Duration::ZERO,
-    });
+            "question": {
+                "type": "string",
+                "description": "Single question (deprecated, use questions)"
+            },
+            "options": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Choices (deprecated)"
+            },
+            "allow_custom": {
+                "type": "boolean",
+                "description": "Allow custom (deprecated)",
+                "default": true
+            }
+        },
+        "anyOf": [
+            { "required": ["questions"] },
+            { "required": ["question"] }
+        ],
+        "additionalProperties": false
+    })
+}
+
+pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_typed(AskTool);
+}
+
+/// Compatibility entry retained for existing in-process tests.
+#[cfg(test)]
+pub(super) fn exec_ask_user(args: &Value) -> crate::ToolResult {
+    use crate::file_mutate::ambient_tool_context;
+    use crate::tool_api::{ErasedTool, TypedToolAdapter};
+
+    let ctx = ambient_tool_context("ask-compat", std::time::Duration::ZERO);
+    TypedToolAdapter::new(AskTool)
+        .execute(ctx, args.clone())
+        .unwrap_or_else(|fatal| panic!("ask tool fatal: {}", fatal.message))
+        .to_tool_result()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_ask_registration_and_display_are_same_source() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        assert!(
+            manager.builtins["ask"].legacy.is_none(),
+            "ask still has legacy executor"
+        );
+        let result = exec_ask_user(&serde_json::json!({
+            "question": "Choose?",
+            "options": ["A", "B"],
+        }));
+        assert!(result.is_success());
+        let display = result.display().expect("typed display");
+        assert_eq!(display.summary.as_deref(), Some("asked 1 question"));
+        assert!(display.body.is_none());
+    }
 
     #[test]
     fn old_format_single_question() {
