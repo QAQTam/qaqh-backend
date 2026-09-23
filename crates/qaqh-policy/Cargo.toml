@@ -1,0 +1,11 @@
+[package]
+name = "qaqh-policy"
+version.workspace = true
+edition.workspace = true
+description = "Pure policy decisions and sandbox specifications for QAQ-Harness"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true
