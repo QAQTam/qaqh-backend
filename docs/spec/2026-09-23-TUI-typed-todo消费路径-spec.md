@@ -7,6 +7,13 @@
 > plan review 的载荷类型改为 `PlanReviewItem`，并让 todo 工具的 canonical
 > 输出收敛到 typed `TodoListOutput`。这两个类型与 workspace todo 面板使用的
 > `DashboardTask` **不是同一个语义面**。
+>
+> **分支事实**：本文描述的是 P3 分支
+> `feat/p3-tool-ledger-production-wiring @ 5c84724` 的落地后契约。当前
+> `betav2 @ 7248a5f` 仍是旧 `TodoItem` 形状，**P3 合并前不要按第 3 节改 TUI**。
+> 上游需求：
+> [`TUI对后端的协作需求`](../../../qaqh-tui-app/docs/spec/2026-09-23-TUI对后端的协作需求-spec.md)
+> §5.1 / P1。
 
 ## 1. 三条消费面
 
@@ -14,7 +21,7 @@
 |---|---|---|
 | plan review 的待评审项 | `qaqh_client::PlanReviewItem`（P3 后由 `qaqh-client` 根入口再导出） | plan modal 里的 Todo 预览 |
 | workspace todo 面板 | `qaqh_client::DashboardTask`，来自 `session.dashboard`；失败时回退 `todo.status` JSON | 右侧/Workspace todo 列表 |
-| todo 工具的结构化输出 | `qaqh_workspace::todo::typed::TodoListOutput` / `TodoItemView` | 仅 backend 内部 canonical/model/display 投影，不是 TUI 公共入口 |
+| todo 工具的结构化输出 | backend 内部 `TodoListOutput` / `TodoItemView`（模块为 `pub(crate)`，不是公开路径） | 仅 backend canonical/model/display 投影，不是 TUI 公共入口 |
 
 `TodoItemView` 所在模块当前是 `pub(crate)`；TUI 不应直接依赖 `qaqh-workspace`
 去命名它，也不要自行复制一份镜像。若未来 TUI 需要 typed workspace todo，
@@ -29,10 +36,15 @@ pub struct PlanReviewItem {
     pub id: String,
     pub title: String,
     pub description: String,
-    /// "small" | "medium" | "large"
+    /// P3 当前实现：String；取值约定 "small" | "medium" | "large"
     pub complexity: String,
 }
 ```
+
+> 注意：`docs/spec/2026-09-18-workspace-v2-输出侧契约-spec.md` 曾规划
+> `PlanComplexity` 枚举与完整 `PlanView`，这组 v2 plan 视图在当前 P3 分支尚未
+> 落地。本文按 P3 已实现的 `String` 交底；未来若 `PlanComplexity` 落地，需另发
+> wire 变更说明。
 
 旧 `TodoItem`：
 
@@ -77,8 +89,8 @@ P3 合并并发布新锚点后：
    的 `qaqh-client` 已从 crate root 再导出 `PlanReviewItem`。
 3. plan modal 渲染：
    - `item.title` 不变；
-   - `item.complexity` 保持现有 `format!("{:?}", item.complexity)` 或改为
-     按字符串展示；
+   - `item.complexity` 是 `String`，按字符串展示；不要用 `format!("{:?}")`，
+     否则会渲染成带引号的 `"small"`；
    - 删除对 `status` / `evidence` 的隐式依赖（当前 TUI 没有直接读取，迁移
      成本主要是类型名）。
 4. workspace todo 面板不改用 `PlanReviewItem`；继续消费 `DashboardTask`。
@@ -114,7 +126,9 @@ P3 的 service 面：
   }
   ```
 
-状态 wire 值统一为 `idle` / `in_progress` / `completed` / `cancelled`。
+输出侧 wire 值承诺为 `idle` / `in_progress` / `completed` / `cancelled`。
+输入侧 `TodoStatusView` 还接受 `pending` / `complete` / `canceled` 三个 alias；
+TUI 若只消费输出，不应依赖这些 alias。
 
 ## 5. 验收
 
@@ -123,4 +137,5 @@ P3 落地后，TUI 至少验证：
 - plan review modal 能显示 `PlanReviewItem.complexity`；
 - approve/reject 不影响 workspace todo 列表；
 - workspace todo 仍只由 `DashboardTask` 驱动；
-- TUI 不直接依赖 `qaqh-domain` / `qaqh-workspace`，也不新增 `TodoItem` 镜像。
+- TUI 不越过 `qaqh-client` 新增对 `qaqh-domain` / `qaqh-workspace` 的直接依赖，
+  也不新增 `TodoItem` 镜像。这是入口纪律，不是编译期隔离保证。
