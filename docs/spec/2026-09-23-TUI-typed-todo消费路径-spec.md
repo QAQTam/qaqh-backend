@@ -9,7 +9,7 @@
 > `DashboardTask` **不是同一个语义面**。
 >
 > **分支事实**：本文描述的是 **PR #288**
-> （`feat/p3-tool-ledger-production-wiring @ c1c60d2`）的落地后契约，不是
+> （`feat/p3-tool-ledger-production-wiring`，head `728487e`）的落地后契约，不是
 > `betav2` 现状。当前 `betav2 @ 39a20a1` 仍是旧 `TodoItem` 形状，
 > **P3 合并前不要按第 3 节改 TUI**：此时 `qaqh-client` 根入口还没有
 > `PlanReviewItem` 这个名字，提前迁移只能越过 `qaqh-client` 去引
@@ -35,7 +35,7 @@
 去命名它，也不要自行复制一份镜像。若未来 TUI 需要 typed workspace todo，
 应先在 `qaqh-client` 增加正式再导出/视图类型，另开契约变更。
 
-## 2. `PlanReviewItem` 与旧 `TodoItem` 的字段对应
+## 2. `PlanReviewItem` 与旧 `TodoItem`：**纯改名，字段一字未动**
 
 P3 后：
 
@@ -49,45 +49,55 @@ pub struct PlanReviewItem {
 }
 ```
 
-> 注意：`docs/spec/2026-09-18-workspace-v2-输出侧契约-spec.md` 曾规划
-> `PlanComplexity` 枚举与完整 `PlanView`，这组 v2 plan 视图在当前 P3 分支尚未
-> 落地。本文按 P3 已实现的 `String` 交底；未来若 `PlanComplexity` 落地，需另发
-> wire 变更说明。
-
-旧 `TodoItem`：
+`betav2` 上的旧类型形状完全相同，只是名字不同：
 
 ```rust
+// crates/qaqh-domain/src/event.rs:258（betav2 @ 39a20a1）
 pub struct TodoItem {
     pub id: String,
     pub title: String,
     pub description: String,
-    pub status: TodoStatus,
-    pub evidence: Option<String>,
+    /// "small" | "medium" | "large"
+    pub complexity: String,
 }
 ```
 
-映射：
+**P3 只是把 `TodoItem` 改名为 `PlanReviewItem`，没有增删字段、没有改
+`complexity` 类型、也没有 wire 形状变化。** 所以这次迁移对 TUI 是**类型名替换**，
+不存在「删除 `status`/`evidence`」这种字段收敛——`qaqh_domain::TodoItem` 从来就
+没有这两个字段。上一版本文写成字段收敛是错的，已按本节更正。
 
-| 旧 `TodoItem` | `PlanReviewItem` | 说明 |
-|---|---|---|
-| `id` | `id` | 直接保留 |
-| `title` | `title` | 直接保留 |
-| `description` | `description` | 直接保留 |
-| `status` | — | plan review 项不携带执行状态 |
-| `evidence` | — | plan review 项不携带完成证据 |
-| — | `complexity` | 新增；用于评审展示，值域为 `small` / `medium` / `large` |
+> 容易混淆的两点，提前说清：
+>
+> 1. `status` / `evidence` 属于**另一个类型**
+>    `qaqh_workspace::todo::typed::TodoItemView`（`pub(crate)`），那是 workspace
+>    todo 的 typed 输出视图，与 plan review 载荷无关，别把两者当成同一个东西。
+> 2. `docs/spec/2026-09-18-workspace-v2-输出侧契约-spec.md` 曾规划
+>    `PlanComplexity` 枚举与完整 `PlanView`，这组 v2 plan 视图在当前 P3 分支尚未
+>    落地。本文按 P3 已实现的 `String` 交底；未来若 `PlanComplexity` 落地，需另发
+>    wire 变更说明。
 
-因此这不是“改一个类型名”，而是 plan review 专用视图的字段收敛：
+迁移结论：
 
-- 删除 `status` / `evidence` 的读取；
-- 新增 `complexity` 展示；
-- 不要把 `PlanReviewItem` 塞回 workspace todo 列表。
+- TUI 侧唯一的改动是把类型名从 `qaqh_client::TodoItem` 换成
+  `qaqh_client::PlanReviewItem`；
+- 渲染代码一行都不用改语义（`complexity` 的展示问题见第 3 节第 3 步）；
+- 不要把 `PlanReviewItem` 塞回 workspace todo 列表，那条链路是 `DashboardTask`。
 
 ## 3. TUI 迁移步骤
 
 P3 合并并发布新锚点后（前置条件：PR #288 已合入 `betav2`，且锚点里
 `crates/qaqh-client/src/lib.rs` / `types.rs` 已再导出 `PlanReviewItem`；
-这两处再导出是 #288 的一部分，不需要 TUI 侧另开 PR）：
+这两处再导出是 #288 的一部分，不需要 TUI 侧另开 PR）。
+
+前置条件可以机械判定，不用人肉确认：
+
+```bash
+grep -n 'PlanReviewItem' crates/qaqh-client/src/lib.rs crates/qaqh-client/src/types.rs
+```
+
+两条 `pub use` 白名单都命中即满足；只要有一条为空，说明锚点还在 `betav2`
+的旧形状上，先别动 TUI。
 
 1. `src/app/session.rs`：
 
@@ -95,15 +105,32 @@ P3 合并并发布新锚点后（前置条件：PR #288 已合入 `betav2`，且
    pub todo_items: Vec<qaqh_client::PlanReviewItem>,
    ```
 
-2. `ControlEvent::PlanReviewRequested { todo_items, .. }` 继续直接赋值；P3
-   的 `qaqh-client` 已从 crate root 再导出 `PlanReviewItem`（PR #288）。
+2. `ControlEvent::PlanReviewRequested { todo_items, .. }` 继续直接赋值——
+   **这条路有 typed 承载，不需要解 JSON**：
+
+   - `qaqh_client::ControlEvent` 是 `qaqh_domain::ControlEvent` 的再导出
+     （`crates/qaqh-client/src/types.rs` 的 `pub use qaqh_domain::{... ControlEvent ...}`），
+     不是 `qaqh_ringing` 独有的新类型；
+   - 该 variant 本身就是 typed 的
+     `PlanReviewRequested { interaction_id, turn_id, plan_content, review_type, todo_items: Option<Vec<PlanReviewItem>> }`；
+   - TUI 现在就是这么用的：`src/app/mod.rs` 里
+     `RingingEvent::Control(ev) => self.handle_control(...)`，`handle_control`
+     直接 `match ControlEvent::PlanReviewRequested { todo_items, .. }` 并把
+     `todo_items.unwrap_or_default()` 塞进 `PlanPanel`。
+
+   > 别和 state 快照那条路混淆：`qaqh_domain::state::PendingInteraction` 只有
+   > `{ id, kind }`，plan 的 `plan_content` / `review_type` / `todo_items` 只出现在
+   > `ringing/projection.rs` 写出的 state JSON `pending_interaction.details` 里，
+   > Rust 侧没有对应字段。**TUI 的 plan modal 从事件流取 `todo_items`，不要改从
+   > state 快照的 `details` 里捞。** 两条路是不同投影，本节的迁移只涉及事件流那条。
+
 3. plan modal 渲染：
    - `item.title` 不变；
-   - `item.complexity` 是 `String`，按字符串展示；不要用 `format!("{:?}")`，
-     否则会渲染成带引号的 `"small"`；也不要对 `small` / `medium` / `large`
-     做穷举 `match`——该值域目前只是注释级约定，schema 里没有 enum 约束；
-   - 删除对 `status` / `evidence` 的隐式依赖（当前 TUI 没有直接读取，迁移
-     成本主要是类型名）。
+   - `item.complexity` 是 `String`，按字符串展示。当前 TUI 两处都是
+     `format!("{:?}", item.complexity)`（`src/ui/v2/modal.rs`、`src/ui/modal.rs`），
+     对 `String` 会渲染成带引号的 `"small"`——这是本次迁移唯一值得顺手改的渲染点；
+   - 不要对 `small` / `medium` / `large` 做穷举 `match`——该值域目前只是注释级
+     约定，schema 里没有 enum 约束。
 4. workspace todo 面板不改用 `PlanReviewItem`；继续消费 `DashboardTask`。
 
 ## 4. `todo.status` 与 typed `todo.list`
@@ -141,7 +168,23 @@ P3 的 service 面：
 输入侧 `TodoStatusView` 还接受 `pending` / `complete` / `canceled` 三个 alias；
 TUI 若只消费输出，不应依赖这些 alias。
 
-### 4.1 `evidence` 的可空语义（实测）
+### 4.1 `todo.status` 与 `todo.list` **不同构**，不要共用一个解包器
+
+两者信封形状不同，别按同一套字段读：
+
+| | `todo.status`（`todo_status_value`） | `todo.list`（typed `TodoListOutput`） |
+|---|---|---|
+| 外层信封 | 无 `timeis` / `status`，直接就是业务对象 | 有 `timeis` + `status: "ok"` |
+| 计数 | **平铺**：`idle` / `pending` / `in_progress` / `completed` / `cancelled` / `total` | **嵌套**：`counts: { idle, in_progress, completed, cancelled, total }` |
+| 当前项 | `current_id` + `current_title` | `current_id` |
+| 额外字段 | `mode` | — |
+| `items[]` | `{id,title,description,status,evidence}` | `{id,title,description,status,evidence}`（形状相同） |
+| 无 store / 空 seed | `null` | 仍返回信封（`items: []`、计数为 0） |
+
+所以 TUI 侧要两个解包器；`todo.status` 是 workspace todo 面板的回退数据源，
+`todo.list` 是工具侧 typed 输出，两者不是同一个契约的两种拼写。
+
+### 4.2 `evidence` 的可空语义（实测）
 
 `TodoItemView.evidence` 是 `Option<String>`，且没有 `skip_serializing_if`。
 serde 对该形状的行为（已用 `serde 1` + `serde_json 1` 最小用例实测）：
