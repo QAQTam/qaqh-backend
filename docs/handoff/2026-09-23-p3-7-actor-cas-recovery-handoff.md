@@ -23,6 +23,14 @@
 - recovery executor：读取 `RecoveryIntent`、对账 open set（计划外 `NoReplay`
   seal 为 `Indeterminate`，计划外 replay/reconcile fail-closed）、seal `NoReplay`、
   在无 pending disposition 后写唯一 `SessionRecovered` 并清理 stale intent。
+- stale batch 语义（2026-09-23 补）：`SessionRecovered` 已落盘、旧 intent 文件仍在
+  盘上时，若之后又出现新的 open intent，**必须重新 plan 一个新 batch** 收口它
+  （`RecoveryRef` / fingerprint 都换新，符合 spec「closed intent 不得复用到新的
+  open state」）。因此：
+  - `lifecycle` 在既有 intent 已 stale 时同样走 `plan_recovery_intent` +
+    `persist_recovery_intent`（后者允许用不同 batch key 替换 stale intent）；
+  - executor 的 `Stale` 分支若发现当前 open set 不被已收口 batch 覆盖，**fail-closed
+    并保留 intent 文件**，不再虚报 `Recovered` / `intent_removed=true`。
 - `tool_outbox` 与 canonical ToolLedger 的只读双写对账观测。
 - todo typed output 的 model/display/service 同源 gate。
 - plan service typed 输出：`PlanListOutput` / `PlanItemView` /
@@ -183,9 +191,13 @@ cargo test --workspace
     不留下半途 seal 的 terminal；
   - 复现原缺陷：replay 遗留 pending 时再出现计划外 `NoReplay` intent，
     重启不再 `RecoveryIntentConflict` 卡死，replay 步骤收口后 batch 正常 closed；
+  - 已收口 batch 的 stale intent 不覆盖后续新 open intent：fail-closed 且保留
+    intent 文件，不虚报 `Recovered`；
   - stale intent 清理不产生第二个 `SessionRecovered`。
 - `crates/qaqh-runtime/src/agent/state/lifecycle.rs` unit test
-  - session resume 前自动发现 open intent 并完成 canonical recovery。
+  - session resume 前自动发现 open intent 并完成 canonical recovery；
+  - stale batch + 后续新 open intent：重新 plan 新 batch 并收口，两个 intent 都有
+    `Indeterminate` terminal、两个 `SessionRecovered`（各一个 batch）。
 - `crates/qaqh-runtime/src/agent/tool_recovery.rs` unit tests
   - canonical open intent 将 `[RESTORE]` 修正为 outcome unknown；
   - canonical terminal 修正为对应 terminal 状态；
