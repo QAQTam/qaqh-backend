@@ -44,6 +44,18 @@ pub enum ToolContentBlock {
 /// 若评审否决可直接回退）。
 #[doc(alias = "ToolOutput")]
 pub trait ToolProjection: Serialize {
+    /// 权威终态。默认成功；exec 等工具在输出内承载 exit_code / timeout /
+    /// cancelled，需要覆盖此方法，避免把非零退出伪装成成功。
+    fn status(&self) -> ToolStatus {
+        ToolStatus::Ok
+    }
+
+    /// 失败终态对应的可恢复错误。默认无错误；覆盖 [`Self::status`] 返回
+    /// 失败态时必须同时提供错误，满足 [`ToolOutcome::check_invariants`]。
+    fn error(&self) -> Option<ToolError> {
+        None
+    }
+
     /// 模型投影。为空时由适配器按 base spec §8.1 默认规则生成
     /// （文本序列化 / summary + 有界 JSON）。
     fn model_blocks(&self) -> Vec<ToolContentBlock> {

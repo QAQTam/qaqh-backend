@@ -5,10 +5,7 @@
 //! 缺省平台自动检测）。pwsh 特判收敛在 [`Shell`] 枚举内（路径降级链 +
 //! -EncodedCommand/-CommandWithArgs），注册层不分支。
 
-use crate::{ToolHandler, ToolRisk};
-use std::time::Duration;
-
-use super::handler::{exec_schema, handle_run_exec};
+use super::handler::ExecTool;
 use super::shell::Shell;
 
 pub fn register(mgr: &mut crate::ToolManager) {
@@ -16,19 +13,5 @@ pub fn register(mgr: &mut crate::ToolManager) {
     // 特定 shell 背书——选壳是每次调用的运行时决策。
     let _ = Shell::detect();
     let _ = Shell::from_name("bash");
-    let description: &'static str = Box::leak(
-        "Run a command. argv = direct exec without a shell; command = shell string (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id."
-            .to_string()
-            .into_boxed_str(),
-    );
-    mgr.register_display("exec", super::display::project_display);
-    mgr.register(ToolHandler {
-        key: "exec".to_string(),
-        description,
-        input_schema: exec_schema(true),
-        handler: handle_run_exec,
-        risk: ToolRisk::Destructive,
-        category: crate::permission::ToolCategory::Exec,
-        default_timeout: Duration::from_secs(30),
-    });
+    mgr.register_typed(ExecTool);
 }
