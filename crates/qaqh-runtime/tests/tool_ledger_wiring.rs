@@ -363,4 +363,29 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
         1,
         "cancelled serial tail must not append an orphan ToolIntent"
     );
+    let cancelled_canonical = format!("call_{}", ulid_from_text(cancelled_call));
+    let cancelled_finished = facts
+        .iter()
+        .find_map(|fact| match &fact.payload {
+            FactPayload::ToolFinished(finished)
+                if finished.call_id.as_str() == cancelled_canonical =>
+            {
+                Some((fact, finished))
+            }
+            _ => None,
+        })
+        .expect("cancelled serial tail must append a canonical terminal");
+    assert_eq!(
+        cancelled_finished.1.terminal_status,
+        ToolTerminalStatus::Cancelled
+    );
+    assert_eq!(cancelled_finished.1.execution_id, None);
+    assert_eq!(
+        cancelled_finished
+            .0
+            .turn_id
+            .as_ref()
+            .map(|turn| turn.as_str()),
+        Some(expected_turn.as_str())
+    );
 }
