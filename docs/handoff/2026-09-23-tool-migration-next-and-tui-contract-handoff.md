@@ -265,7 +265,28 @@ P2：
 
 ## 6. 下一步
 
-1. root agent 单独领 TUI 契约补充任务，立即建立 backend 侧 P0/P1 plan 和测试 hook registry。
-2. 工具迁移继续 Wave 1：`write` / `delete` typed 迁移。
-3. TUI P0 hook 优先于剩余 Wave，但两者使用独立分支/PR，禁止混线。
-4. 按 Wave 2-6 逐批推进，不把多波混进同一个大 PR。
+1. 工具迁移 Wave 1-6 已完成并合入 `betav2`，见 §7。
+2. 后续工作转入 typed 迁移后的 follow-up 收口，不再按 Wave 拆分。
+3. TUI 契约补充任务保持独立：P0 hook 已随 #290 合入，TUI 侧消费任务继续按 `qaqh-tui-app#41` 跟踪。
+
+## 7. 实施收口（2026-09-23）
+
+### 7.1 已合入
+
+| PR | 内容 | 合入提交 |
+|---|---|---|
+| #294 | `write` / `delete` typed 迁移 | `9e12de1` |
+| #295 | `edit` / `apply_patch` / `copy_range` typed 迁移 | `2f5f373` |
+| #296 | `exec` typed 迁移与真实终态映射 | `eb667ce` |
+| #297 | `read_image` typed 迁移与 image attachment projection | `4cdcecb` |
+| #298 | `journal` typed 迁移 | `f9defd1` |
+| #299 | `ask` / `confirm_apply` typed 迁移 | `8e8f665` |
+
+上述 PR 均通过 `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace -- --test-threads=1`。生产注册表已不再为这些内置工具保留 legacy executor；仅 `cfg(test)` 兼容入口仍存在。
+
+### 7.2 迁移后 follow-up（不阻塞 2.0）
+
+- `#288` 遗留：recovery failure fail-open、display `truncated` 与工具自身 flag 合并、`append_interaction_expired` 冲突分类、legacy WAL prune、两处 `ulid_from_text` 拼接、`tool_runtime.rs` 生产 `expect`、Windows hard_link 实测。
+- `#290` 遗留：gap token eager consumption、`plan_review_enabled()` startup snapshot、`test_hooks` cfg gating、ack ms 上限、`SKIPPED` 非法值告警。
+- TUI 侧：`QAQ-Harness/qaqh-tui-app#41`（P1）：`MODE=plan` e2e、permission/ask hang timeout 断言、迁移到 `PlanReviewItem`。
+- 仓库级：`cargo fmt --all --check` 当前仍会在未改动的 `crates/qaqh-client/src/lib.rs`、`types.rs` 报既有 rustfmt 差异；如需恢复全仓 fmt gate，应单独开 PR 收敛，不混入工具迁移。
