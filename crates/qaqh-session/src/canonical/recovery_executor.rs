@@ -174,6 +174,9 @@ pub fn execute_recovery_intent(
         .iter()
         .any(|(_, disposition)| !matches!(disposition, ToolRecoveryDisposition::Finished { .. }))
     {
+        // 恢复只借用 fence：不释放的话，本会话自己的 ledger（另一个 writer id）
+        // 会在 lease 到期前一直拿到 `WriterBusy`，整批工具被拒。
+        ledger.release_writer_lease(now_ms)?;
         return Ok(RecoveryExecutionOutcome::Pending { dispositions });
     }
 
@@ -193,6 +196,7 @@ pub fn execute_recovery_intent(
     let committed_after =
         CommittedFactReader::open(&session_dir, session_id, log_id)?.read_all()?;
     let intent_removed = remove_recovery_intent_if_stale(&session_dir, &intent, &committed_after)?;
+    ledger.release_writer_lease(now_ms)?;
     Ok(RecoveryExecutionOutcome::Recovered(Box::new(
         RecoveryExecution {
             fact,

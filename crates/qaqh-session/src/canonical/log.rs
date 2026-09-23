@@ -268,6 +268,28 @@ impl CanonicalLog {
         })
     }
 
+    /// Voluntarily give up a writer lease.
+    ///
+    /// The fence file is kept — fencing tokens stay monotonic — but its expiry
+    /// moves to `now_ms`, so the next writer can acquire immediately instead of
+    /// waiting out the original lease. A fence that no longer belongs to
+    /// `lease` is left untouched.
+    pub fn release_writer(&self, lease: &WriterLease, now_ms: i64) -> Result<(), CanonicalError> {
+        let _guard = self.lock_exclusive()?;
+        let Some(mut fence) = self.read_fence()? else {
+            return Ok(());
+        };
+        if fence.writer_id != lease.writer_id
+            || fence.generation_epoch != lease.generation_epoch
+            || fence.fencing_token != lease.fencing_token
+        {
+            return Ok(());
+        }
+        fence.lease_expires_at_ms = now_ms;
+        write_json_atomic(&self.fence_path(), &fence)?;
+        Ok(())
+    }
+
     pub fn renew_writer(
         &mut self,
         lease: &WriterLease,
