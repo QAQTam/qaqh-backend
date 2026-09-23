@@ -868,6 +868,53 @@ fn stale_batch_with_uncovered_open_intent_fails_closed() {
 }
 
 #[test]
+fn recovery_releases_the_writer_fence_for_the_owning_session() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let call = call_id(1);
+    let execution = execution_id(1);
+
+    let mut ledger = open_ledger(temp.path(), "writer-a", NOW_MS);
+    ledger
+        .append_intent(
+            event_id(1),
+            None,
+            intent(&call, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 1,
+        )
+        .expect("append intent");
+    drop(ledger);
+    persist_plan(temp.path(), vec![call.as_str().to_owned()]);
+
+    let outcome = execute_recovery_intent(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("recovery-run"),
+        NOW_MS + LEASE_MS + 1,
+        LEASE_MS,
+    )
+    .expect("execute recovery");
+    assert!(matches!(outcome, RecoveryExecutionOutcome::Recovered(_)));
+
+    // 恢复只借用 fence：结束后会话自己的 ledger（另一个 writer id）必须能立刻拿到，
+    // 而不是等原 lease 到期——否则 resume 后一整个 lease 窗口内所有工具都会被
+    // `WriterBusy` 拒成 LEDGER_BLOCKED。
+    let reopened = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("agent-run"),
+        NOW_MS + LEASE_MS + 2,
+        LEASE_MS,
+    );
+    assert!(
+        reopened.is_ok(),
+        "recovery must release the writer fence: {:?}",
+        reopened.err()
+    );
+}
+
+#[test]
 fn stale_intent_is_cleaned_without_second_recovered_fact() {
     let temp = tempfile::tempdir().expect("tempdir");
     let call = call_id(1);
