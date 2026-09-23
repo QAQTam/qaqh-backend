@@ -50,6 +50,9 @@ fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecuti
             mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
+            sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
+                std::path::PathBuf::from(qaqh_workspace::current_workspace()),
+            ),
             timeout: Duration::ZERO,
             cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
             progress: None,
