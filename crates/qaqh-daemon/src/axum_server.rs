@@ -293,6 +293,46 @@ mod sse_tests {
         assert_eq!(event, "conversation_cancelled");
     }
 
+    /// `Scope::Any` 同时匹配 channel 与 timeline 两条流，但 token 仍然只能被消费
+    /// 一次：第一条流拿到终止帧后，第二条流必须收到正常数据。
+    #[tokio::test]
+    async fn injected_stream_termination_any_scope_is_one_shot_across_stream_kinds() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_sse_terminate(
+            "lagged",
+            SseTerminateScope::Any,
+            None,
+        ));
+        let app = build_router(state);
+
+        let (status, mut channel_stream) = open_channel_sse(app.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, _) = next_sse_frame(&mut channel_stream, Duration::from_secs(5))
+            .await
+            .expect("channel stream must get the injected termination frame");
+        assert_eq!(event, "ringing.stream_terminated");
+
+        let (status, mut timeline_stream) = open_timeline_sse(app).await;
+        assert_eq!(status, StatusCode::OK);
+        hub.publish_timeline(
+            SEED,
+            qaqh_domain::TimelineIntent::TurnOpened {
+                turn_id: "t-any-scope".into(),
+                user_text: "must not be terminated".into(),
+            },
+        )
+        .expect("publish timeline intent");
+        let (event, data) = next_sse_frame(&mut timeline_stream, Duration::from_secs(5))
+            .await
+            .expect("timeline stream must still receive normal traffic");
+        assert_ne!(
+            event, "ringing.stream_terminated",
+            "the one-shot token must not be consumable once per stream kind: {data}"
+        );
+        assert_eq!(event, "timeline.entry");
+    }
+
     /// ② 终止后新订阅仍能正常收流（重连重定基不被破坏）。
     ///
     /// 客户端收到终止帧后的既定动作是**带 Last-Event-ID 重连**（新 SSE，
