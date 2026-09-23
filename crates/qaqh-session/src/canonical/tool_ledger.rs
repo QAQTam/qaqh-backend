@@ -12,9 +12,9 @@ use thiserror::Error;
 
 use crate::session_fact_v2::{
     ContentRef, EventId, ExecutionId, FactPayload, FactSchema, InteractionExpired, InteractionId,
-    InteractionRequested, InteractionResolved, RecoveryRef, SessionFact, SessionId, ToolCallId,
-    ToolError, ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-    TurnId,
+    InteractionRequested, InteractionResolved, RecoveryRef, SessionFact, SessionId,
+    SessionRecovered, ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics,
+    ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 use super::{
@@ -66,6 +66,17 @@ pub enum ToolRecoveryDisposition {
     IndeterminateRequired {
         execution_id: ExecutionId,
     },
+}
+
+/// Durable evidence produced by a `Reconcile` probe.
+///
+/// The canonical `ToolFinished` schema can carry either a content-addressed
+/// evidence blob or an exact fact/event pair. Recovery probes must provide one
+/// of those two forms; a bare boolean is not evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolReconciliationEvidence {
+    ContentRef(ContentRef),
+    Fact { fact_seq: u64, event_id: EventId },
 }
 
 #[derive(Debug, Error)]
@@ -126,6 +137,15 @@ pub enum ToolLedgerError {
 
     #[error("interaction {interaction_id} already has a conflicting terminal")]
     InteractionTerminalConflict { interaction_id: InteractionId },
+
+    #[error("tool call {call_id} is not open for reconciliation")]
+    ReconciliationNotAllowed { call_id: ToolCallId },
+
+    #[error("tool call {call_id} reconciliation probe does not match the durable intent")]
+    ReconciliationProbeMismatch { call_id: ToolCallId },
+
+    #[error("tool call {call_id} reconciliation terminal cannot be backgrounded")]
+    ReconciliationTerminalInvalid { call_id: ToolCallId },
 }
 
 #[derive(Debug)]
@@ -469,6 +489,133 @@ impl ToolLedger {
             dispositions.push((call_id, disposition));
         }
         Ok(dispositions)
+    }
+
+    /// All terminal facts known to this ledger, ordered by canonical fact_seq.
+    pub fn finished_facts(&self) -> Vec<&SessionFact> {
+        let mut facts: Vec<_> = self
+            .entries
+            .values()
+            .filter_map(ToolLedgerEntry::finished_fact)
+            .collect();
+        facts.sort_by_key(|fact| fact.fact_seq);
+        facts
+    }
+
+    /// Append the recovery batch's final `SessionRecovered` fact.
+    ///
+    /// Recovery execution owns the same writer lease as the tool ledger so the
+    /// terminal facts and the batch marker cannot be committed by different
+    /// writers.
+    pub fn append_session_recovered(
+        &mut self,
+        event_id: EventId,
+        payload: SessionRecovered,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let fact = SessionFact {
+            schema: FactSchema::v2(),
+            session_id: self.session_id.clone(),
+            log_id: self.log_id.clone(),
+            fact_seq: 0,
+            event_id,
+            ts_ms: now_ms,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SessionRecovered(payload),
+        };
+        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        Ok(outcome.fact)
+    }
+
+    /// Close a `Reconcile` intent with probe evidence.
+    ///
+    /// The probe must match the `probe_ref` frozen in the durable `ToolIntent`.
+    /// The resulting terminal is marked `reconciled=true` and carries either a
+    /// content-addressed evidence reference or an exact evidence fact/event
+    /// pair. Repeating the same reconciliation is idempotent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_reconciled_finished(
+        &mut self,
+        event_id: EventId,
+        call_id: ToolCallId,
+        probe_ref: ContentRef,
+        recovery_ref: RecoveryRef,
+        terminal_status: ToolTerminalStatus,
+        output_ref: Option<ContentRef>,
+        error: Option<ToolError>,
+        evidence: ToolReconciliationEvidence,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        if terminal_status == ToolTerminalStatus::Backgrounded {
+            return Err(ToolLedgerError::ReconciliationTerminalInvalid { call_id });
+        }
+
+        let entry = self
+            .entries
+            .get(&call_id)
+            .ok_or_else(|| ToolLedgerError::IntentMissing {
+                call_id: call_id.clone(),
+            })?;
+        let intent = entry
+            .intent()
+            .cloned()
+            .ok_or_else(|| ToolLedgerError::IntentMissing {
+                call_id: call_id.clone(),
+            })?;
+        let turn_id = entry.intent_fact().and_then(|fact| fact.turn_id.clone());
+        let existing_finished = entry.finished_fact().cloned();
+
+        let ToolReplayCapability::Reconcile {
+            probe_ref: expected_probe_ref,
+        } = &intent.replay_capability
+        else {
+            return Err(ToolLedgerError::ReconciliationNotAllowed { call_id });
+        };
+        if expected_probe_ref != &probe_ref {
+            return Err(ToolLedgerError::ReconciliationProbeMismatch { call_id });
+        }
+
+        let (evidence_ref, evidence_fact_seq, evidence_event_id) = match evidence {
+            ToolReconciliationEvidence::ContentRef(content_ref) => (Some(content_ref), None, None),
+            ToolReconciliationEvidence::Fact { fact_seq, event_id } => {
+                (None, Some(fact_seq), Some(event_id))
+            }
+        };
+        let finished = ToolFinished {
+            call_id: call_id.clone(),
+            execution_id: Some(intent.execution_id.clone()),
+            terminal_status,
+            output_ref,
+            error,
+            metrics: ToolMetrics {
+                started_at_ms: intent.intent_at_ms,
+                finished_at_ms: now_ms,
+                retry_count: 0,
+                output_bytes: 0,
+                progress_bytes_total: 0,
+            },
+            reconciled: true,
+            evidence_ref,
+            evidence_fact_seq,
+            evidence_event_id,
+            recovery_ref: Some(recovery_ref),
+            finished_at_ms: now_ms,
+        };
+
+        if let Some(existing) = existing_finished {
+            if matches!(
+                &existing.payload,
+                FactPayload::ToolFinished(existing) if existing == &finished
+            ) {
+                return Ok(existing);
+            }
+            return Err(ToolLedgerError::FinishedConflict { call_id });
+        }
+
+        self.append_finished(event_id, turn_id, finished, now_ms)
     }
 
     /// Durably append the one intent for `payload.call_id`.

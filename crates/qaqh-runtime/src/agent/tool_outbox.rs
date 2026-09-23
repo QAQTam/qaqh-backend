@@ -52,7 +52,7 @@
 //! persists it); records whose call id has a real result in the archive are
 //! dropped.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -60,6 +60,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::session_fact_v2::{FactPayload, ToolFinished, ToolTerminalStatus};
 use serde::{Deserialize, Serialize};
 
 const OUTBOX_FILE_NAME: &str = "tool_outbox.wal";
@@ -496,6 +498,107 @@ pub fn read_records(session_dir: &Path) -> Vec<OutboxRecord> {
     records
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxLedgerStatusMismatch {
+    pub call_id: String,
+    pub outbox_status: String,
+    pub ledger_status: ToolTerminalStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboxLedgerReconciliation {
+    pub outbox_records: usize,
+    pub ledger_finished: usize,
+    pub matched: usize,
+    pub missing_ledger: Vec<String>,
+    pub missing_outbox: Vec<String>,
+    pub status_mismatches: Vec<OutboxLedgerStatusMismatch>,
+}
+
+impl OutboxLedgerReconciliation {
+    pub fn is_consistent(&self) -> bool {
+        self.missing_ledger.is_empty()
+            && self.missing_outbox.is_empty()
+            && self.status_mismatches.is_empty()
+    }
+}
+
+/// Compare the legacy outbox with the canonical ToolLedger.
+///
+/// This is a read-only dual-write observation step: it never mutates either
+/// source. `missing_ledger` identifies outbox records that did not reach a
+/// canonical `ToolFinished`; `missing_outbox` identifies canonical terminals
+/// not observed by the legacy path. Status mismatches are reported by wire
+/// call id so operators can trace the migration.
+pub fn reconcile_canonical_ledger(
+    session_dir: &Path,
+) -> Result<OutboxLedgerReconciliation, String> {
+    if !session_dir
+        .join(qaqh_session::canonical::EVENTS_FILE)
+        .exists()
+    {
+        return Ok(OutboxLedgerReconciliation::default());
+    }
+    let identity = CanonicalSessionIdentity::open_or_create(session_dir)
+        .map_err(|error| format!("canonical identity: {error}"))?;
+    let facts = CommittedFactReader::open(session_dir, identity.session_id, identity.log_id)
+        .map_err(|error| format!("committed reader: {error}"))?
+        .read_all()
+        .map_err(|error| format!("read committed facts: {error}"))?;
+
+    let mut ledger: HashMap<String, &ToolFinished> = HashMap::new();
+    for fact in &facts {
+        if let FactPayload::ToolFinished(finished) = &fact.payload {
+            ledger.insert(finished.call_id.as_str().to_owned(), finished);
+        }
+    }
+
+    let records = read_records(session_dir);
+    let mut outbox_canonical = HashSet::new();
+    let mut reconciliation = OutboxLedgerReconciliation {
+        outbox_records: records.len(),
+        ledger_finished: ledger.len(),
+        ..OutboxLedgerReconciliation::default()
+    };
+
+    for record in &records {
+        let canonical = crate::agent::tool_runtime::canonical_call_id(&record.call_id);
+        let canonical_id = canonical.as_str().to_owned();
+        outbox_canonical.insert(canonical_id.clone());
+        let Some(finished) = ledger.get(&canonical_id) else {
+            reconciliation.missing_ledger.push(record.call_id.clone());
+            continue;
+        };
+        let outbox_ok = record.status == "ok";
+        if outbox_status_matches(outbox_ok, finished.terminal_status) {
+            reconciliation.matched += 1;
+        } else {
+            reconciliation
+                .status_mismatches
+                .push(OutboxLedgerStatusMismatch {
+                    call_id: record.call_id.clone(),
+                    outbox_status: record.status.clone(),
+                    ledger_status: finished.terminal_status,
+                });
+        }
+    }
+
+    for canonical_id in ledger.keys() {
+        if !outbox_canonical.contains(canonical_id) {
+            reconciliation.missing_outbox.push(canonical_id.clone());
+        }
+    }
+    reconciliation.missing_outbox.sort();
+    Ok(reconciliation)
+}
+
+fn outbox_status_matches(outbox_ok: bool, terminal: ToolTerminalStatus) -> bool {
+    match terminal {
+        ToolTerminalStatus::Succeeded | ToolTerminalStatus::Partial => outbox_ok,
+        _ => !outbox_ok,
+    }
+}
+
 /// Rewrite the outbox keeping only `keep` call ids (atomic temp + rename).
 fn retain_only(session_dir: &Path, keep: &[String]) {
     let path = outbox_path(session_dir);
@@ -746,5 +849,97 @@ mod tests {
             &mut store,
         );
         assert!(store.synthetic_repair_call_ids().is_empty());
+    }
+
+    #[test]
+    fn canonical_ledger_reconciliation_detects_missing_and_mismatched_terminals() {
+        use qaqh_session::canonical::{ToolLedger, WriterId, sha256_content_hash};
+        use qaqh_session::session_fact_v2::{
+            EventId, ExecutionId, PolicyDecisionRef, SideEffectClass, ToolFinished, ToolIntent,
+            ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let now = now_epoch() as i64;
+        let mut ledger = ToolLedger::open(
+            dir.path(),
+            identity.session_id,
+            identity.log_id,
+            WriterId::new("outbox-reconcile-test"),
+            now,
+            60_000,
+        )
+        .expect("open ledger");
+
+        let matched_wire = "wire-matched";
+        let matched_call = crate::agent::tool_runtime::canonical_call_id(matched_wire);
+        let matched_execution =
+            ExecutionId::new(format!("exec_{}", qaqh_session::canonical::generate_ulid()));
+        ledger
+            .append_intent(
+                EventId::new(qaqh_session::canonical::generate_ulid()),
+                None,
+                ToolIntent {
+                    call_id: matched_call.clone(),
+                    execution_id: matched_execution.clone(),
+                    idempotency_key: None,
+                    replay_capability: ToolReplayCapability::NoReplay,
+                    policy_decision: PolicyDecisionRef {
+                        outcome: ToolIntentPolicyOutcome::Allow,
+                        rule_id: "test".into(),
+                        decided_at_ms: now,
+                        reason_ref: None,
+                    },
+                    effective_args_ref: None,
+                    effective_args_hash: None,
+                    sandbox_spec_hash: sha256_content_hash(b"sandbox"),
+                    side_effect_class: SideEffectClass::ReadOnly,
+                    intent_at_ms: now,
+                },
+                now,
+            )
+            .expect("append intent");
+        ledger
+            .append_finished(
+                EventId::new(qaqh_session::canonical::generate_ulid()),
+                None,
+                ToolFinished {
+                    call_id: matched_call.clone(),
+                    execution_id: Some(matched_execution),
+                    terminal_status: ToolTerminalStatus::Succeeded,
+                    output_ref: None,
+                    error: None,
+                    metrics: ToolMetrics {
+                        started_at_ms: now,
+                        finished_at_ms: now,
+                        retry_count: 0,
+                        output_bytes: 0,
+                        progress_bytes_total: 0,
+                    },
+                    reconciled: false,
+                    evidence_ref: None,
+                    evidence_fact_seq: None,
+                    evidence_event_id: None,
+                    recovery_ref: None,
+                    finished_at_ms: now,
+                },
+                now,
+            )
+            .expect("append finished");
+        drop(ledger);
+
+        record_in(dir.path(), matched_wire, "read", true);
+        record_in(dir.path(), "wire-missing", "read", false);
+
+        let reconciliation =
+            reconcile_canonical_ledger(dir.path()).expect("reconcile canonical ledger");
+        assert_eq!(reconciliation.outbox_records, 2);
+        assert_eq!(reconciliation.ledger_finished, 1);
+        assert_eq!(reconciliation.matched, 1);
+        assert_eq!(reconciliation.missing_ledger, vec!["wire-missing"]);
+        assert!(reconciliation.missing_outbox.is_empty());
+        assert!(reconciliation.status_mismatches.is_empty());
+        assert!(!reconciliation.is_consistent());
     }
 }
