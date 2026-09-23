@@ -175,7 +175,20 @@ impl ToolOutcome {
             hint: error.hint.clone(),
         });
         if let Some(details) = self.error.as_ref().and_then(|error| error.details.as_ref()) {
-            result.data = details.clone();
+            // `details` 是对 canonical `data` 的**补充**，不是覆盖：同时带结构化输出
+            // 与 details 的工具不能把结构化输出静默丢掉（否则 wire 形态还会随工具作者
+            // 是否恰好填了 details 而分叉）。只有「没有任何结构化输出」时，details
+            // 才整体充当 `data`。
+            let empty_object =
+                matches!(&result.data, serde_json::Value::Object(map) if map.is_empty());
+            if empty_object {
+                result.data = details.clone();
+            } else if let serde_json::Value::Object(map) = &mut result.data {
+                map.insert("details".to_owned(), details.clone());
+            } else {
+                let canonical = std::mem::replace(&mut result.data, serde_json::Value::Null);
+                result.data = serde_json::json!({ "data": canonical, "details": details });
+            }
         }
         result.metrics = qaqh_types::ToolResultMetrics {
             elapsed_ms: Some(self.metrics.elapsed.as_millis() as u64),
@@ -318,6 +331,35 @@ mod tests {
             metrics: ToolExecutionMetrics::default(),
             effects: Vec::new(),
         }
+    }
+
+    #[test]
+    fn error_details_complement_structured_output_instead_of_replacing_it() {
+        use crate::tool_api::error::ToolErrorKind;
+
+        fn details_error() -> ToolError {
+            let mut error = ToolError::new(ToolErrorKind::Execution, "boom");
+            error.details = Some(serde_json::json!({ "path": "a.txt" }));
+            error
+        }
+
+        // 没有结构化输出（read 工具的错误路径）：details 整体充当 data。
+        let result = outcome(ToolStatus::Error, Some(details_error())).to_tool_result();
+        assert_eq!(result.data, serde_json::json!({ "path": "a.txt" }));
+
+        // 同时有结构化输出：details 是补充，不能把 canonical data 覆盖掉。
+        let mut with_output = outcome(ToolStatus::Error, Some(details_error()));
+        with_output.output = ToolOutputValue::Json(serde_json::json!({ "hits": 3 }));
+        let result = with_output.to_tool_result();
+        assert_eq!(result.data["hits"], serde_json::json!(3));
+        assert_eq!(result.data["details"]["path"], serde_json::json!("a.txt"));
+
+        // 非对象的结构化输出也不能被丢弃。
+        let mut scalar = outcome(ToolStatus::Error, Some(details_error()));
+        scalar.output = ToolOutputValue::Json(serde_json::json!([1, 2, 3]));
+        let result = scalar.to_tool_result();
+        assert_eq!(result.data["data"], serde_json::json!([1, 2, 3]));
+        assert_eq!(result.data["details"]["path"], serde_json::json!("a.txt"));
     }
 
     #[test]
