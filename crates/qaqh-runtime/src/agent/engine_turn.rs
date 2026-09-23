@@ -4,7 +4,7 @@
 //! Receives: RingContext + ToolEngine (for tool execution).
 //! Returns: Outcome (ContinueTurn, YieldToUser, TurnComplete, Error).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use qaqh_domain::AskAnswer;
 use qaqh_session::canonical::{generate_ulid, sha256_content_hash};
@@ -1400,6 +1400,43 @@ impl TurnEngine {
                     .msg
                     .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
                 return Outcome::Handled;
+            }
+
+            if round_num == 0 && crate::test_hooks::plan_review_enabled() {
+                let call_id = format!("test-plan-review-{turn_id}");
+                let content = crate::test_hooks::plan_review_content();
+                let mut pending_plans = VecDeque::new();
+                pending_plans.push_back(PendingPlan {
+                    call_id: call_id.clone(),
+                    content: content.clone(),
+                });
+                self.suspended = Some(TurnState {
+                    session_id: ctx.agent.session.seed.clone(),
+                    turn_id: turn_id.clone(),
+                    round_num,
+                    usage: last_usage.clone(),
+                    pending_permission_ids: Vec::new(),
+                    deferred_authorized: Vec::new(),
+                    tool_call_order: vec![call_id.clone()],
+                    serial_call_ids: HashSet::new(),
+                    pending_asks: VecDeque::new(),
+                    pending_plans,
+                    pending_todo_activation: None,
+                    reason: YieldReason::PlanReview,
+                });
+                ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
+                    qaqh_domain::ControlEvent::PlanReviewRequested {
+                        interaction_id: call_id,
+                        turn_id: turn_id.clone(),
+                        plan_content: content,
+                        review_type: "plan".into(),
+                        todo_items: None,
+                    },
+                ));
+                return Outcome::YieldToUser {
+                    turn_id,
+                    reason: YieldReason::PlanReview,
+                };
             }
 
             // ── 传输快照 + 估计 + auto-compact 预检（已抽至 prepare_gate_snapshot） ──
