@@ -717,15 +717,9 @@ pub(crate) async fn handle_timeline_events(
         loop {
             match rx.recv().await {
                 Ok(live) => {
-                    if gap_remaining > 0 {
-                        gap_remaining -= 1;
-                        continue;
-                    }
-                    if inject_timeline_gap {
-                        let ev = timeline_entry_to_event(&epoch, &seed_clone, &live.entry);
-                        let _ = tx.send(Ok(ev)).await;
-                        return;
-                    }
+                    // Seed ownership and cursor/dedup checks must precede gap
+                    // injection; otherwise a foreign seed could be relabeled
+                    // with this stream's seed.
                     if !should_deliver_timeline_live(
                         &live,
                         &session_id_clone,
@@ -735,6 +729,15 @@ pub(crate) async fn handle_timeline_events(
                         &leases,
                     ) {
                         continue;
+                    }
+                    if gap_remaining > 0 {
+                        gap_remaining -= 1;
+                        continue;
+                    }
+                    if inject_timeline_gap {
+                        let ev = timeline_entry_to_event(&epoch, &seed_clone, &live.entry);
+                        let _ = tx.send(Ok(ev)).await;
+                        return;
                     }
                     if !leases
                         .lock()
