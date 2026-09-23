@@ -48,6 +48,9 @@ fn init_file_logging() {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(qaqh_sandbox::HELPER_SUBCOMMAND) {
+        std::process::exit(qaqh_sandbox::helper_main());
+    }
     init_file_logging();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -57,6 +60,8 @@ fn main() {
             // 临时跨端模式：headless 监听局域网地址，供远端壳直连。
             qaqh_runtime::cache_system_path();
             qaqh_runtime::detect_os_info();
+            let capabilities = qaqh_sandbox::configure_from_current_exe();
+            log::info!("sandbox capabilities: {capabilities:?}");
             let config = match server::ServerNetworkConfig::parse(&args[1..]) {
                 Ok(config) => config,
                 Err(error) => {
@@ -82,6 +87,8 @@ fn main() {
             qaqh_runtime::cache_system_path();
             qaqh_runtime::detect_shell();
             qaqh_runtime::detect_os_info();
+            let capabilities = qaqh_sandbox::configure_from_current_exe();
+            log::info!("sandbox capabilities: {capabilities:?}");
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(server::run());
             // MCP 优雅收尾（同上）：显式 shutdown_all，防子进程孤儿。

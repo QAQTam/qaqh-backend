@@ -1,5 +1,6 @@
 //! exec::direct — direct_exec 主引擎 + ExecOutput（registry-native 生命周期）。
 
+use std::io::Write;
 use std::sync::{Arc, atomic::AtomicU64};
 
 use schemars::JsonSchema;
@@ -16,6 +17,7 @@ use super::truncate::{strip_ansi, token_truncate};
 
 /// Direct command execution: argv array, no shell.
 /// Uses background threads for pipe reading and poll-based timeout.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
 pub(crate) fn direct_exec(
     argv: &[String],
@@ -28,6 +30,61 @@ pub(crate) fn direct_exec(
     progress_tx: Option<ExecProgressSender>,
     tool_call_id: &str,
 ) -> ExecOutput {
+    direct_exec_inner(
+        argv,
+        env,
+        cwd,
+        max_output_tokens,
+        timeout_secs,
+        background_after_secs,
+        cancel,
+        progress_tx,
+        tool_call_id,
+        None,
+    )
+}
+
+/// Execute through the platform sandbox helper when one is configured.
+#[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
+pub(crate) fn direct_exec_sandboxed(
+    argv: &[String],
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    max_output_tokens: u32,
+    timeout_secs: u64,
+    background_after_secs: Option<u64>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress_tx: Option<ExecProgressSender>,
+    tool_call_id: &str,
+    sandbox: &qaqh_sandbox::SandboxSpec,
+) -> ExecOutput {
+    direct_exec_inner(
+        argv,
+        env,
+        cwd,
+        max_output_tokens,
+        timeout_secs,
+        background_after_secs,
+        cancel,
+        progress_tx,
+        tool_call_id,
+        Some(sandbox),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
+fn direct_exec_inner(
+    argv: &[String],
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    max_output_tokens: u32,
+    timeout_secs: u64,
+    background_after_secs: Option<u64>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress_tx: Option<ExecProgressSender>,
+    tool_call_id: &str,
+    sandbox: Option<&qaqh_sandbox::SandboxSpec>,
+) -> ExecOutput {
     let start_time = std::time::Instant::now();
     let display_name = if argv.len() > 1 {
         format!("{} ...", argv[0])
@@ -38,6 +95,24 @@ pub(crate) fn direct_exec(
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
     }
+    let sandbox_request = match sandbox {
+        Some(spec) => match qaqh_sandbox::wrap_command(&mut cmd, argv, spec) {
+            Ok(request) => request,
+            Err(error) => {
+                return ExecOutput {
+                    status: "completed".to_string(),
+                    command: display_name,
+                    exit_code: Some(-1),
+                    output: format!("SANDBOX PREPARE FAILED: {error}"),
+                    truncated: false,
+                    timed_out: false,
+                    cancelled: false,
+                    process_id: None,
+                };
+            }
+        },
+        None => None,
+    };
     if let Some(env) = env {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
@@ -57,7 +132,11 @@ pub(crate) fn direct_exec(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.stdin(std::process::Stdio::null());
+    if sandbox_request.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    } else {
+        cmd.stdin(std::process::Stdio::null());
+    }
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
@@ -76,6 +155,27 @@ pub(crate) fn direct_exec(
             };
         }
     };
+
+    if let Some(request) = sandbox_request {
+        let write_result = match child.stdin.take() {
+            Some(mut stdin) => stdin.write_all(&request),
+            None => Err(std::io::Error::other("sandbox helper stdin unavailable")),
+        };
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ExecOutput {
+                status: "completed".to_string(),
+                command: display_name,
+                exit_code: Some(-1),
+                output: format!("SANDBOX REQUEST FAILED: {error}"),
+                truncated: false,
+                timed_out: false,
+                cancelled: false,
+                process_id: None,
+            };
+        }
+    }
 
     // 接线 ProcessRegistry：先注册（读线程捕获 proc_id），take 管道后
     // 再把子进程句柄移入注册表（poll 经 try_wait、超时移交可查）。
