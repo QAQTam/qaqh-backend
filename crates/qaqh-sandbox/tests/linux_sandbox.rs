@@ -3,7 +3,9 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use qaqh_sandbox::{NetworkPolicy, SandboxBackend, SandboxRequest, SandboxSpec};
+use qaqh_sandbox::{
+    NetworkPolicy, SandboxBackend, SandboxCapabilities, SandboxRequest, SandboxSpec,
+};
 
 fn run_helper(request: &SandboxRequest) -> std::process::Output {
     let helper = env!("CARGO_BIN_EXE_qaqh-sandbox-exec");
@@ -91,5 +93,58 @@ fn network_denial_blocks_tcp_socket_creation() {
         String::from_utf8_lossy(&output.stderr).contains("network denied"),
         "network probe must fail at socket creation: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bubblewrap_workspace_write_denies_outside_write() {
+    let capabilities = SandboxCapabilities::detect();
+    if !capabilities.bubblewrap {
+        eprintln!("skipping bwrap test: {}", capabilities.detail);
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let inside = workspace.join("inside.txt");
+    let outside = tmp.path().join("outside.txt");
+    let spec = SandboxSpec {
+        enabled: true,
+        backend: SandboxBackend::LinuxBubblewrap,
+        writable_roots: vec![workspace.clone()],
+        network: NetworkPolicy::Deny,
+        max_open_files: Some(1024),
+    };
+    let argv = vec![
+        "sh".into(),
+        "-c".into(),
+        "printf inside > \"$1\"; printf outside > \"$2\"".into(),
+        "qaqh-bwrap-test".into(),
+        inside.to_string_lossy().into_owned(),
+        outside.to_string_lossy().into_owned(),
+    ];
+    let mut command = Command::new("sh");
+    let cwd = workspace.to_string_lossy().into_owned();
+    qaqh_sandbox::wrap_command(&mut command, &argv, Some(&cwd), &spec).expect("wrap bwrap command");
+    let output = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run bwrap command");
+
+    assert!(
+        inside.is_file(),
+        "bwrap workspace write should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !outside.exists(),
+        "bwrap outside write must be denied: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "bwrap should report the denied redirection"
     );
 }

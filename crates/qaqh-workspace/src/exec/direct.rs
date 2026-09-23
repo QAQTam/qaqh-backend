@@ -95,9 +95,9 @@ fn direct_exec_inner(
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
     }
-    let sandbox_request = match sandbox {
-        Some(spec) => match qaqh_sandbox::wrap_command(&mut cmd, argv, spec) {
-            Ok(request) => request,
+    let sandbox_launch = match sandbox {
+        Some(spec) => match qaqh_sandbox::wrap_command(&mut cmd, argv, cwd, spec) {
+            Ok(launch) => launch,
             Err(error) => {
                 return ExecOutput {
                     status: "completed".to_string(),
@@ -111,8 +111,13 @@ fn direct_exec_inner(
                 };
             }
         },
-        None => None,
+        None => qaqh_sandbox::SandboxLaunch {
+            backend: qaqh_sandbox::SandboxBackend::None,
+            request: None,
+        },
     };
+    let sandbox_backend = sandbox_launch.backend;
+    let sandbox_request = sandbox_launch.request;
     if let Some(env) = env {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
@@ -391,6 +396,13 @@ fn direct_exec_inner(
     // truncated 口径（见上方 hard_trunc）：字节预算耗尽（任一流）或读线程未以
     // EOF 收尾（settle 放弃 = 孙进程可能继续产出，保守提示输出可能不完整）。
     let cleaned = strip_ansi(&combined);
+    qaqh_sandbox::record_denial_if_any(
+        sandbox_backend,
+        exit_code,
+        &cleaned,
+        tool_call_id,
+        &display_name,
+    );
     let total_tokens = qaqh_types::token::count_tokens(&cleaned);
     let (output_str, truncated) = if total_tokens > max_output_tokens || hard_trunc {
         (token_truncate(&cleaned, max_output_tokens), true)

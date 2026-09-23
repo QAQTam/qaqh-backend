@@ -142,6 +142,10 @@ pub enum PermissionDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxBackend {
+    /// Select the strongest backend available on the host.
+    Auto,
+    /// Linux bubblewrap namespace/mount sandbox.
+    LinuxBubblewrap,
     /// Linux Landlock + seccomp helper.
     LinuxLandlockSeccomp,
     /// Process-tree/resource hardening only; no filesystem/network sandbox.
@@ -173,7 +177,7 @@ impl SandboxSpec {
     pub fn workspace_write(workspace_root: PathBuf) -> Self {
         Self {
             enabled: true,
-            backend: SandboxBackend::LinuxLandlockSeccomp,
+            backend: SandboxBackend::Auto,
             writable_roots: vec![workspace_root],
             network: NetworkPolicy::Deny,
             max_open_files: Some(1024),
@@ -207,7 +211,7 @@ mod tests {
     fn workspace_write_spec_is_network_deny_and_workspace_scoped() {
         let root = PathBuf::from("/tmp/ws");
         let spec = SandboxSpec::workspace_write(root.clone());
-        assert_eq!(spec.backend, SandboxBackend::LinuxLandlockSeccomp);
+        assert_eq!(spec.backend, SandboxBackend::Auto);
         assert_eq!(spec.network, NetworkPolicy::Deny);
         assert_eq!(spec.writable_roots, vec![root]);
         assert_eq!(spec.max_open_files, Some(1024));
