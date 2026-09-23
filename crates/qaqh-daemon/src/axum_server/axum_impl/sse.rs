@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use qaqh_runtime::QaqhService;
 use qaqh_session::actor::ConnectionId;
 
+use super::test_hooks::SseTerminate;
 use super::*;
 
 /// 活跃会话但尚无任何 seed 分片时的挂起轮询间隔（reviewer 阻断 1）。
@@ -66,6 +67,42 @@ fn envelope_to_event(
 fn reset_to_event(reset: &RingingResetRequired) -> Event {
     let data = serde_json::to_string(reset).unwrap_or_else(|_| "{}".into());
     Event::default().event("ringing.reset_required").data(data)
+}
+
+fn injected_termination_event(
+    fault: &SseTerminate,
+    channel: Option<&str>,
+    seed: Option<&str>,
+) -> Event {
+    let mut payload = serde_json::json!({
+        "code": fault.code,
+        "message": "test-injected stream termination; reconnect to continue",
+    });
+    if let Some(channel) = channel {
+        payload["channel"] = serde_json::Value::String(channel.to_string());
+    }
+    if let Some(seed) = seed {
+        payload["seed"] = serde_json::Value::String(seed.to_string());
+    }
+    if let Some(skipped) = fault.skipped {
+        payload["skipped"] = serde_json::Value::from(skipped);
+    }
+    Event::default()
+        .event("ringing.stream_terminated")
+        .data(payload.to_string())
+}
+
+fn injected_termination_response(
+    fault: SseTerminate,
+    channel: Option<&str>,
+    seed: Option<&str>,
+) -> Response {
+    let event = injected_termination_event(&fault, channel, seed);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(event)).await;
+    });
+    Sse::new(ReceiverStream::new(rx)).into_response()
 }
 
 fn timeline_entry_to_event(epoch: &str, seed: &str, entry: &qaqh_domain::TimelineEntry) -> Event {
@@ -490,6 +527,9 @@ pub(crate) async fn handle_events(
     let Some(channel) = parse_channel(&channel_str) else {
         return (StatusCode::NOT_FOUND, "unknown channel").into_response();
     };
+    if let Some(fault) = state.test_hooks.take_channel_terminate(channel) {
+        return injected_termination_response(fault, Some(channel.as_str()), None);
+    }
     // Last-Event-ID from header or ?last_event_id= query (ringing_http compat)
     let last_event_id = headers
         .get("last-event-id")
@@ -617,12 +657,20 @@ pub(crate) async fn handle_timeline_events(
     let Some(session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
-    if seed.is_empty()
-        || !state
-            .leases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .owns_seed(&session_id, &seed)
+    if seed.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    }
+    if state.test_hooks.session_is_404(&seed) {
+        return session_not_found_response(&seed);
+    }
+    if let Some(fault) = state.test_hooks.take_timeline_terminate() {
+        return injected_termination_response(fault, Some("timeline"), Some(&seed));
+    }
+    if !state
+        .leases
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .owns_seed(&session_id, &seed)
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -645,10 +693,18 @@ pub(crate) async fn handle_timeline_events(
     let leases = state.leases.clone();
     let seed_clone = seed.clone();
     let session_id_clone = session_id.clone();
+    let inject_timeline_gap = state.test_hooks.take_timeline_gap();
 
     let (tx, rx_stream) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
         for entry in replay {
+            if inject_timeline_gap {
+                let mut entry = entry;
+                entry.timeline_seq = after.saturating_add(2);
+                let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
+                let _ = tx.send(Ok(ev)).await;
+                return;
+            }
             let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
             if tx.send(Ok(ev)).await.is_err() {
                 return;
@@ -658,6 +714,13 @@ pub(crate) async fn handle_timeline_events(
         loop {
             match rx.recv().await {
                 Ok(live) => {
+                    if inject_timeline_gap {
+                        let mut entry = live.entry;
+                        entry.timeline_seq = after.saturating_add(2);
+                        let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
+                        let _ = tx.send(Ok(ev)).await;
+                        return;
+                    }
                     if !should_deliver_timeline_live(
                         &live,
                         &session_id_clone,

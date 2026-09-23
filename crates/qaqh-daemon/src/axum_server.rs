@@ -3,6 +3,9 @@
 
 mod axum_impl;
 
+#[cfg(test)]
+pub(crate) use axum_impl::test_hooks::SseTerminateScope;
+pub(crate) use axum_impl::test_hooks::TestHooks;
 pub use axum_impl::{AppState, build_router};
 
 #[cfg(test)]
@@ -83,6 +86,7 @@ mod sse_tests {
             token: TOKEN.into(),
             epoch: "lag-epoch".into(),
             shutdown,
+            test_hooks: std::sync::Arc::new(TestHooks::disabled()),
         }
     }
 
@@ -230,6 +234,50 @@ mod sse_tests {
         );
     }
 
+    #[tokio::test]
+    async fn injected_stream_termination_has_stable_wire_shape_and_is_one_shot() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_sse_terminate(
+            "lagged",
+            SseTerminateScope::Channel,
+            Some(qaqh_domain::RingingChannel::Conversation),
+        ));
+
+        let (status, mut first) = open_channel_sse(build_router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data) = next_sse_frame(&mut first, Duration::from_secs(5))
+            .await
+            .expect("injected termination frame must arrive");
+        assert_eq!(event, "ringing.stream_terminated");
+        let value: serde_json::Value = serde_json::from_str(&data).expect("valid json payload");
+        assert_eq!(value["code"], "lagged");
+        assert_eq!(value["channel"], "conversation");
+        assert_eq!(value["skipped"], 7);
+        assert!(
+            next_sse_frame(&mut first, Duration::from_millis(300))
+                .await
+                .is_none(),
+            "injected termination must close the stream"
+        );
+
+        let state = test_state_with_hub(hub.clone());
+        let (_, mut second) = open_channel_sse(build_router(state)).await;
+        hub.publish(
+            SEED,
+            qaqh_domain::DomainEvent::Conversation(
+                qaqh_domain::ConversationEvent::ConversationCancelled {
+                    turn_id: Some("t-after-injection".into()),
+                },
+            ),
+        );
+        let (event, data) = next_sse_frame(&mut second, Duration::from_secs(5))
+            .await
+            .expect("second stream must receive normal live traffic");
+        assert_ne!(event, "ringing.stream_terminated", "{data}");
+        assert_eq!(event, "conversation_cancelled");
+    }
+
     /// ② 终止后新订阅仍能正常收流（重连重定基不被破坏）。
     ///
     /// 客户端收到终止帧后的既定动作是**带 Last-Event-ID 重连**（新 SSE，
@@ -327,6 +375,37 @@ mod sse_tests {
             "no frame may follow the timeline termination frame: {tail:?}"
         );
     }
+
+    #[tokio::test]
+    async fn injected_timeline_gap_emits_cursor_plus_two_once() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
+        let (status, mut stream) = open_timeline_sse(build_router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        hub.publish_timeline(
+            SEED,
+            qaqh_domain::TimelineIntent::TurnOpened {
+                turn_id: "t-gap".into(),
+                user_text: "force a timeline gap".into(),
+            },
+        )
+        .expect("publish timeline intent");
+
+        let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("gap frame must arrive");
+        assert_eq!(event, "timeline.entry");
+        let value: serde_json::Value = serde_json::from_str(&data).expect("valid timeline frame");
+        assert_eq!(value["entry"]["timeline_seq"], 2);
+        assert!(
+            next_sse_frame(&mut stream, Duration::from_millis(300))
+                .await
+                .is_none(),
+            "gap injection must close the stream after forcing re-baseline"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +450,7 @@ mod axum_tests {
             token: String::from("test-token"),
             epoch: String::from("test-epoch"),
             shutdown,
+            test_hooks: std::sync::Arc::new(TestHooks::disabled()),
         }
     }
 
@@ -413,6 +493,26 @@ mod axum_tests {
         // test_state() 无 agent：has_active_work 必须为 false，activities 为空表。
         assert_eq!(value["has_active_work"], serde_json::json!(false));
         assert_eq!(value["activities"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn injected_session_404_short_circuits_timeline_snapshot() {
+        let mut state = test_state();
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_session_404("missing"));
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/ringing/v1/sessions/missing/timeline")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", "cs-test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["code"], "session_not_found");
     }
 
     #[tokio::test]

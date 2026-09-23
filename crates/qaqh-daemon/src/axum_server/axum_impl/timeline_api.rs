@@ -68,6 +68,9 @@ pub(crate) async fn handle_bootstrap(
     if seed.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing seed").into_response();
     }
+    if state.test_hooks.session_is_404(&seed) {
+        return session_not_found_response(&seed);
+    }
     let owns = state
         .leases
         .lock()
@@ -117,6 +120,9 @@ pub(crate) async fn handle_pending_approvals(
     };
     if seed.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    }
+    if state.test_hooks.session_is_404(&seed) {
+        return session_not_found_response(&seed);
     }
     let owns = state
         .leases
@@ -175,6 +181,9 @@ pub(crate) async fn handle_timeline_snapshot(
     };
     if seed.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    }
+    if state.test_hooks.session_is_404(&seed) {
+        return session_not_found_response(&seed);
     }
     let owns = state
         .leases
