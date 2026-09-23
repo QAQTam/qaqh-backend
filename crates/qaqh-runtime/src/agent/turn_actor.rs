@@ -57,6 +57,7 @@ pub(crate) enum TurnActorError {
     DuplicateInput {
         input_id: InputId,
     },
+    ToolLedger(String),
     UnexpectedEffect,
 }
 
@@ -96,6 +97,9 @@ impl fmt::Display for TurnActorError {
             ),
             Self::DuplicateInput { input_id } => {
                 write!(formatter, "input {input_id} was already accepted")
+            }
+            Self::ToolLedger(message) => {
+                write!(formatter, "tool ledger cancellation failed: {message}")
             }
             Self::UnexpectedEffect => {
                 write!(formatter, "session actor returned an unexpected effect")
@@ -352,6 +356,7 @@ impl TurnActor {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel_active(&mut self) -> Result<TurnCancellation, TurnActorError> {
         match self.state().clone() {
             TurnCoreState::Active { turn_id, .. } => {

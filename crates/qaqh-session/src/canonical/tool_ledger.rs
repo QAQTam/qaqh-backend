@@ -12,8 +12,9 @@ use thiserror::Error;
 
 use crate::session_fact_v2::{
     ContentRef, EventId, ExecutionId, FactPayload, FactSchema, InteractionExpired, InteractionId,
-    InteractionResolved, RecoveryRef, SessionFact, SessionId, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    InteractionRequested, InteractionResolved, RecoveryRef, SessionFact, SessionId, ToolCallId,
+    ToolError, ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    TurnId,
 };
 
 use super::{
@@ -120,6 +121,9 @@ pub enum ToolLedgerError {
     #[error("tool call {call_id} has an intent and cannot finish without execution_id")]
     IntentPresentForExecutionlessTerminal { call_id: ToolCallId },
 
+    #[error("interaction {interaction_id} already has a conflicting request")]
+    InteractionRequestConflict { interaction_id: InteractionId },
+
     #[error("interaction {interaction_id} already has a conflicting terminal")]
     InteractionTerminalConflict { interaction_id: InteractionId },
 }
@@ -131,6 +135,7 @@ pub struct ToolLedger {
     session_id: SessionId,
     log_id: crate::session_fact_v2::LogId,
     entries: HashMap<ToolCallId, ToolLedgerEntry>,
+    interaction_requests: HashMap<InteractionId, SessionFact>,
     interaction_terminals: HashMap<InteractionId, SessionFact>,
 }
 
@@ -161,9 +166,15 @@ impl ToolLedger {
         let log_id = store.log_id().clone();
         let reader = CommittedFactReader::open(&session_dir, session_id.clone(), log_id.clone())?;
         let mut entries = HashMap::new();
+        let mut interaction_requests = HashMap::new();
         let mut interaction_terminals = HashMap::new();
         for fact in reader.read_all()? {
-            index_fact(&mut entries, &mut interaction_terminals, fact)?;
+            index_fact(
+                &mut entries,
+                &mut interaction_requests,
+                &mut interaction_terminals,
+                fact,
+            )?;
         }
         Ok(Self {
             store,
@@ -171,6 +182,7 @@ impl ToolLedger {
             session_id,
             log_id,
             entries,
+            interaction_requests,
             interaction_terminals,
         })
     }
@@ -269,6 +281,40 @@ impl ToolLedger {
         self.interaction_terminals.get(interaction_id)
     }
 
+    /// Append the canonical request for an interaction.
+    pub fn append_interaction_requested(
+        &mut self,
+        event_id: EventId,
+        call_id: Option<ToolCallId>,
+        payload: InteractionRequested,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let interaction_id = payload.interaction_id.clone();
+        if self.interaction_terminals.contains_key(&interaction_id) {
+            return Err(ToolLedgerError::InteractionTerminalConflict { interaction_id });
+        }
+        if let Some(existing) = self.interaction_requests.get(&interaction_id) {
+            if interaction_request_matches(&existing.payload, &payload) {
+                return Ok(existing.clone());
+            }
+            return Err(ToolLedgerError::InteractionRequestConflict { interaction_id });
+        }
+
+        let turn_id = payload.turn_id.clone();
+        let fact = self.build_interaction_fact(
+            event_id,
+            Some(turn_id),
+            call_id,
+            interaction_id.clone(),
+            FactPayload::InteractionRequested(payload),
+            now_ms,
+        );
+        let outcome = self.store.append(&self.lease, fact, now_ms)?;
+        self.interaction_requests
+            .insert(interaction_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
     /// Append the first canonical resolution for an interaction.
     ///
     /// A repeated identical resolution is idempotent. Once a resolution or
@@ -284,14 +330,13 @@ impl ToolLedger {
     ) -> Result<SessionFact, ToolLedgerError> {
         let interaction_id = payload.interaction_id.clone();
         if let Some(existing) = self.interaction_terminals.get(&interaction_id) {
-            if matches!(
-                &existing.payload,
-                FactPayload::InteractionResolved(existing) if existing == &payload
-            ) {
+            if interaction_resolution_matches(&existing.payload, &payload) {
                 return Ok(existing.clone());
             }
             return Err(ToolLedgerError::InteractionTerminalConflict { interaction_id });
         }
+        let (turn_id, call_id) =
+            self.interaction_envelope_context(&interaction_id, turn_id, call_id);
 
         let fact = self.build_interaction_fact(
             event_id,
@@ -318,14 +363,13 @@ impl ToolLedger {
     ) -> Result<SessionFact, ToolLedgerError> {
         let interaction_id = payload.interaction_id.clone();
         if let Some(existing) = self.interaction_terminals.get(&interaction_id) {
-            if matches!(
-                &existing.payload,
-                FactPayload::InteractionExpired(existing) if existing == &payload
-            ) {
+            if interaction_expiry_matches(&existing.payload, &payload) {
                 return Ok(existing.clone());
             }
             return Err(ToolLedgerError::InteractionTerminalConflict { interaction_id });
         }
+        let (turn_id, call_id) =
+            self.interaction_envelope_context(&interaction_id, turn_id, call_id);
 
         let fact = self.build_interaction_fact(
             event_id,
@@ -536,6 +580,21 @@ impl ToolLedger {
         Ok(outcome.fact)
     }
 
+    fn interaction_envelope_context(
+        &self,
+        interaction_id: &InteractionId,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+    ) -> (Option<TurnId>, Option<ToolCallId>) {
+        let Some(requested) = self.interaction_requests.get(interaction_id) else {
+            return (turn_id, call_id);
+        };
+        (
+            turn_id.or_else(|| requested.turn_id.clone()),
+            call_id.or_else(|| requested.call_id.clone()),
+        )
+    }
+
     fn build_fact(
         &self,
         event_id: EventId,
@@ -586,6 +645,7 @@ impl ToolLedger {
 
 fn index_fact(
     entries: &mut HashMap<ToolCallId, ToolLedgerEntry>,
+    interaction_requests: &mut HashMap<InteractionId, SessionFact>,
     interaction_terminals: &mut HashMap<InteractionId, SessionFact>,
     fact: SessionFact,
 ) -> Result<(), ToolLedgerError> {
@@ -642,6 +702,9 @@ fn index_fact(
             }
             entry.finished = Some(fact);
         }
+        FactPayload::InteractionRequested(payload) => {
+            index_interaction_request(interaction_requests, payload.interaction_id.clone(), fact)?;
+        }
         FactPayload::InteractionResolved(payload) => {
             index_interaction_terminal(
                 interaction_terminals,
@@ -658,6 +721,50 @@ fn index_fact(
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn interaction_resolution_matches(existing: &FactPayload, incoming: &InteractionResolved) -> bool {
+    matches!(
+        existing,
+        FactPayload::InteractionResolved(existing)
+            if existing.interaction_id == incoming.interaction_id
+                && existing.decision_ref == incoming.decision_ref
+                && existing.resolved_by == incoming.resolved_by
+                && existing.resolution_seq == incoming.resolution_seq
+    )
+}
+
+fn interaction_expiry_matches(existing: &FactPayload, incoming: &InteractionExpired) -> bool {
+    matches!(
+        existing,
+        FactPayload::InteractionExpired(existing)
+            if existing.interaction_id == incoming.interaction_id
+                && existing.reason == incoming.reason
+                && existing.recovery_ref == incoming.recovery_ref
+    )
+}
+
+fn interaction_request_matches(existing: &FactPayload, incoming: &InteractionRequested) -> bool {
+    matches!(
+        existing,
+        FactPayload::InteractionRequested(existing)
+            if existing.interaction_id == incoming.interaction_id
+                && existing.turn_id == incoming.turn_id
+                && existing.call_id == incoming.call_id
+                && existing.kind == incoming.kind
+    )
+}
+
+fn index_interaction_request(
+    interaction_requests: &mut HashMap<InteractionId, SessionFact>,
+    interaction_id: InteractionId,
+    fact: SessionFact,
+) -> Result<(), ToolLedgerError> {
+    if interaction_requests.contains_key(&interaction_id) {
+        return Err(ToolLedgerError::InteractionRequestConflict { interaction_id });
+    }
+    interaction_requests.insert(interaction_id, fact);
     Ok(())
 }
 
