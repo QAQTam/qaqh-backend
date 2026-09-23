@@ -196,35 +196,6 @@ pub(crate) fn project_apply_patch(args: &serde_json::Value, output: &str) -> Too
     with_line_summary(display, first_human_line(output))
 }
 
-pub(crate) fn project_glob(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    let pattern = args
-        .get("pattern")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let root = args
-        .get("path")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let path = match (root, pattern) {
-        (Some(root), Some(pattern)) => format!("{root}:{pattern}"),
-        (Some(root), None) => root.to_string(),
-        (None, Some(pattern)) => pattern.to_string(),
-        (None, None) => {
-            return fallback_display("glob", output);
-        }
-    };
-    let display = ToolDisplay::new(
-        ToolHeader::Path {
-            path,
-            op: PathOp::List,
-        },
-        text_body(output),
-    );
-    with_line_summary(display, first_human_line(output))
-}
-
 fn query_display(
     tool: &'static str,
     query: Option<String>,
@@ -244,19 +215,6 @@ fn query_display(
     with_line_summary(
         display,
         json_summary(output).or_else(|| first_human_line(output)),
-    )
-}
-
-pub(crate) fn project_grep(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    query_display(
-        "grep",
-        args.get("pattern")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        args.get("path")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        output,
     )
 }
 
@@ -556,18 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn query_projectors_declare_pattern_and_scope() {
-        let grep = project_grep(
-            &json!({"pattern": "TODO", "path": "src"}),
-            "src/a.rs:1:TODO\n",
-        );
-        assert_eq!(
-            grep.header,
-            ToolHeader::Query {
-                query: "TODO".into(),
-                scope: Some("src".into())
-            }
-        );
+    fn web_fetch_query_projector_declares_url_and_output_scope() {
         let web = project_web_fetch(
             &json!({"url": "https://example.test", "output": "page.md"}),
             "page",

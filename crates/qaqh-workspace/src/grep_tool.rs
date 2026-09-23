@@ -13,17 +13,388 @@
 
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::PathBuf;
+use std::time::Duration;
 
-use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
+use crate::ToolRisk;
+use crate::tool_api::{
+    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
+    ToolName, ToolProjection, ToolSource, TypedTool,
+};
 
 const DEFAULT_MAX_RESULTS: usize = 200;
 const MAX_RESULTS_CAP: usize = 2_000;
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrepArgs {
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub glob: Option<Vec<String>>,
+    #[serde(default)]
+    pub case_sensitive: Option<bool>,
+    #[serde(default)]
+    pub context_before: Option<u64>,
+    #[serde(default)]
+    pub context_after: Option<u64>,
+    #[serde(default)]
+    pub max_results: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GrepMatch {
+    pub path: String,
+    pub line: u64,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct MatchLine {
     path: String,
     line: u64,
     content: String,
     is_context: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GrepOutput {
+    pub status: String,
+    pub matches: Vec<GrepMatch>,
+    pub truncated: bool,
+    pub count: usize,
+    #[serde(skip)]
+    #[schemars(skip)]
+    lines: Vec<MatchLine>,
+}
+
+impl GrepOutput {
+    fn model_text(&self) -> String {
+        let mut text = String::new();
+        if self.lines.is_empty() {
+            for matched in &self.matches {
+                text.push_str(&format!(
+                    "{}:{}:{}\n",
+                    matched.path, matched.line, matched.content
+                ));
+            }
+        } else {
+            for matched in &self.lines {
+                if matched.is_context {
+                    text.push_str(&format!(
+                        "{}-{}-{}\n",
+                        matched.path, matched.line, matched.content
+                    ));
+                } else {
+                    text.push_str(&format!(
+                        "{}:{}:{}\n",
+                        matched.path, matched.line, matched.content
+                    ));
+                }
+            }
+        }
+        if self.truncated {
+            text.push_str(&format!(
+                "... truncated at {} matches (narrow the pattern, add glob filters, or set a higher max_results)\n",
+                self.count
+            ));
+        }
+        if text.is_empty() {
+            text = "(no matches)\n".to_string();
+        }
+        text
+    }
+}
+
+impl ToolProjection for GrepOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.model_text(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        self.model_text().lines().next().map(str::to_string)
+    }
+
+    fn display(&self, args: &Value) -> ToolDisplay {
+        let query = args
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let scope = args
+            .get("path")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                args.get("paths")
+                    .and_then(Value::as_array)
+                    .and_then(|paths| paths.first())
+                    .and_then(Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let text = self.model_text();
+        match query {
+            Some(query) => ToolDisplay::new(
+                ToolHeader::Query {
+                    query: query.to_string(),
+                    scope,
+                },
+                ToolBody::Text {
+                    text: text.clone(),
+                    truncated: false,
+                },
+            )
+            .with_summary(text.lines().next().unwrap_or_default().to_string()),
+            None => ToolDisplay::new(
+                ToolHeader::Other {
+                    label: "grep".to_string(),
+                },
+                ToolBody::Text {
+                    text,
+                    truncated: false,
+                },
+            ),
+        }
+    }
+}
+
+pub struct GrepTool;
+
+impl TypedTool for GrepTool {
+    type Args = GrepArgs;
+    type Output = GrepOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("grep").expect("valid grep tool name"),
+            display_name: None,
+            description: "Search file contents with ripgrep regex. Returns path:line:content; filter files with glob."
+                .to_string(),
+            input_schema: grep_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(GrepOutput))
+                .expect("grep output schema"),
+            category: crate::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: Duration::from_secs(60),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("grep")
+                .unwrap_or_default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let pattern = args.pattern.trim();
+        if pattern.is_empty() {
+            return Err(grep_error(
+                "grep: 'pattern' is required (regex, e.g. \"fn main\" or \"TODO|FIXME\")",
+            ));
+        }
+        let max_results = args
+            .max_results
+            .unwrap_or(DEFAULT_MAX_RESULTS as u64)
+            .clamp(1, MAX_RESULTS_CAP as u64) as usize;
+
+        let matcher = RegexMatcherBuilder::new()
+            .case_insensitive(!args.case_sensitive.unwrap_or(false))
+            .build(pattern)
+            .map_err(|error| grep_error(format!("grep: invalid regex {pattern:?}: {error}")))?;
+
+        let context_before = args.context_before.unwrap_or(0) as usize;
+        let context_after = args.context_after.unwrap_or(0) as usize;
+
+        let globs = args.glob.unwrap_or_default();
+        let (neg_globs, pos_globs): (Vec<&str>, Vec<&str>) = globs
+            .iter()
+            .map(String::as_str)
+            .partition(|glob| glob.starts_with('!'));
+        let pos_matchers: Vec<globset::GlobMatcher> = pos_globs
+            .iter()
+            .filter_map(|glob| {
+                globset::GlobBuilder::new(glob)
+                    .literal_separator(true)
+                    .build()
+                    .ok()
+            })
+            .map(|glob| glob.compile_matcher())
+            .collect();
+        let neg_matchers: Vec<globset::GlobMatcher> = neg_globs
+            .iter()
+            .filter_map(|glob| {
+                globset::GlobBuilder::new(glob.strip_prefix('!').unwrap_or(glob))
+                    .literal_separator(true)
+                    .build()
+                    .ok()
+            })
+            .map(|glob| glob.compile_matcher())
+            .collect();
+        let glob_filter = |rel: &str| -> bool {
+            // rg -g 是 gitignore 语义：不含 `/` 的模式（如 "*.rs"）匹配任意层级
+            // 的 basename；含 `/` 的模式匹配相对路径。
+            let basename = rel.rsplit('/').next().unwrap_or(rel);
+            let pos_hit = pos_matchers.is_empty()
+                || pos_matchers
+                    .iter()
+                    .any(|matcher| matcher.is_match(rel) || matcher.is_match(basename));
+            if !pos_hit {
+                return false;
+            }
+            !neg_matchers
+                .iter()
+                .any(|matcher| matcher.is_match(rel) || matcher.is_match(basename))
+        };
+
+        let ws_path = if ctx.workspace_root.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            ctx.workspace_root.clone()
+        };
+        let strip_verbatim = |path: &std::path::Path| -> PathBuf {
+            let string = path.to_string_lossy();
+            let string = string.strip_prefix(r"\\?\").unwrap_or(&string);
+            PathBuf::from(string)
+        };
+        let ws_abs = ws_path.canonicalize().unwrap_or_else(|_| ws_path.clone());
+        let ws_abs = strip_verbatim(&ws_abs);
+
+        let raw_paths = args
+            .paths
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if raw_paths.is_empty() {
+            roots.push(ws_abs.clone());
+        } else {
+            for raw_path in &raw_paths {
+                let path = std::path::Path::new(raw_path);
+                let resolved = if path.is_absolute() {
+                    crate::permission::normalize_lexically(path)
+                } else {
+                    crate::permission::normalize_lexically(&ws_path.join(path))
+                };
+                let abs = std::path::absolute(&resolved).unwrap_or(resolved);
+                if !path_within_workspace(&abs, &ws_abs) {
+                    return Err(grep_error(format!(
+                        "grep: path {raw_path:?} resolves outside the workspace — search is workspace-bounded"
+                    )));
+                }
+                roots.push(abs);
+            }
+        }
+
+        let mut searcher = SearcherBuilder::new()
+            .line_number(true)
+            .after_context(context_after)
+            .before_context(context_before)
+            .binary_detection(BinaryDetection::quit(b'\x00'))
+            .build();
+
+        let mut all_matches: Vec<MatchLine> = Vec::new();
+        let mut truncated = false;
+
+        'roots: for root in &roots {
+            let walker = ignore::WalkBuilder::new(root)
+                .standard_filters(true)
+                .require_git(false)
+                .build();
+            for entry in walker.flatten() {
+                if !entry
+                    .file_type()
+                    .is_some_and(|file_type| file_type.is_file())
+                {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = path
+                    .strip_prefix(&ws_abs)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !glob_filter(&rel) {
+                    continue;
+                }
+                // max_results 是**全局**预算：先看已收集数，再给当前文件剩余配额。
+                let collected = all_matches.iter().filter(|m| !m.is_context).count();
+                if collected >= max_results {
+                    truncated = true;
+                    break 'roots;
+                }
+                let mut sink = CollectSink {
+                    path: rel.clone(),
+                    abs_path: path.to_string_lossy().into_owned(),
+                    matches: Vec::new(),
+                    max_matches: max_results - collected,
+                    truncated: false,
+                };
+                // 忽略单个文件的 IO 错误（rg 行为：不可读文件跳过）。
+                let _ = searcher.search_path(&matcher, path, &mut sink);
+                if sink.truncated {
+                    truncated = true;
+                }
+                all_matches.extend(sink.matches);
+                if truncated {
+                    break 'roots;
+                }
+            }
+        }
+
+        let match_count = all_matches.iter().filter(|m| !m.is_context).count();
+        let matches = all_matches
+            .iter()
+            .filter(|m| !m.is_context)
+            .map(|m| GrepMatch {
+                path: m.path.clone(),
+                line: m.line,
+                content: m.content.clone(),
+            })
+            .collect();
+        Ok(GrepOutput {
+            status: "ok".to_string(),
+            matches,
+            truncated,
+            count: match_count,
+            lines: all_matches,
+        })
+    }
+}
+
+fn grep_error(message: impl Into<String>) -> ToolExecutionError {
+    let mut error = ToolError::new(ToolErrorKind::Execution, message);
+    error.code = ToolErrorCode::from_legacy("TOOL_ERROR");
+    ToolExecutionError::Recoverable(error)
+}
+
+fn grep_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Regex (rg syntax)"},
+            "paths": {"type": "array", "items": {"type": "string"}, "description": "Dirs to search"},
+            "glob": {"type": "array", "items": {"type": "string"}, "description": "File filters (rg -g)"},
+            "case_sensitive": {"type": "boolean", "default": false, "description": "Case-sensitive (default false)"},
+            "context_before": {"type": "integer", "minimum": 0, "description": "Context before"},
+            "context_after": {"type": "integer", "minimum": 0, "description": "Context after"},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Max results (default 200)"}
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+    })
 }
 
 /// Sink：按 searcher 的回调顺序收集匹配行与上下文行（顺序天然正确）。
@@ -127,264 +498,8 @@ fn path_within_workspace(abs: &std::path::Path, ws: &std::path::Path) -> bool {
     })
 }
 
-fn exec_grep(args: &serde_json::Value) -> ToolResult {
-    let pattern = args
-        .get("pattern")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim();
-    if pattern.is_empty() {
-        return ToolResult::error(
-            "grep: 'pattern' is required (regex, e.g. \"fn main\" or \"TODO|FIXME\")",
-        );
-    }
-    let max_results = args
-        .get("max_results")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .unwrap_or(DEFAULT_MAX_RESULTS)
-        .clamp(1, MAX_RESULTS_CAP);
-
-    // ── 匹配器（rg 同款：RegexMatcherBuilder）──────────────────────
-    let matcher = match RegexMatcherBuilder::new()
-        .case_insensitive(
-            !args
-                .get("case_sensitive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        )
-        .build(pattern)
-    {
-        Ok(m) => m,
-        Err(e) => {
-            return ToolResult::error(format!("grep: invalid regex {pattern:?}: {e}"));
-        }
-    };
-
-    let context_before = args
-        .get("context_before")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-    let context_after = args
-        .get("context_after")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-
-    // ── glob 过滤（rg -g 语义：positive 至少一个命中；`!` 前缀排除）──
-    let globs: Vec<String> = args
-        .get("glob")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    let (neg_globs, pos_globs): (Vec<&str>, Vec<&str>) = globs
-        .iter()
-        .map(|g| g.as_str())
-        .partition(|g| g.starts_with('!'));
-    let pos_matchers: Vec<globset::GlobMatcher> = pos_globs
-        .iter()
-        .filter_map(|g| {
-            globset::GlobBuilder::new(g)
-                .literal_separator(true)
-                .build()
-                .ok()
-        })
-        .map(|g| g.compile_matcher())
-        .collect();
-    let neg_matchers: Vec<globset::GlobMatcher> = neg_globs
-        .iter()
-        .filter_map(|g| {
-            globset::GlobBuilder::new(g.strip_prefix('!').unwrap_or(g))
-                .literal_separator(true)
-                .build()
-                .ok()
-        })
-        .map(|g| g.compile_matcher())
-        .collect();
-    let glob_filter = |rel: &str| -> bool {
-        // rg -g 是 gitignore 语义：不含 `/` 的模式（如 "*.rs"）匹配任意层级
-        // 的 basename；含 `/` 的模式匹配相对路径。
-        let basename = rel.rsplit('/').next().unwrap_or(rel);
-        let pos_hit = pos_matchers.is_empty()
-            || pos_matchers
-                .iter()
-                .any(|m| m.is_match(rel) || m.is_match(basename));
-        if !pos_hit {
-            return false;
-        }
-        !neg_matchers
-            .iter()
-            .any(|m| m.is_match(rel) || m.is_match(basename))
-    };
-
-    // ── workspace 边界 + 搜索根 ───────────────────────────────────
-    let ws = crate::current_workspace();
-    let ws = if ws.is_empty() { ".".to_string() } else { ws };
-    let ws_path = std::path::Path::new(&ws);
-    let strip_verbatim = |p: &std::path::Path| -> std::path::PathBuf {
-        let s = p.to_string_lossy();
-        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        std::path::PathBuf::from(s)
-    };
-    // canonicalize 在 Windows 返回 verbatim 前缀路径；剥掉后供边界检查与
-    // strip_prefix 共用（walker 产出的路径不带该前缀）。
-    let ws_abs = ws_path
-        .canonicalize()
-        .unwrap_or_else(|_| ws_path.to_path_buf());
-    let ws_abs = strip_verbatim(&ws_abs);
-
-    let mut roots: Vec<std::path::PathBuf> = Vec::new();
-    let raw_paths: Vec<&str> = match args.get("paths").and_then(|v| v.as_array()) {
-        Some(arr) => arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        None => Vec::new(),
-    };
-    if raw_paths.is_empty() {
-        roots.push(ws_abs.clone());
-    } else {
-        for p in &raw_paths {
-            let resolved = crate::resolve_workspace_path(p);
-            let resolved = std::path::Path::new(&resolved);
-            let abs = if resolved.is_absolute() {
-                resolved.to_path_buf()
-            } else {
-                ws_path.join(resolved)
-            };
-            // 相对路径提升为绝对（不碰文件系统），并词法解析 `..`——
-            // 否则 `ws/../../..` 的 starts_with(ws) 组件前缀检查会误放行。
-            let abs = std::path::absolute(&abs).unwrap_or(abs);
-            if !path_within_workspace(&abs, &ws_abs) {
-                return ToolResult::error(format!(
-                    "grep: path {p:?} resolves outside the workspace — search is workspace-bounded"
-                ));
-            }
-            roots.push(abs);
-        }
-    }
-
-    // ── 遍历 + 搜索（rg 同款：ignore 遍历 + Searcher 逐文件）────────
-    let mut searcher = SearcherBuilder::new()
-        .line_number(true)
-        .after_context(context_after)
-        .before_context(context_before)
-        .binary_detection(BinaryDetection::quit(b'\x00'))
-        .build();
-
-    let mut all_matches: Vec<MatchLine> = Vec::new();
-    let mut truncated = false;
-
-    'roots: for root in &roots {
-        let walker = ignore::WalkBuilder::new(root)
-            .standard_filters(true)
-            .require_git(false)
-            .build();
-        for entry in walker.flatten() {
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let path = entry.path();
-            let rel = path
-                .strip_prefix(&ws_abs)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            if !glob_filter(&rel) {
-                continue;
-            }
-            // max_results 是**全局**预算：先看已收集数，再给当前文件剩余配额。
-            let collected = all_matches.iter().filter(|m| !m.is_context).count();
-            if collected >= max_results {
-                truncated = true;
-                break 'roots;
-            }
-            let mut sink = CollectSink {
-                path: rel.clone(),
-                abs_path: path.to_string_lossy().into_owned(),
-                matches: Vec::new(),
-                max_matches: max_results - collected,
-                truncated: false,
-            };
-            // 忽略单个文件的 IO 错误（rg 行为：不可读文件跳过）。
-            let _ = searcher.search_path(&matcher, path, &mut sink);
-            if sink.truncated {
-                truncated = true;
-            }
-            all_matches.extend(sink.matches);
-            if truncated {
-                break 'roots;
-            }
-        }
-    }
-
-    // ── 输出 ──────────────────────────────────────────────────────
-    let match_count = all_matches.iter().filter(|m| !m.is_context).count();
-    let mut text = String::new();
-    for m in &all_matches {
-        if m.is_context {
-            text.push_str(&format!("{}-{}-{}\n", m.path, m.line, m.content));
-        } else {
-            text.push_str(&format!("{}:{}:{}\n", m.path, m.line, m.content));
-        }
-    }
-    if truncated {
-        text.push_str(&format!(
-            "... truncated at {max_results} matches (narrow the pattern, add glob filters, or set a higher max_results)\n"
-        ));
-    }
-    if text.is_empty() {
-        text = "(no matches)\n".to_string();
-    }
-
-    ToolResult::ok_data(
-        serde_json::json!({
-            "status": "ok",
-            "matches": all_matches
-                .iter()
-                .filter(|m| !m.is_context)
-                .map(|m| serde_json::json!({"path": m.path, "line": m.line, "content": m.content}))
-                .collect::<Vec<_>>(),
-            "truncated": truncated,
-            "count": match_count,
-        }),
-        text,
-    )
-}
-
-handler!(handle_grep, exec_grep);
-
-// ── Registration ──
-
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("grep", crate::display::project_grep);
-    mgr.register(ToolHandler {
-            key: "grep".to_string(),
-            description: "Search file contents with ripgrep regex. Returns path:line:content; filter files with glob.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Regex (rg syntax)"},
-                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Dirs to search"},
-                    "glob": {"type": "array", "items": {"type": "string"}, "description": "File filters (rg -g)"},
-                    "case_sensitive": {"type": "boolean", "default": false, "description": "Case-sensitive (default false)"},
-                    "context_before": {"type": "integer", "minimum": 0, "description": "Context before"},
-                    "context_after": {"type": "integer", "minimum": 0, "description": "Context after"},
-                    "max_results": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Max results (default 200)"}
-                },
-                "required": ["pattern"],
-                "additionalProperties": false
-            }),
-            handler: handle_grep,
-            risk: ToolRisk::ReadOnly,
-            category: crate::permission::ToolCategory::Read,
-            default_timeout: std::time::Duration::from_secs(60),
-        });
+    mgr.register_typed(GrepTool);
 }
 
 // ── Tests ──
@@ -392,96 +507,89 @@ pub fn register(mgr: &mut crate::ToolManager) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
-    /// 写 CURRENT_WORKSPACE 的测试必须串行（全局静态，并行测试会互相踩踏）。
-    static WS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn setup(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+    fn setup(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         for (name, content) in files {
-            let p = dir.path().join(name);
-            if let Some(parent) = p.parent() {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            std::fs::write(p, content).unwrap();
+            std::fs::write(path, content).unwrap();
         }
-        let ws = dir.path().to_string_lossy().to_string();
-        (dir, ws)
+        let root = dir.path().to_path_buf();
+        (dir, root)
     }
 
-    fn run(ws: &str, args: serde_json::Value) -> serde_json::Value {
-        // WS_LOCK 串行 grep_tool 内部；TEST_RUNTIME_SERIAL 与改写
-        // CURRENT_WORKSPACE 的其他模块测试（backend/workspace/authorization 等）
-        // 互斥——缺了它全量并行跑时会搜到真实仓库。
-        let _guard = WS_LOCK.lock().unwrap();
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws.to_string());
-        let result = exec_grep(&args);
-        let data = result.data.clone();
-        if data.as_object().is_none_or(|o| o.is_empty()) {
-            let raw = result.model_text();
-            let mut v = serde_json::from_str::<serde_json::Value>(raw).unwrap_or_default();
-            if v.get("code").is_none() {
-                v["status"] =
-                    serde_json::json!(if matches!(result.status, crate::ToolStatus::Ok) {
-                        "ok"
-                    } else {
-                        "error"
-                    });
-                v["raw"] = serde_json::json!(raw);
-            }
-            v
-        } else {
-            data
+    fn ctx(root: &Path) -> ToolCallContext {
+        ToolCallContext {
+            call_id: "grep-test".to_string(),
+            session_id: "grep-test-session".to_string(),
+            workspace_root: root.to_path_buf(),
+            mode: crate::tool_api::AgentMode::Code,
+            permission_level: crate::permission::PermissionLevel::ReadFree,
+            sandbox: crate::tool_api::SandboxMode::Main,
+            timeout: Duration::from_secs(60),
+            cancellation: crate::tool_api::CancellationToken::new(),
+            progress: None,
+            source: crate::tool_api::ToolCallSource::Model,
+        }
+    }
+
+    fn parse_args(args: serde_json::Value) -> GrepArgs {
+        serde_json::from_value(args).expect("valid grep args")
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(root: &Path, args: serde_json::Value) -> Result<GrepOutput, ToolExecutionError> {
+        GrepTool.run(&ctx(root), parse_args(args))
+    }
+
+    fn error_code(error: ToolExecutionError) -> String {
+        match error {
+            ToolExecutionError::Recoverable(error) => error.code.as_str().to_string(),
+            ToolExecutionError::Fatal(error) => error.code,
         }
     }
 
     #[test]
     fn basic_search_returns_path_line_content() {
-        let (_dir, ws) = setup(&[
+        let (_dir, root) = setup(&[
             ("src/a.rs", "fn alpha() {}\nlet x = 1;\n"),
             ("src/b.rs", "fn beta() {}\n"),
             ("README.md", "no code here\n"),
         ]);
-        let out = run(&ws, serde_json::json!({ "pattern": "fn \\w+" }));
-        assert_eq!(out["status"], "ok", "got: {out}");
-        assert_eq!(out["count"], 2);
-        let m = &out["matches"][0];
-        assert_eq!(m["line"], 1);
-        assert!(m["content"].as_str().unwrap().contains("fn "));
+        let output = run(&root, serde_json::json!({ "pattern": "fn \\w+" })).expect("grep");
+        assert_eq!(output.status, "ok");
+        assert_eq!(output.count, 2);
+        assert_eq!(output.matches[0].line, 1);
+        assert!(output.matches[0].content.contains("fn "));
     }
 
     #[test]
     fn case_insensitive_by_default_sensitive_when_requested() {
-        let (_dir, ws) = setup(&[("f.txt", "Hello\nworld\n")]);
-        let out = run(&ws, serde_json::json!({ "pattern": "hello" }));
-        assert_eq!(out["count"], 1, "got: {out}");
-        let out2 = run(
-            &ws,
+        let (_dir, root) = setup(&[("f.txt", "Hello\nworld\n")]);
+        let insensitive = run(&root, serde_json::json!({ "pattern": "hello" })).expect("grep");
+        assert_eq!(insensitive.count, 1);
+        let sensitive = run(
+            &root,
             serde_json::json!({ "pattern": "hello", "case_sensitive": true }),
-        );
-        assert_eq!(out2["count"], 0, "got: {out2}");
+        )
+        .expect("grep");
+        assert_eq!(sensitive.count, 0);
     }
 
     #[test]
     fn glob_filters_files() {
-        let (_dir, ws) = setup(&[("src/a.rs", "target\n"), ("src/a.md", "target\n")]);
-        let out = run(
-            &ws,
+        let (_dir, root) = setup(&[("src/a.rs", "target\n"), ("src/a.md", "target\n")]);
+        let output = run(
+            &root,
             serde_json::json!({ "pattern": "target", "glob": ["*.rs"] }),
-        );
-        assert_eq!(out["count"], 1, "got: {out}");
-        assert!(
-            out["matches"][0]["path"]
-                .as_str()
-                .unwrap()
-                .ends_with("a.rs")
-        );
+        )
+        .expect("grep");
+        assert_eq!(output.count, 1);
+        assert!(output.matches[0].path.ends_with("a.rs"));
     }
 
     #[test]
@@ -491,77 +599,139 @@ mod tests {
             .collect();
         let file_refs: Vec<(&str, &str)> = files
             .iter()
-            .map(|(n, c)| (n.as_str(), c.as_str()))
+            .map(|(name, content)| (name.as_str(), content.as_str()))
             .collect();
-        let (_dir, ws) = setup(&file_refs);
-        let out = run(
-            &ws,
+        let (_dir, root) = setup(&file_refs);
+        let output = run(
+            &root,
             serde_json::json!({ "pattern": "hit", "max_results": 5 }),
-        );
-        assert_eq!(out["count"], 5);
-        assert_eq!(out["truncated"], true);
+        )
+        .expect("grep");
+        assert_eq!(output.count, 5);
+        assert!(output.truncated);
+        assert!(output.model_text().contains("truncated at 5 matches"));
     }
 
     #[test]
     fn no_match_is_ok_with_zero_count() {
-        let (_dir, ws) = setup(&[("f.txt", "abc\n")]);
-        let out = run(&ws, serde_json::json!({ "pattern": "zzz" }));
-        assert_eq!(out["status"], "ok", "got: {out}");
-        assert_eq!(out["count"], 0);
+        let (_dir, root) = setup(&[("f.txt", "abc\n")]);
+        let output = run(&root, serde_json::json!({ "pattern": "zzz" })).expect("grep");
+        assert_eq!(output.status, "ok");
+        assert_eq!(output.count, 0);
+        assert_eq!(output.model_text(), "(no matches)\n");
     }
 
     #[test]
-    fn invalid_regex_reports_error() {
-        let (_dir, ws) = setup(&[("f.txt", "abc\n")]);
-        let out = run(&ws, serde_json::json!({ "pattern": "(" }));
-        assert_eq!(out["status"], "error", "got: {out}");
-        assert!(
-            out["raw"]
-                .as_str()
-                .is_some_and(|s| s.contains("invalid regex")),
-            "got: {out}"
-        );
+    fn invalid_regex_preserves_legacy_error_code() {
+        let (_dir, root) = setup(&[("f.txt", "abc\n")]);
+        let error = run(&root, serde_json::json!({ "pattern": "(" })).expect_err("invalid regex");
+        assert_eq!(error_code(error), "TOOL_ERROR");
+
+        let missing = run(&root, serde_json::json!({})).expect_err("missing pattern");
+        assert_eq!(error_code(missing), "TOOL_ERROR");
     }
 
     #[test]
-    fn context_lines_are_included() {
-        let (_dir, ws) = setup(&[("f.txt", "a\nTARGET\nc\n")]);
-        let out = run(
-            &ws,
+    fn context_lines_are_in_model_text_but_not_canonical_matches() {
+        let (_dir, root) = setup(&[("f.txt", "a\nTARGET\nc\n")]);
+        let output = run(
+            &root,
             serde_json::json!({ "pattern": "TARGET", "context_before": 1, "context_after": 1 }),
-        );
-        assert_eq!(out["count"], 1);
-        assert_eq!(out["matches"][0]["line"], 2);
+        )
+        .expect("grep");
+        assert_eq!(output.count, 1);
+        assert_eq!(output.matches.len(), 1);
+        assert_eq!(output.matches[0].line, 2);
+        let text = output.model_text();
+        assert!(text.contains("f.txt-1-a\n"), "got: {text}");
+        assert!(text.contains("f.txt:2:TARGET\n"), "got: {text}");
+        assert!(text.contains("f.txt-3-c\n"), "got: {text}");
     }
 
     #[test]
-    fn path_outside_workspace_rejected() {
-        let (_dir, ws) = setup(&[("f.txt", "abc\n")]);
-        let out = run(
-            &ws,
+    fn path_outside_workspace_rejected_with_legacy_code() {
+        let (_dir, root) = setup(&[("f.txt", "abc\n")]);
+        let error = run(
+            &root,
             serde_json::json!({ "pattern": "abc", "paths": ["../../.."] }),
-        );
-        assert_eq!(out["status"], "error", "got: {out}");
-        assert!(
-            out["raw"].as_str().is_some_and(|s| s.contains("workspace")),
-            "got: {out}"
-        );
+        )
+        .expect_err("outside path rejected");
+        assert_eq!(error_code(error), "TOOL_ERROR");
     }
 
     #[test]
     fn gitignored_files_are_skipped() {
-        let (_dir, ws) = setup(&[
+        let (_dir, root) = setup(&[
             ("keep.txt", "needle\n"),
             (".gitignore", "skip.txt\n"),
             ("skip.txt", "needle\n"),
         ]);
-        let out = run(&ws, serde_json::json!({ "pattern": "needle" }));
-        assert_eq!(out["count"], 1, "got: {out}");
+        let output = run(&root, serde_json::json!({ "pattern": "needle" })).expect("grep");
+        assert_eq!(output.count, 1);
+        assert!(output.matches[0].path.contains("keep.txt"));
+    }
+
+    #[test]
+    fn grep_registration_is_typed_and_descriptor_keeps_legacy_schema() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        let registered = manager.builtins.get("grep").expect("grep registered");
         assert!(
-            out["matches"][0]["path"]
-                .as_str()
-                .unwrap()
-                .contains("keep.txt")
+            registered.legacy.is_none(),
+            "grep must not use legacy executor"
+        );
+        assert_eq!(
+            registered.descriptor.input_schema["required"],
+            serde_json::json!(["pattern"])
+        );
+        assert_eq!(
+            registered.descriptor.input_schema["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(registered.descriptor.output_schema["type"], "object");
+    }
+
+    #[test]
+    fn grep_typed_output_and_display_share_the_same_text() {
+        let output = GrepOutput {
+            status: "ok".to_string(),
+            matches: vec![GrepMatch {
+                path: "src/a.rs".to_string(),
+                line: 7,
+                content: "TODO".to_string(),
+            }],
+            truncated: false,
+            count: 1,
+            lines: vec![MatchLine {
+                path: "src/a.rs".to_string(),
+                line: 7,
+                content: "TODO".to_string(),
+                is_context: false,
+            }],
+        };
+        let model = match output.model_blocks().into_iter().next() {
+            Some(ToolContentBlock::Text { text }) => text,
+            _ => panic!("grep output must have a text model block"),
+        };
+        assert_eq!(model, "src/a.rs:7:TODO\n");
+        let display = output.display(&serde_json::json!({
+            "pattern": "TODO",
+            "paths": ["src"]
+        }));
+        assert_eq!(display.summary.as_deref(), Some("src/a.rs:7:TODO"));
+        assert_eq!(
+            display.header,
+            ToolHeader::Query {
+                query: "TODO".to_string(),
+                scope: Some("src".to_string()),
+            }
+        );
+        assert_eq!(
+            display.body,
+            ToolBody::Text {
+                text: model,
+                truncated: false,
+            }
         );
     }
 }
