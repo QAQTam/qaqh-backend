@@ -131,25 +131,13 @@ fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecuti
     )
 }
 
-fn run_call(agent: &mut AgentState, seed: &str, call_id: &str, tool_name: &str) -> bool {
-    let args = serde_json::json!({"call": call_id});
-    let auth = match qaqh_workspace::authorize_call(seed, call_id, tool_name, &args, 4) {
-        qaqh_workspace::Admission::Authorized(auth) => auth,
-        qaqh_workspace::Admission::ApprovalRequired(_) => {
-            panic!("call {call_id} unexpectedly requires approval")
-        }
-        qaqh_workspace::Admission::Denied(reason) => {
-            panic!("call {call_id} was denied: {reason}")
-        }
-    };
-    let admitted = AdmittedTool {
-        call_id: call_id.to_string(),
-        auth: Box::new(auth),
-        scope: tool_scope(call_id, seed),
-    };
-    let order = vec![call_id.to_string()];
-    let serial = HashSet::new();
-    let cancel = CancelToken::new();
+fn run_admitted_batch(
+    agent: &mut AgentState,
+    admitted: AdmittedTool,
+    order: Vec<String>,
+    serial: HashSet<String>,
+    cancel: CancelToken,
+) -> bool {
     let emitter = RecordingEmitter::default();
     let mut phase = LoopPhase::ToolsRunning;
     let mut pending = PendingState::default();
@@ -175,6 +163,35 @@ fn run_call(agent: &mut AgentState, seed: &str, call_id: &str, tool_name: &str) 
         &serial,
         "turn-ledger",
         0,
+    )
+}
+
+fn admitted_call(seed: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
+    let args = serde_json::json!({"call": call_id});
+    let auth = match qaqh_workspace::authorize_call(seed, call_id, tool_name, &args, 4) {
+        qaqh_workspace::Admission::Authorized(auth) => auth,
+        qaqh_workspace::Admission::ApprovalRequired(_) => {
+            panic!("call {call_id} unexpectedly requires approval")
+        }
+        qaqh_workspace::Admission::Denied(reason) => {
+            panic!("call {call_id} was denied: {reason}")
+        }
+    };
+    AdmittedTool {
+        call_id: call_id.to_string(),
+        auth: Box::new(auth),
+        scope: tool_scope(call_id, seed),
+    }
+}
+
+fn run_call(agent: &mut AgentState, seed: &str, call_id: &str, tool_name: &str) -> bool {
+    let admitted = admitted_call(seed, call_id, tool_name);
+    run_admitted_batch(
+        agent,
+        admitted,
+        vec![call_id.to_string()],
+        HashSet::new(),
+        CancelToken::new(),
     )
 }
 
@@ -296,5 +313,42 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
     assert_eq!(
         blocked.error.as_ref().map(|error| error.code.as_str()),
         Some("LEDGER_BLOCKED")
+    );
+
+    // A serial tail cancelled before spawn must be sealed as Cancelled without
+    // leaving an orphan ToolIntent behind for recovery to interpret.
+    let cancelled_call = "call-ledger-cancelled-tail";
+    agent.msg = store_with_tool_use(&seed, cancelled_call, "ledger_probe");
+    let cancel = CancelToken::new();
+    cancel.set();
+    let serial = HashSet::from([cancelled_call.to_string()]);
+    assert!(
+        !run_admitted_batch(
+            &mut agent,
+            admitted_call(&seed, cancelled_call, "ledger_probe"),
+            vec![cancelled_call.to_string()],
+            serial,
+            cancel,
+        ),
+        "a pre-cancelled serial call must report an interrupted batch"
+    );
+    assert_eq!(
+        tool_result(&agent.msg, cancelled_call).status,
+        ToolStatus::Cancelled
+    );
+    let facts = CommittedFactReader::open(
+        &session_dir,
+        identity.session_id.clone(),
+        identity.log_id.clone(),
+    )
+    .and_then(|reader| reader.read_all())
+    .expect("read facts after cancelled tail");
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| matches!(fact.payload, FactPayload::ToolIntent(_)))
+            .count(),
+        1,
+        "cancelled serial tail must not append an orphan ToolIntent"
     );
 }
