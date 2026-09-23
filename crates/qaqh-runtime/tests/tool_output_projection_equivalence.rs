@@ -54,6 +54,10 @@ fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
         "the canonical output must carry the typed total"
     );
     assert!(
+        executed.result.display().is_some(),
+        "typed tools must persist the canonical display payload on ToolResult"
+    );
+    assert!(
         executed
             .result
             .model_text()
@@ -76,4 +80,11 @@ fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
             .is_some_and(|summary| summary.trim_start().starts_with('{')),
         "display summary must be human text, not raw JSON"
     );
+
+    let mut corrupted = executed.result.clone();
+    corrupted.set_model_projection("not-json and no longer canonical".into(), false);
+    let display =
+        qaqh_workspace::runtime::project_tool_display_from_result("todo_write", &args, &corrupted)
+            .expect("display must come from ToolResult.display, not model text");
+    assert_eq!(display.summary.as_deref(), Some(executed.result.summary()));
 }

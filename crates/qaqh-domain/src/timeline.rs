@@ -519,6 +519,9 @@ pub struct ToolResultDef {
         skip_serializing_if = "qaqh_types::ToolResultMetrics::is_empty"
     )]
     pub metrics: qaqh_types::ToolResultMetrics,
+    /// Canonical display projection carried by typed tool results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<qaqh_types::ToolResultDisplay>,
 }
 
 /// File metadata snapshot for rich rendering.

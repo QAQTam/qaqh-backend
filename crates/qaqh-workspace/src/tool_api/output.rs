@@ -11,9 +11,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use super::display::ToolDisplay;
+use super::display::{PathOp, ToolBody, ToolDisplay, ToolHeader, ToolMetrics};
 use super::error::ToolError;
-use qaqh_types::{ContentRef, ToolImage};
+use qaqh_types::{
+    ContentRef, ToolImage, ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader,
+    ToolResultDisplayPathOp,
+};
 
 pub use qaqh_types::ToolStatus;
 
@@ -178,7 +181,122 @@ impl ToolOutcome {
             effective_tool_name: self.metrics.effective_tool_name.clone(),
             user_initiated: self.metrics.user_initiated,
         };
+        if self.display != ToolDisplay::default() {
+            result = result.with_display(to_wire_display(&self.display));
+        }
         result
+    }
+}
+
+fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
+    ToolResultDisplay {
+        summary: display.summary.clone(),
+        diff: display.diff.clone(),
+        header: match &display.header {
+            ToolHeader::None => None,
+            ToolHeader::Path { path, op } => Some(ToolResultDisplayHeader::Path {
+                path: path.clone(),
+                op: match op {
+                    PathOp::Read => ToolResultDisplayPathOp::Read,
+                    PathOp::Write => ToolResultDisplayPathOp::Write,
+                    PathOp::Edit => ToolResultDisplayPathOp::Edit,
+                    PathOp::List => ToolResultDisplayPathOp::List,
+                    PathOp::Patch => ToolResultDisplayPathOp::Patch,
+                    PathOp::Delete => ToolResultDisplayPathOp::Delete,
+                },
+            }),
+            ToolHeader::Shell { command } => Some(ToolResultDisplayHeader::Shell {
+                command: command.clone(),
+            }),
+            ToolHeader::Query { query, scope } => Some(ToolResultDisplayHeader::Query {
+                query: query.clone(),
+                scope: scope.clone(),
+            }),
+            ToolHeader::Other { label } => Some(ToolResultDisplayHeader::Other {
+                label: label.clone(),
+            }),
+        },
+        body: match &display.body {
+            ToolBody::None => None,
+            ToolBody::Text { text, truncated } => Some(ToolResultDisplayBody::Text {
+                text: text.clone(),
+                truncated: *truncated,
+            }),
+            ToolBody::Diff { unified, files } => Some(ToolResultDisplayBody::Diff {
+                unified: unified.clone(),
+                files: files.clone(),
+            }),
+            ToolBody::Shell {
+                output,
+                exit_code,
+                truncated,
+            } => Some(ToolResultDisplayBody::Shell {
+                output: output.clone(),
+                exit_code: *exit_code,
+                truncated: *truncated,
+            }),
+            ToolBody::Subagent { name, seed } => Some(ToolResultDisplayBody::Subagent {
+                name: name.clone(),
+                seed: seed.clone(),
+            }),
+        },
+    }
+}
+
+pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
+    ToolDisplay {
+        summary: display.summary.clone(),
+        diff: display.diff.clone(),
+        header: match &display.header {
+            None => ToolHeader::None,
+            Some(ToolResultDisplayHeader::Path { path, op }) => ToolHeader::Path {
+                path: path.clone(),
+                op: match op {
+                    ToolResultDisplayPathOp::Read => PathOp::Read,
+                    ToolResultDisplayPathOp::Write => PathOp::Write,
+                    ToolResultDisplayPathOp::Edit => PathOp::Edit,
+                    ToolResultDisplayPathOp::List => PathOp::List,
+                    ToolResultDisplayPathOp::Patch => PathOp::Patch,
+                    ToolResultDisplayPathOp::Delete => PathOp::Delete,
+                },
+            },
+            Some(ToolResultDisplayHeader::Shell { command }) => ToolHeader::Shell {
+                command: command.clone(),
+            },
+            Some(ToolResultDisplayHeader::Query { query, scope }) => ToolHeader::Query {
+                query: query.clone(),
+                scope: scope.clone(),
+            },
+            Some(ToolResultDisplayHeader::Other { label }) => ToolHeader::Other {
+                label: label.clone(),
+            },
+        },
+        body: match &display.body {
+            None => ToolBody::None,
+            Some(ToolResultDisplayBody::None) => ToolBody::None,
+            Some(ToolResultDisplayBody::Text { text, truncated }) => ToolBody::Text {
+                text: text.clone(),
+                truncated: *truncated,
+            },
+            Some(ToolResultDisplayBody::Diff { unified, files }) => ToolBody::Diff {
+                unified: unified.clone(),
+                files: files.clone(),
+            },
+            Some(ToolResultDisplayBody::Shell {
+                output,
+                exit_code,
+                truncated,
+            }) => ToolBody::Shell {
+                output: output.clone(),
+                exit_code: *exit_code,
+                truncated: *truncated,
+            },
+            Some(ToolResultDisplayBody::Subagent { name, seed }) => ToolBody::Subagent {
+                name: name.clone(),
+                seed: seed.clone(),
+            },
+        },
+        metrics: ToolMetrics::default(),
     }
 }
 
