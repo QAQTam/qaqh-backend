@@ -19,7 +19,8 @@ pub mod capability;
 pub mod protocol;
 
 pub use capability::{Platform, SandboxBackend, SandboxCapabilities};
-pub use protocol::{NetworkPolicy, SandboxRequest, SandboxSpec};
+pub use protocol::SandboxRequest;
+pub use qaqh_policy::{NetworkPolicy, SandboxSpec};
 
 /// Hidden subcommand used when the daemon binary acts as its own helper.
 pub const HELPER_SUBCOMMAND: &str = "__qaqh-sandbox-exec";
