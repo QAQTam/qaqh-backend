@@ -20,7 +20,7 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::session_fact_v2::{
     EventId, ExecutionId, FactPayload, PolicyDecisionRef, SideEffectClass, ToolCallId, ToolIntent,
-    ToolIntentPolicyOutcome, ToolReplayCapability, ToolTerminalStatus,
+    ToolIntentPolicyOutcome, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
@@ -204,7 +204,10 @@ fn open_non_replay_intent_is_sealed_and_handler_never_runs() {
     setup
         .append_intent(
             EventId::new(generate_ulid()),
-            None,
+            Some(TurnId::new(format!(
+                "turn_{}",
+                ulid_from_text("turn-open-intent")
+            ))),
             ToolIntent {
                 call_id: canonical_call.clone(),
                 execution_id: ExecutionId::new(format!("exec_{}", generate_ulid())),
@@ -279,4 +282,13 @@ fn open_non_replay_intent_is_sealed_and_handler_never_runs() {
         ToolTerminalStatus::Indeterminate
     );
     assert_eq!(finished[0].call_id, canonical_call);
+    let expected_turn = format!("turn_{}", ulid_from_text("turn-open-intent"));
+    let finished_fact = facts
+        .iter()
+        .find(|fact| matches!(&fact.payload, FactPayload::ToolFinished(payload) if payload.call_id == canonical_call))
+        .expect("finished fact");
+    assert_eq!(
+        finished_fact.turn_id.as_ref().map(|turn| turn.as_str()),
+        Some(expected_turn.as_str())
+    );
 }

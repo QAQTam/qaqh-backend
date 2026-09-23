@@ -19,7 +19,7 @@ use qaqh_session::canonical::{
 use qaqh_session::session_fact_v2::{
     ContentRef, EventId, ExecutionId, PolicyDecisionRef, SideEffectClass, ToolCallId, ToolError,
     ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
-    ToolTerminalStatus,
+    ToolTerminalStatus, TurnId,
 };
 use qaqh_workspace::AuthorizedToolCall;
 use qaqh_workspace::ExecProgressEvent;
@@ -114,7 +114,7 @@ impl ToolRuntime {
         // right after the tool returns, so a kill between "tool ran" and "result
         // persisted" is still distinguishable from "tool never ran".
         let outbox_seed = ctx.agent.session.seed.clone();
-        let mut admitted = Self::prepare_admitted(ctx, admitted);
+        let mut admitted = Self::prepare_admitted(ctx, admitted, turn_id);
         admitted.sort_by_key(|(item, _)| {
             tool_call_order
                 .iter()
@@ -148,7 +148,7 @@ impl ToolRuntime {
                     ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
                 );
             }
-            let (progress_rx, runs) = Self::spawn_batch(ctx, batch, outbox_seed.clone());
+            let (progress_rx, runs) = Self::spawn_batch(ctx, batch, outbox_seed.clone(), turn_id);
             let cancelled = ctx.cancel.is_set();
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
 
@@ -223,7 +223,7 @@ impl ToolRuntime {
                 ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
             );
             let (progress_rx, runs) =
-                Self::spawn_batch(ctx, vec![(admitted, mode)], outbox_seed.clone());
+                Self::spawn_batch(ctx, vec![(admitted, mode)], outbox_seed.clone(), turn_id);
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
             for result in results {
                 match result.outcome {
@@ -278,6 +278,7 @@ impl ToolRuntime {
     fn prepare_admitted(
         ctx: &mut RingContext,
         admitted: Vec<AdmittedTool>,
+        wire_turn_id: &str,
     ) -> Vec<(AdmittedTool, ToolRunMode)> {
         let ledger = match ctx.agent.tool_ledger_mut() {
             Ok(Some(ledger)) => ledger,
@@ -356,7 +357,7 @@ impl ToolRuntime {
                 let finished = Self::indeterminate_finished(&call_id, &intent, now);
                 let message = match ledger.append_finished(
                     EventId::new(generate_ulid()),
-                    None,
+                    Some(canonical_turn_id(wire_turn_id)),
                     finished,
                     now,
                 ) {
@@ -384,6 +385,7 @@ impl ToolRuntime {
     fn prepare_one(
         ctx: &mut RingContext,
         item: &AdmittedTool,
+        wire_turn_id: &str,
     ) -> Result<Option<LedgerRun>, String> {
         let Some(ledger) = ctx
             .agent
@@ -399,7 +401,12 @@ impl ToolRuntime {
         let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
         let intent = Self::build_intent(item, &execution_id, now);
         ledger
-            .append_intent(EventId::new(generate_ulid()), None, intent, now)
+            .append_intent(
+                EventId::new(generate_ulid()),
+                Some(canonical_turn_id(wire_turn_id)),
+                intent,
+                now,
+            )
             .map_err(|error| format!("tool intent append failed: {error}"))?;
         Ok(Some(LedgerRun {
             execution_id,
@@ -481,6 +488,7 @@ impl ToolRuntime {
         call_id: &str,
         ledger_run: &LedgerRun,
         outcome: &ToolRunOutcome,
+        wire_turn_id: &str,
     ) -> Result<(), ToolLedgerError> {
         let Some(ledger) = ctx.agent.tool_ledger_mut()? else {
             return Ok(());
@@ -534,7 +542,12 @@ impl ToolRuntime {
             recovery_ref: None,
             finished_at_ms: now,
         };
-        ledger.append_finished(EventId::new(generate_ulid()), None, finished, now)?;
+        ledger.append_finished(
+            EventId::new(generate_ulid()),
+            Some(canonical_turn_id(wire_turn_id)),
+            finished,
+            now,
+        )?;
         Ok(())
     }
 
@@ -546,6 +559,7 @@ impl ToolRuntime {
         ctx: &mut RingContext,
         admitted: Vec<(AdmittedTool, ToolRunMode)>,
         outbox_seed: String,
+        wire_turn_id: &str,
     ) -> (Receiver<ExecProgressEvent>, Vec<ToolRun>) {
         let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
         let mut runs = Vec::with_capacity(admitted.len());
@@ -554,7 +568,7 @@ impl ToolRuntime {
             let call_id = admitted.call_id.clone();
             let tool_name = admitted.auth.tool_name().to_string();
             match mode {
-                ToolRunMode::Prepare => match Self::prepare_one(ctx, &admitted) {
+                ToolRunMode::Prepare => match Self::prepare_one(ctx, &admitted, wire_turn_id) {
                     Ok(ledger) => runs.push(Self::spawn(
                         call_id,
                         tool_name,
@@ -623,13 +637,17 @@ impl ToolRuntime {
             auth,
             scope: ToolExecutionScope::capture(context),
         };
-        let prepared = Self::prepare_admitted(ctx, vec![admitted]);
+        let prepared = Self::prepare_admitted(ctx, vec![admitted], turn_id);
         let (admitted, mode) = prepared
             .into_iter()
             .next()
             .expect("single admitted tool must produce one prepared call");
-        let (progress_rx, mut runs) =
-            Self::spawn_batch(ctx, vec![(admitted, mode)], ctx.agent.session.seed.clone());
+        let (progress_rx, mut runs) = Self::spawn_batch(
+            ctx,
+            vec![(admitted, mode)],
+            ctx.agent.session.seed.clone(),
+            turn_id,
+        );
         let run = runs
             .pop()
             .expect("single tool runtime run must produce one worker");
@@ -665,7 +683,8 @@ impl ToolRuntime {
                     Err(_) => ToolRunOutcome::Panicked,
                 };
                 if let Some(ledger_run) = ledger
-                    && let Err(error) = Self::append_finished(ctx, &call_id, &ledger_run, &outcome)
+                    && let Err(error) =
+                        Self::append_finished(ctx, &call_id, &ledger_run, &outcome, turn_id)
                 {
                     return ToolRunResult {
                         call_id,
@@ -724,6 +743,10 @@ impl ToolRuntime {
 
 fn canonical_call_id(wire_call_id: &str) -> ToolCallId {
     ToolCallId::new(format!("call_{}", ulid_from_text(wire_call_id)))
+}
+
+fn canonical_turn_id(wire_turn_id: &str) -> TurnId {
+    TurnId::new(format!("turn_{}", ulid_from_text(wire_turn_id)))
 }
 
 fn terminal_status(status: qaqh_types::ToolStatus) -> ToolTerminalStatus {
