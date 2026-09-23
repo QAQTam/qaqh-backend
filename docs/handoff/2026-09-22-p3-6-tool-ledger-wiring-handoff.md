@@ -1,11 +1,11 @@
 # P3-6 ToolLedger 生产接线 Handoff
 
 > 日期：2026-09-22
-> 状态：实现完成并通过本机全量测试；**尚未 commit / push / PR / merge**
+> 状态：实现完成并通过本机全量测试；已提交到本地分支 `feat/p3-tool-ledger-production-wiring`（`b286d96`），**尚未 push / PR / merge**
 > Issue：`QAQ-Harness/qaqh-backend#287`
 > Base：`betav2 @ 5ec1900`（P3-5 merge commit）
-> Branch：`p3-6-tool-ledger-wiring`
-> Worktree：`/home/qaqtamsy/项目/qaqh-backend-p3-6`
+> Branch：`feat/p3-tool-ledger-production-wiring`
+> Worktree：`/home/qaqtamsy/项目/qaqh-backend`
 
 ## 1. 本次目标
 
@@ -21,23 +21,13 @@
 
 ## 2. 当前代码状态
 
-工作区尚未提交。`git status --short` 预期包含：
+P3-6 已提交到本地分支 `feat/p3-tool-ledger-production-wiring`：
 
-```text
- M Cargo.lock
- M crates/qaqh-runtime/src/agent/engine_tool.rs
- M crates/qaqh-runtime/src/agent/state/agent.rs
- M crates/qaqh-runtime/src/agent/tool_runtime.rs
- M crates/qaqh-session/Cargo.toml
- M crates/qaqh-session/src/canonical/mod.rs
- M crates/qaqh-session/src/canonical/tool_ledger.rs
- M crates/qaqh-session/tests/tool_ledger.rs
-?? crates/qaqh-runtime/tests/tool_ledger_wiring.rs
-?? crates/qaqh-session/src/canonical/identity.rs
-?? docs/handoff/2026-09-22-p3-6-tool-ledger-wiring-handoff.md
-```
+- 基线格式修复：`7cf7833 style: apply rustfmt across workspace`
+- TypedTool 错误边界 Clippy 修复：`1bf017e fix(workspace): keep typed todo error boundary clippy-clean`
+- P3-6 功能提交：`b286d96 feat(session): wire ToolLedger into production execution`
 
-没有 main 工作区改动；主工作区仍是 `betav2 @ 5ec1900` 干净状态。
+当前 worktree 干净；`betav2 @ 5ec1900` 仍是远端基线。
 
 ## 3. 已实现内容
 
@@ -163,34 +153,29 @@ cargo clippy -p qaqh-session -p qaqh-runtime --all-targets -- -D warnings
 - `tool_ordering_contract`：6/6 passed，既有 ordering 行为未变。
 - `tool_ledger`：7/7 passed，新增 idle lease expiry reacquire 测试。
 
-最后一次验证后只做了一个跨平台 import 微调（`identity.rs` 的 unix-only `File` import）。提交前建议再跑一次：
+最终在基线格式与 Clippy 修复合并后，已重新执行并通过：
 
 ```bash
-rustfmt --edition 2024 \
-  crates/qaqh-session/src/canonical/identity.rs \
-  crates/qaqh-session/src/canonical/mod.rs \
-  crates/qaqh-session/src/canonical/tool_ledger.rs \
-  crates/qaqh-runtime/src/agent/state/agent.rs \
-  crates/qaqh-runtime/src/agent/tool_runtime.rs \
-  crates/qaqh-runtime/src/agent/engine_tool.rs \
-  crates/qaqh-runtime/tests/tool_ledger_wiring.rs
-cargo clippy -p qaqh-session -p qaqh-runtime --all-targets -- -D warnings
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
+
+沙箱内端口绑定测试会返回 `PermissionDenied`，属于执行环境限制；非沙箱复跑全量测试通过。
 
 ## 5. 尚未完成
 
-1. 提交当前 worktree 改动。
-2. push `p3-6-tool-ledger-wiring`。
-3. 提 PR，base 固定 `betav2`，标题建议：
+1. push `feat/p3-tool-ledger-production-wiring`。
+2. 提 PR，base 固定 `betav2`，标题建议：
    `P3-6：接通 canonical session identity 与 ToolLedger 生产执行边界`
-4. CNB `npc-auto-review` 仍可能因组织 CPU quota 在 `Prepare` 阶段失败；这不是代码失败。代码健康以本机 check/test/clippy 为准。
-5. 合并 PR 后回主工作区：
+3. CNB `npc-auto-review` 仍可能因组织 CPU quota 在 `Prepare` 阶段失败；这不是代码失败。代码健康以本机 fmt/check/test/clippy 为准。
+4. 合并 PR 后回主工作区：
    ```bash
    git fetch origin
    git merge --ff-only origin/betav2
    git worktree remove --force ../qaqh-backend-p3-6
    ```
-6. 关闭 issue #287。
+5. 关闭 issue #287。
 
 ## 6. P3-7 建议续点
 
