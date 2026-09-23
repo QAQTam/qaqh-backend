@@ -149,8 +149,20 @@ awk '/^pub use types::\{/,/^\};/' crates/qaqh-client/src/lib.rs \
 3. plan modal 渲染：
    - `item.title` 不变；
    - `item.complexity` 是 `String`，按字符串展示。当前 TUI 两处都是
-     `format!("{:?}", item.complexity)`（`src/ui/v2/modal.rs`、`src/ui/modal.rs`），
-     对 `String` 会渲染成带引号的 `"small"`——这是本次迁移唯一值得顺手改的渲染点；
+     `format!("{:?}", item.complexity)`，对 `String` 会渲染成带引号的 `"small"`：
+
+     ```rust
+     // qaqh-tui-app @ bbdcc3b — src/ui/v2/modal.rs（plan modal 的 todo 行）
+     Span::styled(
+         format!("  [{:?}] ", item.complexity),
+         Style::new().fg(theme.text.dim),
+     ),
+
+     // qaqh-tui-app @ bbdcc3b — src/ui/modal.rs（v1 modal 的同一行）
+     Span::styled(format!("  [{:?}] ", item.complexity), theme::dim()),
+     ```
+
+     改成 `{}` 即可（或按你自己的展示格式）；这是本次迁移唯一值得顺手改的渲染点；
    - 不要对 `small` / `medium` / `large` 做穷举 `match`——该值域目前只是注释级
      约定，schema 里没有 enum 约束。
 4. workspace todo 面板不改用 `PlanReviewItem`；继续消费 `DashboardTask`。
@@ -202,7 +214,8 @@ TUI 若只消费输出，不应依赖这些 alias。
 | 额外字段 | `mode` | — |
 | 计数细节 | `idle` 与 `pending` 是**同值双键**（都写同一个 pending 计数），不是两个计数 | 只有 `counts.idle` 一个来源 |
 | `items[]` | `{id,title,description,status,evidence}` | `{id,title,description,status,evidence}`（形状相同） |
-| 无 store / 空 seed | `null` | 仍返回信封（`items: []`、计数为 0） |
+| 无 store 文件 | `null` | 仍返回成功信封（`items: []`、计数为 0） |
+| 空 seed | `null` | **不返回信封**：`todo.list` 走 `&seed()?`，空 seed 直接是 `INVALID_INPUT` 错误信封 |
 
 所以 TUI 侧要两个解包器；`todo.status` 是 workspace todo 面板的回退数据源，
 `todo.list` 是工具侧 typed 输出，两者不是同一个契约的两种拼写。
