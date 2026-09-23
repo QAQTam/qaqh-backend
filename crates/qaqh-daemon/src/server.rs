@@ -289,8 +289,8 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         service: service.clone(),
         token: token.clone(),
         epoch: epoch.clone(),
-        debug_nonces: std::sync::Arc::new(crate::axum_server::DebugNonceStore::new()),
         shutdown: shutdown.clone(),
+        test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),
     };
     let app = crate::axum_server::build_router(app_state);
     let mut shutdown_rx = shutdown.subscribe();

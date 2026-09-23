@@ -15,28 +15,6 @@ pub(crate) fn content_hash(content: &str) -> String {
     hex::encode(Sha256::digest(content.as_bytes()))
 }
 
-/// Refuse an edit based on a stale read without changing the file.
-pub(super) fn verify_expected_hash(
-    path: &str,
-    content: &str,
-    expected: Option<&str>,
-) -> Result<(), String> {
-    let Some(expected) = expected.filter(|value| !value.is_empty()) else {
-        return Ok(());
-    };
-    let actual = content_hash(content);
-    if actual == expected {
-        return Ok(());
-    }
-    Err(serde_json::json!({
-        "timeis": crate::now_utc8(), "status": "error", "code": "STALE_FILE", "path": path,
-        "message": "File content changed since the referenced read",
-        "expected_hash": expected, "actual_hash": actual,
-        "hint": "Use read to obtain current content and hash, then retry the edit."
-    })
-    .to_string())
-}
-
 /// Write through a sibling temporary file, so a failed write never leaves a partially
 /// truncated destination. Rename is atomic on supported filesystems.
 pub(super) fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
@@ -304,11 +282,6 @@ impl PathGuardError {
                 Some("Use exec for devices/pipes, or read a regular file.".to_string())
             }
         }
-    }
-
-    pub(crate) fn into_tool_result(self) -> crate::ToolResult {
-        let (code, message, hint) = (self.code(), self.message(), self.hint());
-        crate::ToolResult::error_data(code, message, false, hint, serde_json::json!({}))
     }
 }
 

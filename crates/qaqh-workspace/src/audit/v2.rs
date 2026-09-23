@@ -65,6 +65,8 @@ static MONO_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Insta
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditKind {
+    /// 高风险副作用执行前写入的 durable intent barrier。
+    ToolIntent,
     /// 工具调用到达终态（成功/失败/取消/后台化）。
     ToolCall,
     /// 工具调用在授权或前置检查阶段被拒绝，未进入执行。
@@ -344,6 +346,9 @@ fn append_event_with_limit(root: &Path, event: Event, limit: u64) -> Result<Reco
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     file.write_all(payload.as_bytes())?;
+    // P4 A1: intent/terminal records are only acknowledged after content is
+    // durable. `sync_data` matches the WAL barrier choice (content, not metadata).
+    file.sync_data()?;
 
     {
         let mut chain = CHAIN.lock().unwrap_or_else(|p| p.into_inner());
@@ -762,10 +767,7 @@ mod tests {
 
     /// 清空进程内链缓存，模拟"新进程首次 append"的恢复路径。
     fn clear_chain_cache() {
-        CHAIN
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
+        CHAIN.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
     #[test]
@@ -851,7 +853,10 @@ mod tests {
         assert!(report.ok, "chain must survive rotation: {report:?}");
         assert_eq!(report.records, 4, "oldest generation is dropped by design");
         assert_eq!(report.first_seq, Some(2));
-        assert!(report.truncated_history, "seq starts above 1 after rotation");
+        assert!(
+            report.truncated_history,
+            "seq starts above 1 after rotation"
+        );
         assert_eq!(report.segments.len(), 4);
     }
 

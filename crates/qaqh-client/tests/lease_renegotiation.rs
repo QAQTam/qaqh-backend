@@ -15,7 +15,7 @@
 //! Run with:  cargo test -p qaqh-client --test lease_renegotiation -- --ignored
 //! Requires a compiled daemon binary: cargo build -p qaqh-daemon
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -46,8 +46,19 @@ async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
 
 // ── isolated test home ───────────────────────────────────────────────────
 
-/// Create a private `home\.qaqh` data root (Windows-validated layout:
-/// parent == home, dir name == ".qaqh") for this test's daemon + client.
+/// Resolve the isolated data root for a private test home.
+///
+/// Keep this aligned with `qaqh_types::platform::data_dir`: Windows uses
+/// `base\.qaqh`, while Unix uses `base/qaqh` and rejects any other leaf name.
+fn isolated_data_dir(base: &Path) -> PathBuf {
+    if cfg!(windows) {
+        base.join(".qaqh")
+    } else {
+        base.join("qaqh")
+    }
+}
+
+/// Create a private, platform-valid data root for this test's daemon + client.
 fn make_isolated_home() -> PathBuf {
     let base = std::env::temp_dir().join(format!(
         "qaqh-lease-test-{}-{}",
@@ -57,13 +68,14 @@ fn make_isolated_home() -> PathBuf {
             .map(|d| d.subsec_nanos())
             .unwrap_or(0)
     ));
-    let data = base.join(".qaqh");
+    let data = isolated_data_dir(&base);
     std::fs::create_dir_all(&data).expect("create isolated data root");
     base
 }
 
-fn cleanup_isolated_home(base: &PathBuf) {
+fn cleanup_isolated_home(base: &Path) {
     // Best effort: daemon may still hold handles right after kill.
+    let _ = std::fs::remove_dir_all(isolated_data_dir(base));
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -110,9 +122,9 @@ fn find_daemon_binary() -> PathBuf {
 /// in 3s, faster than the client's renewal cadence — forces the
 /// re-negotiation path) inside the isolated data root. Never touches the
 /// user's own daemon (separate discovery/lock/data dir).
-fn spawn_isolated_daemon(home: &PathBuf) -> Child {
+fn spawn_isolated_daemon(home: &Path) -> Child {
     let daemon = find_daemon_binary();
-    let data = home.join(".qaqh");
+    let data = isolated_data_dir(home);
 
     let child = Command::new(&daemon)
         .arg("run")
@@ -188,7 +200,7 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
     // 另一个测试改道。
     let _env = lock_env().await;
     let home = make_isolated_home();
-    let data = home.join(".qaqh");
+    let data = isolated_data_dir(&home);
 
     // Point this process's client at the same isolated data root (must be set
     // before any discovery read; the daemon child gets it via env too).
@@ -412,7 +424,7 @@ async fn activating_one_timeline_does_not_stop_another() {
     // 见 ENV_GUARD：同文件的另一个测试也用这个进程级变量。
     let _env = lock_env().await;
     let home = make_isolated_home();
-    let data = home.join(".qaqh");
+    let data = isolated_data_dir(&home);
     // SAFETY: 已持 ENV_GUARD，本进程内无其它并发读写。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);

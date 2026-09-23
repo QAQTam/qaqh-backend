@@ -48,6 +48,9 @@ fn init_file_logging() {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(qaqh_sandbox::HELPER_SUBCOMMAND) {
+        std::process::exit(qaqh_sandbox::helper_main());
+    }
     init_file_logging();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -57,6 +60,8 @@ fn main() {
             // 临时跨端模式：headless 监听局域网地址，供远端壳直连。
             qaqh_runtime::cache_system_path();
             qaqh_runtime::detect_os_info();
+            let capabilities = qaqh_sandbox::configure_from_current_exe();
+            log::info!("sandbox capabilities: {capabilities:?}");
             let config = match server::ServerNetworkConfig::parse(&args[1..]) {
                 Ok(config) => config,
                 Err(error) => {
@@ -82,6 +87,8 @@ fn main() {
             qaqh_runtime::cache_system_path();
             qaqh_runtime::detect_shell();
             qaqh_runtime::detect_os_info();
+            let capabilities = qaqh_sandbox::configure_from_current_exe();
+            log::info!("sandbox capabilities: {capabilities:?}");
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(server::run());
             // MCP 优雅收尾（同上）：显式 shutdown_all，防子进程孤儿。
@@ -91,13 +98,53 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("webui") => {
+            // Thin launcher for the independent gateway binary. Keeping the
+            // gateway out of this crate guarantees `run`/`server` do not link
+            // the browser asset tree.
+            std::process::exit(run_webui_gateway(&args[1..]));
+        }
         Some("todo") => std::process::exit(todo_cli(&args[1..])),
         Some("mcp") => std::process::exit(mcp_cli(&args[1..])),
         Some(command) => {
             eprintln!(
-                "unknown command: {command}; expected run, server, status, stop, todo, or mcp"
+                "unknown command: {command}; expected run, server, webui, status, stop, todo, or mcp"
             );
             std::process::exit(2);
+        }
+    }
+}
+
+fn run_webui_gateway(args: &[String]) -> i32 {
+    let current = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("qaqh-daemon webui: resolve current executable: {error}");
+            return 1;
+        }
+    };
+    let Some(directory) = current.parent() else {
+        eprintln!("qaqh-daemon webui: current executable has no parent directory");
+        return 1;
+    };
+    let name = if cfg!(windows) {
+        "qaqh-webui-gateway.exe"
+    } else {
+        "qaqh-webui-gateway"
+    };
+    let binary = directory.join(name);
+    if !binary.is_file() {
+        eprintln!(
+            "qaqh-daemon webui: gateway binary not found at {}; build it with `cargo build -p qaqh-webui-gateway`",
+            binary.display()
+        );
+        return 1;
+    }
+    match std::process::Command::new(&binary).args(args).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("qaqh-daemon webui: launch {}: {error}", binary.display());
+            1
         }
     }
 }

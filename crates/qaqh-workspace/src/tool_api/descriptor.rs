@@ -52,7 +52,9 @@ impl fmt::Display for ToolName {
 
 fn validate_name(raw: &str) -> Result<(), DescriptorError> {
     if raw.is_empty() {
-        return Err(DescriptorError::InvalidName { reason: "名称为空" });
+        return Err(DescriptorError::InvalidName {
+            reason: "名称为空"
+        });
     }
     if raw.len() > ToolName::MAX_LEN {
         return Err(DescriptorError::InvalidName {
@@ -205,7 +207,7 @@ impl ToolDescriptor {
                 field: "output_schema",
             });
         }
-        if self.default_timeout.is_zero() {
+        if self.default_timeout.is_zero() && !self.capabilities.interactive {
             return Err(DescriptorError::ZeroTimeout);
         }
         Ok(())

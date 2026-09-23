@@ -7,9 +7,12 @@
 //! Key design: a single admit() entry point for both UI and LLM paths.
 //! The old code had two separate code paths; now they converge here.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+use std::time::Duration;
 
+use super::approval_registry::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 use super::dashboard;
+use super::tool_runtime::{ToolRunOutcome, ToolRuntime};
 use crate::agent::state::agent::PendingApproval;
 use qaqh_domain::{AskMode, AskQuestion};
 
@@ -74,7 +77,7 @@ fn emit_timeline_tool_progress(
 
 pub struct ToolEngine {
     /// Pending permission approvals (keyed by tool_call_id).
-    pub(crate) pending: HashMap<String, PendingApproval>,
+    pub(crate) pending: ApprovalRegistry<PendingApproval>,
 }
 
 impl Default for ToolEngine {
@@ -86,7 +89,7 @@ impl Default for ToolEngine {
 impl ToolEngine {
     pub fn new() -> Self {
         Self {
-            pending: HashMap::new(),
+            pending: ApprovalRegistry::new(),
         }
     }
 
@@ -127,20 +130,21 @@ impl ToolEngine {
         tool_call_id: &str,
         name: &str,
         args: &str,
-        output: &str,
-        status: qaqh_types::ToolStatus,
-        metrics: &qaqh_types::ToolResultMetrics,
-        diff: Option<String>,
+        result: &qaqh_types::ToolResult,
     ) {
+        let output = result.model_text();
+        let status = result.status;
         let failure = status.is_failure().then(|| qaqh_domain::TimelineFailure {
             code: "TOOL_EXECUTION_FAILED".into(),
             message: output.to_string(),
         });
         let mut display = serde_json::from_str::<serde_json::Value>(args)
             .ok()
-            .and_then(|args| qaqh_workspace::runtime::project_tool_display(name, &args, output));
+            .and_then(|args| {
+                qaqh_workspace::runtime::project_tool_display_from_result(name, &args, result)
+            });
         if let Some(display) = display.as_mut() {
-            crate::timeline::apply_result_metrics(display, metrics);
+            crate::timeline::apply_result_metrics(display, &result.metrics);
         }
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
@@ -153,7 +157,7 @@ impl ToolEngine {
                     qaqh_domain::TimelineToolState::from(status),
                     Some(args.to_string()),
                     Some(output.to_string()),
-                    diff,
+                    result.diff.clone(),
                     failure,
                     display,
                 ),
@@ -185,15 +189,28 @@ impl ToolEngine {
             qaqh_lsp::sync_projection_now();
         }
 
-        match qaqh_workspace::authorize_call(
-            &ctx.agent.session.seed,
-            id,
-            &effective_name,
-            args,
+        let runtime = crate::agent::context::RuntimeContext::from_legacy_ambient(
+            ctx.agent.session.seed.clone(),
             ctx.agent.config.permission_level,
-        ) {
+            ctx.cancel.clone(),
+        );
+        let tool_context = runtime.tool_call_context(
+            id,
+            Duration::ZERO,
+            None,
+            qaqh_workspace::tool_api::ToolCallSource::User,
+        );
+        match qaqh_workspace::authorize_call_with_context(&effective_name, args, &tool_context) {
             qaqh_workspace::Admission::Authorized(authorized) => {
-                self.execute_and_emit(ctx, id, &effective_name, args, authorized, false);
+                self.execute_and_emit(
+                    ctx,
+                    id,
+                    &effective_name,
+                    args,
+                    authorized,
+                    false,
+                    tool_context,
+                );
             }
             qaqh_workspace::Admission::ApprovalRequired(challenge) => {
                 let cat_str = challenge.category().as_str().to_string();
@@ -314,9 +331,18 @@ impl ToolEngine {
         approved: bool,
         trust_folder: bool,
     ) -> PermissionDisposition {
-        let pending = match self.pending.remove(tool_call_id) {
-            Some(p) => p,
-            None => {
+        let pending = match self.pending.take(tool_call_id) {
+            ApprovalTake::Pending(pending) => pending,
+            ApprovalTake::AlreadyResolved(decision) => {
+                log::debug!(
+                    "[TOOL] duplicate permission response for {tool_call_id}: {}",
+                    decision.as_str()
+                );
+                return PermissionDisposition::AlreadyResolved {
+                    decision: decision.as_str().to_string(),
+                };
+            }
+            ApprovalTake::Missing => {
                 log::warn!("[TOOL] unknown permission response: {tool_call_id}");
                 return PermissionDisposition::Ignored;
             }
@@ -326,9 +352,12 @@ impl ToolEngine {
         let tool_name = pending.challenge.tool_name().to_string();
         let is_llm = pending.is_llm_tool;
         let resources = pending.challenge.resources().to_vec();
+        let tool_context = pending.challenge.context().clone();
 
         match pending.challenge.approve(approved) {
             Ok(authorized) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Approved);
                 if trust_folder {
                     for path in &resources {
                         qaqh_workspace::trust_folder(path.parent().unwrap_or(path));
@@ -337,18 +366,31 @@ impl ToolEngine {
                 if is_llm {
                     return PermissionDisposition::LlmResolved {
                         call_id: call_id.clone(),
-                        admitted: Some(AdmittedTool {
+                        admitted: Some(Box::new(AdmittedTool {
                             call_id,
                             auth: Box::new(authorized),
-                        }),
+                            scope: qaqh_workspace::runtime::ToolExecutionScope::capture(
+                                tool_context,
+                            ),
+                        })),
                     };
                 } else {
                     // UI tool: emit full result flow
                     let args = authorized.args().clone();
-                    self.execute_and_emit(ctx, &call_id, &tool_name, &args, authorized, true);
+                    self.execute_and_emit(
+                        ctx,
+                        &call_id,
+                        &tool_name,
+                        &args,
+                        authorized,
+                        true,
+                        tool_context,
+                    );
                 }
             }
             Err(qaqh_workspace::ApprovalError::Rejected) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Rejected);
                 if is_llm {
                     ctx.agent.msg.push_tool_result_direct(
                         &call_id,
@@ -360,6 +402,8 @@ impl ToolEngine {
                 }
             }
             Err(qaqh_workspace::ApprovalError::Expired) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Expired);
                 if is_llm {
                     ctx.agent.msg.push_tool_result_direct(
                         &call_id,
@@ -371,6 +415,8 @@ impl ToolEngine {
                 }
             }
             Err(qaqh_workspace::ApprovalError::MissingOrReplayed) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Expired);
                 log::warn!("[TOOL] replayed permission response: {call_id}");
                 if is_llm {
                     ctx.agent.msg.push_tool_result_direct(
@@ -406,6 +452,7 @@ impl ToolEngine {
         tools: &[qaqh_message::PendingTool],
         turn_id: &str,
         round_num: u32,
+        turn_context: &crate::agent::context::TurnContext,
     ) -> BatchAdmission {
         let mut authorized = Vec::new();
         let mut pending_permission_ids = Vec::new();
@@ -423,12 +470,16 @@ impl ToolEngine {
             // 权限准入 / prepare_req / handler 全部走内部注册 key（模型面名称
             // 与内部 key 恒等，历史投影已随 minimal:dsh 下线移除）。
             let effective_name = tool.name.as_str();
-            match qaqh_workspace::authorize_call(
-                &ctx.agent.session.seed,
-                &tool.id,
+            let tool_context = turn_context.runtime().tool_call_context(
+                tool.id.clone(),
+                Duration::ZERO,
+                None,
+                qaqh_workspace::tool_api::ToolCallSource::Model,
+            );
+            match qaqh_workspace::authorize_call_with_context(
                 effective_name,
                 &tool.args,
-                ctx.agent.config.permission_level,
+                &tool_context,
             ) {
                 qaqh_workspace::Admission::Authorized(auth) => {
                     if auth.tool_name() == "ask" {
@@ -469,6 +520,9 @@ impl ToolEngine {
                         authorized.push(AdmittedTool {
                             call_id: tool.id.clone(),
                             auth: Box::new(auth), // Box to reduce enum size
+                            scope: qaqh_workspace::runtime::ToolExecutionScope::capture(
+                                tool_context,
+                            ),
                         });
                     }
                 }
@@ -586,6 +640,7 @@ impl ToolEngine {
     // ═══════════════════════════════════════════════════
 
     /// Execute an authorized tool call and emit full result flow.
+    #[allow(clippy::too_many_arguments)]
     fn execute_and_emit(
         &mut self,
         ctx: &mut RingContext,
@@ -594,6 +649,7 @@ impl ToolEngine {
         args: &serde_json::Value,
         authorized: qaqh_workspace::AuthorizedToolCall,
         approved: bool,
+        tool_context: qaqh_workspace::tool_api::ToolCallContext,
     ) {
         let turn_id = format!("tc_{id}");
 
@@ -662,38 +718,40 @@ impl ToolEngine {
                 },
             ));
 
-        // Spawn tool thread
-        let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        let tool_id = id.to_string();
-        // Tool workers run on spawned threads: carry the actor's per-actor tool
-        // scope so concurrent actors stay isolated.
-        let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
-        let handle = std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
-            .spawn(move || {
-                let _scope = actor_scope.install();
-                let result =
-                    qaqh_workspace::execution::execute_authorized(authorized, Some(progress_tx));
+        // Spawn tool thread through the shared runtime boundary.
+        let run = ToolRuntime::run_authorized(
+            ctx,
+            self,
+            id.to_string(),
+            name.to_string(),
+            Box::new(authorized),
+            tool_context,
+            &turn_id,
+            0,
+        );
+        let (tid, mut result, code_delta, skill_effects) = match run.outcome {
+            ToolRunOutcome::Completed(result) => {
+                let result = *result;
                 (
-                    tool_id,
+                    run.call_id,
                     result.result,
                     result.code_delta,
                     result.skill_effects,
                 )
-            })
-            .expect("failed to spawn tool thread");
-
-        // Drain progress（tool_done 有界收尾，冻结事故 P0，见 drain_bounded）
-        self.drain_progress_external(ctx, progress_rx, &turn_id, 0, || handle.is_finished());
-
-        let (tid, mut result, code_delta, skill_effects) = handle.join().unwrap_or_else(|_| {
-            (
+            }
+            ToolRunOutcome::Panicked => (
                 id.to_string(),
                 qaqh_types::ToolResult::error("[ERROR] tool thread panicked"),
                 None,
                 Vec::new(),
-            )
-        });
+            ),
+            ToolRunOutcome::LedgerFailed(message) => (
+                id.to_string(),
+                qaqh_types::ToolResult::error_with("LEDGER_WRITE_FAILED", message, false, None),
+                None,
+                Vec::new(),
+            ),
+        };
         // UI 直调路径：用户发起（权限批准后的续跑同属 UI 路径）。
         result.metrics.user_initiated = true;
         let output = result.model_text().to_string();
@@ -740,6 +798,11 @@ impl ToolEngine {
         // 展示平面 diff / metrics：先取出（ToolFinished 会 move 整个 result）。
         let display_diff = result.diff.clone();
         let result_metrics = result.metrics.clone();
+        let mut display =
+            qaqh_workspace::runtime::project_tool_display_from_result(name, args, &result);
+        if let Some(display) = display.as_mut() {
+            crate::timeline::apply_result_metrics(display, &result_metrics);
+        }
 
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
             qaqh_domain::ToolEvent::ToolFinished {
@@ -754,10 +817,6 @@ impl ToolEngine {
             code: "TOOL_EXECUTION_FAILED".into(),
             message: output.clone(),
         });
-        let mut display = qaqh_workspace::runtime::project_tool_display(name, args, &output);
-        if let Some(display) = display.as_mut() {
-            crate::timeline::apply_result_metrics(display, &result_metrics);
-        }
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
                 turn_id: turn_id.clone(),
@@ -884,18 +943,8 @@ impl ToolEngine {
                     )),
                 });
         }
-        Self::emit_timeline_tool_result(
-            ctx,
-            &turn_id,
-            0,
-            call_id,
-            tool_name,
-            args_json,
-            &output,
-            qaqh_types::ToolStatus::Error,
-            &qaqh_types::ToolResultMetrics::default(),
-            None,
-        );
+        let result = qaqh_types::ToolResult::error(output.clone());
+        Self::emit_timeline_tool_result(ctx, &turn_id, 0, call_id, tool_name, args_json, &result);
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
                 turn_id: turn_id.clone(),
@@ -999,10 +1048,13 @@ pub struct BatchAdmission {
 
 pub enum PermissionDisposition {
     Ignored,
+    AlreadyResolved {
+        decision: String,
+    },
     UiHandled,
     LlmResolved {
         call_id: String,
-        admitted: Option<AdmittedTool>,
+        admitted: Option<Box<AdmittedTool>>,
     },
 }
 

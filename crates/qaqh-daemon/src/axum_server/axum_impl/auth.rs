@@ -1,12 +1,20 @@
 //! axum_impl::auth — see parent module docs.
 
 use super::*;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 pub(crate) fn is_authorized(headers: &HeaderMap, token: &str) -> bool {
-    headers
+    let Some(provided) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == format!("Bearer {token}"))
+    else {
+        return false;
+    };
+    let expected = format!("Bearer {token}");
+    let provided_digest = Sha256::digest(provided.as_bytes());
+    let expected_digest = Sha256::digest(expected.as_bytes());
+    bool::from(provided_digest.ct_eq(&expected_digest))
 }
 
 pub(crate) fn unauthorized() -> Response {
@@ -57,4 +65,36 @@ pub(crate) fn publish_session_created(hub: &RingingHub, seed: &str, command_id: 
         }),
         Some(command_id),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorization_rejects_prefix_length_and_scheme_variants() {
+        let token = "0123456789abcdef";
+        let mut headers = HeaderMap::new();
+        assert!(!is_authorized(&headers, token));
+
+        for value in [
+            format!("Bearer {token}x"),
+            "Bearer 0123456789abcde".to_string(),
+            format!("bearer {token}"),
+            format!("Token {token}"),
+            format!("Bearer  {token}"),
+        ] {
+            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+            assert!(
+                !is_authorized(&headers, token),
+                "must reject malformed authorization header {value:?}"
+            );
+        }
+
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        assert!(is_authorized(&headers, token));
+    }
 }

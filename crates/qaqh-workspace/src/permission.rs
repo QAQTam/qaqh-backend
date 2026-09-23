@@ -10,57 +10,12 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 // ──────────────────────────────────────
-// Tool category taxonomy
+// Policy vocabulary
 // ──────────────────────────────────────
 
-/// Risk profile for each tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolCategory {
-    /// No side effects: read, search, skills, image, ask, process(check/wait),
-    /// and read-only git queries.
-    Read,
-    /// Mutates files or session state: edit, task, and write-oriented git
-    /// operations.
-    Write,
-    /// Executes arbitrary code or controls a running process: exec, process(kill/write).
-    Exec,
-    /// Outbound network: web_fetch.
-    Net,
-}
-
-/// Intrinsic impact of the requested action, independent of the configured
-/// permission policy level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionRisk {
-    Low,
-    Medium,
-    High,
-}
-
-impl PermissionRisk {
-    pub fn consequence(self) -> &'static str {
-        match self {
-            Self::Low => "Reads data without changing it.",
-            Self::Medium => "Changes files inside the current workspace.",
-            Self::High => "May affect external resources or execute arbitrary actions.",
-        }
-    }
-}
+pub use qaqh_policy::{PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory};
 
 /// Classify action impact from authoritative category and normalized resources.
-impl ToolCategory {
-    /// Stable lowercase tag used by timeline/UI payloads (was the loop's
-    /// private `category_str`, PR-1-1).
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ToolCategory::Read => "read",
-            ToolCategory::Write => "write",
-            ToolCategory::Exec => "exec",
-            ToolCategory::Net => "net",
-        }
-    }
-}
-
 pub fn classify_risk(
     category: ToolCategory,
     paths: &[PathBuf],
@@ -83,89 +38,6 @@ pub fn classify_risk(
         ToolCategory::Read => PermissionRisk::Low,
         ToolCategory::Write => PermissionRisk::Medium,
         ToolCategory::Exec | ToolCategory::Net => PermissionRisk::High,
-    }
-}
-
-// ──────────────────────────────────────
-// Permission level
-// ──────────────────────────────────────
-
-/// Agent operating permission level (1–4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum PermissionLevel {
-    /// Level 1: Every tool call requires user confirmation.
-    MaxLockdown = 1,
-    /// Level 2: Workspace reads auto-approve; writes, exec, net require confirmation.
-    ReadFree = 2,
-    /// Level 3: Workspace all auto-approve; cross-workspace writes require one-time folder trust.
-    WorkspaceFree = 3,
-    /// Level 4: Dangerous bypass. Ordinary tools auto-approve; exec may
-    /// escape the workspace until the sandbox is introduced.
-    Unrestricted = 4,
-}
-
-impl PermissionLevel {
-    /// Lenient scalar parser: legal levels (1..=4) map to themselves; **any**
-    /// other value conservatively degrades to [`Self::MaxLockdown`].
-    ///
-    /// BUG-2026-09-13-15: this used to fall through to `Self::Unrestricted`,
-    /// i.e. a typo in `config.toml` (`permission_level = 0`) silently granted
-    /// every tool call a free pass — a fail-open that *amplified* privilege.
-    /// The fallback is now the most restrictive level (fail-closed), matching
-    /// the project's "degrade explicitly, toward fail-closed" rule.
-    ///
-    /// Callers that must distinguish "invalid" from "explicitly MaxLockdown"
-    /// should use [`Self::try_from_u8`].
-    pub fn from_u8(v: u8) -> Self {
-        Self::try_from_u8(v).unwrap_or(Self::MaxLockdown)
-    }
-
-    /// Strict scalar parser: rejects anything outside the documented `1..=4`
-    /// range so configuration write/load ports can fail fast or normalize.
-    pub fn try_from_u8(v: u8) -> Result<Self, String> {
-        match v {
-            1 => Ok(Self::MaxLockdown),
-            2 => Ok(Self::ReadFree),
-            3 => Ok(Self::WorkspaceFree),
-            4 => Ok(Self::Unrestricted),
-            other => Err(format!(
-                "invalid permission level {other} (must be 1-4: 1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree, 4=Unrestricted)"
-            )),
-        }
-    }
-
-    /// Whether `v` is a documented permission level (`1..=4`).
-    pub fn is_valid_u8(v: u8) -> bool {
-        (1..=4).contains(&v)
-    }
-
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::MaxLockdown => "Level 1 — Maximum Lockdown",
-            Self::ReadFree => "Level 2 — Read Free",
-            Self::WorkspaceFree => "Level 3 — Workspace Free",
-            Self::Unrestricted => "Level 4 — Unrestricted",
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::MaxLockdown => "All operations require confirmation. No automatic trust.",
-            Self::ReadFree => {
-                "Reads auto-approve. Writes, execution, and network require confirmation."
-            }
-            Self::WorkspaceFree => {
-                "Auto-approve within workspace. Cross-workspace writes are trusted once per folder."
-            }
-            Self::Unrestricted => {
-                "Dangerous bypass: ordinary tools auto-approve; exec may escape the workspace until sandboxing lands."
-            }
-        }
     }
 }
 
@@ -465,25 +337,7 @@ pub(crate) fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool 
 // Permission decision
 // ──────────────────────────────────────
 
-/// Result of `needs_permission()`: either auto-approve or request confirmation.
-#[derive(Debug)]
-pub enum PermissionDecision {
-    /// No confirmation needed — execute immediately.
-    AutoApprove,
-    /// Confirmation required. Contains the reason and target paths for the dialog.
-    AskUser {
-        /// Human-readable reason for the dialog (e.g. "Write to external path").
-        reason: String,
-        /// Paths to display in the dialog.
-        paths: Vec<PathBuf>,
-        /// Whether the tool is Read/Write/Exec/Net.
-        category: ToolCategory,
-        /// Intrinsic impact of this action, independent of policy level.
-        risk: PermissionRisk,
-        /// User-facing description of the effect of approving the action.
-        consequence: String,
-    },
-}
+// `PermissionDecision` is re-exported above from `qaqh-policy`.
 
 /// Whether `path` points at the agent's own persistent state (history /
 /// credentials under the platform data dir). Blocked from normal `read`

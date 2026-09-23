@@ -11,6 +11,7 @@ qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-runtime = { path = "../qaqh-runtime" }
+qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
@@ -18,16 +19,20 @@ log = { version = "0.4", features = ["std"] }
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+subtle = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 axum = { version = "0.8" }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["trace", "fs", "limit", "cors", "set-header", "util"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
-rust-embed = "8"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 default = ["memory"]
