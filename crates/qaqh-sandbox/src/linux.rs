@@ -24,7 +24,7 @@ use seccompiler::{
     TargetArch,
 };
 
-use crate::protocol::{NetworkPolicy, SandboxRequest};
+use crate::{NetworkPolicy, protocol::SandboxRequest};
 
 #[derive(Debug)]
 pub enum SandboxError {

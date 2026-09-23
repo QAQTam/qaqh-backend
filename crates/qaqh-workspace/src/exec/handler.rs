@@ -223,7 +223,7 @@ fn run_exec(
         .map(|env| env.into_iter().collect())
         .filter(|pairs: &Vec<(String, String)>| !pairs.is_empty());
     let cancel = ctx.cancellation.shared_flag();
-    let sandbox = qaqh_sandbox::SandboxSpec::workspace_write(ctx.workspace_root.clone());
+    let sandbox = ctx.sandbox_spec();
 
     let mut result = direct_exec_sandboxed(
         &argv,
