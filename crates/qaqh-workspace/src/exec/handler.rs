@@ -256,6 +256,14 @@ fn context_from_legacy(ctx: &ToolCallCtx) -> ToolCallContext {
     } else {
         PathBuf::from(workspace)
     };
+    // Legacy unit tests share process-global workspace state; a prior tempdir
+    // may already be gone. Keep the test adapter executable by falling back to
+    // the repository cwd instead of handing a stale root to the sandbox.
+    let workspace_root = if workspace_root.exists() {
+        workspace_root
+    } else {
+        std::env::current_dir().unwrap_or(workspace_root)
+    };
     ToolCallContext {
         call_id: ctx.id.clone(),
         session_id: crate::current_session().unwrap_or_default(),
