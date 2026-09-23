@@ -22,10 +22,21 @@
 //! # 内存回放尾预算
 //!
 //! `TimelineAppender` 的内存 journal 是 SSE 断线重连的补帧窗口，不是持久
-//! 层：超过 [`MAX_TIMELINE_JOURNAL_ENTRIES`] 从头部驱逐最老条目，turn seal
-//! 时即时裁剪该 turn 的全部条目（快照已物化，无需保留）。被驱逐区间的
-//! 重连走 `TimelineGap` → 客户端 `recover_gap` 快照重基线——这是 Phase 0
-//! 已明确接受的代价（"最后几秒未落盘可接受，因为丢得起"）。
+//! 层：超过 [`MAX_TIMELINE_JOURNAL_ENTRIES`] 或 [`MAX_TIMELINE_JOURNAL_BYTES`]
+//! 就从头部驱逐最老条目。被驱逐区间的重连走 `TimelineGap` → 客户端
+//! `recover_gap` 快照重基线——这是 Phase 0 已明确接受的代价（"最后几秒未
+//! 落盘可接受，因为丢得起"）。
+//!
+//! ⚠ **2026-09-23 起不再在 turn seal 时裁剪该 turn 的条目**（#314）。原论据是
+//! 「sealed 内容已在快照内物化，回放不再需要」，但它在**回合中途重基线**时不
+//! 成立：客户端 gap 恢复取到的快照可能落在该 turn 内，此后要靠 `seq > watermark`
+//! 的条目把这个回合补完；若这些条目在 seal 时被裁掉、而重连又晚于它们的 live
+//! 投递，客户端就**永远收不到 `TurnSealed`**，回复不渲染。
+//!
+//! 代价是**稳态占用**：journal 不再每回合收缩，而是常驻在双限附近
+//! （8192 条 / 256 MB per seed，见下）。另注意持久化侧
+//! [`super::hub::RingingHub::prune_sealed_timeline_journal`] 仍会丢弃已 seal
+//! 回合的条目，因此**跨 daemon 重启**的重连依旧走快照重基线。
 
 /// timeline 内存回放尾的硬上限（条目数）。
 ///
@@ -85,7 +96,8 @@ pub fn is_snapshot_persisted(event: &qaqh_domain::TimelineEvent) -> bool {
 ///
 /// TextDelta 是回放尾的主要体积来源（逐 token），但也是重连补帧的
 /// 主要内容——保留（受 [`MAX_TIMELINE_JOURNAL_ENTRIES`] 约束），
-/// 由 seal 裁剪 + 头部驱逐控制上界。
+/// 上界由双限（条数 + 字节）头部驱逐控制。seal 裁剪已于 2026-09-23 移除
+/// （#314：回合中途重基线要靠 seal 后的条目补完），故这里不再有第二道收缩。
 pub fn occupies_replay_tail(event: &qaqh_domain::TimelineEvent) -> bool {
     let _ = event;
     true

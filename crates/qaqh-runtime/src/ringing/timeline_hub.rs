@@ -314,8 +314,25 @@ impl RingingHub {
                 drop(appender);
             }
             None => {
-                // 无快照 → BUG-006：从 messages.jsonl / compact-context 重建投影。
-                if self.rebuild_timeline_from_messages(seed) {
+                // 无快照。BUG-006 的重建是给「**已有历史**但 timeline 文件缺失/
+                // 损坏」用的恢复路径，不是给新会话用的。
+                //
+                // #42：新会话首个回合开始时，`messages.jsonl` 里已经有**正在进行
+                // 的**首条用户消息，而 timeline 文件还没落盘 → 这里会重建出一个
+                // 「只有用户文本、没有任何 block」的空回合。该回合随即被 seal，
+                // 而 `seal_turn_with_state` 的**即时裁剪**会把它的 journal 条目
+                // 全部删掉（设计如此：sealed 内容已在快照里物化）。结果是
+                // `restore(watermark=2, journal=[])`：**seq 1、2 被吃掉，却既没
+                // live 投递、也不在 journal 里**，随后真正的 live 回合只能从
+                // seq 3 起 —— 客户端 cursor=0 按 `cursor + 1` 判 gap，进入
+                // gap→快照恢复循环，transcript 永不渲染。
+                //
+                // `meta.turn_count` 是**已完成**回合数的权威值：为 0 说明这个
+                // seed 没有任何可恢复的历史，交给 live 路径物化即可，绝不能
+                // 在这里凭空消耗 seq 空间。取不到 meta 时保守按 0 处理（同样
+                // 没有可恢复的历史，且 live 路径始终会写）。
+                let completed_turns = self.persisted_turn_count(seed).unwrap_or(0);
+                if completed_turns > 0 && self.rebuild_timeline_from_messages(seed) {
                     self.enable_turn_offload(seed);
                 }
                 return;

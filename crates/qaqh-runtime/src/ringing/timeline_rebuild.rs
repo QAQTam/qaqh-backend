@@ -477,11 +477,19 @@ mod tests {
             .expect("snapshot rebuilt");
         assert_eq!(snapshot.turns.len(), 1);
         assert!(snapshot.watermark > 0);
-        // seal 即时裁剪语义：重建的历史 turn 已 seal，回放尾为空；
+        // #314（2026-09-23 契约变更）：seal **不再**裁剪回放尾，重建出的已 seal
+        // 历史 turn 的条目同样保留在 journal 里（上界由双限驱逐控制）。
         // watermark 由快照独立持有，条目数断言不再适用。
         assert!(
-            journal.is_empty(),
-            "rebuilt sealed turns leave an empty replay tail"
+            !journal.is_empty(),
+            "rebuilt sealed turns keep their replay tail (#314)"
+        );
+        assert!(
+            matches!(
+                journal.last().map(|entry| &entry.event),
+                Some(qaqh_domain::TimelineEvent::TurnSealed { .. })
+            ),
+            "回放尾必须收在 TurnSealed 上"
         );
         assert!(
             snapshot.watermark >= 12,
