@@ -8,9 +8,11 @@
 use std::collections::HashSet;
 
 use crate::agent::engine_tool::ToolEngine;
+use crate::agent::engine_turn::TurnEngine;
+use crate::agent::state::agent::AgentState;
 use crate::agent::tool_runtime::ToolBatchOrigin;
 use crate::agent::turn_actor::TurnActor;
-use crate::agent::types::{AdmittedTool, RingContext};
+use crate::agent::types::{AdmittedTool, Outcome, RingContext, TurnState, YieldReason};
 
 /// Execute an admitted batch through the production runtime with a fresh
 /// active actor, matching the normal (non-resume) production call shape.
@@ -38,4 +40,52 @@ pub fn execute_admitted_batch(
         turn_id,
         round_num,
     )
+}
+
+/// Exercise the production yield observer and durable interaction-request
+/// write path from integration tests.
+pub fn observe_yield_for_test(
+    engine: &mut TurnEngine,
+    agent: &mut AgentState,
+    turn_id: &str,
+    input_id: &str,
+    pending_call_id: &str,
+) -> Result<(), String> {
+    engine
+        .begin_input(turn_id, input_id)
+        .map_err(|error| error.to_string())?;
+    engine.suspended = Some(TurnState {
+        session_id: agent.session.seed.clone(),
+        turn_id: turn_id.to_string(),
+        round_num: 0,
+        pending_permission_ids: vec![pending_call_id.to_string()],
+        deferred_authorized: Vec::new(),
+        tool_call_order: vec![pending_call_id.to_string()],
+        serial_call_ids: HashSet::new(),
+        pending_asks: std::collections::VecDeque::new(),
+        pending_plans: std::collections::VecDeque::new(),
+        pending_todo_activation: None,
+        usage: None,
+        reason: YieldReason::PermissionPending,
+    });
+    engine
+        .observe_outcome(
+            agent,
+            &Outcome::YieldToUser {
+                turn_id: turn_id.to_string(),
+                reason: YieldReason::PermissionPending,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// Exercise the production interaction-resolution write path from integration
+/// tests.
+pub fn record_interaction_resolution_for_test(
+    agent: &mut AgentState,
+    interaction_id: &str,
+    decision: &str,
+) -> Result<(), String> {
+    TurnEngine::record_interaction_resolution(agent, interaction_id, decision)
+        .map_err(|error| error.to_string())
 }
