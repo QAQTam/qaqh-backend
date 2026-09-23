@@ -46,7 +46,9 @@ pub use boundary::{
     PendingKind, ResumeInteraction,
 };
 pub use capabilities::{Concurrency, ToolCapabilities};
-pub use context::{AgentMode, CancellationToken, SandboxMode, ToolCallContext, ToolCallSource};
+pub use context::{
+    AgentMode, CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
+};
 pub use descriptor::{
     DescriptorError, Namespace, OutputBudget, ToolDescriptor, ToolExposure, ToolName, ToolSource,
 };
