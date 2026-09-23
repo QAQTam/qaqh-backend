@@ -42,12 +42,22 @@ cargo test -p qaqh-runtime test_hooks --lib              1 passed
 - timeline gap 不再编造 seq，改为丢弃第一条真实 entry、发送下一条真实
   entry，保证 journal/cursor 自洽；
 - gap 注入前先执行 seed 归属与 cursor/dedup 判定，新增 foreign-seed 负向用例；
-- 明确 gap hook 需要至少两条可投递 entry，live-only 单条不会伪造 gap；
+- gap 钩子改为「只丢一帧、不关流」：不再依赖「至少两条可投递 entry」，也不再用
+  「发下一条真实 entry 后关流」的形态（那会让客户端用同一 cursor 重连并二次收到
+  同一帧）；新增客户端模型级回归，cosplay `expected == cursor + 1` 判定并断言
+  不重复下发；
+- `parse_timeline_cursor` 对非法 `Last-Event-ID` 仍按 0 重放，但补一条 `log::warn!`
+  （空 cursor 属首次连接，不告警）；
 - `QAQH_TEST_COMMAND_ACK_COMMAND` 默认只命中 permission/ask 响应，避免冻结
   同 channel 上其它 command；
 - `permission-deny` / `ask-dismiss` 改为一次性；`*-hang` 明确保持持续语义。
 
 真实 TUI PTY：
+
+> `MODE=*` 是 **TUI 侧 harness 自己的变量**（TUI 仓库 `scripts/e2e-v2-interactions.sh`
+> 及其临时脚本里的取值域：`plan` / `permission` / `ask`），**不是 daemon 开关**，
+> 也不在本文 spec 的表格里。daemon 只读 `QAQH_TEST_*`。TUI 侧把它正式并进脚本时
+> 需要自己定值域与默认值；backend 侧不校验该变量。
 
 ```text
 QAQH_BACKEND_ROOT=../qaqh-backend-tui-contract \

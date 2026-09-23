@@ -145,12 +145,27 @@ mod sse_tests {
             Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
         >,
     ) {
-        let req = Request::builder()
+        open_timeline_sse_with_cursor(app, None).await
+    }
+
+    /// 打开 timeline SSE，可带 `Last-Event-ID`（模拟客户端重连时的 cursor）。
+    async fn open_timeline_sse_with_cursor(
+        app: Router,
+        last_event_id: Option<&str>,
+    ) -> (
+        StatusCode,
+        std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+        >,
+    ) {
+        let mut builder = Request::builder()
             .uri(format!("/ringing/v1/sessions/{SEED}/timeline/events"))
             .header("authorization", format!("Bearer {TOKEN}"))
-            .header("x-qaqh-client-session-id", SESSION)
-            .body(Body::empty())
-            .unwrap();
+            .header("x-qaqh-client-session-id", SESSION);
+        if let Some(cursor) = last_event_id {
+            builder = builder.header("last-event-id", cursor);
+        }
+        let req = builder.body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let stream = axum::body::Body::into_data_stream(resp.into_body());
@@ -377,14 +392,14 @@ mod sse_tests {
     }
 
     #[tokio::test]
-    async fn injected_timeline_gap_skips_first_real_entry_once() {
+    async fn injected_timeline_gap_drops_first_entry_and_keeps_streaming() {
         let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
         let mut state = test_state_with_hub(hub.clone());
         state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
         let (status, mut stream) = open_timeline_sse(build_router(state)).await;
         assert_eq!(status, StatusCode::OK);
 
-        for turn in ["t-gap-1", "t-gap-2"] {
+        for turn in ["t-gap-1", "t-gap-2", "t-gap-3"] {
             hub.publish_timeline(
                 SEED,
                 qaqh_domain::TimelineIntent::TurnOpened {
@@ -395,17 +410,89 @@ mod sse_tests {
             .expect("publish timeline intent");
         }
 
+        // 第一条真实 entry 被丢弃，客户端直接看到第二条 —— 这就是 gap。
         let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
             .await
-            .expect("gap frame must arrive");
+            .expect("frame after the dropped entry must arrive");
         assert_eq!(event, "timeline.entry");
         let value: serde_json::Value = serde_json::from_str(&data).expect("valid timeline frame");
         assert_eq!(value["entry"]["timeline_seq"], 2);
+
+        // 钩子只丢一帧，不关流：后续 entry 必须继续正常下发。
+        let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("the stream must stay open after gap injection");
+        assert_eq!(event, "timeline.entry");
+        let value: serde_json::Value = serde_json::from_str(&data).expect("valid timeline frame");
+        assert_eq!(value["entry"]["timeline_seq"], 3);
+    }
+
+    /// 客户端模型级回归：cosplay TUI 的 `expected == cursor + 1` 判定，断言
+    /// gap 钩子制造的是「跳号」而不是「重复下发已送达 entry」。
+    #[tokio::test]
+    async fn injected_timeline_gap_triggers_client_cursor_check_without_duplicates() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
+
+        // 客户端已经收到 seq1，带 cursor=1 重连（这是 TUI 最常见的重连态）。
+        hub.publish_timeline(
+            SEED,
+            qaqh_domain::TimelineIntent::TurnOpened {
+                turn_id: "t-prior".into(),
+                user_text: "already delivered".into(),
+            },
+        )
+        .expect("publish prior entry");
+
+        let (status, mut stream) =
+            open_timeline_sse_with_cursor(build_router(state), Some("lag-epoch:timeline:1")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // 重连后 journal 里又出现三条：seq2 被钩子丢弃，seq3/seq4 才是客户端看到的。
+        for turn in ["t-new-a", "t-new-b", "t-new-c"] {
+            hub.publish_timeline(
+                SEED,
+                qaqh_domain::TimelineIntent::TurnOpened {
+                    turn_id: turn.into(),
+                    user_text: "after reconnect".into(),
+                },
+            )
+            .expect("publish timeline intent");
+        }
+
+        let mut cursor = 1_u64;
+        let mut gap_triggered = false;
+        let mut delivered: Vec<u64> = Vec::new();
+        while let Some((event, data)) = next_sse_frame(&mut stream, Duration::from_secs(5)).await {
+            assert_eq!(event, "timeline.entry");
+            let value: serde_json::Value =
+                serde_json::from_str(&data).expect("valid timeline frame");
+            let seq = value["entry"]["timeline_seq"]
+                .as_u64()
+                .expect("timeline_seq");
+            assert!(
+                seq > cursor,
+                "gap injection must never re-send an already delivered entry: cursor={cursor} seq={seq}"
+            );
+            if seq != cursor + 1 {
+                gap_triggered = true;
+            }
+            cursor = seq;
+            delivered.push(seq);
+            if delivered.len() == 2 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            delivered,
+            vec![3, 4],
+            "client must see seq3 (gap) and then the stream must keep flowing with seq4"
+        );
         assert!(
-            next_sse_frame(&mut stream, Duration::from_millis(300))
-                .await
-                .is_none(),
-            "gap injection must close the stream after forcing re-baseline"
+            gap_triggered,
+            "client-side `expected == cursor + 1` check must fire on the injected gap"
         );
     }
 
