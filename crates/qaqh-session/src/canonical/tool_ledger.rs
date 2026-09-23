@@ -257,6 +257,17 @@ impl ToolLedger {
         self.entries.get(call_id)
     }
 
+    /// Voluntarily give up this ledger's writer lease.
+    ///
+    /// Recovery owns the fence only for the duration of its batch. Holding it
+    /// until the lease expires would block the owning session's own ledger (a
+    /// different writer id) with `WriterBusy`, which the runtime maps to
+    /// `LEDGER_BLOCKED` for every tool call in the window.
+    pub fn release_writer_lease(&mut self, now_ms: i64) -> Result<(), ToolLedgerError> {
+        self.store.release_writer(&self.lease, now_ms)?;
+        Ok(())
+    }
+
     /// All calls with a durable intent but no terminal fact.
     pub fn open_intents(&self) -> Vec<ToolLedgerEntry> {
         let mut entries: Vec<_> = self
