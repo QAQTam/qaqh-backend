@@ -1,6 +1,6 @@
 # Handoff：剩余 TypedTool 迁移与 TUI 契约补充任务（2026-09-23）
 
-> 状态：工具迁移继续挂在 PR #288；TUI 契约补充为后续独立任务，不混入本次工具迁移。
+> 状态：工具迁移继续挂在 PR #288；TUI 契约补充为独立并行任务，不混入本次工具迁移，P0 优先排期。
 > 当前分支：`feat/p3-tool-ledger-production-wiring`
 > 当前 head：`14fd7b7`
 > 关联 PR：
@@ -205,7 +205,7 @@ cargo test --workspace -- --test-threads=1
 
 ## 4. TUI 契约补充任务
 
-这是**独立任务**，不纳入 Wave 1-6 的工具迁移 PR。
+这是**独立并行任务**，不纳入 Wave 1-6 的工具迁移 PR；可立即启动，P0 优先于剩余工具迁移。
 
 ### 4.1 归属
 
@@ -265,6 +265,7 @@ P2：
 
 ## 6. 下一步
 
-1. 继续 Wave 1：`write` / `delete` typed 迁移。
-2. 按 Wave 2-6 逐批推进，不把多波混进同一个大 PR。
-3. 工具迁移收口后，root agent 单独领 TUI 契约补充任务，建立 backend 侧 P0/P1 plan 和测试 hook registry。
+1. root agent 单独领 TUI 契约补充任务，立即建立 backend 侧 P0/P1 plan 和测试 hook registry。
+2. 工具迁移继续 Wave 1：`write` / `delete` typed 迁移。
+3. TUI P0 hook 优先于剩余 Wave，但两者使用独立分支/PR，禁止混线。
+4. 按 Wave 2-6 逐批推进，不把多波混进同一个大 PR。
