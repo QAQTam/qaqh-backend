@@ -79,24 +79,6 @@ fn first_line(value: &str) -> String {
         .collect()
 }
 
-pub(crate) fn project_write(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    path_result(
-        args.get("path").and_then(|value| value.as_str()),
-        PathOp::Write,
-        "write",
-        output,
-    )
-}
-
-pub(crate) fn project_delete(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    path_result(
-        args.get("path").and_then(|value| value.as_str()),
-        PathOp::Delete,
-        "delete",
-        output,
-    )
-}
-
 pub(crate) fn project_edit(args: &serde_json::Value, output: &str) -> ToolDisplay {
     path_result(
         args.get("path").and_then(|value| value.as_str()),
