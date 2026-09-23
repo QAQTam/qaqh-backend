@@ -179,11 +179,19 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("ws");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let data = temp.path().join("data");
+    std::fs::create_dir_all(&data).expect("data dir");
+    // SAFETY: this test file serializes runtime/global setup with TEST_LOCK.
+    unsafe {
+        std::env::set_var("QAQH_DATA_DIR", &data);
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("USERPROFILE", temp.path());
+    }
     qaqh_workspace::set_workspace(&workspace.to_string_lossy());
     qaqh_workspace::runtime::init_tools(label, &[], vec![]);
     qaqh_workspace::clear_cancel();
 
-    let side_effects = temp.path().join("side-effects.txt");
+    let side_effects = workspace.join("side-effects.txt");
     let mut agent = AgentState::init("cancel-keeps-results-test", qaqh_config::Config::default());
     // 每次运行用独立 seed：canonical ledger 按 session 隔离，复用 seed 会让
     // 上一个用例的 intent 泄漏进本次（`seal_unexecuted_as_cancelled` 会据此跳过）。
