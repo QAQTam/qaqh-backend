@@ -14,7 +14,7 @@ use qaqh_runtime::agent::turn_lap_test_api::execute_admitted_batch;
 use qaqh_runtime::agent::types::{
     AdmittedTool, CancelToken, Emitter, LoopPhase, PendingState, RingContext, StatsCollector,
 };
-use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader, ulid_from_text};
 use qaqh_session::session_fact_v2::{FactPayload, ToolTerminalStatus};
 use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
@@ -295,6 +295,18 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
         "exactly one ToolFinished must be committed"
     );
     assert_eq!(finished[0].terminal_status, ToolTerminalStatus::Succeeded);
+    let expected_turn = format!("turn_{}", ulid_from_text("turn-ledger"));
+    assert!(
+        facts
+            .iter()
+            .filter(|fact| matches!(
+                fact.payload,
+                FactPayload::ToolIntent(_) | FactPayload::ToolFinished(_)
+            ))
+            .all(|fact| fact.turn_id.as_ref().map(|turn| turn.as_str())
+                == Some(expected_turn.as_str())),
+        "tool facts must carry the canonical turn alias"
+    );
 
     // Replay the same call in the same actor. The ledger terminal is the
     // execution guard: the handler counter must not move.
