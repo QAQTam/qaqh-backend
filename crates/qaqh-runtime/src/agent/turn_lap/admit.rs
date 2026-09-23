@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use qaqh_types::UsageInfo;
 
 use crate::agent::engine_tool::ToolEngine;
-use crate::agent::tool_runtime::ToolRuntime;
+use crate::agent::tool_runtime::{ToolBatchOrigin, ToolRuntime};
+use crate::agent::turn_actor::TurnActor;
 use crate::agent::turn_lap::gate::{abort_running_turn, seal_timeline_terminal_round};
 use crate::agent::types::*;
 
@@ -89,9 +90,12 @@ fn emit_active_ask(ctx: &mut RingContext, state: &TurnState) {
 // ── execute_admitted_batch ──
 
 /// Thin compatibility entry: scheduling/execution lives in [`ToolRuntime`].
+#[allow(clippy::too_many_arguments)]
 pub fn execute_admitted_batch(
     ctx: &mut RingContext,
     tool: &ToolEngine,
+    actor: Option<&mut TurnActor>,
+    origin: ToolBatchOrigin,
     admitted: Vec<AdmittedTool>,
     tool_call_order: &[String],
     serial_call_ids: &HashSet<String>,
@@ -101,6 +105,8 @@ pub fn execute_admitted_batch(
     ToolRuntime::execute_batch(
         ctx,
         tool,
+        actor,
+        origin,
         admitted,
         tool_call_order,
         serial_call_ids,
@@ -130,6 +136,7 @@ pub fn execute_admitted_batch(
 pub(crate) fn admit_and_dispatch(
     ctx: &mut RingContext,
     tool: &mut ToolEngine,
+    actor: &mut TurnActor,
     turn_context: &crate::agent::context::TurnContext,
     turn_id: &str,
     round_num: u32,
@@ -294,6 +301,8 @@ pub(crate) fn admit_and_dispatch(
     if !execute_admitted_batch(
         ctx,
         tool,
+        Some(actor),
+        ToolBatchOrigin::Normal,
         admission.authorized,
         &tool_call_order,
         &serial_call_ids,
