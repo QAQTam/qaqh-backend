@@ -20,7 +20,8 @@
 本切片后续追加完成：
 
 - Reconcile probe 的 durable evidence 闭合 primitive。
-- recovery executor：读取 `RecoveryIntent`、校验 open set、seal `NoReplay`、
+- recovery executor：读取 `RecoveryIntent`、对账 open set（计划外 `NoReplay`
+  seal 为 `Indeterminate`，计划外 replay/reconcile fail-closed）、seal `NoReplay`、
   在无 pending disposition 后写唯一 `SessionRecovered` 并清理 stale intent。
 - `tool_outbox` 与 canonical ToolLedger 的只读双写对账观测。
 - todo typed output 的 model/display/service 同源 gate。
@@ -176,7 +177,12 @@ cargo test --workspace
   - `NoReplay` 批量 seal 后写唯一 `SessionRecovered`；
   - replay/reconcile pending 时不提前写 `SessionRecovered`；
   - reconcile probe mismatch fail-closed；
-  - 未列入 recovery plan 的 open intent fail-closed；
+  - 未列入 recovery plan 的 `NoReplay` open intent 被 seal 为 `Indeterminate`
+    （plan 是快照，后续崩溃窗口可以补写新 intent；不再永久 fail-closed）；
+  - 未列入 recovery plan 的 replay/reconcile open intent 仍 fail-closed，且
+    不留下半途 seal 的 terminal；
+  - 复现原缺陷：replay 遗留 pending 时再出现计划外 `NoReplay` intent，
+    重启不再 `RecoveryIntentConflict` 卡死，replay 步骤收口后 batch 正常 closed；
   - stale intent 清理不产生第二个 `SessionRecovered`。
 - `crates/qaqh-runtime/src/agent/state/lifecycle.rs` unit test
   - session resume 前自动发现 open intent 并完成 canonical recovery。
