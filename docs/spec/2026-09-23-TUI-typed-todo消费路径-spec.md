@@ -35,7 +35,7 @@
 |---|---|---|
 | plan review 的待评审项 | `qaqh_client::PlanReviewItem`（由 PR #288 在 `qaqh-client` 根入口再导出） | plan modal 里的 Todo 预览 |
 | workspace todo 面板 | `qaqh_client::DashboardTask`，来自 `session.dashboard`；失败时回退 `todo.status` JSON | 右侧/Workspace todo 列表 |
-| todo 工具的结构化输出 | backend 内部 `TodoListOutput` / `TodoItemView`（模块为 `pub(crate)`，不是公开路径） | 只有 JSON 没有 typed 承载：`todo.list` 走 service 面（TUI 能用 `QueryRequest` 拿到这个 JSON），但 `qaqh-client` 没有对应类型 |
+| todo 工具的结构化输出 | backend 内部 `TodoListOutput` / `TodoItemView`（模块为 `pub(crate)`，不是公开路径） | 只有 JSON 没有 typed 承载：`todo.list` **不在 `qaqh_client::QueryRequest` 里**（`endpoint.rs` 的 `all_query_requests` 穷举闸可证，那里只有 `TodoStatus`），入口是 daemon HTTP / `qaqh-daemon todo list` |
 
 `TodoItemView` 所在模块当前是 `pub(crate)`；TUI 不应直接依赖 `qaqh-workspace`
 去命名它，也不要自行复制一份镜像。若未来 TUI 需要 typed workspace todo，
@@ -145,6 +145,12 @@ awk '/^pub use types::\{/,/^\};/' crates/qaqh-client/src/lib.rs \
    > `ringing/projection.rs` 写出的 state JSON `pending_interaction.details` 里，
    > Rust 侧没有对应字段。**TUI 的 plan modal 从事件流取 `todo_items`，不要改从
    > state 快照的 `details` 里捞。** 两条路是不同投影，本节的迁移只涉及事件流那条。
+   >
+   > 另注意：typed 字段存在 ≠ 一定有值。`todo_items = Some(...)` 目前只有
+   > `pending_todo_activation` 那条路径会填（`turn_lap/admit.rs`），
+   > `engine_tool.rs` 的 plan_submit 路径与 `engine_turn.rs` 的 resume 重放都是
+   > `None`。所以 `unwrap_or_default()` 会经常拿到空列表，plan modal 要按
+   > 「可能没有 todo 预览」设计，不要假设它一定有内容。
 
 3. plan modal 渲染：
    - `item.title` 不变；
@@ -215,7 +221,7 @@ TUI 若只消费输出，不应依赖这些 alias。
 | 计数细节 | `idle` 与 `pending` 是**同值双键**（都写同一个 pending 计数），不是两个计数 | 只有 `counts.idle` 一个来源 |
 | `items[]` | `{id,title,description,status,evidence}` | `{id,title,description,status,evidence}`（形状相同） |
 | 无 store 文件 | `null` | 仍返回成功信封（`items: []`、计数为 0） |
-| 空 seed | `null` | **不返回信封**：`todo.list` 走 `&seed()?`，空 seed 直接是 `INVALID_INPUT` 错误信封 |
+| 空 seed | `null` | **不走成功信封**：`todo.list` 内部用 `&seed()?`，空 seed 时 daemon 返回 HTTP 400 + `{"code":"query_failed"}`（不是 `INVALID_INPUT` 信封，也不是空列表） |
 
 所以 TUI 侧要两个解包器；`todo.status` 是 workspace todo 面板的回退数据源，
 `todo.list` 是工具侧 typed 输出，两者不是同一个契约的两种拼写。
