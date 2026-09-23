@@ -435,3 +435,25 @@ fn exec_symlink_target_is_rejected() {
             .is_symlink()
     );
 }
+
+#[test]
+fn typed_edit_registration_and_display_are_same_source() {
+    let mut manager = crate::ToolManager::new();
+    super::register(&mut manager);
+    assert!(
+        manager.builtins["edit"].legacy.is_none(),
+        "edit still has legacy executor"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "typed.txt", "old\n");
+    let result = call(&path, "old", "new");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(result.data["replaced"], json!(1));
+    let display = result.display().expect("typed display");
+    let display_text = match &display.body {
+        Some(qaqh_types::ToolResultDisplayBody::Text { text, .. }) => text,
+        other => panic!("unexpected edit display body: {other:?}"),
+    };
+    assert_eq!(display_text, result.model_text());
+}

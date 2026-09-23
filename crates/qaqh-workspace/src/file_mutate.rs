@@ -60,19 +60,34 @@ fn first_line(output: &str) -> Option<String> {
         .map(|line| line.chars().take(160).collect())
 }
 
-fn mutation_error(
+pub(crate) fn mutation_error(
     code: &str,
     message: impl Into<String>,
     hint: Option<&str>,
     details: Value,
 ) -> ToolExecutionError {
-    let kind = match code {
-        "STALE_FILE" => ToolErrorKind::Conflict,
-        "NOT_FOUND" => ToolErrorKind::NotFound,
-        _ => ToolErrorKind::Execution,
+    mutation_error_with_retryable(code, message, None, hint, details)
+}
+
+pub(crate) fn mutation_error_with_retryable(
+    code: &str,
+    message: impl Into<String>,
+    retryable: Option<bool>,
+    hint: Option<&str>,
+    details: Value,
+) -> ToolExecutionError {
+    let kind = if code == "STALE_FILE" {
+        ToolErrorKind::Conflict
+    } else if code == "NOT_FOUND" || code.ends_with("_NOT_FOUND") {
+        ToolErrorKind::NotFound
+    } else {
+        ToolErrorKind::Execution
     };
     let mut error = ToolError::new(kind, message);
     error.code = ToolErrorCode::from_legacy(code);
+    if let Some(retryable) = retryable {
+        error.retryable = retryable;
+    }
     if let Some(hint) = hint {
         error = error.with_hint(hint);
     }
@@ -89,7 +104,7 @@ fn write_io_error(path: &str, error: &std::io::Error) -> ToolExecutionError {
     )
 }
 
-fn resolve_mutation_path(ctx: &ToolCallContext, raw_path: &str) -> String {
+pub(crate) fn resolve_mutation_path(ctx: &ToolCallContext, raw_path: &str) -> String {
     if raw_path.is_empty() {
         return String::new();
     }
@@ -119,7 +134,7 @@ fn trash_dir(ctx: &ToolCallContext) -> PathBuf {
     root.join(".qaqh/trash")
 }
 
-fn mutation_display(
+pub(crate) fn mutation_display(
     raw_path: Option<&str>,
     fallback_path: &str,
     op: crate::tool_api::PathOp,
@@ -811,14 +826,14 @@ pub fn register(mgr: &mut crate::ToolManager) {
 /// takes this bridge. This helper only preserves the existing in-process
 /// confirm-apply call shape.
 pub(super) fn exec_write_file(args: &Value) -> crate::ToolResult {
-    let ctx = ambient_tool_context(Duration::from_secs(30));
+    let ctx = ambient_tool_context("write-compat", Duration::from_secs(30));
     TypedToolAdapter::new(WriteTool)
         .execute(ctx, args.clone())
         .unwrap_or_else(|fatal| panic!("write tool fatal: {}", fatal.message))
         .to_tool_result()
 }
 
-fn ambient_tool_context(timeout: Duration) -> ToolCallContext {
+pub(crate) fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext {
     let workspace = crate::current_workspace();
     let workspace_root = if workspace.is_empty() {
         PathBuf::from(".")
@@ -830,7 +845,7 @@ fn ambient_tool_context(timeout: Duration) -> ToolCallContext {
         cancellation.cancel();
     }
     ToolCallContext {
-        call_id: "write-compat".to_string(),
+        call_id: call_id.to_string(),
         session_id: crate::current_session().unwrap_or_default(),
         workspace_root,
         mode: match crate::runtime::current_mode() {
