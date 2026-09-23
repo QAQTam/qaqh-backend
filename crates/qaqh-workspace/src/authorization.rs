@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::tool_api::{CancellationToken, SandboxMode, ToolCallContext, ToolCallSource};
+use crate::tool_api::{
+    CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
+};
 
 // 子代理沙箱标志（per-actor）：`run_actor` subagent 分支在 actor 线程上设置。
 //
@@ -313,6 +315,7 @@ fn legacy_tool_call_context(
         } else {
             SandboxMode::Main
         },
+        sandbox_spec: SandboxSpec::workspace_write(workspace_root.to_path_buf()),
         timeout: Duration::ZERO,
         cancellation,
         progress: None,
@@ -440,6 +443,7 @@ pub fn admit_with_context(
             } else {
                 let challenge_context = ToolCallContext {
                     workspace_root: workspace_root.clone(),
+                    sandbox_spec: SandboxSpec::workspace_write(workspace_root.clone()),
                     ..context.clone()
                 };
                 Admission::ApprovalRequired(PermissionChallenge::new(

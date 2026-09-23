@@ -850,7 +850,7 @@ pub(crate) fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCall
     ToolCallContext {
         call_id: call_id.to_string(),
         session_id: crate::current_session().unwrap_or_default(),
-        workspace_root,
+        workspace_root: workspace_root.clone(),
         mode: match crate::runtime::current_mode() {
             1 => AgentMode::Plan,
             _ => AgentMode::Code,
@@ -863,6 +863,7 @@ pub(crate) fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCall
         } else {
             SandboxMode::Main
         },
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
         timeout,
         cancellation,
         progress: None,
@@ -891,6 +892,7 @@ mod tests {
             mode: AgentMode::Code,
             permission_level: TestPermissionLevel::ReadFree,
             sandbox: TestSandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
             timeout: Duration::from_secs(30),
             cancellation: TestCancellationToken::new(),
             progress: None,
