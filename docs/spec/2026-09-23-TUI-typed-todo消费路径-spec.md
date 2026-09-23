@@ -8,17 +8,15 @@
 > 输出收敛到 typed `TodoListOutput`。这两个类型与 workspace todo 面板使用的
 > `DashboardTask` **不是同一个语义面**。
 >
-> **分支事实**：本文描述的是 **PR #288**
-> （`feat/p3-tool-ledger-production-wiring`，head `728487e`）的落地后契约，不是
-> `betav2` 现状。当前 `betav2 @ 39a20a1` 仍是旧 `TodoItem` 形状，
-> **P3 合并前不要按第 3 节改 TUI**：此时 `qaqh-client` 根入口还没有
-> `PlanReviewItem` 这个名字，提前迁移只能越过 `qaqh-client` 去引
-> `qaqh-domain`，正好违反第 5 节的入口纪律。
+> **分支事实（2026-09-23 更新）**：**PR #288 已合入 `betav2 @ 73abd8c`**，
+> `qaqh-client` 根入口已有 `PlanReviewItem`，**第 3 节的迁移现在可以做**。
+> 历史提示：在 `betav2 @ 39a20a1` 及更早的锚点上它还是旧 `TodoItem` 名字，那时
+> 提前迁移只能越过 `qaqh-client` 去引 `qaqh-domain`，正好违反第 5 节的入口纪律。
 >
-> 复核锚点（`betav2` 上不可见，请按 PR 号看）：
-> `PlanReviewItem` 定义见 PR #288 的 `crates/qaqh-domain/src/event.rs`；
-> 根入口再导出见同一 PR 的 `crates/qaqh-client/src/lib.rs` 与
-> `crates/qaqh-client/src/types.rs`。
+> 复核锚点（`betav2 @ 73abd8c`，可直接复核）：
+> `PlanReviewItem` 定义见 `crates/qaqh-domain/src/event.rs:258`；
+> 根入口再导出见 `crates/qaqh-client/src/lib.rs`（`pub use types::{…}`）与
+> `crates/qaqh-client/src/types.rs`（`pub use qaqh_domain::{…}`）。
 >
 > 本文引用的 TUI 侧路径（`src/app/session.rs` / `src/app/mod.rs` /
 > `src/ui/modal.rs` / `src/ui/v2/modal.rs`）对应 **`qaqh-tui-app @ bbdcc3b`**
@@ -97,12 +95,12 @@ pub struct TodoItem {
 
 ## 3. TUI 迁移步骤
 
-P3 合并并发布新锚点后（前置条件：PR #288 已合入 `betav2`，且锚点里
-`crates/qaqh-client/src/lib.rs` / `types.rs` 已再导出 `PlanReviewItem`；
-这两处再导出是 #288 的一部分，不需要 TUI 侧另开 PR）。
+**前置条件已满足**：PR #288 已合入 `betav2 @ 73abd8c`，锚点里
+`crates/qaqh-client/src/lib.rs` / `types.rs` 都已再导出 `PlanReviewItem`
+（这两处再导出是 #288 的一部分，不需要 TUI 侧另开 PR）。可以直接开始迁移。
 
-前置条件可以机械判定，不用人肉确认。**必须锚定 `pub use` 块本身**，不要用
-`grep -A 20` 这种窗口——`lib.rs` 里另有一条无关的
+如果想在动手前再确认一次（可机械判定，不用人肉确认）：**必须锚定 `pub use` 块
+本身**，不要用 `grep -A 20` 这种窗口——`lib.rs` 里另有一条无关的
 `pub use qaqh_domain::state::{…}`，窗口会把下面的 `pub use types::{…}` 一起吞掉，
 造成「命令通过但命中的不是自己声明的符号」的假阳性：
 
