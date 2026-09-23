@@ -6,6 +6,7 @@ mod meta;
 mod replay;
 mod resource;
 mod set;
+mod sink;
 mod timeline;
 
 pub use control::{
@@ -25,6 +26,8 @@ pub use replay::{
 };
 pub use resource::{GraphEdgeState, ResourceProjection, ResourceSnapshot, WorkspaceResourceState};
 pub use set::{ProjectionSet, ProjectionSetDelta, ProjectionSetSnapshot};
+pub(crate) use sink::publish_projection;
+pub use sink::{ProjectionSink, install_projection_sink};
 pub use timeline::{
     TimelineAssistantBlockState, TimelineCompactionState, TimelineEntry, TimelineEntryKind,
     TimelineInputState, TimelineProjection, TimelineSnapshot, TimelineToolCallState,

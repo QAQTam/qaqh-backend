@@ -45,6 +45,7 @@ pub mod service_api;
 pub mod sse;
 pub(crate) mod test_hooks;
 pub mod timeline_api;
+pub mod v2;
 
 pub(crate) use auth::{
     get_session_id, is_authorized, lease_required_json, parse_channel, publish_session_created,
@@ -59,6 +60,10 @@ pub(crate) use sse::{handle_events, handle_timeline_events};
 pub(crate) use sse::{parse_sse_cursor, parse_timeline_cursor};
 pub(crate) use timeline_api::{
     handle_bootstrap, handle_pending_approvals, handle_timeline_snapshot,
+};
+pub(crate) use v2::{
+    handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_events_v2,
+    handle_open_v2, handle_renew_v2,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -77,6 +82,7 @@ fn lease_ttl_ms() -> u64 {
 #[derive(Clone)]
 pub struct AppState {
     pub hub: Arc<RingingHub>,
+    pub v2_hub: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
     pub leases: Arc<Mutex<RingingLeaseStore>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
@@ -143,6 +149,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/activity", get(activity))
         .route("/ringing/v1/clients/open", post(handle_open))
         .route("/ringing/v1/leases/renew", post(handle_renew))
+        .route("/ringing/v2/clients/open", post(handle_open_v2))
+        .route("/ringing/v2/leases/renew", post(handle_renew_v2))
+        .route(
+            "/ringing/v2/sessions/{seed}/bootstrap",
+            get(handle_bootstrap_v2),
+        )
+        .route(
+            "/ringing/v2/sessions/{seed}/events/{channel}",
+            get(handle_events_v2),
+        )
+        .route(
+            "/ringing/v2/commands/{id}",
+            post(handle_command_v2).get(handle_command_status_v2),
+        )
         .route(
             "/ringing/v1/commands/{id}",
             post(handle_command).get(handle_command_status),
