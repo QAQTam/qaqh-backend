@@ -11,17 +11,28 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 struct Env {
     _tmp: tempfile::TempDir,
+    data: PathBuf,
     workspace: PathBuf,
 }
 
 fn setup(label: &str) -> Env {
+    setup_with_v2_block(label, true)
+}
+
+fn setup_result_failure(label: &str) -> Env {
+    setup_with_v2_block(label, false)
+}
+
+fn setup_with_v2_block(label: &str, block_v2: bool) -> Env {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join(format!("{label}-data"));
     let workspace = tmp.path().join(format!("{label}-ws"));
     std::fs::create_dir_all(&data).expect("create data dir");
     std::fs::create_dir_all(&workspace).expect("create workspace");
-    // Force the v2 append path to fail: v2.jsonl is a directory, not a file.
-    std::fs::create_dir_all(data.join("audit").join("v2.jsonl")).expect("block v2 path");
+    if block_v2 {
+        // Force the v2 append path to fail: v2.jsonl is a directory, not a file.
+        std::fs::create_dir_all(data.join("audit").join("v2.jsonl")).expect("block v2 path");
+    }
     // SAFETY: this test file serializes all env/global runtime setup.
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
@@ -33,6 +44,7 @@ fn setup(label: &str) -> Env {
     qaqh_workspace::runtime::set_context(label, 4);
     Env {
         _tmp: tmp,
+        data,
         workspace,
     }
 }
@@ -159,6 +171,70 @@ fn audit_intent_failure_does_not_block_read_only() {
         result.content.contains("readable body"),
         "read body missing: {}",
         result.content
+    );
+    let _ = env;
+}
+
+#[test]
+fn audit_result_failure_quarantines_and_blocks_subsequent_high_risk_tools() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let env = setup_result_failure("audit-result-quarantine");
+    let ctx = qaqh_workspace::runtime::ToolCtx::admitted("audit-result-quarantine");
+    let first_target = env.workspace.join("first-side-effect.txt");
+
+    // Let the intent barrier succeed, then fail only the terminal result write.
+    qaqh_workspace::audit::fail_next_result_for_test();
+    let first = call(
+        "write",
+        serde_json::json!({"path": first_target, "content": "side effect"}),
+        "call-result-quarantine",
+        &ctx,
+    );
+
+    assert!(
+        !first.success,
+        "result barrier failure must not report success: {}",
+        first.content
+    );
+    assert_eq!(
+        first.result.error.as_ref().map(|error| error.code.as_str()),
+        Some("AUDIT_QUARANTINED")
+    );
+    assert!(
+        first_target.exists(),
+        "handler side effect should have happened before the result barrier failed"
+    );
+    assert!(
+        qaqh_workspace::audit::is_quarantined(),
+        "result barrier failure must enter quarantine"
+    );
+
+    let emergency = std::fs::read_to_string(env.data.join("audit").join("emergency.jsonl"))
+        .expect("emergency sink record");
+    assert!(
+        emergency.contains("call-result-quarantine"),
+        "emergency sink must identify the quarantined call: {emergency}"
+    );
+
+    let second_target = env.workspace.join("must-not-run.txt");
+    let second = call(
+        "write",
+        serde_json::json!({"path": second_target, "content": "must not run"}),
+        "call-after-quarantine",
+        &ctx,
+    );
+    assert!(!second.success, "quarantined write must be rejected");
+    assert_eq!(
+        second
+            .result
+            .error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("AUDIT_QUARANTINED")
+    );
+    assert!(
+        !second_target.exists(),
+        "quarantine must stop subsequent high-risk handlers"
     );
     let _ = env;
 }

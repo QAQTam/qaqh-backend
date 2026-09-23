@@ -699,6 +699,9 @@ pub enum ToolError {
     RuntimeNotInitialized,
     /// Durable audit barrier failed; the handler must not run.
     AuditUnavailable { message: String },
+    /// Result-side audit failed after execution; side effects are
+    /// indeterminate and subsequent high-risk tools are quarantined.
+    AuditQuarantined { message: String },
     /// Tool-specific error with a machine-readable code.
     ToolSpecific {
         tool: String,
@@ -763,6 +766,9 @@ impl std::fmt::Display for ToolError {
             Self::AuditUnavailable { message } => {
                 write!(f, "[ERROR] audit unavailable: {message}")
             }
+            Self::AuditQuarantined { message } => {
+                write!(f, "[ERROR] audit quarantined: {message}")
+            }
             Self::ToolSpecific {
                 tool,
                 code,
@@ -798,6 +804,7 @@ impl ToolError {
             Self::ResourceMismatch => "RESOURCE_MISMATCH",
             Self::RuntimeNotInitialized => "RUNTIME_NOT_INITIALIZED",
             Self::AuditUnavailable { .. } => "AUDIT_UNAVAILABLE",
+            Self::AuditQuarantined { .. } => "AUDIT_QUARANTINED",
             Self::ToolSpecific { .. } => "TOOL_ERROR",
             Self::Partial { .. } => "PARTIAL",
             Self::Internal { .. } => "INTERNAL_ERROR",
@@ -819,6 +826,7 @@ impl ToolError {
             Self::ResourceMismatch => (false, None),
             Self::RuntimeNotInitialized => (false, None),
             Self::AuditUnavailable { .. } => (false, None),
+            Self::AuditQuarantined { .. } => (false, None),
             Self::ToolSpecific { .. } => (false, None),
             Self::Partial { .. } => (false, None),
             Self::Internal { .. } => (true, None),
