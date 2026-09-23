@@ -305,11 +305,6 @@ impl PathGuardError {
             }
         }
     }
-
-    pub(crate) fn into_tool_result(self) -> crate::ToolResult {
-        let (code, message, hint) = (self.code(), self.message(), self.hint());
-        crate::ToolResult::error_data(code, message, false, hint, serde_json::json!({}))
-    }
 }
 
 fn file_kind(meta: &std::fs::Metadata) -> &'static str {

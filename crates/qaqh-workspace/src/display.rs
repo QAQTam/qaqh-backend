@@ -79,43 +79,6 @@ fn first_line(value: &str) -> String {
         .collect()
 }
 
-fn read_paths(args: &serde_json::Value) -> Option<String> {
-    if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
-        let paths: Vec<String> = requests
-            .iter()
-            .filter_map(|request| request.get("path").and_then(|value| value.as_str()))
-            .filter(|path| !path.trim().is_empty())
-            .map(str::to_string)
-            .collect();
-        return match paths.as_slice() {
-            [] => None,
-            [path] => Some(path.clone()),
-            _ => Some(paths.join(", ")),
-        };
-    }
-    args.get("path")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-}
-
-pub(crate) fn project_read(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    match read_paths(args) {
-        Some(path) => {
-            let display = ToolDisplay::new(
-                ToolHeader::Path {
-                    path,
-                    op: PathOp::Read,
-                },
-                text_body(output),
-            );
-            with_line_summary(display, first_human_line(output))
-        }
-        None => fallback_display("read", output),
-    }
-}
-
 pub(crate) fn project_write(args: &serde_json::Value, output: &str) -> ToolDisplay {
     path_result(
         args.get("path").and_then(|value| value.as_str()),
@@ -444,16 +407,6 @@ mod tests {
 
     #[test]
     fn file_projectors_declare_path_and_non_json_summary() {
-        let read = project_read(&json!({"path": "a.rs"}), "L1: fn a()\n");
-        assert_eq!(
-            read.header,
-            ToolHeader::Path {
-                path: "a.rs".into(),
-                op: PathOp::Read
-            }
-        );
-        assert_eq!(read.summary.as_deref(), Some("L1: fn a()"));
-
         let edit = project_edit(&json!({"path": "a.rs"}), "[OK] edit a.rs\n");
         assert_eq!(
             edit.header,

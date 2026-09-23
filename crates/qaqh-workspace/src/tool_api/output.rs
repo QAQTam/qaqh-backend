@@ -174,6 +174,9 @@ impl ToolOutcome {
             retryable: error.retryable,
             hint: error.hint.clone(),
         });
+        if let Some(details) = self.error.as_ref().and_then(|error| error.details.as_ref()) {
+            result.data = details.clone();
+        }
         result.metrics = qaqh_types::ToolResultMetrics {
             elapsed_ms: Some(self.metrics.elapsed.as_millis() as u64),
             output_bytes: self.metrics.output_bytes,
