@@ -127,6 +127,7 @@ fn project_output<O: ToolProjection>(
             effective_tool_name: None,
             user_initiated: matches!(source, ToolCallSource::User),
         },
+        effects: output.effects(),
     }
 }
 
@@ -155,6 +156,7 @@ fn recoverable_outcome(error: ToolError, elapsed: Duration) -> ToolOutcome {
             effective_tool_name: None,
             user_initiated: false,
         },
+        effects: Vec::new(),
     }
 }
 
