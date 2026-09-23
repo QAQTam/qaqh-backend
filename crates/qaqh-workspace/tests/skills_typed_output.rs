@@ -43,6 +43,10 @@ fn skills_typed_activation_carries_effect_and_same_source_output() {
         executed.content
     );
     assert_eq!(executed.result.data["skill"], "typed-skill");
+    assert!(
+        executed.result.display().is_some(),
+        "typed skills output must carry canonical display"
+    );
     assert_eq!(executed.skill_effects.len(), 1);
     assert!(
         executed.result.model_text().contains("typed-skill")
