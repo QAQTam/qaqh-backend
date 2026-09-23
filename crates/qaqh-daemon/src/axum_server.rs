@@ -377,7 +377,7 @@ mod sse_tests {
     }
 
     #[tokio::test]
-    async fn injected_timeline_gap_emits_cursor_plus_two_once() {
+    async fn injected_timeline_gap_skips_first_real_entry_once() {
         let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
         let mut state = test_state_with_hub(hub.clone());
         state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
@@ -406,6 +406,31 @@ mod sse_tests {
                 .await
                 .is_none(),
             "gap injection must close the stream after forcing re-baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_timeline_gap_does_not_leak_foreign_seed_entries() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
+        let (status, mut stream) = open_timeline_sse(build_router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        hub.publish_timeline(
+            "seed-foreign",
+            qaqh_domain::TimelineIntent::TurnOpened {
+                turn_id: "t-foreign".into(),
+                user_text: "foreign timeline data".into(),
+            },
+        )
+        .expect("publish foreign timeline intent");
+
+        assert!(
+            next_sse_frame(&mut stream, Duration::from_millis(300))
+                .await
+                .is_none(),
+            "foreign seed must be filtered before gap injection"
         );
     }
 }
