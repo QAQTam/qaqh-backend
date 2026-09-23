@@ -1,8 +1,8 @@
 # docs — 索引与归档状态
 
-> **索引日期**：2026-09-18（UTC+8）
-> **最后复核**：2026-09-19（docs 物理归档——方案 B 执行：31 份历史文档迁入 `archive/2026-09/`）
-> **基线**：`main` @ `2b472f2`
+> **索引日期**：2026-09-20（UTC+8）
+> **最后复核**：2026-09-20（P2 SessionActor 运行时接线计划）
+> **基线**：`betav2` @ `1d062d9`
 > **本文件用途**：`docs/` 的唯一索引入口——**已完成什么、什么还在跑、归档去哪找**。
 > 目录职责与命名约定见 [`todo/README.md`](./todo/README.md) §6；各目录另有 `以yyyy-mm-dd-标题-*.md作为命名` 说明文件。
 
@@ -23,6 +23,11 @@
 | **09-19** | **审计账本 v2 落地**：JSONL 哈希链 + seq/单调时钟 + 授权决策链 + 对象 before/after 指纹 + 拒绝路径记账；双写 v1 CSV | [`spec/2026-09-19-审计账本v2-spec.md`](./spec/2026-09-19-审计账本v2-spec.md) |
 | **09-19** | **测试缺口盘点（v2.0 重构前）**：16 crate 测试资产清点 + 四个重构面（Ringing/TurnCore/Tool SDK/沙箱）缺口交叉比对 + P0/P1/P2 测试部署清单 | [`report/2026-09-19-测试缺口盘点-v2重构前-report.md`](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) |
 | **09-19** | **docs 物理归档（方案 B）**：§3 归档区 31 份历史文档（buglist 17 / report 11 / handoff 3）迁入 `archive/2026-09/`；`git mv` + 全量改链 + 链接校验同批完成 | [`archive/2026-09/`](./archive/2026-09/) |
+| **09-20** | **QAQH v2.0 总架构设计**：交叉 qaqh-backend / qaqh-tui-app / codex-main / grok-build，裁决 canonical fact、SessionActor、TurnCore、ToolRuntime、Policy/Sandbox、Ringing v2 与迁移验收 | [`plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) |
+| **09-20** | **v2 P0 实现资产**：canonical `session-fact/v2` 类型与 golden fixtures、消费者迁移盘点、I1-I18 Gate 追踪已合并；生产 canonical log 尚未实现 | [`spec/2026-09-20-session-fact-v2-schema-spec.md`](./spec/2026-09-20-session-fact-v2-schema-spec.md)、[`report/2026-09-20-v2-consumer-migration-inventory-report.md`](./report/2026-09-20-v2-consumer-migration-inventory-report.md)、[`report/2026-09-20-v2-p0-gate-traceability-report.md`](./report/2026-09-20-v2-p0-gate-traceability-report.md) |
+| **09-20** | **Gate v2 多协议 spec 补充**：把 plan §5.3 展开为 ProtocolAdapter、EndpointCapabilities、GateRequest/GateEvent/GateOutcome、迁移与 conformance contract | [`spec/2026-09-20-gate-v2多协议与provider适配-spec.md`](./spec/2026-09-20-gate-v2多协议与provider适配-spec.md) |
+| **09-20** | **WebUI 独立网关设计草案**：默认关闭、显式 `webui` 子命令、临时回环网关、浏览器受限会话与 `/debug` 退役 | [`plan/2026-09-20-webui独立网关与debug退役-plan.md`](./plan/2026-09-20-webui独立网关与debug退役-plan.md) |
+| **09-20** | **P2 SessionActor 运行时接线计划**：固化 `run_lap` adapter、mailbox 全入口、token tree、lifecycle/thread-local、SubagentSupervisor 与 QuotaLedger 的执行顺序和 Gate | [`plan/2026-09-20-p2-session-actor-runtime-wiring-plan.md`](./plan/2026-09-20-p2-session-actor-runtime-wiring-plan.md) |
 
 ## 2. 已归档（2026-09-17，方案 A；2026-09-19 物理迁移）
 
@@ -115,11 +120,19 @@
 | spec | [2026-09-17-工具结果展示层契约-spec.md](./spec/2026-09-17-工具结果展示层契约-spec.md) | **已被 09-18 跨仓契约取代**，保留为量化证据与设计参照（悬空引用已修复） |
 | spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
 | spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
+| spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 已冻结并合并**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；PR #115 已落地 canonical types 与 golden fixtures，生产 canonical log 仍待实现 |
+| spec | [2026-09-20-gate-v2多协议与provider适配-spec.md](./spec/2026-09-20-gate-v2多协议与provider适配-spec.md) | **P1 设计补充，待评审**：展开 plan §5.3 的 GateHost 边界，冻结 ProtocolAdapter、EndpointCapabilities、GateRequest/GateEvent/GateOutcome、迁移与 conformance 规则 |
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
+| plan | [2026-09-19-qaqh-v2.0-前瞻设计-plan.md](./plan/2026-09-19-qaqh-v2.0-前瞻设计-plan.md) | **已被 09-20 总架构设计取代**；保留为方向输入与历史证据 |
+| plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构与开发计划（已冻结并合并）**：PR #104 merge `84adf01`；裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收；后续实现按 P1-P6 拆分 |
+| plan | [2026-09-20-p2-session-actor-runtime-wiring-plan.md](./plan/2026-09-20-p2-session-actor-runtime-wiring-plan.md) | **P2 运行时接线执行清单**：从 `run_lap` 1:1 adapter 起，依次完成 mailbox、token tree、lifecycle/thread-local、SubagentSupervisor、恢复与 QuotaLedger |
+| plan | [2026-09-20-webui独立网关与debug退役-plan.md](./plan/2026-09-20-webui独立网关与debug退役-plan.md) | **草案待评审**：WebUI 默认不挂载，`qaqh-daemon webui` 才启动临时回环网关；浏览器使用受限 HttpOnly 会话，`/debug` 产品入口退役 |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
-| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | **当前交接** |
+| handoff | [2026-09-20-qaqh-v2.0-首席架构师-handoff.md](./handoff/2026-09-20-qaqh-v2.0-首席架构师-handoff.md) | **v2.0 架构冻结记录**：D1-D41 已收口；PR #104 merge `84adf01`，Issue #103 `closed/completed`；含工程侧实现边界 |
+| handoff | [2026-09-20-v2-P0实现前置与验收交接-handoff.md](./handoff/2026-09-20-v2-P0实现前置与验收交接-handoff.md) | **P0 实现前置交接**：E3 依赖、环境与验收约束；从最新 `betav2` 启动 P1-P6 |
+| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | 上一轮交接（已完成） |
 | handoff | [2026-09-17-buglist复核九批次执行-handoff.md](./handoff/2026-09-17-buglist复核九批次执行-handoff.md) | 上一轮交接（已完成） |
 | report | [2026-09-12-exec与process工具设计评审-report.md](./report/2026-09-12-exec与process工具设计评审-report.md) | 被上述**未落地 plan** 的 §9 与 P6 引用 |
 | report | [2026-09-13-codex-exec设计对照与修订-report.md](./report/2026-09-13-codex-exec设计对照与修订-report.md) | 同上 |

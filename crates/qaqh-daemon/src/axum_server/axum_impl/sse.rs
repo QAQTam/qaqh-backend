@@ -1,5 +1,11 @@
 //! axum_impl::sse — see parent module docs.
 
+use std::collections::BTreeSet;
+
+use qaqh_runtime::QaqhService;
+use qaqh_session::actor::ConnectionId;
+
+use super::test_hooks::SseTerminate;
 use super::*;
 
 /// 活跃会话但尚无任何 seed 分片时的挂起轮询间隔（reviewer 阻断 1）。
@@ -30,14 +36,28 @@ pub(crate) fn parse_sse_cursor(cursor: &str, epoch: &str, channel: RingingChanne
 }
 
 pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
+    if cursor.is_empty() {
+        // 首次连接：没有 cursor 就是从头开始，这是正常路径，不告警。
+        return 0;
+    }
     let mut parts = cursor.split(':');
     let e = parts.next().unwrap_or_default();
     let kind = parts.next().unwrap_or_default();
     let seq = parts.next().and_then(|v| v.parse::<u64>().ok());
-    if e == epoch && kind == "timeline" && parts.next().is_none() {
-        seq.unwrap_or(0)
-    } else {
-        0
+    let shape_ok = e == epoch && kind == "timeline" && parts.next().is_none();
+    match (shape_ok, seq) {
+        (true, Some(seq)) => seq,
+        _ => {
+            // 两类都落到这里，且都属于「静默全量重放」，所以都要告警：
+            // 1) 形状不符 —— channel SSE 写的是 `{epoch}:{channel}:{seq}`，epoch 轮换
+            //    或游标被截断都会出现；
+            // 2) 形状合法但 seq 缺失/非法 —— 如 `{epoch}:timeline:` 或
+            //    `{epoch}:timeline:abc`。
+            log::warn!(
+                "[sse] timeline Last-Event-ID {cursor:?} is not a usable `{{epoch}}:timeline:{{seq}}` cursor for epoch {epoch:?}; replaying from 0"
+            );
+            0
+        }
     }
 }
 
@@ -61,6 +81,42 @@ fn envelope_to_event(
 fn reset_to_event(reset: &RingingResetRequired) -> Event {
     let data = serde_json::to_string(reset).unwrap_or_else(|_| "{}".into());
     Event::default().event("ringing.reset_required").data(data)
+}
+
+fn injected_termination_event(
+    fault: &SseTerminate,
+    channel: Option<&str>,
+    seed: Option<&str>,
+) -> Event {
+    let mut payload = serde_json::json!({
+        "code": fault.code,
+        "message": "test-injected stream termination; reconnect to continue",
+    });
+    if let Some(channel) = channel {
+        payload["channel"] = serde_json::Value::String(channel.to_string());
+    }
+    if let Some(seed) = seed {
+        payload["seed"] = serde_json::Value::String(seed.to_string());
+    }
+    if let Some(skipped) = fault.skipped {
+        payload["skipped"] = serde_json::Value::from(skipped);
+    }
+    Event::default()
+        .event("ringing.stream_terminated")
+        .data(payload.to_string())
+}
+
+fn injected_termination_response(
+    fault: SseTerminate,
+    channel: Option<&str>,
+    seed: Option<&str>,
+) -> Response {
+    let event = injected_termination_event(&fault, channel, seed);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(event)).await;
+    });
+    Sse::new(ReceiverStream::new(rx)).into_response()
 }
 
 fn timeline_entry_to_event(epoch: &str, seed: &str, entry: &qaqh_domain::TimelineEntry) -> Event {
@@ -154,6 +210,77 @@ fn session_owned_seeds(
     }
 }
 
+/// Transport-owned socket lease for one logical `(connection, channel)`.
+///
+/// The session actor stores the logical subscription; this object only tracks
+/// which seed shards the transport currently has receivers for and mirrors
+/// additions/removals into that actor.
+struct SubscriptionLease {
+    service: QaqhService,
+    connection_id: ConnectionId,
+    channel: RingingChannel,
+    seeds: BTreeSet<String>,
+}
+
+impl SubscriptionLease {
+    fn new(service: QaqhService, connection_id: ConnectionId, channel: RingingChannel) -> Self {
+        Self {
+            service,
+            connection_id,
+            channel,
+            seeds: BTreeSet::new(),
+        }
+    }
+
+    fn subscribe(&mut self, seed: &str) {
+        if !self.seeds.insert(seed.to_string()) {
+            return;
+        }
+        if let Err(error) = self
+            .service
+            .subscribe_channel(seed, &self.connection_id, self.channel)
+        {
+            log::debug!(
+                "[sse] logical subscribe skipped for {seed}/{}: {error}",
+                self.channel
+            );
+        }
+    }
+
+    fn unsubscribe(&mut self, seed: &str) {
+        if !self.seeds.remove(seed) {
+            return;
+        }
+        if let Err(error) =
+            self.service
+                .unsubscribe_channel(seed, &self.connection_id, self.channel)
+        {
+            log::debug!(
+                "[sse] logical unsubscribe skipped for {seed}/{}: {error}",
+                self.channel
+            );
+        }
+    }
+
+    fn close_all(&mut self) {
+        let seeds = std::mem::take(&mut self.seeds);
+        for seed in seeds {
+            if let Err(error) = self.service.connection_closed(&seed, &self.connection_id) {
+                log::debug!(
+                    "[sse] logical connection close skipped for {seed}/{}: {error}",
+                    self.channel
+                );
+            }
+        }
+    }
+}
+
+impl Drop for SubscriptionLease {
+    fn drop(&mut self) {
+        self.close_all();
+    }
+}
+
 /// 某会话在某频道上的**分片**实时流：每个已 attach 的 seed 一个
 /// `broadcast::Receiver`，`recv` 在其上做合并。
 ///
@@ -170,8 +297,9 @@ struct ShardedChannelStream {
         String,
         tokio::sync::broadcast::Receiver<qaqh_ringing::RingingEventEnvelope>,
     )>,
-    /// 已订阅的 seed 集合（增量对账用）。
-    subscribed: HashSet<String>,
+    /// Optional P2-2d-b logical subscription mirror. Tests and non-SSE
+    /// callers may construct the transport without a session actor.
+    subscription: Option<SubscriptionLease>,
     /// 每个分片「已取出但尚未交付」的事件（跨分片按 stream_seq 归并）。
     pending: HashMap<String, qaqh_ringing::RingingEventEnvelope>,
     /// 已检测到溢出、但尚未上报的 `Lagged`（reviewer 阻断 2）。
@@ -200,26 +328,60 @@ impl ShardedChannelStream {
             session_id,
             leases,
             receivers,
-            subscribed: owned,
+            subscription: None,
             pending: HashMap::new(),
             pending_lag: None,
         }
+    }
+
+    fn with_subscription(mut self, service: QaqhService, connection_id: ConnectionId) -> Self {
+        let seeds: Vec<String> = self
+            .receivers
+            .iter()
+            .map(|(seed, _)| seed.clone())
+            .collect();
+        let mut subscription = SubscriptionLease::new(service, connection_id, self.channel);
+        for seed in seeds {
+            subscription.subscribe(&seed);
+        }
+        self.subscription = Some(subscription);
+        self
     }
 
     /// 对账租约的 seed 归属：新 attach 的 seed 增量补订（保持「订阅先于
     /// 回放」的无缝语义）；已 detach 的 seed 退订。会话失活时返回 false。
     fn refresh(&mut self, hub: &RingingHub) -> bool {
         let Some(owned) = session_owned_seeds(&self.session_id, &self.leases) else {
+            if let Some(subscription) = self.subscription.as_mut() {
+                subscription.close_all();
+            }
             return false;
         };
+        let removed: Vec<String> = self
+            .receivers
+            .iter()
+            .filter(|(seed, _)| !owned.contains(seed))
+            .map(|(seed, _)| seed.clone())
+            .collect();
+        for seed in &removed {
+            if let Some(subscription) = self.subscription.as_mut() {
+                subscription.unsubscribe(seed);
+            }
+        }
         self.receivers.retain(|(seed, _)| owned.contains(seed));
         self.pending.retain(|seed, _| owned.contains(seed));
-        self.subscribed.retain(|seed| owned.contains(seed));
-        let added: Vec<String> = owned.difference(&self.subscribed).cloned().collect();
+        let active: HashSet<&String> = self.receivers.iter().map(|(seed, _)| seed).collect();
+        let added: Vec<String> = owned
+            .iter()
+            .filter(|seed| !active.contains(seed))
+            .cloned()
+            .collect();
         for seed in added {
+            if let Some(subscription) = self.subscription.as_mut() {
+                subscription.subscribe(&seed);
+            }
             self.receivers
                 .push((seed.clone(), hub.subscribe(self.channel, &seed)));
-            self.subscribed.insert(seed);
         }
         true
     }
@@ -293,8 +455,10 @@ impl ShardedChannelStream {
             }
             // 2) 有分片关闭：摘除（其 pending 一并丢弃）后重试。
             if let Some(seed) = closed_seed {
+                if let Some(subscription) = self.subscription.as_mut() {
+                    subscription.unsubscribe(&seed);
+                }
                 self.receivers.retain(|(s, _)| s != &seed);
-                self.subscribed.remove(&seed);
                 self.pending.remove(&seed);
                 continue;
             }
@@ -338,8 +502,10 @@ impl ShardedChannelStream {
                     });
                 }
                 Err(RecvError::Closed) => {
+                    if let Some(subscription) = self.subscription.as_mut() {
+                        subscription.unsubscribe(&seed);
+                    }
                     self.receivers.retain(|(s, _)| s != &seed);
-                    self.subscribed.remove(&seed);
                     self.pending.remove(&seed);
                 }
             }
@@ -375,6 +541,9 @@ pub(crate) async fn handle_events(
     let Some(channel) = parse_channel(&channel_str) else {
         return (StatusCode::NOT_FOUND, "unknown channel").into_response();
     };
+    if let Some(fault) = state.test_hooks.take_channel_terminate(channel) {
+        return injected_termination_response(fault, Some(channel.as_str()), None);
+    }
     // Last-Event-ID from header or ?last_event_id= query (ringing_http compat)
     let last_event_id = headers
         .get("last-event-id")
@@ -387,12 +556,19 @@ pub(crate) async fn handle_events(
     // Subscribe before replay to avoid gap。BUG-2026-09-12-12（issue #31）：
     // 按 **(channel, seed) 分片**订阅该会话实际拥有的 seed（而非频道单环），
     // 其它会话的风暴不再把本连接推向 `Lagged`（验收标准 1）。
+    let connection_id = ConnectionId::new(format!(
+        "{}:{}:{}",
+        session_id,
+        channel.as_str(),
+        crate::server::random_hex()
+    ));
     let mut rx = ShardedChannelStream::new(
         &state.hub,
         channel,
         session_id.clone(),
         state.leases.clone(),
-    );
+    )
+    .with_subscription(state.service.clone(), connection_id);
     let replay = filter_replay_for_session(
         state
             .hub
@@ -495,12 +671,20 @@ pub(crate) async fn handle_timeline_events(
     let Some(session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
-    if seed.is_empty()
-        || !state
-            .leases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .owns_seed(&session_id, &seed)
+    if seed.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    }
+    if state.test_hooks.session_is_404(&seed) {
+        return session_not_found_response(&seed);
+    }
+    if let Some(fault) = state.test_hooks.take_timeline_terminate() {
+        return injected_termination_response(fault, Some("timeline"), Some(&seed));
+    }
+    if !state
+        .leases
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .owns_seed(&session_id, &seed)
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -523,10 +707,22 @@ pub(crate) async fn handle_timeline_events(
     let leases = state.leases.clone();
     let seed_clone = seed.clone();
     let session_id_clone = session_id.clone();
+    let inject_timeline_gap = state.test_hooks.take_timeline_gap();
 
     let (tx, rx_stream) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
+        let mut gap_remaining = usize::from(inject_timeline_gap);
         for entry in replay {
+            // Gap injection drops exactly one deliverable entry and keeps
+            // streaming: the client's cursor stays at `after`, so the next
+            // real entry it receives is `after + 2` and its own `cursor + 1`
+            // check fires. Never synthesise a frame and never close the
+            // stream here — closing would make the client reconnect with the
+            // same cursor and receive the already-sent entry twice.
+            if gap_remaining > 0 {
+                gap_remaining -= 1;
+                continue;
+            }
             let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
             if tx.send(Ok(ev)).await.is_err() {
                 return;
@@ -536,6 +732,9 @@ pub(crate) async fn handle_timeline_events(
         loop {
             match rx.recv().await {
                 Ok(live) => {
+                    // Seed ownership and cursor/dedup checks must precede gap
+                    // injection; otherwise a foreign seed could be relabeled
+                    // with this stream's seed.
                     if !should_deliver_timeline_live(
                         &live,
                         &session_id_clone,
@@ -544,6 +743,10 @@ pub(crate) async fn handle_timeline_events(
                         &replayed,
                         &leases,
                     ) {
+                        continue;
+                    }
+                    if gap_remaining > 0 {
+                        gap_remaining -= 1;
                         continue;
                     }
                     if !leases

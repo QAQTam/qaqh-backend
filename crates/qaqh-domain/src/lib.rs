@@ -25,21 +25,22 @@ pub mod timeline;
 
 pub use channel::RingingChannel;
 pub use command::{
-    AskAnswer, ControlCommand, ConversationCommand, ConversationMode, DomainCommand, ImageBlock,
-    ToolCommand,
+    AskAnswer, ControlCommand, ConversationCommand, ConversationInputPurpose, ConversationMode,
+    DomainCommand, ImageBlock, ToolCommand,
 };
 pub use delivery::Delivery;
 pub use event::{
     ActivityState, AgentLifecycleState, AskMode, AskQuestion, AskResolution, CodeDeltaRecord,
     CompactStatus, ContentRef, ControlEvent, ConversationEvent, DashboardDocument,
     DashboardSnapshot, DashboardTask, DomainError, DomainEvent, ErrorScope, NoticeLevel,
-    PermissionCategory, PermissionRisk, ProviderToolState, RoundDeltaKind, SessionActivity,
-    SessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus, TodoItem, ToolEvent, ToolResult,
+    PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState, RoundDeltaKind,
+    SessionActivity, SessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus, ToolEvent,
+    ToolResult,
 };
 pub use timeline::{
     FileSnapshotInfo, RoundBlock, RoundData, TimelineBlock, TimelineBlockKind, TimelineBlockState,
     TimelineEntry, TimelineEvent, TimelineFailure, TimelineIntent, TimelinePathOp, TimelineRound,
     TimelineSnapshot, TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader,
-    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState,
-    ToolCallDef, ToolResultDef, TurnData,
+    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn,
+    TimelineTurnState, ToolCallDef, ToolResultDef, TurnData,
 };

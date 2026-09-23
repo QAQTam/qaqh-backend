@@ -222,9 +222,7 @@ pub(crate) fn apply_result_metrics(
 ///
 /// `metrics` 仅在 `elapsed_ms` 已接线时出现；本期未接时 wire 为 `None`，
 /// client 回退旧字段（H16）。
-pub(crate) fn wire_display(
-    display: &qaqh_workspace::tool_api::ToolDisplay,
-) -> TimelineToolDisplay {
+pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> TimelineToolDisplay {
     use qaqh_workspace::tool_api as sdk;
 
     let header = match &display.header {
@@ -277,13 +275,16 @@ pub(crate) fn wire_display(
         }),
     };
 
-    let metrics = display.metrics.elapsed_ms.map(|elapsed_ms| TimelineToolMetrics {
-        elapsed_ms,
-        output_bytes: display.metrics.output_bytes,
-        retry_count: display.metrics.retry_count,
-        effective_tool_name: display.metrics.effective_tool_name.clone(),
-        user_initiated: display.metrics.user_initiated,
-    });
+    let metrics = display
+        .metrics
+        .elapsed_ms
+        .map(|elapsed_ms| TimelineToolMetrics {
+            elapsed_ms,
+            output_bytes: display.metrics.output_bytes,
+            retry_count: display.metrics.retry_count,
+            effective_tool_name: display.metrics.effective_tool_name.clone(),
+            user_initiated: display.metrics.user_initiated,
+        });
 
     TimelineToolDisplay {
         summary: display.summary.clone(),
@@ -651,8 +652,9 @@ impl TimelineAppender {
         if next_tool.progress_stream.is_none() {
             next_tool.progress_stream = tool.progress_stream.clone();
         }
-        next_tool.progress_bytes_total =
-            next_tool.progress_bytes_total.max(tool.progress_bytes_total);
+        next_tool.progress_bytes_total = next_tool
+            .progress_bytes_total
+            .max(tool.progress_bytes_total);
         if next_tool.permission.is_none() {
             next_tool.permission = tool.permission.clone();
         }
@@ -876,10 +878,20 @@ impl TimelineAppender {
             None,
             TimelineEvent::TurnSealed { state, failure },
         );
-        // seal 即时裁剪：sealed turn 的条目在快照内已物化，回放不再需要
-        // （与 persist 侧 prune_sealed_timeline_journal 语义一致）。不裁剪则
-        // journal 随会话累积（实测单会话 7.3 万条 / 25 MB）。
-        prune_turn_journal(timeline, turn_id);
+        // **不再在 seal 时无条件裁剪该 turn 的 journal 条目**（#42 gap 后续）。
+        //
+        // 原实现「seal 即时裁剪」的论据是「sealed 内容已在快照内物化，回放不再
+        // 需要」。但这条在**重连窗口**里不成立：客户端 gap 恢复时取的快照可能
+        // 是**回合中途**的（watermark 落在该 turn 内），此后它要靠
+        // `seq > watermark` 的条目把这个回合补完。若这些条目在 seal 时被裁掉、
+        // 而重连又晚于它们的 live 投递，客户端就**永远收不到 TurnSealed**——
+        // 回合停在未封口态，回复不渲染（实测：`MODE=gap` 注入丢帧后
+        // `[✓] 用户消息仍在 / [✗] 回复可见`）。
+        //
+        // 内存上界本来就有两条硬约束（`enforce_journal_budget`：条数
+        // `MAX_TIMELINE_JOURNAL_ENTRIES` + 字节 `journal_byte_limit`），
+        // 每次 `next_entry` 都会执行；seal 裁剪是**冗余**的第二道，却以
+        // 「最近一个回合不可重放」为代价。这里去掉它，内存仍由预算钉死。
         Ok(entry)
     }
 
@@ -1096,19 +1108,6 @@ fn offload_turn_blocks(turn: &mut TimelineTurn) {
             }
         }
     }
-}
-
-/// 移除某 turn 的全部 journal 条目（seal 即时裁剪）。
-fn prune_turn_journal(timeline: &mut SeedTimeline, turn_id: &str) {
-    timeline.journal.retain(|entry| {
-        let keep = entry.turn_id != turn_id;
-        if !keep {
-            timeline.journal_bytes = timeline
-                .journal_bytes
-                .saturating_sub(journal_entry_payload_bytes(&entry.event));
-        }
-        keep
-    });
 }
 
 fn existing_round_mut<'a>(
@@ -1424,7 +1423,9 @@ mod tests {
         let mut final_tool = tool();
         final_tool.state = TimelineToolState::Succeeded;
         final_tool.output = Some("done".into());
-        appender.replace_tool("s", "t", 0, "tool", final_tool).unwrap();
+        appender
+            .replace_tool("s", "t", 0, "tool", final_tool)
+            .unwrap();
 
         let snapshot = appender.snapshot("s").unwrap();
         let tool = snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
@@ -1581,7 +1582,8 @@ mod tests {
 
     #[test]
     fn json_like_summaries_fall_back_to_name_and_state() {
-        let exec_json = r#"{"status":"completed","command":"bash -lc ls","exit_code":0,"output":"a\nb"}"#;
+        let exec_json =
+            r#"{"status":"completed","command":"bash -lc ls","exit_code":0,"output":"a\nb"}"#;
         assert_eq!(
             project_tool_summary("exec", TimelineToolState::Succeeded, None, Some(exec_json)),
             "exec · succeeded"
@@ -1880,15 +1882,37 @@ mod tests {
         // 水位到底 = 无条目可回放（客户端已对齐，不产生 gap）。
         assert!(appender.replay_since("s", watermark).is_empty());
 
-        // seal 后回放尾清空（seal 即时裁剪契约，详见 sealed_turn 测试）。
+        // seal **不再**清空回放尾（#314 契约变更）：sealed turn 的条目必须留到
+        // 双限驱逐为止，否则「回合中途重基线」的客户端永远拿不到补齐所需的
+        // `TurnSealed`（快照落在回合内 + seal 裁剪 = 回复永不渲染）。
         appender.seal_turn("s", "t1").unwrap();
-        assert!(appender.replay_since("s", 0).is_empty());
+        let after_seal = appender.replay_since("s", cut);
+        // 下界断言（而非切片相等）：失败时给出可读信息，而不是切片越界 panic。
+        // 期望 `after_seal` ⊇ `all[mid+1..]`，另加 seal 自身产出的 TurnSealed。
+        assert!(
+            after_seal.len() > all.len() - mid - 1,
+            "seal 不得拿走回合中途水位之后的条目（after_seal={}, 期望 > {}）",
+            after_seal.len(),
+            all.len() - mid - 1
+        );
+        assert!(
+            matches!(
+                after_seal.last().map(|entry| &entry.event),
+                Some(TimelineEvent::TurnSealed { .. })
+            ),
+            "补齐区间必须收在 TurnSealed 上"
+        );
     }
 
     #[test]
-    fn sealed_turn_journal_is_pruned_immediately() {
-        // Phase 4 seal 即时裁剪：turn seal 后其全部条目必须立即离开内存
-        // journal（快照已物化）；后续 turn 的条目照常进入回放窗口。
+    fn sealed_turn_journal_survives_until_budget_eviction() {
+        // #314（2026-09-23 契约变更）：turn seal **不再**即时裁剪该 turn 的条目。
+        //
+        // 原契约「sealed 内容已在快照内物化、回放不再需要」在**回合中途重基线**时
+        // 不成立：客户端 gap 恢复取到的快照可能落在该 turn 内，此后要靠
+        // `seq > watermark` 的条目补完；裁掉就永远收不到 `TurnSealed`，回复不渲染。
+        // 内存上界改由双限驱逐兜底——`journal_enforcement_bounds_entries_and_bytes`
+        // 钉的就是那条。
         let mut appender = TimelineAppender::new();
         appender.open_turn("s", "t1", "q1").unwrap();
         appender
@@ -1899,12 +1923,24 @@ mod tests {
             .unwrap();
         appender.seal_block("s", "t1", 0, "r").unwrap();
         appender.seal_round("s", "t1", 0, false).unwrap();
-        assert!(!appender.replay_since("s", 0).is_empty());
+        let before_seal = appender.replay_since("s", 0);
+        assert!(!before_seal.is_empty());
 
         appender.seal_turn("s", "t1").unwrap();
+        let after_seal = appender.replay_since("s", 0);
+        // 下界断言（而非切片相等）：失败时给出可读信息，而不是切片越界 panic。
         assert!(
-            appender.replay_since("s", 0).is_empty(),
-            "sealed turn entries must leave the replay tail immediately"
+            after_seal.len() >= before_seal.len(),
+            "seal 不得裁剪该 turn 的既有条目（after_seal={}, before_seal={}）",
+            after_seal.len(),
+            before_seal.len()
+        );
+        assert!(
+            matches!(
+                after_seal.last().map(|entry| &entry.event),
+                Some(TimelineEvent::TurnSealed { .. })
+            ),
+            "TurnSealed 必须留在回放尾里"
         );
         let snapshot = appender.snapshot("s").unwrap();
         assert_eq!(
@@ -1919,7 +1955,19 @@ mod tests {
         );
 
         appender.open_turn("s", "t2", "q2").unwrap();
-        assert_eq!(appender.replay_since("s", 0).len(), 1);
+        let final_tail = appender.replay_since("s", 0);
+        // 绝对下界（不只是相对增量）：t1 的条目在 t2 进来后仍必须全部留存。
+        assert!(
+            before_seal.iter().all(|old| final_tail
+                .iter()
+                .any(|new| new.timeline_seq == old.timeline_seq)),
+            "后续 turn 进来后，t1 的条目仍必须全部在回放尾里"
+        );
+        assert_eq!(
+            final_tail.len(),
+            after_seal.len() + 1,
+            "后续 turn 的条目照常进入回放窗口"
+        );
     }
 
     #[test]

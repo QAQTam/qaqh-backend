@@ -124,6 +124,210 @@ const startBuild = (repo, body) => api(`${repoPath(repo)}/-/build/start`, { meth
 // ── issues ──
 const listIssueComments = (repo, number, { sort = "-created", pageSize = 3 } = {}) =>
   api(`${repoPath(repo)}/-/issues/${number}/comments?sort=${sort}&page_size=${pageSize}`);
+const postIssueComment = (repo, number, body) =>
+  api(`${repoPath(repo)}/-/issues/${number}/comments`, { method: "POST", body: { body } });
+const postPullComment = (repo, number, body) =>
+  api(`${repoPath(repo)}/-/pulls/${number}/comments`, { method: "POST", body: { body } });
+
+// ── Agent chat bridge (issue / PR) ──
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function normalizeTargetType(value) {
+  return value === "pr" || value === "pull" ? "pr" : "issue";
+}
+
+function compareCommentIds(a, b) {
+  try {
+    const left = BigInt(a);
+    const right = BigInt(b);
+    return left < right ? -1 : left > right ? 1 : 0;
+  } catch {
+    return String(a).localeCompare(String(b));
+  }
+}
+
+function normalizeChatComment(comment) {
+  return {
+    id: String(comment?.id ?? ""),
+    author: comment?.author?.username || "?",
+    author_nickname: comment?.author?.nickname || "",
+    is_npc: comment?.author?.is_npc === true,
+    created_at: comment?.created_at || "",
+    updated_at: comment?.updated_at || "",
+    body: String(comment?.body ?? ""),
+  };
+}
+
+function chatCommentView(comment, maxChars = 12000) {
+  const limit = Math.max(0, Number(maxChars) || 12000);
+  const body = comment.body || "";
+  const truncated = body.length > limit;
+  return {
+    ...comment,
+    body: truncated ? body.slice(0, limit) + `\n...[truncated ${body.length - limit} chars]` : body,
+    body_chars: body.length,
+    truncated,
+  };
+}
+
+async function fetchChatComments(repo, number, {
+  target_type = "issue",
+  pageSize = 100,
+  maxPages = 1000,
+} = {}) {
+  const target = normalizeTargetType(target_type);
+  const resource = target === "pr" ? "pulls" : "issues";
+  const all = [];
+  let total = 0;
+  let pages = 0;
+  for (let page = 1; page <= maxPages; page++) {
+    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (target === "issue") query.set("sort", "-created");
+    const response = await api(`${repoPath(repo)}/-/${resource}/${number}/comments?${query}`);
+    const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+    all.push(...rows);
+    pages = page;
+    total = Number(response?.header?.["x-cnb-total"] ?? response?.total ?? total);
+    if (rows.length < pageSize || (total > 0 && all.length >= total)) break;
+  }
+
+  const seen = new Set();
+  const comments = [];
+  for (const raw of all) {
+    const comment = normalizeChatComment(raw);
+    if (!comment.id || seen.has(comment.id)) continue;
+    seen.add(comment.id);
+    comments.push(comment);
+  }
+  comments.sort((a, b) => {
+    const byId = compareCommentIds(a.id, b.id);
+    return byId || a.created_at.localeCompare(b.created_at);
+  });
+  return {
+    comments,
+    pages,
+    total: total || comments.length,
+    truncated: total > 0 && comments.length < total,
+  };
+}
+
+function parseIssueNumber(value) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new Error(`invalid issue number: ${JSON.stringify(value)}`);
+  }
+  return number;
+}
+
+async function readChat(repo, issue, {
+  target_type = "issue",
+  after_id = null,
+  author = null,
+  limit = 20,
+  max_chars = 12000,
+  order = "latest",
+} = {}) {
+  const number = parseIssueNumber(issue);
+  const target = normalizeTargetType(target_type);
+  const fetched = await fetchChatComments(repo, number, { target_type: target });
+  const cursor = after_id == null || after_id === "" ? null : String(after_id);
+  let selected = cursor == null
+    ? fetched.comments
+    : fetched.comments.filter((comment) => compareCommentIds(comment.id, cursor) > 0);
+  if (author) selected = selected.filter((comment) => comment.author === author);
+  const count = Math.max(1, Math.min(Number(limit) || 20, 100));
+  selected = order === "earliest" ? selected.slice(0, count) : selected.slice(-count);
+  return {
+    repo,
+    target_type: target,
+    issue: number,
+    after_id: cursor,
+    author: author || null,
+    order,
+    count: selected.length,
+    pages: fetched.pages,
+    total: fetched.total,
+    truncated: fetched.truncated,
+    comments: selected.map((comment) => chatCommentView(comment, max_chars)),
+  };
+}
+
+async function waitChat(repo, issue, {
+  target_type = "issue",
+  after_id = null,
+  author = null,
+  timeout_ms = 30000,
+  poll_interval_ms = 3000,
+  max_chars = 12000,
+} = {}) {
+  const number = parseIssueNumber(issue);
+  const target = normalizeTargetType(target_type);
+  const timeoutValue = Number(timeout_ms);
+  const timeout = Number.isFinite(timeoutValue) ? Math.max(0, timeoutValue) : 30000;
+  const interval = Math.max(1000, Number(poll_interval_ms) || 3000);
+  let cursor = after_id == null || after_id === "" ? null : String(after_id);
+
+  if (cursor == null) {
+    // Baseline against the newest comment from all authors; otherwise an
+    // author filter could replay an older message that already existed.
+    const latest = await readChat(repo, number, { target_type: target, limit: 1, max_chars });
+    cursor = latest.comments.at(-1)?.id || "0";
+  }
+
+  const startedAt = Date.now();
+  let lastBatch = null;
+  while (true) {
+    const batch = await readChat(repo, number, {
+      target_type: target,
+      after_id: cursor,
+      author,
+      limit: 100,
+      max_chars,
+      order: "earliest",
+    });
+    lastBatch = batch;
+    if (batch.count > 0) {
+      return {
+        ...batch,
+        waited_ms: Date.now() - startedAt,
+        timed_out: false,
+      };
+    }
+    const remaining = timeout - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      return {
+        ...(lastBatch || {
+          repo,
+          target_type: target,
+          issue: number,
+          after_id: cursor,
+          author: author || null,
+          order: "earliest",
+          pages: 0,
+          total: 0,
+          truncated: false,
+        }),
+        count: 0,
+        comments: [],
+        waited_ms: Date.now() - startedAt,
+        timed_out: true,
+      };
+    }
+    await sleep(Math.min(interval, remaining));
+  }
+}
+
+async function sendChat(repo, issue, body, { target_type = "issue" } = {}) {
+  const number = parseIssueNumber(issue);
+  const target = normalizeTargetType(target_type);
+  const text = String(body ?? "");
+  if (!text.trim()) throw new Error("chat body must not be empty");
+  const response = target === "pr"
+    ? await postPullComment(repo, number, text)
+    : await postIssueComment(repo, number, text);
+  const comment = normalizeChatComment(response?.data ?? response);
+  return { repo, target_type: target, issue: number, sent: true, comment };
+}
 
 // ── pulls ──
 const listPulls = (repo, state = "open") =>
@@ -424,6 +628,55 @@ const TOOLS = [
     },
   },
   {
+    name: "cnb_chat_read",
+    description: "读取 issue 或 PR 评论，按起始评论 ID、作者过滤，返回按时间排序的 Agent 对话消息。适合查看工程师 B 的回复。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "仓库路径，默认 " + DEFAULT_REPO },
+        target_type: { type: "string", enum: ["issue", "pr"], description: "评论目标类型，默认 issue" },
+        issue: { type: "number", description: "issue 或 PR 编号" },
+        after_id: { type: "string", description: "只返回 ID 大于该值的评论；不传则返回最新评论" },
+        author: { type: "string", description: "只保留指定 CNB 用户名，如 AnyBuddy" },
+        limit: { type: "number", description: "最多返回多少条，默认 20，最大 100" },
+        max_chars: { type: "number", description: "单条评论正文最大字符数，默认 12000" },
+      },
+      required: ["issue"],
+    },
+  },
+  {
+    name: "cnb_chat_wait",
+    description: "短轮询等待 issue 或 PR 新评论。首次调用会以当前最新评论为游标，只等待之后的新消息；返回 timed_out=true 表示本轮没有新消息。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "仓库路径，默认 " + DEFAULT_REPO },
+        target_type: { type: "string", enum: ["issue", "pr"], description: "评论目标类型，默认 issue" },
+        issue: { type: "number", description: "issue 或 PR 编号" },
+        after_id: { type: "string", description: "从该评论 ID 之后开始等待；不传则从当前最新评论开始" },
+        author: { type: "string", description: "只等待指定 CNB 用户名，如 AnyBuddy" },
+        timeout_ms: { type: "number", description: "最长等待毫秒数，默认 30000" },
+        poll_interval_ms: { type: "number", description: "轮询间隔毫秒数，默认 3000，最小 1000" },
+        max_chars: { type: "number", description: "单条评论正文最大字符数，默认 12000" },
+      },
+      required: ["issue"],
+    },
+  },
+  {
+    name: "cnb_chat_send",
+    description: "向 issue 或 PR 发送评论，作为 Agent 的直接回复。正文必填，返回创建后的评论 ID。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "仓库路径，默认 " + DEFAULT_REPO },
+        target_type: { type: "string", enum: ["issue", "pr"], description: "评论目标类型，默认 issue" },
+        issue: { type: "number", description: "issue 或 PR 编号" },
+        body: { type: "string", description: "评论正文" },
+      },
+      required: ["issue", "body"],
+    },
+  },
+  {
     name: "cnb_merge_queue",
     description: "批量 squash 合并队列：串行逐个 PR——预检结论【可合并】才放行 → squash merge → 解析标题 Closes #N 自动关单（双参数，state_reason 可选，默认 completed）。预检非【可合并】默认跳过。dry_run=true 只预演不合并。",
     inputSchema: {
@@ -474,6 +727,25 @@ async function callTool(name, args) {
         body: { state: "closed", state_reason: stateReason(args.state_reason) },
       });
     }
+    case "cnb_chat_read":
+      return await readChat(repo, args.issue, {
+        target_type: args.target_type,
+        after_id: args.after_id,
+        author: args.author,
+        limit: args.limit,
+        max_chars: args.max_chars,
+      });
+    case "cnb_chat_wait":
+      return await waitChat(repo, args.issue, {
+        target_type: args.target_type,
+        after_id: args.after_id,
+        author: args.author,
+        timeout_ms: args.timeout_ms,
+        poll_interval_ms: args.poll_interval_ms,
+        max_chars: args.max_chars,
+      });
+    case "cnb_chat_send":
+      return await sendChat(repo, args.issue, args.body, { target_type: args.target_type });
     case "cnb_merge_queue":
       return await mergeQueue(repo, args.prs, {
         ignore_verdict: args.ignore_verdict === true,
@@ -609,19 +881,157 @@ async function runServer() {
 // ─────────────────────────── 独立监视器（--watch） ───────────────────────────
 
 function parseArgs(argv) {
-  const args = { watch: false, json: false, issues: [], builds: [] };
+  const args = {
+    mode: "server",
+    help: false,
+    json: false,
+    repo: null,
+    issues: [],
+    builds: [],
+    targetType: "issue",
+    issue: null,
+    afterId: null,
+    author: null,
+    limit: 20,
+    timeoutMs: 30000,
+    intervalMs: 3000,
+    maxChars: 12000,
+    body: null,
+    bodyFile: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--watch") args.watch = true;
+    if (a === "--watch") args.mode = "watch";
+    else if (a === "--chat-read") args.mode = "chat-read";
+    else if (a === "--chat-wait") args.mode = "chat-wait";
+    else if (a === "--chat-listen") args.mode = "chat-listen";
+    else if (a === "--chat-send") args.mode = "chat-send";
     else if (a === "--json") args.json = true;
+    else if (a === "--help" || a === "-h") args.help = true;
+    else if (a === "--repo") args.repo = argv[++i] || null;
     else if (a === "--issues") args.issues = (argv[++i] || "").split(",").map(Number).filter(Boolean);
     else if (a === "--builds") args.builds = (argv[++i] || "").split(",").filter(Boolean);
+    else if (a === "--issue") args.issue = argv[++i] || null;
+    else if (a === "--pr" || a === "--pull") {
+      args.targetType = "pr";
+      args.issue = argv[++i] || null;
+    }
+    else if (a === "--after-id") args.afterId = argv[++i] || null;
+    else if (a === "--author") args.author = argv[++i] || null;
+    else if (a === "--limit") args.limit = Number(argv[++i]);
+    else if (a === "--timeout-ms") args.timeoutMs = Number(argv[++i]);
+    else if (a === "--interval-ms") args.intervalMs = Number(argv[++i]);
+    else if (a === "--max-chars") args.maxChars = Number(argv[++i]);
+    else if (a === "--body") args.body = argv[++i] || "";
+    else if (a === "--body-file") args.bodyFile = argv[++i] || null;
   }
   return args;
 }
 
+function printCliHelp() {
+  console.log(`用法:
+  node server.mjs                        启动 MCP stdio server
+  node server.mjs --watch --issues 97,100
+  node server.mjs --chat-read (--issue 100 | --pr 102) [--after-id ID] [--author AnyBuddy] [--json]
+  node server.mjs --chat-wait (--issue 100 | --pr 102) [--after-id ID] [--author AnyBuddy] [--timeout-ms 30000] [--interval-ms 3000] [--json]
+  node server.mjs --chat-listen (--issue 100 | --pr 102) [--after-id ID] [--author AnyBuddy] [--timeout-ms 30000] [--interval-ms 3000] [--json]
+  node server.mjs --chat-send (--issue 100 | --pr 102) (--body TEXT | --body-file FILE) [--json]`);
+}
+
+function formatChatResult(result) {
+  if (result.sent) {
+    return `sent comment id=${result.comment.id} author=${result.comment.author}`;
+  }
+  const header = result.timed_out
+    ? `timeout after ${result.waited_ms}ms`
+    : `received ${result.count} message(s) after ${result.waited_ms ?? 0}ms`;
+  const lines = [header];
+  for (const comment of result.comments || []) {
+    lines.push(`\n[${comment.created_at}] @${comment.author} id=${comment.id}\n${comment.body}`);
+  }
+  return lines.join("\n");
+}
+
+async function runChatListen(args) {
+  if (!args.issue) throw new Error("--issue is required");
+  const repo = args.repo || DEFAULT_REPO;
+  const issue = parseIssueNumber(args.issue);
+  const targetType = normalizeTargetType(args.targetType);
+  let cursor = args.afterId == null || args.afterId === "" ? null : String(args.afterId);
+  if (cursor == null) {
+    const latest = await readChat(repo, issue, {
+      target_type: targetType,
+      limit: 1,
+      max_chars: args.maxChars,
+    });
+    cursor = latest.comments.at(-1)?.id || "0";
+  }
+
+  const started = {
+    type: "listening",
+    repo,
+    target_type: targetType,
+    issue,
+    author: args.author || null,
+    after_id: cursor,
+    interval_ms: Math.max(1000, args.intervalMs || 3000),
+  };
+  process.stdout.write((args.json ? JSON.stringify(started) : `listening ${targetType}=${issue} author=${started.author || "*"} after_id=${cursor}`) + "\n");
+
+  while (true) {
+    const result = await waitChat(repo, issue, {
+      target_type: targetType,
+      after_id: cursor,
+      author: args.author,
+      timeout_ms: args.timeoutMs,
+      poll_interval_ms: args.intervalMs,
+      max_chars: args.maxChars,
+    });
+    if (result.count === 0) continue;
+    cursor = result.comments.at(-1).id;
+    process.stdout.write((args.json
+      ? JSON.stringify({ type: "messages", ...result })
+      : formatChatResult(result)) + "\n");
+  }
+}
+
+async function runChat(args) {
+  if (!args.issue) throw new Error("--issue is required");
+  const repo = args.repo || DEFAULT_REPO;
+  const targetType = normalizeTargetType(args.targetType);
+  let result;
+  if (args.mode === "chat-read") {
+    result = await readChat(repo, args.issue, {
+      target_type: targetType,
+      after_id: args.afterId,
+      author: args.author,
+      limit: args.limit,
+      max_chars: args.maxChars,
+    });
+  } else if (args.mode === "chat-wait") {
+    result = await waitChat(repo, args.issue, {
+      target_type: targetType,
+      after_id: args.afterId,
+      author: args.author,
+      timeout_ms: args.timeoutMs,
+      poll_interval_ms: args.intervalMs,
+      max_chars: args.maxChars,
+    });
+  } else if (args.mode === "chat-send") {
+    let body = args.body;
+    if (args.bodyFile) {
+      const { readFile } = await import("node:fs/promises");
+      body = await readFile(args.bodyFile, "utf-8");
+    }
+    result = await sendChat(repo, args.issue, body, { target_type: targetType });
+  } else {
+    throw new Error(`unsupported chat mode: ${args.mode}`);
+  }
+  process.stdout.write((args.json ? JSON.stringify(result, null, 2) : formatChatResult(result)) + "\n");
+}
+
 async function runWatch(args) {
-  if (!process.env.CNB_TOKEN) { try { await loadToken(); } catch {} }
+  const repo = args.repo || DEFAULT_REPO;
   const buildMapPath = new URL("./wave3_builds.json", import.meta.url);
   let buildMap = {};
   try {
@@ -635,7 +1045,7 @@ async function runWatch(args) {
   } catch { /* 无映射文件时只用评论+PR 判定 */ }
 
   const issues = args.issues.length ? args.issues : Object.keys(buildMap).map(Number);
-  const summary = await watchWave(DEFAULT_REPO, issues, buildMap);
+  const summary = await watchWave(repo, issues, buildMap);
   if (args.json) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
@@ -656,8 +1066,15 @@ const rows_sort = (rows) => [...rows].sort((a, b) => a.issue - b.issue);
 // ─────────────────────────── 入口 ───────────────────────────
 
 const argv = process.argv.slice(2);
-if (argv.includes("--watch")) {
-  runWatch(parseArgs(argv)).catch((e) => { console.error(e); process.exit(1); });
+const cliArgs = parseArgs(argv);
+if (cliArgs.help) {
+  printCliHelp();
+} else if (cliArgs.mode === "watch") {
+  runWatch(cliArgs).catch((e) => { console.error(e); process.exit(1); });
+} else if (cliArgs.mode === "chat-listen") {
+  runChatListen(cliArgs).catch((e) => { console.error(e); process.exit(1); });
+} else if (cliArgs.mode.startsWith("chat-")) {
+  runChat(cliArgs).catch((e) => { console.error(e); process.exit(1); });
 } else {
   runServer().catch((e) => { console.error("server crashed:", e); process.exit(1); });
 }

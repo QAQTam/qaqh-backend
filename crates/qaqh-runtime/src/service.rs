@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use qaqh_domain::ActivityState;
 use qaqh_domain::ControlCommand;
+use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
+use qaqh_session::actor::ConnectionId;
 use serde_json::{Value, json};
 
 use crate::{AgentRegistry, RingingHub};
@@ -94,6 +96,35 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .send_ringing(seed, env)
+    }
+
+    pub fn subscribe_channel(
+        &self,
+        seed: &str,
+        connection_id: &ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        self.registry()?
+            .subscribe_channel(seed, connection_id.clone(), channel)
+    }
+
+    pub fn unsubscribe_channel(
+        &self,
+        seed: &str,
+        connection_id: &ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        self.registry()?
+            .unsubscribe_channel(seed, connection_id.clone(), channel)
+    }
+
+    pub fn connection_closed(
+        &self,
+        seed: &str,
+        connection_id: &ConnectionId,
+    ) -> Result<usize, String> {
+        self.registry()?
+            .connection_closed(seed, connection_id.clone())
     }
 
     /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
@@ -232,7 +263,8 @@ impl QaqhService {
             // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
             "fs.list" => {
                 let path = pstr(params, "path")?;
-                list_remote_directory(&self.sessions, &path)
+                let scope_seed = params.get("scope_seed").and_then(Value::as_str);
+                list_remote_directory(&self.sessions, &path, scope_seed)
             }
             "fs.read" => {
                 let path = pstr(params, "path")?;
@@ -240,7 +272,8 @@ impl QaqhService {
                     .get("max_bytes")
                     .and_then(Value::as_u64)
                     .unwrap_or(512 * 1024);
-                read_remote_file(&self.sessions, &path, max_bytes)
+                let scope_seed = params.get("scope_seed").and_then(Value::as_str);
+                read_remote_file(&self.sessions, &path, max_bytes, scope_seed)
             }
             "workspace.create" => {
                 let path = pstr(params, "path")?;
@@ -490,30 +523,25 @@ impl QaqhService {
                 })?;
                 Ok(Value::Null)
             }
-            "todo.status" => parse_json_string(qaqh_workspace::todo::todo_status_json(&seed()?)?),
-            "todo.cancel" => parse_json_string(qaqh_workspace::todo::todo_cancel_json(
-                &seed()?,
-                &pstr(params, "id")?,
-            )?),
-            "todo.set" => parse_json_string(qaqh_workspace::todo::todo_set_for(&seed()?, params)?),
-            "todo.list" => {
-                parse_json_string(qaqh_workspace::todo::todo_list_for(&seed()?, params)?)
+            "todo.status" => qaqh_workspace::todo::todo_status_value(&seed()?),
+            "todo.cancel" => {
+                qaqh_workspace::todo::todo_cancel_value(&seed()?, &pstr(params, "id")?)
             }
+            "todo.set" => qaqh_workspace::todo::todo_set_value_for(&seed()?, params),
+            "todo.list" => qaqh_workspace::todo::todo_list_value_for(&seed()?, params),
             "plan.context_stats" => context_stats(&self.sessions, &seed()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
-            "plan.read" => read_plan(&self.sessions, &seed()?),
-            "plan.action" => {
-                plan_action(
-                    &self.sessions,
-                    &seed()?,
-                    &pstr2(params, "item_id", "itemId")?,
-                    &pstr(params, "action")?,
-                    value2(params, "user_comment", "userComment")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                )?;
-                Ok(Value::Null)
-            }
+            "plan.read" => serde_json::to_value(read_plan(&self.sessions, &seed()?)).map_err(err),
+            "plan.action" => serde_json::to_value(plan_action(
+                &self.sessions,
+                &seed()?,
+                &pstr2(params, "item_id", "itemId")?,
+                &pstr(params, "action")?,
+                value2(params, "user_comment", "userComment")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )?)
+            .map_err(err),
             // ── Subagent orchestration ──────────────────────────────────────
             // Spawn an isolated subagent worker and return its seed. The
             // caller (parent agent) then attaches the seed and drives it with
@@ -848,7 +876,7 @@ pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod stats;
 
-use self::common::{command_id, err, parse_json_string, release_freed_heap_memory};
+use self::common::{command_id, err, release_freed_heap_memory};
 use self::fs_git::{git, list_remote_directory, read_remote_file, workspace};
 use self::params::{
     optional_tool_mode, pbool, pstr, pstr2, pstrings, pu64, validate_tool_mode, value2,

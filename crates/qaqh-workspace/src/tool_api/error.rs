@@ -114,9 +114,9 @@ impl ToolErrorCode {
     /// 桥接构造：legacy 错误码为 UPPER_SNAKE（如 `RESOURCE_MISMATCH`），
     /// 不做小写/命名空间校验。
     ///
-    /// **仅限 legacy 适配层**（[`super::legacy`]）使用；新工具必须走
-    /// [`Self::parse`] / [`Self::builtin`]。
-    pub(crate) fn from_legacy(raw: &str) -> Self {
+    /// **仅限 legacy 工具迁移期**使用，用于保持既有 wire error code 不变；
+    /// 全新工具必须走 [`Self::parse`] / [`Self::builtin`]。
+    pub fn from_legacy(raw: &str) -> Self {
         Self(raw.to_owned())
     }
 
@@ -326,7 +326,11 @@ mod tests {
 
     #[test]
     fn code_parse_accepts_builtin_and_namespaced_forms() {
-        for raw in ["invalid_arguments", "mcp.rate_limited", "edit.hash_mismatch"] {
+        for raw in [
+            "invalid_arguments",
+            "mcp.rate_limited",
+            "edit.hash_mismatch",
+        ] {
             assert!(ToolErrorCode::parse(raw).is_ok(), "{raw} 应合法");
         }
     }

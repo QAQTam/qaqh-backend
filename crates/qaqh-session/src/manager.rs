@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use qaqh_message::legacy_writer::LegacyWriterFacade;
+
 use crate::store;
 
 static INSTANCE: OnceLock<Arc<SessionManager>> = OnceLock::new();
@@ -230,6 +232,7 @@ impl SessionManager {
             .session_dir(seed)
             .ok_or_else(|| format!("Session not found: {seed}"))?;
 
+        let _legacy_writer = LegacyWriterFacade::lock();
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete session: {e}"))?;
 
         store::remove_from_index(&self.sessions_dir, seed);
@@ -807,6 +810,7 @@ impl SessionManager {
         }
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _legacy_writer = LegacyWriterFacade::lock();
         if self.session_dir(seed).is_some() {
             log::warn!(
                 "[session] create_session: seed {seed} already has a session directory — refusing to overwrite"
@@ -1376,6 +1380,7 @@ impl SessionManager {
     ) -> R {
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _legacy_writer = LegacyWriterFacade::lock();
         let dir = self.session_path_dir(seed);
         if create_dir {
             let _ = std::fs::create_dir_all(&dir);

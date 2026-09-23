@@ -3,7 +3,10 @@
 
 mod axum_impl;
 
-pub use axum_impl::{AppState, DebugNonceStore, build_router};
+#[cfg(test)]
+pub(crate) use axum_impl::test_hooks::SseTerminateScope;
+pub(crate) use axum_impl::test_hooks::TestHooks;
+pub use axum_impl::{AppState, build_router};
 
 #[cfg(test)]
 /// 进程级 SessionManager 初始化守卫。
@@ -82,8 +85,8 @@ mod sse_tests {
                 .clone(),
             token: TOKEN.into(),
             epoch: "lag-epoch".into(),
-            debug_nonces: std::sync::Arc::new(DebugNonceStore::new()),
             shutdown,
+            test_hooks: std::sync::Arc::new(TestHooks::disabled()),
         }
     }
 
@@ -142,12 +145,27 @@ mod sse_tests {
             Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
         >,
     ) {
-        let req = Request::builder()
+        open_timeline_sse_with_cursor(app, None).await
+    }
+
+    /// 打开 timeline SSE，可带 `Last-Event-ID`（模拟客户端重连时的 cursor）。
+    async fn open_timeline_sse_with_cursor(
+        app: Router,
+        last_event_id: Option<&str>,
+    ) -> (
+        StatusCode,
+        std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+        >,
+    ) {
+        let mut builder = Request::builder()
             .uri(format!("/ringing/v1/sessions/{SEED}/timeline/events"))
             .header("authorization", format!("Bearer {TOKEN}"))
-            .header("x-qaqh-client-session-id", SESSION)
-            .body(Body::empty())
-            .unwrap();
+            .header("x-qaqh-client-session-id", SESSION);
+        if let Some(cursor) = last_event_id {
+            builder = builder.header("last-event-id", cursor);
+        }
+        let req = builder.body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let stream = axum::body::Body::into_data_stream(resp.into_body());
@@ -229,6 +247,90 @@ mod sse_tests {
             tail.is_none(),
             "no frame may follow the termination frame: {tail:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn injected_stream_termination_has_stable_wire_shape_and_is_one_shot() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_sse_terminate(
+            "lagged",
+            SseTerminateScope::Channel,
+            Some(qaqh_domain::RingingChannel::Conversation),
+        ));
+
+        let (status, mut first) = open_channel_sse(build_router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data) = next_sse_frame(&mut first, Duration::from_secs(5))
+            .await
+            .expect("injected termination frame must arrive");
+        assert_eq!(event, "ringing.stream_terminated");
+        let value: serde_json::Value = serde_json::from_str(&data).expect("valid json payload");
+        assert_eq!(value["code"], "lagged");
+        assert_eq!(value["channel"], "conversation");
+        assert_eq!(value["skipped"], 7);
+        assert!(
+            next_sse_frame(&mut first, Duration::from_millis(300))
+                .await
+                .is_none(),
+            "injected termination must close the stream"
+        );
+
+        let state = test_state_with_hub(hub.clone());
+        let (_, mut second) = open_channel_sse(build_router(state)).await;
+        hub.publish(
+            SEED,
+            qaqh_domain::DomainEvent::Conversation(
+                qaqh_domain::ConversationEvent::ConversationCancelled {
+                    turn_id: Some("t-after-injection".into()),
+                },
+            ),
+        );
+        let (event, data) = next_sse_frame(&mut second, Duration::from_secs(5))
+            .await
+            .expect("second stream must receive normal live traffic");
+        assert_ne!(event, "ringing.stream_terminated", "{data}");
+        assert_eq!(event, "conversation_cancelled");
+    }
+
+    /// `Scope::Any` 同时匹配 channel 与 timeline 两条流，但 token 仍然只能被消费
+    /// 一次：第一条流拿到终止帧后，第二条流必须收到正常数据。
+    #[tokio::test]
+    async fn injected_stream_termination_any_scope_is_one_shot_across_stream_kinds() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_sse_terminate(
+            "lagged",
+            SseTerminateScope::Any,
+            None,
+        ));
+        let app = build_router(state);
+
+        let (status, mut channel_stream) = open_channel_sse(app.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, _) = next_sse_frame(&mut channel_stream, Duration::from_secs(5))
+            .await
+            .expect("channel stream must get the injected termination frame");
+        assert_eq!(event, "ringing.stream_terminated");
+
+        let (status, mut timeline_stream) = open_timeline_sse(app).await;
+        assert_eq!(status, StatusCode::OK);
+        hub.publish_timeline(
+            SEED,
+            qaqh_domain::TimelineIntent::TurnOpened {
+                turn_id: "t-any-scope".into(),
+                user_text: "must not be terminated".into(),
+            },
+        )
+        .expect("publish timeline intent");
+        let (event, data) = next_sse_frame(&mut timeline_stream, Duration::from_secs(5))
+            .await
+            .expect("timeline stream must still receive normal traffic");
+        assert_ne!(
+            event, "ringing.stream_terminated",
+            "the one-shot token must not be consumable once per stream kind: {data}"
+        );
+        assert_eq!(event, "timeline.entry");
     }
 
     /// ② 终止后新订阅仍能正常收流（重连重定基不被破坏）。
@@ -328,6 +430,136 @@ mod sse_tests {
             "no frame may follow the timeline termination frame: {tail:?}"
         );
     }
+
+    #[tokio::test]
+    async fn injected_timeline_gap_drops_first_entry_and_keeps_streaming() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
+        let (status, mut stream) = open_timeline_sse(build_router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        for turn in ["t-gap-1", "t-gap-2", "t-gap-3"] {
+            hub.publish_timeline(
+                SEED,
+                qaqh_domain::TimelineIntent::TurnOpened {
+                    turn_id: turn.into(),
+                    user_text: "force a timeline gap".into(),
+                },
+            )
+            .expect("publish timeline intent");
+        }
+
+        // 第一条真实 entry 被丢弃，客户端直接看到第二条 —— 这就是 gap。
+        let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("frame after the dropped entry must arrive");
+        assert_eq!(event, "timeline.entry");
+        let value: serde_json::Value = serde_json::from_str(&data).expect("valid timeline frame");
+        assert_eq!(value["entry"]["timeline_seq"], 2);
+
+        // 钩子只丢一帧，不关流：后续 entry 必须继续正常下发。
+        let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("the stream must stay open after gap injection");
+        assert_eq!(event, "timeline.entry");
+        let value: serde_json::Value = serde_json::from_str(&data).expect("valid timeline frame");
+        assert_eq!(value["entry"]["timeline_seq"], 3);
+    }
+
+    /// 客户端模型级回归：cosplay TUI 的 `expected == cursor + 1` 判定，断言
+    /// gap 钩子制造的是「跳号」而不是「重复下发已送达 entry」。
+    #[tokio::test]
+    async fn injected_timeline_gap_triggers_client_cursor_check_without_duplicates() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
+
+        // 客户端已经收到 seq1，带 cursor=1 重连（这是 TUI 最常见的重连态）。
+        hub.publish_timeline(
+            SEED,
+            qaqh_domain::TimelineIntent::TurnOpened {
+                turn_id: "t-prior".into(),
+                user_text: "already delivered".into(),
+            },
+        )
+        .expect("publish prior entry");
+
+        let (status, mut stream) =
+            open_timeline_sse_with_cursor(build_router(state), Some("lag-epoch:timeline:1")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // 重连后 journal 里又出现三条：seq2 被钩子丢弃，seq3/seq4 才是客户端看到的。
+        for turn in ["t-new-a", "t-new-b", "t-new-c"] {
+            hub.publish_timeline(
+                SEED,
+                qaqh_domain::TimelineIntent::TurnOpened {
+                    turn_id: turn.into(),
+                    user_text: "after reconnect".into(),
+                },
+            )
+            .expect("publish timeline intent");
+        }
+
+        let mut cursor = 1_u64;
+        let mut gap_triggered = false;
+        let mut delivered: Vec<u64> = Vec::new();
+        while let Some((event, data)) = next_sse_frame(&mut stream, Duration::from_secs(5)).await {
+            assert_eq!(event, "timeline.entry");
+            let value: serde_json::Value =
+                serde_json::from_str(&data).expect("valid timeline frame");
+            let seq = value["entry"]["timeline_seq"]
+                .as_u64()
+                .expect("timeline_seq");
+            assert!(
+                seq > cursor,
+                "gap injection must never re-send an already delivered entry: cursor={cursor} seq={seq}"
+            );
+            if seq != cursor + 1 {
+                gap_triggered = true;
+            }
+            cursor = seq;
+            delivered.push(seq);
+            if delivered.len() == 2 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            delivered,
+            vec![3, 4],
+            "client must see seq3 (gap) and then the stream must keep flowing with seq4"
+        );
+        assert!(
+            gap_triggered,
+            "client-side `expected == cursor + 1` check must fire on the injected gap"
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_timeline_gap_does_not_leak_foreign_seed_entries() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let mut state = test_state_with_hub(hub.clone());
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
+        let (status, mut stream) = open_timeline_sse(build_router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        hub.publish_timeline(
+            "seed-foreign",
+            qaqh_domain::TimelineIntent::TurnOpened {
+                turn_id: "t-foreign".into(),
+                user_text: "foreign timeline data".into(),
+            },
+        )
+        .expect("publish foreign timeline intent");
+
+        assert!(
+            next_sse_frame(&mut stream, Duration::from_millis(300))
+                .await
+                .is_none(),
+            "foreign seed must be filtered before gap injection"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -371,8 +603,8 @@ mod axum_tests {
             service,
             token: String::from("test-token"),
             epoch: String::from("test-epoch"),
-            debug_nonces: std::sync::Arc::new(DebugNonceStore::new()),
             shutdown,
+            test_hooks: std::sync::Arc::new(TestHooks::disabled()),
         }
     }
 
@@ -388,10 +620,22 @@ mod axum_tests {
     }
 
     #[tokio::test]
+    async fn activity_requires_auth() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .uri("/activity")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn activity_exposes_has_active_work() {
         let app = build_router(test_state());
         let req = Request::builder()
             .uri("/activity")
+            .header("authorization", "Bearer test-token")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -403,6 +647,26 @@ mod axum_tests {
         // test_state() 无 agent：has_active_work 必须为 false，activities 为空表。
         assert_eq!(value["has_active_work"], serde_json::json!(false));
         assert_eq!(value["activities"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn injected_session_404_short_circuits_timeline_snapshot() {
+        let mut state = test_state();
+        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_session_404("missing"));
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/ringing/v1/sessions/missing/timeline")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", "cs-test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["code"], "session_not_found");
     }
 
     #[tokio::test]
@@ -681,32 +945,28 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// P0-3：桥脚本只下发一次性 nonce，绝不内联真实 token。
+    /// 普通 daemon Router 不挂载浏览器控制面；WebUI 只能走独立 `webui` 网关。
     #[tokio::test]
-    async fn debug_bridge_returns_nonce_not_token() {
+    async fn webui_routes_are_not_mounted() {
         let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "text/javascript; charset=utf-8"
-        );
-        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-        let txt = String::from_utf8_lossy(&body);
-        assert!(txt.contains("window.__QAQH_DEBUG__"));
-        assert!(txt.contains("nonce"));
-        assert!(
-            !txt.contains("test-token"),
-            "bridge must not inline the daemon token: {txt}"
-        );
+        for path in [
+            "/debug/",
+            "/debug/__qaqh_bridge__.js",
+            "/debug/__qaqh_token__",
+            "/ui/",
+            "/__gateway/bootstrap.js",
+        ] {
+            let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not be mounted on the daemon"
+            );
+        }
     }
 
-    /// `/health` 不再回显 `token_len`（凭据长度也是旁路信息）。
+    /// `/health` 不回显 `token_len`（凭据长度也是旁路信息）。
     #[tokio::test]
     async fn health_does_not_leak_token() {
         let app = build_router(test_state());
@@ -725,290 +985,6 @@ mod axum_tests {
         );
     }
 
-    /// nonce 一次性兑换：第一次成功、第二次（同 nonce）作废。
-    #[tokio::test]
-    async fn debug_token_exchange_is_one_time() {
-        let state = test_state();
-        let app = build_router(state);
-        // 1) 取桥脚本里的 nonce。
-        let bridge = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(bridge).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let txt = String::from_utf8_lossy(&body);
-        let nonce = txt
-            .split("\"nonce\":\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("bridge body must carry a nonce")
-            .to_string();
-
-        // 2) 兑换成功并拿到真实 token。
-        let exchange = |nonce: String| {
-            Request::builder()
-                .method("POST")
-                .uri("/debug/__qaqh_token__")
-                .header("host", "127.0.0.1")
-                .header("sec-fetch-site", "same-origin")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "nonce": nonce }).to_string(),
-                ))
-                .unwrap()
-        };
-        let resp = app.clone().oneshot(exchange(nonce.clone())).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("cache-control").map(|v| v.as_bytes()),
-            Some(b"no-store".as_slice()),
-            "token exchange must not be cacheable"
-        );
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["token"], serde_json::json!("test-token"));
-
-        // 3) 同一 nonce 再用一次 → 403。
-        let resp = app.oneshot(exchange(nonce)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    /// 跨站 `Sec-Fetch-Site` 的兑换请求必须被拒（DNS rebinding 兜底）。
-    #[tokio::test]
-    async fn debug_token_exchange_rejects_cross_site() {
-        let state = test_state();
-        let app = build_router(state);
-        let bridge = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(bridge).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let txt = String::from_utf8_lossy(&body);
-        let nonce = txt
-            .split("\"nonce\":\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("bridge body must carry a nonce")
-            .to_string();
-        let req = Request::builder()
-            .method("POST")
-            .uri("/debug/__qaqh_token__")
-            .header("host", "127.0.0.1")
-            .header("sec-fetch-site", "cross-site")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({ "nonce": nonce }).to_string(),
-            ))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn debug_rejects_traversal() {
-        let app = build_router(test_state());
-        // safe_join should reject traversal; we hit /debug/../outside
-        let req = Request::builder()
-            .uri("/debug/../outside")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        // axum normalizes path, but our safe_join will reject => 400
-        // If axum normalizes `..` to `/`, it may become 404; accept either 400 or 404
-        assert!(resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn debug_not_found_for_missing_file() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/debug/missing_file_xyz.txt")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn stop_requires_auth() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn stop_success() {
-        let state = test_state();
-        let app = build_router(state);
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop")
-            .header("authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn stop_if_idle_conflict_when_busy() {
-        // has_active_work is false in test (no agents), so should be OK, not conflict
-        // Just verify auth and basic path
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop-if-idle")
-            .header("authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        // In test, no active work, so 200; if busy would be 409
-        assert!(resp.status() == StatusCode::OK || resp.status() == StatusCode::CONFLICT);
-    }
-
-    #[tokio::test]
-    async fn debug_bridge_rejects_non_loopback() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn debug_bridge_allows_loopback() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    /// `/debug` 的 Host 白名单：伪造 Host（DNS rebinding 形态）必须 421。
-    #[tokio::test]
-    async fn debug_bridge_rejects_foreign_host() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "evil.example")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
-    }
-
-    /// 缺 Host 一律拒绝（fail-closed；hyper 的 HTTP/1.1 服务端恒会补 Host）。
-    #[tokio::test]
-    async fn debug_bridge_rejects_missing_host() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let app = build_router(test_state());
-        let mut req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            12345,
-        )));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
-    }
-
-    /// 回环 Host 的白名单形态：localhost / IPv4 / IPv6 字面量（均可带端口）。
-    #[tokio::test]
-    async fn debug_bridge_allows_loopback_host_forms() {
-        use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        for host in ["127.0.0.1:51325", "localhost:51325", "[::1]:51325"] {
-            let app = build_router(test_state());
-            let mut req = Request::builder()
-                .uri("/debug/__qaqh_bridge__.js")
-                .header("host", host)
-                .body(Body::empty())
-                .unwrap();
-            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                12345,
-            )));
-            let resp = app.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK, "host {host} must be allowed");
-        }
-    }
-
-    /// 跨源 no-cors 子资源加载必须在浏览器侧被拒：`<script src>` 拿不到 token。
-    #[tokio::test]
-    async fn debug_bridge_sets_corp_and_nosniff() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/debug/__qaqh_bridge__.js")
-            .header("host", "127.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers()
-                .get("cross-origin-resource-policy")
-                .expect("CORP header"),
-            "same-origin"
-        );
-        assert_eq!(
-            resp.headers()
-                .get("x-content-type-options")
-                .expect("nosniff header"),
-            "nosniff"
-        );
-    }
-
-    /// Host 守卫只作用于 `/debug` 前缀：LAN 模式远端壳（自定义 Host）不受影响。
-    #[tokio::test]
-    async fn foreign_host_does_not_block_command_api() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("POST")
-            .uri("/control/v1/stop-if-idle")
-            .header("host", "192.168.1.50:51325")
-            .header("authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_ne!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
-    }
     /// BUG-2026-09-13-18：`limit=0` 时 handler 曾把 0 直通给 `paginate_turns`，
     /// `end == start` → 空页，但 `start > 0` 仍报 `has_more=true`，按 has_more
     /// 驱动的客户端翻页永远拿不到行、也永远停不下来。修复要求 limit 经

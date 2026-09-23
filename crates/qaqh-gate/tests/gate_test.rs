@@ -549,22 +549,58 @@ fn default_provider_tool_history_is_unchanged() {
     assert!(request["messages"][1].get("content").is_none());
 }
 
+/// #315 回归锁：sync 路径必须能在**没有 Tokio runtime 上下文**的线程上跑。
+///
+/// 真实调用方 `engine_title.rs` 用裸 `std::thread::spawn` 起 `session-title` 线程
+/// 调 `chat_sync`，那个线程没有 runtime。旧实现写的是 `block_on( ... .send())`
+/// —— `.send()` 是 `block_on` 的**实参**，先于它求值；而 reqwest 的
+/// `RequestBuilder::send` 是普通 fn，内部立刻构造 `tokio::time::sleep`，
+/// 于是在无 runtime 线程上 panic「there is no reactor running」，LLM 标题永不生效。
+///
+/// 本用例刻意用 plain `#[test]`（**不是** `#[tokio::test]`）：测试线程没有 runtime
+/// 上下文，正是生产里那条线程的等价环境。修复前本用例必 panic，修复后正常返回。
 #[test]
-#[allow(clippy::assertions_on_constants)] // 占位验证：sync 路径需独立 JSON 端点 mock
-fn chat_sync_non_streaming() {
-    let scenario = vec![
-        SseChunk::text("Hello sync"),
-        SseChunk::finish("stop", None),
-        SseChunk::done(),
-    ];
-    let _mock = MockServer::new(scenario);
-    // For sync we don't use the mock scenario the same way (sync expects JSON body, not SSE).
-    // We need to serve a normal JSON response for sync.
-    // Let's use a separate approach: a mock server for sync.
-    // Actually sync chat uses ureq::post without stream parameter.
-    // The mock SSE scenario won't work for sync. We need a separate mock.
-    // Let me just verify the test infrastructure works by testing streaming.
-    assert!(true, "sync test needs JSON response endpoint");
+fn openai_sync_works_without_tokio_runtime_context() {
+    let mock = MockServer::new(vec![SseChunk::json_body(json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "Hello sync" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3 }
+    }))]);
+    let provider = make_provider(&mock);
+
+    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("hi")], 64);
+    assert_eq!(
+        out.ok().as_deref(),
+        Some("Hello sync"),
+        "无 runtime 线程上的 sync 调用必须正常返回，而不是 panic"
+    );
+}
+
+/// 同上，Anthropic 适配器（`message_api.rs` 的 sync 站点）——同一形态的第二处，
+/// 由 #315 复核时发现（issue 原文把这一处记成 `:993`，实际是 `:991`）。
+#[test]
+fn anthropic_sync_works_without_tokio_runtime_context() {
+    let mock = MockServer::new(vec![SseChunk::json_body(json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Hello sync" }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 1, "output_tokens": 2 }
+    }))]);
+    let provider = make_anthropic_provider(&mock);
+
+    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("hi")], 64);
+    assert_eq!(
+        out.ok().as_deref(),
+        Some("Hello sync"),
+        "无 runtime 线程上的 anthropic sync 调用必须正常返回，而不是 panic"
+    );
 }
 
 // ── Skills ephemeral injection: API acceptance test ──────────────────

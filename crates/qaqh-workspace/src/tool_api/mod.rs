@@ -46,20 +46,21 @@ pub use boundary::{
     PendingKind, ResumeInteraction,
 };
 pub use capabilities::{Concurrency, ToolCapabilities};
-pub use context::{AgentMode, CancellationToken, ToolCallContext, ToolCallSource};
+pub use context::{
+    AgentMode, CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
+};
 pub use descriptor::{
     DescriptorError, Namespace, OutputBudget, ToolDescriptor, ToolExposure, ToolName, ToolSource,
 };
 pub use display::{PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolHeader, ToolMetrics};
 pub use erased::ErasedTool;
 pub use error::{
-    FatalToolError, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind,
-    ToolExecutionError,
+    FatalToolError, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError,
 };
-pub use legacy::{map_tool_result, LegacyCallOutcome, LegacyToolAdapter};
+pub use legacy::{LegacyCallOutcome, LegacyToolAdapter, map_tool_result};
 pub use output::{
     ToolContentBlock, ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue,
     ToolProjection, ToolStatus,
 };
 pub use progress::{ProgressSink, ProgressStream, ToolProgress};
-pub use typed::TypedTool;
+pub use typed::{TypedTool, TypedToolAdapter};

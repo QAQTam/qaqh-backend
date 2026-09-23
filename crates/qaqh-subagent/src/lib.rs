@@ -24,15 +24,22 @@
 //! initialization (the subagent worker itself does this via
 //! `AgentState::init_subagent`) to register the `spawn_subagent` tool.
 
+#![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
+
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{ControlEvent, ConversationCommand, ConversationEvent};
 use qaqh_ringing::{RingingCommand, RingingEvent};
-// `ContentRef` / `EventBatch`（trait 签名 + transport 事件流）经下方
-// `pub use host::{ContentRef, EventBatch, ..}` 引入。
-use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
+use qaqh_workspace::tool_api::{
+    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
+    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
+    ToolSource, TypedTool,
+};
+use qaqh_workspace::{ToolManager, ToolRisk};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 mod host;
 pub use host::{ContentRef, EventBatch, SubagentHost, host, install_host};
@@ -44,29 +51,92 @@ const SUBAGENT_IDENTITY_PROMPT: &str = "\
 You are a subagent engineer working in QAQ-Harness. Follow the main coding agent's \
 instructions exactly, never take unauthorized actions, and complete the assigned task faithfully.";
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnSubagentArgs {
+    task_description: String,
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SpawnSubagentOutput {
+    timeis: String,
+    status: String,
+    process_id: u32,
+    seed: String,
+    name: String,
+    content: String,
+}
+
+impl ToolProjection for SpawnSubagentOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_default(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        Some(self.content.clone())
+    }
+
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        ToolDisplay::new(
+            qaqh_workspace::tool_api::ToolHeader::Other {
+                label: "subagent".to_string(),
+            },
+            qaqh_workspace::tool_api::ToolBody::Subagent {
+                name: self.name.clone(),
+                seed: self.seed.clone(),
+            },
+        )
+        .with_summary(self.content.clone())
+    }
+}
+
+pub struct SpawnSubagentTool;
+
+impl TypedTool for SpawnSubagentTool {
+    type Args = SpawnSubagentArgs;
+    type Output = SpawnSubagentOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("spawn_subagent").expect("valid subagent tool name"),
+            display_name: None,
+            description: "Spawn an isolated subagent for a focused task. Returns process_id; \
+                its final answer is injected as a [SUBAGENT] message when done - do not poll. \
+                agent_name = verb+task phrase (e.g. 'explore_task')."
+                .to_string(),
+            input_schema: spawn_subagent_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(SpawnSubagentOutput))
+                .expect("subagent output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Exec,
+            risk: ToolRisk::Administrative,
+            default_timeout: Duration::from_secs(180),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: SpawnSubagentArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        handle_spawn_subagent(ctx, args)
+    }
+}
+
 pub fn register(mgr: &mut ToolManager) {
     mgr.register_display("spawn_subagent", project_subagent_display);
-    mgr.register(ToolHandler {
-        key: "spawn_subagent".to_string(),
-        description: "Spawn an isolated subagent for a focused task. Returns process_id; \
-            its final answer is injected as a [SUBAGENT] message when done - do not poll. \
-            agent_name = verb+task phrase (e.g. 'explore_task').",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "task_description": {"type": "string", "description": "Short description of the task for the subagent."},
-                "agent_name": {"type": "string", "description": "Name for this subagent, verb+task phrase (e.g. 'explore_task', 'review_code')."},
-                "context": {"type": "string", "description": "Optional background context to hand to the subagent before the task."},
-                "timeout_secs": {"type": "integer", "description": "Maximum time in seconds before the subagent is cancelled. Default 120."}
-            },
-            "required": ["task_description"],
-            "additionalProperties": false
-        }),
-        handler: handle_spawn_subagent,
-        risk: ToolRisk::Administrative,
-        category: qaqh_workspace::permission::ToolCategory::Exec,
-        default_timeout: std::time::Duration::from_secs(180),
-    });
+    mgr.register_typed(SpawnSubagentTool);
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
@@ -189,60 +259,39 @@ fn project_subagent_display(
     args: &serde_json::Value,
     output: &str,
 ) -> qaqh_workspace::tool_api::ToolDisplay {
-    use qaqh_workspace::tool_api::{ToolBody, ToolDisplay, ToolHeader};
-
+    if let Ok(output) = serde_json::from_str::<SpawnSubagentOutput>(output) {
+        return output.display(args);
+    }
     let name = args
         .get("agent_name")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("sub");
-    let view = serde_json::from_str::<serde_json::Value>(output).ok();
-    let seed = view
-        .as_ref()
-        .and_then(|view| view.get("seed"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let summary = view
-        .as_ref()
-        .and_then(|view| view.get("content"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let display = ToolDisplay::new(
-        ToolHeader::Other {
+    qaqh_workspace::tool_api::ToolDisplay::new(
+        qaqh_workspace::tool_api::ToolHeader::Other {
             label: "subagent".to_string(),
         },
-        ToolBody::Subagent {
+        qaqh_workspace::tool_api::ToolBody::Subagent {
             name: name.to_string(),
-            seed: seed.to_string(),
+            seed: String::new(),
         },
-    );
-    match summary.filter(|summary| !summary.trim().is_empty()) {
-        Some(summary) => display.with_summary(summary),
-        None => display,
-    }
+    )
 }
 
-fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
-    let name: String = ctx
-        .args
-        .get("agent_name")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "sub".to_string());
-    let task: String = ctx
-        .args
-        .get("task_description")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
-    let context: String = ctx
-        .args
-        .get("context")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
+fn handle_spawn_subagent(
+    ctx: &ToolCallContext,
+    args: SpawnSubagentArgs,
+) -> Result<SpawnSubagentOutput, ToolExecutionError> {
+    let name = args
+        .agent_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("sub")
+        .to_string();
+    let task = args.task_description;
+    let context = args.context.unwrap_or_default();
 
     // 模型面只暴露 4 个参数；工具白名单 / 模型 / base-url / max-tokens /
     // 超时默认值一律取自用户设置（cfg.subagent.*，前端设置页可调），
@@ -260,32 +309,27 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
                 )
             })
             .unwrap_or_default();
-    let timeout_secs: u64 = ctx
-        .args
-        .get("timeout_secs")
-        .and_then(|v| v.as_u64())
+    let timeout_secs = args
+        .timeout_secs
         .unwrap_or(cfg_timeout.max(1))
         .clamp(1, 3600);
 
     if task.trim().is_empty() {
-        return qaqh_workspace::json_err(
+        return Err(subagent_error(
             "MISSING_TASK",
             "spawn_subagent: task_description is required",
             "Provide a task description.",
-        );
+        ));
     }
     let task_text = build_subagent_task(&task, &context);
 
-    // 子代理继承主代理的工作区（BUG-2026-09-12-06）：必须读 TLS 优先的
-    // current_workspace 而非进程全局 CURRENT_WORKSPACE——本 handler 运行在
-    // 派生工具线程上，daemon 的进程全局恒空，旧读法使继承永远失效
-    // （子代理 meta.cwd = None，相对路径全部锚到 daemon 进程 cwd）。为空/
-    // `.` 时不传，宿主侧同样跳过继承。
-    let parent_workspace = qaqh_workspace::current_workspace();
+    // 子代理继承主代理的工作区。workspace 由显式 ToolCallContext 注入，
+    // 派生工具线程不再读取线程局部状态。为空/`.` 时不传。
+    let parent_workspace = ctx.workspace_root.to_string_lossy();
     let workspace = if parent_workspace.is_empty() || parent_workspace == "." {
         None
     } else {
-        Some(parent_workspace)
+        Some(parent_workspace.into_owned())
     };
     let model = if model_override.is_empty() {
         None
@@ -303,9 +347,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         Some(max_tokens)
     };
 
-    // ── 1. 选择传输：宿主直连（进程内，无 HTTP/SSE 回环）优先；双子代理
-    //        actor 未安装宿主时回退旧 daemon HTTP/SSE 路径。两种方式产出
-    //        `(seed, Box<dyn SubagentTransport>)`，后续流程共用。──
+    // ── 1. 选择传输：宿主直连（进程内，无 HTTP/SSE 回环）。──
     let (seed, transport): (String, Box<dyn SubagentTransport>) = if let Some(host) = host() {
         log::info!(
             "[SUBAGENT] '{name}' using in-process host direct transport (tools={})",
@@ -320,18 +362,18 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         ) {
             Ok(seed) if !seed.is_empty() => seed,
             Ok(_) => {
-                return qaqh_workspace::json_err(
+                return Err(subagent_error(
                     "SPAWN_ERROR",
                     "spawn_subagent: host returned empty seed",
                     "Check host/daemon logs.",
-                );
+                ));
             }
-            Err(e) => {
-                return qaqh_workspace::json_err(
+            Err(error) => {
+                return Err(subagent_error(
                     "SPAWN_ERROR",
-                    format!("spawn_subagent: host rejected spawn: {e}"),
+                    format!("spawn_subagent: host rejected spawn: {error}"),
                     "Check that the daemon can start subagent actors.",
-                );
+                ));
             }
         };
         let batch_rx = host.subscribe(&seed);
@@ -340,46 +382,42 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
             Box::new(HostTransport { host, batch_rx }) as Box<dyn SubagentTransport>,
         )
     } else {
-        // PR-4-2（Q4a）：legacy daemon HTTP/SSE 回连降级路径已删除——宿主未装配
-        // （非 daemon 进程 / 未 install_host）即失败，不再回连。
-        return qaqh_workspace::json_err(
+        return Err(subagent_error(
             "HOST_UNAVAILABLE",
             "spawn_subagent: no in-process subagent host installed",
             "Subagent spawning requires the daemon host (install_host).",
-        );
+        ));
     };
     log::info!("[SUBAGENT] '{name}' worker seed={seed}");
 
-    // ── 2. Send the task (attach/lease 语义封装在 transport 内；宿主直连
-    //        进程内直接入 actor 命令队列，无 lease)。──
+    // ── 2. Send the task. ──
     let send = RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
         text: task_text,
         images: vec![],
         attachments: None,
+        message_id: Some(format!("subagent-task:{seed}")),
+        input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
         as_system: false,
     });
-    // 任务发送校验：Rejected/Err 意味着子 actor 未收到任务，立即失败，不要
-    // 让 collect 空等 timeout。
-    let send_accepted = match transport.send_command(&seed, send) {
-        Ok(accepted) if accepted => true,
-        Ok(_) => {
+    match transport.send_command(&seed, send) {
+        Ok(true) => {}
+        Ok(false) => {
             transport.close();
-            return qaqh_workspace::json_err(
+            return Err(subagent_error(
                 "SEND_REJECTED",
                 "spawn_subagent: daemon rejected task send",
                 "Check daemon/worker logs for lease or state conflicts.",
-            );
+            ));
         }
-        Err(e) => {
+        Err(error) => {
             transport.close();
-            return qaqh_workspace::json_err(
+            return Err(subagent_error(
                 "SEND_ERROR",
-                format!("spawn_subagent: send task: {e}"),
+                format!("spawn_subagent: send task: {error}"),
                 "Check daemon/worker logs.",
-            );
+            ));
         }
-    };
-    let _ = send_accepted;
+    }
     log::info!("[SUBAGENT] '{name}' task delivered to {seed} (accepted)");
 
     // ── 3. Register the process and collect the result in the background. ──
@@ -388,10 +426,8 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     // ProcessRegistry。最终结果仍经 Ringing 注入主代理会话回传。
     let registry_ref = register_subagent_process(&format!("subagent:{name}"));
     let registry_id = registry_ref.id();
-    // 主代理会话 seed：collect 完成后把最终作答注入回主会话（模型下一轮自然看到）。
-    let parent_seed = qaqh_workspace::runtime::context()
-        .map(|ctx| ctx.active_session.clone())
-        .unwrap_or_default();
+    // 主代理会话 seed 由显式上下文提供，collect 完成后把最终作答注入主会话。
+    let parent_seed = ctx.session_id.clone();
     let name_bg = name.clone();
     let seed_bg = seed.clone();
     std::thread::spawn(move || {
@@ -406,12 +442,47 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     });
 
     log::info!("[SUBAGENT] '{name}' spawned (seed={seed}, process={registry_id})");
-    ToolResult::ok(qaqh_workspace::json_ok(serde_json::json!({
-        "process_id": registry_id,
-        "seed": seed,
-        "name": name,
-        "content": format!("Subagent '{name}' spawned (process {registry_id}); the final answer will be injected into the conversation as a [SUBAGENT] system message when it completes."),
-    })))
+    let content = format!(
+        "Subagent '{name}' spawned (process {registry_id}); the final answer will be injected into the conversation as a [SUBAGENT] system message when it completes."
+    );
+    Ok(SpawnSubagentOutput {
+        timeis: qaqh_workspace::now_utc8(),
+        status: "ok".to_string(),
+        process_id: registry_id,
+        seed,
+        name,
+        content,
+    })
+}
+
+fn subagent_error(
+    code: &str,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> ToolExecutionError {
+    let kind = match code {
+        "MISSING_TASK" => ToolErrorKind::InvalidArguments,
+        "HOST_UNAVAILABLE" | "SEND_ERROR" => ToolErrorKind::Unavailable,
+        "SEND_REJECTED" | "SPAWN_ERROR" => ToolErrorKind::Execution,
+        _ => ToolErrorKind::Custom,
+    };
+    let mut error = ToolError::new(kind, message).with_hint(hint);
+    error.code = ToolErrorCode::from_legacy(code);
+    ToolExecutionError::Recoverable(error)
+}
+
+fn spawn_subagent_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "task_description": {"type": "string", "description": "Short description of the task for the subagent."},
+            "agent_name": {"type": "string", "description": "Name for this subagent, verb+task phrase (e.g. 'explore_task', 'review_code')."},
+            "context": {"type": "string", "description": "Optional background context to hand to the subagent before the task."},
+            "timeout_secs": {"type": "integer", "description": "Maximum time in seconds before the subagent is cancelled. Default 120."}
+        },
+        "required": ["task_description"],
+        "additionalProperties": false
+    })
 }
 
 /// Background collector: watches the sub-seed's event stream (process-local or
@@ -589,6 +660,8 @@ fn collect_subagent_result(
                 ),
                 images: vec![],
                 attachments: None,
+                message_id: Some(format!("subagent-result:{seed}")),
+                input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
                 // 以 system 角色注入（而非 user）：模型可见但不等同于用户输入，
                 // 保留 [SUBAGENT ...] 标签供模型区分注入数据与系统指令。
                 as_system: true,
@@ -735,6 +808,78 @@ mod tests {
         assert!(with_ctx.contains("[TASK]\nreview the diff"));
         // 身份提示在前，任务在后。
         assert!(with_ctx.find("[SYSTEM]").unwrap() < with_ctx.find("[TASK]").unwrap());
+    }
+
+    #[test]
+    fn typed_output_model_and_display_share_the_same_payload() {
+        let output = SpawnSubagentOutput {
+            timeis: "UTC+8 2026-09-23 12:00".to_string(),
+            status: "ok".to_string(),
+            process_id: 7,
+            seed: "sub-seed".to_string(),
+            name: "review_code".to_string(),
+            content: "Subagent 'review_code' spawned (process 7)".to_string(),
+        };
+        let model = match output.model_blocks().into_iter().next() {
+            Some(ToolContentBlock::Text { text }) => text,
+            _ => panic!("subagent output must have a text model block"),
+        };
+        assert!(model.contains("\"process_id\":7"));
+        assert!(model.contains("\"seed\":\"sub-seed\""));
+        assert!(model.contains("\"content\":\"Subagent 'review_code' spawned"));
+        let display = output.display(&serde_json::json!({}));
+        assert_eq!(
+            display.summary.as_deref(),
+            Some("Subagent 'review_code' spawned (process 7)")
+        );
+        match display.body {
+            qaqh_workspace::tool_api::ToolBody::Subagent { name, seed } => {
+                assert_eq!(name, "review_code");
+                assert_eq!(seed, "sub-seed");
+            }
+            other => panic!("unexpected subagent display body: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_task_keeps_the_legacy_error_code() {
+        let ctx = ToolCallContext {
+            call_id: "call-subagent".to_string(),
+            session_id: "parent-seed".to_string(),
+            workspace_root: std::path::PathBuf::from("/tmp/workspace"),
+            mode: qaqh_workspace::tool_api::AgentMode::Code,
+            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
+            sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
+                std::path::PathBuf::from("/tmp/workspace"),
+            ),
+            timeout: Duration::from_secs(180),
+            cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
+            progress: None,
+            source: qaqh_workspace::tool_api::ToolCallSource::Model,
+        };
+        let error = SpawnSubagentTool
+            .run(
+                &ctx,
+                SpawnSubagentArgs {
+                    task_description: "   ".to_string(),
+                    agent_name: None,
+                    context: None,
+                    timeout_secs: None,
+                },
+            )
+            .expect_err("empty task must fail before host lookup");
+        match error {
+            ToolExecutionError::Recoverable(error) => {
+                assert_eq!(error.code.as_str(), "MISSING_TASK");
+            }
+            ToolExecutionError::Fatal(error) => {
+                panic!(
+                    "missing task must be recoverable, got fatal: {}",
+                    error.message
+                )
+            }
+        }
     }
 
     // ── kill 路径回归（PR #57 reviewer 阻断 ③）────────────────────────

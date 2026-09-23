@@ -19,10 +19,21 @@
 
 pub mod image_utils;
 
-use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::ToolRisk;
+use crate::file_mutate::{mutation_error, resolve_mutation_path};
+use crate::tool_api::{
+    OutputBudget, PathOp, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection, ToolSource, TypedTool,
+};
 
 /// Raw byte cap before decoding (~20 MB).
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -102,164 +113,264 @@ pub fn peek_image(seed: &str, index: usize) -> Option<(String, String)> {
 // ── Capability gate ───────────────────────────────────────────────────
 
 /// Whether the currently configured provider endpoint accepts image input.
-///
-/// Single source of truth is the provider registry
-/// ([`qaqh_config::registry::image_tool_enabled`], probed via
-/// [`crate::runtime::image_tool_enabled`]). Unknown/unloadable configs fail
-/// closed (tool hidden).
 use crate::runtime::image_model_supported;
 
-// ── Main handler ──────────────────────────────────────────────────────
+// ── Typed output / handler ────────────────────────────────────────────
 
-/// Handle the `read_image` tool call.
-///
-/// Exactly one of `image_index` / `path` must be provided. On success the
-/// returned [`ToolResult`] carries the image in `images`; the message layer
-/// appends it to the tool message and the gate lowers it to media parts.
-///
-/// Every payload passes through [`image_utils::normalize_image`]: oversized
-/// images are downscaled / re-compressed before entering the conversation.
-pub(super) fn handle_read_image(ctx: ToolCallCtx) -> ToolResult {
-    if !image_model_supported() {
-        // 模型级拒绝（端点关闭或当前模型不在视觉 allowlist 内）。语义是
-        // 给模型的可执行指引而非纯报错：不要重试，改走文本路径并告知用户。
-        return ToolResult::error(
-            "read_image: the active model does not support image input. \
-             Do NOT retry read_image. Tell the user this model cannot see images, \
-             and continue with a text-only approach (e.g. ask the user to describe \
-             the image or paste relevant text).",
-        );
-    }
-
-    let index = ctx.get_u64("image_index");
-    let path_arg = ctx.get_str("path").unwrap_or_default().to_string();
-
-    // ── Resolve raw bytes ──
-    let (raw_bytes, display) = if let Some(idx) = index {
-        let idx = idx as usize;
-        let seed = match crate::runtime::context() {
-            Some(c) => c.active_session,
-            None => {
-                return ToolResult::error(
-                    "read_image: no active session — image_index requires a running session context",
-                );
-            }
-        };
-        match peek_image(&seed, idx) {
-            Some((_mime, data)) => {
-                // 上传侧无大小校验（Electron main 原样透传），这里兜底：
-                // 拒绝异常巨大的 base64，避免无谓的解码开销。
-                if data.len() > image_utils::MAX_BASE64_BYTES * 4 {
-                    return ToolResult::error(format!(
-                        "read_image: upload #{idx} is too large ({}, limit ~{} bytes)",
-                        data.len(),
-                        image_utils::MAX_BASE64_BYTES * 4
-                    ));
-                }
-                let raw = match image_utils::decode_base64(&data) {
-                    Ok(raw) => raw,
-                    Err(e) => {
-                        return ToolResult::error(format!(
-                            "read_image: upload #{idx} has invalid base64: {e}"
-                        ));
-                    }
-                };
-                (raw, format!("upload #{idx}"))
-            }
-            None => {
-                return ToolResult::error(format!(
-                    "read_image: image_index {idx} not found in session '{seed}'. \
-                     The upload may have left the context. Ask the user to re-attach it."
-                ));
-            }
-        }
-    } else if !path_arg.is_empty() {
-        match read_image_file(&path_arg) {
-            Ok(pair) => pair,
-            Err(err) => return ToolResult::error(format!("read_image: {err}")),
-        }
-    } else {
-        return ToolResult::error(
-            "read_image: either image_index or path is required. \
-             If you see [Image #N: ...] in the conversation, use image_index=N.",
-        );
-    };
-
-    // ── Normalize (downscale + re-compress) ──
-    let normalized = match image_utils::normalize_image(&raw_bytes) {
-        Ok(n) => n,
-        Err(e) => return ToolResult::error(format!("read_image: {display}: {e}")),
-    };
-    let mime_type = normalized.mime;
-    let data = image_utils::encode_base64(&normalized.bytes);
-
-    ToolResult::ok(format!(
-        "Image read successfully: {display} ({mime_type}, {}×{}, {} bytes base64 after normalization). \
-         The image is attached to this tool result and visible to you.",
-        normalized.width,
-        normalized.height,
-        data.len()
-    ))
-    .with_image(mime_type.to_string(), data)
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadImageArgs {
+    #[serde(default)]
+    pub image_index: Option<u64>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
-/// Read an image file from disk (workspace-relative or absolute).
-fn read_image_file(path: &str) -> Result<(Vec<u8>, String), String> {
-    let root = crate::runtime::active_workspace_root();
-    let candidate = Path::new(path);
-    let full = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        root.join(candidate)
-    };
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReadImageOutput {
+    pub status: String,
+    pub source: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub base64_bytes: usize,
+    #[serde(skip)]
+    #[schemars(skip)]
+    model_text: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    image: Option<qaqh_types::ToolImage>,
+}
 
-    let meta =
-        std::fs::metadata(&full).map_err(|e| format!("cannot stat '{}': {e}", full.display()))?;
-    if !meta.is_file() {
-        return Err(format!("'{}' is not a regular file", full.display()));
+impl ToolProjection for ReadImageOutput {
+    fn images(&self) -> Vec<qaqh_types::ToolImage> {
+        self.image.clone().into_iter().collect()
     }
-    if meta.len() as usize > MAX_IMAGE_BYTES {
-        return Err(format!(
-            "'{}' is too large ({} bytes, max ~{MAX_IMAGE_BYTES})",
-            full.display(),
-            meta.len()
+
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.model_text.clone(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        self.model_text.lines().next().map(str::to_string)
+    }
+
+    fn display(&self, args: &Value) -> ToolDisplay {
+        let header = args
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(|path| ToolHeader::Path {
+                path: path.to_string(),
+                op: PathOp::Read,
+            })
+            .unwrap_or(ToolHeader::Other {
+                label: "read_image".to_string(),
+            });
+        let (text, truncated) = crate::tool_api::display::clamp_display_body(&self.model_text);
+        ToolDisplay::new(header, ToolBody::Text { text, truncated })
+            .with_summary(self.summary().unwrap_or_else(|| "image".to_string()))
+    }
+}
+
+pub struct ReadImageTool;
+
+impl TypedTool for ReadImageTool {
+    type Args = ReadImageArgs;
+    type Output = ReadImageOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("read_image").expect("valid read_image tool name"),
+            display_name: None,
+            description: "Load image into visual context (by image_index or file path). Auto downscale if oversized."
+                .to_string(),
+            input_schema: read_image_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(ReadImageOutput))
+                .expect("read_image output schema"),
+            category: crate::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("read_image")
+                .unwrap_or_default(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        if !image_model_supported() {
+            return Err(mutation_error(
+                "TOOL_ERROR",
+                "read_image: the active model does not support image input. Do NOT retry read_image. Tell the user this model cannot see images, and continue with a text-only approach (e.g. ask the user to describe the image or paste relevant text).",
+                None,
+                json!({}),
+            ));
+        }
+
+        let (raw_bytes, display) = if let Some(index) = args.image_index {
+            let index = index as usize;
+            let seed = &ctx.session_id;
+            let (_mime, data) = peek_image(seed, index).ok_or_else(|| {
+                mutation_error(
+                    "TOOL_ERROR",
+                    format!(
+                        "read_image: image_index {index} not found in session '{seed}'. The upload may have left the context. Ask the user to re-attach it."
+                    ),
+                    None,
+                    json!({}),
+                )
+            })?;
+            if data.len() > image_utils::MAX_BASE64_BYTES * 4 {
+                return Err(mutation_error(
+                    "TOOL_ERROR",
+                    format!(
+                        "read_image: upload #{index} is too large ({}, limit ~{} bytes)",
+                        data.len(),
+                        image_utils::MAX_BASE64_BYTES * 4
+                    ),
+                    None,
+                    json!({}),
+                ));
+            }
+            let raw = image_utils::decode_base64(&data).map_err(|error| {
+                mutation_error(
+                    "TOOL_ERROR",
+                    format!("read_image: upload #{index} has invalid base64: {error}"),
+                    None,
+                    json!({}),
+                )
+            })?;
+            (raw, format!("upload #{index}"))
+        } else if let Some(path) = args.path.as_deref().filter(|path| !path.is_empty()) {
+            read_image_file(ctx, path)?
+        } else {
+            return Err(mutation_error(
+                "TOOL_ERROR",
+                "read_image: either image_index or path is required. If you see [Image #N: ...] in the conversation, use image_index=N.",
+                None,
+                json!({}),
+            ));
+        };
+
+        let normalized = image_utils::normalize_image(&raw_bytes).map_err(|error| {
+            mutation_error(
+                "TOOL_ERROR",
+                format!("read_image: {display}: {error}"),
+                None,
+                json!({}),
+            )
+        })?;
+        let mime_type = normalized.mime.to_string();
+        let data = image_utils::encode_base64(&normalized.bytes);
+        let model_text = format!(
+            "Image read successfully: {display} ({mime_type}, {}×{}, {} bytes base64 after normalization). The image is attached to this tool result and visible to you.",
+            normalized.width,
+            normalized.height,
+            data.len()
+        );
+        Ok(ReadImageOutput {
+            status: "ok".to_string(),
+            source: display,
+            mime_type: mime_type.clone(),
+            width: normalized.width,
+            height: normalized.height,
+            base64_bytes: data.len(),
+            model_text,
+            image: Some(qaqh_types::ToolImage { mime_type, data }),
+        })
+    }
+}
+
+#[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+fn read_image_file(
+    ctx: &ToolCallContext,
+    path: &str,
+) -> Result<(Vec<u8>, String), ToolExecutionError> {
+    let full = PathBuf::from(resolve_mutation_path(ctx, path));
+    let metadata = std::fs::metadata(&full).map_err(|error| {
+        mutation_error(
+            "TOOL_ERROR",
+            format!("read_image: cannot stat '{}': {error}", full.display()),
+            None,
+            json!({}),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(mutation_error(
+            "TOOL_ERROR",
+            format!("read_image: '{}' is not a regular file", full.display()),
+            None,
+            json!({}),
         ));
     }
-
-    let bytes =
-        std::fs::read(&full).map_err(|e| format!("cannot read '{}': {e}", full.display()))?;
+    if metadata.len() as usize > MAX_IMAGE_BYTES {
+        return Err(mutation_error(
+            "TOOL_ERROR",
+            format!(
+                "read_image: '{}' is too large ({} bytes, max ~{MAX_IMAGE_BYTES})",
+                full.display(),
+                metadata.len()
+            ),
+            None,
+            json!({}),
+        ));
+    }
+    let bytes = std::fs::read(&full).map_err(|error| {
+        mutation_error(
+            "TOOL_ERROR",
+            format!("read_image: cannot read '{}': {error}", full.display()),
+            None,
+            json!({}),
+        )
+    })?;
     Ok((bytes, full.display().to_string()))
 }
 
-// ── Registration ──────────────────────────────────────────────────────
+fn read_image_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "image_index": {
+                "type": "integer",
+                "description": "Uploaded image index (0-based)"
+            },
+            "path": {
+                "type": "string",
+                "description": "Image file path"
+            }
+        },
+        "additionalProperties": false,
+        "anyOf": [
+            { "required": ["image_index"] },
+            { "required": ["path"] }
+        ]
+    })
+}
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler {
-        key: "read_image".to_string(),
-        description: "Load image into visual context (by image_index or file path). Auto downscale if oversized.",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "image_index": {
-                    "type": "integer",
-                    "description": "Uploaded image index (0-based)"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Image file path"
-                }
-            },
-            "additionalProperties": false,
-            "anyOf": [
-                { "required": ["image_index"] },
-                { "required": ["path"] }
-            ]
-        }),
-        handler: handle_read_image,
-        risk: ToolRisk::ReadOnly,
-        category: crate::permission::ToolCategory::Read,
-        default_timeout: std::time::Duration::from_secs(30),
-    });
+    mgr.register_typed(ReadImageTool);
+}
+
+/// Compatibility entry retained for existing in-process tests.
+#[cfg(test)]
+pub(super) fn handle_read_image(ctx: crate::ToolCallCtx) -> crate::ToolResult {
+    use crate::file_mutate::ambient_tool_context;
+    use crate::tool_api::{ErasedTool, TypedToolAdapter};
+
+    let call_ctx = ambient_tool_context("read-image-compat", Duration::from_secs(30));
+    TypedToolAdapter::new(ReadImageTool)
+        .execute(call_ctx, ctx.args)
+        .unwrap_or_else(|fatal| panic!("read_image tool fatal: {}", fatal.message))
+        .to_tool_result()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -358,6 +469,40 @@ mod tests {
 
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn typed_read_image_projects_attachment_without_base64_in_model_text() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        assert!(
+            manager.builtins["read_image"].legacy.is_none(),
+            "read_image still has legacy executor"
+        );
+
+        let output = ReadImageOutput {
+            status: "ok".to_string(),
+            source: "upload #0".to_string(),
+            mime_type: "image/png".to_string(),
+            width: 1,
+            height: 1,
+            base64_bytes: 4,
+            model_text: "Image read successfully: upload #0 (image/png, 1×1, 4 bytes base64 after normalization). The image is attached to this tool result and visible to you.".to_string(),
+            image: Some(qaqh_types::ToolImage {
+                mime_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+            }),
+        };
+        let images = output.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].data, "AAAA");
+        let blocks = output.model_blocks();
+        let model_text = match &blocks[0] {
+            ToolContentBlock::Text { text } => text,
+            other => panic!("unexpected read_image model block: {other:?}"),
+        };
+        assert!(!model_text.contains("AAAA"));
+        assert!(model_text.contains("attached"));
     }
 
     #[test]

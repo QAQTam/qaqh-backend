@@ -14,6 +14,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use qaqh_domain::RingingChannel;
+use qaqh_message::legacy_writer::LegacyWriterFacade;
 use qaqh_ringing::RingingEventEnvelope;
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +133,7 @@ impl JournalStore {
         identity: &str,
         envelope: &RingingEventEnvelope,
     ) -> std::io::Result<()> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         let path = self.replaceable_path(channel, seed, identity);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -150,6 +152,7 @@ impl JournalStore {
         seed: &str,
         identity: &str,
     ) -> std::io::Result<()> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         let path = self.replaceable_path(channel, seed, identity);
         if path.exists() {
             std::fs::remove_file(path)?;
@@ -169,6 +172,7 @@ impl JournalStore {
         envelopes: &[RingingEventEnvelope],
         checkpoints: &[(String, u64)],
     ) -> std::io::Result<()> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         self.files.remove(&(channel, seed.to_string()));
         self.pending_bytes.insert((channel, seed.to_string()), 0);
         let path = self.path_for(channel, seed);
@@ -373,6 +377,7 @@ impl JournalStore {
         seed: &str,
         op: &JournalOp,
     ) -> std::io::Result<()> {
+        let _legacy_writer = LegacyWriterFacade::lock();
         let file = self.file(channel, seed)?;
         let mut line = serde_json::to_vec(op).map_err(io_error)?;
         line.push(b'\n');

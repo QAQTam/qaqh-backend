@@ -127,6 +127,30 @@ fn missing_or_corrupt_timeline_is_rebuilt_from_persisted_messages() {
             .is_empty()
     );
 
+    // ── #314 回归锁：新会话不得靠重建凭空占用 seq 空间 ──
+    //
+    // 起点是新会话首个回合：`messages.jsonl` 里已经有「正在进行的首条用户消息」，
+    // 但没有任何**已完成**回合（`meta.turn_count == 0`），而 timeline 文件尚未落盘。
+    // 修复前 `ensure_timeline_loaded` 的 `None` 分支会无条件重建，产出一个只有
+    // `user_text`、没有任何 block 的**空回合**（seq 1 = TurnOpened / 2 = TurnSealed），
+    // 该回合随即 seal、其 journal 条目又被 seal 裁剪删掉 → `restore(watermark=2,
+    // journal=[])`：seq 1、2 被吃掉却既无 live 投递、也不在 journal 里；真正的 live
+    // 回合只能从 seq 3 起，客户端 cursor=0 按 `cursor + 1` 判 gap → gap→快照恢复
+    // 循环 → transcript 永不渲染。
+    let fresh_seed = "fresh-in-progress-seed";
+    SessionManager::global().save_append(
+        fresh_seed,
+        &[Message::system("system"), Message::user("hi")],
+        "test-model",
+        None,
+        0,
+        0, // turn_count = 0：没有任何**已完成**回合
+    );
+    assert!(
+        hub.timeline_snapshot(fresh_seed).is_none(),
+        "新会话（无已完成回合）不得靠重建凭空占用 seq 空间"
+    );
+
     drop(hub);
     let _ = std::fs::remove_dir_all(root);
 }
