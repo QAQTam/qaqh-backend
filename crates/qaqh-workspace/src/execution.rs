@@ -33,20 +33,21 @@ pub fn execute_authorized(
         cancellation.cancel();
     }
     let ambient = crate::runtime::context();
+    let workspace_root = {
+        let workspace = crate::current_workspace();
+        if workspace.is_empty() || workspace == "." {
+            call.workspace_root().to_path_buf()
+        } else {
+            std::path::PathBuf::from(workspace)
+        }
+    };
     let context = ToolCallContext {
         call_id: call.call_id().to_string(),
         session_id: ambient
             .as_ref()
             .map(|ctx| ctx.active_session.clone())
             .unwrap_or_else(|| call.session_id().to_string()),
-        workspace_root: {
-            let workspace = crate::current_workspace();
-            if workspace.is_empty() || workspace == "." {
-                call.workspace_root().to_path_buf()
-            } else {
-                std::path::PathBuf::from(workspace)
-            }
-        },
+        workspace_root: workspace_root.clone(),
         mode: match crate::runtime::current_mode() {
             1 => AgentMode::Plan,
             _ => AgentMode::Code,
@@ -59,6 +60,7 @@ pub fn execute_authorized(
         } else {
             SandboxMode::Main
         },
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
         timeout: Duration::ZERO,
         cancellation,
         progress: None,
@@ -962,6 +964,9 @@ mod tests {
             mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::Unrestricted,
             sandbox: crate::tool_api::SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
+                workspace.path().to_path_buf(),
+            ),
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1010,6 +1015,9 @@ mod tests {
             mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::MaxLockdown,
             sandbox: crate::tool_api::SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
+                workspace.path().to_path_buf(),
+            ),
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1049,6 +1057,9 @@ mod tests {
             mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::Unrestricted,
             sandbox: crate::tool_api::SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
+                crate::runtime::active_workspace_root(),
+            ),
             timeout: Duration::ZERO,
             cancellation,
             progress: None,

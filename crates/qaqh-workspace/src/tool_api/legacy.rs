@@ -408,6 +408,9 @@ mod tests {
             mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadFree,
             sandbox: SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
+                "/tmp/ws",
+            )),
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress,
@@ -619,6 +622,8 @@ mod tests {
             LegacyToolAdapter::new(legacy_handler("context", context_handler)).expect("adapter");
         let mut ctx = test_ctx(None);
         ctx.workspace_root = std::path::PathBuf::from("/tmp/qaqh-adapter-context");
+        ctx.sandbox_spec =
+            crate::tool_api::SandboxSpec::workspace_write(ctx.workspace_root.clone());
         ctx.session_id = "adapter-seed".to_string();
         ctx.mode = AgentMode::Plan;
         ctx.sandbox = SandboxMode::Subagent;

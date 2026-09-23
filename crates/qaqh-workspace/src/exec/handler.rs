@@ -235,7 +235,7 @@ fn run_exec(
         Some(cancel.as_ref()),
         progress_tx,
         &ctx.call_id,
-        &sandbox,
+        sandbox,
     );
     // 观测线纪律（事故 2026-09-02 预防）：检测 shell 命令中的后台派生 `&`，
     // 以强提示引导走 background_after_secs + process 工具的受控路径。
@@ -267,7 +267,7 @@ fn context_from_legacy(ctx: &ToolCallCtx) -> ToolCallContext {
     ToolCallContext {
         call_id: ctx.id.clone(),
         session_id: crate::current_session().unwrap_or_default(),
-        workspace_root,
+        workspace_root: workspace_root.clone(),
         mode: match crate::runtime::current_mode() {
             1 => AgentMode::Plan,
             _ => AgentMode::Code,
@@ -280,6 +280,7 @@ fn context_from_legacy(ctx: &ToolCallCtx) -> ToolCallContext {
         } else {
             SandboxMode::Main
         },
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
         timeout: Duration::from_secs(ctx.timeout_secs.unwrap_or(30)),
         cancellation: CancellationToken::from_shared_flag(ctx.cancel.clone()),
         progress: None,
