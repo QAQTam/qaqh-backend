@@ -11,9 +11,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use super::display::ToolDisplay;
+use super::display::{PathOp, ToolBody, ToolDisplay, ToolHeader, ToolMetrics};
 use super::error::ToolError;
-use qaqh_types::{ContentRef, ToolImage};
+use qaqh_types::{
+    ContentRef, ToolImage, ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader,
+    ToolResultDisplayPathOp,
+};
 
 pub use qaqh_types::ToolStatus;
 
@@ -57,6 +60,12 @@ pub trait ToolProjection: Serialize {
     /// 解析未经校验的输入（H13）。
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         ToolDisplay::default()
+    }
+
+    /// 宿主侧 typed effects。默认无副作用；需要注入 skill activation 等
+    /// 可信状态迁移的工具在此显式返回，禁止让 runtime 解析工具文本猜测。
+    fn effects(&self) -> Vec<crate::ToolEffect> {
+        Vec::new()
     }
 }
 
@@ -122,6 +131,8 @@ pub struct ToolOutcome {
     pub images: Vec<ToolImage>,
     /// 执行指标。
     pub metrics: ToolExecutionMetrics,
+    /// 宿主侧可信 effects（例如 skill activation）。
+    pub effects: Vec<crate::ToolEffect>,
 }
 
 impl ToolOutcome {
@@ -151,6 +162,9 @@ impl ToolOutcome {
             }
         };
         let mut result = qaqh_types::ToolResult::text(self.status, self.model.text.clone());
+        if let Some(summary) = &self.display.summary {
+            result = result.with_summary(summary.clone());
+        }
         result.data = data;
         result.images = self.images.clone();
         result.diff = self.display.diff.clone();
@@ -160,6 +174,22 @@ impl ToolOutcome {
             retryable: error.retryable,
             hint: error.hint.clone(),
         });
+        if let Some(details) = self.error.as_ref().and_then(|error| error.details.as_ref()) {
+            // `details` 是对 canonical `data` 的**补充**，不是覆盖：同时带结构化输出
+            // 与 details 的工具不能把结构化输出静默丢掉（否则 wire 形态还会随工具作者
+            // 是否恰好填了 details 而分叉）。只有「没有任何结构化输出」时，details
+            // 才整体充当 `data`。
+            let empty_object =
+                matches!(&result.data, serde_json::Value::Object(map) if map.is_empty());
+            if empty_object {
+                result.data = details.clone();
+            } else if let serde_json::Value::Object(map) = &mut result.data {
+                map.insert("details".to_owned(), details.clone());
+            } else {
+                let canonical = std::mem::replace(&mut result.data, serde_json::Value::Null);
+                result.data = serde_json::json!({ "data": canonical, "details": details });
+            }
+        }
         result.metrics = qaqh_types::ToolResultMetrics {
             elapsed_ms: Some(self.metrics.elapsed.as_millis() as u64),
             output_bytes: self.metrics.output_bytes,
@@ -167,7 +197,122 @@ impl ToolOutcome {
             effective_tool_name: self.metrics.effective_tool_name.clone(),
             user_initiated: self.metrics.user_initiated,
         };
+        if self.display != ToolDisplay::default() {
+            result = result.with_display(to_wire_display(&self.display));
+        }
         result
+    }
+}
+
+fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
+    ToolResultDisplay {
+        summary: display.summary.clone(),
+        diff: display.diff.clone(),
+        header: match &display.header {
+            ToolHeader::None => None,
+            ToolHeader::Path { path, op } => Some(ToolResultDisplayHeader::Path {
+                path: path.clone(),
+                op: match op {
+                    PathOp::Read => ToolResultDisplayPathOp::Read,
+                    PathOp::Write => ToolResultDisplayPathOp::Write,
+                    PathOp::Edit => ToolResultDisplayPathOp::Edit,
+                    PathOp::List => ToolResultDisplayPathOp::List,
+                    PathOp::Patch => ToolResultDisplayPathOp::Patch,
+                    PathOp::Delete => ToolResultDisplayPathOp::Delete,
+                },
+            }),
+            ToolHeader::Shell { command } => Some(ToolResultDisplayHeader::Shell {
+                command: command.clone(),
+            }),
+            ToolHeader::Query { query, scope } => Some(ToolResultDisplayHeader::Query {
+                query: query.clone(),
+                scope: scope.clone(),
+            }),
+            ToolHeader::Other { label } => Some(ToolResultDisplayHeader::Other {
+                label: label.clone(),
+            }),
+        },
+        body: match &display.body {
+            ToolBody::None => None,
+            ToolBody::Text { text, truncated } => Some(ToolResultDisplayBody::Text {
+                text: text.clone(),
+                truncated: *truncated,
+            }),
+            ToolBody::Diff { unified, files } => Some(ToolResultDisplayBody::Diff {
+                unified: unified.clone(),
+                files: files.clone(),
+            }),
+            ToolBody::Shell {
+                output,
+                exit_code,
+                truncated,
+            } => Some(ToolResultDisplayBody::Shell {
+                output: output.clone(),
+                exit_code: *exit_code,
+                truncated: *truncated,
+            }),
+            ToolBody::Subagent { name, seed } => Some(ToolResultDisplayBody::Subagent {
+                name: name.clone(),
+                seed: seed.clone(),
+            }),
+        },
+    }
+}
+
+pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
+    ToolDisplay {
+        summary: display.summary.clone(),
+        diff: display.diff.clone(),
+        header: match &display.header {
+            None => ToolHeader::None,
+            Some(ToolResultDisplayHeader::Path { path, op }) => ToolHeader::Path {
+                path: path.clone(),
+                op: match op {
+                    ToolResultDisplayPathOp::Read => PathOp::Read,
+                    ToolResultDisplayPathOp::Write => PathOp::Write,
+                    ToolResultDisplayPathOp::Edit => PathOp::Edit,
+                    ToolResultDisplayPathOp::List => PathOp::List,
+                    ToolResultDisplayPathOp::Patch => PathOp::Patch,
+                    ToolResultDisplayPathOp::Delete => PathOp::Delete,
+                },
+            },
+            Some(ToolResultDisplayHeader::Shell { command }) => ToolHeader::Shell {
+                command: command.clone(),
+            },
+            Some(ToolResultDisplayHeader::Query { query, scope }) => ToolHeader::Query {
+                query: query.clone(),
+                scope: scope.clone(),
+            },
+            Some(ToolResultDisplayHeader::Other { label }) => ToolHeader::Other {
+                label: label.clone(),
+            },
+        },
+        body: match &display.body {
+            None => ToolBody::None,
+            Some(ToolResultDisplayBody::None) => ToolBody::None,
+            Some(ToolResultDisplayBody::Text { text, truncated }) => ToolBody::Text {
+                text: text.clone(),
+                truncated: *truncated,
+            },
+            Some(ToolResultDisplayBody::Diff { unified, files }) => ToolBody::Diff {
+                unified: unified.clone(),
+                files: files.clone(),
+            },
+            Some(ToolResultDisplayBody::Shell {
+                output,
+                exit_code,
+                truncated,
+            }) => ToolBody::Shell {
+                output: output.clone(),
+                exit_code: *exit_code,
+                truncated: *truncated,
+            },
+            Some(ToolResultDisplayBody::Subagent { name, seed }) => ToolBody::Subagent {
+                name: name.clone(),
+                seed: seed.clone(),
+            },
+        },
+        metrics: ToolMetrics::default(),
     }
 }
 
@@ -184,7 +329,37 @@ mod tests {
             display: ToolDisplay::default(),
             images: Vec::new(),
             metrics: ToolExecutionMetrics::default(),
+            effects: Vec::new(),
         }
+    }
+
+    #[test]
+    fn error_details_complement_structured_output_instead_of_replacing_it() {
+        use crate::tool_api::error::ToolErrorKind;
+
+        fn details_error() -> ToolError {
+            let mut error = ToolError::new(ToolErrorKind::Execution, "boom");
+            error.details = Some(serde_json::json!({ "path": "a.txt" }));
+            error
+        }
+
+        // 没有结构化输出（read 工具的错误路径）：details 整体充当 data。
+        let result = outcome(ToolStatus::Error, Some(details_error())).to_tool_result();
+        assert_eq!(result.data, serde_json::json!({ "path": "a.txt" }));
+
+        // 同时有结构化输出：details 是补充，不能把 canonical data 覆盖掉。
+        let mut with_output = outcome(ToolStatus::Error, Some(details_error()));
+        with_output.output = ToolOutputValue::Json(serde_json::json!({ "hits": 3 }));
+        let result = with_output.to_tool_result();
+        assert_eq!(result.data["hits"], serde_json::json!(3));
+        assert_eq!(result.data["details"]["path"], serde_json::json!("a.txt"));
+
+        // 非对象的结构化输出也不能被丢弃。
+        let mut scalar = outcome(ToolStatus::Error, Some(details_error()));
+        scalar.output = ToolOutputValue::Json(serde_json::json!([1, 2, 3]));
+        let result = scalar.to_tool_result();
+        assert_eq!(result.data["data"], serde_json::json!([1, 2, 3]));
+        assert_eq!(result.data["details"]["path"], serde_json::json!("a.txt"));
     }
 
     #[test]

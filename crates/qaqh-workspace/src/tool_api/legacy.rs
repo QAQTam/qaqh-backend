@@ -315,6 +315,7 @@ pub fn map_tool_result(result: ToolResult) -> ToolOutcome {
         display,
         images: result.images.clone(),
         metrics,
+        effects: Vec::new(),
     }
 }
 

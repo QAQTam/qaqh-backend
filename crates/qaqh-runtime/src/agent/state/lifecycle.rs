@@ -27,6 +27,105 @@ fn enable_message_wal(agent: &mut AgentState) {
     agent.msg.enable_wal(&session_dir);
 }
 
+/// Run the canonical recovery batch before any tool can be dispatched.
+///
+/// Legacy sessions without a canonical identity/events log are left untouched.
+/// Once a canonical log exists, recovery is fail-closed: a failure is logged
+/// and the later ToolRuntime admission will still reject an open intent.
+fn recover_canonical_tool_ledger(seed: &str) -> Result<(), String> {
+    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    recover_canonical_tool_ledger_in(&session_dir, seed)
+}
+
+fn recover_canonical_tool_ledger_in(
+    session_dir: &std::path::Path,
+    seed: &str,
+) -> Result<(), String> {
+    use qaqh_session::canonical::{
+        CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_FILE,
+        RecoveryExecutionOutcome, RecoveryIntentStatus, WriterId, execute_recovery_intent,
+        generate_ulid, load_recovery_intent, persist_recovery_intent, plan_recovery_intent,
+        sha256_content_hash,
+    };
+    use qaqh_session::session_fact_v2::{EventId, RecoveryId};
+
+    if !session_dir.join(CANONICAL_IDENTITY_FILE).exists()
+        && !session_dir.join(EVENTS_FILE).exists()
+    {
+        return Ok(());
+    }
+
+    let identity =
+        CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
+    let facts = CommittedFactReader::open(
+        session_dir,
+        identity.session_id.clone(),
+        identity.log_id.clone(),
+    )
+    .map_err(|error| error.to_string())?
+    .read_all()
+    .map_err(|error| error.to_string())?;
+
+    let existing = load_recovery_intent(session_dir).map_err(|error| error.to_string())?;
+    let existing_stale = match existing.as_ref() {
+        Some(intent) => {
+            intent.status(&facts).map_err(|error| error.to_string())? == RecoveryIntentStatus::Stale
+        }
+        None => false,
+    };
+    if existing.is_none() || existing_stale {
+        // 既有 intent 已 stale（它的 `SessionRecovered` 已落盘）时同样要重新 plan：
+        // batch closed 之后出现的 open intent 必须拿到新的 `RecoveryRef` /
+        // fingerprint，不能被旧 batch 吞掉，也不能让旧 intent 文件挡住收口。
+        let planned = plan_recovery_intent(
+            session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            RecoveryId::new(format!("recovery_{}", generate_ulid())),
+            EventId::new(generate_ulid()),
+            sha256_content_hash(b"[]"),
+        )
+        .map_err(|error| error.to_string())?;
+        match planned {
+            Some(intent) => {
+                persist_recovery_intent(session_dir, &intent, &facts)
+                    .map_err(|error| error.to_string())?;
+            }
+            // 没有 open intent：无既有 intent 时无事可做；既有 stale intent 时
+            // 留给 executor 走 Stale 分支把它清掉。
+            None if existing.is_none() => return Ok(()),
+            None => {}
+        }
+    }
+
+    let outcome = execute_recovery_intent(
+        session_dir,
+        identity.session_id,
+        identity.log_id,
+        WriterId::new(format!("recovery-{}-{}", std::process::id(), seed)),
+        super::agent::unix_ms(),
+        super::agent::tool_ledger_lease_ms(),
+    )
+    .map_err(|error| error.to_string())?;
+    match outcome {
+        RecoveryExecutionOutcome::Recovered(execution) => {
+            log::info!(
+                "[recovery] canonical tool ledger recovered for {seed}: {} action(s), intent_removed={}",
+                execution.actions.len(),
+                execution.intent_removed
+            );
+        }
+        RecoveryExecutionOutcome::Pending { dispositions } => {
+            log::warn!(
+                "[recovery] canonical tool ledger for {seed} still has {} replay/reconcile disposition(s)",
+                dispositions.len()
+            );
+        }
+        RecoveryExecutionOutcome::NoIntent => {}
+    }
+    Ok(())
+}
+
 /// Load session from disk via the injected session-manager handle.
 ///
 /// On success, restores the message store and rebinds the workspace.
@@ -150,15 +249,10 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 // L2：为真实会话启用 enqueue 级 WAL（恢复路径的 load_for_resume
                 // 已在创建 store 前重放并截断旧 WAL）。临时/子代理 store 不启用。
                 enable_message_wal(agent);
-                // L3：工具 outbox 对账——已执行但结果丢失的工具，修正 [RESTORE]
-                // 占位符语义（"未执行" → "已执行、结果未持久化"）。
-                //
-                // 对账前先把上一轮 worker 的批量化 fsync 落定（BUG-2026-09-12-14
-                // 之后 fsync 交由后台 flusher 合并）：worker 退出路径已 flush，但
-                // 进程在同一会话重开 worker 时，读到未 fsync 的记录仍可能来自
-                // OS 页缓存；显式 flush 把「恢复读到的事实」钉在盘上。
-                crate::agent::tool_outbox::flush(&agent.session.seed);
-                crate::agent::tool_outbox::reconcile_store(&mut agent.msg, &agent.session.seed);
+                // P3：canonical ToolIntent/ToolFinished 修正 [RESTORE] 占位符
+                // 语义（"未执行" → "已开始/已有终态、结果未持久化"）。旧
+                // tool_outbox.wal 仅作为历史会话迁移 fallback 读取，不再写入。
+                crate::agent::tool_recovery::reconcile_store(&mut agent.msg, &agent.session.seed);
                 // 重建 read_image 图片注册表：registry 是内存态，daemon 重启
                 // 后会丢失；但上传图片本就以 ContentBlock::Image 持久化在
                 // user 消息里。按活跃视图的时序重放注册，使 [Image #N] 占位
@@ -227,6 +321,12 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 let tool_mode = agent.session.tool_mode.clone();
                 let custom_tools = agent.session.custom_tools.clone();
                 agent.apply_tool_mode(&tool_mode, &custom_tools);
+                if let Err(error) = recover_canonical_tool_ledger(&agent.session.seed) {
+                    log::error!(
+                        "[recovery] canonical tool ledger recovery failed for {}: {error}",
+                        agent.session.seed
+                    );
+                }
                 log::info!(
                     "qaqh-agent: restored session {} ({} msgs, {} tokens)",
                     agent.session.seed,
@@ -362,4 +462,249 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
         "qaqh-agent: new session with preset seed {}",
         agent.session.seed
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qaqh_session::canonical::{
+        CanonicalSessionIdentity, CommittedFactReader, RecoveryExecutionOutcome, ToolLedger,
+        WriterId, execute_recovery_intent, generate_ulid, load_recovery_intent,
+        persist_recovery_intent, plan_recovery_intent, sha256_content_hash,
+    };
+    use qaqh_session::session_fact_v2::{
+        EventId, ExecutionId, FactPayload, PolicyDecisionRef, RecoveryId, SideEffectClass,
+        ToolCallId, ToolIntent, ToolIntentPolicyOutcome, ToolReplayCapability, ToolTerminalStatus,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn canonical_recovery_seals_open_intent_before_session_resume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let now = super::super::agent::unix_ms();
+        let mut ledger = ToolLedger::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            WriterId::new("lifecycle-recovery-setup"),
+            now,
+            1,
+        )
+        .expect("open setup ledger");
+        let call = ToolCallId::new(format!("call_{}", generate_ulid()));
+        let execution = ExecutionId::new(format!("exec_{}", generate_ulid()));
+        ledger
+            .append_intent(
+                EventId::new(generate_ulid()),
+                None,
+                ToolIntent {
+                    call_id: call.clone(),
+                    execution_id: execution,
+                    idempotency_key: None,
+                    replay_capability: ToolReplayCapability::NoReplay,
+                    policy_decision: PolicyDecisionRef {
+                        outcome: ToolIntentPolicyOutcome::Allow,
+                        rule_id: "test".into(),
+                        decided_at_ms: now,
+                        reason_ref: None,
+                    },
+                    effective_args_ref: None,
+                    effective_args_hash: None,
+                    sandbox_spec_hash: sha256_content_hash(b"sandbox"),
+                    side_effect_class: SideEffectClass::ReadOnly,
+                    intent_at_ms: now,
+                },
+                now,
+            )
+            .expect("append open intent");
+        drop(ledger);
+        std::thread::sleep(Duration::from_millis(2));
+
+        recover_canonical_tool_ledger_in(dir.path(), "lifecycle-recovery-test")
+            .expect("recover canonical ledger");
+
+        assert!(
+            load_recovery_intent(dir.path())
+                .expect("load intent")
+                .is_none()
+        );
+        let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
+            .expect("reader")
+            .read_all()
+            .expect("facts");
+        let finished = facts
+            .iter()
+            .filter_map(|fact| match &fact.payload {
+                FactPayload::ToolFinished(finished) => Some(finished),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].call_id, call);
+        assert_eq!(
+            finished[0].terminal_status,
+            ToolTerminalStatus::Indeterminate
+        );
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|fact| matches!(fact.payload, FactPayload::SessionRecovered(_)))
+                .count(),
+            1
+        );
+    }
+
+    /// 回归：batch 已收口后（`SessionRecovered` 已落盘）又出现新的 open intent，
+    /// 而旧 intent 文件还在盘上时，恢复必须**重新 plan 一个新 batch**把它收口，
+    /// 不能被 stale 分支挡住、更不能虚报「已恢复」。
+    #[test]
+    fn canonical_recovery_replans_stale_batch_for_later_open_intent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let now = super::super::agent::unix_ms();
+
+        let mut ledger = ToolLedger::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            WriterId::new("lifecycle-stale-setup"),
+            now,
+            1,
+        )
+        .expect("open setup ledger");
+        let first = ToolCallId::new(format!("call_{}", generate_ulid()));
+        ledger
+            .append_intent(
+                EventId::new(generate_ulid()),
+                None,
+                no_replay_intent(&first, now),
+                now,
+            )
+            .expect("append first intent");
+        drop(ledger);
+
+        // 先手工落一个只覆盖 `first` 的 plan，让它成为本次 batch 的 intent。
+        let facts = CommittedFactReader::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .expect("reader")
+        .read_all()
+        .expect("facts");
+        let plan = plan_recovery_intent(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            RecoveryId::new(format!("recovery_{}", generate_ulid())),
+            EventId::new(generate_ulid()),
+            sha256_content_hash(b"[]"),
+        )
+        .expect("plan recovery")
+        .expect("open intent must yield a plan");
+        persist_recovery_intent(dir.path(), &plan, &facts).expect("persist plan");
+
+        // 第一次收口直接用 executor + 1ms 租约，免得默认租约把后面的写入挡住。
+        let outcome = execute_recovery_intent(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            WriterId::new("lifecycle-stale-first"),
+            super::super::agent::unix_ms(),
+            1,
+        )
+        .expect("first recovery closes the batch");
+        assert!(matches!(outcome, RecoveryExecutionOutcome::Recovered(_)));
+        assert!(
+            load_recovery_intent(dir.path())
+                .expect("load intent")
+                .is_none()
+        );
+        // 收口之后才出现的新 open intent（崩溃窗口）。
+        std::thread::sleep(Duration::from_millis(2));
+        let later = ToolCallId::new(format!("call_{}", generate_ulid()));
+        let later_now = super::super::agent::unix_ms();
+        let mut ledger = ToolLedger::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            WriterId::new("lifecycle-stale-later"),
+            later_now,
+            1,
+        )
+        .expect("open later ledger");
+        ledger
+            .append_intent(
+                EventId::new(generate_ulid()),
+                None,
+                no_replay_intent(&later, later_now),
+                later_now,
+            )
+            .expect("append later intent");
+        drop(ledger);
+
+        // 模拟「旧 intent 文件还没被删掉」的重启态：它现在 stale，且不覆盖 `later`。
+        let facts = CommittedFactReader::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .expect("reader")
+        .read_all()
+        .expect("facts");
+        persist_recovery_intent(dir.path(), &plan, &facts).expect("re-persist stale plan");
+
+        recover_canonical_tool_ledger_in(dir.path(), "lifecycle-stale-test")
+            .expect("recovery must re-plan and seal the later intent");
+
+        assert!(
+            load_recovery_intent(dir.path())
+                .expect("load intent")
+                .is_none()
+        );
+        let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
+            .expect("reader")
+            .read_all()
+            .expect("facts");
+        let sealed: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match &fact.payload {
+                FactPayload::ToolFinished(finished) => Some(finished),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sealed.len(), 2, "both open intents must be sealed");
+        for finished in sealed {
+            assert_eq!(finished.terminal_status, ToolTerminalStatus::Indeterminate);
+        }
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|fact| matches!(fact.payload, FactPayload::SessionRecovered(_)))
+                .count(),
+            2,
+            "the later open intent needs its own closed batch"
+        );
+    }
+
+    fn no_replay_intent(call: &ToolCallId, now: i64) -> ToolIntent {
+        ToolIntent {
+            call_id: call.clone(),
+            execution_id: ExecutionId::new(format!("exec_{}", generate_ulid())),
+            idempotency_key: None,
+            replay_capability: ToolReplayCapability::NoReplay,
+            policy_decision: PolicyDecisionRef {
+                outcome: ToolIntentPolicyOutcome::Allow,
+                rule_id: "test".into(),
+                decided_at_ms: now,
+                reason_ref: None,
+            },
+            effective_args_ref: None,
+            effective_args_hash: None,
+            sandbox_spec_hash: sha256_content_hash(b"sandbox"),
+            side_effect_class: SideEffectClass::ReadOnly,
+            intent_at_ms: now,
+        }
+    }
 }

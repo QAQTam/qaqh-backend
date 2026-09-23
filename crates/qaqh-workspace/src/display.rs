@@ -79,43 +79,6 @@ fn first_line(value: &str) -> String {
         .collect()
 }
 
-fn read_paths(args: &serde_json::Value) -> Option<String> {
-    if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
-        let paths: Vec<String> = requests
-            .iter()
-            .filter_map(|request| request.get("path").and_then(|value| value.as_str()))
-            .filter(|path| !path.trim().is_empty())
-            .map(str::to_string)
-            .collect();
-        return match paths.as_slice() {
-            [] => None,
-            [path] => Some(path.clone()),
-            _ => Some(paths.join(", ")),
-        };
-    }
-    args.get("path")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-}
-
-pub(crate) fn project_read(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    match read_paths(args) {
-        Some(path) => {
-            let display = ToolDisplay::new(
-                ToolHeader::Path {
-                    path,
-                    op: PathOp::Read,
-                },
-                text_body(output),
-            );
-            with_line_summary(display, first_human_line(output))
-        }
-        None => fallback_display("read", output),
-    }
-}
-
 pub(crate) fn project_write(args: &serde_json::Value, output: &str) -> ToolDisplay {
     path_result(
         args.get("path").and_then(|value| value.as_str()),
@@ -194,83 +157,6 @@ pub(crate) fn project_apply_patch(args: &serde_json::Value, output: &str) -> Too
         None => fallback_display("apply_patch", output),
     };
     with_line_summary(display, first_human_line(output))
-}
-
-pub(crate) fn project_glob(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    let pattern = args
-        .get("pattern")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let root = args
-        .get("path")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let path = match (root, pattern) {
-        (Some(root), Some(pattern)) => format!("{root}:{pattern}"),
-        (Some(root), None) => root.to_string(),
-        (None, Some(pattern)) => pattern.to_string(),
-        (None, None) => {
-            return fallback_display("glob", output);
-        }
-    };
-    let display = ToolDisplay::new(
-        ToolHeader::Path {
-            path,
-            op: PathOp::List,
-        },
-        text_body(output),
-    );
-    with_line_summary(display, first_human_line(output))
-}
-
-fn query_display(
-    tool: &'static str,
-    query: Option<String>,
-    scope: Option<String>,
-    output: &str,
-) -> ToolDisplay {
-    let display = match query.filter(|query| !query.trim().is_empty()) {
-        Some(query) => ToolDisplay::new(
-            ToolHeader::Query {
-                query,
-                scope: scope.filter(|scope| !scope.trim().is_empty()),
-            },
-            text_body(&human_body(output)),
-        ),
-        None => fallback_display(tool, output),
-    };
-    with_line_summary(
-        display,
-        json_summary(output).or_else(|| first_human_line(output)),
-    )
-}
-
-pub(crate) fn project_grep(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    query_display(
-        "grep",
-        args.get("pattern")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        args.get("path")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        output,
-    )
-}
-
-pub(crate) fn project_web_fetch(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    query_display(
-        "web_fetch",
-        args.get("url")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        args.get("output")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        output,
-    )
 }
 
 /// todo 系列的面板数据由 dashboard 维护；display 只保留 canonical 摘要行。
@@ -521,16 +407,6 @@ mod tests {
 
     #[test]
     fn file_projectors_declare_path_and_non_json_summary() {
-        let read = project_read(&json!({"path": "a.rs"}), "L1: fn a()\n");
-        assert_eq!(
-            read.header,
-            ToolHeader::Path {
-                path: "a.rs".into(),
-                op: PathOp::Read
-            }
-        );
-        assert_eq!(read.summary.as_deref(), Some("L1: fn a()"));
-
         let edit = project_edit(&json!({"path": "a.rs"}), "[OK] edit a.rs\n");
         assert_eq!(
             edit.header,
@@ -551,32 +427,6 @@ mod tests {
             ToolHeader::Path {
                 path: "src/app.rs".into(),
                 op: PathOp::Patch
-            }
-        );
-    }
-
-    #[test]
-    fn query_projectors_declare_pattern_and_scope() {
-        let grep = project_grep(
-            &json!({"pattern": "TODO", "path": "src"}),
-            "src/a.rs:1:TODO\n",
-        );
-        assert_eq!(
-            grep.header,
-            ToolHeader::Query {
-                query: "TODO".into(),
-                scope: Some("src".into())
-            }
-        );
-        let web = project_web_fetch(
-            &json!({"url": "https://example.test", "output": "page.md"}),
-            "page",
-        );
-        assert_eq!(
-            web.header,
-            ToolHeader::Query {
-                query: "https://example.test".into(),
-                scope: Some("page.md".into())
             }
         );
     }
@@ -605,7 +455,10 @@ mod tests {
         };
         let display = project_todo_list(&json!({}), &output.to_envelope_string().unwrap());
         assert_eq!(display.body, ToolBody::None);
-        assert_eq!(display.summary.as_deref(), Some("2 task(s) · 1 in progress"));
+        assert_eq!(
+            display.summary.as_deref(),
+            Some("2 task(s) · 1 in progress")
+        );
         assert!(!display.summary.as_deref().unwrap().starts_with('{'));
     }
 

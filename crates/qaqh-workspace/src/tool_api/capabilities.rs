@@ -58,9 +58,17 @@ mod tests {
     #[test]
     fn defaults_are_conservative() {
         let caps = ToolCapabilities::default();
-        assert_eq!(caps.concurrency, Concurrency::Serial, "默认串行（迁移保守档）");
+        assert_eq!(
+            caps.concurrency,
+            Concurrency::Serial,
+            "默认串行（迁移保守档）"
+        );
         assert!(!caps.streaming);
-        assert_eq!(caps.cancel_grace, Duration::from_secs(5), "5s 兜底（补充稿 Q7）");
+        assert_eq!(
+            caps.cancel_grace,
+            Duration::from_secs(5),
+            "5s 兜底（补充稿 Q7）"
+        );
         assert!(!caps.idempotent);
         assert!(caps.workspace_bound);
         assert!(!caps.interactive);

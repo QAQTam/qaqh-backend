@@ -79,6 +79,11 @@ impl CanonicalSessionStore {
         self.log.renew_writer(lease, now_ms, lease_duration_ms)
     }
 
+    /// Give up a writer lease early (see [`CanonicalLog::release_writer`]).
+    pub fn release_writer(&self, lease: &WriterLease, now_ms: i64) -> Result<(), CanonicalError> {
+        self.log.release_writer(lease, now_ms)
+    }
+
     /// Durably append one fact, then update projections and publishable events.
     pub fn append(
         &mut self,

@@ -772,7 +772,10 @@ fn bounded_progress_queue_drops_updates_without_blocking_pipe_readers() {
     }
     assert_eq!(tx.dropped_bytes(), 1);
     // 累计口径：256 帧入队 + 1 帧被丢弃 = 257 字节观测总量。
-    assert_eq!(tx.totals().total_bytes(), crate::EXEC_PROGRESS_CHANNEL_CAPACITY as u64 + 1);
+    assert_eq!(
+        tx.totals().total_bytes(),
+        crate::EXEC_PROGRESS_CHANNEL_CAPACITY as u64 + 1
+    );
 }
 
 /// 阶段 2（报告 P1）回归：process wait 阻塞期间收到取消旗标必须立即

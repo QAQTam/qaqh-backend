@@ -762,10 +762,7 @@ mod tests {
 
     /// 清空进程内链缓存，模拟"新进程首次 append"的恢复路径。
     fn clear_chain_cache() {
-        CHAIN
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
+        CHAIN.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
     #[test]
@@ -851,7 +848,10 @@ mod tests {
         assert!(report.ok, "chain must survive rotation: {report:?}");
         assert_eq!(report.records, 4, "oldest generation is dropped by design");
         assert_eq!(report.first_seq, Some(2));
-        assert!(report.truncated_history, "seq starts above 1 after rotation");
+        assert!(
+            report.truncated_history,
+            "seq starts above 1 after rotation"
+        );
         assert_eq!(report.segments.len(), 4);
     }
 

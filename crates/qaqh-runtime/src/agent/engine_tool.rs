@@ -727,6 +727,12 @@ impl ToolEngine {
                 None,
                 Vec::new(),
             ),
+            ToolRunOutcome::LedgerFailed(message) => (
+                id.to_string(),
+                qaqh_types::ToolResult::error_with("LEDGER_WRITE_FAILED", message, false, None),
+                None,
+                Vec::new(),
+            ),
         };
         // UI 直调路径：用户发起（权限批准后的续跑同属 UI 路径）。
         result.metrics.user_initiated = true;

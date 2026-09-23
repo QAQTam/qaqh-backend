@@ -13,6 +13,36 @@
 /// 工具输出（H13）。
 pub type ToolDisplayFn = fn(&serde_json::Value, &str) -> ToolDisplay;
 
+/// 按模型侧同一上限截断 display body，返回 `(text, truncated)`。
+///
+/// canonical display 会被 `ToolResult` 带进 `messages.jsonl`，所以大内容工具的
+/// display body 不能直接放完整正文——否则每次调用都会把正文多持久化一份。模型侧
+/// 已经按 [`CONTENT_BEARING_CHAR_LIMIT`](crate::tool_side_fold::CONTENT_BEARING_CHAR_LIMIT)
+/// 折叠，display 侧对齐即可，`truncated` 如实标记。
+pub(crate) fn clamp_display_body(text: &str) -> (String, bool) {
+    let limit = crate::tool_side_fold::CONTENT_BEARING_CHAR_LIMIT;
+    if text.chars().count() <= limit {
+        return (text.to_owned(), false);
+    }
+    (text.chars().take(limit).collect(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_display_body;
+
+    #[test]
+    fn clamp_display_body_caps_content_bearing_text() {
+        assert_eq!(clamp_display_body("abc"), ("abc".to_owned(), false));
+
+        let limit = crate::tool_side_fold::CONTENT_BEARING_CHAR_LIMIT;
+        let long = "字".repeat(limit + 5);
+        let (text, truncated) = clamp_display_body(&long);
+        assert!(truncated, "over-limit body must be marked truncated");
+        assert_eq!(text.chars().count(), limit, "cap is counted in chars");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ToolDisplay {
     /// 单行人类可读摘要。禁止 JSON（H1）。

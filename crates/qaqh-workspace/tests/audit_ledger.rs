@@ -52,15 +52,13 @@ fn setup(label: &str) -> Env {
     }
 }
 
-fn call(name: &str, args: serde_json::Value, call_id: &str, ctx: &qaqh_workspace::runtime::ToolCtx) -> qaqh_workspace::execution::ToolExecResult {
-    qaqh_workspace::execution::execute_with_context(
-        name,
-        "",
-        &args.to_string(),
-        call_id,
-        None,
-        ctx,
-    )
+fn call(
+    name: &str,
+    args: serde_json::Value,
+    call_id: &str,
+    ctx: &qaqh_workspace::runtime::ToolCtx,
+) -> qaqh_workspace::execution::ToolExecResult {
+    qaqh_workspace::execution::execute_with_context(name, "", &args.to_string(), call_id, None, ctx)
 }
 
 #[test]
@@ -181,14 +179,18 @@ fn audit_ledger_traces_calls_end_to_end() {
     for (index, record) in records.iter().enumerate() {
         assert_eq!(record["seq"], (index + 1) as u64, "seq must be contiguous");
         assert!(record["ts"].is_string(), "wall clock missing: {record}");
-        assert!(record["ts_mono_ns"].is_u64(), "mono clock missing: {record}");
+        assert!(
+            record["ts_mono_ns"].is_u64(),
+            "mono clock missing: {record}"
+        );
         assert!(
             record["boot_id"].as_str().map(str::is_empty) == Some(false),
             "boot id missing: {record}"
         );
         if index > 0 {
             assert_eq!(
-                record["prev_hash"], records[index - 1]["hash"],
+                record["prev_hash"],
+                records[index - 1]["hash"],
                 "chain must link record {index}"
             );
         }
