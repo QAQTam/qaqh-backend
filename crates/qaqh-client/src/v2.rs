@@ -272,7 +272,7 @@ impl Client {
         let state = self.require_v2_session().await?;
         let command_id = options
             .command_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .unwrap_or_else(qaqh_session::canonical::generate_ulid);
         let mut payload =
             RingingV2CommandEnvelope::new(command_id.clone(), state.client_instance_id, command)
                 .with_client_session_id(state.client_session_id);
