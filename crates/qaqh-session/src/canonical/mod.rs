@@ -4,6 +4,7 @@
 //! owns durable storage identity, writer fencing and commit high-water.
 
 mod clock;
+mod identity;
 mod log;
 mod migration;
 mod reader;
@@ -16,6 +17,10 @@ mod types;
 
 pub use clock::{
     CONTENT_CLOCK_FILE, CONTENT_CLOCK_SCHEMA, CONTENT_DIR, ContentClock, ContentClockRecord,
+};
+pub use identity::{
+    CANONICAL_IDENTITY_FILE, CANONICAL_IDENTITY_SCHEMA, CanonicalIdentityError,
+    CanonicalSessionIdentity, generate_ulid, ulid_from_text,
 };
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,

@@ -15,7 +15,10 @@ use crate::session_fact_v2::{
     ToolFinished, ToolIntent, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
-use super::{CanonicalError, CanonicalSessionStore, CommittedFactReader, WriterId, WriterLease};
+use super::{
+    CanonicalError, CanonicalIdentityError, CanonicalSessionStore, CommittedFactReader, WriterId,
+    WriterLease,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolLedgerEntry {
@@ -67,6 +70,9 @@ pub enum ToolRecoveryDisposition {
 pub enum ToolLedgerError {
     #[error(transparent)]
     Canonical(#[from] CanonicalError),
+
+    #[error(transparent)]
+    Identity(#[from] CanonicalIdentityError),
 
     #[error("tool call {call_id} already has an intent")]
     DuplicateIntent { call_id: ToolCallId },
@@ -183,6 +189,29 @@ impl ToolLedger {
             .store
             .renew_writer(&self.lease, now_ms, lease_duration_ms)?;
         Ok(())
+    }
+
+    /// Keep the actor's writer lease alive across idle gaps.
+    ///
+    /// `renew_writer` deliberately rejects an expired fence. A long-lived actor
+    /// can legitimately outlive its lease between tool calls, so an expired
+    /// lease is reacquired under the same writer id; an active lease is renewed
+    /// without rotating fence identity.
+    pub fn ensure_lease(
+        &mut self,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<(), ToolLedgerError> {
+        if self.lease.lease_expires_at_ms > now_ms {
+            self.renew_lease(now_ms, lease_duration_ms)
+        } else {
+            self.lease = self.store.acquire_writer(
+                self.lease.writer_id.clone(),
+                now_ms,
+                lease_duration_ms,
+            )?;
+            Ok(())
+        }
     }
 
     pub fn get(&self, call_id: &ToolCallId) -> Option<&ToolLedgerEntry> {
