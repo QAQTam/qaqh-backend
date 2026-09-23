@@ -256,6 +256,9 @@ mod tests {
             mode: AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::ReadFree,
             sandbox: SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
+                "/tmp/ws",
+            )),
             timeout: Duration::from_secs(10),
             cancellation: CancellationToken::new(),
             progress: None,
