@@ -222,9 +222,7 @@ pub(crate) fn apply_result_metrics(
 ///
 /// `metrics` 仅在 `elapsed_ms` 已接线时出现；本期未接时 wire 为 `None`，
 /// client 回退旧字段（H16）。
-pub(crate) fn wire_display(
-    display: &qaqh_workspace::tool_api::ToolDisplay,
-) -> TimelineToolDisplay {
+pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> TimelineToolDisplay {
     use qaqh_workspace::tool_api as sdk;
 
     let header = match &display.header {
@@ -277,13 +275,16 @@ pub(crate) fn wire_display(
         }),
     };
 
-    let metrics = display.metrics.elapsed_ms.map(|elapsed_ms| TimelineToolMetrics {
-        elapsed_ms,
-        output_bytes: display.metrics.output_bytes,
-        retry_count: display.metrics.retry_count,
-        effective_tool_name: display.metrics.effective_tool_name.clone(),
-        user_initiated: display.metrics.user_initiated,
-    });
+    let metrics = display
+        .metrics
+        .elapsed_ms
+        .map(|elapsed_ms| TimelineToolMetrics {
+            elapsed_ms,
+            output_bytes: display.metrics.output_bytes,
+            retry_count: display.metrics.retry_count,
+            effective_tool_name: display.metrics.effective_tool_name.clone(),
+            user_initiated: display.metrics.user_initiated,
+        });
 
     TimelineToolDisplay {
         summary: display.summary.clone(),
@@ -651,8 +652,9 @@ impl TimelineAppender {
         if next_tool.progress_stream.is_none() {
             next_tool.progress_stream = tool.progress_stream.clone();
         }
-        next_tool.progress_bytes_total =
-            next_tool.progress_bytes_total.max(tool.progress_bytes_total);
+        next_tool.progress_bytes_total = next_tool
+            .progress_bytes_total
+            .max(tool.progress_bytes_total);
         if next_tool.permission.is_none() {
             next_tool.permission = tool.permission.clone();
         }
@@ -1424,7 +1426,9 @@ mod tests {
         let mut final_tool = tool();
         final_tool.state = TimelineToolState::Succeeded;
         final_tool.output = Some("done".into());
-        appender.replace_tool("s", "t", 0, "tool", final_tool).unwrap();
+        appender
+            .replace_tool("s", "t", 0, "tool", final_tool)
+            .unwrap();
 
         let snapshot = appender.snapshot("s").unwrap();
         let tool = snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
@@ -1581,7 +1585,8 @@ mod tests {
 
     #[test]
     fn json_like_summaries_fall_back_to_name_and_state() {
-        let exec_json = r#"{"status":"completed","command":"bash -lc ls","exit_code":0,"output":"a\nb"}"#;
+        let exec_json =
+            r#"{"status":"completed","command":"bash -lc ls","exit_code":0,"output":"a\nb"}"#;
         assert_eq!(
             project_tool_summary("exec", TimelineToolState::Succeeded, None, Some(exec_json)),
             "exec · succeeded"
