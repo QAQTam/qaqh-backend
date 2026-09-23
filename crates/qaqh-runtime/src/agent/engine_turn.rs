@@ -342,6 +342,7 @@ impl TurnEngine {
         agent: &mut AgentState,
         interaction_id: &str,
         decision: &str,
+        causation_id: Option<&str>,
     ) -> Result<(), TurnActorError> {
         let Some(ledger) = agent
             .tool_ledger_mut()
@@ -366,8 +367,18 @@ impl TurnEngine {
             resolution_seq: 1,
             resolved_at_ms: now,
         };
+        let causation_id = causation_id
+            .filter(|value| is_ulid(value))
+            .map(EventId::new);
         ledger
-            .append_interaction_resolved(EventId::new(generate_ulid()), None, None, payload, now)
+            .append_interaction_resolved_with_causation(
+                EventId::new(generate_ulid()),
+                causation_id,
+                None,
+                None,
+                payload,
+                now,
+            )
             .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
         Ok(())
     }
@@ -588,6 +599,7 @@ impl TurnEngine {
         ctx: &mut RingContext,
         tool: &mut ToolEngine,
         call_id: &str,
+        command_id: &str,
         admitted: Option<AdmittedTool>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
@@ -609,7 +621,9 @@ impl TurnEngine {
         } else {
             "rejected"
         };
-        if let Err(error) = Self::record_interaction_resolution(ctx.agent, call_id, decision) {
+        if let Err(error) =
+            Self::record_interaction_resolution(ctx.agent, call_id, decision, Some(command_id))
+        {
             log::error!("[TURN] failed to persist permission resolution {call_id}: {error}");
         }
 
@@ -694,6 +708,7 @@ impl TurnEngine {
         ctx: &mut RingContext,
         tool: &mut ToolEngine,
         ask_id: &str,
+        command_id: &str,
         answers: &[AskAnswer],
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
@@ -727,7 +742,9 @@ impl TurnEngine {
                 return Outcome::Handled;
             }
         };
-        if let Err(error) = Self::record_interaction_resolution(ctx.agent, ask_id, "answered") {
+        if let Err(error) =
+            Self::record_interaction_resolution(ctx.agent, ask_id, "answered", Some(command_id))
+        {
             log::error!("[TURN] failed to persist ask resolution {ask_id}: {error}");
         }
 
@@ -769,11 +786,13 @@ impl TurnEngine {
 
     /// Validate and apply a plan review decision without consuming state
     /// on identity or payload errors.
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_plan_response(
         &mut self,
         ctx: &mut RingContext,
         tool: &mut ToolEngine,
         call_id: &str,
+        command_id: &str,
         approved: bool,
         message: &str,
         autonomous: bool,
@@ -806,6 +825,7 @@ impl TurnEngine {
             ctx.agent,
             call_id,
             if approved { "approved" } else { "rejected" },
+            Some(command_id),
         ) {
             log::error!("[TURN] failed to persist plan resolution {call_id}: {error}");
         }
@@ -904,6 +924,7 @@ impl TurnEngine {
         ctx: &mut RingContext,
         tool: &mut ToolEngine,
         ask_id: &str,
+        command_id: &str,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -919,7 +940,9 @@ impl TurnEngine {
             Self::emit_ask_rejected(ctx, ask_id, "ask_id does not match the active prompt");
             return Outcome::Handled;
         }
-        if let Err(error) = Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed") {
+        if let Err(error) =
+            Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed", Some(command_id))
+        {
             log::error!("[TURN] failed to persist ask dismissal {ask_id}: {error}");
         }
 
@@ -1799,6 +1822,23 @@ impl TurnEngine {
             (state.turn_id, state.usage)
         })
     }
+}
+
+fn is_ulid(value: &str) -> bool {
+    value.len() == 26
+        && value.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'0'..=b'9'
+                    | b'A'..=b'H'
+                    | b'J'
+                    | b'K'
+                    | b'M'
+                    | b'N'
+                    | b'P'..=b'T'
+                    | b'V'..=b'Z'
+            )
+        })
 }
 
 #[cfg(test)]
