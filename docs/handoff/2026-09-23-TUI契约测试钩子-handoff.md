@@ -46,13 +46,19 @@ QAQH_TEST_INTERACTION_FAULT=permission-deny MODE=permission ...
 
 QAQH_TEST_INTERACTION_FAULT=ask-dismiss MODE=ask ...
 → ask modal visible / answered / no panic           PASS
+
+QAQH_TEST_INTERACTION_FAULT=permission-hang MODE=permission ...
+→ modal visible / key handled / no panic / no cursor timeout PASS（清理路径冒烟）
+
+QAQH_TEST_INTERACTION_FAULT=ask-hang MODE=ask ...
+→ modal visible / key handled / no panic / no cursor timeout PASS（清理路径冒烟）
 ```
 
 ## 3. 未收口
 
 - TUI 仓库尚未提交正式 `MODE=plan` harness；本次只在 `/tmp` 临时脚本验证。
-- `permission-hang` / `ask-hang` 只验证了 daemon 侧不返回 ack 的实现，尚未跑
-  TUI 侧超时 UI 断言。
+- `permission-hang` / `ask-hang` 的真实 PTY 清理路径已冒烟通过，但当前 harness
+  没有断言“超时提示文案出现”的 UI 终态，仍需 TUI 侧补一条定时断言。
 - P1 仍未做：
   - `session.meta` / `plan.*` / `stats.token_usage` / `git.*` 的 client typed 变体；
   - P3 typed todo 消费路径说明；
