@@ -22,6 +22,16 @@
   - TCP bind/connect 拒绝；
   - seccomp 拒绝 AF_INET/AF_INET6/AF_PACKET socket 及一组高风险 syscall；
   - `RLIMIT_CORE=0`，`RLIMIT_NOFILE` 默认 1024。
+- bwrap 后端：
+  - `SandboxBackend::Auto` 优先选择 bubblewrap，失败时回退 Landlock/seccomp helper；
+  - 探测 `bwrap --version` 和 user namespace probe，缓存探测结果；
+  - 使用 `--unshare-all`、`--die-with-parent`、`--ro-bind / /`、workspace `--bind`、`--dev`、`--proc`；
+  - `NetworkPolicy::Allow` 时加 `--share-net`，否则保持网络 namespace 隔离；
+  - 显式指定不可用后端时 fail-closed，不静默绕过。
+- 埋点：
+  - `sandbox_backend_selected` 结构化日志记录 requested/resolved backend、能力位、network、writable roots；
+  - 从命令输出分类 `sandbox_denial`：`permission_denied`、`operation_not_permitted`、`read_only_file_system`、`policy_denied`；
+  - denial 日志携带 backend、exit_code、tool_call_id、command 和 bounded output snippet。
 - exec 接线：
   - `exec` handler 构造 `SandboxSpec::workspace_write(ctx.workspace_root)`；
   - daemon 启动时探测能力，仅 Linux 支持时设置 `QAQH_SANDBOX_EXEC` 为当前 daemon；
@@ -35,6 +45,9 @@
 cargo test -p qaqh-sandbox -- --test-threads=1
   linux_sandbox::workspace_write_is_allowed_and_outside_write_is_denied PASS
   linux_sandbox::network_denial_blocks_tcp_socket_creation PASS
+  linux_sandbox::bubblewrap_workspace_write_denies_outside_write PASS
+  tests::auto_prefers_bubblewrap_then_landlock PASS
+  tests::denial_classifier_recognizes_read_only_filesystem PASS
 
 cargo test -p qaqh-daemon --test sandbox_helper -- --test-threads=1
   daemon_helper_denies_write_outside_workspace PASS

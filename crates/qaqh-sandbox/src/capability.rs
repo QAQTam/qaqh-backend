@@ -5,8 +5,25 @@
 //! bypass; it does not make the daemon unstartable.
 
 use serde::{Deserialize, Serialize};
+use std::process::Command;
+use std::sync::OnceLock;
 
 pub use qaqh_policy::SandboxBackend;
+
+const USER_NAMESPACE_FAILURES: [&str; 4] = [
+    "loopback: Failed RTM_NEWADDR",
+    "loopback: Failed RTM_NEWLINK",
+    "setting up uid map: Permission denied",
+    "No permissions to create a new namespace",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BubblewrapSupport {
+    available: bool,
+    detail: String,
+}
+
+static BUBBLEWRAP_SUPPORT: OnceLock<BubblewrapSupport> = OnceLock::new();
 
 /// Operating-system family used by policy presets and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +40,9 @@ pub enum Platform {
 pub struct SandboxCapabilities {
     pub platform: Platform,
     pub backend: SandboxBackend,
+    pub landlock: bool,
+    pub seccomp: bool,
+    pub bubblewrap: bool,
     pub filesystem_write_isolation: bool,
     pub network_isolation: bool,
     pub process_hardening: bool,
@@ -41,6 +61,9 @@ impl SandboxCapabilities {
             return Self {
                 platform: Platform::Macos,
                 backend: SandboxBackend::None,
+                landlock: false,
+                seccomp: false,
+                bubblewrap: false,
                 filesystem_write_isolation: false,
                 network_isolation: false,
                 process_hardening: true,
@@ -52,6 +75,9 @@ impl SandboxCapabilities {
             return Self {
                 platform: Platform::Windows,
                 backend: SandboxBackend::None,
+                landlock: false,
+                seccomp: false,
+                bubblewrap: false,
                 filesystem_write_isolation: false,
                 network_isolation: false,
                 process_hardening: true,
@@ -62,6 +88,9 @@ impl SandboxCapabilities {
         Self {
             platform: Platform::Other,
             backend: SandboxBackend::None,
+            landlock: false,
+            seccomp: false,
+            bubblewrap: false,
             filesystem_write_isolation: false,
             network_isolation: false,
             process_hardening: false,
@@ -77,25 +106,102 @@ fn detect_linux() -> SandboxCapabilities {
     // Seccomp is a kernel facility available on all supported Linux targets;
     // installation is verified by the helper itself and remains fail-closed.
     let seccomp = std::path::Path::new("/proc/self/status").is_file();
-    if landlock && seccomp {
-        SandboxCapabilities {
-            platform: Platform::Linux,
-            backend: SandboxBackend::LinuxLandlockSeccomp,
-            filesystem_write_isolation: true,
-            network_isolation: true,
-            process_hardening: true,
-            detail: "Landlock LSM + seccomp-bpf available".into(),
-        }
-    } else {
-        SandboxCapabilities {
-            platform: Platform::Linux,
-            backend: SandboxBackend::ProcessHardening,
-            filesystem_write_isolation: false,
-            network_isolation: false,
-            process_hardening: true,
-            detail: format!(
-                "Landlock unavailable (landlock={landlock}, seccomp={seccomp}); process hardening only"
+    let bubblewrap = bubblewrap_support();
+
+    let (backend, detail) = if bubblewrap.available {
+        (
+            SandboxBackend::LinuxBubblewrap,
+            format!("bubblewrap available: {}", bubblewrap.detail),
+        )
+    } else if landlock && seccomp {
+        (
+            SandboxBackend::LinuxLandlockSeccomp,
+            format!(
+                "Landlock LSM + seccomp-bpf available; bubblewrap unavailable: {}",
+                bubblewrap.detail
             ),
-        }
+        )
+    } else {
+        (
+            SandboxBackend::ProcessHardening,
+            format!(
+                "Landlock unavailable (landlock={landlock}, seccomp={seccomp}); bubblewrap unavailable: {}",
+                bubblewrap.detail
+            ),
+        )
+    };
+
+    SandboxCapabilities {
+        platform: Platform::Linux,
+        backend,
+        landlock,
+        seccomp,
+        bubblewrap: bubblewrap.available,
+        filesystem_write_isolation: backend != SandboxBackend::ProcessHardening,
+        network_isolation: backend != SandboxBackend::ProcessHardening,
+        process_hardening: true,
+        detail,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn bubblewrap_support() -> &'static BubblewrapSupport {
+    BUBBLEWRAP_SUPPORT.get_or_init(|| {
+        let version = match Command::new("bwrap").arg("--version").output() {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            Ok(output) => {
+                return BubblewrapSupport {
+                    available: false,
+                    detail: format!(
+                        "bwrap --version failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                };
+            }
+            Err(error) => {
+                return BubblewrapSupport {
+                    available: false,
+                    detail: format!("bwrap not found on PATH: {error}"),
+                };
+            }
+        };
+
+        match Command::new("bwrap")
+            .args([
+                "--unshare-user",
+                "--unshare-net",
+                "--ro-bind",
+                "/",
+                "/",
+                "/bin/true",
+            ])
+            .output()
+        {
+            Ok(output) if output.status.success() => BubblewrapSupport {
+                available: true,
+                detail: format!("{version}; user namespace probe passed"),
+            },
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let failure = USER_NAMESPACE_FAILURES
+                    .iter()
+                    .find(|failure| stderr.contains(**failure));
+                BubblewrapSupport {
+                    available: false,
+                    detail: match failure {
+                        Some(failure) => {
+                            format!("{version}; user namespace probe failed: {failure}")
+                        }
+                        None => format!("{version}; probe failed: {}", stderr.trim()),
+                    },
+                }
+            }
+            Err(error) => BubblewrapSupport {
+                available: false,
+                detail: format!("{version}; probe spawn failed: {error}"),
+            },
+        }
+    })
 }
