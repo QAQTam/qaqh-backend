@@ -58,6 +58,12 @@ pub trait ToolProjection: Serialize {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         ToolDisplay::default()
     }
+
+    /// 宿主侧 typed effects。默认无副作用；需要注入 skill activation 等
+    /// 可信状态迁移的工具在此显式返回，禁止让 runtime 解析工具文本猜测。
+    fn effects(&self) -> Vec<crate::ToolEffect> {
+        Vec::new()
+    }
 }
 
 /// canonical 输出值（base spec §8.2）：宿主 / 审计 / 后续工具可消费，
@@ -122,6 +128,8 @@ pub struct ToolOutcome {
     pub images: Vec<ToolImage>,
     /// 执行指标。
     pub metrics: ToolExecutionMetrics,
+    /// 宿主侧可信 effects（例如 skill activation）。
+    pub effects: Vec<crate::ToolEffect>,
 }
 
 impl ToolOutcome {
@@ -187,6 +195,7 @@ mod tests {
             display: ToolDisplay::default(),
             images: Vec::new(),
             metrics: ToolExecutionMetrics::default(),
+            effects: Vec::new(),
         }
     }
 
