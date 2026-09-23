@@ -1,20 +1,21 @@
 # Handoff：剩余 TypedTool 迁移与 TUI 契约补充任务（2026-09-23）
 
-> 状态：工具迁移继续挂在 PR #288；TUI 契约补充为独立并行任务，不混入本次工具迁移，P0 优先排期。
-> 当前分支：`feat/p3-tool-ledger-production-wiring`
-> 当前 head：`14fd7b7`
-> 关联 PR：
-> - #288：P3 ToolLedger / typed tool 迁移主线
-> - #289：`ConversationInputPurpose` 独立 re-export PR，base `betav2`
+> 状态：**Wave 1-6 已完成并合入 `betav2`**。本文保留为迁移计划、验收约束与收口记录。
+> 收口基线：`betav2 @ e641bba3f7d953a680da4827e24fc123274696cd`。
+> 关联：
+> - #288：P3 ToolLedger / typed tool 迁移主线（已合入）
+> - #289：`ConversationInputPurpose` 独立 re-export（已合入）
+> - #294-#299：Wave 1-6 typed tool 迁移（已合入）
+> - #301：`QAQH_TEST_PLAN_REVIEW` 保真度收口（已合入）
 >
 > TUI 输入：
 > [`../../../qaqh-tui-app/docs/spec/2026-09-23-TUI对后端的协作需求-spec.md`](../../../qaqh-tui-app/docs/spec/2026-09-23-TUI对后端的协作需求-spec.md)
 
 ## 1. 当前状态
 
-### 1.1 已完成的 typed 工具
+### 1.1 已完成迁移的内置工具
 
-已迁移到 `TypedTool` 或 typed output 面：
+以下工具均已迁移到 `TypedTool` / typed output 面，生产注册项不再携带 legacy executor：
 
 - `todo_write` / `todo_update` / `todo_list`
 - `skills`
@@ -25,41 +26,21 @@
 - `grep`
 - `web_fetch`
 - `read`
-
-`read` 已完成：
-
-- 批量/范围读取；
-- `if_hash`；
-- 文件账本基线；
-- 行号修正；
-- legacy error code；
-- 错误 details 回填 wire `data`。
-
-### 1.2 仍为 legacy executor 的内置工具
-
-按当前 `registration.rs` 与各模块注册面统计：
-
-| 工具 | 模块 | 当前状态 |
-|---|---|---|
-| `write` | `file_mutate.rs` | legacy |
-| `delete` | `file_mutate.rs` | legacy |
-| `edit` | `edit/handler.rs` | legacy |
-| `apply_patch` | `apply_patch.rs` | legacy |
-| `copy_range` | `copy_range.rs` | legacy |
-| `exec` | `exec/register.rs` | legacy |
-| `read_image` | `read_image/mod.rs` | legacy |
-| `journal` | `journal.rs` | legacy |
-| `ask` | `ask_user.rs` | legacy |
-| `confirm_apply` | `confirm_apply.rs` | legacy |
-
-`read` 已完成，因此原先的 `exec/read/write` 组现在剩：
-
+- `write` / `delete`
+- `edit` / `apply_patch` / `copy_range`
 - `exec`
-- `write`
+- `read_image`
+- `journal`
+- `ask` / `confirm_apply`
 
-以及文件变更族和交互/资源族。
+### 1.2 收口结果
 
-## 2. 后续工具迁移顺序
+Wave 1-6 已全部合并，详细 PR 与验证见 §7。当前仅保留 `cfg(test)` 兼容入口；
+生产注册表不再存在本文件原先列出的 legacy builtin 路径。
+
+## 2. 后续工具迁移顺序（历史计划，已全部执行）
+
+> 以下 Wave 1-6 是实际执行顺序；各 Wave 的 Gate 与 §3 统一验收均已通过。
 
 ### Wave 1：文件写入基础族
 
@@ -246,14 +227,14 @@ P2：
 - 不让 TUI 自建 client mirror；
 - 不为 TUI 私有需求引入兼容层。
 
-### 4.4 当前已先行的项
+### 4.4 当前已收口项
 
-- `tui-anchor-2026-09-23`
-  - `5ec1900d6c937b6ff927d8f65fcd37d465de7988`
-  - daemon 构建已实测。
-- PR #289
-  - `ConversationInputPurpose` re-export；
-  - 独立于 #288，base `betav2`。
+- 最新不可移动 TUI 锚点：`tui-anchor-2026-09-23-p3-typed-tools`
+  - `84e08117535eac4a8782a1fb3051cfa2a92b0321`
+  - daemon 构建与真实 smoke 已实测。
+- PR #289：`ConversationInputPurpose` re-export（已合入）。
+- PR #290：TUI 契约故障注入 hook（已合入）。
+- PR #301：plan review hook timeline/context 保真度收口（已合入，Closes TUI #43）。
 
 ## 5. 协作原则
 
@@ -288,5 +269,5 @@ P2：
 
 - `#288` 遗留：recovery failure fail-open、display `truncated` 与工具自身 flag 合并、`append_interaction_expired` 冲突分类、legacy WAL prune、两处 `ulid_from_text` 拼接、`tool_runtime.rs` 生产 `expect`、Windows hard_link 实测。
 - `#290` 遗留：gap token eager consumption、`plan_review_enabled()` startup snapshot、`test_hooks` cfg gating、ack ms 上限、`SKIPPED` 非法值告警。
-- TUI 侧：`QAQ-Harness/qaqh-tui-app#41`（P1）：`MODE=plan` e2e、permission/ask hang timeout 断言、迁移到 `PlanReviewItem`。
+- TUI 侧：`QAQ-Harness/qaqh-tui-app#41` 的 P0 hook 已由 #290 交付；plan review 保真度缺口由 #301 收口。TUI 仓仍需按自己的节奏消费新锚点并补 `MODE=plan-reject` 的 timeline/context 断言。
 - 仓库级：`cargo fmt --all --check` 当前仍会在未改动的 `crates/qaqh-client/src/lib.rs`、`types.rs` 报既有 rustfmt 差异；如需恢复全仓 fmt gate，应单独开 PR 收敛，不混入工具迁移。
