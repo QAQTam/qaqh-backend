@@ -13,6 +13,7 @@ use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
 
 use qaqh_message::PendingTool;
+use qaqh_session::actor::ToolAdmission;
 use qaqh_session::canonical::{
     ToolLedgerError, generate_ulid, sha256_content_hash, ulid_from_text,
 };
@@ -28,7 +29,14 @@ use qaqh_workspace::runtime::ToolExecutionScope;
 use crate::agent::dashboard;
 use crate::agent::engine_tool::ToolEngine;
 use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
+use crate::agent::turn_actor::TurnActor;
 use crate::agent::types::{AdmittedTool, RingContext};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolBatchOrigin {
+    Normal,
+    Resume,
+}
 
 /// 并行工具 worker 上限（保持 v1 行为）。
 pub(crate) const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
@@ -101,15 +109,19 @@ impl ToolRuntime {
     /// provide the admitted batch and original model order; this method handles
     /// parallel batching, serial tail, progress, outbox, cancellation sealing
     /// and ordered skill effects.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_batch(
         ctx: &mut RingContext,
         tool: &ToolEngine,
+        actor: Option<&mut TurnActor>,
+        origin: ToolBatchOrigin,
         admitted: Vec<AdmittedTool>,
         tool_call_order: &[String],
         serial_call_ids: &HashSet<String>,
         turn_id: &str,
         round_num: u32,
     ) -> bool {
+        let mut actor = actor;
         // L3 outbox: execution facts are recorded inside the tool worker thread,
         // right after the tool returns, so a kill between "tool ran" and "result
         // persisted" is still distinguishable from "tool never ran".
@@ -134,7 +146,8 @@ impl ToolRuntime {
                     .iter()
                     .map(|(item, _)| item.call_id.clone())
                     .chain(serial.iter().map(|(item, _)| item.call_id.clone()));
-                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT, turn_id);
+                let actor = actor.as_deref_mut();
+                seal_unexecuted_as_cancelled(ctx, actor, remaining, CANCELLED_TOOL_RESULT, turn_id);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
                 return false;
             }
@@ -148,7 +161,9 @@ impl ToolRuntime {
                     ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
                 );
             }
-            let (progress_rx, runs) = Self::spawn_batch(ctx, batch, outbox_seed.clone(), turn_id);
+            let actor_ref = actor.as_deref_mut();
+            let (progress_rx, runs) =
+                Self::spawn_batch(ctx, actor_ref, origin, batch, outbox_seed.clone(), turn_id);
             let cancelled = ctx.cancel.is_set();
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
 
@@ -198,7 +213,14 @@ impl ToolRuntime {
                 // 剩余并行批根本没起，或上面的项被回收时仍未落结果——统一补终态，
                 // 保证「每个 tool_use 恰有一条 tool_result」。
                 let remaining = parallel.iter().map(|(item, _)| item.call_id.clone());
-                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT, turn_id);
+                let actor_ref = actor.as_deref_mut();
+                seal_unexecuted_as_cancelled(
+                    ctx,
+                    actor_ref,
+                    remaining,
+                    CANCELLED_TOOL_RESULT,
+                    turn_id,
+                );
                 parallel.clear();
                 break;
             }
@@ -212,7 +234,8 @@ impl ToolRuntime {
                 // 收集的 skill_effects，并把未执行的 tool_use 留成 open。
                 let remaining = std::iter::once(admitted.call_id)
                     .chain(serial.by_ref().map(|(admitted, _)| admitted.call_id));
-                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT, turn_id);
+                let actor = actor.as_deref_mut();
+                seal_unexecuted_as_cancelled(ctx, actor, remaining, CANCELLED_TOOL_RESULT, turn_id);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
                 return false;
             }
@@ -222,8 +245,15 @@ impl ToolRuntime {
             ToolEngine::emit_timeline_tool_running(
                 ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
             );
-            let (progress_rx, runs) =
-                Self::spawn_batch(ctx, vec![(admitted, mode)], outbox_seed.clone(), turn_id);
+            let actor = actor.as_deref_mut();
+            let (progress_rx, runs) = Self::spawn_batch(
+                ctx,
+                actor,
+                origin,
+                vec![(admitted, mode)],
+                outbox_seed.clone(),
+                turn_id,
+            );
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
             for result in results {
                 match result.outcome {
@@ -384,6 +414,8 @@ impl ToolRuntime {
 
     fn prepare_one(
         ctx: &mut RingContext,
+        actor: Option<&mut TurnActor>,
+        origin: ToolBatchOrigin,
         item: &AdmittedTool,
         wire_turn_id: &str,
     ) -> Result<Option<LedgerRun>, String> {
@@ -400,13 +432,64 @@ impl ToolRuntime {
             .map_err(|error| format!("tool ledger lease renewal failed: {error}"))?;
         let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
         let intent = Self::build_intent(item, &execution_id, now);
+        let actor_turn = TurnId::new(wire_turn_id);
+        let canonical_turn = canonical_turn_id(wire_turn_id);
+        let event_id = EventId::new(generate_ulid());
+
+        if let Some(actor) = actor {
+            let resume_interaction =
+                (origin == ToolBatchOrigin::Resume).then_some(item.call_id.as_str());
+            let admission = actor
+                .admit_tool_intent(
+                    ledger,
+                    &actor_turn,
+                    &canonical_turn,
+                    event_id,
+                    intent,
+                    now,
+                    resume_interaction,
+                )
+                .map_err(|error| format!("tool intent admission failed: {error}"))?;
+            return match admission {
+                ToolAdmission::Admitted {
+                    execution_id,
+                    intent_at_ms,
+                } => Ok(Some(LedgerRun {
+                    execution_id,
+                    intent_at_ms,
+                })),
+                ToolAdmission::ExistingIntent { intent } => {
+                    if matches!(
+                        intent.replay_capability,
+                        ToolReplayCapability::IdempotentReplay
+                    ) {
+                        Ok(Some(LedgerRun {
+                            execution_id: intent.execution_id,
+                            intent_at_ms: intent.intent_at_ms,
+                        }))
+                    } else {
+                        Err(format!(
+                            "tool call {} already has an open intent; refusing replay",
+                            intent.call_id
+                        ))
+                    }
+                }
+                ToolAdmission::ExistingFinished { finished } => Err(format!(
+                    "tool call {} already has terminal {:?}; refusing to execute again",
+                    finished.call_id, finished.terminal_status
+                )),
+                ToolAdmission::Cancelled => Err(format!(
+                    "tool call {} was cancelled before admission",
+                    canonical_call_id(&item.call_id)
+                )),
+                ToolAdmission::TurnTerminal { turn_id, terminal } => Err(format!(
+                    "turn {turn_id} is terminal ({terminal:?}); refusing tool admission"
+                )),
+            };
+        }
+
         ledger
-            .append_intent(
-                EventId::new(generate_ulid()),
-                Some(canonical_turn_id(wire_turn_id)),
-                intent,
-                now,
-            )
+            .append_intent(event_id, Some(canonical_turn), intent, now)
             .map_err(|error| format!("tool intent append failed: {error}"))?;
         Ok(Some(LedgerRun {
             execution_id,
@@ -557,6 +640,8 @@ impl ToolRuntime {
     /// 不做调度决策，只负责执行机制。进度 sender 共享给本批所有 worker。
     fn spawn_batch(
         ctx: &mut RingContext,
+        mut actor: Option<&mut TurnActor>,
+        origin: ToolBatchOrigin,
         admitted: Vec<(AdmittedTool, ToolRunMode)>,
         outbox_seed: String,
         wire_turn_id: &str,
@@ -568,30 +653,33 @@ impl ToolRuntime {
             let call_id = admitted.call_id.clone();
             let tool_name = admitted.auth.tool_name().to_string();
             match mode {
-                ToolRunMode::Prepare => match Self::prepare_one(ctx, &admitted, wire_turn_id) {
-                    Ok(ledger) => runs.push(Self::spawn(
-                        call_id,
-                        tool_name,
-                        admitted.auth,
-                        admitted.scope,
-                        tx,
-                        outbox_seed.clone(),
-                        ledger,
-                    )),
-                    Err(message) => {
-                        let blocked_name = tool_name.clone();
-                        let handle = std::thread::Builder::new()
-                            .stack_size(4 * 1024 * 1024)
-                            .spawn(move || blocked_tool_exec_result(&blocked_name, &message))
-                            .expect("tool thread spawn");
-                        runs.push(ToolRun {
+                ToolRunMode::Prepare => {
+                    let actor = actor.as_deref_mut();
+                    match Self::prepare_one(ctx, actor, origin, &admitted, wire_turn_id) {
+                        Ok(ledger) => runs.push(Self::spawn(
                             call_id,
                             tool_name,
-                            handle,
-                            ledger: None,
-                        });
+                            admitted.auth,
+                            admitted.scope,
+                            tx,
+                            outbox_seed.clone(),
+                            ledger,
+                        )),
+                        Err(message) => {
+                            let blocked_name = tool_name.clone();
+                            let handle = std::thread::Builder::new()
+                                .stack_size(4 * 1024 * 1024)
+                                .spawn(move || blocked_tool_exec_result(&blocked_name, &message))
+                                .expect("tool thread spawn");
+                            runs.push(ToolRun {
+                                call_id,
+                                tool_name,
+                                handle,
+                                ledger: None,
+                            });
+                        }
                     }
-                },
+                }
                 ToolRunMode::Execute { ledger } => runs.push(Self::spawn(
                     call_id,
                     tool_name,
@@ -644,6 +732,8 @@ impl ToolRuntime {
             .expect("single admitted tool must produce one prepared call");
         let (progress_rx, mut runs) = Self::spawn_batch(
             ctx,
+            None,
+            ToolBatchOrigin::Normal,
             vec![(admitted, mode)],
             ctx.agent.session.seed.clone(),
             turn_id,
@@ -819,25 +909,68 @@ fn blocked_tool_exec_result(
 /// 返回补了终态的项数。
 fn seal_unexecuted_as_cancelled(
     ctx: &mut RingContext,
+    actor: Option<&mut TurnActor>,
     call_ids: impl IntoIterator<Item = String>,
     reason: &str,
     wire_turn_id: &str,
 ) -> usize {
     let executed = crate::agent::tool_outbox::executed_call_ids(&ctx.agent.session.seed);
-    let mut sealed = 0;
-    for call_id in call_ids {
-        if ctx.agent.msg.step_has_tool_result(&call_id) || executed.contains(&call_id) {
-            continue;
-        }
+    let unexecuted: Vec<String> = call_ids
+        .into_iter()
+        .filter(|call_id| {
+            !ctx.agent.msg.step_has_tool_result(call_id) && !executed.contains(call_id)
+        })
+        .collect();
+    for call_id in &unexecuted {
         ctx.agent.msg.push_tool_result_canonical(
-            &call_id,
+            call_id,
             &qaqh_types::ToolResult::cancelled(reason),
             &[],
         );
-        append_executionless_cancelled(ctx, &call_id, wire_turn_id);
-        sealed += 1;
     }
-    sealed
+
+    if let Some(actor) = actor {
+        let now = unix_ms();
+        match ctx.agent.tool_ledger_mut() {
+            Ok(Some(ledger)) => {
+                let actor_turn = TurnId::new(wire_turn_id);
+                let canonical_turn = canonical_turn_id(wire_turn_id);
+                let canonical_calls = unexecuted
+                    .iter()
+                    .map(|call_id| canonical_call_id(call_id))
+                    .collect();
+                if let Err(error) = actor.cancel_tool_batch(
+                    ledger,
+                    &actor_turn,
+                    &canonical_turn,
+                    canonical_calls,
+                    now,
+                ) {
+                    log::warn!(
+                        "[tool-ledger] actor cancellation failed for turn {wire_turn_id}: {error}"
+                    );
+                }
+            }
+            Ok(None) => {
+                if let Err(error) = actor.cancel(wire_turn_id) {
+                    log::warn!(
+                        "[tool-ledger] actor cancellation failed for turn {wire_turn_id}: {error}"
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "[tool-ledger] ledger unavailable during cancellation for turn {wire_turn_id}: {error}"
+                );
+            }
+        }
+    } else {
+        for call_id in &unexecuted {
+            append_executionless_cancelled(ctx, call_id, wire_turn_id);
+        }
+    }
+
+    unexecuted.len()
 }
 
 /// Seal a call that was cancelled before any durable ToolIntent was appended.

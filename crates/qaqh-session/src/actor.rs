@@ -8,7 +8,11 @@ use std::collections::{BTreeMap, VecDeque};
 use qaqh_domain::RingingChannel;
 use thiserror::Error;
 
-use crate::session_fact_v2::{InputId, InterruptReason, TurnId, TurnMode, TurnTerminal};
+use crate::canonical::{ToolLedger, ToolLedgerError, generate_ulid};
+use crate::session_fact_v2::{
+    EventId, ExecutionId, InputId, InterruptReason, ToolCallId, ToolFinished, ToolIntent,
+    ToolMetrics, ToolTerminalStatus, TurnId, TurnMode, TurnTerminal,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnCoreState {
@@ -94,6 +98,34 @@ pub enum TurnCoreError {
     InvalidRound { current: u32, round: u32 },
     #[error("turn already has a different terminal")]
     ConflictingTerminal,
+}
+
+/// Result of admitting a tool call through the actor's serialized CAS path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolAdmission {
+    Admitted {
+        execution_id: ExecutionId,
+        intent_at_ms: i64,
+    },
+    ExistingIntent {
+        intent: ToolIntent,
+    },
+    ExistingFinished {
+        finished: ToolFinished,
+    },
+    Cancelled,
+    TurnTerminal {
+        turn_id: TurnId,
+        terminal: TurnTerminal,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ToolAdmissionError {
+    #[error(transparent)]
+    Turn(#[from] TurnCoreError),
+    #[error(transparent)]
+    Ledger(#[from] ToolLedgerError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +279,29 @@ impl TurnCore {
             TurnCoreState::Terminal { .. } => Err(TurnCoreError::ConflictingTerminal),
             TurnCoreState::Idle => Err(TurnCoreError::NoActiveTurn),
         }
+    }
+}
+
+fn cancelled_tool_finished(call_id: ToolCallId, now_ms: i64) -> ToolFinished {
+    ToolFinished {
+        call_id,
+        execution_id: None,
+        terminal_status: ToolTerminalStatus::Cancelled,
+        output_ref: None,
+        error: None,
+        metrics: ToolMetrics {
+            started_at_ms: now_ms,
+            finished_at_ms: now_ms,
+            retry_count: 0,
+            output_bytes: 0,
+            progress_bytes_total: 0,
+        },
+        reconciled: false,
+        evidence_ref: None,
+        evidence_fact_seq: None,
+        evidence_event_id: None,
+        recovery_ref: None,
+        finished_at_ms: now_ms,
     }
 }
 
@@ -449,6 +504,139 @@ impl SessionActor {
 
     pub fn subscribers(&self) -> &SubscriberRegistry {
         &self.subscribers
+    }
+
+    /// Atomically resume an active turn and append its tool intent.
+    ///
+    /// The turn-state check, optional suspended -> active transition, and
+    /// durable `ToolIntent` append happen while this actor owns `&mut self`.
+    /// A conflicting terminal or an existing intent never starts a handler.
+    pub fn admit_tool_intent(
+        &mut self,
+        ledger: &mut ToolLedger,
+        actor_turn_id: &TurnId,
+        ledger_turn_id: &TurnId,
+        event_id: EventId,
+        payload: ToolIntent,
+        now_ms: i64,
+    ) -> Result<ToolAdmission, ToolAdmissionError> {
+        let suspended = match self.core.state() {
+            TurnCoreState::Idle => return Err(TurnCoreError::NoActiveTurn.into()),
+            TurnCoreState::Terminal {
+                turn_id: terminal_turn,
+                terminal,
+            } if terminal_turn == actor_turn_id => {
+                return Ok(ToolAdmission::TurnTerminal {
+                    turn_id: terminal_turn.clone(),
+                    terminal: *terminal,
+                });
+            }
+            TurnCoreState::Terminal { .. } => {
+                return Err(TurnCoreError::TurnIdMismatch.into());
+            }
+            TurnCoreState::Active {
+                turn_id: active,
+                suspended,
+                ..
+            } if active == actor_turn_id => *suspended,
+            TurnCoreState::Active { .. } => {
+                return Err(TurnCoreError::TurnIdMismatch.into());
+            }
+        };
+
+        if let Some(entry) = ledger.get(&payload.call_id) {
+            if let Some(finished) = entry.finished() {
+                return Ok(ToolAdmission::ExistingFinished {
+                    finished: finished.clone(),
+                });
+            }
+            if let Some(existing) = entry.intent() {
+                if existing == &payload {
+                    return Ok(ToolAdmission::ExistingIntent {
+                        intent: existing.clone(),
+                    });
+                }
+                return Err(ToolLedgerError::IntentConflict {
+                    call_id: payload.call_id.clone(),
+                    existing_execution_id: existing.execution_id.clone(),
+                    incoming_execution_id: payload.execution_id.clone(),
+                }
+                .into());
+            }
+        }
+
+        let execution_id = payload.execution_id.clone();
+        let intent_at_ms = payload.intent_at_ms;
+        let previous = self.core.state().clone();
+        if suspended {
+            self.core.step(TurnCommand::Resume {
+                turn_id: actor_turn_id.clone(),
+            })?;
+        }
+        if let Err(error) =
+            ledger.append_intent(event_id, Some(ledger_turn_id.clone()), payload, now_ms)
+        {
+            self.core.state = previous;
+            return Err(error.into());
+        }
+        Ok(ToolAdmission::Admitted {
+            execution_id,
+            intent_at_ms,
+        })
+    }
+
+    /// Close a cancelled turn and append executionless `Cancelled` terminals.
+    ///
+    /// Calls with an existing intent are left open for the recovery path: an
+    /// execution-bearing intent must never be overwritten with an
+    /// executionless cancellation. The turn transition happens after all
+    /// terminal appends so a failed append leaves the actor retryable.
+    pub fn cancel_tool_batch(
+        &mut self,
+        ledger: &mut ToolLedger,
+        actor_turn_id: &TurnId,
+        ledger_turn_id: &TurnId,
+        call_ids: impl IntoIterator<Item = ToolCallId>,
+        now_ms: i64,
+    ) -> Result<Vec<ToolCallId>, ToolAdmissionError> {
+        let already_cancelled = match self.core.state() {
+            TurnCoreState::Active {
+                turn_id: active, ..
+            } if active == actor_turn_id => false,
+            TurnCoreState::Terminal {
+                turn_id: terminal_turn,
+                terminal: TurnTerminal::Cancelled,
+            } if terminal_turn == actor_turn_id => true,
+            TurnCoreState::Terminal { .. } => {
+                return Err(TurnCoreError::ConflictingTerminal.into());
+            }
+            TurnCoreState::Idle => return Err(TurnCoreError::NoActiveTurn.into()),
+            TurnCoreState::Active { .. } => return Err(TurnCoreError::TurnIdMismatch.into()),
+        };
+
+        let mut appended = Vec::new();
+        for call_id in call_ids {
+            if ledger
+                .get(&call_id)
+                .is_some_and(|entry| entry.finished().is_some() || entry.intent().is_some())
+            {
+                continue;
+            }
+            ledger.append_finished(
+                EventId::new(generate_ulid()),
+                Some(ledger_turn_id.clone()),
+                cancelled_tool_finished(call_id.clone(), now_ms),
+                now_ms,
+            )?;
+            appended.push(call_id);
+        }
+
+        if !already_cancelled {
+            self.core.step(TurnCommand::Cancel {
+                turn_id: actor_turn_id.clone(),
+            })?;
+        }
+        Ok(appended)
     }
 
     pub fn submit(&mut self, command: SessionCommand) -> Result<(), SessionActorError> {

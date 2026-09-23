@@ -9,10 +9,13 @@ use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 
 use qaqh_session::actor::{
-    SessionActor, SessionActorEffect, SessionActorError, SessionCommand, TurnCommand,
-    TurnCoreState, TurnEffect,
+    SessionActor, SessionActorEffect, SessionActorError, SessionCommand, ToolAdmission,
+    ToolAdmissionError, TurnCommand, TurnCoreState, TurnEffect,
 };
-use qaqh_session::session_fact_v2::{InputId, InterruptReason, TurnId, TurnMode, TurnTerminal};
+use qaqh_session::canonical::ToolLedger;
+use qaqh_session::session_fact_v2::{
+    EventId, InputId, InterruptReason, ToolCallId, ToolIntent, TurnId, TurnMode, TurnTerminal,
+};
 
 use super::types::Outcome;
 
@@ -116,6 +119,39 @@ impl From<SessionActorError> for TurnActorError {
 }
 
 #[derive(Debug)]
+pub(crate) enum ToolAdmissionFailure {
+    InteractionNotResolved { interaction_id: String },
+    Admission(ToolAdmissionError),
+}
+
+impl fmt::Display for ToolAdmissionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InteractionNotResolved { interaction_id } => write!(
+                formatter,
+                "interaction {interaction_id} has no accepted resolution"
+            ),
+            Self::Admission(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ToolAdmissionFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InteractionNotResolved { .. } => None,
+            Self::Admission(error) => Some(error),
+        }
+    }
+}
+
+impl From<ToolAdmissionError> for ToolAdmissionFailure {
+    fn from(error: ToolAdmissionError) -> Self {
+        Self::Admission(error)
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct TurnActor {
     actor: SessionActor,
     pending_interactions: BTreeSet<String>,
@@ -213,6 +249,60 @@ impl TurnActor {
             return InteractionState::AlreadyResolved;
         }
         InteractionState::Unknown
+    }
+
+    /// Admit a tool intent through the same serialized actor boundary as
+    /// interaction resolution and cancellation.
+    ///
+    /// A resume admission must present the interaction id that already won
+    /// first-answer-wins. The underlying `SessionActor` then performs the
+    /// suspended -> active transition and durable intent append atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_tool_intent(
+        &mut self,
+        ledger: &mut ToolLedger,
+        actor_turn_id: &TurnId,
+        ledger_turn_id: &TurnId,
+        event_id: EventId,
+        payload: ToolIntent,
+        now_ms: i64,
+        resume_interaction: Option<&str>,
+    ) -> Result<ToolAdmission, ToolAdmissionFailure> {
+        if let Some(interaction_id) = resume_interaction
+            && self.pending_interactions.contains(interaction_id)
+        {
+            return Err(ToolAdmissionFailure::InteractionNotResolved {
+                interaction_id: interaction_id.to_string(),
+            });
+        }
+        self.actor
+            .admit_tool_intent(
+                ledger,
+                actor_turn_id,
+                ledger_turn_id,
+                event_id,
+                payload,
+                now_ms,
+            )
+            .map_err(ToolAdmissionFailure::from)
+    }
+
+    /// Atomically cancel the turn and append executionless terminals for the
+    /// supplied unstarted calls.
+    pub(crate) fn cancel_tool_batch(
+        &mut self,
+        ledger: &mut ToolLedger,
+        actor_turn_id: &TurnId,
+        ledger_turn_id: &TurnId,
+        call_ids: Vec<ToolCallId>,
+        now_ms: i64,
+    ) -> Result<Vec<ToolCallId>, ToolAdmissionFailure> {
+        let appended = self
+            .actor
+            .cancel_tool_batch(ledger, actor_turn_id, ledger_turn_id, call_ids, now_ms)
+            .map_err(ToolAdmissionFailure::from)?;
+        self.pending_interactions.clear();
+        Ok(appended)
     }
 
     /// Record an explicit cancellation. Late cancellation of an idle or
@@ -444,13 +534,60 @@ impl TurnActor {
 
 #[cfg(test)]
 mod tests {
-    use qaqh_session::actor::TurnCoreState;
-    use qaqh_session::session_fact_v2::{InterruptReason, TurnTerminal};
+    use qaqh_session::actor::{ToolAdmission, TurnCoreState};
+    use qaqh_session::canonical::{ToolLedger, WriterId};
+    use qaqh_session::session_fact_v2::{
+        ContentHash, EventId, ExecutionId, InterruptReason, LogId, PolicyDecisionRef, SessionId,
+        SideEffectClass, ToolCallId, ToolIntent, ToolIntentPolicyOutcome, ToolReplayCapability,
+        TurnTerminal,
+    };
 
     use super::{
         InteractionAdmission, InteractionState, TurnActor, TurnActorError, TurnCancellation,
     };
     use crate::agent::types::Outcome;
+
+    const NOW_MS: i64 = 1_789_830_000_000;
+
+    fn ledger_turn_id() -> qaqh_session::session_fact_v2::TurnId {
+        qaqh_session::session_fact_v2::TurnId::new("turn_01J00000000000000000000001")
+    }
+
+    fn canonical_call_id() -> ToolCallId {
+        ToolCallId::new("call_01J00000000000000000000001")
+    }
+
+    fn tool_intent() -> ToolIntent {
+        ToolIntent {
+            call_id: canonical_call_id(),
+            execution_id: ExecutionId::new("exec_01J00000000000000000000001"),
+            idempotency_key: None,
+            replay_capability: ToolReplayCapability::NoReplay,
+            policy_decision: PolicyDecisionRef {
+                outcome: ToolIntentPolicyOutcome::Allow,
+                rule_id: "test.resume".into(),
+                decided_at_ms: NOW_MS,
+                reason_ref: None,
+            },
+            effective_args_ref: None,
+            effective_args_hash: None,
+            sandbox_spec_hash: ContentHash::new(format!("sha256:{:064x}", 1)),
+            side_effect_class: SideEffectClass::ReadOnly,
+            intent_at_ms: NOW_MS,
+        }
+    }
+
+    fn open_ledger(dir: &std::path::Path) -> ToolLedger {
+        ToolLedger::open(
+            dir,
+            SessionId::new("0198f1a0-0000-7000-8000-000000000001"),
+            LogId::new("0198f1a0-0000-7000-8000-000000000002"),
+            WriterId::new("turn-actor-test"),
+            NOW_MS,
+            10_000,
+        )
+        .expect("open ledger")
+    }
 
     fn continue_round(turn_id: &str, round_num: u32) -> Outcome {
         Outcome::ContinueTurn {
@@ -720,5 +857,107 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resume_admission_requires_resolved_interaction_and_appends_intent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut ledger = open_ledger(temp.path());
+        let mut actor = TurnActor::new();
+        actor
+            .observe_outcome(&continue_round("t1", 0))
+            .expect("start turn");
+        actor
+            .observe_outcome_with_interactions(
+                &Outcome::YieldToUser {
+                    turn_id: "t1".into(),
+                    reason: crate::agent::types::YieldReason::PermissionPending,
+                },
+                &["call-resume".into()],
+            )
+            .expect("suspend for permission");
+        assert_eq!(
+            actor.admit_interaction_resolution("call-resume"),
+            InteractionAdmission::Accepted { remaining: 0 }
+        );
+
+        let admission = actor
+            .admit_tool_intent(
+                &mut ledger,
+                &qaqh_session::session_fact_v2::TurnId::new("t1"),
+                &ledger_turn_id(),
+                EventId::new("01J00000000000000000000011"),
+                tool_intent(),
+                NOW_MS + 1,
+                Some("call-resume"),
+            )
+            .expect("resume admission");
+        assert!(matches!(admission, ToolAdmission::Admitted { .. }));
+        assert!(matches!(
+            actor.state(),
+            TurnCoreState::Active {
+                suspended: false,
+                ..
+            }
+        ));
+        assert!(ledger.get(&canonical_call_id()).expect("entry").is_open());
+    }
+
+    #[test]
+    fn cancel_before_resume_admission_returns_terminal_without_intent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut ledger = open_ledger(temp.path());
+        let mut actor = TurnActor::new();
+        actor
+            .observe_outcome(&continue_round("t1", 0))
+            .expect("start turn");
+        actor
+            .observe_outcome_with_interactions(
+                &Outcome::YieldToUser {
+                    turn_id: "t1".into(),
+                    reason: crate::agent::types::YieldReason::PermissionPending,
+                },
+                &["call-resume".into()],
+            )
+            .expect("suspend for permission");
+        assert_eq!(
+            actor.admit_interaction_resolution("call-resume"),
+            InteractionAdmission::Accepted { remaining: 0 }
+        );
+
+        actor
+            .cancel_tool_batch(
+                &mut ledger,
+                &qaqh_session::session_fact_v2::TurnId::new("t1"),
+                &ledger_turn_id(),
+                vec![canonical_call_id()],
+                NOW_MS + 2,
+            )
+            .expect("cancel before resume");
+        let admission = actor
+            .admit_tool_intent(
+                &mut ledger,
+                &qaqh_session::session_fact_v2::TurnId::new("t1"),
+                &ledger_turn_id(),
+                EventId::new("01J00000000000000000000012"),
+                tool_intent(),
+                NOW_MS + 3,
+                Some("call-resume"),
+            )
+            .expect("terminal admission result");
+        assert!(matches!(
+            admission,
+            ToolAdmission::TurnTerminal {
+                terminal: TurnTerminal::Cancelled,
+                ..
+            }
+        ));
+        assert!(
+            ledger
+                .get(&canonical_call_id())
+                .expect("entry")
+                .intent()
+                .is_none()
+        );
     }
 }
