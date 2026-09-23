@@ -697,6 +697,8 @@ pub enum ToolError {
     ResourceMismatch,
     /// Runtime context not initialised.
     RuntimeNotInitialized,
+    /// Durable audit barrier failed; the handler must not run.
+    AuditUnavailable { message: String },
     /// Tool-specific error with a machine-readable code.
     ToolSpecific {
         tool: String,
@@ -758,6 +760,9 @@ impl std::fmt::Display for ToolError {
                     "[ERROR] Tool execution requires an initialized runtime context — call set_context() first"
                 )
             }
+            Self::AuditUnavailable { message } => {
+                write!(f, "[ERROR] audit unavailable: {message}")
+            }
             Self::ToolSpecific {
                 tool,
                 code,
@@ -792,6 +797,7 @@ impl ToolError {
             Self::Io { .. } => "IO_ERROR",
             Self::ResourceMismatch => "RESOURCE_MISMATCH",
             Self::RuntimeNotInitialized => "RUNTIME_NOT_INITIALIZED",
+            Self::AuditUnavailable { .. } => "AUDIT_UNAVAILABLE",
             Self::ToolSpecific { .. } => "TOOL_ERROR",
             Self::Partial { .. } => "PARTIAL",
             Self::Internal { .. } => "INTERNAL_ERROR",
@@ -812,6 +818,7 @@ impl ToolError {
             Self::Io { .. } => (false, None),
             Self::ResourceMismatch => (false, None),
             Self::RuntimeNotInitialized => (false, None),
+            Self::AuditUnavailable { .. } => (false, None),
             Self::ToolSpecific { .. } => (false, None),
             Self::Partial { .. } => (false, None),
             Self::Internal { .. } => (true, None),
