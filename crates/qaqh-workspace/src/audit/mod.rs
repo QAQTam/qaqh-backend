@@ -15,10 +15,12 @@
 //! 永不落明文；对象只落路径与内容指纹。
 
 use sha2::Digest;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 pub mod v2;
 
@@ -34,6 +36,25 @@ const AUDIT_GENERATIONS: u32 = 3;
 /// 已被改名走的 inode；同进程内必须互斥。跨进程的安全性由 rename 语义保证
 /// （见 [`rotate_if_needed`]）。
 static AUDIT_APPEND_LOCK: Mutex<()> = Mutex::new(());
+
+/// Durable quarantine marker. Its presence blocks subsequent high-risk tool
+/// dispatch until the audit store is repaired and the operator removes it.
+pub const QUARANTINE_FILE: &str = "quarantine.json";
+
+/// Best-effort emergency sink for failures that cannot be written to the
+/// normal audit chain.
+pub const EMERGENCY_FILE: &str = "emergency.jsonl";
+
+/// Process-local fast path for roots already known to be quarantined.
+///
+/// The durable marker remains authoritative across restarts. The set is keyed
+/// by audit root so test instances with different `QAQH_DATA_DIR` values do not
+/// contaminate one another.
+static QUARANTINED_ROOTS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Test fault injection for the result-side barrier.
+static FAIL_NEXT_RESULT: AtomicBool = AtomicBool::new(false);
 
 /// A single audit entry for a tool invocation.
 ///
@@ -145,6 +166,10 @@ pub enum AuditError {
     Csv(std::io::Error),
     /// v2 JSONL 写入失败。
     V2(v2::AuditError),
+    /// quarantine marker / emergency sink 写入失败。
+    Emergency(std::io::Error),
+    /// 测试注入的 result barrier 失败。
+    InjectedResultFailure,
 }
 
 impl std::fmt::Display for AuditError {
@@ -152,6 +177,8 @@ impl std::fmt::Display for AuditError {
         match self {
             Self::Csv(e) => write!(f, "audit csv write failed: {e}"),
             Self::V2(e) => write!(f, "audit v2 write failed: {e}"),
+            Self::Emergency(e) => write!(f, "audit emergency sink failed: {e}"),
+            Self::InjectedResultFailure => write!(f, "injected audit result failure"),
         }
     }
 }
@@ -161,6 +188,8 @@ impl std::error::Error for AuditError {
         match self {
             Self::Csv(e) => Some(e),
             Self::V2(e) => Some(e),
+            Self::Emergency(e) => Some(e),
+            Self::InjectedResultFailure => None,
         }
     }
 }
@@ -195,6 +224,72 @@ pub fn audit_dir() -> PathBuf {
 #[cfg(test)]
 fn unit_test_dir() -> PathBuf {
     std::env::temp_dir().join(format!("qaqh-audit-unit-test-{}", std::process::id()))
+}
+
+/// 当前 audit root 是否处于 quarantine。
+///
+/// 持久 marker 是权威事实；进程内 set 只用于同一进程内 marker 写入失败或
+/// 刚写入后的快速判断。重启后仍能通过 marker 继续 fail-closed。
+pub fn is_quarantined() -> bool {
+    let root = audit_dir();
+    let known = QUARANTINED_ROOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&root);
+    known || root.join(QUARANTINE_FILE).is_file()
+}
+
+/// Enter durable quarantine and record the failure in the emergency sink.
+///
+/// The marker is written before the emergency record so a failure in the
+/// sink cannot accidentally allow subsequent high-risk dispatch.
+pub fn quarantine(entry: &AuditEntry, reason: &str) -> Result<(), AuditError> {
+    let root = audit_dir();
+    QUARANTINED_ROOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(root.clone());
+
+    std::fs::create_dir_all(&root).map_err(AuditError::Emergency)?;
+    let record = serde_json::json!({
+        "schema": "qaqh.audit/quarantine/v1",
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        "reason": reason,
+        "session": entry.session,
+        "call_id": entry.call_id,
+        "tool": entry.tool,
+        "action": entry.action,
+        "category": entry.category,
+        "args_hash": entry.args_hash,
+        "args_bytes": entry.args_bytes,
+    });
+    let mut payload = serde_json::to_vec(&record)
+        .map_err(|error| AuditError::Emergency(std::io::Error::other(error.to_string())))?;
+    payload.push(b'\n');
+    append_emergency(&root.join(QUARANTINE_FILE), &payload)?;
+    append_emergency(&root.join(EMERGENCY_FILE), &payload)?;
+    Ok(())
+}
+
+/// Test-only hook for exercising the result-side audit barrier.
+#[doc(hidden)]
+pub fn fail_next_result_for_test() {
+    FAIL_NEXT_RESULT.store(true, Ordering::SeqCst);
+}
+
+fn append_emergency(path: &Path, payload: &[u8]) -> Result<(), AuditError> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(AuditError::Emergency)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    file.write_all(payload).map_err(AuditError::Emergency)?;
+    file.sync_data().map_err(AuditError::Emergency)
 }
 
 /// 第 `generation` 代 rotate 文件：`audit.csv` → `audit.csv.1` / `.2` / …。
@@ -241,6 +336,9 @@ fn rotate_if_needed(path: &Path) {
 ///
 /// 两个账本都会尝试写入（互不短路）；任一失败返回错误，调用方必须上报。
 pub fn append_audit(entry: &AuditEntry) -> Result<(), AuditError> {
+    if FAIL_NEXT_RESULT.swap(false, Ordering::SeqCst) {
+        return Err(AuditError::InjectedResultFailure);
+    }
     AUDIT_WRITER.append(entry)
 }
 
