@@ -422,3 +422,24 @@ fn open_intent_recovery_disposition_is_replay_capability_driven() {
     );
     assert_eq!(ledger.open_intents().len(), 2);
 }
+
+#[test]
+fn ensure_lease_reacquires_after_idle_expiry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let call = call_id(20);
+    let execution = execution_id(20);
+    let mut ledger = open_ledger(temp.path());
+
+    ledger
+        .ensure_lease(NOW_MS + LEASE_MS + 1, LEASE_MS)
+        .expect("expired lease can be reacquired by the same writer");
+    ledger
+        .append_intent(
+            event_id(20),
+            None,
+            intent(&call, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + LEASE_MS + 2,
+        )
+        .expect("append after reacquire");
+    assert!(ledger.get(&call).expect("entry").is_open());
+}
