@@ -138,6 +138,21 @@ pub fn execute_recovery_intent(
                 "stale recovery intent has no matching SessionRecovered fact".into(),
             )
         })?;
+        // A closed batch must not swallow an open intent that appeared *after* it
+        // was closed: spec requires a new `RecoveryRef`/fingerprint for new open
+        // state. Fail closed and keep the intent file so the next load can
+        // re-plan a batch for the current open set.
+        let uncovered: Vec<String> = open_tool_call_ids(&committed)
+            .into_iter()
+            .filter(|call_id| !intent.sorted_open_ids.contains(call_id))
+            .collect();
+        if !uncovered.is_empty() {
+            return Err(CanonicalError::RecoveryIntentConflict(format!(
+                "closed recovery batch does not cover open tool intent(s) {}; the current open set needs a new recovery batch",
+                uncovered.join(", ")
+            ))
+            .into());
+        }
         let actions = recovered_actions(&fact);
         let intent_removed = remove_recovery_intent_if_stale(&session_dir, &intent, &committed)?;
         return Ok(RecoveryExecutionOutcome::Recovered(Box::new(
