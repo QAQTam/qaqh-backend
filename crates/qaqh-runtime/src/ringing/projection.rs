@@ -578,6 +578,7 @@ fn build_turns(
                                 status: Some(result.status),
                                 file: None,
                                 metrics: result.metrics.clone(),
+                                display: result.display().cloned(),
                             })
                         } else {
                             None

@@ -124,6 +124,80 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ToolResultDisplay {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<ToolResultDisplayHeader>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ToolResultDisplayBody>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolResultDisplayHeader {
+    Path {
+        path: String,
+        op: ToolResultDisplayPathOp,
+    },
+    Shell {
+        command: String,
+    },
+    Query {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+    Other {
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultDisplayPathOp {
+    Read,
+    Write,
+    Edit,
+    List,
+    Patch,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolResultDisplayBody {
+    None,
+    Text {
+        text: String,
+        #[serde(default)]
+        truncated: bool,
+    },
+    Diff {
+        unified: String,
+        #[serde(default)]
+        files: Vec<String>,
+    },
+    Shell {
+        output: String,
+        #[serde(default)]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        truncated: bool,
+    },
+    Subagent {
+        name: String,
+        seed: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolResult {
@@ -139,6 +213,13 @@ pub struct ToolResult {
     /// 显式填充；缺失时默认 None（向后兼容）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// Canonical display projection emitted by a typed tool.
+    ///
+    /// Legacy handlers leave this `None`; the runtime then falls back to the
+    /// registered text projector. Typed tools use this field so header/body
+    /// never have to be reconstructed from `model.text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<ToolResultDisplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ToolError>,
     /// 运行元数据（框架填充，工具实现不写）。
@@ -273,6 +354,7 @@ impl ToolResult {
                 continuation: None,
             },
             diff: None,
+            display: None,
             output_ref: None,
             error: None,
             metrics: ToolResultMetrics::default(),
@@ -284,6 +366,17 @@ impl ToolResult {
     pub fn with_diff(mut self, diff: impl Into<String>) -> Self {
         self.diff = Some(diff.into());
         self
+    }
+
+    /// Attach the canonical display projection emitted by a typed tool.
+    pub fn with_display(mut self, display: ToolResultDisplay) -> Self {
+        self.display = Some(display);
+        self
+    }
+
+    /// Canonical display projection, when the producing tool supplied one.
+    pub fn display(&self) -> Option<&ToolResultDisplay> {
+        self.display.as_ref()
     }
 
     /// Replace the display/model summary without changing the model payload.
@@ -507,6 +600,28 @@ mod tests {
         assert!(result.model.truncated);
         assert!(result.project_for_model().get("success").is_none());
         result.validate().unwrap();
+    }
+
+    #[test]
+    fn display_payload_is_optional_and_roundtrips() {
+        let legacy = serde_json::to_value(ToolResult::ok("legacy")).expect("serialize");
+        let restored: ToolResult = serde_json::from_value(legacy).expect("legacy JSON");
+        assert!(restored.display().is_none());
+
+        let result = ToolResult::ok("typed").with_display(ToolResultDisplay {
+            summary: Some("typed summary".into()),
+            diff: None,
+            header: Some(ToolResultDisplayHeader::Other {
+                label: "typed".into(),
+            }),
+            body: Some(ToolResultDisplayBody::Text {
+                text: "typed body".into(),
+                truncated: false,
+            }),
+        });
+        let value = serde_json::to_value(&result).expect("serialize display");
+        let restored: ToolResult = serde_json::from_value(value).expect("deserialize display");
+        assert_eq!(restored.display(), result.display());
     }
 
     #[test]
