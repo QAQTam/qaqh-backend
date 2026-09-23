@@ -971,14 +971,24 @@ pub fn chat_sync_openai(
     let policy = RetryPolicy::from_spec(provider.retry.as_ref());
     let mut on_event = |_e: StreamEvent| {};
     run_with_retry(&policy, None, &mut on_event, |attempt, _on_event| {
-        let resp = match block_on(
+        // ⚠ `.send()` 必须在 `block_on` **内部**求值（#315）。
+        //
+        // reqwest 的 `RequestBuilder::send` 是**普通 fn**（request.rs:517），它立刻调
+        // `Client::execute_request`（client.rs:2603，也是普通 fn），而后者在构造阶段就
+        // 建 `tokio::time::sleep`（client.rs:2658/2664）。写成 `block_on(....send())`
+        // 时 `.send()` 是**实参**、先于 `block_on` 求值 —— 在没有 runtime 的线程上
+        // （如 `engine_title.rs` 的裸 `session-title` 线程）直接 panic：
+        // "there is no reactor running"。放进 `async` 块后，构造推迟到首次 poll，
+        // 此时已在 `FALLBACK_RT` 内。
+        let resp = match block_on(async {
             provider
                 .apply_opencode_headers(crate::shared_http_client().post(&url))
                 .header("Authorization", format!("Bearer {}", provider.api_key))
                 .header("Content-Type", "application/json")
                 .json(&body)
-                .send(),
-        ) {
+                .send()
+                .await
+        }) {
             Ok(resp) => resp,
             Err(e) => {
                 log::warn!("OpenAI sync attempt {attempt} transport error, will retry: {e}");
