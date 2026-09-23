@@ -55,8 +55,9 @@ pub(crate) struct TestHooks {
     sse_terminate: Option<SseTerminate>,
     sse_terminate_scope: SseTerminateScope,
     sse_terminate_channel: Option<RingingChannel>,
-    channel_terminate_used: AtomicBool,
-    timeline_terminate_used: AtomicBool,
+    /// Shared by channel and timeline streams: `Scope::Any` matches both, so the
+    /// one-shot token must not be consumable once per stream kind.
+    sse_terminate_used: AtomicBool,
     timeline_gap: bool,
     timeline_gap_used: AtomicBool,
     session_404_seed: Option<String>,
@@ -73,8 +74,7 @@ impl TestHooks {
             sse_terminate: None,
             sse_terminate_scope: SseTerminateScope::Any,
             sse_terminate_channel: None,
-            channel_terminate_used: AtomicBool::new(false),
-            timeline_terminate_used: AtomicBool::new(false),
+            sse_terminate_used: AtomicBool::new(false),
             timeline_gap: false,
             timeline_gap_used: AtomicBool::new(false),
             session_404_seed: None,
@@ -139,8 +139,7 @@ impl TestHooks {
             sse_terminate,
             sse_terminate_scope,
             sse_terminate_channel,
-            channel_terminate_used: AtomicBool::new(false),
-            timeline_terminate_used: AtomicBool::new(false),
+            sse_terminate_used: AtomicBool::new(false),
             timeline_gap,
             timeline_gap_used: AtomicBool::new(false),
             session_404_seed,
@@ -165,8 +164,13 @@ impl TestHooks {
         {
             return None;
         }
+        self.take_sse_terminate_once()
+    }
+
+    /// Shared one-shot consumer for channel and timeline streams.
+    fn take_sse_terminate_once(&self) -> Option<SseTerminate> {
         let terminate = self.sse_terminate.clone()?;
-        if self.channel_terminate_used.swap(true, Ordering::AcqRel) {
+        if self.sse_terminate_used.swap(true, Ordering::AcqRel) {
             return None;
         }
         Some(terminate)
@@ -180,11 +184,7 @@ impl TestHooks {
         ) {
             return None;
         }
-        let terminate = self.sse_terminate.clone()?;
-        if self.timeline_terminate_used.swap(true, Ordering::AcqRel) {
-            return None;
-        }
-        Some(terminate)
+        self.take_sse_terminate_once()
     }
 
     /// Consume the one-shot timeline gap injection.
