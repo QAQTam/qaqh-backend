@@ -124,13 +124,45 @@ fn audit_ledger_traces_calls_end_to_end() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse v2 record"))
         .collect();
-    assert_eq!(records.len(), 4, "every call must be audited: {raw}");
+    assert_eq!(
+        records.len(),
+        5,
+        "write intent + terminal + rejected + blocked + failed read must be audited: {raw}"
+    );
 
-    // ① 成功调用：主体链 + 工具面 + 决策 + 对象。
-    let first = &records[0];
+    // ①a 高风险写入的 intent barrier：先落 durable intent，再进入 handler。
+    let intent = &records[0];
+    assert_eq!(intent["kind"], "tool_intent");
+    assert_eq!(intent["seq"], 1);
+    assert_eq!(intent["actor"]["session"], "audit-ledger");
+    assert_eq!(intent["actor"]["call_id"], "call-1");
+    assert_eq!(intent["tool"]["name"], "write");
+    assert_eq!(intent["tool"]["category"], "write");
+    assert_eq!(intent["decision"]["outcome"], "auto");
+    assert!(
+        intent.get("result").is_none() || intent["result"].is_null(),
+        "intent must not claim a terminal result: {intent}"
+    );
+    let intent_objects = intent["objects"].as_array().expect("intent objects");
+    assert!(
+        intent_objects.iter().any(|object| object["path"]
+            .as_str()
+            .map(|path| path.ends_with("secret.txt"))
+            .unwrap_or(false)),
+        "intent object path missing: {intent}"
+    );
+    assert!(
+        intent_objects
+            .iter()
+            .all(|object| object["after_sha"].is_null()),
+        "intent must not carry after-fingerprint: {intent}"
+    );
+
+    // ①b 成功调用终态：主体链 + 工具面 + 决策 + 对象。
+    let first = &records[1];
     assert_eq!(first["schema"], "qaqh.audit/v2");
     assert_eq!(first["kind"], "tool_call");
-    assert_eq!(first["seq"], 1);
+    assert_eq!(first["seq"], 2);
     assert_eq!(first["actor"]["session"], "audit-ledger");
     assert_eq!(first["actor"]["call_id"], "call-1");
     assert_eq!(first["actor"]["sandbox"], false);
@@ -157,7 +189,7 @@ fn audit_ledger_traces_calls_end_to_end() {
     );
 
     // ② 拒绝记录：需要审批但通道不可用。
-    let denied_record = &records[1];
+    let denied_record = &records[2];
     assert_eq!(denied_record["kind"], "tool_rejected");
     assert_eq!(denied_record["actor"]["call_id"], "call-2");
     assert_eq!(denied_record["decision"]["outcome"], "challenge_required");
@@ -165,12 +197,12 @@ fn audit_ledger_traces_calls_end_to_end() {
     assert_eq!(denied_record["tool"]["permission_level"], 1);
 
     // ③ PLAN 阻断。
-    let blocked_record = &records[2];
+    let blocked_record = &records[3];
     assert_eq!(blocked_record["kind"], "tool_rejected");
     assert_eq!(blocked_record["result"]["error_code"], "BLOCKED_BY_MODE");
 
     // ④ 失败终态：执行层错误码透传。
-    let failed_record = &records[3];
+    let failed_record = &records[4];
     assert_eq!(failed_record["kind"], "tool_call");
     assert_eq!(failed_record["result"]["status"], "error");
     assert_eq!(failed_record["result"]["error_code"], "NOT_FOUND");
@@ -205,14 +237,18 @@ fn audit_ledger_traces_calls_end_to_end() {
     // 完整性：链校验全绿。
     let report = qaqh_workspace::audit::v2::verify_ledger(&env.data.join("audit"));
     assert!(report.ok, "verify must pass: {report:?}");
-    assert_eq!(report.records, 4);
+    assert_eq!(report.records, 5);
     assert_eq!(report.first_seq, Some(1));
-    assert_eq!(report.last_seq, Some(4));
+    assert_eq!(report.last_seq, Some(5));
 
-    // 双写：v1 CSV 同步落 4 行、15 列。
+    // 双写：v1 CSV 只记终态/拒绝，intent 是 v2-only；共 4 行、15 列。
     let csv = std::fs::read_to_string(env.data.join("audit.csv")).expect("read csv");
     let rows: Vec<&str> = csv.lines().collect();
-    assert_eq!(rows.len(), 4, "csv must mirror every call: {csv}");
+    assert_eq!(
+        rows.len(),
+        4,
+        "csv must mirror terminal/rejected calls: {csv}"
+    );
     for row in rows {
         assert_eq!(row.split(',').count(), 15, "row: {row}");
     }

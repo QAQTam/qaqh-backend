@@ -253,6 +253,59 @@ pub fn execute_authorized_with_context(
         .iter()
         .map(|path| (path.clone(), crate::file_state::last_hash(path)))
         .collect();
+
+    // P4 A1: write/exec/net 必须先写 durable audit intent；失败不得进入 handler。
+    if matches!(
+        category,
+        crate::permission::ToolCategory::Write
+            | crate::permission::ToolCategory::Exec
+            | crate::permission::ToolCategory::Net
+    ) {
+        let objects = audit_paths
+            .iter()
+            .map(|path| crate::audit::v2::AuditObject {
+                kind: "file".to_string(),
+                path: path.clone(),
+                before_sha: before_hashes
+                    .iter()
+                    .find(|(candidate, _)| candidate == path)
+                    .and_then(|(_, hash)| hash.clone()),
+                after_sha: None,
+            })
+            .collect();
+        let intent = crate::audit::AuditEntry {
+            ts: chrono::Utc::now().to_rfc3339(),
+            user: "agent".into(),
+            tool: name.clone(),
+            action: action.clone(),
+            args_hash: crate::audit::hash_args(&args),
+            args_bytes: crate::audit::args_size(&args),
+            status: "pending".to_string(),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            kind: crate::audit::v2::AuditKind::ToolIntent,
+            session: session_id.clone(),
+            call_id: call_id.clone(),
+            category: category.as_str().to_string(),
+            permission_level: pre_bind_level,
+            error_code: None,
+            output_bytes: 0,
+            retry_count: 0,
+            effective_name: prepared.effective_tool_name.clone(),
+            decision: Some(grant.as_str().to_string()),
+            decision_reason: None,
+            objects,
+        };
+        if let Err(error) = crate::audit::append_audit_intent(&intent) {
+            log::error!("audit: intent barrier failed for {name}: {error}");
+            return failure(
+                &name,
+                crate::ToolError::AuditUnavailable {
+                    message: format!("audit intent barrier failed: {error}"),
+                },
+            );
+        }
+    }
+
     let (mut tool_result, skill_effects) = match prepared.executor.clone() {
         crate::manager::PreparedExecutor::Legacy(legacy) => {
             let result = legacy(prepared.ctx.clone());
