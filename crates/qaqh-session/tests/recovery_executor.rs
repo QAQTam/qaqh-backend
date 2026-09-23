@@ -713,6 +713,84 @@ fn unplanned_no_replay_intent_after_pending_recovery_does_not_wedge_session() {
 }
 
 #[test]
+fn stale_batch_with_uncovered_open_intent_fails_closed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let first = call_id(1);
+    let second = call_id(2);
+    let execution = execution_id(1);
+
+    let mut ledger = open_ledger(temp.path(), "writer-a", NOW_MS);
+    ledger
+        .append_intent(
+            event_id(1),
+            None,
+            intent(&first, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 1,
+        )
+        .expect("append first intent");
+    drop(ledger);
+    let plan = persist_plan(temp.path(), vec![first.as_str().to_owned()]);
+
+    let outcome = execute_recovery_intent(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + LEASE_MS + 1,
+        LEASE_MS,
+    )
+    .expect("first recovery");
+    assert!(matches!(outcome, RecoveryExecutionOutcome::Recovered(_)));
+    assert!(
+        load_recovery_intent(temp.path())
+            .expect("load intent")
+            .is_none()
+    );
+
+    // Crash window: a new open intent lands *after* the batch was closed.
+    let mut ledger = open_ledger(temp.path(), "writer-c", NOW_MS + 2 * LEASE_MS + 2);
+    ledger
+        .append_intent(
+            event_id(2),
+            None,
+            intent(&second, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 2 * LEASE_MS + 3,
+        )
+        .expect("append later intent");
+    drop(ledger);
+
+    // Simulate the restart state where the closed batch's intent file is still
+    // on disk: it is now stale, and its plan does not cover `second`.
+    let facts = CommittedFactReader::open(temp.path(), session_id(), log_id())
+        .expect("open reader")
+        .read_all()
+        .expect("read facts");
+    persist_recovery_intent(temp.path(), &plan, &facts).expect("re-persist stale intent");
+
+    let error = execute_recovery_intent(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-d"),
+        NOW_MS + 3 * LEASE_MS + 4,
+        LEASE_MS,
+    )
+    .expect_err("a closed batch must not report recovery while an open intent is uncovered");
+    assert!(matches!(
+        error,
+        qaqh_session::canonical::RecoveryExecutionError::Canonical(
+            qaqh_session::canonical::CanonicalError::RecoveryIntentConflict(_)
+        )
+    ));
+    assert!(
+        load_recovery_intent(temp.path())
+            .expect("load intent")
+            .is_some(),
+        "the stale intent must survive so the next load can re-plan a new batch"
+    );
+}
+
+#[test]
 fn stale_intent_is_cleaned_without_second_recovered_fact() {
     let temp = tempfile::tempdir().expect("tempdir");
     let call = call_id(1);
