@@ -188,3 +188,39 @@ tui-ringing-v2-frozen-2026-09-23
 - 已完成工作均已在 `betav2`，未完成工作已在本 handoff 登记。
 - 本地 worktree 已清理，仅保留主仓。
 - `main <- betav2` 可 fast-forward。
+
+## 6. main 合并后执行登记
+
+`main <- betav2` 已通过 PR #321 合并，`main` 当前提交为
+`e0753baca66d557f393de9bb020911a3a200d050`。
+
+本地合并后状态：
+
+- 本地 branch 仅保留 `main`，`main` 与 `origin/main` 一致。
+- 本地 worktree 仅保留主仓 `/home/qaqtamsy/项目/qaqh-backend`。
+- 已删除本地 `betav2` 分支。
+- 已移除 detached TUI anchor worktree；冻结 tag 仍保留。
+- 前后端同步进入 `v2.0.0-alpha1`，等待团队负责人下一步分工。
+
+原计划接下来的执行顺序仍以第 4 节为准：
+
+1. **P4-2b：canonical interaction / amend / escalation**
+   - permission、ask、plan 统一接入 `InteractionRegistry`；
+   - 跨重启 replay、一次性 grant、amend rule；
+   - sandbox denial escalation；
+   - first-answer-wins 完整 Gate 矩阵。
+2. **P4-3：Linux sandbox hardening**
+   - bwrap 读白名单、`.git/hooks` 只读、私有 `/tmp` / `TMPDIR`；
+   - cgroup v2 CPU / memory limits；
+   - symlink/device/FIFO/TOCTOU 完整边界矩阵。
+3. **P5-1：Ringing v2 wire 类型与 cursor token**
+4. **P5-2：qaqh-client v2 与 daemon `/ringing/v2` 端点**
+5. **P4-4 / P4-5：policy engine 与 audit 收口**
+6. **P6：存储清理与 composition root**
+
+执行起点原定为 **P4-2b**，不是直接开始 P5。P5 的语义当时虽已冻结，但运行时
+代码尚未开工。
+
+后续记录（2026-09-24）：TUI 侧提权后，实际执行顺序调整为
+P5-1/P5-2（v2 wire + client）→ P0-3（daemon canonical 最小闭环）→
+P0-4 第一刀（interaction causation）。本节保留的是调整前的原计划记录。
