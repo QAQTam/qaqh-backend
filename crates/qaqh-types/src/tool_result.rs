@@ -286,6 +286,16 @@ impl ToolResult {
         self
     }
 
+    /// Replace the display/model summary without changing the model payload.
+    ///
+    /// Typed tool adapters use this to keep the wire `summary` aligned with
+    /// the human display projection while the model receives the canonical
+    /// structured payload.
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = bounded_text(&summary.into(), TOOL_SUMMARY_MAX_CHARS).0;
+        self
+    }
+
     /// Attach an image (mime + base64) to be appended to the tool message.
     pub fn with_image(mut self, mime_type: impl Into<String>, data: impl Into<String>) -> Self {
         self.images.push(ToolImage {
