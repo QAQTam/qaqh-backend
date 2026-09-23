@@ -134,7 +134,7 @@ impl ToolRuntime {
                     .iter()
                     .map(|(item, _)| item.call_id.clone())
                     .chain(serial.iter().map(|(item, _)| item.call_id.clone()));
-                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
+                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT, turn_id);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
                 return false;
             }
@@ -198,7 +198,7 @@ impl ToolRuntime {
                 // 剩余并行批根本没起，或上面的项被回收时仍未落结果——统一补终态，
                 // 保证「每个 tool_use 恰有一条 tool_result」。
                 let remaining = parallel.iter().map(|(item, _)| item.call_id.clone());
-                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
+                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT, turn_id);
                 parallel.clear();
                 break;
             }
@@ -212,7 +212,7 @@ impl ToolRuntime {
                 // 收集的 skill_effects，并把未执行的 tool_use 留成 open。
                 let remaining = std::iter::once(admitted.call_id)
                     .chain(serial.by_ref().map(|(admitted, _)| admitted.call_id));
-                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
+                seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT, turn_id);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
                 return false;
             }
@@ -821,6 +821,7 @@ fn seal_unexecuted_as_cancelled(
     ctx: &mut RingContext,
     call_ids: impl IntoIterator<Item = String>,
     reason: &str,
+    wire_turn_id: &str,
 ) -> usize {
     let executed = crate::agent::tool_outbox::executed_call_ids(&ctx.agent.session.seed);
     let mut sealed = 0;
@@ -833,9 +834,57 @@ fn seal_unexecuted_as_cancelled(
             &qaqh_types::ToolResult::cancelled(reason),
             &[],
         );
+        append_executionless_cancelled(ctx, &call_id, wire_turn_id);
         sealed += 1;
     }
     sealed
+}
+
+/// Seal a call that was cancelled before any durable ToolIntent was appended.
+fn append_executionless_cancelled(ctx: &mut RingContext, call_id: &str, wire_turn_id: &str) {
+    let now = unix_ms();
+    let finished = ToolFinished {
+        call_id: canonical_call_id(call_id),
+        execution_id: None,
+        terminal_status: ToolTerminalStatus::Cancelled,
+        output_ref: None,
+        error: None,
+        metrics: ToolMetrics {
+            started_at_ms: now,
+            finished_at_ms: now,
+            retry_count: 0,
+            output_bytes: 0,
+            progress_bytes_total: 0,
+        },
+        reconciled: false,
+        evidence_ref: None,
+        evidence_fact_seq: None,
+        evidence_event_id: None,
+        recovery_ref: None,
+        finished_at_ms: now,
+    };
+    match ctx.agent.tool_ledger_mut() {
+        Ok(Some(ledger)) => {
+            if let Err(error) = ledger.ensure_lease(now, tool_ledger_lease_ms()) {
+                log::warn!("[tool-ledger] cancelled call {call_id} lease renewal failed: {error}");
+                return;
+            }
+            if let Err(error) = ledger.append_finished(
+                EventId::new(generate_ulid()),
+                Some(canonical_turn_id(wire_turn_id)),
+                finished,
+                now,
+            ) {
+                log::warn!(
+                    "[tool-ledger] cancelled call {call_id} terminal append failed: {error}"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            log::warn!("[tool-ledger] cancelled call {call_id} ledger unavailable: {error}");
+        }
+    }
 }
 
 /// 回填一个已执行工具的结果，并发射其副作用（code delta / dashboard）。
