@@ -1,5 +1,6 @@
 //! service::plan — token 统计 + plan 读写自由函数。
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use std::io::BufRead;
@@ -7,6 +8,38 @@ use std::io::BufRead;
 use super::common::err;
 
 use super::fs_git::qaqh_dir;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PlanItemStatus {
+    #[serde(rename = "")]
+    Pending,
+    #[serde(rename = "✓")]
+    Approved,
+    #[serde(rename = "-")]
+    Rejected,
+    #[serde(rename = "?")]
+    Question,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PlanItemView {
+    pub id: String,
+    pub title: String,
+    pub status: PlanItemStatus,
+    pub comment: String,
+    pub actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct PlanListOutput(pub Vec<PlanItemView>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PlanActionOutput {
+    pub item_id: String,
+    pub action: String,
+    pub item: Option<PlanItemView>,
+}
 
 /// `stats.token_usage.days` 是 IPC 直传参数，同时决定条目数与循环数：
 /// 未封顶时 `days = u32::MAX` 会产出约 43 亿条目（daemon 线程 OOM + 挂死）。
@@ -79,34 +112,21 @@ pub(crate) fn days_before_today(days: u32) -> String {
 pub(crate) fn read_plan(
     sessions: &qaqh_session::SessionManager,
     seed: &str,
-) -> Result<Value, String> {
+) -> Result<PlanListOutput, String> {
     let content = match std::fs::read_to_string(qaqh_dir(sessions, seed).join("PLAN.md")) {
         Ok(value) => value,
-        Err(_) => return Ok(json!([])),
+        Err(_) => return Ok(PlanListOutput(Vec::new())),
     };
-    let items = content
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if !line.starts_with("- [") {
-                return None;
-            }
-            let end = line.find(']')?;
-            let status = line.get(3..end)?.trim();
-            let rest = line.get(end + 1..)?.trim();
-            let (id, title) = rest.split_once(": ")?;
-            Some(json!({"id":id,"title":title,"status":status,"comment":"","actions":[]}))
-        })
-        .collect();
-    Ok(Value::Array(items))
+    Ok(parse_plan(&content))
 }
+
 pub(crate) fn plan_action(
     sessions: &qaqh_session::SessionManager,
     seed: &str,
     item_id: &str,
     action: &str,
     comment: &str,
-) -> Result<(), String> {
+) -> Result<PlanActionOutput, String> {
     let path = qaqh_dir(sessions, seed).join("PLAN.md");
     let content = std::fs::read_to_string(&path).map_err(err)?;
     let mut found = false;
@@ -150,5 +170,86 @@ pub(crate) fn plan_action(
     } else {
         output
     };
-    std::fs::write(path, output).map_err(err)
+    let item = parse_plan(&output)
+        .0
+        .into_iter()
+        .find(|item| item.id == item_id);
+    std::fs::write(path, output).map_err(err)?;
+    Ok(PlanActionOutput {
+        item_id: item_id.to_string(),
+        action: action.to_string(),
+        item,
+    })
+}
+
+fn parse_plan(content: &str) -> PlanListOutput {
+    PlanListOutput(content.lines().filter_map(parse_plan_line).collect())
+}
+
+fn parse_plan_line(line: &str) -> Option<PlanItemView> {
+    let line = line.trim();
+    let rest = line.strip_prefix("- [")?;
+    let end = rest.find(']')?;
+    let status = match rest.get(..end)? {
+        " " => PlanItemStatus::Pending,
+        "✓" => PlanItemStatus::Approved,
+        "-" => PlanItemStatus::Rejected,
+        "?" => PlanItemStatus::Question,
+        _ => return None,
+    };
+    let rest = rest.get(end + 1..)?.trim();
+    let (id, title) = rest.split_once(": ")?;
+    let (title, comment) = title
+        .split_once(" | ")
+        .map_or((title, String::new()), |(title, comment)| {
+            (title, comment.to_string())
+        });
+    Some(PlanItemView {
+        id: id.to_string(),
+        title: title.to_string(),
+        status,
+        comment,
+        actions: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod typed_plan_tests {
+    use super::*;
+
+    #[test]
+    fn plan_projection_keeps_wire_shape_and_separates_comments() {
+        let output = parse_plan(
+            "- [ ] item-1: first step\n\
+             - [✓] item-2: second step | approved in review\n\
+             - [-] item-3: rejected step | not needed\n",
+        );
+        let value = serde_json::to_value(output).expect("typed plan output");
+        assert_eq!(
+            value,
+            json!([
+                {
+                    "id": "item-1",
+                    "title": "first step",
+                    "status": "",
+                    "comment": "",
+                    "actions": []
+                },
+                {
+                    "id": "item-2",
+                    "title": "second step",
+                    "status": "✓",
+                    "comment": "approved in review",
+                    "actions": []
+                },
+                {
+                    "id": "item-3",
+                    "title": "rejected step",
+                    "status": "-",
+                    "comment": "not needed",
+                    "actions": []
+                }
+            ])
+        );
+    }
 }

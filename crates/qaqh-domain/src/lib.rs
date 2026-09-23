@@ -33,8 +33,9 @@ pub use event::{
     ActivityState, AgentLifecycleState, AskMode, AskQuestion, AskResolution, CodeDeltaRecord,
     CompactStatus, ContentRef, ControlEvent, ConversationEvent, DashboardDocument,
     DashboardSnapshot, DashboardTask, DomainError, DomainEvent, ErrorScope, NoticeLevel,
-    PermissionCategory, PermissionRisk, ProviderToolState, RoundDeltaKind, SessionActivity,
-    SessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus, TodoItem, ToolEvent, ToolResult,
+    PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState, RoundDeltaKind,
+    SessionActivity, SessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus, ToolEvent,
+    ToolResult,
 };
 pub use timeline::{
     FileSnapshotInfo, RoundBlock, RoundData, TimelineBlock, TimelineBlockKind, TimelineBlockState,
