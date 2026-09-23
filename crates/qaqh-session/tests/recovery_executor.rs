@@ -635,11 +635,35 @@ fn unplanned_no_replay_intent_after_pending_recovery_does_not_wedge_session() {
     let RecoveryExecutionOutcome::Pending { dispositions } = outcome else {
         panic!("expected the read to remain pending on its replay step");
     };
-    assert_eq!(dispositions.len(), 1);
-    assert_eq!(dispositions[0].0, read_call);
+    assert_eq!(
+        dispositions.len(),
+        2,
+        "the unplanned write is sealed in the same run, the read stays replayable"
+    );
+    let replayable: Vec<_> = dispositions
+        .iter()
+        .filter(|(_, disposition)| {
+            matches!(
+                disposition,
+                qaqh_session::canonical::ToolRecoveryDisposition::ReplayAllowed { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        replayable.len(),
+        1,
+        "only the read still needs a replay step"
+    );
+    assert_eq!(replayable[0].0, read_call);
+    let sealed_write = dispositions
+        .iter()
+        .find(|(call_id, _)| *call_id == write_call)
+        .expect("the sealed write must be reported");
     assert!(matches!(
-        dispositions[0].1,
-        qaqh_session::canonical::ToolRecoveryDisposition::ReplayAllowed { .. }
+        sealed_write.1,
+        qaqh_session::canonical::ToolRecoveryDisposition::Finished {
+            terminal_status: ToolTerminalStatus::Indeterminate
+        }
     ));
 
     let facts = CommittedFactReader::open(temp.path(), session_id(), log_id())
@@ -710,6 +734,59 @@ fn unplanned_no_replay_intent_after_pending_recovery_does_not_wedge_session() {
     };
     assert_eq!(recovered.actions.len(), 2);
     assert!(recovered.intent_removed);
+}
+
+#[test]
+fn planned_no_replay_open_intent_is_still_sealed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let planned = call_id(1);
+    let execution = execution_id(1);
+
+    let mut ledger = open_ledger(temp.path(), "writer-a", NOW_MS);
+    ledger
+        .append_intent(
+            event_id(1),
+            None,
+            intent(&planned, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 1,
+        )
+        .expect("append planned intent");
+    drop(ledger);
+    persist_plan(temp.path(), vec![planned.as_str().to_owned()]);
+
+    // 计划内的 NoReplay call 仍然是 open（plan 只是快照）：它必须被本批次 seal，
+    // 不能因为「在计划里」就跳过，否则 recovery_actions 找不到终态而 fail-closed。
+    let outcome = execute_recovery_intent(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + LEASE_MS + 1,
+        LEASE_MS,
+    )
+    .expect("a planned but still open NoReplay call must be sealed");
+    let RecoveryExecutionOutcome::Recovered(recovered) = outcome else {
+        panic!("expected recovered outcome");
+    };
+    assert_eq!(recovered.actions.len(), 1);
+
+    let facts = CommittedFactReader::open(temp.path(), session_id(), log_id())
+        .expect("open reader")
+        .read_all()
+        .expect("read facts");
+    let finished = facts
+        .iter()
+        .find_map(|fact| match &fact.payload {
+            FactPayload::ToolFinished(finished) if finished.call_id == planned => Some(finished),
+            _ => None,
+        })
+        .expect("planned call must have a terminal");
+    assert_eq!(finished.terminal_status, ToolTerminalStatus::Indeterminate);
+    assert!(
+        load_recovery_intent(temp.path())
+            .expect("load intent")
+            .is_none()
+    );
 }
 
 #[test]
