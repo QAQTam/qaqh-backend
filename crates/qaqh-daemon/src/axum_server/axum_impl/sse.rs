@@ -44,15 +44,20 @@ pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
     let e = parts.next().unwrap_or_default();
     let kind = parts.next().unwrap_or_default();
     let seq = parts.next().and_then(|v| v.parse::<u64>().ok());
-    if e == epoch && kind == "timeline" && parts.next().is_none() {
-        seq.unwrap_or(0)
-    } else {
-        // channel SSE 写的是 `{epoch}:{channel}:{seq}`，epoch 轮换或游标被截断也会
-        // 落到这里。静默按 0 处理等于「全量重放」，所以至少留一条日志。
-        log::warn!(
-            "[sse] timeline Last-Event-ID {cursor:?} is not a `{{epoch}}:timeline:{{seq}}` cursor for epoch {epoch:?}; replaying from 0"
-        );
-        0
+    let shape_ok = e == epoch && kind == "timeline" && parts.next().is_none();
+    match (shape_ok, seq) {
+        (true, Some(seq)) => seq,
+        _ => {
+            // 两类都落到这里，且都属于「静默全量重放」，所以都要告警：
+            // 1) 形状不符 —— channel SSE 写的是 `{epoch}:{channel}:{seq}`，epoch 轮换
+            //    或游标被截断都会出现；
+            // 2) 形状合法但 seq 缺失/非法 —— 如 `{epoch}:timeline:` 或
+            //    `{epoch}:timeline:abc`。
+            log::warn!(
+                "[sse] timeline Last-Event-ID {cursor:?} is not a usable `{{epoch}}:timeline:{{seq}}` cursor for epoch {epoch:?}; replaying from 0"
+            );
+            0
+        }
     }
 }
 

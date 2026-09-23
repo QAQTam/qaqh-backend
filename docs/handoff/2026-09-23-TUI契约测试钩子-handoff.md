@@ -30,7 +30,7 @@
 
 ```text
 cargo check -p qaqh-daemon -p qaqh-runtime --all-targets  PASS
-cargo test -p qaqh-daemon --bin qaqh-daemon              56 passed
+cargo test -p qaqh-daemon --bin qaqh-daemon              57 passed
 cargo test -p qaqh-runtime --test plan_review_hook       4 passed
 cargo test -p qaqh-runtime test_hooks --lib              1 passed
 ```
