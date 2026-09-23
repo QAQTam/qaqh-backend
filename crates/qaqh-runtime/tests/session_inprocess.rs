@@ -224,7 +224,7 @@ fn cross_session_cancel_does_not_leak() {
 
 /// E: idle 卸载 → 重生 → 会话历史连续（docs/memory-governance-plan.md §E）。
 /// 卸载走 registry.close 优雅路径；重生走 spawn_new 的 resume 语义
-/// （load_for_resume + WAL 重放 + outbox 对账）。
+/// （load_for_resume + message WAL 重放 + canonical tool recovery）。
 #[test]
 fn idle_unload_then_respawn_preserves_history() {
     let _test_lock = test_guard();
