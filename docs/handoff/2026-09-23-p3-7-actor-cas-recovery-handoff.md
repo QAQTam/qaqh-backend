@@ -28,7 +28,6 @@
 仍未完成：
 
 - 全量 typed output 迁移（skills/plan/process/subagent）。
-- 完整进程级 crash matrix/failpoint 门禁。
 - `tool_outbox` 最终退场策略（当前只做对账观测，不删除旧写）。
 
 ## 2. SessionActor CAS
@@ -138,6 +137,10 @@ cargo test --workspace
   - session resume 前自动发现 open intent 并完成 canonical recovery。
 - `crates/qaqh-runtime/src/agent/tool_outbox.rs` unit test
   - outbox 与 canonical ledger 的 matched/missing/status mismatch 对账。
+- `crates/qaqh-runtime/tests/tool_crash_recovery.rs`
+  - 真实子进程在 `ToolIntent` 后崩溃，恢复后唯一 `Indeterminate`，不重跑；
+  - 真实子进程在 handler 副作用后、`ToolFinished` 前崩溃，恢复后唯一
+    `Indeterminate`，副作用标记保留且不重放。
 - `crates/qaqh-runtime/tests/tool_output_projection_equivalence.rs`
   - todo typed output 的 model/display/service 同源。
 - `crates/qaqh-workspace/tests/tool_sdk_parity.rs`
@@ -147,8 +150,6 @@ cargo test --workspace
 
 1. 迁移 skills/plan/process/subagent 到 typed output，并删除对应 JSON
    字符串错误路径。
-2. 把 crash matrix 从现有进程内故障注入升级为可重复的进程级 failpoint
-   门禁。
-3. 在 outbox 对账观测稳定后设计并执行旧 `tool_outbox` 退场，保留 canonical
+2. 在 outbox 对账观测稳定后设计并执行旧 `tool_outbox` 退场，保留 canonical
    ToolLedger 作为唯一终态事实源。
-4. 收口 display/model/resource/service 的全工具同源验收，完成 P3 gate。
+3. 收口 display/model/resource/service 的全工具同源验收，完成 P3 gate。
