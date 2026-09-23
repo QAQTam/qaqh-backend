@@ -266,7 +266,10 @@ pub fn execute_authorized_with_context(
         crate::manager::PreparedExecutor::Typed(erased) => match erased
             .execute(context.clone(), args.clone())
         {
-            Ok(outcome) => (outcome.to_tool_result(), Vec::new()),
+            Ok(outcome) => {
+                let effects = outcome.effects.clone();
+                (outcome.to_tool_result(), effects)
+            }
             Err(fatal) => {
                 log::error!(
                     "typed tool '{}' returned fatal error {}: {}",
