@@ -5,10 +5,10 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
-    InteractionExpired, InteractionExpiryReason, InteractionId, InteractionResolved, LogId,
-    PolicyDecisionRef, RecoveryId, RecoveryRef, SessionId, SideEffectClass, ToolCallId, ToolError,
-    ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
-    ToolTerminalStatus,
+    InteractionExpired, InteractionExpiryReason, InteractionId, InteractionKind,
+    InteractionRequested, InteractionResolved, LogId, PolicyDecisionRef, RecoveryId, RecoveryRef,
+    SessionId, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
+    ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 const NOW_MS: i64 = 1_789_830_000_000;
@@ -52,6 +52,18 @@ fn recovery_ref() -> RecoveryRef {
 
 fn interaction_id() -> InteractionId {
     InteractionId::new("int_01J00000000000000000000001")
+}
+
+fn interaction_requested() -> InteractionRequested {
+    InteractionRequested {
+        interaction_id: interaction_id(),
+        call_id: Some(call_id(50)),
+        turn_id: TurnId::new("turn_01J00000000000000000000050"),
+        kind: InteractionKind::Permission,
+        request_ref: content_ref(5),
+        expires_at_ms: None,
+        requested_at_ms: NOW_MS + 39,
+    }
 }
 
 fn interaction_resolved() -> InteractionResolved {
@@ -518,6 +530,44 @@ fn recovery_seal_carries_batch_provenance_and_is_idempotent() {
             .and_then(|entry| entry.finished())
             .map(|finished| finished.terminal_status),
         Some(ToolTerminalStatus::Indeterminate)
+    );
+}
+
+#[test]
+fn interaction_request_context_is_used_for_terminal_envelope() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+    let requested = interaction_requested();
+
+    ledger
+        .append_interaction_requested(
+            event_id(39),
+            Some(call_id(50)),
+            requested.clone(),
+            NOW_MS + 39,
+        )
+        .expect("append request");
+    let repeated = ledger
+        .append_interaction_requested(event_id(40), Some(call_id(50)), requested, NOW_MS + 40)
+        .expect("repeat request is idempotent");
+    assert_eq!(repeated.fact_seq, 1);
+
+    let resolved = ledger
+        .append_interaction_resolved(
+            event_id(41),
+            None,
+            None,
+            interaction_resolved(),
+            NOW_MS + 41,
+        )
+        .expect("resolve request");
+    assert_eq!(
+        resolved.turn_id.as_ref().map(TurnId::as_str),
+        Some("turn_01J00000000000000000000050")
+    );
+    assert_eq!(
+        resolved.call_id.as_ref().map(ToolCallId::as_str),
+        Some("call_00000000000000000000000050")
     );
 }
 

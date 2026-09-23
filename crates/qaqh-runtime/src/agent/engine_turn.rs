@@ -7,6 +7,11 @@
 use std::collections::{HashMap, HashSet};
 
 use qaqh_domain::AskAnswer;
+use qaqh_session::canonical::{generate_ulid, sha256_content_hash};
+use qaqh_session::session_fact_v2::{
+    ActorKind, ActorRef, ContentRef, EventId, InteractionKind, InteractionRequested,
+    InteractionResolved,
+};
 use qaqh_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
@@ -14,6 +19,8 @@ use super::turn_actor::{
     InteractionAdmission, InteractionState, TurnActor, TurnActorError, TurnCancellation,
 };
 use super::types::*;
+use crate::agent::state::agent::{AgentState, tool_ledger_lease_ms, unix_ms};
+use crate::agent::tool_runtime::{canonical_call_id, canonical_interaction_id, canonical_turn_id};
 use crate::agent::turn_lap::admit as turn_admit;
 use crate::agent::turn_lap::backfill as turn_backfill;
 use crate::agent::turn_lap::gate::{
@@ -240,8 +247,13 @@ impl TurnEngine {
         self.suspended.as_ref().map(|state| state.turn_id.as_str())
     }
 
-    pub(crate) fn observe_outcome(&mut self, outcome: &Outcome) -> Result<(), TurnActorError> {
-        let pending_interactions = if matches!(outcome, Outcome::YieldToUser { .. }) {
+    pub(crate) fn observe_outcome(
+        &mut self,
+        agent: &mut AgentState,
+        outcome: &Outcome,
+    ) -> Result<(), TurnActorError> {
+        let yielding = matches!(outcome, Outcome::YieldToUser { .. });
+        let pending_interactions = if yielding {
             self.suspended
                 .as_ref()
                 .map(Self::pending_interaction_ids)
@@ -250,7 +262,114 @@ impl TurnEngine {
             Vec::new()
         };
         self.actor
-            .observe_outcome_with_interactions(outcome, &pending_interactions)
+            .observe_outcome_with_interactions(outcome, &pending_interactions)?;
+        if yielding {
+            self.persist_interaction_requests(agent)?;
+        }
+        Ok(())
+    }
+
+    fn persist_interaction_requests(&self, agent: &mut AgentState) -> Result<(), TurnActorError> {
+        let Some(state) = self.suspended.as_ref() else {
+            return Ok(());
+        };
+        let Some(ledger) = agent
+            .tool_ledger_mut()
+            .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let now = unix_ms();
+        ledger
+            .ensure_lease(now, tool_ledger_lease_ms())
+            .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+
+        let turn_id = canonical_turn_id(&state.turn_id);
+        let mut requests = Vec::new();
+        requests.extend(
+            state
+                .pending_permission_ids
+                .iter()
+                .map(|call_id| (call_id.as_str(), InteractionKind::Permission)),
+        );
+        requests.extend(
+            state
+                .pending_asks
+                .iter()
+                .map(|ask| (ask.call_id.as_str(), InteractionKind::Ask)),
+        );
+        requests.extend(
+            state
+                .pending_plans
+                .iter()
+                .map(|plan| (plan.call_id.as_str(), InteractionKind::Plan)),
+        );
+        if let Some(todo) = &state.pending_todo_activation {
+            requests.push((todo.call_id.as_str(), InteractionKind::Plan));
+        }
+
+        for (wire_interaction_id, kind) in requests {
+            let interaction_id = canonical_interaction_id(wire_interaction_id);
+            let call_id = canonical_call_id(wire_interaction_id);
+            let request_bytes = serde_json::to_vec(&serde_json::json!({
+                "interaction_id": interaction_id.as_str(),
+                "call_id": call_id.as_str(),
+                "kind": format!("{kind:?}"),
+            }))
+            .unwrap_or_default();
+            let payload = InteractionRequested {
+                interaction_id,
+                call_id: Some(call_id.clone()),
+                turn_id: turn_id.clone(),
+                kind,
+                request_ref: ContentRef::new(sha256_content_hash(&request_bytes)),
+                expires_at_ms: None,
+                requested_at_ms: now,
+            };
+            ledger
+                .append_interaction_requested(
+                    EventId::new(generate_ulid()),
+                    Some(call_id),
+                    payload,
+                    now,
+                )
+                .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_interaction_resolution(
+        agent: &mut AgentState,
+        interaction_id: &str,
+        decision: &str,
+    ) -> Result<(), TurnActorError> {
+        let Some(ledger) = agent
+            .tool_ledger_mut()
+            .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let now = unix_ms();
+        ledger
+            .ensure_lease(now, tool_ledger_lease_ms())
+            .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+        let decision_bytes =
+            serde_json::to_vec(&serde_json::json!({ "decision": decision })).unwrap_or_default();
+        let payload = InteractionResolved {
+            interaction_id: canonical_interaction_id(interaction_id),
+            decision_ref: ContentRef::new(sha256_content_hash(&decision_bytes)),
+            resolved_by: ActorRef {
+                kind: ActorKind::User,
+                id: "user".into(),
+                display_name: None,
+            },
+            resolution_seq: 1,
+            resolved_at_ms: now,
+        };
+        ledger
+            .append_interaction_resolved(EventId::new(generate_ulid()), None, None, payload, now)
+            .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+        Ok(())
     }
 
     pub(crate) fn admit_interaction_resolution(
@@ -272,15 +391,63 @@ impl TurnEngine {
         self.actor.begin_input(turn_id, input_id)
     }
 
-    pub(crate) fn cancel_turn(
+    /// Cancel through the canonical ledger when this session is durable.
+    ///
+    /// `call_ids` are wire IDs collected by the caller before it drops the
+    /// suspended/runtime state. Calls that already have an intent are left
+    /// open by the actor; calls without one are sealed as executionless
+    /// `Cancelled`.
+    pub(crate) fn cancel_with_ledger(
         &mut self,
-        turn_id: &str,
+        agent: &mut AgentState,
+        turn_id: Option<&str>,
+        call_ids: Vec<String>,
     ) -> Result<TurnCancellation, TurnActorError> {
-        self.actor.cancel(turn_id)
-    }
+        let before = self.actor.state().clone();
+        let wire_turn = turn_id.map(str::to_string).or_else(|| match &before {
+            qaqh_session::actor::TurnCoreState::Active { turn_id, .. } => {
+                Some(turn_id.as_str().to_string())
+            }
+            _ => None,
+        });
+        let Some(wire_turn) = wire_turn else {
+            return Ok(match before {
+                qaqh_session::actor::TurnCoreState::Terminal { .. } => {
+                    TurnCancellation::AlreadyTerminal
+                }
+                _ => TurnCancellation::Idle,
+            });
+        };
 
-    pub(crate) fn cancel_active_turn(&mut self) -> Result<TurnCancellation, TurnActorError> {
-        self.actor.cancel_active()
+        let ledger = match agent.tool_ledger_mut() {
+            Ok(Some(ledger)) => ledger,
+            Ok(None) => return self.actor.cancel(&wire_turn),
+            Err(error) => return Err(TurnActorError::ToolLedger(error.to_string())),
+        };
+        let actor_turn = qaqh_session::session_fact_v2::TurnId::new(wire_turn.clone());
+        let ledger_turn = canonical_turn_id(&wire_turn);
+        let canonical_calls = call_ids
+            .into_iter()
+            .map(|call_id| canonical_call_id(&call_id))
+            .collect();
+        self.actor
+            .cancel_tool_batch(
+                ledger,
+                &actor_turn,
+                &ledger_turn,
+                canonical_calls,
+                unix_ms(),
+            )
+            .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+        Ok(match before {
+            qaqh_session::actor::TurnCoreState::Active { .. } => TurnCancellation::Interrupted {
+                reason: qaqh_session::session_fact_v2::InterruptReason::CancelBeforeSeal,
+            },
+            qaqh_session::actor::TurnCoreState::Terminal { .. } => {
+                TurnCancellation::AlreadyTerminal
+            }
+            qaqh_session::actor::TurnCoreState::Idle => TurnCancellation::Idle,
+        })
     }
 
     fn pending_interaction_ids(state: &TurnState) -> Vec<String> {
@@ -437,6 +604,14 @@ impl TurnEngine {
             log::warn!("[TURN] stale permission resolution ignored: {call_id}");
             return Outcome::Handled;
         }
+        let decision = if admitted.is_some() {
+            "approved"
+        } else {
+            "rejected"
+        };
+        if let Err(error) = Self::record_interaction_resolution(ctx.agent, call_id, decision) {
+            log::error!("[TURN] failed to persist permission resolution {call_id}: {error}");
+        }
 
         if let Some(admitted) = admitted {
             saved.deferred_authorized.push(admitted);
@@ -552,6 +727,9 @@ impl TurnEngine {
                 return Outcome::Handled;
             }
         };
+        if let Err(error) = Self::record_interaction_resolution(ctx.agent, ask_id, "answered") {
+            log::error!("[TURN] failed to persist ask resolution {ask_id}: {error}");
+        }
 
         let mut saved = self.suspended.take().expect("active ask suspension exists");
         let active = saved.pending_asks.pop_front().expect("active ask exists");
@@ -623,6 +801,13 @@ impl TurnEngine {
         if active_id != Some(call_id) {
             log::warn!("[TURN] plan response without a suspended review: {call_id}");
             return Outcome::Handled;
+        }
+        if let Err(error) = Self::record_interaction_resolution(
+            ctx.agent,
+            call_id,
+            if approved { "approved" } else { "rejected" },
+        ) {
+            log::error!("[TURN] failed to persist plan resolution {call_id}: {error}");
         }
 
         let mut saved = self
@@ -733,6 +918,9 @@ impl TurnEngine {
         if active_id != Some(ask_id) {
             Self::emit_ask_rejected(ctx, ask_id, "ask_id does not match the active prompt");
             return Outcome::Handled;
+        }
+        if let Err(error) = Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed") {
+            log::error!("[TURN] failed to persist ask dismissal {ask_id}: {error}");
         }
 
         let saved = self.suspended.take().expect("active ask suspension exists");

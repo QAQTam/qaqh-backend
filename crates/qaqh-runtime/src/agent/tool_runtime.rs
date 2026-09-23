@@ -831,12 +831,21 @@ impl ToolRuntime {
     }
 }
 
-fn canonical_call_id(wire_call_id: &str) -> ToolCallId {
+pub(crate) fn canonical_call_id(wire_call_id: &str) -> ToolCallId {
     ToolCallId::new(format!("call_{}", ulid_from_text(wire_call_id)))
 }
 
-fn canonical_turn_id(wire_turn_id: &str) -> TurnId {
+pub(crate) fn canonical_turn_id(wire_turn_id: &str) -> TurnId {
     TurnId::new(format!("turn_{}", ulid_from_text(wire_turn_id)))
+}
+
+pub(crate) fn canonical_interaction_id(
+    wire_interaction_id: &str,
+) -> qaqh_session::session_fact_v2::InteractionId {
+    qaqh_session::session_fact_v2::InteractionId::new(format!(
+        "int_{}",
+        ulid_from_text(wire_interaction_id)
+    ))
 }
 
 fn terminal_status(status: qaqh_types::ToolStatus) -> ToolTerminalStatus {

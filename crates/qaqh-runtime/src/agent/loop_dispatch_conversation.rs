@@ -103,10 +103,40 @@ impl Loop {
             ConversationCommand::ConversationCancel { turn_id } => {
                 self.cancel.set();
                 qaqh_workspace::set_cancel(true);
-                let actor_cancel = match turn_id.as_deref() {
-                    Some(turn_id) => self.session.turn.cancel_turn(turn_id),
-                    None => self.session.turn.cancel_active_turn(),
+                let cancel_call_ids = {
+                    let mut call_ids = Vec::new();
+                    if let Some(suspended) = self.session.turn.suspended.as_ref() {
+                        call_ids.extend(suspended.pending_permission_ids.iter().cloned());
+                        call_ids
+                            .extend(suspended.pending_asks.iter().map(|ask| ask.call_id.clone()));
+                        call_ids.extend(
+                            suspended
+                                .pending_plans
+                                .iter()
+                                .map(|plan| plan.call_id.clone()),
+                        );
+                        if let Some(todo) = &suspended.pending_todo_activation {
+                            call_ids.push(todo.call_id.clone());
+                        }
+                        call_ids.extend(suspended.tool_call_order.iter().cloned());
+                    }
+                    call_ids.extend(
+                        self.session
+                            .agent
+                            .msg
+                            .get_last_step_pending()
+                            .into_iter()
+                            .map(|pending| pending.id),
+                    );
+                    call_ids.sort();
+                    call_ids.dedup();
+                    call_ids
                 };
+                let actor_cancel = self.session.turn.cancel_with_ledger(
+                    &mut self.session.agent,
+                    turn_id.as_deref(),
+                    cancel_call_ids,
+                );
                 let actor_cancel_rejected = actor_cancel.is_err();
                 let emit_terminal = match actor_cancel {
                     Ok(TurnCancellation::Interrupted { reason }) => {
