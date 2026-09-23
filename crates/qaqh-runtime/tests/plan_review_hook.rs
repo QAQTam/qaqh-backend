@@ -16,9 +16,11 @@ use std::time::{Duration, Instant};
 
 use qaqh_domain::{
     ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState,
+    TimelineBlockKind, TimelineIntent, TimelineToolState,
 };
 use qaqh_ringing::{
-    RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
+    RingingCommand, RingingEvent, RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope,
+    RingingWorkerEventEnvelope,
 };
 use qaqh_runtime::agent::state::agent::AgentState;
 use serde_json::json;
@@ -29,6 +31,7 @@ static SESSION_INIT: Once = Once::new();
 struct MockProvider {
     base_url: String,
     requests: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<serde_json::Value>>>,
     stop: Arc<Mutex<bool>>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -38,21 +41,32 @@ impl MockProvider {
         let server = Server::http("127.0.0.1:0").expect("bind mock server");
         let port = server.server_addr().to_ip().expect("mock address").port();
         let requests = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(Mutex::new(false));
         let scenarios = Arc::new(Mutex::new(VecDeque::from(scenarios)));
         let request_counter = requests.clone();
+        let request_bodies = bodies.clone();
         let stop_flag = stop.clone();
         let handle = thread::spawn(move || {
             loop {
                 if *stop_flag.lock().expect("stop lock") {
                     break;
                 }
-                let request = match server.recv_timeout(Duration::from_millis(50)) {
+                let mut request = match server.recv_timeout(Duration::from_millis(50)) {
                     Ok(Some(request)) => request,
                     Ok(None) => continue,
                     Err(_) => break,
                 };
                 request_counter.fetch_add(1, Ordering::SeqCst);
+                let mut request_body = String::new();
+                request
+                    .as_reader()
+                    .read_to_string(&mut request_body)
+                    .expect("read provider request");
+                request_bodies
+                    .lock()
+                    .expect("request bodies lock")
+                    .push(serde_json::from_str(&request_body).expect("provider request json"));
                 let scenario = scenarios
                     .lock()
                     .expect("scenario lock")
@@ -75,6 +89,7 @@ impl MockProvider {
         Self {
             base_url: format!("http://127.0.0.1:{port}"),
             requests,
+            bodies,
             stop,
             handle: Some(handle),
         }
@@ -227,6 +242,84 @@ fn final_round(text: &str) -> Vec<String> {
     ]
 }
 
+fn assert_plan_tool_block_opened(intents: &Arc<Mutex<Vec<TimelineIntent>>>, call_id: &str) {
+    let block_id = format!("tool:{call_id}");
+    let found = intents
+        .lock()
+        .expect("timeline intents lock")
+        .iter()
+        .any(|intent| {
+            matches!(
+                intent,
+                TimelineIntent::BlockOpened {
+                    block_id: actual,
+                    kind: TimelineBlockKind::Tool,
+                    tool: Some(tool),
+                    ..
+                } if actual == &block_id
+                    && tool.name == "plan_submit"
+                    && tool.state == TimelineToolState::Prepared
+            )
+        });
+    assert!(found, "plan tool block was not opened for {call_id}");
+}
+
+fn assert_plan_tool_terminal(
+    intents: &Arc<Mutex<Vec<TimelineIntent>>>,
+    call_id: &str,
+    expected_state: TimelineToolState,
+) {
+    let block_id = format!("tool:{call_id}");
+    let found = intents
+        .lock()
+        .expect("timeline intents lock")
+        .iter()
+        .any(|intent| {
+            matches!(
+                intent,
+                TimelineIntent::ToolUpdated {
+                    block_id: actual,
+                    tool,
+                    ..
+                } if actual == &block_id && tool.state == expected_state
+            )
+        });
+    assert!(
+        found,
+        "plan tool block did not reach {expected_state:?} for {call_id}"
+    );
+}
+
+fn assert_provider_plan_pair(body: &serde_json::Value, expected_result: &str) {
+    let messages = body
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .expect("provider request messages");
+    let tool = messages
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "tool")
+        .expect("provider request tool result");
+    let tool_json = serde_json::to_string(tool).expect("serialize tool result");
+    assert!(
+        tool_json.contains(expected_result),
+        "missing expected plan result {expected_result:?}: {tool_json}"
+    );
+    let assistant = messages
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .expect("provider request assistant tool call");
+    let call_id = assistant["tool_calls"][0]["id"]
+        .as_str()
+        .expect("assistant tool call id");
+    assert_eq!(
+        tool["tool_call_id"].as_str(),
+        Some(call_id),
+        "plan result must pair with the assistant tool call"
+    );
+}
+
 #[test]
 fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
     SESSION_INIT.call_once(|| {
@@ -261,17 +354,26 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
     let mut agent_loop =
         common::spawn_pipe_loop(agent, BufReader::new(input_reader), output_writer);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let timeline_intents = Arc::new(Mutex::new(Vec::new()));
+    let timeline_sink = timeline_intents.clone();
     thread::spawn(move || {
         for line in BufReader::new(output_reader).lines().map_while(Result::ok) {
-            if let Ok(env) = serde_json::from_str::<RingingWorkerEventEnvelope>(&line)
-                && event_tx.send(env.event).is_err()
-            {
-                break;
+            if let Ok(env) = serde_json::from_str::<RingingWorkerEventEnvelope>(&line) {
+                if event_tx.send(env.event).is_err() {
+                    break;
+                }
+            } else if let Ok(env) = serde_json::from_str::<RingingTimelineIntentEnvelope>(&line) {
+                timeline_sink
+                    .lock()
+                    .expect("timeline intents lock")
+                    .push(env.intent);
             }
         }
     });
 
     let requests = mock.requests.clone();
+    let request_bodies = mock.bodies.clone();
+    let timeline_assertions = timeline_intents.clone();
     let driver = thread::spawn(move || {
         send_cmd(&mut input_writer, "", cmd_session_create());
         let seed = expect_session_created(&event_rx);
@@ -279,6 +381,7 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
         send_cmd(&mut input_writer, &seed, cmd_user_input("first"));
         let (first_id, _, first_content) = expect_plan_review(&event_rx);
         assert_eq!(first_content, "hook test plan");
+        assert_plan_tool_block_opened(&timeline_assertions, &first_id);
         assert_eq!(
             requests.load(Ordering::SeqCst),
             0,
@@ -290,16 +393,23 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
             cmd_plan_respond(&first_id, true, None),
         );
         expect_turn_completed(&event_rx);
+        assert_plan_tool_terminal(
+            &timeline_assertions,
+            &first_id,
+            TimelineToolState::Succeeded,
+        );
 
         send_cmd(&mut input_writer, &seed, cmd_user_input("second"));
         let (second_id, _, second_content) = expect_plan_review(&event_rx);
         assert_eq!(second_content, "hook test plan");
+        assert_plan_tool_block_opened(&timeline_assertions, &second_id);
         send_cmd(
             &mut input_writer,
             &seed,
             cmd_plan_respond(&second_id, false, Some("not this time")),
         );
         expect_turn_completed(&event_rx);
+        assert_plan_tool_terminal(&timeline_assertions, &second_id, TimelineToolState::Failed);
 
         send_cmd(&mut input_writer, &seed, cmd_session_shutdown());
     });
@@ -307,4 +417,8 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
     agent_loop.run();
     driver.join().expect("test driver");
     assert_eq!(mock.requests.load(Ordering::SeqCst), 2);
+    let bodies = request_bodies.lock().expect("request bodies lock");
+    assert_eq!(bodies.len(), 2);
+    assert_provider_plan_pair(&bodies[0], "Plan approved.");
+    assert_provider_plan_pair(&bodies[1], "Plan rejected: not this time");
 }
