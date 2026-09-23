@@ -27,6 +27,106 @@ fn enable_message_wal(agent: &mut AgentState) {
     agent.msg.enable_wal(&session_dir);
 }
 
+/// Run the canonical recovery batch before any tool can be dispatched.
+///
+/// Legacy sessions without a canonical identity/events log are left untouched.
+/// Once a canonical log exists, recovery is fail-closed: a failure is logged
+/// and the later ToolRuntime admission will still reject an open intent.
+fn recover_canonical_tool_ledger(seed: &str) -> Result<(), String> {
+    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    recover_canonical_tool_ledger_in(&session_dir, seed)
+}
+
+fn recover_canonical_tool_ledger_in(
+    session_dir: &std::path::Path,
+    seed: &str,
+) -> Result<(), String> {
+    use qaqh_session::canonical::{
+        CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_FILE,
+        RecoveryExecutionOutcome, WriterId, execute_recovery_intent, generate_ulid,
+        load_recovery_intent, persist_recovery_intent, plan_recovery_intent, sha256_content_hash,
+    };
+    use qaqh_session::session_fact_v2::{EventId, RecoveryId};
+
+    if !session_dir.join(CANONICAL_IDENTITY_FILE).exists()
+        && !session_dir.join(EVENTS_FILE).exists()
+    {
+        return Ok(());
+    }
+
+    let identity =
+        CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
+    let facts = CommittedFactReader::open(
+        session_dir,
+        identity.session_id.clone(),
+        identity.log_id.clone(),
+    )
+    .map_err(|error| error.to_string())?
+    .read_all()
+    .map_err(|error| error.to_string())?;
+
+    match crate::agent::tool_outbox::reconcile_canonical_ledger(session_dir) {
+        Ok(reconciliation) if !reconciliation.is_consistent() => {
+            log::warn!(
+                "[recovery] tool_outbox/canonical ledger drift for {seed}: missing_ledger={}, missing_outbox={}, status_mismatches={}",
+                reconciliation.missing_ledger.len(),
+                reconciliation.missing_outbox.len(),
+                reconciliation.status_mismatches.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::error!(
+                "[recovery] tool_outbox/canonical reconciliation failed for {seed}: {error}"
+            );
+        }
+    }
+
+    let existing = load_recovery_intent(session_dir).map_err(|error| error.to_string())?;
+    if existing.is_none() {
+        let Some(intent) = plan_recovery_intent(
+            session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            RecoveryId::new(format!("recovery_{}", generate_ulid())),
+            EventId::new(generate_ulid()),
+            sha256_content_hash(b"[]"),
+        )
+        .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
+        };
+        persist_recovery_intent(session_dir, &intent, &facts).map_err(|error| error.to_string())?;
+    }
+
+    let outcome = execute_recovery_intent(
+        session_dir,
+        identity.session_id,
+        identity.log_id,
+        WriterId::new(format!("recovery-{}-{}", std::process::id(), seed)),
+        super::agent::unix_ms(),
+        super::agent::tool_ledger_lease_ms(),
+    )
+    .map_err(|error| error.to_string())?;
+    match outcome {
+        RecoveryExecutionOutcome::Recovered(execution) => {
+            log::info!(
+                "[recovery] canonical tool ledger recovered for {seed}: {} action(s), intent_removed={}",
+                execution.actions.len(),
+                execution.intent_removed
+            );
+        }
+        RecoveryExecutionOutcome::Pending { dispositions } => {
+            log::warn!(
+                "[recovery] canonical tool ledger for {seed} still has {} replay/reconcile disposition(s)",
+                dispositions.len()
+            );
+        }
+        RecoveryExecutionOutcome::NoIntent => {}
+    }
+    Ok(())
+}
+
 /// Load session from disk via the injected session-manager handle.
 ///
 /// On success, restores the message store and rebinds the workspace.
@@ -227,6 +327,12 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 let tool_mode = agent.session.tool_mode.clone();
                 let custom_tools = agent.session.custom_tools.clone();
                 agent.apply_tool_mode(&tool_mode, &custom_tools);
+                if let Err(error) = recover_canonical_tool_ledger(&agent.session.seed) {
+                    log::error!(
+                        "[recovery] canonical tool ledger recovery failed for {}: {error}",
+                        agent.session.seed
+                    );
+                }
                 log::info!(
                     "qaqh-agent: restored session {} ({} msgs, {} tokens)",
                     agent.session.seed,
@@ -362,4 +468,95 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
         "qaqh-agent: new session with preset seed {}",
         agent.session.seed
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qaqh_session::canonical::{
+        CanonicalSessionIdentity, CommittedFactReader, ToolLedger, WriterId, generate_ulid,
+        load_recovery_intent, sha256_content_hash,
+    };
+    use qaqh_session::session_fact_v2::{
+        EventId, ExecutionId, FactPayload, PolicyDecisionRef, SideEffectClass, ToolCallId,
+        ToolIntent, ToolIntentPolicyOutcome, ToolReplayCapability, ToolTerminalStatus,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn canonical_recovery_seals_open_intent_before_session_resume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let now = super::super::agent::unix_ms();
+        let mut ledger = ToolLedger::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            WriterId::new("lifecycle-recovery-setup"),
+            now,
+            1,
+        )
+        .expect("open setup ledger");
+        let call = ToolCallId::new(format!("call_{}", generate_ulid()));
+        let execution = ExecutionId::new(format!("exec_{}", generate_ulid()));
+        ledger
+            .append_intent(
+                EventId::new(generate_ulid()),
+                None,
+                ToolIntent {
+                    call_id: call.clone(),
+                    execution_id: execution,
+                    idempotency_key: None,
+                    replay_capability: ToolReplayCapability::NoReplay,
+                    policy_decision: PolicyDecisionRef {
+                        outcome: ToolIntentPolicyOutcome::Allow,
+                        rule_id: "test".into(),
+                        decided_at_ms: now,
+                        reason_ref: None,
+                    },
+                    effective_args_ref: None,
+                    effective_args_hash: None,
+                    sandbox_spec_hash: sha256_content_hash(b"sandbox"),
+                    side_effect_class: SideEffectClass::ReadOnly,
+                    intent_at_ms: now,
+                },
+                now,
+            )
+            .expect("append open intent");
+        drop(ledger);
+        std::thread::sleep(Duration::from_millis(2));
+
+        recover_canonical_tool_ledger_in(dir.path(), "lifecycle-recovery-test")
+            .expect("recover canonical ledger");
+
+        assert!(
+            load_recovery_intent(dir.path())
+                .expect("load intent")
+                .is_none()
+        );
+        let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
+            .expect("reader")
+            .read_all()
+            .expect("facts");
+        let finished = facts
+            .iter()
+            .filter_map(|fact| match &fact.payload {
+                FactPayload::ToolFinished(finished) => Some(finished),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].call_id, call);
+        assert_eq!(
+            finished[0].terminal_status,
+            ToolTerminalStatus::Indeterminate
+        );
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|fact| matches!(fact.payload, FactPayload::SessionRecovered(_)))
+                .count(),
+            1
+        );
+    }
 }
