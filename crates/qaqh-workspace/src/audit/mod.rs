@@ -123,13 +123,16 @@ impl AuditEntry {
                 hash: self.args_hash.clone(),
                 bytes: self.args_bytes,
             },
-            result: Some(v2::ResultMeta {
-                status: self.status.clone(),
-                error_code: self.error_code.clone(),
-                elapsed_ms: self.elapsed_ms,
-                output_bytes: self.output_bytes,
-                retry_count: self.retry_count,
-            }),
+            result: match self.kind {
+                v2::AuditKind::ToolIntent => None,
+                v2::AuditKind::ToolCall | v2::AuditKind::ToolRejected => Some(v2::ResultMeta {
+                    status: self.status.clone(),
+                    error_code: self.error_code.clone(),
+                    elapsed_ms: self.elapsed_ms,
+                    output_bytes: self.output_bytes,
+                    retry_count: self.retry_count,
+                }),
+            },
             objects: self.objects.clone(),
         }
     }
@@ -238,7 +241,39 @@ fn rotate_if_needed(path: &Path) {
 ///
 /// 两个账本都会尝试写入（互不短路）；任一失败返回错误，调用方必须上报。
 pub fn append_audit(entry: &AuditEntry) -> Result<(), AuditError> {
-    append_audit_impl(&audit_path(), &audit_dir(), entry)
+    AUDIT_WRITER.append(entry)
+}
+
+/// Append a high-risk tool intent to the v2 ledger only.
+///
+/// v1 CSV has no intent vocabulary and must remain terminal/rejected-only.
+/// The v2 ledger is the authoritative chain for the pre-execution barrier.
+pub fn append_audit_intent(entry: &AuditEntry) -> Result<(), AuditError> {
+    AUDIT_WRITER.append_intent(entry)
+}
+
+/// 唯一审计 writer：统一串行化 intent、CSV 与 v2 写入。
+#[derive(Debug, Default)]
+pub struct AuditWriter;
+
+static AUDIT_WRITER_LOCK: Mutex<()> = Mutex::new(());
+static AUDIT_WRITER: AuditWriter = AuditWriter;
+
+impl AuditWriter {
+    fn append(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+        let _guard = AUDIT_WRITER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        append_audit_impl(&audit_path(), &audit_dir(), entry)
+    }
+
+    fn append_intent(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+        debug_assert_eq!(entry.kind, v2::AuditKind::ToolIntent);
+        let _guard = AUDIT_WRITER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        append_audit_intent_impl(&audit_dir(), entry)
+    }
 }
 
 /// [`append_audit`] 的可测形态（路径显式注入）。
@@ -252,6 +287,14 @@ fn append_audit_impl(
         .map(|_| ())
         .map_err(AuditError::V2);
     csv_result.and(v2_result)
+}
+
+/// [`append_audit_intent`] 的可测形态（路径显式注入）。
+fn append_audit_intent_impl(v2_root: &Path, entry: &AuditEntry) -> Result<(), AuditError> {
+    debug_assert_eq!(entry.kind, v2::AuditKind::ToolIntent);
+    v2::append_event(v2_root, entry.to_v2_event())
+        .map(|_| ())
+        .map_err(AuditError::V2)
 }
 
 /// 追加一行 v1 CSV（15 列：8 旧列 + 7 扩展列）。
@@ -293,7 +336,10 @@ fn append_csv_to(path: &Path, entry: &AuditEntry) -> std::io::Result<()> {
         entry.retry_count,
         csv_escape(entry.decision.as_deref().unwrap_or("")),
     );
-    file.write_all(row.as_bytes())
+    file.write_all(row.as_bytes())?;
+    // P4 A1: audit barrier must be durable before the caller can execute.
+    file.sync_data()?;
+    Ok(())
 }
 
 /// Compute SHA-256 hex digest of the serialized arguments.
