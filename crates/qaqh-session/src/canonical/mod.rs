@@ -4,10 +4,12 @@
 //! owns durable storage identity, writer fencing and commit high-water.
 
 mod clock;
+mod identity;
 mod log;
 mod migration;
 mod reader;
 mod recovery;
+mod recovery_executor;
 mod recovery_state;
 mod replay_window;
 mod store;
@@ -16,6 +18,10 @@ mod types;
 
 pub use clock::{
     CONTENT_CLOCK_FILE, CONTENT_CLOCK_SCHEMA, CONTENT_DIR, ContentClock, ContentClockRecord,
+};
+pub use identity::{
+    CANONICAL_IDENTITY_FILE, CANONICAL_IDENTITY_SCHEMA, CanonicalIdentityError,
+    CanonicalSessionIdentity, generate_ulid, ulid_from_text,
 };
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
@@ -34,6 +40,10 @@ pub use recovery::{
     persist_recovery_intent, recovery_input_fingerprint, recovery_intent_path,
     remove_recovery_intent_if_stale, sha256_content_hash,
 };
+pub use recovery_executor::{
+    RecoveryExecution, RecoveryExecutionError, RecoveryExecutionOutcome, execute_recovery_intent,
+    plan_recovery_intent,
+};
 pub use recovery_state::{
     CanonicalRecoveryState, CommitRepairOutcome, inspect_recovery_state, repair_commit_marker,
 };
@@ -44,7 +54,10 @@ pub use replay_window::{
     recover_replay_window_manifest, replay_window_path,
 };
 pub use store::{AppendOutcome, CanonicalSessionStore};
-pub use tool_ledger::{ToolLedger, ToolLedgerEntry, ToolLedgerError, ToolRecoveryDisposition};
+pub use tool_ledger::{
+    ToolLedger, ToolLedgerEntry, ToolLedgerError, ToolReconciliationEvidence,
+    ToolRecoveryDisposition,
+};
 pub use types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,
     UPGRADE_FENCE_SCHEMA, UpgradeFence, UpgradeState, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
