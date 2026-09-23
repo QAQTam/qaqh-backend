@@ -6,20 +6,35 @@
 use qaqh_ringing::{
     RINGING_SCHEMA, RINGING_V2_VERSION, RINGING_VERSION, RingingCommandEnvelope,
     RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandEnvelope,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    RingingV2DriverState, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
+    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingInteraction,
 };
 use qaqh_runtime::ringing::V2StreamItem;
-use qaqh_session::projection::{ControlSnapshot, ControlToolState, ConversationSnapshot};
+use qaqh_session::projection::{
+    ControlRoundState, ControlSubagentState, ControlToolState, ConversationSnapshot,
+};
+use qaqh_session::session_fact_v2::{
+    ActivityState, InteractionKind, RecoveryOutcome, SessionId, ToolCallId, TurnId,
+};
 use serde::Serialize;
 
 use super::*;
 
 #[derive(Debug, Clone, Serialize)]
 struct V2ControlState {
-    #[serde(flatten)]
-    snapshot: ControlSnapshot,
+    session_id: Option<SessionId>,
+    activity: ActivityState,
+    current_turn_id: Option<TurnId>,
+    current_call_id: Option<ToolCallId>,
+    round: Option<ControlRoundState>,
+    tools: Vec<ControlToolState>,
+    subagents: Vec<ControlSubagentState>,
+    last_recovery: Option<RecoveryOutcome>,
+    revision: u64,
+    last_fact_seq: u64,
+    interactions: Vec<RingingV2PendingInteraction>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    driver: Option<qaqh_ringing::RingingV2DriverState>,
+    driver: Option<RingingV2DriverState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,15 +148,51 @@ pub(crate) async fn handle_bootstrap_v2(
             return v2_hub_error_response(error);
         }
     };
+    let control_snapshot = &bootstrap.projections.control;
+    let interactions = control_snapshot
+        .interactions
+        .iter()
+        .filter(|interaction| {
+            interaction.resolution.is_none() && interaction.expired_reason.is_none()
+        })
+        .map(|interaction| RingingV2PendingInteraction {
+            interaction_id: interaction.interaction_id.as_str().to_string(),
+            call_id: interaction
+                .call_id
+                .as_ref()
+                .map(|call_id| call_id.as_str().to_string())
+                .unwrap_or_default(),
+            turn_id: interaction
+                .turn_id
+                .as_ref()
+                .map(|turn_id| turn_id.as_str().to_string())
+                .unwrap_or_default(),
+            kind: match interaction.kind {
+                InteractionKind::Permission => RingingV2InteractionKind::Permission,
+                InteractionKind::Ask => RingingV2InteractionKind::Ask,
+                InteractionKind::Plan => RingingV2InteractionKind::PlanReview,
+            },
+        })
+        .collect();
     let control = V2ControlState {
-        snapshot: bootstrap.projections.control.clone(),
+        session_id: control_snapshot.session_id.clone(),
+        activity: control_snapshot.activity,
+        current_turn_id: control_snapshot.current_turn_id.clone(),
+        current_call_id: control_snapshot.current_call_id.clone(),
+        round: control_snapshot.round.clone(),
+        tools: control_snapshot.tools.clone(),
+        subagents: control_snapshot.subagents.clone(),
+        last_recovery: control_snapshot.last_recovery,
+        revision: control_snapshot.revision,
+        last_fact_seq: control_snapshot.last_fact_seq,
+        interactions,
         driver: None,
     };
     let conversation = bootstrap.projections.conversation.clone();
     let tool = V2ToolState {
-        tools: bootstrap.projections.control.tools.clone(),
+        tools: control_snapshot.tools.clone(),
     };
-    let tool_revision = bootstrap.projections.control.revision;
+    let tool_revision = control_snapshot.revision;
     let response: RingingV2Bootstrap<V2ControlState, ConversationSnapshot, V2ToolState> =
         RingingV2Bootstrap {
             schema: RINGING_SCHEMA.into(),
@@ -151,7 +202,7 @@ pub(crate) async fn handle_bootstrap_v2(
             snapshot_cursor: bootstrap.snapshot_cursor,
             control: RingingV2ChannelSnapshot {
                 channel: RingingChannel::Control,
-                state_revision: control.snapshot.revision,
+                state_revision: control.revision,
                 snapshot_version: 1,
                 state: control,
             },

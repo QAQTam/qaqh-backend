@@ -42,6 +42,8 @@ pub struct ControlInteractionResolution {
 pub struct ControlInteractionState {
     pub interaction_id: InteractionId,
     pub call_id: Option<ToolCallId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
     pub kind: InteractionKind,
     pub request: ContentValue,
     pub expires_at_ms: Option<i64>,
@@ -151,7 +153,7 @@ impl Projection for ControlProjection {
                 })
             }
             FactPayload::InteractionRequested(payload) => {
-                self.apply_interaction_requested(payload);
+                self.apply_interaction_requested(payload, fact.turn_id.as_ref());
                 Some(ControlDelta::InteractionRequested {
                     revision: self.next_revision(),
                     interaction_id: payload.interaction_id.clone(),
@@ -269,9 +271,14 @@ impl ControlProjection {
         state.reconciled = Some(payload.reconciled);
     }
 
-    fn apply_interaction_requested(&mut self, payload: &InteractionRequested) {
+    fn apply_interaction_requested(
+        &mut self,
+        payload: &InteractionRequested,
+        turn_id: Option<&TurnId>,
+    ) {
         let state = self.interaction_state_mut(&payload.interaction_id);
         state.call_id = payload.call_id.clone();
+        state.turn_id = turn_id.cloned();
         state.kind = payload.kind;
         state.request = content_ref_value(payload.request_ref.clone());
         state.expires_at_ms = payload.expires_at_ms;
@@ -389,6 +396,7 @@ impl ControlProjection {
         self.snapshot.interactions.push(ControlInteractionState {
             interaction_id: interaction_id.clone(),
             call_id: None,
+            turn_id: None,
             kind: InteractionKind::Ask,
             request: ContentValue::Inline {
                 text: String::new(),
