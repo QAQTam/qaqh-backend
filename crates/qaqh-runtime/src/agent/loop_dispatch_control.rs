@@ -22,7 +22,7 @@ impl Loop {
         self.emit_operation_failed(
             command_id,
             qaqh_domain::ErrorScope::Control,
-            "interaction_not_found",
+            "interaction_already_resolved",
             &format!("{kind} interaction was already resolved"),
         );
         true
@@ -59,7 +59,7 @@ impl Loop {
                 self.emit_operation_failed(
                     command_id,
                     qaqh_domain::ErrorScope::Control,
-                    "interaction_not_found",
+                    "interaction_already_resolved",
                     "interaction was already resolved",
                 );
                 false
@@ -219,6 +219,7 @@ impl Loop {
                     &mut ctx,
                     &mut self.session.tool,
                     &interaction_id,
+                    command_id,
                     &answers,
                 );
                 let _ = ctx;
@@ -246,6 +247,7 @@ impl Loop {
                     &mut ctx,
                     &mut self.session.tool,
                     &interaction_id,
+                    command_id,
                 );
                 let _ = ctx;
                 if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
@@ -281,6 +283,7 @@ impl Loop {
                     &mut ctx,
                     &mut self.session.tool,
                     &interaction_id,
+                    command_id,
                     approved,
                     &message.unwrap_or_default(),
                     autonomous,

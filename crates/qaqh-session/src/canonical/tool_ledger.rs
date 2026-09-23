@@ -346,6 +346,7 @@ impl ToolLedger {
         let turn_id = payload.turn_id.clone();
         let fact = self.build_interaction_fact(
             event_id,
+            None,
             Some(turn_id),
             call_id,
             interaction_id.clone(),
@@ -371,6 +372,21 @@ impl ToolLedger {
         payload: InteractionResolved,
         now_ms: i64,
     ) -> Result<SessionFact, ToolLedgerError> {
+        self.append_interaction_resolved_with_causation(
+            event_id, None, turn_id, call_id, payload, now_ms,
+        )
+    }
+
+    /// Append a resolution whose command id is the canonical causation id.
+    pub fn append_interaction_resolved_with_causation(
+        &mut self,
+        event_id: EventId,
+        causation_id: Option<EventId>,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+        payload: InteractionResolved,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
         let interaction_id = payload.interaction_id.clone();
         if let Some(existing) = self.interaction_terminals.get(&interaction_id) {
             if interaction_resolution_matches(&existing.payload, &payload) {
@@ -383,6 +399,7 @@ impl ToolLedger {
 
         let fact = self.build_interaction_fact(
             event_id,
+            causation_id,
             turn_id,
             call_id,
             interaction_id.clone(),
@@ -416,6 +433,7 @@ impl ToolLedger {
 
         let fact = self.build_interaction_fact(
             event_id,
+            None,
             turn_id,
             call_id,
             interaction_id.clone(),
@@ -788,9 +806,11 @@ impl ToolLedger {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_interaction_fact(
         &self,
         event_id: EventId,
+        causation_id: Option<EventId>,
         turn_id: Option<TurnId>,
         call_id: Option<ToolCallId>,
         interaction_id: InteractionId,
@@ -804,7 +824,7 @@ impl ToolLedger {
             fact_seq: 0,
             event_id,
             ts_ms: now_ms,
-            causation_id: None,
+            causation_id,
             turn_id,
             call_id,
             interaction_id: Some(interaction_id),

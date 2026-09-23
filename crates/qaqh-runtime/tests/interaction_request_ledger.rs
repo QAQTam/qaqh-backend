@@ -72,8 +72,14 @@ fn yield_persists_canonical_interaction_request() {
         format!("int_{}", ulid_from_text(wire_call))
     );
 
-    record_interaction_resolution_for_test(&mut agent, wire_call, "approved")
-        .expect("persist resolution");
+    let command_id = qaqh_session::canonical::generate_ulid();
+    record_interaction_resolution_for_test(
+        &mut agent,
+        wire_call,
+        "approved",
+        Some(&command_id),
+    )
+    .expect("persist resolution");
     let facts = CommittedFactReader::open(&session_dir, identity.session_id, identity.log_id)
         .and_then(|reader| reader.read_all())
         .expect("read canonical facts after resolution");
@@ -89,4 +95,11 @@ fn yield_persists_canonical_interaction_request() {
     assert_eq!(resolution_fact.turn_id.as_ref(), Some(&request.turn_id));
     assert_eq!(resolution_fact.call_id.as_ref(), request.call_id.as_ref());
     assert_eq!(resolution.interaction_id, request.interaction_id);
+    assert_eq!(
+        resolution_fact
+            .causation_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some(command_id.as_str())
+    );
 }
