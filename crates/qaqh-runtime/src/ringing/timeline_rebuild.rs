@@ -341,8 +341,14 @@ fn rebuild_tool(
     // 展示投影由工具作者声明；重建路径用归档 args 重新调用同一投影函数，
     // 保证 live 与 rebuild 两条路径产出同形 display（契约 §7.1）。
     let mut display = result.and_then(|result| {
-        let args = serde_json::from_str::<serde_json::Value>(&card.args_json).ok()?;
-        qaqh_workspace::runtime::project_tool_display(&card.name, &args, &result.output)
+        result
+            .display
+            .as_ref()
+            .map(qaqh_workspace::runtime::project_tool_display_from_wire)
+            .or_else(|| {
+                let args = serde_json::from_str::<serde_json::Value>(&card.args_json).ok()?;
+                qaqh_workspace::runtime::project_tool_display(&card.name, &args, &result.output)
+            })
     });
     if let (Some(display), Some(result)) = (display.as_mut(), result) {
         crate::timeline::apply_result_metrics(display, &result.metrics);
@@ -378,6 +384,49 @@ mod tests {
     use super::*;
     use qaqh_domain::{RoundBlock, RoundData, ToolCallDef, ToolResultDef, TurnData};
 
+    #[test]
+    fn rebuild_prefers_canonical_display_payload_over_text_projection() {
+        let card = ToolCallDef {
+            id: "call-1".into(),
+            name: "read".into(),
+            args_display: "read".into(),
+            args_json: "{}".into(),
+        };
+        let result = ToolResultDef {
+            tool_call_id: "call-1".into(),
+            output: "not-json legacy text".into(),
+            success: true,
+            status: Some(qaqh_types::ToolStatus::Ok),
+            file: None,
+            metrics: Default::default(),
+            display: Some(qaqh_types::ToolResultDisplay {
+                summary: Some("canonical summary".into()),
+                diff: None,
+                header: Some(qaqh_types::ToolResultDisplayHeader::Other {
+                    label: "canonical".into(),
+                }),
+                body: Some(qaqh_types::ToolResultDisplayBody::Text {
+                    text: "canonical body".into(),
+                    truncated: false,
+                }),
+            }),
+        };
+
+        let tool = rebuild_tool(&card, &[result]);
+
+        assert_eq!(tool.summary.as_deref(), Some("canonical summary"));
+        let display = tool.display.expect("canonical display");
+        assert_eq!(display.summary.as_deref(), Some("canonical summary"));
+        assert!(matches!(
+            display.header,
+            Some(qaqh_domain::TimelineToolHeader::Other { .. })
+        ));
+        assert!(matches!(
+            display.body,
+            Some(qaqh_domain::TimelineToolBody::Text { .. })
+        ));
+    }
+
     fn turn_with_blocks() -> TurnData {
         TurnData {
             turn_id: "t1".into(),
@@ -400,6 +449,7 @@ mod tests {
                     status: None,
                     file: None,
                     metrics: Default::default(),
+                    display: None,
                 }],
                 blocks: vec![
                     RoundBlock::Reasoning {
@@ -496,6 +546,7 @@ mod tests {
             status: None,
             file: None,
             metrics: Default::default(),
+            display: None,
         }];
 
         let (snapshot, _) =
@@ -533,6 +584,7 @@ mod tests {
             status: Some(qaqh_types::ToolStatus::Cancelled),
             file: None,
             metrics: Default::default(),
+            display: None,
         }];
 
         let (snapshot, _) =

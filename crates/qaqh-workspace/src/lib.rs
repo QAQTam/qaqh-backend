@@ -649,6 +649,7 @@ impl ToolCallCtx {
     pub fn get_bool(&self, key: &str) -> Option<bool> {
         self.args.get(key).and_then(|v| v.as_bool())
     }
+    #[allow(dead_code)] // legacy adapters/tests still use this bridge
     pub(crate) fn push_skill_effect(&self, effect: qaqh_skills::SkillEffect) {
         self.skill_effects
             .lock()

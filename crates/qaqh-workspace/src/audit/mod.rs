@@ -455,12 +455,18 @@ mod tests {
         assert_eq!(parsed.schema, v2::SCHEMA);
         assert_eq!(parsed.actor.session, "sess-1");
         assert_eq!(parsed.actor.call_id, "call-write");
-        assert_eq!(parsed.tool.as_ref().map(|t| t.category.as_str()), Some("write"));
+        assert_eq!(
+            parsed.tool.as_ref().map(|t| t.category.as_str()),
+            Some("write")
+        );
         assert_eq!(
             parsed.decision.as_ref().map(|d| d.outcome.as_str()),
             Some("auto")
         );
-        assert_eq!(parsed.result.as_ref().map(|r| r.status.as_str()), Some("ok"));
+        assert_eq!(
+            parsed.result.as_ref().map(|r| r.status.as_str()),
+            Some("ok")
+        );
         assert_eq!(parsed.objects.len(), 1);
         assert!(
             v2::verify_ledger(&v2_root).ok,
