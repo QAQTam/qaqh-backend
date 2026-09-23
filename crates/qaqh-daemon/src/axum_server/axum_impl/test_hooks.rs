@@ -7,7 +7,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use qaqh_domain::RingingChannel;
+use qaqh_domain::{RingingChannel, ToolCommand};
+use qaqh_ringing::RingingCommand;
 
 /// Scope of an injected SSE termination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,15 @@ pub(crate) enum CommandAckFault {
     Delay(Duration),
 }
 
+/// Command predicate for [`CommandAckFault`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandAckTarget {
+    InteractionResponses,
+    PermissionResponse,
+    AskResponse,
+    All,
+}
+
 /// Injected outcome for permission/ask response commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InteractionFault {
@@ -52,7 +62,9 @@ pub(crate) struct TestHooks {
     session_404_seed: Option<String>,
     command_ack: Option<CommandAckFault>,
     command_ack_channel: Option<RingingChannel>,
+    command_ack_target: CommandAckTarget,
     interaction_fault: Option<InteractionFault>,
+    interaction_fault_used: AtomicBool,
 }
 
 impl TestHooks {
@@ -68,7 +80,9 @@ impl TestHooks {
             session_404_seed: None,
             command_ack: None,
             command_ack_channel: None,
+            command_ack_target: CommandAckTarget::InteractionResponses,
             interaction_fault: None,
+            interaction_fault_used: AtomicBool::new(false),
         }
     }
 
@@ -109,6 +123,15 @@ impl TestHooks {
         });
         let command_ack_channel = env_string("QAQH_TEST_COMMAND_ACK_CHANNEL")
             .and_then(|value| parse_channel_name(&value));
+        let command_ack_target = match env_string("QAQH_TEST_COMMAND_ACK_COMMAND")
+            .as_deref()
+            .unwrap_or("interaction")
+        {
+            "permission_response" => CommandAckTarget::PermissionResponse,
+            "ask_response" => CommandAckTarget::AskResponse,
+            "all" => CommandAckTarget::All,
+            _ => CommandAckTarget::InteractionResponses,
+        };
         let interaction_fault = env_string("QAQH_TEST_INTERACTION_FAULT")
             .and_then(|value| parse_interaction_fault(&value));
 
@@ -123,7 +146,9 @@ impl TestHooks {
             session_404_seed,
             command_ack,
             command_ack_channel,
+            command_ack_target,
             interaction_fault,
+            interaction_fault_used: AtomicBool::new(false),
         }
     }
 
@@ -173,24 +198,77 @@ impl TestHooks {
             .is_some_and(|configured| configured == "*" || configured == seed)
     }
 
-    pub(crate) fn interaction_fault(&self) -> Option<InteractionFault> {
-        self.interaction_fault
+    pub(crate) fn take_interaction_fault(
+        &self,
+        command: &RingingCommand,
+    ) -> Option<InteractionFault> {
+        let fault = self.interaction_fault?;
+        let matches = match fault {
+            InteractionFault::PermissionDeny | InteractionFault::PermissionHang => matches!(
+                command,
+                RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
+            ),
+            InteractionFault::AskDismiss | InteractionFault::AskHang => matches!(
+                command,
+                RingingCommand::Control(qaqh_domain::ControlCommand::InteractionAskRespond { .. })
+            ),
+        };
+        if !matches {
+            return None;
+        }
+        if matches!(
+            fault,
+            InteractionFault::PermissionDeny | InteractionFault::AskDismiss
+        ) && self.interaction_fault_used.swap(true, Ordering::AcqRel)
+        {
+            return None;
+        }
+        Some(fault)
     }
 
-    /// Apply command-ack delay/hang after routing has selected the channel.
-    pub(crate) async fn apply_command_ack_fault(&self, channel: RingingChannel) {
+    /// Apply command-ack delay/hang after routing has selected the channel and
+    /// parsed the command payload.
+    pub(crate) async fn apply_command_ack_fault(
+        &self,
+        channel: RingingChannel,
+        command: &RingingCommand,
+    ) {
         let Some(fault) = self.command_ack else {
             return;
         };
         if self
             .command_ack_channel
             .is_some_and(|expected| expected != channel)
+            || !self.command_ack_target.matches(command)
         {
             return;
         }
         match fault {
             CommandAckFault::Hang => std::future::pending::<()>().await,
             CommandAckFault::Delay(delay) => tokio::time::sleep(delay).await,
+        }
+    }
+}
+
+impl CommandAckTarget {
+    fn matches(self, command: &RingingCommand) -> bool {
+        match self {
+            Self::InteractionResponses => matches!(
+                command,
+                RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
+                    | RingingCommand::Control(
+                        qaqh_domain::ControlCommand::InteractionAskRespond { .. }
+                    )
+            ),
+            Self::PermissionResponse => matches!(
+                command,
+                RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
+            ),
+            Self::AskResponse => matches!(
+                command,
+                RingingCommand::Control(qaqh_domain::ControlCommand::InteractionAskRespond { .. })
+            ),
+            Self::All => true,
         }
     }
 }
@@ -273,6 +351,27 @@ fn parse_interaction_fault(value: &str) -> Option<InteractionFault> {
 mod tests {
     use super::*;
 
+    fn permission_command() -> RingingCommand {
+        RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+            tool_call_id: "call-1".into(),
+            approved: true,
+            trust_folder: false,
+        })
+    }
+
+    fn ask_command() -> RingingCommand {
+        RingingCommand::Control(qaqh_domain::ControlCommand::InteractionAskRespond {
+            interaction_id: "ask-1".into(),
+            answers: vec![],
+        })
+    }
+
+    fn conversation_command() -> RingingCommand {
+        RingingCommand::Conversation(qaqh_domain::ConversationCommand::ConversationCancel {
+            turn_id: None,
+        })
+    }
+
     #[test]
     fn channel_name_parser_is_closed() {
         assert_eq!(parse_channel_name("control"), Some(RingingChannel::Control));
@@ -305,6 +404,64 @@ mod tests {
         );
         assert_eq!(parse_interaction_fault("deny"), None);
         assert_eq!(parse_interaction_fault("permission-disconnect"), None);
+    }
+
+    #[test]
+    fn deny_and_dismiss_faults_are_one_shot_and_type_scoped() {
+        let hooks = TestHooks {
+            interaction_fault: Some(InteractionFault::PermissionDeny),
+            ..TestHooks::disabled()
+        };
+        assert!(hooks.take_interaction_fault(&ask_command()).is_none());
+        assert_eq!(
+            hooks.take_interaction_fault(&permission_command()),
+            Some(InteractionFault::PermissionDeny)
+        );
+        assert!(
+            hooks
+                .take_interaction_fault(&permission_command())
+                .is_none()
+        );
+
+        let hooks = TestHooks {
+            interaction_fault: Some(InteractionFault::AskDismiss),
+            ..TestHooks::disabled()
+        };
+        assert!(
+            hooks
+                .take_interaction_fault(&permission_command())
+                .is_none()
+        );
+        assert_eq!(
+            hooks.take_interaction_fault(&ask_command()),
+            Some(InteractionFault::AskDismiss)
+        );
+        assert!(hooks.take_interaction_fault(&ask_command()).is_none());
+    }
+
+    #[test]
+    fn hang_faults_remain_persistent_and_type_scoped() {
+        let hooks = TestHooks {
+            interaction_fault: Some(InteractionFault::PermissionHang),
+            ..TestHooks::disabled()
+        };
+        assert!(hooks.take_interaction_fault(&ask_command()).is_none());
+        assert_eq!(
+            hooks.take_interaction_fault(&permission_command()),
+            Some(InteractionFault::PermissionHang)
+        );
+        assert_eq!(
+            hooks.take_interaction_fault(&permission_command()),
+            Some(InteractionFault::PermissionHang)
+        );
+    }
+
+    #[test]
+    fn command_ack_target_defaults_to_interaction_responses() {
+        assert!(CommandAckTarget::InteractionResponses.matches(&permission_command()));
+        assert!(CommandAckTarget::InteractionResponses.matches(&ask_command()));
+        assert!(!CommandAckTarget::InteractionResponses.matches(&conversation_command()));
+        assert!(CommandAckTarget::All.matches(&conversation_command()));
     }
 
     #[test]
