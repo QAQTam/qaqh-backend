@@ -40,6 +40,6 @@ pub use timeline::{
     FileSnapshotInfo, RoundBlock, RoundData, TimelineBlock, TimelineBlockKind, TimelineBlockState,
     TimelineEntry, TimelineEvent, TimelineFailure, TimelineIntent, TimelinePathOp, TimelineRound,
     TimelineSnapshot, TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader,
-    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState,
-    ToolCallDef, ToolResultDef, TurnData,
+    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn,
+    TimelineTurnState, ToolCallDef, ToolResultDef, TurnData,
 };

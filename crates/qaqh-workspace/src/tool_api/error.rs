@@ -326,7 +326,11 @@ mod tests {
 
     #[test]
     fn code_parse_accepts_builtin_and_namespaced_forms() {
-        for raw in ["invalid_arguments", "mcp.rate_limited", "edit.hash_mismatch"] {
+        for raw in [
+            "invalid_arguments",
+            "mcp.rate_limited",
+            "edit.hash_mismatch",
+        ] {
             assert!(ToolErrorCode::parse(raw).is_ok(), "{raw} 应合法");
         }
     }

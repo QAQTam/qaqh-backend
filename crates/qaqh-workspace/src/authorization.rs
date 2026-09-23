@@ -133,7 +133,12 @@ impl AuthorizedToolCall {
     }
 
     pub(crate) fn into_parts(self) -> (ToolInvocation, Vec<PathBuf>, PathBuf, GrantKind) {
-        (self.invocation, self.resources, self.workspace_root, self.grant)
+        (
+            self.invocation,
+            self.resources,
+            self.workspace_root,
+            self.grant,
+        )
     }
 }
 

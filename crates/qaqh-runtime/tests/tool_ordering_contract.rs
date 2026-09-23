@@ -90,7 +90,9 @@ fn probe_state() -> &'static Mutex<ProbeState> {
 }
 
 fn lock_probe() -> std::sync::MutexGuard<'static, ProbeState> {
-    probe_state().lock().unwrap_or_else(|error| error.into_inner())
+    probe_state()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 /// 测试探针：记录 start/end 与并发峰值，可选 sleep 与同批 rendezvous。
@@ -213,9 +215,7 @@ fn init_process_data_root() {
         }
         dir
     });
-    SESSION_INIT.call_once(|| {
-        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir())
-    });
+    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
 }
 
 #[derive(Debug)]
@@ -323,8 +323,7 @@ fn run_batch<F: FnOnce(&Path)>(
     }
     admitted.reverse(); // 输入顺序 ≠ 模型序：由批执行自行归一。
 
-    let cancel =
-        CancelToken::with_query_hook(Arc::new(|| CANCEL_ARMED.load(Ordering::SeqCst)));
+    let cancel = CancelToken::with_query_hook(Arc::new(|| CANCEL_ARMED.load(Ordering::SeqCst)));
     let emitter = RecordingEmitter::default();
     let mut phase = LoopPhase::ToolsRunning;
     let mut pending = PendingState::default();
@@ -346,15 +345,7 @@ fn run_batch<F: FnOnce(&Path)>(
             stats: &mut stats,
             flow: &mut flow,
         };
-        execute_admitted_batch(
-            &mut ctx,
-            &tool,
-            admitted,
-            &order,
-            &serial,
-            "t-ordering",
-            0,
-        )
+        execute_admitted_batch(&mut ctx, &tool, admitted, &order, &serial, "t-ordering", 0)
     };
 
     let (events, max_active) = {
@@ -441,8 +432,7 @@ fn mixed_batch_serial_group_runs_after_parallel_group() {
     );
     let serial_start = outcome.at("ord-b", "start");
     assert!(
-        serial_start > outcome.at("ord-a", "end")
-            && serial_start > outcome.at("ord-c", "end"),
+        serial_start > outcome.at("ord-a", "end") && serial_start > outcome.at("ord-c", "end"),
         "serial item must start only after the whole parallel group finished: {outcome:?}"
     );
     // 回填 = 执行阶段顺序：并行组（a、c，组内模型序）先落，串行组（b）随后。

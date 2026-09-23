@@ -514,7 +514,10 @@ pub struct ToolResultDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<FileSnapshotInfo>,
     /// 运行元数据（09-18 展示契约）。历史归档缺失时为空对象。
-    #[serde(default, skip_serializing_if = "qaqh_types::ToolResultMetrics::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "qaqh_types::ToolResultMetrics::is_empty"
+    )]
     pub metrics: qaqh_types::ToolResultMetrics,
 }
 

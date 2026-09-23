@@ -53,10 +53,9 @@ pub use descriptor::{
 pub use display::{PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolHeader, ToolMetrics};
 pub use erased::ErasedTool;
 pub use error::{
-    FatalToolError, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind,
-    ToolExecutionError,
+    FatalToolError, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError,
 };
-pub use legacy::{map_tool_result, LegacyCallOutcome, LegacyToolAdapter};
+pub use legacy::{LegacyCallOutcome, LegacyToolAdapter, map_tool_result};
 pub use output::{
     ToolContentBlock, ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue,
     ToolProjection, ToolStatus,
