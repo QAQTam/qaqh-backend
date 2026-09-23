@@ -211,8 +211,8 @@ mod tests {
             .expect("exec projector must be registered by exec::register");
         assert!(display.summary.is_some());
         assert!(
-            manager.project_display("read", &args, "L1: ok").is_some(),
-            "契约 §6.1 的文件读取投影必须可用"
+            manager.project_display("read", &args, "L1: ok").is_none(),
+            "read is typed and carries display in ToolResult"
         );
         assert!(
             manager

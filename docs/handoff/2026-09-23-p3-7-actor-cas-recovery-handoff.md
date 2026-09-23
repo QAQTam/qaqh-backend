@@ -58,10 +58,18 @@
     session 取 `ctx.session_id`；
   - 缺 URL 保留 `MISSING_URL`，网络/读取失败保留 legacy `TOOL_ERROR`
     JSON payload 形态；成功结果 canonical data 仍为空对象。
+- `read` typed 迁移：
+  - 单文件/1-8 批量、范围截断、`if_hash`、账本行号修正与
+    `file_state::record_read` 语义保持；
+  - workspace 根显式取自 `ToolCallContext`，model/display 从同一 typed
+    output 派生；
+  - `LINE_OUT_OF_RANGE` / `RANGE_TOO_LARGE` 等 legacy error code 与结构化
+    details 回填 wire `data`；
+  - 删除 read 文本 projector。
 
 仍未完成：
 
-- 尚未迁移为 `TypedTool` 的 legacy 工具（read/write/edit/apply_patch/
+- 尚未迁移为 `TypedTool` 的 legacy 工具（write/edit/apply_patch/
   copy_range/journal/read_image/exec/ask 等）仍依赖文本 projector；
   typed 工具已完全脱离该路径。
 - 旧 `tool_outbox.wal` 的只读兼容代码可在兼容窗口结束后删除；当前保留
