@@ -19,6 +19,12 @@
 > `PlanReviewItem` 定义见 PR #288 的 `crates/qaqh-domain/src/event.rs`；
 > 根入口再导出见同一 PR 的 `crates/qaqh-client/src/lib.rs` 与
 > `crates/qaqh-client/src/types.rs`。
+>
+> 本文引用的 TUI 侧路径（`src/app/session.rs` / `src/app/mod.rs` /
+> `src/ui/modal.rs` / `src/ui/v2/modal.rs`）对应 **`qaqh-tui-app @ bbdcc3b`**
+> （`chore(anchor): 采纳后端 tui-anchor-2026-09-23`）——那是 TUI 锚定
+> `tui-anchor-2026-09-23` 时的状态；backend 仓没有该仓库副本，这几行按该 commit
+> 复核。
 > 上游需求：
 > [`TUI对后端的协作需求`](../../../qaqh-tui-app/docs/spec/2026-09-23-TUI对后端的协作需求-spec.md)
 > §5.1 / P1。
@@ -29,7 +35,7 @@
 |---|---|---|
 | plan review 的待评审项 | `qaqh_client::PlanReviewItem`（由 PR #288 在 `qaqh-client` 根入口再导出） | plan modal 里的 Todo 预览 |
 | workspace todo 面板 | `qaqh_client::DashboardTask`，来自 `session.dashboard`；失败时回退 `todo.status` JSON | 右侧/Workspace todo 列表 |
-| todo 工具的结构化输出 | backend 内部 `TodoListOutput` / `TodoItemView`（模块为 `pub(crate)`，不是公开路径） | 仅 backend canonical/model/display 投影，不是 TUI 公共入口 |
+| todo 工具的结构化输出 | backend 内部 `TodoListOutput` / `TodoItemView`（模块为 `pub(crate)`，不是公开路径） | 只有 JSON 没有 typed 承载：`todo.list` 走 service 面（TUI 能用 `QueryRequest` 拿到这个 JSON），但 `qaqh-client` 没有对应类型 |
 
 `TodoItemView` 所在模块当前是 `pub(crate)`；TUI 不应直接依赖 `qaqh-workspace`
 去命名它，也不要自行复制一份镜像。若未来 TUI 需要 typed workspace todo，
@@ -95,20 +101,25 @@ P3 合并并发布新锚点后（前置条件：PR #288 已合入 `betav2`，且
 `crates/qaqh-client/src/lib.rs` / `types.rs` 已再导出 `PlanReviewItem`；
 这两处再导出是 #288 的一部分，不需要 TUI 侧另开 PR）。
 
-前置条件可以机械判定，不用人肉确认（锚定 `pub use` 声明形态，避免注释/测试里的
-同名提及造成假阳性）：
+前置条件可以机械判定，不用人肉确认。**必须锚定 `pub use` 块本身**，不要用
+`grep -A 20` 这种窗口——`lib.rs` 里另有一条无关的
+`pub use qaqh_domain::state::{…}`，窗口会把下面的 `pub use types::{…}` 一起吞掉，
+造成「命令通过但命中的不是自己声明的符号」的假阳性：
 
 ```bash
-grep -nE 'pub use qaqh_domain' -A 20 crates/qaqh-client/src/lib.rs \
-  | grep -q 'PlanReviewItem' \
-&& grep -nE 'pub use qaqh_domain' -A 20 crates/qaqh-client/src/types.rs \
-  | grep -q 'PlanReviewItem' \
+awk '/^pub use types::\{/,/^\};/' crates/qaqh-client/src/lib.rs \
+  | grep -qw 'PlanReviewItem' \
+&& awk '/^pub use qaqh_domain::\{/,/^\};/' crates/qaqh-client/src/types.rs \
+  | grep -qw 'PlanReviewItem' \
 && echo "anchor OK"
 ```
 
-两条 `pub use` 白名单都命中即满足；只要有一条为空，说明锚点还在 `betav2`
-的旧形状上，先别动 TUI。（更硬的判据是 `cargo build -p qaqh-client --features ts`
-后查生成物里的类型名。）
+（`lib.rs` 那条锚 `pub use types::`，`types.rs` 那条锚 `pub use qaqh_domain::` ——
+`lib.rs` 的 `pub use qaqh_domain` 只覆盖 `::state`，本来就不该在那里命中
+`PlanReviewItem`。两条都命中即满足；任一条为空说明锚点还在 `betav2` 的旧形状上，
+先别动 TUI。更硬的判据仍是编译：`cargo build -p qaqh-client --features ts` 后查
+生成物，或直接在 `crates/qaqh-client/tests/public_api.rs` 里加一条
+`use qaqh_client::PlanReviewItem;`。）
 
 1. `src/app/session.rs`：
 
@@ -189,6 +200,7 @@ TUI 若只消费输出，不应依赖这些 alias。
 | 计数 | **平铺**：`idle` / `pending` / `in_progress` / `completed` / `cancelled` / `total` | **嵌套**：`counts: { idle, in_progress, completed, cancelled, total }` |
 | 当前项 | `current_id` + `current_title` | `current_id` |
 | 额外字段 | `mode` | — |
+| 计数细节 | `idle` 与 `pending` 是**同值双键**（都写同一个 pending 计数），不是两个计数 | 只有 `counts.idle` 一个来源 |
 | `items[]` | `{id,title,description,status,evidence}` | `{id,title,description,status,evidence}`（形状相同） |
 | 无 store / 空 seed | `null` | 仍返回信封（`items: []`、计数为 0） |
 
