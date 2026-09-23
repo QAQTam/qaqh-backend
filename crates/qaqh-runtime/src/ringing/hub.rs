@@ -2834,11 +2834,20 @@ mod tests {
             snapshot.turns[0].rounds[0].blocks[0].state,
             qaqh_domain::TimelineBlockState::Sealed
         );
-        // seal 裁剪语义：turn seal 后回放尾清空（TurnSealed 条目自身也被
-        // 裁剪）；重连客户端由快照 watermark 重基线（recover_gap 契约）。
+        // #314（2026-09-23 契约变更）：seal **不再**裁剪回放尾。sealed turn 的条目
+        // 必须留到双限驱逐为止，否则「回合中途重基线」的客户端拿不到补齐所需的
+        // `TurnSealed`。此处孤儿 turn 收尾后，从 seq 1 起仍应能回放到 TurnSealed。
+        let tail = hub.timeline_replay_since("s", 1);
         assert!(
-            hub.timeline_replay_since("s", 1).is_empty(),
-            "sealed turn must leave an empty replay tail"
+            !tail.is_empty(),
+            "sealed turn 的条目必须留在回放尾里（#314）"
+        );
+        assert!(
+            matches!(
+                tail.last().map(|entry| &entry.event),
+                Some(qaqh_domain::TimelineEvent::TurnSealed { .. })
+            ),
+            "回放尾必须收在 TurnSealed 上"
         );
         let _ = std::fs::remove_dir_all(root);
     }
