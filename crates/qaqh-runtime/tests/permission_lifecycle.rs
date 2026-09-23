@@ -536,6 +536,70 @@ fn llm_approval_resumes_original_turn_once() {
 }
 
 #[test]
+fn llm_duplicate_permission_response_is_stable_and_does_not_execute_twice() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("input.txt");
+    std::fs::write(&path, "hello\n").unwrap();
+    run_case(
+        1,
+        temp.path(),
+        vec![
+            tool_round(&[("llm-read-once", "read", json!({"path": path}))]),
+            final_round("finished once"),
+        ],
+        2,
+        move |writer, receiver| {
+            send_cmd(writer, "", cmd_user_input("read it once"));
+            assert_eq!(permission_id(receiver), "llm-read-once");
+            send_cmd(writer, "", cmd_permission_respond("llm-read-once", true));
+
+            let events = collect_through_terminal(receiver);
+            assert_single_completion(&events, 1);
+            assert!(finished_result(&events).is_some_and(|result| result.is_success()));
+
+            send_cmd(writer, "", cmd_permission_respond("llm-read-once", true));
+            let duplicate = expect_event(receiver, Duration::from_secs(5), |event| {
+                matches!(
+                    event,
+                    RingingEvent::Control(ControlEvent::OperationFailed { error, .. })
+                        if error.code == "interaction_already_resolved"
+                )
+            });
+            match duplicate {
+                RingingEvent::Control(ControlEvent::OperationFailed { error, .. }) => {
+                    assert!(error.message.contains("approved"));
+                }
+                other => panic!("expected interaction_already_resolved, got {other:?}"),
+            }
+
+            // The duplicate response must not produce another tool result or turn.
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                match receiver.recv_timeout(Duration::from_millis(25)) {
+                    Ok(event)
+                        if matches!(
+                            event,
+                            RingingEvent::Tool(ToolEvent::ToolFinished { .. })
+                                | RingingEvent::Conversation(
+                                    ConversationEvent::TurnCompleted { .. }
+                                        | ConversationEvent::TurnFailed { .. }
+                                )
+                        ) =>
+                    {
+                        panic!("duplicate approval executed the tool again: {event:?}");
+                    }
+                    Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        panic!("event channel disconnected")
+                    }
+                }
+            }
+        },
+    );
+}
+
+#[test]
 fn llm_rejection_resumes_with_original_failure() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let temp = tempfile::tempdir().expect("tempdir");

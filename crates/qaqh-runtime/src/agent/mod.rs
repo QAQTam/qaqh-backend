@@ -41,6 +41,7 @@
 //! 2. 对外构造唯一入口为 `spawn_agent`（`actor.rs` / `registry.rs` 不得自行
 //!    装配 `AgentState`）。
 
+pub(crate) mod approval_registry;
 pub(crate) mod compaction_port;
 pub mod context;
 pub(crate) mod dashboard;

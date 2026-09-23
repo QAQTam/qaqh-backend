@@ -71,6 +71,17 @@ impl Loop {
                             "tool permission request is no longer pending",
                         );
                     }
+                    PermissionDisposition::AlreadyResolved { decision } => {
+                        let _ = ctx;
+                        let message =
+                            format!("tool permission request was already resolved as {decision}");
+                        self.emit_operation_failed(
+                            command_id,
+                            qaqh_domain::ErrorScope::Tool,
+                            "interaction_already_resolved",
+                            &message,
+                        );
+                    }
                     PermissionDisposition::UiHandled => {}
                     PermissionDisposition::LlmResolved { call_id, admitted } => {
                         match self.session.turn.admit_interaction_resolution(&call_id) {
