@@ -13,188 +13,271 @@
 //! 失败时**只重发未生效的部分**——已生效的 hunk 已落在盘上，重发完整 patch
 //! 会对它们二次 `NO_MATCH`（失败响应会列出「已生效 / 未生效」两份路径）。
 
+use std::time::Duration;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::ToolRisk;
 use crate::apply_patch_engine::EngineError;
-use crate::{ToolHandler, ToolResult, ToolRisk};
+use crate::file_mutate::{ambient_tool_context, mutation_display, mutation_error};
+use crate::tool_api::{
+    ErasedTool, OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolExecutionError, ToolExposure, ToolName, ToolProjection, ToolSource, TypedTool,
+    TypedToolAdapter,
+};
 
-fn workspace_root() -> String {
-    let ws = crate::current_workspace();
-    if ws.is_empty() { ".".to_string() } else { ws }
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyPatchArgs {
+    pub patch: String,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
-/// 执行 apply_patch：patch（必填，`*** Begin Patch` Codex 格式）+ dry_run。
-pub(super) fn exec_apply_patch(args: &serde_json::Value) -> ToolResult {
-    let patch = match args
-        .get("patch")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        Some(p) => p,
-        None => {
-            return crate::ToolResult::error(serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "error",
-                "code": "PARSE_ERROR",
-                "message": "apply_patch: missing 'patch'",
-                "hint": "Provide a Codex-format patch: '*** Begin Patch' ... '*** End Patch' (see the tool description for the format).",
-            }).to_string());
-        }
-    };
-    let dry_run = args
-        .get("dry_run")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyPatchOutput {
+    pub timeis: String,
+    pub status: String,
+    pub format: String,
+    pub dry_run: bool,
+    pub files: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overwritten: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub touched: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_id: Option<String>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    model_text: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    first_path: Option<String>,
+}
 
-    let ws = workspace_root();
-    let mut result = exec_engine_patch(&ws, patch, dry_run);
-    // dry-run 通过 → 暂存参数供 confirm_apply 内存直提（模型无需重发 patch）。
-    if dry_run && result.status == crate::ToolStatus::Ok {
-        let mut pending_args = args.clone();
-        if let Some(obj) = pending_args.as_object_mut() {
-            obj.remove("dry_run");
-        }
-        let pending_id = crate::pending::store("apply_patch", &pending_args);
-        result.data["pending_id"] = serde_json::json!(pending_id);
-        result.data["dry_run"] = serde_json::json!(true);
-        result.push_hint(&format!(
-            "pending_id={pending_id} — confirm with confirm_apply {{\"pending_id\":\"{pending_id}\",\"action\":\"apply\"}}"
-        ));
+impl ToolProjection for ApplyPatchOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.model_text.clone(),
+        }]
     }
-    result
+
+    fn summary(&self) -> Option<String> {
+        self.model_text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(160).collect())
+    }
+
+    fn display(&self, _args: &Value) -> ToolDisplay {
+        mutation_display(
+            self.first_path.as_deref(),
+            "",
+            crate::tool_api::PathOp::Patch,
+            "apply_patch",
+            &self.model_text,
+            None,
+        )
+    }
 }
 
-/// 内容匹配引擎：无行号、四级匹配、按序应用（任一 hunk 失败即停，已写入
-/// 的文件保留——与上游 Codex 一致；失败前先 `dry_run=true` 预检全部 hunk）。
-fn exec_engine_patch(ws: &str, patch: &str, dry_run: bool) -> ToolResult {
-    use crate::apply_patch_engine::{apply_patch_engine, dry_run_patch_engine};
+pub struct ApplyPatchTool;
 
-    let outcome = if dry_run {
-        dry_run_patch_engine(patch, std::path::Path::new(ws))
-    } else {
-        apply_patch_engine(patch, std::path::Path::new(ws), Default::default())
-    };
+impl TypedTool for ApplyPatchTool {
+    type Args = ApplyPatchArgs;
+    type Output = ApplyPatchOutput;
 
-    match outcome {
-        Ok(outcome) => {
-            let mut ins = 0usize;
-            let mut del = 0usize;
-            for d in &outcome.deltas {
-                match (&d.old, &d.new) {
-                    (None, Some(new)) => ins += new.lines().count(),
-                    (Some(old), None) => del += old.lines().count(),
-                    (Some(old), Some(new)) => {
-                        let (a, r, _) = crate::file_shared::diff_stats_between(old, new);
-                        ins += a as usize;
-                        del += r as usize;
-                    }
-                    (None, None) => {}
-                }
-                // 账本同步：引擎直接写盘，touched 文件的最新内容登记进
-                // file_state，否则后续 edit 盲定位防漂移会误报。
-                if !dry_run {
-                    if let Some(new) = &d.new {
-                        // 账本键用解析后的绝对路径（与 read/edit/write 同键），
-                        // 否则同一文件会有两套键，STALE_FILE 校验看不到本写入。
-                        crate::file_state::record_write(&d.resolved_path, new);
-                    }
-                    let op = if d.old.is_none() {
-                        "add"
-                    } else if d.new.is_none() {
-                        "delete"
-                    } else {
-                        "update"
-                    };
-                    crate::journal::record_change(
-                        &crate::journal::active_session(),
-                        "",
-                        "apply_patch",
-                        &d.path,
-                        op,
-                        d.old.as_deref(),
-                        d.new.as_deref(),
-                        "ok",
-                    );
-                }
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("apply_patch").expect("valid apply_patch tool name"),
+            display_name: None,
+            description: DESCRIPTION.to_string(),
+            input_schema: apply_patch_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(ApplyPatchOutput))
+                .expect("apply_patch output schema"),
+            category: crate::permission::ToolCategory::Write,
+            risk: ToolRisk::Write,
+            default_timeout: Duration::from_secs(60),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("apply_patch")
+                .unwrap_or_default(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        use crate::apply_patch_engine::{apply_patch_engine, dry_run_patch_engine};
+
+        if args.patch.is_empty() {
+            return Err(mutation_error(
+                "PARSE_ERROR",
+                "apply_patch: missing 'patch'",
+                Some(
+                    "Provide a Codex-format patch: '*** Begin Patch' ... '*** End Patch' (see the tool description for the format).",
+                ),
+                json!({}),
+            ));
+        }
+
+        let patch = args.patch;
+        let dry_run = args.dry_run;
+        let outcome = if dry_run {
+            dry_run_patch_engine(&patch, &ctx.workspace_root)
+        } else {
+            apply_patch_engine(&patch, &ctx.workspace_root, Default::default())
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let (code, hint) = error_code_and_hint(&error);
+                return Err(mutation_error(
+                    code,
+                    error.to_string(),
+                    Some(&hint),
+                    json!({}),
+                ));
             }
-            let n = outcome.affected.added.len()
-                + outcome.affected.modified.len()
-                + outcome.affected.deleted.len();
-            // `*** Add File:` 打到已存在路径 = 整文件覆盖（上游语义，fixture
-            // 011 依赖）。引擎已把旧内容记进 `FileDelta.old`；这里再显式列出，
-            // 免得响应体看起来像一次普通新增（BUG-2026-09-16-10）。
-            let overwritten: Vec<String> = outcome
-                .deltas
-                .iter()
-                .filter(|d| {
-                    d.old.is_some()
-                        && d.new.is_some()
-                        && outcome.affected.added.iter().any(|a| a == &d.path)
-                })
-                .map(|d| d.path.clone())
-                .collect();
-            let text = if dry_run {
-                format!(
-                    "[DRY RUN] apply_patch — patch parses: {n} file(s), +{ins} -{del}; engine pre-checked every hunk against current file contents (a real apply may still differ)\n"
-                )
-            } else if overwritten.is_empty() {
-                format!("[OK] apply_patch — applied: {n} file(s), +{ins} -{del}\n")
-            } else {
-                format!(
-                    "[OK] apply_patch — applied: {n} file(s), +{ins} -{del}; OVERWROTE existing: {} (previous contents recorded for rollback)\n",
-                    overwritten.join(", ")
-                )
-            };
-            let mut data = serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "ok",
-                "format": "codex",
-                "dry_run": dry_run,
-                "files": n,
-                "insertions": ins,
-                "deletions": del,
-                "added": outcome.affected.added,
-                "modified": outcome.affected.modified,
-                "deleted": outcome.affected.deleted,
-            });
-            if !overwritten.is_empty() {
-                data["overwritten"] = serde_json::json!(overwritten);
+        };
+
+        let mut insertions = 0usize;
+        let mut deletions = 0usize;
+        for delta in &outcome.deltas {
+            match (&delta.old, &delta.new) {
+                (None, Some(new)) => insertions += new.lines().count(),
+                (Some(old), None) => deletions += old.lines().count(),
+                (Some(old), Some(new)) => {
+                    let (added, removed, _) = crate::file_shared::diff_stats_between(old, new);
+                    insertions += added as usize;
+                    deletions += removed as usize;
+                }
+                (None, None) => {}
             }
-            if dry_run {
-                data["touched"] = serde_json::Value::Array(
-                    outcome
-                        .deltas
-                        .iter()
-                        .map(|d| serde_json::Value::String(d.path.clone()))
-                        .collect(),
+            // 账本同步：引擎直接写盘，touched 文件的最新内容登记进 file_state，
+            // 否则后续 edit 盲定位防漂移会误报。
+            if !dry_run {
+                if let Some(new) = &delta.new {
+                    // 账本键用解析后的绝对路径（与 read/edit/write 同键）。
+                    crate::file_state::record_write(&delta.resolved_path, new);
+                }
+                let operation = if delta.old.is_none() {
+                    "add"
+                } else if delta.new.is_none() {
+                    "delete"
+                } else {
+                    "update"
+                };
+                crate::journal::record_change(
+                    &ctx.session_id,
+                    "",
+                    "apply_patch",
+                    &delta.path,
+                    operation,
+                    delta.old.as_deref(),
+                    delta.new.as_deref(),
+                    "ok",
                 );
             }
-            crate::ToolResult::ok_data(data, text)
         }
-        Err(e) => {
-            let (code, hint) = error_code_and_hint(&e);
-            crate::json_err(code, e.to_string(), hint)
-        }
+
+        let files = outcome.affected.added.len()
+            + outcome.affected.modified.len()
+            + outcome.affected.deleted.len();
+        let overwritten: Vec<String> = outcome
+            .deltas
+            .iter()
+            .filter(|delta| {
+                delta.old.is_some()
+                    && delta.new.is_some()
+                    && outcome
+                        .affected
+                        .added
+                        .iter()
+                        .any(|path| path == &delta.path)
+            })
+            .map(|delta| delta.path.clone())
+            .collect();
+        let touched: Vec<String> = if dry_run {
+            outcome
+                .deltas
+                .iter()
+                .map(|delta| delta.path.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let first_path = outcome.deltas.first().map(|delta| delta.path.clone());
+
+        let mut model_text = if dry_run {
+            format!(
+                "[DRY RUN] apply_patch — patch parses: {files} file(s), +{insertions} -{deletions}; engine pre-checked every hunk against current file contents (a real apply may still differ)\n"
+            )
+        } else if overwritten.is_empty() {
+            format!("[OK] apply_patch — applied: {files} file(s), +{insertions} -{deletions}\n")
+        } else {
+            format!(
+                "[OK] apply_patch — applied: {files} file(s), +{insertions} -{deletions}; OVERWROTE existing: {} (previous contents recorded for rollback)\n",
+                overwritten.join(", ")
+            )
+        };
+        let pending_id = if dry_run {
+            let pending_id = crate::pending::store("apply_patch", &json!({"patch": patch}));
+            model_text.push_str(&format!(
+                "\npending_id={pending_id} — confirm with confirm_apply {{\"pending_id\":\"{pending_id}\",\"action\":\"apply\"}}"
+            ));
+            Some(pending_id)
+        } else {
+            None
+        };
+
+        Ok(ApplyPatchOutput {
+            timeis: crate::now_utc8(),
+            status: "ok".to_string(),
+            format: "codex".to_string(),
+            dry_run,
+            files,
+            insertions,
+            deletions,
+            added: outcome.affected.added,
+            modified: outcome.affected.modified,
+            deleted: outcome.affected.deleted,
+            overwritten,
+            touched,
+            pending_id,
+            model_text,
+            first_path,
+        })
     }
 }
 
-/// Map an engine error to its `(code, hint)` pair for the **display plane**.
-///
-/// ⚠ 通道事实（2026-09-17 实测）：模型读到的是 `ToolResult::render_xml_envelope()`，
-/// 其 body 取 `model.text`，而 `model.text` 来自 `error_with` 的 `message` 参数
-/// （即 [`EngineError`] 的 `Display`，上限 `TOOL_MODEL_MAX_CHARS`）。
-/// `ToolError.hint` **不进入该通道**（`project_for_model` 也不携带它），
-/// 所以本函数返回的 hint 只服务前端/展示面，且被 `TOOL_SUMMARY_MAX_CHARS`(512) 截断。
-///
-/// 因此「已生效 / 未生效」清单必须走 [`EngineError::Partial`] 的 `Display`
-/// （见 `apply_patch_engine::EngineError` 的 `fmt`），**不能只写在 hint 里**——
-/// 否则模型看到的仍是一句「找不到上下文」，照旧重发整个 patch
-/// （BUG-2026-09-16-09）。这里只保留一句短的行动指引，避免 512 截断吃掉它。
-fn error_code_and_hint(e: &EngineError) -> (&'static str, String) {
-    // ⚠ 可达性（N-2①）：`WouldOverwrite` **只可能由 dry-run 产生**——真 apply 的
-    // `AddFile` 分支没有守卫，保持上游覆盖语义（见 `apply_patch_engine::apply_hunk`，
-    // 旧内容记进 `FileDelta.old`）。评审担心的「真 apply 走到这里时前序 hunk 已
-    // 落盘、重发同 patch 会 NO_MATCH」在 HEAD 上不成立，故 hint 只需标明这是
-    // dry-run 的发现，不必再分两种场景写两套文案。
-    match e {
+fn apply_patch_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "patch": {"type": "string", "description": "Codex patch text. If a hunk's context is not unique in the file, extend it with surrounding lines or anchor the chunk with '@@ <context line>'; the engine edits the FIRST match."},
+            "dry_run": {"type": "boolean", "description": "Preview only (also reports WOULD_OVERWRITE when '*** Add File:' targets an existing path)", "default": false}
+        },
+        "required": ["patch"],
+        "additionalProperties": false
+    })
+}
+
+/// Map an engine error to its `(code, hint)` pair for the display plane.
+fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
+    match error {
         EngineError::Partial { error, .. } => {
             let (code, hint) = error_code_and_hint(error);
             (
@@ -235,14 +318,6 @@ fn error_code_and_hint(e: &EngineError) -> (&'static str, String) {
     }
 }
 
-fn handle_apply_patch(ctx: crate::ToolCallCtx) -> ToolResult {
-    exec_apply_patch(&ctx.args)
-}
-
-// ─────────────────────────────────────────────────────────────
-// Registration
-// ─────────────────────────────────────────────────────────────
-
 /// 工具描述。**必须**保留「重复上下文取首个命中」的警示：匹配器不做歧义
 /// 拒绝（`seek_sequence` exact 循环直接返回首个 `i`，与上游 codex 一致），
 /// 上下文不够时被改的是第一处而结果仍是 `[OK]`（BUG-2026-09-16-11）。
@@ -250,24 +325,36 @@ pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch (*** Begin Patc
      disambiguate repeated context with extra lines or '@@ <context line>'. dry_run previews.";
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("apply_patch", crate::display::project_apply_patch);
-    mgr.register(ToolHandler {
-        key: "apply_patch".to_string(),
-        description: DESCRIPTION,
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "patch": {"type": "string", "description": "Codex patch text. If a hunk's context is not unique in the file, extend it with surrounding lines or anchor the chunk with '@@ <context line>'; the engine edits the FIRST match."},
-                "dry_run": {"type": "boolean", "description": "Preview only (also reports WOULD_OVERWRITE when '*** Add File:' targets an existing path)", "default": false}
-            },
-            "required": ["patch"],
-            "additionalProperties": false
-        }),
-        handler: handle_apply_patch,
-        risk: ToolRisk::Write,
-        category: crate::permission::ToolCategory::Write,
-        default_timeout: std::time::Duration::from_secs(60),
-    });
+    mgr.register_typed(ApplyPatchTool);
+}
+
+/// Compatibility entry retained until `confirm_apply` is typed (Wave 6).
+///
+/// Production registration uses [`ApplyPatchTool`] directly; this bridge keeps
+/// the existing in-process call shape for confirm-apply and older tests.
+pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
+    if args
+        .get("patch")
+        .and_then(Value::as_str)
+        .filter(|patch| !patch.is_empty())
+        .is_none()
+    {
+        return crate::ToolResult::error(
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": "PARSE_ERROR",
+                "message": "apply_patch: missing 'patch'",
+                "hint": "Provide a Codex-format patch: '*** Begin Patch' ... '*** End Patch' (see the tool description for the format).",
+            })
+            .to_string(),
+        );
+    }
+    let ctx = ambient_tool_context("apply-patch-compat", Duration::from_secs(60));
+    TypedToolAdapter::new(ApplyPatchTool)
+        .execute(ctx, args.clone())
+        .unwrap_or_else(|fatal| panic!("apply_patch tool fatal: {}", fatal.message))
+        .to_tool_result()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -648,6 +735,32 @@ mod tests {
             desc.contains("@@ <context line>"),
             "description must tell the model to anchor with @@: {desc}"
         );
+    }
+
+    #[test]
+    fn typed_apply_patch_registration_and_display_are_same_source() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        assert!(
+            manager.builtins["apply_patch"].legacy.is_none(),
+            "apply_patch still has legacy executor"
+        );
+
+        let (_dir, workspace) = repo_with_commit(&[("a.txt", "old\n")]);
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
+        crate::CURRENT_WORKSPACE
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone_from(&workspace);
+        let result = exec_apply_patch(&serde_json::json!({"patch": patch}));
+        assert!(result.is_success(), "{}", result.model_text());
+        assert_eq!(result.data["files"], serde_json::json!(1));
+        let display = result.display().expect("typed display");
+        let display_text = match &display.body {
+            Some(qaqh_types::ToolResultDisplayBody::Text { text, .. }) => text,
+            other => panic!("unexpected apply_patch display body: {other:?}"),
+        };
+        assert_eq!(display_text, result.model_text());
     }
 
     #[cfg(unix)]
