@@ -219,6 +219,11 @@ pub(crate) mod pure_tests {
             parse_timeline_cursor("epoch-1:timeline:42:extra", "epoch-1"),
             0
         );
+        // 空 cursor = 首次连接，正常从头开始（不告警）。
+        assert_eq!(parse_timeline_cursor("", "epoch-1"), 0);
+        // 形状合法但 seq 缺失/非法：同样按 0 重放，且和形状不符一样告警。
+        assert_eq!(parse_timeline_cursor("epoch-1:timeline:", "epoch-1"), 0);
+        assert_eq!(parse_timeline_cursor("epoch-1:timeline:abc", "epoch-1"), 0);
     }
     #[test]
     fn session_close_seed_resolution_prefers_command_seed() {
