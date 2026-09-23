@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use qaqh_policy::SandboxBackend;
+
 /// Operating-system family used by policy presets and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,18 +16,6 @@ pub enum Platform {
     Macos,
     Windows,
     Other,
-}
-
-/// Enforcing backend available on the current host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxBackend {
-    /// Linux Landlock + seccomp helper.
-    LinuxLandlockSeccomp,
-    /// Process-tree/resource hardening only; no filesystem/network sandbox.
-    ProcessHardening,
-    /// No enforcing backend is currently wired.
-    None,
 }
 
 /// Capability matrix exposed to policy and diagnostics.

@@ -114,6 +114,17 @@ pub struct ToolCallContext {
     pub source: ToolCallSource,
 }
 
+impl ToolCallContext {
+    /// Canonical sandbox policy derived from this explicit call context.
+    ///
+    /// The first Linux cut uses workspace-write + network-deny. Keeping this
+    /// as a method avoids a second source of truth while the full policy
+    /// engine is still being extracted.
+    pub fn sandbox_spec(&self) -> qaqh_policy::SandboxSpec {
+        qaqh_policy::SandboxSpec::workspace_write(self.workspace_root.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +154,9 @@ mod tests {
         };
         assert_eq!(ctx.mode, AgentMode::Code);
         assert_eq!(ctx.source, ToolCallSource::Model);
+        assert_eq!(
+            ctx.sandbox_spec().writable_roots,
+            vec![PathBuf::from("/tmp/ws")]
+        );
     }
 }
