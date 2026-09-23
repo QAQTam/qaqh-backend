@@ -190,6 +190,7 @@ fn glob_root(ctx: &ToolCallContext, raw_path: Option<&str>) -> PathBuf {
 }
 
 fn glob_display(args: &Value, output: &str) -> ToolDisplay {
+    let (glob_body, glob_body_truncated) = crate::tool_api::display::clamp_display_body(output);
     let pattern = args
         .get("pattern")
         .and_then(Value::as_str)
@@ -210,8 +211,8 @@ fn glob_display(args: &Value, output: &str) -> ToolDisplay {
                     label: "glob".to_string(),
                 },
                 ToolBody::Text {
-                    text: output.to_string(),
-                    truncated: false,
+                    text: glob_body.clone(),
+                    truncated: glob_body_truncated,
                 },
             );
         }
@@ -222,8 +223,8 @@ fn glob_display(args: &Value, output: &str) -> ToolDisplay {
             op: crate::tool_api::PathOp::List,
         },
         ToolBody::Text {
-            text: output.to_string(),
-            truncated: false,
+            text: glob_body,
+            truncated: glob_body_truncated,
         },
     )
     .with_summary(output.lines().next().unwrap_or_default().to_string())

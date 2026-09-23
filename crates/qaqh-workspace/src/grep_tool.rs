@@ -142,6 +142,7 @@ impl ToolProjection for GrepOutput {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let text = self.model_text();
+        let (body_text, body_truncated) = crate::tool_api::display::clamp_display_body(&text);
         match query {
             Some(query) => ToolDisplay::new(
                 ToolHeader::Query {
@@ -149,8 +150,8 @@ impl ToolProjection for GrepOutput {
                     scope,
                 },
                 ToolBody::Text {
-                    text: text.clone(),
-                    truncated: false,
+                    text: body_text.clone(),
+                    truncated: body_truncated,
                 },
             )
             .with_summary(text.lines().next().unwrap_or_default().to_string()),
@@ -159,8 +160,8 @@ impl ToolProjection for GrepOutput {
                     label: "grep".to_string(),
                 },
                 ToolBody::Text {
-                    text,
-                    truncated: false,
+                    text: body_text,
+                    truncated: body_truncated,
                 },
             ),
         }

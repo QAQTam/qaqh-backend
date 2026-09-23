@@ -33,7 +33,11 @@ use qaqh_types::ToolResult;
 /// 命令输出（exec）的默认字符上限（StandardPolicy）。
 const EXEC_CHAR_LIMIT: usize = 8_000;
 /// 大内容工具（网络/图像/进程输出）的默认字符上限。
-const CONTENT_BEARING_CHAR_LIMIT: usize = 16_000;
+///
+/// display 投影复用同一个上限（见 `tool_api::display::clamp_display_body`）：
+/// canonical display 会随 `ToolResult` 落进 `messages.jsonl`，不设限等于把完整
+/// 正文再持久化一份。
+pub(crate) const CONTENT_BEARING_CHAR_LIMIT: usize = 16_000;
 /// exec 内部 token 截断的默认上限（StandardPolicy；模型可显式传参覆盖）。
 const EXEC_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 10_000;
 

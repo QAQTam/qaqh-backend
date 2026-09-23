@@ -58,9 +58,11 @@ impl ToolProjection for WebFetchOutput {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let (body_text, body_truncated) =
+            crate::tool_api::display::clamp_display_body(&self.content);
         let body = ToolBody::Text {
-            text: self.content.clone(),
-            truncated: false,
+            text: body_text,
+            truncated: body_truncated,
         };
         match query {
             Some(query) => ToolDisplay::new(
