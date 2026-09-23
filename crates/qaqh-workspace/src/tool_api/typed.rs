@@ -111,6 +111,7 @@ fn project_output<O: ToolProjection>(
     let output_bytes = model_text.len() as u64;
     let status = output.status();
     let error = output.error();
+    let images = output.images();
 
     ToolOutcome {
         status,
@@ -121,7 +122,7 @@ fn project_output<O: ToolProjection>(
             truncated: false,
         },
         display,
-        images: Vec::new(),
+        images,
         metrics: ToolExecutionMetrics {
             elapsed,
             output_bytes,

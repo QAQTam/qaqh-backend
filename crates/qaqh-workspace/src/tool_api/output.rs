@@ -56,6 +56,12 @@ pub trait ToolProjection: Serialize {
         None
     }
 
+    /// 图片附件。默认无图片；`read_image` 等工具覆盖此方法，避免把
+    /// base64 载荷塞进模型文本 JSON。
+    fn images(&self) -> Vec<qaqh_types::ToolImage> {
+        Vec::new()
+    }
+
     /// 模型投影。为空时由适配器按 base spec §8.1 默认规则生成
     /// （文本序列化 / summary + 有界 JSON）。
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
