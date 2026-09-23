@@ -11,8 +11,9 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::session_fact_v2::{
-    ContentRef, EventId, ExecutionId, FactPayload, FactSchema, SessionFact, SessionId, ToolCallId,
-    ToolFinished, ToolIntent, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    ContentRef, EventId, ExecutionId, FactPayload, FactSchema, RecoveryRef, SessionFact, SessionId,
+    ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability,
+    ToolTerminalStatus, TurnId,
 };
 
 use super::{
@@ -258,6 +259,63 @@ impl ToolLedger {
         })
     }
 
+    /// Seal one open non-replayable intent as part of a recovery batch.
+    ///
+    /// This is the recovery counterpart to the live execution path: the
+    /// resulting `ToolFinished::Indeterminate` carries the batch's canonical
+    /// `RecoveryRef`, and the method is idempotent for repeated recovery runs.
+    /// Idempotent replay and reconciliation intents remain open for their
+    /// dedicated recovery step.
+    pub fn seal_recovery_intent(
+        &mut self,
+        call_id: &ToolCallId,
+        event_id: EventId,
+        recovery_ref: RecoveryRef,
+        now_ms: i64,
+    ) -> Result<ToolRecoveryDisposition, ToolLedgerError> {
+        let (intent, turn_id) = match self.entries.get(call_id) {
+            Some(entry) => {
+                if let Some(finished) = entry.finished() {
+                    return Ok(ToolRecoveryDisposition::Finished {
+                        terminal_status: finished.terminal_status,
+                    });
+                }
+                let intent = entry
+                    .intent()
+                    .ok_or_else(|| ToolLedgerError::IntentMissing {
+                        call_id: call_id.clone(),
+                    })?
+                    .clone();
+                let turn_id = entry.intent_fact().and_then(|fact| fact.turn_id.clone());
+                (intent, turn_id)
+            }
+            None => {
+                return Err(ToolLedgerError::IntentMissing {
+                    call_id: call_id.clone(),
+                });
+            }
+        };
+
+        match &intent.replay_capability {
+            ToolReplayCapability::NoReplay => {
+                let finished = recovery_indeterminate_finished(&intent, recovery_ref, now_ms);
+                self.append_finished(event_id, turn_id, finished, now_ms)?;
+                Ok(ToolRecoveryDisposition::Finished {
+                    terminal_status: ToolTerminalStatus::Indeterminate,
+                })
+            }
+            ToolReplayCapability::IdempotentReplay => Ok(ToolRecoveryDisposition::ReplayAllowed {
+                execution_id: intent.execution_id,
+            }),
+            ToolReplayCapability::Reconcile { probe_ref } => {
+                Ok(ToolRecoveryDisposition::ReconcileRequired {
+                    execution_id: intent.execution_id,
+                    probe_ref: probe_ref.clone(),
+                })
+            }
+        }
+    }
+
     /// Durably append the one intent for `payload.call_id`.
     ///
     /// Repeating the exact same intent is idempotent and returns the existing
@@ -451,6 +509,38 @@ fn index_fact(
         _ => {}
     }
     Ok(())
+}
+
+fn recovery_indeterminate_finished(
+    intent: &ToolIntent,
+    recovery_ref: RecoveryRef,
+    now_ms: i64,
+) -> ToolFinished {
+    ToolFinished {
+        call_id: intent.call_id.clone(),
+        execution_id: Some(intent.execution_id.clone()),
+        terminal_status: ToolTerminalStatus::Indeterminate,
+        output_ref: None,
+        error: Some(ToolError {
+            code: "indeterminate_after_crash".into(),
+            message: "non-idempotent execution was not replayed".into(),
+            retryable: false,
+            details_ref: None,
+        }),
+        metrics: ToolMetrics {
+            started_at_ms: intent.intent_at_ms,
+            finished_at_ms: now_ms,
+            retry_count: 0,
+            output_bytes: 0,
+            progress_bytes_total: 0,
+        },
+        reconciled: false,
+        evidence_ref: None,
+        evidence_fact_seq: None,
+        evidence_event_id: None,
+        recovery_ref: Some(recovery_ref),
+        finished_at_ms: now_ms,
+    }
 }
 
 fn tool_intent_payload(fact: &SessionFact) -> Option<&ToolIntent> {
