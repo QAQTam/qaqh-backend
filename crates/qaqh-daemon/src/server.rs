@@ -156,6 +156,12 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         RingingHub::with_persistence(epoch.clone(), data_root.join("ringing"))
             .with_sessions(sessions.clone()),
     );
+    let v2_hub = Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new(epoch.clone()));
+    if let Err(existing) = v2_hub.install() {
+        log::warn!(
+            "[ringing-v2] projection sink already installed; keeping existing sink ({existing:p})"
+        );
+    }
     let service = QaqhService::init(sessions);
     service.attach_ringing(hub.clone());
     // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
@@ -284,6 +290,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     write_discovery(&discovery)?;
     let app_state = crate::axum_server::AppState {
         hub: hub.clone(),
+        v2_hub: v2_hub.clone(),
         leases: ringing_leases.clone(),
         pending: pending_commands.clone(),
         service: service.clone(),

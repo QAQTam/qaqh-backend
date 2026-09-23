@@ -24,11 +24,15 @@ pub mod sequencer;
 pub mod service_methods;
 pub mod timeline_hub;
 pub(crate) mod timeline_rebuild;
+pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;
 pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
 pub use lease_store::RingingLeaseStore;
 pub use pending_store::PendingCommandStore;
+pub use v2::{
+    V2BootstrapSnapshot, V2Envelope, V2HubError, V2ProjectionHub, V2StreamItem, V2Subscription,
+};
 
 // PR-2-3 模块规则 1（R-4）：ringing/ 的对外消费面收敛为上方 re-export
 // 白名单；`ringing/` 之外的模块禁止深路径引用（如 `ringing::content_store::*`），
