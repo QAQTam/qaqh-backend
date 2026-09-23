@@ -9,12 +9,13 @@ use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 
 use qaqh_session::actor::{
-    SessionActor, SessionActorEffect, SessionActorError, SessionCommand, ToolAdmission,
-    ToolAdmissionError, TurnCommand, TurnCoreState, TurnEffect,
+    InteractionCancellation, SessionActor, SessionActorEffect, SessionActorError, SessionCommand,
+    ToolAdmission, ToolAdmissionError, TurnCommand, TurnCoreState, TurnEffect,
 };
-use qaqh_session::canonical::ToolLedger;
+use qaqh_session::canonical::{ToolLedger, ulid_from_text};
 use qaqh_session::session_fact_v2::{
-    EventId, InputId, InterruptReason, ToolCallId, ToolIntent, TurnId, TurnMode, TurnTerminal,
+    EventId, InputId, InteractionId, InterruptReason, ToolCallId, ToolIntent, TurnId, TurnMode,
+    TurnTerminal,
 };
 
 use super::types::Outcome;
@@ -297,9 +298,30 @@ impl TurnActor {
         call_ids: Vec<ToolCallId>,
         now_ms: i64,
     ) -> Result<Vec<ToolCallId>, ToolAdmissionFailure> {
+        let interactions: Vec<InteractionCancellation> = self
+            .pending_interactions
+            .iter()
+            .map(|interaction_id| InteractionCancellation {
+                interaction_id: InteractionId::new(format!(
+                    "int_{}",
+                    ulid_from_text(interaction_id)
+                )),
+                call_id: Some(ToolCallId::new(format!(
+                    "call_{}",
+                    ulid_from_text(interaction_id)
+                ))),
+            })
+            .collect();
         let appended = self
             .actor
-            .cancel_tool_batch(ledger, actor_turn_id, ledger_turn_id, call_ids, now_ms)
+            .cancel_tool_batch(
+                ledger,
+                actor_turn_id,
+                ledger_turn_id,
+                interactions,
+                call_ids,
+                now_ms,
+            )
             .map_err(ToolAdmissionFailure::from)?;
         self.pending_interactions.clear();
         Ok(appended)
@@ -537,9 +559,9 @@ mod tests {
     use qaqh_session::actor::{ToolAdmission, TurnCoreState};
     use qaqh_session::canonical::{ToolLedger, WriterId};
     use qaqh_session::session_fact_v2::{
-        ContentHash, EventId, ExecutionId, InterruptReason, LogId, PolicyDecisionRef, SessionId,
-        SideEffectClass, ToolCallId, ToolIntent, ToolIntentPolicyOutcome, ToolReplayCapability,
-        TurnTerminal,
+        ContentHash, EventId, ExecutionId, InteractionId, InterruptReason, LogId,
+        PolicyDecisionRef, SessionId, SideEffectClass, ToolCallId, ToolIntent,
+        ToolIntentPolicyOutcome, ToolReplayCapability, TurnTerminal,
     };
 
     use super::{
@@ -901,6 +923,49 @@ mod tests {
             }
         ));
         assert!(ledger.get(&canonical_call_id()).expect("entry").is_open());
+    }
+
+    #[test]
+    fn cancel_pending_interaction_writes_expired_terminal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut ledger = open_ledger(temp.path());
+        let mut actor = TurnActor::new();
+        actor
+            .observe_outcome(&continue_round("t1", 0))
+            .expect("start turn");
+        actor
+            .observe_outcome_with_interactions(
+                &Outcome::YieldToUser {
+                    turn_id: "t1".into(),
+                    reason: crate::agent::types::YieldReason::PermissionPending,
+                },
+                &["call-resume".into()],
+            )
+            .expect("suspend for permission");
+
+        actor
+            .cancel_tool_batch(
+                &mut ledger,
+                &qaqh_session::session_fact_v2::TurnId::new("t1"),
+                &ledger_turn_id(),
+                vec![canonical_call_id()],
+                NOW_MS + 2,
+            )
+            .expect("cancel pending interaction");
+
+        let interaction_id = InteractionId::new(format!(
+            "int_{}",
+            qaqh_session::canonical::ulid_from_text("call-resume")
+        ));
+        let terminal = ledger
+            .interaction_terminal(&interaction_id)
+            .expect("interaction terminal");
+        assert!(matches!(
+            &terminal.payload,
+            qaqh_session::session_fact_v2::FactPayload::InteractionExpired(payload)
+                if payload.reason
+                    == qaqh_session::session_fact_v2::InteractionExpiryReason::TurnCancelled
+        ));
     }
 
     #[test]
