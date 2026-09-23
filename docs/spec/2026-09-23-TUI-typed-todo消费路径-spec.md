@@ -67,6 +67,11 @@ pub struct TodoItem {
 不存在「删除 `status`/`evidence`」这种字段收敛——`qaqh_domain::TodoItem` 从来就
 没有这两个字段。上一版本文写成字段收敛是错的，已按本节更正。
 
+> 措辞限定：**Rust 侧与 JSON wire 形状无变化**。但 `PlanReviewItem` 带
+> `#[cfg_attr(feature = "ts", derive(TS), export_to = "qaqh/")]`，所以 **TS 生成绑定
+> 的类型名会从 `TodoItem` 变成 `PlanReviewItem`** —— 对任何 import 生成绑定的 TS
+> 消费方是编译期改名（本仓 `webui` 的 `TodoItemView` 是手写类型，不受影响）。
+
 > 容易混淆的两点，提前说清：
 >
 > 1. `status` / `evidence` 属于**另一个类型**
@@ -90,14 +95,20 @@ P3 合并并发布新锚点后（前置条件：PR #288 已合入 `betav2`，且
 `crates/qaqh-client/src/lib.rs` / `types.rs` 已再导出 `PlanReviewItem`；
 这两处再导出是 #288 的一部分，不需要 TUI 侧另开 PR）。
 
-前置条件可以机械判定，不用人肉确认：
+前置条件可以机械判定，不用人肉确认（锚定 `pub use` 声明形态，避免注释/测试里的
+同名提及造成假阳性）：
 
 ```bash
-grep -n 'PlanReviewItem' crates/qaqh-client/src/lib.rs crates/qaqh-client/src/types.rs
+grep -nE 'pub use qaqh_domain' -A 20 crates/qaqh-client/src/lib.rs \
+  | grep -q 'PlanReviewItem' \
+&& grep -nE 'pub use qaqh_domain' -A 20 crates/qaqh-client/src/types.rs \
+  | grep -q 'PlanReviewItem' \
+&& echo "anchor OK"
 ```
 
 两条 `pub use` 白名单都命中即满足；只要有一条为空，说明锚点还在 `betav2`
-的旧形状上，先别动 TUI。
+的旧形状上，先别动 TUI。（更硬的判据是 `cargo build -p qaqh-client --features ts`
+后查生成物里的类型名。）
 
 1. `src/app/session.rs`：
 
@@ -207,4 +218,7 @@ P3 落地后，TUI 至少验证：
 - approve/reject 不影响 workspace todo 列表；
 - workspace todo 仍只由 `DashboardTask` 驱动；
 - TUI 不越过 `qaqh-client` 新增对 `qaqh-domain` / `qaqh-workspace` 的直接依赖，
-  也不新增 `TodoItem` 镜像。这是入口纪律，不是编译期隔离保证。
+  也不新增 `TodoItem` 镜像。这是入口纪律，不是编译期隔离保证——本仓已有的
+  `crates/qaqh-client/tests/public_api.rs`（#288 新增了 `PlanReviewItem` /
+  `ConversationInputPurpose` 的用例）可以当后续机械化的护栏起点：再出现「壳层只能
+  自己抄一份」的名字缺口时，先往那里加一条断言，而不是等 TUI 侧报编译错误。
