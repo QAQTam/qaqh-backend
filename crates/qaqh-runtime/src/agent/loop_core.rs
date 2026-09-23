@@ -13,7 +13,7 @@
 //! │  │   ├─ stats: StatsCollector                        │
 //! │  │   ├─ turn: TurnEngine                             │
 //! │  │   └─ tool: ToolEngine                             │
-//! │  ├─ Engines: session_eng, input, misc（compact 已去壳为自由函数）│
+//! │  ├─ Engines: input, misc（compact 已去壳为自由函数）       │
 //! │  ├─ flow: ContextFlow（消息落盘/注入融合）            │
 //! │  ├─ injection_bus: 注入总线（idle 直派 / busy 入队）  │
 //! │  └─ paced_emitter: 事件节拍 + causation 作用域        │
@@ -54,11 +54,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-use super::engine_compact::CompactMeta;
+use super::compaction_port::CompactionPort;
 use super::engine_input::InputEngine;
 use super::engine_misc::MiscEngine;
-use super::engine_session::SessionEngine;
 use super::injection::InjectionBus;
+use super::lifecycle_port::{LifecyclePort, RuntimeLifecyclePort};
 use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::agent::state::agent::AgentState;
@@ -154,12 +154,6 @@ pub struct Loop {
     // ── Process-level signals ──
     /// Cancellation token shared across engines.
     pub(super) cancel: CancelToken,
-    /// T-1-3：取消**原因**位——用户显式取消（`ConversationCancel`）后置位，
-    /// 直到下一条用户输入才清除。`cancel` token 只表达「此刻是否取消」，无法
-    /// 区分「用户取消」与「回合内取消」，于是任何系统注入（子代理报告等）
-    /// 都会在 idle 分支清掉取消标记并开新回合，把用户已取消的会话复活。
-    /// 置位期间系统注入只入队、不开回合。
-    pub(super) user_cancelled: bool,
     /// Current phase (Idle / GateRunning / ToolsRunning).
     pub(super) phase: LoopPhase,
     /// Deferred interrupt commands received while busy.
@@ -183,8 +177,6 @@ pub struct Loop {
     pub(super) session: SessionBundle,
 
     // ── Session-agnostic engines (process lifetime, no session state) ──
-    /// Session lifecycle: create, resume, reload config.
-    pub(super) session_eng: SessionEngine,
     /// User input handler: compliance guard, auto-create session.
     pub(super) input: InputEngine,
     /// Miscellaneous: undo, dashboard, mode.
@@ -196,17 +188,14 @@ pub struct Loop {
     pub(super) flow: qaqh_message::ContextFlow,
     /// Busy-turn injections waiting for the next lap boundary.
     pub(super) injection_bus: InjectionBus,
-    /// Pending compact result (set when compact is running in background).
-    pub(super) pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
-    pub(super) pending_compact_id: Option<String>,
-    pub(super) pending_compact_causation: Option<String>,
+    /// Background compaction task state.
+    pub(super) compaction: CompactionPort,
 
     /// Direct output emitter. The renderer performs frame-level coalescing.
     pub(super) paced_emitter: PacedEmitter,
 
-    /// Idle-unload liveness signal shared with the daemon registry. The Loop
-    /// is the producer (busy/activity/suspend), the registry is the consumer.
-    pub(super) liveness: std::sync::Arc<super::liveness::WorkerLiveness>,
+    /// Lifecycle boundary: liveness, session lifecycle and title task port.
+    pub(super) lifecycle: Box<dyn LifecyclePort>,
 
     /// Test-only panic injection seam: when set, dispatching a command whose
     /// `command_id` matches panics **on the dispatching thread** (same thread
@@ -238,28 +227,25 @@ impl Loop {
 
         let mut flow = qaqh_message::ContextFlow::new();
         qaqh_message::builtin::register_all(&mut flow);
+        let lifecycle: Box<dyn LifecyclePort> = Box::new(RuntimeLifecyclePort::new(liveness));
 
         Loop {
             cmd_rx,
             event_tx,
             cancel,
-            user_cancelled: false,
             phase: LoopPhase::Idle,
             pending: PendingState::default(),
             deferred_ringing: VecDeque::new(),
             writer_dead,
             ready_emitted: false,
             session: SessionBundle::new(agent),
-            session_eng: SessionEngine::new(),
             input: InputEngine::new(),
             misc: MiscEngine::new(),
             flow,
             injection_bus: InjectionBus::new(),
-            pending_compact_rx: None,
-            pending_compact_id: None,
-            pending_compact_causation: None,
+            compaction: CompactionPort::new(),
             paced_emitter,
-            liveness,
+            lifecycle,
             #[cfg(test)]
             panic_on_command_id: None,
         }
@@ -286,7 +272,7 @@ impl Loop {
     {
         // Idle-unload liveness: this dispatch counts as activity; the registry
         // must never unload while it is running.
-        self.liveness.set_busy(true);
+        self.lifecycle.dispatch_started();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             f(self);
         }));
@@ -338,10 +324,8 @@ impl Loop {
         // Liveness bookkeeping runs on both the success and panic-recovery
         // paths: a completed dispatch is activity, and a suspended turn
         // (unresolved ask / permission / plan) blocks idle unload.
-        self.liveness.set_busy(false);
-        self.liveness.touch();
-        self.liveness
-            .set_suspend_pending(self.session.turn.is_suspended());
+        self.lifecycle
+            .dispatch_finished(self.session.turn.is_suspended());
     }
 
     /// Reset all engines to clean idle state.
@@ -351,8 +335,22 @@ impl Loop {
     /// suspended state or pending approvals. Stateless engines are
     /// no-ops. Stats accumulator is replaced with a fresh one.
     pub(super) fn reset_all_engines(&mut self) {
+        self.reset_all_engines_inner(true);
+    }
+
+    /// Reset every non-turn engine and clear turn runtime state, but keep the
+    /// actor terminal result available for duplicate cancel/terminal fencing.
+    pub(super) fn reset_all_engines_preserving_turn_terminal(&mut self) {
+        self.reset_all_engines_inner(false);
+    }
+
+    fn reset_all_engines_inner(&mut self, reset_turn_actor: bool) {
         // Session-level engines (hold mutable state)
-        self.session.turn.reset();
+        if reset_turn_actor {
+            self.session.turn.reset();
+        } else {
+            self.session.turn.reset_runtime_state();
+        }
         self.session.tool.clear_pending();
         self.session.stats = StatsCollector::new();
 
@@ -376,10 +374,6 @@ impl Loop {
         self.reset_all_engines();
         self.cancel.clear();
         qaqh_workspace::clear_cancel();
-        // T-1-3：取消原因位随旧会话一起作废——新会话/恢复的会话不是「用户
-        // 取消」的会话，系统注入必须能照常开回合（否则一次取消会永久压制
-        // 后续所有子代理结果注入）。
-        self.user_cancelled = false;
     }
 
     /// 将会话 seed 同步到 PacedEmitter（Ringing 事件信封路由键）。
@@ -447,7 +441,7 @@ impl Loop {
             // Signal readiness at most once per truly idle period. A manual
             // compact runs in a background worker, but it still owns the
             // active context transaction until CompactEnd is applied.
-            if self.pending_compact_rx.is_none() && !self.ready_emitted {
+            if !self.compaction.is_running() && !self.ready_emitted {
                 self.ready_emitted = true;
             }
 
@@ -481,11 +475,6 @@ impl Loop {
 
         // ── Cleanup ──
         qaqh_workspace::runtime::shutdown_tools();
-        // 工具 outbox 的 fsync 已批量化（BUG-2026-09-12-14）：退出前必须把本会话
-        // 尚未落盘的记录同步到磁盘，否则 worker 退出后紧接着的重启会丢掉窗口内
-        // 的「已执行」事实，重新变成「未执行，可重试」——正是 outbox 要消除的语义。
-        // 位置：工具线程均已 join（drain_bounded 之后），故不会与在途追加竞争。
-        crate::agent::tool_outbox::flush(&self.session.agent.session.seed);
         self.session.flush();
         // Final drain: SessionBundle::flush enqueues a flush_meta op; the old
         // synchronous path wrote it before exiting (PR-1-6).
@@ -499,8 +488,8 @@ impl Loop {
 
         if let Some(seed) = resume_seed {
             if self
-                .session_eng
-                .resume(&mut self.session.agent, &seed, &self.cancel)
+                .lifecycle
+                .resume_session(&mut self.session.agent, &self.cancel, &seed)
             {
                 // init_session 已把 agent.session.seed 设为权威值（恢复成功
                 // 为原 seed，fallback 为新 seed）；此后 Ringing 事件必须携带它。
@@ -516,8 +505,8 @@ impl Loop {
                     },
                 ));
         } else if has_seed && !self.session.agent.session.from_resume {
-            self.session_eng
-                .create_with_seed(&mut self.session.agent, &self.cancel);
+            self.lifecycle
+                .create_session_with_seed(&mut self.session.agent, &self.cancel);
             self.sync_emitter_seed();
             let seed = self.session.agent.session.seed.clone();
             self.paced_emitter

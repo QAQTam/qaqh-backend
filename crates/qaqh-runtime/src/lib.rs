@@ -2,9 +2,13 @@ mod activity;
 mod actor;
 pub mod agent;
 mod host_impl;
+pub mod quota_ledger;
 mod registry;
 pub mod ringing;
 mod service;
+pub mod subagent_recovery;
+mod subagent_supervisor;
+pub(crate) mod test_hooks;
 pub mod timeline;
 mod timeline_store;
 

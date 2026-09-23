@@ -41,6 +41,9 @@
 //! 2. 对外构造唯一入口为 `spawn_agent`（`actor.rs` / `registry.rs` 不得自行
 //!    装配 `AgentState`）。
 
+pub(crate) mod approval_registry;
+pub(crate) mod compaction_port;
+pub mod context;
 pub(crate) mod dashboard;
 pub mod engine_compact;
 pub mod engine_input;
@@ -51,6 +54,7 @@ pub mod engine_tool;
 pub mod engine_turn;
 pub mod injection;
 pub mod input_guard;
+pub(crate) mod lifecycle_port;
 pub mod liveness;
 pub mod loop_core;
 pub mod loop_dispatch_control;
@@ -62,7 +66,9 @@ pub mod paced_emitter;
 pub mod prompt;
 pub(crate) mod spawn;
 pub mod state;
-pub mod tool_outbox;
+pub mod tool_recovery;
+pub(crate) mod tool_runtime;
+pub(crate) mod turn_actor;
 pub(crate) mod turn_lap;
 
 /// 回归测试入口：批执行/取消收割路径（BUG-2026-09-13-08 回归）。

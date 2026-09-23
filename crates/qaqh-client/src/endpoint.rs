@@ -57,6 +57,39 @@ pub enum QueryRequest {
     TodoStatus {
         seed: String,
     },
+    /// 单会话 meta（daemon `session.meta`）。
+    SessionMeta {
+        seed: String,
+    },
+    /// 读取当前会话 plan（daemon `plan.read`）。
+    PlanRead {
+        seed: String,
+    },
+    /// 当前会话 context 统计（daemon `plan.context_stats`）。
+    PlanContextStats {
+        seed: String,
+    },
+    /// 最近 token 用量（daemon `stats.token_usage`）。
+    StatsTokenUsage {
+        days: u32,
+    },
+    /// Git working tree 状态（daemon `git.diff`）。
+    GitDiff {
+        seed: String,
+    },
+    /// 当前 Git 分支（daemon `git.branch`）。
+    GitBranch {
+        seed: String,
+    },
+    /// Git 分支列表（daemon `git.branches`）。
+    GitBranches {
+        seed: String,
+    },
+    /// 单文件 Git diff（daemon `git.file_diff`）。
+    GitFileDiff {
+        seed: String,
+        file_path: String,
+    },
 }
 
 impl QueryRequest {
@@ -77,6 +110,17 @@ impl QueryRequest {
             }
             Self::SessionDashboard { seed } => ("session.dashboard", json!({ "seed": seed })),
             Self::TodoStatus { seed } => ("todo.status", json!({ "seed": seed })),
+            Self::SessionMeta { seed } => ("session.meta", json!({ "seed": seed })),
+            Self::PlanRead { seed } => ("plan.read", json!({ "seed": seed })),
+            Self::PlanContextStats { seed } => ("plan.context_stats", json!({ "seed": seed })),
+            Self::StatsTokenUsage { days } => ("stats.token_usage", json!({ "days": days })),
+            Self::GitDiff { seed } => ("git.diff", json!({ "seed": seed })),
+            Self::GitBranch { seed } => ("git.branch", json!({ "seed": seed })),
+            Self::GitBranches { seed } => ("git.branches", json!({ "seed": seed })),
+            Self::GitFileDiff { seed, file_path } => (
+                "git.file_diff",
+                json!({ "seed": seed, "file_path": file_path }),
+            ),
         }
     }
 }
@@ -160,6 +204,17 @@ pub enum ActionRequest {
         /// boundary against the *parent's* workspace.
         workspace: Option<String>,
     },
+    /// 切换 Git 分支（daemon `git.switch_branch`）。
+    GitSwitchBranch {
+        seed: String,
+        branch: String,
+        stash: bool,
+    },
+    /// 提交当前 Git working tree（daemon `git.commit`）。
+    GitCommit {
+        seed: String,
+        message: String,
+    },
 }
 
 impl ActionRequest {
@@ -236,6 +291,17 @@ impl ActionRequest {
                 }
                 ("subagent.spawn", params)
             }
+            Self::GitSwitchBranch {
+                seed,
+                branch,
+                stash,
+            } => (
+                "git.switch_branch",
+                json!({ "seed": seed, "branch": branch, "stash": stash }),
+            ),
+            Self::GitCommit { seed, message } => {
+                ("git.commit", json!({ "seed": seed, "message": message }))
+            }
         }
     }
 }
@@ -270,6 +336,29 @@ mod tests {
     }
 
     #[test]
+    fn git_write_variants_are_actions() {
+        let (name, params) = ActionRequest::GitSwitchBranch {
+            seed: "s".into(),
+            branch: "main".into(),
+            stash: true,
+        }
+        .into_parts();
+        assert_eq!(name, "git.switch_branch");
+        assert_eq!(
+            params,
+            json!({ "seed": "s", "branch": "main", "stash": true })
+        );
+
+        let (name, params) = ActionRequest::GitCommit {
+            seed: "s".into(),
+            message: "checkpoint".into(),
+        }
+        .into_parts();
+        assert_eq!(name, "git.commit");
+        assert_eq!(params, json!({ "seed": "s", "message": "checkpoint" }));
+    }
+
+    #[test]
     fn query_variants_have_no_call_site_method_strings() {
         let (name, params) = QueryRequest::SessionList.into_parts();
         assert_eq!(name, "session.list");
@@ -290,6 +379,52 @@ mod tests {
         assert_eq!(params, json!({ "seed": "s2" }));
     }
 
+    #[test]
+    fn tui_service_variants_use_existing_routes() {
+        for (request, expected_name) in [
+            (
+                QueryRequest::SessionMeta { seed: "s".into() },
+                "session.meta",
+            ),
+            (QueryRequest::PlanRead { seed: "s".into() }, "plan.read"),
+            (
+                QueryRequest::PlanContextStats { seed: "s".into() },
+                "plan.context_stats",
+            ),
+            (
+                QueryRequest::StatsTokenUsage { days: 30 },
+                "stats.token_usage",
+            ),
+            (QueryRequest::GitDiff { seed: "s".into() }, "git.diff"),
+            (QueryRequest::GitBranch { seed: "s".into() }, "git.branch"),
+            (
+                QueryRequest::GitBranches { seed: "s".into() },
+                "git.branches",
+            ),
+            (
+                QueryRequest::GitFileDiff {
+                    seed: "s".into(),
+                    file_path: "src/lib.rs".into(),
+                },
+                "git.file_diff",
+            ),
+        ] {
+            assert_eq!(request.into_parts().0, expected_name);
+        }
+
+        let (name, params) = QueryRequest::GitFileDiff {
+            seed: "s".into(),
+            file_path: "src/lib.rs".into(),
+        }
+        .into_parts();
+        assert_eq!(name, "git.file_diff");
+        assert_eq!(params, json!({ "seed": "s", "file_path": "src/lib.rs" }));
+
+        let (name, params) = QueryRequest::StatsTokenUsage { days: 30 }.into_parts();
+        assert_eq!(name, "stats.token_usage");
+        assert_eq!(params, json!({ "days": 30 }));
+    }
+
     /// **变体清单 + 穷举闸（G3）**：Rust 的枚举无法被迭代，清单只能手写。
     /// 这里用一条**穷举 `match`** 把手写变成「编译器盯着的手写」：新增变体时
     /// `into_parts` 先报错，改完再来这里，`match` 不穷举会**再报一次错**，
@@ -298,7 +433,7 @@ mod tests {
     /// **已知的窄缝**（实测过，不是推测）：新增变体后只在下面 `match` 里补臂、
     /// 忘了 `vec!` 那一行，本闸**不响**——代价是该路由不被检查（不会产生错误
     /// 结果，只是少查一次）。反方向是关着的：**删除**一行会让末尾的条数断言
-    /// 直接失败（实测 23 ≠ 24）。要关掉剩下这条缝需要一个 `EnumIter` 派生
+    /// 直接失败（删一条后总数断言会立刻报警）。要关掉剩下这条缝需要一个 `EnumIter` 派生
     /// （多一个依赖）或把枚举改成宏生成（可读性代价）。按 G3「流程优先、实现
     /// 保持封闭枚举」暂不引入。
     fn all_query_requests() -> Vec<QueryRequest> {
@@ -315,6 +450,17 @@ mod tests {
             },
             QueryRequest::SessionDashboard { seed: "s".into() },
             QueryRequest::TodoStatus { seed: "s".into() },
+            QueryRequest::SessionMeta { seed: "s".into() },
+            QueryRequest::PlanRead { seed: "s".into() },
+            QueryRequest::PlanContextStats { seed: "s".into() },
+            QueryRequest::StatsTokenUsage { days: 30 },
+            QueryRequest::GitDiff { seed: "s".into() },
+            QueryRequest::GitBranch { seed: "s".into() },
+            QueryRequest::GitBranches { seed: "s".into() },
+            QueryRequest::GitFileDiff {
+                seed: "s".into(),
+                file_path: "src/lib.rs".into(),
+            },
         ];
         // 穷举闸：上面的清单必须覆盖全部变体，否则这里编译失败。
         for q in &all {
@@ -327,7 +473,15 @@ mod tests {
                 | QueryRequest::FsList { .. }
                 | QueryRequest::FsRead { .. }
                 | QueryRequest::SessionDashboard { .. }
-                | QueryRequest::TodoStatus { .. } => {}
+                | QueryRequest::TodoStatus { .. }
+                | QueryRequest::SessionMeta { .. }
+                | QueryRequest::PlanRead { .. }
+                | QueryRequest::PlanContextStats { .. }
+                | QueryRequest::StatsTokenUsage { .. }
+                | QueryRequest::GitDiff { .. }
+                | QueryRequest::GitBranch { .. }
+                | QueryRequest::GitBranches { .. }
+                | QueryRequest::GitFileDiff { .. } => {}
             }
         }
         all
@@ -376,6 +530,15 @@ mod tests {
                 max_tokens: None,
                 workspace: None,
             },
+            ActionRequest::GitSwitchBranch {
+                seed: "s".into(),
+                branch: "main".into(),
+                stash: false,
+            },
+            ActionRequest::GitCommit {
+                seed: "s".into(),
+                message: "checkpoint".into(),
+            },
         ];
         // 穷举闸：见 all_query_requests。
         for a in &all {
@@ -394,7 +557,9 @@ mod tests {
                 | ActionRequest::WorkspaceMoveSession { .. }
                 | ActionRequest::WorkspaceDetach { .. }
                 | ActionRequest::SessionSetToolMode { .. }
-                | ActionRequest::SubagentSpawn { .. } => {}
+                | ActionRequest::SubagentSpawn { .. }
+                | ActionRequest::GitSwitchBranch { .. }
+                | ActionRequest::GitCommit { .. } => {}
             }
         }
         all
@@ -440,8 +605,8 @@ mod tests {
             assert_route_shape(name);
             assert!(seen.insert(name), "重复的 {kind} 路由: {name}");
         }
-        // 两个枚举**合计** 24 条路由。条数写死是刻意的：它与上面两份清单一起
+        // 两个枚举**合计** 34 条路由。条数写死是刻意的：它与上面两份清单一起
         // 构成「新增方法必须显式过一次」的检查点。
-        assert_eq!(seen.len(), 24, "服务面路由总数变了——确认是新增而非改错");
+        assert_eq!(seen.len(), 34, "服务面路由总数变了——确认是新增而非改错");
     }
 }

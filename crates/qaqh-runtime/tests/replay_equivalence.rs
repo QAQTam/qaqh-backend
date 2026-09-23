@@ -173,7 +173,12 @@ fn replaceable_replay_returns_current_value_unfiltered_by_cursor() {
         .expect("in-window replay");
     let prepared: Vec<&RingingEventEnvelope> = replayed
         .iter()
-        .filter(|e| matches!(e.event, RingingEvent::Tool(ToolEvent::ToolCallPrepared { .. })))
+        .filter(|e| {
+            matches!(
+                e.event,
+                RingingEvent::Tool(ToolEvent::ToolCallPrepared { .. })
+            )
+        })
         .collect();
     assert_eq!(
         prepared.len(),
@@ -314,7 +319,10 @@ fn fresh_connection_skips_reliable_history() {
     // 而 per-seed 路径仍会回放（用例 3 已断言）。
     let after = hub.replay_channel_since(RingingChannel::Tool, prepared.stream_seq, false);
     assert!(
-        after.events.iter().all(|e| e.stream_seq > prepared.stream_seq),
+        after
+            .events
+            .iter()
+            .all(|e| e.stream_seq > prepared.stream_seq),
         "频道级重放对 replaceable 仍按 seq 过滤：{:?}",
         after
             .events

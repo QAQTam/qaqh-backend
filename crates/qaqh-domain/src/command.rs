@@ -122,6 +122,18 @@ pub enum ControlCommand {
 }
 
 /// Conversation 频道命令。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum ConversationInputPurpose {
+    /// Deliver the message and trigger a turn when the child is idle.
+    #[default]
+    TriggerTurn,
+    /// Persist/deliver the message without starting a turn.
+    QueueOnly,
+}
+
+/// Conversation 频道命令。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -135,6 +147,13 @@ pub enum ConversationCommand {
         /// Electron main 上传后的会话附件引用；命令中不允许出现本地路径。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attachments: Option<Vec<ContentRef>>,
+        /// Stable inter-agent message identity. User/UI messages may omit it
+        /// and fall back to the command id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// Whether this message must trigger a turn or is queue-only.
+        #[serde(default)]
+        input_purpose: ConversationInputPurpose,
         /// 系统级注入（如子代理结果回传）：以 system 角色进入 transcript 并
         /// 触发新回合，跳过用户输入专属处理（compliance guard / 技能激活 /
         /// todo 模式切换）。false 时行为与普通用户消息完全一致。

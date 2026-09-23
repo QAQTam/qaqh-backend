@@ -1,33 +1,18 @@
 //! exec 展示投影（09-18 跨仓展示契约 §3.2 / §7 工具映射表）。
 //!
-//! 投影函数由工具作者声明（H13），runtime 只负责调用与 wire 映射。
-//! 它解析的是 exec **自己的** canonical 输出格式（`ExecOutput` JSON），
-//! 不是 client 侧的通用 JSON 考古。
+//! 投影由 typed `ExecOutput` 直接派生；legacy 字符串路径只在确认是 exec
+//! 自己的 canonical JSON 时复用同一投影函数，不做 client 侧 JSON 考古。
 
-use serde::Deserialize;
+use super::direct::ExecOutput;
+use crate::tool_api::{
+    ToolBody, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind, ToolHeader,
+    ToolProjection, ToolStatus,
+};
 
-use crate::tool_api::{ToolBody, ToolDisplay, ToolHeader};
-
-/// `ExecOutput` 的反序列化视图（宽进：缺字段按默认值处理）。
-#[derive(Debug, Deserialize)]
-struct ExecOutputView {
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    exit_code: Option<i32>,
-    #[serde(default)]
-    output: String,
-    #[serde(default)]
-    truncated: bool,
-    #[serde(default)]
-    timed_out: bool,
-    #[serde(default)]
-    process_id: Option<u32>,
-}
-
+#[cfg(test)]
 pub(crate) fn project_display(args: &serde_json::Value, output: &str) -> ToolDisplay {
     let command = command_from_args(args);
-    let Ok(view) = serde_json::from_str::<ExecOutputView>(output) else {
+    let Ok(view) = serde_json::from_str::<ExecOutput>(output) else {
         // 非 ExecOutput（如 manager 失败文本）：仍给出可渲染的 header/body，
         // 不猜测结构，原样透出文本。
         let header = command
@@ -44,14 +29,55 @@ pub(crate) fn project_display(args: &serde_json::Value, output: &str) -> ToolDis
             },
         );
     };
+    display_from_output(&view, command)
+}
 
+impl ToolProjection for ExecOutput {
+    fn status(&self) -> ToolStatus {
+        let success = match self.exit_code {
+            Some(0) => true,
+            Some(_) => false,
+            None => !self.timed_out && !self.cancelled,
+        };
+        if success {
+            ToolStatus::Ok
+        } else {
+            ToolStatus::Error
+        }
+    }
+
+    fn error(&self) -> Option<ToolError> {
+        if self.status() == ToolStatus::Ok {
+            return None;
+        }
+        let mut error = ToolError::new(ToolErrorKind::Execution, self.to_json());
+        error.code = ToolErrorCode::from_legacy("TOOL_ERROR");
+        Some(error)
+    }
+
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.to_json(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        Some(shell_summary(self, None))
+    }
+
+    fn display(&self, args: &serde_json::Value) -> ToolDisplay {
+        display_from_output(self, command_from_args(args))
+    }
+}
+
+fn display_from_output(view: &ExecOutput, command: Option<String>) -> ToolDisplay {
     let header = command
         .clone()
         .map(|command| ToolHeader::Shell { command })
         .unwrap_or(ToolHeader::Other {
             label: "exec".to_string(),
         });
-    let summary = shell_summary(&view, command.as_deref());
+    let summary = shell_summary(view, command.as_deref());
     ToolDisplay::new(
         header,
         ToolBody::Shell {
@@ -87,7 +113,7 @@ fn normalize_carriage_returns(text: &str) -> String {
     lines.join("\n")
 }
 
-fn shell_summary(view: &ExecOutputView, command: Option<&str>) -> String {
+fn shell_summary(view: &ExecOutput, command: Option<&str>) -> String {
     let label = match (
         view.timed_out,
         view.process_id,
@@ -206,13 +232,16 @@ mod tests {
         let manager = crate::registration::build_tool_manager(&[]);
         let args = serde_json::json!({"command": "ls"});
         let output = r#"{"status":"completed","exit_code":0,"output":"ok","truncated":false,"timed_out":false}"#;
-        let display = manager
-            .project_display("exec", &args, output)
-            .expect("exec projector must be registered by exec::register");
+        assert!(
+            manager.project_display("exec", &args, output).is_none(),
+            "exec is typed and carries display in ToolResult"
+        );
+        let view: ExecOutput = serde_json::from_str(output).expect("exec output");
+        let display = view.display(&args);
         assert!(display.summary.is_some());
         assert!(
-            manager.project_display("read", &args, "L1: ok").is_some(),
-            "契约 §6.1 的文件读取投影必须可用"
+            manager.project_display("read", &args, "L1: ok").is_none(),
+            "read is typed and carries display in ToolResult"
         );
         assert!(
             manager
