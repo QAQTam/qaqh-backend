@@ -7,18 +7,18 @@ use serde::{Deserialize, Serialize};
 pub const DATA_ROOT_MARKER: &str = ".qaqh-data-root.json";
 
 /// 对外产品版本号（User-Agent 使用）：不带 rc/预发布后缀，正式发布时手工 bump。
-/// 与 cargo 包版本（`CARGO_PKG_VERSION`，如 `1.0.0-rc.6`）解耦——UA 里暴露的是
+/// 与 cargo 包版本（`CARGO_PKG_VERSION`，如 `2.0.0-rc.6`）解耦——UA 里暴露的是
 /// 面向服务的稳定版本标识，而非内部打包版本。
 macro_rules! qaqh_ua_version {
     () => {
-        "1.0.0"
+        "2.0.0"
     };
 }
 
 /// 对外产品版本号（与 `QAQH_USER_AGENT` 同源，见上）。
 pub const QAQH_UA_VERSION: &str = qaqh_ua_version!();
 
-/// 统一产品 User-Agent：`qaqharness/1.0.0/`。
+/// 统一产品 User-Agent：`qaqharness/2.0.0/`。
 ///
 /// 用于所有对外 API 请求（gate chat/responses、provider 模型目录拉取），
 /// 便于服务端识别客户端与版本。
@@ -415,6 +415,15 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
 mod data_root_tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn ua_version_tracks_package_version() {
+        let package_version = env!("CARGO_PKG_VERSION");
+        let release_version = package_version
+            .split_once('-')
+            .map_or(package_version, |(version, _)| version);
+        assert_eq!(qaqh_ua_version!(), release_version);
+    }
 
     #[test]
     fn copied_data_marker_cannot_authorize_another_directory() {
