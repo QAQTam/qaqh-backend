@@ -11,6 +11,7 @@ qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-runtime = { path = "../qaqh-runtime" }
+qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
