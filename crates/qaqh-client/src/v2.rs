@@ -25,7 +25,7 @@ use crate::types::{CommandOptions, RingingCommand, TimelinePage};
 pub use qaqh_ringing::{
     CanonicalCursor as ClientV2Cursor, CursorToken as ClientV2CursorToken,
     END_OF_FACT as CLIENT_V2_END_OF_FACT, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
-    RingingV2ControlState as ClientV2ControlState, RingingV2DriverState as ClientV2DriverState,
+    RingingV2DriverState as ClientV2DriverState,
     RingingV2InteractionKind as ClientV2InteractionKind,
     RingingV2PendingInteraction as ClientV2PendingInteraction,
     RingingV2PendingSet as ClientV2PendingSet, RingingV2ResetReason as ClientV2ResetReason,
@@ -41,8 +41,24 @@ pub type ClientV2Event = RingingV2EventEnvelope<ClientV2Payload>;
 /// Alias kept explicit for shells that prefer the full contract name.
 pub type ClientV2EventEnvelope = ClientV2Event;
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientV2ControlState {
+    #[serde(flatten)]
+    pub snapshot: qaqh_session::projection::ControlSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<ClientV2DriverState>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientV2ToolState {
+    pub tools: Vec<qaqh_session::projection::ControlToolState>,
+}
+
+pub type ClientV2ConversationState = qaqh_session::projection::ConversationSnapshot;
+
 /// Typed authoritative v2 bootstrap.
-pub type ClientV2Bootstrap = RingingV2Bootstrap;
+pub type ClientV2Bootstrap =
+    RingingV2Bootstrap<ClientV2ControlState, ClientV2ConversationState, ClientV2ToolState>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientV2SessionState {
