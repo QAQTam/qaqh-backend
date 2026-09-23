@@ -1,10 +1,12 @@
 //! Durable ToolLedger core contract.
 
-use qaqh_session::canonical::{ToolLedger, ToolLedgerError, ToolRecoveryDisposition, WriterId};
+use qaqh_session::canonical::{
+    CommittedFactReader, ToolLedger, ToolLedgerError, ToolRecoveryDisposition, WriterId,
+};
 use qaqh_session::session_fact_v2::{
-    ContentHash, ContentRef, EventId, ExecutionId, LogId, PolicyDecisionRef, SessionId,
-    SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent, ToolIntentPolicyOutcome,
-    ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    ContentHash, ContentRef, EventId, ExecutionId, FactPayload, LogId, PolicyDecisionRef,
+    RecoveryId, RecoveryRef, SessionId, SideEffectClass, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
 };
 
 const NOW_MS: i64 = 1_789_830_000_000;
@@ -36,6 +38,14 @@ fn content_hash(seed: u8) -> ContentHash {
 
 fn content_ref(seed: u8) -> ContentRef {
     ContentRef::new(content_hash(seed))
+}
+
+fn recovery_ref() -> RecoveryRef {
+    RecoveryRef {
+        recovery_id: RecoveryId::new("recovery_01J00000000000000000000000"),
+        recovery_event_id: EventId::new("01J00000000000000000000099"),
+        recovery_input_fingerprint: content_hash(9),
+    }
 }
 
 fn intent(
@@ -421,6 +431,65 @@ fn open_intent_recovery_disposition_is_replay_capability_driven() {
         })
     );
     assert_eq!(ledger.open_intents().len(), 2);
+}
+
+#[test]
+fn recovery_seal_carries_batch_provenance_and_is_idempotent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let call = call_id(30);
+    let execution = execution_id(30);
+    let recovery_ref = recovery_ref();
+    let mut ledger = open_ledger(temp.path());
+
+    ledger
+        .append_intent(
+            event_id(30),
+            Some(qaqh_session::session_fact_v2::TurnId::new(
+                "turn_01J00000000000000000000030",
+            )),
+            intent(&call, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 30,
+        )
+        .expect("append open intent");
+
+    let first = ledger
+        .seal_recovery_intent(&call, event_id(31), recovery_ref.clone(), NOW_MS + 31)
+        .expect("seal recovery intent");
+    assert_eq!(
+        first,
+        ToolRecoveryDisposition::Finished {
+            terminal_status: ToolTerminalStatus::Indeterminate,
+        }
+    );
+
+    let facts = CommittedFactReader::open(temp.path(), session_id(), log_id())
+        .and_then(|reader| reader.read_all())
+        .expect("read facts");
+    let finished = facts
+        .iter()
+        .filter_map(|fact| match &fact.payload {
+            FactPayload::ToolFinished(finished) => Some(finished),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].recovery_ref.as_ref(), Some(&recovery_ref));
+    assert_eq!(
+        finished[0].terminal_status,
+        ToolTerminalStatus::Indeterminate
+    );
+
+    let second = ledger
+        .seal_recovery_intent(&call, event_id(32), recovery_ref, NOW_MS + 32)
+        .expect("repeat recovery seal");
+    assert_eq!(second, first);
+    assert_eq!(
+        ledger
+            .get(&call)
+            .and_then(|entry| entry.finished())
+            .map(|finished| finished.terminal_status),
+        Some(ToolTerminalStatus::Indeterminate)
+    );
 }
 
 #[test]
