@@ -776,7 +776,7 @@ fn duplicate_ask_resolution_is_rejected_after_terminal_without_modal_replay() {
                 &seed,
                 cmd_ask_respond("duplicate-ask", &[("q1", "A")]),
             );
-            expect_operation_failed(receiver, "interaction_not_found");
+            expect_operation_failed(receiver, "interaction_already_resolved");
             assert_eq!(request_count.load(Ordering::SeqCst), 2);
         },
     );
