@@ -1885,6 +1885,7 @@ dependencies = [
  "log",
  "qaqh-domain",
  "qaqh-ringing",
+ "qaqh-session",
  "qaqh-types",
  "reqwest",
  "serde",
@@ -2038,6 +2039,7 @@ dependencies = [
 name = "qaqh-ringing"
 version = "2.0.0-alpha1"
 dependencies = [
+ "base64 0.22.1",
  "qaqh-domain",
  "serde",
  "serde_json",
