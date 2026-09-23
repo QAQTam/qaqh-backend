@@ -83,9 +83,9 @@ pub fn plan_recovery_intent(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
-    let committed_offset = reader.committed().committed_offset as usize;
-    let torn_tail_bytes_hash = if events.len() > committed_offset {
-        sha256_content_hash(&events[committed_offset..])
+    let committed_offset = reader.committed().committed_offset;
+    let torn_tail_bytes_hash = if (events.len() as u64) > committed_offset {
+        sha256_content_hash(&events[committed_offset as usize..])
     } else {
         sha256_content_hash(b"")
     };
