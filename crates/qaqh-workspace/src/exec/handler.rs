@@ -1,23 +1,358 @@
-//! exec::handler — 工具 handler 层（normalize_rg/handle_run_with_shell/strip_ansi/exec_schema）。
+//! exec::handler — typed exec 工具、参数归一化与 legacy 兼容入口。
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::ExecProgressSender;
+use crate::ToolRisk;
+use crate::file_mutate::{mutation_error, resolve_mutation_path};
+#[cfg(test)]
+use crate::tool_api::{
+    AgentMode, CancellationToken, SandboxMode, ToolCallSource, ToolError, ToolExecutionMetrics,
+    ToolModelProjection, ToolOutcome, ToolOutputValue, ToolProjection,
+};
+use crate::tool_api::{
+    OutputBudget, ToolCallContext, ToolDescriptor, ToolExecutionError, ToolExposure, ToolName,
+    ToolSource, TypedTool,
+};
+#[cfg(test)]
 use crate::{ToolCallCtx, ToolResult};
+#[cfg(test)]
+use serde_json::Value;
+#[cfg(test)]
+use std::path::PathBuf;
 
-use super::direct::direct_exec;
-use super::shell::Shell;
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecArgs {
+    #[serde(default)]
+    pub argv: Option<Vec<String>>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub background_after_secs: Option<u64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+}
 
-// ── Tool handler ──
+pub struct ExecTool;
+
+impl TypedTool for ExecTool {
+    type Args = ExecArgs;
+    type Output = super::direct::ExecOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("exec").expect("valid exec tool name"),
+            display_name: None,
+            description: "Run a command. argv = direct exec without a shell; command = shell string (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id."
+                .to_string(),
+            input_schema: exec_schema(true),
+            output_schema: serde_json::to_value(schemars::schema_for!(super::direct::ExecOutput))
+                .expect("exec output schema"),
+            category: crate::permission::ToolCategory::Exec,
+            risk: ToolRisk::Destructive,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("exec")
+                .unwrap_or_default(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let progress = ctx
+            .progress
+            .as_ref()
+            .map(crate::tool_api::legacy::bridge_progress);
+        run_exec(ctx, args, None, progress)
+    }
+}
+
+fn exec_error(code: &str, message: impl Into<String>, hint: Option<&str>) -> ToolExecutionError {
+    mutation_error(code, message, hint, json!({}))
+}
+
+#[allow(clippy::too_many_arguments, clippy::result_large_err)] // 参数面来自 exec 的既有 wire 契约；错误边界为冻结 SDK 类型。
+fn run_exec(
+    ctx: &ToolCallContext,
+    args: ExecArgs,
+    fixed: Option<super::shell::Shell>,
+    progress_tx: Option<ExecProgressSender>,
+) -> Result<super::direct::ExecOutput, ToolExecutionError> {
+    use super::direct::direct_exec;
+    use super::shell::Shell;
+
+    // ── Resolve argv ──
+    let shell_command = args.command.clone();
+    let argv: Vec<String> = if let Some(command) = shell_command.as_deref() {
+        if command.is_empty() {
+            return Err(exec_error(
+                "EMPTY_COMMAND",
+                "command string is empty",
+                Some("Provide a shell command string."),
+            ));
+        }
+        let command = normalize_command_rg(command);
+        let shell = match fixed {
+            Some(shell) => {
+                if !shell_available(shell) {
+                    return Err(exec_error(
+                        "SHELL_NOT_FOUND",
+                        format!("{} not found on this machine", shell.path()),
+                        Some(&format!("available shells: {}", available_shells())),
+                    ));
+                }
+                shell
+            }
+            None => match args.shell.as_deref() {
+                Some(name) if !name.is_empty() => match Shell::from_name(name) {
+                    Some(shell) => shell,
+                    None => {
+                        return Err(exec_error(
+                            "UNKNOWN_SHELL",
+                            format!("unknown shell '{name}'"),
+                            Some(
+                                "Use one of: bash, zsh, sh, pwsh, powershell, cmd. The default is auto-detected (pwsh on Windows, bash elsewhere).",
+                            ),
+                        ));
+                    }
+                },
+                _ => Shell::detect(),
+            },
+        };
+        let extra_args = args.args.as_deref().filter(|args| !args.is_empty());
+        if extra_args.is_some() && shell == Shell::Cmd {
+            return Err(exec_error(
+                "ARGS_NOT_SUPPORTED",
+                "args is only supported for bash/zsh/sh ($1/$@) and pwsh -CommandWithArgs ($args)",
+                Some(
+                    "Use exec with shell bash/zsh/sh and args as string array (positional $1...), or shell pwsh.",
+                ),
+            ));
+        }
+        shell.derive_exec_args_with(&command, extra_args)
+    } else {
+        if let Some(name) = args.shell.as_deref().filter(|name| !name.is_empty()) {
+            return Err(exec_error(
+                "ARGV_IGNORES_SHELL",
+                format!("argv mode runs direct exec without a shell; 'shell: {name}' is ignored"),
+                Some("Use command (not argv) to run through a shell, or drop the shell parameter."),
+            ));
+        }
+        if args.args.as_ref().is_some_and(|args| !args.is_empty()) {
+            return Err(exec_error(
+                "ARGV_IGNORES_ARGS",
+                "argv mode runs direct exec without a shell; 'args' only applies to command mode",
+                Some("Use command + args (positional $1... / $args), or drop args."),
+            ));
+        }
+        let Some(mut argv) = args.argv.clone() else {
+            return Err(exec_error(
+                "MISSING_ARGV",
+                "exec requires argv or command",
+                Some(r#"Example: {"argv": ["cargo", "check"]} or {"command": "cargo check"}"#),
+            ));
+        };
+        normalize_rg_argv(&mut argv);
+        argv
+    };
+    if argv.is_empty() {
+        return Err(exec_error(
+            "EMPTY_ARGV",
+            "argv array is empty",
+            Some("Provide at least one element."),
+        ));
+    }
+
+    // ── Execution limits / cwd / env ──
+    let policy_default = crate::tool_side_fold::policy()
+        .exec_max_output_tokens()
+        .unwrap_or(u32::MAX);
+    let max_output_tokens = args
+        .max_output_tokens
+        .filter(|&n| (100..=50000).contains(&n))
+        .map(|n| n as u32)
+        .unwrap_or(policy_default);
+    let timeout_secs = args
+        .timeout_secs
+        .filter(|&n| n > 0 && n <= 3600)
+        .unwrap_or_else(|| ctx.timeout.as_secs().clamp(1, 3600));
+    let background_after_secs = args.background_after_secs.filter(|&n| n > 0 && n <= 3600);
+    let cwd: Option<String> = args
+        .cwd
+        .as_deref()
+        .map(|cwd| {
+            let resolved = resolve_mutation_path(ctx, cwd);
+            if resolved.is_empty() {
+                cwd.to_string()
+            } else {
+                resolved
+            }
+        })
+        .or_else(|| {
+            let workspace = ctx.workspace_root.to_string_lossy();
+            if workspace.is_empty() || workspace == "." {
+                None
+            } else {
+                Some(workspace.to_string())
+            }
+        });
+    let env: Option<Vec<(String, String)>> = args
+        .env
+        .map(|env| env.into_iter().collect())
+        .filter(|pairs: &Vec<(String, String)>| !pairs.is_empty());
+    let cancel = ctx.cancellation.shared_flag();
+
+    let mut result = direct_exec(
+        &argv,
+        env.as_deref(),
+        cwd.as_deref(),
+        max_output_tokens,
+        timeout_secs,
+        background_after_secs,
+        Some(cancel.as_ref()),
+        progress_tx,
+        &ctx.call_id,
+    );
+    // 观测线纪律（事故 2026-09-02 预防）：检测 shell 命令中的后台派生 `&`，
+    // 以强提示引导走 background_after_secs + process 工具的受控路径。
+    if let Some(command) = shell_command.as_deref()
+        && result.status == "completed"
+        && detect_background_derivation(command)
+    {
+        result.output.push_str(BACKGROUND_DERIVATION_HINT);
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+fn context_from_legacy(ctx: &ToolCallCtx) -> ToolCallContext {
+    let workspace = crate::current_workspace();
+    let workspace_root = if workspace.is_empty() {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(workspace)
+    };
+    ToolCallContext {
+        call_id: ctx.id.clone(),
+        session_id: crate::current_session().unwrap_or_default(),
+        workspace_root,
+        mode: match crate::runtime::current_mode() {
+            1 => AgentMode::Plan,
+            _ => AgentMode::Code,
+        },
+        permission_level: crate::runtime::context()
+            .map(|context| crate::permission::PermissionLevel::from_u8(context.permission_level))
+            .unwrap_or(crate::permission::PermissionLevel::MaxLockdown),
+        sandbox: if crate::authorization::is_subagent_sandbox() {
+            SandboxMode::Subagent
+        } else {
+            SandboxMode::Main
+        },
+        timeout: Duration::from_secs(ctx.timeout_secs.unwrap_or(30)),
+        cancellation: CancellationToken::from_shared_flag(ctx.cancel.clone()),
+        progress: None,
+        source: ToolCallSource::Model,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn handle_run_exec(ctx: ToolCallCtx) -> ToolResult {
+    handle_run_with_shell(ctx, None)
+}
+
+/// Compatibility entry retained for existing in-process callers/tests.
+#[cfg(test)]
+pub(crate) fn handle_run_with_shell(
+    ctx: ToolCallCtx,
+    fixed: Option<super::shell::Shell>,
+) -> ToolResult {
+    let args: ExecArgs = match serde_json::from_value(ctx.args.clone()) {
+        Ok(args) => args,
+        Err(error) => {
+            return crate::json_err(
+                "INVALID_ARGUMENTS",
+                format!("invalid arguments: {error}"),
+                "",
+            );
+        }
+    };
+    let call_ctx = context_from_legacy(&ctx);
+    match run_exec(&call_ctx, args, fixed, ctx.tx_progress.clone()) {
+        Ok(output) => exec_output_to_tool_result(&output, &ctx.args),
+        Err(ToolExecutionError::Recoverable(error)) => tool_result_from_error(error),
+        Err(ToolExecutionError::Fatal(fatal)) => {
+            panic!("exec tool fatal: {}", fatal.message)
+        }
+    }
+}
+
+#[cfg(test)]
+fn exec_output_to_tool_result(output: &super::direct::ExecOutput, args: &Value) -> ToolResult {
+    let model_text = output.to_json();
+    let outcome = ToolOutcome {
+        status: output.status(),
+        output: ToolOutputValue::Json(serde_json::to_value(output).unwrap_or_else(|_| json!({}))),
+        error: output.error(),
+        model: ToolModelProjection {
+            text: model_text.clone(),
+            truncated: false,
+        },
+        display: output.display(args),
+        images: Vec::new(),
+        metrics: ToolExecutionMetrics {
+            elapsed: Duration::ZERO,
+            output_bytes: model_text.len() as u64,
+            retry_count: 0,
+            effective_tool_name: None,
+            user_initiated: false,
+        },
+        effects: Vec::new(),
+    };
+    outcome.to_tool_result()
+}
+
+#[cfg(test)]
+fn tool_result_from_error(error: ToolError) -> ToolResult {
+    let mut text = error.detail.clone();
+    if let Some(hint) = error.hint.as_ref()
+        && !hint.is_empty()
+    {
+        text.push_str("\nHint: ");
+        text.push_str(hint);
+    }
+    let mut result = ToolResult::error_with(
+        error.code.as_str(),
+        text,
+        error.retryable,
+        error.hint.clone(),
+    );
+    result.data = error.details.unwrap_or_else(|| json!({}));
+    result
+}
 
 /// ripgrep `-rn` 习惯陷阱防御（grep 迁移）。
-///
-/// `grep -rn`（`-r` 递归 + `-n` 行号）是 POSIX 经典组合；ripgrep 中 `-r` 被
-/// 定义为 `--replace`，`rg -rn "pat"` 会被解析为 `-r n`（把匹配替换成字面
-/// `n`），输出被污染、搜索不到预期内容。exec 层在调用前把误用的紧贴组合
-/// 改写为 rg 的正确写法（递归默认开启，行号用 `-n`）：
-///   `rg -rn`  → `rg -n`
-///   `rg -rni` → `rg -ni`   （+ 忽略大小写）
-///   `rg -rnl` → `rg -nl`   （+ 仅列文件名）
-/// 仅改写紧贴组合；`-r` 单独出现（`--replace` 的合法用法，如 `rg -r x pat`）
-/// 与长选项 `--replace` 不受影响。grep 本身（`grep -rn` 合法）不处理。
 pub(crate) fn normalize_rg_argv(argv: &mut [String]) {
     if !matches!(
         argv.first().map(|p| p.to_lowercase()).as_deref(),
@@ -35,9 +370,6 @@ pub(crate) fn normalize_rg_argv(argv: &mut [String]) {
 }
 
 /// command 模式版本：在 shell 命令字符串里改写 `rg -rn...` → `rg -n...`。
-/// 匹配 `rg` / `rg.exe` 后紧跟的 `-rn` 前缀组合（大小写不敏感，适配
-/// Windows `RG.EXE`）；管道/多命令场景同样覆盖。引号内出现的字面文本
-/// 也会被改写——罕见且语义无害，接受。
 pub(crate) fn normalize_command_rg(command: &str) -> String {
     use std::sync::OnceLock;
     static RG_HABIT_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -45,7 +377,6 @@ pub(crate) fn normalize_command_rg(command: &str) -> String {
         regex::Regex::new(r"(?i)\b(rg(\.exe)?)\s+-rn([a-z]*)").expect("rg habit regex")
     });
     re.replace_all(command, |caps: &regex::Captures| {
-        // caps[1] 为完整程序名（含 .exe，原始大小写），caps[3] 为组合尾缀
         let prog = &caps[1];
         let rest = caps.get(3).map(|m| m.as_str()).unwrap_or("");
         let cleaned = format!("{prog} -n{rest}");
@@ -55,27 +386,16 @@ pub(crate) fn normalize_command_rg(command: &str) -> String {
     .into_owned()
 }
 
-/// exec 通用入口：`shell` 参数显式选壳（默认平台自动检测），`command` 经
-/// 选定 shell 包装执行，`argv` 直调（无 shell）。pwsh 特判收敛在 Shell 枚举
-/// 内（-EncodedCommand/-CommandWithArgs 降级链），此层不分支。
-pub(crate) fn handle_run_exec(ctx: ToolCallCtx) -> ToolResult {
-    handle_run_with_shell(ctx, None)
-}
-/// shell 可用性软检测：注册不拒绝，调用时解析路径不可用才报错。
-/// 探测口径委托给 [`Shell::available`]——按候选集探测，与派生 argv 同源；
-/// 旧实现只查 `path()` 一个名字，在「只有 sh/dash 的精简镜像」或
-/// 「git-bash 尚未解析」时会把明明能跑的命令判成 SHELL_NOT_FOUND。
-pub(crate) fn shell_available(shell: Shell) -> bool {
+pub(crate) fn shell_available(shell: super::shell::Shell) -> bool {
     shell.available()
 }
 
-/// 本机可用 shell 清单（软检测报错的引导信息）。
 pub(crate) fn available_shells() -> String {
     let mut list = Vec::new();
     for (name, shell) in [
-        ("bash", Shell::Bash),
-        ("pwsh", Shell::PowerShell),
-        ("cmd", Shell::Cmd),
+        ("bash", super::shell::Shell::Bash),
+        ("pwsh", super::shell::Shell::PowerShell),
+        ("cmd", super::shell::Shell::Cmd),
     ] {
         if shell_available(shell) {
             list.push(name);
@@ -85,223 +405,6 @@ pub(crate) fn available_shells() -> String {
         "none detected".to_string()
     } else {
         list.join(", ")
-    }
-}
-
-/// 共享执行引擎。`fixed` = 强制指定壳（仅单测）；
-/// None = exec 通用入口（`shell` 参数显式选壳，缺省平台自动检测）。
-/// `argv` 直调无 shell：`shell`/`args` 与 `argv` 同传时显式拒绝（静默忽略
-/// 比报错更贵——模型会误以为参数生效）。
-pub(crate) fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
-    // ── Resolve argv ──
-    // Two modes: `command` (auto-wrapped in platform shell) or `argv` (direct exec).
-    let shell_command: Option<String> = ctx.get_str("command").map(String::from);
-    let argv: Vec<String> = if let Some(command) = shell_command.as_deref() {
-        if command.is_empty() {
-            return crate::json_err(
-                "EMPTY_COMMAND",
-                "command string is empty",
-                "Provide a shell command string.",
-            );
-        }
-        // ── rg 习惯陷阱防御（grep 迁移）：`rg -rn` → `rg -n` ──
-        // `grep -rn`（-r 递归 + -n 行号）是 POSIX 经典组合；ripgrep 中
-        // `-r` 是 --replace，`rg -rn "pat"` 会被解析成 `-r n`（把匹配替换成
-        // 字面 `n`），输出被污染。在此把 command 字符串中的紧贴组合改写为
-        // rg 正确写法（递归默认开启，行号用 -n）。
-        let command = normalize_command_rg(command);
-        // 固定 shell（bash/pwsh 独立工具）或 exec 的 `shell` 参数/平台默认。
-        let shell = match fixed {
-            Some(shell) => {
-                if !shell_available(shell) {
-                    return crate::json_err(
-                        "SHELL_NOT_FOUND",
-                        format!("{} not found on this machine", shell.path()),
-                        format!("available shells: {}", available_shells()),
-                    );
-                }
-                shell
-            }
-            None => match ctx.args.get("shell").and_then(|v| v.as_str()) {
-                Some(name) if !name.is_empty() => match Shell::from_name(name) {
-                    Some(shell) => shell,
-                    None => {
-                        return crate::json_err(
-                            "UNKNOWN_SHELL",
-                            format!("unknown shell '{name}'"),
-                            "Use one of: bash, zsh, sh, pwsh, powershell, cmd. The default is auto-detected (pwsh on Windows, bash elsewhere).",
-                        );
-                    }
-                },
-                _ => Shell::detect(),
-            },
-        };
-        // `args: string[]` 透传（模板与数据分离，避免在脚本字符串内拼接引号）：
-        // - PowerShell 7.6 LTS：-CommandWithArgs 把额外参数原样填入 $args
-        //   （只绑 $args，不产生 $arg0/$argN——脚本用 $args[0]/$args.Count 取样）；
-        // - POSIX（bash/zsh/sh）：`sh -c 'script' _ arg...`，参数进 $1/$2/$@（$0 固定占位 `_`）。
-        let extra_args: Option<Vec<String>> = ctx
-            .args
-            .get("args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .filter(|v: &Vec<String>| !v.is_empty());
-        if extra_args.is_some() && shell == Shell::Cmd {
-            return crate::json_err(
-                "ARGS_NOT_SUPPORTED",
-                "args is only supported for bash/zsh/sh ($1/$@) and pwsh -CommandWithArgs ($args)",
-                "Use exec with shell bash/zsh/sh and args as string array (positional $1...), or shell pwsh.",
-            );
-        }
-        shell.derive_exec_args_with(&command, extra_args.as_deref())
-    } else {
-        // argv 直调无 shell：shell/args 与 argv 同传是模型误解（以为参数
-        // 会生效），显式拒绝比静默忽略便宜。
-        if let Some(name) = ctx.args.get("shell").and_then(|v| v.as_str())
-            && !name.is_empty()
-        {
-            return crate::json_err(
-                "ARGV_IGNORES_SHELL",
-                format!("argv mode runs direct exec without a shell; 'shell: {name}' is ignored"),
-                "Use command (not argv) to run through a shell, or drop the shell parameter.",
-            );
-        }
-        if ctx
-            .args
-            .get("args")
-            .and_then(|v| v.as_array())
-            .is_some_and(|a| !a.is_empty())
-        {
-            return crate::json_err(
-                "ARGV_IGNORES_ARGS",
-                "argv mode runs direct exec without a shell; 'args' only applies to command mode",
-                "Use command + args (positional $1... / $args), or drop args.",
-            );
-        }
-        match ctx.args.get("argv").and_then(|v| v.as_array()) {
-            Some(arr) => {
-                let mut argv: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
-                // ── rg 习惯陷阱防御（argv 模式）：`rg -rn...` → `rg -n...` ──
-                normalize_rg_argv(&mut argv);
-                argv
-            }
-            None => {
-                return crate::json_err(
-                    "MISSING_ARGV",
-                    "exec requires argv or command",
-                    "Example: {\"argv\": [\"cargo\", \"check\"]} or {\"command\": \"cargo check\"}",
-                );
-            }
-        }
-    };
-    if argv.is_empty() {
-        return crate::json_err(
-            "EMPTY_ARGV",
-            "argv array is empty",
-            "Provide at least one element.",
-        );
-    }
-    // 默认 token 上限跟随折叠策略：StandardPolicy=10K；NoFoldPolicy（极限模式）
-    // = 不截断（u32::MAX，模型显式传 max_output_tokens 时以模型参数为准）。
-    let policy_default = crate::tool_side_fold::policy()
-        .exec_max_output_tokens()
-        .unwrap_or(u32::MAX);
-    let max_output_tokens = ctx
-        .get_u64("max_output_tokens")
-        .filter(|&n| (100..=50000).contains(&n))
-        .map(|n| n as u32)
-        .unwrap_or(policy_default);
-    let timeout_secs = ctx
-        .get_u64("timeout_secs")
-        .filter(|&n| n > 0 && n <= 3600)
-        .unwrap_or_else(|| ctx.timeout_secs.unwrap_or(30).clamp(1, 3600));
-    // 快速后台移交窗口：进程存活超过该时长（秒）即返回 backgrounded，
-    // 不等 timeout_secs。用于拉起长驻服务（serve/daemon/watch）。
-    let background_after_secs = ctx
-        .get_u64("background_after_secs")
-        .filter(|&n| n > 0 && n <= 3600);
-    // Fall back to workspace root when the caller doesn't supply cwd.
-    // A relative cwd resolves against the workspace root (or the process
-    // directory when no workspace is set) — same semantics as file tools.
-    // IMPORTANT: never let a resolved cwd be relative. The child process
-    // inherits the daemon's process cwd, which is a shared, drifting
-    // resource in the multi-actor daemon; anchor every fallback to the
-    // session workspace so execution always matches authorization.
-    let cwd: Option<String> = ctx
-        .get_str("cwd")
-        .map(String::from)
-        .map(|cwd| {
-            let resolved = crate::resolve_workspace_path(&cwd);
-            if resolved.is_empty() { cwd } else { resolved }
-        })
-        .or_else(|| {
-            // Actor 工作区兜底：缺省 cwd = 会话工作区。仅当无工作区
-            // （独立 serve/CLI 进程）时才保持 None → 子进程继承进程 cwd，
-            // 此时进程 cwd 与工作区语义一致（serve.rs/main.rs 启动时已对齐）。
-            let ws = crate::current_workspace();
-            if ws.is_empty() || ws == "." {
-                None
-            } else {
-                Some(ws)
-            }
-        });
-    // 可选环境变量覆盖（传入完整 env 供子进程使用）。
-    let env: Option<Vec<(String, String)>> = ctx
-        .args
-        .get("env")
-        .and_then(|v| v.as_object())
-        .map(|map| {
-            map.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .filter(|pairs: &Vec<(String, String)>| !pairs.is_empty());
-    let cwd_ref: Option<&str> = cwd.as_deref();
-    let mut result = direct_exec(
-        &argv,
-        env.as_deref(),
-        cwd_ref,
-        max_output_tokens,
-        timeout_secs,
-        background_after_secs,
-        Some(ctx.cancel.as_ref()),
-        ctx.tx_progress.clone(),
-        &ctx.id,
-    );
-    // 观测线纪律（事故 2026-09-02 预防）：检测 shell 命令中的后台派生 `&`，
-    // 以强提示引导走 background_after_secs + process 工具的受控路径。
-    if let Some(command) = shell_command.as_deref()
-        && result.status == "completed"
-        && detect_background_derivation(command)
-    {
-        result.output.push_str(BACKGROUND_DERIVATION_HINT);
-    }
-    let success = match result.exit_code {
-        Some(0) => true,
-        Some(_) => false,
-        None => !result.timed_out && !result.cancelled,
-    };
-    let json = result.to_json();
-    if success {
-        // 极限模式（NoFoldPolicy）：exec/bash/pwsh 输出完全透传，
-        // 连 qaqh-types 的 24K 字符硬顶也放开（仍保留 read_stream 字节保护）。
-        if crate::tool_side_fold::policy()
-            .exec_max_output_tokens()
-            .is_none()
-        {
-            ToolResult::ok_with_limit(json, None)
-        } else {
-            ToolResult::ok(json)
-        }
-    } else {
-        ToolResult::error(json)
     }
 }
 
