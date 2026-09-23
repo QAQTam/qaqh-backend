@@ -1,12 +1,7 @@
 //! service::common — handle 与各路由组共用的微型 helper。
 
-use serde_json::Value;
-
 pub(crate) fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
-}
-pub(crate) fn parse_json_string(value: String) -> Result<Value, String> {
-    serde_json::from_str(&value).map_err(err)
 }
 
 pub(crate) fn release_freed_heap_memory() {

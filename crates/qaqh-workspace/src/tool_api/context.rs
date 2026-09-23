@@ -10,6 +10,19 @@ use std::time::Duration;
 
 use super::progress::ProgressSink;
 use crate::permission::PermissionLevel;
+pub use qaqh_policy::SandboxSpec;
+
+/// Sandbox policy effective for one tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxMode {
+    /// Main session actor: normal permission/admission flow.
+    #[default]
+    Main,
+    /// Subagent actor: no interactive approval channel; workspace file
+    /// operations may auto-approve, while exec/net/cross-workspace calls are
+    /// denied.
+    Subagent,
+}
 
 /// 调用来源（09-19 补充稿 §4.2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +66,14 @@ impl CancellationToken {
         Self::default()
     }
 
+    /// Build a token sharing an existing cancellation flag.
+    ///
+    /// This is the bridge used when a runtime-owned cancellation tree must be
+    /// projected into an explicit [`ToolCallContext`].
+    pub fn from_shared_flag(flag: Arc<AtomicBool>) -> Self {
+        Self { inner: flag }
+    }
+
     /// 置位取消（宿主调用；工具侧只读）。
     pub fn cancel(&self) {
         self.inner.store(true, Ordering::SeqCst);
@@ -82,6 +103,13 @@ pub struct ToolCallContext {
     pub mode: AgentMode,
     /// 生效权限档位。
     pub permission_level: PermissionLevel,
+    /// 生效沙箱模式。
+    pub sandbox: SandboxMode,
+    /// Canonical sandbox policy for this call.
+    ///
+    /// This is resolved before execution and carried explicitly so runtime
+    /// intent hashing and the exec handler consume the same policy value.
+    pub sandbox_spec: SandboxSpec,
     /// 生效超时（调用方显式值覆盖 descriptor 默认值；构造后定稿）。
     pub timeout: Duration,
     /// 取消信号（只读）。
@@ -90,6 +118,13 @@ pub struct ToolCallContext {
     pub progress: Option<ProgressSink>,
     /// 调用来源。
     pub source: ToolCallSource,
+}
+
+impl ToolCallContext {
+    /// Canonical sandbox policy for this call.
+    pub fn sandbox_spec(&self) -> &SandboxSpec {
+        &self.sandbox_spec
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +148,8 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/ws"),
             mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadFree,
+            sandbox: SandboxMode::Main,
+            sandbox_spec: SandboxSpec::workspace_write(PathBuf::from("/tmp/ws")),
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
@@ -120,5 +157,29 @@ mod tests {
         };
         assert_eq!(ctx.mode, AgentMode::Code);
         assert_eq!(ctx.source, ToolCallSource::Model);
+        assert_eq!(
+            ctx.sandbox_spec().writable_roots,
+            vec![PathBuf::from("/tmp/ws")]
+        );
+    }
+
+    #[test]
+    fn explicit_sandbox_spec_is_not_derived_from_workspace_root() {
+        let ctx = ToolCallContext {
+            call_id: "call_1".to_owned(),
+            session_id: "d9a1a320".to_owned(),
+            workspace_root: PathBuf::from("/tmp/ws"),
+            mode: AgentMode::Code,
+            permission_level: PermissionLevel::ReadFree,
+            sandbox: SandboxMode::Main,
+            sandbox_spec: SandboxSpec::disabled(),
+            timeout: Duration::from_secs(30),
+            cancellation: CancellationToken::new(),
+            progress: None,
+            source: ToolCallSource::Model,
+        };
+
+        assert!(!ctx.sandbox_spec().enabled);
+        assert!(ctx.sandbox_spec().writable_roots.is_empty());
     }
 }

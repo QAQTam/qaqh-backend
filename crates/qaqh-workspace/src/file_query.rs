@@ -1,197 +1,304 @@
 //! Query tools: file read, diff.
 
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
 use super::file_shared::{LineIndex, content_hash, is_binary_read_error, normalize_newlines};
-use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
+use crate::ToolRisk;
+use crate::tool_api::{
+    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
+    ToolName, ToolProjection, ToolSource, TypedTool,
+};
 
-// ------ exec_read (from file_read.rs) ------
-
-pub(super) fn exec_read(args: &serde_json::Value) -> ToolResult {
-    let requests = args
-        .get("requests")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_else(|| vec![args.clone()]);
-    if requests.is_empty() || requests.len() > 8 {
-        return ToolResult::error_data(
-            "INVALID_REQUEST_COUNT",
-            "read accepts between 1 and 8 file requests",
-            false,
-            Some("Split the read into multiple calls.".into()),
-            serde_json::json!({"max_requests": 8}),
-        );
-    }
-
-    let mut outputs = Vec::with_capacity(requests.len());
-    let mut metadata = Vec::with_capacity(requests.len());
-    let mut total_chars = 0usize;
-    for request in requests {
-        let (result, meta) = read_one(&request);
-        if !result.is_success() {
-            return result;
-        }
-        let text = result.model_text().to_string();
-        total_chars += text.chars().count();
-        if total_chars > 48_000 {
-            return ToolResult::error_data(
-                "RANGE_TOO_LARGE",
-                "combined read result exceeds the 12k-token lap budget",
-                false,
-                Some("Read fewer files or split the requests.".into()),
-                serde_json::json!({"max_tokens": 12_000}),
-            );
-        }
-        outputs.push(text);
-        metadata.push(meta);
-    }
-    let text = outputs.join("\n\n---\n\n");
-    ToolResult::ok_data(serde_json::json!({"files": metadata}), text)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadRequest {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_hash: Option<String>,
 }
 
-fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadArgs {
+    #[serde(default)]
+    pub requests: Option<Vec<ReadRequest>>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<u64>,
+    #[serde(default)]
+    pub end_line: Option<u64>,
+    #[serde(default)]
+    pub if_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReadFileMetadata {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<usize>,
+    pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_lines: Option<Vec<usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_modified: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReadOutput {
+    pub files: Vec<ReadFileMetadata>,
+    #[serde(skip, default)]
+    #[schemars(skip)]
+    body: String,
+}
+
+impl ToolProjection for ReadOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.body.clone(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        self.body.lines().next().map(str::to_string)
+    }
+
+    fn display(&self, args: &Value) -> ToolDisplay {
+        read_display(args, &self.body)
+    }
+}
+
+struct ReadPart {
+    metadata: ReadFileMetadata,
+    body: String,
+}
+
+pub struct ReadTool;
+
+impl TypedTool for ReadTool {
+    type Args = ReadArgs;
+    type Output = ReadOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("read").expect("valid read tool name"),
+            display_name: None,
+            description: "Read files (L-prefixed lines, hash+line_count). Up to 8 files; dirs -> IS_DIRECTORY."
+                .to_string(),
+            input_schema: read_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(ReadOutput))
+                .expect("read output schema"),
+            category: crate::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: Duration::from_secs(15),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("read")
+                .unwrap_or_default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let requests = args.requests.unwrap_or_else(|| {
+            vec![ReadRequest {
+                path: args.path.unwrap_or_default(),
+                start_line: args.start_line,
+                end_line: args.end_line,
+                if_hash: args.if_hash,
+            }]
+        });
+        if requests.is_empty() || requests.len() > 8 {
+            return Err(read_error(
+                "INVALID_REQUEST_COUNT",
+                "read accepts between 1 and 8 file requests",
+                Some("Split the read into multiple calls."),
+                json!({"max_requests": 8}),
+            ));
+        }
+
+        let mut files = Vec::with_capacity(requests.len());
+        let mut bodies = Vec::with_capacity(requests.len());
+        let mut total_chars = 0usize;
+        for request in requests {
+            let part = read_one(ctx, &request)?;
+            total_chars += part.body.chars().count();
+            if total_chars > 48_000 {
+                return Err(read_error(
+                    "RANGE_TOO_LARGE",
+                    "combined read result exceeds the 12k-token lap budget",
+                    Some("Read fewer files or split the requests."),
+                    json!({"max_tokens": 12_000}),
+                ));
+            }
+            files.push(part.metadata);
+            bodies.push(part.body);
+        }
+        Ok(ReadOutput {
+            files,
+            body: bodies.join("\n\n---\n\n"),
+        })
+    }
+}
+
+#[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, ToolExecutionError> {
     const MAX_LINES: usize = crate::file_shared::READ_MAX_LINES;
     const MAX_MODEL_CHARS: usize = crate::file_shared::READ_MAX_CHARS;
-    let path = crate::resolve_workspace_path(
-        args.get("path")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default(),
-    );
+
+    let path = resolve_read_path(ctx, &request.path);
     if path.is_empty() {
-        return (
-            ToolResult::error("read: path is required"),
-            serde_json::json!({}),
-        );
+        return Err(read_error(
+            "TOOL_ERROR",
+            "read: path is required",
+            None,
+            json!({}),
+        ));
     }
-    let workspace = crate::current_workspace();
-    if let Some(skill) = qaqh_skills::managed_skill_for_path(
-        std::path::Path::new(&workspace),
-        std::path::Path::new(&path),
-    ) {
-        return (
-            ToolResult::error_data(
-                "USE_SKILLS_TOOL",
-                format!("'{path}' is managed by skill '{skill}'"),
-                false,
-                Some("Use skills(action=activate|resource, name=...) instead.".into()),
-                serde_json::json!({"path": path}),
+    let workspace = ctx.workspace_root.to_string_lossy().to_string();
+    if let Some(skill) =
+        qaqh_skills::managed_skill_for_path(Path::new(&workspace), Path::new(&path))
+    {
+        return Err(read_error(
+            "USE_SKILLS_TOOL",
+            format!("'{path}' is managed by skill '{skill}'"),
+            Some("Use skills(action=activate|resource, name=...) instead."),
+            json!({"path": path}),
+        ));
+    }
+    if Path::new(&path).is_dir() {
+        return Err(read_error(
+            "IS_DIRECTORY",
+            format!("'{path}' is a directory"),
+            Some(
+                "Use exec with argv [\"rg\", \"--files\"] (or [\"ls\", \"-la\"] / [\"cmd\", \"/c\", \"dir\", \"/b\"]) to list directory contents.",
             ),
-            serde_json::json!({}),
-        );
+            json!({"path": path}),
+        ));
     }
-    if std::path::Path::new(&path).is_dir() {
-        return (
-            ToolResult::error_data(
-                "IS_DIRECTORY",
-                format!("'{path}' is a directory"),
-                false,
-                Some("Use exec with argv [\"rg\", \"--files\"] (or [\"ls\", \"-la\"] / [\"cmd\", \"/c\", \"dir\", \"/b\"]) to list directory contents.".into()),
-                serde_json::json!({"path": path}),
-            ),
-            serde_json::json!({}),
-        );
-    }
-    // 只允许普通文件：FIFO 会永久阻塞、设备无 EOF（/dev/zero 无界读）、socket 同理。
     if let Err(guard) = crate::file_shared::ensure_readable_regular_file(&path) {
-        return (guard.into_tool_result(), serde_json::json!({}));
+        let code = guard.code();
+        let message = guard.message();
+        let hint = guard.hint();
+        return Err(read_error(code, message, hint.as_deref(), json!({})));
     }
-    // 大小上限：避免大文件全量读入内存后才截断。
     if let Ok(meta) = std::fs::metadata(&path)
         && meta.is_file()
         && meta.len() > crate::file_shared::READ_MAX_BYTES
     {
-        return (
-            ToolResult::error_data(
-                "FILE_TOO_LARGE",
-                format!(
-                    "'{path}' is {} bytes (read limit {} bytes)",
-                    meta.len(),
-                    crate::file_shared::READ_MAX_BYTES
-                ),
-                false,
-                Some("Use exec (rg/sed/head) to inspect large files.".into()),
-                serde_json::json!({
-                    "path": path,
-                    "size": meta.len(),
-                    "max_bytes": crate::file_shared::READ_MAX_BYTES
-                }),
+        return Err(read_error(
+            "FILE_TOO_LARGE",
+            format!(
+                "'{path}' is {} bytes (read limit {} bytes)",
+                meta.len(),
+                crate::file_shared::READ_MAX_BYTES
             ),
-            serde_json::json!({}),
-        );
+            Some("Use exec (rg/sed/head) to inspect large files."),
+            json!({
+                "path": path,
+                "size": meta.len(),
+                "max_bytes": crate::file_shared::READ_MAX_BYTES
+            }),
+        ));
     }
 
-    let mut start = args
-        .get("start_line")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .map(|v| if v == 0 { 1 } else { v });
-    let mut end = args
-        .get("end_line")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .map(|v| if v == 0 { 1 } else { v });
+    let mut start = request
+        .start_line
+        .map(|value| value as usize)
+        .map(|value| if value == 0 { 1 } else { value });
+    let mut end = request
+        .end_line
+        .map(|value| value as usize)
+        .map(|value| if value == 0 { 1 } else { value });
     if let (Some(start), Some(end)) = (start, end) {
         if end < start {
-            return (
-                ToolResult::error("end_line must be greater than or equal to start_line"),
-                serde_json::json!({}),
-            );
+            return Err(read_error(
+                "TOOL_ERROR",
+                "end_line must be greater than or equal to start_line",
+                None,
+                json!({}),
+            ));
         }
         if end - start + 1 > MAX_LINES {
-            return (
-                ToolResult::error_data(
-                    "RANGE_TOO_LARGE",
-                    format!("requested range exceeds {MAX_LINES} lines"),
-                    false,
-                    Some("Use smaller contiguous ranges.".into()),
-                    serde_json::json!({"max_lines": MAX_LINES}),
-                ),
-                serde_json::json!({}),
-            );
+            return Err(read_error(
+                "RANGE_TOO_LARGE",
+                format!("requested range exceeds {MAX_LINES} lines"),
+                Some("Use smaller contiguous ranges."),
+                json!({"max_lines": MAX_LINES}),
+            ));
         }
     }
 
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if is_binary_read_error(&error.to_string()) => {
-            return (
-                ToolResult::error_data(
-                    "BINARY_FILE",
-                    format!("'{path}' is binary and cannot be read as text"),
-                    false,
-                    Some("Use exec for a binary-aware inspection.".into()),
-                    serde_json::json!({"path": path}),
-                ),
-                serde_json::json!({}),
-            );
+            return Err(read_error(
+                "BINARY_FILE",
+                format!("'{path}' is binary and cannot be read as text"),
+                Some("Use exec for a binary-aware inspection."),
+                json!({"path": path}),
+            ));
         }
         Err(error) => {
-            return (
-                ToolResult::error_data(
-                    "NOT_FOUND",
-                    format!("cannot read '{path}': {error}"),
-                    false,
-                    Some("Verify the path, then retry read.".into()),
-                    serde_json::json!({"path": path}),
-                ),
-                serde_json::json!({}),
-            );
+            return Err(read_error(
+                "NOT_FOUND",
+                format!("cannot read '{path}': {error}"),
+                Some("Verify the path, then retry read."),
+                json!({"path": path}),
+            ));
         }
     };
     let (content, _endings) = normalize_newlines(&raw);
     let hash = content_hash(&content);
-    if args.get("if_hash").and_then(|v| v.as_str()) == Some(hash.as_str()) {
-        let meta = serde_json::json!({"path": path, "not_modified": true, "hash": hash});
-        return (ToolResult::ok_data(meta.clone(), "not modified"), meta);
+    if request.if_hash.as_deref() == Some(hash.as_str()) {
+        return Ok(ReadPart {
+            metadata: ReadFileMetadata {
+                path,
+                start_line: None,
+                end_line: None,
+                total_lines: None,
+                hash,
+                truncated: None,
+                continuation: None,
+                corrected: None,
+                original_lines: None,
+                line_offset: None,
+                not_modified: Some(true),
+            },
+            body: "not modified".to_string(),
+        });
     }
     let index = LineIndex::new(&content);
     let lines = index.lines();
     let total_lines = index.line_count();
 
-    // ── 账本行号修正 ──────────────────────────────────────────────
-    // 偏移链非空 = 最近一次 read 基线之后发生过账本 edit → 模型仍用旧行号
-    // 盲定位时自动补偿（grep 输出清链、write 全覆盖清链、read 新基线清链，
-    // 因此实时行号/全覆盖场景不会被误修正）。仅当首尾偏移一致（范围宽度
-    // 不变）才修正；偏移不一致保持原样，由 expected_hash 兜底。修正信息经
-    // meta 透明回传（corrected/original_lines/line_offset）。
     let mut corrected: Option<(usize, usize)> = None;
     let mut offset: Option<i64> = None;
     if let (Some(s), Some(e)) = (start, end)
@@ -210,33 +317,23 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
 
     let explicit = start.is_some() || end.is_some();
     let first = start.unwrap_or(1).saturating_sub(1);
-    // 宽容语义：仅 start 越界（行号概念失效）硬拒绝；end 越界截断到
-    // total_lines（读少不读错，与全文件读的截断一致，truncated 会标注）。
     if first > total_lines {
-        return (
-            ToolResult::error_data(
-                "LINE_OUT_OF_RANGE",
-                format!("requested lines are outside '{path}' ({total_lines} total lines)"),
-                false,
-                Some("Use the total_lines value and retry.".into()),
-                serde_json::json!({"path": path, "total_lines": total_lines, "hash": hash}),
-            ),
-            serde_json::json!({}),
-        );
+        return Err(read_error(
+            "LINE_OUT_OF_RANGE",
+            format!("requested lines are outside '{path}' ({total_lines} total lines)"),
+            Some("Use the total_lines value and retry."),
+            json!({"path": path, "total_lines": total_lines, "hash": hash}),
+        ));
     }
     let requested_end = end.unwrap_or(total_lines).min(total_lines);
     let mut end_index = requested_end;
     if explicit && end_index.saturating_sub(first) > MAX_MODEL_CHARS / 40 {
-        return (
-            ToolResult::error_data(
-                "RANGE_TOO_LARGE",
-                "requested range exceeds the model output budget",
-                false,
-                Some("Split the range into smaller contiguous reads.".into()),
-                serde_json::json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
-            ),
-            serde_json::json!({}),
-        );
+        return Err(read_error(
+            "RANGE_TOO_LARGE",
+            "requested range exceeds the model output budget",
+            Some("Split the range into smaller contiguous reads."),
+            json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
+        ));
     }
     if !explicit {
         let full_chars = lines
@@ -265,78 +362,172 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
         .collect::<Vec<_>>()
         .join("\n");
     if explicit && body.chars().count() > MAX_MODEL_CHARS {
-        return (
-            ToolResult::error_data(
-                "RANGE_TOO_LARGE",
-                "requested range exceeds the model output budget",
-                false,
-                Some("Split the range into smaller contiguous reads.".into()),
-                serde_json::json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
-            ),
-            serde_json::json!({}),
-        );
+        return Err(read_error(
+            "RANGE_TOO_LARGE",
+            "requested range exceeds the model output budget",
+            Some("Split the range into smaller contiguous reads."),
+            json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
+        ));
     }
     let truncated = end_index < total_lines;
-    let mut meta = serde_json::json!({
-        "path": path,
-        "start_line": first + 1,
-        "end_line": end_index,
-        "total_lines": total_lines,
-        "hash": hash,
-        "truncated": truncated,
-    });
+    let mut metadata = ReadFileMetadata {
+        path,
+        start_line: Some(first + 1),
+        end_line: Some(end_index),
+        total_lines: Some(total_lines),
+        hash,
+        truncated: Some(truncated),
+        continuation: None,
+        corrected: None,
+        original_lines: None,
+        line_offset: None,
+        not_modified: None,
+    };
     if truncated {
-        let mut continuation = args.clone();
-        continuation["start_line"] = serde_json::json!(end_index + 1);
-        continuation["end_line"] = serde_json::Value::Null;
-        meta["continuation"] = continuation;
+        let mut continuation = serde_json::to_value(request).unwrap_or_else(|_| json!({}));
+        continuation["start_line"] = json!(end_index + 1);
+        continuation["end_line"] = Value::Null;
+        metadata.continuation = Some(continuation);
     }
     if let (Some((os, oe)), Some(delta)) = (corrected, offset) {
-        meta["corrected"] = serde_json::json!(true);
-        meta["original_lines"] = serde_json::json!([os, oe]);
-        meta["line_offset"] = serde_json::json!(delta);
+        metadata.corrected = Some(true);
+        metadata.original_lines = Some(vec![os, oe]);
+        metadata.line_offset = Some(delta);
     }
-    // 任何 read（全文件或范围）都建立账本基线：模型后续用 start_line 盲定位时，
-    // 工具凭账本自动防漂移，无需模型手动回传 hash。
-    crate::file_state::record_read(&path, &content, total_lines);
-    (ToolResult::ok_data(meta.clone(), body), meta)
+    crate::file_state::record_read(&metadata.path, &content, total_lines);
+    Ok(ReadPart { metadata, body })
 }
 
-handler!(handle_read, exec_read);
+fn resolve_read_path(ctx: &ToolCallContext, raw_path: &str) -> String {
+    if raw_path.is_empty() {
+        return String::new();
+    }
+    let path = Path::new(raw_path);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else if ctx.workspace_root.as_os_str().is_empty() {
+        PathBuf::from(raw_path)
+    } else {
+        ctx.workspace_root.join(path)
+    };
+    crate::permission::normalize_lexically(&joined)
+        .to_string_lossy()
+        .to_string()
+}
 
-// ------ Registration ------
+fn read_display(args: &Value, output: &str) -> ToolDisplay {
+    let paths = if let Some(requests) = args.get("requests").and_then(Value::as_array) {
+        let paths = requests
+            .iter()
+            .filter_map(|request| request.get("path").and_then(Value::as_str))
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        match paths.as_slice() {
+            [] => None,
+            [path] => Some(path.clone()),
+            _ => Some(paths.join(", ")),
+        }
+    } else {
+        args.get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+    };
+    match paths {
+        Some(path) => ToolDisplay::new(
+            ToolHeader::Path {
+                path,
+                op: crate::tool_api::PathOp::Read,
+            },
+            ToolBody::Text {
+                text: output.to_string(),
+                truncated: false,
+            },
+        )
+        .with_summary(output.lines().next().unwrap_or_default().to_string()),
+        None => ToolDisplay::new(
+            ToolHeader::Other {
+                label: "read".to_string(),
+            },
+            ToolBody::Text {
+                text: output.to_string(),
+                truncated: false,
+            },
+        ),
+    }
+}
+
+fn read_error(
+    code: &str,
+    message: impl Into<String>,
+    hint: Option<&str>,
+    details: Value,
+) -> ToolExecutionError {
+    let mut error = ToolError::new(ToolErrorKind::Execution, message);
+    error.code = ToolErrorCode::from_legacy(code);
+    if let Some(hint) = hint {
+        error = error.with_hint(hint);
+    }
+    error.details = Some(details);
+    ToolExecutionError::Recoverable(error)
+}
+
+fn read_schema() -> Value {
+    json!({
+        "type":"object",
+        "properties": {
+            "requests": {
+                "type":"array", "maxItems":8,
+                "description":"Batch (mirrors single-file fields)",
+                "items": {"type":"object", "properties": {
+                    "path":{"type":"string","description":"File"},
+                    "start_line":{"type":"integer","minimum":1,"description":"Start line (1-based)"},
+                    "end_line":{"type":"integer","minimum":1,"description":"End line inclusive"},
+                    "if_hash":{"type":"string","description":"Hash from prior read; NOT_MODIFIED if unchanged"}
+                }, "required":["path"], "additionalProperties":false}
+            },
+            "path":{"type":"string","description":"File"},
+            "start_line":{"type":"integer","minimum":1,"description":"Start line (1-based)"},
+            "end_line":{"type":"integer","minimum":1,"description":"End line inclusive"},
+            "if_hash":{"type":"string","description":"Hash from prior read; NOT_MODIFIED if unchanged"}
+        },
+        "oneOf":[{"required":["requests"]},{"required":["path"]}],
+        "additionalProperties":false
+    })
+}
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("read", crate::display::project_read);
-    mgr.register(ToolHandler {
-        key: "read".to_string(),
-        description: "Read files (L-prefixed lines, hash+line_count). Up to 8 files; dirs -> IS_DIRECTORY.",
-        input_schema: serde_json::json!({
-            "type":"object",
-            "properties": {
-                "requests": {
-                    "type":"array", "maxItems":8,
-                    "description":"Batch (mirrors single-file fields)",
-                    "items": {"type":"object", "properties": {
-                        "path":{"type":"string","description":"File"},
-                        "start_line":{"type":"integer","minimum":1,"description":"Start line (1-based)"},
-                        "end_line":{"type":"integer","minimum":1,"description":"End line inclusive"},
-                        "if_hash":{"type":"string","description":"Hash from prior read; NOT_MODIFIED if unchanged"}
-                    }, "required":["path"], "additionalProperties":false}
-                },
-                "path":{"type":"string","description":"File"},
-                "start_line":{"type":"integer","minimum":1,"description":"Start line (1-based)"},
-                "end_line":{"type":"integer","minimum":1,"description":"End line inclusive"},
-                "if_hash":{"type":"string","description":"Hash from prior read; NOT_MODIFIED if unchanged"}
-            },
-            "oneOf":[{"required":["requests"]},{"required":["path"]}],
-            "additionalProperties":false
-        }),
-        handler: handle_read,
-        risk: ToolRisk::ReadOnly,
-        category: crate::permission::ToolCategory::Read,
-        default_timeout: std::time::Duration::from_secs(15),
-    });
+    mgr.register_typed(ReadTool);
+}
+
+#[cfg(test)]
+pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
+    use crate::tool_api::ErasedTool;
+    let workspace = crate::current_workspace();
+    let workspace_root = if workspace.is_empty() {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(workspace)
+    };
+    let ctx = ToolCallContext {
+        call_id: "read-test".to_string(),
+        session_id: "read-test-session".to_string(),
+        workspace_root: workspace_root.clone(),
+        mode: crate::tool_api::AgentMode::Code,
+        permission_level: crate::permission::PermissionLevel::ReadFree,
+        sandbox: crate::tool_api::SandboxMode::Main,
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        timeout: Duration::from_secs(15),
+        cancellation: crate::tool_api::CancellationToken::new(),
+        progress: None,
+        source: crate::tool_api::ToolCallSource::Model,
+    };
+    crate::tool_api::TypedToolAdapter::new(ReadTool)
+        .execute(ctx, args.clone())
+        .expect("read must not return fatal")
+        .to_tool_result()
 }
 
 #[cfg(test)]
@@ -440,6 +631,28 @@ fn out_of_range_start_still_rejects() {
     }));
     assert!(!result.is_success());
     assert_eq!(result.error.as_ref().unwrap().code, "LINE_OUT_OF_RANGE");
+    assert_eq!(result.data["total_lines"], 2);
+    assert!(result.data["hash"].as_str().is_some());
+}
+
+#[test]
+fn read_registration_is_typed_and_descriptor_keeps_legacy_schema() {
+    let mut manager = crate::ToolManager::new();
+    register(&mut manager);
+    let registered = manager.builtins.get("read").expect("read registered");
+    assert!(
+        registered.legacy.is_none(),
+        "read must not use legacy executor"
+    );
+    assert_eq!(
+        registered.descriptor.input_schema["additionalProperties"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        registered.descriptor.input_schema["oneOf"],
+        serde_json::json!([{"required": ["requests"]}, {"required": ["path"]}])
+    );
+    assert_eq!(registered.descriptor.output_schema["type"], "object");
 }
 
 #[test]

@@ -2,9 +2,13 @@
 //!
 //! Follows the same pattern as qaqh-workspace::ToolManager.
 
+pub mod actor;
+pub mod canonical;
 pub mod grouping;
 pub mod manager;
 mod migrate;
+pub mod projection;
+pub mod session_fact_v2;
 pub mod session_meta;
 pub mod store;
 pub use grouping::{WorkspaceMeta, WorkspaceStore};

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use qaqh_config::Config;
+use qaqh_session::canonical::{CanonicalSessionIdentity, ToolLedger, ToolLedgerError, WriterId};
 use qaqh_session::{SessionManager, SessionMeta};
 
 use super::token_calibration::{
@@ -202,6 +203,15 @@ pub struct AgentState {
     /// (PR-3-1: `Arc` handle; `None` only in unit tests that never init the
     /// session store — their ops simply never flush).
     pub session_manager: Option<Arc<SessionManager>>,
+    /// Canonical tool lifecycle ledger owned by this session actor.
+    ///
+    /// It is opened lazily at the first durable tool execution, then kept for
+    /// the actor lifetime so a single writer lease covers all ToolIntent /
+    /// ToolFinished appends. Ephemeral sessions leave this `None`.
+    tool_ledger: Option<ToolLedger>,
+    /// Seed that owns `tool_ledger`; guards against stale reuse when the
+    /// same `AgentState` is rebound to another session.
+    tool_ledger_seed: Option<String>,
     /// Loop bookkeeping queue (PR-1-5 / B6): title / context-stats / mode /
     /// usage / skills writes, drained by [`Self::drain_persist_ops`].
     pub pending_meta_ops: Vec<MetaOp>,
@@ -244,6 +254,8 @@ impl AgentState {
             last_injected_epoch: 0,
             last_mcp_env_block: None,
             session_manager: SessionManager::try_global(),
+            tool_ledger: None,
+            tool_ledger_seed: None,
             pending_meta_ops: Vec::new(),
             endpoint_spec: None,
         };
@@ -255,6 +267,45 @@ impl AgentState {
     /// Call after any mutation of `config.provider_id` / `config.endpoint`.
     pub fn refresh_endpoint_spec(&mut self) {
         self.endpoint_spec = qaqh_config::registry::resolve_for_config(&self.config);
+    }
+
+    /// Return this actor's canonical tool ledger, opening it on first use.
+    ///
+    /// `None` means the session is intentionally ephemeral and must not write
+    /// canonical facts. All other failures are surfaced to the caller so the
+    /// execution boundary can fail closed before spawning a handler.
+    pub(crate) fn tool_ledger_mut(&mut self) -> Result<Option<&mut ToolLedger>, ToolLedgerError> {
+        if self.ephemeral || self.session.seed.is_empty() {
+            return Ok(None);
+        }
+
+        if self.tool_ledger_seed.as_deref() != Some(self.session.seed.as_str()) {
+            self.tool_ledger = None;
+            self.tool_ledger_seed = None;
+        }
+
+        if self.tool_ledger.is_none() {
+            let session_dir = qaqh_types::platform::sessions_dir().join(&self.session.seed);
+            let identity = CanonicalSessionIdentity::open_or_create(&session_dir)?;
+            let now_ms = unix_ms();
+            let writer_id = WriterId::new(format!(
+                "agent-{}-{}",
+                std::process::id(),
+                self.session.seed
+            ));
+            let ledger = ToolLedger::open(
+                &session_dir,
+                identity.session_id,
+                identity.log_id,
+                writer_id,
+                now_ms,
+                tool_ledger_lease_ms(),
+            )?;
+            self.tool_ledger = Some(ledger);
+            self.tool_ledger_seed = Some(self.session.seed.clone());
+        }
+
+        Ok(self.tool_ledger.as_mut())
     }
 
     /// Push the image capability snapshot for the current config into the
@@ -839,6 +890,24 @@ pub struct TurnResumeState {
     pub round_num: u32,
     pub pending_call_ids: Vec<String>,
     pub usage: Option<qaqh_types::UsageInfo>,
+}
+
+pub(crate) fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Tool ledger writer lease. Short enough that a crashed actor can be taken
+/// over promptly, long enough to avoid renewal on every fast tool call.
+/// `QAQH_TOOL_LEDGER_LEASE_MS` is a test/ops override.
+pub(crate) fn tool_ledger_lease_ms() -> i64 {
+    std::env::var("QAQH_TOOL_LEDGER_LEASE_MS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30_000)
 }
 
 #[cfg(test)]

@@ -13,7 +13,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::time::Duration;
+
+use crate::file_mutate::{mutation_error, resolve_mutation_path};
+use crate::tool_api::{
+    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection, ToolSource, TypedTool,
+};
 
 /// Full-file snapshots are stored as content-addressed blobs up to this size.
 /// Larger files only keep their hashes; replay reports that the full content
@@ -21,7 +30,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_BLOB_BYTES: usize = 1024 * 1024;
 
 /// A single append-only modification step.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Step {
     /// Global monotonically increasing sequence number.
     pub seq: u64,
@@ -339,152 +348,280 @@ fn export_patches(steps: &[Step]) -> String {
     out
 }
 
-/// Execute the `journal` workspace tool.
-fn exec_journal(args: &serde_json::Value) -> crate::ToolResult {
-    let action = args
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("query");
-    match action {
-        "query" | "export" => {
-            let session = args
-                .get("session")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let file = args.get("file").and_then(|v| v.as_str());
-            let since = args.get("since").and_then(|v| v.as_u64());
-            let format = args
-                .get("format")
-                .and_then(|v| v.as_str())
-                .unwrap_or("json");
-            let steps = query(
-                (!session.is_empty()).then_some(session),
-                file,
-                since,
-            );
-            if action == "export" && format == "patches" {
-                let patches = export_patches(&steps);
-                let text = if patches.is_empty() {
-                    "[OK] journal export: no patches\n".to_string()
-                } else {
-                    patches.clone()
-                };
-                let data = serde_json::json!({
-                    "timeis": crate::now_utc8(),
-                    "status": "ok",
-                    "action": action,
-                    "format": "patches",
-                    "patches": patches,
-                });
-                return crate::ToolResult::ok_data(data, text);
-            }
-            let text = if steps.is_empty() {
-                format!("[OK] journal {action}: no matching steps\n")
-            } else {
-                format!("[OK] journal {action}: {} step(s)\n", steps.len())
-            };
-            let data = serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "ok",
-                "action": action,
-                "format": format,
-                "steps": steps,
-            });
-            crate::ToolResult::ok_data(data, text)
-        }
-        "replay" => {
-            let file = match args.get("file").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                Some(file) => file,
-                None => {
-                    return crate::ToolResult::error(serde_json::json!({
-                        "timeis": crate::now_utc8(),
-                        "status": "error",
-                        "code": "MISSING_FILE",
-                        "message": "journal replay requires 'file'",
-                    }).to_string());
-                }
-            };
-            let at_seq = args.get("at").and_then(|v| v.as_u64());
-            // Resolve `out` against the workspace root BEFORE handing it to the
-            // writer. The permission layer binds the authorization resource via
-            // resolve_target_path (workspace-anchored); without the same
-            // resolution here the evaluated path and the actual write path
-            // diverge whenever the workspace root differs from the process cwd.
-            let out_owned: Option<std::path::PathBuf> = args
-                .get("out")
-                .and_then(|v| v.as_str())
-                .map(crate::resolve_workspace_path)
-                .map(std::path::PathBuf::from);
-            let out = out_owned.as_deref();
-            match replay_to_path(file, at_seq, out) {
-                Ok(Some(content)) => {
-                    let data = serde_json::json!({
-                        "timeis": crate::now_utc8(),
-                        "status": "ok",
-                        "action": "replay",
-                        "file": file,
-                        "at": at_seq,
-                        "exists": true,
-                        "content": content,
-                    });
-                    crate::ToolResult::ok_data(data, content)
-                }
-                Ok(None) => {
-                    let data = serde_json::json!({
-                        "timeis": crate::now_utc8(),
-                        "status": "ok",
-                        "action": "replay",
-                        "file": file,
-                        "at": at_seq,
-                        "exists": false,
-                    });
-                    crate::ToolResult::ok_data(data, format!("[OK] journal replay: {file} did not exist at requested sequence\n"))
-                }
-                Err(error) => crate::ToolResult::error(serde_json::json!({
-                    "timeis": crate::now_utc8(),
-                    "status": "error",
-                    "code": "REPLAY_FAILED",
-                    "message": error,
-                }).to_string()),
-            }
-        }
-        other => crate::ToolResult::error(serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": "INVALID_ACTION",
-            "message": format!("invalid journal action {other:?} — use query, replay, or export"),
-        }).to_string()),
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JournalArgs {
+    #[serde(default = "default_journal_action")]
+    pub action: String,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub since: Option<u64>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub at: Option<u64>,
+    #[serde(default)]
+    pub out: Option<String>,
+}
+
+fn default_journal_action() -> String {
+    "query".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct JournalOutput {
+    pub timeis: String,
+    pub status: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<Step>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patches: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exists: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    model_text: String,
+}
+
+impl ToolProjection for JournalOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.model_text.clone(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        self.model_text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(160).collect())
+    }
+
+    fn display(&self, args: &Value) -> ToolDisplay {
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|action| !action.is_empty())
+            .unwrap_or("query");
+        ToolDisplay::new(
+            ToolHeader::Other {
+                label: format!("journal {action}"),
+            },
+            ToolBody::Text {
+                text: self.model_text.clone(),
+                truncated: false,
+            },
+        )
+        .with_summary(
+            self.summary()
+                .unwrap_or_else(|| format!("journal {action}")),
+        )
     }
 }
 
-fn handle_journal(ctx: crate::ToolCallCtx) -> crate::ToolResult {
-    exec_journal(&ctx.args)
+pub struct JournalTool;
+
+impl TypedTool for JournalTool {
+    type Args = JournalArgs;
+    type Output = JournalOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("journal").expect("valid journal tool name"),
+            display_name: None,
+            description:
+                "Query/replay session journal (SMJ): query list, export dump, replay restore."
+                    .to_string(),
+            input_schema: journal_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(JournalOutput))
+                .expect("journal output schema"),
+            category: crate::permission::ToolCategory::Write,
+            risk: crate::ToolRisk::Write,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("journal")
+                .unwrap_or_default(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        match args.action.as_str() {
+            "query" | "export" => {
+                let action = args.action.clone();
+                let session = args
+                    .session
+                    .as_deref()
+                    .filter(|session| !session.is_empty());
+                let steps = query(session, args.file.as_deref(), args.since);
+                let format = args.format.as_deref().unwrap_or("json");
+                if action == "export" && format == "patches" {
+                    let patches = export_patches(&steps);
+                    let model_text = if patches.is_empty() {
+                        "[OK] journal export: no patches\n".to_string()
+                    } else {
+                        patches.clone()
+                    };
+                    return Ok(JournalOutput {
+                        timeis: crate::now_utc8(),
+                        status: "ok".to_string(),
+                        action,
+                        format: Some("patches".to_string()),
+                        steps: None,
+                        patches: Some(patches),
+                        file: None,
+                        at: None,
+                        exists: None,
+                        content: None,
+                        model_text,
+                    });
+                }
+                let model_text = if steps.is_empty() {
+                    format!("[OK] journal {action}: no matching steps\n")
+                } else {
+                    format!("[OK] journal {action}: {} step(s)\n", steps.len())
+                };
+                Ok(JournalOutput {
+                    timeis: crate::now_utc8(),
+                    status: "ok".to_string(),
+                    action,
+                    format: Some(format.to_string()),
+                    steps: Some(steps),
+                    patches: None,
+                    file: None,
+                    at: None,
+                    exists: None,
+                    content: None,
+                    model_text,
+                })
+            }
+            "replay" => {
+                let file = args
+                    .file
+                    .as_deref()
+                    .filter(|file| !file.is_empty())
+                    .ok_or_else(|| {
+                        mutation_error(
+                            "MISSING_FILE",
+                            "journal replay requires 'file'",
+                            None,
+                            json!({}),
+                        )
+                    })?;
+                let out = args
+                    .out
+                    .as_deref()
+                    .map(|out| std::path::PathBuf::from(resolve_mutation_path(ctx, out)));
+                let replayed = replay_to_path(file, args.at, out.as_deref()).map_err(|error| {
+                    mutation_error(
+                        "REPLAY_FAILED",
+                        error,
+                        None,
+                        json!({
+                            "timeis": crate::now_utc8(),
+                            "status": "error",
+                            "code": "REPLAY_FAILED",
+                            "file": file,
+                        }),
+                    )
+                })?;
+                match replayed {
+                    Some(content) => Ok(JournalOutput {
+                        timeis: crate::now_utc8(),
+                        status: "ok".to_string(),
+                        action: "replay".to_string(),
+                        format: None,
+                        steps: None,
+                        patches: None,
+                        file: Some(file.to_string()),
+                        at: args.at,
+                        exists: Some(true),
+                        model_text: content.clone(),
+                        content: Some(content),
+                    }),
+                    None => Ok(JournalOutput {
+                        timeis: crate::now_utc8(),
+                        status: "ok".to_string(),
+                        action: "replay".to_string(),
+                        format: None,
+                        steps: None,
+                        patches: None,
+                        file: Some(file.to_string()),
+                        at: args.at,
+                        exists: Some(false),
+                        content: None,
+                        model_text: format!(
+                            "[OK] journal replay: {file} did not exist at requested sequence\n"
+                        ),
+                    }),
+                }
+            }
+            other => Err(mutation_error(
+                "INVALID_ACTION",
+                format!("invalid journal action {other:?} — use query, replay, or export"),
+                None,
+                json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": "INVALID_ACTION",
+                }),
+            )),
+        }
+    }
+}
+
+fn journal_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["query", "export", "replay"], "default": "query", "description": "Action"},
+            "session": {"type": "string", "description": "Session seed"},
+            "file": {"type": "string", "description": "File filter / replay target"},
+            "since": {"type": "integer", "description": "Since epoch seconds"},
+            "at": {"type": "integer", "description": "Replay up to seq"},
+            "out": {"type": "string", "description": "Output path for replay"}
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
 }
 
 /// Register the `journal` workspace tool.
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("journal", crate::display::project_journal);
-    mgr.register(crate::ToolHandler {
-            key: "journal".to_string(),
-            description: "Query/replay session journal (SMJ): query list, export dump, replay restore.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["query", "export", "replay"], "default": "query", "description": "Action"},
-                    "session": {"type": "string", "description": "Session seed"},
-                    "file": {"type": "string", "description": "File filter / replay target"},
-                    "since": {"type": "integer", "description": "Since epoch seconds"},
-                    "at": {"type": "integer", "description": "Replay up to seq"},
-                    "out": {"type": "string", "description": "Output path for replay"}
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }),
-            handler: handle_journal,
-            risk: crate::ToolRisk::Write,
-            category: crate::permission::ToolCategory::Write,
-            default_timeout: std::time::Duration::from_secs(30),
-        });
+    mgr.register_typed(JournalTool);
+}
+
+/// Compatibility entry retained for existing in-process tests.
+#[cfg(test)]
+fn exec_journal(args: &Value) -> crate::ToolResult {
+    use crate::file_mutate::ambient_tool_context;
+    use crate::tool_api::{ErasedTool, TypedToolAdapter};
+
+    let ctx = ambient_tool_context("journal-compat", Duration::from_secs(30));
+    TypedToolAdapter::new(JournalTool)
+        .execute(ctx, args.clone())
+        .unwrap_or_else(|fatal| panic!("journal tool fatal: {}", fatal.message))
+        .to_tool_result()
 }
 
 /// CLI entry: `qaqh-workspace journal query|replay|export ...`
@@ -788,6 +925,42 @@ mod tests {
             assert!(patches.contains("--- a/a.txt"), "got: {patches}");
             assert!(patches.contains("+++ b/a.txt"), "got: {patches}");
             assert!(patches.contains("+hello world"), "got: {patches}");
+        });
+    }
+
+    #[test]
+    fn typed_journal_registration_and_display_are_same_source() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        assert!(
+            manager.builtins["journal"].legacy.is_none(),
+            "journal still has legacy executor"
+        );
+
+        with_temp_journal(|| {
+            record_change(
+                "s1",
+                "c1",
+                "write",
+                "a.txt",
+                "overwrite",
+                None,
+                Some("data\n"),
+                "ok",
+            );
+            let result = exec_journal(&serde_json::json!({
+                "action": "query",
+                "session": "s1",
+            }));
+            assert!(result.is_success(), "{}", result.model_text());
+            assert_eq!(result.data["action"], serde_json::json!("query"));
+            assert_eq!(result.data["steps"].as_array().map(Vec::len), Some(1));
+            let display = result.display().expect("typed display");
+            let display_text = match &display.body {
+                Some(qaqh_types::ToolResultDisplayBody::Text { text, .. }) => text,
+                other => panic!("unexpected journal display body: {other:?}"),
+            };
+            assert_eq!(display_text, result.model_text());
         });
     }
 

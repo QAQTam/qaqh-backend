@@ -1,6 +1,6 @@
 # QAQ-Harness
 
-AI 编码代理的跨平台 **Rust 后端核心**(monorepo,16 个 workspace 成员)。单个常驻 daemon 承载多会话对话循环、LLM 网关、19 个内置工具、Agent Skills 与子代理隔离执行;Windows 桌面壳(WinUI3)/ TUI / Web 壳位于独立仓库,通过统一的 **Ringing V1** HTTP/SSE 协议接入。
+AI 编码代理的跨平台 **Rust 后端核心**(monorepo,19 个 workspace 成员)。单个常驻 daemon 承载多会话对话循环、LLM 网关、19 个内置工具、Agent Skills 与子代理隔离执行;Windows 桌面壳(WinUI3)/ TUI / Web 壳位于独立仓库,通过统一的 **Ringing V1** HTTP/SSE 协议接入。
 
 - Edition 2024 · License MIT · 状态:alpha
 - HTTP 栈: `axum 0.8 + hyper 1 + tower 0.5 + tower-http 0.6 + tokio 1`，`SSE KeepAlive 15s`，release 静态 CRT 单文件 exe(`opt-level=z` + LTO + strip)
@@ -40,7 +40,8 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,16 个 workspace 成�
 | | `qaqh-ringing` | Ringing 线协议:envelope / ack / batch / snapshot / content ref / worker frame / 能力协商 |
 | 运行时 | `qaqh-runtime` | daemon 应用运行时:`QaqhService` 方法分发、AgentRegistry、actor、RingingHub、TurnEngine(对话循环:输入处理 → gate 快照 → 工具审批/执行 → 回合完成 → 自动压缩) |
 | | `qaqh-message` | 消息存储状态机(Turn/Step 结构、Effect 驱动、ContextFlow 摄取编排) |
-| | `qaqh-daemon` | headless 入口二进制(`run` / `server` / `status` / `stop`) |
+| | `qaqh-daemon` | headless 入口二进制(`run` / `server` / `webui` / `status` / `stop`) |
+| | `qaqh-webui-gateway` | 独立、仅回环、显式启动的 WebUI 浏览器网关 |
 | 会话/配置 | `qaqh-session` | SessionManager 单例:index/meta/消息 JSONL 持久化、归档、临时会话、WorkspaceStore |
 | | `qaqh-types` | 共享类型、平台路径(data_dir/marker)、tool_mode 定义、DaemonDiscovery(daemon.json 磁盘契约唯一源) |
 | | `qaqh-config` | Config 加载/保存事务、provider 注册表、system prompt、secrets |
@@ -58,8 +59,8 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,16 个 workspace 成�
 ### Ringing V1 协议
 客户端先 `POST /clients/open` 能力协商,获得 `client_instance_id / session_id / lease`;命令按 control/conversation/tool 三频道 POST,事件经对应频道 SSE 推送(batch 信封,16MB 帧上限);另有 per-session timeline SSE(快照页 + Last-Event-ID 断点续传)。鉴权三层:Bearer token + client-session lease + seed 所有权。worker 已收敛为 daemon 内线程,但保留完整 frame 边界语义,未来可无感切回子进程隔离。
 
-### 多前端与 webUI 托管
-daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器一律以 Ringing V1 HTTP/SSE 接入,daemon 侧不存在任何第二前端协议。浏览器形态由 daemon 内置静态托管承担:`GET /debug/` 直接服务 renderer 静态产物(定位 `out/renderer`,electron-vite 布局),入口页加载 `__qaqh_bridge__.js` 获取一次性 nonce,再经同源 `/debug/__qaqh_token__` 兑换运行 token——改前端 → 刷新浏览器即可,无需重打包。安全边界:**仅限 loopback 来源**(非回环连接一律 403,LAN 模式下远端壳是已持 token 的原生应用);debug 托管本身只提供静态读取与 nonce 兑换端点。
+### 多前端与 webUI 网关
+daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器一律以 Ringing V1 HTTP/SSE 接入,daemon 侧不存在任何第二前端协议。WebUI 默认关闭:普通 `qaqh-daemon run` / `server` 不挂载 `/debug`、`/ui`、nonce、静态资源或任何浏览器控制面。WebUI 源码在仓库根 `webui/`,构建产物由独立的 `qaqh-webui-gateway` binary 编译时嵌入;只有显式执行 `qaqh-daemon webui` 才会启动该网关。网关读取本机 discovery 并持有 daemon Bearer,浏览器只持有 HttpOnly、SameSite=Strict 的网关 session cookie 与短生命周期 CSRF token;命令、service、seed scope 和 SSE 均由网关注入 lease 后代理。
 
 ### 会话与存储
 - seed 为 8 位 hex;磁盘布局 `sessions/index.json` + `sessions/{seed}/{meta.json, messages.jsonl, compact-context.json, todo.json}`,全部 temp+rename 原子写
@@ -92,6 +93,8 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 ```powershell
 # 构建(release,产出 daemon 二进制)
 just build-daemon
+# 构建 WebUI 网关 release(先构建 webui/out/renderer)
+just build-webui-gateway
 
 # 开发运行(headless daemon)
 just dev
@@ -102,10 +105,14 @@ cargo run -p qaqh-daemon -- server   # 局域网 headless 模式(远端壳直连
 cargo run -p qaqh-daemon -- status   # 读 daemon.json 探活
 cargo run -p qaqh-daemon -- stop
 
-# webUI(浏览器直连,与桌面壳同一 renderer)
-# 启动 daemon 后打开 http://127.0.0.1:<port>/debug/
-# (端口读 daemon.json;renderer 产物放在 out/renderer 或用
-#  QAQH_DEBUG_RENDERER_DIR 指定;仅限本机访问)
+# WebUI 构建与安全回归(输出 webui/out/renderer,不入库)
+cd webui && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build
+
+# WebUI 网关(先构建独立 binary;默认随机端口并打印实际地址)
+cargo build -p qaqh-webui-gateway
+cargo run -p qaqh-daemon -- webui
+# 固定端口必须显式指定:
+cargo run -p qaqh-daemon -- webui --port 41234
 ```
 
 ## 开发工作流

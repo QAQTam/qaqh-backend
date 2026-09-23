@@ -6,6 +6,7 @@ use super::loop_core::Loop;
 use super::types::*;
 
 use super::injection::{Injection, InjectionPriority, InjectionSemantics, SUBAGENT_SOURCE};
+use super::turn_actor::TurnCancellation;
 use qaqh_domain::{ConversationCommand, DomainEvent};
 
 impl Loop {
@@ -20,8 +21,11 @@ impl Loop {
                 text,
                 images,
                 attachments: _,
+                message_id,
+                input_purpose,
                 as_system,
             } => {
+                let input_id = message_id.as_deref().unwrap_or(command_id).to_string();
                 if as_system {
                     // 统一注入入口：时序决策（compact 进行中 / turn 运行
                     // 中 / idle）全部由 inject() 负责；compact 窗口不拒绝
@@ -30,6 +34,8 @@ impl Loop {
                     let injection = Injection {
                         session_id: session_id.to_string(),
                         command_id: command_id.to_string(),
+                        input_id,
+                        input_purpose,
                         source: SUBAGENT_SOURCE,
                         role: qaqh_types::Message::ROLE_USER,
                         text,
@@ -83,12 +89,11 @@ impl Loop {
                     stats: &mut self.session.stats,
                     flow: &mut self.flow,
                 };
-                // T-1-3：用户输入是唯一的「复活」入口——显式取消态在此解除，
-                // 之后的系统注入（子代理报告）才允许再开回合。
-                self.user_cancelled = false;
                 let outcome = self.input.handle_user_input(
                     &mut ctx,
+                    &mut self.session.turn,
                     qaqh_message::builtin::USER,
+                    &input_id,
                     &text,
                     images,
                 );
@@ -98,9 +103,55 @@ impl Loop {
             ConversationCommand::ConversationCancel { turn_id } => {
                 self.cancel.set();
                 qaqh_workspace::set_cancel(true);
-                // T-1-3：记录取消**原因**——系统注入只在非用户取消态清除标记
-                // 并开回合（见 `Loop::inject` / `dispatch_injections_after_compact`）。
-                self.user_cancelled = true;
+                let cancel_call_ids = {
+                    let mut call_ids = Vec::new();
+                    if let Some(suspended) = self.session.turn.suspended.as_ref() {
+                        call_ids.extend(suspended.pending_permission_ids.iter().cloned());
+                        call_ids
+                            .extend(suspended.pending_asks.iter().map(|ask| ask.call_id.clone()));
+                        call_ids.extend(
+                            suspended
+                                .pending_plans
+                                .iter()
+                                .map(|plan| plan.call_id.clone()),
+                        );
+                        if let Some(todo) = &suspended.pending_todo_activation {
+                            call_ids.push(todo.call_id.clone());
+                        }
+                        call_ids.extend(suspended.tool_call_order.iter().cloned());
+                    }
+                    call_ids.extend(
+                        self.session
+                            .agent
+                            .msg
+                            .get_last_step_pending()
+                            .into_iter()
+                            .map(|pending| pending.id),
+                    );
+                    call_ids.sort();
+                    call_ids.dedup();
+                    call_ids
+                };
+                let actor_cancel = self.session.turn.cancel_with_ledger(
+                    &mut self.session.agent,
+                    turn_id.as_deref(),
+                    cancel_call_ids,
+                );
+                let actor_cancel_rejected = actor_cancel.is_err();
+                let emit_terminal = match actor_cancel {
+                    Ok(TurnCancellation::Interrupted { reason }) => {
+                        log::debug!(
+                            "[CANCEL] SessionActor interrupted active turn with {reason:?}"
+                        );
+                        true
+                    }
+                    Ok(TurnCancellation::Idle) => true,
+                    Ok(TurnCancellation::AlreadyTerminal) => false,
+                    Err(error) => {
+                        log::error!("[CANCEL] SessionActor rejected cancellation: {error}");
+                        true
+                    }
+                };
                 // BUG-2026-09-13-08：取消不得留下「有 tool_use 无 tool_result」
                 // 的孤儿 step —— 下轮模型会重发同一 tool_use，已执行过的工具
                 // 被重复执行（挂起→批准→取消正是触发窗口）。
@@ -123,10 +174,16 @@ impl Loop {
                     &self.session.agent.config.model,
                     &self.session.agent.config.reasoning_effort,
                 );
-                self.reset_all_engines();
-                self.paced_emitter.emit_domain(DomainEvent::Conversation(
-                    qaqh_domain::ConversationEvent::ConversationCancelled { turn_id },
-                ));
+                if actor_cancel_rejected {
+                    self.reset_all_engines();
+                } else {
+                    self.reset_all_engines_preserving_turn_terminal();
+                }
+                if emit_terminal {
+                    self.paced_emitter.emit_domain(DomainEvent::Conversation(
+                        qaqh_domain::ConversationEvent::ConversationCancelled { turn_id },
+                    ));
+                }
             }
             ConversationCommand::ConversationUndoTurn { turn_id } => {
                 // 与 legacy UndoTurn 语义对齐：活动回合被挂起（ask/权限/plan

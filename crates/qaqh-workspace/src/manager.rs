@@ -10,6 +10,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::tool_api::{
+    ErasedTool, LegacyToolAdapter, OutputBudget, ToolCapabilities, ToolDescriptor, ToolExposure,
+    ToolName, ToolSource, TypedTool, TypedToolAdapter,
+};
 use crate::{SafetyVerdict, ToolHandler, ToolRisk};
 
 // ── Execution metadata ──
@@ -39,17 +43,41 @@ pub struct ToolStats {
     pub files_written: Vec<String>,
 }
 
+/// 迁移期 legacy 执行面：保留 `ToolResult` 语义，避免 registry 迁移改变 wire/审计行为。
+pub(crate) type LegacyExecutor = Arc<dyn Fn(crate::ToolCallCtx) -> crate::ToolResult + Send + Sync>;
+
+/// 统一注册项：`ErasedTool` 是描述与 typed 执行面；legacy 仅保留给
+/// 尚未迁移的 v1 handler。typed 注册项的 `legacy` 为 `None`。
+pub(crate) struct RegisteredTool {
+    pub(crate) descriptor: ToolDescriptor,
+    pub(crate) erased: Arc<dyn ErasedTool>,
+    pub(crate) legacy: Option<LegacyExecutor>,
+}
+
+impl RegisteredTool {
+    pub(crate) fn tool_def(&self) -> qaqh_types::ToolDef {
+        let descriptor = self.erased.descriptor();
+        qaqh_types::ToolDef {
+            call_type: "function".into(),
+            function: qaqh_types::ToolFunction {
+                name: descriptor.name.as_str().to_owned(),
+                description: descriptor.description.clone(),
+                parameters: descriptor.input_schema.clone(),
+            },
+        }
+    }
+}
+
 pub struct ToolManager {
-    pub(crate) handlers: BTreeMap<String, ToolHandler>,
+    pub(crate) builtins: BTreeMap<String, RegisteredTool>,
     allowed: Option<Vec<String>>,
     /// PR-M2-2：set_allowed 的原始输入（未过 known 过滤）——动态层重建后
     /// 重应用用（观察项 ①：MCP refresh 换名后 custom 名单仍生效）。
     allowed_raw: Option<Vec<String>>,
-    /// 动态工具（MCP；设计 §5.3）：完整前缀名 → 模型面 + 无状态路由。
-    /// 与 `handlers` 分层的原因：`ToolHandler.description` 是 `&'static str`，
-    /// 而 MCP 的描述/schema 来自 server（运行期 String）——平行结构避免
-    /// `Box::leak` hack；E-5 单一 dispatcher fn 指针照旧（在飞安全）。
-    dynamic: BTreeMap<String, DynamicTool>,
+    /// 动态工具（MCP；设计 §5.3）：完整前缀名 → 统一 ErasedTool 注册项。
+    /// 动态描述/schema 是运行期 String，由 owned descriptor 承载，避免
+    /// `ToolHandler.description: &'static str` 的 `Box::leak` hack。
+    dynamic: BTreeMap<String, RegisteredTool>,
     inflight_tasks: BTreeMap<String, Arc<AtomicBool>>,
     stats_total: u32,
     stats_failures: u32,
@@ -128,12 +156,23 @@ pub fn build_dynamic_tool(
     )
 }
 
+/// 根据动态注册名推断来源；未知前缀按扩展处理。
+fn dynamic_source(name: &str) -> ToolSource {
+    if name.starts_with(MCP_DYNAMIC_PREFIX) {
+        ToolSource::Mcp
+    } else if name.starts_with("lsp__") {
+        ToolSource::Lsp
+    } else {
+        ToolSource::Extension
+    }
+}
+
 /// 动态工具注册条目（设计 §5.3/E-5；PR-M1-4）。
 ///
 /// 与 [`ToolHandler`] 的差异：模型面（[`qaqh_types::ToolDef`]）与路由元数据
 /// 合一，description 为自有 String（server 侧动态文本，经 2KB 截断）。
-/// `handler_fn` 指向**同一个** dispatcher（无状态 fn 指针，PreparedCall
-/// 捕获后永不失效——refresh 换 def 不影响在飞调用）。
+/// `handler_fn` 只作为注册输入；注册后统一包装为 [`ErasedTool`] 与
+/// `LegacyExecutor`，refresh 换 def 不影响在飞调用。
 #[derive(Clone)]
 pub struct DynamicTool {
     /// 模型面（`mcp__{server}__{tool}` 命名 + schema 直通 + 截断后描述）。
@@ -154,12 +193,20 @@ pub struct DynamicTool {
 
 // ── Three-phase execution for parallel tool support ──
 
+/// 已准备调用的执行面。legacy 保留 `ToolCallCtx`/宿主 effects 语义；
+/// typed 直接进入 `ErasedTool`，由适配器负责投影。
+#[derive(Clone)]
+pub(crate) enum PreparedExecutor {
+    Legacy(LegacyExecutor),
+    Typed(Arc<dyn ErasedTool>),
+}
+
 /// Prepared tool call, ready for execution without holding the manager lock.
 pub(crate) struct PreparedCall {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) effective_tool_name: Option<String>,
-    pub(crate) handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
+    pub(crate) executor: PreparedExecutor,
     pub(crate) ctx: crate::ToolCallCtx,
     pub(crate) audit_args: serde_json::Value,
 }
@@ -173,7 +220,7 @@ impl Default for ToolManager {
 impl ToolManager {
     pub fn new() -> Self {
         Self {
-            handlers: BTreeMap::new(),
+            builtins: BTreeMap::new(),
             allowed: None,
             allowed_raw: None,
             dynamic: BTreeMap::new(),
@@ -188,12 +235,47 @@ impl ToolManager {
 
     pub fn register(&mut self, handler: ToolHandler) {
         let key = handler.key.clone();
-        self.handlers.insert(key, handler);
+        let capabilities = crate::tool_capabilities::builtin_capabilities(&key).unwrap_or_default();
+        let adapter = LegacyToolAdapter::new_with_capabilities(handler.clone(), capabilities)
+            .unwrap_or_else(|error| panic!("invalid builtin tool descriptor for {key}: {error}"));
+        let descriptor = adapter.descriptor();
+        let handler_fn = handler.handler;
+        let legacy: LegacyExecutor = Arc::new(handler_fn);
+        self.builtins.insert(
+            key,
+            RegisteredTool {
+                descriptor,
+                erased: Arc::new(adapter),
+                legacy: Some(legacy),
+            },
+        );
+    }
+
+    /// 注册新 typed 工具。描述符由工具实现提供，执行统一走 [`ErasedTool`]；
+    /// 迁移期不存在 legacy executor，因此不会经过 `ToolCallCtx` 兼容面。
+    pub fn register_typed<T>(&mut self, tool: T)
+    where
+        T: TypedTool + 'static,
+    {
+        let descriptor = tool.descriptor();
+        descriptor
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid typed tool descriptor: {error}"));
+        let key = descriptor.name.as_str().to_owned();
+        let adapter = TypedToolAdapter::new(tool);
+        self.builtins.insert(
+            key,
+            RegisteredTool {
+                descriptor,
+                erased: Arc::new(adapter),
+                legacy: None,
+            },
+        );
     }
 
     /// 注册工具作者声明的展示投影（09-18 展示契约 §3.4）。
     ///
-    /// 与 `handlers` 分离：投影是展示面扩展，未注册的工具在 timeline 上保持
+    /// 与 `builtins` 分离：投影是展示面扩展，未注册的工具在 timeline 上保持
     /// `display = None`，由 client 回退旧字段。
     pub fn register_display(&mut self, name: &str, projector: crate::tool_api::ToolDisplayFn) {
         self.display_projectors.insert(name.to_string(), projector);
@@ -219,15 +301,40 @@ impl ToolManager {
 
     /// 注册动态工具（MCP 投影入口；仅回合边界由 actor 调用——无并发写面）。
     ///
-    /// 碰撞拒绝（设计 §5.3）：与内置词汇表（`handlers`）或已注册动态名重名
+    /// 碰撞拒绝（设计 §5.3）：与内置词汇表（`builtins`）或已注册动态名重名
     /// → Err 且**不**写入（防模型面膨胀出歧义名）。刷新批次应先
     /// [`Self::clear_dynamic`] 再逐条注册（MCP 名带 `mcp__` 前缀，与内置
     /// 零碰撞；此处防御面向未来形态）。
     pub fn register_dynamic(&mut self, name: String, tool: DynamicTool) -> Result<(), String> {
-        if self.handlers.contains_key(&name) || self.dynamic.contains_key(&name) {
+        if self.builtins.contains_key(&name) || self.dynamic.contains_key(&name) {
             return Err(format!("dynamic tool name collides: {name:?}"));
         }
-        self.dynamic.insert(name, tool);
+        let descriptor = ToolDescriptor {
+            name: ToolName::new(&name).map_err(|error| error.to_string())?,
+            display_name: tool.effective_name.clone(),
+            description: tool.def.function.description.clone(),
+            input_schema: tool.def.function.parameters.clone(),
+            output_schema: serde_json::json!({"type": "object"}),
+            category: tool.category,
+            risk: tool.risk.clone(),
+            default_timeout: tool.default_timeout,
+            exposure: ToolExposure::Direct,
+            source: dynamic_source(&name),
+            output_budget: OutputBudget::default(),
+            capabilities: ToolCapabilities::default(),
+        };
+        let adapter = LegacyToolAdapter::from_owned(descriptor.clone(), tool.handler_fn)
+            .map_err(|error| error.to_string())?;
+        let handler_fn = tool.handler_fn;
+        let legacy: LegacyExecutor = Arc::new(handler_fn);
+        self.dynamic.insert(
+            name,
+            RegisteredTool {
+                descriptor,
+                erased: Arc::new(adapter),
+                legacy: Some(legacy),
+            },
+        );
         Ok(())
     }
 
@@ -253,16 +360,16 @@ impl ToolManager {
         self.dynamic.keys().cloned().collect()
     }
 
-    pub fn lookup(&self, name: &str) -> Option<&ToolHandler> {
-        self.handlers.get(name)
+    pub fn lookup(&self, name: &str) -> Option<&ToolDescriptor> {
+        self.builtins
+            .get(name)
+            .or_else(|| self.dynamic.get(name))
+            .map(|tool| &tool.descriptor)
     }
 
     /// 查工具能力类别（权限决策单一事实源；内置 + 动态两层）。
     pub fn category_of(&self, name: &str) -> Option<crate::permission::ToolCategory> {
-        if let Some(handler) = self.handlers.get(name) {
-            return Some(handler.category);
-        }
-        self.dynamic.get(name).map(|tool| tool.category)
+        self.lookup(name).map(|descriptor| descriptor.category)
     }
 
     /// 运行时重设工具白名单（工具模式切换的入口）：空列表 = 全量（标准模式）。
@@ -280,7 +387,7 @@ impl ToolManager {
         let total = allowed_tools.len();
         let known: Vec<String> = allowed_tools
             .into_iter()
-            .filter(|name| self.handlers.contains_key(name) || self.dynamic.contains_key(name))
+            .filter(|name| self.builtins.contains_key(name) || self.dynamic.contains_key(name))
             .collect();
         if known.len() != total {
             log::warn!(
@@ -302,10 +409,13 @@ impl ToolManager {
     }
 
     pub fn all_defs(&self) -> Vec<qaqh_types::ToolDef> {
-        let mut defs: Vec<qaqh_types::ToolDef> =
-            self.handlers.values().map(|h| h.to_tool_def()).collect();
+        let mut defs: Vec<qaqh_types::ToolDef> = self
+            .builtins
+            .values()
+            .map(RegisteredTool::tool_def)
+            .collect();
         // 动态层（MCP）合并在后：模型面 = 内置词汇表 + 动态投影。
-        defs.extend(self.dynamic.values().map(|tool| tool.def.clone()));
+        defs.extend(self.dynamic.values().map(RegisteredTool::tool_def));
         defs
     }
 
@@ -324,6 +434,7 @@ impl ToolManager {
 
     /// Phase 1: validate, safety-check, register inflight. Returns a [`PreparedCall`]
     /// that can be executed without the manager lock.
+    #[cfg(test)]
     #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项
     pub(crate) fn prepare_req(
         &mut self,
@@ -333,6 +444,30 @@ impl ToolManager {
         args: serde_json::Value,
         timeout_secs: Option<u64>,
         progress_tx: Option<crate::ExecProgressSender>,
+    ) -> Result<PreparedCall, ToolExecReport> {
+        self.prepare_req_with_cancel(
+            id,
+            name,
+            action,
+            args,
+            timeout_secs,
+            progress_tx,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Phase 1 variant for a runtime-owned cancellation token.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项
+    pub(crate) fn prepare_req_with_cancel(
+        &mut self,
+        id: String,
+        name: &str,
+        action: &str,
+        args: serde_json::Value,
+        timeout_secs: Option<u64>,
+        progress_tx: Option<crate::ExecProgressSender>,
+        cancel_flag: Arc<AtomicBool>,
     ) -> Result<PreparedCall, ToolExecReport> {
         if let Some(ref allowed) = self.allowed
             && !allowed.contains(&name.to_string())
@@ -356,52 +491,29 @@ impl ToolManager {
             });
         }
 
-        // 内置/动态统一路由视图：PreparedCall 只需要 fn 指针 + 超时 + risk；
-        // ToolHandler 的 'static description 不参与执行路径。`category` 只供
-        // 出工区安全判定区分「文件型」与「执行/网络型」Destructive 工具。
-        struct ResolvedRoute {
-            handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
-            default_timeout: Duration,
-            risk: ToolRisk,
-            category: crate::permission::ToolCategory,
-            effective_tool_name: Option<String>,
-        }
-        let route = match self.handlers.get(name) {
-            Some(handler) => ResolvedRoute {
-                handler_fn: handler.handler,
-                default_timeout: handler.default_timeout,
-                risk: handler.risk.clone(),
-                category: handler.category,
-                effective_tool_name: None,
-            },
-            None => match self.dynamic.get(name) {
-                Some(tool) => ResolvedRoute {
-                    handler_fn: tool.handler_fn,
-                    default_timeout: tool.default_timeout,
-                    risk: tool.risk.clone(),
-                    category: tool.category,
-                    effective_tool_name: tool.effective_name.clone(),
-                },
-                None => {
-                    let msg = format!("[ERROR] Unknown tool: {}", name);
-                    return Err(ToolExecReport {
+        // 内置/动态统一路由视图：执行元数据只从 descriptor 读取，legacy
+        // executor 是迁移期桥，typed executor 后续接同一 RegisteredTool。
+        let tool = match self.builtins.get(name).or_else(|| self.dynamic.get(name)) {
+            Some(tool) => tool,
+            None => {
+                let msg = format!("[ERROR] Unknown tool: {}", name);
+                return Err(ToolExecReport {
+                    success: false,
+                    content: msg.clone(),
+                    files_affected: Vec::new(),
+                    meta: ToolExecMeta {
+                        name: name.to_string(),
+                        elapsed_ms: 0,
+                        output_size: msg.len(),
                         success: false,
-                        content: msg.clone(),
-                        files_affected: Vec::new(),
-                        meta: ToolExecMeta {
-                            name: name.to_string(),
-                            elapsed_ms: 0,
-                            output_size: msg.len(),
-                            success: false,
-                            args_summary: String::new(),
-                        },
-                    });
-                }
-            },
+                        args_summary: String::new(),
+                    },
+                });
+            }
         };
+        let descriptor = &tool.descriptor;
 
-        let timeout_secs = timeout_secs.unwrap_or(route.default_timeout.as_secs());
-        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let timeout_secs = timeout_secs.unwrap_or(descriptor.default_timeout.as_secs());
         let skill_effects = Arc::new(Mutex::new(Vec::new()));
         let ctx = crate::ToolCallCtx {
             id: id.clone(),
@@ -413,8 +525,8 @@ impl ToolManager {
             cancel: cancel_flag.clone(),
             skill_effects: skill_effects.clone(),
         };
-        let in_workspace = is_path_in_workspace(&ctx, &route.risk, route.category);
-        match crate::safety::SafetyPolicy::evaluate(route.risk.clone(), in_workspace) {
+        let in_workspace = is_path_in_workspace(&ctx, &descriptor.risk, descriptor.category);
+        match crate::safety::SafetyPolicy::evaluate(descriptor.risk.clone(), in_workspace) {
             SafetyVerdict::Block(reason) => {
                 let msg = format!("[ERROR] {}", reason);
                 return Err(ToolExecReport {
@@ -447,11 +559,16 @@ impl ToolManager {
             skill_effects,
         };
 
+        let executor = match tool.legacy.as_ref() {
+            Some(legacy) => PreparedExecutor::Legacy(legacy.clone()),
+            None => PreparedExecutor::Typed(tool.erased.clone()),
+        };
+
         Ok(PreparedCall {
             id,
             name: name.to_string(),
-            effective_tool_name: route.effective_tool_name,
-            handler_fn: route.handler_fn,
+            effective_tool_name: descriptor.display_name.clone(),
+            executor,
             ctx,
             audit_args,
         })
@@ -811,10 +928,11 @@ mod tests {
             .map_err(|report| report.content)
             .expect("dynamic tool prepare should succeed");
         assert_eq!(prepared.effective_tool_name.as_deref(), Some("echo"));
-        assert_eq!(
-            prepared.handler_fn as *const () as usize, marker_fn as *const () as usize,
-            "路由必须指向注入的 dispatcher fn（E-5 单一 fn 指针）"
-        );
+        let result = match prepared.executor {
+            PreparedExecutor::Legacy(legacy) => legacy(prepared.ctx.clone()),
+            PreparedExecutor::Typed(_) => panic!("dynamic tool must stay on legacy bridge"),
+        };
+        assert_eq!(result.model_text(), "mcp-dispatched");
 
         let report = match mgr.prepare_req(
             "id-2".to_owned(),

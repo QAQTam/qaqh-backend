@@ -1,5 +1,6 @@
 //! axum_impl::command — 命令面（open/renew/command/command_status + Ack builder）。
 
+use super::test_hooks::InteractionFault;
 use super::*;
 
 /// Rejected 命令回执构造器（22 处 `RingingCommandAck` 字面量的单一构造点）。
@@ -172,7 +173,7 @@ pub(crate) async fn handle_command(
     let Some(expected) = parse_channel(&channel) else {
         return (StatusCode::NOT_FOUND, "unknown channel").into_response();
     };
-    let env: RingingCommandEnvelope = match serde_json::from_slice(&body) {
+    let mut env: RingingCommandEnvelope = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
             return ack_response(
@@ -209,6 +210,10 @@ pub(crate) async fn handle_command(
             ),
         );
     }
+    state
+        .test_hooks
+        .apply_command_ack_fault(expected, &env.command)
+        .await;
     // unsupported ConversationLoadMore
     if matches!(
         &env.command,
@@ -261,6 +266,55 @@ pub(crate) async fn handle_command(
                 Some("duplicate command_id (already accepted)".into()),
             ),
         );
+    }
+    if let Some(fault) = state.test_hooks.take_interaction_fault(&env.command) {
+        match fault {
+            InteractionFault::PermissionDeny => {
+                if let qaqh_ringing::RingingCommand::Tool(
+                    qaqh_domain::ToolCommand::ToolPermissionRespond {
+                        approved,
+                        trust_folder,
+                        ..
+                    },
+                ) = &mut env.command
+                {
+                    *approved = false;
+                    *trust_folder = false;
+                }
+            }
+            InteractionFault::PermissionHang => {
+                if matches!(
+                    &env.command,
+                    qaqh_ringing::RingingCommand::Tool(
+                        qaqh_domain::ToolCommand::ToolPermissionRespond { .. }
+                    )
+                ) {
+                    std::future::pending::<()>().await;
+                }
+            }
+            InteractionFault::AskDismiss => {
+                if let qaqh_ringing::RingingCommand::Control(
+                    qaqh_domain::ControlCommand::InteractionAskRespond { interaction_id, .. },
+                ) = &env.command
+                {
+                    env.command = qaqh_ringing::RingingCommand::Control(
+                        qaqh_domain::ControlCommand::InteractionAskDismiss {
+                            interaction_id: interaction_id.clone(),
+                        },
+                    );
+                }
+            }
+            InteractionFault::AskHang => {
+                if matches!(
+                    &env.command,
+                    qaqh_ringing::RingingCommand::Control(
+                        qaqh_domain::ControlCommand::InteractionAskRespond { .. }
+                    )
+                ) {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
     }
     // SessionClose
     if let qaqh_ringing::RingingCommand::Control(ControlCommand::SessionClose {

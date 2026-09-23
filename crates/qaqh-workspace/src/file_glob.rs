@@ -11,135 +11,259 @@
 //! - `[a-z]` / `[abc]` character classes
 //! - `{a,b}` alternation
 
-use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::ToolRisk;
+use crate::tool_api::{
+    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
+    ToolName, ToolProjection, ToolSource, TypedTool,
+};
 
 /// 默认返回上限：防超大仓库结果爆炸（`rg --files` 语义下的熔断）。
 const DEFAULT_MAX_RESULTS: usize = 500;
 const MAX_RESULTS_CAP: usize = 10_000;
 
-fn exec_glob(args: &serde_json::Value) -> ToolResult {
-    let pattern = args
-        .get("pattern")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim();
-    if pattern.is_empty() {
-        return ToolResult::error("glob: pattern is required (e.g. \"src/**/*.rs\")");
-    }
-    // Path resolution parity with grep (grep_tool.rs): explicit path →
-    // workspace resolution; empty → current workspace root; no workspace →
-    // process cwd ("."). Previously the empty case bypassed the workspace
-    // entirely, so daemon-hosted sessions searched the daemon's start
-    // directory instead of the session workspace.
-    let raw_path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let root = if raw_path.is_empty() {
-        crate::current_workspace()
-    } else {
-        crate::resolve_workspace_path(raw_path)
-    };
-    let root = if root.is_empty() { "." } else { root.as_str() };
-    let max_results = args
-        .get("max_results")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .unwrap_or(DEFAULT_MAX_RESULTS)
-        .clamp(1, MAX_RESULTS_CAP);
-
-    // gitignore 风格：`*` 不跨 `/`（与 rg -g / VS Code 一致）。
-    let glob = match globset::GlobBuilder::new(pattern)
-        .literal_separator(true)
-        .build()
-    {
-        Ok(glob) => glob,
-        Err(e) => return ToolResult::error(format!("glob: invalid pattern: {e}")),
-    };
-    let matcher = glob.compile_matcher();
-
-    let root_path = Path::new(root);
-    let walker = ignore::WalkBuilder::new(root_path)
-        // rg --files 默认：跳过 hidden + gitignored + parent 忽略规则；
-        // require_git(false)：非 git 仓库目录同样应用 .gitignore（对齐 rg）。
-        .standard_filters(true)
-        .require_git(false)
-        .build();
-
-    let mut matches: Vec<String> = Vec::new();
-    let mut truncated = false;
-    for entry in walker.flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let Ok(rel) = entry.path().strip_prefix(root_path) else {
-            continue;
-        };
-        // 统一 `/` 分隔（globset 按 `/` 匹配；Windows 下 Path 是 `\`）。
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if matcher.is_match(&rel_str) {
-            matches.push(rel_str);
-            if matches.len() >= max_results {
-                truncated = true;
-                break;
-            }
-        }
-    }
-
-    matches.sort();
-    let mut text = matches.join("\n");
-    if truncated {
-        text.push_str(&format!("\n... truncated at {max_results} matches"));
-    }
-    if text.is_empty() {
-        text = "(no files match the pattern)".to_string();
-    }
-    ToolResult::ok_data(
-        serde_json::json!({
-            "matches": matches,
-            "truncated": truncated,
-            "count": matches.len(),
-        }),
-        text,
-    )
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GlobArgs {
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub max_results: Option<u64>,
 }
 
-handler!(handle_glob, exec_glob);
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GlobOutput {
+    pub matches: Vec<String>,
+    pub truncated: bool,
+    pub count: usize,
+}
+
+impl GlobOutput {
+    fn model_text(&self) -> String {
+        let mut text = self.matches.join("\n");
+        if self.truncated {
+            text.push_str(&format!(
+                "\n... truncated at {} matches",
+                self.matches.len()
+            ));
+        }
+        if text.is_empty() {
+            text = "(no files match the pattern)".to_string();
+        }
+        text
+    }
+}
+
+impl ToolProjection for GlobOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.model_text(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        self.model_text().lines().next().map(str::to_string)
+    }
+
+    fn display(&self, args: &Value) -> ToolDisplay {
+        glob_display(args, &self.model_text())
+    }
+}
+
+pub struct GlobTool;
+
+impl TypedTool for GlobTool {
+    type Args = GlobArgs;
+    type Output = GlobOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("glob").expect("valid glob tool name"),
+            display_name: None,
+            description: "List files by glob (gitignore-aware, native). Pattern vs rg -g."
+                .to_string(),
+            input_schema: glob_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(GlobOutput))
+                .expect("glob output schema"),
+            category: crate::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("glob")
+                .unwrap_or_default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let pattern = args.pattern.trim();
+        if pattern.is_empty() {
+            return Err(glob_error(
+                "glob: pattern is required (e.g. \"src/**/*.rs\")",
+            ));
+        }
+
+        let max_results = args
+            .max_results
+            .unwrap_or(DEFAULT_MAX_RESULTS as u64)
+            .clamp(1, MAX_RESULTS_CAP as u64) as usize;
+
+        // gitignore 风格：`*` 不跨 `/`（与 rg -g / VS Code 一致）。
+        let glob = globset::GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|error| glob_error(format!("glob: invalid pattern: {error}")))?;
+        let matcher = glob.compile_matcher();
+
+        let root_path = glob_root(ctx, args.path.as_deref());
+        let walker = ignore::WalkBuilder::new(&root_path)
+            // rg --files 默认：跳过 hidden + gitignored + parent 忽略规则；
+            // require_git(false)：非 git 仓库目录同样应用 .gitignore（对齐 rg）。
+            .standard_filters(true)
+            .require_git(false)
+            .build();
+
+        let mut matches: Vec<String> = Vec::new();
+        let mut truncated = false;
+        for entry in walker.flatten() {
+            if !entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_file())
+            {
+                continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(&root_path) else {
+                continue;
+            };
+            // 统一 `/` 分隔（globset 按 `/` 匹配；Windows 下 Path 是 `\`）。
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if matcher.is_match(&rel_str) {
+                matches.push(rel_str);
+                if matches.len() >= max_results {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+
+        matches.sort();
+        Ok(GlobOutput {
+            count: matches.len(),
+            matches,
+            truncated,
+        })
+    }
+}
+
+fn glob_root(ctx: &ToolCallContext, raw_path: Option<&str>) -> PathBuf {
+    let raw_path = raw_path.unwrap_or_default();
+    let root = if raw_path.is_empty() {
+        ctx.workspace_root.clone()
+    } else {
+        let path = Path::new(raw_path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            ctx.workspace_root.join(path)
+        }
+    };
+    let normalized = crate::permission::normalize_lexically(&root);
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn glob_display(args: &Value, output: &str) -> ToolDisplay {
+    let (glob_body, glob_body_truncated) = crate::tool_api::display::clamp_display_body(output);
+    let pattern = args
+        .get("pattern")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let root = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let path = match (root, pattern) {
+        (Some(root), Some(pattern)) => format!("{root}:{pattern}"),
+        (Some(root), None) => root.to_string(),
+        (None, Some(pattern)) => pattern.to_string(),
+        (None, None) => {
+            return ToolDisplay::new(
+                ToolHeader::Other {
+                    label: "glob".to_string(),
+                },
+                ToolBody::Text {
+                    text: glob_body.clone(),
+                    truncated: glob_body_truncated,
+                },
+            );
+        }
+    };
+    ToolDisplay::new(
+        ToolHeader::Path {
+            path,
+            op: crate::tool_api::PathOp::List,
+        },
+        ToolBody::Text {
+            text: glob_body,
+            truncated: glob_body_truncated,
+        },
+    )
+    .with_summary(output.lines().next().unwrap_or_default().to_string())
+}
+
+fn glob_error(message: impl Into<String>) -> ToolExecutionError {
+    let mut error = ToolError::new(ToolErrorKind::Execution, message);
+    error.code = ToolErrorCode::from_legacy("TOOL_ERROR");
+    ToolExecutionError::Recoverable(error)
+}
+
+fn glob_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern"
+            },
+            "path": {
+                "type": "string",
+                "description": "Search root"
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000,
+                "description": "Max results (default 500)"
+            }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+    })
+}
 
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("glob", crate::display::project_glob);
-    mgr.register(ToolHandler {
-        key: "glob".to_string(),
-        description: "List files by glob (gitignore-aware, native). Pattern vs rg -g.",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Glob pattern"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Search root"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10000,
-                    "description": "Max results (default 500)"
-                }
-            },
-            "required": ["pattern"],
-            "additionalProperties": false
-        }),
-        handler: handle_glob,
-        risk: ToolRisk::ReadOnly,
-        category: crate::permission::ToolCategory::Read,
-        default_timeout: std::time::Duration::from_secs(30),
-    });
+    mgr.register_typed(GlobTool);
 }
 
 #[cfg(test)]
@@ -164,31 +288,60 @@ mod tests {
         dir
     }
 
-    fn run(root: &Path, args: serde_json::Value) -> ToolResult {
+    fn ctx(root: &Path) -> ToolCallContext {
+        ToolCallContext {
+            call_id: "glob-test".to_string(),
+            session_id: "glob-test-session".to_string(),
+            workspace_root: root.to_path_buf(),
+            mode: crate::tool_api::AgentMode::Code,
+            permission_level: crate::permission::PermissionLevel::ReadFree,
+            sandbox: crate::tool_api::SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
+            timeout: Duration::from_secs(30),
+            cancellation: crate::tool_api::CancellationToken::new(),
+            progress: None,
+            source: crate::tool_api::ToolCallSource::Model,
+        }
+    }
+
+    fn parse_args(args: serde_json::Value) -> GlobArgs {
+        serde_json::from_value(args).expect("valid glob args")
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(root: &Path, args: serde_json::Value) -> Result<GlobOutput, ToolExecutionError> {
         let mut args = args;
-        if let Some(obj) = args.as_object_mut() {
-            obj.insert(
+        if let Some(object) = args.as_object_mut() {
+            object.insert(
                 "path".to_string(),
                 serde_json::json!(root.to_string_lossy().to_string()),
             );
         }
-        exec_glob(&args)
+        GlobTool.run(&ctx(root), parse_args(args))
     }
 
-    fn lines(result: &ToolResult) -> Vec<String> {
-        result.model_text().lines().map(String::from).collect()
+    fn lines(output: &GlobOutput) -> Vec<String> {
+        output.model_text().lines().map(String::from).collect()
+    }
+
+    fn error_code(error: ToolExecutionError) -> String {
+        match error {
+            ToolExecutionError::Recoverable(error) => error.code.as_str().to_string(),
+            ToolExecutionError::Fatal(error) => error.code,
+        }
     }
 
     #[test]
     fn glob_star_star_matches_recursively() {
         let dir = fixture();
-        let result = run(dir.path(), serde_json::json!({ "pattern": "src/**/*.rs" }));
-        assert!(result.is_success(), "{}", result.model_text());
-        let list = lines(&result);
+        let output = run(dir.path(), serde_json::json!({ "pattern": "src/**/*.rs" }))
+            .expect("glob succeeds");
+        let list = lines(&output);
         assert!(list.contains(&"src/a.rs".to_string()));
         assert!(list.contains(&"src/sub/b.rs".to_string()));
         // `*` 不跨 `/`：单星不匹配子目录。
-        let single = run(dir.path(), serde_json::json!({ "pattern": "src/*.rs" }));
+        let single =
+            run(dir.path(), serde_json::json!({ "pattern": "src/*.rs" })).expect("glob succeeds");
         let single_list = lines(&single);
         assert!(single_list.contains(&"src/a.rs".to_string()));
         assert!(!single_list.contains(&"src/sub/b.rs".to_string()));
@@ -198,9 +351,9 @@ mod tests {
     fn glob_skips_hidden_and_gitignored() {
         let dir = fixture();
         fs::write(dir.path().join(".gitignore"), "data.txt\n").expect("gitignore");
-        let result = run(dir.path(), serde_json::json!({ "pattern": "**/*" }));
-        assert!(result.is_success(), "{}", result.model_text());
-        let list = lines(&result);
+        let output =
+            run(dir.path(), serde_json::json!({ "pattern": "**/*" })).expect("glob succeeds");
+        let list = lines(&output);
         assert!(list.contains(&"src/a.rs".to_string()));
         assert!(
             !list.contains(&"src/.hidden.rs".to_string()),
@@ -215,58 +368,71 @@ mod tests {
     #[test]
     fn glob_alternation_and_root_limiting() {
         let dir = fixture();
-        let result = run(
+        let output = run(
             dir.path(),
             serde_json::json!({ "pattern": "crates/{qaqh-a,qaqh-b}/src/lib.rs" }),
-        );
-        let list = lines(&result);
+        )
+        .expect("glob succeeds");
+        let list = lines(&output);
         assert!(list.contains(&"crates/qaqh-a/src/lib.rs".to_string()));
         assert!(!list.contains(&"README.md".to_string()));
     }
 
-    /// Empty `path` must anchor to the current workspace (grep parity), not
-    /// the process cwd. Serializes on TEST_RUNTIME_SERIAL because it writes
-    /// the global CURRENT_WORKSPACE.
     #[test]
-    fn glob_empty_path_anchors_to_current_workspace() {
-        let _guard = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn glob_empty_path_anchors_to_session_workspace() {
         let dir = fixture();
-        crate::set_workspace(&dir.path().to_string_lossy());
+        let tool_ctx = ctx(dir.path());
 
-        // No `path` argument at all → search the workspace root, not cwd.
-        let result = exec_glob(&serde_json::json!({ "pattern": "src/a.rs" }));
-        assert!(result.is_success(), "{}", result.model_text());
+        // No `path` argument at all → search the explicit session workspace.
+        let output = GlobTool
+            .run(
+                &tool_ctx,
+                parse_args(serde_json::json!({ "pattern": "src/a.rs" })),
+            )
+            .expect("glob succeeds");
         assert!(
-            lines(&result).contains(&"src/a.rs".to_string()),
+            lines(&output).contains(&"src/a.rs".to_string()),
             "empty path must search the session workspace"
         );
 
         // Explicit relative path still resolves against the workspace;
         // results are printed relative to the search root.
-        let rel = exec_glob(&serde_json::json!({ "pattern": "a.rs", "path": "src" }));
-        assert!(lines(&rel).contains(&"a.rs".to_string()));
-
-        crate::set_workspace("");
+        let relative = GlobTool
+            .run(
+                &tool_ctx,
+                parse_args(serde_json::json!({ "pattern": "a.rs", "path": "src" })),
+            )
+            .expect("glob succeeds");
+        assert!(lines(&relative).contains(&"a.rs".to_string()));
     }
 
     #[test]
-    fn glob_invalid_pattern_and_empty_match() {
+    fn glob_errors_preserve_legacy_code() {
         let dir = fixture();
-        let bad = run(
+        let invalid = run(
             dir.path(),
             serde_json::json!({ "pattern": "src/[unclosed" }),
+        )
+        .expect_err("invalid glob must error");
+        assert_eq!(error_code(invalid), "TOOL_ERROR");
+
+        let missing = GlobTool
+            .run(&ctx(dir.path()), parse_args(serde_json::json!({})))
+            .expect_err("missing pattern must error");
+        assert_eq!(error_code(missing), "TOOL_ERROR");
+
+        let none = run(dir.path(), serde_json::json!({ "pattern": "*.toml" }))
+            .expect("empty match is success");
+        assert!(
+            lines(&none)
+                .iter()
+                .any(|line| line.contains("no files match"))
         );
-        assert!(!bad.is_success(), "invalid glob must error");
-        let none = run(dir.path(), serde_json::json!({ "pattern": "*.toml" }));
-        assert!(none.is_success());
-        assert!(lines(&none).iter().any(|l| l.contains("no files match")));
     }
 
     #[test]
     fn glob_is_read_only_under_permission_engine() {
-        // 权限引擎必须把 glob（handler 声明 Read）视为只读：Level 2 自动批准。
+        // 权限引擎必须把 glob（descriptor 声明 ReadOnly）视为只读：Level 2 自动批准。
         use crate::permission::{PermissionDecision, PermissionLevel, needs_permission};
         let ws = std::env::temp_dir().join("qaqh-glob-perm");
         let decision = needs_permission(
@@ -283,18 +449,66 @@ mod tests {
     #[test]
     fn glob_respects_max_results() {
         let dir = fixture();
-        let result = run(
+        let output = run(
             dir.path(),
             serde_json::json!({ "pattern": "**/*", "max_results": 2 }),
-        );
-        assert!(result.is_success(), "{}", result.model_text());
-        // 文本截断标记 + 恰好 2 行路径（其余为截断提示）。
-        assert!(result.model_text().contains("truncated"));
-        let path_lines = result
-            .model_text()
-            .lines()
-            .filter(|l| !l.starts_with("..."))
-            .count();
+        )
+        .expect("glob succeeds");
+        let text = output.model_text();
+        assert!(text.contains("truncated"));
+        let path_lines = text.lines().filter(|line| !line.starts_with("...")).count();
         assert_eq!(path_lines, 2);
+        assert_eq!(output.count, 2);
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn glob_registration_is_typed_and_descriptor_keeps_legacy_schema() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        let registered = manager.builtins.get("glob").expect("glob registered");
+        assert!(
+            registered.legacy.is_none(),
+            "glob must not use legacy executor"
+        );
+        assert_eq!(
+            registered.descriptor.input_schema["required"],
+            serde_json::json!(["pattern"])
+        );
+        assert_eq!(
+            registered.descriptor.input_schema["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(registered.descriptor.output_schema["type"], "object");
+    }
+
+    #[test]
+    fn glob_typed_output_and_display_share_the_same_text() {
+        let output = GlobOutput {
+            matches: vec!["src/a.rs".to_string()],
+            truncated: false,
+            count: 1,
+        };
+        let model = match output.model_blocks().into_iter().next() {
+            Some(ToolContentBlock::Text { text }) => text,
+            _ => panic!("glob output must have a text model block"),
+        };
+        assert_eq!(model, "src/a.rs");
+        let display = output.display(&serde_json::json!({"pattern": "**/*.rs"}));
+        assert_eq!(display.summary.as_deref(), Some("src/a.rs"));
+        assert_eq!(
+            display.header,
+            ToolHeader::Path {
+                path: "**/*.rs".to_string(),
+                op: crate::tool_api::PathOp::List,
+            }
+        );
+        assert_eq!(
+            display.body,
+            ToolBody::Text {
+                text: model,
+                truncated: false,
+            }
+        );
     }
 }

@@ -30,7 +30,9 @@ use std::time::Duration;
 
 use super::capabilities::ToolCapabilities;
 use super::context::ToolCallContext;
-use super::descriptor::{DescriptorError, OutputBudget, ToolDescriptor, ToolExposure, ToolName, ToolSource};
+use super::descriptor::{
+    DescriptorError, OutputBudget, ToolDescriptor, ToolExposure, ToolName, ToolSource,
+};
 use super::display::ToolDisplay;
 use super::erased::ErasedTool;
 use super::error::{FatalToolError, ToolError, ToolErrorCode, ToolErrorKind};
@@ -40,13 +42,23 @@ use crate::{ExecProgressSender, ToolCallCtx, ToolEffect, ToolHandler, ToolResult
 
 /// legacy 工具包装器（实现 [`ErasedTool`]）。
 pub struct LegacyToolAdapter {
-    handler: ToolHandler,
+    inner: LegacyToolAdapterInner,
     name: ToolName,
     source: ToolSource,
     exposure: ToolExposure,
     capabilities: ToolCapabilities,
     output_budget: OutputBudget,
     output_schema: serde_json::Value,
+}
+
+enum LegacyToolAdapterInner {
+    /// 内置静态描述（`ToolHandler` 的 `&'static str` 描述）。
+    Handler(ToolHandler),
+    /// 动态工具的 owned descriptor（MCP/LSP 运行期描述与 schema）。
+    Owned {
+        descriptor: ToolDescriptor,
+        handler: fn(ToolCallCtx) -> ToolResult,
+    },
 }
 
 /// 一次 legacy 调用的完整结果。
@@ -64,21 +76,60 @@ pub struct LegacyCallOutcome {
 impl LegacyToolAdapter {
     /// 包装一个 legacy handler。
     ///
-    /// 构造期校验：名称合法、描述非空、input_schema 为 object、超时非零
-    /// （即 [`ToolDescriptor::validate`] 全量通过）；非法直接返回错误，不 panic。
+    /// 构造期校验：名称合法、描述非空、input_schema 为 object、非交互工具
+    /// 超时非零（即 [`ToolDescriptor::validate`] 全量通过）；非法直接返回错误。
     pub fn new(handler: ToolHandler) -> Result<Self, DescriptorError> {
+        Self::from_handler(handler, ToolCapabilities::default())
+    }
+
+    /// 包装一个 legacy handler，并注入显式 capability。
+    ///
+    /// `ask` 等交互工具用 `interactive = true` 表达“无默认超时”，避免把
+    /// `Duration::ZERO` 误当成普通工具超时。
+    pub fn new_with_capabilities(
+        handler: ToolHandler,
+        capabilities: ToolCapabilities,
+    ) -> Result<Self, DescriptorError> {
+        Self::from_handler(handler, capabilities)
+    }
+
+    fn from_handler(
+        handler: ToolHandler,
+        capabilities: ToolCapabilities,
+    ) -> Result<Self, DescriptorError> {
         let name = ToolName::new(&handler.key)?;
         let adapter = Self {
-            handler,
+            inner: LegacyToolAdapterInner::Handler(handler),
             name,
             source: ToolSource::Builtin,
             exposure: ToolExposure::Direct,
-            capabilities: ToolCapabilities::default(),
+            capabilities,
             output_budget: OutputBudget::default(),
             output_schema: default_output_schema(),
         };
         adapter.descriptor().validate()?;
         Ok(adapter)
+    }
+
+    /// 用 owned descriptor 包装动态工具（MCP/LSP）。
+    pub(crate) fn from_owned(
+        descriptor: ToolDescriptor,
+        handler: fn(ToolCallCtx) -> ToolResult,
+    ) -> Result<Self, DescriptorError> {
+        descriptor.validate()?;
+        let name = descriptor.name.clone();
+        Ok(Self {
+            inner: LegacyToolAdapterInner::Owned {
+                descriptor: descriptor.clone(),
+                handler,
+            },
+            name,
+            source: descriptor.source,
+            exposure: descriptor.exposure,
+            capabilities: descriptor.capabilities.clone(),
+            output_budget: descriptor.output_budget.clone(),
+            output_schema: descriptor.output_schema.clone(),
+        })
     }
 
     /// 覆盖来源（默认 [`ToolSource::Builtin`]）。
@@ -111,21 +162,24 @@ impl LegacyToolAdapter {
         self
     }
 
-    /// 工具描述符（由 legacy 字段构造）。
+    /// 工具描述符（由 legacy 字段或 owned descriptor 构造）。
     pub fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: self.name.clone(),
-            display_name: None,
-            description: self.handler.description.to_owned(),
-            input_schema: self.handler.input_schema.clone(),
-            output_schema: self.output_schema.clone(),
-            category: self.handler.category,
-            risk: self.handler.risk.clone(),
-            default_timeout: self.handler.default_timeout,
-            exposure: self.exposure,
-            source: self.source,
-            output_budget: self.output_budget.clone(),
-            capabilities: self.capabilities.clone(),
+        match &self.inner {
+            LegacyToolAdapterInner::Handler(handler) => ToolDescriptor {
+                name: self.name.clone(),
+                display_name: None,
+                description: handler.description.to_owned(),
+                input_schema: handler.input_schema.clone(),
+                output_schema: self.output_schema.clone(),
+                category: handler.category,
+                risk: handler.risk.clone(),
+                default_timeout: handler.default_timeout,
+                exposure: self.exposure,
+                source: self.source,
+                output_budget: self.output_budget.clone(),
+                capabilities: self.capabilities.clone(),
+            },
+            LegacyToolAdapterInner::Owned { descriptor, .. } => descriptor.clone(),
         }
     }
 
@@ -139,10 +193,14 @@ impl LegacyToolAdapter {
         args: serde_json::Value,
     ) -> Result<LegacyCallOutcome, FatalToolError> {
         let progress = ctx.progress.as_ref().map(bridge_progress);
-        let legacy_ctx = self.build_legacy_ctx(ctx, args, progress);
+        let legacy_ctx = build_legacy_ctx(&self.name, ctx, args, progress);
+        // Legacy handlers still read workspace/session/mode/sandbox/cancel via
+        // thread-local accessors. Install the explicit context as that
+        // compatibility view; the context remains the source of truth.
+        let _scope = crate::runtime::install_tool_call_context(ctx);
         // ToolCallCtx 克隆共享 skill_effects 单元；handler 消费一个克隆，
         // 本函数从原值取回副作用。
-        let result = (self.handler.handler)(legacy_ctx.clone());
+        let result = (self.handler_fn())(legacy_ctx.clone());
         let effects = legacy_ctx.take_skill_effects();
         Ok(LegacyCallOutcome {
             outcome: map_tool_result(result),
@@ -150,24 +208,31 @@ impl LegacyToolAdapter {
         })
     }
 
-    fn build_legacy_ctx(
-        &self,
-        ctx: &ToolCallContext,
-        args: serde_json::Value,
-        progress: Option<ExecProgressSender>,
-    ) -> ToolCallCtx {
-        ToolCallCtx {
-            id: ctx.call_id.clone(),
-            name: self.name.as_str().to_owned(),
-            // 新契约无 action：legacy 的 `{name}_{action}` 解析属 admit 侧。
-            action: String::new(),
-            args,
-            tx_progress: progress,
-            timeout_secs: Some(ctx.timeout.as_secs()),
-            // 与 ToolCallContext.cancellation 共享同一信号（exec/process 轮询它）。
-            cancel: ctx.cancellation.shared_flag(),
-            skill_effects: Arc::new(Mutex::new(Vec::new())),
+    fn handler_fn(&self) -> fn(ToolCallCtx) -> ToolResult {
+        match &self.inner {
+            LegacyToolAdapterInner::Handler(handler) => handler.handler,
+            LegacyToolAdapterInner::Owned { handler, .. } => *handler,
         }
+    }
+}
+
+fn build_legacy_ctx(
+    name: &ToolName,
+    ctx: &ToolCallContext,
+    args: serde_json::Value,
+    progress: Option<ExecProgressSender>,
+) -> ToolCallCtx {
+    ToolCallCtx {
+        id: ctx.call_id.clone(),
+        name: name.as_str().to_owned(),
+        // 新契约无 action：legacy 的 `{name}_{action}` 解析属 admit 侧。
+        action: String::new(),
+        args,
+        tx_progress: progress,
+        timeout_secs: Some(ctx.timeout.as_secs()),
+        // 与 ToolCallContext.cancellation 共享同一信号（exec/process 轮询它）。
+        cancel: ctx.cancellation.shared_flag(),
+        skill_effects: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -184,8 +249,7 @@ impl ErasedTool for LegacyToolAdapter {
         let call = self.execute_legacy(&ctx, args)?;
         if !call.effects.is_empty() {
             log::warn!(
-                "LegacyToolAdapter: 工具 '{}' 产生 {} 个宿主副作用，经 execute() 路径被丢弃；\
-                 接线前请使用 execute_legacy()（P2.5）",
+                "LegacyToolAdapter: 工具 '{}' 产生 {} 个宿主副作用，经 execute() 路径被丢弃；接线前请使用 execute_legacy()（P2.5）",
                 self.name,
                 call.effects.len()
             );
@@ -251,6 +315,7 @@ pub fn map_tool_result(result: ToolResult) -> ToolOutcome {
         display,
         images: result.images.clone(),
         metrics,
+        effects: Vec::new(),
     }
 }
 
@@ -259,8 +324,12 @@ fn map_error_kind(code: &str) -> ToolErrorKind {
     match code {
         "INVALID_ARGUMENTS" | "INVALID_ARGS" => ToolErrorKind::InvalidArguments,
         "UNKNOWN_TOOL" | "NOT_FOUND" => ToolErrorKind::NotFound,
-        "PERMISSION_DENIED" | "PERMISSION_REQUIRED" | "BLOCKED_BY_MODE" | "SESSION_MISMATCH"
-        | "RESOURCE_MISMATCH" | "WORKSPACE_MISMATCH" => ToolErrorKind::PermissionDenied,
+        "PERMISSION_DENIED"
+        | "PERMISSION_REQUIRED"
+        | "BLOCKED_BY_MODE"
+        | "SESSION_MISMATCH"
+        | "RESOURCE_MISMATCH"
+        | "WORKSPACE_MISMATCH" => ToolErrorKind::PermissionDenied,
         "CANCELLED" => ToolErrorKind::Cancelled,
         "TIMEOUT" => ToolErrorKind::Timeout,
         "MANAGER_UNAVAILABLE" | "RUNTIME_NOT_INITIALIZED" => ToolErrorKind::Unavailable,
@@ -273,8 +342,8 @@ fn map_error_kind(code: &str) -> ToolErrorKind {
 
 /// legacy 错误 → SDK 错误（code 原样保留，kind 由 code 推导）。
 fn map_error(error: &qaqh_types::ToolError) -> ToolError {
-    let mut mapped =
-        ToolError::new(map_error_kind(&error.code), error.message.clone()).with_retryable(error.retryable);
+    let mut mapped = ToolError::new(map_error_kind(&error.code), error.message.clone())
+        .with_retryable(error.retryable);
     mapped.code = ToolErrorCode::from_legacy(&error.code);
     if let Some(hint) = &error.hint {
         mapped = mapped.with_hint(hint.clone());
@@ -286,7 +355,7 @@ fn map_error(error: &qaqh_types::ToolError) -> ToolError {
 ///
 /// 返回给 legacy handler 的 sender 被丢弃后，转发线程自行退出；
 /// 线程分离运行（不 join）——后台进程可能在工具返回后继续产生进度帧。
-fn bridge_progress(sink: &ProgressSink) -> ExecProgressSender {
+pub(crate) fn bridge_progress(sink: &ProgressSink) -> ExecProgressSender {
     let (tx, rx) = crate::bounded_exec_progress_channel();
     let sink = sink.clone();
     let spawned = std::thread::Builder::new()
@@ -315,9 +384,9 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
-    use crate::permission::{PermissionLevel, ToolCategory};
-    use crate::tool_api::context::{AgentMode, CancellationToken};
     use crate::ToolRisk;
+    use crate::permission::{PermissionLevel, ToolCategory};
+    use crate::tool_api::context::{AgentMode, CancellationToken, SandboxMode};
 
     fn legacy_handler(key: &str, handler: fn(ToolCallCtx) -> ToolResult) -> ToolHandler {
         ToolHandler {
@@ -338,6 +407,10 @@ mod tests {
             workspace_root: std::path::PathBuf::from("/tmp/ws"),
             mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadFree,
+            sandbox: SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
+                "/tmp/ws",
+            )),
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress,
@@ -353,6 +426,16 @@ mod tests {
             .unwrap_or("")
             .to_owned();
         ToolResult::ok(text)
+    }
+
+    fn context_handler(_ctx: ToolCallCtx) -> ToolResult {
+        ToolResult::ok(format!(
+            "{}|{}|{}|{}",
+            crate::current_workspace(),
+            crate::current_session().unwrap_or_default(),
+            crate::runtime::current_mode(),
+            crate::authorization::is_subagent_sandbox(),
+        ))
     }
 
     fn diff_handler(_ctx: ToolCallCtx) -> ToolResult {
@@ -373,10 +456,7 @@ mod tests {
     }
 
     fn cancel_probe_handler(ctx: ToolCallCtx) -> ToolResult {
-        ToolResult::ok(format!(
-            "cancelled={}",
-            ctx.cancel.load(Ordering::SeqCst)
-        ))
+        ToolResult::ok(format!("cancelled={}", ctx.cancel.load(Ordering::SeqCst)))
     }
 
     fn progress_handler(ctx: ToolCallCtx) -> ToolResult {
@@ -393,20 +473,22 @@ mod tests {
     }
 
     fn skill_handler(ctx: ToolCallCtx) -> ToolResult {
-        ctx.push_skill_effect(qaqh_skills::SkillEffect::Activate(qaqh_skills::SkillActivation {
-            metadata: qaqh_skills::SkillMetadata {
-                name: "demo".to_owned(),
-                description: "demo skill".to_owned(),
-                license: None,
-                compatibility: None,
-                metadata: Default::default(),
-                allowed_tools: Vec::new(),
-                path: std::path::PathBuf::from("/tmp/skill"),
-                scope: qaqh_skills::SkillScope::Project,
+        ctx.push_skill_effect(qaqh_skills::SkillEffect::Activate(
+            qaqh_skills::SkillActivation {
+                metadata: qaqh_skills::SkillMetadata {
+                    name: "demo".to_owned(),
+                    description: "demo skill".to_owned(),
+                    license: None,
+                    compatibility: None,
+                    metadata: Default::default(),
+                    allowed_tools: Vec::new(),
+                    path: std::path::PathBuf::from("/tmp/skill"),
+                    scope: qaqh_skills::SkillScope::Project,
+                },
+                body: "body".to_owned(),
+                resources: Vec::new(),
             },
-            body: "body".to_owned(),
-            resources: Vec::new(),
-        }));
+        ));
         ToolResult::ok("activated")
     }
 
@@ -439,8 +521,8 @@ mod tests {
         let error = call.outcome.error.expect("partial 必须带 error");
         assert_eq!(error.code.as_str(), "PARTIAL");
 
-        let adapter = LegacyToolAdapter::new(legacy_handler("exec", backgrounded_handler))
-            .expect("adapter");
+        let adapter =
+            LegacyToolAdapter::new(legacy_handler("exec", backgrounded_handler)).expect("adapter");
         let call = adapter
             .execute_legacy(&test_ctx(None), serde_json::json!({}))
             .expect("execute");
@@ -490,8 +572,22 @@ mod tests {
     }
 
     #[test]
+    fn interactive_capability_allows_zero_timeout() {
+        let mut handler = legacy_handler("ask", echo_handler);
+        handler.default_timeout = Duration::ZERO;
+        let capabilities = ToolCapabilities {
+            interactive: true,
+            ..ToolCapabilities::default()
+        };
+        let adapter = LegacyToolAdapter::new_with_capabilities(handler, capabilities)
+            .expect("interactive tool may use zero default timeout");
+        assert_eq!(adapter.descriptor().default_timeout, Duration::ZERO);
+    }
+
+    #[test]
     fn descriptor_reflects_legacy_fields_and_validates() {
-        let adapter = LegacyToolAdapter::new(legacy_handler("read", echo_handler)).expect("adapter");
+        let adapter =
+            LegacyToolAdapter::new(legacy_handler("read", echo_handler)).expect("adapter");
         let descriptor = adapter.descriptor();
         assert_eq!(descriptor.name.as_str(), "read");
         assert_eq!(descriptor.description, "测试工具");
@@ -505,7 +601,8 @@ mod tests {
 
     #[test]
     fn execute_maps_success_display_and_args() {
-        let adapter = LegacyToolAdapter::new(legacy_handler("echo", echo_handler)).expect("adapter");
+        let adapter =
+            LegacyToolAdapter::new(legacy_handler("echo", echo_handler)).expect("adapter");
         let call = adapter
             .execute_legacy(&test_ctx(None), serde_json::json!({"text": "hello"}))
             .expect("execute");
@@ -517,6 +614,36 @@ mod tests {
         assert!(outcome.error.is_none());
         assert_eq!(outcome.check_invariants(), Ok(()));
         assert!(call.effects.is_empty());
+    }
+
+    #[test]
+    fn execute_legacy_installs_explicit_context_for_handler() {
+        let adapter =
+            LegacyToolAdapter::new(legacy_handler("context", context_handler)).expect("adapter");
+        let mut ctx = test_ctx(None);
+        ctx.workspace_root = std::path::PathBuf::from("/tmp/qaqh-adapter-context");
+        ctx.sandbox_spec =
+            crate::tool_api::SandboxSpec::workspace_write(ctx.workspace_root.clone());
+        ctx.session_id = "adapter-seed".to_string();
+        ctx.mode = AgentMode::Plan;
+        ctx.sandbox = SandboxMode::Subagent;
+        crate::set_actor_context("/tmp/qaqh-before-adapter", "before-seed");
+        crate::runtime::set_mode(2);
+        crate::authorization::set_subagent_sandbox(false);
+
+        let outcome = adapter
+            .execute_legacy(&ctx, serde_json::json!({}))
+            .expect("context probe");
+        assert_eq!(
+            outcome.outcome.model.text,
+            "/tmp/qaqh-adapter-context|adapter-seed|1|true"
+        );
+        assert_eq!(crate::current_session().as_deref(), Some("before-seed"));
+        assert_eq!(crate::current_workspace(), "/tmp/qaqh-before-adapter");
+        assert_eq!(crate::runtime::current_mode(), 2);
+        assert!(!crate::authorization::is_subagent_sandbox());
+        crate::clear_actor_context();
+        crate::runtime::set_mode(0);
     }
 
     #[test]
@@ -656,10 +783,8 @@ mod tests {
     #[test]
     fn output_ref_takes_priority_over_data() {
         fn externalized_handler(_ctx: ToolCallCtx) -> ToolResult {
-            let mut result = ToolResult::ok_data(
-                serde_json::json!({"path": "big.log"}),
-                "retained head",
-            );
+            let mut result =
+                ToolResult::ok_data(serde_json::json!({"path": "big.log"}), "retained head");
             result.externalize_output(
                 "retained head".to_owned(),
                 "big.log head".to_owned(),

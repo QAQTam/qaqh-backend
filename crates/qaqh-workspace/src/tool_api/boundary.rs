@@ -143,7 +143,10 @@ mod tests {
             fatal: None,
         };
         assert_eq!(outcome.pending_interactions.len(), 1);
-        assert_eq!(outcome.pending_interactions[0].kind, PendingKind::Permission);
+        assert_eq!(
+            outcome.pending_interactions[0].kind,
+            PendingKind::Permission
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
+use super::compaction_port::CompactionPoll;
 use super::engine_compact::CompactMeta;
 use super::loop_core::Loop;
 use super::types::*;
@@ -12,17 +13,16 @@ use super::types::*;
 impl Loop {
     pub(super) fn finish_pending_compact(&mut self, status: qaqh_domain::CompactStatus) {
         self.session.agent.finish_manual_compact();
-        self.pending_compact_rx = None;
-        let Some(compact_id) = self.pending_compact_id.take() else {
-            self.pending_compact_causation = None;
+        let Some(pending) = self.compaction.take() else {
             return;
         };
-        let causation = self.pending_compact_causation.take();
-        let _scope = self.paced_emitter.enter_causation(causation.as_deref());
+        let _scope = self
+            .paced_emitter
+            .enter_causation(pending.causation.as_deref());
         self.paced_emitter
             .emit_domain(qaqh_domain::DomainEvent::Conversation(
                 qaqh_domain::ConversationEvent::CompactFinished {
-                    compact_id,
+                    compact_id: pending.compact_id,
                     status,
                     summary_chars: Some(0),
                     turns_compacted: Some(0),
@@ -34,60 +34,62 @@ impl Loop {
 
     /// Check if a background compact has completed and apply the result.
     pub(super) fn check_pending_compact(&mut self) {
-        if let Some(ref rx) = self.pending_compact_rx {
-            // G4：挂起/运行中不消费压缩结果——应用会折叠悬空 tool_use。
-            // 结果留在 channel 里，安全点（Idle 且无 suspension）再取。
-            if self.session.turn.is_suspended() || self.phase != LoopPhase::Idle {
-                return;
-            }
-            match rx.try_recv() {
-                Ok(meta) => {
-                    self.session.agent.finish_manual_compact();
-                    self.pending_compact_rx = None;
-                    let compact_id = self.pending_compact_id.take();
-                    let causation = self.pending_compact_causation.take();
-                    let _scope = self.paced_emitter.enter_causation(causation.as_deref());
-                    if compact_id.as_deref() != Some(meta.compact_id.as_str()) {
-                        log::warn!(
-                            "[COMPACT] pending/result id mismatch: pending={compact_id:?}, result={}",
-                            meta.compact_id
-                        );
-                    }
-                    {
-                        let mut ctx = RingContext {
-                            agent: &mut self.session.agent,
-                            emitter: &self.paced_emitter,
-                            cancel: &self.cancel,
-                            phase: &mut self.phase,
-                            pending: &mut self.pending,
-                            writer_dead: &self.writer_dead,
-                            stats: &mut self.session.stats,
-                            flow: &mut self.flow,
-                        };
-                        super::engine_compact::apply_result(&mut ctx, &meta);
-                    }
-                    // compact 完成且回到 idle：把 compact 期间入队的注入
-                    // 逐条开新 turn（替代旧 compact-defer 特判的派发点）。
-                    self.dispatch_injections_after_compact();
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Worker thread died without sending result.
-                    // Clear pending state and report error so frontend
-                    // doesn't stay stuck at the "compacting" animation.
-                    log::error!("[COMPACT] worker thread disconnected without result");
-                    self.pending_compact_rx = None;
-                    self.finish_pending_compact(qaqh_domain::CompactStatus::Failed);
-                    // 失败同时由 OperationFailed 暴露具体原因。
-                    self.emit_operation_failed(
-                        "compact-worker-crashed",
-                        qaqh_domain::ErrorScope::Conversation,
-                        "compact_worker_crashed",
-                        "Context compaction failed: worker thread crashed.",
+        // G4：挂起/运行中不消费压缩结果——应用会折叠悬空 tool_use。
+        // 结果留在 port 里，安全点（Idle 且无 suspension）再取。
+        if !self.compaction.is_running()
+            || self.session.turn.is_suspended()
+            || self.phase != LoopPhase::Idle
+        {
+            return;
+        }
+        match self.compaction.poll() {
+            CompactionPoll::Empty | CompactionPoll::Running => {}
+            CompactionPoll::Ready(meta) => {
+                let Some(pending) = self.compaction.take() else {
+                    log::error!("[COMPACT] result arrived without a pending task");
+                    return;
+                };
+                self.session.agent.finish_manual_compact();
+                let _scope = self
+                    .paced_emitter
+                    .enter_causation(pending.causation.as_deref());
+                if pending.compact_id != meta.compact_id {
+                    log::warn!(
+                        "[COMPACT] pending/result id mismatch: pending={}, result={}",
+                        pending.compact_id,
+                        meta.compact_id
                     );
                 }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // Still running — check again next loop iteration.
+                {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        flow: &mut self.flow,
+                    };
+                    super::engine_compact::apply_result(&mut ctx, &meta);
                 }
+                // compact 完成且回到 idle：把 compact 期间入队的注入
+                // 逐条开新 turn（替代旧 compact-defer 特判的派发点）。
+                self.dispatch_injections_after_compact();
+            }
+            CompactionPoll::Disconnected => {
+                // Worker thread died without sending result.
+                // Clear pending state and report error so frontend
+                // doesn't stay stuck at the "compacting" animation.
+                log::error!("[COMPACT] worker thread disconnected without result");
+                self.finish_pending_compact(qaqh_domain::CompactStatus::Failed);
+                // 失败同时由 OperationFailed 暴露具体原因。
+                self.emit_operation_failed(
+                    "compact-worker-crashed",
+                    qaqh_domain::ErrorScope::Conversation,
+                    "compact_worker_crashed",
+                    "Context compaction failed: worker thread crashed.",
+                );
             }
         }
     }
@@ -100,12 +102,12 @@ impl Loop {
     /// 边界 `drain_injections` 落盘进当前回合（见缝插针语义不变），
     /// writer 死亡则进程即将退出。
     pub(super) fn dispatch_injections_after_compact(&mut self) {
-        // T-1-3：用户取消态下 compact 完成后也不得逐条开新回合（与
-        // `Loop::inject` 的 idle 分支同一语义）。记录留在总线里，等用户重新
-        // 输入后由 lap 边界落盘。
+        // 取消门置位时 compact 完成后也不得逐条开新回合（与
+        // `Loop::inject` 的 idle 分支同一语义）。记录留在总线里，等用户动作
+        // 复位 token 后由 lap 边界落盘。
         if self.writer_dead.load(Ordering::SeqCst)
             || self.phase != LoopPhase::Idle
-            || self.user_cancelled
+            || self.cancel.is_set()
             || self.injection_bus.pending_len() == 0
         {
             return;
@@ -139,9 +141,13 @@ impl Loop {
             let _scope = self
                 .paced_emitter
                 .enter_causation(Some(command_id.as_str()));
-            let outcome =
-                self.input
-                    .handle_system_input(&mut ctx, &text, Some(command_id.as_str()));
+            let outcome = self.input.handle_system_input(
+                &mut ctx,
+                &mut self.session.turn,
+                &command_id,
+                &text,
+                Some(command_id.as_str()),
+            );
             let _ = ctx;
             self.apply_outcome(outcome);
         }
@@ -201,7 +207,7 @@ impl Loop {
                 "Context compaction is not allowed while a turn is running or suspended.".into(),
             );
         }
-        if self.pending_compact_rx.is_some() || self.session.agent.manual_compact_running() {
+        if self.compaction.is_running() || self.session.agent.manual_compact_running() {
             return Outcome::Error("Context compaction is already running.".into());
         }
         let compact = {
@@ -258,9 +264,7 @@ impl Loop {
                     let _ = tx.send(meta);
                 }) {
                 Ok(_) => {
-                    self.pending_compact_rx = Some(rx);
-                    self.pending_compact_id = Some(pending_compact_id);
-                    self.pending_compact_causation = causation;
+                    self.compaction.install(rx, pending_compact_id, causation);
                 }
                 Err(error) => {
                     log::error!("[COMPACT] failed to spawn worker: {error}");
@@ -375,6 +379,24 @@ impl Loop {
     /// - `YieldToUser` → do nothing, wait for PermissionResponse or UserInput
     /// - `Handled` / `Error` / `Shutdown` → straightforward
     pub(super) fn apply_outcome(&mut self, outcome: Outcome) {
+        if let Err(error) = self
+            .session
+            .turn
+            .observe_outcome(&mut self.session.agent, &outcome)
+        {
+            let message = error.to_string();
+            log::error!("[TURN] SessionActor rejected runtime transition: {message}");
+            self.emit_operation_failed(
+                "turn-actor-transition",
+                qaqh_domain::ErrorScope::Conversation,
+                "turn_actor_transition",
+                &message,
+            );
+            self.reset_all_engines();
+            self.phase = LoopPhase::Idle;
+            return;
+        }
+
         // G5：孤儿 tool_result 升级为领域事件——store 只记录，此处统一
         // 上报（覆盖所有执行路径），前端不再对"已授权执行却消失"零感知。
         let orphans = self.session.agent.msg.take_orphan_tool_results();
@@ -405,6 +427,19 @@ impl Loop {
         }
         match outcome {
             Outcome::TurnComplete { turn_id, usage } => {
+                {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        flow: &mut self.flow,
+                    };
+                    self.lifecycle.turn_completed(&mut ctx);
+                }
                 self.session.agent.skills.complete_user_turn();
                 // Persist session state
                 self.session.flush();
@@ -431,6 +466,10 @@ impl Loop {
                                          完成此步骤后，调用 todo(action=\"set\", id=\"{}\", status=\"completed\", evidence=\"...\").",
                         item.id, item.title, item.description, item.id
                     );
+                    let input_id = format!(
+                        "goal-auto-advance:{}",
+                        self.session.agent.msg.context_revision()
+                    );
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,
@@ -443,7 +482,9 @@ impl Loop {
                     };
                     let next_outcome = self.input.handle_user_input(
                         &mut ctx,
+                        &mut self.session.turn,
                         qaqh_message::builtin::GOAL,
+                        &input_id,
                         &prompt,
                         vec![],
                     );
@@ -457,7 +498,7 @@ impl Loop {
             Outcome::TurnAborted { turn_id, usage } => {
                 self.session.agent.skills.abort_user_turn();
                 self.session.flush();
-                self.reset_all_engines();
+                self.reset_all_engines_preserving_turn_terminal();
                 self.paced_emitter
                     .emit_domain(qaqh_domain::DomainEvent::Conversation(
                         qaqh_domain::ConversationEvent::TurnCompleted {

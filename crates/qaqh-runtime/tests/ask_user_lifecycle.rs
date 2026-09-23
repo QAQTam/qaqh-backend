@@ -126,6 +126,8 @@ fn cmd_user_input(text: &str) -> RingingCommand {
         text: text.into(),
         images: vec![],
         attachments: None,
+        message_id: None,
+        input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
         as_system: false,
     })
 }
@@ -304,6 +306,36 @@ fn collect_through_terminal(
             return events;
         }
     }
+}
+
+fn collect_until_quiet(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+    quiet: Duration,
+) -> Vec<RingingEvent> {
+    let mut events = Vec::new();
+    loop {
+        match receiver.recv_timeout(quiet) {
+            Ok(event) => events.push(event),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return events,
+        }
+    }
+}
+
+fn terminal_count(events: &[RingingEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RingingEvent::Conversation(
+                    ConversationEvent::TurnCompleted { .. }
+                        | ConversationEvent::TurnFailed { .. }
+                        | ConversationEvent::ConversationCancelled { .. }
+                )
+            )
+        })
+        .count()
 }
 
 fn tool_finished_ids(events: &[RingingEvent]) -> Vec<String> {
@@ -701,6 +733,56 @@ fn invalid_or_stale_responses_do_not_consume_the_active_ask() {
 }
 
 #[test]
+fn duplicate_ask_resolution_is_rejected_after_terminal_without_modal_replay() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    run_case(
+        vec![
+            tool_round(&[(
+                "duplicate-ask",
+                "ask",
+                json!({"question":"Pick A", "options":["A"], "allow_custom":false}),
+            )]),
+            final_round("finished"),
+        ],
+        2,
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("resolve once"));
+            expect_interaction_requested(receiver, "duplicate-ask");
+            send_cmd(
+                writer,
+                &seed,
+                cmd_ask_respond("duplicate-ask", &[("q1", "A")]),
+            );
+            expect_interaction_resolved(receiver, "duplicate-ask", AskResolution::Answered);
+
+            let events = collect_through_terminal(receiver);
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                RingingEvent::Control(ControlEvent::InteractionRequested { .. })
+            )));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+                    ))
+                    .count(),
+                1
+            );
+
+            send_cmd(
+                writer,
+                &seed,
+                cmd_ask_respond("duplicate-ask", &[("q1", "A")]),
+            );
+            expect_operation_failed(receiver, "interaction_not_found");
+            assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        },
+    );
+}
+
+#[test]
 fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     run_case(
@@ -841,17 +923,16 @@ fn cancel_aborts_one_suspended_turn_and_invalidates_its_ask_id() {
             expect_interaction_requested(receiver, "cancel-ask");
 
             send_cmd(writer, &seed, cmd_cancel());
-            let aborted = collect_through_terminal(receiver);
-            assert!(aborted.iter().any(|event| match event {
-                RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. }) => true,
-                RingingEvent::Conversation(ConversationEvent::TurnCompleted {
-                    stop_reason,
-                    ..
-                }) => {
-                    stop_reason.as_deref() == Some("cancelled")
-                }
-                _ => false,
-            }));
+            let aborted = collect_until_quiet(receiver, Duration::from_millis(500));
+            assert_eq!(
+                terminal_count(&aborted),
+                1,
+                "suspended cancel must publish exactly one terminal: {aborted:?}"
+            );
+            assert!(aborted.iter().any(|event| matches!(
+                event,
+                RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. })
+            )));
 
             send_cmd(
                 writer,
@@ -968,7 +1049,7 @@ fn undo_invalidates_the_suspended_ask() {
 }
 
 #[test]
-fn cancel_during_gate_emits_one_complete_terminal_transaction() {
+fn cancel_during_gate_emits_exactly_one_terminal_transaction() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     run_case_with_delay(
         vec![final_round("too late")],
@@ -983,13 +1064,13 @@ fn cancel_during_gate_emits_one_complete_terminal_transaction() {
             }
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
             send_cmd(writer, &seed, cmd_cancel());
-            let events = collect_through_terminal(receiver);
-            assert!(events.iter().any(|event| matches!(
-                event,
-                RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. })
-                    | RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
-                    | RingingEvent::Conversation(ConversationEvent::TurnFailed { .. })
-            )));
+            send_cmd(writer, &seed, cmd_cancel());
+            let events = collect_until_quiet(receiver, Duration::from_millis(500));
+            assert_eq!(
+                terminal_count(&events),
+                1,
+                "cancel and duplicate cancel must publish exactly one terminal: {events:?}"
+            );
         },
     );
 }

@@ -10,9 +10,12 @@
 //! CLI).
 
 use qaqh_types::ToolDef;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::tool_api::context::{SandboxMode, ToolCallContext};
 
 /// Unified runtime security context used for session binding and admission.
 #[derive(Clone)]
@@ -43,6 +46,14 @@ thread_local! {
     static AGENT_MODE: Cell<u8> = const { Cell::new(0) };
 }
 
+// Explicit per-call cancellation override. This is installed only while a
+// `ToolCallContext` is executing and is checked before the legacy actor/global
+// flags, so handlers that still call `is_cancel()` observe the same token as
+// the runtime-owned cancellation tree.
+thread_local! {
+    static TOOL_CALL_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
 pub fn set_context(session: &str, permission_level: u8) {
     RUNTIME_CTX.with(|ctx| {
         *ctx.borrow_mut() = Some(RuntimeContext {
@@ -62,6 +73,158 @@ pub fn context() -> Option<RuntimeContext> {
 
 pub fn set_mode(mode: u8) {
     AGENT_MODE.with(|slot| slot.set(mode));
+}
+
+/// Snapshot the current agent mode for an explicit runtime context.
+pub fn current_mode() -> u8 {
+    AGENT_MODE.with(|slot| slot.get())
+}
+
+pub(crate) fn explicit_cancel_flag() -> Option<Arc<AtomicBool>> {
+    TOOL_CALL_CANCEL.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) fn explicit_cancel_is_set() -> Option<bool> {
+    explicit_cancel_flag().map(|flag| flag.load(Ordering::SeqCst))
+}
+
+/// Install one explicit [`ToolCallContext`] as the ambient compatibility view
+/// for the current tool worker.
+///
+/// The explicit context is the source of truth. The thread-local slots are
+/// populated only because legacy handlers still read them; the guard restores
+/// every previous value on drop.
+pub fn install_tool_call_context(ctx: &ToolCallContext) -> ToolCallContextGuard {
+    let previous_runtime = RUNTIME_CTX.with(|slot| {
+        let previous = slot.borrow().clone();
+        *slot.borrow_mut() = Some(RuntimeContext {
+            active_session: ctx.session_id.clone(),
+            permission_level: ctx.permission_level as u8,
+        });
+        previous
+    });
+    let previous_workspace = crate::ACTOR_WORKSPACE.with(|slot| {
+        slot.borrow_mut()
+            .replace(ctx.workspace_root.to_string_lossy().to_string())
+    });
+    let previous_session =
+        crate::ACTOR_SESSION.with(|slot| slot.borrow_mut().replace(ctx.session_id.clone()));
+    let previous_actor_cancel = crate::ACTOR_CANCEL.with(|slot| slot.replace(false));
+    let previous_mode = AGENT_MODE.with(|slot| {
+        let previous = slot.get();
+        slot.set(match ctx.mode {
+            crate::tool_api::AgentMode::Code => 0,
+            crate::tool_api::AgentMode::Plan => 1,
+        });
+        previous
+    });
+    let previous_sandbox = crate::authorization::is_subagent_sandbox();
+    crate::authorization::set_subagent_sandbox(matches!(ctx.sandbox, SandboxMode::Subagent));
+    let previous_cancel =
+        TOOL_CALL_CANCEL.with(|slot| slot.borrow_mut().replace(ctx.cancellation.shared_flag()));
+
+    ToolCallContextGuard {
+        previous_runtime,
+        previous_workspace,
+        previous_session,
+        previous_actor_cancel,
+        previous_mode,
+        previous_sandbox,
+        previous_cancel,
+    }
+}
+
+/// Restores the thread-local compatibility view captured by
+/// [`install_tool_call_context`].
+pub struct ToolCallContextGuard {
+    previous_runtime: Option<RuntimeContext>,
+    previous_workspace: Option<String>,
+    previous_session: Option<String>,
+    previous_actor_cancel: bool,
+    previous_mode: u8,
+    previous_sandbox: bool,
+    previous_cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for ToolCallContextGuard {
+    fn drop(&mut self) {
+        RUNTIME_CTX.with(|slot| *slot.borrow_mut() = self.previous_runtime.take());
+        crate::ACTOR_WORKSPACE.with(|slot| {
+            *slot.borrow_mut() = self.previous_workspace.take();
+        });
+        crate::ACTOR_SESSION.with(|slot| {
+            *slot.borrow_mut() = self.previous_session.take();
+        });
+        crate::ACTOR_CANCEL.with(|slot| slot.set(self.previous_actor_cancel));
+        AGENT_MODE.with(|slot| slot.set(self.previous_mode));
+        crate::authorization::set_subagent_sandbox(self.previous_sandbox);
+        TOOL_CALL_CANCEL.with(|slot| {
+            *slot.borrow_mut() = self.previous_cancel.take();
+        });
+    }
+}
+
+/// Worker scope carrying one explicit tool context plus the non-SDK runtime
+/// state that still lives in thread-local storage (ToolManager and fold
+/// policy).
+///
+/// The explicit context remains authoritative for
+/// workspace/session/mode/sandbox/cancellation; manager and policy are
+/// captured on the actor thread and restored on the worker.
+#[derive(Clone)]
+pub struct ToolExecutionScope {
+    context: ToolCallContext,
+    manager: Option<Arc<Mutex<crate::ToolManager>>>,
+    policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
+}
+
+impl ToolExecutionScope {
+    /// Capture the actor-thread manager/policy and bind them to an explicit
+    /// tool context.
+    pub fn capture(context: ToolCallContext) -> Self {
+        Self {
+            context,
+            manager: ACTOR_TOOL_MANAGER.with(|slot| slot.borrow().clone()),
+            policy: crate::tool_side_fold::policy(),
+        }
+    }
+
+    /// Explicit context bound to this worker scope.
+    pub fn context(&self) -> &ToolCallContext {
+        &self.context
+    }
+
+    /// Install the manager/policy compatibility view and the explicit tool
+    /// context on the current thread.
+    pub fn install(&self) -> ToolExecutionScopeGuard {
+        let previous_manager = ACTOR_TOOL_MANAGER
+            .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.manager.clone()));
+        let previous_policy = crate::tool_side_fold::policy();
+        crate::tool_side_fold::set_thread_policy(self.policy.clone());
+        let context_guard = install_tool_call_context(&self.context);
+        ToolExecutionScopeGuard {
+            _context_guard: context_guard,
+            previous_manager,
+            previous_policy,
+        }
+    }
+}
+
+/// Restores manager/policy/context state captured by
+/// [`ToolExecutionScope::install`].
+pub struct ToolExecutionScopeGuard {
+    _context_guard: ToolCallContextGuard,
+    previous_manager: Option<Arc<Mutex<crate::ToolManager>>>,
+    previous_policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
+}
+
+impl Drop for ToolExecutionScopeGuard {
+    fn drop(&mut self) {
+        ACTOR_TOOL_MANAGER.with(|slot| {
+            *slot.borrow_mut() = self.previous_manager.take();
+        });
+        crate::tool_side_fold::set_thread_policy(self.previous_policy.clone());
+    }
 }
 
 /// Explicit tool-execution context (PR-3-2 / D5-G2): the caller (agent tool
@@ -147,17 +310,11 @@ pub fn set_allowed_tools(tools: Vec<String>) {
     with_manager(|manager| manager.set_allowed(tools));
 }
 
-pub(crate) fn is_plan_mode() -> bool {
-    AGENT_MODE.with(|slot| slot.get() == 1)
-}
-
-/// Snapshot of the per-actor tool runtime state on the actor thread.
+/// Snapshot of the legacy per-actor tool runtime state on the actor thread.
 ///
-/// Tool execution runs on **spawned OS threads** (see engine_turn/engine_tool),
-/// which never inherit the actor thread's thread-locals. The actor captures its
-/// scope with [`ActorToolScope::capture`] before spawning a tool worker, and the
-/// worker reinstalls it with [`ActorToolScope::install`], so concurrent actors
-/// each run their tools under their own context/manager/mode/sandbox/fold-policy.
+/// Production tool workers now carry [`ToolExecutionScope`], which binds an
+/// explicit `ToolCallContext` to the remaining manager/policy state. This
+/// compatibility type is retained for legacy callers and thread-boundary tests.
 #[derive(Clone, Default)]
 pub struct ActorToolScope {
     runtime: Option<RuntimeContext>,
@@ -428,6 +585,26 @@ pub fn project_tool_display(
     output: &str,
 ) -> Option<crate::tool_api::ToolDisplay> {
     with_manager(|manager| manager.project_display(name, args, output)).flatten()
+}
+
+/// 优先从 typed canonical payload 生成 display，失败时回退旧输出投影。
+pub fn project_tool_display_from_result(
+    name: &str,
+    args: &serde_json::Value,
+    result: &qaqh_types::ToolResult,
+) -> Option<crate::tool_api::ToolDisplay> {
+    result
+        .display()
+        .map(crate::tool_api::output::from_wire_display)
+        .or_else(|| crate::display::project_typed_tool_display(name, args, &result.data))
+        .or_else(|| project_tool_display(name, args, result.model_text()))
+}
+
+/// Rehydrate a canonical display payload without re-parsing tool text.
+pub fn project_tool_display_from_wire(
+    display: &qaqh_types::ToolResultDisplay,
+) -> crate::tool_api::ToolDisplay {
+    crate::tool_api::output::from_wire_display(display)
 }
 
 pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {

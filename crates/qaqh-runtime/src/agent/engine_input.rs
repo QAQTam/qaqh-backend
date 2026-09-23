@@ -2,6 +2,7 @@
 //!
 //! Receives raw user text, handles auto-session-creation, compliance guard,
 //! and routes to TurnEngine for LLM processing.
+use super::engine_turn::TurnEngine;
 use super::types::*;
 
 pub struct InputEngine;
@@ -27,7 +28,9 @@ impl InputEngine {
     pub fn handle_user_input(
         &self,
         ctx: &mut RingContext,
+        turn: &mut TurnEngine,
         source_id: &'static str,
+        input_id: &str,
         text: &str,
         images: Vec<qaqh_domain::ImageBlock>,
     ) -> Outcome {
@@ -166,6 +169,10 @@ impl InputEngine {
 
         log::info!("[INPUT] pushing user message via ContextFlow (source={source_id})");
         let turn_id = ctx.agent.msg.allocate_turn_id();
+        if let Err(error) = turn.begin_input(&turn_id, input_id) {
+            Self::emit_input_rejected(ctx, input_id, &error.to_string());
+            return Outcome::Handled;
+        }
         let receipt = ctx.flow.ingest(
             &mut ctx.agent.msg,
             source_id,
@@ -244,6 +251,8 @@ impl InputEngine {
     pub fn handle_system_input(
         &self,
         ctx: &mut RingContext,
+        turn: &mut TurnEngine,
+        input_id: &str,
         text: &str,
         command_id: Option<&str>,
     ) -> Outcome {
@@ -258,16 +267,20 @@ impl InputEngine {
             ctx.emitter.set_seed(&ctx.agent.session.seed);
         }
 
-        // T-1-3：清零取消标记意味着「开新回合」——因此本函数**不得**在用户
-        // 显式取消后被调用。唯一的两个调用方（`Loop::inject` 的 idle 分支与
-        // `dispatch_injections_after_compact`）都在 `Loop::user_cancelled`
-        // 置位时提前拒绝（注入改为入总线排队），用户输入路径才是复位点。
-        // 新增调用方必须沿用同一守卫，否则系统注入会复活已取消的会话。
+        // 清零取消标记意味着「开新回合」——因此本函数**不得**在取消门置位
+        // 后被调用。唯一的两个调用方（`Loop::inject` 的 idle 分支与
+        // `dispatch_injections_after_compact`）都在 `cancel.is_set()` 时提前
+        // 拒绝（注入改为入总线排队），用户动作路径才是复位点。新增调用方
+        // 必须沿用同一守卫，否则系统注入会复活已取消的会话。
         ctx.cancel.clear();
         qaqh_workspace::clear_cancel();
 
         log::info!("[INPUT] pushing system injection via ContextFlow (subagent source)");
         let turn_id = ctx.agent.msg.allocate_turn_id();
+        if let Err(error) = turn.begin_input(&turn_id, input_id) {
+            Self::emit_input_rejected(ctx, input_id, &error.to_string());
+            return Outcome::Handled;
+        }
         // 统一管道：submit → drain（idle 时立即落盘 trailing）
         // ——与回合中的 lap 边界消费同一代码路径，不再分叉。
         // 角色统一为 user + name=subagent（与 busy 见缝插针/崩溃恢复路径一致）：
@@ -327,5 +340,22 @@ impl InputEngine {
             round_num: 0,
             usage: None,
         }
+    }
+
+    fn emit_input_rejected(ctx: &mut RingContext, input_id: &str, message: &str) {
+        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
+            qaqh_domain::ControlEvent::OperationFailed {
+                occurrence_id: input_id.to_string(),
+                scope: qaqh_domain::ErrorScope::Conversation,
+                error: qaqh_domain::DomainError {
+                    error_id: input_id.to_string(),
+                    code: "input_rejected".into(),
+                    message: message.to_string(),
+                    retryable: false,
+                    dedupe_key: Some(input_id.to_string()),
+                },
+                operation_id: Some(input_id.to_string()),
+            },
+        ));
     }
 }

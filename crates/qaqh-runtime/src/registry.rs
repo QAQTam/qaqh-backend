@@ -4,7 +4,15 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use qaqh_domain::RingingChannel;
+use qaqh_session::actor::{
+    ConnectionId, SessionActor, SessionActorEffect, SessionCommand, SubscriptionCommand,
+    SubscriptionEffect,
+};
+
 use crate::agent::SubagentSpawnSpec;
+use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
+use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
 use crate::{RingingHub, SessionActivityTracker};
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
@@ -238,6 +246,10 @@ pub struct AgentInstance {
     seed: String,
     transport: AgentTransport,
     kind: AgentKind,
+    /// P2-2d-b migration bridge: daemon-side logical subscription mailbox.
+    /// The worker `TurnActor` remains authoritative for turn state until the
+    /// actors are consolidated.
+    subscription_actor: SessionActor,
     /// Idle-unload liveness (shared with the Loop actor). `None` for legacy
     /// process workers — they are not idle-unload candidates.
     liveness: Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>>,
@@ -261,13 +273,11 @@ pub struct AgentRegistry {
     shutting_down: bool,
     /// 最近一次 spawn 时间（防崩溃-重启风暴：同一 seed 1 秒内不重复拉起）。
     last_spawn: HashMap<String, std::time::Instant>,
-    /// T-1-4：子代理 seed → 派生出它的父会话 seed（`spawn_subagent` 登记，
-    /// `close` 清理）。取消传播需要反向查询，故与 `subagent_children` 成对
-    /// 维护。
-    subagent_parent: HashMap<String, String>,
-    /// T-1-4：父会话 seed → 其子代理 seed 集合。父会话收到
-    /// `ConversationCancel` 时逐个取消（见 `cancel_subagent_children`）。
-    subagent_children: HashMap<String, std::collections::HashSet<String>>,
+    /// P2-5：daemon 级 parent/child edge 与 unload 顺序状态机。
+    supervisor: SubagentSupervisor,
+    /// P2-7：root session tree 的 durable quota owner。
+    quota_ledgers: HashMap<String, QuotaLedger>,
+    quota_limits: QuotaLimits,
 }
 
 impl AgentRegistry {
@@ -279,8 +289,9 @@ impl AgentRegistry {
             hub: None,
             shutting_down: false,
             last_spawn: HashMap::new(),
-            subagent_parent: HashMap::new(),
-            subagent_children: HashMap::new(),
+            supervisor: SubagentSupervisor::default(),
+            quota_ledgers: HashMap::new(),
+            quota_limits: QuotaLimits::unlimited(),
         }
     }
 
@@ -362,7 +373,16 @@ impl AgentRegistry {
         let parent_seed = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
-        self.spawn_subagent_inprocess(
+        let root_seed = if parent_seed.is_empty() {
+            seed.to_string()
+        } else {
+            self.supervisor.root_of(&parent_seed)
+        };
+        // Durable reservation must exist before the child actor can perform
+        // any side effect.
+        let reservation = self.reserve_spawn(&root_seed, seed)?;
+        let parent_cancel = self.cancel_for_seed(&parent_seed);
+        if let Err(error) = self.spawn_subagent_inprocess(
             seed,
             SubagentSpawnSpec {
                 tools: tools.to_vec(),
@@ -371,9 +391,35 @@ impl AgentRegistry {
                 max_tokens,
                 ephemeral,
             },
-        )?;
-        if !parent_seed.is_empty() && parent_seed != seed {
-            self.link_subagent(&parent_seed, seed);
+            parent_cancel,
+        ) {
+            let _ = self.release_spawn(
+                &root_seed,
+                &reservation.reservation_id,
+                ReleaseReason::Cancelled,
+            );
+            return Err(error);
+        }
+        if !parent_seed.is_empty()
+            && parent_seed != seed
+            && let Err(error) = self.link_subagent(&parent_seed, seed)
+        {
+            self.close(seed);
+            let _ = self.release_spawn(
+                &root_seed,
+                &reservation.reservation_id,
+                ReleaseReason::Cancelled,
+            );
+            return Err(error);
+        }
+        if let Err(error) = self.commit_spawn(&root_seed, &reservation.reservation_id) {
+            self.close(seed);
+            let _ = self.release_spawn(
+                &root_seed,
+                &reservation.reservation_id,
+                ReleaseReason::Reconciliation,
+            );
+            return Err(error);
         }
         Ok(())
     }
@@ -382,6 +428,7 @@ impl AgentRegistry {
         &mut self,
         seed: &str,
         spec: SubagentSpawnSpec,
+        parent_cancel: Option<crate::agent::types::CancelToken>,
     ) -> Result<(), String> {
         if self.instances.contains_key(seed) {
             return Err(format!("agent already running for {seed}"));
@@ -399,6 +446,7 @@ impl AgentRegistry {
             cancel,
             writer_dead,
         } = channels;
+        let cancel = parent_cancel.map_or(cancel, |parent| parent.child());
         let cancel_for_sender = cancel.clone();
 
         let event_seed = seed.to_string();
@@ -446,6 +494,7 @@ impl AgentRegistry {
                     cancel: cancel_for_sender,
                 },
                 kind: AgentKind::Subagent(spec),
+                subscription_actor: SessionActor::new(16),
                 liveness: None,
                 reader: Some(reader),
                 thread: Some(thread),
@@ -566,6 +615,7 @@ impl AgentRegistry {
                     cancel: cancel_for_sender,
                 },
                 kind: AgentKind::Session,
+                subscription_actor: SessionActor::new(16),
                 liveness: Some(liveness_for_registry),
                 reader: Some(reader),
                 thread: Some(thread),
@@ -625,12 +675,17 @@ impl AgentRegistry {
             .get(seed)
             .map(AgentInstance::kind_name)
             .unwrap_or(AgentKind::Session);
-        if let Some(dead) = self.instances.remove(seed) {
-            dead.shutdown();
-        }
+        let parent_cancel = self
+            .supervisor
+            .parent_of(seed)
+            .as_ref()
+            .and_then(|parent| self.cancel_for_seed(parent));
+        self.close(seed);
         match kind {
             AgentKind::Session => self.get_or_spawn(seed)?,
-            AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(seed, spec)?,
+            AgentKind::Subagent(spec) => {
+                self.spawn_subagent_inprocess(seed, spec, parent_cancel)?
+            }
         }
         write(self.instances.get(seed).expect("respawned instance"))
     }
@@ -653,58 +708,212 @@ impl AgentRegistry {
         failed
     }
 
-    pub fn close(&mut self, seed: &str) {
-        if let Some(instance) = self.instances.remove(seed) {
-            instance.shutdown();
+    pub fn subscribe_channel(
+        &mut self,
+        seed: &str,
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        let instance = self
+            .instances
+            .get_mut(seed)
+            .ok_or_else(|| format!("session {seed} is not running"))?;
+        match instance.apply_subscription(SubscriptionCommand::Subscribe {
+            connection_id,
+            channel,
+        })? {
+            SubscriptionEffect::Subscribed { changed, .. } => Ok(changed),
+            effect => Err(format!("unexpected subscribe effect: {effect:?}")),
         }
-        // T-1-4：会话/子代理关闭即摘除派生登记（等价于 hub 的 `forget_seed`
-        // 生命周期点）——父集合与反向指针都不随历史 seed 无界增长。
-        self.unlink_subagent(seed);
+    }
+
+    pub fn unsubscribe_channel(
+        &mut self,
+        seed: &str,
+        connection_id: ConnectionId,
+        channel: RingingChannel,
+    ) -> Result<bool, String> {
+        let instance = self
+            .instances
+            .get_mut(seed)
+            .ok_or_else(|| format!("session {seed} is not running"))?;
+        match instance.apply_subscription(SubscriptionCommand::Unsubscribe {
+            connection_id,
+            channel,
+        })? {
+            SubscriptionEffect::Unsubscribed { changed, .. } => Ok(changed),
+            effect => Err(format!("unexpected unsubscribe effect: {effect:?}")),
+        }
+    }
+
+    pub fn connection_closed(
+        &mut self,
+        seed: &str,
+        connection_id: ConnectionId,
+    ) -> Result<usize, String> {
+        let Some(instance) = self.instances.get_mut(seed) else {
+            return Ok(0);
+        };
+        match instance
+            .apply_subscription(SubscriptionCommand::ConnectionClosed { connection_id })?
+        {
+            SubscriptionEffect::ConnectionClosed { removed, .. } => Ok(removed),
+            effect => Err(format!("unexpected connection-close effect: {effect:?}")),
+        }
+    }
+
+    pub fn close(&mut self, seed: &str) {
+        let descendants = self.supervisor.begin_unload(seed);
+        for child in descendants {
+            let parent = self.supervisor.parent_of(&child);
+            self.finish_for_unload(&child, parent.as_deref());
+            self.supervisor.unlink(&child);
+        }
+
+        let parent = self.supervisor.parent_of(seed);
+        self.finish_for_unload(seed, parent.as_deref());
+        self.supervisor.unlink(seed);
+        self.supervisor.parent_unload_ack(seed);
+    }
+
+    /// Signal, observe terminal, then join one worker. For a child, the parent
+    /// edge is closed before the join, which is the P2-5 ordering contract.
+    fn finish_for_unload(&mut self, seed: &str, parent: Option<&str>) {
+        if let Some(parent) = parent {
+            self.supervisor.cancel_sent(parent, seed);
+        }
+        let Some(mut instance) = self.instances.remove(seed) else {
+            if let Some(parent) = parent {
+                self.supervisor.child_terminal(parent, seed);
+                self.supervisor.parent_subagent_finished(parent, seed);
+                self.supervisor.child_joined(parent, seed);
+            }
+            qaqh_workspace::remove_session_cancel(seed);
+            return;
+        };
+
+        instance.signal_shutdown();
+        if !instance.wait_until_stopped(seed) {
+            log::warn!("[registry] worker {seed} did not stop before join timeout");
+        }
+        if let Some(parent) = parent {
+            self.supervisor.child_terminal(parent, seed);
+            self.supervisor.parent_subagent_finished(parent, seed);
+        }
+        instance.finish_shutdown();
+        if let Some(parent) = parent {
+            self.supervisor.child_joined(parent, seed);
+        }
+        qaqh_workspace::remove_session_cancel(seed);
     }
 
     /// T-1-4：登记父会话 → 子代理的派生关系（幂等）。
-    fn link_subagent(&mut self, parent: &str, child: &str) {
-        self.subagent_parent
-            .insert(child.to_string(), parent.to_string());
-        self.subagent_children
-            .entry(parent.to_string())
-            .or_default()
-            .insert(child.to_string());
-    }
-
-    /// T-1-4：摘除某个 seed 的派生登记——作为父会话关闭时丢弃它的子集合；
-    /// 作为子代理关闭时从父集合中移除自身。
-    fn unlink_subagent(&mut self, seed: &str) {
-        if let Some(parent) = self.subagent_parent.remove(seed) {
-            let parent_now_empty = match self.subagent_children.get_mut(&parent) {
-                Some(children) => {
-                    children.remove(seed);
-                    children.is_empty()
-                }
-                None => false,
-            };
-            if parent_now_empty {
-                self.subagent_children.remove(&parent);
-            }
-        }
-        self.subagent_children.remove(seed);
+    fn link_subagent(&mut self, parent: &str, child: &str) -> Result<(), String> {
+        self.supervisor.link(parent, child)
     }
 
     /// T-1-4：父会话当前登记的子代理 seed（排序后返回，便于日志与测试）。
     fn children_of(&self, parent: &str) -> Vec<String> {
-        let mut children: Vec<String> = self
-            .subagent_children
-            .get(parent)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default();
-        children.sort();
-        children
+        self.supervisor.children_of(parent)
+    }
+
+    fn cancel_for_seed(&self, seed: &str) -> Option<crate::agent::types::CancelToken> {
+        if seed.is_empty() {
+            return None;
+        }
+        self.instances.get(seed).map(|instance| {
+            let AgentTransport::InProcess { cancel, .. } = &instance.transport;
+            cancel.clone()
+        })
     }
 
     /// T-1-4 测试/运维只读视图：父会话登记的子代理 seed。
     #[doc(hidden)]
     pub fn subagent_children(&self, parent: &str) -> Vec<String> {
         self.children_of(parent)
+    }
+
+    /// Set root-tree quota limits. Existing in-memory ledgers are dropped;
+    /// durable files remain and are replayed on next access.
+    pub fn set_quota_limits(&mut self, limits: QuotaLimits) {
+        self.quota_limits = limits;
+        self.quota_ledgers.clear();
+    }
+
+    /// P2-7 test/ops view for one root ledger.
+    #[doc(hidden)]
+    pub fn quota_snapshot(
+        &mut self,
+        root: &str,
+    ) -> Result<crate::quota_ledger::QuotaSnapshot, String> {
+        self.quota_ledger_mut(root)?.snapshot()
+    }
+
+    fn quota_ledger_mut(&mut self, root: &str) -> Result<&mut QuotaLedger, String> {
+        if !self.quota_ledgers.contains_key(root) {
+            let ledger = QuotaLedger::open(root, self.quota_limits)?;
+            self.quota_ledgers.insert(root.to_string(), ledger);
+        }
+        self.quota_ledgers
+            .get_mut(root)
+            .ok_or_else(|| format!("quota ledger for {root} missing after open"))
+    }
+
+    fn reserve_spawn(&mut self, root: &str, child: &str) -> Result<QuotaReservation, String> {
+        self.quota_ledger_mut(root)?.reserve(
+            QuotaKind::Spawn,
+            1,
+            format!("subagent-spawn:{child}"),
+            Some(child.to_string()),
+        )
+    }
+
+    fn commit_spawn(&mut self, root: &str, reservation_id: &str) -> Result<(), String> {
+        self.quota_ledger_mut(root)?.commit(reservation_id)
+    }
+
+    fn release_spawn(
+        &mut self,
+        root: &str,
+        reservation_id: &str,
+        reason: ReleaseReason,
+    ) -> Result<(), String> {
+        self.quota_ledger_mut(root)?.release(reservation_id, reason)
+    }
+
+    /// P2-5 测试/运维只读视图：parent/child 生命周期事件顺序。
+    #[doc(hidden)]
+    pub fn subagent_lifecycle_trace(&self) -> Vec<String> {
+        self.supervisor
+            .trace()
+            .iter()
+            .map(|event| match event {
+                LifecycleEvent::EdgeLinked { parent, child } => {
+                    format!("edge_linked:{parent}:{child}")
+                }
+                LifecycleEvent::EdgeUnlinked { parent, child } => {
+                    format!("edge_unlinked:{parent}:{child}")
+                }
+                LifecycleEvent::ParentUnloadRequested { parent } => {
+                    format!("parent_unload_requested:{parent}")
+                }
+                LifecycleEvent::ChildCancelSent { parent, child } => {
+                    format!("child_cancel_sent:{parent}:{child}")
+                }
+                LifecycleEvent::ChildTerminal { parent, child } => {
+                    format!("child_terminal:{parent}:{child}")
+                }
+                LifecycleEvent::ParentSubagentFinished { parent, child } => {
+                    format!("parent_subagent_finished:{parent}:{child}")
+                }
+                LifecycleEvent::ChildJoined { parent, child } => {
+                    format!("child_joined:{parent}:{child}")
+                }
+                LifecycleEvent::ParentUnloadAck { parent } => {
+                    format!("parent_unload_ack:{parent}")
+                }
+            })
+            .collect()
     }
 
     /// T-1-4：把父会话的取消传播到它派生的全部子 seed（递归覆盖孙代）。
@@ -720,6 +929,7 @@ impl AgentRegistry {
     fn cancel_subagent_children(&mut self, parent: &str) {
         let children = self.children_of(parent);
         for child in children {
+            self.supervisor.cancel_sent(parent, &child);
             qaqh_workspace::set_session_cancel(&child, true);
             if let Some(hub) = self.hub.as_ref() {
                 hub.mark_worker_dead(&child);
@@ -740,12 +950,12 @@ impl AgentRegistry {
             );
             let delivered = match self.instances.get(&child) {
                 Some(AgentInstance {
-                    transport: AgentTransport::InProcess { cmd_tx, cancel },
+                    transport: AgentTransport::InProcess { cmd_tx, cancel: _ },
                     ..
                 }) => {
-                    // 与 `send_ringing` 的 interrupt 分支一致：先置 token，长
-                    // 在途的 gate/tool 工作立即观察到取消。
-                    cancel.set();
+                    // Token tree propagation already happened when the parent
+                    // token was set in `send_ringing`. This command is still
+                    // required to drain the child actor and emit its terminal.
                     cmd_tx
                         .send(crate::agent::types::WorkerCommand {
                             frame: env,
@@ -813,20 +1023,31 @@ impl AgentRegistry {
 
     pub fn shutdown_all(&mut self) {
         self.shutting_down = true;
-        let mut instances: Vec<AgentInstance> = self
+        // Close roots through the supervisor so every child tree follows
+        // terminal -> edge finish -> join -> parent ack.
+        let mut roots: Vec<String> = self
+            .instances
+            .keys()
+            .filter(|seed| {
+                self.supervisor
+                    .parent_of(seed)
+                    .is_none_or(|parent| !self.instances.contains_key(&parent))
+            })
+            .cloned()
+            .collect();
+        roots.sort();
+        for seed in roots {
+            self.close(&seed);
+        }
+        // Defensive fallback for an instance whose edge state was already
+        // removed before shutdown.
+        let leftovers: Vec<AgentInstance> = self
             .instances
             .drain()
             .map(|(_, instance)| instance)
             .collect();
-        // Signal every worker before waiting on any of them. In-process actors
-        // run concurrently (per-actor thread-local state); signal all before
-        // joining any, so a busy actor is not left waiting on its channel while
-        // shut down.
-        for instance in &mut instances {
-            instance.signal_shutdown();
-        }
-        for mut instance in instances {
-            instance.finish_shutdown();
+        for instance in leftovers {
+            instance.shutdown();
         }
     }
 
@@ -837,13 +1058,28 @@ impl AgentRegistry {
         if self.shutting_down {
             return;
         }
-        let dead: Vec<(String, AgentKind)> = self
+        let dead: Vec<(String, AgentKind, Option<crate::agent::types::CancelToken>)> = self
             .instances
             .iter()
             .filter(|(_, instance)| instance.is_dead())
-            .map(|(seed, instance)| (seed.clone(), instance.kind_name()))
+            .filter(|(seed, _)| {
+                self.supervisor.parent_of(seed).is_none_or(|parent| {
+                    !self
+                        .instances
+                        .get(&parent)
+                        .is_some_and(AgentInstance::is_dead)
+                })
+            })
+            .map(|(seed, instance)| {
+                let parent_cancel = self
+                    .supervisor
+                    .parent_of(seed)
+                    .as_ref()
+                    .and_then(|parent| self.cancel_for_seed(parent));
+                (seed.clone(), instance.kind_name(), parent_cancel)
+            })
             .collect();
-        for (seed, kind) in dead {
+        for (seed, kind, parent_cancel) in dead {
             // 退避：同一 seed 最近 1 秒内刚 spawn 过（例如刚拉起又立刻崩溃）
             // 则跳过本轮，避免无意义的重启风暴。
             if self
@@ -854,9 +1090,12 @@ impl AgentRegistry {
                 log::warn!("[AGENT:{seed}] worker exited immediately after spawn; backing off");
                 continue;
             }
-            if let Some(instance) = self.instances.remove(&seed) {
-                instance.shutdown();
+            if !self.children_of(&seed).is_empty() {
+                log::warn!(
+                    "[AGENT:{seed}] dead parent detected; closing child tree before respawn"
+                );
             }
+            self.close(&seed);
             log::warn!("[AGENT:{seed}] in-process worker died; respawning");
             // B9/R2：先 seal 后 spawn——新 worker 线程一启动就可能发布
             // 新 ask/TurnOpened，晚于 spawn 的 force 收尾会误杀活交互。
@@ -868,7 +1107,9 @@ impl AgentRegistry {
             }
             let spawned = match kind {
                 AgentKind::Session => self.spawn(&seed, None),
-                AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(&seed, spec),
+                AgentKind::Subagent(spec) => {
+                    self.spawn_subagent_inprocess(&seed, spec, parent_cancel)
+                }
             };
             if let Err(error) = spawned {
                 log::error!("[AGENT:{seed}] respawn failed: {error}");
@@ -888,6 +1129,13 @@ impl AgentRegistry {
         self.instances.contains_key(seed)
     }
 
+    /// Test/ops hook: whether the worker's loop thread has exited without
+    /// having been reaped by `close` or `respawn_dead_agents`.
+    #[doc(hidden)]
+    pub fn worker_finished(&self, seed: &str) -> bool {
+        self.instances.get(seed).is_some_and(AgentInstance::is_dead)
+    }
+
     /// 向所有存活 agent 广播同一 Ringing 命令。
     pub fn send_ringing_all(&mut self, command: qaqh_ringing::RingingCommand) {
         let seeds: Vec<_> = self.instances.keys().cloned().collect();
@@ -903,6 +1151,24 @@ impl AgentRegistry {
 }
 
 impl AgentInstance {
+    fn apply_subscription(
+        &mut self,
+        command: SubscriptionCommand,
+    ) -> Result<SubscriptionEffect, String> {
+        self.subscription_actor
+            .submit(SessionCommand::Subscription(command))
+            .map_err(|error| error.to_string())?;
+        match self
+            .subscription_actor
+            .step()
+            .map_err(|error| error.to_string())?
+        {
+            Some(SessionActorEffect::Subscription(effect)) => Ok(effect),
+            Some(effect) => Err(format!("unexpected subscription actor effect: {effect:?}")),
+            None => Err("subscription actor produced no effect".into()),
+        }
+    }
+
     fn is_dead(&self) -> bool {
         match &self.transport {
             AgentTransport::InProcess { .. } => self
@@ -910,6 +1176,31 @@ impl AgentInstance {
                 .as_ref()
                 .is_some_and(std::thread::JoinHandle::is_finished),
         }
+    }
+
+    fn is_fully_stopped(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+            && self
+                .reader
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    fn wait_until_stopped(&self, seed: &str) -> bool {
+        const TERMINAL_WAIT: Duration = Duration::from_secs(30);
+        let deadline = Instant::now() + TERMINAL_WAIT;
+        while !self.is_fully_stopped() {
+            if Instant::now() >= deadline {
+                log::error!(
+                    "[registry] child {seed} terminal observation timed out after {TERMINAL_WAIT:?}"
+                );
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
     }
 
     fn kind_name(&self) -> AgentKind {
@@ -920,6 +1211,8 @@ impl AgentInstance {
     }
 
     fn signal_shutdown(&mut self) {
+        let _ = self.subscription_actor.submit(SessionCommand::Shutdown);
+        let _ = self.subscription_actor.step();
         // 优雅关闭：agent 侧只识别 Ringing 帧（legacy Ui2Agent 已拆除）。
         let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
             self.seed.clone(),
@@ -1102,6 +1395,235 @@ mod tests {
     fn probe_output_missing_program_is_none() {
         let command = Command::new("qaqh-no-such-program-xyz");
         assert!(probe_output(command, Duration::from_millis(200)).is_none());
+    }
+
+    #[test]
+    fn subscription_actor_is_idempotent_and_shutdown_closes_ingress() {
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
+        let mut instance = AgentInstance {
+            seed: "seed-subscription".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx,
+                cancel: crate::agent::types::CancelToken::new(),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let connection_id = ConnectionId::new("connection-1");
+
+        assert_eq!(
+            instance.apply_subscription(SubscriptionCommand::Subscribe {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+            }),
+            Ok(SubscriptionEffect::Subscribed {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+                changed: true,
+            })
+        );
+        assert_eq!(
+            instance.apply_subscription(SubscriptionCommand::Subscribe {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+            }),
+            Ok(SubscriptionEffect::Subscribed {
+                connection_id: connection_id.clone(),
+                channel: RingingChannel::Control,
+                changed: false,
+            })
+        );
+        assert_eq!(
+            instance.apply_subscription(SubscriptionCommand::ConnectionClosed {
+                connection_id: connection_id.clone(),
+            }),
+            Ok(SubscriptionEffect::ConnectionClosed {
+                connection_id: connection_id.clone(),
+                removed: 1,
+            })
+        );
+
+        instance.signal_shutdown();
+        assert!(
+            instance
+                .apply_subscription(SubscriptionCommand::Subscribe {
+                    connection_id,
+                    channel: RingingChannel::Tool,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn registry_subscription_ingress_is_connection_scoped_and_shutdown_is_terminal() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            directory.path().join("sessions"),
+            directory.path().join(".active_session"),
+        ));
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
+        let instance = AgentInstance {
+            seed: "seed-registry".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx,
+                cancel: crate::agent::types::CancelToken::new(),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let mut registry = AgentRegistry {
+            instances: HashMap::from([("seed-registry".into(), instance)]),
+            activity: SessionActivityTracker::default(),
+            sessions,
+            hub: None,
+            shutting_down: false,
+            last_spawn: HashMap::new(),
+            supervisor: SubagentSupervisor::default(),
+            quota_ledgers: HashMap::new(),
+            quota_limits: QuotaLimits::unlimited(),
+        };
+        let connection_id = ConnectionId::new("connection-registry");
+
+        assert_eq!(
+            registry.subscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Control
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.subscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Control
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            registry.unsubscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Control
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.subscribe_channel(
+                "seed-registry",
+                connection_id.clone(),
+                RingingChannel::Tool
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.connection_closed("seed-registry", connection_id.clone()),
+            Ok(1)
+        );
+
+        registry.close("seed-registry");
+        assert_eq!(
+            registry.connection_closed("seed-registry", connection_id),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn parent_cancel_uses_token_tree_and_still_delivers_child_terminal_command() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            directory.path().join("sessions"),
+            directory.path().join(".active_session"),
+        ));
+        let parent_cancel = crate::agent::types::CancelToken::new();
+        let child_cancel = parent_cancel.child();
+        let (parent_tx, parent_rx) = std::sync::mpsc::sync_channel(4);
+        let (child_tx, child_rx) = std::sync::mpsc::sync_channel(4);
+        let parent = AgentInstance {
+            seed: "parent-seed".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx: parent_tx,
+                cancel: parent_cancel.clone(),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let child = AgentInstance {
+            seed: "child-seed".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx: child_tx,
+                cancel: child_cancel.clone(),
+            },
+            kind: AgentKind::Subagent(SubagentSpawnSpec {
+                tools: Vec::new(),
+                model: None,
+                base_url: None,
+                max_tokens: None,
+                ephemeral: true,
+            }),
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let mut registry = AgentRegistry {
+            instances: HashMap::from([
+                ("parent-seed".into(), parent),
+                ("child-seed".into(), child),
+            ]),
+            activity: SessionActivityTracker::default(),
+            sessions,
+            hub: None,
+            shutting_down: false,
+            last_spawn: HashMap::new(),
+            supervisor: SubagentSupervisor::default(),
+            quota_ledgers: HashMap::new(),
+            quota_limits: QuotaLimits::unlimited(),
+        };
+        registry
+            .link_subagent("parent-seed", "child-seed")
+            .expect("link subagent");
+        let cancel = qaqh_ringing::RingingWorkerCommandEnvelope::new(
+            "parent-seed",
+            "cancel-parent",
+            qaqh_ringing::RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
+            ),
+        );
+
+        registry
+            .send_ringing("parent-seed", &cancel)
+            .expect("cancel parent");
+
+        assert!(parent_cancel.is_set());
+        assert!(
+            child_cancel.is_set(),
+            "parent cancellation must propagate through the token tree"
+        );
+        assert!(
+            parent_rx.try_recv().is_ok(),
+            "parent cancel command must still be delivered"
+        );
+        let child_command = child_rx
+            .try_recv()
+            .expect("child terminal command must still be delivered");
+        assert!(matches!(
+            child_command.frame.command,
+            qaqh_ringing::RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None }
+            )
+        ));
+        qaqh_workspace::remove_session_cancel("parent-seed");
+        qaqh_workspace::remove_session_cancel("child-seed");
     }
 
     fn tool_finished(summary: String) -> qaqh_domain::DomainEvent {

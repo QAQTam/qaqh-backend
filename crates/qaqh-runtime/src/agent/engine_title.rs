@@ -47,19 +47,7 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
     }
 
     // ── ① 立即：截断标题（instant 可见）──
-    let fallback = truncate_title(first_user);
-    ctx.agent
-        .enqueue_meta_op(crate::agent::state::agent::MetaOp::UpdateTitle {
-            seed: seed.clone(),
-            title: fallback.clone(),
-        });
-    ctx.agent.session.title = Some(fallback.clone());
-    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-        qaqh_domain::ControlEvent::SessionMetaChanged {
-            seed: seed.clone(),
-            title: Some(fallback.clone()),
-        },
-    ));
+    let _ = apply_fallback_title(ctx, &seed, first_user);
 
     // ── ② 异步：LLM 总结覆盖（失败/超时保持截断版）──
     let provider = build_provider(ctx);
@@ -114,6 +102,28 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
     if let Err(error) = spawned {
         log::warn!("[TITLE] spawn summary thread failed: {error}");
     }
+}
+
+/// Apply the synchronous fallback title. Returns the title applied to the
+/// session, or `None` when the session was already frozen.
+fn apply_fallback_title(ctx: &mut RingContext<'_>, seed: &str, first_user: &str) -> Option<String> {
+    if ctx.agent.session.title.is_some() {
+        return None;
+    }
+    let fallback = truncate_title(first_user);
+    ctx.agent
+        .enqueue_meta_op(crate::agent::state::agent::MetaOp::UpdateTitle {
+            seed: seed.to_string(),
+            title: fallback.clone(),
+        });
+    ctx.agent.session.title = Some(fallback.clone());
+    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
+        qaqh_domain::ControlEvent::SessionMetaChanged {
+            seed: seed.to_string(),
+            title: Some(fallback.clone()),
+        },
+    ));
+    Some(fallback)
 }
 
 /// 首条 user 消息的纯文本（取第一个 text block；无则 None）。
@@ -195,6 +205,60 @@ fn build_provider(ctx: &RingContext) -> qaqh_gate::ProviderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingEmitter {
+        titles: RefCell<Vec<String>>,
+    }
+
+    impl crate::agent::types::Emitter for RecordingEmitter {
+        fn emit_domain(&self, event: qaqh_domain::DomainEvent) {
+            if let qaqh_domain::DomainEvent::Control(
+                qaqh_domain::ControlEvent::SessionMetaChanged {
+                    title: Some(title), ..
+                },
+            ) = event
+            {
+                self.titles.borrow_mut().push(title);
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_title_is_applied_once_and_frozen() {
+        let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config::default());
+        agent.session.seed = "seed-title".to_string();
+        agent.msg.push_user("## 修复标题生成链路");
+        let emitter = RecordingEmitter::default();
+        let cancel = crate::agent::types::CancelToken::new();
+        let writer_dead = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut phase = crate::agent::types::LoopPhase::Idle;
+        let mut pending = crate::agent::types::PendingState::default();
+        let mut stats = crate::agent::types::StatsCollector::new();
+        let mut flow = qaqh_message::ContextFlow::new();
+        let mut ctx = crate::agent::types::RingContext {
+            agent: &mut agent,
+            emitter: &emitter,
+            cancel: &cancel,
+            phase: &mut phase,
+            pending: &mut pending,
+            writer_dead: &writer_dead,
+            stats: &mut stats,
+            flow: &mut flow,
+        };
+
+        let first = apply_fallback_title(&mut ctx, "seed-title", "## 修复标题生成链路");
+        assert_eq!(first.as_deref(), Some("修复标题生成链路"));
+        assert_eq!(ctx.agent.session.title.as_deref(), Some("修复标题生成链路"));
+
+        let second = apply_fallback_title(&mut ctx, "seed-title", "另一个标题");
+        assert_eq!(second, None, "title must freeze after the first write");
+        assert_eq!(
+            emitter.titles.into_inner(),
+            vec!["修复标题生成链路".to_string()]
+        );
+    }
 
     #[test]
     fn truncate_strips_markdown_and_folds_whitespace() {

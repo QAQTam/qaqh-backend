@@ -1,5 +1,6 @@
 use std::sync::{Arc, atomic::AtomicU64};
 
+use crate::tool_api::ToolProjection;
 use crate::{ExecOutputStream, ExecProgressEvent};
 
 use super::*;
@@ -772,7 +773,10 @@ fn bounded_progress_queue_drops_updates_without_blocking_pipe_readers() {
     }
     assert_eq!(tx.dropped_bytes(), 1);
     // 累计口径：256 帧入队 + 1 帧被丢弃 = 257 字节观测总量。
-    assert_eq!(tx.totals().total_bytes(), crate::EXEC_PROGRESS_CHANNEL_CAPACITY as u64 + 1);
+    assert_eq!(
+        tx.totals().total_bytes(),
+        crate::EXEC_PROGRESS_CHANNEL_CAPACITY as u64 + 1
+    );
 }
 
 /// 阶段 2（报告 P1）回归：process wait 阻塞期间收到取消旗标必须立即
@@ -1123,6 +1127,45 @@ fn make_ctx(name: &str, args: serde_json::Value) -> crate::ToolCallCtx {
         cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
     }
+}
+
+#[test]
+fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
+    let mut manager = crate::ToolManager::new();
+    super::register::register(&mut manager);
+    assert!(
+        manager.builtins["exec"].legacy.is_none(),
+        "exec still has legacy executor"
+    );
+
+    let success = super::direct::ExecOutput {
+        status: "completed".to_string(),
+        command: "echo ok".to_string(),
+        exit_code: Some(0),
+        output: "ok\n".to_string(),
+        truncated: false,
+        timed_out: false,
+        cancelled: false,
+        process_id: None,
+    };
+    assert_eq!(success.status(), crate::ToolStatus::Ok);
+    assert!(success.error().is_none());
+
+    let failed = super::direct::ExecOutput {
+        status: "completed".to_string(),
+        command: "false".to_string(),
+        exit_code: Some(1),
+        output: String::new(),
+        truncated: false,
+        timed_out: false,
+        cancelled: false,
+        process_id: None,
+    };
+    assert_eq!(failed.status(), crate::ToolStatus::Error);
+    assert_eq!(
+        failed.error().as_ref().map(|error| error.code.as_str()),
+        Some("TOOL_ERROR")
+    );
 }
 
 #[test]

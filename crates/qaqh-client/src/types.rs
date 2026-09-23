@@ -18,15 +18,15 @@ use serde::{Deserialize, Serialize};
 pub use qaqh_domain::{
     ActivityState as DomainActivityState, AgentLifecycleState, AskAnswer, AskMode,
     AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef, ControlCommand,
-    ControlEvent, ConversationCommand, ConversationEvent, ConversationMode, DashboardDocument,
-    DashboardSnapshot as DomainDashboardSnapshot, DashboardTask, Delivery, DomainError, ErrorScope,
-    ImageBlock, NoticeLevel, PermissionCategory, PermissionRisk, ProviderToolState,
-    RingingChannel as Channel, RoundDeltaKind, SessionActivity, SessionState as DomainSessionState,
-    SkillInfo, SkillRuntimeInfo, SkillsStatus, TimelineBlock, TimelineBlockKind,
-    TimelineBlockState, TimelineEntry, TimelineEvent, TimelineFailure, TimelinePathOp,
-    TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolBody, TimelineToolDisplay,
-    TimelineToolHeader, TimelineToolMetrics, TimelineToolPermission, TimelineToolState,
-    TimelineTurn, TimelineTurnState, TodoItem, ToolCommand, ToolEvent,
+    ControlEvent, ConversationCommand, ConversationEvent, ConversationInputPurpose,
+    ConversationMode, DashboardDocument, DashboardSnapshot as DomainDashboardSnapshot,
+    DashboardTask, Delivery, DomainError, ErrorScope, ImageBlock, NoticeLevel, PermissionCategory,
+    PermissionRisk, PlanReviewItem, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
+    SessionActivity, SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus,
+    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
+    TimelineFailure, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolBody,
+    TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics, TimelineToolPermission,
+    TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand, ToolEvent,
 };
 pub use qaqh_ringing::{
     CLIENT_SESSION_HEADER, ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse,
@@ -43,18 +43,41 @@ pub use qaqh_types::{
 /// Stable channel order used to start the three independent SSE streams.
 pub const CHANNELS: [Channel; 3] = [Channel::Control, Channel::Conversation, Channel::Tool];
 
+/// 服务端主动终止流的结构化原因。
+///
+/// `None` 表示普通网络断开或超时；只有服务端发送了终止帧时才会带原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReconnectReason {
+    /// 服务端事件缓冲溢出，`skipped` 为明确丢弃的事件数。
+    Lagged { skipped: u64 },
+    /// 服务端以其他稳定 code 终止流；未知 code 原样保留。
+    StreamTerminated { code: String },
+}
+
 /// Per-channel SSE connection state. This is a native transport state rather
 /// than a renderer payload; UI shells marshal it onto their dispatcher.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum ChannelStatus {
     Connecting,
-    Open { server_epoch: String, cursor: u64 },
-    Reconnecting { retry_ms: u64, last_cursor: u64 },
-    Closed { reason: String },
+    Open {
+        server_epoch: String,
+        cursor: u64,
+    },
+    Reconnecting {
+        retry_ms: u64,
+        last_cursor: u64,
+        reason: Option<ReconnectReason>,
+    },
+    Closed {
+        reason: String,
+    },
 }
 
 /// Per-session timeline connection state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum TimelineStatus {
     Connecting {
         seed: String,
@@ -68,6 +91,7 @@ pub enum TimelineStatus {
         seed: String,
         retry_ms: u64,
         cursor: u64,
+        reason: Option<ReconnectReason>,
     },
     Closed {
         seed: String,
@@ -257,5 +281,55 @@ mod tests {
         };
         page.validate_for("seed-1").expect("valid page");
         assert!(page.validate_for("seed-2").is_err());
+    }
+
+    #[test]
+    fn reconnect_reason_serializes_without_losing_server_detail() {
+        assert_eq!(
+            serde_json::to_value(ReconnectReason::Lagged { skipped: 7 }).expect("serialize lagged"),
+            serde_json::json!({"kind": "lagged", "skipped": 7})
+        );
+        assert_eq!(
+            serde_json::to_value(ReconnectReason::StreamTerminated {
+                code: "protocol_version".into(),
+            })
+            .expect("serialize terminated"),
+            serde_json::json!({"kind": "stream_terminated", "code": "protocol_version"})
+        );
+    }
+
+    #[test]
+    fn reconnecting_status_keeps_none_and_structured_reasons_distinct() {
+        let ordinary = ChannelStatus::Reconnecting {
+            retry_ms: 1_000,
+            last_cursor: 42,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&ordinary).expect("serialize ordinary reconnect"),
+            serde_json::json!({
+                "status": "reconnecting",
+                "retry_ms": 1_000,
+                "last_cursor": 42,
+                "reason": null
+            })
+        );
+
+        let lagged = TimelineStatus::Reconnecting {
+            seed: "seed-1".into(),
+            retry_ms: 2_000,
+            cursor: 9,
+            reason: Some(ReconnectReason::Lagged { skipped: 3 }),
+        };
+        assert_eq!(
+            serde_json::to_value(&lagged).expect("serialize lagged reconnect"),
+            serde_json::json!({
+                "status": "reconnecting",
+                "seed": "seed-1",
+                "retry_ms": 2_000,
+                "cursor": 9,
+                "reason": {"kind": "lagged", "skipped": 3}
+            })
+        );
     }
 }

@@ -1,8 +1,10 @@
 //! exec::direct — direct_exec 主引擎 + ExecOutput（registry-native 生命周期）。
 
+use std::io::Write;
 use std::sync::{Arc, atomic::AtomicU64};
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::{ExecOutputStream, ExecProgressSender};
 
@@ -15,6 +17,7 @@ use super::truncate::{strip_ansi, token_truncate};
 
 /// Direct command execution: argv array, no shell.
 /// Uses background threads for pipe reading and poll-based timeout.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
 pub(crate) fn direct_exec(
     argv: &[String],
@@ -27,6 +30,61 @@ pub(crate) fn direct_exec(
     progress_tx: Option<ExecProgressSender>,
     tool_call_id: &str,
 ) -> ExecOutput {
+    direct_exec_inner(
+        argv,
+        env,
+        cwd,
+        max_output_tokens,
+        timeout_secs,
+        background_after_secs,
+        cancel,
+        progress_tx,
+        tool_call_id,
+        None,
+    )
+}
+
+/// Execute through the platform sandbox helper when one is configured.
+#[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
+pub(crate) fn direct_exec_sandboxed(
+    argv: &[String],
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    max_output_tokens: u32,
+    timeout_secs: u64,
+    background_after_secs: Option<u64>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress_tx: Option<ExecProgressSender>,
+    tool_call_id: &str,
+    sandbox: &qaqh_sandbox::SandboxSpec,
+) -> ExecOutput {
+    direct_exec_inner(
+        argv,
+        env,
+        cwd,
+        max_output_tokens,
+        timeout_secs,
+        background_after_secs,
+        cancel,
+        progress_tx,
+        tool_call_id,
+        Some(sandbox),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
+fn direct_exec_inner(
+    argv: &[String],
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    max_output_tokens: u32,
+    timeout_secs: u64,
+    background_after_secs: Option<u64>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress_tx: Option<ExecProgressSender>,
+    tool_call_id: &str,
+    sandbox: Option<&qaqh_sandbox::SandboxSpec>,
+) -> ExecOutput {
     let start_time = std::time::Instant::now();
     let display_name = if argv.len() > 1 {
         format!("{} ...", argv[0])
@@ -37,6 +95,29 @@ pub(crate) fn direct_exec(
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
     }
+    let sandbox_launch = match sandbox {
+        Some(spec) => match qaqh_sandbox::wrap_command(&mut cmd, argv, cwd, spec) {
+            Ok(launch) => launch,
+            Err(error) => {
+                return ExecOutput {
+                    status: "completed".to_string(),
+                    command: display_name,
+                    exit_code: Some(-1),
+                    output: format!("SANDBOX PREPARE FAILED: {error}"),
+                    truncated: false,
+                    timed_out: false,
+                    cancelled: false,
+                    process_id: None,
+                };
+            }
+        },
+        None => qaqh_sandbox::SandboxLaunch {
+            backend: qaqh_sandbox::SandboxBackend::None,
+            request: None,
+        },
+    };
+    let sandbox_backend = sandbox_launch.backend;
+    let sandbox_request = sandbox_launch.request;
     if let Some(env) = env {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
@@ -56,7 +137,11 @@ pub(crate) fn direct_exec(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.stdin(std::process::Stdio::null());
+    if sandbox_request.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    } else {
+        cmd.stdin(std::process::Stdio::null());
+    }
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
@@ -64,7 +149,7 @@ pub(crate) fn direct_exec(
         Ok(c) => c,
         Err(e) => {
             return ExecOutput {
-                status: "completed",
+                status: "completed".to_string(),
                 command: display_name,
                 exit_code: Some(-1),
                 output: format!("SPAWN FAILED: {e}"),
@@ -75,6 +160,27 @@ pub(crate) fn direct_exec(
             };
         }
     };
+
+    if let Some(request) = sandbox_request {
+        let write_result = match child.stdin.take() {
+            Some(mut stdin) => stdin.write_all(&request),
+            None => Err(std::io::Error::other("sandbox helper stdin unavailable")),
+        };
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ExecOutput {
+                status: "completed".to_string(),
+                command: display_name,
+                exit_code: Some(-1),
+                output: format!("SANDBOX REQUEST FAILED: {error}"),
+                truncated: false,
+                timed_out: false,
+                cancelled: false,
+                process_id: None,
+            };
+        }
+    }
 
     // 接线 ProcessRegistry：先注册（读线程捕获 proc_id），take 管道后
     // 再把子进程句柄移入注册表（poll 经 try_wait、超时移交可查）。
@@ -211,7 +317,7 @@ pub(crate) fn direct_exec(
         let info = crate::process_registry::ProcessRegistry::get_info(proc_id)
             .unwrap_or_else(|| serde_json::json!({}));
         return ExecOutput {
-            status: "backgrounded",
+            status: "backgrounded".to_string(),
             command: display_name,
             exit_code: None,
             output: serde_json::json!({
@@ -290,6 +396,13 @@ pub(crate) fn direct_exec(
     // truncated 口径（见上方 hard_trunc）：字节预算耗尽（任一流）或读线程未以
     // EOF 收尾（settle 放弃 = 孙进程可能继续产出，保守提示输出可能不完整）。
     let cleaned = strip_ansi(&combined);
+    qaqh_sandbox::record_denial_if_any(
+        sandbox_backend,
+        exit_code,
+        &cleaned,
+        tool_call_id,
+        &display_name,
+    );
     let total_tokens = qaqh_types::token::count_tokens(&cleaned);
     let (output_str, truncated) = if total_tokens > max_output_tokens || hard_trunc {
         (token_truncate(&cleaned, max_output_tokens), true)
@@ -298,7 +411,11 @@ pub(crate) fn direct_exec(
     };
 
     ExecOutput {
-        status: if cancelled { "cancelled" } else { "completed" },
+        status: if cancelled {
+            "cancelled".to_string()
+        } else {
+            "completed".to_string()
+        },
         command: display_name,
         exit_code,
         output: output_str,
@@ -310,17 +427,24 @@ pub(crate) fn direct_exec(
 }
 
 /// Structured output from a command execution.
-#[derive(Serialize, Debug, Clone)]
-pub(crate) struct ExecOutput {
-    pub(crate) status: &'static str,
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+pub struct ExecOutput {
+    #[serde(default)]
+    pub(crate) status: String,
+    #[serde(default)]
     pub(crate) command: String,
+    #[serde(default)]
     pub(crate) exit_code: Option<i32>,
+    #[serde(default)]
     pub(crate) output: String,
+    #[serde(default)]
     pub(crate) truncated: bool,
+    #[serde(default)]
     pub(crate) timed_out: bool,
+    #[serde(default)]
     pub(crate) cancelled: bool,
     /// 超时移交后台时的注册表进程 id（由 process 的 action 使用）。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) process_id: Option<u32>,
 }
 

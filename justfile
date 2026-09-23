@@ -2,7 +2,7 @@
 # 用法: just [recipe]
 #
 # 项目结构:
-#   crates/          Rust 后端 (16 crates)
+#   crates/          Rust 后端 (17 crates)
 #
 # 说明：Windows 桌面层（WinUI3 壳 / installer / updater）已拆分为独立仓库
 # F:\qaqh-winui-app；本仓库只保留跨平台后端核心与公共 SDK。
@@ -20,42 +20,31 @@ default:
 build-daemon:
     cargo build --release -p qaqh-daemon
 
+# 编译 WebUI 网关（release；依赖 webui/out/renderer 构建产物）
+build-webui-gateway: web-build
+    cargo build --release -p qaqh-webui-gateway
+
 # ── 开发 ────────────────────────────────────────────
 
 # 启动 daemon（dev profile）
 dev:
     cargo run -p qaqh-daemon -- run
 
-# ── webUI（浏览器直连）─────────────────────────────
+# ── webUI（独立回环网关）───────────────────────────
 
-# 打开 webUI：读 daemon.json 解析地址，浏览器打开 /debug/（token 由桥脚本
-# 自动注入，无需手填）。前置：daemon 已运行（just dev）且 renderer 产物
-# 可被定位（QAQH_DEBUG_RENDERER_DIR 或 out/renderer）。
+# 构建 WebUI 并启动显式回环网关。前置：daemon 已运行（just dev）。
+web-build:
+    cd webui && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build
+
 [unix]
-web:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    f="${QAQH_DATA_DIR:-$HOME/.config/qaqh}/daemon.json"
-    if [ ! -f "$f" ]; then echo "daemon.json 不存在：先启动 daemon（just dev）" >&2; exit 1; fi
-    url=$(python3 - "$f" <<'PY'
-    import json, sys
-    d = json.load(open(sys.argv[1]))
-    ep = d["endpoint"].replace("ws://", "http://").split("/control/v1")[0]
-    print(ep + "/debug/")
-    PY
-    )
-    echo "webUI: $url"
-    xdg-open "$url" >/dev/null 2>&1 || open "$url" >/dev/null 2>&1 || echo "（手动打开上方地址）"
+web: web-build
+    cargo build -p qaqh-webui-gateway
+    cargo run -p qaqh-daemon -- webui
 
 [windows]
-web:
-    #!/usr/bin/env pwsh
-    $file = if ($env:QAQH_DATA_DIR) { Join-Path $env:QAQH_DATA_DIR "daemon.json" } else { Join-Path $env:USERPROFILE ".qaqh\daemon.json" }
-    if (-not (Test-Path $file)) { Write-Error "daemon.json 不存在：先启动 daemon（just dev）"; exit 1 }
-    $d = Get-Content $file -Raw | ConvertFrom-Json
-    $url = ($d.endpoint -replace '^ws://', 'http://') -replace '/control/v1$', ''
-    Write-Output "webUI: $url/debug/"
-    Start-Process "$url/debug/"
+web: web-build
+    cargo build -p qaqh-webui-gateway
+    cargo run -p qaqh-daemon -- webui
 
 # ── 检查 & 测试 ─────────────────────────────────────
 

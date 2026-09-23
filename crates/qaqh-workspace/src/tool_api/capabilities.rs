@@ -31,6 +31,11 @@ pub struct ToolCapabilities {
     /// 是否 workspace 绑定（cwd 敏感工具必须为 true，执行器强制注入
     /// `ToolCallContext.workspace_root`）。
     pub workspace_bound: bool,
+    /// 是否阻塞等待用户交互。
+    ///
+    /// 交互工具可以声明 `default_timeout = 0` 表示“无默认超时”；
+    /// 非交互工具仍必须给出正数默认超时。
+    pub interactive: bool,
 }
 
 impl Default for ToolCapabilities {
@@ -41,6 +46,7 @@ impl Default for ToolCapabilities {
             cancel_grace: Duration::from_secs(5),
             idempotent: false,
             workspace_bound: true,
+            interactive: false,
         }
     }
 }
@@ -52,11 +58,20 @@ mod tests {
     #[test]
     fn defaults_are_conservative() {
         let caps = ToolCapabilities::default();
-        assert_eq!(caps.concurrency, Concurrency::Serial, "默认串行（迁移保守档）");
+        assert_eq!(
+            caps.concurrency,
+            Concurrency::Serial,
+            "默认串行（迁移保守档）"
+        );
         assert!(!caps.streaming);
-        assert_eq!(caps.cancel_grace, Duration::from_secs(5), "5s 兜底（补充稿 Q7）");
+        assert_eq!(
+            caps.cancel_grace,
+            Duration::from_secs(5),
+            "5s 兜底（补充稿 Q7）"
+        );
         assert!(!caps.idempotent);
         assert!(caps.workspace_bound);
+        assert!(!caps.interactive);
     }
 
     #[test]
