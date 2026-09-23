@@ -278,7 +278,7 @@ pub(crate) fn admit_and_dispatch(
                     todo_items: todo_items.map(|items| {
                         items
                             .into_iter()
-                            .map(|t| qaqh_domain::TodoItem {
+                            .map(|t| qaqh_domain::PlanReviewItem {
                                 id: t.id,
                                 title: t.title,
                                 description: t.description,
@@ -385,7 +385,7 @@ pub(crate) fn admit_and_dispatch(
                     todo_items: todo_items.map(|items| {
                         items
                             .into_iter()
-                            .map(|t| qaqh_domain::TodoItem {
+                            .map(|t| qaqh_domain::PlanReviewItem {
                                 id: t.id,
                                 title: t.title,
                                 description: t.description,

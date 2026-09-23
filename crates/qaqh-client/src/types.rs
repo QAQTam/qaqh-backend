@@ -21,12 +21,12 @@ pub use qaqh_domain::{
     ControlEvent, ConversationCommand, ConversationEvent, ConversationInputPurpose,
     ConversationMode, DashboardDocument, DashboardSnapshot as DomainDashboardSnapshot,
     DashboardTask, Delivery, DomainError, ErrorScope, ImageBlock, NoticeLevel, PermissionCategory,
-    PermissionRisk, ProviderToolState, RingingChannel as Channel, RoundDeltaKind, SessionActivity,
-    SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus, TimelineBlock,
-    TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelineFailure,
-    TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolBody,
+    PermissionRisk, PlanReviewItem, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
+    SessionActivity, SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus,
+    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
+    TimelineFailure, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolBody,
     TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics, TimelineToolPermission,
-    TimelineToolState, TimelineTurn, TimelineTurnState, TodoItem, ToolCommand, ToolEvent,
+    TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand, ToolEvent,
 };
 pub use qaqh_ringing::{
     CLIENT_SESSION_HEADER, ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse,

@@ -138,7 +138,12 @@ pub(crate) fn exec_todo_set(args: &Value) -> Result<String, String> {
 /// runtime 线程局部上下文）。锁与工具路径一致：本函数内获取，持久化
 /// 直调 write_store_for（不得再走 save_todo 二次加锁）。
 pub fn todo_set_for(seed: &str, args: &Value) -> Result<String, String> {
-    super::typed::todo_update_for_typed(seed, args)?.to_envelope_string()
+    serde_json::to_string(&todo_set_value_for(seed, args)?)
+        .map_err(|error| format!("todo: {error}"))
+}
+
+pub fn todo_set_value_for(seed: &str, args: &Value) -> Result<Value, String> {
+    super::typed::todo_update_for_typed(seed, args)?.to_envelope_value()
 }
 
 pub(crate) fn exec_todo_list(args: &Value) -> Result<String, String> {

@@ -1,6 +1,6 @@
 //! todo::store — 持久化与查询（todo.json 读写 + status/cancel JSON）。
 
-use crate::{json_err_string, json_ok};
+use crate::json_err_string;
 
 use super::model::{TODO_LOCK, TodoItem, TodoMode, TodoStatus, TodoStore};
 
@@ -72,9 +72,9 @@ pub fn save_todo(store: &TodoStore) -> Result<(), String> {
 }
 
 /// Session-scoped todo status for the frontend Todo panel.
-pub fn todo_status_json(seed: &str) -> Result<String, String> {
+pub fn todo_status_value(seed: &str) -> Result<serde_json::Value, String> {
     if seed.is_empty() {
-        return Ok("null".into());
+        return Ok(serde_json::Value::Null);
     }
     // Serialise with writer to avoid reading a half-renamed tmp.
     let _guard = TODO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -83,7 +83,9 @@ pub fn todo_status_json(seed: &str) -> Result<String, String> {
         .join("todo.json");
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("null".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Value::Null);
+        }
         Err(e) => return Err(format!("read todo.json: {e}")),
     };
     let store: TodoStore =
@@ -108,7 +110,7 @@ pub fn todo_status_json(seed: &str) -> Result<String, String> {
     let completed = count_status(&store, TodoStatus::Completed);
     let cancelled = count_status(&store, TodoStatus::Cancelled);
     let items_summary: Vec<serde_json::Value> = store.items.iter().map(todo_item_json).collect();
-    serde_json::to_string(&serde_json::json!({
+    Ok(serde_json::json!({
         "mode": "manual",
         "current_id": current.map(|item| item.id.clone()),
         "current_title": current.map(|i| i.title.clone()),
@@ -120,11 +122,14 @@ pub fn todo_status_json(seed: &str) -> Result<String, String> {
         "total": store.items.len(),
         "items": items_summary,
     }))
-    .map_err(|e| format!("todo: {e}"))
+}
+
+pub fn todo_status_json(seed: &str) -> Result<String, String> {
+    serde_json::to_string(&todo_status_value(seed)?).map_err(|e| format!("todo: {e}"))
 }
 
 /// Direct cancel by session seed — no runtime context needed.
-pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
+pub fn todo_cancel_value(seed: &str, id: &str) -> Result<serde_json::Value, String> {
     if seed.is_empty() {
         return Err(json_err_string("INVALID_INPUT", "no active session", ""));
     }
@@ -165,10 +170,16 @@ pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
     std::fs::write(&tmp, data).map_err(|e| format!("write todo.tmp: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename todo: {e}"))?;
 
-    Ok(json_ok(serde_json::json!({
+    Ok(serde_json::json!({
+        "timeis": crate::now_utc8(),
+        "status": "ok",
         "item": item_json,
         "message": format!("Todo {id} cancelled.")
-    })))
+    }))
+}
+
+pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
+    serde_json::to_string(&todo_cancel_value(seed, id)?).map_err(|e| format!("todo: {e}"))
 }
 
 pub(crate) fn read_store() -> Result<TodoStore, String> {

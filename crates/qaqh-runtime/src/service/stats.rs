@@ -8,9 +8,8 @@ use super::common::err;
 
 pub(crate) fn dashboard(seed: &str) -> Result<Value, String> {
     let dir = qaqh_types::platform::sessions_dir().join(seed);
-    let tasks: Vec<Value> = qaqh_workspace::todo::todo_status_json(seed)
+    let tasks: Vec<Value> = qaqh_workspace::todo::todo_status_value(seed)
         .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| {
             v.get("items")?.as_array().map(|arr| {
                 arr.iter()

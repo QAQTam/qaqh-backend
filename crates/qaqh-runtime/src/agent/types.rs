@@ -354,11 +354,11 @@ pub struct PendingPlan {
 }
 
 /// A todo_activate tool call intercepted and waiting for user review.
-/// Carries the todo items that will be activated if approved.
+/// Carries the plan review items that will be activated if approved.
 #[derive(Debug, Clone)]
 pub struct PendingTodoActivation {
     pub call_id: String,
-    pub items: Vec<qaqh_domain::TodoItem>,
+    pub items: Vec<qaqh_domain::PlanReviewItem>,
 }
 
 /// Serialized snapshot of a turn mid-execution.

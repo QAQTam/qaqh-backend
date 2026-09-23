@@ -24,11 +24,24 @@
   在无 pending disposition 后写唯一 `SessionRecovered` 并清理 stale intent。
 - `tool_outbox` 与 canonical ToolLedger 的只读双写对账观测。
 - todo typed output 的 model/display/service 同源 gate。
+- plan service typed 输出：`PlanListOutput` / `PlanItemView` /
+  `PlanActionOutput`，保留现有 status 符号与 `plan.read` 数组 wire 形态。
+- subagent typed 输出：`spawn_subagent` 改为 `TypedTool`，workspace/session
+  显式取自 `ToolCallContext`，保留 `MISSING_TASK` / `SPAWN_ERROR` /
+  `HOST_UNAVAILABLE` / `SEND_REJECTED` / `SEND_ERROR` legacy error code。
+- `qaqh_domain::TodoItem` 改名为 `PlanReviewItem`，消除与 workspace todo
+  数据模型的同名异义。
+- runtime service 的 `todo.status/cancel/set` 改为直接返回 canonical `Value`；
+  `parse_json_string` 已从 service 边界移除，dashboard 直接消费 todo typed
+  value。
 
 仍未完成：
 
-- typed output 剩余迁移（plan/subagent）。
-- `tool_outbox` 最终退场策略（当前只做对账观测，不删除旧写）。
+- `tool_outbox` 最终退场策略（当前只做对账观测，不删除旧写）。恢复路径
+  仍依赖它修正 `[RESTORE]` 的“是否实际执行”语义，需先提供等价 canonical
+  ledger 消费路径。
+- 部分 legacy 工具的文本 projector fallback；typed 工具执行不再依赖文本
+  解析，但 wire 尚未直接携带完整 typed display，故暂不能全量删除。
 
 ## 2. SessionActor CAS
 
@@ -151,11 +164,21 @@ cargo test --workspace
 - `crates/qaqh-workspace/src/process_inspect.rs` unit tests
   - `process` typed output model/display 同源；
   - kill 的 `NO_OS_PID` / `NOT_FOUND` legacy error code 保持不变。
+- `crates/qaqh-runtime/src/service/plan.rs` unit tests
+  - plan Markdown 投影保持数组 wire 形态；
+  - comment 与 title 分离，status 保持 `""` / `✓` / `-` / `?`。
+- `crates/qaqh-subagent/src/lib.rs` unit tests
+  - typed output 的 model/display 同源；
+  - 空 task 在 host lookup 前失败，并保留 `MISSING_TASK` legacy code；
+  - 输入 schema 仍只暴露 4 个模型参数且不泄漏 API key。
+- `crates/qaqh-workspace/src/todo` tests
+  - `todo.status/cancel/set` 的 Value 路径保持既有 envelope；
+  - service/dashboard 不再解析 JSON 字符串。
 
 ## 6. 下一步
 
-1. 迁移 plan/subagent 到 typed output，并删除对应 JSON
-   字符串错误路径。
-2. 在 outbox 对账观测稳定后设计并执行旧 `tool_outbox` 退场，保留 canonical
-   ToolLedger 作为唯一终态事实源。
-3. 收口 display/model/resource/service 的全工具同源验收，完成 P3 gate。
+1. 设计旧 `tool_outbox` 的 canonical 替代路径：恢复时由 ToolLedger 的
+   `ToolFinished` 直接修正 `[RESTORE]` 语义，再停写并删除 `tool_outbox.wal`。
+2. 让 wire/display 直接携带 typed display（或保留 canonical payload 的完整
+   display 投影），随后删除剩余 legacy 文本 projector fallback。
+3. 运行全仓 P3 gate，更新 PR #288 并等待合并窗口。

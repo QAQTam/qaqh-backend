@@ -2074,6 +2074,7 @@ dependencies = [
  "qaqh-domain",
  "qaqh-ringing",
  "qaqh-workspace",
+ "schemars",
  "serde",
  "serde_json",
 ]
