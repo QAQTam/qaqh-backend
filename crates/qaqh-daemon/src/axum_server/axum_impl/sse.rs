@@ -36,6 +36,10 @@ pub(crate) fn parse_sse_cursor(cursor: &str, epoch: &str, channel: RingingChanne
 }
 
 pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
+    if cursor.is_empty() {
+        // 首次连接：没有 cursor 就是从头开始，这是正常路径，不告警。
+        return 0;
+    }
     let mut parts = cursor.split(':');
     let e = parts.next().unwrap_or_default();
     let kind = parts.next().unwrap_or_default();
@@ -43,6 +47,11 @@ pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
     if e == epoch && kind == "timeline" && parts.next().is_none() {
         seq.unwrap_or(0)
     } else {
+        // channel SSE 写的是 `{epoch}:{channel}:{seq}`，epoch 轮换或游标被截断也会
+        // 落到这里。静默按 0 处理等于「全量重放」，所以至少留一条日志。
+        log::warn!(
+            "[sse] timeline Last-Event-ID {cursor:?} is not a `{{epoch}}:timeline:{{seq}}` cursor for epoch {epoch:?}; replaying from 0"
+        );
         0
     }
 }
@@ -699,14 +708,15 @@ pub(crate) async fn handle_timeline_events(
     tokio::spawn(async move {
         let mut gap_remaining = usize::from(inject_timeline_gap);
         for entry in replay {
+            // Gap injection drops exactly one deliverable entry and keeps
+            // streaming: the client's cursor stays at `after`, so the next
+            // real entry it receives is `after + 2` and its own `cursor + 1`
+            // check fires. Never synthesise a frame and never close the
+            // stream here — closing would make the client reconnect with the
+            // same cursor and receive the already-sent entry twice.
             if gap_remaining > 0 {
                 gap_remaining -= 1;
                 continue;
-            }
-            if inject_timeline_gap {
-                let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
-                let _ = tx.send(Ok(ev)).await;
-                return;
             }
             let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
             if tx.send(Ok(ev)).await.is_err() {
@@ -733,11 +743,6 @@ pub(crate) async fn handle_timeline_events(
                     if gap_remaining > 0 {
                         gap_remaining -= 1;
                         continue;
-                    }
-                    if inject_timeline_gap {
-                        let ev = timeline_entry_to_event(&epoch, &seed_clone, &live.entry);
-                        let _ = tx.send(Ok(ev)).await;
-                        return;
                     }
                     if !leases
                         .lock()
