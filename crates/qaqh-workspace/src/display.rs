@@ -605,7 +605,10 @@ mod tests {
         };
         let display = project_todo_list(&json!({}), &output.to_envelope_string().unwrap());
         assert_eq!(display.body, ToolBody::None);
-        assert_eq!(display.summary.as_deref(), Some("2 task(s) · 1 in progress"));
+        assert_eq!(
+            display.summary.as_deref(),
+            Some("2 task(s) · 1 in progress")
+        );
         assert!(!display.summary.as_deref().unwrap().starts_with('{'));
     }
 
