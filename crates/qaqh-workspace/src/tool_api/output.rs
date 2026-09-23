@@ -151,6 +151,9 @@ impl ToolOutcome {
             }
         };
         let mut result = qaqh_types::ToolResult::text(self.status, self.model.text.clone());
+        if let Some(summary) = &self.display.summary {
+            result = result.with_summary(summary.clone());
+        }
         result.data = data;
         result.images = self.images.clone();
         result.diff = self.display.diff.clone();
