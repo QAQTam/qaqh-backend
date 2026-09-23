@@ -95,7 +95,7 @@ impl Loop {
                                 self.emit_operation_failed(
                                     command_id,
                                     qaqh_domain::ErrorScope::Tool,
-                                    "interaction_not_found",
+                                    "interaction_already_resolved",
                                     "tool permission request was already resolved",
                                 );
                                 return;
@@ -109,6 +109,7 @@ impl Loop {
                             &mut ctx,
                             &mut self.session.tool,
                             &call_id,
+                            command_id,
                             admitted.map(|admitted| *admitted),
                         );
                         let _ = ctx;
