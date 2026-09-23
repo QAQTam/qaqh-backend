@@ -79,6 +79,9 @@ mod sse_tests {
         super::init_session_manager();
         AppState {
             hub,
+            v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new(
+                "lag-epoch",
+            )),
             leases,
             pending,
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
@@ -598,6 +601,9 @@ mod axum_tests {
         super::init_session_manager();
         AppState {
             hub,
+            v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new(
+                "test-epoch",
+            )),
             leases,
             pending,
             service,
@@ -697,6 +703,139 @@ mod axum_tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn v2_open_bootstrap_uses_canonical_projection() {
+        use qaqh_session::canonical::{
+            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
+        };
+        use qaqh_session::session_fact_v2::{
+            EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
+            SessionMetadataChanged, SessionMetadataPatch,
+        };
+
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
+        let seed = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+        let now = 1_789_830_000_000;
+        let mut store = CanonicalSessionStore::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .unwrap();
+        let lease = store
+            .acquire_writer(WriterId::new("v2-route-test"), now, 60_000)
+            .unwrap();
+        let fact = SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SessionCreated(SessionCreated {
+                created_at_ms: now,
+                cwd: "/tmp".into(),
+                model: "test".into(),
+                parent_session_id: None,
+                schema_caps: Vec::new(),
+            }),
+        };
+        store.append(&lease, fact, now).unwrap();
+
+        let state = test_state();
+        let v2_hub = state.v2_hub.clone();
+        let app = build_router(state);
+        let open = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/clients/open")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .body(Body::from(
+                serde_json::to_vec(&qaqh_ringing::RingingV2OpenRequest::new("ci-v2")).unwrap(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(open).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let open: qaqh_ringing::RingingV2OpenResponse = serde_json::from_slice(&body).unwrap();
+
+        let bootstrap = Request::builder()
+            .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", open.client_session_id.clone())
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(bootstrap).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["seed"], seed);
+        assert_eq!(value["control"]["state"]["revision"], 1);
+        let snapshot_cursor = value["snapshot_cursor"].as_str().unwrap().to_string();
+        assert!(snapshot_cursor.starts_with("v2."));
+
+        let changed = SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now + 1,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SessionMetadataChanged(SessionMetadataChanged {
+                patch: SessionMetadataPatch {
+                    cwd: None,
+                    model: Some("test-2".into()),
+                    archived: None,
+                    search_visibility: None,
+                    parent_session_id: None,
+                    schema_caps: None,
+                },
+                source: MetadataSource::Api,
+                changed_at_ms: now + 1,
+            }),
+        };
+        let changed = store.append(&lease, changed, now + 1).unwrap();
+        qaqh_session::projection::ProjectionSink::publish(
+            v2_hub.as_ref(),
+            dir.path(),
+            &changed.fact,
+            &changed.events,
+        );
+
+        let events = Request::builder()
+            .uri(format!(
+                "/ringing/v2/sessions/{seed}/events/control?since_cursor={snapshot_cursor}"
+            ))
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", open.client_session_id)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(events).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        use futures_util::StreamExt as _;
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = stream.next().await.unwrap().unwrap();
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(text.contains("event: ringing.event"), "{text}");
+        assert!(text.contains("\"fact_seq\":2"), "{text}");
     }
 
     #[tokio::test]
