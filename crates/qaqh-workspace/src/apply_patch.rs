@@ -21,11 +21,10 @@ use serde_json::{Value, json};
 
 use crate::ToolRisk;
 use crate::apply_patch_engine::EngineError;
-use crate::file_mutate::{ambient_tool_context, mutation_display, mutation_error};
+use crate::file_mutate::{mutation_display, mutation_error};
 use crate::tool_api::{
-    ErasedTool, OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
     ToolExecutionError, ToolExposure, ToolName, ToolProjection, ToolSource, TypedTool,
-    TypedToolAdapter,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -332,7 +331,11 @@ pub fn register(mgr: &mut crate::ToolManager) {
 ///
 /// Production registration uses [`ApplyPatchTool`] directly; this bridge keeps
 /// the existing in-process call shape for confirm-apply and older tests.
+#[cfg(test)]
 pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
+    use crate::file_mutate::ambient_tool_context;
+    use crate::tool_api::{ErasedTool, TypedToolAdapter};
+
     if args
         .get("patch")
         .and_then(Value::as_str)

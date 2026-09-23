@@ -12,10 +12,10 @@ use super::file_shared::{
 };
 use crate::ToolRisk;
 use crate::tool_api::{
-    AgentMode, CancellationToken, ErasedTool, OutputBudget, SandboxMode, ToolBody, ToolCallContext,
+    AgentMode, CancellationToken, OutputBudget, SandboxMode, ToolBody, ToolCallContext,
     ToolCallSource, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError, ToolErrorCode,
     ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection,
-    ToolSource, TypedTool, TypedToolAdapter,
+    ToolSource, TypedTool,
 };
 
 // ── Shared helpers ──
@@ -825,7 +825,10 @@ pub fn register(mgr: &mut crate::ToolManager) {
 /// Production registration uses [`WriteTool`] directly and therefore never
 /// takes this bridge. This helper only preserves the existing in-process
 /// confirm-apply call shape.
+#[cfg(test)]
 pub(super) fn exec_write_file(args: &Value) -> crate::ToolResult {
+    use crate::tool_api::{ErasedTool, TypedToolAdapter};
+
     let ctx = ambient_tool_context("write-compat", Duration::from_secs(30));
     TypedToolAdapter::new(WriteTool)
         .execute(ctx, args.clone())
@@ -872,8 +875,8 @@ mod tests {
     use super::*;
     use crate::permission::PermissionLevel as TestPermissionLevel;
     use crate::tool_api::{
-        CancellationToken as TestCancellationToken, SandboxMode as TestSandboxMode,
-        ToolCallSource as TestToolCallSource,
+        CancellationToken as TestCancellationToken, ErasedTool, SandboxMode as TestSandboxMode,
+        ToolCallSource as TestToolCallSource, TypedToolAdapter,
     };
 
     fn write(args: Value) -> String {
