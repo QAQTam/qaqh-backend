@@ -106,10 +106,7 @@ pub fn set_fsync_hook(hook: Option<FsyncHook>) {
 }
 
 fn sync_file(file: &File, path: &Path, phase: FsyncPhase) -> std::io::Result<()> {
-    let hook = FSYNC_HOOK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let hook = FSYNC_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match hook {
         Some(hook) => {
             hook(path, phase);

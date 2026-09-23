@@ -232,7 +232,11 @@ mod tests {
     fn workspace_unbound_tools_are_pinned() {
         let unbound: Vec<&str> = table_tool_names()
             .into_iter()
-            .filter(|name| !builtin_capabilities(name).expect("表内条目").workspace_bound)
+            .filter(|name| {
+                !builtin_capabilities(name)
+                    .expect("表内条目")
+                    .workspace_bound
+            })
             .collect();
         assert_eq!(
             unbound,
