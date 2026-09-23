@@ -4,7 +4,7 @@
 //! `ToolHeader::Other` + `ToolBody::Text`，保持 H1 的「summary 禁止 JSON」。
 //! 框架会在运行后覆写 `metrics`（H4），因此这里只构造展示形态。
 
-use crate::tool_api::{PathOp, ToolBody, ToolDisplay, ToolHeader, ToolProjection};
+use crate::tool_api::{ToolBody, ToolDisplay, ToolHeader, ToolProjection};
 
 /// 解析工具输出的 JSON 信封；工具输出不是 JSON 时返回 `None`。
 fn json_view(output: &str) -> Option<serde_json::Value> {
@@ -53,6 +53,7 @@ fn text_body(output: &str) -> ToolBody {
     }
 }
 
+#[cfg(test)]
 fn fallback_display(label: &str, output: &str) -> ToolDisplay {
     ToolDisplay::new(
         ToolHeader::Other {
@@ -77,68 +78,6 @@ fn first_line(value: &str) -> String {
         .chars()
         .take(160)
         .collect()
-}
-
-pub(crate) fn project_edit(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    path_result(
-        args.get("path").and_then(|value| value.as_str()),
-        PathOp::Edit,
-        "edit",
-        output,
-    )
-}
-
-pub(crate) fn project_copy_range(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    path_result(
-        args.get("target_path").and_then(|value| value.as_str()),
-        PathOp::Write,
-        "copy_range",
-        output,
-    )
-}
-
-fn path_result(path: Option<&str>, op: PathOp, tool: &'static str, output: &str) -> ToolDisplay {
-    match path.map(str::trim).filter(|path| !path.is_empty()) {
-        Some(path) => {
-            let display = ToolDisplay::new(
-                ToolHeader::Path {
-                    path: path.to_string(),
-                    op,
-                },
-                text_body(output),
-            );
-            with_line_summary(display, first_human_line(output))
-        }
-        None => fallback_display(tool, output),
-    }
-}
-
-pub(crate) fn project_apply_patch(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    let path = args
-        .get("patch")
-        .and_then(|value| value.as_str())
-        .and_then(|patch| {
-            patch.lines().find_map(|line| {
-                let (marker, path) = line
-                    .split_once(" File: ")
-                    .map(|(marker, path)| (marker.trim_start_matches('*'), path))
-                    .unwrap_or_default();
-                let marker = marker.trim();
-                (matches!(marker, "Update" | "Add" | "Delete") && !path.trim().is_empty())
-                    .then(|| path.trim().to_string())
-            })
-        });
-    let display = match path {
-        Some(path) => ToolDisplay::new(
-            ToolHeader::Path {
-                path,
-                op: PathOp::Patch,
-            },
-            text_body(&human_body(output)),
-        ),
-        None => fallback_display("apply_patch", output),
-    };
-    with_line_summary(display, first_human_line(output))
 }
 
 /// todo 系列的面板数据由 dashboard 维护；display 只保留 canonical 摘要行。
@@ -384,12 +323,19 @@ pub(crate) fn project_journal(args: &serde_json::Value, output: &str) -> ToolDis
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_api::ToolMetrics;
+    use crate::tool_api::{PathOp, ToolMetrics};
     use serde_json::json;
 
     #[test]
     fn file_projectors_declare_path_and_non_json_summary() {
-        let edit = project_edit(&json!({"path": "a.rs"}), "[OK] edit a.rs\n");
+        let edit = crate::file_mutate::mutation_display(
+            Some("a.rs"),
+            "a.rs",
+            PathOp::Edit,
+            "edit",
+            "[OK] edit a.rs\n",
+            None,
+        );
         assert_eq!(
             edit.header,
             ToolHeader::Path {
@@ -401,9 +347,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_patch_header_uses_first_target_from_own_patch() {
-        let args = json!({"patch": "*** Begin Patch\n*** Update File: src/app.rs\n@@\n-old\n+new\n*** End Patch\n"});
-        let display = project_apply_patch(&args, "[OK] apply_patch — applied: 1 file(s)");
+    fn apply_patch_header_uses_canonical_first_target() {
+        let display = crate::file_mutate::mutation_display(
+            Some("src/app.rs"),
+            "",
+            PathOp::Patch,
+            "apply_patch",
+            "[OK] apply_patch — applied: 1 file(s)",
+            None,
+        );
         assert_eq!(
             display.header,
             ToolHeader::Path {

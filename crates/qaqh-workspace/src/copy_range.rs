@@ -13,7 +13,19 @@
 //!   （CRLF 文件插入 CRLF），未改动行保持原字节。
 //! - 同文件拷贝：插入点落在被拷贝区间内 → 拒绝（区间随插入位移会乱）。
 
-use crate::{ToolHandler, ToolResult, ToolRisk};
+use std::path::Path;
+use std::time::Duration;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::ToolRisk;
+use crate::file_mutate::{mutation_display, mutation_error, resolve_mutation_path};
+use crate::tool_api::{
+    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
+    ToolExecutionError, ToolExposure, ToolName, ToolProjection, ToolSource, TypedTool,
+};
 
 const MODES: &[&str] = &["insert_after", "insert_before", "append", "prepend"];
 
@@ -35,6 +47,7 @@ impl Mode {
             _ => None,
         }
     }
+
     fn name(self) -> &'static str {
         match self {
             Mode::InsertAfter => "insert_after",
@@ -52,69 +65,94 @@ struct RangeResult {
     /// 目标插入位置（0-based 行索引）
     insert_at: usize,
     mode: Mode,
+    target_before: String,
+    target_after: String,
 }
 
 /// 行级精确匹配（尾部空白容差）。返回所有命中位置（0-based）。
 fn locate_exact(lines: &[String], anchor: &str) -> Vec<usize> {
-    let a = anchor.trim_end();
+    let anchor = anchor.trim_end();
     lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.trim_end() == a)
-        .map(|(i, _)| i)
+        .filter(|(_, line)| line.trim_end() == anchor)
+        .map(|(index, _)| index)
         .collect()
 }
 
-fn ambiguous_error(kind: &str, anchor: &str, hits: &[usize]) -> String {
-    let locs: Vec<String> = hits
+fn ambiguous_error(kind: &str, anchor: &str, hits: &[usize]) -> ToolExecutionError {
+    let locations: Vec<String> = hits
         .iter()
         .take(5)
-        .map(|&i| format!("L{}", i + 1))
+        .map(|&index| format!("L{}", index + 1))
         .collect();
-    serde_json::json!({
-        "timeis": crate::now_utc8(),
-        "status": "error",
-        "code": kind,
-        "message": format!("anchor {anchor:?} matches {} locations: {}", hits.len(), locs.join(", ")),
-        "candidates": hits.iter().take(5).map(|&i| i + 1).collect::<Vec<usize>>(),
-        "hint": "Make the anchor a longer/more unique line fragment, or add neighboring context in the anchor text (anchors match a WHOLE line)."
-    })
-    .to_string()
+    mutation_error(
+        kind,
+        format!(
+            "{kind}: anchor {anchor:?} matches {} locations: {}",
+            hits.len(),
+            locations.join(", ")
+        ),
+        Some(
+            "Make the anchor a longer/more unique line fragment, or add neighboring context in the anchor text (anchors match a WHOLE line).",
+        ),
+        json!({
+            "timeis": crate::now_utc8(),
+            "status": "error",
+            "code": kind,
+            "candidates": hits.iter().take(5).map(|&index| index + 1).collect::<Vec<usize>>(),
+        }),
+    )
 }
 
-fn not_found_error(kind: &str, anchor: &str) -> String {
-    serde_json::json!({
-        "timeis": crate::now_utc8(),
-        "status": "error",
-        "code": kind,
-        "message": format!("anchor {anchor:?} not found — check the exact line content (whitespace at line ends is tolerated; leading whitespace is significant)"),
-    })
-    .to_string()
+fn not_found_error(kind: &str, anchor: &str) -> ToolExecutionError {
+    mutation_error(
+        kind,
+        format!(
+            "{kind}: anchor {anchor:?} not found — check the exact line content (whitespace at line ends is tolerated; leading whitespace is significant)"
+        ),
+        None,
+        json!({
+            "timeis": crate::now_utc8(),
+            "status": "error",
+            "code": kind,
+            "anchor": anchor,
+        }),
+    )
 }
 
-/// 核心逻辑（纯函数，方便测试）：读源 → 定位区间 → 读目标 → 定位插入点 →
-/// 生成新目标内容。`src`/`tgt` 为已解析的绝对路径。
+/// 核心逻辑：读源 → 定位区间 → 读目标 → 定位插入点 → 生成并写入新目标内容。
+/// `src`/`tgt` 为已解析的绝对路径。
+#[allow(clippy::too_many_arguments, clippy::result_large_err)] // 迁移期保留原工具参数面与冻结错误边界。
 fn run_copy_range(
-    src: &std::path::Path,
-    tgt: &std::path::Path,
+    src: &Path,
+    tgt: &Path,
     target_display: &str,
+    session_id: &str,
     start_anchor: &str,
     end_anchor: Option<&str>,
     target_anchor: Option<&str>,
     mode: Mode,
-) -> Result<RangeResult, String> {
-    let src_content = std::fs::read_to_string(src).map_err(|e| {
-        serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": "SOURCE_READ_ERROR",
-            "message": format!("failed to read source {}: {e}", src.to_string_lossy()),
-        })
-        .to_string()
+) -> Result<RangeResult, ToolExecutionError> {
+    let src_content = std::fs::read_to_string(src).map_err(|error| {
+        mutation_error(
+            "SOURCE_READ_ERROR",
+            format!(
+                "SOURCE_READ_ERROR: failed to read source {}: {error}",
+                src.to_string_lossy()
+            ),
+            None,
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": "SOURCE_READ_ERROR",
+                "path": src.to_string_lossy(),
+            }),
+        )
     })?;
     let (src_lf, _) = crate::file_shared::normalize_newlines(&src_content);
     let mut src_lines: Vec<String> = src_lf.split('\n').map(String::from).collect();
-    if src_lines.last().is_some_and(|s| s.is_empty()) {
+    if src_lines.last().is_some_and(|line| line.is_empty()) {
         src_lines.pop();
     }
 
@@ -139,14 +177,12 @@ fn run_copy_range(
                 .iter()
                 .enumerate()
                 .skip(start_idx)
-                .filter(|(_, l)| l.trim_end() == end_anchor.trim_end())
-                .map(|(i, _)| i)
+                .filter(|(_, line)| line.trim_end() == end_anchor.trim_end())
+                .map(|(index, _)| index)
                 .collect();
             match end_hits.first() {
-                Some(&i) => i,
-                None => {
-                    return Err(not_found_error("SOURCE_END_NOT_FOUND", end_anchor));
-                }
+                Some(&index) => index,
+                None => return Err(not_found_error("SOURCE_END_NOT_FOUND", end_anchor)),
             }
         }
         None => start_idx,
@@ -156,18 +192,25 @@ fn run_copy_range(
     let range = (start_idx + 1, end_idx + 1);
 
     // ── 目标读取与插入点定位 ────────────────────────────────────
-    let tgt_content = std::fs::read_to_string(tgt).map_err(|e| {
-        serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": "TARGET_READ_ERROR",
-            "message": format!("failed to read target {}: {e}", tgt.to_string_lossy()),
-        })
-        .to_string()
+    let target_before = std::fs::read_to_string(tgt).map_err(|error| {
+        mutation_error(
+            "TARGET_READ_ERROR",
+            format!(
+                "TARGET_READ_ERROR: failed to read target {}: {error}",
+                tgt.to_string_lossy()
+            ),
+            None,
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": "TARGET_READ_ERROR",
+                "path": tgt.to_string_lossy(),
+            }),
+        )
     })?;
-    let (tgt_lf, endings) = crate::file_shared::normalize_newlines(&tgt_content);
+    let (tgt_lf, endings) = crate::file_shared::normalize_newlines(&target_before);
     let mut tgt_lines: Vec<String> = tgt_lf.split('\n').map(String::from).collect();
-    if tgt_lines.last().is_some_and(|s| s.is_empty()) {
+    if tgt_lines.last().is_some_and(|line| line.is_empty()) {
         tgt_lines.pop();
     }
 
@@ -176,13 +219,19 @@ fn run_copy_range(
         Mode::Prepend => 0,
         Mode::InsertAfter | Mode::InsertBefore => {
             let anchor = target_anchor.ok_or_else(|| {
-                serde_json::json!({
-                    "timeis": crate::now_utc8(),
-                    "status": "error",
-                    "code": "MISSING_TARGET_ANCHOR",
-                    "message": format!("mode={:?} requires 'target_anchor'", mode.name()),
-                })
-                .to_string()
+                mutation_error(
+                    "MISSING_TARGET_ANCHOR",
+                    format!(
+                        "MISSING_TARGET_ANCHOR: mode={:?} requires 'target_anchor'",
+                        mode.name()
+                    ),
+                    None,
+                    json!({
+                        "timeis": crate::now_utc8(),
+                        "status": "error",
+                        "code": "MISSING_TARGET_ANCHOR",
+                    }),
+                )
             })?;
             let hits = locate_exact(&tgt_lines, anchor);
             if hits.is_empty() {
@@ -203,56 +252,71 @@ fn run_copy_range(
     if same_file && insert_at > start_idx && insert_at <= end_idx {
         // 插入点落在 [start..=end] 区间内 → 位移后区间漂移。
         // （insert_at == end_idx + 1，即区间正后方插入，是安全的。）
-        return Err(serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": "INSERT_INSIDE_RANGE",
-            "message": format!(
-                "source and target are the same file and the insertion point (after line {}) lies inside the copied range L{}-L{} — copy would shift the range",
+        return Err(mutation_error(
+            "INSERT_INSIDE_RANGE",
+            format!(
+                "INSERT_INSIDE_RANGE: source and target are the same file and the insertion point (after line {}) lies inside the copied range L{}-L{} — copy would shift the range",
                 insert_at, range.0, range.1
             ),
-            "hint": "Insert before the range start, after the range end, or use a different target file.",
-        })
-        .to_string());
+            Some(
+                "Insert before the range start, after the range end, or use a different target file.",
+            ),
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": "INSERT_INSIDE_RANGE",
+            }),
+        ));
     }
 
     // ── 组装并写回 ──────────────────────────────────────────────
     let eol = endings.preferred.as_str();
     tgt_lines.splice(insert_at..insert_at, copied.iter().cloned());
-    let mut out = tgt_lines.join(eol);
+    let mut target_after = tgt_lines.join(eol);
     // 历史行为：目标文件以换行结尾（无尾换行时补上；空文件不加）。
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push_str(eol);
+    if !target_after.is_empty() && !target_after.ends_with('\n') {
+        target_after.push_str(eol);
     }
     // 写策略：拒绝符号链接（不替换链接、不穿透写）与设备/FIFO/目录。
     let tgt_str = tgt.to_string_lossy();
     if let Err(guard) = crate::file_shared::ensure_writable_regular_target(&tgt_str) {
-        return Err(serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": guard.code(),
-            "message": guard.message(),
-        })
-        .to_string());
+        let code = guard.code();
+        return Err(mutation_error(
+            code,
+            format!("{code}: {}", guard.message()),
+            guard.hint().as_deref(),
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": code,
+            }),
+        ));
     }
-    std::fs::write(tgt, &out).map_err(|e| {
-        serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": "TARGET_WRITE_ERROR",
-            "message": format!("failed to write target {}: {e}", tgt.to_string_lossy()),
-        })
-        .to_string()
+    std::fs::write(tgt, &target_after).map_err(|error| {
+        mutation_error(
+            "TARGET_WRITE_ERROR",
+            format!(
+                "TARGET_WRITE_ERROR: failed to write target {}: {error}",
+                tgt.to_string_lossy()
+            ),
+            None,
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": "TARGET_WRITE_ERROR",
+                "path": tgt.to_string_lossy(),
+            }),
+        )
     })?;
 
     crate::journal::record_change(
-        &crate::journal::active_session(),
+        session_id,
         "",
         "copy_range",
         target_display,
         mode.name(),
-        Some(&tgt_content),
-        Some(&out),
+        Some(&target_before),
+        Some(&target_after),
         "ok",
     );
 
@@ -261,148 +325,252 @@ fn run_copy_range(
         range,
         insert_at,
         mode,
+        target_before,
+        target_after,
     })
 }
 
-fn workspace_root() -> String {
-    let ws = crate::current_workspace();
-    if ws.is_empty() { ".".to_string() } else { ws }
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CopyRangeArgs {
+    pub source_path: String,
+    pub source_start: String,
+    #[serde(default)]
+    pub source_end: Option<String>,
+    pub target_path: String,
+    #[serde(default)]
+    pub target_anchor: Option<String>,
+    #[serde(default = "default_mode")]
+    pub mode: String,
 }
 
-fn exec_copy_range(args: &serde_json::Value) -> ToolResult {
-    let get = |k: &str| args.get(k).and_then(|x| x.as_str()).map(str::to_string);
+fn default_mode() -> String {
+    "append".to_string()
+}
 
-    let (Some(source_path), Some(source_start), Some(target_path)) =
-        (get("source_path"), get("source_start"), get("target_path"))
-    else {
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CopyRangeOutput {
+    pub timeis: String,
+    pub status: String,
+    pub copied_lines: usize,
+    pub source_range: [usize; 2],
+    pub source_path: String,
+    pub target_path: String,
+    pub mode: String,
+    pub insert_at: usize,
+    pub lines_added: u32,
+    pub lines_removed: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_changed_line: Option<u32>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    model_text: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    diff: Option<String>,
+}
+
+impl ToolProjection for CopyRangeOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: self.model_text.clone(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        self.model_text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(160).collect())
+    }
+
+    fn display(&self, args: &Value) -> ToolDisplay {
+        mutation_display(
+            args.get("target_path").and_then(Value::as_str),
+            &self.target_path,
+            crate::tool_api::PathOp::Write,
+            "copy_range",
+            &self.model_text,
+            self.diff.clone(),
+        )
+    }
+}
+
+pub struct CopyRangeTool;
+
+impl TypedTool for CopyRangeTool {
+    type Args = CopyRangeArgs;
+    type Output = CopyRangeOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("copy_range").expect("valid copy_range tool name"),
+            display_name: None,
+            description: "Copy a line range by exact line anchors: source_start/source_end; mode=insert_after|insert_before|append|prepend."
+                .to_string(),
+            input_schema: copy_range_schema(),
+            output_schema: serde_json::to_value(schemars::schema_for!(CopyRangeOutput))
+                .expect("copy_range output schema"),
+            category: crate::permission::ToolCategory::Write,
+            risk: ToolRisk::Write,
+            default_timeout: Duration::from_secs(60),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: crate::tool_capabilities::builtin_capabilities("copy_range")
+                .unwrap_or_default(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let mode = Mode::parse(&args.mode).ok_or_else(|| {
+            mutation_error(
+                "INVALID_MODE",
+                format!(
+                    "INVALID_MODE: invalid mode — use one of: {}",
+                    MODES.join(" | ")
+                ),
+                None,
+                json!({}),
+            )
+        })?;
+        let source_path = args.source_path;
+        let target_path = args.target_path;
+        let workspace = ctx.workspace_root.clone();
+        let src =
+            crate::apply_patch_engine::resolve_workspace_path(&workspace, Path::new(&source_path))
+                .map_err(|error| {
+                    mutation_error(
+                        "PATH_OUTSIDE_WORKSPACE",
+                        format!("PATH_OUTSIDE_WORKSPACE: {error}"),
+                        None,
+                        json!({}),
+                    )
+                })?;
+        let tgt =
+            crate::apply_patch_engine::resolve_workspace_path(&workspace, Path::new(&target_path))
+                .map_err(|error| {
+                    mutation_error(
+                        "PATH_OUTSIDE_WORKSPACE",
+                        format!("PATH_OUTSIDE_WORKSPACE: {error}"),
+                        None,
+                        json!({}),
+                    )
+                })?;
+
+        let result = run_copy_range(
+            &src,
+            &tgt,
+            &target_path,
+            &ctx.session_id,
+            &args.source_start,
+            args.source_end.as_deref(),
+            args.target_anchor.as_deref(),
+            mode,
+        )?;
+
+        // 账本同步：目标已写盘，登记最新内容供 edit 防漂移。
+        // 键形态必须与 read/write 的账本键完全一致（lib 版本，不 canonicalize）。
+        let ledger_key = resolve_mutation_path(ctx, &target_path);
+        if let Ok(content) = std::fs::read_to_string(&tgt) {
+            crate::file_state::record_write(&ledger_key, &content);
+        }
+
+        let copied_lines = result.copied.len();
+        let mut model_text = format!(
+            "[OK] copy_range — {copied_lines} line(s) L{}-L{} copied: {source_path} → {target_path} ({})\n",
+            result.range.0,
+            result.range.1,
+            match result.mode {
+                Mode::InsertAfter => format!("after line {}", result.insert_at),
+                Mode::InsertBefore => format!("before line {}", result.insert_at + 1),
+                Mode::Append => "append".to_string(),
+                Mode::Prepend => "prepend".to_string(),
+            }
+        );
+        if let Some(anchor) = &args.target_anchor {
+            model_text = format!(
+                "[OK] copy_range — {copied_lines} line(s) L{}-L{} copied: {source_path} → {target_path} ({} {anchor:?})\n",
+                result.range.0,
+                result.range.1,
+                result.mode.name(),
+            );
+        }
+
+        let (before_lf, _) = crate::file_shared::normalize_newlines(&result.target_before);
+        let (after_lf, _) = crate::file_shared::normalize_newlines(&result.target_after);
+        let diff_text = crate::file_shared::unified_diff(&before_lf, &after_lf, &target_path);
+        let has_diff = !diff_text.is_empty();
+        let (lines_added, lines_removed, first_line) =
+            crate::file_shared::diff_stats_between(&before_lf, &after_lf);
+
+        Ok(CopyRangeOutput {
+            timeis: crate::now_utc8(),
+            status: "ok".to_string(),
+            copied_lines,
+            source_range: [result.range.0, result.range.1],
+            source_path,
+            target_path,
+            mode: result.mode.name().to_string(),
+            insert_at: result.insert_at,
+            lines_added,
+            lines_removed,
+            first_changed_line: has_diff.then_some(first_line),
+            model_text,
+            diff: has_diff.then_some(diff_text),
+        })
+    }
+}
+
+fn copy_range_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "source_path": {"type": "string", "description": "Source file"},
+            "source_start": {"type": "string", "description": "Start anchor line (exact)"},
+            "source_end": {"type": "string", "description": "End anchor inclusive; omit=single line", "default": null},
+            "target_path": {"type": "string", "description": "Target file"},
+            "target_anchor": {"type": "string", "description": "Anchor for insert_after/before"},
+            "mode": {"type": "string", "enum": ["insert_after", "insert_before", "append", "prepend"], "description": "Insert position (default append)", "default": "append"}
+        },
+        "required": ["source_path", "source_start", "target_path"],
+        "additionalProperties": false
+    })
+}
+
+pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_typed(CopyRangeTool);
+}
+
+/// Compatibility entry retained for existing in-process callers/tests.
+///
+/// Production registration uses [`CopyRangeTool`] directly; the pre-check keeps
+/// the legacy `MISSING_ARGUMENT` shape for malformed calls.
+#[cfg(test)]
+fn exec_copy_range(args: &Value) -> crate::ToolResult {
+    use crate::tool_api::ErasedTool;
+
+    let get = |key: &str| args.get(key).and_then(Value::as_str);
+    if get("source_path").is_none() || get("source_start").is_none() || get("target_path").is_none()
+    {
         return crate::json_err(
             "MISSING_ARGUMENT",
             "copy_range requires 'source_path', 'source_start' and 'target_path'",
             "",
         );
-    };
-    let source_end = get("source_end");
-    let target_anchor = get("target_anchor");
-    let mode = match Mode::parse(
-        args.get("mode")
-            .and_then(|x| x.as_str())
-            .unwrap_or("append"),
-    ) {
-        Some(m) => m,
-        None => {
-            return crate::json_err(
-                "INVALID_MODE",
-                format!("invalid mode — use one of: {}", MODES.join(" | ")),
-                "",
-            );
-        }
-    };
-
-    let ws = std::path::PathBuf::from(workspace_root());
-    let src =
-        crate::apply_patch_engine::resolve_workspace_path(&ws, std::path::Path::new(&source_path));
-    let tgt =
-        crate::apply_patch_engine::resolve_workspace_path(&ws, std::path::Path::new(&target_path));
-    let (src, tgt) = match (src, tgt) {
-        (Ok(s), Ok(t)) => (s, t),
-        (Err(e), _) | (_, Err(e)) => {
-            return crate::ToolResult::error(
-                serde_json::json!({
-                    "timeis": crate::now_utc8(),
-                    "status": "error",
-                    "code": "PATH_OUTSIDE_WORKSPACE",
-                    "message": e.to_string(),
-                })
-                .to_string(),
-            );
-        }
-    };
-
-    match run_copy_range(
-        &src,
-        &tgt,
-        &target_path,
-        &source_start,
-        source_end.as_deref(),
-        target_anchor.as_deref(),
-        mode,
-    ) {
-        Ok(r) => {
-            // 账本同步：目标已写盘，登记最新内容供 edit 防漂移。
-            // 键形态必须与 read/write 的账本键完全一致：lib::resolve_workspace_path
-            // （不 canonicalize、无 \\?\ verbatim 前缀）。apply_patch_engine 版本在
-            // Windows 上返回 canonicalize 结果，带 \\?\ 前缀，会导致同一文件出现
-            // 两套键、STALE_FILE 校验看不到本次写入（BUG-2026-09-13-16 跟进）。
-            let ledger_key = crate::resolve_workspace_path(&target_path);
-            if let Ok(content) = std::fs::read_to_string(&tgt) {
-                crate::file_state::record_write(&ledger_key, &content);
-            }
-            let n = r.copied.len();
-            let mut text = format!(
-                "[OK] copy_range — {n} line(s) L{}-L{} copied: {source_path} → {target_path} ({})\n",
-                r.range.0,
-                r.range.1,
-                match r.mode {
-                    Mode::InsertAfter => format!("after line {}", r.insert_at),
-                    Mode::InsertBefore => format!("before line {}", r.insert_at + 1),
-                    Mode::Append => "append".to_string(),
-                    Mode::Prepend => "prepend".to_string(),
-                }
-            );
-            if let Some(anchor) = &target_anchor {
-                text = format!(
-                    "[OK] copy_range — {n} line(s) L{}-L{} copied: {source_path} → {target_path} ({} {anchor:?})\n",
-                    r.range.0,
-                    r.range.1,
-                    r.mode.name(),
-                );
-            }
-            let data = serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "ok",
-                "copied_lines": n,
-                "source_range": [r.range.0, r.range.1],
-                "source_path": source_path,
-                "target_path": target_path,
-                "mode": r.mode.name(),
-            });
-            crate::ToolResult::ok_data(data, text)
-        }
-        Err(msg) => crate::ToolResult::error(msg),
     }
-}
-
-fn handle_copy_range(ctx: crate::ToolCallCtx) -> ToolResult {
-    exec_copy_range(&ctx.args)
-}
-
-// ─────────────────────────────────────────────────────────────
-// Registration
-// ─────────────────────────────────────────────────────────────
-
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("copy_range", crate::display::project_copy_range);
-    mgr.register(ToolHandler {
-        key: "copy_range".to_string(),
-        description: "Copy a line range by exact line anchors: source_start/source_end; mode=insert_after|insert_before|append|prepend.",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "source_path": {"type": "string", "description": "Source file"},
-                "source_start": {"type": "string", "description": "Start anchor line (exact)"},
-                "source_end": {"type": "string", "description": "End anchor inclusive; omit=single line", "default": null},
-                "target_path": {"type": "string", "description": "Target file"},
-                "target_anchor": {"type": "string", "description": "Anchor for insert_after/before"},
-                "mode": {"type": "string", "enum": ["insert_after", "insert_before", "append", "prepend"], "description": "Insert position (default append)", "default": "append"}
-            },
-            "required": ["source_path", "source_start", "target_path"],
-            "additionalProperties": false
-        }),
-        handler: handle_copy_range,
-        risk: ToolRisk::Write,
-        category: crate::permission::ToolCategory::Write,
-        default_timeout: std::time::Duration::from_secs(60),
-    });
+    let ctx =
+        crate::file_mutate::ambient_tool_context("copy-range-compat", Duration::from_secs(60));
+    crate::tool_api::TypedToolAdapter::new(CopyRangeTool)
+        .execute(ctx, args.clone())
+        .unwrap_or_else(|fatal| panic!("copy_range tool fatal: {}", fatal.message))
+        .to_tool_result()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -762,6 +930,37 @@ mod tests {
             "expected STALE_FILE, got: {}",
             stale.model_text()
         );
+    }
+
+    #[test]
+    fn typed_copy_range_registration_and_display_are_same_source() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        assert!(
+            manager.builtins["copy_range"].legacy.is_none(),
+            "copy_range still has legacy executor"
+        );
+
+        let (_dir, workspace) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
+        let _guard = WS_LOCK.lock().unwrap();
+        crate::CURRENT_WORKSPACE
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone_from(&workspace.to_string_lossy().to_string());
+        let result = exec_copy_range(&serde_json::json!({
+            "source_path": "src.rs",
+            "source_start": "copied",
+            "target_path": "dst.rs",
+            "mode": "append",
+        }));
+        assert!(result.is_success(), "{}", result.model_text());
+        assert_eq!(result.data["copied_lines"], serde_json::json!(1));
+        let display = result.display().expect("typed display");
+        let display_text = match &display.body {
+            Some(qaqh_types::ToolResultDisplayBody::Text { text, .. }) => text,
+            other => panic!("unexpected copy_range display body: {other:?}"),
+        };
+        assert_eq!(display_text, result.model_text());
     }
 
     #[test]
