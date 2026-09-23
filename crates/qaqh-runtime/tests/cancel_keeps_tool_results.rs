@@ -1,7 +1,7 @@
 //! 回归：批取消路径不得丢弃**已执行**工具结果（BUG-2026-09-13-08）。
 //!
 //! 触发链路：权限挂起（YieldToUser）→ 用户批准 → deferred 批执行中取消。
-//! 工具副作用已经发生（outbox 已记录），但旧实现里取消分支
+//! 工具副作用已经发生（ToolIntent 已 durable），但旧实现里取消分支
 //! （`execute_admitted_batch` 并行 `let _ = handle.join(); continue;` / 串行
 //! `if ctx.cancel.is_set() { return false; }`）把已 join 出来的结果直接丢弃
 //! → store 里留下 open tool_use → 下轮模型重发同一 tool_use，工具被重复执行。
@@ -41,7 +41,7 @@ fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecuti
 }
 
 static SESSION_INIT: Once = Once::new();
-/// workspace / tool manager / outbox 均为进程级单例：本文件用例串行。
+/// workspace / tool manager 均为进程级单例：本文件用例串行。
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 const TURN_ID: &str = "t-cancel-batch";
@@ -185,8 +185,8 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
 
     let side_effects = temp.path().join("side-effects.txt");
     let mut agent = AgentState::init("cancel-keeps-results-test", qaqh_config::Config::default());
-    // 每次运行用独立 seed：outbox 按 seed 归档，复用 seed 会让上一个用例的
-    // 「已执行」记录泄漏进本次（`seal_unexecuted_as_cancelled` 会据此跳过）。
+    // 每次运行用独立 seed：canonical ledger 按 session 隔离，复用 seed 会让
+    // 上一个用例的 intent 泄漏进本次（`seal_unexecuted_as_cancelled` 会据此跳过）。
     let seed = format!(
         "cancel-keeps-results-{label}-{}",
         std::time::SystemTime::now()

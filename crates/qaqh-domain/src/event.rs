@@ -252,10 +252,10 @@ fn default_true() -> bool {
     true
 }
 
-/// todo_activate 评审项。
+/// plan review 评审项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct TodoItem {
+pub struct PlanReviewItem {
     pub id: String,
     pub title: String,
     pub description: String,
@@ -610,7 +610,7 @@ pub enum ControlEvent {
         #[serde(default)]
         review_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        todo_items: Option<Vec<TodoItem>>,
+        todo_items: Option<Vec<PlanReviewItem>>,
     },
     /// plan review 已裁决。
     PlanReviewResolved {

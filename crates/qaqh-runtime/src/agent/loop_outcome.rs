@@ -379,7 +379,11 @@ impl Loop {
     /// - `YieldToUser` → do nothing, wait for PermissionResponse or UserInput
     /// - `Handled` / `Error` / `Shutdown` → straightforward
     pub(super) fn apply_outcome(&mut self, outcome: Outcome) {
-        if let Err(error) = self.session.turn.observe_outcome(&outcome) {
+        if let Err(error) = self
+            .session
+            .turn
+            .observe_outcome(&mut self.session.agent, &outcome)
+        {
             let message = error.to_string();
             log::error!("[TURN] SessionActor rejected runtime transition: {message}");
             self.emit_operation_failed(

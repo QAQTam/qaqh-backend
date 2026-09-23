@@ -646,6 +646,7 @@ fn legacy_error_to_tool_error(raw: String) -> ToolError {
     error
 }
 
+#[allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
 fn to_args_value<T: Serialize>(args: &T) -> Result<Value, ToolExecutionError> {
     serde_json::to_value(args).map_err(|error| {
         ToolExecutionError::Recoverable(ToolError::invalid_arguments(format!(

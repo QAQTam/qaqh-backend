@@ -523,28 +523,25 @@ impl QaqhService {
                 })?;
                 Ok(Value::Null)
             }
-            "todo.status" => parse_json_string(qaqh_workspace::todo::todo_status_json(&seed()?)?),
-            "todo.cancel" => parse_json_string(qaqh_workspace::todo::todo_cancel_json(
-                &seed()?,
-                &pstr(params, "id")?,
-            )?),
-            "todo.set" => parse_json_string(qaqh_workspace::todo::todo_set_for(&seed()?, params)?),
+            "todo.status" => qaqh_workspace::todo::todo_status_value(&seed()?),
+            "todo.cancel" => {
+                qaqh_workspace::todo::todo_cancel_value(&seed()?, &pstr(params, "id")?)
+            }
+            "todo.set" => qaqh_workspace::todo::todo_set_value_for(&seed()?, params),
             "todo.list" => qaqh_workspace::todo::todo_list_value_for(&seed()?, params),
             "plan.context_stats" => context_stats(&self.sessions, &seed()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
-            "plan.read" => read_plan(&self.sessions, &seed()?),
-            "plan.action" => {
-                plan_action(
-                    &self.sessions,
-                    &seed()?,
-                    &pstr2(params, "item_id", "itemId")?,
-                    &pstr(params, "action")?,
-                    value2(params, "user_comment", "userComment")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                )?;
-                Ok(Value::Null)
-            }
+            "plan.read" => serde_json::to_value(read_plan(&self.sessions, &seed()?)).map_err(err),
+            "plan.action" => serde_json::to_value(plan_action(
+                &self.sessions,
+                &seed()?,
+                &pstr2(params, "item_id", "itemId")?,
+                &pstr(params, "action")?,
+                value2(params, "user_comment", "userComment")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )?)
+            .map_err(err),
             // ── Subagent orchestration ──────────────────────────────────────
             // Spawn an isolated subagent worker and return its seed. The
             // caller (parent agent) then attaches the seed and drives it with
@@ -879,7 +876,7 @@ pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod stats;
 
-use self::common::{command_id, err, parse_json_string, release_freed_heap_memory};
+use self::common::{command_id, err, release_freed_heap_memory};
 use self::fs_git::{git, list_remote_directory, read_remote_file, workspace};
 use self::params::{
     optional_tool_mode, pbool, pstr, pstr2, pstrings, pu64, validate_tool_mode, value2,

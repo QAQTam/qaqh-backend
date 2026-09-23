@@ -593,8 +593,18 @@ pub fn project_tool_display_from_result(
     args: &serde_json::Value,
     result: &qaqh_types::ToolResult,
 ) -> Option<crate::tool_api::ToolDisplay> {
-    crate::display::project_typed_tool_display(name, args, &result.data)
+    result
+        .display()
+        .map(crate::tool_api::output::from_wire_display)
+        .or_else(|| crate::display::project_typed_tool_display(name, args, &result.data))
         .or_else(|| project_tool_display(name, args, result.model_text()))
+}
+
+/// Rehydrate a canonical display payload without re-parsing tool text.
+pub fn project_tool_display_from_wire(
+    display: &qaqh_types::ToolResultDisplay,
+) -> crate::tool_api::ToolDisplay {
+    crate::tool_api::output::from_wire_display(display)
 }
 
 pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
