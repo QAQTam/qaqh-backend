@@ -45,11 +45,19 @@
   - `ToolOutcome -> ToolResult` 写入完整 header/body/summary；
   - live projection 与 timeline rebuild 都优先使用该 payload；
   - 即使 model text 被破坏，typed 工具 display 也不再回退到 JSON 文本考古。
+- 文件检索工具 typed 迁移：
+  - `glob` / `grep` 改为 `TypedTool`，workspace 根显式取自
+    `ToolCallContext`；
+  - canonical data 保持既有 `{matches,truncated,count}`（grep 另有
+    `status:"ok"`）wire 形态；
+  - model/display 从同一 typed output 派生，删除对应文本 projector；
+  - 缺参、非法 pattern/regex、越界路径继续保留 legacy `TOOL_ERROR`。
 
 仍未完成：
 
-- 尚未迁移为 `TypedTool` 的 legacy 工具仍依赖文本 projector；typed 工具
-  已完全脱离该路径。
+- 尚未迁移为 `TypedTool` 的 legacy 工具（read/write/edit/apply_patch/
+  copy_range/web_fetch/journal/read_image/exec/ask 等）仍依赖文本 projector；
+  typed 工具已完全脱离该路径。
 - 旧 `tool_outbox.wal` 的只读兼容代码可在兼容窗口结束后删除；当前保留
   是为了让升级前会话仍能恢复。
 
