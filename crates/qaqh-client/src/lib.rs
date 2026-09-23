@@ -1,8 +1,10 @@
-//! QAQ-Harness Ringing V1 daemon client (HTTP/SSE).
+//! QAQ-Harness Ringing V1/V2 daemon client (HTTP/SSE).
 //!
 //! Shared transport for the TUI and desktop shells: discovery, lease
 //! negotiation/renewal, three SSE event channels and the per-session timeline
-//! stream, plus commands, queries, bootstrap and graceful stop.
+//! stream, plus commands, queries, bootstrap and graceful stop. The additive
+//! [`v2`] surface exposes canonical cursors, typed projection events,
+//! bootstrap/reset and driver commands for the beta cutover.
 //!
 //! The public API uses the canonical `qaqh-domain` and `qaqh-ringing`
 //! contracts. HTTP/SSE JSON is decoded at this boundary and never becomes a
@@ -18,6 +20,7 @@ pub mod sse;
 mod sse_decoder;
 pub mod timeline;
 pub mod types;
+pub mod v2;
 
 pub use client::{
     Client, ClientHandlers, ClientOptions, RemoteEndpoint, StopStatus, runtime_handle,
@@ -35,6 +38,13 @@ pub use remote_path::{display_host, display_path, remote_path_from_display};
 pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
 pub use types::ResetRequired;
+pub use v2::{
+    CLIENT_V2_END_OF_FACT, ClientV2Bootstrap, ClientV2Capabilities, ClientV2ControlState,
+    ClientV2Cursor, ClientV2CursorToken, ClientV2Delivery, ClientV2DriverState, ClientV2Event,
+    ClientV2EventEnvelope, ClientV2InteractionKind, ClientV2Payload, ClientV2PendingInteraction,
+    ClientV2PendingSet, ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey,
+    ClientV2Subscription, ClientV2SubscriptionEvent, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+};
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
     ChannelStatus, CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent,

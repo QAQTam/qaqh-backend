@@ -2,13 +2,14 @@
 name = "qaqh-client"
 version.workspace = true
 edition = "2024"
-description = "QAQ-Harness Ringing V1 daemon client (HTTP/SSE) — shared by TUI and desktop shells"
+description = "QAQ-Harness Ringing V1/V2 daemon client (HTTP/SSE) — shared by TUI and desktop shells"
 license = "MIT"
 
 [dependencies]
 bytes = "1"
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing = { path = "../qaqh-ringing" }
+qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
 futures-util = "0.3"
 log = "0.4"
