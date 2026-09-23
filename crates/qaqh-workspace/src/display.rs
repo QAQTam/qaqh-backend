@@ -196,41 +196,6 @@ pub(crate) fn project_apply_patch(args: &serde_json::Value, output: &str) -> Too
     with_line_summary(display, first_human_line(output))
 }
 
-fn query_display(
-    tool: &'static str,
-    query: Option<String>,
-    scope: Option<String>,
-    output: &str,
-) -> ToolDisplay {
-    let display = match query.filter(|query| !query.trim().is_empty()) {
-        Some(query) => ToolDisplay::new(
-            ToolHeader::Query {
-                query,
-                scope: scope.filter(|scope| !scope.trim().is_empty()),
-            },
-            text_body(&human_body(output)),
-        ),
-        None => fallback_display(tool, output),
-    };
-    with_line_summary(
-        display,
-        json_summary(output).or_else(|| first_human_line(output)),
-    )
-}
-
-pub(crate) fn project_web_fetch(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    query_display(
-        "web_fetch",
-        args.get("url")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        args.get("output")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        output,
-    )
-}
-
 /// todo 系列的面板数据由 dashboard 维护；display 只保留 canonical 摘要行。
 fn todo_display(label: &'static str, output: &str) -> ToolDisplay {
     ToolDisplay::new(
@@ -509,21 +474,6 @@ mod tests {
             ToolHeader::Path {
                 path: "src/app.rs".into(),
                 op: PathOp::Patch
-            }
-        );
-    }
-
-    #[test]
-    fn web_fetch_query_projector_declares_url_and_output_scope() {
-        let web = project_web_fetch(
-            &json!({"url": "https://example.test", "output": "page.md"}),
-            "page",
-        );
-        assert_eq!(
-            web.header,
-            ToolHeader::Query {
-                query: "https://example.test".into(),
-                scope: Some("page.md".into())
             }
         );
     }
