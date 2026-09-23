@@ -19,7 +19,8 @@
   - `QAQH_TEST_SESSION_404_SEED=<seed|*>`。
 - command ack：
   - `QAQH_TEST_COMMAND_ACK=hang|<ms>`；
-  - `QAQH_TEST_COMMAND_ACK_CHANNEL=...`。
+  - `QAQH_TEST_COMMAND_ACK_CHANNEL=...`；
+  - `QAQH_TEST_COMMAND_ACK_COMMAND=interaction|permission_response|ask_response|all`。
 - permission / ask：
   - `QAQH_TEST_INTERACTION_FAULT=permission-deny|permission-hang|ask-dismiss|ask-hang`。
 
@@ -29,9 +30,20 @@
 
 ```text
 cargo check -p qaqh-daemon -p qaqh-runtime --all-targets  PASS
-cargo test -p qaqh-daemon --bin qaqh-daemon              52 passed
+cargo test -p qaqh-daemon --bin qaqh-daemon              55 passed
+cargo test -p qaqh-runtime --test plan_review_hook       4 passed
 cargo test -p qaqh-runtime test_hooks --lib              1 passed
 ```
+
+评审阻断项收口：
+
+- plan review 增加真实 Loop + mock provider 集成测试，覆盖 approve / reject
+  后进入下一轮 provider 请求；
+- timeline gap 不再编造 seq，改为丢弃第一条真实 entry、发送下一条真实
+  entry，保证 journal/cursor 自洽；
+- `QAQH_TEST_COMMAND_ACK_COMMAND` 默认只命中 permission/ask 响应，避免冻结
+  同 channel 上其它 command；
+- `permission-deny` / `ask-dismiss` 改为一次性；`*-hang` 明确保持持续语义。
 
 真实 TUI PTY：
 

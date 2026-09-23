@@ -384,14 +384,16 @@ mod sse_tests {
         let (status, mut stream) = open_timeline_sse(build_router(state)).await;
         assert_eq!(status, StatusCode::OK);
 
-        hub.publish_timeline(
-            SEED,
-            qaqh_domain::TimelineIntent::TurnOpened {
-                turn_id: "t-gap".into(),
-                user_text: "force a timeline gap".into(),
-            },
-        )
-        .expect("publish timeline intent");
+        for turn in ["t-gap-1", "t-gap-2"] {
+            hub.publish_timeline(
+                SEED,
+                qaqh_domain::TimelineIntent::TurnOpened {
+                    turn_id: turn.into(),
+                    user_text: "force a timeline gap".into(),
+                },
+            )
+            .expect("publish timeline intent");
+        }
 
         let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
             .await

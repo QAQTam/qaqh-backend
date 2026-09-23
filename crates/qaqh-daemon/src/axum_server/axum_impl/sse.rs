@@ -697,10 +697,13 @@ pub(crate) async fn handle_timeline_events(
 
     let (tx, rx_stream) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
+        let mut gap_remaining = usize::from(inject_timeline_gap);
         for entry in replay {
+            if gap_remaining > 0 {
+                gap_remaining -= 1;
+                continue;
+            }
             if inject_timeline_gap {
-                let mut entry = entry;
-                entry.timeline_seq = after.saturating_add(2);
                 let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
                 let _ = tx.send(Ok(ev)).await;
                 return;
@@ -714,10 +717,12 @@ pub(crate) async fn handle_timeline_events(
         loop {
             match rx.recv().await {
                 Ok(live) => {
+                    if gap_remaining > 0 {
+                        gap_remaining -= 1;
+                        continue;
+                    }
                     if inject_timeline_gap {
-                        let mut entry = live.entry;
-                        entry.timeline_seq = after.saturating_add(2);
-                        let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
+                        let ev = timeline_entry_to_event(&epoch, &seed_clone, &live.entry);
                         let _ = tx.send(Ok(ev)).await;
                         return;
                     }
