@@ -43,6 +43,7 @@ pub mod content;
 pub mod control;
 pub mod service_api;
 pub mod sse;
+pub(crate) mod test_hooks;
 pub mod timeline_api;
 
 pub(crate) use auth::{
@@ -82,6 +83,7 @@ pub struct AppState {
     pub token: String,
     pub epoch: String,
     pub shutdown: tokio::sync::watch::Sender<bool>,
+    pub(crate) test_hooks: Arc<test_hooks::TestHooks>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +108,19 @@ impl IntoResponse for JsonResponse {
         )
             .into_response()
     }
+}
+
+pub(crate) fn session_not_found_response(seed: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::json!({
+            "code": "session_not_found",
+            "message": format!("test-injected missing session: {seed}"),
+        })
+        .to_string(),
+    )
+        .into_response()
 }
 
 /// BUG-2026-09-12-11（O-7）：daemon 此前没有任何 HTTP 状态码记录——TraceLayer
@@ -204,6 +219,11 @@ pub(crate) mod pure_tests {
             parse_timeline_cursor("epoch-1:timeline:42:extra", "epoch-1"),
             0
         );
+        // 空 cursor = 首次连接，正常从头开始（不告警）。
+        assert_eq!(parse_timeline_cursor("", "epoch-1"), 0);
+        // 形状合法但 seq 缺失/非法：同样按 0 重放，且和形状不符一样告警。
+        assert_eq!(parse_timeline_cursor("epoch-1:timeline:", "epoch-1"), 0);
+        assert_eq!(parse_timeline_cursor("epoch-1:timeline:abc", "epoch-1"), 0);
     }
     #[test]
     fn session_close_seed_resolution_prefers_command_seed() {
