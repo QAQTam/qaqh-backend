@@ -14,6 +14,7 @@ qaqh-message = { path = "../qaqh-message" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-subagent = { path = "../qaqh-subagent" }
+qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-workspace = { path = "../qaqh-workspace" }
 qaqh-gate = { path = "../qaqh-gate" }
 unicode-normalization = "0.1"

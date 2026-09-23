@@ -493,11 +493,11 @@ impl ToolRuntime {
         let args_bytes = serde_json::to_vec(item.auth.args()).unwrap_or_default();
         let args_hash = sha256_content_hash(&args_bytes);
         let context = item.scope.context();
+        let sandbox_spec =
+            qaqh_sandbox::SandboxSpec::workspace_write(context.workspace_root.clone());
         let sandbox_bytes = serde_json::to_vec(&serde_json::json!({
-            "workspace_root": context.workspace_root.to_string_lossy(),
-            "mode": format!("{:?}", context.mode),
-            "permission_level": context.permission_level as u8,
-            "sandbox": format!("{:?}", context.sandbox),
+            "spec": sandbox_spec,
+            "capabilities": qaqh_sandbox::SandboxCapabilities::detect(),
         }))
         .unwrap_or_default();
         let sandbox_spec_hash = sha256_content_hash(&sandbox_bytes);

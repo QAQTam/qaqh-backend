@@ -100,7 +100,7 @@ fn run_exec(
     fixed: Option<super::shell::Shell>,
     progress_tx: Option<ExecProgressSender>,
 ) -> Result<super::direct::ExecOutput, ToolExecutionError> {
-    use super::direct::direct_exec;
+    use super::direct::direct_exec_sandboxed;
     use super::shell::Shell;
 
     // ── Resolve argv ──
@@ -223,8 +223,9 @@ fn run_exec(
         .map(|env| env.into_iter().collect())
         .filter(|pairs: &Vec<(String, String)>| !pairs.is_empty());
     let cancel = ctx.cancellation.shared_flag();
+    let sandbox = qaqh_sandbox::SandboxSpec::workspace_write(ctx.workspace_root.clone());
 
-    let mut result = direct_exec(
+    let mut result = direct_exec_sandboxed(
         &argv,
         env.as_deref(),
         cwd.as_deref(),
@@ -234,6 +235,7 @@ fn run_exec(
         Some(cancel.as_ref()),
         progress_tx,
         &ctx.call_id,
+        &sandbox,
     );
     // 观测线纪律（事故 2026-09-02 预防）：检测 shell 命令中的后台派生 `&`，
     // 以强提示引导走 background_after_secs + process 工具的受控路径。
