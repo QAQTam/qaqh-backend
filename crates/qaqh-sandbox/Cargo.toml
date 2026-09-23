@@ -6,6 +6,7 @@ description = "Platform capability discovery and Linux process sandboxing"
 
 [dependencies]
 log = "0.4"
+qaqh-policy = { path = "../qaqh-policy" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
