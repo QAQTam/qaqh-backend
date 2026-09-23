@@ -1405,6 +1405,69 @@ impl TurnEngine {
             if round_num == 0 && crate::test_hooks::plan_review_enabled() {
                 let call_id = format!("test-plan-review-{turn_id}");
                 let content = crate::test_hooks::plan_review_content();
+                let tool_call = qaqh_types::ToolCall {
+                    id: call_id.clone(),
+                    call_type: "function".into(),
+                    function: qaqh_types::FunctionCall {
+                        name: "plan_submit".into(),
+                        arguments: serde_json::json!({ "plan": content }).to_string(),
+                    },
+                };
+                let assistant_msg = crate::agent::util::build_assistant_message(
+                    "",
+                    "",
+                    std::slice::from_ref(&tool_call),
+                );
+                // Keep the test hook on the production transcript path: open
+                // the tool block before the assistant step is admitted, then
+                // let the normal plan-response handler update and seal it.
+                ctx.emitter
+                    .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
+                        turn_id: turn_id.clone(),
+                        round_num,
+                        block_id: format!("tool:{call_id}"),
+                        kind: qaqh_domain::TimelineBlockKind::Tool,
+                        tool: Some(qaqh_domain::TimelineTool {
+                            tool_call_id: call_id.clone(),
+                            name: tool_call.function.name.clone(),
+                            state: qaqh_domain::TimelineToolState::Prepared,
+                            summary: Some("plan_submit · prepared".into()),
+                            args_json: Some(tool_call.function.arguments.clone()),
+                            output: None,
+                            diff: None,
+                            progress: String::new(),
+                            progress_truncated: false,
+                            progress_stream: None,
+                            progress_bytes_total: 0,
+                            display: None,
+                            failure: None,
+                            permission: None,
+                        }),
+                    });
+                let receipt = ctx.flow.ingest(
+                    &mut ctx.agent.msg,
+                    qaqh_message::builtin::MODEL,
+                    assistant_msg.clone(),
+                );
+                if !receipt.stored {
+                    log::warn!(
+                        "[TURN] plan-review hook assistant step was not stored: {:?}",
+                        ctx.flow.trace().back()
+                    );
+                }
+                crate::agent::util::emit_round_complete_via_emitter(
+                    ctx.emitter,
+                    &turn_id,
+                    round_num,
+                    &assistant_msg,
+                    "",
+                    "",
+                    std::slice::from_ref(&tool_call),
+                );
+                ctx.agent
+                    .msg
+                    .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+
                 let mut pending_plans = VecDeque::new();
                 pending_plans.push_back(PendingPlan {
                     call_id: call_id.clone(),
