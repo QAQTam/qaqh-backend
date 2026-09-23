@@ -1,11 +1,15 @@
 //! Recovery batch execution over the canonical tool ledger.
 //!
-//! The intent file is the durable plan. This executor validates that the
-//! current open set is a subset of that plan, seals every non-replayable
-//! intent with the batch `RecoveryRef`, and only writes the final
-//! `SessionRecovered` fact after no open tool intent remains. Replay and
+//! The intent file is the durable plan. This executor seals every
+//! non-replayable intent with the batch `RecoveryRef`, and only writes the
+//! final `SessionRecovered` fact after no open tool intent remains. Replay and
 //! reconciliation dispositions are returned to the caller for their dedicated
 //! steps; the intent stays active until those steps close the calls.
+//!
+//! The plan is a snapshot, so a later crash can leave an open intent it does
+//! not cover. Such a call is sealed when it is non-replayable (there is no
+//! replay step to plan for it) and fails closed when it needs a replay or
+//! reconcile step — see `seal_unplanned_open_intents`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -16,6 +20,7 @@ use thiserror::Error;
 use crate::session_fact_v2::{
     ContentHash, EventId, FactPayload, LogId, RecoveryAction, RecoveryId, RecoveryOutcome,
     RecoveryToolCompletion, SessionFact, SessionId, SessionRecovered, ToolCallId, ToolFinished,
+    ToolReplayCapability,
 };
 
 use super::{
@@ -148,7 +153,7 @@ pub fn execute_recovery_intent(
     let lease = store.acquire_writer(writer_id, now_ms, lease_duration_ms)?;
     let mut ledger = ToolLedger::from_store(&session_dir, store, lease)?;
 
-    validate_open_set(&ledger, &intent)?;
+    seal_unplanned_open_intents(&mut ledger, &intent, now_ms)?;
     let dispositions = ledger.recover_open_intents(intent.recovery_ref.clone(), now_ms)?;
     if dispositions
         .iter()
@@ -182,27 +187,88 @@ pub fn execute_recovery_intent(
     )))
 }
 
-fn validate_open_set(ledger: &ToolLedger, intent: &RecoveryIntent) -> Result<(), CanonicalError> {
+/// Seal open intents that the durable plan does not cover, and fail closed on
+/// the ones that cannot be sealed.
+///
+/// The intent file is a snapshot of the open set taken when the plan was
+/// written. A later crash can leave a *new* open intent behind — for example a
+/// `write` interrupted while an earlier `read` is still waiting on its replay
+/// step. Re-planning is not available for an active intent (the batch key must
+/// stay stable), so the executor reconciles the difference here instead of
+/// failing forever:
+///
+/// - a non-replayable call has no replay step to plan, so sealing it as
+///   `Indeterminate` under the batch `RecoveryRef` is exactly the outcome the
+///   batch would have produced had the call been in the plan;
+/// - a replay/reconcile call *does* need a planned step, so it still fails
+///   closed — silently sealing it would drop its replay/reconcile contract.
+///
+/// The sealed terminals carry the batch `RecoveryRef`, so they show up in the
+/// batch's `SessionRecovered.actions` even when a later run writes the summary.
+/// The operation is idempotent: a re-run sees the sealed calls as closed and
+/// seals nothing.
+fn seal_unplanned_open_intents(
+    ledger: &mut ToolLedger,
+    intent: &RecoveryIntent,
+    now_ms: i64,
+) -> Result<(), RecoveryExecutionError> {
     let planned: HashSet<&str> = intent.sorted_open_ids.iter().map(String::as_str).collect();
+    let mut sealable = Vec::new();
     for entry in ledger.open_intents() {
-        let Some(call_id) = entry.intent().map(|intent| intent.call_id.as_str()) else {
+        let Some(open) = entry.intent() else {
             continue;
         };
-        if !planned.contains(call_id) {
-            return Err(CanonicalError::RecoveryIntentConflict(format!(
-                "open tool intent {call_id} is not covered by the recovery plan"
-            )));
+        if planned.contains(open.call_id.as_str()) {
+            continue;
         }
+        match open.replay_capability {
+            ToolReplayCapability::NoReplay => sealable.push(open.call_id.clone()),
+            ToolReplayCapability::IdempotentReplay | ToolReplayCapability::Reconcile { .. } => {
+                return Err(CanonicalError::RecoveryIntentConflict(format!(
+                    "open tool intent {} requires its own recovery step but is not covered by the recovery plan",
+                    open.call_id
+                ))
+                .into());
+            }
+        }
+    }
+
+    for call_id in sealable {
+        ledger.seal_recovery_intent(
+            &call_id,
+            EventId::new(generate_ulid()),
+            intent.recovery_ref.clone(),
+            now_ms,
+        )?;
     }
     Ok(())
 }
 
+/// Summarise every terminal the batch wrote.
+///
+/// The plan's calls come first (sorted, as planned); terminals that carry the
+/// batch `RecoveryRef` without being in the plan follow in fact order. Those
+/// are the unplanned non-replayable calls the executor sealed, including ones
+/// sealed by an earlier run of the same batch.
 fn recovery_actions(
     ledger: &ToolLedger,
     intent: &RecoveryIntent,
 ) -> Result<Vec<RecoveryAction>, CanonicalError> {
-    let mut actions = Vec::with_capacity(intent.sorted_open_ids.len());
-    for call_id in &intent.sorted_open_ids {
+    let mut call_ids: Vec<&str> = intent.sorted_open_ids.iter().map(String::as_str).collect();
+    for fact in ledger.finished_facts() {
+        if finished_recovery_ref(fact) != Some(&intent.recovery_ref) {
+            continue;
+        }
+        let Some(call_id) = fact.call_id.as_ref().map(ToolCallId::as_str) else {
+            continue;
+        };
+        if !call_ids.contains(&call_id) {
+            call_ids.push(call_id);
+        }
+    }
+
+    let mut actions = Vec::with_capacity(call_ids.len());
+    for call_id in call_ids {
         let fact = ledger
             .finished_facts()
             .into_iter()
