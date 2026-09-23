@@ -168,7 +168,7 @@ pub fn execute_recovery_intent(
     let lease = store.acquire_writer(writer_id, now_ms, lease_duration_ms)?;
     let mut ledger = ToolLedger::from_store(&session_dir, store, lease)?;
 
-    seal_unplanned_open_intents(&mut ledger, &intent, now_ms)?;
+    validate_open_set(&ledger, &intent)?;
     let dispositions = ledger.recover_open_intents(intent.recovery_ref.clone(), now_ms)?;
     if dispositions
         .iter()
@@ -202,33 +202,29 @@ pub fn execute_recovery_intent(
     )))
 }
 
-/// Seal open intents that the durable plan does not cover, and fail closed on
-/// the ones that cannot be sealed.
+/// Validate that the durable plan can still cover every open intent.
 ///
 /// The intent file is a snapshot of the open set taken when the plan was
-/// written. A later crash can leave a *new* open intent behind — for example a
-/// `write` interrupted while an earlier `read` is still waiting on its replay
+/// written, so a later crash can leave a *new* open intent behind — for example
+/// a `write` interrupted while an earlier `read` is still waiting on its replay
 /// step. Re-planning is not available for an active intent (the batch key must
-/// stay stable), so the executor reconciles the difference here instead of
+/// stay stable), so the difference is reconciled by capability instead of
 /// failing forever:
 ///
-/// - a non-replayable call has no replay step to plan, so sealing it as
-///   `Indeterminate` under the batch `RecoveryRef` is exactly the outcome the
-///   batch would have produced had the call been in the plan;
-/// - a replay/reconcile call *does* need a planned step, so it still fails
-///   closed — silently sealing it would drop its replay/reconcile contract.
+/// - a non-replayable call has no replay step to plan for, so
+///   [`ToolLedger::recover_open_intents`] seals it as `Indeterminate` under the
+///   batch `RecoveryRef` — exactly the outcome the batch would have produced had
+///   the call been in the plan. That holds whether or not the call is in
+///   `sorted_open_ids`, so planned-but-still-open `NoReplay` calls are covered
+///   too;
+/// - a replay/reconcile call *does* need a planned step, so an unplanned one
+///   still fails closed — silently sealing it would drop its replay/reconcile
+///   contract.
 ///
-/// The sealed terminals carry the batch `RecoveryRef`, so they show up in the
-/// batch's `SessionRecovered.actions` even when a later run writes the summary.
-/// The operation is idempotent: a re-run sees the sealed calls as closed and
-/// seals nothing.
-fn seal_unplanned_open_intents(
-    ledger: &mut ToolLedger,
-    intent: &RecoveryIntent,
-    now_ms: i64,
-) -> Result<(), RecoveryExecutionError> {
+/// This runs before anything is sealed, so a batch that cannot be executed
+/// leaves no partially sealed terminal behind.
+fn validate_open_set(ledger: &ToolLedger, intent: &RecoveryIntent) -> Result<(), CanonicalError> {
     let planned: HashSet<&str> = intent.sorted_open_ids.iter().map(String::as_str).collect();
-    let mut sealable = Vec::new();
     for entry in ledger.open_intents() {
         let Some(open) = entry.intent() else {
             continue;
@@ -237,24 +233,14 @@ fn seal_unplanned_open_intents(
             continue;
         }
         match open.replay_capability {
-            ToolReplayCapability::NoReplay => sealable.push(open.call_id.clone()),
+            ToolReplayCapability::NoReplay => {}
             ToolReplayCapability::IdempotentReplay | ToolReplayCapability::Reconcile { .. } => {
                 return Err(CanonicalError::RecoveryIntentConflict(format!(
                     "open tool intent {} requires its own recovery step but is not covered by the recovery plan",
                     open.call_id
-                ))
-                .into());
+                )));
             }
         }
-    }
-
-    for call_id in sealable {
-        ledger.seal_recovery_intent(
-            &call_id,
-            EventId::new(generate_ulid()),
-            intent.recovery_ref.clone(),
-            now_ms,
-        )?;
     }
     Ok(())
 }
