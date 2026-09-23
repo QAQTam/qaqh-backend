@@ -4,10 +4,10 @@
 //! without importing `qaqh-ringing`, `qaqh-domain` or `qaqh-session`.
 
 use qaqh_client::{
-    ClientError, ClientV2Bootstrap, ClientV2Cursor, ClientV2CursorToken, ClientV2Event,
-    ClientV2EventEnvelope, ClientV2Payload, ClientV2Reset, ClientV2ResetReason,
-    ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent, RINGING_V2_BASE_PATH,
-    RINGING_V2_VERSION,
+    ClientError, ClientV2Bootstrap, ClientV2ControlState, ClientV2ConversationState,
+    ClientV2Cursor, ClientV2CursorToken, ClientV2Event, ClientV2EventEnvelope, ClientV2Payload,
+    ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2Subscription,
+    ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
 
 #[test]
@@ -17,6 +17,9 @@ fn v2_surface_is_nameable_from_the_client_root() {
     assert_eq!(token.decode_snapshot().expect("decoded cursor"), cursor);
 
     let _: Option<ClientV2Bootstrap> = None;
+    let _: Option<ClientV2ControlState> = None;
+    let _: Option<ClientV2ConversationState> = None;
+    let _: Option<ClientV2ToolState> = None;
     let _: Option<ClientV2Event> = None;
     let _: Option<ClientV2EventEnvelope> = None;
     let _: Option<ClientV2Payload> = None;

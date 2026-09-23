@@ -148,6 +148,14 @@ impl CursorToken {
         Ok(cursor)
     }
 
+    /// Wrap an opaque token received from the wire.
+    ///
+    /// Validation is deferred to [`Self::decode`] so the caller can map a
+    /// malformed token to a stable protocol error.
+    pub fn from_opaque(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

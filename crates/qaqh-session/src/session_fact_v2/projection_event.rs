@@ -129,6 +129,9 @@ pub struct ProjectionEvent {
     pub event_id: EventId,
     pub source_fact_seq: u64,
     pub source_event_id: EventId,
+    /// Causal source copied from the canonical fact (for example a command id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<EventId>,
     pub stream_key: StreamKey,
     pub delivery: Delivery,
     /// Reliable must be `Some` and match the delivery cursor's slot.
@@ -211,6 +214,7 @@ impl ProjectionEvent {
             event_id,
             source_fact_seq: source_fact.fact_seq,
             source_event_id: source_fact.event_id.clone(),
+            causation_id: source_fact.causation_id.clone(),
             stream_key,
             delivery: Delivery::Reliable {
                 cursor: ReliableCursor {
@@ -238,6 +242,7 @@ impl ProjectionEvent {
             event_id,
             source_fact_seq: source_fact.fact_seq,
             source_event_id: source_fact.event_id.clone(),
+            causation_id: source_fact.causation_id.clone(),
             stream_key,
             delivery: Delivery::Replaceable { revision },
             projection_slot: None,
@@ -258,6 +263,7 @@ impl ProjectionEvent {
             event_id,
             source_fact_seq: source_fact.fact_seq,
             source_event_id: source_fact.event_id.clone(),
+            causation_id: source_fact.causation_id.clone(),
             stream_key,
             delivery: Delivery::Ephemeral,
             projection_slot: None,
@@ -282,6 +288,18 @@ pub enum ProjectionPayload {
 }
 
 impl ProjectionPayload {
+    /// Projection revision carried by every reducer-facing delta.
+    pub fn revision(&self) -> Option<u64> {
+        match self {
+            Self::AuditRef(_) | Self::Unknown(_) => None,
+            _ => serde_json::to_value(self)
+                .ok()?
+                .get("data")?
+                .get("revision")?
+                .as_u64(),
+        }
+    }
+
     fn reliable_slot(&self) -> Option<ProjectionSlot> {
         match self {
             Self::ConversationDelta(_) => Some(ProjectionSlot::Conversation),
