@@ -13,12 +13,21 @@ use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
 
 use qaqh_message::PendingTool;
+use qaqh_session::canonical::{
+    ToolLedgerError, generate_ulid, sha256_content_hash, ulid_from_text,
+};
+use qaqh_session::session_fact_v2::{
+    ContentRef, EventId, ExecutionId, PolicyDecisionRef, SideEffectClass, ToolCallId, ToolError,
+    ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
+    ToolTerminalStatus,
+};
 use qaqh_workspace::AuthorizedToolCall;
 use qaqh_workspace::ExecProgressEvent;
 use qaqh_workspace::runtime::ToolExecutionScope;
 
 use crate::agent::dashboard;
 use crate::agent::engine_tool::ToolEngine;
+use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
 use crate::agent::types::{AdmittedTool, RingContext};
 
 /// 并行工具 worker 上限（保持 v1 行为）。
@@ -27,17 +36,39 @@ pub(crate) const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
 /// 取消收尾的取消原因文案（进入模型上下文的 tool_result）。
 const CANCELLED_TOOL_RESULT: &str = "[CANCELLED] Tool was not executed (user interrupted).";
 
+#[derive(Clone)]
+struct LedgerRun {
+    execution_id: ExecutionId,
+    intent_at_ms: i64,
+}
+
+/// A prepared call either enters the handler or is rejected by the durable
+/// ledger before any side effect can happen.
+enum ToolRunMode {
+    /// Append the durable intent immediately before this worker is spawned.
+    Prepare,
+    Execute {
+        ledger: Option<LedgerRun>,
+    },
+    Blocked {
+        message: String,
+    },
+}
+
 /// 一个已启动的工具 worker。
 pub(crate) struct ToolRun {
     pub call_id: String,
     pub tool_name: String,
     handle: JoinHandle<qaqh_workspace::execution::ToolExecResult>,
+    ledger: Option<LedgerRun>,
 }
 
 /// worker 的归一结果；panic 保留给调用方决定回填文案/路径。
 pub(crate) enum ToolRunOutcome {
     Completed(Box<qaqh_workspace::execution::ToolExecResult>),
     Panicked,
+    /// Handler completed but the canonical terminal could not be committed.
+    LedgerFailed(String),
 }
 
 pub(crate) struct ToolRunResult {
@@ -73,7 +104,7 @@ impl ToolRuntime {
     pub(crate) fn execute_batch(
         ctx: &mut RingContext,
         tool: &ToolEngine,
-        mut admitted: Vec<AdmittedTool>,
+        admitted: Vec<AdmittedTool>,
         tool_call_order: &[String],
         serial_call_ids: &HashSet<String>,
         turn_id: &str,
@@ -83,7 +114,8 @@ impl ToolRuntime {
         // right after the tool returns, so a kill between "tool ran" and "result
         // persisted" is still distinguishable from "tool never ran".
         let outbox_seed = ctx.agent.session.seed.clone();
-        admitted.sort_by_key(|item| {
+        let mut admitted = Self::prepare_admitted(ctx, admitted);
+        admitted.sort_by_key(|(item, _)| {
             tool_call_order
                 .iter()
                 .position(|id| id == &item.call_id)
@@ -92,7 +124,7 @@ impl ToolRuntime {
         let mut ordered_skill_effects = Vec::new();
         let (mut parallel, serial): (Vec<_>, Vec<_>) = admitted
             .into_iter()
-            .partition(|item| !serial_call_ids.contains(&item.call_id));
+            .partition(|(item, _)| !serial_call_ids.contains(&item.call_id));
 
         while !parallel.is_empty() {
             // 批间取消检查：取消已到达就不再 spawn 新工具线程、不再发
@@ -100,15 +132,15 @@ impl ToolRuntime {
             if ctx.cancel.is_set() {
                 let remaining = parallel
                     .iter()
-                    .map(|item| item.call_id.clone())
-                    .chain(serial.iter().map(|item| item.call_id.clone()));
+                    .map(|(item, _)| item.call_id.clone())
+                    .chain(serial.iter().map(|(item, _)| item.call_id.clone()));
                 seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
                 return false;
             }
             let batch_len = parallel.len().min(MAX_PARALLEL_TOOL_WORKERS);
             let batch: Vec<_> = parallel.drain(..batch_len).collect();
-            for admitted in &batch {
+            for (admitted, _) in &batch {
                 let call_id = admitted.call_id.clone();
                 let tool_name = admitted.auth.tool_name().to_string();
                 let tool_args = admitted.auth.args().clone();
@@ -116,7 +148,7 @@ impl ToolRuntime {
                     ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
                 );
             }
-            let (progress_rx, runs) = Self::spawn_batch(batch, outbox_seed.clone());
+            let (progress_rx, runs) = Self::spawn_batch(ctx, batch, outbox_seed.clone());
             let cancelled = ctx.cancel.is_set();
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
 
@@ -148,12 +180,24 @@ impl ToolRuntime {
                         "[ERROR] tool thread panicked",
                         false,
                     ),
+                    ToolRunOutcome::LedgerFailed(message) => {
+                        ctx.agent.msg.push_tool_result_canonical(
+                            &call_id,
+                            &qaqh_types::ToolResult::error_with(
+                                "LEDGER_WRITE_FAILED",
+                                message,
+                                false,
+                                None,
+                            ),
+                            &[],
+                        );
+                    }
                 }
             }
             if cancelled {
                 // 剩余并行批根本没起，或上面的项被回收时仍未落结果——统一补终态，
                 // 保证「每个 tool_use 恰有一条 tool_result」。
-                let remaining = parallel.iter().map(|item| item.call_id.clone());
+                let remaining = parallel.iter().map(|(item, _)| item.call_id.clone());
                 seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
                 parallel.clear();
                 break;
@@ -161,13 +205,13 @@ impl ToolRuntime {
         }
 
         let mut serial = serial.into_iter();
-        while let Some(admitted) = serial.next() {
+        while let Some((admitted, mode)) = serial.next() {
             if ctx.cancel.is_set() {
                 // 串行路径取消：已收集的 skill_effects 照常应用，未执行的项（当前
                 // 这一项及其后全部）补取消终态。旧实现 `return false` 会丢弃已
                 // 收集的 skill_effects，并把未执行的 tool_use 留成 open。
                 let remaining = std::iter::once(admitted.call_id)
-                    .chain(serial.by_ref().map(|admitted| admitted.call_id));
+                    .chain(serial.by_ref().map(|(admitted, _)| admitted.call_id));
                 seal_unexecuted_as_cancelled(ctx, remaining, CANCELLED_TOOL_RESULT);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
                 return false;
@@ -178,7 +222,8 @@ impl ToolRuntime {
             ToolEngine::emit_timeline_tool_running(
                 ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
             );
-            let (progress_rx, runs) = Self::spawn_batch(vec![admitted], outbox_seed.clone());
+            let (progress_rx, runs) =
+                Self::spawn_batch(ctx, vec![(admitted, mode)], outbox_seed.clone());
             let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
             for result in results {
                 match result.outcome {
@@ -200,6 +245,18 @@ impl ToolRuntime {
                         "[ERROR] tool thread panicked",
                         false,
                     ),
+                    ToolRunOutcome::LedgerFailed(message) => {
+                        ctx.agent.msg.push_tool_result_canonical(
+                            &call_id,
+                            &qaqh_types::ToolResult::error_with(
+                                "LEDGER_WRITE_FAILED",
+                                message,
+                                false,
+                                None,
+                            ),
+                            &[],
+                        );
+                    }
                 }
             }
         }
@@ -214,26 +271,336 @@ impl ToolRuntime {
         true
     }
 
+    /// Classify every admitted call against the durable ledger before
+    /// scheduling. New calls are marked `Prepare`; their intent is appended
+    /// immediately before the worker spawn so a cancelled serial tail does not
+    /// leave an orphan intent.
+    fn prepare_admitted(
+        ctx: &mut RingContext,
+        admitted: Vec<AdmittedTool>,
+    ) -> Vec<(AdmittedTool, ToolRunMode)> {
+        let ledger = match ctx.agent.tool_ledger_mut() {
+            Ok(Some(ledger)) => ledger,
+            Ok(None) => {
+                return admitted
+                    .into_iter()
+                    .map(|item| (item, ToolRunMode::Execute { ledger: None }))
+                    .collect();
+            }
+            Err(error) => {
+                let message = format!("tool ledger unavailable: {error}");
+                return admitted
+                    .into_iter()
+                    .map(|item| {
+                        (
+                            item,
+                            ToolRunMode::Blocked {
+                                message: message.clone(),
+                            },
+                        )
+                    })
+                    .collect();
+            }
+        };
+
+        let mut prepared = Vec::with_capacity(admitted.len());
+        for item in admitted {
+            let call_id = canonical_call_id(&item.call_id);
+            let existing = ledger
+                .get(&call_id)
+                .map(|entry| (entry.finished().cloned(), entry.intent().cloned()));
+
+            if let Some((Some(finished), _)) = existing {
+                prepared.push((
+                    item,
+                    ToolRunMode::Blocked {
+                        message: format!(
+                            "tool call {} already has terminal {:?}; refusing to execute again",
+                            call_id, finished.terminal_status
+                        ),
+                    },
+                ));
+                continue;
+            }
+
+            if let Some((_, Some(intent))) = existing {
+                if matches!(
+                    &intent.replay_capability,
+                    ToolReplayCapability::IdempotentReplay
+                ) {
+                    let now = unix_ms();
+                    if let Err(error) = ledger.ensure_lease(now, tool_ledger_lease_ms()) {
+                        prepared.push((
+                            item,
+                            ToolRunMode::Blocked {
+                                message: format!(
+                                    "tool ledger lease renewal failed before replay: {error}"
+                                ),
+                            },
+                        ));
+                        continue;
+                    }
+                    prepared.push((
+                        item,
+                        ToolRunMode::Execute {
+                            ledger: Some(LedgerRun {
+                                execution_id: intent.execution_id.clone(),
+                                intent_at_ms: intent.intent_at_ms,
+                            }),
+                        },
+                    ));
+                    continue;
+                }
+
+                let now = unix_ms();
+                let finished = Self::indeterminate_finished(&call_id, &intent, now);
+                let message = match ledger.append_finished(
+                    EventId::new(generate_ulid()),
+                    None,
+                    finished,
+                    now,
+                ) {
+                    Ok(_) => format!(
+                        "tool call {} is indeterminate after an open intent; refusing replay",
+                        call_id
+                    ),
+                    Err(error) => format!(
+                        "tool call {} has an open intent and could not be sealed: {error}",
+                        call_id
+                    ),
+                };
+                prepared.push((item, ToolRunMode::Blocked { message }));
+                continue;
+            }
+
+            // New durable calls append their intent immediately before the
+            // worker spawn in `spawn_batch`; appending here would create
+            // orphan intents for a serial tail cancelled before it runs.
+            prepared.push((item, ToolRunMode::Prepare));
+        }
+        prepared
+    }
+
+    fn prepare_one(
+        ctx: &mut RingContext,
+        item: &AdmittedTool,
+    ) -> Result<Option<LedgerRun>, String> {
+        let Some(ledger) = ctx
+            .agent
+            .tool_ledger_mut()
+            .map_err(|error| format!("tool ledger unavailable: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let now = unix_ms();
+        ledger
+            .ensure_lease(now, tool_ledger_lease_ms())
+            .map_err(|error| format!("tool ledger lease renewal failed: {error}"))?;
+        let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
+        let intent = Self::build_intent(item, &execution_id, now);
+        ledger
+            .append_intent(EventId::new(generate_ulid()), None, intent, now)
+            .map_err(|error| format!("tool intent append failed: {error}"))?;
+        Ok(Some(LedgerRun {
+            execution_id,
+            intent_at_ms: now,
+        }))
+    }
+
+    fn build_intent(item: &AdmittedTool, execution_id: &ExecutionId, now: i64) -> ToolIntent {
+        let capabilities =
+            qaqh_workspace::tool_capabilities::builtin_capabilities(item.auth.tool_name())
+                .unwrap_or_default();
+        let args_bytes = serde_json::to_vec(item.auth.args()).unwrap_or_default();
+        let args_hash = sha256_content_hash(&args_bytes);
+        let context = item.scope.context();
+        let sandbox_bytes = serde_json::to_vec(&serde_json::json!({
+            "workspace_root": context.workspace_root.to_string_lossy(),
+            "mode": format!("{:?}", context.mode),
+            "permission_level": context.permission_level as u8,
+            "sandbox": format!("{:?}", context.sandbox),
+        }))
+        .unwrap_or_default();
+        let sandbox_spec_hash = sha256_content_hash(&sandbox_bytes);
+
+        ToolIntent {
+            call_id: canonical_call_id(&item.call_id),
+            execution_id: execution_id.clone(),
+            idempotency_key: capabilities
+                .idempotent
+                .then(|| format!("{}:{}", item.auth.tool_name(), item.call_id)),
+            replay_capability: if capabilities.idempotent {
+                ToolReplayCapability::IdempotentReplay
+            } else {
+                ToolReplayCapability::NoReplay
+            },
+            policy_decision: PolicyDecisionRef {
+                outcome: ToolIntentPolicyOutcome::Allow,
+                rule_id: format!("authorized:{}", item.auth.grant().as_str()),
+                decided_at_ms: now,
+                reason_ref: None,
+            },
+            effective_args_ref: Some(ContentRef::new(args_hash.clone())),
+            effective_args_hash: Some(args_hash),
+            sandbox_spec_hash,
+            side_effect_class: side_effect_class(item.auth.tool_name()),
+            intent_at_ms: now,
+        }
+    }
+
+    fn indeterminate_finished(call_id: &ToolCallId, intent: &ToolIntent, now: i64) -> ToolFinished {
+        ToolFinished {
+            call_id: call_id.clone(),
+            execution_id: Some(intent.execution_id.clone()),
+            terminal_status: ToolTerminalStatus::Indeterminate,
+            output_ref: None,
+            error: Some(ToolError {
+                code: "indeterminate_after_crash".into(),
+                message: "non-idempotent execution was not replayed".into(),
+                retryable: false,
+                details_ref: None,
+            }),
+            metrics: ToolMetrics {
+                started_at_ms: intent.intent_at_ms,
+                finished_at_ms: now,
+                retry_count: 0,
+                output_bytes: 0,
+                progress_bytes_total: 0,
+            },
+            reconciled: false,
+            evidence_ref: None,
+            evidence_fact_seq: None,
+            evidence_event_id: None,
+            recovery_ref: None,
+            finished_at_ms: now,
+        }
+    }
+
+    fn append_finished(
+        ctx: &mut RingContext,
+        call_id: &str,
+        ledger_run: &LedgerRun,
+        outcome: &ToolRunOutcome,
+    ) -> Result<(), ToolLedgerError> {
+        let Some(ledger) = ctx.agent.tool_ledger_mut()? else {
+            return Ok(());
+        };
+        let now = unix_ms();
+        ledger.ensure_lease(now, tool_ledger_lease_ms())?;
+        let (terminal_status, error, output_bytes) = match outcome {
+            ToolRunOutcome::Completed(result) => (
+                terminal_status(result.result.status),
+                canonical_tool_error(result.result.error.as_ref()),
+                result.content.len() as u64,
+            ),
+            ToolRunOutcome::Panicked => (
+                ToolTerminalStatus::Indeterminate,
+                Some(ToolError {
+                    code: "tool_panicked".into(),
+                    message: "tool thread panicked; side-effect outcome is unknown".into(),
+                    retryable: false,
+                    details_ref: None,
+                }),
+                0,
+            ),
+            ToolRunOutcome::LedgerFailed(message) => (
+                ToolTerminalStatus::Indeterminate,
+                Some(ToolError {
+                    code: "ledger_write_failed".into(),
+                    message: message.clone(),
+                    retryable: false,
+                    details_ref: None,
+                }),
+                0,
+            ),
+        };
+        let finished = ToolFinished {
+            call_id: canonical_call_id(call_id),
+            execution_id: Some(ledger_run.execution_id.clone()),
+            terminal_status,
+            output_ref: None,
+            error,
+            metrics: ToolMetrics {
+                started_at_ms: ledger_run.intent_at_ms,
+                finished_at_ms: now,
+                retry_count: 0,
+                output_bytes,
+                progress_bytes_total: 0,
+            },
+            reconciled: false,
+            evidence_ref: None,
+            evidence_fact_seq: None,
+            evidence_event_id: None,
+            recovery_ref: None,
+            finished_at_ms: now,
+        };
+        ledger.append_finished(EventId::new(generate_ulid()), None, finished, now)?;
+        Ok(())
+    }
+
     /// 启动一批已经授权的工具 worker。
     ///
     /// 调用方负责把 `admitted` 限制在 [`MAX_PARALLEL_TOOL_WORKERS`] 内；本函数
     /// 不做调度决策，只负责执行机制。进度 sender 共享给本批所有 worker。
-    pub(crate) fn spawn_batch(
-        admitted: Vec<AdmittedTool>,
+    fn spawn_batch(
+        ctx: &mut RingContext,
+        admitted: Vec<(AdmittedTool, ToolRunMode)>,
         outbox_seed: String,
     ) -> (Receiver<ExecProgressEvent>, Vec<ToolRun>) {
         let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
         let mut runs = Vec::with_capacity(admitted.len());
-        for admitted in admitted {
+        for (admitted, mode) in admitted {
             let tx = progress_tx.clone();
-            runs.push(Self::spawn(
-                admitted.call_id,
-                admitted.auth.tool_name().to_string(),
-                admitted.auth,
-                admitted.scope,
-                tx,
-                outbox_seed.clone(),
-            ));
+            let call_id = admitted.call_id.clone();
+            let tool_name = admitted.auth.tool_name().to_string();
+            match mode {
+                ToolRunMode::Prepare => match Self::prepare_one(ctx, &admitted) {
+                    Ok(ledger) => runs.push(Self::spawn(
+                        call_id,
+                        tool_name,
+                        admitted.auth,
+                        admitted.scope,
+                        tx,
+                        outbox_seed.clone(),
+                        ledger,
+                    )),
+                    Err(message) => {
+                        let blocked_name = tool_name.clone();
+                        let handle = std::thread::Builder::new()
+                            .stack_size(4 * 1024 * 1024)
+                            .spawn(move || blocked_tool_exec_result(&blocked_name, &message))
+                            .expect("tool thread spawn");
+                        runs.push(ToolRun {
+                            call_id,
+                            tool_name,
+                            handle,
+                            ledger: None,
+                        });
+                    }
+                },
+                ToolRunMode::Execute { ledger } => runs.push(Self::spawn(
+                    call_id,
+                    tool_name,
+                    admitted.auth,
+                    admitted.scope,
+                    tx,
+                    outbox_seed.clone(),
+                    ledger,
+                )),
+                ToolRunMode::Blocked { message } => {
+                    let blocked_name = tool_name.clone();
+                    let handle = std::thread::Builder::new()
+                        .stack_size(4 * 1024 * 1024)
+                        .spawn(move || blocked_tool_exec_result(&blocked_name, &message))
+                        .expect("tool thread spawn");
+                    runs.push(ToolRun {
+                        call_id,
+                        tool_name,
+                        handle,
+                        ledger: None,
+                    });
+                }
+            }
         }
         drop(progress_tx);
         (progress_rx, runs)
@@ -245,21 +612,27 @@ impl ToolRuntime {
         ctx: &mut RingContext,
         tool: &ToolEngine,
         call_id: String,
-        tool_name: String,
+        _tool_name: String,
         auth: Box<AuthorizedToolCall>,
         context: qaqh_workspace::tool_api::ToolCallContext,
         turn_id: &str,
         round_num: u32,
     ) -> ToolRunResult {
-        let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-        let run = Self::spawn(
+        let admitted = AdmittedTool {
             call_id,
-            tool_name,
             auth,
-            ToolExecutionScope::capture(context),
-            progress_tx,
-            ctx.agent.session.seed.clone(),
-        );
+            scope: ToolExecutionScope::capture(context),
+        };
+        let prepared = Self::prepare_admitted(ctx, vec![admitted]);
+        let (admitted, mode) = prepared
+            .into_iter()
+            .next()
+            .expect("single admitted tool must produce one prepared call");
+        let (progress_rx, mut runs) =
+            Self::spawn_batch(ctx, vec![(admitted, mode)], ctx.agent.session.seed.clone());
+        let run = runs
+            .pop()
+            .expect("single tool runtime run must produce one worker");
         Self::collect(ctx, tool, progress_rx, vec![run], turn_id, round_num)
             .into_iter()
             .next()
@@ -281,13 +654,28 @@ impl ToolRuntime {
 
         runs.into_iter()
             .map(|run| {
-                let outcome = match run.handle.join() {
+                let ToolRun {
+                    call_id,
+                    tool_name,
+                    handle,
+                    ledger,
+                } = run;
+                let outcome = match handle.join() {
                     Ok(result) => ToolRunOutcome::Completed(Box::new(result)),
                     Err(_) => ToolRunOutcome::Panicked,
                 };
+                if let Some(ledger_run) = ledger
+                    && let Err(error) = Self::append_finished(ctx, &call_id, &ledger_run, &outcome)
+                {
+                    return ToolRunResult {
+                        call_id,
+                        tool_name,
+                        outcome: ToolRunOutcome::LedgerFailed(error.to_string()),
+                    };
+                }
                 ToolRunResult {
-                    call_id: run.call_id,
-                    tool_name: run.tool_name,
+                    call_id,
+                    tool_name,
                     outcome,
                 }
             })
@@ -301,6 +689,7 @@ impl ToolRuntime {
         scope: ToolExecutionScope,
         progress_tx: qaqh_workspace::ExecProgressSender,
         outbox_seed: String,
+        ledger: Option<LedgerRun>,
     ) -> ToolRun {
         let worker_call_id = call_id.clone();
         let worker_tool_name = tool_name.clone();
@@ -328,7 +717,65 @@ impl ToolRuntime {
             call_id,
             tool_name,
             handle,
+            ledger,
         }
+    }
+}
+
+fn canonical_call_id(wire_call_id: &str) -> ToolCallId {
+    ToolCallId::new(format!("call_{}", ulid_from_text(wire_call_id)))
+}
+
+fn terminal_status(status: qaqh_types::ToolStatus) -> ToolTerminalStatus {
+    match status {
+        qaqh_types::ToolStatus::Ok => ToolTerminalStatus::Succeeded,
+        qaqh_types::ToolStatus::Error => ToolTerminalStatus::Failed,
+        qaqh_types::ToolStatus::Partial => ToolTerminalStatus::Partial,
+        qaqh_types::ToolStatus::Backgrounded => ToolTerminalStatus::Backgrounded,
+        qaqh_types::ToolStatus::Cancelled => ToolTerminalStatus::Cancelled,
+    }
+}
+
+fn canonical_tool_error(error: Option<&qaqh_types::ToolError>) -> Option<ToolError> {
+    error.map(|error| ToolError {
+        code: error.code.clone(),
+        message: error.message.clone(),
+        retryable: error.retryable,
+        details_ref: None,
+    })
+}
+
+fn side_effect_class(tool_name: &str) -> SideEffectClass {
+    match tool_name {
+        "read" | "glob" | "grep" | "read_image" | "todo_list" => SideEffectClass::ReadOnly,
+        "exec" | "process" => SideEffectClass::Process,
+        "web_fetch" => SideEffectClass::Network,
+        _ => SideEffectClass::WorkspaceWrite,
+    }
+}
+
+fn blocked_tool_exec_result(
+    tool_name: &str,
+    message: &str,
+) -> qaqh_workspace::execution::ToolExecResult {
+    qaqh_workspace::execution::ToolExecResult {
+        content: message.to_string(),
+        success: false,
+        result: qaqh_types::ToolResult::error_with(
+            "LEDGER_BLOCKED",
+            message.to_string(),
+            false,
+            None,
+        ),
+        meta: qaqh_workspace::ToolExecMeta {
+            name: tool_name.to_string(),
+            elapsed_ms: 0,
+            output_size: 0,
+            success: false,
+            args_summary: String::new(),
+        },
+        code_delta: None,
+        skill_effects: Vec::new(),
     }
 }
 
