@@ -192,24 +192,6 @@ fn compact_args_summary(args: &serde_json::Value) -> String {
 }
 
 /// ask 的结果由 interaction 面板承载；display 只留一条调用语义。
-pub(crate) fn project_ask(args: &serde_json::Value, _output: &str) -> ToolDisplay {
-    let count = args
-        .get("questions")
-        .and_then(|value| value.as_array())
-        .map(Vec::len)
-        .unwrap_or(1);
-    ToolDisplay::new(
-        ToolHeader::Other {
-            label: "ask".to_string(),
-        },
-        ToolBody::None,
-    )
-    .with_summary(format!(
-        "asked {count} question{}",
-        if count == 1 { "" } else { "s" }
-    ))
-}
-
 /// skills 的 activate/list/resource/validate 输出各自有明确回执语义。
 pub(crate) fn project_skills(args: &serde_json::Value, output: &str) -> ToolDisplay {
     let action = args
@@ -414,10 +396,26 @@ mod tests {
 
     #[test]
     fn ask_and_skills_use_panel_semantics_without_json_dumping() {
-        let ask = project_ask(
-            &json!({"questions": [{"question": "A?"}, {"question": "B?"}]}),
-            &crate::json_ok(json!({"mode":"batch"})),
-        );
+        let ask = crate::ask_user::AskOutput {
+            timeis: crate::now_utc8(),
+            status: "ok".to_string(),
+            mode: crate::ask_user::NormalizedAskMode::Batch,
+            questions: vec![
+                crate::ask_user::NormalizedAskQuestion {
+                    id: "q1".to_string(),
+                    question: "A?".to_string(),
+                    options: Vec::new(),
+                    allow_custom: true,
+                },
+                crate::ask_user::NormalizedAskQuestion {
+                    id: "q2".to_string(),
+                    question: "B?".to_string(),
+                    options: Vec::new(),
+                    allow_custom: true,
+                },
+            ],
+        };
+        let ask = ask.display(&json!({}));
         assert_eq!(ask.summary.as_deref(), Some("asked 2 questions"));
         assert_eq!(ask.body, ToolBody::None);
 
