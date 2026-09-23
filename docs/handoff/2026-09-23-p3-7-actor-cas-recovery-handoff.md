@@ -52,11 +52,17 @@
     `status:"ok"`）wire 形态；
   - model/display 从同一 typed output 派生，删除对应文本 projector；
   - 缺参、非法 pattern/regex、越界路径继续保留 legacy `TOOL_ERROR`。
+- `web_fetch` typed 迁移：
+  - URL 抓取、HTML 转文本、512 KiB 限流与可选 `output` 落盘保持原语义；
+  - `output` 路径相对显式 `ToolCallContext.workspace_root` 解析，journal
+    session 取 `ctx.session_id`；
+  - 缺 URL 保留 `MISSING_URL`，网络/读取失败保留 legacy `TOOL_ERROR`
+    JSON payload 形态；成功结果 canonical data 仍为空对象。
 
 仍未完成：
 
 - 尚未迁移为 `TypedTool` 的 legacy 工具（read/write/edit/apply_patch/
-  copy_range/web_fetch/journal/read_image/exec/ask 等）仍依赖文本 projector；
+  copy_range/journal/read_image/exec/ask 等）仍依赖文本 projector；
   typed 工具已完全脱离该路径。
 - 旧 `tool_outbox.wal` 的只读兼容代码可在兼容窗口结束后删除；当前保留
   是为了让升级前会话仍能恢复。
