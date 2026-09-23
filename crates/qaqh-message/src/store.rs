@@ -399,24 +399,48 @@ impl MessageStore {
     /// Call ids of orphan tool_use entries repaired by [`Self::from_messages`]
     /// with a synthetic `[RESTORE]` result (see [`SYNTHETIC_RESTORE_PREFIX`]).
     pub fn synthetic_repair_call_ids(&self) -> Vec<String> {
-        let mut ids = Vec::new();
+        self.synthetic_repair_entries()
+            .into_iter()
+            .map(|(call_id, _)| call_id)
+            .collect()
+    }
+
+    /// Call ids and declared tool names of synthetic `[RESTORE]` repairs.
+    pub fn synthetic_repair_entries(&self) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
         for turn in &self.turns {
             for step in &turn.steps {
                 for result in &step.tool_results {
                     for block in &result.content {
-                        if let qaqh_types::ContentBlock::ToolResult {
+                        let qaqh_types::ContentBlock::ToolResult {
                             tool_use_id,
                             result,
                         } = block
-                            && result.model_text().starts_with(SYNTHETIC_RESTORE_PREFIX)
-                        {
-                            ids.push(tool_use_id.clone());
+                        else {
+                            continue;
+                        };
+                        if !result.model_text().starts_with(SYNTHETIC_RESTORE_PREFIX) {
+                            continue;
                         }
+                        let name = step
+                            .assistant
+                            .content
+                            .iter()
+                            .find_map(|block| match block {
+                                qaqh_types::ContentBlock::ToolUse { id, name, .. }
+                                    if id == tool_use_id =>
+                                {
+                                    Some(name.clone())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        entries.push((tool_use_id.clone(), name));
                     }
                 }
             }
         }
-        ids
+        entries
     }
 
     /// Refine a synthetic `[RESTORE]` placeholder with richer recovery

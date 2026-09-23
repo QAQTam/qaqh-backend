@@ -14,7 +14,7 @@
 //! - `cancel_grace`：`1s` = 进程内、IO 边界轮询取消；`5s` = 派生进程组或批量
 //!   重写（exec/process/journal；spec Q7 的兜底值，迁移时按实际收割路径标定）。
 //! - `idempotent`：`true` ⇔ 纯读取（重放不改本地状态）；写类/交互类/exec 一律
-//!   `false`（对齐 tool_outbox「已执行事实」语义）。
+//!   `false`（对齐 canonical ToolIntent「已准入执行」语义）。
 //! - `workspace_bound`：触碰工作区文件的工具为 `true`（执行器须强制注入
 //!   workspace_root）；纯交互（ask）、会话内存（todo_*）、网络（web_fetch）为 `false`。
 //! - `interactive`：`ask` 为 `true`，允许 descriptor 用零 `default_timeout`
