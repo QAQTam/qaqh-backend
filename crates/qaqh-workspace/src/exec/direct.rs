@@ -2,7 +2,8 @@
 
 use std::sync::{Arc, atomic::AtomicU64};
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::{ExecOutputStream, ExecProgressSender};
 
@@ -64,7 +65,7 @@ pub(crate) fn direct_exec(
         Ok(c) => c,
         Err(e) => {
             return ExecOutput {
-                status: "completed",
+                status: "completed".to_string(),
                 command: display_name,
                 exit_code: Some(-1),
                 output: format!("SPAWN FAILED: {e}"),
@@ -211,7 +212,7 @@ pub(crate) fn direct_exec(
         let info = crate::process_registry::ProcessRegistry::get_info(proc_id)
             .unwrap_or_else(|| serde_json::json!({}));
         return ExecOutput {
-            status: "backgrounded",
+            status: "backgrounded".to_string(),
             command: display_name,
             exit_code: None,
             output: serde_json::json!({
@@ -298,7 +299,11 @@ pub(crate) fn direct_exec(
     };
 
     ExecOutput {
-        status: if cancelled { "cancelled" } else { "completed" },
+        status: if cancelled {
+            "cancelled".to_string()
+        } else {
+            "completed".to_string()
+        },
         command: display_name,
         exit_code,
         output: output_str,
@@ -310,17 +315,24 @@ pub(crate) fn direct_exec(
 }
 
 /// Structured output from a command execution.
-#[derive(Serialize, Debug, Clone)]
-pub(crate) struct ExecOutput {
-    pub(crate) status: &'static str,
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+pub struct ExecOutput {
+    #[serde(default)]
+    pub(crate) status: String,
+    #[serde(default)]
     pub(crate) command: String,
+    #[serde(default)]
     pub(crate) exit_code: Option<i32>,
+    #[serde(default)]
     pub(crate) output: String,
+    #[serde(default)]
     pub(crate) truncated: bool,
+    #[serde(default)]
     pub(crate) timed_out: bool,
+    #[serde(default)]
     pub(crate) cancelled: bool,
     /// 超时移交后台时的注册表进程 id（由 process 的 action 使用）。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) process_id: Option<u32>,
 }
 

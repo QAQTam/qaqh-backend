@@ -109,11 +109,13 @@ fn project_output<O: ToolProjection>(
         display.summary = output.summary();
     }
     let output_bytes = model_text.len() as u64;
+    let status = output.status();
+    let error = output.error();
 
     ToolOutcome {
-        status: qaqh_types::ToolStatus::Ok,
+        status,
         output: ToolOutputValue::Json(output_value),
-        error: None,
+        error,
         model: ToolModelProjection {
             text: model_text,
             truncated: false,

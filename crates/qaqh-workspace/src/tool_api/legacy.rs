@@ -355,7 +355,7 @@ fn map_error(error: &qaqh_types::ToolError) -> ToolError {
 ///
 /// 返回给 legacy handler 的 sender 被丢弃后，转发线程自行退出；
 /// 线程分离运行（不 join）——后台进程可能在工具返回后继续产生进度帧。
-fn bridge_progress(sink: &ProgressSink) -> ExecProgressSender {
+pub(crate) fn bridge_progress(sink: &ProgressSink) -> ExecProgressSender {
     let (tx, rx) = crate::bounded_exec_progress_channel();
     let sink = sink.clone();
     let spawned = std::thread::Builder::new()
