@@ -304,22 +304,6 @@ pub(crate) fn project_process(args: &serde_json::Value, output: &str) -> ToolDis
     with_line_summary(display, summary)
 }
 
-pub(crate) fn project_journal(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    let action = args
-        .get("action")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("query");
-    let display = ToolDisplay::new(
-        ToolHeader::Other {
-            label: format!("journal {action}"),
-        },
-        text_body(output),
-    );
-    with_line_summary(display, first_human_line(output))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
