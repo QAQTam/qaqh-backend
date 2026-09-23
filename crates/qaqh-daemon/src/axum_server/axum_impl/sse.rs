@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use qaqh_runtime::QaqhService;
 use qaqh_session::actor::ConnectionId;
 
+use super::test_hooks::SseTerminate;
 use super::*;
 
 /// 活跃会话但尚无任何 seed 分片时的挂起轮询间隔（reviewer 阻断 1）。
@@ -35,14 +36,28 @@ pub(crate) fn parse_sse_cursor(cursor: &str, epoch: &str, channel: RingingChanne
 }
 
 pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
+    if cursor.is_empty() {
+        // 首次连接：没有 cursor 就是从头开始，这是正常路径，不告警。
+        return 0;
+    }
     let mut parts = cursor.split(':');
     let e = parts.next().unwrap_or_default();
     let kind = parts.next().unwrap_or_default();
     let seq = parts.next().and_then(|v| v.parse::<u64>().ok());
-    if e == epoch && kind == "timeline" && parts.next().is_none() {
-        seq.unwrap_or(0)
-    } else {
-        0
+    let shape_ok = e == epoch && kind == "timeline" && parts.next().is_none();
+    match (shape_ok, seq) {
+        (true, Some(seq)) => seq,
+        _ => {
+            // 两类都落到这里，且都属于「静默全量重放」，所以都要告警：
+            // 1) 形状不符 —— channel SSE 写的是 `{epoch}:{channel}:{seq}`，epoch 轮换
+            //    或游标被截断都会出现；
+            // 2) 形状合法但 seq 缺失/非法 —— 如 `{epoch}:timeline:` 或
+            //    `{epoch}:timeline:abc`。
+            log::warn!(
+                "[sse] timeline Last-Event-ID {cursor:?} is not a usable `{{epoch}}:timeline:{{seq}}` cursor for epoch {epoch:?}; replaying from 0"
+            );
+            0
+        }
     }
 }
 
@@ -66,6 +81,42 @@ fn envelope_to_event(
 fn reset_to_event(reset: &RingingResetRequired) -> Event {
     let data = serde_json::to_string(reset).unwrap_or_else(|_| "{}".into());
     Event::default().event("ringing.reset_required").data(data)
+}
+
+fn injected_termination_event(
+    fault: &SseTerminate,
+    channel: Option<&str>,
+    seed: Option<&str>,
+) -> Event {
+    let mut payload = serde_json::json!({
+        "code": fault.code,
+        "message": "test-injected stream termination; reconnect to continue",
+    });
+    if let Some(channel) = channel {
+        payload["channel"] = serde_json::Value::String(channel.to_string());
+    }
+    if let Some(seed) = seed {
+        payload["seed"] = serde_json::Value::String(seed.to_string());
+    }
+    if let Some(skipped) = fault.skipped {
+        payload["skipped"] = serde_json::Value::from(skipped);
+    }
+    Event::default()
+        .event("ringing.stream_terminated")
+        .data(payload.to_string())
+}
+
+fn injected_termination_response(
+    fault: SseTerminate,
+    channel: Option<&str>,
+    seed: Option<&str>,
+) -> Response {
+    let event = injected_termination_event(&fault, channel, seed);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(event)).await;
+    });
+    Sse::new(ReceiverStream::new(rx)).into_response()
 }
 
 fn timeline_entry_to_event(epoch: &str, seed: &str, entry: &qaqh_domain::TimelineEntry) -> Event {
@@ -490,6 +541,9 @@ pub(crate) async fn handle_events(
     let Some(channel) = parse_channel(&channel_str) else {
         return (StatusCode::NOT_FOUND, "unknown channel").into_response();
     };
+    if let Some(fault) = state.test_hooks.take_channel_terminate(channel) {
+        return injected_termination_response(fault, Some(channel.as_str()), None);
+    }
     // Last-Event-ID from header or ?last_event_id= query (ringing_http compat)
     let last_event_id = headers
         .get("last-event-id")
@@ -617,12 +671,20 @@ pub(crate) async fn handle_timeline_events(
     let Some(session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
-    if seed.is_empty()
-        || !state
-            .leases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .owns_seed(&session_id, &seed)
+    if seed.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    }
+    if state.test_hooks.session_is_404(&seed) {
+        return session_not_found_response(&seed);
+    }
+    if let Some(fault) = state.test_hooks.take_timeline_terminate() {
+        return injected_termination_response(fault, Some("timeline"), Some(&seed));
+    }
+    if !state
+        .leases
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .owns_seed(&session_id, &seed)
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -645,10 +707,22 @@ pub(crate) async fn handle_timeline_events(
     let leases = state.leases.clone();
     let seed_clone = seed.clone();
     let session_id_clone = session_id.clone();
+    let inject_timeline_gap = state.test_hooks.take_timeline_gap();
 
     let (tx, rx_stream) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
+        let mut gap_remaining = usize::from(inject_timeline_gap);
         for entry in replay {
+            // Gap injection drops exactly one deliverable entry and keeps
+            // streaming: the client's cursor stays at `after`, so the next
+            // real entry it receives is `after + 2` and its own `cursor + 1`
+            // check fires. Never synthesise a frame and never close the
+            // stream here — closing would make the client reconnect with the
+            // same cursor and receive the already-sent entry twice.
+            if gap_remaining > 0 {
+                gap_remaining -= 1;
+                continue;
+            }
             let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
             if tx.send(Ok(ev)).await.is_err() {
                 return;
@@ -658,6 +732,9 @@ pub(crate) async fn handle_timeline_events(
         loop {
             match rx.recv().await {
                 Ok(live) => {
+                    // Seed ownership and cursor/dedup checks must precede gap
+                    // injection; otherwise a foreign seed could be relabeled
+                    // with this stream's seed.
                     if !should_deliver_timeline_live(
                         &live,
                         &session_id_clone,
@@ -666,6 +743,10 @@ pub(crate) async fn handle_timeline_events(
                         &replayed,
                         &leases,
                     ) {
+                        continue;
+                    }
+                    if gap_remaining > 0 {
+                        gap_remaining -= 1;
                         continue;
                     }
                     if !leases
