@@ -255,12 +255,21 @@ pub fn execute_authorized_with_context(
         .collect();
 
     // P4 A1: write/exec/net 必须先写 durable audit intent；失败不得进入 handler。
-    if matches!(
+    let high_risk = matches!(
         category,
         crate::permission::ToolCategory::Write
             | crate::permission::ToolCategory::Exec
             | crate::permission::ToolCategory::Net
-    ) {
+    );
+    if high_risk && crate::audit::is_quarantined() {
+        return failure(
+            &name,
+            crate::ToolError::AuditQuarantined {
+                message: "audit store is quarantined; high-risk tool dispatch is blocked".into(),
+            },
+        );
+    }
+    if high_risk {
         let objects = audit_paths
             .iter()
             .map(|path| crate::audit::v2::AuditObject {
@@ -414,6 +423,19 @@ pub fn execute_authorized_with_context(
             };
             if let Err(e) = crate::audit::append_audit(&audit_entry) {
                 log::error!("audit: append failed for {name}: {e}");
+                if high_risk {
+                    let reason =
+                        format!("result audit barrier failed after handler execution: {e}");
+                    if let Err(quarantine_error) = crate::audit::quarantine(&audit_entry, &reason) {
+                        log::error!(
+                            "audit: quarantine sink failed for {name} after result barrier failure: {quarantine_error}"
+                        );
+                    }
+                    return failure(
+                        &name,
+                        crate::ToolError::AuditQuarantined { message: reason },
+                    );
+                }
             }
             result
         }

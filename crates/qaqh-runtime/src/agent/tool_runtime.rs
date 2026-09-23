@@ -827,6 +827,13 @@ fn terminal_status(result: &qaqh_types::ToolResult) -> ToolTerminalStatus {
     if result
         .error
         .as_ref()
+        .is_some_and(|error| error.code == "AUDIT_QUARANTINED")
+    {
+        return ToolTerminalStatus::Indeterminate;
+    }
+    if result
+        .error
+        .as_ref()
         .is_some_and(|error| error.code == "TIMEOUT")
     {
         return ToolTerminalStatus::TimedOut;
@@ -1102,6 +1109,21 @@ mod tests {
             terminal_status(&result),
             ToolTerminalStatus::TimedOut,
             "timeout must not collapse into generic failed"
+        );
+    }
+
+    #[test]
+    fn audit_quarantine_maps_to_canonical_indeterminate() {
+        let result = qaqh_types::ToolResult::error_with(
+            "AUDIT_QUARANTINED",
+            "result audit failed after side effects".to_string(),
+            false,
+            None,
+        );
+        assert_eq!(
+            terminal_status(&result),
+            ToolTerminalStatus::Indeterminate,
+            "quarantined side effects must not be reported as a definite failure"
         );
     }
 }
