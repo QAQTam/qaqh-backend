@@ -4,9 +4,11 @@ use qaqh_session::canonical::{
     CommittedFactReader, ToolLedger, ToolLedgerError, ToolRecoveryDisposition, WriterId,
 };
 use qaqh_session::session_fact_v2::{
-    ContentHash, ContentRef, EventId, ExecutionId, FactPayload, LogId, PolicyDecisionRef,
-    RecoveryId, RecoveryRef, SessionId, SideEffectClass, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    ActorKind, ActorRef, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
+    InteractionExpired, InteractionExpiryReason, InteractionId, InteractionResolved, LogId,
+    PolicyDecisionRef, RecoveryId, RecoveryRef, SessionId, SideEffectClass, ToolCallId, ToolError,
+    ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
+    ToolTerminalStatus,
 };
 
 const NOW_MS: i64 = 1_789_830_000_000;
@@ -45,6 +47,33 @@ fn recovery_ref() -> RecoveryRef {
         recovery_id: RecoveryId::new("recovery_01J00000000000000000000000"),
         recovery_event_id: EventId::new("01J00000000000000000000099"),
         recovery_input_fingerprint: content_hash(9),
+    }
+}
+
+fn interaction_id() -> InteractionId {
+    InteractionId::new("int_01J00000000000000000000001")
+}
+
+fn interaction_resolved() -> InteractionResolved {
+    InteractionResolved {
+        interaction_id: interaction_id(),
+        decision_ref: content_ref(4),
+        resolved_by: ActorRef {
+            kind: ActorKind::User,
+            id: "user-1".into(),
+            display_name: None,
+        },
+        resolution_seq: 1,
+        resolved_at_ms: NOW_MS + 40,
+    }
+}
+
+fn interaction_expired(reason: InteractionExpiryReason) -> InteractionExpired {
+    InteractionExpired {
+        interaction_id: interaction_id(),
+        reason,
+        recovery_ref: None,
+        expired_at_ms: NOW_MS + 41,
     }
 }
 
@@ -490,6 +519,148 @@ fn recovery_seal_carries_batch_provenance_and_is_idempotent() {
             .map(|finished| finished.terminal_status),
         Some(ToolTerminalStatus::Indeterminate)
     );
+}
+
+#[test]
+fn interaction_terminal_is_first_answer_wins_and_survives_reopen() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+    let resolved = interaction_resolved();
+
+    let first = ledger
+        .append_interaction_resolved(event_id(40), None, None, resolved.clone(), NOW_MS + 40)
+        .expect("append resolution");
+    assert_eq!(first.fact_seq, 1);
+    assert!(matches!(first.payload, FactPayload::InteractionResolved(_)));
+
+    let repeated = ledger
+        .append_interaction_resolved(event_id(41), None, None, resolved, NOW_MS + 41)
+        .expect("repeat resolution is idempotent");
+    assert_eq!(repeated.fact_seq, 1);
+
+    let conflict = ledger
+        .append_interaction_expired(
+            event_id(42),
+            None,
+            None,
+            interaction_expired(InteractionExpiryReason::TurnCancelled),
+            NOW_MS + 42,
+        )
+        .expect_err("expiry after resolution must not overwrite first answer");
+    assert!(matches!(
+        conflict,
+        ToolLedgerError::InteractionTerminalConflict { interaction_id: id }
+            if id == interaction_id()
+    ));
+
+    drop(ledger);
+    let ledger = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + LEASE_MS + 1,
+        LEASE_MS,
+    )
+    .expect("reopen ledger");
+    let terminal = ledger
+        .interaction_terminal(&interaction_id())
+        .expect("interaction terminal");
+    assert_eq!(terminal.fact_seq, 1);
+    assert!(matches!(
+        terminal.payload,
+        FactPayload::InteractionResolved(_)
+    ));
+}
+
+#[test]
+fn recovery_batch_seals_only_non_replayable_intents() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let no_replay = call_id(41);
+    let replay = call_id(42);
+    let reconcile = call_id(43);
+    let recovery_ref = recovery_ref();
+    let mut ledger = open_ledger(temp.path());
+
+    ledger
+        .append_intent(
+            event_id(41),
+            None,
+            intent(
+                &no_replay,
+                &execution_id(41),
+                ToolReplayCapability::NoReplay,
+            ),
+            NOW_MS + 41,
+        )
+        .expect("no replay intent");
+    ledger
+        .append_intent(
+            event_id(42),
+            None,
+            intent(
+                &replay,
+                &execution_id(42),
+                ToolReplayCapability::IdempotentReplay,
+            ),
+            NOW_MS + 42,
+        )
+        .expect("replay intent");
+    ledger
+        .append_intent(
+            event_id(43),
+            None,
+            intent(
+                &reconcile,
+                &execution_id(43),
+                ToolReplayCapability::Reconcile {
+                    probe_ref: content_ref(8),
+                },
+            ),
+            NOW_MS + 43,
+        )
+        .expect("reconcile intent");
+
+    let dispositions = ledger
+        .recover_open_intents(recovery_ref.clone(), NOW_MS + 44)
+        .expect("recover open intents");
+    assert_eq!(dispositions.len(), 3);
+    assert_eq!(
+        dispositions[0],
+        (
+            no_replay.clone(),
+            ToolRecoveryDisposition::Finished {
+                terminal_status: ToolTerminalStatus::Indeterminate,
+            },
+        )
+    );
+    assert_eq!(
+        dispositions[1],
+        (
+            replay.clone(),
+            ToolRecoveryDisposition::ReplayAllowed {
+                execution_id: execution_id(42),
+            },
+        )
+    );
+    assert_eq!(
+        dispositions[2],
+        (
+            reconcile.clone(),
+            ToolRecoveryDisposition::ReconcileRequired {
+                execution_id: execution_id(43),
+                probe_ref: content_ref(8),
+            },
+        )
+    );
+    assert_eq!(ledger.open_intents().len(), 2);
+
+    let finished = ledger
+        .get(&no_replay)
+        .and_then(|entry| entry.finished())
+        .expect("recovered terminal");
+    assert_eq!(finished.recovery_ref.as_ref(), Some(&recovery_ref));
+    assert_eq!(finished.terminal_status, ToolTerminalStatus::Indeterminate);
 }
 
 #[test]

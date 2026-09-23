@@ -7,18 +7,21 @@
 
 ## 1. 本次范围
 
-本切片只收口 P3-7 的两个高风险窗口：
+本切片收口 P3-7 的三个高风险窗口：
 
 1. resume/terminal/cancel 与 `ToolIntent` 的串行 CAS。
-2. crash recovery 补写 `ToolFinished::Indeterminate` 时的 canonical
-   `recovery_ref` provenance。
+2. interaction terminal 的 canonical first-answer-wins，以及 cancel 时
+   `InteractionExpired { reason=turn_cancelled }` → `ToolFinished::Cancelled`
+   的顺序提交。
+3. crash recovery 补写 `ToolFinished::Indeterminate` 时的 canonical
+   `recovery_ref` provenance 与 batch primitive。
 
 未在本切片完成：
 
-- canonical `InteractionResolved/InteractionExpired` 与 ToolFinished 的完整
-  fact 顺序提交。
+- 生产 `YieldToUser` / permission / ask / plan 路径的 canonical
+  `InteractionRequested` / `InteractionResolved` 全量写入。
 - Reconcile probe 的真正执行与 evidence 写入。
-- recovery executor 的完整 batch driver。
+- recovery executor 的完整 `SessionRecovered` batch driver。
 - `tool_outbox` 与 canonical ToolLedger 的最终退场策略。
 
 ## 2. SessionActor CAS
@@ -33,6 +36,8 @@
   - 已有终态返回 `TurnTerminal` / `ExistingFinished`，不再次 admit；
   - 同一 intent 重复提交返回 `ExistingIntent`。
 - `SessionActor::cancel_tool_batch`：
+  - 先对 pending interaction 写唯一
+    `InteractionExpired { reason=turn_cancelled }`；
   - 对未开始、无 intent 的 call 写 executionless `Cancelled`；
   - 已存在 intent 的 call 保持 open，交给 recovery 判 `Indeterminate`；
   - terminal 写完后才把 turn 置为 `Cancelled`，append 失败可重试。
@@ -61,12 +66,21 @@ CAS API 中显式分开，避免既有 `t1`/wire id 与 canonical validation 冲
 
 `crates/qaqh-session/src/canonical/tool_ledger.rs` 新增：
 
+- interaction terminal index：
+  - `append_interaction_resolved` / `append_interaction_expired`；
+  - 同一 interaction 只允许一个 resolved/expired 终态；
+  - 重复同值 terminal 幂等，冲突 terminal fail-closed；
+  - reopen 后从 committed facts 重建 index。
 - `ToolLedger::seal_recovery_intent`：
   - `NoReplay` open intent → 写唯一
     `ToolFinished::Indeterminate { recovery_ref: Some(batch_ref) }`；
   - `IdempotentReplay` → 返回 `ReplayAllowed`，保持 open；
   - `Reconcile` → 返回 `ReconcileRequired`，保持 open；
   - 重复 recovery run 幂等，不产生第二个终态。
+- `ToolLedger::recover_open_intents`：
+  - 按 canonical call-id 顺序处理全部 open intent；
+  - 使用同一 batch `RecoveryRef`；
+  - 只 seal `NoReplay`，返回 replay/reconcile disposition 给后续步骤。
 
 ## 5. 验证
 
@@ -83,19 +97,24 @@ cargo test --workspace
 - `crates/qaqh-session/tests/session_actor.rs`
   - suspend → resume admission 成功并提交 intent；
   - 已有 terminal 不重复写 intent；
-  - cancel batch 写 executionless Cancelled；
+  - cancel batch 先写 interaction expiry，再写 executionless Cancelled；
   - cancel 先于 resume 时返回 terminal 且不写 intent。
 - `crates/qaqh-runtime/src/agent/turn_actor.rs` unit tests
   - resume admission 必须有 interaction resolution；
-  - cancel-before-resume 不进入 handler。
+  - cancel-before-resume 不进入 handler；
+  - pending interaction cancel 写 `InteractionExpired(turn_cancelled)`。
 - `crates/qaqh-session/tests/tool_ledger.rs`
-  - recovery seal 携带 `RecoveryRef` 且重复执行幂等。
+  - interaction terminal first-answer-wins 且 reopen 可重建；
+  - recovery seal 携带 `RecoveryRef` 且重复执行幂等；
+  - recovery batch 只 seal `NoReplay`，保留 replay/reconcile。
 
 ## 6. 下一步
 
-1. 将 `InteractionResolved/InteractionExpired` 与 `ToolFinished` 纳入同一
-   canonical batch 顺序。
-2. 实现 Reconcile probe，写 evidence 后再闭合 call。
-3. 建 recovery executor：读取 `RecoveryIntent`，逐个调用
-   `seal_recovery_intent`，最后写 `SessionRecovered`。
-4. 完成 `tool_outbox` 与 canonical ledger 对账，逐步退场旧 outbox。
+1. 接通生产 `YieldToUser` / permission / ask / plan 的 canonical
+   `InteractionRequested` / `InteractionResolved` 写入。
+2. 把显式 `ConversationCancel` 路径也切到 ledger-aware actor cancel，避免
+   只覆盖 ToolRuntime 内的取消窗口。
+3. 实现 Reconcile probe，写 evidence 后再闭合 call。
+4. 建 recovery executor：读取 `RecoveryIntent`，调用
+   `recover_open_intents`，最后写 `SessionRecovered`。
+5. 完成 `tool_outbox` 与 canonical ledger 对账，逐步退场旧 outbox。

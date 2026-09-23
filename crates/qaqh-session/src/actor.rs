@@ -10,8 +10,9 @@ use thiserror::Error;
 
 use crate::canonical::{ToolLedger, ToolLedgerError, generate_ulid};
 use crate::session_fact_v2::{
-    EventId, ExecutionId, InputId, InterruptReason, ToolCallId, ToolFinished, ToolIntent,
-    ToolMetrics, ToolTerminalStatus, TurnId, TurnMode, TurnTerminal,
+    EventId, ExecutionId, InputId, InteractionExpired, InteractionExpiryReason, InteractionId,
+    InterruptReason, ToolCallId, ToolFinished, ToolIntent, ToolMetrics, ToolTerminalStatus, TurnId,
+    TurnMode, TurnTerminal,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +127,12 @@ pub enum ToolAdmissionError {
     Turn(#[from] TurnCoreError),
     #[error(transparent)]
     Ledger(#[from] ToolLedgerError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionCancellation {
+    pub interaction_id: InteractionId,
+    pub call_id: Option<ToolCallId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -596,6 +603,7 @@ impl SessionActor {
         ledger: &mut ToolLedger,
         actor_turn_id: &TurnId,
         ledger_turn_id: &TurnId,
+        interactions: impl IntoIterator<Item = InteractionCancellation>,
         call_ids: impl IntoIterator<Item = ToolCallId>,
         now_ms: i64,
     ) -> Result<Vec<ToolCallId>, ToolAdmissionError> {
@@ -613,6 +621,29 @@ impl SessionActor {
             TurnCoreState::Idle => return Err(TurnCoreError::NoActiveTurn.into()),
             TurnCoreState::Active { .. } => return Err(TurnCoreError::TurnIdMismatch.into()),
         };
+
+        for interaction in interactions {
+            let payload = InteractionExpired {
+                interaction_id: interaction.interaction_id.clone(),
+                reason: InteractionExpiryReason::TurnCancelled,
+                recovery_ref: None,
+                expired_at_ms: now_ms,
+            };
+            match ledger.append_interaction_expired(
+                EventId::new(generate_ulid()),
+                Some(ledger_turn_id.clone()),
+                interaction.call_id,
+                payload,
+                now_ms,
+            ) {
+                Ok(_) => {}
+                Err(ToolLedgerError::InteractionTerminalConflict { .. }) => {
+                    // First-answer-wins: a resolution that beat cancellation
+                    // must not be overwritten by a later expiry.
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
 
         let mut appended = Vec::new();
         for call_id in call_ids {
