@@ -65,23 +65,6 @@ fn recover_canonical_tool_ledger_in(
     .read_all()
     .map_err(|error| error.to_string())?;
 
-    match crate::agent::tool_outbox::reconcile_canonical_ledger(session_dir) {
-        Ok(reconciliation) if !reconciliation.is_consistent() => {
-            log::warn!(
-                "[recovery] tool_outbox/canonical ledger drift for {seed}: missing_ledger={}, missing_outbox={}, status_mismatches={}",
-                reconciliation.missing_ledger.len(),
-                reconciliation.missing_outbox.len(),
-                reconciliation.status_mismatches.len()
-            );
-        }
-        Ok(_) => {}
-        Err(error) => {
-            log::error!(
-                "[recovery] tool_outbox/canonical reconciliation failed for {seed}: {error}"
-            );
-        }
-    }
-
     let existing = load_recovery_intent(session_dir).map_err(|error| error.to_string())?;
     if existing.is_none() {
         let Some(intent) = plan_recovery_intent(
@@ -250,15 +233,10 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 // L2：为真实会话启用 enqueue 级 WAL（恢复路径的 load_for_resume
                 // 已在创建 store 前重放并截断旧 WAL）。临时/子代理 store 不启用。
                 enable_message_wal(agent);
-                // L3：工具 outbox 对账——已执行但结果丢失的工具，修正 [RESTORE]
-                // 占位符语义（"未执行" → "已执行、结果未持久化"）。
-                //
-                // 对账前先把上一轮 worker 的批量化 fsync 落定（BUG-2026-09-12-14
-                // 之后 fsync 交由后台 flusher 合并）：worker 退出路径已 flush，但
-                // 进程在同一会话重开 worker 时，读到未 fsync 的记录仍可能来自
-                // OS 页缓存；显式 flush 把「恢复读到的事实」钉在盘上。
-                crate::agent::tool_outbox::flush(&agent.session.seed);
-                crate::agent::tool_outbox::reconcile_store(&mut agent.msg, &agent.session.seed);
+                // P3：canonical ToolIntent/ToolFinished 修正 [RESTORE] 占位符
+                // 语义（"未执行" → "已开始/已有终态、结果未持久化"）。旧
+                // tool_outbox.wal 仅作为历史会话迁移 fallback 读取，不再写入。
+                crate::agent::tool_recovery::reconcile_store(&mut agent.msg, &agent.session.seed);
                 // 重建 read_image 图片注册表：registry 是内存态，daemon 重启
                 // 后会丢失；但上传图片本就以 ContentBlock::Image 持久化在
                 // user 消息里。按活跃视图的时序重放注册，使 [Image #N] 占位

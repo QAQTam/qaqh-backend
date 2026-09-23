@@ -60,7 +60,7 @@ fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecuti
 
 /// tool manager / workspace / 探针均为进程级状态：本文件用例串行。
 static TEST_LOCK: Mutex<()> = Mutex::new(());
-/// 本进程独占的数据根（会话/outbox/审计落此）。
+/// 本进程独占的数据根（会话/canonical ledger/审计落此）。
 static DATA_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
 static SESSION_INIT: Once = Once::new();
 

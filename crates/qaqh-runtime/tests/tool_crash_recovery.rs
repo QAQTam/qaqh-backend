@@ -6,10 +6,11 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use qaqh_message::MessageStore;
 use qaqh_session::canonical::{
     CanonicalSessionIdentity, CommittedFactReader, RecoveryExecutionOutcome, ToolLedger, WriterId,
     execute_recovery_intent, generate_ulid, persist_recovery_intent, plan_recovery_intent,
-    sha256_content_hash,
+    sha256_content_hash, ulid_from_text,
 };
 use qaqh_session::session_fact_v2::{
     EventId, ExecutionId, FactPayload, PolicyDecisionRef, RecoveryId, SideEffectClass, ToolCallId,
@@ -19,6 +20,7 @@ use qaqh_session::session_fact_v2::{
 const CHILD_MODE_ENV: &str = "QAQH_CRASH_CHILD_MODE";
 const CHILD_DIR_ENV: &str = "QAQH_CRASH_CHILD_DIR";
 const SIDE_EFFECT_FILE: &str = "handler-side-effect.marker";
+const WIRE_CALL_ID: &str = "wire-crash-call";
 
 fn unix_ms() -> i64 {
     std::time::SystemTime::now()
@@ -44,7 +46,7 @@ fn append_intent_before_abort(dir: &Path, mode: &str) {
             EventId::new(generate_ulid()),
             None,
             ToolIntent {
-                call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
+                call_id: ToolCallId::new(format!("call_{}", ulid_from_text(WIRE_CALL_ID))),
                 execution_id: ExecutionId::new(format!("exec_{}", generate_ulid())),
                 idempotency_key: None,
                 replay_capability: ToolReplayCapability::NoReplay,
@@ -156,13 +158,58 @@ fn assert_single_indeterminate_terminal(dir: &Path) {
     assert_eq!(recovered, 1, "exactly one recovery batch marker");
 }
 
+fn orphan_restore_store() -> MessageStore {
+    let mut assistant = qaqh_types::Message {
+        msg_id: None,
+        role: "assistant".into(),
+        name: None,
+        content: Vec::new(),
+    };
+    assistant.content.push(qaqh_types::ContentBlock::ToolUse {
+        id: WIRE_CALL_ID.into(),
+        name: "write".into(),
+        input: serde_json::json!({"path": "crash-marker"}),
+    });
+    let messages = vec![qaqh_types::Message::user("do it"), assistant];
+    let (store, repairs) = MessageStore::from_messages("crash-recovery", &messages, 0);
+    assert_eq!(repairs.len(), 1, "orphan tool_use must be repaired");
+    store
+}
+
+fn restore_note_after_reconcile(dir: &Path) -> String {
+    let mut store = orphan_restore_store();
+    qaqh_runtime::agent::tool_recovery::reconcile_store_in(dir, &mut store);
+    store
+        .turns()
+        .iter()
+        .flat_map(|turn| turn.steps.iter())
+        .flat_map(|step| step.tool_results.iter())
+        .find_map(|result| {
+            result.content.iter().find_map(|block| match block {
+                qaqh_types::ContentBlock::ToolResult { result, .. } => {
+                    Some(result.model_text().to_string())
+                }
+                _ => None,
+            })
+        })
+        .expect("restore note")
+}
+
 #[test]
 fn process_crash_after_intent_is_sealed_without_replay() {
     let dir = tempfile::tempdir().expect("tempdir");
     run_child(dir.path(), "after_intent");
     assert!(!dir.path().join(SIDE_EFFECT_FILE).exists());
+    assert!(
+        restore_note_after_reconcile(dir.path()).contains("durable execution intent"),
+        "open canonical intent must refine the pre-recovery restore placeholder"
+    );
     recover(dir.path());
     assert_single_indeterminate_terminal(dir.path());
+    assert!(
+        restore_note_after_reconcile(dir.path()).contains("canonical terminal indeterminate"),
+        "recovered terminal must refine the post-recovery restore placeholder"
+    );
 }
 
 #[test]
@@ -173,10 +220,18 @@ fn process_crash_after_side_effect_before_terminal_is_not_replayed() {
         dir.path().join(SIDE_EFFECT_FILE).exists(),
         "side effect must survive the crash"
     );
+    assert!(
+        restore_note_after_reconcile(dir.path()).contains("durable execution intent"),
+        "side-effect crash must not restore as not-executed"
+    );
     recover(dir.path());
     assert_single_indeterminate_terminal(dir.path());
     assert!(
         dir.path().join(SIDE_EFFECT_FILE).exists(),
         "recovery must not erase or replay the side effect"
+    );
+    assert!(
+        restore_note_after_reconcile(dir.path()).contains("canonical terminal indeterminate"),
+        "recovered side-effect call must restore with its canonical terminal"
     );
 }

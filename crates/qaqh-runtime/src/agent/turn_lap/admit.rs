@@ -296,8 +296,8 @@ pub(crate) fn admit_and_dispatch(
     }
 
     // Execute the authorized batch through the same runtime path as
-    // approved-resume batches. The helper owns ordering, progress, outbox,
-    // cancellation sealing, and skill-effect application.
+    // approved-resume batches. The helper owns ordering, progress, canonical
+    // ledger commits, cancellation sealing, and skill-effect application.
     if !execute_admitted_batch(
         ctx,
         tool,

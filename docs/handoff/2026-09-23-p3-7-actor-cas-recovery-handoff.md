@@ -1,7 +1,7 @@
 # P3-7 SessionActor CAS 与 Recovery Provenance Handoff
 
 > 日期：2026-09-23
-> 状态：P3-7 第一阶段与 recovery executor/outbox 对账已完成，已在本地分支验证；继续挂在 PR #288 的 P3-6/P3-7 交付线上
+> 状态：P3-7 第一阶段、recovery executor 与 tool_outbox 退场已完成，已在本地分支验证；继续挂在 PR #288 的 P3-6/P3-7 交付线上
 > Base：`betav2`
 > Branch：`feat/p3-tool-ledger-production-wiring`
 
@@ -34,14 +34,19 @@
 - runtime service 的 `todo.status/cancel/set` 改为直接返回 canonical `Value`；
   `parse_json_string` 已从 service 边界移除，dashboard 直接消费 todo typed
   value。
+- `tool_outbox` 退场：
+  - 工具 worker 不再写 `tool_outbox.wal`；
+  - 恢复由 canonical `ToolIntent/ToolFinished` 直接修正 `[RESTORE]`；
+  - 取消收尾从 in-memory ToolLedger 判断“已准入”，不再读 WAL；
+  - 旧 WAL 只读兼容：仅在 canonical 无状态时作为历史会话 fallback，消息
+    结果持久化后自动 prune。
 
 仍未完成：
 
-- `tool_outbox` 最终退场策略（当前只做对账观测，不删除旧写）。恢复路径
-  仍依赖它修正 `[RESTORE]` 的“是否实际执行”语义，需先提供等价 canonical
-  ledger 消费路径。
 - 部分 legacy 工具的文本 projector fallback；typed 工具执行不再依赖文本
   解析，但 wire 尚未直接携带完整 typed display，故暂不能全量删除。
+- 旧 `tool_outbox.wal` 的只读兼容代码可在兼容窗口结束后删除；当前保留
+  是为了让升级前会话仍能恢复。
 
 ## 2. SessionActor CAS
 
@@ -148,12 +153,17 @@ cargo test --workspace
   - stale intent 清理不产生第二个 `SessionRecovered`。
 - `crates/qaqh-runtime/src/agent/state/lifecycle.rs` unit test
   - session resume 前自动发现 open intent 并完成 canonical recovery。
-- `crates/qaqh-runtime/src/agent/tool_outbox.rs` unit test
-  - outbox 与 canonical ledger 的 matched/missing/status mismatch 对账。
+- `crates/qaqh-runtime/src/agent/tool_recovery.rs` unit tests
+  - canonical open intent 将 `[RESTORE]` 修正为 outcome unknown；
+  - canonical terminal 修正为对应 terminal 状态；
+  - executionless cancel 保持“未执行”语义；
+  - 旧 WAL 只读迁移，消息结果持久化后自动 prune。
 - `crates/qaqh-runtime/tests/tool_crash_recovery.rs`
   - 真实子进程在 `ToolIntent` 后崩溃，恢复后唯一 `Indeterminate`，不重跑；
   - 真实子进程在 handler 副作用后、`ToolFinished` 前崩溃，恢复后唯一
-    `Indeterminate`，副作用标记保留且不重放。
+    `Indeterminate`，副作用标记保留且不重放；
+  - 两个窗口均验证 `[RESTORE]` 由 canonical intent/terminal 修正，不依赖
+    `tool_outbox.wal`。
 - `crates/qaqh-runtime/tests/tool_output_projection_equivalence.rs`
   - todo typed output 的 model/display/service 同源。
 - `crates/qaqh-workspace/tests/tool_sdk_parity.rs`
@@ -177,8 +187,7 @@ cargo test --workspace
 
 ## 6. 下一步
 
-1. 设计旧 `tool_outbox` 的 canonical 替代路径：恢复时由 ToolLedger 的
-   `ToolFinished` 直接修正 `[RESTORE]` 语义，再停写并删除 `tool_outbox.wal`。
-2. 让 wire/display 直接携带 typed display（或保留 canonical payload 的完整
+1. 让 wire/display 直接携带 typed display（或保留 canonical payload 的完整
    display 投影），随后删除剩余 legacy 文本 projector fallback。
+2. 兼容窗口结束后删除 `tool_recovery` 中的旧 WAL 只读迁移分支。
 3. 运行全仓 P3 gate，更新 PR #288 并等待合并窗口。
