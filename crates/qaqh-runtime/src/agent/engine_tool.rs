@@ -7,9 +7,10 @@
 //! Key design: a single admit() entry point for both UI and LLM paths.
 //! The old code had two separate code paths; now they converge here.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::time::Duration;
 
+use super::approval_registry::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 use super::dashboard;
 use super::tool_runtime::{ToolRunOutcome, ToolRuntime};
 use crate::agent::state::agent::PendingApproval;
@@ -76,7 +77,7 @@ fn emit_timeline_tool_progress(
 
 pub struct ToolEngine {
     /// Pending permission approvals (keyed by tool_call_id).
-    pub(crate) pending: HashMap<String, PendingApproval>,
+    pub(crate) pending: ApprovalRegistry<PendingApproval>,
 }
 
 impl Default for ToolEngine {
@@ -88,7 +89,7 @@ impl Default for ToolEngine {
 impl ToolEngine {
     pub fn new() -> Self {
         Self {
-            pending: HashMap::new(),
+            pending: ApprovalRegistry::new(),
         }
     }
 
@@ -330,9 +331,18 @@ impl ToolEngine {
         approved: bool,
         trust_folder: bool,
     ) -> PermissionDisposition {
-        let pending = match self.pending.remove(tool_call_id) {
-            Some(p) => p,
-            None => {
+        let pending = match self.pending.take(tool_call_id) {
+            ApprovalTake::Pending(pending) => pending,
+            ApprovalTake::AlreadyResolved(decision) => {
+                log::debug!(
+                    "[TOOL] duplicate permission response for {tool_call_id}: {}",
+                    decision.as_str()
+                );
+                return PermissionDisposition::AlreadyResolved {
+                    decision: decision.as_str().to_string(),
+                };
+            }
+            ApprovalTake::Missing => {
                 log::warn!("[TOOL] unknown permission response: {tool_call_id}");
                 return PermissionDisposition::Ignored;
             }
@@ -346,6 +356,8 @@ impl ToolEngine {
 
         match pending.challenge.approve(approved) {
             Ok(authorized) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Approved);
                 if trust_folder {
                     for path in &resources {
                         qaqh_workspace::trust_folder(path.parent().unwrap_or(path));
@@ -377,6 +389,8 @@ impl ToolEngine {
                 }
             }
             Err(qaqh_workspace::ApprovalError::Rejected) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Rejected);
                 if is_llm {
                     ctx.agent.msg.push_tool_result_direct(
                         &call_id,
@@ -388,6 +402,8 @@ impl ToolEngine {
                 }
             }
             Err(qaqh_workspace::ApprovalError::Expired) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Expired);
                 if is_llm {
                     ctx.agent.msg.push_tool_result_direct(
                         &call_id,
@@ -399,6 +415,8 @@ impl ToolEngine {
                 }
             }
             Err(qaqh_workspace::ApprovalError::MissingOrReplayed) => {
+                self.pending
+                    .mark_resolved(call_id.as_str(), ApprovalDecision::Expired);
                 log::warn!("[TOOL] replayed permission response: {call_id}");
                 if is_llm {
                     ctx.agent.msg.push_tool_result_direct(
@@ -1030,6 +1048,9 @@ pub struct BatchAdmission {
 
 pub enum PermissionDisposition {
     Ignored,
+    AlreadyResolved {
+        decision: String,
+    },
     UiHandled,
     LlmResolved {
         call_id: String,
