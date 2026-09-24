@@ -179,22 +179,15 @@ pub(crate) async fn handle_bootstrap_v2(
         })
         .collect();
     let driver = {
-        let (holder, driver_epoch) = {
-            let drivers = state
-                .drivers
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let state = drivers.state(&seed);
-            (state.holder, state.driver_epoch)
-        };
-        let holder_active = holder.as_deref().is_some_and(|holder| {
-            state
-                .leases
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_active_session(holder)
-        });
-        let effective_holder = holder_active.then_some(holder).flatten();
+        let driver = canonical_driver_state(&state, &seed);
+        let holder = driver.as_ref().and_then(|driver| driver.holder.clone());
+        let driver_epoch = driver
+            .as_ref()
+            .map(|driver| driver.driver_epoch)
+            .unwrap_or(0);
+        // A recorded holder whose lease is gone is presented as vacant; the
+        // next claim takes over via `stale_holder`.
+        let effective_holder = holder.filter(|holder| holder_is_live(&state, holder));
         Some(RingingV2DriverState {
             can_claim: effective_holder.as_deref() != Some(caller.as_str()),
             holder: effective_holder,
@@ -315,6 +308,70 @@ pub(crate) async fn handle_events_v2(
         .into_response()
 }
 
+/// Canonical driver seat, or `None` when the session has no `DriverChanged`
+/// fact (or no canonical log at all).
+fn canonical_driver_state(
+    state: &AppState,
+    seed: &str,
+) -> Option<qaqh_session::projection::ControlDriverState> {
+    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    state.v2_hub.driver_state(&session_dir, seed).ok().flatten()
+}
+
+/// Whether a recorded driver still holds a live daemon lease.
+fn holder_is_live(state: &AppState, holder: &str) -> bool {
+    state
+        .leases
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_active_session(holder)
+}
+
+/// Forward a daemon-normalized driver command to the session actor.
+///
+/// The actor's `ToolLedger` is the canonical single writer, so it — not the
+/// daemon — allocates `driver_epoch` and appends `DriverChanged`. The HTTP
+/// response below is therefore "requested"; the authoritative seat reaches
+/// clients as the reliable `DriverChanged` event.
+async fn forward_driver_command(
+    state: &AppState,
+    headers: &HeaderMap,
+    seed: &str,
+    caller: &str,
+    command: qaqh_domain::ControlCommand,
+) -> Response {
+    let client_instance_id = state
+        .leases
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .instance_for_session(caller)
+        .unwrap_or_default();
+    let envelope = RingingCommandEnvelope::new(
+        qaqh_session::canonical::generate_ulid(),
+        client_instance_id,
+        qaqh_ringing::RingingCommand::Control(command),
+    )
+    .with_client_session_id(caller)
+    .with_seed(seed);
+    let body = match serde_json::to_vec(&envelope) {
+        Ok(body) => body,
+        Err(error) => {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "encode_error",
+                &error.to_string(),
+            );
+        }
+    };
+    handle_command(
+        State(state.clone()),
+        headers.clone(),
+        Path("control".into()),
+        Bytes::from(body),
+    )
+    .await
+}
+
 pub(crate) async fn handle_driver_claim_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -323,46 +380,70 @@ pub(crate) async fn handle_driver_claim_v2(
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let Some(session_id) = require_v2_lease(&state, &headers) else {
+    let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
     };
     if seed.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
-    let holder_active = current_holder_active(&state, &seed);
-    let outcome = state
-        .drivers
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .claim(&seed, &session_id, holder_active);
-    let response = match outcome {
-        qaqh_runtime::ringing::DriverClaimOutcome::Claimed { driver_epoch } => {
-            RingingV2DriverClaimResponse {
-                accepted: true,
-                holder: Some(session_id),
-                driver_epoch,
-                reason: "claimed".into(),
-            }
+    let current = canonical_driver_state(&state, &seed);
+    let holder = current.as_ref().and_then(|driver| driver.holder.clone());
+    let driver_epoch = current
+        .as_ref()
+        .map(|driver| driver.driver_epoch)
+        .unwrap_or(0);
+    if let Some(holder) = holder.clone() {
+        if holder == caller {
+            return json_response(
+                StatusCode::OK,
+                &RingingV2DriverClaimResponse {
+                    accepted: true,
+                    holder: Some(holder),
+                    driver_epoch,
+                    reason: "already_holder".into(),
+                },
+            );
         }
-        qaqh_runtime::ringing::DriverClaimOutcome::AlreadyHeld { driver_epoch } => {
-            RingingV2DriverClaimResponse {
-                accepted: true,
-                holder: Some(session_id),
-                driver_epoch,
-                reason: "already_holder".into(),
-            }
+        if holder_is_live(&state, &holder) {
+            return json_response(
+                StatusCode::OK,
+                &RingingV2DriverClaimResponse {
+                    accepted: false,
+                    holder: Some(holder),
+                    driver_epoch,
+                    reason: "driver_busy".into(),
+                },
+            );
         }
-        qaqh_runtime::ringing::DriverClaimOutcome::Busy {
+    }
+    // Seat is free, or its recorded holder's lease has expired.
+    let stale_holder = holder
+        .clone()
+        .filter(|holder| !holder_is_live(&state, holder));
+    let dispatch = forward_driver_command(
+        &state,
+        &headers,
+        &seed,
+        &caller,
+        qaqh_domain::ControlCommand::DriverClaim {
+            client_session_id: caller.clone(),
+            stale_holder,
+        },
+    )
+    .await;
+    if !dispatch.status().is_success() {
+        return dispatch;
+    }
+    json_response(
+        StatusCode::OK,
+        &RingingV2DriverClaimResponse {
+            accepted: true,
+            // State at request time; the new seat arrives via `DriverChanged`.
             holder,
             driver_epoch,
-        } => RingingV2DriverClaimResponse {
-            accepted: false,
-            holder: Some(holder),
-            driver_epoch,
-            reason: "driver_busy".into(),
+            reason: "claim_requested".into(),
         },
-    };
-    json_response(StatusCode::OK, &response)
+    )
 }
 
 pub(crate) async fn handle_driver_release_v2(
@@ -373,53 +454,51 @@ pub(crate) async fn handle_driver_release_v2(
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let Some(session_id) = require_v2_lease(&state, &headers) else {
+    let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
     };
     if seed.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
-    let outcome = state
-        .drivers
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .release(&seed, &session_id);
-    let response = match outcome {
-        qaqh_runtime::ringing::DriverReleaseOutcome::Released { driver_epoch } => {
-            RingingV2DriverReleaseResponse {
-                accepted: true,
-                holder: None,
+    let current = canonical_driver_state(&state, &seed);
+    let holder = current.as_ref().and_then(|driver| driver.holder.clone());
+    let driver_epoch = current
+        .as_ref()
+        .map(|driver| driver.driver_epoch)
+        .unwrap_or(0);
+    if holder.as_deref() != Some(caller.as_str()) {
+        return json_response(
+            StatusCode::OK,
+            &RingingV2DriverReleaseResponse {
+                accepted: false,
+                holder,
                 driver_epoch,
-                reason: "released".into(),
-            }
-        }
-        qaqh_runtime::ringing::DriverReleaseOutcome::NotDriver {
-            holder,
-            driver_epoch,
-        } => RingingV2DriverReleaseResponse {
-            accepted: false,
-            holder,
-            driver_epoch,
-            reason: "not_driver".into(),
+                reason: "not_driver".into(),
+            },
+        );
+    }
+    let dispatch = forward_driver_command(
+        &state,
+        &headers,
+        &seed,
+        &caller,
+        qaqh_domain::ControlCommand::DriverRelease {
+            client_session_id: caller.clone(),
         },
-    };
-    json_response(StatusCode::OK, &response)
-}
-
-/// Whether the recorded driver still holds a live lease.
-fn current_holder_active(state: &AppState, seed: &str) -> bool {
-    let holder = state
-        .drivers
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .holder(seed);
-    holder.is_some_and(|holder| {
-        state
-            .leases
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_active_session(&holder)
-    })
+    )
+    .await;
+    if !dispatch.status().is_success() {
+        return dispatch;
+    }
+    json_response(
+        StatusCode::OK,
+        &RingingV2DriverReleaseResponse {
+            accepted: true,
+            holder,
+            driver_epoch,
+            reason: "release_requested".into(),
+        },
+    )
 }
 
 /// Commands that mutate the session and therefore require the driver seat.
@@ -463,23 +542,12 @@ fn driver_admission(
         return None;
     }
     let session_id = require_v2_lease(state, headers)?;
-    let (holder, epoch) = {
-        let drivers = state
-            .drivers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let state = drivers.state(seed);
-        (state.holder, state.driver_epoch)
-    };
-    let holder = holder?;
-    let holder_active = state
-        .leases
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .is_active_session(&holder);
-    if !holder_active {
+    let driver = canonical_driver_state(state, seed)?;
+    let holder = driver.holder?;
+    if !holder_is_live(state, &holder) {
         return None;
     }
+    let epoch = driver.driver_epoch;
     if holder != session_id {
         return Some(RingingV2CommandAck {
             command_id: String::new(),
@@ -516,7 +584,7 @@ pub(crate) async fn handle_command_v2(
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let envelope: RingingV2CommandEnvelope = match serde_json::from_slice(&body) {
+    let mut envelope: RingingV2CommandEnvelope = match serde_json::from_slice(&body) {
         Ok(envelope) => envelope,
         Err(error) => {
             return api_error_response(
@@ -614,6 +682,31 @@ pub(crate) async fn handle_command_v2(
     {
         rejection.command_id = envelope.command_id.clone();
         return json_response(StatusCode::OK, &rejection);
+    }
+    // Driver commands are daemon-normalized: identity fields on the wire are
+    // never trusted, so a direct `driver_claim` submission cannot claim a seat
+    // on behalf of another lease.
+    if let Some(caller) = require_v2_lease(&state, &headers) {
+        let seed = envelope.seed.clone();
+        match &mut envelope.command {
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::DriverClaim {
+                client_session_id,
+                stale_holder,
+            }) => {
+                *client_session_id = caller;
+                *stale_holder = seed
+                    .as_deref()
+                    .and_then(|seed| canonical_driver_state(&state, seed))
+                    .and_then(|driver| driver.holder)
+                    .filter(|holder| !holder_is_live(&state, holder));
+            }
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::DriverRelease {
+                client_session_id,
+            }) => {
+                *client_session_id = caller;
+            }
+            _ => {}
+        }
     }
     let v1 = RingingCommandEnvelope {
         schema: RINGING_SCHEMA.into(),
