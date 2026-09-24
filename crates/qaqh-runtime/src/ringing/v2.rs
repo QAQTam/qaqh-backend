@@ -4,7 +4,7 @@
 //! projection state per canonical session, publishes committed projection
 //! events to live subscribers, and replays from the committed canonical log.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -18,7 +18,8 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::projection::{
     ControlDriverState, ControlInteractionState, Projection, ProjectionSet, ProjectionSetSnapshot,
-    ProjectionSink, projection_events_for_fact,
+    ProjectionSink, projection_events_for_fact, projection_replaceable_events_for_fact,
+    replaceable_identity,
 };
 use qaqh_session::session_fact_v2::{
     Delivery, LogId, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
@@ -79,6 +80,7 @@ struct V2Session {
 struct V2SessionState {
     last_fact_seq: u64,
     projections: ProjectionSet,
+    replaceables: BTreeMap<String, ProjectionEvent>,
     live_tx: broadcast::Sender<V2Envelope>,
 }
 
@@ -261,7 +263,7 @@ impl V2ProjectionHub {
             None => (state.last_fact_seq, None),
         };
 
-        let replay = if initial_reset.is_some() {
+        let mut replay = if initial_reset.is_some() {
             VecDeque::new()
         } else {
             replay_after(
@@ -272,8 +274,17 @@ impl V2ProjectionHub {
                 since_fact_seq,
             )?
             .into_iter()
-            .collect()
+            .collect::<VecDeque<_>>()
         };
+        if initial_reset.is_none() {
+            // Replaceable history is never replayed. Reconnect/rebaseline gets
+            // only the latest value for each stable identity.
+            for event in state.replaceables.values() {
+                if let Some(envelope) = event_to_envelope(&self.epoch, seed, event) {
+                    replay.push_back(envelope);
+                }
+            }
+        }
         drop(state);
 
         Ok(V2Subscription {
@@ -339,6 +350,11 @@ impl ProjectionSink for V2ProjectionHub {
             state.last_fact_seq = fact.fact_seq;
         }
         for event in events {
+            if matches!(event.delivery, Delivery::Replaceable { .. })
+                && let Some(identity) = replaceable_identity(&event.payload)
+            {
+                state.replaceables.insert(identity, event.clone());
+            }
             let Some(envelope) = event_to_envelope(&self.epoch, seed, event) else {
                 continue;
             };
@@ -412,11 +428,23 @@ fn load_session_state(
         .read_all()
         .map_err(|error| V2HubError::Canonical(error.to_string()))?;
     let last_fact_seq = facts.last().map(|fact| fact.fact_seq).unwrap_or(0);
-    let projections = ProjectionSet::rebuild(facts.into_iter());
+    let mut projections = ProjectionSet::default();
+    let mut replaceables = BTreeMap::new();
+    for fact in &facts {
+        let deltas = projections.apply(fact);
+        for event in projection_replaceable_events_for_fact(fact, &deltas)
+            .map_err(|error| V2HubError::InvalidEvent(error.to_string()))?
+        {
+            if let Some(identity) = replaceable_identity(&event.payload) {
+                replaceables.insert(identity, event);
+            }
+        }
+    }
     let (live_tx, _) = broadcast::channel(live_capacity);
     Ok(V2SessionState {
         last_fact_seq,
         projections,
+        replaceables,
         live_tx,
     })
 }
