@@ -90,7 +90,8 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 fn manager_slot_raw() -> &'static RwLock<Arc<McpManager>> {
     static MANAGER_SLOT: OnceLock<RwLock<Arc<McpManager>>> = OnceLock::new();
-    // 槽位模式范本：backend.rs:227（OnceLock + 读写锁中毒 into_inner）。
+    // 槽位模式：OnceLock 全局槽 + 锁中毒 into_inner 继续（仓库惯例，见
+    // qaqh-workspace/src/lib.rs 的全局槽处理）。
     MANAGER_SLOT.get_or_init(|| RwLock::new(McpManager::disabled()))
 }
 

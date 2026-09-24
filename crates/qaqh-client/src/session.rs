@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(s.credentials().token, "t");
     }
 
-    /// 尾随斜杠归一化：否则会拼出 `http://host:port//ringing/v1/...`。
+    /// 尾随斜杠归一化：否则会拼出 `http://host:port//ringing/v2/...`。
     #[test]
     fn constructor_normalizes_trailing_slash() {
         assert_eq!(

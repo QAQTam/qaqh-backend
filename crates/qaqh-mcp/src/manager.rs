@@ -1,7 +1,7 @@
 //! [`McpManager`]：daemon 级 MCP 客户端生命周期容器（设计 §3 / §10-6）。
 //!
 //! - 归属：`QaqhService` 组装（设计 §10-6 决议），本 crate 只提供容器与
-//!   全局槽位（OnceLock 模式，照抄 `qaqh-workspace/src/backend.rs:227`）。
+//!   全局槽位（OnceLock 模式，照抄 `qaqh-workspace` 的全局槽惯例）。
 //! - 语义：配置声明即信任（D4/D5）；daemon 启动不做网络操作——连接全部
 //!   lazy（[`McpManager::get_or_connect`] → [`ServerConnection::ensure_connected`]）。
 //! - 关闭：[`McpManager::shutdown_all`] 置 `shutting_down` 闸（对齐

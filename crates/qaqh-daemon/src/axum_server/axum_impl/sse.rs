@@ -219,7 +219,8 @@ pub(crate) async fn handle_timeline_events(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    // BUG-2026-09-12-11：同 handle_events，补日志与终止帧。
+                    // BUG-2026-09-12-11：与（已删除的）v1 频道流同款处理——
+                    // 补日志并下发终止帧，让客户端 re-baseline。
                     log::warn!(
                         "[sse] timeline {seed_clone} stream lagged: {skipped} entries skipped; terminating for client re-baseline"
                     );

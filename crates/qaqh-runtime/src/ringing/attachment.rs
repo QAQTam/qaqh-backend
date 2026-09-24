@@ -1,5 +1,6 @@
 //! Attachment preview hydration shared between daemon HTTP paths.
-//! Extracted from `qaqh-daemon/src/ringing_http.rs` to avoid drift.
+//! Extracted from the legacy daemon HTTP layer (now `qaqh-daemon/src/axum_server`)
+//! to avoid drift.
 
 use crate::RingingHub;
 
