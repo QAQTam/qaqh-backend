@@ -120,7 +120,7 @@ pub(crate) struct ClientInner {
     /// 端点与 Bearer token 的唯一权威来源——**不要**在这里另存一份：
     /// daemon 重启会换掉两者，而 [`RingingSession::refresh_discovery`] 只能
     /// 更新 session 持有的那份，副本会静默变陈旧。
-    session: Arc<RingingSession>,
+    pub(crate) session: Arc<RingingSession>,
     handlers: ClientHandlers,
     stop_tx: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -135,10 +135,6 @@ pub(crate) struct ClientInner {
     /// lease re-negotiation so seed-scoped reads do not 401 with the new
     /// client_session_id.
     attached_seeds: Mutex<HashSet<String>>,
-    /// Optional v2 negotiation state. Kept separate from the v1 lease so the
-    /// 2.0 compatibility window can run both protocols without aliasing
-    /// identities.
-    pub(crate) v2_session: Mutex<Option<crate::v2::ClientV2SessionState>>,
 }
 
 /// Bookkeeping for the currently activated timeline stream.
@@ -229,7 +225,6 @@ impl Client {
                 tasks,
                 timeline: Mutex::new(HashMap::new()),
                 attached_seeds: Mutex::new(HashSet::new()),
-                v2_session: Mutex::new(None),
             }),
         };
 
@@ -412,11 +407,11 @@ impl Client {
         Ok(response.json().await?)
     }
 
-    /// `POST /ringing/v1/service/{name}` — typed read-only query.
+    /// `POST /ringing/v2/service/{name}` — typed read-only query.
     pub async fn query(&self, request: QueryRequest) -> Result<Value> {
         let (name, params) = request.into_parts();
         let session_id = self.session_id_header().await?;
-        let path = format!("/ringing/v1/service/{name}");
+        let path = format!("/ringing/v2/service/{name}");
         let response = self
             .inner
             .http
@@ -485,7 +480,7 @@ impl Client {
                 "fingerprint": fingerprint,
             });
         }
-        let path = format!("/ringing/v1/service/{name}");
+        let path = format!("/ringing/v2/service/{name}");
         let response = self
             .inner
             .http

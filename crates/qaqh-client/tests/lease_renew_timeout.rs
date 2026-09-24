@@ -137,7 +137,7 @@ async fn renew_returns_within_client_timeout_when_daemon_hangs() {
     // 首个 interval 后 renew 发出并挂在无响应的 daemon 上。
     assert!(
         daemon
-            .wait_requests("/ringing/v1/leases/renew", 1, Duration::from_secs(5))
+            .wait_requests("/ringing/v2/leases/renew", 1, Duration::from_secs(5))
             .await,
         "first renewal was never issued"
     );
@@ -171,7 +171,7 @@ async fn renew_returns_within_client_timeout_when_daemon_hangs() {
 /// [红→绿] renew 挂起让路后，自愈循环必须推进到「重新 open」。
 ///
 /// 修复前：`tokio::select!` 永久停在 tick 分支，ticker 停摆——测试等不到
-/// 第二次 `/ringing/v1/clients/open`（永远停在第一次挂起的 renew 上）。
+/// 第二次 `/ringing/v2/clients/open`（永远停在第一次挂起的 renew 上）。
 /// 修复后：每次超时都计入失败，达到 `MAX_RENEW_FAILURES`(2) 后跳过注定失败的
 /// renew 直接重新 open（open 同样带超时，失败则下个 interval 重试）。
 #[tokio::test]
@@ -187,7 +187,7 @@ async fn renewal_loop_self_heals_after_renew_timeout() {
 
     assert!(
         daemon
-            .wait_requests("/ringing/v1/leases/renew", 1, Duration::from_secs(5))
+            .wait_requests("/ringing/v2/leases/renew", 1, Duration::from_secs(5))
             .await,
         "first renewal was never issued"
     );
@@ -215,7 +215,7 @@ async fn renewal_loop_self_heals_after_renew_timeout() {
     let healed = tokio::time::timeout(Duration::from_secs(3 * CLIENT_TIMEOUT_SECS + 10), async {
         loop {
             if daemon
-                .wait_requests("/ringing/v1/clients/open", 1, Duration::from_secs(1))
+                .wait_requests("/ringing/v2/clients/open", 1, Duration::from_secs(1))
                 .await
             {
                 return true;

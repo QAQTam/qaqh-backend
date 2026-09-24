@@ -7,8 +7,6 @@ use tokio::sync::{Mutex, watch};
 use crate::discovery::DiscoveryExt;
 use crate::error::{ClientError, Result};
 
-use crate::types::{OpenRequest, OpenResponse};
-
 /// Negotiated session state (mirrors `RingingSessionOpen` in TS).
 #[derive(Debug, Clone)]
 pub struct SessionState {
@@ -51,6 +49,9 @@ pub struct RingingSession {
     /// 流重连即读到新 lease——否则流永远复用已过期的 session 死循环
     /// （daemon 的 keepalive 闸门持续关闭旧 session 的流）。
     session_ctx: watch::Sender<Option<(String, String)>>,
+    /// v2 握手得到的 capability 与会话身份（纯 v2：与 `state` 同一个 lease，
+    /// 不再是「第二条 lease」）。
+    v2_state: Arc<Mutex<Option<crate::v2::ClientV2SessionState>>>,
 }
 
 const MAX_RENEW_FAILURES: u32 = 2;
@@ -80,6 +81,7 @@ impl RingingSession {
             state: Arc::new(Mutex::new(None)),
             renew_failures: Arc::new(Mutex::new(0)),
             session_ctx,
+            v2_state: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -131,33 +133,39 @@ impl RingingSession {
         true
     }
 
-    /// `POST /ringing/v1/clients/open` — capability negotiation.
+    /// `POST /ringing/v2/clients/open` — capability negotiation（纯 v2：唯一握手）。
+    ///
+    /// 一次握手同时填充 `SessionState`（header 身份，SSE/命令/服务共用）与
+    /// `v2_state`（capability / v2 端点）。**不再有第二条 lease**。
     pub async fn open(&self) -> Result<SessionState> {
         let client_instance_id = self.client_instance_id();
         let creds = self.credentials();
+        let path = "/ringing/v2/clients/open";
         let response = self
             .http
-            .post(format!("{}/ringing/v1/clients/open", creds.base_url))
+            .post(format!("{}{path}", creds.base_url))
             .bearer_auth(&creds.token)
             // 请求级超时（不作用于 SSE 长连接）：daemon 冷启动/重启窗口内
             // discovery 已发布但 HTTP 尚未 accept 时，TCP 连接会成功（backlog
             // 排队）而响应迟迟不来——无超时会让 open 永久挂起，进而卡死桥的
             // rebuild 循环（rebuilding 永不复位，所有请求被拒）。
             .timeout(std::time::Duration::from_secs(OPEN_TIMEOUT_SECS))
-            .json(&OpenRequest::new(client_instance_id.clone()))
+            .json(&qaqh_ringing::RingingV2OpenRequest::new(
+                client_instance_id.clone(),
+            ))
             .send()
             .await?;
         if !response.status().is_success() {
             return Err(ClientError::Http {
                 status: response.status().as_u16(),
-                path: "/ringing/v1/clients/open".into(),
+                path: path.into(),
             });
         }
-        let result: OpenResponse = response.json().await?;
-        if result.schema != qaqh_ringing::RINGING_SCHEMA
-            || result.version != qaqh_ringing::RINGING_VERSION
-            || !result.accepted
-        {
+        let result: qaqh_ringing::RingingV2OpenResponse = response.json().await?;
+        result
+            .validate()
+            .map_err(|code| ClientError::Protocol(format!("invalid v2 open response: {code}")))?;
+        if !result.accepted {
             return Err(ClientError::Negotiation(
                 "open not accepted by daemon".into(),
             ));
@@ -172,9 +180,9 @@ impl RingingSession {
             ));
         }
         let state = SessionState {
-            client_instance_id,
-            client_session_id: result.client_session_id,
-            server_epoch: result.server_epoch,
+            client_instance_id: client_instance_id.clone(),
+            client_session_id: result.client_session_id.clone(),
+            server_epoch: result.server_epoch.clone(),
             lease_ttl_ms: result.lease_ttl_ms,
             renew_interval_ms: result.renew_interval_ms,
         };
@@ -183,7 +191,19 @@ impl RingingSession {
             state.server_epoch.clone(),
             state.client_session_id.clone(),
         )));
+        let v2_state = crate::v2::ClientV2SessionState::from_open(client_instance_id, result)?;
+        *self.v2_state.lock().await = Some(v2_state);
         Ok(state)
+    }
+
+    /// 当前 v2 会话状态（capability / v2 端点身份）。
+    pub(crate) async fn v2_state(&self) -> Option<crate::v2::ClientV2SessionState> {
+        self.v2_state.lock().await.clone()
+    }
+
+    /// 显式 v2 握手路径（`Client::open_v2`）写入的状态。
+    pub(crate) async fn adopt_v2_state(&self, state: crate::v2::ClientV2SessionState) {
+        *self.v2_state.lock().await = Some(state);
     }
 
     /// Subscribe to the current `(server_epoch, client_session_id)`.
@@ -294,15 +314,16 @@ impl RingingSession {
         }
     }
 
-    /// `POST /ringing/v1/leases/renew` — single renewal attempt.
+    /// `POST /ringing/v2/leases/renew` — single renewal attempt.
     async fn renew_once(&self) -> Result<()> {
         let Some(state) = self.state.lock().await.clone() else {
             return Err(ClientError::Negotiation("no session to renew".into()));
         };
         let creds = self.credentials();
+        let path = "/ringing/v2/leases/renew";
         let response = self
             .http
-            .post(format!("{}/ringing/v1/leases/renew", creds.base_url))
+            .post(format!("{}{path}", creds.base_url))
             .bearer_auth(&creds.token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id)
             // 请求级超时：daemon TCP 可达但 HTTP 不 accept（冷启动/重启/挂起
@@ -315,7 +336,7 @@ impl RingingSession {
         if !response.status().is_success() {
             return Err(ClientError::Http {
                 status: response.status().as_u16(),
-                path: "/ringing/v1/leases/renew".into(),
+                path: path.into(),
             });
         }
         Ok(())

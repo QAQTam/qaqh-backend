@@ -1,4 +1,4 @@
-//! Typed service RPC requests (`POST /ringing/v1/service/{method}`，唯一服务面)。
+//! Typed service RPC requests (`POST /ringing/v2/service/{method}`，唯一服务面)。
 //!
 //! These enums keep service method names and JSON assembly inside the
 //! transport crate. Native shells choose a closed Rust variant; they cannot

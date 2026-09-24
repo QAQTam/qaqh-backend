@@ -123,7 +123,10 @@ pub struct ClientV2SessionState {
 }
 
 impl ClientV2SessionState {
-    fn from_open(client_instance_id: String, response: RingingV2OpenResponse) -> Result<Self> {
+    pub(crate) fn from_open(
+        client_instance_id: String,
+        response: RingingV2OpenResponse,
+    ) -> Result<Self> {
         response
             .validate()
             .map_err(|code| ClientError::Protocol(format!("invalid v2 open response: {code}")))?;
@@ -193,10 +196,11 @@ impl ClientV2Subscription {
 
 impl Client {
     /// Connect through the existing discovery path and negotiate a v2 lease.
+    ///
+    /// 纯 v2 下 [`Client::connect_async`] 的 `open()` 本身就是 v2 握手，这里
+    /// 不再额外开第二条 lease。
     pub async fn connect_v2_async(options: ClientOptions) -> Result<Client> {
-        let client = Self::connect_async(options).await?;
-        client.open_v2().await?;
-        Ok(client)
+        Self::connect_async(options).await
     }
 
     /// `POST /ringing/v2/clients/open`.
@@ -225,12 +229,12 @@ impl Client {
         }
         let response: RingingV2OpenResponse = response.json().await?;
         let state = ClientV2SessionState::from_open(client_instance_id, response.clone())?;
-        *self.inner.v2_session.lock().await = Some(state);
+        self.inner.session.adopt_v2_state(state).await;
         Ok(response)
     }
 
     pub async fn v2_session_state(&self) -> Option<ClientV2SessionState> {
-        self.inner.v2_session.lock().await.clone()
+        self.inner.session.v2_state().await
     }
 
     /// `POST /ringing/v2/leases/renew`.
@@ -504,10 +508,9 @@ impl Client {
 
     async fn require_v2_session(&self) -> Result<ClientV2SessionState> {
         self.inner
-            .v2_session
-            .lock()
+            .session
+            .v2_state()
             .await
-            .clone()
             .ok_or_else(|| ClientError::Negotiation("v2 session not open".into()))
     }
 }
