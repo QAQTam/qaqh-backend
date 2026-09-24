@@ -389,6 +389,64 @@ try:
 
     status, _ = request("GET", f"/ringing/v1/content/{ref}", session=client_a, raw=True)
     check("⑤ v1 content 路由已硬切", status == 404, f"status={status}")
+
+    if MODE == "permission":
+        # #336 P2 real-machine check: approve the pending exec, let the real
+        # tool runtime finish, and read the structured terminal state back from
+        # the canonical timeline snapshot.
+        request("POST", "/ringing/v2/leases/renew", session=client_a)
+        status, ack = command(
+            client_a,
+            "tool",
+            {
+                "channel": "tool",
+                "type": "tool_permission_respond",
+                "tool_call_id": interaction["call_id"],
+                "approved": True,
+                "trust_folder": False,
+            },
+            seed=seed,
+            instance="content-probe-a",
+        )
+        assert status == 200, f"permission respond: {status} {ack}"
+
+        def find_display_outcome(node):
+            if isinstance(node, dict):
+                display = node.get("display")
+                if isinstance(display, dict) and isinstance(display.get("outcome"), dict):
+                    return display["outcome"]
+                for value in node.values():
+                    found = find_display_outcome(value)
+                    if found is not None:
+                        return found
+            elif isinstance(node, list):
+                for value in node:
+                    found = find_display_outcome(value)
+                    if found is not None:
+                        return found
+            return None
+
+        def completed_tool_outcome():
+            request("POST", "/ringing/v2/leases/renew", session=client_a)
+            status, body = request(
+                "GET",
+                f"/ringing/v2/sessions/{seed}/timeline",
+                session=client_a,
+            )
+            if status != 200:
+                return None
+            return find_display_outcome(body)
+
+        outcome = wait_until(completed_tool_outcome, "structured tool outcome")
+        check(
+            "⑥ 工具终态结构化（不再从 [OK] 文本推断）",
+            outcome.get("state") == "succeeded"
+            and outcome.get("exit_code") == 0
+            and isinstance(outcome.get("duration_ms"), int)
+            and outcome.get("output_bytes", 0) > 0
+            and outcome.get("truncated") is False,
+            json.dumps(outcome, ensure_ascii=False),
+        )
 finally:
     stop_daemon()
 

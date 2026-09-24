@@ -106,8 +106,8 @@ qaqh-runtime  v2_acceptance_matrix::single_stream_carries_all_channels_in_global
    前置；中途 `push_system` 会顶到最前，从第一个字节起 cache 全 miss。
 2. **P6 设计输入 B（compact 进 canonical log）**：`compact-context.json` 仍是第二
    真源；`build_context_for_gate` 仍整段 clone（请求峰值 2×）。
-3. **v1 `Last-Event-ID` → v2 cursor 映射表**（P1）：本次单流化后，v1 的 channel 段
-   只用于过滤，映射表设计需要在单流语义下重做。
+3. **v1 `Last-Event-ID` → v2 cursor 映射**（已随 v1 端点硬切作废；见
+   `2026-09-24-tool-outcome-p2-v1-cursor-closure-handoff.md` §1）。
 4. **V2-C3 replaceable producer**（已补，见
    `2026-09-24-ringing-v2-alpha-closure-handoff.md` §2.7）。
 5. **driver 侧剩余**：回收延迟（3s 巡检）、`not_eligible`/优先级、`driver_epoch`
