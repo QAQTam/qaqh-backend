@@ -1276,16 +1276,23 @@ pub(crate) fn stash_interaction_body(
     seed: &str,
     event: &qaqh_domain::DomainEvent,
 ) {
-    use qaqh_domain::{ControlEvent, interaction_body};
-    let (interaction_id, bytes) = match event {
+    use qaqh_domain::{ControlEvent, ToolEvent, interaction_body};
+    // (content store 的交互 key, 正文 bytes, 是否 pin)。
+    //
+    // ask / plan 用 wire interaction_id 作 key 并 pin（resolve 时按同一个 key unpin）。
+    // permission 用 canonical interaction_id 作 key 且**不 pin**：纯 v2 的 wire 上
+    // 没有 tool 频道快照，详情只能从正文取；而拒绝/过期路径没有可挂 unpin 的域事件，
+    // 走 30min TTL 的普通条目反而不会泄漏 pin 配额。
+    let (interaction_id, bytes, pinned) = match event {
         qaqh_domain::DomainEvent::Control(ControlEvent::InteractionRequested {
             interaction_id,
             mode,
             questions,
             ..
         }) => (
-            interaction_id.as_str(),
+            interaction_id.clone(),
             interaction_body::ask_body(*mode, questions),
+            true,
         ),
         qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewRequested {
             interaction_id,
@@ -1294,14 +1301,51 @@ pub(crate) fn stash_interaction_body(
             todo_items,
             ..
         }) => (
-            interaction_id.as_str(),
+            interaction_id.clone(),
             interaction_body::plan_body(plan_content, review_type, todo_items.as_deref()),
+            true,
+        ),
+        qaqh_domain::DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
+            tool_call_id,
+            tool_name,
+            action_summary,
+            reason,
+            paths,
+            category,
+            level,
+            risk,
+            consequence,
+            ..
+        }) => (
+            crate::agent::tool_runtime::canonical_interaction_id(tool_call_id)
+                .as_str()
+                .to_string(),
+            interaction_body::permission_body(
+                tool_name,
+                action_summary.as_deref(),
+                reason,
+                paths,
+                *category,
+                *level,
+                *risk,
+                consequence,
+            ),
+            false,
         ),
         _ => return,
     };
+    if !pinned {
+        hub.put_content(
+            seed,
+            interaction_body::INTERACTION_BODY_MEDIA_TYPE,
+            bytes,
+            false,
+        );
+        return;
+    }
     match hub.put_interaction_content(
         seed,
-        interaction_id,
+        &interaction_id,
         interaction_body::INTERACTION_BODY_MEDIA_TYPE,
         bytes,
     ) {

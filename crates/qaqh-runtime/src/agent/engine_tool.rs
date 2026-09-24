@@ -458,6 +458,7 @@ impl ToolEngine {
     ) -> BatchAdmission {
         let mut authorized = Vec::new();
         let mut pending_permission_ids = Vec::new();
+        let mut pending_permission_bodies: Vec<(String, Vec<u8>)> = Vec::new();
         let mut pending_asks = VecDeque::new();
         // L-msgloop②：pending_plans / pending_todo_activation 恒为空——
         // plan 评审与 todo 激活当前由 UI ToolInvoke / todo 工具自身闭环，
@@ -587,26 +588,45 @@ impl ToolEngine {
                         }
                         qaqh_workspace::PermissionRisk::High => qaqh_domain::PermissionRisk::High,
                     };
+                    let paths: Vec<String> = challenge
+                        .resources()
+                        .iter()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .collect();
+                    let action_summary = challenge.action_summary();
+                    let reason = challenge.reason().to_string();
+                    let consequence = challenge.consequence().to_string();
+                    let level = ctx.agent.config.permission_level;
                     ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
                         qaqh_domain::ToolEvent::ToolPermissionRequested {
                             tool_call_id: call_id.clone(),
                             turn_id: turn_id.to_string(),
                             round_num,
                             tool_name: challenge.tool_name().to_string(),
-                            action_summary: challenge.action_summary(),
-                            reason: challenge.reason().to_string(),
-                            paths: challenge
-                                .resources()
-                                .iter()
-                                .map(|path| path.to_string_lossy().to_string())
-                                .collect(),
+                            action_summary: action_summary.clone(),
+                            reason: reason.clone(),
+                            paths: paths.clone(),
                             category: cat_domain,
-                            level: ctx.agent.config.permission_level,
+                            level,
                             risk: risk_domain,
-                            consequence: challenge.consequence().to_string(),
+                            consequence: consequence.clone(),
                         },
                     ));
+                    // 正文与域事件同源（`interaction_body` 单点序列化）：canonical
+                    // fact 的 `request_ref` 与 hub 写进 content store 的 bytes 必须
+                    // 逐字节一致，否则壳层取不到授权详情。
+                    let body = qaqh_domain::interaction_body::permission_body(
+                        challenge.tool_name(),
+                        action_summary.as_deref(),
+                        &reason,
+                        &paths,
+                        cat_domain,
+                        level,
+                        risk_domain,
+                        &consequence,
+                    );
                     pending_permission_ids.push(call_id.clone());
+                    pending_permission_bodies.push((call_id.clone(), body));
                     self.pending.insert(
                         call_id,
                         PendingApproval {
@@ -631,6 +651,7 @@ impl ToolEngine {
         BatchAdmission {
             authorized,
             pending_permission_ids,
+            pending_permission_bodies,
             pending_asks,
             pending_plans,
             pending_todo_activation,
@@ -1043,6 +1064,9 @@ fn drain_bounded(
 pub struct BatchAdmission {
     pub authorized: Vec<AdmittedTool>,
     pub pending_permission_ids: Vec<String>,
+    /// (wire call_id, canonical interaction body bytes)。`persist_interaction_requests`
+    /// 用它算 permission 交互的 `request_ref`（与 content store 里的 bytes 一致）。
+    pub pending_permission_bodies: Vec<(String, Vec<u8>)>,
     pub pending_asks: VecDeque<PendingAsk>,
     pub pending_plans: VecDeque<PendingPlan>,
     pub pending_todo_activation: Option<PendingTodoActivation>,
