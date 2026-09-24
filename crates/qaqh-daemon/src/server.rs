@@ -168,6 +168,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingLeaseStore::new()));
+    let ringing_drivers = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingDriverStore::new()));
     let pending_commands = Arc::new(Mutex::new(
         qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
     ));
@@ -292,6 +293,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         hub: hub.clone(),
         v2_hub: v2_hub.clone(),
         leases: ringing_leases.clone(),
+        drivers: ringing_drivers.clone(),
         pending: pending_commands.clone(),
         service: service.clone(),
         token: token.clone(),

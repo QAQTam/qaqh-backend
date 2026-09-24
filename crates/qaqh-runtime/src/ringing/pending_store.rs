@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use qaqh_ringing::{RingingCommandState, RingingCommandStatus, RingingEvent, RingingEventEnvelope};
+use qaqh_ringing::{
+    RingingCommandState, RingingCommandStatus, RingingEvent, RingingEventEnvelope,
+    RingingV2AskOutcome, RingingV2CommandResult, RingingV2CommandStatus, RingingV2ExistingResult,
+};
 
 /// 已 accepted 命令的幂等表（有界 TTL；accepted 后断线重试不得重复执行）。
 #[derive(Debug, Default)]
@@ -34,9 +37,33 @@ struct CommandReceipt {
     state: RingingCommandState,
     terminal_event_id: Option<String>,
     error_code: Option<String>,
+    /// 终态的 typed payload（ask/plan 等）。ACK 丢失后重放 command_id 或
+    /// 轮询 command_status 时返回，客户端不必再靠 code/message 猜结果。
+    result: Option<RingingV2CommandResult>,
     /// 上次冻结告警时刻（epoch ms，仅内存不持久化）：同一 receipt 的重复
     /// 告警按间隔限频，避免周期巡检刷屏。
     last_stale_warn_ms: Option<u64>,
+}
+
+/// v2 command 的已有 receipt 视图（含指纹，供重放时做 payload 校验）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingCommandReceipt {
+    pub state: RingingCommandState,
+    pub payload_fingerprint: String,
+    pub terminal_event_id: Option<String>,
+    pub error_code: Option<String>,
+    pub result: Option<RingingV2CommandResult>,
+}
+
+impl ExistingCommandReceipt {
+    pub fn into_existing(self) -> RingingV2ExistingResult {
+        RingingV2ExistingResult::CommandReceipt {
+            state: self.state,
+            terminal_event_id: self.terminal_event_id,
+            error_code: self.error_code,
+            result: self.result,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -50,6 +77,8 @@ struct PersistedCommandReceipt {
     terminal_event_id: Option<String>,
     #[serde(default)]
     error_code: Option<String>,
+    #[serde(default)]
+    result: Option<RingingV2CommandResult>,
 }
 
 impl PendingCommandStore {
@@ -100,6 +129,7 @@ impl PendingCommandStore {
                     state: receipt.state,
                     terminal_event_id: receipt.terminal_event_id,
                     error_code: receipt.error_code,
+                    result: receipt.result,
                     last_stale_warn_ms: None,
                 },
             );
@@ -125,6 +155,7 @@ impl PendingCommandStore {
                             state: receipt.state,
                             terminal_event_id: receipt.terminal_event_id.clone(),
                             error_code: receipt.error_code.clone(),
+                            result: receipt.result.clone(),
                         },
                     )
                 })
@@ -190,6 +221,7 @@ impl PendingCommandStore {
                 state: RingingCommandState::Accepted,
                 terminal_event_id: None,
                 error_code: None,
+                result: None,
                 last_stale_warn_ms: None,
             },
         );
@@ -274,11 +306,12 @@ impl PendingCommandStore {
             _ => None,
         };
         if let Some((state, error_code)) = terminal {
-            self.mark_terminal(
+            self.mark_terminal_with_result(
                 command_id,
                 state,
                 Some(envelope.event_id.clone()),
                 error_code,
+                terminal_result(&envelope.event),
             );
         }
     }
@@ -290,10 +323,23 @@ impl PendingCommandStore {
         event_id: Option<String>,
         error_code: Option<String>,
     ) {
+        self.mark_terminal_with_result(command_id, state, event_id, error_code, None);
+    }
+
+    /// 终态落库，同时记录可被 v2 ACK/status 回放的 typed payload。
+    pub fn mark_terminal_with_result(
+        &mut self,
+        command_id: &str,
+        state: RingingCommandState,
+        event_id: Option<String>,
+        error_code: Option<String>,
+        result: Option<RingingV2CommandResult>,
+    ) {
         if let Some(receipt) = self.accepted.get_mut(command_id) {
             receipt.state = state;
             receipt.terminal_event_id = event_id;
             receipt.error_code = error_code;
+            receipt.result = result;
             self.persist();
         }
     }
@@ -366,6 +412,71 @@ impl PendingCommandStore {
                 error_code: receipt.error_code.clone(),
             })
         })
+    }
+
+    /// v2 status view: same receipt plus the typed terminal payload.
+    pub fn v2_status_for_session(
+        &self,
+        command_id: &str,
+        client_session_id: &str,
+    ) -> Option<RingingV2CommandStatus> {
+        self.accepted.get(command_id).and_then(|receipt| {
+            (receipt.accepted_at + RECEIPT_TTL > Instant::now()
+                && receipt.client_session_id.as_deref() == Some(client_session_id))
+            .then(|| RingingV2CommandStatus {
+                command_id: command_id.to_string(),
+                state: receipt.state,
+                payload_fingerprint: receipt.fingerprint.clone(),
+                terminal_event_id: receipt.terminal_event_id.clone(),
+                error_code: receipt.error_code.clone(),
+                result: receipt.result.clone(),
+            })
+        })
+    }
+
+    /// Existing receipt for a replayed `command_id`, scoped to its owning lease.
+    pub fn existing_receipt_for_session(
+        &self,
+        command_id: &str,
+        client_session_id: &str,
+    ) -> Option<ExistingCommandReceipt> {
+        self.accepted.get(command_id).and_then(|receipt| {
+            (receipt.accepted_at + RECEIPT_TTL > Instant::now()
+                && receipt.client_session_id.as_deref() == Some(client_session_id))
+            .then(|| ExistingCommandReceipt {
+                state: receipt.state,
+                payload_fingerprint: receipt.fingerprint.clone(),
+                terminal_event_id: receipt.terminal_event_id.clone(),
+                error_code: receipt.error_code.clone(),
+                result: receipt.result.clone(),
+            })
+        })
+    }
+}
+
+/// Derive the typed payload a client can reconcile from, when the terminal
+/// event carries one. Permission resolution is not yet a canonical fact, so it
+/// is intentionally absent until the permission registry lands.
+fn terminal_result(event: &RingingEvent) -> Option<RingingV2CommandResult> {
+    match event {
+        RingingEvent::Control(qaqh_domain::ControlEvent::InteractionResolved {
+            interaction_id,
+            resolution,
+        }) => Some(RingingV2CommandResult::AskResolved {
+            interaction_id: interaction_id.clone(),
+            outcome: match resolution {
+                qaqh_domain::AskResolution::Answered => RingingV2AskOutcome::Answered,
+                qaqh_domain::AskResolution::Dismissed => RingingV2AskOutcome::Dismissed,
+            },
+        }),
+        RingingEvent::Control(qaqh_domain::ControlEvent::PlanReviewResolved {
+            interaction_id,
+            approved,
+        }) => Some(RingingV2CommandResult::PlanReviewResolved {
+            interaction_id: interaction_id.clone(),
+            approved: *approved,
+        }),
+        _ => None,
     }
 }
 
@@ -441,6 +552,87 @@ mod tests {
             .expect("status");
         assert_eq!(status.state, RingingCommandState::Succeeded);
         assert_eq!(status.terminal_event_id.as_deref(), Some("event-1"));
+    }
+
+    #[test]
+    fn interaction_resolution_records_typed_result_for_replay() {
+        let mut store = PendingCommandStore::new();
+        assert!(
+            store
+                .record_fingerprint_for_session("cmd-ask", "fp", "session-a")
+                .expect("accept")
+        );
+        let envelope = RingingEventEnvelope::new(
+            "seed",
+            1,
+            1,
+            1,
+            "event-ask",
+            RingingEvent::Control(qaqh_domain::ControlEvent::InteractionResolved {
+                interaction_id: "ask-1".into(),
+                resolution: qaqh_domain::AskResolution::Answered,
+            }),
+        )
+        .with_causation("cmd-ask");
+        store.observe_terminal_event(&envelope);
+
+        let status = store
+            .v2_status_for_session("cmd-ask", "session-a")
+            .expect("status");
+        assert_eq!(status.state, RingingCommandState::Succeeded);
+        assert_eq!(
+            status.result,
+            Some(RingingV2CommandResult::AskResolved {
+                interaction_id: "ask-1".into(),
+                outcome: RingingV2AskOutcome::Answered,
+            })
+        );
+
+        let existing = store
+            .existing_receipt_for_session("cmd-ask", "session-a")
+            .expect("existing receipt");
+        assert_eq!(existing.payload_fingerprint, "fp");
+        assert!(matches!(
+            existing.into_existing(),
+            RingingV2ExistingResult::CommandReceipt {
+                state: RingingCommandState::Succeeded,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn plan_review_resolution_records_typed_result() {
+        let mut store = PendingCommandStore::new();
+        assert!(
+            store
+                .record_fingerprint_for_session("cmd-plan", "fp", "session-a")
+                .expect("accept")
+        );
+        let envelope = RingingEventEnvelope::new(
+            "seed",
+            1,
+            1,
+            1,
+            "event-plan",
+            RingingEvent::Control(qaqh_domain::ControlEvent::PlanReviewResolved {
+                interaction_id: "plan-1".into(),
+                approved: false,
+            }),
+        )
+        .with_causation("cmd-plan");
+        store.observe_terminal_event(&envelope);
+
+        assert_eq!(
+            store
+                .v2_status_for_session("cmd-plan", "session-a")
+                .expect("status")
+                .result,
+            Some(RingingV2CommandResult::PlanReviewResolved {
+                interaction_id: "plan-1".into(),
+                approved: false,
+            })
+        );
     }
 }
 

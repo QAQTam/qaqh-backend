@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::session_fact_v2::{
     ActivityState, ActorRef, ContentHash, ContentRef, ContentValue, ControlDelta, ExecutionId,
-    FactPayload, InteractionExpired, InteractionExpiryReason, InteractionId, InteractionKind,
-    InteractionRequested, InteractionResolved, RecoveryOutcome, RecoveryRef, SessionFact,
-    SessionId, SessionRecovered, SubagentFinished, SubagentSpawned, SubagentTerminalStatus,
-    ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics, ToolTerminalStatus, TurnId,
+    FactPayload, InteractionDecision, InteractionExpired, InteractionExpiryReason, InteractionId,
+    InteractionKind, InteractionRequested, InteractionResolved, RecoveryOutcome, RecoveryRef,
+    SessionFact, SessionId, SessionRecovered, SubagentFinished, SubagentSpawned,
+    SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics,
+    ToolTerminalStatus, TurnId,
 };
 
 use super::Projection;
@@ -34,6 +35,9 @@ pub struct ControlToolState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlInteractionResolution {
     pub decision: ContentValue,
+    /// Structured verdict. `None` for facts written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<InteractionDecision>,
     pub resolved_by: ActorRef,
     pub resolution_seq: u64,
 }
@@ -169,6 +173,7 @@ impl Projection for ControlProjection {
                     revision: self.next_revision(),
                     interaction_id: payload.interaction_id.clone(),
                     decision: content_ref_value(payload.decision_ref.clone()),
+                    verdict: payload.decision,
                     resolved_by: payload.resolved_by.clone(),
                     resolution_seq: payload.resolution_seq,
                 })
@@ -295,6 +300,7 @@ impl ControlProjection {
         {
             state.resolution = Some(ControlInteractionResolution {
                 decision: content_ref_value(payload.decision_ref.clone()),
+                verdict: payload.decision,
                 resolved_by: payload.resolved_by.clone(),
                 resolution_seq: payload.resolution_seq,
             });
