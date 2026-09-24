@@ -800,6 +800,30 @@ fn driver_seat_epoch_is_monotonic_and_survives_reopen() {
 }
 
 #[test]
+fn dropping_a_ledger_releases_the_writer_fence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ledger = open_ledger(temp.path());
+    // `open_ledger` stamps the fence with a synthetic `NOW_MS`; without a
+    // release on drop the successor below would be `WriterBusy` until the
+    // lease TTL elapsed on that same synthetic clock.
+    drop(ledger);
+
+    let reopened = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS,
+        LEASE_MS,
+    );
+    assert!(
+        reopened.is_ok(),
+        "dropping a ledger must release its writer fence: {:?}",
+        reopened.err()
+    );
+}
+
+#[test]
 fn ensure_lease_reacquires_after_idle_expiry() {
     let temp = tempfile::tempdir().expect("tempdir");
     let call = call_id(20);
