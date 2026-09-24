@@ -77,6 +77,23 @@ impl<T> ApprovalRegistry<T> {
             .unwrap_or(ApprovalTake::Missing)
     }
 
+    /// 把入站 id 归一到 registry 的 key：先精确匹配；否则按 canonical 形式在
+    /// 挂起/已解决项里找。
+    ///
+    /// v2 投影（`ControlDelta::InteractionRequested.call_id`）只暴露 canonical
+    /// call_id，而本表按 wire id 记账——不归一的话 v2 壳层的答复会落成
+    /// `unknown permission response`。
+    pub(crate) fn resolve_key(&self, incoming: &str) -> Option<String> {
+        if self.pending.contains_key(incoming) || self.resolved.contains_key(incoming) {
+            return Some(incoming.to_string());
+        }
+        self.pending
+            .keys()
+            .chain(self.resolved.keys())
+            .find(|key| super::tool_runtime::permission_id_matches(key, incoming))
+            .cloned()
+    }
+
     /// Record the first answer for a consumed pending approval.
     pub(crate) fn mark_resolved(&mut self, call_id: impl Into<String>, decision: ApprovalDecision) {
         let call_id = call_id.into();

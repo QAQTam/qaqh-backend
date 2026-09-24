@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use qaqh_client::{
-    Channel, ChannelStatus, Client, ClientHandlers, ClientOptions, CommandOptions, ControlCommand,
-    QueryRequest, RingingCommand, RingingCommandAckStatus,
+    Client, ClientHandlers, ClientOptions, CommandOptions, ControlCommand, QueryRequest,
+    RingingCommand, RingingCommandAckStatus, V2StreamStatus,
 };
 
 // ── 进程级环境变量的互斥 ─────────────────────────────────────────────────
@@ -214,34 +214,27 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         home: home.clone(),
     };
 
-    // Per-channel counters: open vs reconnecting transitions.
-    let open_counts: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![0, 0, 0]));
-    let reconnect_counts: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![0, 0, 0]));
+    // v2 单流 counters: open vs reconnecting transitions (single attached seed).
+    let open_counts: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![0]));
+    let reconnect_counts: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![0]));
 
     let handlers = ClientHandlers {
         on_liveness: std::sync::Arc::new(|| {}),
-        on_batch: Arc::new(|_| {}),
-        on_status: {
+        on_v2_event: Arc::new(|_, _| {}),
+        on_v2_reset: Arc::new(|_, _| {}),
+        on_v2_status: {
             let open_counts = open_counts.clone();
             let reconnect_counts = reconnect_counts.clone();
-            Arc::new(move |channel: Channel, status: ChannelStatus| {
-                let idx = match channel {
-                    Channel::Control => 0,
-                    Channel::Conversation => 1,
-                    Channel::Tool => 2,
-                };
-                match &status {
-                    ChannelStatus::Open { .. } => {
-                        open_counts.lock().unwrap()[idx] += 1;
-                    }
-                    ChannelStatus::Reconnecting { .. } => {
-                        reconnect_counts.lock().unwrap()[idx] += 1;
-                    }
-                    _ => {}
+            Arc::new(move |_seed: String, status: V2StreamStatus| match &status {
+                V2StreamStatus::Open { .. } => {
+                    open_counts.lock().unwrap()[0] += 1;
                 }
+                V2StreamStatus::Reconnecting { .. } => {
+                    reconnect_counts.lock().unwrap()[0] += 1;
+                }
+                _ => {}
             })
         },
-        on_reset: None,
         on_timeline_entry: Arc::new(|_, _| {}),
         on_timeline_status: Arc::new(|_| {}),
         on_timeline_snapshot: Arc::new(|_| {}),
@@ -301,8 +294,13 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         found.expect("created session seed appears in session.list")
     };
     client.attach(&seed).await.expect("attach created session");
+    // The canonical v2 single stream starts with `activate_timeline`.
+    client
+        .activate_timeline(&seed)
+        .await
+        .expect("activate timeline + v2 stream");
 
-    // Phase 1: wait for the initial Open on all three channels.
+    // Phase 1: wait for the initial Open on the v2 stream.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let all_open = open_counts.lock().unwrap().iter().all(|&c| c >= 1);
@@ -314,7 +312,7 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
     let initial = open_counts.lock().unwrap().clone();
     assert!(
         initial.iter().all(|&c| c >= 1),
-        "channels did not reach Open initially: {initial:?}"
+        "v2 stream did not reach Open initially: {initial:?}"
     );
 
     // Phase 2: with TTL (3s) < renewal interval (5s), the lease keeps
@@ -438,9 +436,9 @@ async fn activating_one_timeline_does_not_stop_another() {
     let statuses: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let handlers = ClientHandlers {
         on_liveness: std::sync::Arc::new(|| {}),
-        on_batch: Arc::new(|_| {}),
-        on_status: Arc::new(|_, _| {}),
-        on_reset: None,
+        on_v2_event: Arc::new(|_, _| {}),
+        on_v2_reset: Arc::new(|_, _| {}),
+        on_v2_status: Arc::new(|_, _| {}),
         on_timeline_entry: Arc::new(|_, _| {}),
         on_timeline_status: {
             let statuses = statuses.clone();
