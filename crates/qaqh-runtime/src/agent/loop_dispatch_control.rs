@@ -265,9 +265,10 @@ impl Loop {
                 client_session_id,
                 stale_holder,
             } => self.handle_driver_claim(command_id, &client_session_id, stale_holder.as_deref()),
-            ControlCommand::DriverRelease { client_session_id } => {
-                self.handle_driver_release(command_id, &client_session_id)
-            }
+            ControlCommand::DriverRelease {
+                client_session_id,
+                expected_epoch,
+            } => self.handle_driver_release(command_id, &client_session_id, expected_epoch),
             ControlCommand::PlanReviewRespond {
                 interaction_id,
                 approved,
@@ -359,8 +360,14 @@ impl Loop {
         }
     }
 
-    /// Canonical driver release; only the recorded holder may release.
-    fn handle_driver_release(&mut self, command_id: &str, holder: &str) {
+    /// Canonical driver release; only the recorded holder may release, and an
+    /// `expected_epoch` CAS guards delayed reclaims.
+    fn handle_driver_release(
+        &mut self,
+        command_id: &str,
+        holder: &str,
+        expected_epoch: Option<u64>,
+    ) {
         let now = unix_ms();
         let event_id = EventId::new(generate_ulid());
         let causation_id = driver_causation_id(command_id);
@@ -371,7 +378,7 @@ impl Loop {
                     .map_err(|error| error.to_string())
                     .and_then(|()| {
                         ledger
-                            .release_driver(holder, event_id, causation_id, now)
+                            .release_driver(holder, expected_epoch, event_id, causation_id, now)
                             .map_err(|error| error.to_string())
                     }),
                 Ok(None) => Err("session has no canonical ledger".to_string()),
@@ -388,6 +395,14 @@ impl Loop {
                     qaqh_domain::ErrorScope::Control,
                     "not_driver",
                     "client does not hold the driver seat",
+                );
+            }
+            Ok(qaqh_session::canonical::DriverReleaseOutcome::StaleEpoch { driver_epoch }) => {
+                self.emit_operation_failed(
+                    command_id,
+                    qaqh_domain::ErrorScope::Control,
+                    "stale_driver_epoch",
+                    &format!("driver seat moved on (current epoch {driver_epoch})"),
                 );
             }
             Err(error) => self.emit_operation_failed(
