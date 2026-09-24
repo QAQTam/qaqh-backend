@@ -8,10 +8,14 @@
 v2 command ack / command status 新增 typed「已有结果」载荷，v1 线协议零改动：
 
 - `qaqh-ringing::v2` 新增（v1 类型未原地修改）：
-  - `RingingV2CommandAck`：v1 ack 的 wire 超集，新增 `existing: Option<RingingV2ExistingCommand>`。
-  - `RingingV2ExistingCommand`：`state` / `terminal_event_id` / `error_code` / `result`。
+  - `RingingV2CommandAck`：v1 ack 的 wire 超集，新增 `existing: Option<RingingV2ExistingResult>`。
+  - `RingingV2ExistingResult`（`source` 标签枚举）：
+    - `CommandReceipt { state, terminal_event_id, error_code, result }`——同
+      `command_id` 重放；
+    - `InteractionResolved { result }`——first-answer-wins 的已有裁决。
   - `RingingV2CommandResult`：`AskResolved { interaction_id, outcome }`、
-    `PlanReviewResolved { interaction_id, approved }`。
+    `PlanReviewResolved { interaction_id, approved }`、
+    `PermissionResolved { interaction_id, approved }`。
   - `RingingV2AskOutcome`：`Answered` / `Dismissed`。
   - `RingingV2CommandStatus`：v1 status 的超集，新增 `result`。
   - `into_v1()` 投影，保证 v1 形状可无损取回。

@@ -12,7 +12,7 @@ pub use types::{
     RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
     RingingV2ControlState, RingingV2Delivery, RingingV2DriverClaimResponse,
     RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope,
-    RingingV2ExistingCommand, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
+    RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
     RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingInteraction, RingingV2PendingSet,
     RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey, open_path,
 };
