@@ -760,16 +760,24 @@ fn driver_seat_epoch_is_monotonic_and_survives_reopen() {
     // Non-holder release is rejected; holder release bumps the epoch.
     assert_eq!(
         ledger
-            .release_driver("cs-a", event_id(34), None, NOW_MS)
+            .release_driver("cs-a", None, event_id(34), None, NOW_MS)
             .expect("not driver"),
         qaqh_session::canonical::DriverReleaseOutcome::NotDriver {
             holder: Some("cs-b".into()),
             driver_epoch: 2,
         }
     );
+    // A delayed reclaim carrying the pre-takeover epoch must be a no-op.
     assert_eq!(
         ledger
-            .release_driver("cs-b", event_id(35), None, NOW_MS)
+            .release_driver("cs-b", Some(1), event_id(35), None, NOW_MS)
+            .expect("stale release"),
+        qaqh_session::canonical::DriverReleaseOutcome::StaleEpoch { driver_epoch: 2 }
+    );
+    assert_eq!(ledger.driver_state(), (Some("cs-b".into()), 2));
+    assert_eq!(
+        ledger
+            .release_driver("cs-b", Some(2), event_id(36), None, NOW_MS)
             .expect("release"),
         qaqh_session::canonical::DriverReleaseOutcome::Released { driver_epoch: 3 }
     );

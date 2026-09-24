@@ -169,6 +169,10 @@ pub enum DriverReleaseOutcome {
         holder: Option<String>,
         driver_epoch: u64,
     },
+    /// `expected_epoch` CAS failed: the seat moved on, so the release is a no-op.
+    StaleEpoch {
+        driver_epoch: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -282,10 +286,13 @@ impl ToolLedger {
         Ok(DriverClaimOutcome::Claimed { driver_epoch })
     }
 
-    /// Release the driver seat. Only the recorded holder may release.
+    /// Release the driver seat. Only the recorded holder may release, and an
+    /// optional `expected_epoch` CAS makes a delayed reclaim a no-op when the
+    /// seat has since been re-claimed.
     pub fn release_driver(
         &mut self,
         holder: &str,
+        expected_epoch: Option<u64>,
         event_id: EventId,
         causation_id: Option<EventId>,
         now_ms: i64,
@@ -293,6 +300,11 @@ impl ToolLedger {
         if self.driver_holder.as_deref() != Some(holder) {
             return Ok(DriverReleaseOutcome::NotDriver {
                 holder: self.driver_holder.clone(),
+                driver_epoch: self.driver_epoch,
+            });
+        }
+        if expected_epoch.is_some_and(|expected| expected != self.driver_epoch) {
+            return Ok(DriverReleaseOutcome::StaleEpoch {
                 driver_epoch: self.driver_epoch,
             });
         }

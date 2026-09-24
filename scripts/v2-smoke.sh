@@ -39,7 +39,9 @@ say "== starting daemon =="
 # A stale discovery file from a previous run would make the readiness loop
 # below succeed against a dead endpoint.
 mv "$DATA/daemon.json" "$DATA/daemon.json.prev" 2>/dev/null || true
-QAQH_DATA_DIR="$DATA" "$ROOT/target/debug/qaqh-daemon" run > "$DATA/../daemon.out" 2>&1 &
+# Short lease TTL so the driver-seat reclaim path is reachable in one run.
+QAQH_DATA_DIR="$DATA" QAQH_TEST_LEASE_TTL_MS=6000 \
+    "$ROOT/target/debug/qaqh-daemon" run > "$DATA/../daemon.out" 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
@@ -67,6 +69,22 @@ command() {
 driver() {
     curl -sS -X POST "$ENDPOINT/ringing/v2/sessions/$SEED/driver/$2" \
         -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $1"
+}
+# Poll the canonical seat via an observer lease. `-` means "no holder".
+# The observer renews its own lease so it stays alive while another seat expires.
+wait_driver() {
+    local expected_holder="$1" expected_epoch="$2" observer="$3" got=""
+    for _ in $(seq 1 80); do
+        curl -sS -X POST "$ENDPOINT/ringing/v2/leases/renew" \
+            -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $observer" \
+            > /dev/null 2>&1 || true
+        got="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
+            -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $observer" \
+            | python3 -c "import json,sys;d=json.load(sys.stdin)['control']['state']['driver'];print(d.get('holder') or '-', d.get('driver_epoch'))")"
+        [ "$got" = "$expected_holder $expected_epoch" ] && return 0
+        sleep 0.5
+    done
+    fail "driver state: expected '$expected_holder $expected_epoch', got '$got'"
 }
 
 A="$(open_client smoke-a)"
@@ -105,15 +123,7 @@ CLAIM_A="$(driver "$A" claim)"
     || fail "claim a must be a forwarded request (canonical ledger allocates the epoch)"
 # The actor's ToolLedger is the single writer: the authoritative seat arrives
 # as the canonical DriverChanged fact, visible in the next bootstrap.
-DRIVER=""
-for _ in $(seq 1 40); do
-    DRIVER="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
-        -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" \
-        | python3 -c "import json,sys;d=json.load(sys.stdin)['control']['state']['driver'];print(d.get('holder'), d.get('driver_epoch'))")"
-    [ "$DRIVER" = "$A 1" ] && break
-    sleep 0.25
-done
-[ "$DRIVER" = "$A 1" ] || fail "canonical DriverChanged did not land (got: $DRIVER)"
+wait_driver "$A" 1 "$A"
 CLAIM_B="$(driver "$B" claim)"
 [ "$(printf '%s' "$CLAIM_B" | json_get "['reason']")" = "driver_busy" ] || fail "claim b busy"
 
@@ -150,5 +160,19 @@ SSE_HEAD="$(curl -sS -i -N --max-time 2 \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null | head -1 || true)"
 printf '%s' "$SSE_HEAD" | grep -q "200" || fail "SSE subscribe ($SSE_HEAD)"
 
-driver "$A" release > /dev/null
+say "== driver release (explicit) =="
+RELEASE_A="$(driver "$A" release)"
+[ "$(printf '%s' "$RELEASE_A" | json_get "['reason']")" = "release_requested" ] \
+    || fail "release a must be a forwarded request"
+wait_driver "-" 2 "$B"
+
+say "== driver auto-reclaim on lease expiry =="
+CLAIM_AGAIN="$(driver "$A" claim)"
+[ "$(printf '%s' "$CLAIM_AGAIN" | json_get "['reason']")" = "claim_requested" ] \
+    || fail "re-claim a"
+wait_driver "$A" 3 "$B"
+# A's lease is no longer renewed: the daemon's reclaim task must release the
+# canonical seat on its own (spec §9.3 自动移交), advancing the epoch.
+wait_driver "-" 4 "$B"
+
 say "PASS: Ringing v2 real-machine smoke test"

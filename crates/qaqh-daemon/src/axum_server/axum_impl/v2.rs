@@ -187,6 +187,11 @@ pub(crate) async fn handle_bootstrap_v2(
             .unwrap_or(0);
         // A recorded holder whose lease is gone is presented as vacant; the
         // next claim takes over via `stale_holder`.
+        if holder.is_some() {
+            // Observers keep the seat on the reclaim scan list too, so an
+            // expired holder is released even if nobody claims afterwards.
+            watch_driver_seat(&state, &seed);
+        }
         let effective_holder = holder.filter(|holder| holder_is_live(&state, holder));
         Some(RingingV2DriverState {
             can_claim: effective_holder.as_deref() != Some(caller.as_str()),
@@ -327,6 +332,70 @@ fn holder_is_live(state: &AppState, holder: &str) -> bool {
         .is_active_session(holder)
 }
 
+/// Remember a seed whose seat is worth scanning for lease expiry.
+fn watch_driver_seat(state: &AppState, seed: &str) {
+    state
+        .driver_watch
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(seed.to_string());
+}
+
+/// Reclaim driver seats whose holder's lease has expired (spec §9.3 自动移交).
+///
+/// The daemon cannot append canonical facts, so this forwards a privileged
+/// `DriverRelease` to the session actor with an `expected_epoch` CAS. If the
+/// seat moved on in the meantime the release is a no-op instead of kicking the
+/// new holder.
+pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
+    let seeds: Vec<String> = state
+        .driver_watch
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .cloned()
+        .collect();
+    for seed in seeds {
+        let Some(driver) = canonical_driver_state(state, &seed) else {
+            state
+                .driver_watch
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&seed);
+            continue;
+        };
+        let Some(holder) = driver.holder.clone() else {
+            // Seat already vacant: stop scanning this seed.
+            state
+                .driver_watch
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&seed);
+            continue;
+        };
+        if holder_is_live(state, &holder) {
+            continue;
+        }
+        let envelope = qaqh_ringing::RingingWorkerCommandEnvelope::new(
+            seed.as_str(),
+            qaqh_session::canonical::generate_ulid(),
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::DriverRelease {
+                client_session_id: holder,
+                expected_epoch: Some(driver.driver_epoch),
+            }),
+        );
+        match state.service.send_ringing_command(&seed, &envelope) {
+            Ok(()) => log::info!(
+                "[ringing-v2] reclaiming driver seat for {seed}: holder lease expired at epoch {}",
+                driver.driver_epoch
+            ),
+            Err(error) => {
+                log::warn!("[ringing-v2] driver seat reclaim dispatch failed for {seed}: {error}")
+            }
+        }
+    }
+}
+
 /// Forward a daemon-normalized driver command to the session actor.
 ///
 /// The actor's `ToolLedger` is the canonical single writer, so it — not the
@@ -386,6 +455,7 @@ pub(crate) async fn handle_driver_claim_v2(
     if seed.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
+    watch_driver_seat(&state, &seed);
     let current = canonical_driver_state(&state, &seed);
     let holder = current.as_ref().and_then(|driver| driver.holder.clone());
     let driver_epoch = current
@@ -484,6 +554,7 @@ pub(crate) async fn handle_driver_release_v2(
         &caller,
         qaqh_domain::ControlCommand::DriverRelease {
             client_session_id: caller.clone(),
+            expected_epoch: Some(driver_epoch),
         },
     )
     .await;
@@ -702,8 +773,13 @@ pub(crate) async fn handle_command_v2(
             }
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::DriverRelease {
                 client_session_id,
+                expected_epoch,
             }) => {
                 *client_session_id = caller;
+                *expected_epoch = seed
+                    .as_deref()
+                    .and_then(|seed| canonical_driver_state(&state, seed))
+                    .map(|driver| driver.driver_epoch);
             }
             _ => {}
         }
