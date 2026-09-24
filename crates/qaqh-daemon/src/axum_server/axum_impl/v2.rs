@@ -5,8 +5,10 @@
 
 use qaqh_ringing::{
     RINGING_SCHEMA, RINGING_V2_VERSION, RINGING_VERSION, RingingCommandAckStatus,
-    RingingCommandEnvelope, RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot,
-    RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2DriverState, RingingV2InteractionKind,
+    RingingCommandEnvelope, RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities,
+    RingingV2ChannelSnapshot, RingingV2CommandAck, RingingV2CommandEnvelope,
+    RingingV2CommandResult, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,
+    RingingV2DriverState, RingingV2ExistingResult, RingingV2InteractionKind,
     RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
     RingingV2PendingInteraction,
 };
@@ -15,7 +17,8 @@ use qaqh_session::projection::{
     ControlRoundState, ControlSubagentState, ControlToolState, ConversationSnapshot,
 };
 use qaqh_session::session_fact_v2::{
-    ActivityState, InteractionKind, RecoveryOutcome, SessionId, ToolCallId, TurnId,
+    ActivityState, InteractionDecision, InteractionKind, RecoveryOutcome, SessionId, ToolCallId,
+    TurnId,
 };
 use serde::Serialize;
 
@@ -136,9 +139,9 @@ pub(crate) async fn handle_bootstrap_v2(
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    if require_v2_lease(&state, &headers).is_none() {
+    let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
-    }
+    };
     if seed.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
@@ -175,6 +178,29 @@ pub(crate) async fn handle_bootstrap_v2(
             },
         })
         .collect();
+    let driver = {
+        let (holder, driver_epoch) = {
+            let drivers = state
+                .drivers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let state = drivers.state(&seed);
+            (state.holder, state.driver_epoch)
+        };
+        let holder_active = holder.as_deref().is_some_and(|holder| {
+            state
+                .leases
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_active_session(holder)
+        });
+        let effective_holder = holder_active.then_some(holder).flatten();
+        Some(RingingV2DriverState {
+            can_claim: effective_holder.as_deref() != Some(caller.as_str()),
+            holder: effective_holder,
+            driver_epoch,
+        })
+    };
     let control = V2ControlState {
         session_id: control_snapshot.session_id.clone(),
         activity: control_snapshot.activity,
@@ -187,7 +213,7 @@ pub(crate) async fn handle_bootstrap_v2(
         revision: control_snapshot.revision,
         last_fact_seq: control_snapshot.last_fact_seq,
         interactions,
-        driver: None,
+        driver,
     };
     let conversation = bootstrap.projections.conversation.clone();
     let tool = V2ToolState {
@@ -289,6 +315,198 @@ pub(crate) async fn handle_events_v2(
         .into_response()
 }
 
+pub(crate) async fn handle_driver_claim_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(seed): Path<String>,
+) -> Response {
+    if !is_authorized(&headers, &state.token) {
+        return unauthorized();
+    }
+    let Some(session_id) = require_v2_lease(&state, &headers) else {
+        return lease_required_v2();
+    };
+    if seed.trim().is_empty() {
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+    }
+    let holder_active = current_holder_active(&state, &seed);
+    let outcome = state
+        .drivers
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .claim(&seed, &session_id, holder_active);
+    let response = match outcome {
+        qaqh_runtime::ringing::DriverClaimOutcome::Claimed { driver_epoch } => {
+            RingingV2DriverClaimResponse {
+                accepted: true,
+                holder: Some(session_id),
+                driver_epoch,
+                reason: "claimed".into(),
+            }
+        }
+        qaqh_runtime::ringing::DriverClaimOutcome::AlreadyHeld { driver_epoch } => {
+            RingingV2DriverClaimResponse {
+                accepted: true,
+                holder: Some(session_id),
+                driver_epoch,
+                reason: "already_holder".into(),
+            }
+        }
+        qaqh_runtime::ringing::DriverClaimOutcome::Busy {
+            holder,
+            driver_epoch,
+        } => RingingV2DriverClaimResponse {
+            accepted: false,
+            holder: Some(holder),
+            driver_epoch,
+            reason: "driver_busy".into(),
+        },
+    };
+    json_response(StatusCode::OK, &response)
+}
+
+pub(crate) async fn handle_driver_release_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(seed): Path<String>,
+) -> Response {
+    if !is_authorized(&headers, &state.token) {
+        return unauthorized();
+    }
+    let Some(session_id) = require_v2_lease(&state, &headers) else {
+        return lease_required_v2();
+    };
+    if seed.trim().is_empty() {
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+    }
+    let outcome = state
+        .drivers
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .release(&seed, &session_id);
+    let response = match outcome {
+        qaqh_runtime::ringing::DriverReleaseOutcome::Released { driver_epoch } => {
+            RingingV2DriverReleaseResponse {
+                accepted: true,
+                holder: None,
+                driver_epoch,
+                reason: "released".into(),
+            }
+        }
+        qaqh_runtime::ringing::DriverReleaseOutcome::NotDriver {
+            holder,
+            driver_epoch,
+        } => RingingV2DriverReleaseResponse {
+            accepted: false,
+            holder,
+            driver_epoch,
+            reason: "not_driver".into(),
+        },
+    };
+    json_response(StatusCode::OK, &response)
+}
+
+/// Whether the recorded driver still holds a live lease.
+fn current_holder_active(state: &AppState, seed: &str) -> bool {
+    let holder = state
+        .drivers
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .holder(seed);
+    holder.is_some_and(|holder| {
+        state
+            .leases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_active_session(&holder)
+    })
+}
+
+/// Commands that mutate the session and therefore require the driver seat.
+///
+/// Interaction answers (permission / ask / plan) are deliberately excluded:
+/// a non-driver must still be able to resolve a pending interaction.
+fn driver_gated(command: &qaqh_ringing::RingingCommand) -> bool {
+    use qaqh_domain::ControlCommand;
+    matches!(
+        command,
+        qaqh_ringing::RingingCommand::Conversation(_)
+            | qaqh_ringing::RingingCommand::Control(
+                ControlCommand::SessionClose { .. }
+                    | ControlCommand::SessionArchive { .. }
+                    | ControlCommand::SessionUnarchive { .. }
+                    | ControlCommand::SessionDelete { .. }
+                    | ControlCommand::SessionShutdown
+                    | ControlCommand::AgentReloadConfig
+                    | ControlCommand::SetToolMode { .. }
+                    | ControlCommand::SkillsActivate { .. }
+                    | ControlCommand::SkillsReload
+                    | ControlCommand::SkillsOperation { .. },
+            )
+    )
+}
+
+/// Driver admission for a gated command.
+///
+/// Returns `Some(rejection)` when the command must not reach the worker.
+/// A session with no claimed driver stays permissive: gating only kicks in
+/// once somebody holds the seat, so unclaimed sessions keep working while the
+/// TUI has not adopted driver claiming yet.
+fn driver_admission(
+    state: &AppState,
+    headers: &HeaderMap,
+    seed: &str,
+    command: &qaqh_ringing::RingingCommand,
+    driver_epoch: Option<u64>,
+) -> Option<RingingV2CommandAck> {
+    if !driver_gated(command) {
+        return None;
+    }
+    let session_id = require_v2_lease(state, headers)?;
+    let (holder, epoch) = {
+        let drivers = state
+            .drivers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = drivers.state(seed);
+        (state.holder, state.driver_epoch)
+    };
+    let holder = holder?;
+    let holder_active = state
+        .leases
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_active_session(&holder);
+    if !holder_active {
+        return None;
+    }
+    if holder != session_id {
+        return Some(RingingV2CommandAck {
+            command_id: String::new(),
+            status: RingingCommandAckStatus::Rejected,
+            code: Some("not_driver".into()),
+            message: Some("another client holds the driver seat".into()),
+            retry_after_ms: None,
+            existing: None,
+        });
+    }
+    if let Some(expected) = driver_epoch
+        && expected != epoch
+    {
+        return Some(RingingV2CommandAck {
+            command_id: String::new(),
+            status: RingingCommandAckStatus::Rejected,
+            code: Some("stale_driver_epoch".into()),
+            message: Some(format!(
+                "driver_epoch {expected} is stale; current epoch is {epoch}"
+            )),
+            retry_after_ms: None,
+            existing: None,
+        });
+    }
+    None
+}
+
 pub(crate) async fn handle_command_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -365,6 +583,38 @@ pub(crate) async fn handle_command_v2(
             },
         );
     }
+    // First-answer-wins: if the canonical control projection already carries a
+    // structured verdict for the targeted interaction, answer synchronously
+    // with the winning result instead of dispatching a command the worker can
+    // only reject with a bare `interaction_already_resolved`.
+    if require_v2_lease(&state, &headers).is_some()
+        && let Some(seed) = envelope.seed.as_deref()
+        && let Some(existing) = resolved_interaction_existing(&state, seed, &envelope.command)
+    {
+        return json_response(
+            StatusCode::OK,
+            &RingingV2CommandAck {
+                command_id: envelope.command_id.clone(),
+                status: RingingCommandAckStatus::Rejected,
+                code: Some("interaction_already_resolved".into()),
+                message: Some("interaction was already resolved".into()),
+                retry_after_ms: None,
+                existing: Some(existing),
+            },
+        );
+    }
+    if let Some(seed) = envelope.seed.as_deref()
+        && let Some(mut rejection) = driver_admission(
+            &state,
+            &headers,
+            seed,
+            &envelope.command,
+            envelope.driver_epoch,
+        )
+    {
+        rejection.command_id = envelope.command_id.clone();
+        return json_response(StatusCode::OK, &rejection);
+    }
     let v1 = RingingCommandEnvelope {
         schema: RINGING_SCHEMA.into(),
         version: RINGING_VERSION,
@@ -387,6 +637,108 @@ pub(crate) async fn handle_command_v2(
         }
     };
     handle_command(State(state), headers, Path(id), Bytes::from(body)).await
+}
+
+/// Interaction addressed by an interaction-resolution command.
+enum InteractionTarget<'a> {
+    /// ask / plan commands carry the canonical `int_...` interaction id.
+    InteractionId(&'a str),
+    /// permission commands carry the canonical `call_...` tool call id.
+    CallId(&'a str),
+}
+
+fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<InteractionTarget<'_>> {
+    use qaqh_domain::{ControlCommand, ToolCommand};
+    match command {
+        qaqh_ringing::RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+            tool_call_id,
+            ..
+        }) => Some(InteractionTarget::CallId(tool_call_id)),
+        qaqh_ringing::RingingCommand::Control(
+            ControlCommand::InteractionAskRespond { interaction_id, .. }
+            | ControlCommand::InteractionAskDismiss { interaction_id }
+            | ControlCommand::PlanReviewRespond { interaction_id, .. },
+        ) => Some(InteractionTarget::InteractionId(interaction_id)),
+        _ => None,
+    }
+}
+
+/// Structured verdict of an already-resolved interaction, if the canonical
+/// control projection has one. Legacy facts carry no verdict → `None`, and the
+/// command falls through to the worker's existing rejection path.
+fn resolved_interaction_existing(
+    state: &AppState,
+    seed: &str,
+    command: &qaqh_ringing::RingingCommand,
+) -> Option<RingingV2ExistingResult> {
+    let target = interaction_target(command)?;
+    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    let interactions = state.v2_hub.control_interactions(&session_dir, seed).ok()?;
+    let interaction = match target {
+        InteractionTarget::InteractionId(id) => interactions
+            .iter()
+            .find(|interaction| interaction.interaction_id.as_str() == id),
+        InteractionTarget::CallId(id) => interactions.iter().find(|interaction| {
+            interaction
+                .call_id
+                .as_ref()
+                .is_some_and(|call_id| call_id.as_str() == id)
+        }),
+    }?;
+    let verdict = interaction.resolution.as_ref()?.verdict?;
+    let result = command_result_for(
+        interaction.kind,
+        interaction.interaction_id.as_str(),
+        verdict,
+    )?;
+    Some(RingingV2ExistingResult::InteractionResolved { result })
+}
+
+fn command_result_for(
+    kind: InteractionKind,
+    interaction_id: &str,
+    verdict: InteractionDecision,
+) -> Option<RingingV2CommandResult> {
+    let interaction_id = interaction_id.to_string();
+    match (kind, verdict) {
+        (InteractionKind::Permission, InteractionDecision::Approved) => {
+            Some(RingingV2CommandResult::PermissionResolved {
+                interaction_id,
+                approved: true,
+            })
+        }
+        (InteractionKind::Permission, InteractionDecision::Rejected) => {
+            Some(RingingV2CommandResult::PermissionResolved {
+                interaction_id,
+                approved: false,
+            })
+        }
+        (InteractionKind::Ask, InteractionDecision::Answered) => {
+            Some(RingingV2CommandResult::AskResolved {
+                interaction_id,
+                outcome: RingingV2AskOutcome::Answered,
+            })
+        }
+        (InteractionKind::Ask, InteractionDecision::Dismissed) => {
+            Some(RingingV2CommandResult::AskResolved {
+                interaction_id,
+                outcome: RingingV2AskOutcome::Dismissed,
+            })
+        }
+        (InteractionKind::Plan, InteractionDecision::Approved) => {
+            Some(RingingV2CommandResult::PlanReviewResolved {
+                interaction_id,
+                approved: true,
+            })
+        }
+        (InteractionKind::Plan, InteractionDecision::Rejected) => {
+            Some(RingingV2CommandResult::PlanReviewResolved {
+                interaction_id,
+                approved: false,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Look up a replayable receipt for the lease named by the request header.

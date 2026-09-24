@@ -24,9 +24,10 @@ pub use qaqh_domain::{
     PermissionRisk, PlanReviewItem, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
     SessionActivity, SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus,
     TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
-    TimelineFailure, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolBody,
-    TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics, TimelineToolPermission,
-    TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand, ToolEvent,
+    TimelineFailure, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineTool,
+    TimelineToolBody, TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics,
+    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand,
+    ToolEvent,
 };
 pub use qaqh_ringing::{
     CLIENT_SESSION_HEADER, ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse,
@@ -214,6 +215,10 @@ pub fn envelope_to_batch(
 pub struct CommandOptions {
     pub command_id: Option<String>,
     pub expected_revision: Option<u64>,
+    /// Driver seat epoch the caller holds. `None` opts out of the v2
+    /// `stale_driver_epoch` guard (required for interaction answers, which are
+    /// not driver-gated).
+    pub driver_epoch: Option<u64>,
 }
 
 #[cfg(test)]

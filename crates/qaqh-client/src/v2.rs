@@ -28,7 +28,7 @@ pub use qaqh_ringing::{
     RingingV2AskOutcome as ClientV2AskOutcome, RingingV2CommandAck as ClientV2CommandAck,
     RingingV2CommandResult as ClientV2CommandResult,
     RingingV2CommandStatus as ClientV2CommandStatus, RingingV2DriverState as ClientV2DriverState,
-    RingingV2ExistingCommand as ClientV2ExistingCommand,
+    RingingV2ExistingResult as ClientV2ExistingResult,
     RingingV2InteractionKind as ClientV2InteractionKind,
     RingingV2PendingInteraction as ClientV2PendingInteraction,
     RingingV2PendingSet as ClientV2PendingSet, RingingV2ResetReason as ClientV2ResetReason,
@@ -298,6 +298,7 @@ impl Client {
             payload = payload.with_seed(seed);
         }
         payload.expected_revision = options.expected_revision;
+        payload.driver_epoch = options.driver_epoch;
         payload
             .validate()
             .map_err(|code| ClientError::Protocol(format!("invalid v2 command: {code}")))?;
