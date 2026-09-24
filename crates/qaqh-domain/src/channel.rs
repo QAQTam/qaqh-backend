@@ -19,7 +19,8 @@ pub enum RingingChannel {
 }
 
 impl RingingChannel {
-    /// SSE 事件流的 URL 片段（`/ringing/v1/events/{channel}`）。
+    /// 频道名（v2 单流事件里的 `stream_key.channel` 取值；v1 的
+    /// `/ringing/v1/events/{channel}` 路由已删除）。
     pub fn as_str(self) -> &'static str {
         match self {
             RingingChannel::Control => "control",

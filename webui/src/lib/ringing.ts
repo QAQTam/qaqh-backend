@@ -234,8 +234,12 @@ export class Ringing {
     return this.call(`/__gateway/ringing/sessions/${encodeURIComponent(seed)}/bootstrap`);
   }
 
-  sseUrl(kind: "control" | "conversation" | "tool"): string {
-    return `/__gateway/ringing/events/${kind}`;
+  /// 每 seed 一条 canonical 事件流（v2 单流）。
+  ///
+  /// 2026-09-24 硬切：daemon 的三条 per-channel `events/{channel}` 已删除；单流
+  /// 事件带 `stream_key`，调用方自行 demux。
+  eventsUrl(seed: string): string {
+    return `/__gateway/ringing/sessions/${encodeURIComponent(seed)}/events`;
   }
 
   timelineSseUrl(seed: string): string {
