@@ -278,7 +278,10 @@ fn build_router(state: GatewayState) -> Router {
             get(proxy_content_get),
         )
         .route("/__gateway/ringing/content", post(proxy_content_upload))
-        .route("/__gateway/ringing/events/{channel}", get(proxy_events))
+        .route(
+            "/__gateway/ringing/sessions/{seed}/events",
+            get(proxy_events),
+        )
         .route(
             "/__gateway/ringing/sessions/{seed}/bootstrap",
             get(proxy_bootstrap),
@@ -896,31 +899,38 @@ async fn proxy_content_upload(
     forward_response(response).await
 }
 
+/// 每 seed 一条 canonical 事件流（v2 单流）。
+///
+/// 2026-09-24 硬切：daemon 的三条 per-channel `events/{channel}` 已删除，这里跟着
+/// 换成 per-seed 单流；事件带 `stream_key`，浏览器自行 demux。
 async fn proxy_events(
     State(state): State<GatewayState>,
-    AxumPath(channel): AxumPath<String>,
+    AxumPath(seed): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
     let session = match authenticate(&state, &headers, true) {
         Ok(session) => session,
         Err(response) => return response,
     };
-    if channel_from_path(&channel).is_none() {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_channel");
-    }
-    if session.active_seed().is_none() {
-        return error_response(StatusCode::CONFLICT, "no_active_seed");
+    if session.active_seed().as_deref() != Some(seed.as_str()) {
+        return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
     }
     let lease = session.lease_snapshot();
     let response = match state
         .daemon
-        .get_stream(&format!("/ringing/v1/events/{channel}"), &lease, &headers)
+        .get_stream(&events_proxy_path(&seed), &lease, &headers)
         .await
     {
         Ok(response) => response,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
     };
     stream_response(response)
+}
+
+/// 事件流的 daemon 侧路径。抽成函数是为了让「必须指向 v2 单流」有回归测试兜住
+/// ——这条路径曾经在 v1 硬切后漏改，导致浏览器事件流全部 404。
+fn events_proxy_path(seed: &str) -> String {
+    format!("/ringing/v2/sessions/{}/events", encode_path(seed))
 }
 
 async fn proxy_bootstrap(
@@ -1619,6 +1629,20 @@ mod tests {
         assert!(service_allowed("fs.read"));
         assert!(!service_allowed("config.save"));
         assert!(!service_allowed("workspace.delete"));
+    }
+
+    /// 回归：事件流代理必须指向 v2 单流。这条路径在 v1 硬切后曾漏改，浏览器
+    /// 三条 per-channel EventSource 全部 404。
+    #[test]
+    fn events_proxy_path_targets_the_v2_single_stream() {
+        assert_eq!(
+            events_proxy_path("seed-1"),
+            "/ringing/v2/sessions/seed-1/events"
+        );
+        assert!(
+            !events_proxy_path("seed-1").contains("/ringing/v1"),
+            "v1 事件路径已删除"
+        );
     }
 
     #[test]

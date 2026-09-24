@@ -102,31 +102,6 @@ function normalizeTodo(raw: Record<string, any>): TodoSummary {
   };
 }
 
-function todoSummaryFromDashboard(snapshot: Record<string, any> | null | undefined): TodoSummary | null {
-  const items: TodoItemView[] = (snapshot?.tasks ?? []).map((item: Record<string, any>) => ({
-    id: String(item.id ?? ""),
-    title: String(item.subject ?? item.title ?? ""),
-    description: String(item.description ?? ""),
-    status: (String(item.status ?? "pending") === "idle" ? "pending" : String(item.status ?? "pending")) as TodoStatusName,
-    evidence: item.evidence ?? null,
-  }));
-  if (items.length === 0) return null;
-  const count = (status: TodoStatusName) => items.filter((item) => item.status === status).length;
-  return {
-    mode: "dashboard",
-    currentId: snapshot?.current_todo_id ?? null,
-    currentTitle: items.find((item) => item.id === snapshot?.current_todo_id)?.title ?? null,
-    counts: {
-      pending: count("pending"),
-      inProgress: count("in_progress"),
-      completed: count("completed"),
-      cancelled: count("cancelled"),
-      total: items.length,
-    },
-    items,
-  };
-}
-
 let todoInflight = false;
 let todoQueued = false;
 let todoRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -164,21 +139,6 @@ export async function refreshTodo(): Promise<void> {
 
 // ── streams ─────────────────────────────────────────────────────────────────
 const sources = new Map<string, EventSource>();
-const CHANNEL_EVENTS: Record<string, string[]> = {
-  control: [
-    "agent_lifecycle_changed", "config_changed", "dashboard_updated", "dashboard_snapshot",
-    "interaction_requested", "interaction_resolved", "plan_review_requested", "plan_review_resolved",
-    "session_activity_changed", "session_meta_changed", "session_state_changed", "skills_updated",
-    "subagent_status", "system_notice", "operation_completed", "operation_failed",
-  ],
-  conversation: [
-    "block_checkpoint", "compact_finished", "compact_progress", "compact_started",
-    "conversation_cancelled", "provider_retrying", "provider_tool_status", "round_completed",
-    "round_delta", "turn_completed", "turn_failed", "turn_started", "usage_updated",
-  ],
-  tool: ["audit_recorded", "code_changed", "tool_call_prepared", "tool_finished", "tool_notice", "tool_permission_requested", "tool_started"],
-  timeline: ["timeline.entry"],
-};
 
 function setStream(kind: string, state: string): void {
   setStreams((current) => ({ ...current, [kind]: state }));
@@ -236,50 +196,58 @@ function scheduleApprovalsRefresh(): void {
   }, 80);
 }
 
-function onControl(name: string, event: Record<string, any>): void {
-  switch (name) {
-    case "session_activity_changed":
-      if (!event.seed || event.seed === seed()) setActivity(event.state ?? null);
+/// v2 单流事件 → 本页需要的刷新信号。
+///
+/// 前端只把投影事件当**刷新信号**用（真正的数据一律走 RPC / timeline 快照），所以
+/// 这里按 `stream_key` + payload `kind` 分派，不解析领域字段细节。
+function applyProjection(streamKey: unknown, payload: unknown): void {
+  const key = (streamKey ?? {}) as Record<string, any>;
+  const body = (payload ?? {}) as Record<string, any>;
+  const delta = (body.data ?? {}) as Record<string, any>;
+  const kind = typeof delta.kind === "string" ? delta.kind : "";
+  const data = (delta.data ?? {}) as Record<string, any>;
+
+  if (key.kind === "resource") {
+    scheduleTodoRefresh();
+    return;
+  }
+  switch (key.data) {
+    case "control":
+      switch (kind) {
+        case "activity":
+          setActivity(data.state ?? null);
+          break;
+        case "interaction_requested":
+        case "interaction_resolved":
+        case "interaction_expired":
+          scheduleApprovalsRefresh();
+          break;
+        case "session_created":
+        case "session_recovered":
+        case "subagent_spawned":
+        case "subagent_finished":
+          scheduleSessionsRefresh();
+          break;
+        default:
+          break;
+      }
       break;
-    case "session_state_changed":
-    case "session_meta_changed":
-      scheduleSessionsRefresh();
+    case "conversation":
+      if (kind === "assistant_block_sealed") {
+        setModel(data.model ?? model());
+        const usage = data.usage as Record<string, any> | null | undefined;
+        if (usage) setContext({ used: usage.prompt_tokens ?? 0, limit: context().limit });
+      }
+      if (kind === "turn_finished" || kind === "turn_interrupted") {
+        scheduleApprovalsRefresh();
+      }
       break;
-    case "interaction_requested":
-    case "plan_review_requested":
-    case "interaction_resolved":
-    case "plan_review_resolved":
-      if (!event.seed || event.seed === seed()) scheduleApprovalsRefresh();
+    case "tool":
+      if (kind === "tool_intent" || kind === "tool_finished") scheduleApprovalsRefresh();
+      if (kind === "tool_finished") scheduleTodoRefresh();
       break;
-    case "dashboard_snapshot": {
-      const snapshot = event.snapshot as Record<string, unknown> | undefined;
-      if (snapshot && snapshot.seed && snapshot.seed !== seed()) break;
-      // DashboardSnapshot already carries the authoritative tasks projection.
-      // Apply it now; the debounced RPC only repairs stale legacy daemons.
-      setTodo(todoSummaryFromDashboard(snapshot as Record<string, any> | undefined));
-      scheduleTodoRefresh();
-      break;
-    }
     default:
       break;
-  }
-}
-
-function onTool(name: string, event: Record<string, any>): void {
-  if (event.seed && event.seed !== seed()) return;
-  if (name === "tool_permission_requested" || name === "tool_started" || name === "tool_finished") {
-    scheduleApprovalsRefresh();
-  }
-  // 旧投影的 todo 刷新信号：任何工具收尾都值得对一次账（todo.status 很轻）；
-  // v2 落地后改由 TodoChanged 事件驱动，此启发式删除。
-  if (name === "tool_finished") scheduleTodoRefresh();
-}
-
-function onConversation(name: string, event: Record<string, any>): void {
-  if (event.seed && event.seed !== seed()) return;
-  if (name === "usage_updated") {
-    setModel(event.model ?? model());
-    setContext({ used: event.usage?.prompt_tokens ?? 0, limit: event.context_limit ?? 0 });
   }
 }
 
@@ -327,42 +295,53 @@ function onTimelineEntry(payload: Record<string, any>): void {
   });
 }
 
-function wire(kind: string, source: EventSource): void {
-  source.onopen = () => setStream(kind, "open");
-  source.onerror = () => setStream(kind, source.readyState === EventSource.CLOSED ? "closed" : "connecting");
-  source.addEventListener("webui.stream_state", (event) => {
+/// 每 seed 一条 canonical 事件流（v2 单流）。
+///
+/// 2026-09-24 硬切：daemon 的三条 per-channel `events/{channel}` 已删除，网关只暴露
+/// `/__gateway/ringing/sessions/{seed}/events`。事件带 `stream_key`，这里 demux。
+function wireEvents(seedName: string, source: EventSource): void {
+  source.onopen = () => setStream("events", "open");
+  source.onerror = () =>
+    setStream("events", source.readyState === EventSource.CLOSED ? "closed" : "connecting");
+  source.addEventListener("ringing.event", (event) => {
+    let envelope: Record<string, any> = {};
     try {
-      const parsed = JSON.parse((event as MessageEvent).data) as { state?: string };
-      setStream(kind, parsed.state === "open" ? "open" : parsed.state ?? "connecting");
+      envelope = JSON.parse((event as MessageEvent).data);
     } catch {
-      setStream(kind, "connecting");
+      return;
     }
+    if (envelope.seed && envelope.seed !== seedName) return;
+    applyProjection(envelope.stream_key, envelope.payload);
   });
-  for (const name of CHANNEL_EVENTS[kind] ?? []) {
-    source.addEventListener(name, (event) => {
-      let parsed: Record<string, any> = {};
-      try {
-        parsed = JSON.parse((event as MessageEvent).data);
-      } catch {
-        return;
-      }
-      const inner = parsed.event ?? {};
-      if (kind === "control") onControl(name, inner);
-      else if (kind === "tool") onTool(name, inner);
-      else if (kind === "conversation") onConversation(name, inner);
-      else if (kind === "timeline") onTimelineEntry(parsed);
-    });
-  }
+  source.addEventListener("ringing.reset_required", () => {
+    // 服务端要求重新对齐：全量刷一遍（流自身会重连）。
+    scheduleSessionsRefresh();
+    scheduleApprovalsRefresh();
+    scheduleTodoRefresh();
+  });
 }
 
-function connectChannels(): void {
-  for (const kind of ["control", "conversation", "tool"] as const) {
-    sources.get(kind)?.close();
-    const source = new EventSource(ringing.sseUrl(kind));
-    sources.set(kind, source);
-    setStream(kind, "connecting");
-    wire(kind, source);
-  }
+function wireTimeline(source: EventSource): void {
+  source.onopen = () => setStream("timeline", "open");
+  source.onerror = () =>
+    setStream("timeline", source.readyState === EventSource.CLOSED ? "closed" : "connecting");
+  source.addEventListener("timeline.entry", (event) => {
+    let parsed: Record<string, any> = {};
+    try {
+      parsed = JSON.parse((event as MessageEvent).data);
+    } catch {
+      return;
+    }
+    onTimelineEntry(parsed);
+  });
+}
+
+function connectEvents(currentSeed: string): void {
+  sources.get("events")?.close();
+  const source = new EventSource(ringing.eventsUrl(currentSeed));
+  sources.set("events", source);
+  setStream("events", "connecting");
+  wireEvents(currentSeed, source);
 }
 
 function connectTimeline(currentSeed: string): void {
@@ -370,7 +349,7 @@ function connectTimeline(currentSeed: string): void {
   const source = new EventSource(ringing.timelineSseUrl(currentSeed));
   sources.set("timeline", source);
   setStream("timeline", "connecting");
-  wire("timeline", source);
+  wireTimeline(source);
 }
 
 function closeStreams(): void {
@@ -404,7 +383,7 @@ export async function attach(target: string): Promise<void> {
     return;
   }
   setSeed(target);
-  connectChannels();
+  connectEvents(target);
   connectTimeline(target);
 
   try {
@@ -439,9 +418,11 @@ function onLeaseChanged(value: GatewaySession | null): void {
   if (token !== lastSessionToken && lastSessionToken !== null && token !== null) {
     // A gateway session rotation invalidates all cookie-authenticated streams.
     closeStreams();
-    connectChannels();
     const current = seed();
-    if (current) connectTimeline(current);
+    if (current) {
+      connectEvents(current);
+      connectTimeline(current);
+    }
   }
   lastSessionToken = token;
 }
@@ -451,7 +432,7 @@ export function installDebugHooks(): void {
   w.__webuiDebug = {
     attach,
     stopStreams: closeStreams,
-    connectChannels,
+    connectEvents,
     renderersSize: () => renderers.size,
     seed: () => seed(),
     domNodes: () => document.querySelectorAll("*").length,
