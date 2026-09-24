@@ -985,7 +985,7 @@ async fn proxy_seeded_get(
     }
     let lease = session.lease_snapshot();
     let path = if suffix == "bootstrap" {
-        format!("/ringing/v1/sessions/{}/bootstrap", encode_path(&seed))
+        format!("/ringing/v2/sessions/{}/bootstrap", encode_path(&seed))
     } else {
         format!("/ringing/v2/sessions/{}/timeline", encode_path(&seed))
     };
