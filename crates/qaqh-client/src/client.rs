@@ -373,25 +373,13 @@ impl Client {
         Ok(response.json().await?)
     }
 
-    /// `GET /ringing/v1/sessions/{seed}/bootstrap` — authoritative snapshot.
-    pub async fn bootstrap(&self, seed: &str) -> Result<qaqh_ringing::RingingSessionBootstrap> {
-        let session_id = self.session_id_header().await?;
-        let path = format!("/ringing/v1/sessions/{seed}/bootstrap");
-        let response = self
-            .inner
-            .http
-            .get(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", session_id)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(ClientError::Http {
-                status: response.status().as_u16(),
-                path,
-            });
-        }
-        Ok(response.json().await?)
+    /// `GET /ringing/v2/sessions/{seed}/bootstrap` — authoritative snapshot.
+    ///
+    /// 2026-09-24 硬切：v1 `/ringing/v1/…/bootstrap` 已删除，本方法直接走 v2
+    /// 三频道 typed 快照（`control` / `conversation` / `tool`）。返回类型从
+    /// v1 的 `RingingSessionBootstrap` 换成 [`crate::ClientV2Bootstrap`]。
+    pub async fn bootstrap(&self, seed: &str) -> Result<crate::ClientV2Bootstrap> {
+        self.bootstrap_v2(seed).await
     }
 
     /// Execute a closed, typed auxiliary action (Write 类服务方法)。Method

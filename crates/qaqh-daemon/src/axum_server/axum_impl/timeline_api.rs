@@ -54,53 +54,6 @@ pub(crate) fn page_plan(
 
 // ---- handlers ----
 
-pub(crate) async fn handle_bootstrap(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(seed): Path<String>,
-) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
-    let Some(session_id) = get_session_id(&headers) else {
-        return lease_required_json();
-    };
-    if seed.is_empty() {
-        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
-    }
-    if state.test_hooks.session_is_404(&seed) {
-        return session_not_found_response(&seed);
-    }
-    let owns = state
-        .leases
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .owns_seed(&session_id, &seed);
-    if !owns {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::CONTENT_TYPE, "application/json")],
-            br#"{"code":"lease_required","message":"attach the session seed before bootstrap"}"#
-                .to_vec(),
-        )
-            .into_response();
-    }
-    state.hub.seal_orphan_channel_state(&seed, false);
-    let bootstrap = qaqh_ringing::RingingSessionBootstrap::new(
-        state.hub.epoch(),
-        &seed,
-        state.hub.snapshot(RingingChannel::Control, &seed),
-        state.hub.conversation_snapshot(&seed),
-        state.hub.snapshot(RingingChannel::Tool, &seed),
-    );
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_vec(&bootstrap).unwrap_or_default(),
-    )
-        .into_response()
-}
-
 /// Minimal pending-approval projection for the local browser gateway.
 ///
 /// This endpoint is deliberately separate from `/bootstrap`: bootstrap carries
