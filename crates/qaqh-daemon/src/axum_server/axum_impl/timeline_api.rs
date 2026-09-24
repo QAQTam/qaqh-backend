@@ -54,72 +54,6 @@ pub(crate) fn page_plan(
 
 // ---- handlers ----
 
-/// Minimal pending-approval projection for the local browser gateway.
-///
-/// This endpoint is deliberately separate from `/bootstrap`: bootstrap carries
-/// the full conversation history, while challenge issuance only needs the two
-/// bounded pending records. The gateway still wraps the canonical ids in
-/// opaque, one-shot challenge ids before the browser sees anything.
-pub(crate) async fn handle_pending_approvals(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(seed): Path<String>,
-) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
-    let Some(session_id) = get_session_id(&headers) else {
-        return lease_required_json();
-    };
-    if seed.is_empty() {
-        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
-    }
-    if state.test_hooks.session_is_404(&seed) {
-        return session_not_found_response(&seed);
-    }
-    let owns = state
-        .leases
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .owns_seed(&session_id, &seed);
-    if !owns {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::CONTENT_TYPE, "application/json")],
-            br#"{"code":"lease_required","message":"attach the session seed before approvals"}"#
-                .to_vec(),
-        )
-            .into_response();
-    }
-
-    state.hub.seal_orphan_channel_state(&seed, false);
-    let control = state.hub.snapshot(RingingChannel::Control, &seed).state;
-    let tool = state.hub.snapshot(RingingChannel::Tool, &seed).state;
-    let payload = pending_approval_payload(&control, &tool);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_vec(&payload).unwrap_or_default(),
-    )
-        .into_response()
-}
-
-fn pending_approval_payload(
-    control: &serde_json::Value,
-    tool: &serde_json::Value,
-) -> serde_json::Value {
-    serde_json::json!({
-        "pending_permission": tool
-            .get("pending_permission_details")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        "pending_interaction": control
-            .get("pending_interaction")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    })
-}
-
 pub(crate) async fn handle_timeline_snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -308,33 +242,5 @@ mod tests {
         let (total, truncated) = window_metadata(40, Some(39));
         assert_eq!(total, 40);
         assert!(!truncated);
-    }
-
-    #[test]
-    fn pending_approval_projection_keeps_authoritative_details_only() {
-        let payload = pending_approval_payload(
-            &serde_json::json!({
-                "pending_interaction": {
-                    "id": "interaction-1",
-                    "kind": "plan",
-                    "details": { "plan_content": "step 1" },
-                },
-            }),
-            &serde_json::json!({
-                "pending_permission_details": {
-                    "tool_call_id": "call-1",
-                    "tool_name": "exec",
-                    "risk": "high",
-                    "consequence": "runs a command",
-                },
-                "unrelated": "must not leak",
-            }),
-        );
-        assert_eq!(payload["pending_permission"]["tool_call_id"], "call-1");
-        assert_eq!(
-            payload["pending_interaction"]["details"]["plan_content"],
-            "step 1"
-        );
-        assert!(payload.get("unrelated").is_none());
     }
 }
