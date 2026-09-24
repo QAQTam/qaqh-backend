@@ -248,6 +248,17 @@ V1_EVENTS_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -N --max-time 2 \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
 [ "$V1_EVENTS_STATUS" = "404" ] || fail "v1 events/{channel} must be gone (got $V1_EVENTS_STATUS)"
 
+say "== approvals is v2-only =="
+# 2026-09-24 硬切：待审批投影只剩 v2 路由（源是 canonical control 投影 + content ref）。
+V1_APPROVALS_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+    "$ENDPOINT/ringing/v1/sessions/$SEED/approvals" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
+[ "$V1_APPROVALS_STATUS" = "404" ] || fail "v1 approvals must be gone (got $V1_APPROVALS_STATUS)"
+V2_APPROVALS_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+    "$ENDPOINT/ringing/v2/sessions/$SEED/approvals" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
+[ "$V2_APPROVALS_STATUS" = "200" ] || fail "v2 approvals must answer 200 (got $V2_APPROVALS_STATUS)"
+
 say "== driver release (explicit) =="
 renew "$A"
 RELEASE_A="$(driver "$A" release)"

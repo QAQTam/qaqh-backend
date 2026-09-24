@@ -378,6 +378,9 @@ pub struct TurnState {
     pub usage: Option<UsageInfo>,
     /// Tool call IDs still awaiting permission approval.
     pub pending_permission_ids: Vec<String>,
+    /// (wire call_id, canonical permission body bytes) for the pending approvals.
+    /// `persist_interaction_requests` 用它算 canonical `request_ref`。
+    pub pending_permission_bodies: Vec<(String, Vec<u8>)>,
     /// Authorized calls held until every permission decision is recorded.
     pub deferred_authorized: Vec<AdmittedTool>,
     /// Original assistant tool-call order for deterministic write serialization.

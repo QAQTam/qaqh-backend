@@ -1886,7 +1886,8 @@ mod axum_tests {
             // identical and carry the canonical interaction id.
             let first =
                 bootstrap(app.clone(), seed.clone(), client.client_session_id.clone()).await;
-            let second = bootstrap(app.clone(), seed, client.client_session_id.clone()).await;
+            let second =
+                bootstrap(app.clone(), seed.clone(), client.client_session_id.clone()).await;
             assert_eq!(first, second, "{kind:?} pending set must be stable");
             assert_eq!(
                 first.len(),
@@ -1895,7 +1896,66 @@ mod axum_tests {
             );
             assert_eq!(first[0]["interaction_id"], interaction_id.as_str());
             assert_eq!(first[0]["kind"], expected_kind);
+
+            // v2 approvals 端点：与旧 v1 端点同形，id 为 canonical 形态。
+            let request = Request::builder()
+                .uri(format!("/ringing/v2/sessions/{seed}/approvals"))
+                .header("authorization", "Bearer test-token")
+                .header("x-qaqh-client-session-id", client.client_session_id.clone())
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            match kind {
+                InteractionKind::Permission => {
+                    assert_eq!(
+                        value["pending_permission"]["tool_call_id"],
+                        call_id.as_str(),
+                        "permission 以 canonical call_id 暴露"
+                    );
+                    assert_eq!(
+                        value["pending_permission"]["details_unavailable"], true,
+                        "测试没往 content store 写正文，应标记详情不可用"
+                    );
+                    assert!(value["pending_interaction"].is_null());
+                }
+                InteractionKind::Ask | InteractionKind::Plan => {
+                    assert_eq!(
+                        value["pending_interaction"]["id"],
+                        interaction_id.as_str(),
+                        "ask/plan 以 canonical interaction_id 暴露"
+                    );
+                    // approvals 沿用旧 v1 端点词汇：ask / plan（不是 bootstrap 的
+                    // plan_review）。
+                    let expected = if kind == InteractionKind::Ask {
+                        "ask"
+                    } else {
+                        "plan"
+                    };
+                    assert_eq!(value["pending_interaction"]["kind"], expected);
+                    assert!(value["pending_permission"].is_null());
+                }
+            }
         }
+    }
+
+    /// 纯 v2：approvals 的 v1 路径已硬切。
+    #[tokio::test]
+    async fn approvals_v1_route_is_hard_cut() {
+        let state = test_state();
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/ringing/v1/sessions/seed-1/approvals")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", "cs-1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

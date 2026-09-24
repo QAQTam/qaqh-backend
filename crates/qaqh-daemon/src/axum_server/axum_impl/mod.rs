@@ -58,11 +58,11 @@ pub(crate) use service_api::handle_service;
 pub(crate) use sse::handle_timeline_events;
 #[cfg(test)]
 pub(crate) use sse::parse_timeline_cursor;
-pub(crate) use timeline_api::{handle_pending_approvals, handle_timeline_snapshot};
+pub(crate) use timeline_api::handle_timeline_snapshot;
 pub(crate) use v2::{
     handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_driver_claim_v2,
-    handle_driver_release_v2, handle_events_v2, handle_open_v2, handle_renew_v2,
-    reclaim_dead_driver_seats,
+    handle_driver_release_v2, handle_events_v2, handle_open_v2, handle_pending_approvals_v2,
+    handle_renew_v2, reclaim_dead_driver_seats,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -160,8 +160,8 @@ pub fn build_router(state: AppState) -> Router {
             post(handle_driver_release_v2),
         )
         .route(
-            "/ringing/v1/sessions/{seed}/approvals",
-            get(handle_pending_approvals),
+            "/ringing/v2/sessions/{seed}/approvals",
+            get(handle_pending_approvals_v2),
         )
         .route(
             "/ringing/v2/sessions/{seed}/timeline",
