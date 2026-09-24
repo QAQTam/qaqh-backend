@@ -1,5 +1,9 @@
 # Ringing v2 P0-4 / P0-5 落地 + 实机调测 Handoff（2026-09-24）
 
+> 后续：本文件 §4-A-1 的 canonical `DriverChanged` 已在
+> `docs/handoff/2026-09-24-ringing-v2-canonical-driver-changed-handoff.md`
+> 落地（driver 改为 canonical 单写者，`RingingDriverStore` 已删除）。
+
 状态：**P0-4 全部落地、P0-5 daemon 侧落地、实机 smoke 通过**。承接
 `docs/handoff/2026-09-24-ringing-v2-p0-3-p0-4-handoff.md` 的「下一步顺序 1–2」。
 

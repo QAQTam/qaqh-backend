@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::session_fact_v2::{
-    ContentRef, EventId, ExecutionId, FactPayload, FactSchema, InteractionExpired, InteractionId,
-    InteractionRequested, InteractionResolved, RecoveryRef, SessionFact, SessionId,
+    ContentRef, DriverChanged, EventId, ExecutionId, FactPayload, FactSchema, InteractionExpired,
+    InteractionId, InteractionRequested, InteractionResolved, RecoveryRef, SessionFact, SessionId,
     SessionRecovered, ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics,
     ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
@@ -148,6 +148,29 @@ pub enum ToolLedgerError {
     ReconciliationTerminalInvalid { call_id: ToolCallId },
 }
 
+/// Outcome of a canonical driver-seat claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriverClaimOutcome {
+    /// Seat was free (or its recorded holder was reported stale by the caller).
+    Claimed { driver_epoch: u64 },
+    /// The caller already holds the seat; no fact is written.
+    AlreadyHeld { driver_epoch: u64 },
+    /// Another holder owns the seat.
+    Busy { holder: String, driver_epoch: u64 },
+}
+
+/// Outcome of a canonical driver-seat release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriverReleaseOutcome {
+    Released {
+        driver_epoch: u64,
+    },
+    NotDriver {
+        holder: Option<String>,
+        driver_epoch: u64,
+    },
+}
+
 #[derive(Debug)]
 pub struct ToolLedger {
     store: CanonicalSessionStore,
@@ -158,6 +181,9 @@ pub struct ToolLedger {
     entries: HashMap<ToolCallId, ToolLedgerEntry>,
     interaction_requests: HashMap<InteractionId, SessionFact>,
     interaction_terminals: HashMap<InteractionId, SessionFact>,
+    /// Canonical driver seat, rebuilt from `DriverChanged` facts on open.
+    driver_holder: Option<String>,
+    driver_epoch: u64,
 }
 
 impl ToolLedger {
@@ -189,7 +215,13 @@ impl ToolLedger {
         let mut entries = HashMap::new();
         let mut interaction_requests = HashMap::new();
         let mut interaction_terminals = HashMap::new();
+        let mut driver_holder = None;
+        let mut driver_epoch = 0;
         for fact in reader.read_all()? {
+            if let FactPayload::DriverChanged(payload) = &fact.payload {
+                driver_holder = payload.holder.clone();
+                driver_epoch = payload.driver_epoch;
+            }
             index_fact(
                 &mut entries,
                 &mut interaction_requests,
@@ -206,7 +238,98 @@ impl ToolLedger {
             entries,
             interaction_requests,
             interaction_terminals,
+            driver_holder,
+            driver_epoch,
         })
+    }
+
+    /// Current canonical driver seat (`holder`, `driver_epoch`).
+    pub fn driver_state(&self) -> (Option<String>, u64) {
+        (self.driver_holder.clone(), self.driver_epoch)
+    }
+
+    /// Claim the driver seat. `stale_holder` lets the caller (the daemon, which
+    /// owns lease liveness) take over a seat whose holder's lease has expired.
+    pub fn claim_driver(
+        &mut self,
+        holder: &str,
+        stale_holder: Option<&str>,
+        event_id: EventId,
+        causation_id: Option<EventId>,
+        now_ms: i64,
+    ) -> Result<DriverClaimOutcome, ToolLedgerError> {
+        if let Some(current) = self.driver_holder.clone() {
+            if current == holder {
+                return Ok(DriverClaimOutcome::AlreadyHeld {
+                    driver_epoch: self.driver_epoch,
+                });
+            }
+            if stale_holder != Some(current.as_str()) {
+                return Ok(DriverClaimOutcome::Busy {
+                    holder: current,
+                    driver_epoch: self.driver_epoch,
+                });
+            }
+        }
+        let driver_epoch = self.driver_epoch.saturating_add(1);
+        self.append_driver_changed(
+            Some(holder.to_string()),
+            driver_epoch,
+            event_id,
+            causation_id,
+            now_ms,
+        )?;
+        Ok(DriverClaimOutcome::Claimed { driver_epoch })
+    }
+
+    /// Release the driver seat. Only the recorded holder may release.
+    pub fn release_driver(
+        &mut self,
+        holder: &str,
+        event_id: EventId,
+        causation_id: Option<EventId>,
+        now_ms: i64,
+    ) -> Result<DriverReleaseOutcome, ToolLedgerError> {
+        if self.driver_holder.as_deref() != Some(holder) {
+            return Ok(DriverReleaseOutcome::NotDriver {
+                holder: self.driver_holder.clone(),
+                driver_epoch: self.driver_epoch,
+            });
+        }
+        let driver_epoch = self.driver_epoch.saturating_add(1);
+        self.append_driver_changed(None, driver_epoch, event_id, causation_id, now_ms)?;
+        Ok(DriverReleaseOutcome::Released { driver_epoch })
+    }
+
+    fn append_driver_changed(
+        &mut self,
+        holder: Option<String>,
+        driver_epoch: u64,
+        event_id: EventId,
+        causation_id: Option<EventId>,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let fact = SessionFact {
+            schema: FactSchema::v2(),
+            session_id: self.session_id.clone(),
+            log_id: self.log_id.clone(),
+            fact_seq: 0,
+            event_id,
+            ts_ms: now_ms,
+            causation_id,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::DriverChanged(DriverChanged {
+                holder: holder.clone(),
+                driver_epoch,
+                changed_at_ms: now_ms,
+            }),
+        };
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        self.driver_holder = holder;
+        self.driver_epoch = driver_epoch;
+        Ok(outcome.fact)
     }
 
     fn append_and_publish(

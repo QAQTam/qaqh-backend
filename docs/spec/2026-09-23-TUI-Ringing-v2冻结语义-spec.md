@@ -398,6 +398,11 @@ actor_mailbox_overflow
 - `driver_epoch` 单调递增；旧 epoch 的命令返回 `stale_driver_epoch`。
 - `can_claim` 只是服务端建议；最终以 claim 响应为准。
 - driver 变化产生 reliable `DriverChanged` ControlDelta。
+- **席位真源是 canonical fact**：`DriverChanged { holder, driver_epoch,
+  changed_at_ms }` 由 session actor 的 `ToolLedger` 单写者追加，bootstrap 读
+  control 投影，客户端增量只认 `DriverChanged`。daemon 不持有席位状态。
+- `holder` 的 lease 过期时，席位在投影里仍记录旧 holder，但 bootstrap 呈现为
+  `holder = null`；下一次 claim 通过 `stale_holder` 显式接管并推进 epoch。
 
 ### 9.3 claim / release
 
@@ -406,19 +411,35 @@ actor_mailbox_overflow
 ```json
 {
   "accepted": true,
-  "holder": "cs-...",
-  "driver_epoch": 4,
-  "reason": "claimed"
+  "holder": null,
+  "driver_epoch": 3,
+  "reason": "claim_requested"
 }
 ```
 
-拒绝时稳定 code：
+**claim 是两段式**：canonical 席位由 session actor 的 `ToolLedger` 单写者分配
+epoch，daemon 无法同步拿到新值。因此：
+
+- `accepted = true` 只表示**请求已转发**；`holder` / `driver_epoch` 是**请求时**
+  的服务端视图，不是变更后的值。
+- 变更后的权威席位经 reliable `DriverChanged`（或重新 bootstrap）到达。
+- daemon 能同步裁决的分支仍然是权威的：
+  - `already_holder`：调用方已持有席位（epoch 为当前值）；
+  - `driver_busy`：另一 lease 持有席位；
+  - `not_driver`（release）：调用方不是 holder。
+
+`reason` 取值：
 
 ```text
-driver_busy
-not_eligible
-stale_driver_epoch
+claim_requested   请求已转发，等待 DriverChanged
+release_requested 请求已转发，等待 DriverChanged
+already_holder    daemon 同步裁决：已是 holder
+driver_busy       daemon 同步裁决：他人持有
+not_driver        daemon 同步裁决：release 方不是 holder
 ```
+
+被占席位时 `accepted = false`；`driver_busy` / `not_driver` 保持稳定语义。
+命令层的 `stale_driver_epoch` 仍由 daemon 依据 canonical 投影同步拒绝。
 
 `POST /ringing/v2/sessions/{seed}/driver/release` 只允许当前 holder 调用。
 holder 断线或 lease 过期后，服务端可以按自身策略自动移交，并发布

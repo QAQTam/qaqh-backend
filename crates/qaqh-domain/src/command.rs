@@ -99,6 +99,18 @@ pub enum ControlCommand {
     },
     /// 关闭 ask_user 交互而不作答（中止被挂起的回合）。
     InteractionAskDismiss { interaction_id: String },
+    /// 认领 v2 driver 席位（canonical `DriverChanged` 的唯一写入路径）。
+    ///
+    /// `client_session_id` 与 `stale_holder` 由 daemon 从已认证 lease 覆写后
+    /// 再转发；wire 上的这两个字段不可信，worker 不得直接采信客户端提交值。
+    DriverClaim {
+        client_session_id: String,
+        /// 允许接管的「已死」holder（daemon 依据 lease 存活判定给出）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stale_holder: Option<String>,
+    },
+    /// 释放 v2 driver 席位。`client_session_id` 同样由 daemon 覆写。
+    DriverRelease { client_session_id: String },
     /// 提交 plan review 决策（对应 PlanReviewRequested）。
     PlanReviewRespond {
         interaction_id: String,

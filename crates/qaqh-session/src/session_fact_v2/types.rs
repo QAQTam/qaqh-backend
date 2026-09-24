@@ -168,6 +168,7 @@ pub enum FactPayload {
     WorkspaceResourceChanged(WorkspaceResourceChanged),
     SubagentSpawned(SubagentSpawned),
     SubagentFinished(SubagentFinished),
+    DriverChanged(DriverChanged),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +310,22 @@ pub struct InteractionResolved {
     pub resolved_by: ActorRef,
     pub resolution_seq: u64,
     pub resolved_at_ms: i64,
+}
+
+/// Driver seat handover.
+///
+/// `holder` is the daemon's `client_session_id`; `driver_epoch` is monotonic
+/// across handovers so a stale client can be rejected with
+/// `stale_driver_epoch`. This is a canonical fact (not daemon-local state) so
+/// the seat survives daemon restart and reaches clients as a reliable,
+/// cursor-ordered control event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriverChanged {
+    /// `None` = the seat is vacant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    pub driver_epoch: u64,
+    pub changed_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
