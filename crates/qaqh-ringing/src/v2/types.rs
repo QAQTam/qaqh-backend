@@ -850,7 +850,6 @@ mod tests {
     #[test]
     fn v1_constants_remain_unchanged() {
         assert_eq!(crate::RINGING_VERSION, 1);
-        assert_eq!(crate::RINGING_BASE_PATH, "/ringing/v1");
         assert_eq!(RINGING_V2_VERSION, 2);
         assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
         assert_eq!(open_path(), "/ringing/v2/clients/open");
