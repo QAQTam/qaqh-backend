@@ -77,11 +77,23 @@ impl ToolProjection for ApplyPatchOutput {
     }
 
     fn display(&self, _args: &Value) -> ToolDisplay {
+        let summary = match self.first_path.as_deref() {
+            Some(path) if !path.is_empty() => crate::file_mutate::mutation_change_summary(
+                path,
+                self.insertions as u32,
+                self.deletions as u32,
+            ),
+            _ => format!(
+                "{} file(s) · +{} -{}",
+                self.files, self.insertions, self.deletions
+            ),
+        };
         mutation_display(
             self.first_path.as_deref(),
             "",
             crate::tool_api::PathOp::Patch,
             "apply_patch",
+            Some(summary),
             &self.model_text,
             None,
         )
