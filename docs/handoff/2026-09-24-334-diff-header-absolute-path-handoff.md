@@ -70,7 +70,8 @@ scripts/v2-smoke.sh <data-root>                         PASS（全阶段，含 r
 1. **#345**（P1）pending interaction 的 request 正文不在 canonical log —— v2 重连无法
    重建 modal。三条路线（A 进 canonical fact / **B 内容落盘 + `/ringing/v2/content/{id}`** /
    C bootstrap 内联）仍待裁决；B 卡在 content 端点语义未定（TTL / quota / 授权 / 上传）。
-2. **#336**（P2）工具展示数据源重构：summary 不该是「输出首行」。
+2. **#336**（P2/P3）工具展示数据源重构：P1 metadata summary、P2 结构化终态、
+   P3 stdout/stderr 分离均已落地；见 `2026-09-24-tool-streams-p3-handoff.md`。
 3. **#339**（P3，挂起）P6 设计输入：上下文结构解耦。
 4. **P6 B**：compact 去掉第二真源（`compact-context.json` → marker 进 `messages.jsonl`）。
 5. **v1 `Last-Event-ID` → v2 cursor 映射**（已随 v1 端点硬切作废，见

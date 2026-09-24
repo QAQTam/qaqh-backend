@@ -410,23 +410,23 @@ try:
         )
         assert status == 200, f"permission respond: {status} {ack}"
 
-        def find_display_outcome(node):
+        def find_tool_display(node):
             if isinstance(node, dict):
                 display = node.get("display")
                 if isinstance(display, dict) and isinstance(display.get("outcome"), dict):
-                    return display["outcome"]
+                    return display
                 for value in node.values():
-                    found = find_display_outcome(value)
+                    found = find_tool_display(value)
                     if found is not None:
                         return found
             elif isinstance(node, list):
                 for value in node:
-                    found = find_display_outcome(value)
+                    found = find_tool_display(value)
                     if found is not None:
                         return found
             return None
 
-        def completed_tool_outcome():
+        def completed_tool_display():
             request("POST", "/ringing/v2/leases/renew", session=client_a)
             status, body = request(
                 "GET",
@@ -435,9 +435,10 @@ try:
             )
             if status != 200:
                 return None
-            return find_display_outcome(body)
+            return find_tool_display(body)
 
-        outcome = wait_until(completed_tool_outcome, "structured tool outcome")
+        display = wait_until(completed_tool_display, "structured tool display")
+        outcome = display["outcome"]
         check(
             "⑥ 工具终态结构化（不再从 [OK] 文本推断）",
             outcome.get("state") == "succeeded"
@@ -446,6 +447,15 @@ try:
             and outcome.get("output_bytes", 0) > 0
             and outcome.get("truncated") is False,
             json.dumps(outcome, ensure_ascii=False),
+        )
+        body = display.get("body") or {}
+        check(
+            "⑦ stdout/stderr 结构化分离",
+            body.get("kind") == "streams"
+            and "permission-probe" in body.get("stdout", "")
+            and body.get("stderr") == ""
+            and body.get("interleaved") is False,
+            json.dumps(body, ensure_ascii=False),
         )
 finally:
     stop_daemon()
