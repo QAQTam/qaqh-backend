@@ -234,6 +234,13 @@ OLD_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -N --max-time 2 \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
 [ "$OLD_STATUS" = "404" ] || fail "events/{channel} must be gone (got $OLD_STATUS)"
 
+say "== v1 bootstrap is hard-cut =="
+# 2026-09-24 硬切：权威快照只剩 v2 typed 三频道 bootstrap。
+V1_BOOT_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+    "$ENDPOINT/ringing/v1/sessions/$SEED/bootstrap" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
+[ "$V1_BOOT_STATUS" = "404" ] || fail "v1 bootstrap must be gone (got $V1_BOOT_STATUS)"
+
 say "== driver release (explicit) =="
 renew "$A"
 RELEASE_A="$(driver "$A" release)"
