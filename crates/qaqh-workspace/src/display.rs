@@ -299,6 +299,7 @@ mod tests {
             "a.rs",
             PathOp::Edit,
             "edit",
+            Some("a.rs · +1 -1".into()),
             "[OK] edit a.rs\n",
             None,
         );
@@ -309,7 +310,12 @@ mod tests {
                 op: PathOp::Edit
             }
         );
-        assert_eq!(edit.summary.as_deref(), Some("[OK] edit a.rs"));
+        assert_eq!(edit.summary.as_deref(), Some("a.rs · +1 -1"));
+        assert_ne!(
+            edit.summary.as_deref(),
+            Some("[OK] edit a.rs"),
+            "display summary must not be the human output's first line"
+        );
     }
 
     #[test]
@@ -319,6 +325,7 @@ mod tests {
             "",
             PathOp::Patch,
             "apply_patch",
+            Some("src/app.rs · +1 -0".into()),
             "[OK] apply_patch — applied: 1 file(s)",
             None,
         );
