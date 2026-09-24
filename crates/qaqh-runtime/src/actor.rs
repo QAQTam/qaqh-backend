@@ -59,6 +59,9 @@ fn publish_worker_event(
         }
         crate::agent::types::WriterEvent::Ringing(env) => {
             let domain: qaqh_domain::DomainEvent = env.event.into();
+            // #345：交互正文（ask/plan）在发布前入 content store 并 pin——canonical
+            // fact 里只有 ref，正文走展示面旁路。
+            crate::registry::stash_interaction_body(hub, &env.seed, &domain);
             let domain = crate::registry::externalize_large_content(hub, &env.seed, domain);
             let _ =
                 hub.publish_with_causation(&env.seed, domain.clone(), env.causation_id.as_deref());

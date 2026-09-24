@@ -10,7 +10,7 @@ pub use cursor::{CanonicalCursor, CursorError, CursorToken, END_OF_FACT};
 pub use types::{
     RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot,
     RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
-    RingingV2ControlState, RingingV2Delivery, RingingV2DriverClaimResponse,
+    RingingV2ContentValue, RingingV2ControlState, RingingV2Delivery, RingingV2DriverClaimResponse,
     RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope,
     RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
     RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingInteraction, RingingV2PendingSet,

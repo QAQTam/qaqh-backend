@@ -852,7 +852,7 @@ async fn proxy_content_get(
     let lease = session.lease_snapshot();
     let response = match state
         .daemon
-        .get(&format!("/ringing/v1/content/{content_id}"), &lease)
+        .get(&format!("/ringing/v2/content/{content_id}"), &lease)
         .await
     {
         Ok(response) => response,
@@ -880,7 +880,7 @@ async fn proxy_content_upload(
         .unwrap_or("application/octet-stream");
     let response = match state
         .daemon
-        .post_bytes("/ringing/v1/content", &lease, body.to_vec(), content_type)
+        .post_bytes("/ringing/v2/content", &lease, body.to_vec(), content_type)
         .await
     {
         Ok(response) => response,
