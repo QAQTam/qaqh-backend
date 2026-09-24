@@ -43,7 +43,10 @@ start_daemon() {
     # below succeed against a dead endpoint.
     mv "$DATA/daemon.json" "$DATA/daemon.json.prev" 2>/dev/null || true
     # Short lease TTL so the driver-seat reclaim path is reachable in one run.
-    QAQH_DATA_DIR="$DATA" QAQH_TEST_LEASE_TTL_MS=6000 \
+    # `QAQH_SMOKE_LEASE_TTL_MS` can raise it when the host is under heavy load:
+    # the phases between two lease renewals otherwise outlive a 6s TTL and the
+    # explicit-release probe fails with `lease_required` (not a product bug).
+    QAQH_DATA_DIR="$DATA" QAQH_TEST_LEASE_TTL_MS="${QAQH_SMOKE_LEASE_TTL_MS:-6000}" \
         "$ROOT/target/debug/qaqh-daemon" run > "$DATA/../daemon.out" 2>&1 &
     DAEMON_PID=$!
     for _ in $(seq 1 80); do
