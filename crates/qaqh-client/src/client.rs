@@ -557,7 +557,7 @@ impl Client {
         self.get_timeline_page(seed, before_index, limit).await
     }
 
-    /// GET `/ringing/v1/sessions/{seed}/timeline` + typed protocol validation.
+    /// GET `/ringing/v2/sessions/{seed}/timeline` + typed protocol validation.
     async fn get_timeline_page(
         &self,
         seed: &str,
@@ -573,7 +573,7 @@ impl Client {
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let path = format!("/ringing/v1/sessions/{seed}/timeline");
+        let path = format!("/ringing/v2/sessions/{seed}/timeline");
         let mut request = self
             .inner
             .http
