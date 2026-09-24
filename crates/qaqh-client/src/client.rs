@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, watch};
 
 use qaqh_domain::ControlCommand;
-use qaqh_ringing::{RingingCommandEnvelope, RingingCommandStatus};
+use qaqh_ringing::RingingCommandStatus;
 
 use crate::discovery::{DaemonDiscovery, DiscoveryExt, read_discovery};
 use crate::endpoint::{ActionRequest, QueryRequest};
@@ -337,74 +337,17 @@ impl Client {
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingCommandAck> {
-        let state = self
-            .inner
-            .session
-            .state()
-            .await
-            .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let channel = command.channel();
-        let command_id = options
-            .command_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mut payload = RingingCommandEnvelope::new(
-            command_id.clone(),
-            state.client_instance_id.clone(),
-            command,
-        )
-        .with_client_session_id(state.client_session_id.clone());
-        if let Some(seed) = seed {
-            payload = payload.with_seed(seed);
-        }
-        payload.expected_revision = options.expected_revision;
-        payload
-            .validate()
-            .map_err(|code| ClientError::Protocol(format!("invalid command: {code}")))?;
-        let path = format!("/ringing/v1/commands/{}", channel.as_str());
-        let session_id = self.session_id_header().await?;
-        let response = self
-            .inner
-            .http
-            .post(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", session_id)
-            .json(&payload)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(ClientError::Http {
-                status: response.status().as_u16(),
-                path,
-            });
-        }
-        let ack: RingingCommandAck = response.json().await?;
-        if ack.command_id != command_id {
-            return Err(ClientError::Protocol(
-                "command ack id does not match submission".into(),
-            ));
-        }
-        Ok(ack)
+        // 纯 v2：命令面只有 v2 一条路径（`send_command_v2_typed` 是带 typed
+        // `existing` 的入口，这里投影回 v1 形状保持既有壳层 API）。
+        Ok(self
+            .send_command_v2_typed(seed, command, options)
+            .await?
+            .into_v1())
     }
 
-    /// `GET /ringing/v1/commands/{command_id}` — resolve post-acceptance uncertainty.
+    /// `GET /ringing/v2/commands/{command_id}` — resolve post-acceptance uncertainty.
     pub async fn command_status(&self, command_id: &str) -> Result<RingingCommandStatus> {
-        let path = format!("/ringing/v1/commands/{}", command_id);
-        let session_id = self.session_id_header().await?;
-        let response = self
-            .inner
-            .http
-            .get(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", session_id)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(ClientError::Http {
-                status: response.status().as_u16(),
-                path,
-            });
-        }
-        Ok(response.json().await?)
+        Ok(self.command_status_v2_typed(command_id).await?.into_v1())
     }
 
     /// `POST /ringing/v2/service/{name}` — typed read-only query.
