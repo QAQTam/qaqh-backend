@@ -71,9 +71,6 @@ mod sse_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
-        let drivers = std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_runtime::ringing::RingingDriverStore::new(),
-        ));
         let (shutdown, _) = tokio::sync::watch::channel(false);
         // 与 `axum_tests::test_state` 同源：SessionManager 是进程级单例
         // （`init` 用 `OnceLock::set`，重复调用会 panic）——测试二进制的多个
@@ -84,7 +81,6 @@ mod sse_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("lag-epoch")),
             leases,
-            drivers,
             pending,
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
                 .clone(),
@@ -589,9 +585,6 @@ mod axum_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
-        let drivers = std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_runtime::ringing::RingingDriverStore::new(),
-        ));
         let service = TEST_SERVICE
             .get_or_init(|| {
                 super::init_session_manager();
@@ -608,7 +601,6 @@ mod axum_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("test-epoch")),
             leases,
-            drivers,
             pending,
             service,
             token: String::from("test-token"),
@@ -1256,110 +1248,16 @@ mod axum_tests {
         (status, ack)
     }
 
-    #[tokio::test]
-    async fn v2_driver_claim_gates_mutation_commands() {
-        use qaqh_domain::ConversationCommand;
-        use qaqh_ringing::{RingingCommand, RingingV2CommandEnvelope};
-
-        let app = build_router(test_state());
-        let a = open_v2_session(app.clone(), "ci-a").await;
-        let b = open_v2_session(app.clone(), "ci-b").await;
-
-        let claim_a = post_driver(app.clone(), "seed-1", "claim", &a.client_session_id).await;
-        assert_eq!(claim_a["accepted"], true);
-        assert_eq!(claim_a["reason"], "claimed");
-        assert_eq!(claim_a["driver_epoch"], 1);
-        assert_eq!(claim_a["holder"], a.client_session_id);
-
-        let claim_b = post_driver(app.clone(), "seed-1", "claim", &b.client_session_id).await;
-        assert_eq!(claim_b["accepted"], false);
-        assert_eq!(claim_b["reason"], "driver_busy");
-        assert_eq!(claim_b["holder"], a.client_session_id);
-
-        let gated = |command_id: &str, client_session_id: &str| {
-            RingingV2CommandEnvelope::new(
-                command_id,
-                "ci-v2",
-                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
-                    turn_id: None,
-                }),
-            )
-            .with_client_session_id(client_session_id)
-            .with_seed("seed-1")
-        };
-
-        let (_, rejected) = post_v2_command(
-            app.clone(),
-            &b.client_session_id,
-            &gated("cmd-b-cancel", &b.client_session_id),
-        )
-        .await;
-        assert_eq!(rejected.code.as_deref(), Some("not_driver"));
-
-        let (_, allowed) = post_v2_command(
-            app.clone(),
-            &a.client_session_id,
-            &gated("cmd-a-cancel", &a.client_session_id).with_driver_epoch(1),
-        )
-        .await;
-        assert_ne!(allowed.code.as_deref(), Some("not_driver"));
-
-        let release_b = post_driver(app.clone(), "seed-1", "release", &b.client_session_id).await;
-        assert_eq!(release_b["accepted"], false);
-        assert_eq!(release_b["reason"], "not_driver");
-
-        let release_a = post_driver(app.clone(), "seed-1", "release", &a.client_session_id).await;
-        assert_eq!(release_a["accepted"], true);
-        assert_eq!(release_a["reason"], "released");
-        assert_eq!(release_a["driver_epoch"], 2);
-    }
-
-    #[tokio::test]
-    async fn v2_stale_driver_epoch_is_rejected() {
-        use qaqh_domain::ConversationCommand;
-        use qaqh_ringing::{RingingCommand, RingingV2CommandEnvelope};
-
-        let app = build_router(test_state());
-        let a = open_v2_session(app.clone(), "ci-a").await;
-        let claim = post_driver(app.clone(), "seed-1", "claim", &a.client_session_id).await;
-        assert_eq!(claim["driver_epoch"], 1);
-
-        let envelope = |command_id: &str| {
-            RingingV2CommandEnvelope::new(
-                command_id,
-                "ci-v2",
-                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
-                    turn_id: None,
-                }),
-            )
-            .with_client_session_id(a.client_session_id.clone())
-            .with_seed("seed-1")
-        };
-
-        let (_, stale) = post_v2_command(
-            app.clone(),
-            &a.client_session_id,
-            &envelope("cmd-stale").with_driver_epoch(0),
-        )
-        .await;
-        assert_eq!(stale.code.as_deref(), Some("stale_driver_epoch"));
-
-        let (_, current) = post_v2_command(
-            app,
-            &a.client_session_id,
-            &envelope("cmd-current").with_driver_epoch(1),
-        )
-        .await;
-        assert_ne!(current.code.as_deref(), Some("stale_driver_epoch"));
-    }
-
-    #[tokio::test]
-    async fn v2_bootstrap_reports_driver_state() {
+    /// Seed a canonical session carrying a `DriverChanged` fact.
+    fn seed_canonical_driver_session(
+        holder: Option<&str>,
+        driver_epoch: u64,
+    ) -> (tempfile::TempDir, String) {
         use qaqh_session::canonical::{
             CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
         };
         use qaqh_session::session_fact_v2::{
-            EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
+            DriverChanged, EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
         };
 
         let sessions_dir = qaqh_types::platform::sessions_dir();
@@ -1380,39 +1278,134 @@ mod axum_tests {
         )
         .unwrap();
         let lease = store
-            .acquire_writer(WriterId::new("v2-driver-bootstrap-test"), now, 60_000)
+            .acquire_writer(WriterId::new("driver-seed"), now, 600_000)
             .unwrap();
+        let fact = |ts_ms: i64, payload: FactPayload| SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload,
+        };
         store
             .append(
                 &lease,
-                SessionFact {
-                    schema: FactSchema::v2(),
-                    session_id: identity.session_id.clone(),
-                    log_id: identity.log_id.clone(),
-                    fact_seq: 0,
-                    event_id: EventId::new(generate_ulid()),
-                    ts_ms: now,
-                    causation_id: None,
-                    turn_id: None,
-                    call_id: None,
-                    interaction_id: None,
-                    payload: FactPayload::SessionCreated(SessionCreated {
+                fact(
+                    now,
+                    FactPayload::SessionCreated(SessionCreated {
                         created_at_ms: now,
                         cwd: "/tmp".into(),
                         model: "test".into(),
                         parent_session_id: None,
                         schema_caps: Vec::new(),
                     }),
-                },
+                ),
                 now,
             )
             .unwrap();
+        if driver_epoch > 0 {
+            store
+                .append(
+                    &lease,
+                    fact(
+                        now + 1,
+                        FactPayload::DriverChanged(DriverChanged {
+                            holder: holder.map(str::to_string),
+                            driver_epoch,
+                            changed_at_ms: now + 1,
+                        }),
+                    ),
+                    now + 1,
+                )
+                .unwrap();
+        }
+        (dir, seed)
+    }
+
+    #[tokio::test]
+    async fn v2_driver_gate_rejects_non_driver_and_stale_epoch() {
+        use qaqh_domain::ConversationCommand;
+        use qaqh_ringing::{RingingCommand, RingingV2CommandEnvelope};
 
         let app = build_router(test_state());
         let a = open_v2_session(app.clone(), "ci-a").await;
         let b = open_v2_session(app.clone(), "ci-b").await;
-        let claim = post_driver(app.clone(), &seed, "claim", &a.client_session_id).await;
-        assert_eq!(claim["accepted"], true);
+        // Canonical seat held by `a`, whose lease is live.
+        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 1);
+
+        let gated = |command_id: &str, session_id: &str| {
+            RingingV2CommandEnvelope::new(
+                command_id,
+                "ci-v2",
+                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
+                    turn_id: None,
+                }),
+            )
+            .with_client_session_id(session_id)
+            .with_seed(seed.clone())
+        };
+
+        let (_, rejected) = post_v2_command(
+            app.clone(),
+            &b.client_session_id,
+            &gated("cmd-b-cancel", &b.client_session_id),
+        )
+        .await;
+        assert_eq!(rejected.code.as_deref(), Some("not_driver"));
+
+        let (_, stale) = post_v2_command(
+            app.clone(),
+            &a.client_session_id,
+            &gated("cmd-a-stale", &a.client_session_id).with_driver_epoch(0),
+        )
+        .await;
+        assert_eq!(stale.code.as_deref(), Some("stale_driver_epoch"));
+
+        let (_, current) = post_v2_command(
+            app,
+            &a.client_session_id,
+            &gated("cmd-a-current", &a.client_session_id).with_driver_epoch(1),
+        )
+        .await;
+        assert_ne!(current.code.as_deref(), Some("not_driver"));
+        assert_ne!(current.code.as_deref(), Some("stale_driver_epoch"));
+    }
+
+    #[tokio::test]
+    async fn v2_driver_busy_claim_is_rejected_before_dispatch() {
+        let app = build_router(test_state());
+        let a = open_v2_session(app.clone(), "ci-a").await;
+        let b = open_v2_session(app.clone(), "ci-b").await;
+        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 1);
+
+        let busy = post_driver(app.clone(), &seed, "claim", &b.client_session_id).await;
+        assert_eq!(busy["accepted"], false);
+        assert_eq!(busy["reason"], "driver_busy");
+        assert_eq!(busy["holder"], a.client_session_id);
+        assert_eq!(busy["driver_epoch"], 1);
+
+        let already = post_driver(app.clone(), &seed, "claim", &a.client_session_id).await;
+        assert_eq!(already["accepted"], true);
+        assert_eq!(already["reason"], "already_holder");
+        assert_eq!(already["driver_epoch"], 1);
+
+        let not_driver = post_driver(app, &seed, "release", &b.client_session_id).await;
+        assert_eq!(not_driver["accepted"], false);
+        assert_eq!(not_driver["reason"], "not_driver");
+    }
+
+    #[tokio::test]
+    async fn v2_bootstrap_reports_canonical_driver_state() {
+        let app = build_router(test_state());
+        let a = open_v2_session(app.clone(), "ci-a").await;
+        let b = open_v2_session(app.clone(), "ci-b").await;
+        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 3);
 
         let bootstrap = |session_id: String| {
             let app = app.clone();
@@ -1436,7 +1429,7 @@ mod axum_tests {
 
         let holder_view = bootstrap(a.client_session_id.clone()).await;
         assert_eq!(holder_view["holder"], a.client_session_id);
-        assert_eq!(holder_view["driver_epoch"], 1);
+        assert_eq!(holder_view["driver_epoch"], 3);
         assert_eq!(holder_view["can_claim"], false);
 
         let other_view = bootstrap(b.client_session_id).await;
