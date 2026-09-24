@@ -20,6 +20,7 @@ pub mod channel;
 pub mod command;
 pub mod delivery;
 pub mod event;
+pub mod interaction_body;
 pub mod state;
 pub mod timeline;
 

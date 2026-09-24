@@ -269,6 +269,28 @@ pub struct RingingV2PendingInteraction {
     pub call_id: String,
     pub turn_id: String,
     pub kind: RingingV2InteractionKind,
+    /// modal 正文载荷（#345）。
+    ///
+    /// - `Ref { content_ref }`：正文在 content store 里，用
+    ///   `GET /ringing/v2/content/{content_ref}` 取（ask / plan）；
+    /// - `Inline { text }`：正文随事件内联；
+    /// - `None`：该交互没有可取的正文（permission —— 它的详情在 tool 频道
+    ///   快照 / timeline 卡里，客户端**不得**尝试取 content）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RingingV2ContentValue>,
+}
+
+/// pending interaction 的正文载荷（#345）。
+///
+/// 与 canonical `ContentValue` 的 serde 形态一致（`kind` / `data` 判别式），
+/// 但 wire 层不依赖 session crate，因此在这里独立声明；`Unavailable` 的
+/// reason 结构不在此重复建模，按不透明 JSON 透传。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum RingingV2ContentValue {
+    Inline { text: String },
+    Ref { content_ref: String },
+    Unavailable(serde_json::Value),
 }
 
 pub type RingingV2PendingSet = Vec<RingingV2PendingInteraction>;

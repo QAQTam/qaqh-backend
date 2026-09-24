@@ -3,11 +3,15 @@
 use super::*;
 use axum::http::HeaderValue;
 
+/// `GET /ringing/v2/content/{content_id}`。
+///
+/// **不带 seed 参数**：先按 id 取条目，再用条目自己的 `seed` 校验调用方归属
+/// （客户端可能同时 attach 多个 seed，所以不能反推）。未命中一律 404——不泄漏
+/// 「存在但不属于你」。
 pub(crate) async fn handle_content_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(content_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
@@ -18,14 +22,19 @@ pub(crate) async fn handle_content_get(
     if content_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing content_id").into_response();
     }
-    let Some(seed) = params.get("seed").cloned() else {
-        return (StatusCode::BAD_REQUEST, "missing seed query param").into_response();
+    // canonical `ContentRef` 用 `sha256:<hex>`（schema 校验强制），content store 的
+    // 条目 id 是裸 hex（`sha256_hex`）；两种形态都接受，统一归一后查 store。
+    let store_id = content_id
+        .strip_prefix("sha256:")
+        .unwrap_or(content_id.as_str());
+    let Some(entry) = state.hub.get_content_any(store_id) else {
+        return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
     };
     let owns = state
         .leases
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .owns_seed(&session_id, &seed);
+        .owns_seed(&session_id, &entry.seed);
     if !owns {
         return (
             StatusCode::FORBIDDEN,
@@ -35,26 +44,21 @@ pub(crate) async fn handle_content_get(
         )
             .into_response();
     }
-    match state.hub.get_content(&seed, &content_id) {
-        Some(entry) => {
-            // BUG-2026-09-13-03 双保险：历史上可能已入库非法 media_type（注入
-            // 面修复前），直接拼响应头会让 axum TryInto<HeaderValue> 失败 →
-            // panic（存储型 DoS）。出站前校验，非法回退 octet-stream。
-            let content_type = if is_valid_media_type(&entry.media_type) {
-                HeaderValue::from_str(&entry.media_type)
-                    .unwrap_or(HeaderValue::from_static("application/octet-stream"))
-            } else {
-                HeaderValue::from_static("application/octet-stream")
-            };
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, content_type)],
-                entry.bytes,
-            )
-                .into_response()
-        }
-        None => (StatusCode::NOT_FOUND, "content not found or expired").into_response(),
-    }
+    // BUG-2026-09-13-03 双保险：历史上可能已入库非法 media_type（注入
+    // 面修复前），直接拼响应头会让 axum TryInto<HeaderValue> 失败 →
+    // panic（存储型 DoS）。出站前校验，非法回退 octet-stream。
+    let content_type = if is_valid_media_type(&entry.media_type) {
+        HeaderValue::from_str(&entry.media_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream"))
+    } else {
+        HeaderValue::from_static("application/octet-stream")
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        entry.bytes,
+    )
+        .into_response()
 }
 
 /// BUG-2026-09-13-03：media_type 会直接拼进 GET 响应头（content.rs:40），

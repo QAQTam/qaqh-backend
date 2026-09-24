@@ -1262,6 +1262,59 @@ impl AgentInstance {
     }
 }
 
+/// #345：把 pending interaction 的正文写进 content store 并 pin。
+///
+/// 正文的 content_id 必须与引擎写进 canonical fact 的 `request_ref` 一致：
+/// 两处都走 `qaqh_domain::interaction_body` 的同一个构造函数，**不要**在这里
+/// 另写一份序列化（哈希漂移不会有编译期错误，只会让客户端取不到 modal 正文）。
+///
+/// 超配额（[`ContentQuotaExceeded`]）时只记录错误、不写正文：客户端会拿到
+/// 404 并收掉 modal（契约要求把 404 当「正文不可用」）。pinned 额度按 seed 计
+/// 且交互终结即释放，正常会话不可能触达。
+pub(crate) fn stash_interaction_body(
+    hub: &RingingHub,
+    seed: &str,
+    event: &qaqh_domain::DomainEvent,
+) {
+    use qaqh_domain::{ControlEvent, interaction_body};
+    let (interaction_id, bytes) = match event {
+        qaqh_domain::DomainEvent::Control(ControlEvent::InteractionRequested {
+            interaction_id,
+            mode,
+            questions,
+            ..
+        }) => (
+            interaction_id.as_str(),
+            interaction_body::ask_body(*mode, questions),
+        ),
+        qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewRequested {
+            interaction_id,
+            plan_content,
+            review_type,
+            todo_items,
+            ..
+        }) => (
+            interaction_id.as_str(),
+            interaction_body::plan_body(plan_content, review_type, todo_items.as_deref()),
+        ),
+        _ => return,
+    };
+    match hub.put_interaction_content(
+        seed,
+        interaction_id,
+        interaction_body::INTERACTION_BODY_MEDIA_TYPE,
+        bytes,
+    ) {
+        Ok(content_id) => log::debug!(
+            "[ringing] interaction body stashed for {seed}/{interaction_id} -> {content_id}"
+        ),
+        Err(error) => log::error!(
+            "[ringing] interaction body rejected for {seed}/{interaction_id}: {error} \
+             (client will 404 the request ref)"
+        ),
+    }
+}
+
 pub(crate) fn externalize_large_content(
     hub: &RingingHub,
     seed: &str,
