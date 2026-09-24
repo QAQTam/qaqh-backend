@@ -157,5 +157,7 @@ fn main() {
         }
         println!("{}", serde_json::Value::Object(seeded));
     }
-    store.release_writer(&lease, now).expect("release writer");
+    store
+        .release_writer(&lease, i64::MIN)
+        .expect("release writer");
 }
