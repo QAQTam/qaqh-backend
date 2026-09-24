@@ -51,7 +51,7 @@ pub(crate) use auth::{
     get_session_id, is_authorized, lease_required_json, parse_channel, publish_session_created,
     session_close_seed, unauthorized,
 };
-pub(crate) use command::{command_fingerprint, handle_command, handle_command_status};
+pub(crate) use command::{command_fingerprint, handle_command};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
@@ -160,10 +160,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/ringing/v2/sessions/{seed}/driver/release",
             post(handle_driver_release_v2),
-        )
-        .route(
-            "/ringing/v1/commands/{id}",
-            post(handle_command).get(handle_command_status),
         )
         .route(
             "/ringing/v1/sessions/{seed}/bootstrap",
