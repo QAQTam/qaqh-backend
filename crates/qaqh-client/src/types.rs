@@ -34,15 +34,12 @@ pub use qaqh_ringing::{
     MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_VERSION, RingingChannelSnapshot, RingingCommand,
     RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
     RingingEvent, RingingEventBatch as EventBatch, RingingEventEnvelope,
-    RingingResetRequired as ResetRequired, RingingSessionBootstrap, is_safe_integer,
+    RingingResetRequired as ResetRequired, is_safe_integer,
 };
 pub use qaqh_types::{
     SessionListEntry, SessionMeta, ToolContinuation, ToolError, ToolImage, ToolModelPayload,
     ToolResult, ToolStatus, UsageInfo,
 };
-
-/// Stable channel order used to start the three independent SSE streams.
-pub const CHANNELS: [Channel; 3] = [Channel::Control, Channel::Conversation, Channel::Tool];
 
 /// 服务端主动终止流的结构化原因。
 ///
@@ -54,26 +51,6 @@ pub enum ReconnectReason {
     Lagged { skipped: u64 },
     /// 服务端以其他稳定 code 终止流；未知 code 原样保留。
     StreamTerminated { code: String },
-}
-
-/// Per-channel SSE connection state. This is a native transport state rather
-/// than a renderer payload; UI shells marshal it onto their dispatcher.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum ChannelStatus {
-    Connecting,
-    Open {
-        server_epoch: String,
-        cursor: u64,
-    },
-    Reconnecting {
-        retry_ms: u64,
-        last_cursor: u64,
-        reason: Option<ReconnectReason>,
-    },
-    Closed {
-        reason: String,
-    },
 }
 
 /// Per-session timeline connection state.
@@ -305,21 +282,6 @@ mod tests {
 
     #[test]
     fn reconnecting_status_keeps_none_and_structured_reasons_distinct() {
-        let ordinary = ChannelStatus::Reconnecting {
-            retry_ms: 1_000,
-            last_cursor: 42,
-            reason: None,
-        };
-        assert_eq!(
-            serde_json::to_value(&ordinary).expect("serialize ordinary reconnect"),
-            serde_json::json!({
-                "status": "reconnecting",
-                "retry_ms": 1_000,
-                "last_cursor": 42,
-                "reason": null
-            })
-        );
-
         let lagged = TimelineStatus::Reconnecting {
             seed: "seed-1".into(),
             retry_ms: 2_000,
