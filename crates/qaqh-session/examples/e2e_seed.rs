@@ -7,8 +7,11 @@
 //! first-answer-wins real-machine probes. Prints a JSON object keyed by kind,
 //! each carrying `interaction_id` and `call_id`.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use qaqh_session::canonical::{
-    CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid, sha256_content_hash,
+    CanonicalSessionIdentity, CanonicalSessionStore, CommittedFactReader, WriterId, generate_ulid,
+    sha256_content_hash,
 };
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, ContentRef, EventId, FactPayload, FactSchema, InteractionDecision,
@@ -24,10 +27,21 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("create session dir");
 
     let identity = CanonicalSessionIdentity::open_or_create(&dir).expect("identity");
-    let now = 1_789_830_000_000_i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
     let mut store =
         CanonicalSessionStore::open(&dir, identity.session_id.clone(), identity.log_id.clone())
             .expect("store");
+    let has_created =
+        CommittedFactReader::open(&dir, identity.session_id.clone(), identity.log_id.clone())
+            .expect("reader")
+            .read_all()
+            .expect("facts")
+            .iter()
+            .any(|fact| matches!(&fact.payload, FactPayload::SessionCreated(_)));
     let lease = store
         .acquire_writer(WriterId::new("e2e-seed"), now, 600_000)
         .expect("writer lease");
@@ -50,25 +64,27 @@ fn main() {
         payload,
     };
 
-    store
-        .append(
-            &lease,
-            envelope(
+    if !has_created {
+        store
+            .append(
+                &lease,
+                envelope(
+                    now,
+                    None,
+                    None,
+                    None,
+                    FactPayload::SessionCreated(SessionCreated {
+                        created_at_ms: now,
+                        cwd: "/tmp".into(),
+                        model: "e2e".into(),
+                        parent_session_id: None,
+                        schema_caps: Vec::new(),
+                    }),
+                ),
                 now,
-                None,
-                None,
-                None,
-                FactPayload::SessionCreated(SessionCreated {
-                    created_at_ms: now,
-                    cwd: "/tmp".into(),
-                    model: "e2e".into(),
-                    parent_session_id: None,
-                    schema_caps: Vec::new(),
-                }),
-            ),
-            now,
-        )
-        .expect("append created");
+            )
+            .expect("append created");
+    }
 
     if resolved {
         let mut seeded = serde_json::Map::new();
@@ -141,4 +157,5 @@ fn main() {
         }
         println!("{}", serde_json::Value::Object(seeded));
     }
+    store.release_writer(&lease, now).expect("release writer");
 }

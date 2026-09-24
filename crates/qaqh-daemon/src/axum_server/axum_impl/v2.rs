@@ -197,15 +197,11 @@ pub(crate) async fn handle_bootstrap_v2(
                 InteractionKind::Ask => RingingV2InteractionKind::Ask,
                 InteractionKind::Plan => RingingV2InteractionKind::PlanReview,
             },
-            // #345：ask / plan 的 modal 正文走 content store（ref 指向正文）；
-            // permission 没有可取正文（详情在 tool 频道快照 / timeline 卡里），
-            // 因此**不暴露**那个身份摘要 ref，避免客户端去取一个取不到的东西。
-            request: match interaction.kind {
-                InteractionKind::Permission => None,
-                InteractionKind::Ask | InteractionKind::Plan => {
-                    Some(wire_content_value(&interaction.request))
-                }
-            },
+            // #345 / 2026-09-24 修订：ask / plan / permission 的 modal 正文
+            // 都走 content store（ref 指向正文）。permission 在旧实现里靠
+            // tool 频道快照 / timeline 卡兜底；纯 v2 单流下该快照已不存在，
+            // 因此也必须暴露 canonical 正文 ref。
+            request: Some(wire_content_value(&interaction.request)),
         })
         .collect();
     let driver = {
@@ -335,6 +331,10 @@ pub(crate) async fn handle_pending_approvals_v2(
                     InteractionKind::Plan => "plan",
                     InteractionKind::Permission => "permission",
                 },
+                // 与 permission 的 `details_unavailable` 同语义：正文取不到时
+                // 仍保留可答复的 id/kind，details 降级为 null。
+                "details": interaction_body_value(&state, &interaction.request)
+                    .unwrap_or(serde_json::Value::Null),
             })
         });
 
@@ -840,6 +840,7 @@ pub(crate) async fn handle_command_v2(
         envelope.channel,
         envelope.seed.as_deref(),
         envelope.expected_revision,
+        envelope.driver_epoch,
         &envelope.command,
     );
     if let Some(existing) = existing_v2_receipt(&state, &headers, &envelope.command_id) {
