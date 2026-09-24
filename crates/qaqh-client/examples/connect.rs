@@ -1,5 +1,5 @@
-//! Smoke test: connect to the daemon, open a Ringing lease, observe the three
-//! SSE channels, then issue a typed query.
+//! Smoke test: connect to the daemon, open a v2 lease, observe the canonical
+//! per-seed event stream, then issue a typed query.
 //!
 //! Run against the dev daemon:
 //! ```powershell
@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use qaqh_client::{ChannelStatus, Client, ClientHandlers, ClientOptions, QueryRequest};
+use qaqh_client::{Client, ClientHandlers, ClientOptions, QueryRequest, V2StreamStatus};
 
 fn main() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -18,28 +18,28 @@ fn main() {
         let client = Client::connect_async(ClientOptions {
             handlers: ClientHandlers {
                 on_liveness: std::sync::Arc::new(|| {}),
-                on_batch: std::sync::Arc::new(|batch| {
+                on_v2_event: std::sync::Arc::new(|seed, event| {
                     println!(
-                        "[batch] {} seed={} seq={}..{} envelopes={}",
-                        batch.channel.as_str(),
-                        batch.seed,
-                        batch.from_stream_seq,
-                        batch.to_stream_seq,
-                        batch.envelopes.len(),
+                        "[event] seed={seed} id={} delivery={:?} cursor={:?}",
+                        event.event_id,
+                        event.delivery,
+                        event.cursor.as_ref().map(|c| c.as_str()),
                     );
                 }),
-                on_status: std::sync::Arc::new(|channel, status| {
+                on_v2_reset: std::sync::Arc::new(|seed, reset| {
+                    println!("[reset] seed={seed} reason={:?}", reset.reason);
+                }),
+                on_v2_status: std::sync::Arc::new(|seed, status| {
                     let state = match &status {
-                        ChannelStatus::Connecting => "connecting".to_string(),
-                        ChannelStatus::Open { cursor, .. } => format!("open cursor={cursor}"),
-                        ChannelStatus::Reconnecting { retry_ms, .. } => {
+                        V2StreamStatus::Connecting => "connecting".to_string(),
+                        V2StreamStatus::Open { cursor, .. } => format!("open cursor={cursor:?}"),
+                        V2StreamStatus::Reconnecting { retry_ms, .. } => {
                             format!("reconnecting in {retry_ms}ms")
                         }
-                        ChannelStatus::Closed { reason } => format!("closed: {reason}"),
+                        V2StreamStatus::Closed { reason } => format!("closed: {reason}"),
                     };
-                    println!("[status] {} {state}", channel.as_str());
+                    println!("[status] {seed} {state}");
                 }),
-                on_reset: None,
                 ..Default::default()
             },
             launch_daemon_if_missing: false,
@@ -59,7 +59,8 @@ fn main() {
             start.elapsed()
         );
 
-        // Observe events for a few seconds, then run a typed query.
+        // Observe events for a few seconds, then run a typed query. The
+        // per-seed v2 stream only starts once a session is activated.
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         match client.query(QueryRequest::SessionList).await {
