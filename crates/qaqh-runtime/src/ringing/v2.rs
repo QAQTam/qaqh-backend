@@ -17,7 +17,8 @@ use qaqh_session::canonical::{
     CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_FILE,
 };
 use qaqh_session::projection::{
-    ProjectionSet, ProjectionSetSnapshot, ProjectionSink, projection_events_for_fact,
+    ControlInteractionState, Projection, ProjectionSet, ProjectionSetSnapshot, ProjectionSink,
+    projection_events_for_fact,
 };
 use qaqh_session::session_fact_v2::{
     Delivery, LogId, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
@@ -139,6 +140,26 @@ impl V2ProjectionHub {
             last_fact_seq: state.last_fact_seq,
             projections: state.projections.snapshot(),
         })
+    }
+
+    /// Control-channel interaction states for a seed.
+    ///
+    /// Cheaper than [`Self::bootstrap`] because it clones only the control
+    /// projection, not the conversation/timeline/resource snapshots. Used by
+    /// the command path to detect an interaction that was already resolved.
+    pub fn control_interactions(
+        &self,
+        session_dir: impl AsRef<Path>,
+        seed: &str,
+    ) -> Result<Vec<ControlInteractionState>, V2HubError> {
+        let session_dir = session_dir.as_ref();
+        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
+        let session = self.session_for(session_dir, session_id, log_id)?;
+        let state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        Ok(state.projections.control.snapshot().interactions)
     }
 
     pub fn subscribe(
@@ -570,5 +591,46 @@ mod tests {
         .expect("replay");
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].fact_seq, Some(changed.fact_seq));
+    }
+
+    #[tokio::test]
+    async fn subscribe_with_foreign_log_cursor_requires_log_id_reset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let (_, changed) = append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-1"));
+        let foreign =
+            CanonicalCursor::snapshot("0198f1a0-0000-7000-8000-0000000000ff", changed.fact_seq);
+        let token = CursorToken::encode_snapshot(&foreign).expect("token");
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", RingingChannel::Control, Some(&token))
+            .expect("subscribe");
+        match subscription.next().await {
+            V2StreamItem::Reset(reset) => {
+                assert_eq!(reset.reason, RingingV2ResetReason::LogIdMismatch);
+                assert_eq!(reset.seed, "seed");
+            }
+            other => panic!("expected log_id reset, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_beyond_last_fact_requires_unknown_fact_reset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let (_, changed) = append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-1"));
+        let ahead = CanonicalCursor::snapshot(identity.log_id.as_str(), changed.fact_seq + 10);
+        let token = CursorToken::encode_snapshot(&ahead).expect("token");
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", RingingChannel::Control, Some(&token))
+            .expect("subscribe");
+        match subscription.next().await {
+            V2StreamItem::Reset(reset) => {
+                assert_eq!(reset.reason, RingingV2ResetReason::UnknownFact);
+                assert!(reset.snapshot_cursor.is_some());
+            }
+            other => panic!("expected unknown_fact reset, got {other:?}"),
+        }
     }
 }

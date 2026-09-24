@@ -3,12 +3,12 @@
 use qaqh_session::projection::{ControlProjection, Projection};
 use qaqh_session::session_fact_v2::{
     ActivityState, ActorKind, ActorRef, ContentHash, ContentRef, ControlDelta, EventId,
-    ExecutionId, FactPayload, InputId, InteractionId, InteractionKind, InteractionRequested,
-    InteractionResolved, ModelRoundStarted, PolicyDecisionRef, RecoveryId, RecoveryOutcome,
-    SessionFact, SessionId, SessionTitleChanged, SideEffectClass, SubagentFinished,
-    SubagentSpawned, SubagentTerminalStatus, TitleSource, ToolCallId, ToolFinished, ToolIntent,
-    ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished,
-    TurnId, TurnMode, TurnTerminal,
+    ExecutionId, FactPayload, InputId, InteractionDecision, InteractionId, InteractionKind,
+    InteractionRequested, InteractionResolved, ModelRoundStarted, PolicyDecisionRef, RecoveryId,
+    RecoveryOutcome, SessionFact, SessionId, SessionTitleChanged, SideEffectClass,
+    SubagentFinished, SubagentSpawned, SubagentTerminalStatus, TitleSource, ToolCallId,
+    ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
+    ToolTerminalStatus, TurnFinished, TurnId, TurnMode, TurnTerminal,
 };
 
 const ENVELOPE_FIXTURE: &str = include_str!("fixtures/session_fact_v2/envelope.jsonl");
@@ -166,6 +166,7 @@ fn interaction_resolved(ordinal: u64) -> SessionFact {
         FactPayload::InteractionResolved(InteractionResolved {
             interaction_id: interaction_id.clone(),
             decision_ref: content_ref(3),
+            decision: Some(InteractionDecision::Answered),
             resolved_by: ActorRef {
                 kind: ActorKind::User,
                 id: "local".into(),
@@ -350,7 +351,13 @@ fn control_projection_applies_and_rebuilds_equivalently() {
         Some(ToolTerminalStatus::Succeeded)
     );
     assert_eq!(snapshot.interactions.len(), 1);
-    assert!(snapshot.interactions[0].resolution.is_some());
+    assert_eq!(
+        snapshot.interactions[0]
+            .resolution
+            .as_ref()
+            .and_then(|resolution| resolution.verdict),
+        Some(InteractionDecision::Answered)
+    );
     assert_eq!(snapshot.subagents.len(), 1);
     assert_eq!(
         snapshot.subagents[0].status,

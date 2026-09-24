@@ -10,6 +10,7 @@
 pub mod attachment;
 pub mod content_store;
 pub mod conversation_snapshot;
+pub mod driver_store;
 pub mod hub;
 pub mod journal;
 pub mod journal_store;
@@ -28,8 +29,9 @@ pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;
 pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
+pub use driver_store::{DriverClaimOutcome, DriverReleaseOutcome, DriverState, RingingDriverStore};
 pub use lease_store::RingingLeaseStore;
-pub use pending_store::PendingCommandStore;
+pub use pending_store::{ExistingCommandReceipt, PendingCommandStore};
 pub use v2::{
     V2BootstrapSnapshot, V2Envelope, V2HubError, V2ProjectionHub, V2StreamItem, V2Subscription,
 };

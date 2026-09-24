@@ -922,6 +922,9 @@ fn interaction_resolution_matches(existing: &FactPayload, incoming: &Interaction
                 && existing.decision_ref == incoming.decision_ref
                 && existing.resolved_by == incoming.resolved_by
                 && existing.resolution_seq == incoming.resolution_seq
+                // Legacy facts predate the structured decision; keep them
+                // idempotent instead of raising a terminal conflict.
+                && (existing.decision.is_none() || existing.decision == incoming.decision)
     )
 }
 

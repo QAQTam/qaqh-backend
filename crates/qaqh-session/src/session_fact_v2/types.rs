@@ -285,10 +285,27 @@ pub struct InteractionRequested {
     pub requested_at_ms: i64,
 }
 
+/// Structured interaction verdict.
+///
+/// `decision_ref` alone is a content hash, so a client (or a restarted daemon)
+/// could not tell what an already-resolved interaction decided. The structured
+/// value is additive: facts written before this field existed deserialize with
+/// `decision = None` and keep `decision_ref` as their only record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionDecision {
+    Approved,
+    Rejected,
+    Answered,
+    Dismissed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InteractionResolved {
     pub interaction_id: InteractionId,
     pub decision_ref: ContentRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<InteractionDecision>,
     pub resolved_by: ActorRef,
     pub resolution_seq: u64,
     pub resolved_at_ms: i64,
