@@ -336,9 +336,10 @@ impl Client {
         let command_id = options
             .command_id
             .unwrap_or_else(qaqh_session::canonical::generate_ulid);
+        let session_id = state.client_session_id.clone();
         let mut payload =
             RingingV2CommandEnvelope::new(command_id.clone(), state.client_instance_id, command)
-                .with_client_session_id(state.client_session_id);
+                .with_client_session_id(session_id.clone());
         if let Some(seed) = seed {
             payload = payload.with_seed(seed);
         }
@@ -356,6 +357,9 @@ impl Client {
             .http
             .post(format!("{}{path}", self.credentials().base_url))
             .bearer_auth(&self.credentials().token)
+            // daemon 的 lease 判定只看 header（信封里的 client_session_id 不参与
+            // 鉴权）——漏这个头会稳定拿 401 lease_required。
+            .header("X-QAQH-Client-Session-Id", &session_id)
             .json(&payload)
             .send()
             .await?;

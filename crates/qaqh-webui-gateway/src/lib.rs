@@ -29,6 +29,7 @@ use daemon::DaemonClient;
 use qaqh_domain::{ControlCommand, ConversationCommand, RingingChannel};
 use qaqh_ringing::{
     RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope,
+    RingingV2CommandEnvelope,
 };
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 use reqwest::Response as UpstreamResponse;
@@ -545,7 +546,7 @@ async fn attach_seed(
 
     let command = RingingCommand::Control(ControlCommand::SessionAttach { seed: seed.clone() });
     let envelope =
-        RingingCommandEnvelope::new(session::random_token(), client_instance_id, command)
+        RingingV2CommandEnvelope::new(session::random_token(), client_instance_id, command)
             .with_client_session_id(lease.client_session_id.clone())
             .with_seed(seed.clone());
     let body = match serde_json::to_value(envelope) {
@@ -554,7 +555,7 @@ async fn attach_seed(
     };
     let response = match state
         .daemon
-        .post_json("/ringing/v1/commands/control", &lease, &body)
+        .post_json("/ringing/v2/commands/control", &lease, &body)
         .await
     {
         Ok(response) => response,
@@ -723,7 +724,7 @@ async fn respond_approval(
     };
     let channel = command.channel();
     let lease = session.lease_snapshot();
-    let envelope = RingingCommandEnvelope::new(
+    let envelope = RingingV2CommandEnvelope::new(
         session::random_token(),
         lease.client_instance_id.clone(),
         command,
@@ -740,7 +741,7 @@ async fn respond_approval(
     let response = match state
         .daemon
         .post_json(
-            &format!("/ringing/v1/commands/{}", channel_path(channel)),
+            &format!("/ringing/v2/commands/{}", channel_path(channel)),
             &lease,
             &body,
         )
@@ -792,19 +793,25 @@ async fn proxy_command(
         return error_response(StatusCode::FORBIDDEN, "command_not_allowed");
     }
     let lease = session.lease_snapshot();
-    envelope.client_instance_id = lease.client_instance_id.clone();
-    envelope.client_session_id = lease.client_session_id.clone();
-    envelope.seed = Some(active_seed);
-    if let Err(error) = envelope.validate() {
+    // 浏览器侧仍按 v1 形状提交（网关自有 API），转发给 daemon 时构造 v2 信封。
+    let mut v2 = RingingV2CommandEnvelope::new(
+        envelope.command_id,
+        lease.client_instance_id.clone(),
+        envelope.command,
+    )
+    .with_client_session_id(lease.client_session_id.clone())
+    .with_seed(active_seed);
+    v2.expected_revision = envelope.expected_revision;
+    if let Err(error) = v2.validate() {
         return error_response(StatusCode::BAD_REQUEST, error);
     }
-    let body = match serde_json::to_value(envelope) {
+    let body = match serde_json::to_value(v2) {
         Ok(body) => body,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed"),
     };
     let response = match state
         .daemon
-        .post_json(&format!("/ringing/v1/commands/{channel}"), &lease, &body)
+        .post_json(&format!("/ringing/v2/commands/{channel}"), &lease, &body)
         .await
     {
         Ok(response) => response,
@@ -828,7 +835,7 @@ async fn proxy_command_status(
     let lease = session.lease_snapshot();
     let response = match state
         .daemon
-        .get(&format!("/ringing/v1/commands/{id}"), &lease)
+        .get(&format!("/ringing/v2/commands/{id}"), &lease)
         .await
     {
         Ok(response) => response,
