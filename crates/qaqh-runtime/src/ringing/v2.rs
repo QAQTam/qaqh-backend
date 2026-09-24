@@ -14,7 +14,8 @@ use qaqh_ringing::{
     RingingV2ResetRequired, RingingV2StreamKey,
 };
 use qaqh_session::canonical::{
-    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_FILE,
+    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
+    EVENTS_FILE,
 };
 use qaqh_session::projection::{
     ControlDriverState, ControlInteractionState, Projection, ProjectionSet, ProjectionSetSnapshot,
@@ -68,6 +69,7 @@ pub struct V2BootstrapSnapshot {
 
 pub struct V2ProjectionHub {
     epoch: String,
+    live_capacity: usize,
     sessions: RwLock<HashMap<SessionId, Arc<V2Session>>>,
 }
 
@@ -101,6 +103,19 @@ impl V2ProjectionHub {
     pub fn new(server_epoch: impl Into<String>) -> Self {
         Self {
             epoch: server_epoch.into(),
+            live_capacity: LIVE_CAPACITY,
+            sessions: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Test-only: shrink the per-session live broadcast capacity so the
+    /// `replay_overflow` reset path is reachable without publishing thousands
+    /// of events. Production always uses [`LIVE_CAPACITY`].
+    #[doc(hidden)]
+    pub fn with_live_capacity(server_epoch: impl Into<String>, live_capacity: usize) -> Self {
+        Self {
+            epoch: server_epoch.into(),
+            live_capacity: live_capacity.max(1),
             sessions: RwLock::new(HashMap::new()),
         }
     }
@@ -287,7 +302,8 @@ impl V2ProjectionHub {
             return Ok(session);
         }
 
-        let state = load_session_state(session_dir, session_id.clone(), log_id)?;
+        let state =
+            load_session_state(session_dir, session_id.clone(), log_id, self.live_capacity)?;
         let session = Arc::new(V2Session {
             state: Mutex::new(state),
         });
@@ -381,6 +397,12 @@ fn resolve_identity(session_dir: &Path, seed: &str) -> Result<(SessionId, LogId)
     }
     let identity = CanonicalSessionIdentity::open_or_create(session_dir)
         .map_err(|error| V2HubError::Canonical(error.to_string()))?;
+    // A session can exist (identity minted) before its first canonical commit.
+    // There is no snapshot cursor to hand out yet, so surface the documented
+    // `snapshot_missing` reason rather than a generic canonical error.
+    if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+        return Err(V2HubError::SnapshotMissing(seed.to_string()));
+    }
     Ok((identity.session_id, identity.log_id))
 }
 
@@ -388,6 +410,7 @@ fn load_session_state(
     session_dir: &Path,
     session_id: SessionId,
     log_id: LogId,
+    live_capacity: usize,
 ) -> Result<V2SessionState, V2HubError> {
     let facts = CommittedFactReader::open(session_dir, session_id, log_id.clone())
         .map_err(|error| V2HubError::Canonical(error.to_string()))?
@@ -395,7 +418,7 @@ fn load_session_state(
         .map_err(|error| V2HubError::Canonical(error.to_string()))?;
     let last_fact_seq = facts.last().map(|fact| fact.fact_seq).unwrap_or(0);
     let projections = ProjectionSet::rebuild(facts.into_iter());
-    let (live_tx, _) = broadcast::channel(LIVE_CAPACITY);
+    let (live_tx, _) = broadcast::channel(live_capacity);
     Ok(V2SessionState {
         last_fact_seq,
         projections,
