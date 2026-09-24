@@ -39,12 +39,14 @@ pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
 pub use types::ResetRequired;
 pub use v2::{
-    CLIENT_V2_END_OF_FACT, ClientV2Bootstrap, ClientV2Capabilities, ClientV2ControlState,
+    CLIENT_V2_END_OF_FACT, ClientV2AskOutcome, ClientV2Bootstrap, ClientV2Capabilities,
+    ClientV2CommandAck, ClientV2CommandResult, ClientV2CommandStatus, ClientV2ControlState,
     ClientV2ConversationState, ClientV2Cursor, ClientV2CursorToken, ClientV2Delivery,
-    ClientV2DriverState, ClientV2Event, ClientV2EventEnvelope, ClientV2InteractionKind,
-    ClientV2Payload, ClientV2PendingInteraction, ClientV2PendingSet, ClientV2Reset,
-    ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey, ClientV2Subscription,
-    ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+    ClientV2DriverState, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingCommand,
+    ClientV2InteractionKind, ClientV2Payload, ClientV2PendingInteraction, ClientV2PendingSet,
+    ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey,
+    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH,
+    RINGING_V2_VERSION,
 };
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,

@@ -11,9 +11,9 @@ use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_domain::RingingChannel;
 use qaqh_ringing::{
     CursorToken, RingingCommandAck, RingingCommandStatus, RingingV2Bootstrap,
-    RingingV2Capabilities, RingingV2CommandEnvelope, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2EventEnvelope, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest, RingingV2OpenResponse,
+    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandStatus,
+    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2EventEnvelope,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -25,7 +25,10 @@ use crate::types::{CommandOptions, RingingCommand, TimelinePage};
 pub use qaqh_ringing::{
     CanonicalCursor as ClientV2Cursor, CursorToken as ClientV2CursorToken,
     END_OF_FACT as CLIENT_V2_END_OF_FACT, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
-    RingingV2DriverState as ClientV2DriverState,
+    RingingV2AskOutcome as ClientV2AskOutcome, RingingV2CommandAck as ClientV2CommandAck,
+    RingingV2CommandResult as ClientV2CommandResult,
+    RingingV2CommandStatus as ClientV2CommandStatus, RingingV2DriverState as ClientV2DriverState,
+    RingingV2ExistingCommand as ClientV2ExistingCommand,
     RingingV2InteractionKind as ClientV2InteractionKind,
     RingingV2PendingInteraction as ClientV2PendingInteraction,
     RingingV2PendingSet as ClientV2PendingSet, RingingV2ResetReason as ClientV2ResetReason,
@@ -269,6 +272,21 @@ impl Client {
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingCommandAck> {
+        Ok(self
+            .send_command_v2_typed(seed, command, options)
+            .await?
+            .into_v1())
+    }
+
+    /// v2 command submission that keeps the typed `existing` receipt returned
+    /// for an idempotent `command_id` replay. `send_command_v2` remains as the
+    /// v1-shaped compatibility surface.
+    pub async fn send_command_v2_typed(
+        &self,
+        seed: Option<&str>,
+        command: RingingCommand,
+        options: CommandOptions,
+    ) -> Result<RingingV2CommandAck> {
         let state = self.require_v2_session().await?;
         let command_id = options
             .command_id
@@ -298,7 +316,7 @@ impl Client {
         if !response.status().is_success() {
             return Err(api_error(response, &path).await);
         }
-        let ack: RingingCommandAck = response.json().await?;
+        let ack: RingingV2CommandAck = response.json().await?;
         if ack.command_id != command_id {
             return Err(ClientError::Protocol(
                 "v2 command ack id does not match submission".into(),
@@ -309,6 +327,14 @@ impl Client {
 
     /// `GET /ringing/v2/commands/{command_id}`.
     pub async fn command_status_v2(&self, command_id: &str) -> Result<RingingCommandStatus> {
+        Ok(self.command_status_v2_typed(command_id).await?.into_v1())
+    }
+
+    /// v2 command status that keeps the typed terminal `result` payload.
+    pub async fn command_status_v2_typed(
+        &self,
+        command_id: &str,
+    ) -> Result<RingingV2CommandStatus> {
         let state = self.require_v2_session().await?;
         let path = format!("{RINGING_V2_BASE_PATH}/commands/{command_id}");
         let response = self
