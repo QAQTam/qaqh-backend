@@ -14,11 +14,12 @@ use qaqh_ringing::{
 };
 use qaqh_runtime::ringing::V2StreamItem;
 use qaqh_session::projection::{
-    ControlRoundState, ControlSubagentState, ControlToolState, ConversationSnapshot,
+    ControlInteractionState, ControlRoundState, ControlSubagentState, ControlToolState,
+    ConversationSnapshot,
 };
 use qaqh_session::session_fact_v2::{
-    ActivityState, InteractionDecision, InteractionKind, RecoveryOutcome, SessionId, ToolCallId,
-    TurnId,
+    ActivityState, ContentValue, InteractionDecision, InteractionKind, RecoveryOutcome, SessionId,
+    ToolCallId, TurnId,
 };
 use serde::Serialize;
 
@@ -274,6 +275,116 @@ pub(crate) async fn handle_bootstrap_v2(
             },
         };
     json_response(StatusCode::OK, &response)
+}
+
+/// `GET /ringing/v2/sessions/{seed}/approvals` — 本地浏览器网关的待审批投影。
+///
+/// 纯 v2：pending 集合来自 canonical control 投影（只取未 resolved / 未 expired 的
+/// 条目），正文来自 canonical content ref（`request`）。形状与旧 v1 端点保持一致，
+/// 网关与前端无需改动：
+///
+/// ```json
+/// { "pending_permission": {...}|null, "pending_interaction": {...}|null }
+/// ```
+///
+/// 返回的 id 是 **canonical** 形态（`call_<ULID>` / `int_<ULID>`）；运行时侧已接受
+/// canonical 与 wire 两种形态，故网关直接透传即可。
+pub(crate) async fn handle_pending_approvals_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(seed): Path<String>,
+) -> Response {
+    if !is_authorized(&headers, &state.token) {
+        return unauthorized();
+    }
+    if require_v2_lease(&state, &headers).is_none() {
+        return lease_required_v2();
+    }
+    if seed.trim().is_empty() {
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+    }
+    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
+    let bootstrap = match state.v2_hub.bootstrap(&session_dir, &seed) {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => return v2_hub_error_response(error),
+    };
+    let interactions = &bootstrap.projections.control.interactions;
+    let pending = |interaction: &&ControlInteractionState| {
+        interaction.resolution.is_none() && interaction.expired_reason.is_none()
+    };
+
+    let pending_permission = interactions
+        .iter()
+        .filter(pending)
+        .find(|interaction| interaction.kind == InteractionKind::Permission)
+        .and_then(|interaction| pending_permission_view(&state, interaction));
+    let pending_interaction = interactions
+        .iter()
+        .filter(pending)
+        .find(|interaction| {
+            matches!(
+                interaction.kind,
+                InteractionKind::Ask | InteractionKind::Plan
+            )
+        })
+        .map(|interaction| {
+            serde_json::json!({
+                "id": interaction.interaction_id.as_str(),
+                "kind": match interaction.kind {
+                    InteractionKind::Ask => "ask",
+                    InteractionKind::Plan => "plan",
+                    InteractionKind::Permission => "permission",
+                },
+            })
+        });
+
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "pending_permission": pending_permission.unwrap_or(serde_json::Value::Null),
+            "pending_interaction": pending_interaction.unwrap_or(serde_json::Value::Null),
+        }),
+    )
+}
+
+/// 从 canonical interaction 的 `request` 取回 permission 详情正文，映射回旧 v1
+/// 端点暴露的 `pending_permission_details` 形状。
+///
+/// 正文取不到（被淘汰）时仍返回条目本身——id 是答复所必需的，详情缺失只能降级
+/// 展示，不能让待审批项从 UI 上消失。
+fn pending_permission_view(
+    state: &AppState,
+    interaction: &ControlInteractionState,
+) -> Option<serde_json::Value> {
+    let call_id = interaction.call_id.as_ref()?.as_str().to_string();
+    let body = interaction_body_value(state, &interaction.request);
+    Some(serde_json::json!({
+        "tool_call_id": call_id,
+        "tool_name": body.as_ref().and_then(|b| b.get("tool_name")).cloned().unwrap_or(serde_json::Value::Null),
+        "action_summary": body.as_ref().and_then(|b| b.get("action_summary")).cloned().unwrap_or(serde_json::Value::Null),
+        "reason": body.as_ref().and_then(|b| b.get("reason")).cloned().unwrap_or(serde_json::Value::Null),
+        "paths": body.as_ref().and_then(|b| b.get("paths")).cloned().unwrap_or(serde_json::json!([])),
+        "category": body.as_ref().and_then(|b| b.get("category")).cloned().unwrap_or(serde_json::Value::Null),
+        "level": body.as_ref().and_then(|b| b.get("level")).cloned().unwrap_or(serde_json::Value::Null),
+        "risk": body.as_ref().and_then(|b| b.get("risk")).cloned().unwrap_or(serde_json::Value::Null),
+        "consequence": body.as_ref().and_then(|b| b.get("consequence")).cloned().unwrap_or(serde_json::Value::Null),
+        "details_unavailable": body.is_none(),
+    }))
+}
+
+/// 解析 interaction `request` 的正文 JSON（Inline 直接解，Ref 走 content store）。
+fn interaction_body_value(state: &AppState, request: &ContentValue) -> Option<serde_json::Value> {
+    match request {
+        ContentValue::Inline { text } => serde_json::from_str(text).ok(),
+        ContentValue::Ref { content_ref } => {
+            // canonical ref 是 `sha256:<hex>`，content store 的 id 是裸 hex。
+            let store_id = content_ref.hash().as_str();
+            let store_id = store_id.strip_prefix("sha256:").unwrap_or(store_id);
+            let entry = state.hub.get_content_any(store_id)?;
+            serde_json::from_slice(&entry.bytes).ok()
+        }
+        ContentValue::Unavailable(_) => None,
+    }
 }
 
 /// 每 seed 一条 SSE（2026-09-24 冻结修订）。

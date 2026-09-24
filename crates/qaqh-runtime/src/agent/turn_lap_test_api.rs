@@ -59,6 +59,7 @@ pub fn observe_yield_for_test(
         turn_id: turn_id.to_string(),
         round_num: 0,
         pending_permission_ids: vec![pending_call_id.to_string()],
+        pending_permission_bodies: Vec::new(),
         deferred_authorized: Vec::new(),
         tool_call_order: vec![pending_call_id.to_string()],
         serial_call_ids: HashSet::new(),
@@ -104,6 +105,7 @@ pub fn observe_ask_yield_for_test(
         turn_id: turn_id.to_string(),
         round_num: 0,
         pending_permission_ids: Vec::new(),
+        pending_permission_bodies: Vec::new(),
         deferred_authorized: Vec::new(),
         tool_call_order: vec![pending_call_id.to_string()],
         serial_call_ids: HashSet::new(),
@@ -119,6 +121,45 @@ pub fn observe_ask_yield_for_test(
             &Outcome::YieldToUser {
                 turn_id: turn_id.to_string(),
                 reason: YieldReason::AskUser,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// Exercise the production yield observer and durable interaction-request
+/// write path from integration tests（permission 变体，覆盖授权详情正文 ref）。
+pub fn observe_permission_yield_for_test(
+    engine: &mut TurnEngine,
+    agent: &mut AgentState,
+    turn_id: &str,
+    input_id: &str,
+    pending_call_id: &str,
+    body: Vec<u8>,
+) -> Result<(), String> {
+    engine
+        .begin_input(turn_id, input_id)
+        .map_err(|error| error.to_string())?;
+    engine.suspended = Some(TurnState {
+        session_id: agent.session.seed.clone(),
+        turn_id: turn_id.to_string(),
+        round_num: 0,
+        pending_permission_ids: vec![pending_call_id.to_string()],
+        pending_permission_bodies: vec![(pending_call_id.to_string(), body)],
+        deferred_authorized: Vec::new(),
+        tool_call_order: vec![pending_call_id.to_string()],
+        serial_call_ids: HashSet::new(),
+        pending_asks: std::collections::VecDeque::new(),
+        pending_plans: std::collections::VecDeque::new(),
+        pending_todo_activation: None,
+        usage: None,
+        reason: YieldReason::PermissionPending,
+    });
+    engine
+        .observe_outcome(
+            agent,
+            &Outcome::YieldToUser {
+                turn_id: turn_id.to_string(),
+                reason: YieldReason::PermissionPending,
             },
         )
         .map_err(|error| error.to_string())

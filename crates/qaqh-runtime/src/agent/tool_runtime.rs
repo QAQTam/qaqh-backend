@@ -819,6 +819,12 @@ pub(crate) fn permission_id_matches(stored_wire_id: &str, incoming: &str) -> boo
     stored_wire_id == incoming || canonical_call_id(stored_wire_id).as_str() == incoming
 }
 
+/// 入站 ask/plan 交互 id 是否指向某条挂起项：接受 wire id 本身，**或**它的
+/// canonical 形式（v2 投影只暴露 canonical `interaction_id`）。
+pub(crate) fn interaction_id_matches(stored_wire_id: &str, incoming: &str) -> bool {
+    stored_wire_id == incoming || canonical_interaction_id(stored_wire_id).as_str() == incoming
+}
+
 pub(crate) fn canonical_turn_id(wire_turn_id: &str) -> TurnId {
     TurnId::new(format!("turn_{}", ulid_from_text(wire_turn_id)))
 }
