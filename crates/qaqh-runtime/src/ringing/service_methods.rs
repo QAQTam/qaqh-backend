@@ -1,4 +1,4 @@
-//! Ringing 服务面方法表（`POST /ringing/v1/service/{method}` 的单一权威清单）。
+//! Ringing 服务面方法表（`POST /ringing/v2/service/{method}` 的单一权威清单）。
 //!
 //! 旧 `/queries/{name}`（闭表白名单）与 `/actions/{name}`（前缀 allowlist）
 //! 双端点及其 slash/dot 双别名容忍已合并于此：一个方法一个条目，

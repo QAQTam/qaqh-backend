@@ -781,9 +781,11 @@ mod axum_tests {
         let app = build_router(test_state());
         let req = Request::builder()
             .method("POST")
-            .uri("/ringing/v1/clients/open")
+            .uri("/ringing/v2/clients/open")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"schema":"qaqh.Ringing","version":1,"client_instance_id":"ci","capabilities":[]}"#))
+            .body(Body::from(
+                r#"{"schema":"qaqh.Ringing","version":2,"client_instance_id":"ci"}"#,
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -793,17 +795,39 @@ mod axum_tests {
     async fn open_success() {
         let app = build_router(test_state());
         let body = serde_json::json!({
-            "schema":"qaqh.Ringing","version":1,"client_instance_id":"ci-1"
+            "schema":"qaqh.Ringing","version":2,"client_instance_id":"ci-1"
         });
         let req = Request::builder()
             .method("POST")
-            .uri("/ringing/v1/clients/open")
+            .uri("/ringing/v2/clients/open")
             .header("content-type", "application/json")
             .header("authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// 纯 v2：v1 的 open / renew / service 三条路径已硬切。
+    #[tokio::test]
+    async fn v1_open_renew_service_are_hard_cut() {
+        let app = build_router(test_state());
+        for (method, uri) in [
+            ("POST", "/ringing/v1/clients/open"),
+            ("POST", "/ringing/v1/leases/renew"),
+            ("POST", "/ringing/v1/service/session.list"),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", "Bearer test-token")
+                .header("x-qaqh-client-session-id", "cs-1")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "uri={uri}");
+        }
     }
 
     #[tokio::test]
@@ -2205,7 +2229,7 @@ mod axum_tests {
         let app = build_router(state);
         let req = Request::builder()
             .method("POST")
-            .uri("/ringing/v1/service/todo.set")
+            .uri("/ringing/v2/service/todo.set")
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", "cs-1")
             .header("content-type", "application/json")
@@ -2218,24 +2242,22 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// open 握手声明 attach_seed 后，同 seed 的 READ_SEEDED 调用放行
-    /// （todo.list 只读，读不到即空表，不落盘）。
+    /// 纯 v2：open 不再带 attach_seed，归属由 `session_attach` 命令建立；
+    /// attach 后同 seed 的 READ_SEEDED 调用放行（todo.list 只读，读不到即空表）。
     #[tokio::test]
-    async fn todo_list_allowed_after_open_attached_seed() {
+    async fn todo_list_allowed_after_seed_attached() {
         let state = test_state();
-        // 经 handle_open 真实路径建 lease 并 attach（覆盖 flatten 解析分支）
         let app = build_router(state);
         let open_req = Request::builder()
             .method("POST")
-            .uri("/ringing/v1/clients/open")
+            .uri("/ringing/v2/clients/open")
             .header("authorization", "Bearer test-token")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::json!({
                     "schema": qaqh_ringing::protocol::RINGING_SCHEMA,
-                    "version": qaqh_ringing::protocol::RINGING_VERSION,
+                    "version": qaqh_ringing::RINGING_V2_VERSION,
                     "client_instance_id": "ci-cli",
-                    "attach_seed": "seed-1",
                 })
                 .to_string(),
             ))
@@ -2246,12 +2268,37 @@ mod axum_tests {
             .await
             .unwrap();
         let open: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let session_id = open["client_session_id"].as_str().expect("session id");
+        let session_id = open["client_session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let attach_req = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/commands/control")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", &session_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "schema": qaqh_ringing::protocol::RINGING_SCHEMA,
+                    "version": qaqh_ringing::RINGING_V2_VERSION,
+                    "channel": "control",
+                    "command_id": "cli-attach-test",
+                    "client_instance_id": "ci-cli",
+                    "client_session_id": session_id,
+                    "seed": "seed-1",
+                    "command": {"channel": "control", "type": "session_attach", "seed": "seed-1"},
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(attach_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
         let req = Request::builder()
             .method("POST")
-            .uri("/ringing/v1/service/todo.list")
+            .uri("/ringing/v2/service/todo.list")
             .header("authorization", "Bearer test-token")
-            .header("x-qaqh-client-session-id", session_id)
+            .header("x-qaqh-client-session-id", &session_id)
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::json!({"seed": "seed-1"}).to_string(),

@@ -228,8 +228,8 @@ fn read_discovery() -> Result<qaqh_types::DaemonDiscovery, String> {
 
 // ───────────────────────── todo CLI（薄壳直访 service 面） ─────────────────────────
 //
-// 路线：daemon.json discovery → /ringing/v1/clients/open（attach_seed 轻量
-// lease 握手）→ POST /ringing/v1/service/todo.{list,set}（WRITE_SEEDED/
+// 路线：daemon.json discovery → /ringing/v2/clients/open（唯一握手）→
+// control `session_attach` 建立 seed 归属 → POST /ringing/v2/service/todo.{list,set}（WRITE_SEEDED/
 // READ_SEEDED 白名单）。执行核心与 LLM 工具分发表共用（exec 系列 seed
 // 参数化变体），禁止直改 todo.json（进程内互斥/Dashboard 推送断链）。
 
@@ -353,11 +353,14 @@ fn todo_cli(args: &[String]) -> i32 {
 /// 缺省 --seed 时：session.list 只返回一个会话则自动取用（多/零会话报错，
 /// 绝不静默猜测写错会话的 todo.json）。
 fn auto_discover_seed(discovery: &qaqh_types::DaemonDiscovery) -> Result<String, String> {
+    // 纯 v2：先开 lease（v2 open 不再接受 attach_seed），再走 v2 service。
+    let instance_id = cli_instance_id();
+    let session_id = open_lease(discovery, &instance_id)?;
     let (_, sessions) = http_post_json(
         discovery,
-        "/ringing/v1/service/session.list",
+        "/ringing/v2/service/session.list",
         &serde_json::json!({}),
-        None,
+        Some(&session_id),
     )?;
     let Some(entries) = sessions.as_array() else {
         return Err("session.list returned unexpected payload".into());
@@ -380,46 +383,92 @@ fn auto_discover_seed(discovery: &qaqh_types::DaemonDiscovery) -> Result<String,
     }
 }
 
-/// open lease（attach_seed 轻量握手）→ 调 service 方法 → 打印结果。
-fn run_service_call(
-    discovery: &qaqh_types::DaemonDiscovery,
-    seed: &str,
-    method: &str,
-    params: &serde_json::Value,
-) -> i32 {
-    let instance_id = format!(
+fn cli_instance_id() -> String {
+    format!(
         "cli-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0)
-    );
+    )
+}
+
+/// v2 open（唯一握手）→ 返回 client_session_id。
+fn open_lease(
+    discovery: &qaqh_types::DaemonDiscovery,
+    instance_id: &str,
+) -> Result<String, String> {
     let open_body = serde_json::json!({
         "schema": qaqh_ringing::protocol::RINGING_SCHEMA,
-        "version": qaqh_ringing::protocol::RINGING_VERSION,
+        "version": qaqh_ringing::RINGING_V2_VERSION,
         "client_instance_id": instance_id,
-        "attach_seed": seed,
     });
     let (status, response) =
-        match http_post_json(discovery, "/ringing/v1/clients/open", &open_body, None) {
-            Ok(result) => result,
-            Err(error) => {
-                eprintln!("todo: lease open failed: {error}");
-                return 1;
-            }
-        };
+        http_post_json(discovery, "/ringing/v2/clients/open", &open_body, None)?;
     if status != 200 {
-        eprintln!("todo: lease open rejected (HTTP {status}): {response}");
+        return Err(format!("lease open rejected (HTTP {status}): {response}"));
+    }
+    response
+        .get("client_session_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "lease open response missing client_session_id".to_string())
+}
+
+/// v2 open 没有 attach_seed：用 control 命令建立 seed 归属。
+fn attach_seed(
+    discovery: &qaqh_types::DaemonDiscovery,
+    instance_id: &str,
+    session_id: &str,
+    seed: &str,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "schema": qaqh_ringing::protocol::RINGING_SCHEMA,
+        "version": qaqh_ringing::RINGING_V2_VERSION,
+        "channel": "control",
+        "command_id": format!("cli-attach-{}-{seed}", cli_instance_id()),
+        "client_instance_id": instance_id,
+        "client_session_id": session_id,
+        "seed": seed,
+        "command": {"channel": "control", "type": "session_attach", "seed": seed},
+    });
+    let (status, response) = http_post_json(
+        discovery,
+        "/ringing/v2/commands/control",
+        &body,
+        Some(session_id),
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "session_attach rejected (HTTP {status}): {response}"
+        ));
+    }
+    Ok(())
+}
+
+/// v2 open lease → attach seed → 调 service 方法 → 打印结果。
+fn run_service_call(
+    discovery: &qaqh_types::DaemonDiscovery,
+    seed: &str,
+    method: &str,
+    params: &serde_json::Value,
+) -> i32 {
+    let instance_id = cli_instance_id();
+    let session_id = match open_lease(discovery, &instance_id) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            eprintln!("todo: lease open failed: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = attach_seed(discovery, &instance_id, &session_id, seed) {
+        eprintln!("todo: {error}");
         return 1;
     }
-    let Some(session_id) = response.get("client_session_id").and_then(|v| v.as_str()) else {
-        eprintln!("todo: lease open response missing client_session_id");
-        return 1;
-    };
 
-    let path = format!("/ringing/v1/service/{method}");
-    match http_post_json(discovery, &path, params, Some(session_id)) {
+    let path = format!("/ringing/v2/service/{method}");
+    match http_post_json(discovery, &path, params, Some(&session_id)) {
         Ok((status, body)) if (200..300).contains(&status) => {
             println!(
                 "{}",
