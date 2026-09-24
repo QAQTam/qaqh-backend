@@ -1,10 +1,17 @@
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use qaqh_domain::ActivityState;
 use qaqh_domain::ControlCommand;
 use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use qaqh_session::actor::ConnectionId;
+use qaqh_session::canonical::{
+    CanonicalSessionIdentity, CanonicalSessionStore, CommittedFactReader, WriterId, generate_ulid,
+};
+use qaqh_session::session_fact_v2::{
+    EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
+};
 use serde_json::{Value, json};
 
 use crate::{AgentRegistry, RingingHub};
@@ -355,6 +362,28 @@ impl QaqhService {
                     self.sessions
                         .persist_tool_mode(&seed, &tool_mode, &custom_tools)
                         .map_err(|error| format!("persist tool_mode failed: {error}"))?;
+                }
+                // 纯 v2：session_create 即物化 canonical identity + 首个
+                // `SessionCreated` 事实。否则 bootstrap/events 要等首个工具事实
+                // 才可用，新建会话在第一回合前一直处于 snapshot_missing 瞬态。
+                let canonical_cwd = self
+                    .sessions
+                    .workspace_cwd(&seed)
+                    .filter(|cwd| !cwd.is_empty())
+                    .or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .map(|cwd| cwd.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "/".to_string());
+                let model = qaqh_config::Config::load()
+                    .map(|config| config.model)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                if let Err(error) = materialize_canonical_session(&seed, &canonical_cwd, &model) {
+                    let _ = self.sessions.delete(&seed);
+                    return Err(format!(
+                        "session.new: canonical materialization failed: {error}"
+                    ));
                 }
                 self.registry()?.spawn_new(&seed)?;
                 Ok(json!(seed))
@@ -870,6 +899,99 @@ fn spawn_config_file_poller() {
     });
 }
 
+/// 在 `session.new` 的持久化阶段写入 canonical 基线。
+///
+/// `CanonicalSessionIdentity::open_or_create` 只建 identity sidecar；bootstrap
+/// 还要求 `events.commit.json` 存在。这里在 worker spawn 前串行写入首个
+/// `SessionCreated`，把「identity 已建但 snapshot 缺失」的瞬态消掉。
+fn materialize_canonical_session(seed: &str, cwd: &str, model: &str) -> Result<(), String> {
+    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    materialize_canonical_session_in(&session_dir, cwd, model)
+}
+
+fn materialize_canonical_session_in(
+    session_dir: &std::path::Path,
+    cwd: &str,
+    model: &str,
+) -> Result<(), String> {
+    let identity =
+        CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
+    let session_id = identity.session_id.clone();
+    let log_id = identity.log_id.clone();
+    // `CanonicalSessionStore::open` initializes an empty commit marker for a
+    // brand-new session; `CommittedFactReader` would fail before that.
+    let mut store = CanonicalSessionStore::open(session_dir, session_id.clone(), log_id.clone())
+        .map_err(|error| error.to_string())?;
+    let facts = CommittedFactReader::open(session_dir, session_id.clone(), log_id.clone())
+        .map_err(|error| error.to_string())?
+        .read_all()
+        .map_err(|error| error.to_string())?;
+    if facts
+        .iter()
+        .any(|fact| matches!(&fact.payload, FactPayload::SessionCreated(_)))
+    {
+        return Ok(());
+    }
+    let now_ms = system_time_ms();
+    let writer_id = WriterId::new(format!(
+        "daemon-session-init-{}-{}",
+        std::process::id(),
+        session_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+    ));
+    let lease = store
+        .acquire_writer(writer_id, now_ms, 60_000)
+        .map_err(|error| error.to_string())?;
+    let cwd = if std::path::Path::new(cwd).is_absolute() {
+        cwd.to_string()
+    } else {
+        std::env::current_dir()
+            .map(|base| base.join(cwd).to_string_lossy().into_owned())
+            .unwrap_or_else(|_| cwd.to_string())
+    };
+    let model = if model.trim().is_empty() {
+        "unknown"
+    } else {
+        model
+    };
+    let fact = SessionFact {
+        schema: FactSchema::v2(),
+        session_id,
+        log_id,
+        fact_seq: 0,
+        event_id: EventId::new(generate_ulid()),
+        ts_ms: now_ms,
+        causation_id: None,
+        turn_id: None,
+        call_id: None,
+        interaction_id: None,
+        payload: FactPayload::SessionCreated(SessionCreated {
+            created_at_ms: now_ms,
+            cwd,
+            model: model.to_string(),
+            parent_session_id: None,
+            schema_caps: Vec::new(),
+        }),
+    };
+    store
+        .append(&lease, fact, now_ms)
+        .map_err(|error| error.to_string())?;
+    store
+        .release_writer(&lease, now_ms)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn system_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
 pub(crate) mod common;
 pub(crate) mod fs_git;
 pub(crate) mod params;
@@ -883,6 +1005,46 @@ use self::params::{
 };
 use self::plan::{plan_action, read_plan, token_stats};
 use self::stats::{activity, context_stats, dashboard, load_config};
+
+#[cfg(test)]
+mod canonical_session_materialization_tests {
+    use super::*;
+    use qaqh_session::canonical::{CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE};
+
+    #[test]
+    fn session_creation_materializes_one_canonical_baseline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model")
+            .expect("materialize");
+        assert!(dir.path().join(CANONICAL_IDENTITY_FILE).exists());
+        assert!(dir.path().join(EVENTS_COMMIT_FILE).exists());
+
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let facts = CommittedFactReader::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .expect("reader")
+        .read_all()
+        .expect("facts");
+        assert_eq!(facts.len(), 1);
+        let FactPayload::SessionCreated(created) = &facts[0].payload else {
+            panic!("first fact must be SessionCreated");
+        };
+        assert_eq!(created.cwd, "/tmp/workspace");
+        assert_eq!(created.model, "test-model");
+
+        // 幂等：重复调用不得追加第二个 SessionCreated。
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model")
+            .expect("second materialize");
+        let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
+            .expect("reader")
+            .read_all()
+            .expect("facts");
+        assert_eq!(facts.len(), 1);
+    }
+}
 
 #[cfg(test)]
 mod tool_mode_tests {

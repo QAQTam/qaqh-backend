@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# #345 真机探针：pending ask 的 modal 正文能否从 canonical ref 取回。
+# #345 真机探针：pending interaction 的 modal 正文能否从 canonical ref 取回。
 #
 # 链路全真：真实 daemon + 本地 OpenAI-compatible fake provider（按脚本下发
-# `ask` tool_call）→ 引擎挂起回合 → canonical `InteractionRequested` →
+# `ask` 或 `exec` tool_call）→ 引擎挂起回合 → canonical `InteractionRequested` →
 # v2 bootstrap 拿到 `request` ref → `GET /ringing/v2/content/{ref}` 取回正文。
 #
 # 判据（缺一即红）：
 #   ① bootstrap 的 pending interaction 带 `ContentValue::Ref`；
-#   ② 用该 ref 取 content 拿到 200，且 body 是 `kind=ask` 的正文（问题文本对得上）；
+#   ② 用该 ref 取 content 拿到 200，且 body 的 `kind` 与模式一致；
 #   ③ 裸 hex 形态（strip `sha256:`）同样可取；
 #   ④ **第二个 client session**（同进程内重连路径）resume 后 bootstrap 得到同一个
 #      ref，并能取到同一份正文；
 #   ⑤ v1 content 路由已硬切（404）。
 #
 # 用法：scripts/v2-content-probe.sh [data-root]
+# 模式：QAQH_CONTENT_PROBE_MODE=ask（默认）| permission
 # data-root 必须以 `qaqh` 结尾（daemon 安全规则）。
 set -euo pipefail
 
@@ -23,6 +24,11 @@ export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 
 DATA="${1:-$HOME/.qaqh-content-probe/qaqh}"
+MODE="${QAQH_CONTENT_PROBE_MODE:-ask}"
+case "$MODE" in
+    ask | permission) ;;
+    *) echo "QAQH_CONTENT_PROBE_MODE 只支持 ask / permission：$MODE" >&2; exit 1 ;;
+esac
 case "$DATA" in
     *qaqh) ;;
     *) echo "data root 必须以 qaqh 结尾：$DATA" >&2; exit 1 ;;
@@ -34,6 +40,7 @@ cargo build -q -p qaqh-daemon
 
 export QAQH_CONTENT_PROBE_ROOT="$ROOT"
 export QAQH_CONTENT_PROBE_DATA="$DATA"
+export QAQH_CONTENT_PROBE_MODE="$MODE"
 python3 - <<'PY'
 import json
 import os
@@ -48,6 +55,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(os.environ["QAQH_CONTENT_PROBE_ROOT"])
 DATA = pathlib.Path(os.environ["QAQH_CONTENT_PROBE_DATA"])
+MODE = os.environ.get("QAQH_CONTENT_PROBE_MODE", "ask")
 WORK = DATA.parent / "work"
 WORK.mkdir(parents=True, exist_ok=True)
 QUESTION = "Proceed with the #345 content probe?"
@@ -80,6 +88,20 @@ class FakeProvider(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         if turn == 0:
+            if MODE == "permission":
+                tool_name = "exec"
+                arguments = json.dumps({"command": "echo permission-probe"})
+                call_id = "call_probe_permission"
+            else:
+                tool_name = "ask"
+                arguments = json.dumps(
+                    {
+                        "question": QUESTION,
+                        "options": ["yes", "no"],
+                        "allow_custom": False,
+                    }
+                )
+                call_id = "call_probe_ask"
             chunks = [
                 {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]},
                 {
@@ -90,17 +112,11 @@ class FakeProvider(BaseHTTPRequestHandler):
                                 "tool_calls": [
                                     {
                                         "index": 0,
-                                        "id": "call_probe_ask",
+                                        "id": call_id,
                                         "type": "function",
                                         "function": {
-                                            "name": "ask",
-                                            "arguments": json.dumps(
-                                                {
-                                                    "question": QUESTION,
-                                                    "options": ["yes", "no"],
-                                                    "allow_custom": False,
-                                                }
-                                            ),
+                                            "name": tool_name,
+                                            "arguments": arguments,
                                         },
                                     }
                                 ]
@@ -138,10 +154,11 @@ port = server.server_address[1]
 threading.Thread(target=server.serve_forever, daemon=True).start()
 print(f"fake provider: http://127.0.0.1:{port}/v1")
 
+permission_level = 2 if MODE == "permission" else 3
 (DATA / "config.toml").write_text(
     f'''provider_id = "openai"
 active_profile = "default"
-permission_level = 3
+permission_level = {permission_level}
 
 [profiles.default]
 model = "fake-model"
@@ -316,7 +333,10 @@ try:
         if status != 200 or "control" not in body:
             return None
         interactions = body["control"]["state"]["interactions"]
-        return interactions[0] if interactions else None
+        return next(
+            (interaction for interaction in interactions if interaction.get("kind") == MODE),
+            None,
+        )
 
     interaction = wait_until(lambda: pending(client_a), "pending interaction")
     print(f"pending interaction: {json.dumps(interaction)[:600]}")
@@ -327,11 +347,20 @@ try:
 
     status, body = request("GET", f"/ringing/v2/content/{ref}", session=client_a, raw=True)
     body_json = json.loads(body) if status == 200 else {}
-    check(
-        "② 用 canonical ref 取回 ask 正文",
+    body_matches = (
         status == 200
-        and body_json.get("kind") == "ask"
-        and body_json.get("questions", [{}])[0].get("question") == QUESTION,
+        and body_json.get("kind") == MODE
+        and (
+            body_json.get("questions", [{}])[0].get("question") == QUESTION
+            if MODE == "ask"
+            else body_json.get("tool_name") == "exec"
+            and bool(body_json.get("reason"))
+            and body_json.get("category") == "exec"
+        )
+    )
+    check(
+        f"② 用 canonical ref 取回 {MODE} 正文",
+        body_matches,
         f"status={status} body={body_json}",
     )
 
@@ -353,7 +382,7 @@ try:
     ref_b = reconnected["request"]["data"]["content_ref"]
     status, body_b = request("GET", f"/ringing/v2/content/{ref_b}", session=client_b, raw=True)
     check(
-        "④ 第二个 client session 重建 modal 正文",
+        f"④ 第二个 client session 重建 {MODE} 正文",
         ref_b == ref and status == 200 and body_b == body,
         f"ref_match={ref_b == ref} status={status}",
     )

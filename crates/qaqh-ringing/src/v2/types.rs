@@ -215,6 +215,10 @@ pub enum RingingV2ResetReason {
     SnapshotExpired,
     SnapshotHashMismatch,
     StaleWriter,
+    /// 会话级内容总量 hard watermark 触发的重置原因（session-fact spec §5.6）。
+    ///
+    /// 交互正文的 pinned 准入配额是另一条写路径：超限时不入库并让客户端按
+    /// 正文 404 降级，不会把这个值当作流 reset reason。
     ContentQuotaExceeded,
     PerConnectionOverflow,
     ProgressBufferOverflow,
@@ -260,6 +264,10 @@ impl RingingV2ResetRequired {
 pub enum RingingV2InteractionKind {
     Permission,
     Ask,
+    /// Rust 侧保留历史变体名，wire 值统一为 `plan`（与 canonical delta 的
+    /// `InteractionKind::Plan` 一致）。2026-09-24 修订前 bootstrap 会序列化成
+    /// `plan_review`，壳层必须自己映射；现在两条路径使用同一个 wire 值。
+    #[serde(rename = "plan")]
     PlanReview,
 }
 
@@ -269,13 +277,13 @@ pub struct RingingV2PendingInteraction {
     pub call_id: String,
     pub turn_id: String,
     pub kind: RingingV2InteractionKind,
-    /// modal 正文载荷（#345）。
+    /// modal 正文载荷（#345 / 2026-09-24 修订）。
     ///
     /// - `Ref { content_ref }`：正文在 content store 里，用
-    ///   `GET /ringing/v2/content/{content_ref}` 取（ask / plan）；
+    ///   `GET /ringing/v2/content/{content_ref}` 取（ask / plan / permission）；
     /// - `Inline { text }`：正文随事件内联；
-    /// - `None`：该交互没有可取的正文（permission —— 它的详情在 tool 频道
-    ///   快照 / timeline 卡里，客户端**不得**尝试取 content）。
+    /// - `None`：历史事实没有可取的正文，或正文入 store 失败；客户端按
+    ///   「正文不可用」降级，不得再依赖已删除的 tool 频道快照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<RingingV2ContentValue>,
 }
@@ -720,7 +728,7 @@ mod tests {
                         "interaction_id": "i1",
                         "call_id": "c1",
                         "turn_id": "t1",
-                        "kind": "plan_review"
+                        "kind": "plan"
                     }],
                     "driver": {
                         "holder": null,
@@ -749,6 +757,11 @@ mod tests {
         assert_eq!(
             bootstrap.control.state.interactions[0].kind,
             RingingV2InteractionKind::PlanReview
+        );
+        assert_eq!(
+            serde_json::to_value(bootstrap.control.state.interactions[0].kind)
+                .expect("serialize interaction kind"),
+            serde_json::json!("plan")
         );
         assert_eq!(
             bootstrap
