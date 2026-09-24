@@ -61,7 +61,7 @@ pub struct PersistentConfig {
     // ── Daemon session policy ──
     /// 空闲会话 worker 自动卸载阈值（秒）。`None`/0 = 禁用（缺省）。
     /// 卸载 = 优雅 seal + 从 registry 摘除 + 释放内存；下次输入自动
-    /// load_for_resume 恢复。详见 docs/memory-governance-plan.md §E。
+    /// load_for_resume 恢复。详见 docs/current/architecture.md。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_idle_unload_secs: Option<u64>,
 
@@ -92,11 +92,11 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold: Option<f64>,
 
-    /// MCP 客户端配置（docs/mcp-client-design.md §6）。
+    /// MCP 客户端配置（docs/current/architecture.md）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<PersistentMcpConfig>,
 
-    /// LSP 客户端配置（docs/lsp-client-design.md §6；全部 Option）。
+    /// LSP 客户端配置（docs/current/architecture.md；全部 Option）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsp: Option<PersistentLspConfig>,
 }
@@ -127,7 +127,7 @@ pub struct PersistentSubagentConfig {
     pub default_tools: Option<Vec<String>>,
 }
 
-/// MCP 客户端配置持久层（docs/mcp-client-design.md §6；全部 Option）。
+/// MCP 客户端配置持久层（docs/current/architecture.md；全部 Option）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistentMcpConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,7 +180,7 @@ pub struct PersistentMcpServerConfig {
     pub cwd: Option<String>,
 }
 
-/// LSP 客户端配置持久层（docs/lsp-client-design.md §6；全部 Option）。
+/// LSP 客户端配置持久层（docs/current/architecture.md；全部 Option）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistentLspConfig {
     #[serde(skip_serializing_if = "Option::is_none")]

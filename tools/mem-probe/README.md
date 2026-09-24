@@ -147,7 +147,7 @@ base=0x1a99c1b2000  pointer density =  5.0%  runs>=60: 236  <- 字符串容器
 | 4 | 按 seed 分列：de0522b9 21 万、203c8b32 20 万… | 与 15 个活跃会话吻合 |
 | 5 | 指针密度 49% vs 5% 两类混杂 | 确认是「大容器」类结构 |
 
-**最终定位到 4 个失效的回收机制**（见 `docs/report/` 与源码）：
+**最终定位到 4 个失效的回收机制**（历史记录见 `docs/archive/2026-09/pre-reset/report/`，当前待办见 `docs/current/debug-backlog.md`）：
 
 1. `session_idle_unload_secs: 0`（默认禁用）→ **15 个会话永不卸载**（日志：15 spawn / 0 unload）
 2. `auto_compact_threshold = 0.0` → 自动压缩短路（日志：`auto-compact preflight` 0 次）

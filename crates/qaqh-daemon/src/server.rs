@@ -237,7 +237,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         shutdown: shutdown.clone(),
         test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),
     };
-    // E: idle 会话卸载周期任务（docs/memory-governance-plan.md §E）。
+    // E: idle 会话卸载周期任务（docs/current/architecture.md）。
     // 每 60s 读一次 config（热生效），对空闲超过阈值的 Session worker 走
     // 优雅 close（join + bundle drop + final flush/drain）。registry.close
     // 是阻塞 join，必须放 spawn_blocking，避免卡死 tokio worker 线程。

@@ -53,7 +53,7 @@ impl QaqhService {
         // store 用默认位置（[secrets.mcp] 段）；禁用配置时 manager 以
         // disabled 形态拒绝一切调用（MCP_DISABLED）。
         qaqh_mcp::install_manager(qaqh_mcp::McpManager::new(config.mcp.clone()));
-        // LSP manager 装配（docs/lsp-client-design.md §4：mcp 同款单例；
+        // LSP manager 装配（docs/current/architecture.md；与 MCP 同款单例；
         // 默认关闭——enabled=false 时 disabled 形态拒一切调用 LSP_DISABLED）。
         qaqh_lsp::install_manager(qaqh_lsp::LspManager::new(config.lsp.clone()));
         // P2-1：热重载接线——①重载器：订阅 watch 单写口广播，[mcp] 段变化
@@ -184,7 +184,7 @@ impl QaqhService {
         }
     }
 
-    /// E: idle 卸载空闲会话 worker（docs/memory-governance-plan.md §E）。
+    /// E: idle 卸载空闲会话 worker（docs/current/architecture.md）。
     /// `idle_secs` <= 0 时为 no-op（配置禁用）。对每个被卸载的 seed 发布
     /// `SessionStateChanged::Closed`（与手动 close_session 一致，UI 可感知）。
     /// 返回被卸载的 seed 列表。registry.close 是阻塞 join——调用方

@@ -294,7 +294,7 @@ pub fn process_is_running(pid: u32) -> bool {
 mod tests {
     use super::*;
 
-    // 前端契约冻结面锚点：`docs/spec/2026-09-15-前端契约与client-API稳定性-spec.md` §1
+    // 前端契约冻结面锚点：`docs/current/architecture.md`
     // （原注释指向的 `frontend-contract.md` 从不存在，已改指该文件）。discovery endpoint 的兼容解析。
     // 旧形态 ws://host:port/control/v1 必须无损转 http://，新形态原样通过；
     // 破坏任一分支即破坏已发布客户端的 discovery 兼容。
