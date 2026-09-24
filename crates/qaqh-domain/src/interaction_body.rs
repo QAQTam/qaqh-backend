@@ -45,10 +45,9 @@ pub fn plan_body(
 
 /// permission 交互正文（`kind = "permission"`）。
 ///
-/// #345 时 permission 刻意**没有**正文（详情只在 tool 频道快照 / timeline 卡里）。
-/// 纯 v2 之后 wire 上不再有 tool 频道快照，壳层（TUI / webui gateway）只能从
-/// canonical ref 取正文才能渲染授权面板 ⇒ 详情也必须走同一条路。
-/// canonical ref 依赖逐字节一致，故参数与 wire 字段一一对应、不做结构体包装。
+/// 纯 v2 之后 wire 上不再有 tool 频道快照，壳层（TUI / webui gateway）必须从
+/// canonical ref 取正文才能渲染授权面板。canonical ref 依赖逐字节一致，故参数
+/// 与 wire 字段一一对应、不做结构体包装。
 #[allow(clippy::too_many_arguments)]
 pub fn permission_body(
     tool_name: &str,

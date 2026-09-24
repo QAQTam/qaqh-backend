@@ -45,8 +45,8 @@ pub type ClientV2Payload = qaqh_session::session_fact_v2::ProjectionPayload;
 /// 命名注意：这里的 `kind` 字段是 [`ClientV2DeltaInteractionKind`]（wire 值
 /// `ask` / `plan` / `permission`），与 bootstrap 的
 /// [`ClientV2PendingInteraction`]`.kind`（[`ClientV2InteractionKind`]，wire 值
-/// `ask` / `plan_review` / `permission`）**不是同一个枚举**。两者是既有 wire
-/// 事实，本别名不改语义，只让壳层能同时命名它们。
+/// 同样为 `ask` / `plan` / `permission`）**不是同一个 Rust 枚举**。两者 wire
+/// 语义已在 2026-09-24 统一，本别名只让壳层能同时命名它们。
 pub use qaqh_session::session_fact_v2::ControlDelta as ClientV2ControlDelta;
 
 /// `ClientV2ControlDelta::SubagentFinished.status`。
@@ -516,16 +516,25 @@ impl Client {
 
     /// `GET /ringing/v2/content/{content_id}`.
     pub async fn content_v2(&self, content_id: &str) -> Result<Bytes> {
+        self.content_v2_range(content_id, None).await
+    }
+
+    /// `GET /ringing/v2/content/{content_id}` with an optional RFC 9110
+    /// `Range` header (for example `bytes=0-65535`). The server returns
+    /// `206 Partial Content`; this method returns the selected bytes.
+    pub async fn content_v2_range(&self, content_id: &str, range: Option<&str>) -> Result<Bytes> {
         let state = self.require_v2_session().await?;
         let path = format!("{RINGING_V2_BASE_PATH}/content/{content_id}");
-        let response = self
+        let mut request = self
             .inner
             .http
             .get(format!("{}{path}", self.credentials().base_url))
             .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
-            .send()
-            .await?;
+            .header("X-QAQH-Client-Session-Id", &state.client_session_id);
+        if let Some(range) = range {
+            request = request.header("Range", range);
+        }
+        let response = request.send().await?;
         if !response.status().is_success() {
             return Err(api_error(response, &path).await);
         }
@@ -615,6 +624,10 @@ mod tests {
             can_claim: true,
         };
         assert_eq!(set.len(), 1);
+        assert_eq!(
+            serde_json::to_value(ClientV2InteractionKind::PlanReview).expect("json"),
+            serde_json::json!("plan")
+        );
         assert!(driver.can_claim);
     }
 }
