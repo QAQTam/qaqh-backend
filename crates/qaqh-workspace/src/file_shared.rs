@@ -390,11 +390,29 @@ pub(crate) fn unified_diff(before: &str, after: &str, path: &str) -> String {
     if before == after {
         return String::new();
     }
+    let (from, to) = diff_header_labels(path);
     let diff = TextDiff::from_lines(before, after);
     diff.unified_diff()
         .context_radius(3)
-        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .header(&from, &to)
         .to_string()
+}
+
+/// diff 头的 `a/` `b/` 前缀是 git 惯例，语义是「相对仓库根」；绝对路径再拼前缀
+/// 会得到 `a//tmp/...` 这种双斜杠，所以绝对路径原样输出，只有相对路径加前缀。
+fn diff_header_labels(path: &str) -> (String, String) {
+    if is_absolute_path(path) {
+        (path.to_string(), path.to_string())
+    } else {
+        (format!("a/{path}"), format!("b/{path}"))
+    }
+}
+
+/// 展示用绝对路径判断：跨平台（Linux 绝对路径、Windows 盘符 / UNC 路径）。
+fn is_absolute_path(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || path.starts_with('\\')
+        || matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
 }
 
 /// Count added/removed lines and find the first changed line between two
@@ -450,6 +468,31 @@ mod atomic_write_tests {
         atomic_write(&target.to_string_lossy(), "after").unwrap();
 
         assert_eq!(std::fs::read_to_string(target).unwrap(), "after");
+    }
+
+    #[test]
+    fn unified_diff_headers_avoid_double_slash_for_absolute_paths() {
+        let diff = unified_diff("old\n", "new\n", "/tmp/work/a.txt");
+        assert!(diff.contains("--- /tmp/work/a.txt"), "got: {diff}");
+        assert!(diff.contains("+++ /tmp/work/a.txt"), "got: {diff}");
+        assert!(!diff.contains("a//"), "got: {diff}");
+        assert!(!diff.contains("b//"), "got: {diff}");
+    }
+
+    #[test]
+    fn unified_diff_headers_keep_git_prefix_for_relative_paths() {
+        let diff = unified_diff("old\n", "new\n", "src/a.rs");
+        assert!(diff.contains("--- a/src/a.rs"), "got: {diff}");
+        assert!(diff.contains("+++ b/src/a.rs"), "got: {diff}");
+    }
+
+    #[test]
+    fn is_absolute_path_recognizes_platform_forms() {
+        assert!(is_absolute_path("/tmp/x"));
+        assert!(is_absolute_path("C:\\work\\x"));
+        assert!(is_absolute_path("\\\\server\\share\\x"));
+        assert!(!is_absolute_path("src/a.rs"));
+        assert!(!is_absolute_path("./a.rs"));
     }
 
     #[test]
