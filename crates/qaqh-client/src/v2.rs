@@ -37,6 +37,39 @@ pub use qaqh_ringing::{
 /// Typed canonical projection payload exposed to shells through qaqh-client.
 pub type ClientV2Payload = qaqh_session::session_fact_v2::ProjectionPayload;
 
+/// Typed control delta (#323 缺口 1).
+///
+/// 壳层必须能 `match ClientV2ControlDelta::InteractionRequested { .. }` —— match
+/// 枚举变体**必须写出枚举名**，所以只导出 `ClientV2Payload` 不够。
+///
+/// 命名注意：这里的 `kind` 字段是 [`ClientV2DeltaInteractionKind`]（wire 值
+/// `ask` / `plan` / `permission`），与 bootstrap 的
+/// [`ClientV2PendingInteraction`]`.kind`（[`ClientV2InteractionKind`]，wire 值
+/// `ask` / `plan_review` / `permission`）**不是同一个枚举**。两者是既有 wire
+/// 事实，本别名不改语义，只让壳层能同时命名它们。
+pub use qaqh_session::session_fact_v2::ControlDelta as ClientV2ControlDelta;
+
+/// `ClientV2ControlDelta::InteractionRequested.kind` 的类型。
+pub use qaqh_session::session_fact_v2::InteractionKind as ClientV2DeltaInteractionKind;
+
+/// `ClientV2ControlDelta::InteractionRequested/Resolved/Expired.interaction_id`.
+pub use qaqh_session::session_fact_v2::InteractionId as ClientV2InteractionId;
+
+/// `ClientV2ControlDelta::InteractionRequested.call_id`.
+pub use qaqh_session::session_fact_v2::ToolCallId as ClientV2ToolCallId;
+
+/// `InteractionRequested.request` / `InteractionResolved.decision` 的载荷。
+pub use qaqh_session::session_fact_v2::ContentValue as ClientV2ContentValue;
+
+/// `InteractionResolved.verdict`（结构化裁决；legacy fact 为 `None`）。
+pub use qaqh_session::session_fact_v2::InteractionDecision as ClientV2InteractionDecision;
+
+/// `InteractionResolved.resolved_by`.
+pub use qaqh_session::session_fact_v2::ActorRef as ClientV2ActorRef;
+
+/// `InteractionExpired.reason`。
+pub use qaqh_session::session_fact_v2::InteractionExpiryReason as ClientV2InteractionExpiryReason;
+
 /// Typed v2 SSE envelope.
 pub type ClientV2Event = RingingV2EventEnvelope<ClientV2Payload>;
 
