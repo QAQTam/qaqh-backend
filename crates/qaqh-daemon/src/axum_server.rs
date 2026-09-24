@@ -1337,6 +1337,206 @@ mod axum_tests {
         (dir, seed)
     }
 
+    /// Seed a canonical session carrying a *resolved* interaction of `kind`
+    /// with a typed `decision`, for the concurrent-answer (V2-R4) fixtures.
+    fn seed_resolved_interaction_session(
+        kind: qaqh_session::session_fact_v2::InteractionKind,
+        decision: qaqh_session::session_fact_v2::InteractionDecision,
+        tag: &str,
+    ) -> (
+        tempfile::TempDir,
+        String,
+        qaqh_session::session_fact_v2::InteractionId,
+        qaqh_session::session_fact_v2::ToolCallId,
+    ) {
+        use qaqh_session::canonical::{
+            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
+            sha256_content_hash,
+        };
+        use qaqh_session::session_fact_v2::{
+            ActorKind, ActorRef, ContentRef, EventId, FactPayload, FactSchema, InteractionId,
+            InteractionRequested, InteractionResolved, SessionCreated, SessionFact, ToolCallId,
+            TurnId,
+        };
+
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
+        let seed = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+        let now = 1_789_830_000_000;
+        let mut store = CanonicalSessionStore::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .unwrap();
+        let lease = store
+            .acquire_writer(WriterId::new(tag), now, 600_000)
+            .unwrap();
+        let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
+        let call_id = ToolCallId::new(format!("call_{}", generate_ulid()));
+        let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+        let envelope = |ts_ms: i64, payload: FactPayload| SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms,
+            causation_id: None,
+            turn_id: Some(turn_id.clone()),
+            call_id: Some(call_id.clone()),
+            interaction_id: Some(interaction_id.clone()),
+            payload,
+        };
+        store
+            .append(
+                &lease,
+                envelope(
+                    now,
+                    FactPayload::SessionCreated(SessionCreated {
+                        created_at_ms: now,
+                        cwd: "/tmp".into(),
+                        model: "test".into(),
+                        parent_session_id: None,
+                        schema_caps: Vec::new(),
+                    }),
+                ),
+                now,
+            )
+            .unwrap();
+        store
+            .append(
+                &lease,
+                envelope(
+                    now + 1,
+                    FactPayload::InteractionRequested(InteractionRequested {
+                        interaction_id: interaction_id.clone(),
+                        call_id: Some(call_id.clone()),
+                        turn_id: turn_id.clone(),
+                        kind,
+                        request_ref: ContentRef::new(sha256_content_hash(b"request")),
+                        expires_at_ms: None,
+                        requested_at_ms: now + 1,
+                    }),
+                ),
+                now + 1,
+            )
+            .unwrap();
+        store
+            .append(
+                &lease,
+                envelope(
+                    now + 2,
+                    FactPayload::InteractionResolved(InteractionResolved {
+                        interaction_id: interaction_id.clone(),
+                        decision_ref: ContentRef::new(sha256_content_hash(b"decision")),
+                        decision: Some(decision),
+                        resolved_by: ActorRef {
+                            kind: ActorKind::User,
+                            id: "v2-fixture".into(),
+                            display_name: None,
+                        },
+                        resolution_seq: 1,
+                        resolved_at_ms: now + 2,
+                    }),
+                ),
+                now + 2,
+            )
+            .unwrap();
+        (dir, seed, interaction_id, call_id)
+    }
+
+    /// V2-R4 for permission and plan: a second answer for an already-resolved
+    /// interaction is rejected with a typed winning verdict, mirroring ask.
+    #[tokio::test]
+    async fn v2_second_answer_returns_winning_verdict_for_permission_and_plan() {
+        use qaqh_domain::{ControlCommand, ToolCommand};
+        use qaqh_ringing::{
+            RingingCommand, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
+            RingingV2ExistingResult,
+        };
+        use qaqh_session::session_fact_v2::{InteractionDecision, InteractionKind};
+
+        let app = build_router(test_state());
+        let client = open_v2_session(app.clone(), "ci-v2").await;
+
+        // (kind, winning decision, second-answer command, expected typed result)
+        let permission = {
+            let (dir, seed, interaction_id, call_id) = seed_resolved_interaction_session(
+                InteractionKind::Permission,
+                InteractionDecision::Approved,
+                "v2-permission-fixture",
+            );
+            let command = RingingV2CommandEnvelope::new(
+                "cmd-second-permission",
+                "ci-v2",
+                RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+                    tool_call_id: call_id.as_str().to_string(),
+                    approved: false,
+                    trust_folder: false,
+                }),
+            )
+            .with_client_session_id(client.client_session_id.clone())
+            .with_seed(seed);
+            let expected = RingingV2CommandResult::PermissionResolved {
+                interaction_id: interaction_id.as_str().to_string(),
+                approved: true,
+            };
+            (dir, command, expected)
+        };
+        let plan = {
+            let (dir, seed, interaction_id, _call_id) = seed_resolved_interaction_session(
+                InteractionKind::Plan,
+                InteractionDecision::Rejected,
+                "v2-plan-fixture",
+            );
+            let command = RingingV2CommandEnvelope::new(
+                "cmd-second-plan",
+                "ci-v2",
+                RingingCommand::Control(ControlCommand::PlanReviewRespond {
+                    interaction_id: interaction_id.as_str().to_string(),
+                    approved: true,
+                    message: None,
+                    autonomous: false,
+                }),
+            )
+            .with_client_session_id(client.client_session_id.clone())
+            .with_seed(seed);
+            let expected = RingingV2CommandResult::PlanReviewResolved {
+                interaction_id: interaction_id.as_str().to_string(),
+                approved: false,
+            };
+            (dir, command, expected)
+        };
+
+        for (label, _dir, command, expected) in [
+            ("permission", permission.0, permission.1, permission.2),
+            ("plan", plan.0, plan.1, plan.2),
+        ] {
+            let (status, ack): (StatusCode, RingingV2CommandAck) =
+                post_v2_command(app.clone(), &client.client_session_id, &command).await;
+            assert_eq!(status, StatusCode::OK, "{label}");
+            assert_eq!(
+                ack.code.as_deref(),
+                Some("interaction_already_resolved"),
+                "{label}"
+            );
+            match ack.existing.expect("winning verdict") {
+                RingingV2ExistingResult::InteractionResolved { result } => {
+                    assert_eq!(result, expected, "{label}");
+                }
+                other => panic!("{label}: expected interaction_resolved, got {other:?}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn v2_driver_gate_rejects_non_driver_and_stale_epoch() {
         use qaqh_domain::ConversationCommand;
@@ -1444,6 +1644,172 @@ mod axum_tests {
         let other_view = bootstrap(b.client_session_id).await;
         assert_eq!(other_view["holder"], a.client_session_id);
         assert_eq!(other_view["can_claim"], true);
+    }
+
+    /// V2-C7: a session whose canonical log has no commit yet cannot mint a
+    /// snapshot cursor; the route must surface the documented
+    /// `snapshot_missing` reason (409) instead of a generic 500.
+    #[tokio::test]
+    async fn v2_bootstrap_reports_snapshot_missing_for_uncommitted_session() {
+        use qaqh_session::canonical::CanonicalSessionIdentity;
+
+        let app = build_router(test_state());
+        let client = open_v2_session(app.clone(), "ci-v2").await;
+
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
+        let seed = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // Identity only: no `events.commit` marker, so no committed facts.
+        CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+
+        let request = Request::builder()
+            .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", client.client_session_id)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["code"], "snapshot_missing");
+    }
+
+    /// V2-D3: a driver handover is a *reliable* control event, not just a
+    /// bootstrap field. A client that reconnects with a pre-handover cursor
+    /// must replay the `DriverChanged` fact.
+    #[tokio::test]
+    async fn v2_driver_handover_emits_reliable_control_event() {
+        use qaqh_session::canonical::{
+            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
+        };
+        use qaqh_session::session_fact_v2::{
+            DriverChanged, EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
+        };
+
+        let state = test_state();
+        let v2_hub = state.v2_hub.clone();
+        let app = build_router(state);
+        let a = open_v2_session(app.clone(), "ci-a").await;
+
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
+        let seed = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+        let now = 1_789_830_000_000;
+        let mut store = CanonicalSessionStore::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .unwrap();
+        let lease = store
+            .acquire_writer(WriterId::new("v2-handover-test"), now, 600_000)
+            .unwrap();
+        let fact = |ts_ms: i64, payload: FactPayload| SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload,
+        };
+        store
+            .append(
+                &lease,
+                fact(
+                    now,
+                    FactPayload::SessionCreated(SessionCreated {
+                        created_at_ms: now,
+                        cwd: "/tmp".into(),
+                        model: "test".into(),
+                        parent_session_id: None,
+                        schema_caps: Vec::new(),
+                    }),
+                ),
+                now,
+            )
+            .unwrap();
+
+        // Snapshot cursor taken *before* the handover.
+        let bootstrap = Request::builder()
+            .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", a.client_session_id.clone())
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(bootstrap).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["control"]["state"]["driver"]["holder"].is_null());
+        assert_eq!(value["control"]["state"]["driver"]["driver_epoch"], 0);
+        let cursor = value["snapshot_cursor"].as_str().unwrap().to_string();
+
+        // `a` takes the seat: canonical DriverChanged + projection publish.
+        let changed = store
+            .append(
+                &lease,
+                fact(
+                    now + 1,
+                    FactPayload::DriverChanged(DriverChanged {
+                        holder: Some(a.client_session_id.clone()),
+                        driver_epoch: 1,
+                        changed_at_ms: now + 1,
+                    }),
+                ),
+                now + 1,
+            )
+            .unwrap();
+        qaqh_session::projection::ProjectionSink::publish(
+            v2_hub.as_ref(),
+            dir.path(),
+            &changed.fact,
+            &changed.events,
+        );
+
+        // Reconnect from the pre-handover cursor: the reliable event must be
+        // replayed on the control channel.
+        let request = Request::builder()
+            .uri(format!(
+                "/ringing/v2/sessions/{seed}/events/control?since_cursor={cursor}"
+            ))
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", a.client_session_id.clone())
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        use futures_util::StreamExt as _;
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = stream.next().await.unwrap().unwrap();
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(text.contains("event: ringing.event"), "{text}");
+        assert!(text.contains("\"delivery\":\"reliable\""), "{text}");
+        assert!(text.contains("\"kind\":\"driver_changed\""), "{text}");
+        assert!(text.contains("\"fact_seq\":2"), "{text}");
+        assert!(text.contains("\"driver_epoch\":1"), "{text}");
     }
 
     /// V2-R1..R3: a pending interaction survives a reconnect as a stable
