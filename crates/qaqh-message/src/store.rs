@@ -528,8 +528,28 @@ impl MessageStore {
         std::mem::take(&mut self.pending_persist)
     }
 
+    /// Push a **front-of-context** system message.
+    ///
+    /// # 不变量：只在会话建立时调用一次
+    ///
+    /// `system_messages` 渲染时**永远前置**（见 [`Self::build_context_for_gate`]），
+    /// 与 msg_id 的写入序无关。因此**在历史已经存在之后**再 `push_system`，会让
+    /// 新内容落到整个上下文的最前面，从第一个字节起击穿 provider 前缀缓存。
+    ///
+    /// 生产路径只有会话建立的三个入口（`create_session` /
+    /// `create_session_with_preset_seed` / resume 建立）会调用本方法，且此时
+    /// `turns` 与 `trailing_messages` 均为空。运行期注入（skills envelope、
+    /// subagent 报告、goal、MCP 清单）一律走
+    /// [`Self::push_trailing_system`]，按写入序追加在尾部——那是缓存友好的位置。
+    ///
+    /// 需要新增「运行期系统消息」时，请用 trailing 路径，不要放宽这里的断言。
     pub fn push_system(&mut self, msg: Message) -> bool {
         debug_assert_eq!(msg.role, "system", "push_system requires role=system");
+        debug_assert!(
+            self.turns.is_empty() && self.trailing_messages.is_empty(),
+            "push_system 只能用于会话建立（历史为空）；运行期注入请用 push_trailing_system，\
+             否则新内容会落到上下文最前面并击穿前缀缓存"
+        );
         // Guard: skip if an identical system message already exists.
         // This prevents double-injection when lifecycle paths are called
         // multiple times (e.g. create_session after a failed resume).
@@ -2202,6 +2222,42 @@ mod tests {
             inject_idx > result_idx,
             "injection must not split toolcall/result"
         );
+    }
+
+    /// 不变量：`push_system` 只在会话建立（历史为空）时可用；此后注入走
+    /// trailing，按写入序追加在尾部。
+    ///
+    /// 这条断言是 P6 设计输入 A 的**替代品**：实测生产只有会话建立的三个入口
+    /// 调用 `push_system`（skills / MCP / subagent / goal 全部走 trailing），
+    /// 所以「中途 push_system 把新内容顶到最前」不是现存 bug，而是**潜在**
+    /// 编程错误。把它变成 debug_assert 后，未来任何引入该形态的改动会在测试
+    /// 构建里立刻失败，而不是静默击穿前缀缓存。
+    #[test]
+    fn push_system_is_creation_only_and_injection_stays_trailing() {
+        let mut store = MessageStore::new_ephemeral("test");
+        // 建立期：历史为空 → 允许。
+        assert!(!store.push_system(Message::system("base")));
+        store.push_user("hello");
+
+        // 建立期之后注入必须走 trailing，并且落在 base 之后。
+        store.push_trailing_system(Message::developer("<skill_context_envelope />"));
+        let rendered = store.to_vec();
+        let roles: Vec<&str> = rendered.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["system", "user", "developer"],
+            "base 必须仍是第一段；注入在尾部"
+        );
+    }
+
+    /// 反向证据：历史非空时 `push_system` 会命中 debug_assert（测试构建即红）。
+    #[test]
+    #[should_panic(expected = "push_system 只能用于会话建立")]
+    fn push_system_after_history_is_a_programming_error() {
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_system(Message::system("base"));
+        store.push_user("hello");
+        store.push_system(Message::system("late catalog"));
     }
 
     #[test]
