@@ -36,9 +36,40 @@ pub const AGGREGATE_TOOL_NAME: &str = "mcp";
 /// `read_resource` 等待桥接结果的轮询间隔（与 bridge::wait_response 同款）。
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// 聚合工具的 description 后缀：告知存在性而不占历史。
+///
+/// 这段文本随 tools 数组下发（`tools_hash` 维度），**不写进 messages.jsonl**，
+/// 所以 MCP 配置变化不会打断 prefix cache 的消息前缀。server 名来自
+/// `BTreeMap`（有序），保证同一配置下逐字节稳定。
+fn aggregate_description(cfg: &qaqh_config::config::McpConfig) -> String {
+    let mut description = String::from(
+        "MCP resources: list_servers, list_resources, read_resource, list_prompts, read_prompt.",
+    );
+    if cfg.servers.is_empty() {
+        description.push_str(
+            " No MCP servers are configured. Call list_servers to confirm, or configure [mcp.servers] in config.toml.",
+        );
+        return description;
+    }
+    let names: Vec<&str> = cfg.servers.keys().map(String::as_str).collect();
+    description.push_str(&format!(
+        " {} MCP server(s) configured: {}. Call list_resources to discover resources and URI templates.",
+        names.len(),
+        names.join(", ")
+    ));
+    description
+}
+
 /// 构造聚合工具的投影条目（批次头部钉入；timeout 与 per-server 工具默认值
 /// 同源——资源读取是快速 RPC，60s 封顶足够）。
-pub fn aggregate_entry(timeout: Duration) -> (String, DynamicTool) {
+///
+/// description 是**动态**的（server 数量与名称来自当前配置），用于替代「把
+/// 资源清单注入历史」：模型从 tools 数组就能知道有哪些 server，再按需调
+/// `list_resources` 拿完整清单。
+pub fn aggregate_entry(
+    cfg: &qaqh_config::config::McpConfig,
+    timeout: Duration,
+) -> (String, DynamicTool) {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -76,8 +107,7 @@ pub fn aggregate_entry(timeout: Duration) -> (String, DynamicTool) {
         call_type: "function".to_owned(),
         function: ToolFunction {
             name: AGGREGATE_TOOL_NAME.to_owned(),
-            description: "MCP resources: list_servers, list_resources, read_resource, list_prompts, read_prompt."
-                .to_owned(),
+            description: aggregate_description(cfg),
             parameters: schema,
         },
     };
@@ -385,6 +415,11 @@ const ENV_ITEM_MAX_CHARS: usize = 120;
 /// runtime 在回合边界拉取并与上次比对，变化才经 ContextFlow 物化
 /// （prefix cache 友好）。连接状态解耦：未连接的 server 不占条目，
 /// 全部为空时返回 None（不注入占位文本）。
+///
+/// **默认关闭**（`[mcp].inject_resource_env_block = false`）：清单是「环境
+/// 能力」不是「对话事实」，注入会随清单变化追加历史并打断 prefix cache。
+/// 模型按需调 `mcp list_resources` 拿到的是同一份本地缓存，且不受
+/// [`ENV_BLOCK_MAX_ITEMS`] 封顶。该开关只作调试/兼容保留。
 pub fn resource_env_block() -> Option<String> {
     resource_env_block_with(&crate::manager_slot())
 }
@@ -392,7 +427,8 @@ pub fn resource_env_block() -> Option<String> {
 /// [`resource_env_block`] 的可测形态（manager 显式注入；测试垫片暴露）。
 #[doc(hidden)]
 pub fn resource_env_block_with(manager: &Arc<McpManager>) -> Option<String> {
-    if !manager.config().enabled {
+    let cfg = manager.config();
+    if !cfg.enabled || !cfg.inject_resource_env_block {
         return None;
     }
     let mut lines: Vec<String> = Vec::new();

@@ -45,6 +45,41 @@ fn absent_section_defaults_to_disabled() {
     assert!(!cfg.mcp.enabled, "未配置 [mcp] → 默认关闭");
     assert!(cfg.mcp.servers.is_empty());
     assert_eq!(cfg.mcp.idle_shutdown_secs, 300, "默认 idle 300s");
+    assert!(
+        !cfg.mcp.inject_resource_env_block,
+        "资源清单注入默认关闭（清单是环境能力，不是对话事实）"
+    );
+}
+
+/// 资源清单注入是 opt-in：缺省 false，显式 `true` 才回写历史。
+#[test]
+fn resource_env_block_injection_is_opt_in() {
+    let default = McpConfig::default();
+    assert!(
+        !default.inject_resource_env_block,
+        "McpConfig::default() 必须关闭注入"
+    );
+
+    let toml_text = r#"
+[mcp]
+enabled = true
+inject_resource_env_block = true
+
+[mcp.servers.mock]
+command = "mock"
+"#;
+    let cfg = load_toml("env-block-on", toml_text).expect("load 应成功");
+    assert!(cfg.mcp.inject_resource_env_block, "显式 true 应生效");
+
+    let toml_text = r#"
+[mcp]
+enabled = true
+
+[mcp.servers.mock]
+command = "mock"
+"#;
+    let cfg = load_toml("env-block-default", toml_text).expect("load 应成功");
+    assert!(!cfg.mcp.inject_resource_env_block, "缺省即关闭");
 }
 
 #[test]
@@ -202,6 +237,7 @@ fn persistent_roundtrip_keeps_mcp_section() {
             import_external: None,
             enabled: Some(true),
             idle_shutdown_secs: Some(120),
+            inject_resource_env_block: Some(true),
             servers: Some(servers),
         }),
         ..Default::default()

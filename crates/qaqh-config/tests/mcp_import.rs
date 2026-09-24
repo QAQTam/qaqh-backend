@@ -110,6 +110,7 @@ fn base_cfg(import_external: bool) -> qaqh_config::config::McpConfig {
             },
         )]),
         import_external,
+        inject_resource_env_block: false,
     }
 }
 

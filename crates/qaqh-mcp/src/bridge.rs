@@ -415,9 +415,10 @@ pub fn projection_batch_with(manager: &Arc<McpManager>) -> Option<Vec<(String, D
     // 见 resources.rs）。碰撞拒绝由 replace_dynamic_tools 兜底（与内置工具重名
     // 会被拒绝并计数告警——当前内置面无 `mcp` 名）。
     if manager.config().enabled {
-        batch.push(crate::resources::aggregate_entry(Duration::from_secs(
-            DEFAULT_TIMEOUT_SECS,
-        )));
+        batch.push(crate::resources::aggregate_entry(
+            &manager.config(),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        ));
     }
     for conn in manager.connections() {
         let Some(tools) = conn.cached_tools() else {
