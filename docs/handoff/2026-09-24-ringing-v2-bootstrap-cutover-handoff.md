@@ -1,7 +1,7 @@
 # Ringing v2 bootstrap 切换 Handoff（2026-09-24）
 
-状态：**后端已落地（v1 路由硬切 + client 走 v2）；TUI 侧改了 2 个文件（未提交，需一次
-rev bump 才能吃到）。**
+状态：**后端已落地（v1 路由硬切 + client 走 v2，MR #351 已并入 main）；TUI 侧改动已提交
+在 `qaqh-tui-app` 分支 `feat/v2-bootstrap-cutover`（基于 alpha1 线），需一次 rev bump 才能吃到。**
 
 ## 1. 这次修的是什么
 
@@ -89,10 +89,11 @@ scripts/v2-content-probe.sh <data-root>                 PASS（#345 专项）
 
 ⇒ 只剩这两条（+ 上面第 4 条的 harness 收口）。
 
-## 7. TUI 侧要做的（未提交，需要一次 rev bump）
+## 7. TUI 侧要做的（需要一次 rev bump）
 
-本次已改 `src/app/mod.rs` / `src/app/session.rs`（**未提交**，TUI 仓另有他人在飞的
-`src/terminal/agent.rs`、`src/ui/v2/fullscreen.rs` 改动，不要一并提交）。rev bump 时：
+本次已在 `qaqh-tui-app` 分支 `feat/v2-bootstrap-cutover`（基于 alpha1 线）提交
+`src/app/mod.rs` / `src/app/session.rs`（**只含这两个文件**；TUI 仓另有他人在飞的
+`src/terminal/agent.rs`、`src/ui/v2/fullscreen.rs` 改动，未一并提交）。rev bump 时：
 
 1. 带上这两个文件的改动；
 2. 重建锚点 + bump `scripts/ci-linux.sh` 的 `QAQH_BACKEND_REV` + 给后端 rev 打 annotated
