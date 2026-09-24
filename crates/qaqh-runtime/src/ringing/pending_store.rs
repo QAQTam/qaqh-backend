@@ -1,7 +1,7 @@
 //! Pending command store — Ringing V1 command idempotency + 4096 cap.
 //!
-//! Extracted from `qaqh-daemon/src/ringing_http.rs:2866` for sharing between
-//! legacy TCP and axum paths.
+//! Extracted from the legacy daemon HTTP layer (now
+//! `qaqh-daemon/src/axum_server`) for sharing between the old TCP and axum paths.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
