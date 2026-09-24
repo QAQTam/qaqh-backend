@@ -40,8 +40,7 @@ pub use envelope::{
 };
 pub use event::{RingingControlEvent, RingingConversationEvent, RingingEvent, RingingToolEvent};
 pub use protocol::{
-    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_BASE_PATH, RINGING_SCHEMA, RINGING_VERSION,
-    is_safe_integer,
+    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_VERSION, is_safe_integer,
 };
 pub use reset::RingingResetRequired;
 pub use snapshot::RingingChannelSnapshot;

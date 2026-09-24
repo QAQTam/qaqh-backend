@@ -1274,7 +1274,8 @@ impl RingingHub {
         replay
     }
 
-    /// 读取领域快照（HTTP `GET /ringing/v1/sessions/{seed}/bootstrap`）。
+    /// 读取某频道的领域快照（v1 bootstrap 路由已删除；本方法是 orphan_seal 等
+    /// 内部路径与产出方往返测试的读入口）。
     pub fn snapshot(&self, channel: RingingChannel, seed: &str) -> RingingChannelSnapshot {
         // R3：只读路径加载失败时降级为空快照/零水位，不阻断读取。
         let _ = self.ensure_seed_loaded(channel, seed);
