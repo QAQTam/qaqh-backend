@@ -14,7 +14,8 @@ content probe 全绿。** 契约修订见
 4. v2 content GET 支持 RFC 9110 单区间 Range；
 5. `session.new` 即物化 canonical `SessionCreated` / commit marker；
 6. v2 command fingerprint 纳入 `driver_epoch`；
-7. `content_quota_exceeded` 的双重语义写入修订 spec。
+7. `content_quota_exceeded` 的双重语义写入修订 spec；
+8. V2-C3 replaceable producer 最小闭环（control/resource 当前值）。
 
 ## 2. 具体改动
 
@@ -85,13 +86,34 @@ challenge 形状。
 v2 command fingerprint 现在包含 `envelope.driver_epoch`。同一 `command_id` 在不同
 driver epoch 下提交会被判为不同 payload，不会重放旧 ACK；v1 面固定传 `None`。
 
+### 2.7 V2-C3 replaceable producer
+
+同一 canonical fact 现在可同时产出 reliable delta 和 replaceable current-value
+mirror：
+
+- control：`Activity` / `Round` / `DriverChanged`；
+- resource：`WorkspaceResourceChanged` / `GraphEdge`；
+- 每个稳定 identity 只保留最新 revision；
+- 订阅/重连时先 reliable replay，再补发 cursorless 当前值；
+- hub 从 canonical prefix 重建 replaceable 当前值，不新增持久化文件。
+
+同时修复 `ProjectionPayload::revision()` 少下钻一层 `data.data` 的问题；此前
+reliable revision 会错误回退到 `fact_seq`，replaceable 则根本取不到 revision。
+
+`scripts/v2-smoke.sh` 的 driver handover 阶段现在显式断言 SSE 中同时出现：
+
+- `delivery = reliable` 的 canonical replay；
+- `delivery = replaceable`、无 cursor/projection_index、payload 为
+  `driver_changed` 的当前值。
+
 ## 3. 验证
 
 ```text
 cargo test --workspace -- --test-threads=1              PASS（0 failed）
+cargo test -p qaqh-runtime --test v2_acceptance_matrix PASS（含 V2-C3）
 cargo clippy --workspace --all-targets -- -D warnings    PASS
 cargo fmt --all -- --check                               PASS
-QAQH_SMOKE_LEASE_TTL_MS=30000 scripts/v2-smoke.sh ...    PASS
+QAQH_SMOKE_LEASE_TTL_MS=30000 scripts/v2-smoke.sh ...    PASS（含 replaceable 当前值断言）
 scripts/v2-content-probe.sh ...                          PASS（ask）
 QAQH_CONTENT_PROBE_MODE=permission scripts/v2-content-probe.sh ...
                                                          PASS（permission）
@@ -113,13 +135,12 @@ body={"kind":"permission","tool_name":"exec",
 
 这些不是本轮“已既定”项，已从 alpha 收口范围显式排除：
 
-1. **V2-C3 replaceable 无生产 producer**：需要先冻结 fact → replaceable 的映射；
-2. **interaction 正文跨 daemon 重启持久化**：与 pending interaction 跨重启存活绑定；
-3. **permission 正文 pinned 与终结 unpin**：需要稳定的权限终结域事件；
-4. **driver 侧**：回收延迟（3s 巡检）、`not_eligible`/优先级、workspace command
+1. **interaction 正文跨 daemon 重启持久化**：与 pending interaction 跨重启存活绑定；
+2. **permission 正文 pinned 与终结 unpin**：需要稳定的权限终结域事件；
+3. **driver 侧**：回收延迟（3s 巡检）、`not_eligible`/优先级、workspace command
    gate 集合；
-5. **崩溃路径 writer fence 轮转**：`ToolLedger::Drop` 只覆盖有序退出；
-6. TUI 侧 6 个 e2e harness 仍打 v1（他们的仓，勿在后端仓改）。
+4. **崩溃路径 writer fence 轮转**：`ToolLedger::Drop` 只覆盖有序退出；
+5. TUI 侧 6 个 e2e harness 仍打 v1（他们的仓，勿在后端仓改）。
 
 ## 5. 接手注意
 

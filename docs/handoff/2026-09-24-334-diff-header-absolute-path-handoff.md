@@ -74,7 +74,8 @@ scripts/v2-smoke.sh <data-root>                         PASS（全阶段，含 r
 3. **#339**（P3，挂起）P6 设计输入：上下文结构解耦。
 4. **P6 B**：compact 去掉第二真源（`compact-context.json` → marker 进 `messages.jsonl`）。
 5. **v1 `Last-Event-ID` → v2 cursor 映射表**（P1；单流化后需重做设计）。
-6. **V2-C3 replaceable 无生产 producer**（projection 只产 reliable）。
+6. **V2-C3 replaceable producer**（已补，见
+   `2026-09-24-ringing-v2-alpha-closure-handoff.md` §2.7）。
 7. driver 侧：回收延迟（3s 巡检）、`not_eligible` / 优先级、`driver_epoch` 未进
    command fingerprint、workspace 命令 gate 集合。
 8. 崩溃路径 fence 轮转（`ToolLedger::Drop` 只覆盖有序退出）。

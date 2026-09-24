@@ -173,6 +173,35 @@ HANDOVER="$(curl -sS -N --max-time 3 \
 printf '%s' "$HANDOVER" | grep -q "event: ringing.event" || fail "reliable replay event name"
 printf '%s' "$HANDOVER" | grep -q '"delivery":"reliable"' || fail "reliable replay delivery"
 printf '%s' "$HANDOVER" | grep -q '"kind":"driver_changed"' || fail "driver_changed replay payload"
+# The same handover is mirrored as a cursorless replaceable current value. On
+# reconnect the client gets the latest value even though replaceable history is
+# never replayed.
+printf '%s' "$HANDOVER" | python3 -c '
+import json
+import sys
+
+for block in sys.stdin.read().replace("\r\n", "\n").split("\n\n"):
+    data = [
+        line[6:] if line.startswith("data: ") else line[5:]
+        for line in block.splitlines()
+        if line.startswith("data:")
+    ]
+    if not data:
+        continue
+    try:
+        event = json.loads("\n".join(data))
+    except json.JSONDecodeError:
+        continue
+    if event.get("delivery") != "replaceable":
+        continue
+    assert event.get("cursor") is None
+    assert event.get("projection_index") is None
+    assert event.get("revision") is not None
+    assert event.get("payload", {}).get("kind") == "control_delta"
+    assert event["payload"]["data"]["kind"] == "driver_changed"
+    raise SystemExit(0)
+raise SystemExit("missing replaceable driver current value")
+' || fail "replaceable current-value replay"
 
 say "== not_driver gate =="
 renew "$A"

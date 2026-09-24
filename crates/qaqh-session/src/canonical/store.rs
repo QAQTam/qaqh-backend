@@ -2,7 +2,10 @@
 
 use std::path::Path;
 
-use crate::projection::{ProjectionSet, ProjectionSetSnapshot, projection_events_for_fact};
+use crate::projection::{
+    ProjectionSet, ProjectionSetSnapshot, projection_events_for_fact,
+    projection_replaceable_events_for_fact,
+};
 use crate::session_fact_v2::{LogId, ProjectionEvent, SessionFact, SessionId};
 
 use super::{
@@ -93,7 +96,8 @@ impl CanonicalSessionStore {
     ) -> Result<AppendOutcome, CanonicalError> {
         let fact = self.log.append(lease, fact, now_ms)?;
         let deltas = self.projections.apply(&fact);
-        let events = projection_events_for_fact(&fact, &deltas)?;
+        let mut events = projection_events_for_fact(&fact, &deltas)?;
+        events.extend(projection_replaceable_events_for_fact(&fact, &deltas)?);
         Ok(AppendOutcome { fact, events })
     }
 

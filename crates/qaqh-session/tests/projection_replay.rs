@@ -3,7 +3,8 @@
 use qaqh_domain::RingingChannel;
 use qaqh_session::projection::{
     ProjectionSet, ReplayOutcome, ReplayWindow, projection_event_id, projection_events_for_fact,
-    projection_stream_key, replay_reliable,
+    projection_replaceable_events_for_fact, projection_stream_key, replaceable_identity,
+    replay_reliable,
 };
 use qaqh_session::session_fact_v2::{
     AuditRef, ContentHash, Delivery, END_OF_FACT, EventId, FactPayload, LogId, ProjectionEvent,
@@ -92,6 +93,41 @@ fn all_projection_set_deltas_become_valid_stable_events() {
     }
 
     assert_eq!(total_events, 33);
+}
+
+#[test]
+fn replaceable_events_cover_current_state_only() {
+    let fact = payload_facts()
+        .into_iter()
+        .find(|fact| matches!(&fact.payload, FactPayload::WorkspaceResourceChanged(_)))
+        .expect("workspace_resource_changed fixture");
+    let mut set = ProjectionSet::default();
+    let deltas = set.apply(&fact);
+    let events =
+        projection_replaceable_events_for_fact(&fact, &deltas).expect("replaceable events");
+
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert!(matches!(
+        &event.delivery,
+        Delivery::Replaceable { revision: 1 }
+    ));
+    assert_eq!(event.payload.revision(), Some(1));
+    assert_eq!(
+        replaceable_identity(&event.payload).as_deref(),
+        Some("resource:workspace:file:res_01J00000000000000000000000")
+    );
+    assert_eq!(event.source_fact_seq, fact.fact_seq);
+
+    let input = input_fact();
+    let mut input_set = ProjectionSet::default();
+    let input_deltas = input_set.apply(&input);
+    assert!(
+        projection_replaceable_events_for_fact(&input, &input_deltas)
+            .expect("input replaceable events")
+            .is_empty(),
+        "conversation/timeline history stays reliable-only"
+    );
 }
 
 #[test]

@@ -92,11 +92,10 @@ commit marker is missing")`，被 daemon 映射成 500 `canonical_error`。而 s
 
 ### A. P0-6 剩余
 
-1. **V2-C3 replaceable 没有生产 producer**：projection 路径只产出 reliable
-   （`projection_events_for_fact` 只调 `ProjectionEvent::reliable`）。
-   `replaceable` / `ephemeral` 目前只在 wire 类型层可达，没有 fact → delivery 映射。
-   要让 V2-C3/C4 端到端成立，需要先定「哪些 projection 是 replaceable / ephemeral」
-   的契约（新决策，不宜顺手做）。
+1. **V2-C3 replaceable producer 已补（2026-09-24）**：
+   `projection_replaceable_events_for_fact` 已冻结 control/resource 当前值映射，
+   `V2ProjectionHub` 在重连时补发 cursorless 最新 revision；验收见
+   `crates/qaqh-runtime/tests/v2_acceptance_matrix.rs::v2_c3_*`。
 2. **V2-V1 v1 `Last-Event-ID` → v2 cursor 映射**：服务端映射表尚未实现
    （spec §10 的 `(server_epoch, channel, stream_seq)` 表）。`cross_session` /
    `v1_epoch_mismatch` / 映射缺失的 `cursor_expired` 都依赖它。这是 P1 项。

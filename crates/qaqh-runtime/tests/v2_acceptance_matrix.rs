@@ -10,6 +10,7 @@
 //! |-------|--------------------------------------------|
 //! | V2-C1 | snapshot + subscribe (no gap, no dup)      |
 //! | V2-C2 | reliable reconnect replays only after cursor |
+//! | V2-C3 | replaceable reconnect sends latest current only |
 //! | V2-C4 | ephemeral never enters replay/cursor       |
 //! | V2-C5 | log_id mismatch -> `log_id_mismatch`       |
 //! | V2-C6 | cursor expired / unknown fact reset        |
@@ -20,9 +21,8 @@
 //! tests (`crates/qaqh-daemon/src/axum_server.rs`), which own lease, admission
 //! and HTTP concerns.
 //!
-//! Known gaps (see the P0-6 handoff): V2-C3 (replaceable) and the v1 cursor
-//! mapping (V2-V1) have no production producer yet, so they are asserted at the
-//! wire level only.
+//! Known gaps (see the P0-6 handoff): the v1 cursor mapping (V2-V1) has no
+//! production producer yet, so it is asserted at the wire level only.
 
 use std::path::Path;
 
@@ -36,7 +36,7 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::projection::ProjectionSink;
 use qaqh_session::session_fact_v2::{
-    EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
+    DriverChanged, EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
     SessionMetadataChanged, SessionMetadataPatch,
 };
 
@@ -142,6 +142,21 @@ impl Fixture {
         )
     }
 
+    /// Build (but do not append) a driver handover — one control replaceable
+    /// current value plus its reliable cursor event.
+    fn driver_fact(&mut self, holder: &str, driver_epoch: u64) -> SessionFact {
+        self.seq += 1;
+        let ts = NOW_MS + self.seq;
+        self.envelope(
+            ts,
+            FactPayload::DriverChanged(DriverChanged {
+                holder: Some(holder.to_string()),
+                driver_epoch,
+                changed_at_ms: ts,
+            }),
+        )
+    }
+
     fn append(&mut self, fact: SessionFact) -> SessionFact {
         let ts = fact.ts_ms;
         self.store
@@ -231,6 +246,80 @@ async fn v2_c2_reliable_reconnect_replays_only_after_cursor() {
         fact_seq(&seen) > resumed_after,
         "no event at or before the cursor may replay"
     );
+}
+
+/// V2-C3: replaceable state is rebuilt from canonical facts on reconnect, but
+/// only the latest value per identity is sent. It never carries a canonical
+/// cursor; a later live update replaces the current value.
+#[tokio::test]
+async fn v2_c3_replaceable_reconnect_sends_latest_current_value_only() {
+    let mut fixture = Fixture::new("v2-c3");
+    fixture.created();
+    let first = fixture.driver_fact("client-a", 1);
+    fixture.append(first);
+    let second = fixture.driver_fact("client-b", 2);
+    fixture.append(second);
+
+    // Fresh hub = daemon restart/rebuild from the committed canonical prefix.
+    let hub = V2ProjectionHub::new("epoch-c3");
+    let bootstrap = hub.bootstrap(fixture.path(), "seed").expect("bootstrap");
+    let mut subscription = hub
+        .subscribe(fixture.path(), "seed", Some(&bootstrap.snapshot_cursor))
+        .expect("subscribe");
+
+    let item = tokio::time::timeout(std::time::Duration::from_secs(2), subscription.next())
+        .await
+        .expect("current replaceable value must be queued");
+    let event = match item {
+        V2StreamItem::Event(event) => event,
+        other => panic!("expected replaceable event, got {other:?}"),
+    };
+    assert_eq!(event.delivery, RingingV2Delivery::Replaceable);
+    assert_eq!(event.revision, Some(3));
+    assert_eq!(event.cursor_value().expect("valid envelope"), None);
+    match &event.payload {
+        qaqh_session::session_fact_v2::ProjectionPayload::ControlDelta(
+            qaqh_session::session_fact_v2::ControlDelta::DriverChanged {
+                holder,
+                driver_epoch,
+                ..
+            },
+        ) => {
+            assert_eq!(holder.as_deref(), Some("client-b"));
+            assert_eq!(*driver_epoch, 2);
+        }
+        other => panic!("expected driver replaceable, got {other:?}"),
+    }
+
+    // No historical replaceable values or reliable replay after the cursor.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), subscription.next())
+            .await
+            .is_err(),
+        "replaceable reconnect must not replay old revisions"
+    );
+
+    // Live update emits the reliable cursor event and then the replaceable
+    // current-value mirror; consume both and assert the latter is cursorless.
+    let third = fixture.driver_fact("client-c", 3);
+    fixture.append_and_publish(&hub, third);
+    let mut live_replaceable = None;
+    for _ in 0..2 {
+        let item = tokio::time::timeout(std::time::Duration::from_secs(2), subscription.next())
+            .await
+            .expect("live update must arrive");
+        let event = match item {
+            V2StreamItem::Event(event) => event,
+            other => panic!("expected live event, got {other:?}"),
+        };
+        if event.delivery == RingingV2Delivery::Replaceable {
+            live_replaceable = Some(event);
+            break;
+        }
+    }
+    let event = live_replaceable.expect("live replaceable mirror");
+    assert_eq!(event.revision, Some(4));
+    assert_eq!(event.cursor_value().expect("valid envelope"), None);
 }
 
 /// V2-C4: an ephemeral envelope carries no cursor and never advances canonical
