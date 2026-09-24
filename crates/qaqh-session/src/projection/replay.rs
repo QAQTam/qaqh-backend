@@ -6,9 +6,9 @@ use qaqh_domain::RingingChannel;
 use serde::{Deserialize, Serialize};
 
 use crate::session_fact_v2::{
-    EventId, FactPayload, LogId, MAX_SAFE_FACT_SEQ, ProjectionEvent, ProjectionSlot,
-    ReliableCursor, ResetReason, ResetRequired, SessionFact, StreamKey, ValidationError,
-    projection_slots,
+    ControlDelta, EventId, FactPayload, LogId, MAX_SAFE_FACT_SEQ, ProjectionEvent,
+    ProjectionPayload, ProjectionSlot, ReliableCursor, ResetReason, ResetRequired, ResourceDelta,
+    ResourceKind, SessionFact, StreamKey, ValidationError, projection_slots,
 };
 
 use super::ProjectionSetDelta;
@@ -65,6 +65,81 @@ pub fn projection_events_for_fact(
             )
         })
         .collect()
+}
+
+/// Build the replaceable projection events for one fact.
+///
+/// Replaceable delivery is deliberately narrow: it carries the current value
+/// for state-like control/resource projections whose history is not needed
+/// after reconnect. The same fact still emits its reliable delta, so canonical
+/// cursor replay remains complete.
+pub fn projection_replaceable_events_for_fact(
+    fact: &SessionFact,
+    deltas: &[ProjectionSetDelta],
+) -> Result<Vec<ProjectionEvent>, ValidationError> {
+    deltas
+        .iter()
+        .filter_map(|delta| {
+            let revision = delta.payload.revision()?;
+            replaceable_identity(&delta.payload).map(|identity| {
+                ProjectionEvent::replaceable(
+                    replaceable_event_id(fact, delta.slot, &identity),
+                    fact,
+                    projection_stream_key(fact, delta.slot),
+                    revision,
+                    delta.payload.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Stable replaceable merge identity for a projection payload.
+///
+/// `None` means the payload is reliable-only. The identity is intentionally
+/// independent from `event_id`: every update of the same logical state must
+/// replace the previous value in the live/current-value slot.
+pub fn replaceable_identity(payload: &ProjectionPayload) -> Option<String> {
+    match payload {
+        ProjectionPayload::ControlDelta(ControlDelta::Activity { .. }) => {
+            Some("control:activity".into())
+        }
+        ProjectionPayload::ControlDelta(ControlDelta::Round { .. }) => Some("control:round".into()),
+        ProjectionPayload::ControlDelta(ControlDelta::DriverChanged { .. }) => {
+            Some("control:driver".into())
+        }
+        ProjectionPayload::ResourceDelta(ResourceDelta::WorkspaceResourceChanged {
+            resource_kind,
+            resource_id,
+            ..
+        }) => Some(format!(
+            "resource:workspace:{}:{}",
+            resource_kind_key(*resource_kind),
+            resource_id.as_str()
+        )),
+        ProjectionPayload::ResourceDelta(ResourceDelta::GraphEdge {
+            child_session_id, ..
+        }) => Some(format!("resource:graph:{}", child_session_id.as_str())),
+        _ => None,
+    }
+}
+
+fn replaceable_event_id(fact: &SessionFact, slot: ProjectionSlot, identity: &str) -> EventId {
+    EventId::new(format!(
+        "{}:{:02}:replaceable:{identity}",
+        fact.event_id.as_str(),
+        slot.as_u16()
+    ))
+}
+
+fn resource_kind_key(kind: ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Todo => "todo",
+        ResourceKind::Skill => "skill",
+        ResourceKind::Plan => "plan",
+        ResourceKind::Activity => "activity",
+        ResourceKind::File => "file",
+    }
 }
 
 /// Stable auxiliary event id for a source fact and projection slot.

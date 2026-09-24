@@ -295,6 +295,7 @@ impl ProjectionPayload {
             _ => serde_json::to_value(self)
                 .ok()?
                 .get("data")?
+                .get("data")?
                 .get("revision")?
                 .as_u64(),
         }
