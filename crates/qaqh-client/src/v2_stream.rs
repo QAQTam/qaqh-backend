@@ -3,7 +3,7 @@
 //! 2026-09-24 硬切：v1 的三条 `/ringing/v1/events/{channel}` 全局流被
 //! `/ringing/v2/sessions/{seed}/events` **每 seed 一条**取代。本模块是客户端侧的
 //! 常驻读循环：连接 / 解码 / cursor 推进 / reset / 退避重连，语义对齐
-//! [`crate::sse::ChannelStream`] 与 [`crate::timeline::TimelineStream`]。
+//! [`crate::timeline::TimelineStream`] 与 [`crate::v2::ClientV2Subscription`]。
 //!
 //! 与 v1 通道流的差异：
 //! - **按 seed 起流**（attach 时启动、detach 时停止），不再是三条全局流；
