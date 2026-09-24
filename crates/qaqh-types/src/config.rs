@@ -138,6 +138,13 @@ pub struct PersistentMcpConfig {
     /// idle 回收阈值（秒）；None/0 = 常驻不回收。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_shutdown_secs: Option<u64>,
+    /// 是否把 MCP 资源清单注入历史（trailing developer 消息）。
+    ///
+    /// 缺省 **false**：清单是「环境能力」不是「对话事实」，注入会随清单变化
+    /// 追加历史并打断 prefix cache；模型按需调 `mcp list_resources` 能拿到
+    /// 同一份本地缓存且不受 20 条封顶。开启仅用于调试/兼容。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject_resource_env_block: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<HashMap<String, PersistentMcpServerConfig>>,
 }
