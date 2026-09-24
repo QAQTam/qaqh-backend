@@ -698,16 +698,18 @@ impl Client {
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))
     }
 
-    /// `GET /ringing/v1/content/{content_id}` — resolve session-owned external
+    /// `GET /ringing/v2/content/{content_id}` — resolve session-owned external
     /// content and verify it against the digest carried by the canonical ref.
-    pub async fn download_content(&self, seed: &str, reference: &ContentRef) -> Result<Vec<u8>> {
-        let path = format!("/ringing/v1/content/{}", reference.content_id);
+    ///
+    /// v2 端点**不带 seed**：服务端按 content_id 取到条目后，用条目自己的
+    /// `seed` 校验调用方归属（调用方可能同时 attach 多个 seed）。
+    pub async fn download_content(&self, reference: &ContentRef) -> Result<Vec<u8>> {
+        let path = format!("/ringing/v2/content/{}", reference.content_id);
         let session_id = self.session_id_header().await?;
         let response = self
             .inner
             .http
             .get(format!("{}{path}", self.credentials().base_url))
-            .query(&[("seed", seed)])
             .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .send()
@@ -735,7 +737,7 @@ impl Client {
         Ok(bytes)
     }
 
-    /// `POST /ringing/v1/content` — upload a local attachment as a session
+    /// `POST /ringing/v2/content` — upload a local attachment as a session
     /// content reference.
     ///
     /// Hand-rolled multipart/form-data（daemon 受限解析只认
@@ -768,7 +770,7 @@ impl Client {
             .inner
             .http
             .post(format!(
-                "{}/ringing/v1/content",
+                "{}/ringing/v2/content",
                 self.credentials().base_url
             ))
             .bearer_auth(&self.credentials().token)
@@ -783,7 +785,7 @@ impl Client {
         if !response.status().is_success() {
             return Err(ClientError::Http {
                 status: response.status().as_u16(),
-                path: "/ringing/v1/content".into(),
+                path: "/ringing/v2/content".into(),
             });
         }
         Ok(response.json().await?)
