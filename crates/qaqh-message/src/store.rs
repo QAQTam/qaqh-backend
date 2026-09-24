@@ -13,6 +13,18 @@ pub const SYNTHETIC_RESTORE_PREFIX: &str = "[RESTORE] Tool \"";
 /// `engine_turn`/`admit` 的取消收割保持同一措辞，模型侧可识别）。
 pub const CANCELLED_TOOL_RESULT: &str = "[CANCELLED] Tool was not executed (user interrupted).";
 
+/// 压缩摘要是归档里的一条普通 `user` 消息，但读侧必须把它与真实用户回合区分开：
+/// 模型面只保留最新摘要，人类 transcript 则完全跳过它。
+pub fn is_compaction_summary(message: &Message) -> bool {
+    message.role == "user"
+        && message.content.iter().any(|block| {
+            matches!(
+                block,
+                qaqh_types::ContentBlock::Text { text } if text.starts_with("[Compacted ")
+            )
+        })
+}
+
 /// Tool results are finalized exactly once, at storage time — but the shaping
 /// itself (truncation / folding) now happens at the TOOL side
 /// (`qaqh-workspace::tool_side_fold`) before results reach this store. The
@@ -147,19 +159,13 @@ pub struct MessageStore {
     turns: Vec<Turn>,
     cancelled: bool,
     /// Number of earliest turns that have been compacted (skipped in LLM context).
+    /// Kept only for legacy logical-compaction replay; physical compaction
+    /// appends a summary and resets this to zero.
     compact_skip: usize,
-    /// B（Tier C）：已从内存驱逐的逻辑压缩前缀 turn 数。磁盘（messages.jsonl）
-    /// 仍是真源——驱逐只影响常驻内存。语义约束：
-    /// 1. 活跃窗口的全局 seq 起点 = `evicted_prefix + 1`（undo 映射依赖）；
-    /// 2. 持久化 meta 的 `compact_skip` 保持 = `evicted_prefix`（见
-    ///    [`Self::persisted_compact_skip`]）——归档里前缀仍在，重启重放
-    ///    `from_messages(archive, N)` 后视图一致；
-    /// 3. 驱逐同时把持久化模式翻转为 compact-checkpoint（`has_compact_context`
-    ///    = true）：内存里已没有前缀字节，任何 SaveFull 都无法重建完整归档。
-    evicted_prefix: usize,
-    /// True once the store is backed by a separate compact checkpoint instead
-    /// of treating `messages.jsonl` as its active context.
-    has_compact_context: bool,
+    /// Highest archived msg_id covered by the latest compaction summary.
+    /// The active view is derived from `messages.jsonl` using this watermark;
+    /// there is no separate compact-context file.
+    compact_covered_through_msg_id: Option<u64>,
     /// Next message ID to assign (monotonic per session).
     next_msg_id: u64,
     /// Next externally visible turn sequence. Unlike `turns.len()`, this never
@@ -197,6 +203,10 @@ impl std::fmt::Debug for MessageStore {
             .field("turns", &self.turns.len())
             .field("cancelled", &self.cancelled)
             .field("compact_skip", &self.compact_skip)
+            .field(
+                "compact_covered_through_msg_id",
+                &self.compact_covered_through_msg_id,
+            )
             .field("next_msg_id", &self.next_msg_id)
             .finish()
     }
@@ -213,8 +223,7 @@ impl Clone for MessageStore {
             turns: self.turns.clone(),
             cancelled: self.cancelled,
             compact_skip: self.compact_skip,
-            evicted_prefix: self.evicted_prefix,
-            has_compact_context: self.has_compact_context,
+            compact_covered_through_msg_id: self.compact_covered_through_msg_id,
             next_msg_id: self.next_msg_id,
             next_turn_seq: self.next_turn_seq,
             context_revision: self.context_revision,
@@ -239,8 +248,7 @@ impl MessageStore {
             turns: Vec::new(),
             cancelled: false,
             compact_skip: 0,
-            evicted_prefix: 0,
-            has_compact_context: false,
+            compact_covered_through_msg_id: None,
             next_msg_id: 1,
             next_turn_seq: 1,
             context_revision: 0,
@@ -323,14 +331,9 @@ impl MessageStore {
                 model: model.to_string(),
                 effort: Some(effort.to_string()),
                 compact_skip: self.persisted_compact_skip(),
+                compact_covered_through_msg_id: self.compact_covered_through_msg_id,
                 turn_count,
             });
-            if self.has_compact_context {
-                ops.push(PersistOp::UpdateCompactContext {
-                    seed: self.seed.clone(),
-                    messages: self.to_vec(),
-                });
-            }
         } else {
             ops.push(PersistOp::UpdateMeta {
                 seed: self.seed.clone(),
@@ -342,11 +345,11 @@ impl MessageStore {
         }
         // L2 WAL: log message-bearing ops BEFORE they enter the drain queue,
         // so a process death between this flush and the host-side drain loses
-        // nothing (recovery replays the log; SaveFull / compact-context ops
-        // are deliberately not logged — see crate::wal module docs). fsync
-        // policy is round-boundary: flushes carrying Appends happen at lap
-        // boundaries, so syncing here bounds the power-loss window to one
-        // round while keeping meta-only flushes cheap.
+        // nothing (recovery replays the log; SaveFull is deliberately not
+        // logged — see crate::wal module docs). fsync policy is round-boundary:
+        // flushes carrying Appends happen at lap boundaries, so syncing here
+        // bounds the power-loss window to one round while keeping meta-only
+        // flushes cheap.
         if let Some(wal) = &mut self.wal {
             let mut logged_message_op = false;
             for op in &ops {
@@ -469,55 +472,10 @@ impl MessageStore {
         false
     }
 
-    /// B（Tier C，docs/memory-governance-plan.md）：驱逐逻辑压缩前缀
-    /// （`compact_skip > 0` 且无 compact checkpoint）出常驻内存。
-    ///
-    /// 前缀 turn 在 LLM 视图（`flat_in_write_order(compact_skip)`）与 token
-    /// 统计中均被跳过——运行时零依赖，驻留纯属意外。驱逐语义：
-    /// - `turns.drain(0..n)`，`compact_skip` 归零（剩余 turn 全部活跃）；
-    /// - `evicted_prefix = n`（seq 水位：undo 的 `t{seq}` → 窗口索引映射、
-    ///   持久化 meta 的 compact_skip 都以它为准）；
-    /// - **持久化模式物理化**：翻转为 `has_compact_context = true` 并立即
-    ///   排队 `UpdateCompactContext`。此后所有整写走 compact checkpoint，
-    ///   `messages.jsonl` 归档不再被 SaveFull 触碰——内存里已没有前缀
-    ///   字节，无法重建完整归档。
-    ///
-    /// 崩溃安全（WAL 不记录 compact 类 op）：checkpoint 落盘前崩溃则磁盘
-    /// 仍是「全量归档 + meta.compact_skip=N」（驱逐未产生任何已 drain 的
-    /// 磁盘变更），重启重放后视图一致；checkpoint 落盘后崩溃则重启直接走
-    /// compact_context 活跃视图。两个方向都不会让被压缩前缀「复活」。
-    ///
-    /// 返回驱逐的 turn 数（0 = 无可驱逐）。
-    pub fn evict_compacted_prefix(&mut self) -> usize {
-        if self.compact_skip == 0 || self.has_compact_context || self.ephemeral {
-            return 0;
-        }
-        let n = self.compact_skip.min(self.turns.len());
-        if n == 0 {
-            self.compact_skip = 0;
-            return 0;
-        }
-        self.turns.drain(0..n);
-        self.compact_skip = 0;
-        self.evicted_prefix = n;
-        self.has_compact_context = true;
-        self.pending_persist.push(PersistOp::UpdateCompactContext {
-            seed: self.seed.clone(),
-            messages: self.to_vec(),
-        });
-        self.context_revision = self.context_revision.saturating_add(1);
-        n
-    }
-
-    /// 持久化到 meta 的 compact_skip。驱逐后必须保持水位 N 而非 0：归档里
-    /// 前缀仍在，重启 `from_messages(archive, N)` 才能还原同一视图；一旦
-    /// compact checkpoint 存在，该值被生命周期强制无效化（不影响正确性）。
+    /// 持久化到 meta 的 legacy compact_skip。物理压缩会把被压缩 turn 从活跃
+    /// 视图移除并写入新的摘要水位，因此新链路下该值恒为 0。
     fn persisted_compact_skip(&self) -> usize {
-        if self.evicted_prefix > 0 {
-            self.evicted_prefix
-        } else {
-            self.compact_skip
-        }
+        self.compact_skip
     }
 
     /// Take the queued persistence ops for host-side execution. The queue is
@@ -793,6 +751,7 @@ impl MessageStore {
                     model: self.last_flush_model.0.clone(),
                     effort: self.last_flush_model.1.clone(),
                     compact_skip: self.persisted_compact_skip(),
+                    compact_covered_through_msg_id: self.compact_covered_through_msg_id,
                     turn_count: self.turns.len(),
                 });
             }
@@ -986,8 +945,17 @@ impl MessageStore {
     /// first then trailing — the legacy order. This keeps ephemeral/subagent
     /// workers (which never persist ids) byte-compatible with the old layout.
     fn flat_in_write_order(&self, skip_turns: usize) -> Vec<Message> {
+        // A compaction summary is appended to the archive with a fresh,
+        // monotonic msg_id, but logically belongs before every kept message.
+        // Emit summary turns first and only write-order-sort ordinary history;
+        // otherwise the fresh id would push the summary to the tail.
+        let mut summaries: Vec<Message> = Vec::new();
         let mut items: Vec<(Option<u64>, Message)> = Vec::new();
         for turn in self.turns.iter().skip(skip_turns) {
+            if Self::compacted_turn_count(&turn.user).is_some() {
+                summaries.push(turn.user.clone());
+                continue;
+            }
             items.push((turn.user.msg_id, turn.user.clone()));
             for step in &turn.steps {
                 items.push((step.assistant.msg_id, step.assistant.clone()));
@@ -1005,7 +973,10 @@ impl MessageStore {
             // to the provider round-trip it serves.
             items.sort_by_key(|(id, _)| id.unwrap_or(u64::MAX));
         }
-        items.into_iter().map(|(_, m)| m).collect()
+        summaries
+            .into_iter()
+            .chain(items.into_iter().map(|(_, m)| m))
+            .collect()
     }
 
     pub fn build_context_for_gate(&self, annotations: &[String]) -> Vec<Message> {
@@ -1231,31 +1202,47 @@ impl MessageStore {
         v
     }
 
-    /// Save all messages (full rewrite). Used for undo or compact.
-    /// No-op if the session seed has not been initialized yet.
-    /// Enqueues a [`PersistOp`] for host-side execution (see [`Self::flush_meta`]).
+    /// Save the current active view as a full archive rewrite. Used for undo
+    /// and defensive image repair — **not** for compaction. Compaction appends
+    /// a summary through [`Self::persist_compaction`] and never rewrites the
+    /// archive.
+    ///
+    /// No-op if the session seed has not been initialized yet. Enqueues a
+    /// [`PersistOp`] for host-side execution (see [`Self::flush_meta`]).
     pub fn snapshot_full(&mut self, model: &str, effort: &str) {
         if self.seed.is_empty() || self.ephemeral {
             return;
         }
         let msgs = self.to_vec();
         let turn_count = self.turns.len();
-        if self.has_compact_context {
-            self.pending_persist.push(PersistOp::SaveCompactContext {
-                seed: self.seed.clone(),
-                messages: msgs,
-            });
+        // The rewrite replaces the archive with the active view. If a summary
+        // turn remains, preserve its watermark so the rewritten archive still
+        // derives the same active view after restart. Clearing every turn is
+        // the one case where the old covered prefix no longer exists.
+        let compact_covered_through_msg_id = if self.turns.is_empty() {
+            None
         } else {
-            self.pending_persist.push(PersistOp::SaveFull {
-                seed: self.seed.clone(),
-                messages: msgs,
-                model: model.to_string(),
-                effort: Some(effort.to_string()),
-                compact_skip: self.persisted_compact_skip(),
-                turn_count,
-            });
-        }
+            self.compact_covered_through_msg_id
+        };
+        self.compact_skip = 0;
+        self.compact_covered_through_msg_id = compact_covered_through_msg_id;
+        self.pending_persist.push(PersistOp::SaveFull {
+            seed: self.seed.clone(),
+            messages: msgs,
+            model: model.to_string(),
+            effort: Some(effort.to_string()),
+            compact_skip: 0,
+            compact_covered_through_msg_id,
+            turn_count,
+        });
         self.pending_save.clear();
+    }
+
+    /// Persist a just-applied compaction. `apply_compact` has already assigned
+    /// the summary a fresh msg_id and placed it in `pending_save`; this method
+    /// flushes that append together with the new covered watermark.
+    pub fn persist_compaction(&mut self, model: &str, effort: &str) {
+        self.flush_meta(model, effort);
     }
 
     /// Reconstruct the internal turn/step structure by replaying saved messages
@@ -1434,11 +1421,11 @@ impl MessageStore {
         (store, repairs)
     }
 
-    /// Mark a restored store as being driven by a compact checkpoint.  New
-    /// messages still append to the immutable archive, while the checkpoint
-    /// is refreshed with the active model context.
-    pub fn set_compact_context_active(&mut self, active: bool) {
-        self.has_compact_context = active;
+    /// Restore the archive-derived compact watermark when resuming. The
+    /// lifecycle passes the persisted meta value so a later full rewrite can
+    /// preserve the same marker.
+    pub fn set_compact_covered_through_msg_id(&mut self, covered: Option<u64>) {
+        self.compact_covered_through_msg_id = covered;
     }
 
     /// Keep IDs monotonic against the raw archive when restoring a compact
@@ -1524,19 +1511,14 @@ impl MessageStore {
             _ => return false,
         };
         // 活跃 turns 数组起点的全局序号：无 compact 时 = 1；物理 compact 后
-        // turns[0] 是合成摘要（占一个数组位），起点 = 被压缩 turn 数 + 1；
-        // B 驱逐后（逻辑压缩窗口化）turns[0] 是真实 turn，起点 = 水位 + 1。
-        let (first_seq, summary_offset) = if self.evicted_prefix > 0 {
-            (self.evicted_prefix + 1, 0)
-        } else {
-            match self
-                .turns
-                .first()
-                .and_then(|t| Self::compacted_turn_count(&t.user))
-            {
-                Some(skip) => (skip + 1, 1),
-                None => (1, 0),
-            }
+        // turns[0] 是合成摘要（占一个数组位），起点 = 被压缩 turn 数 + 1。
+        let (first_seq, summary_offset) = match self
+            .turns
+            .first()
+            .and_then(|t| Self::compacted_turn_count(&t.user))
+        {
+            Some(skip) => (skip + 1, 1),
+            None => (1, 0),
         };
         if seq < first_seq {
             // 撤回已被压缩的 turn：清空全部（含摘要——它正是这些 turn 的替身）。
@@ -1569,17 +1551,19 @@ impl MessageStore {
         }
     }
 
-    /// Compact: keep `keep` recent turns in LLM context, physically remove older ones.
-    /// Inserts the summary as a synthetic user turn before the kept turns
-    /// so that `to_vec()` serializes correctly without duplicating compacted data.
-    /// Sets `compact_skip` to 0 because all turns now present are live.
+    /// Compact: keep `keep` recent turns in the active model view, append the
+    /// summary as a new archive message, and advance the covered watermark.
+    ///
+    /// `messages.jsonl` is append-only: the summary gets a fresh monotonic
+    /// `msg_id` (never the id of a compacted turn). `flat_in_write_order`
+    /// explicitly emits summary turns first, so the fresh high id does not
+    /// move the summary to the tail.
     ///
     /// Trailing injections in the compacted region (msg_id < the first kept
     /// turn) are folded together with the old turns: their text has already
-    /// entered the compact summary input (the summary request is built with
-    /// all trailing messages), so keeping them would both duplicate the text
-    /// and re-position a stale injection at the "latest message" slot. Only
-    /// injections in the kept region survive, at their original positions.
+    /// entered the compact summary input, so keeping them would both duplicate
+    /// the text and re-position a stale injection at the "latest message"
+    /// slot. Only injections in the kept region survive.
     pub fn apply_compact(&mut self, summary: &str, keep: usize) {
         // 防御：确保至少保留 1 个 turn，防止 caller 传入 keep=0 导致清空全部历史。
         let keep = keep.max(1);
@@ -1588,7 +1572,7 @@ impl MessageStore {
             return;
         }
 
-        // Remove old compact markers
+        // Remove old compact markers from the legacy front-of-context slot.
         self.system_messages.retain(|m| !m.content.iter().any(|b| matches!(b, qaqh_types::ContentBlock::Text { text } if text.starts_with("[COMPACT"))));
 
         // Build compact summary as a synthetic user turn (no steps).
@@ -1608,14 +1592,14 @@ impl MessageStore {
         let skip_real = skip.saturating_sub(summary_slot);
         let total_real = prev_compacted + skip_real;
         let compact_text = format!("[Compacted {} turns]\n{}", total_real, summary.trim(),);
-        // 摘要占据被压缩的最早 turn 的写入位置：与 trailing 注入按 msg_id 合并时，
-        // 摘要保持最前，其后是按写入顺序的注入与保留 turn。
-        let first_compacted_id = self.turns[0].user.msg_id;
+
         // 首个保留 turn 的写入 id：压缩区内的 trailing 注入（id < 此值）随旧 turn
-        // 折叠丢弃；保留区内的注入留在原位（A1 折叠语义）。
+        // 折叠丢弃；保留区内的注入留在原位（A1 折叠语义）。摘要本身拿到新的
+        // 高水位 id，归档顺序仍是 append-only；读侧按 watermark 重新拼活跃视图。
         let first_kept_id = self.turns[skip].user.msg_id.unwrap_or(0);
         let mut compact_turn = Turn::new(Message::user(&compact_text));
-        compact_turn.user.msg_id = first_compacted_id;
+        let summary_id = self.save_msg(&compact_turn.user);
+        compact_turn.user.msg_id = summary_id;
 
         // 折叠压缩区 trailing 注入：文本已进摘要输入，随旧 turn 一起丢弃，
         // 不再"复活"到摘要之后/活跃 turn 之前（双重表示）。
@@ -1627,9 +1611,15 @@ impl MessageStore {
         self.turns = kept;
         // Prepend compact summary as a synthetic turn before the kept turns.
         self.turns.insert(0, compact_turn);
-        // No skipping needed — compacted data is physically gone.
+        // No logical skipping needed — the watermark derives the archive view.
         self.compact_skip = 0;
-        self.has_compact_context = true;
+        if first_kept_id > 0 {
+            let covered = first_kept_id.saturating_sub(1);
+            self.compact_covered_through_msg_id = Some(
+                self.compact_covered_through_msg_id
+                    .map_or(covered, |existing| existing.max(covered)),
+            );
+        }
         self.context_revision = self.context_revision.saturating_add(1);
     }
 
@@ -2674,112 +2664,64 @@ mod tests {
         assert_eq!(repairs.len(), 2);
     }
 
-    /// B：构造 5 个 turn（msg_id 1..10），逻辑 compact_skip=2。
-    fn evict_fixture() -> MessageStore {
-        let mut msgs: Vec<Message> = Vec::new();
-        let mut id = 1u64;
-        for i in 0..5 {
-            msgs.push(Message {
-                msg_id: Some(id),
-                role: "user".into(),
-                name: None,
-                content: vec![ContentBlock::Text {
-                    text: format!("u{i}"),
-                }],
-            });
-            id += 1;
-            msgs.push(Message {
-                msg_id: Some(id),
+    fn persisted_turns(count: usize) -> MessageStore {
+        let mut store = MessageStore::new("compact-append-test");
+        for i in 1..=count {
+            store.push_user(&format!("u{i}"));
+            store.push_assistant(Message {
+                msg_id: None,
                 role: "assistant".into(),
                 name: None,
                 content: vec![ContentBlock::Text {
                     text: format!("a{i}"),
                 }],
             });
-            id += 1;
         }
-        let (store, repairs) = MessageStore::from_messages("evict-test", &msgs, 2);
-        assert!(repairs.is_empty());
-        assert_eq!(store.turn_count(), 5);
         store
     }
 
     #[test]
-    fn evict_compacted_prefix_frees_memory_and_physicalizes_persistence() {
-        let mut store = evict_fixture();
-        let view_before = store.build_context_for_gate(&[]);
-        assert_eq!(store.turn_count(), 5);
-
-        let evicted = store.evict_compacted_prefix();
-        assert_eq!(evicted, 2);
-        assert_eq!(store.turn_count(), 3, "prefix turns must leave memory");
-        assert_eq!(store.compact_skip, 0, "remaining turns are all live");
-
-        // LLM 视图逐字节不变（前缀本就被 skip）。
-        let view_after = store.build_context_for_gate(&[]);
-        assert_eq!(
-            serde_json::to_value(&view_before).unwrap(),
-            serde_json::to_value(&view_after).unwrap()
-        );
-
-        // 驱逐即物理化：队列里有 UpdateCompactContext；后续整写走
-        // SaveCompactContext 而非 SaveFull（归档不被触碰）。
-        let ops = store.take_persist_ops();
-        assert!(ops.iter().any(
-            |op| matches!(op, PersistOp::UpdateCompactContext { messages, .. } if messages.len() == 6)
-        ));
-        store.snapshot_full("m", "high");
-        let ops = store.take_persist_ops();
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, PersistOp::SaveCompactContext { .. })),
-            "snapshot must go through the compact checkpoint after eviction"
-        );
-        assert!(
-            !ops.iter()
-                .any(|op| matches!(op, PersistOp::SaveFull { .. }))
-        );
-
-        // 持久化 meta 的 compact_skip 保持水位 2（归档里前缀仍在）。
+    fn compaction_appends_summary_with_fresh_id_and_watermark() {
+        let mut store = persisted_turns(4);
         store.flush_meta("m", "high");
-        let ops = store.take_persist_ops();
-        assert!(ops.iter().any(|op| match op {
-            PersistOp::UpdateMeta { compact_skip, .. } => *compact_skip == 2,
-            _ => false,
-        }));
-    }
-
-    #[test]
-    fn evict_is_idempotent_and_noop_without_logical_compact() {
-        let mut store = evict_fixture();
-        assert_eq!(store.evict_compacted_prefix(), 2);
         let _ = store.take_persist_ops();
-        // 幂等：水位已建立，再次驱逐 = 0。
-        assert_eq!(store.evict_compacted_prefix(), 0);
-        // 无逻辑压缩的 store：no-op。
-        let mut plain = MessageStore::new_ephemeral("plain");
-        plain.push_user("hi");
-        assert_eq!(plain.evict_compacted_prefix(), 0);
-        assert_eq!(plain.turn_count(), 1);
+        store.apply_compact("summary", 2);
+        store.persist_compaction("m", "high");
+
+        let ops = store.take_persist_ops();
+        let (messages, covered) = ops
+            .iter()
+            .find_map(|op| match op {
+                PersistOp::Append {
+                    messages,
+                    compact_covered_through_msg_id,
+                    ..
+                } => Some((messages, *compact_covered_through_msg_id)),
+                _ => None,
+            })
+            .expect("compaction must append a summary");
+        assert_eq!(messages.len(), 1);
+        assert!(is_compaction_summary(&messages[0]));
+        assert_eq!(
+            messages[0].msg_id,
+            Some(9),
+            "summary must use a fresh append id, not a compacted turn id"
+        );
+        assert_eq!(
+            covered,
+            Some(4),
+            "watermark must cover every message before the first kept turn"
+        );
     }
 
     #[test]
-    fn truncate_before_turn_uses_evicted_watermark() {
-        let mut store = evict_fixture();
-        let _ = store.evict_compacted_prefix();
-        // live turns 全局 seq 为 3/4/5。
-        // 撤回 t4：保留 t3，丢弃 t4/t5。
-        assert!(store.truncate_before_turn("t4"));
-        assert_eq!(store.turn_count(), 1);
-        // turn seq 按回合编号：t1=u0, t2=u1（被驱逐），t3=u2, t4=u3, t5=u4。
-        // undo t4 → 保留 t3（u2 的回合），丢弃 t4/t5。
+    fn compaction_summary_is_rendered_first_despite_fresh_id() {
+        let mut store = persisted_turns(4);
+        store.apply_compact("summary", 2);
+
         let view = store.build_context_for_gate(&[]);
+        assert!(is_compaction_summary(&view[0]));
         assert!(view.iter().any(|m| {
-            m.content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { text } if text == "u2"))
-        }));
-        assert!(!view.iter().any(|m| {
             m.content
                 .iter()
                 .any(|b| matches!(b, ContentBlock::Text { text } if text == "u3"))
@@ -2787,30 +2729,59 @@ mod tests {
         assert!(!view.iter().any(|m| {
             m.content
                 .iter()
-                .any(|b| matches!(b, ContentBlock::Text { text } if text == "u4"))
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "u1"))
         }));
-        // 撤回未来 turn：no-op。
-        assert!(!store.truncate_before_turn("t9"));
     }
 
     #[test]
-    fn undo_across_evicted_boundary_clears_live_view() {
-        // 撤回点落在被驱逐前缀内（seq < 水位+1）：与物理 compact 的「清空」
-        // 语义一致——活跃视图清空，归档（真源）不动。
-        let mut store = evict_fixture();
-        let _ = store.evict_compacted_prefix();
-        assert!(store.truncate_before_turn("t2"));
-        assert_eq!(store.turn_count(), 0);
+    fn full_rewrite_preserves_compaction_watermark_unless_all_turns_are_cleared() {
+        let mut store = persisted_turns(4);
+        store.apply_compact("summary", 2);
+        let _ = store.take_persist_ops();
+
         store.snapshot_full("m", "high");
-        let ops = store.take_persist_ops();
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, PersistOp::SaveCompactContext { .. }))
-        );
-        assert!(
-            !ops.iter()
-                .any(|op| matches!(op, PersistOp::SaveFull { .. }))
-        );
+        let op = store.take_persist_ops().pop().expect("save full op");
+        assert!(matches!(
+            op,
+            PersistOp::SaveFull {
+                compact_covered_through_msg_id: Some(4),
+                ..
+            }
+        ));
+
+        // Undo across the compacted boundary clears the summary too; the
+        // rewritten archive must not retain a watermark with nothing to hide.
+        assert!(store.truncate_before_turn("t1"));
+        store.snapshot_full("m", "high");
+        let op = store.take_persist_ops().pop().expect("save full op");
+        assert!(matches!(
+            op,
+            PersistOp::SaveFull {
+                compact_covered_through_msg_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn repeated_compaction_replaces_the_old_summary_in_active_view() {
+        let mut store = persisted_turns(4);
+        store.apply_compact("first", 2);
+        let _ = store.take_persist_ops();
+        store.push_user("u5");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::Text { text: "a5".into() }],
+        });
+        store.apply_compact("second", 2);
+
+        let view = store.build_context_for_gate(&[]);
+        assert!(is_compaction_summary(&view[0]));
+        let rendered = serde_json::to_string(&view).unwrap();
+        assert!(rendered.contains("second"));
+        assert!(!rendered.contains("first"));
     }
 
     #[test]

@@ -44,16 +44,49 @@ fn generate_from_source(
     SessionManager::generate_seed()
 }
 
-/// The LLM-facing view after a compact operation.  Raw messages remain in the
-/// normal session archive; this is deliberately a separate, replaceable view.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CompactContext {
-    pub version: u32,
-    pub checkpoint_id: String,
-    pub parent_checkpoint_id: Option<String>,
-    pub created_at: u64,
-    pub archive_message_count: usize,
-    pub messages: Vec<Message>,
+/// Derive the model-visible view from the immutable archive.
+///
+/// A compacted session keeps every original message in `messages.jsonl`; the
+/// latest `[Compacted N turns]` message is the replacement summary and
+/// `compact_covered_through_msg_id` marks the hidden prefix. The active view is
+/// therefore `leading system messages + latest summary + every non-summary
+/// message with msg_id > watermark`, regardless of the summary's physical
+/// append position.
+fn derive_active_messages(meta: &SessionMeta, archive: &[Message]) -> Result<Vec<Message>, String> {
+    let Some(covered) = meta.compact_covered_through_msg_id else {
+        return Ok(archive.to_vec());
+    };
+    let max_id = archive.iter().filter_map(|m| m.msg_id).max().unwrap_or(0);
+    if covered > max_id {
+        return Err(format!(
+            "compact watermark {covered} points past archive max msg_id {max_id}"
+        ));
+    }
+    let summary = archive
+        .iter()
+        .filter(|message| qaqh_message::is_compaction_summary(message))
+        .filter(|message| message.msg_id.is_some_and(|id| id > covered))
+        .max_by_key(|message| message.msg_id.unwrap_or(0))
+        .ok_or_else(|| {
+            format!("compact watermark {covered} has no newer [Compacted] summary in archive")
+        })?;
+
+    let mut active = Vec::new();
+    let mut prefix_len = 0;
+    while prefix_len < archive.len() && archive[prefix_len].role == "system" {
+        active.push(archive[prefix_len].clone());
+        prefix_len += 1;
+    }
+    active.push(summary.clone());
+    for message in &archive[prefix_len..] {
+        if qaqh_message::is_compaction_summary(message) {
+            continue;
+        }
+        if message.msg_id.is_none_or(|id| id > covered) {
+            active.push(message.clone());
+        }
+    }
+    Ok(active)
 }
 
 fn read_messages_without_deduplication(path: &std::path::Path) -> Result<Vec<Message>, String> {
@@ -259,82 +292,66 @@ impl SessionManager {
         self.snapshot_from_files(seed).ok()
     }
 
-    /// Load the immutable archive plus the latest compact context, if one
-    /// exists.  Callers must use `active_messages` for the model loop and
-    /// retain `archive_messages` for replay/pagination.
+    /// Load the immutable archive and the active model view derived from it.
     ///
-    /// Fail-closed compact semantics (BUG-007): if a compact checkpoint file
-    /// exists but cannot be parsed or points past the archive, this returns
-    /// `None`. Compacted history must never become reversible just because
-    /// the checkpoint was damaged.
+    /// The third element is always the model-visible view: either the full
+    /// archive (no compaction) or `summary + messages after the covered
+    /// watermark`. The second element remains the raw archive for
+    /// replay/pagination and human-facing projection.
+    ///
+    /// Fail-closed compact semantics: a watermark past the archive or without a
+    /// matching newer summary returns `None`. Compacted history must never
+    /// become reversible because the marker is damaged.
     ///
     /// Phase 2 note: this path reads the **full** archive (the model loop
     /// needs complete history). Projection-only consumers (timeline rebuild)
-    /// should use [`Self::load_recent_for_projection`] instead — bounded tail
-    /// read, no full-file cost.
-    pub fn load_for_resume(
-        &self,
-        seed: &str,
-    ) -> Option<(SessionMeta, Vec<Message>, Option<CompactContext>)> {
+    /// should use [`Self::load_archive_tail`] instead — bounded tail read, no
+    /// full-file cost.
+    pub fn load_for_resume(&self, seed: &str) -> Option<(SessionMeta, Vec<Message>, Vec<Message>)> {
         // L2 recovery: fold any un-drained WAL ops into the archive BEFORE any
         // consumer projects from it (worker resume, conversation snapshot,
         // timeline rebuild all funnel through here). Idempotent — see
         // `replay_message_wal`.
         self.replay_message_wal(seed);
         let (meta, archive_messages) = self.load(seed)?;
-        let selected = match self.read_compact_context_checked(seed) {
-            Ok(None) => None,
-            Ok(Some(context)) if context.archive_message_count <= archive_messages.len() => {
-                Some(context)
-            }
-            Ok(Some(context)) => {
-                log::error!(
-                    "SessionManager: compact context for {seed} points past archive \
-                     (archive_message_count={}, archive_len={}) — refusing full-history fallback",
-                    context.archive_message_count,
-                    archive_messages.len()
-                );
-                return None;
-            }
+        let active_messages = match derive_active_messages(&meta, &archive_messages) {
+            Ok(messages) => messages,
             Err(error) => {
                 log::error!(
-                    "SessionManager: compact context for {seed} is unreadable \
-                     ({error}) — refusing full-history fallback"
+                    "SessionManager: compact watermark for {seed} is invalid ({error}) \
+                     — refusing full-history fallback"
                 );
                 return None;
             }
         };
-        Some((meta, archive_messages, selected))
+        Some((meta, archive_messages, active_messages))
     }
 
     /// Phase 2（有界恢复）：只读**最近 `recent` 条**消息做投影重建。
     ///
-    /// 与 [`Self::load_for_resume`] 的语义边界：
-    /// - 模型循环需要完整历史（compact context 优先）——那是 `load_for_resume`；
-    /// - timeline 重建（BUG-006 降级路径）只需要前端 transcript 恢复窗口
-    ///   （最近若干轮）。这里用反向扫描（`store::bounded_read`）只触碰
-    ///   文件尾部，GB 级归档的重建从 O(文件) 降到 O(尾部)。
+    /// - 无 compact marker：反向扫描（`store::bounded_read`）只触碰文件尾部，
+    ///   GB 级归档的重建从 O(文件) 降到 O(尾部)。
+    /// - 有 compact marker：活跃视图由归档水位推导；为保证摘要与保留段
+    ///   完整，这里复用 `load_for_resume` 的派生结果。
     ///
-    /// 消息选择规则与 `load_for_resume` 同构：compact context 存在且完好
-    /// 时优先（它是权威视图），否则用归档尾部。返回 `None` 表示磁盘上
-    /// 无该会话（区别于“有会话但尾部为空”——那返回空 Vec）。
-    ///
-    /// WAL fold：与 `load_for_resume` 相同先折 WAL（幂等），保证尾部读到
-    /// 已落盘的最新消息。
+    /// 返回 `None` 表示磁盘上无该会话（区别于“有会话但尾部为空”——那返回
+    /// 空 Vec）。WAL fold 与 `load_for_resume` 相同，先折幂等。
     pub fn load_recent_for_projection(&self, seed: &str, recent: usize) -> Option<Vec<Message>> {
         self.replay_message_wal(seed);
-        self.session_dir(seed)?;
-        // compact context 完好时优先（与 BUG-007 的 fail-closed 语义一致：
-        // 损坏的 compact 在 load_for_resume 是整段拒绝；投影路径取归档尾部
-        // ——投影是可重建派生物，不该因 compact 损坏而整体失败）。
-        if let Ok(Some(context)) = self.read_compact_context_checked(seed) {
-            return Some(context.messages);
+        let meta = self.load_meta(seed)?;
+        if meta.compact_covered_through_msg_id.is_some() {
+            let (_, _, active_messages) = self.load_for_resume(seed)?;
+            return Some(active_messages);
         }
         let dir = self.session_path_dir(seed);
-        Some(crate::store::bounded_read::read_messages_tail(
-            &dir.join("messages.jsonl"),
-            recent,
-        ))
+        let messages =
+            crate::store::bounded_read::read_messages_tail(&dir.join("messages.jsonl"), recent);
+        Some(
+            messages
+                .into_iter()
+                .filter(|message| !qaqh_message::is_compaction_summary(message))
+                .collect(),
+        )
     }
 
     /// 归档尾部读取：**只看 append-only 的 `messages.jsonl`，无视 compact context**。
@@ -352,7 +369,8 @@ impl SessionManager {
     /// 混用会同时坏两件事：压缩摘要 `[Compacted N turns]` 会被 `from_messages`
     /// 当成一个真实回合显示给用户（`store.rs` 的 `push_user` 分支），而且
     /// `meta.turn_count`（真实持久化回合数）与投影出的回合数对不上，
-    /// 全局回合序号就无从算起。
+    /// 全局回合序号就无从算起。摘要现在是归档里的真实行，因此本函数显式
+    /// 过滤它，只把真实回合交给人类 transcript。
     ///
     /// 语义边界与 `load_recent_for_projection` 相同：`None` = 磁盘上无该会话
     /// （区别于「有会话但尾部为空」——那返回空 Vec）。WAL 同样先折（幂等）。
@@ -360,10 +378,12 @@ impl SessionManager {
         self.replay_message_wal(seed);
         self.session_dir(seed)?;
         let dir = self.session_path_dir(seed);
-        Some(crate::store::bounded_read::read_messages_tail(
-            &dir.join("messages.jsonl"),
-            recent,
-        ))
+        Some(
+            crate::store::bounded_read::read_messages_tail(&dir.join("messages.jsonl"), recent)
+                .into_iter()
+                .filter(|message| !qaqh_message::is_compaction_summary(message))
+                .collect(),
+        )
     }
 
     /// The single `PersistOp` → store mapping (PR-1-6 / Z5). The runtime's
@@ -378,14 +398,16 @@ impl SessionManager {
                 model,
                 effort,
                 compact_skip,
+                compact_covered_through_msg_id,
                 turn_count,
             } => {
-                self.save_append(
+                self.save_append_with_watermark(
                     seed,
                     messages,
                     model,
                     effort.as_deref(),
                     *compact_skip,
+                    *compact_covered_through_msg_id,
                     *turn_count,
                 );
             }
@@ -398,26 +420,22 @@ impl SessionManager {
             } => {
                 self.update_meta(seed, model, effort.as_deref(), *compact_skip, *turn_count);
             }
-            qaqh_message::PersistOp::UpdateCompactContext { seed, messages } => {
-                self.update_compact_context(seed, messages);
-            }
-            qaqh_message::PersistOp::SaveCompactContext { seed, messages } => {
-                self.save_compact_context(seed, messages);
-            }
             qaqh_message::PersistOp::SaveFull {
                 seed,
                 messages,
                 model,
                 effort,
                 compact_skip,
+                compact_covered_through_msg_id,
                 turn_count,
             } => {
-                self.save_full(
+                self.save_full_with_watermark(
                     seed,
                     messages,
                     model,
                     effort.as_deref(),
                     *compact_skip,
+                    *compact_covered_through_msg_id,
                     *turn_count,
                 );
             }
@@ -431,8 +449,8 @@ impl SessionManager {
     ///   (msg_ids are session-monotonic), so a crash between "op applied" and
     ///   "WAL checkpointed" converges instead of duplicating;
     /// - `UpdateMeta` is a pure metadata refresh;
-    /// - `SaveFull` / compact-context ops never reach the WAL (generation
-    ///   rewrites — see `qaqh_message::wal` module docs).
+    /// - `SaveFull` never reaches the WAL (generation rewrite — see
+    ///   `qaqh_message::wal` module docs).
     ///
     /// Single-writer invariant: a non-empty WAL implies the previous worker
     /// died before draining, so no live writer exists for this seed while
@@ -498,13 +516,14 @@ impl SessionManager {
                     model,
                     effort,
                     compact_skip,
+                    compact_covered_through_msg_id,
                     turn_count,
                 } => {
                     let fresh: Vec<Message> = messages
                         .into_iter()
                         .filter(|message| message.msg_id.is_none_or(|id| id > applied_max_msg_id))
                         .collect();
-                    if fresh.is_empty() {
+                    if fresh.is_empty() && compact_covered_through_msg_id.is_none() {
                         continue;
                     }
                     applied_max_msg_id = applied_max_msg_id.max(
@@ -520,6 +539,7 @@ impl SessionManager {
                         model,
                         effort,
                         compact_skip,
+                        compact_covered_through_msg_id,
                         turn_count,
                     });
                 }
@@ -535,52 +555,6 @@ impl SessionManager {
         // only costs a redundant (idempotent) replay next time.
         if let Err(error) = qaqh_message::wal::checkpoint_file(&dir) {
             log::error!("SessionManager: WAL checkpoint for {seed} failed: {error}");
-        }
-    }
-
-    /// Persist a new checkpoint without rewriting the raw history archive.
-    pub fn save_compact_context(&self, seed: &str, messages: &[Message]) {
-        let lock = self.session_lock(seed);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let archive_count = self
-            .load_meta(seed)
-            .map(|meta| meta.message_count)
-            .unwrap_or_else(|| {
-                store::count_message_lines(&self.session_path_dir(seed)).unwrap_or(0)
-            });
-        let parent_checkpoint_id = self
-            .read_compact_context(seed)
-            .map(|context| context.checkpoint_id);
-        let now = Self::now_epoch();
-        let context = CompactContext {
-            version: 1,
-            checkpoint_id: format!("compact-{now}-{archive_count}"),
-            parent_checkpoint_id,
-            created_at: now,
-            archive_message_count: archive_count,
-            messages: messages.to_vec(),
-        };
-        if let Err(error) = self.write_compact_context(seed, &context) {
-            log::error!("SessionManager: write compact context failed for {seed}: {error}");
-        }
-    }
-
-    /// Refresh the active view after later raw messages were appended.
-    pub fn update_compact_context(&self, seed: &str, messages: &[Message]) {
-        let Some(mut context) = self.read_compact_context(seed) else {
-            return;
-        };
-        let lock = self.session_lock(seed);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        context.archive_message_count = self
-            .load_meta(seed)
-            .map(|meta| meta.message_count)
-            .unwrap_or_else(|| {
-                store::count_message_lines(&self.session_path_dir(seed)).unwrap_or(0)
-            });
-        context.messages = messages.to_vec();
-        if let Err(error) = self.write_compact_context(seed, &context) {
-            log::error!("SessionManager: update compact context failed for {seed}: {error}");
         }
     }
 
@@ -962,7 +936,7 @@ impl SessionManager {
     }
 
     /// Save session: write meta + rewrite all messages.
-    /// Used for initial save or after undo/compact.
+    /// Used for initial save or after undo/image repair.
     pub fn save_full(
         &self,
         seed: &str,
@@ -970,6 +944,31 @@ impl SessionManager {
         model: &str,
         effort: Option<&str>,
         compact_skip: usize,
+        turn_count: usize,
+    ) {
+        self.save_full_with_watermark(
+            seed,
+            messages,
+            model,
+            effort,
+            compact_skip,
+            None,
+            turn_count,
+        );
+    }
+
+    /// Full rewrite that optionally preserves an archive-derived compact
+    /// watermark. `None` clears the marker; `Some(id)` keeps the rewritten
+    /// active view filtered after restart.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_full_with_watermark(
+        &self,
+        seed: &str,
+        messages: &[Message],
+        model: &str,
+        effort: Option<&str>,
+        compact_skip: usize,
+        compact_covered_through_msg_id: Option<u64>,
         turn_count: usize,
     ) {
         let lock = self.session_lock(seed);
@@ -1001,6 +1000,7 @@ impl SessionManager {
         meta.turn_count = turn_count;
         meta.last_summary = last_summary;
         meta.compact_skip = compact_skip;
+        meta.compact_covered_through_msg_id = compact_covered_through_msg_id;
         // 保留字段保持既有注释语义：tool_mode/custom_tools（工具模式不随
         // compact/undo 丢失）、title（冻结语义）。
         meta.mode = existing.mode;
@@ -1034,9 +1034,51 @@ impl SessionManager {
         compact_skip: usize,
         turn_count: usize,
     ) {
+        self.save_append_with_watermark(
+            seed,
+            new_messages,
+            model,
+            effort,
+            compact_skip,
+            None,
+            turn_count,
+        );
+    }
+
+    /// Append new messages and optionally advance the compact watermark in the
+    /// same meta critical section. `None` preserves the existing watermark.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_append_with_watermark(
+        &self,
+        seed: &str,
+        new_messages: &[Message],
+        model: &str,
+        effort: Option<&str>,
+        compact_skip: usize,
+        compact_covered_through_msg_id: Option<u64>,
+        turn_count: usize,
+    ) {
         let now = Self::now_epoch();
         self.with_meta_locked(seed, true, |dir, meta| {
+            // A WAL replay can arrive after the summary bytes were appended but
+            // before meta.json was updated. In that case the message batch is
+            // already archived, but the watermark still must be applied.
+            let mut persist_watermark_only = || {
+                let Some(covered) = compact_covered_through_msg_id else {
+                    return;
+                };
+                meta.seed = seed.to_string();
+                meta.updated_at = now;
+                meta.compact_covered_through_msg_id = Some(covered);
+                if let Err(e) = store::write_meta(dir, meta) {
+                    log::error!("SessionManager: watermark-only meta write failed: {e}");
+                    return;
+                }
+                store::upsert_index(&self.sessions_dir, meta);
+            };
+
             if new_messages.is_empty() {
+                persist_watermark_only();
                 return;
             }
             // BUG-2026-09-12-07（首消息双写）：归档追加是盲写，无法区分
@@ -1059,6 +1101,7 @@ impl SessionManager {
                     "[session] save_append: all {} message(s) already archived (max msg_id {archived_max}) — deduped",
                     new_messages.len()
                 );
+                persist_watermark_only();
                 return;
             }
             if meta.created_at == 0 {
@@ -1073,6 +1116,9 @@ impl SessionManager {
             meta.turn_count = turn_count;
             meta.last_summary = last_summary;
             meta.compact_skip = compact_skip;
+            if let Some(covered) = compact_covered_through_msg_id {
+                meta.compact_covered_through_msg_id = Some(covered);
+            }
 
             // Append messages（仅写入过滤后的新消息）
             if let Err(e) = store::append_messages(dir, &fresh) {
@@ -1399,43 +1445,6 @@ impl SessionManager {
             .clone()
     }
 
-    fn compact_context_path(&self, seed: &str) -> PathBuf {
-        self.session_path_dir(seed).join("compact-context.json")
-    }
-
-    fn read_compact_context(&self, seed: &str) -> Option<CompactContext> {
-        self.read_compact_context_checked(seed).ok().flatten()
-    }
-
-    /// Like [`Self::read_compact_context`], but distinguishes “no checkpoint
-    /// file” from “checkpoint exists and is damaged”. `load_for_resume` uses
-    /// this distinction to fail closed instead of falling back to the full
-    /// pre-compact archive.
-    fn read_compact_context_checked(&self, seed: &str) -> Result<Option<CompactContext>, String> {
-        let path = self.compact_context_path(seed);
-        let body = match std::fs::read_to_string(&path) {
-            Ok(body) => body,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("read {}: {error}", path.display())),
-        };
-        serde_json::from_str(&body)
-            .map(Some)
-            .map_err(|error| format!("parse {}: {error}", path.display()))
-    }
-
-    fn write_compact_context(&self, seed: &str, context: &CompactContext) -> Result<(), String> {
-        let path = self.compact_context_path(seed);
-        std::fs::create_dir_all(self.session_path_dir(seed))
-            .map_err(|error| format!("create compact context directory: {error}"))?;
-        let temporary = path.with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(context)
-            .map_err(|error| format!("serialize compact context: {error}"))?;
-        std::fs::write(&temporary, data)
-            .map_err(|error| format!("write compact context: {error}"))?;
-        std::fs::rename(&temporary, &path)
-            .map_err(|error| format!("activate compact context: {error}"))
-    }
-
     fn snapshot_from_files(&self, seed: &str) -> Result<(SessionMeta, Vec<Message>), String> {
         let dir = self
             .session_dir(seed)
@@ -1660,121 +1669,159 @@ mod skill_persistence_tests {
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
+    fn stamped(id: u64, role: &str, text: &str) -> Message {
+        Message {
+            msg_id: Some(id),
+            role: role.into(),
+            name: None,
+            content: vec![qaqh_types::ContentBlock::text(text)],
+        }
+    }
+
     #[test]
-    fn compact_context_preserves_archive_and_restores_the_active_view() {
+    fn compact_marker_preserves_archive_and_derives_active_view() {
         let (root, manager) = manager();
         let archive = vec![
-            Message::user("one"),
-            Message::user("two"),
-            Message::user("three"),
+            stamped(1, "system", "base"),
+            stamped(2, "user", "one"),
+            stamped(3, "assistant", "reply one"),
+            stamped(4, "user", "two"),
+            stamped(5, "assistant", "reply two"),
         ];
         manager.save_full("compact-seed", &archive, "model", None, 0, 2);
-        let active = vec![
-            Message::user("[Compacted 1 turns]\nsummary"),
-            Message::user("three"),
-        ];
-        manager.save_compact_context("compact-seed", &active);
-
-        let (_, restored_archive, context) =
-            manager.load_for_resume("compact-seed").expect("resume");
-        assert_eq!(
-            restored_archive.len(),
-            archive.len(),
-            "raw archive must not be rewritten"
+        manager.save_append_with_watermark(
+            "compact-seed",
+            &[stamped(6, "user", "[Compacted 1 turns]\nsummary")],
+            "model",
+            None,
+            0,
+            Some(3),
+            2,
         );
-        let context = context.expect("compact checkpoint");
-        assert_eq!(context.messages.len(), active.len());
-        assert_eq!(context.parent_checkpoint_id, None);
+
+        let (_, restored_archive, active) =
+            manager.load_for_resume("compact-seed").expect("resume");
+        assert_eq!(restored_archive.len(), 6, "archive must remain append-only");
+        assert_eq!(active.len(), 4, "system + summary + two kept messages");
+        assert_eq!(active[0].role, "system");
+        assert!(qaqh_message::is_compaction_summary(&active[1]));
+        assert_eq!(active[2].msg_id, Some(4));
+        assert_eq!(active[3].msg_id, Some(5));
+        assert!(
+            !manager
+                .session_path_dir("compact-seed")
+                .join("compact-context.json")
+                .exists(),
+            "route 1 must not create a second compact truth source"
+        );
+
+        let tail = manager
+            .load_archive_tail("compact-seed", 10)
+            .expect("archive tail");
+        assert!(
+            tail.iter()
+                .all(|message| !qaqh_message::is_compaction_summary(message)),
+            "human transcript must not show the synthetic summary"
+        );
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
-    fn repeated_compact_links_checkpoints_without_losing_archive() {
+    fn repeated_compaction_uses_latest_summary_and_watermark() {
         let (root, manager) = manager();
         let archive = vec![
-            Message::user("one"),
-            Message::user("two"),
-            Message::user("three"),
+            stamped(1, "system", "base"),
+            stamped(2, "user", "one"),
+            stamped(3, "assistant", "reply one"),
+            stamped(4, "user", "two"),
+            stamped(5, "assistant", "reply two"),
         ];
-        manager.save_full("multi-compact", &archive, "model", None, 0, 3);
-        manager.save_compact_context("multi-compact", &[Message::user("[Compacted]\nfirst")]);
-        let first = manager
-            .read_compact_context("multi-compact")
-            .expect("first checkpoint");
-        manager.save_compact_context("multi-compact", &[Message::user("[Compacted]\nsecond")]);
-        let second = manager
-            .read_compact_context("multi-compact")
-            .expect("second checkpoint");
-        assert_eq!(
-            second.parent_checkpoint_id.as_deref(),
-            Some(first.checkpoint_id.as_str())
+        manager.save_full("multi-compact", &archive, "model", None, 0, 2);
+        manager.save_append_with_watermark(
+            "multi-compact",
+            &[stamped(6, "user", "[Compacted 1 turns]\nfirst")],
+            "model",
+            None,
+            0,
+            Some(3),
+            2,
         );
-        assert_eq!(
-            manager.load("multi-compact").expect("archive").1.len(),
-            archive.len()
+        manager.save_append_with_watermark(
+            "multi-compact",
+            &[stamped(7, "user", "[Compacted 2 turns]\nsecond")],
+            "model",
+            None,
+            0,
+            Some(5),
+            2,
         );
+
+        let (_, archive, active) = manager.load_for_resume("multi-compact").expect("resume");
+        assert_eq!(archive.len(), 7, "both summaries remain in the archive");
+        assert_eq!(
+            active.len(),
+            2,
+            "only latest summary + post-watermark messages"
+        );
+        assert!(qaqh_message::is_compaction_summary(&active[1]));
+        assert!(text_of(&active[1]).unwrap_or_default().contains("second"));
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
-    fn corrupt_compact_context_refuses_full_archive_fallback() {
+    fn invalid_compact_watermark_fails_closed() {
         let (root, manager) = manager();
-        let archive = vec![Message::user("one"), Message::user("two")];
-        manager.save_full("corrupt-compact", &archive, "model", None, 0, 2);
-        std::fs::write(
-            manager.compact_context_path("corrupt-compact"),
-            b"{not-json",
-        )
-        .expect("write corrupt compact context");
-
-        assert!(
-            manager.load_for_resume("corrupt-compact").is_none(),
-            "damaged compact context must never fall back to the full archive"
+        manager.save_full(
+            "past-watermark",
+            &[stamped(1, "user", "one")],
+            "model",
+            None,
+            0,
+            1,
         );
-        // The immutable archive itself is untouched; recovery tooling can still
-        // inspect it deliberately.
-        assert_eq!(
-            manager.load("corrupt-compact").expect("archive").1.len(),
-            archive.len()
+        manager.save_append_with_watermark(
+            "past-watermark",
+            &[stamped(2, "user", "[Compacted 1 turns]\nsummary")],
+            "model",
+            None,
+            0,
+            Some(99),
+            1,
+        );
+        assert!(
+            manager.load_for_resume("past-watermark").is_none(),
+            "watermark past the archive must fail closed"
+        );
+
+        manager.save_full(
+            "missing-summary",
+            &[stamped(1, "user", "one")],
+            "model",
+            None,
+            0,
+            1,
+        );
+        manager.save_append_with_watermark(
+            "missing-summary",
+            &[stamped(2, "user", "ordinary")],
+            "model",
+            None,
+            0,
+            Some(1),
+            1,
+        );
+        assert!(
+            manager.load_for_resume("missing-summary").is_none(),
+            "watermark without a newer summary must fail closed"
         );
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
-    fn compact_context_past_archive_refuses_full_archive_fallback() {
-        let (root, manager) = manager();
-        let archive = vec![Message::user("one"), Message::user("two")];
-        manager.save_full("past-archive", &archive, "model", None, 0, 2);
-        let damaged = CompactContext {
-            version: 1,
-            checkpoint_id: "damaged-checkpoint".into(),
-            parent_checkpoint_id: None,
-            created_at: SessionManager::now_epoch(),
-            archive_message_count: archive.len() + 1,
-            messages: vec![Message::user("summary")],
-        };
-        std::fs::write(
-            manager.compact_context_path("past-archive"),
-            serde_json::to_vec_pretty(&damaged).expect("serialize damaged compact context"),
-        )
-        .expect("write damaged compact context");
-
-        assert!(
-            manager.load_for_resume("past-archive").is_none(),
-            "archive_message_count past the archive must fail closed"
-        );
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    #[test]
-    fn recent_projection_reads_bounded_tail() {
-        // Phase 2 契约：投影重建路径只读尾部窗口。
-        // 1. 尾部窗口内含最近 N 条（正向序）；
-        // 2. compact context 完好时优先于归档尾部（与 resume 同构）；
-        // 3. 损坏的 compact 不阻断投影（归档尾部兑底，区别于 resume 的整段拒绝）。
+    fn recent_projection_reads_bounded_tail_without_compaction() {
         let (root, manager) = manager();
         let archive: Vec<Message> = (1..=50)
-            .map(|index| Message::user(&format!("msg-{index}")))
+            .map(|index| stamped(index, "user", &format!("msg-{index}")))
             .collect();
         manager.save_full("bounded-tail", &archive, "model", None, 0, 25);
 
@@ -1792,37 +1839,6 @@ mod skill_persistence_tests {
             Some("msg-41".to_string()),
             "tail window must be the newest contiguous slice"
         );
-
-        // compact context 优先：投影应看到 active 视图而非归档尾部。
-        manager.save_compact_context(
-            "bounded-tail",
-            &[
-                Message::user("[Compacted]\nsummary"),
-                Message::user("msg-50"),
-            ],
-        );
-        let with_compact = manager
-            .load_recent_for_projection("bounded-tail", 5)
-            .expect("session exists");
-        assert_eq!(
-            with_compact.len(),
-            2,
-            "compact context wins over archive tail"
-        );
-
-        // 损坏的 compact：投影降级到归档尾部（fail-open），不整段拒绝。
-        std::fs::write(manager.compact_context_path("bounded-tail"), b"{not-json")
-            .expect("corrupt compact context");
-        let degraded = manager
-            .load_recent_for_projection("bounded-tail", 5)
-            .expect("session exists");
-        assert_eq!(
-            degraded.last().and_then(text_of),
-            Some("msg-50".to_string()),
-            "corrupt compact must degrade to archive tail, not fail"
-        );
-
-        // 磁盘上无此会话 → None（区别于空尾部）。
         assert!(manager.load_recent_for_projection("ghost", 5).is_none());
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
@@ -1880,6 +1896,7 @@ mod wal_recovery_tests {
             model: "m".into(),
             effort: None,
             compact_skip: 0,
+            compact_covered_through_msg_id: None,
             turn_count: 1,
         }
     }
@@ -1950,6 +1967,47 @@ mod wal_recovery_tests {
             })
             .count();
         assert_eq!(quarantined, 1, "the faulting log must be kept as evidence");
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn wal_replay_applies_watermark_when_summary_is_already_archived() {
+        let (root, manager) = manager();
+        let seed = "wal-compact-watermark";
+        let dir = root.join("sessions").join(seed);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut system = user_msg(1, "system");
+        system.role = "system".into();
+        let archive = vec![
+            system,
+            user_msg(2, "one"),
+            user_msg(3, "reply one"),
+            user_msg(4, "two"),
+            user_msg(5, "reply two"),
+        ];
+        manager.save_full(seed, &archive, "m", None, 0, 2);
+        let summary = user_msg(6, "[Compacted 1 turns]\nsummary");
+        manager.save_append(seed, std::slice::from_ref(&summary), "m", None, 0, 2);
+
+        // Simulate the crash window: summary bytes reached the archive, but
+        // meta.json still lacks the watermark and the op remains in WAL.
+        write_wal(
+            &dir,
+            &[PersistOp::Append {
+                seed: seed.to_string(),
+                messages: vec![summary],
+                model: "m".into(),
+                effort: None,
+                compact_skip: 0,
+                compact_covered_through_msg_id: Some(3),
+                turn_count: 2,
+            }],
+        );
+
+        let (meta, _, active) = manager.load_for_resume(seed).expect("resume");
+        assert_eq!(meta.compact_covered_through_msg_id, Some(3));
+        assert_eq!(active.len(), 4, "system + summary + two kept messages");
+        assert!(qaqh_message::is_compaction_summary(&active[1]));
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 

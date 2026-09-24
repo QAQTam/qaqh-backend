@@ -102,10 +102,11 @@ qaqh-runtime  v2_acceptance_matrix::single_stream_carries_all_channels_in_global
 
 ## 7. 仍未完成（alpha 迭代清单）
 
-1. **P6 设计输入 A（前缀 Segment 分区）**：`system_messages` 仍是插入顺序 + 永远
-   前置；中途 `push_system` 会顶到最前，从第一个字节起 cache 全 miss。
-2. **P6 设计输入 B（compact 进 canonical log）**：`compact-context.json` 仍是第二
-   真源；`build_context_for_gate` 仍整段 clone（请求峰值 2×）。
+1. **P6 设计输入 A（前缀 Segment 分区）**：**已复核不成立**；`push_system`
+   的生产调用只发生在会话建立期，运行期注入走 trailing。
+2. **P6 设计输入 B（compact 进 canonical log）**：**路线 1 已落地
+   （2026-09-25）**；`compact-context.json` 已删除，摘要进 `messages.jsonl`，
+   `build_context_for_gate` 的整段 clone 仍属后续内存优化。
 3. **v1 `Last-Event-ID` → v2 cursor 映射**（已随 v1 端点硬切作废；见
    `2026-09-24-tool-outcome-p2-v1-cursor-closure-handoff.md` §1）。
 4. **V2-C3 replaceable producer**（已补，见
