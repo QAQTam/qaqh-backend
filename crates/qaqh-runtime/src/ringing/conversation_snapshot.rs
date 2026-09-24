@@ -13,14 +13,10 @@ pub fn persisted_conversation_state(
     sessions: Option<&SessionManager>,
     seed: &str,
 ) -> Option<serde_json::Value> {
-    let (meta, archive_messages, compact_context) = sessions?.load_for_resume(seed)?;
-    // 与 legacy resume 投影保持一致：compact 上下文优先（否则 daemon 快照与
-    // worker resume 的 transcript 基线不一致）。
-    let messages = compact_context
-        .as_ref()
-        .map(|context| context.messages.as_slice())
-        .unwrap_or(archive_messages.as_slice());
-    let (total, turns) = super::projection::project_turns_from_messages(seed, messages, None, None);
+    let (meta, _archive_messages, active_messages) = sessions?.load_for_resume(seed)?;
+    // 与 worker resume 同一基线：活跃视图已由归档摘要 + 水位派生。
+    let (total, turns) =
+        super::projection::project_turns_from_messages(seed, &active_messages, None, None);
     // 恢复 Info 面板所需元数据：model 以会话实际使用过的为准（meta.json 持久化），
     // 老会话可能为空，回退到当前配置；context_limit 未持久化，取当前配置。
     let config = qaqh_config::Config::load().unwrap_or_default();

@@ -12,7 +12,7 @@
 //! 该日志原本承担的三项职责改由更合适的载体承担：
 //!   - transcript 读侧：`ringing-timeline/{seed}.json`（本模块持久化的快照）
 //!   - 断线重连回放尾：`TimelineAppender` 内存 journal（进程内有界）
-//!   - 崩溃恢复：`timeline_rebuild`（从 messages.jsonl / compact-context 重建）
+//!   - 崩溃恢复：`timeline_rebuild`（从 messages.jsonl 归档重建）
 //!
 //! 代价（已确认可接受）：daemon 崩溃后，客户端重连时无法回放**上一次进程**的
 //! 中间帧，只能从快照 watermark 重新基线化。客户端 `recover_gap` 会自动完成
