@@ -27,9 +27,8 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use qaqh_domain::{ControlCommand, RingingChannel};
 use qaqh_ringing::{
-    ClientOpenRequest, ClientOpenResponse, RINGING_SCHEMA, RINGING_VERSION, RingingCommandAck,
-    RingingCommandAckStatus, RingingCommandEnvelope, RingingCommandState, RingingResetRequired,
-    RingingV2ContentValue,
+    RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope, RingingCommandState,
+    RingingResetRequired, RingingV2ContentValue,
 };
 use qaqh_runtime::ringing::{PendingCommandStore, RingingLeaseStore, service_methods};
 use qaqh_runtime::{QaqhService, RingingHub};
@@ -52,9 +51,7 @@ pub(crate) use auth::{
     get_session_id, is_authorized, lease_required_json, parse_channel, publish_session_created,
     session_close_seed, unauthorized,
 };
-pub(crate) use command::{
-    command_fingerprint, handle_command, handle_command_status, handle_open, handle_renew,
-};
+pub(crate) use command::{command_fingerprint, handle_command, handle_command_status};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
@@ -114,18 +111,6 @@ pub struct TimelineQuery {
     pub limit: Option<usize>,
 }
 
-struct JsonResponse(Vec<u8>);
-impl IntoResponse for JsonResponse {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            self.0,
-        )
-            .into_response()
-    }
-}
-
 pub(crate) fn session_not_found_response(seed: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -157,8 +142,6 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/activity", get(activity))
-        .route("/ringing/v1/clients/open", post(handle_open))
-        .route("/ringing/v1/leases/renew", post(handle_renew))
         .route("/ringing/v2/clients/open", post(handle_open_v2))
         .route("/ringing/v2/leases/renew", post(handle_renew_v2))
         .route(
@@ -196,7 +179,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/ringing/v2/content/{content_id}", get(handle_content_get))
         .route("/ringing/v2/content", post(handle_content_upload))
-        .route("/ringing/v1/service/{method}", post(handle_service))
+        .route("/ringing/v2/service/{method}", post(handle_service))
         .route("/ringing/v1/events/{channel}", get(handle_events))
         .route(
             "/ringing/v2/sessions/{seed}/timeline/events",
