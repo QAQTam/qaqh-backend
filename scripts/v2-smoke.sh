@@ -82,6 +82,16 @@ driver() {
     curl -sS -X POST "$ENDPOINT/ringing/v2/sessions/$SEED/driver/$2" \
         -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $1"
 }
+# `require_v2_lease` does NOT renew: a lease only refreshes on an explicit
+# `/leases/renew`. The phases below spend seconds in SSE waits, so any phase
+# that needs a *live* holder must renew it first — otherwise the 6s TTL lapses
+# mid-script and the probe fails with `lease_required`/forwarded-command (a
+# harness bug, not a product one).
+renew() {
+    curl -sS -X POST "$ENDPOINT/ringing/v2/leases/renew" \
+        -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $1" \
+        > /dev/null 2>&1 || true
+}
 # Poll the canonical seat via an observer lease. `-` means "no holder".
 # The observer renews its own lease so it stays alive while another seat expires.
 wait_driver() {
@@ -154,6 +164,7 @@ printf '%s' "$HANDOVER" | grep -q '"delivery":"reliable"' || fail "reliable repl
 printf '%s' "$HANDOVER" | grep -q '"kind":"driver_changed"' || fail "driver_changed replay payload"
 
 say "== not_driver gate =="
+renew "$A"
 GATED="$(command "$B" conversation \
     "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"conversation\",\"command_id\":\"smoke-b-cancel\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"conversation\",\"type\":\"conversation_cancel\"}}")"
 [ "$(printf '%s' "$GATED" | json_get "['code']")" = "not_driver" ] || fail "not_driver gate"
@@ -189,6 +200,7 @@ PLAN_LOSER="$(command "$B" control \
     || fail "second plan answer winning verdict"
 
 say "== command replay + status =="
+renew "$A"
 REPLAY_ID="smoke-replay-$$"
 ATTACH="{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"$REPLAY_ID\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"seed\":\"$SEED\"}}"
 command "$A" control "$ATTACH" > /dev/null
@@ -200,6 +212,7 @@ STATUS="$(curl -sS "$ENDPOINT/ringing/v2/commands/$REPLAY_ID" \
 [ "$(printf '%s' "$STATUS" | json_get "['state']")" = "succeeded" ] || fail "command status"
 
 say "== SSE subscribe =="
+renew "$A"
 CURSOR="$(printf '%s' "$BOOTSTRAP" | json_get "['snapshot_cursor']")"
 SSE_HEAD="$(curl -sS -i -N --max-time 2 \
     "$ENDPOINT/ringing/v2/sessions/$SEED/events/control?since_cursor=$CURSOR" \
@@ -207,12 +220,14 @@ SSE_HEAD="$(curl -sS -i -N --max-time 2 \
 printf '%s' "$SSE_HEAD" | grep -q "200" || fail "SSE subscribe ($SSE_HEAD)"
 
 say "== driver release (explicit) =="
+renew "$A"
 RELEASE_A="$(driver "$A" release)"
 [ "$(printf '%s' "$RELEASE_A" | json_get "['reason']")" = "release_requested" ] \
     || fail "release a must be a forwarded request"
 wait_driver "-" 2 "$B"
 
 say "== driver auto-reclaim on lease expiry =="
+renew "$A"
 CLAIM_AGAIN="$(driver "$A" claim)"
 [ "$(printf '%s' "$CLAIM_AGAIN" | json_get "['reason']")" = "claim_requested" ] \
     || fail "re-claim a"
