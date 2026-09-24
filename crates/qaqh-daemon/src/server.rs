@@ -168,7 +168,11 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingLeaseStore::new()));
-    let driver_watch = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Persisted so a restart still reclaims seats whose holder lease expired
+    // while the daemon was down.
+    let driver_watch = Arc::new(Mutex::new(
+        qaqh_runtime::ringing::RingingDriverWatch::new_persistent(),
+    ));
     let pending_commands = Arc::new(Mutex::new(
         qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
     ));
