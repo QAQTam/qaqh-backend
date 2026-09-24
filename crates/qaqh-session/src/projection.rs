@@ -10,8 +10,8 @@ mod sink;
 mod timeline;
 
 pub use control::{
-    ControlInteractionResolution, ControlInteractionState, ControlProjection, ControlRoundState,
-    ControlSnapshot, ControlSubagentState, ControlToolState,
+    ControlDriverState, ControlInteractionResolution, ControlInteractionState, ControlProjection,
+    ControlRoundState, ControlSnapshot, ControlSubagentState, ControlToolState,
 };
 pub use conversation::{
     ConversationAssistantBlockState, ConversationCompactionState, ConversationContextEntry,

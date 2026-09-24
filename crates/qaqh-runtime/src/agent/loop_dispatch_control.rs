@@ -2,11 +2,16 @@
 //!
 //! 由 `loop_core.rs` 拆分（Phase 2-5）：`impl Loop` 跨文件块，对外 API 不变。
 
+use super::engine_turn::is_ulid;
 use super::loop_core::Loop;
 use super::turn_actor::{InteractionAdmission, InteractionState};
 use super::types::*;
 
 use qaqh_domain::{ControlCommand, DomainEvent};
+use qaqh_session::canonical::generate_ulid;
+use qaqh_session::session_fact_v2::EventId;
+
+use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
 
 impl Loop {
     fn reject_already_resolved_interaction(
@@ -256,6 +261,13 @@ impl Loop {
                 }
                 self.apply_outcome(outcome);
             }
+            ControlCommand::DriverClaim {
+                client_session_id,
+                stale_holder,
+            } => self.handle_driver_claim(command_id, &client_session_id, stale_holder.as_deref()),
+            ControlCommand::DriverRelease { client_session_id } => {
+                self.handle_driver_release(command_id, &client_session_id)
+            }
             ControlCommand::PlanReviewRespond {
                 interaction_id,
                 approved,
@@ -297,4 +309,106 @@ impl Loop {
             }
         }
     }
+
+    /// Canonical driver claim.
+    ///
+    /// The ledger is the single canonical writer, so it also owns
+    /// `driver_epoch` allocation. The daemon's HTTP ack is therefore an
+    /// optimistic "requested"; the authoritative seat reaches clients as the
+    /// reliable `DriverChanged` event published from the appended fact.
+    fn handle_driver_claim(&mut self, command_id: &str, holder: &str, stale_holder: Option<&str>) {
+        let now = unix_ms();
+        let event_id = EventId::new(generate_ulid());
+        let causation_id = driver_causation_id(command_id);
+        let outcome: Result<qaqh_session::canonical::DriverClaimOutcome, String> = {
+            match self.session.agent.tool_ledger_mut() {
+                Ok(Some(ledger)) => ledger
+                    .ensure_lease(now, tool_ledger_lease_ms())
+                    .map_err(|error| error.to_string())
+                    .and_then(|()| {
+                        ledger
+                            .claim_driver(holder, stale_holder, event_id, causation_id, now)
+                            .map_err(|error| error.to_string())
+                    }),
+                Ok(None) => Err("session has no canonical ledger".to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        match outcome {
+            Ok(qaqh_session::canonical::DriverClaimOutcome::Claimed { driver_epoch }) => {
+                self.emit_driver_changed(Some(holder), driver_epoch);
+            }
+            Ok(qaqh_session::canonical::DriverClaimOutcome::AlreadyHeld { .. }) => {
+                self.emit_operation_completed(command_id, qaqh_domain::ErrorScope::Control);
+            }
+            Ok(qaqh_session::canonical::DriverClaimOutcome::Busy {
+                holder,
+                driver_epoch,
+            }) => self.emit_operation_failed(
+                command_id,
+                qaqh_domain::ErrorScope::Control,
+                "driver_busy",
+                &format!("driver seat is held by {holder} at epoch {driver_epoch}"),
+            ),
+            Err(error) => self.emit_operation_failed(
+                command_id,
+                qaqh_domain::ErrorScope::Control,
+                "driver_claim_failed",
+                &error,
+            ),
+        }
+    }
+
+    /// Canonical driver release; only the recorded holder may release.
+    fn handle_driver_release(&mut self, command_id: &str, holder: &str) {
+        let now = unix_ms();
+        let event_id = EventId::new(generate_ulid());
+        let causation_id = driver_causation_id(command_id);
+        let outcome: Result<qaqh_session::canonical::DriverReleaseOutcome, String> = {
+            match self.session.agent.tool_ledger_mut() {
+                Ok(Some(ledger)) => ledger
+                    .ensure_lease(now, tool_ledger_lease_ms())
+                    .map_err(|error| error.to_string())
+                    .and_then(|()| {
+                        ledger
+                            .release_driver(holder, event_id, causation_id, now)
+                            .map_err(|error| error.to_string())
+                    }),
+                Ok(None) => Err("session has no canonical ledger".to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        match outcome {
+            Ok(qaqh_session::canonical::DriverReleaseOutcome::Released { driver_epoch }) => {
+                self.emit_driver_changed(None, driver_epoch);
+            }
+            Ok(qaqh_session::canonical::DriverReleaseOutcome::NotDriver { .. }) => {
+                self.emit_operation_failed(
+                    command_id,
+                    qaqh_domain::ErrorScope::Control,
+                    "not_driver",
+                    "client does not hold the driver seat",
+                );
+            }
+            Err(error) => self.emit_operation_failed(
+                command_id,
+                qaqh_domain::ErrorScope::Control,
+                "driver_release_failed",
+                &error,
+            ),
+        }
+    }
+
+    fn emit_driver_changed(&self, holder: Option<&str>, driver_epoch: u64) {
+        self.paced_emitter.emit_domain(DomainEvent::Control(
+            qaqh_domain::ControlEvent::DriverChanged {
+                holder: holder.map(str::to_string),
+                driver_epoch,
+            },
+        ));
+    }
+}
+
+fn driver_causation_id(command_id: &str) -> Option<EventId> {
+    is_ulid(command_id).then(|| EventId::new(command_id))
 }

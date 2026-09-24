@@ -617,6 +617,14 @@ pub enum ControlEvent {
         interaction_id: String,
         approved: bool,
     },
+    /// v2 driver 席位变更（canonical `DriverChanged` 的 Ringing 双发）。
+    DriverChanged {
+        /// `None` = 席位已释放。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<String>,
+        #[cfg_attr(feature = "ts", ts(as = "u32"))]
+        driver_epoch: u64,
+    },
     /// skill 目录/激活状态变更。
     SkillsUpdated {
         available: Vec<SkillInfo>,
