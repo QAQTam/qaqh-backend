@@ -1,8 +1,8 @@
 //! Ringing client session lease store.
 //!
-//! Extracted from `qaqh-daemon/src/ringing_http.rs:2866` for sharing between
-//! the legacy hand-written TCP path and the new axum path. Single source of
-//! truth; no drift.
+//! Extracted from the legacy daemon HTTP layer (now
+//! `qaqh-daemon/src/axum_server`) for sharing between the old TCP path and the
+//! axum path. Single source of truth; no drift.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
