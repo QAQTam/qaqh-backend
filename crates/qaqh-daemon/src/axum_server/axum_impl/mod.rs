@@ -28,7 +28,7 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use qaqh_domain::{ControlCommand, RingingChannel};
 use qaqh_ringing::{
     RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope, RingingCommandState,
-    RingingResetRequired, RingingV2ContentValue,
+    RingingV2ContentValue,
 };
 use qaqh_runtime::ringing::{PendingCommandStore, RingingLeaseStore, service_methods};
 use qaqh_runtime::{QaqhService, RingingHub};
@@ -55,9 +55,9 @@ pub(crate) use command::{command_fingerprint, handle_command};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
-pub(crate) use sse::{handle_events, handle_timeline_events};
+pub(crate) use sse::handle_timeline_events;
 #[cfg(test)]
-pub(crate) use sse::{parse_sse_cursor, parse_timeline_cursor};
+pub(crate) use sse::parse_timeline_cursor;
 pub(crate) use timeline_api::{handle_pending_approvals, handle_timeline_snapshot};
 pub(crate) use v2::{
     handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_driver_claim_v2,
@@ -170,7 +170,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ringing/v2/content/{content_id}", get(handle_content_get))
         .route("/ringing/v2/content", post(handle_content_upload))
         .route("/ringing/v2/service/{method}", post(handle_service))
-        .route("/ringing/v1/events/{channel}", get(handle_events))
         .route(
             "/ringing/v2/sessions/{seed}/timeline/events",
             get(handle_timeline_events),
@@ -198,25 +197,6 @@ pub(crate) mod pure_tests {
         );
         assert_eq!(parse_channel("tool"), Some(RingingChannel::Tool));
         assert_eq!(parse_channel("bogus"), None);
-    }
-    #[test]
-    fn sse_cursor_parsing() {
-        assert_eq!(
-            parse_sse_cursor("epoch-1:tool:42", "epoch-1", RingingChannel::Tool),
-            42
-        );
-        assert_eq!(
-            parse_sse_cursor("epoch-2:tool:42", "epoch-1", RingingChannel::Tool),
-            0
-        );
-        assert_eq!(
-            parse_sse_cursor("epoch-1:conversation:7", "epoch-1", RingingChannel::Tool),
-            0
-        );
-        assert_eq!(
-            parse_sse_cursor("garbage", "epoch-1", RingingChannel::Tool),
-            0
-        );
     }
     #[test]
     fn timeline_cursor_is_separate() {
