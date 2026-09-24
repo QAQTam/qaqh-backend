@@ -30,6 +30,7 @@ async fn e2e_context7_real_server() {
         idle_shutdown_secs: 0,
         servers: BTreeMap::new(),
         import_external: false,
+        inject_resource_env_block: false,
     };
     cfg.servers.insert(
         "e2e".to_owned(),

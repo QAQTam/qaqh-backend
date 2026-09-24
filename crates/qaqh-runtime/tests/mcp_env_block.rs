@@ -145,6 +145,8 @@ fn shared_manager() -> &'static Arc<McpManager> {
     MANAGER.get_or_init(|| {
         let cfg = McpConfig {
             import_external: false,
+            // 本文件专测「注入路径」本身，因此显式打开（生产默认关闭）。
+            inject_resource_env_block: true,
             enabled: true,
             idle_shutdown_secs: 0,
             servers: BTreeMap::from([(

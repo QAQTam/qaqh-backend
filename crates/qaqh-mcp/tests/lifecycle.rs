@@ -167,6 +167,7 @@ fn mock_server_cfg() -> McpServerConfig {
 fn mock_cfg(idle_secs: u64) -> McpConfig {
     McpConfig {
         import_external: false,
+        inject_resource_env_block: false,
         enabled: true,
         idle_shutdown_secs: idle_secs,
         servers: BTreeMap::from([("mock".to_owned(), mock_server_cfg())]),
@@ -212,6 +213,7 @@ fn subprocess_cfg(tag: &str, mode: &str, idle_secs: u64) -> McpConfig {
     };
     McpConfig {
         import_external: false,
+        inject_resource_env_block: false,
         enabled: true,
         idle_shutdown_secs: idle_secs,
         servers: BTreeMap::from([(tag.to_owned(), server)]),

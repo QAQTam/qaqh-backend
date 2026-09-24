@@ -284,9 +284,18 @@ fn make_manager_named(server: Option<&str>) -> Arc<McpManager> {
 
 /// 多 server 变体（env block 封顶用例：n × 3 资源条目）。
 fn make_manager_multi(names: Vec<String>) -> Arc<McpManager> {
+    make_manager_multi_with_injection(names, false)
+}
+
+/// 显式控制资源清单注入开关（生产默认关闭；开启仅用于调试/兼容）。
+fn make_manager_multi_with_injection(
+    names: Vec<String>,
+    inject_resource_env_block: bool,
+) -> Arc<McpManager> {
     let servers: BTreeMap<_, _> = names.into_iter().map(|name| (name, server_cfg())).collect();
     let cfg = McpConfig {
         import_external: false,
+        inject_resource_env_block,
         enabled: true,
         idle_shutdown_secs: 0,
         servers,
@@ -379,6 +388,38 @@ async fn aggregate_tool_pinned_in_batch_head() {
             .collect::<Vec<_>>(),
         vec!["mcp"],
         "零 server 配置：批次只含聚合工具（enabled 即在场）"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_description_carries_configured_servers() {
+    // 替代「把资源清单注入历史」：模型从 tools 数组就能知道有哪些 server，
+    // 再按需调 list_resources。description 随 tools_hash 变化，不进历史。
+    let empty = make_manager_named(None);
+    qaqh_mcp::bridge_for_tests::mark_dirty(&empty);
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&empty).expect("batch");
+    let description = &batch[0].1.def.function.description;
+    assert!(
+        description.contains("No MCP servers are configured"),
+        "零 server 必须明说：{description}"
+    );
+    assert!(
+        description.contains("list_servers"),
+        "必须指向 list_servers：{description}"
+    );
+
+    let manager = make_manager_multi(vec!["alpha".to_owned(), "beta".to_owned()]);
+    qaqh_mcp::bridge_for_tests::mark_dirty(&manager);
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager).expect("batch");
+    let description = &batch[0].1.def.function.description;
+    assert!(description.contains("2 MCP server(s)"), "{description}");
+    assert!(
+        description.contains("alpha, beta"),
+        "BTreeMap 有序：{description}"
+    );
+    assert!(
+        description.contains("list_resources"),
+        "必须指向 list_resources：{description}"
     );
 }
 
@@ -661,9 +702,31 @@ async fn env_block_none_when_disabled_or_empty() {
     );
 }
 
+/// 生产默认：`inject_resource_env_block = false` → 即使有连接、有资源也不注入。
+///
+/// 资源清单是「环境能力」不是「对话事实」；模型按需调 `mcp list_resources`
+/// 拿到的是同一份本地缓存，且不受 20 条封顶。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn env_block_off_by_default_even_with_cached_resources() {
+    let manager = make_manager_multi(vec!["mock".to_owned()]);
+    connect_and_wait(&manager, "mock").await;
+    assert!(
+        manager
+            .connection("mock")
+            .and_then(|conn| conn.cached_resources())
+            .is_some_and(|resources| !resources.is_empty()),
+        "前置：资源已缓存"
+    );
+    assert_eq!(
+        qaqh_mcp::bridge_for_tests::resource_env_block_with(&manager),
+        None,
+        "注入默认关闭 → 有资源也不进历史"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn env_block_renders_resources_and_templates() {
-    let manager = make_manager_named(Some("mock"));
+    let manager = make_manager_multi_with_injection(vec!["mock".to_owned()], true);
     connect_and_wait(&manager, "mock").await;
     let block = qaqh_mcp::bridge_for_tests::resource_env_block_with(&manager)
         .expect("resources cached → block");
@@ -679,7 +742,7 @@ async fn env_block_renders_resources_and_templates() {
 async fn env_block_caps_at_20_entries() {
     // 15 server × 3 条（2 资源 + 1 模板）= 45 条 → 封顶 20 条 + 截断行。
     let names: Vec<String> = (0..15).map(|index| format!("srv{index:02}")).collect();
-    let manager = make_manager_multi(names.clone());
+    let manager = make_manager_multi_with_injection(names.clone(), true);
     for name in &names {
         connect_and_wait(&manager, name).await;
     }

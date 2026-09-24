@@ -153,6 +153,7 @@ fn make_manager(url: Option<String>) -> Arc<McpManager> {
     };
     let cfg = McpConfig {
         import_external: false,
+        inject_resource_env_block: false,
         enabled: true,
         idle_shutdown_secs: 0,
         servers,
@@ -241,9 +242,22 @@ async fn http_resource_read() {
     manager.get_or_connect("mock").await.expect("connect");
     wait_caches(&manager, "mock").await;
 
-    let block = qaqh_mcp::bridge_for_tests::resource_env_block_with(&manager)
-        .expect("resources cached → env block");
-    assert!(block.contains("http://fixture/greeting"), "{block}");
+    // 清单注入默认关闭，所以这里走生产查询路径证明缓存已就位。
+    let listed = aggregate(
+        &manager,
+        serde_json::json!({ "action": "list_resources", "server": "mock" }),
+    );
+    assert!(listed.is_success(), "{}", listed.model_text());
+    assert!(
+        listed.model_text().contains("http://fixture/greeting"),
+        "{}",
+        listed.model_text()
+    );
+    assert_eq!(
+        qaqh_mcp::bridge_for_tests::resource_env_block_with(&manager),
+        None,
+        "注入默认关闭：即使缓存已就位也不进历史"
+    );
 
     let result = aggregate(
         &manager,
@@ -266,6 +280,7 @@ async fn http_url_required() {
     let manager = McpManager::with_settings(
         McpConfig {
             import_external: false,
+            inject_resource_env_block: false,
             enabled: true,
             idle_shutdown_secs: 0,
             servers: BTreeMap::from([(
@@ -336,6 +351,7 @@ async fn unix_socket_round_trip() {
             enabled: true,
             idle_shutdown_secs: 0,
             import_external: false,
+            inject_resource_env_block: false,
             servers: BTreeMap::from([(
                 "mock".to_owned(),
                 McpServerConfig {
@@ -389,6 +405,7 @@ async fn unix_socket_missing_path_fails_connect() {
             enabled: true,
             idle_shutdown_secs: 0,
             import_external: false,
+            inject_resource_env_block: false,
             servers: BTreeMap::from([(
                 "mock".to_owned(),
                 McpServerConfig {
