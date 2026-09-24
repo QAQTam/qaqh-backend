@@ -49,6 +49,23 @@ pub type ClientV2Payload = qaqh_session::session_fact_v2::ProjectionPayload;
 /// 事实，本别名不改语义，只让壳层能同时命名它们。
 pub use qaqh_session::session_fact_v2::ControlDelta as ClientV2ControlDelta;
 
+/// `ClientV2ControlDelta::SubagentFinished.status`。
+pub use qaqh_session::session_fact_v2::SubagentTerminalStatus as ClientV2SubagentTerminalStatus;
+
+/// 会话删除原因（`MetaDelta::Deleted.reason`）。
+pub use qaqh_session::session_fact_v2::DeleteReason as ClientV2DeleteReason;
+/// 会话回合 id（`ConversationDelta::TurnStarted.turn_id` 等）。
+pub use qaqh_session::session_fact_v2::TurnId as ClientV2TurnId;
+/// 回合终态（`ConversationDelta::TurnFinished.terminal`）。
+pub use qaqh_session::session_fact_v2::TurnTerminal as ClientV2TurnTerminal;
+
+/// `ClientV2Payload::ConversationDelta` 的载荷。
+pub use qaqh_session::session_fact_v2::ConversationDelta as ClientV2ConversationDelta;
+/// `ClientV2Payload::MetaDelta` 的载荷。
+pub use qaqh_session::session_fact_v2::MetaDelta as ClientV2MetaDelta;
+/// `ClientV2Payload::ResourceDelta` 的载荷。
+pub use qaqh_session::session_fact_v2::ResourceDelta as ClientV2ResourceDelta;
+
 /// `ClientV2ControlDelta::InteractionRequested.kind` 的类型。
 pub use qaqh_session::session_fact_v2::InteractionKind as ClientV2DeltaInteractionKind;
 

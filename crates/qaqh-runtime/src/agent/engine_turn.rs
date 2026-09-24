@@ -653,7 +653,10 @@ impl TurnEngine {
             return Outcome::Handled;
         };
         if saved.reason != YieldReason::PermissionPending
-            || !saved.pending_permission_ids.iter().any(|id| id == call_id)
+            || !saved
+                .pending_permission_ids
+                .iter()
+                .any(|id| crate::agent::tool_runtime::permission_id_matches(id, call_id))
         {
             log::warn!("[TURN] stale permission resolution ignored: {call_id}");
             return Outcome::Handled;
@@ -672,7 +675,9 @@ impl TurnEngine {
         if let Some(admitted) = admitted {
             saved.deferred_authorized.push(admitted);
         }
-        saved.pending_permission_ids.retain(|id| id != call_id);
+        saved
+            .pending_permission_ids
+            .retain(|id| !crate::agent::tool_runtime::permission_id_matches(id, call_id));
         if !saved.pending_permission_ids.is_empty() {
             return Outcome::YieldToUser {
                 turn_id: saved.turn_id.clone(),

@@ -1,5 +1,5 @@
-//! High-level Ringing V1 client: discovery + open + three SSE channels + lease
-//! renewal + commands/service-rpc/bootstrap/stop.
+//! High-level Ringing client: discovery + v2 open + per-seed canonical event
+//! stream + lease renewal + commands/service-rpc/bootstrap/stop.
 //!
 //! The client owns a global tokio runtime and runs all transport tasks in the
 //! background; the shell receives events through callbacks (which must marshal
@@ -18,19 +18,26 @@ use crate::discovery::{DaemonDiscovery, DiscoveryExt, read_discovery};
 use crate::endpoint::{ActionRequest, QueryRequest};
 use crate::error::{ClientError, Result};
 use crate::session::{RingingSession, SessionState};
-use crate::sse::{ChannelStream, StreamHandlers};
 use crate::timeline::TimelineStream;
 use crate::types::{
-    CHANNELS, Channel, ChannelStatus, CommandOptions, ContentRef, EventBatch, RingingCommand,
-    RingingCommandAck, RingingCommandAckStatus, TimelineEntry, TimelinePage, TimelineStatus,
+    CommandOptions, ContentRef, RingingCommand, RingingCommandAck, RingingCommandAckStatus,
+    TimelineEntry, TimelinePage, TimelineStatus,
 };
+use crate::v2_stream::{V2Stream, V2StreamHandlers};
 
 /// Callbacks delivered on the client's background tasks.
 #[derive(Clone)]
 pub struct ClientHandlers {
-    pub on_batch: std::sync::Arc<dyn Fn(EventBatch) + Send + Sync>,
-    pub on_status: std::sync::Arc<dyn Fn(Channel, ChannelStatus) + Send + Sync>,
-    pub on_reset: Option<std::sync::Arc<dyn Fn(crate::types::ResetRequired) + Send + Sync>>,
+    /// Per-seed canonical v2 event (`GET /ringing/v2/sessions/{seed}/events`).
+    ///
+    /// 2026-09-24 硬切：v1 的三条 `events/{channel}` 全局流已删除，投影事件只从
+    /// 这条单流来；`(seed, event)` 由调用方按 seed 分派。
+    pub on_v2_event: std::sync::Arc<dyn Fn(String, crate::v2::ClientV2Event) + Send + Sync>,
+    /// v2 `ResetRequired`：服务端发完即断流，调用方应重新 bootstrap 再订阅。
+    pub on_v2_reset: std::sync::Arc<dyn Fn(String, crate::v2::ClientV2Reset) + Send + Sync>,
+    /// v2 单流状态迁移（每 seed 一条）。
+    pub on_v2_status:
+        std::sync::Arc<dyn Fn(String, crate::v2_stream::V2StreamStatus) + Send + Sync>,
     /// Per-session timeline entry (seed, entry).
     pub on_timeline_entry: std::sync::Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
     pub on_timeline_status: std::sync::Arc<dyn Fn(TimelineStatus) + Send + Sync>,
@@ -78,9 +85,9 @@ pub struct ClientOptions {
 impl Default for ClientHandlers {
     fn default() -> Self {
         Self {
-            on_batch: std::sync::Arc::new(|_| {}),
-            on_status: std::sync::Arc::new(|_, _| {}),
-            on_reset: None,
+            on_v2_event: std::sync::Arc::new(|_, _| {}),
+            on_v2_reset: std::sync::Arc::new(|_, _| {}),
+            on_v2_status: std::sync::Arc::new(|_, _| {}),
             on_timeline_entry: std::sync::Arc::new(|_, _| {}),
             on_timeline_status: std::sync::Arc::new(|_| {}),
             on_timeline_snapshot: std::sync::Arc::new(|_| {}),
@@ -131,6 +138,9 @@ pub(crate) struct ClientInner {
     /// timeline streams. A single slot would silently stop another session's
     /// stream mid-turn.
     timeline: Mutex<HashMap<String, TimelineHandle>>,
+    /// Active per-seed canonical v2 event streams (started with the timeline,
+    /// stopped on `deactivate_timeline`).
+    v2_streams: Mutex<HashMap<String, V2StreamHandle>>,
     /// Seeds this client has attached (BUG-2026-09-12-10): replayed after a
     /// lease re-negotiation so seed-scoped reads do not 401 with the new
     /// client_session_id.
@@ -141,6 +151,11 @@ pub(crate) struct ClientInner {
 struct TimelineHandle {
     stop_tx: watch::Sender<bool>,
     status: watch::Sender<Option<TimelineStatus>>,
+}
+
+/// Bookkeeping for the currently activated v2 single stream.
+struct V2StreamHandle {
+    stop_tx: watch::Sender<bool>,
 }
 
 impl Client {
@@ -224,6 +239,7 @@ impl Client {
                 stop_tx,
                 tasks,
                 timeline: Mutex::new(HashMap::new()),
+                v2_streams: Mutex::new(HashMap::new()),
                 attached_seeds: Mutex::new(HashSet::new()),
             }),
         };
@@ -273,29 +289,9 @@ impl Client {
         };
         client.push_task(replay).await;
 
-        // Three SSE channels.
-        for channel in CHANNELS {
-            let stream = ChannelStream::new(
-                channel,
-                http.clone(),
-                StreamHandlers {
-                    on_batch: options.handlers.on_batch.clone(),
-                    on_status: {
-                        let cb = options.handlers.on_status.clone();
-                        std::sync::Arc::new(move |status| cb(channel, status))
-                    },
-                    on_reset: options.handlers.on_reset.clone(),
-                    on_liveness: options.handlers.on_liveness.clone(),
-                },
-                session.clone(),
-            );
-            let stop = stop_rx.clone();
-            let task = tokio::spawn(async move {
-                let mut stream = stream;
-                stream.run(stop).await;
-            });
-            client.push_task(task).await;
-        }
+        // 2026-09-24 硬切：v1 的三条全局 `events/{channel}` 流已删除。投影事件改由
+        // 每 seed 一条的 canonical v2 单流承载，随 `activate_timeline` 起、随
+        // `deactivate_timeline` 停（见 [`Self::activate_timeline`]）。
 
         Ok(client)
     }
@@ -587,7 +583,32 @@ impl Client {
         // caller and pushed as a snapshot event so listeners rebuild the
         // transcript immediately.
         (self.inner.handlers.on_timeline_snapshot)(page.clone());
+        // 同一时刻起 canonical v2 单流：投影事件（control/conversation/meta/…）
+        // 只从它来，v1 三频道流已删除。
+        self.start_v2_stream(seed).await;
         Ok(page)
+    }
+
+    /// 启动（或替换）一条 seed 的 canonical v2 单流。`activate_timeline` 调用。
+    async fn start_v2_stream(&self, seed: &str) {
+        let mut guard = self.inner.v2_streams.lock().await;
+        if let Some(prev) = guard.remove(seed) {
+            let _ = prev.stop_tx.send(true);
+        }
+        let handlers = V2StreamHandlers {
+            on_event: self.inner.handlers.on_v2_event.clone(),
+            on_reset: self.inner.handlers.on_v2_reset.clone(),
+            on_status: self.inner.handlers.on_v2_status.clone(),
+            on_liveness: self.inner.handlers.on_liveness.clone(),
+        };
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let mut stream = V2Stream::new(seed.to_string(), self.clone(), handlers);
+        let session_stop = self.inner.stop_tx.subscribe();
+        let task = tokio::spawn(async move {
+            stream.run(stop_rx, session_stop).await;
+        });
+        self.push_task(task).await;
+        guard.insert(seed.to_string(), V2StreamHandle { stop_tx });
     }
 
     /// Stop the timeline stream for one seed (no-op when not active). The other
@@ -600,6 +621,9 @@ impl Client {
                 seed: seed.to_string(),
                 reason: "deactivated".into(),
             }));
+        }
+        if let Some(handle) = self.inner.v2_streams.lock().await.remove(seed) {
+            let _ = handle.stop_tx.send(true);
         }
     }
 
@@ -630,7 +654,31 @@ impl Client {
     /// v2 端点**不带 seed**：服务端按 content_id 取到条目后，用条目自己的
     /// `seed` 校验调用方归属（调用方可能同时 attach 多个 seed）。
     pub async fn download_content(&self, reference: &ContentRef) -> Result<Vec<u8>> {
-        let path = format!("/ringing/v2/content/{}", reference.content_id);
+        let bytes = self.download_content_by_id(&reference.content_id).await?;
+        let digest = {
+            use sha2::Digest;
+            let hash = sha2::Sha256::digest(&bytes);
+            hash.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        if !digest.eq_ignore_ascii_case(&reference.sha256) {
+            return Err(ClientError::Protocol(format!(
+                "content digest mismatch for {}: expected {}, received {digest}",
+                reference.content_id, reference.sha256
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// `GET /ringing/v2/content/{content_id}` by raw canonical id
+    /// (`sha256:<hex>` 或裸 hex)，**不做** digest 校验。
+    ///
+    /// v2 投影里的 `ContentValue::Ref` 携带的是 session crate 的
+    /// `ContentRef(ContentHash)`，与 `qaqh-types` 的 [`ContentRef`] 不是同一个
+    /// 类型；壳层拿到投影 ref 时用本入口直取。
+    pub async fn download_content_by_id(&self, content_id: &str) -> Result<Vec<u8>> {
+        let path = format!("/ringing/v2/content/{content_id}");
         let session_id = self.session_id_header().await?;
         let response = self
             .inner
@@ -646,21 +694,7 @@ impl Client {
                 path,
             });
         }
-        let bytes = response.bytes().await?.to_vec();
-        let digest = {
-            use sha2::Digest;
-            let hash = sha2::Sha256::digest(&bytes);
-            hash.iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        };
-        if !digest.eq_ignore_ascii_case(&reference.sha256) {
-            return Err(ClientError::Protocol(format!(
-                "content digest mismatch for {}: expected {}, received {digest}",
-                reference.content_id, reference.sha256
-            )));
-        }
-        Ok(bytes)
+        Ok(response.bytes().await?.to_vec())
     }
 
     /// `POST /ringing/v2/content` — upload a local attachment as a session

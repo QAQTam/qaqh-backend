@@ -4,8 +4,6 @@
 mod axum_impl;
 
 pub(crate) use axum_impl::reclaim_dead_driver_seats;
-#[cfg(test)]
-pub(crate) use axum_impl::test_hooks::SseTerminateScope;
 pub(crate) use axum_impl::test_hooks::TestHooks;
 pub use axum_impl::{AppState, build_router};
 
@@ -26,7 +24,6 @@ mod sse_tests {
     //! SSE 终止帧路径回归（BUG-2026-09-12-11 遗留 / issue #35）。
     //!
     //! 覆盖真实 handler 路径（`build_router` →
-    //! `/ringing/v1/events/{channel}` 与
     //! `/ringing/v2/sessions/{seed}/timeline/events`）：
     //! 慢消费者 `Lagged` → `ringing.stream_terminated` 终止帧 → 关流，
     //! 且终止后新订阅仍能正常收流。
@@ -96,28 +93,6 @@ mod sse_tests {
         }
     }
 
-    /// 打开一条真实 channel SSE：返回 (状态, 事件流)。
-    async fn open_channel_sse(
-        app: Router,
-    ) -> (
-        StatusCode,
-        std::pin::Pin<
-            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
-        >,
-    ) {
-        let req = Request::builder()
-            .uri("/ringing/v1/events/conversation")
-            .header("authorization", format!("Bearer {TOKEN}"))
-            .header("x-qaqh-client-session-id", SESSION)
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        let status = resp.status();
-        let stream = axum::body::Body::into_data_stream(resp.into_body());
-        (status, Box::pin(stream))
-    }
-
-    /// 从 SSE 字节流里取下一个 `event:`/`data:` 帧（超时返回 `None`）。
     async fn next_sse_frame(
         stream: &mut std::pin::Pin<
             Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
@@ -202,180 +177,6 @@ mod sse_tests {
         } else {
             Some((event, data))
         }
-    }
-
-    /// ① channel 流：慢消费者 → `ringing.stream_terminated` → 关流。
-    ///
-    /// 装置（确定性，不靠"真的慢"）：tokio broadcast 的语义是——
-    ///  - 在 Sender **有积压历史之后**才 subscribe 的 receiver，看不到历史
-    ///    （本测试与 tokio 实测一致：late subscriber 得到 `Empty`）；
-    ///  - 而在灌满之前就存在的 receiver，若一直不排空，其**下一次** `recv()`
-    ///    必然 `Lagged(capacity 之外的条数)`（环零保留）。
-    ///
-    /// 因此这里必须让 receiver **先于**溢出存在：handler 的
-    /// `hub.subscribe(channel)` 只发生在请求进来之后，所以顺序是
-    /// ① 起 handler 建立订阅 → ② 用 `channel_live_sender` 直接灌
-    /// `capacity + 1` 条，把 handler 那个 receiver 挤出环 → ③ handler 的
-    /// `recv()` 返回 `Lagged`，走终止帧分支。
-    #[tokio::test]
-    async fn channel_stream_lagged_sends_termination_frame_then_closes() {
-        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
-        let state = test_state_with_hub(hub.clone());
-        let app = build_router(state);
-        let (status, mut stream) = open_channel_sse(app).await;
-        assert_eq!(status, StatusCode::OK);
-
-        // handler 的 receiver 已存在（`subscribe()` 在进入 SSE 流前完成）。
-        let capacity =
-            qaqh_runtime::RingingHub::live_capacity(qaqh_domain::RingingChannel::Conversation);
-        hub.overflow_channel_live(
-            qaqh_domain::RingingChannel::Conversation,
-            SEED,
-            1,
-            capacity as u64 + 1,
-        );
-
-        let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
-            .await
-            .expect("termination frame must arrive");
-        assert_eq!(event, "ringing.stream_terminated");
-        let v: serde_json::Value = serde_json::from_str(&data).expect("valid json payload");
-        assert_eq!(v["code"], "lagged");
-        assert_eq!(v["channel"], "conversation");
-        assert!(
-            v["skipped"].as_u64().unwrap_or(0) > 0,
-            "payload must carry the skipped count: {data}"
-        );
-
-        // 终止帧是**最后一帧**：发完即关流，不再有任何数据帧。
-        let tail = next_sse_frame(&mut stream, Duration::from_millis(300)).await;
-        assert!(
-            tail.is_none(),
-            "no frame may follow the termination frame: {tail:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn injected_stream_termination_has_stable_wire_shape_and_is_one_shot() {
-        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
-        let mut state = test_state_with_hub(hub.clone());
-        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_sse_terminate(
-            "lagged",
-            SseTerminateScope::Channel,
-            Some(qaqh_domain::RingingChannel::Conversation),
-        ));
-
-        let (status, mut first) = open_channel_sse(build_router(state)).await;
-        assert_eq!(status, StatusCode::OK);
-        let (event, data) = next_sse_frame(&mut first, Duration::from_secs(5))
-            .await
-            .expect("injected termination frame must arrive");
-        assert_eq!(event, "ringing.stream_terminated");
-        let value: serde_json::Value = serde_json::from_str(&data).expect("valid json payload");
-        assert_eq!(value["code"], "lagged");
-        assert_eq!(value["channel"], "conversation");
-        assert_eq!(value["skipped"], 7);
-        assert!(
-            next_sse_frame(&mut first, Duration::from_millis(300))
-                .await
-                .is_none(),
-            "injected termination must close the stream"
-        );
-
-        let state = test_state_with_hub(hub.clone());
-        let (_, mut second) = open_channel_sse(build_router(state)).await;
-        hub.publish(
-            SEED,
-            qaqh_domain::DomainEvent::Conversation(
-                qaqh_domain::ConversationEvent::ConversationCancelled {
-                    turn_id: Some("t-after-injection".into()),
-                },
-            ),
-        );
-        let (event, data) = next_sse_frame(&mut second, Duration::from_secs(5))
-            .await
-            .expect("second stream must receive normal live traffic");
-        assert_ne!(event, "ringing.stream_terminated", "{data}");
-        assert_eq!(event, "conversation_cancelled");
-    }
-
-    /// `Scope::Any` 同时匹配 channel 与 timeline 两条流，但 token 仍然只能被消费
-    /// 一次：第一条流拿到终止帧后，第二条流必须收到正常数据。
-    #[tokio::test]
-    async fn injected_stream_termination_any_scope_is_one_shot_across_stream_kinds() {
-        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
-        let mut state = test_state_with_hub(hub.clone());
-        state.test_hooks = std::sync::Arc::new(TestHooks::for_test_sse_terminate(
-            "lagged",
-            SseTerminateScope::Any,
-            None,
-        ));
-        let app = build_router(state);
-
-        let (status, mut channel_stream) = open_channel_sse(app.clone()).await;
-        assert_eq!(status, StatusCode::OK);
-        let (event, _) = next_sse_frame(&mut channel_stream, Duration::from_secs(5))
-            .await
-            .expect("channel stream must get the injected termination frame");
-        assert_eq!(event, "ringing.stream_terminated");
-
-        let (status, mut timeline_stream) = open_timeline_sse(app).await;
-        assert_eq!(status, StatusCode::OK);
-        hub.publish_timeline(
-            SEED,
-            qaqh_domain::TimelineIntent::TurnOpened {
-                turn_id: "t-any-scope".into(),
-                user_text: "must not be terminated".into(),
-            },
-        )
-        .expect("publish timeline intent");
-        let (event, data) = next_sse_frame(&mut timeline_stream, Duration::from_secs(5))
-            .await
-            .expect("timeline stream must still receive normal traffic");
-        assert_ne!(
-            event, "ringing.stream_terminated",
-            "the one-shot token must not be consumable once per stream kind: {data}"
-        );
-        assert_eq!(event, "timeline.entry");
-    }
-
-    /// ② 终止后新订阅仍能正常收流（重连重定基不被破坏）。
-    ///
-    /// 客户端收到终止帧后的既定动作是**带 Last-Event-ID 重连**（新 SSE，
-    /// 新 receiver）。这里断言终止帧没有把 hub 打坏：终止之后起的第二条
-    /// SSE 依然能收到 live 事件。
-    #[tokio::test]
-    async fn a_new_subscription_still_receives_after_termination() {
-        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
-        let capacity =
-            qaqh_runtime::RingingHub::live_capacity(qaqh_domain::RingingChannel::Conversation);
-
-        // 第一条流：被挤爆 → 终止帧。
-        let state = test_state_with_hub(hub.clone());
-        let (_, mut first) = open_channel_sse(build_router(state)).await;
-        hub.overflow_channel_live(
-            qaqh_domain::RingingChannel::Conversation,
-            SEED,
-            1,
-            capacity as u64 + 1,
-        );
-        let (event, _) = next_sse_frame(&mut first, Duration::from_secs(5))
-            .await
-            .expect("first stream must terminate");
-        assert_eq!(event, "ringing.stream_terminated");
-
-        // 第二条流：新订阅，必须还能收到 live 事件。
-        let state = test_state_with_hub(hub.clone());
-        let (_, mut second) = open_channel_sse(build_router(state)).await;
-        hub.overflow_channel_live(qaqh_domain::RingingChannel::Conversation, SEED, 10_000, 1);
-        let (event, data) = next_sse_frame(&mut second, Duration::from_secs(5))
-            .await
-            .expect("a fresh subscription must still receive live events");
-        assert_ne!(
-            event, "ringing.stream_terminated",
-            "a fresh stream must not be terminated by the previous overflow: {data}"
-        );
-        assert_eq!(event, "conversation_cancelled");
     }
 
     /// ③ timeline 流：慢消费者 → `ringing.stream_terminated`(seed) → 关流。
@@ -769,6 +570,27 @@ mod axum_tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 纯 v2：v1 三频道 SSE 已硬切，投影事件只剩每 seed 一条的 v2 单流。
+    #[tokio::test]
+    async fn events_v1_route_is_hard_cut() {
+        let state = test_state();
+        let app = build_router(state);
+        for uri in [
+            "/ringing/v1/events/tool",
+            "/ringing/v1/events/conversation",
+            "/ringing/v1/events/control",
+        ] {
+            let req = Request::builder()
+                .uri(uri)
+                .header("authorization", "Bearer test-token")
+                .header("x-qaqh-client-session-id", "cs-1")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "uri={uri}");
+        }
     }
 
     #[tokio::test]
@@ -2074,84 +1896,6 @@ mod axum_tests {
             assert_eq!(first[0]["interaction_id"], interaction_id.as_str());
             assert_eq!(first[0]["kind"], expected_kind);
         }
-    }
-
-    #[tokio::test]
-    async fn events_requires_auth() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/ringing/v1/events/tool")
-            .header("x-qaqh-client-session-id", "cs-1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn events_requires_lease() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .uri("/ringing/v1/events/tool")
-            .header("authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn events_unknown_channel() {
-        let state = test_state();
-        state
-            .leases
-            .lock()
-            .unwrap()
-            .open("cs-1".into(), "ci-1".into());
-        let app = build_router(state);
-        let req = Request::builder()
-            .uri("/ringing/v1/events/bogus")
-            .header("authorization", "Bearer test-token")
-            .header("x-qaqh-client-session-id", "cs-1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn events_success() {
-        let state = test_state();
-        state
-            .leases
-            .lock()
-            .unwrap()
-            .open("cs-1".into(), "ci-1".into());
-        state.leases.lock().unwrap().attach_seed("cs-1", "seed-1");
-        // publish an event for replay check (but new connection without cursor skips replay per design)
-        let _ = state.hub.publish(
-            "seed-1",
-            qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolStarted {
-                tool_call_id: "c1".into(),
-                turn_id: "t1".into(),
-                round_num: 0,
-                name: "exec".into(),
-            }),
-        );
-        let app = build_router(state);
-        let req = Request::builder()
-            .uri("/ringing/v1/events/tool")
-            .header("authorization", "Bearer test-token")
-            .header("x-qaqh-client-session-id", "cs-1")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "text/event-stream"
-        );
-        assert_eq!(resp.headers().get("cache-control").unwrap(), "no-cache");
     }
 
     #[tokio::test]

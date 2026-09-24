@@ -1,6 +1,6 @@
 //! Ringing write-path smoke test: create/open a session, send a message,
 //! and observe the event echo — exercising command/ack/command_status and
-//! the batch event stream end to end.
+//! the canonical v2 event stream end to end.
 //!
 //! Usage (against the parallel dev daemon):
 //!   $env:QAQH_DATA_DIR = "F:\QAQ-Harness\.qaqh-test-home\.qaqh"
@@ -13,39 +13,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qaqh_client::{
-    Channel, Client, ClientHandlers, ClientOptions, CommandOptions, ControlCommand,
-    ConversationCommand, EventBatch, QueryRequest, RingingCommand,
+    Client, ClientHandlers, ClientOptions, CommandOptions, ControlCommand, ConversationCommand,
+    QueryRequest, RingingCommand,
 };
 
 fn main() {
     let handlers = ClientHandlers {
         on_liveness: std::sync::Arc::new(|| {}),
-        on_batch: Arc::new(|batch: EventBatch| {
+        on_v2_event: Arc::new(|seed, event| {
             println!(
-                "[event] batch channel={} seq={}..{} envelopes={}",
-                batch.channel.as_str(),
-                batch.from_stream_seq,
-                batch.to_stream_seq,
-                batch.envelopes.len()
+                "[event] seed={seed} id={} delivery={:?}",
+                event.event_id, event.delivery
             );
-            for env in &batch.envelopes {
-                if let Ok(v) = serde_json::to_value(env) {
-                    let kind = v
-                        .get("event")
-                        .and_then(|e| e.get("type"))
-                        .or_else(|| v.get("event").and_then(|e| e.get("kind")))
-                        .and_then(|k| k.as_str())
-                        .unwrap_or("?");
-                    println!("[event]   envelope seq={} kind={kind}", env.stream_seq);
-                }
+            if let Ok(v) = serde_json::to_value(&event.payload) {
+                let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+                println!("[event]   kind={kind}");
             }
         }),
-        on_status: Arc::new(|channel: Channel, status| {
-            println!("[status] channel={} status={status:?}", channel.as_str());
+        on_v2_reset: Arc::new(|seed, reset| {
+            println!("[reset] seed={seed} reason={:?}", reset.reason);
         }),
-        on_reset: Some(Arc::new(|reset| {
-            println!("[reset] channel={} seed={}", reset.channel, reset.seed);
-        })),
+        on_v2_status: Arc::new(|seed, status| {
+            println!("[status] seed={seed} status={status:?}");
+        }),
         ..Default::default()
     };
 
