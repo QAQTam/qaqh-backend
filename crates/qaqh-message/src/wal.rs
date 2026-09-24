@@ -21,12 +21,13 @@
 //!   drain. Replay is idempotent (msg_id dedupe on the archive tail), so a
 //!   crash between "applied" and "checkpointed" converges instead of
 //!   duplicating.
-//! - `SaveFull` / compact-context ops are deliberately NOT logged: they are
-//!   generation rewrites (undo / compaction). Losing one on a crash degrades
-//!   gracefully (the compaction is simply not applied; it can re-trigger),
-//!   whereas replaying appends across an applied generation rewrite would
-//!   resurrect undone turns. Keeping them out also avoids the ambiguous
-//!   "archive shorter than compact checkpoint" failure mode.
+//! - `SaveFull` is deliberately NOT logged: it is a generation rewrite
+//!   (undo / defensive repair). Losing one on a crash degrades gracefully
+//!   (the rewrite is simply not applied), whereas replaying appends across an
+//!   applied generation rewrite would resurrect undone turns.
+//! - Compaction itself is an ordinary `Append` carrying the summary message
+//!   and the new covered watermark, so it is covered by the same WAL path as
+//!   normal messages.
 //!
 //! Recovery lives in `qaqh-session` (`SessionManager::replay_message_wal`),
 //! which owns the apply mapping; this module only owns the file format.
@@ -811,6 +812,7 @@ mod tests {
             model: "m".into(),
             effort: None,
             compact_skip: 0,
+            compact_covered_through_msg_id: None,
             turn_count: 1,
         }
     }
@@ -1110,6 +1112,7 @@ mod io_fault_tests {
             model: "m".into(),
             effort: None,
             compact_skip: 0,
+            compact_covered_through_msg_id: None,
             turn_count: 1,
         }
     }

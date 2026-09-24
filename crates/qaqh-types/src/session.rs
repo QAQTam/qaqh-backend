@@ -76,6 +76,15 @@ pub struct SessionMeta {
     /// Number of earliest turns compacted (skipped in LLM context).
     #[serde(default)]
     pub compact_skip: usize,
+    /// Highest archived `msg_id` covered by the latest compaction summary.
+    ///
+    /// `messages.jsonl` remains the immutable archive. On resume the active
+    /// model view is derived as: leading system messages + the latest
+    /// `[Compacted N turns]` message + every non-summary message with
+    /// `msg_id > compact_covered_through_msg_id`. `None` means no compaction
+    /// marker has been applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_covered_through_msg_id: Option<u64>,
     /// Agent operating mode: 0=Code(默认), 1=Plan, 2=Code(旧编码兼容).
     /// Persisted so PLAN/CODE mode survives agent restart within the same session.
     #[serde(default)]
@@ -276,6 +285,7 @@ mod tests {
             turn_count: 4,
             last_summary: "最后一条回复首行".into(),
             compact_skip: 5,
+            compact_covered_through_msg_id: Some(9),
             mode: 1,
             tool_mode: "custom".into(),
             custom_tools: vec!["bash".into()],
@@ -321,6 +331,7 @@ mod tests {
             // ── SessionMeta 的持久化字段（全量，含手抄时代漏掉的那些）──
             "archived",
             "cache_reported_requests",
+            "compact_covered_through_msg_id",
             "compact_skip",
             "context_stats",
             "created_at",

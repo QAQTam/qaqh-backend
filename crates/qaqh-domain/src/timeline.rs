@@ -498,7 +498,7 @@ pub enum TimelineIntent {
 // ═══════════════════════════════════════════════════════════
 //
 // TurnData/RoundData/RoundBlock/ToolCallDef/ToolResultDef 是 resume /
-// compact-context 检查点链使用的**聚合投影**（回合聚合树 ≠ domain 事件流）。
+// 归档推导活跃视图使用的**聚合投影**（回合聚合树 ≠ domain 事件流）。
 // 原 proto 同名类型原样迁入；刻意不加 ts-rs 导出（维持零前端曝光现状）。
 // JSON/磁盘形状（含字段顺序与 skip_serializing_if）保持逐字节不变。
 

@@ -1234,7 +1234,7 @@ fn block_mut<'a>(
 
 // `materialize_timeline_from_journal` / `apply_journal_entry` / `block_mut_replay`
 // 已随 timeline-journal 一并移除（2026-09-10）。重建投影现由
-// `ringing::timeline_rebuild` 从 messages.jsonl / compact-context 完成。
+// `ringing::timeline_rebuild` 从 messages.jsonl 归档完成。
 
 #[cfg(test)]
 mod tests {
