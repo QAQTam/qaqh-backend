@@ -277,6 +277,19 @@ pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> T
             exit_code: *exit_code,
             truncated: *truncated,
         }),
+        sdk::ToolBody::Streams {
+            stdout,
+            stderr,
+            exit_code,
+            truncated,
+            interleaved,
+        } => Some(TimelineToolBody::Streams {
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
+            exit_code: *exit_code,
+            truncated: *truncated,
+            interleaved: *interleaved,
+        }),
         sdk::ToolBody::Subagent { name, seed } => Some(TimelineToolBody::Subagent {
             name: name.clone(),
             seed: seed.clone(),
@@ -2231,6 +2244,35 @@ mod display_mapping_tests {
         );
         assert_eq!(outcome.exit_code, Some(0));
         assert_eq!(outcome.duration_ms, Some(12));
+    }
+
+    #[test]
+    fn wire_display_maps_separated_streams() {
+        use qaqh_workspace::tool_api as sdk;
+
+        let display = sdk::ToolDisplay::new(
+            sdk::ToolHeader::Shell {
+                command: "sh -c 'echo out; echo err >&2'".into(),
+            },
+            sdk::ToolBody::Streams {
+                stdout: "out\n".into(),
+                stderr: "err\n".into(),
+                exit_code: Some(1),
+                truncated: false,
+                interleaved: false,
+            },
+        );
+        let wire = wire_display(&display);
+        assert!(matches!(
+            wire.body,
+            Some(TimelineToolBody::Streams {
+                stdout,
+                stderr,
+                exit_code: Some(1),
+                interleaved: false,
+                ..
+            }) if stdout == "out\n" && stderr == "err\n"
+        ));
     }
 
     #[test]

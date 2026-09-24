@@ -405,9 +405,12 @@ mod tests {
                 header: Some(qaqh_types::ToolResultDisplayHeader::Other {
                     label: "canonical".into(),
                 }),
-                body: Some(qaqh_types::ToolResultDisplayBody::Text {
-                    text: "canonical body".into(),
+                body: Some(qaqh_types::ToolResultDisplayBody::Streams {
+                    stdout: "canonical stdout".into(),
+                    stderr: "canonical stderr".into(),
+                    exit_code: Some(0),
                     truncated: false,
+                    interleaved: false,
                 }),
                 outcome: Some(qaqh_types::ToolResultDisplayOutcome {
                     state: qaqh_types::ToolResultDisplayOutcomeState::Succeeded,
@@ -430,7 +433,11 @@ mod tests {
         ));
         assert!(matches!(
             display.body,
-            Some(qaqh_domain::TimelineToolBody::Text { .. })
+            Some(qaqh_domain::TimelineToolBody::Streams {
+                ref stdout,
+                ref stderr,
+                ..
+            }) if stdout == "canonical stdout" && stderr == "canonical stderr"
         ));
         let outcome = display
             .outcome

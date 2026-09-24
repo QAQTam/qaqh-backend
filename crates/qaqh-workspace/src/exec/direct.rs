@@ -104,6 +104,8 @@ fn direct_exec_inner(
                     command: display_name,
                     exit_code: Some(-1),
                     output: format!("SANDBOX PREPARE FAILED: {error}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
                     truncated: false,
                     timed_out: false,
                     cancelled: false,
@@ -153,6 +155,8 @@ fn direct_exec_inner(
                 command: display_name,
                 exit_code: Some(-1),
                 output: format!("SPAWN FAILED: {e}"),
+                stdout: String::new(),
+                stderr: String::new(),
                 truncated: false,
                 timed_out: false,
                 cancelled: false,
@@ -174,6 +178,8 @@ fn direct_exec_inner(
                 command: display_name,
                 exit_code: Some(-1),
                 output: format!("SANDBOX REQUEST FAILED: {error}"),
+                stdout: String::new(),
+                stderr: String::new(),
                 truncated: false,
                 timed_out: false,
                 cancelled: false,
@@ -328,6 +334,8 @@ fn direct_exec_inner(
                 "info": info,
             })
             .to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
             truncated: false,
             timed_out: true,
             cancelled: false,
@@ -419,6 +427,8 @@ fn direct_exec_inner(
         command: display_name,
         exit_code,
         output: output_str,
+        stdout: strip_ansi(&stdout_out),
+        stderr: strip_ansi(&stderr_out),
         truncated,
         timed_out,
         cancelled,
@@ -437,6 +447,12 @@ pub struct ExecOutput {
     pub(crate) exit_code: Option<i32>,
     #[serde(default)]
     pub(crate) output: String,
+    /// v2 display-only streams. `#[serde(skip)]` keeps them out of model JSON;
+    /// they are populated by the direct executor and consumed by `display()`.
+    #[serde(skip)]
+    pub(crate) stdout: String,
+    #[serde(skip)]
+    pub(crate) stderr: String,
     #[serde(default)]
     pub(crate) truncated: bool,
     #[serde(default)]

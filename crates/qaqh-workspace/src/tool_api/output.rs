@@ -292,6 +292,11 @@ fn body_terminal_fields(body: &ToolBody) -> (Option<i32>, Option<bool>) {
             exit_code,
             truncated,
             ..
+        }
+        | ToolBody::Streams {
+            exit_code,
+            truncated,
+            ..
         } => (*exit_code, Some(*truncated)),
         ToolBody::Text { truncated, .. } => (None, Some(*truncated)),
         _ => (None, None),
@@ -344,6 +349,19 @@ fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
                 output: output.clone(),
                 exit_code: *exit_code,
                 truncated: *truncated,
+            }),
+            ToolBody::Streams {
+                stdout,
+                stderr,
+                exit_code,
+                truncated,
+                interleaved,
+            } => Some(ToolResultDisplayBody::Streams {
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+                exit_code: *exit_code,
+                truncated: *truncated,
+                interleaved: *interleaved,
             }),
             ToolBody::Subagent { name, seed } => Some(ToolResultDisplayBody::Subagent {
                 name: name.clone(),
@@ -419,10 +437,24 @@ pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
                 exit_code: *exit_code,
                 truncated: *truncated,
             },
+            Some(ToolResultDisplayBody::Streams {
+                stdout,
+                stderr,
+                exit_code,
+                truncated,
+                interleaved,
+            }) => ToolBody::Streams {
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+                exit_code: *exit_code,
+                truncated: *truncated,
+                interleaved: *interleaved,
+            },
             Some(ToolResultDisplayBody::Subagent { name, seed }) => ToolBody::Subagent {
                 name: name.clone(),
                 seed: seed.clone(),
             },
+            Some(ToolResultDisplayBody::Unknown) => ToolBody::None,
         },
         metrics: ToolMetrics::default(),
         outcome: display.outcome.as_ref().map(from_wire_outcome),
@@ -584,6 +616,34 @@ mod tests {
         assert_eq!(restored.state, ToolResultDisplayOutcomeState::Succeeded);
         assert_eq!(restored.exit_code, Some(0));
         assert_eq!(restored.duration_ms, Some(5));
+    }
+
+    #[test]
+    fn streams_body_roundtrips_through_wire() {
+        let display = ToolDisplay::new(
+            ToolHeader::Shell {
+                command: "sh -c 'echo out; echo err >&2'".into(),
+            },
+            ToolBody::Streams {
+                stdout: "out\n".into(),
+                stderr: "err\n".into(),
+                exit_code: Some(1),
+                truncated: false,
+                interleaved: false,
+            },
+        );
+        let wire = to_wire_display(&display);
+        assert!(matches!(
+            wire.body,
+            Some(ToolResultDisplayBody::Streams {
+                ref stdout,
+                ref stderr,
+                exit_code: Some(1),
+                interleaved: false,
+                ..
+            }) if stdout == "out\n" && stderr == "err\n"
+        ));
+        assert_eq!(from_wire_display(&wire).body, display.body);
     }
 
     #[test]
