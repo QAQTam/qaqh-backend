@@ -97,6 +97,7 @@ pub(crate) async fn handle_open_v2(
             timeline: true,
             service: true,
             content: true,
+            single_stream: true,
         },
     };
     json_response(StatusCode::OK, &response)
@@ -247,10 +248,14 @@ pub(crate) async fn handle_bootstrap_v2(
     json_response(StatusCode::OK, &response)
 }
 
+/// 每 seed 一条 SSE（2026-09-24 冻结修订）。
+///
+/// 事件带 `stream_key`，客户端自行 demux；per-channel 的 `events/{channel}`
+/// 已硬切删除。reset 在单流上只发一次。
 pub(crate) async fn handle_events_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((seed, channel)): Path<(String, String)>,
+    Path(seed): Path<String>,
     Query(query): Query<V2EventsQuery>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
@@ -259,13 +264,6 @@ pub(crate) async fn handle_events_v2(
     if require_v2_lease(&state, &headers).is_none() {
         return lease_required_v2();
     }
-    let Some(channel) = parse_channel(&channel) else {
-        return api_error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_channel",
-            "invalid channel",
-        );
-    };
     if seed.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
@@ -274,14 +272,10 @@ pub(crate) async fn handle_events_v2(
         .as_deref()
         .map(qaqh_ringing::CursorToken::from_opaque);
     let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
-    let mut subscription =
-        match state
-            .v2_hub
-            .subscribe(&session_dir, &seed, channel, cursor.as_ref())
-        {
-            Ok(subscription) => subscription,
-            Err(error) => return v2_hub_error_response(error),
-        };
+    let mut subscription = match state.v2_hub.subscribe(&session_dir, &seed, cursor.as_ref()) {
+        Ok(subscription) => subscription,
+        Err(error) => return v2_hub_error_response(error),
+    };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     tokio::spawn(async move {
