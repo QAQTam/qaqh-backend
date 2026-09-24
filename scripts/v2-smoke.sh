@@ -2,12 +2,15 @@
 # Ringing v2 real-machine smoke test.
 #
 # Builds the daemon, runs it against an isolated data root, seeds a canonical
-# session with a resolved ask interaction, and probes the v2 surface over a
-# real HTTP socket:
+# session with resolved ask/permission/plan interactions, and probes the v2
+# surface over a real HTTP socket:
 #
 #   open -> bootstrap -> driver claim/busy -> not_driver gate
-#        -> first-answer-wins typed verdict -> command replay
-#        -> command status -> SSE subscribe
+#        -> first-answer-wins typed verdict (ask/permission/plan)
+#        -> reliable reconnect (driver_changed replay)
+#        -> command replay -> command status -> SSE subscribe
+#        -> driver release / lease reclaim / restart reclaim
+#        -> snapshot_missing
 #
 # Usage: scripts/v2-smoke.sh [data-root]
 # The data root must end in `qaqh` (daemon safety rule); default
@@ -110,9 +113,12 @@ say "session=$SEED"
 # The actor can only resume a daemon-created session (meta + message store), so
 # the canonical log is seeded *into* it rather than into a bare directory.
 cargo run -q -p qaqh-session --example e2e_seed -- "$DATA/sessions/$SEED" --resolved \
-    > "$DATA/../interaction.txt"
-INTERACTION="$(cat "$DATA/../interaction.txt")"
-say "seeded canonical log + resolved interaction $INTERACTION"
+    > "$DATA/../interactions.json"
+INTERACTIONS="$(cat "$DATA/../interactions.json")"
+ASK_ID="$(printf '%s' "$INTERACTIONS" | json_get "['ask']['interaction_id']")"
+PERMISSION_CALL="$(printf '%s' "$INTERACTIONS" | json_get "['permission']['call_id']")"
+PLAN_ID="$(printf '%s' "$INTERACTIONS" | json_get "['plan']['interaction_id']")"
+say "seeded canonical log + resolved ask/permission/plan interactions"
 
 say "== bootstrap =="
 BOOTSTRAP="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
@@ -121,6 +127,7 @@ BOOTSTRAP="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
 [ "$(printf '%s' "$BOOTSTRAP" | json_get "['seed']")" = "$SEED" ] || fail "bootstrap seed"
 [ "$(printf '%s' "$BOOTSTRAP" | json_get "['control']['state']['driver']['can_claim']")" = "True" ] \
     || fail "driver can_claim before claim"
+CURSOR="$(printf '%s' "$BOOTSTRAP" | json_get "['snapshot_cursor']")"
 
 say "== driver claim / busy =="
 CLAIM_A="$(driver "$A" claim)"
@@ -133,6 +140,16 @@ wait_driver "$A" 1 "$A"
 CLAIM_B="$(driver "$B" claim)"
 [ "$(printf '%s' "$CLAIM_B" | json_get "['reason']")" = "driver_busy" ] || fail "claim b busy"
 
+say "== reliable reconnect replays driver handover =="
+# `CURSOR` was taken before the claim, so the canonical DriverChanged fact must
+# come back as a reliable control event on reconnect.
+HANDOVER="$(curl -sS -N --max-time 3 \
+    "$ENDPOINT/ringing/v2/sessions/$SEED/events/control?since_cursor=$CURSOR" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null | head -c 8192 || true)"
+printf '%s' "$HANDOVER" | grep -q "event: ringing.event" || fail "reliable replay event name"
+printf '%s' "$HANDOVER" | grep -q '"delivery":"reliable"' || fail "reliable replay delivery"
+printf '%s' "$HANDOVER" | grep -q '"kind":"driver_changed"' || fail "driver_changed replay payload"
+
 say "== not_driver gate =="
 GATED="$(command "$B" conversation \
     "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"conversation\",\"command_id\":\"smoke-b-cancel\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"conversation\",\"type\":\"conversation_cancel\"}}")"
@@ -140,13 +157,33 @@ GATED="$(command "$B" conversation \
 
 say "== first-answer-wins typed verdict =="
 LOSER="$(command "$B" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-answer\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"interaction_ask_respond\",\"interaction_id\":\"$INTERACTION\",\"answers\":[]}}")"
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-answer\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"interaction_ask_respond\",\"interaction_id\":\"$ASK_ID\",\"answers\":[]}}")"
 [ "$(printf '%s' "$LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
     || fail "second answer code"
 [ "$(printf '%s' "$LOSER" | json_get "['existing']['source']")" = "interaction_resolved" ] \
     || fail "second answer typed source"
 [ "$(printf '%s' "$LOSER" | json_get "['existing']['result']['kind']")" = "ask_resolved" ] \
     || fail "second answer typed kind"
+
+say "== permission first-answer-wins typed verdict =="
+PERMISSION_LOSER="$(command "$B" tool \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"tool\",\"command_id\":\"smoke-second-permission\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"tool\",\"type\":\"tool_permission_respond\",\"tool_call_id\":\"$PERMISSION_CALL\",\"approved\":false,\"trust_folder\":false}}")"
+[ "$(printf '%s' "$PERMISSION_LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
+    || fail "second permission answer code"
+[ "$(printf '%s' "$PERMISSION_LOSER" | json_get "['existing']['result']['kind']")" = "permission_resolved" ] \
+    || fail "second permission answer typed kind"
+[ "$(printf '%s' "$PERMISSION_LOSER" | json_get "['existing']['result']['approved']")" = "True" ] \
+    || fail "second permission answer winning verdict"
+
+say "== plan first-answer-wins typed verdict =="
+PLAN_LOSER="$(command "$B" control \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-plan\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"plan_review_respond\",\"interaction_id\":\"$PLAN_ID\",\"approved\":true,\"autonomous\":false}}")"
+[ "$(printf '%s' "$PLAN_LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
+    || fail "second plan answer code"
+[ "$(printf '%s' "$PLAN_LOSER" | json_get "['existing']['result']['kind']")" = "plan_review_resolved" ] \
+    || fail "second plan answer typed kind"
+[ "$(printf '%s' "$PLAN_LOSER" | json_get "['existing']['result']['approved']")" = "False" ] \
+    || fail "second plan answer winning verdict"
 
 say "== command replay + status =="
 REPLAY_ID="smoke-replay-$$"
@@ -195,5 +232,20 @@ start_daemon
 # the seat on its own, with no client touching the session first.
 OBSERVER="$(open_client smoke-observer)"
 wait_driver "-" 6 "$OBSERVER"
+
+say "== snapshot_missing probe =="
+# A session that has an identity but no committed canonical log cannot mint a
+# snapshot cursor: the route must report the documented `snapshot_missing`.
+EMPTY_SEED="smoke-empty-$$"
+PROBE_CLIENT="$(open_client smoke-probe)"
+mkdir -p "$DATA/sessions/$EMPTY_SEED"
+cp "$DATA/sessions/$SEED/canonical-identity.json" \
+    "$DATA/sessions/$EMPTY_SEED/canonical-identity.json"
+MISSING_STATUS="$(curl -sS -o "$DATA/../snapshot-missing.json" -w '%{http_code}' \
+    "$ENDPOINT/ringing/v2/sessions/$EMPTY_SEED/bootstrap" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $PROBE_CLIENT")"
+[ "$MISSING_STATUS" = "409" ] || fail "snapshot_missing status ($MISSING_STATUS)"
+[ "$(cat "$DATA/../snapshot-missing.json" | json_get "['code']")" = "snapshot_missing" ] \
+    || fail "snapshot_missing code"
 
 say "PASS: Ringing v2 real-machine smoke test"

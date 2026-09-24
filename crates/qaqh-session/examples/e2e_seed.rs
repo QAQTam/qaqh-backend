@@ -3,8 +3,9 @@
 //! Usage: `e2e_seed <session_dir> [--resolved]`
 //!
 //! Creates a canonical session with `SessionCreated`, optionally followed by
-//! an ask interaction that is already resolved (for the first-answer-wins
-//! real-machine probe).
+//! one resolved interaction per kind (ask / permission / plan) for the
+//! first-answer-wins real-machine probes. Prints a JSON object keyed by kind,
+//! each carrying `interaction_id` and `call_id`.
 
 use qaqh_session::canonical::{
     CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid, sha256_content_hash,
@@ -70,54 +71,74 @@ fn main() {
         .expect("append created");
 
     if resolved {
-        let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
-        let call_id = ToolCallId::new(format!("call_{}", generate_ulid()));
-        let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
-        store
-            .append(
-                &lease,
-                envelope(
-                    now + 1,
-                    Some(turn_id.clone()),
-                    Some(call_id.clone()),
-                    Some(interaction_id.clone()),
-                    FactPayload::InteractionRequested(InteractionRequested {
-                        interaction_id: interaction_id.clone(),
-                        call_id: Some(call_id.clone()),
-                        turn_id: turn_id.clone(),
-                        kind: InteractionKind::Ask,
-                        request_ref: ContentRef::new(sha256_content_hash(b"e2e-request")),
-                        expires_at_ms: None,
-                        requested_at_ms: now + 1,
-                    }),
-                ),
-                now + 1,
-            )
-            .expect("append requested");
-        store
-            .append(
-                &lease,
-                envelope(
-                    now + 2,
-                    Some(turn_id),
-                    Some(call_id),
-                    Some(interaction_id.clone()),
-                    FactPayload::InteractionResolved(InteractionResolved {
-                        interaction_id: interaction_id.clone(),
-                        decision_ref: ContentRef::new(sha256_content_hash(b"answered")),
-                        decision: Some(InteractionDecision::Answered),
-                        resolved_by: ActorRef {
-                            kind: ActorKind::User,
-                            id: "e2e-user".into(),
-                            display_name: None,
-                        },
-                        resolution_seq: 1,
-                        resolved_at_ms: now + 2,
-                    }),
-                ),
-                now + 2,
-            )
-            .expect("append resolved");
-        println!("{interaction_id}");
+        let mut seeded = serde_json::Map::new();
+        let kinds = [
+            ("ask", InteractionKind::Ask, InteractionDecision::Answered),
+            (
+                "permission",
+                InteractionKind::Permission,
+                InteractionDecision::Approved,
+            ),
+            ("plan", InteractionKind::Plan, InteractionDecision::Rejected),
+        ];
+        for (ts, (key, kind, decision)) in kinds.into_iter().enumerate() {
+            let base = now + 1 + (ts as i64) * 2;
+            let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
+            let call_id = ToolCallId::new(format!("call_{}", generate_ulid()));
+            let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+            store
+                .append(
+                    &lease,
+                    envelope(
+                        base,
+                        Some(turn_id.clone()),
+                        Some(call_id.clone()),
+                        Some(interaction_id.clone()),
+                        FactPayload::InteractionRequested(InteractionRequested {
+                            interaction_id: interaction_id.clone(),
+                            call_id: Some(call_id.clone()),
+                            turn_id: turn_id.clone(),
+                            kind,
+                            request_ref: ContentRef::new(sha256_content_hash(b"e2e-request")),
+                            expires_at_ms: None,
+                            requested_at_ms: base,
+                        }),
+                    ),
+                    base,
+                )
+                .expect("append requested");
+            store
+                .append(
+                    &lease,
+                    envelope(
+                        base + 1,
+                        Some(turn_id),
+                        Some(call_id.clone()),
+                        Some(interaction_id.clone()),
+                        FactPayload::InteractionResolved(InteractionResolved {
+                            interaction_id: interaction_id.clone(),
+                            decision_ref: ContentRef::new(sha256_content_hash(b"decision")),
+                            decision: Some(decision),
+                            resolved_by: ActorRef {
+                                kind: ActorKind::User,
+                                id: "e2e-user".into(),
+                                display_name: None,
+                            },
+                            resolution_seq: 1,
+                            resolved_at_ms: base + 1,
+                        }),
+                    ),
+                    base + 1,
+                )
+                .expect("append resolved");
+            seeded.insert(
+                key.to_string(),
+                serde_json::json!({
+                    "interaction_id": interaction_id.as_str(),
+                    "call_id": call_id.as_str(),
+                }),
+            );
+        }
+        println!("{}", serde_json::Value::Object(seeded));
     }
 }
