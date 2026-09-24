@@ -962,8 +962,8 @@ mod tests {
         assert!(out.starts_with("[OK] "), "got: {out}");
         assert!(out.contains("+1 -1"), "got: {out}");
         assert!(out.contains("| write"), "got: {out}");
-        assert!(!out.contains("--- a/"), "diff body leaked: {out}");
-        assert!(!out.contains("+++ b/"), "diff body leaked: {out}");
+        assert!(!out.contains("--- "), "diff body leaked: {out}");
+        assert!(!out.contains("+++ "), "diff body leaked: {out}");
         assert!(!out.contains("CHANGED"), "content echo leaked: {out}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -1018,8 +1018,19 @@ mod tests {
             "path": path, "content": "new\n", "dry_run": true
         }));
         assert!(out.starts_with("[DRY RUN] "), "got: {out}");
-        assert!(out.contains("--- a/"), "dry_run must include diff: {out}");
-        assert!(out.contains("+++ b/"), "dry_run must include diff: {out}");
+        let header_path = path.to_string_lossy();
+        assert!(
+            out.contains(&format!("--- {header_path}")),
+            "dry_run must include diff: {out}"
+        );
+        assert!(
+            out.contains(&format!("+++ {header_path}")),
+            "dry_run must include diff: {out}"
+        );
+        assert!(
+            !out.contains("a//") && !out.contains("b//"),
+            "diff header must not double-slash absolute paths: {out}"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
     }
 
