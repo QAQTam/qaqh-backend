@@ -165,6 +165,9 @@ impl SnapshotProjector {
                     }
                     CE::SkillsUpdated { .. }
                     | CE::DashboardUpdated { .. }
+                    // Driver 席位是 v2 canonical 投影的职责；v1 折叠面不做
+                    // 二次真源（v1 没有 driver 概念）。
+                    | CE::DriverChanged { .. }
                     // 瞬态终态推送：不折叠进快照（tracker 收敛走实时事件）。
                     | CE::SubagentStatus { .. } => false,
                 }

@@ -1841,7 +1841,7 @@ impl TurnEngine {
     }
 }
 
-fn is_ulid(value: &str) -> bool {
+pub(crate) fn is_ulid(value: &str) -> bool {
     value.len() == 26
         && value.bytes().all(|byte| {
             matches!(
