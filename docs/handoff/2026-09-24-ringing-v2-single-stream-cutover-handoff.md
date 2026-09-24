@@ -1,7 +1,8 @@
 # Ringing v2 单流硬切 Handoff（2026-09-24）
 
-状态：**后端 + 客户端已落地（v1 三频道 SSE 路由删除，客户端每 seed 一条 v2 单流）；
-TUI 侧改动在 `qaqh-tui-app` 分支 `feat/v2-bootstrap-cutover`（需一次 rev bump）。**
+状态：**后端 + 客户端已落地（MR #352 已并入 main，v1 三频道 SSE 路由删除，客户端每
+seed 一条 v2 单流）；TUI 侧改动在 `qaqh-tui-app` 分支 `feat/v2-single-stream-cutover`
+（基于 `feat/v2-bootstrap-cutover`，需一次 rev bump）。**
 
 ## 1. 这次修的是什么
 
@@ -85,7 +86,19 @@ scripts/v2-content-probe.sh <data-root>                 PASS
 |---|---|
 | `GET /ringing/v1/sessions/{seed}/approvals` | 只读审批查询，v2 无对应端点（需设计：并入 bootstrap 或新端点） |
 
-## 7. alpha 未决清单（本次新增/更新）
+## 7. TUI 侧要做的（需要一次 rev bump）
+
+本次已在 `qaqh-tui-app` 分支 `feat/v2-single-stream-cutover`（基于
+`feat/v2-bootstrap-cutover`）提交 TUI 改动（只含本次相关文件；TUI 仓另有他人在飞的
+`settings*.rs` / `terminal/agent.rs` / `ui/v2/workspace.rs` 改动，未一并提交）。
+rev bump 时：
+
+1. 带上这些文件的改动；
+2. 重建锚点 + bump `scripts/ci-linux.sh` 的 `QAQH_BACKEND_REV` + 给后端 rev 打
+   annotated tag（沿用 `tui-ringing-v2-*` 命名，旧 tag 不动）；
+3. 同批把 §8.2 的 v2 e2e harness 从 v1 open 改成 v2 open + `session_attach`。
+
+## 8. alpha 未决清单（本次新增/更新）
 
 1. **v2 交互缺 wire call id**：permission 面板详情无法与 timeline 工具卡精确关联
    （现在靠 canonical↔wire 的运行时归一兜底，UI 侧可能显示占位）。建议
@@ -101,7 +114,7 @@ scripts/v2-content-probe.sh <data-root>                 PASS
 5. `ClientHandlers` 是破坏性改名（`on_batch`→`on_v2_event` 等）：本仓 examples/tests 已
    同步，其它壳层需同批。
 
-## 8. 仍是 v1 的面（承 #351）
+## 9. 仍是 v1 的面（承 #351）
 
 `GET /ringing/v1/sessions/{seed}/approvals` 一条；`RingingSessionBootstrap` 类型仍留
 （v1 hub 的产出方往返测试还在用），approvals 迁完可一并删。
