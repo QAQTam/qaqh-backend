@@ -69,11 +69,12 @@ qaqh-runtime mcp_env_block（注入路径本身，夹具显式打开开关）
 
 ## 5. 仍未完成（alpha 迭代清单）
 
-1. **P6 设计输入 A（前缀 Segment 分区）**：`system_messages` 仍是插入顺序 +
-   永远前置；中途 `push_system` 会顶到最前，从第一个字节起 cache 全 miss。
-   待做：显式 `Segment { Base, Skills, Environment, History }` + 按段 hash 诊断。
-2. **P6 设计输入 B（compact 进 canonical log）**：`compact-context.json` 仍是
-   第二真源，`build_context_for_gate` 仍整段 clone（请求峰值 2×）。
+1. **P6 设计输入 A（前缀 Segment 分区）**：~~待做~~ **已复核不成立**；
+   生产路径的 `push_system` 只在会话建立时调用，运行期注入全部走 trailing，
+   以 `debug_assert` 固化护栏即可。
+2. **P6 设计输入 B（compact 进 canonical log）**：~~`compact-context.json` 仍是
+   第二真源~~ **路线 1 已落地（2026-09-25）**：摘要 append 进 `messages.jsonl`，
+   meta 记覆盖水位；`build_context_for_gate` 的整段 clone 仍属后续内存优化。
 3. **driver 侧剩余**：回收延迟（3s 巡检）、`not_eligible`/优先级、
    `driver_epoch` 未进 command fingerprint、workspace 命令 gate 集合。
 4. **崩溃路径 fence 轮转**：`ToolLedger` 的 `Drop` 只覆盖有序退出；SIGKILL

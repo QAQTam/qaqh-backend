@@ -310,7 +310,7 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
     let compact_noop = ctx.agent.msg.turn_count() == turns_before_apply;
     ctx.agent
         .msg
-        .snapshot_full(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+        .persist_compaction(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 
     let (
         chat_text,

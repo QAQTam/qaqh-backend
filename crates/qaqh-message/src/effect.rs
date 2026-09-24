@@ -34,6 +34,12 @@ pub enum PersistOp {
         model: String,
         effort: Option<String>,
         compact_skip: usize,
+        /// `Some(id)` advances the archive-derived compact watermark; `None`
+        /// preserves the existing meta watermark. Compaction summaries are
+        /// ordinary appended `Message`s, so this field travels with the same
+        /// op that makes the summary durable.
+        #[serde(default)]
+        compact_covered_through_msg_id: Option<u64>,
         turn_count: usize,
     },
     /// Refresh meta/index without new messages (was `update_meta`).
@@ -44,25 +50,22 @@ pub enum PersistOp {
         compact_skip: usize,
         turn_count: usize,
     },
-    /// Refresh the live-context projection of the compact checkpoint
-    /// (was `update_compact_context`).
-    UpdateCompactContext {
-        seed: String,
-        messages: Vec<Message>,
-    },
-    /// Full rewrite of the compact checkpoint (was `save_compact_context`).
-    SaveCompactContext {
-        seed: String,
-        messages: Vec<Message>,
-    },
-    /// Full rewrite of messages.jsonl — undo / compact aftermath
-    /// (was `save_full`).
+    /// Full rewrite of messages.jsonl — undo / image repair aftermath.
+    ///
+    /// A full rewrite replaces the canonical archive with the current active
+    /// view. The optional watermark below lets that rewritten view keep its
+    /// compaction marker; `None` means the rewrite removed the marker.
     SaveFull {
         seed: String,
         messages: Vec<Message>,
         model: String,
         effort: Option<String>,
         compact_skip: usize,
+        /// `Some(id)` preserves an archive-derived compact marker across an
+        /// active-view rewrite; `None` means the rewritten archive has no
+        /// compacted prefix to hide.
+        #[serde(default)]
+        compact_covered_through_msg_id: Option<u64>,
         turn_count: usize,
     },
 }

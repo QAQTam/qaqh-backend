@@ -404,10 +404,10 @@ impl RingingHub {
         }
     }
 
-    /// BUG-006：timeline 目录缺失/记录损坏/记录落后时，它必须能从 messages.jsonl /
-    /// compact-context 重建，否则 timeline 就不是"可重建投影"，而会变成第二份
-    /// 事实源。重建结果与 conversation snapshot 同一基线（compact 优先），
-    /// 并同步写回 timeline 缓存 + timeline journal（保证下次也 journal 权威）。
+    /// BUG-006：timeline 目录缺失/记录损坏/记录落后时，它必须能从
+    /// `messages.jsonl` 归档重建，否则 timeline 就不是"可重建投影"，而会变成
+    /// 第二份事实源。重建只跳过合成摘要，保留真实人类回合，并同步写回
+    /// timeline 缓存 + timeline journal（保证下次也 journal 权威）。
     ///
     /// 返回 `true` = 已用重建结果接管该 seed 的 timeline（调用方无需再装载旧快照）。
     pub(super) fn rebuild_timeline_from_messages(&self, seed: &str) -> bool {

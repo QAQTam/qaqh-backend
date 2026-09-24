@@ -1211,9 +1211,10 @@ impl TurnEngine {
                 };
                 let turns_before_apply = ctx.agent.msg.turn_count();
                 ctx.agent.msg.apply_compact(&summary, kept);
-                ctx.agent
-                    .msg
-                    .snapshot_full(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+                ctx.agent.msg.persist_compaction(
+                    &ctx.agent.config.model,
+                    &ctx.agent.config.reasoning_effort,
+                );
                 let after = {
                     let (c, t, tc, tr, ts, sp, _, _) = ctx.agent.msg.compute_context_stats(None);
                     c + t + tc + tr + ts + sp

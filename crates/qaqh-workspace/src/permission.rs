@@ -348,10 +348,10 @@ pub(crate) fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool 
 pub fn is_sensitive_session_path(path: &Path) -> bool {
     // Block the agent from reading its own persistent history / credentials.
     // These live under the platform data dir (e.g. ~/.config/qaqh/sessions/…/messages.jsonl,
-    // meta.json, compact-context.json, token_stats.jsonl, secrets.toml) and are
-    // outside any workspace. At Level 4 they'd otherwise auto-approve, allowing
-    // the model to exfiltrate prior turns via a normal `read` tool call and then
-    // replay that content into the gateway (messages.jsonl → gateway leak).
+    // meta.json, token_stats.jsonl, secrets.toml) and are outside any workspace.
+    // At Level 4 they'd otherwise auto-approve, allowing the model to exfiltrate
+    // prior turns via a normal `read` tool call and then replay that content
+    // into the gateway (messages.jsonl → gateway leak).
     //
     // 平台会话目录本身及其全部后代：字符串名单靠 `"/sessions/"` 判定会漏掉
     // 目录本身（无尾分隔符），且数据根可被 `QAQH_DATA_DIR` 重定向到任意名字
@@ -368,7 +368,6 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
     let s = path.to_string_lossy().to_ascii_lowercase();
     s.contains("messages.jsonl")
         || s.contains("meta.json")
-        || s.contains("compact-context.json")
         || s.contains("token_stats.jsonl")
         || s.contains("secrets.toml")
         || s.contains("/sessions/")
@@ -818,7 +817,6 @@ mod tests {
         for path in [
             "/home/test/.config/qaqh/sessions/abc/messages.jsonl",
             "/home/test/.config/qaqh/sessions/abc/meta.json",
-            "/home/test/.config/qaqh/sessions/abc/compact-context.json",
             "/home/test/.config/qaqh/token_stats.jsonl",
         ] {
             let decision = needs_permission(

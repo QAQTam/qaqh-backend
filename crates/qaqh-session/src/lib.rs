@@ -12,7 +12,7 @@ pub mod session_fact_v2;
 pub mod session_meta;
 pub mod store;
 pub use grouping::{WorkspaceMeta, WorkspaceStore};
-pub use manager::{CompactContext, SessionManager};
+pub use manager::SessionManager;
 pub use session_meta::SessionMeta;
 
 /// Free-function seed generator (PR-1-5 / B6): loop crates consume the

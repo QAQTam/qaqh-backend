@@ -150,33 +150,30 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 );
                 return false;
             }
-            if let Some((meta, archive_messages, compact_context)) = agent
+            if let Some((meta, archive_messages, active_messages)) = agent
                 .session_manager
                 .as_ref()
                 .and_then(|sm| sm.load_for_resume(s))
             {
-                let active_messages = compact_context
-                    .as_ref()
-                    .map(|context| context.messages.as_slice())
-                    .unwrap_or(archive_messages.as_slice());
                 log::info!(
                     "[LIFECYCLE] loaded session, {} archived messages, {} active messages",
                     archive_messages.len(),
                     active_messages.len()
                 );
+                let compact_covered_through_msg_id = meta.compact_covered_through_msg_id;
+                let has_compact_marker = compact_covered_through_msg_id.is_some();
+                let effective_compact_skip = if has_compact_marker {
+                    // 活跃视图已经按归档水位裁剪；不能再套用旧的 turn 跳过。
+                    0
+                } else {
+                    meta.compact_skip
+                };
                 agent.session = meta;
                 agent.session.from_resume = true;
                 agent.session.tokens = agent.session.usage_totals.total_tokens.into();
-                // 如果有 compact 上下文，compact_skip 必须为 0——压缩后的消息
-                // 已经是去除了旧 turn 的活跃视图，不需要再跳过任何 turn。
-                let effective_compact_skip = if compact_context.is_some() {
-                    0
-                } else {
-                    agent.session.compact_skip
-                };
                 let (msg, repairs) = qaqh_message::MessageStore::from_messages(
                     &agent.session.seed,
-                    active_messages,
+                    &active_messages,
                     effective_compact_skip,
                 );
                 let archive_next_id = archive_messages
@@ -186,7 +183,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                     .unwrap_or(0)
                     .saturating_add(1);
                 let mut msg = msg;
-                msg.set_compact_context_active(compact_context.is_some());
+                msg.set_compact_covered_through_msg_id(compact_covered_through_msg_id);
                 msg.ensure_next_msg_id(archive_next_id);
                 // Turn IDs belong to the immutable archive, not the compacted
                 // active view. Otherwise compacting 30 turns down to 6 would
@@ -229,17 +226,6 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 // Keep the persisted metadata in sync with the authoritative
                 // replay so a later flush does not write a stale count back.
                 agent.session.turn_count = authority_turn_count as usize;
-                // B（Tier C）：逻辑压缩前缀在内存里零依赖——分配器基线（上面
-                // 已用「全量 restored 计数」校准，不受驱逐影响）固化后即可
-                // 从常驻内存驱逐。驱逐会把持久化模式物理化为 compact
-                // checkpoint（归档不再被 SaveFull 整写），崩溃安全分析见
-                // MessageStore::evict_compacted_prefix。
-                let evicted = agent.msg.evict_compacted_prefix();
-                if evicted > 0 {
-                    log::info!(
-                        "[LIFECYCLE] evicted {evicted} compacted prefix turns from memory (Tier C)"
-                    );
-                }
                 log::info!(
                     "[LIFECYCLE] from_messages done, {} turns, {} repairs",
                     msg.turn_count(),

@@ -15,7 +15,7 @@ pub use context_flow::{
     builtin,
 };
 pub use effect::{PendingTool, PersistOp};
-pub use store::{MessageStore, StepToolResult, Turn};
+pub use store::{MessageStore, StepToolResult, Turn, is_compaction_summary};
 pub use wal::{WalReadError, WalReader, WalWriter, checkpoint_file, open_reader};
 
 /// Deterministic WAL read-fault injection for downstream tests

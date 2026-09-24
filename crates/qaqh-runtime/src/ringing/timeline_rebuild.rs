@@ -1,9 +1,9 @@
 //! Timeline 投影重建（BUG-006）。
 //!
-//! timeline 是前端 transcript 的权威读侧，但 `messages.jsonl` /
-//! `compact-context.json` 才是消息写侧事实。timeline 文件缺失或损坏时，
-//! 这里按 conversation snapshot 同一基线（compact 优先）重建一条全 sealed
-//! 的 timeline，使 timeline 恢复“可重建投影”的地位。
+//! timeline 是前端 transcript 的权威读侧，但 `messages.jsonl` 才是消息写侧
+//! 事实。timeline 文件缺失或损坏时，这里从归档重建一条全 sealed 的 timeline，
+//! 使 timeline 恢复“可重建投影”的地位；压缩摘要作为归档行存在，但读取时
+//! 显式跳过，不能污染人类 transcript。
 
 use qaqh_domain::{
     TimelineBlockKind, TimelineFailure, TimelineIntent, TimelineSnapshot, TimelineTool,
@@ -28,8 +28,8 @@ const REBUILD_RECENT_TURNS: usize = 40;
 /// 拿它当 transcript 的来源会把用户已经看过的对话抹掉。deepseek-harness 把这条写成
 /// 了设计条款（`surface.ts`：「the model-visible surface … is the wrong source for a
 /// human transcript」），codex 与 grok-build 同款（后者干脆把 `chat_history.jsonl`
-/// 与 append-only 的 `updates.jsonl` 分成两个文件）。改用归档还顺带修掉一个可见缺陷：
-/// `[Compacted N turns]` 摘要此前会被当成一个真实回合显示给用户。
+/// 与 append-only 的 `updates.jsonl` 分成两个文件）。摘要现在是归档里的真实行，
+/// 但 `load_archive_tail` 会过滤 `[Compacted N turns]`，不会把它当成真实回合显示。
 pub fn rebuild_timeline_snapshot(
     sessions: Option<&SessionManager>,
     seed: &str,

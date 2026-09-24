@@ -66,13 +66,15 @@ fn drain(store: &mut MessageStore) {
                 model,
                 effort,
                 compact_skip,
+                compact_covered_through_msg_id,
                 turn_count,
-            } => sm.save_append(
+            } => sm.save_append_with_watermark(
                 seed,
                 messages,
                 model,
                 effort.as_deref(),
                 *compact_skip,
+                *compact_covered_through_msg_id,
                 *turn_count,
             ),
             PersistOp::UpdateMeta {
@@ -82,25 +84,21 @@ fn drain(store: &mut MessageStore) {
                 compact_skip,
                 turn_count,
             } => sm.update_meta(seed, model, effort.as_deref(), *compact_skip, *turn_count),
-            PersistOp::UpdateCompactContext { seed, messages } => {
-                sm.update_compact_context(seed, messages)
-            }
-            PersistOp::SaveCompactContext { seed, messages } => {
-                sm.save_compact_context(seed, messages)
-            }
             PersistOp::SaveFull {
                 seed,
                 messages,
                 model,
                 effort,
                 compact_skip,
+                compact_covered_through_msg_id,
                 turn_count,
-            } => sm.save_full(
+            } => sm.save_full_with_watermark(
                 seed,
                 messages,
                 model,
                 effort.as_deref(),
                 *compact_skip,
+                *compact_covered_through_msg_id,
                 *turn_count,
             ),
         }
@@ -124,8 +122,7 @@ fn flush_ops_enqueue_in_legacy_call_order() {
     store.push_user("first");
     store.push_assistant(assistant("reply"));
 
-    // First flush: non-empty pending_save → Append (+ UpdateCompactContext
-    // only when a compact checkpoint exists; none here).
+    // First flush: non-empty pending_save → Append (no compact watermark here).
     store.flush_meta("model-a", "high");
     let ops = store.take_persist_ops();
     assert_eq!(ops.len(), 1, "no checkpoint → Append only");
@@ -136,12 +133,14 @@ fn flush_ops_enqueue_in_legacy_call_order() {
             model,
             effort,
             compact_skip,
+            compact_covered_through_msg_id,
             turn_count,
         } => {
             assert_eq!(seed, "ops-order-seed");
             assert_eq!(model, "model-a");
             assert_eq!(effort.as_deref(), Some("high"));
             assert_eq!(*compact_skip, 0);
+            assert_eq!(*compact_covered_through_msg_id, None);
             assert_eq!(*turn_count, 1);
             assert_eq!(messages.len(), 2);
             assert_eq!(messages[0].msg_id, Some(1));

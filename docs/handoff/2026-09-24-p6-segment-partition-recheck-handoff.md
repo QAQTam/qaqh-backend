@@ -120,3 +120,7 @@ rollback，属于 P6 主线而不是一次增量。
 
 **建议**：先做路线 1（拿掉第二真源 + 峰值 2× 的一半），把路线 2 留给 P6 的
 「删除旧目录 / canonical 单源」窗口。
+
+> **落地更新（2026-09-25）**：路线 1 已完成，见
+> `docs/handoff/2026-09-25-p6-compact-archive-single-source-handoff.md`。
+> 路线 2 仍留给 P6 单源窗口。
