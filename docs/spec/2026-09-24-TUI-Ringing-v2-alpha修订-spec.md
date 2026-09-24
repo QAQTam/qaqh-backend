@@ -129,7 +129,20 @@ V2-C3 不再依赖 wire 类型层自证。同一 canonical fact 可以同时产�
 `ephemeral` 仍没有 canonical fact → ephemeral 映射：它按 spec 只属于 live
 连接，不能从 canonical log 重建，因此 V2-C4 继续是 wire 契约测试。
 
-## 9. 仍未决（不在本次 alpha 修订）
+## 9. V2-V1 映射随 v1 硬切作废
+
+基线 §10 的 v1 `Last-Event-ID` → v2 cursor 映射依赖 v1 兼容 adapter：
+
+- v1 emitter 负责分配 `(epoch, channel, stream_seq)`；
+- 每次 emit 前写 `diagnostics/v1-cursor-map.jsonl`；
+- v2 侧只读取该 sidecar，不把 `stream_seq` 当 `fact_seq`。
+
+alpha 已裁决 v1 端点整体硬切：`/ringing/v1/bootstrap`、`/ringing/v1/events/*`、
+`/ringing/v1/commands/*` 均返回 404，且没有 v1 emitter 继续写 mapping。
+因此 V2-V1 不再作为 alpha 验收项实现；没有生产者的映射表只会成为伪造兼容层。
+该裁决与「不留 v1、不做兼容」一致。
+
+## 10. 仍未决（不在本次 alpha 修订）
 
 - interaction 正文跨 daemon 重启持久化（与 pending interaction 跨重启存活绑定）；
 - permission 正文 pinned 与终结 unpin（需要一条稳定的权限终结域事件）；

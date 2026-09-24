@@ -142,6 +142,10 @@ body={"kind":"permission","tool_name":"exec",
 4. **崩溃路径 writer fence 轮转**：`ToolLedger::Drop` 只覆盖有序退出；
 5. TUI 侧 6 个 e2e harness 仍打 v1（他们的仓，勿在后端仓改）。
 
+补充：V2-V1 `Last-Event-ID` 映射已随 v1 端点硬切作废，不再作为 alpha 待办；
+#336 P2 结构化工具终态已另行落地，见
+`2026-09-24-tool-outcome-p2-v1-cursor-closure-handoff.md`。
+
 ## 5. 接手注意
 
 - 不要改回 bootstrap permission `request = None`；TUI/webui 的授权详情现在依赖

@@ -409,6 +409,13 @@ mod tests {
                     text: "canonical body".into(),
                     truncated: false,
                 }),
+                outcome: Some(qaqh_types::ToolResultDisplayOutcome {
+                    state: qaqh_types::ToolResultDisplayOutcomeState::Succeeded,
+                    exit_code: Some(0),
+                    duration_ms: Some(9),
+                    output_bytes: Some(14),
+                    truncated: Some(false),
+                }),
             }),
         };
 
@@ -425,6 +432,14 @@ mod tests {
             display.body,
             Some(qaqh_domain::TimelineToolBody::Text { .. })
         ));
+        let outcome = display
+            .outcome
+            .expect("snapshot preserves structured outcome");
+        assert_eq!(
+            outcome.state,
+            qaqh_types::ToolResultDisplayOutcomeState::Succeeded
+        );
+        assert_eq!(outcome.exit_code, Some(0));
     }
 
     fn turn_with_blocks() -> TurnData {

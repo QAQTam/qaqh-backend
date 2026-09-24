@@ -33,7 +33,6 @@ use super::context::ToolCallContext;
 use super::descriptor::{
     DescriptorError, OutputBudget, ToolDescriptor, ToolExposure, ToolName, ToolSource,
 };
-use super::display::ToolDisplay;
 use super::erased::ErasedTool;
 use super::error::{FatalToolError, ToolError, ToolErrorCode, ToolErrorKind};
 use super::output::{ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue};
@@ -277,7 +276,10 @@ pub fn map_tool_result(result: ToolResult) -> ToolOutcome {
         truncated: result.model_truncated(),
     };
 
-    let mut display = ToolDisplay::default();
+    let mut display = result
+        .display()
+        .map(super::output::from_wire_display)
+        .unwrap_or_default();
     let summary = result.summary();
     if !summary.is_empty() {
         display.summary = Some(summary.to_owned());

@@ -106,6 +106,9 @@ pub struct TimelineToolDisplay {
     pub body: Option<TimelineToolBody>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<TimelineToolMetrics>,
+    /// 结构化终态（#336 P2）；旧 client 忽略后仍可读 summary/body。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<qaqh_types::ToolResultDisplayOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,11 +11,13 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use super::display::{PathOp, ToolBody, ToolDisplay, ToolHeader, ToolMetrics};
-use super::error::ToolError;
+use super::display::{
+    PathOp, ToolBody, ToolDisplay, ToolDisplayOutcome, ToolHeader, ToolMetrics, ToolTerminalState,
+};
+use super::error::{ToolError, ToolErrorKind};
 use qaqh_types::{
     ContentRef, ToolImage, ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader,
-    ToolResultDisplayPathOp,
+    ToolResultDisplayOutcome, ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
 };
 
 pub use qaqh_types::ToolStatus;
@@ -215,10 +217,84 @@ impl ToolOutcome {
             effective_tool_name: self.metrics.effective_tool_name.clone(),
             user_initiated: self.metrics.user_initiated,
         };
-        if self.display != ToolDisplay::default() {
-            result = result.with_display(to_wire_display(&self.display));
+        let display = self.display_with_framework_outcome();
+        if display != ToolDisplay::default() {
+            result = result.with_display(to_wire_display(&display));
         }
         result
+    }
+
+    /// Fill framework-owned metrics/outcome without mutating the tool's
+    /// declared display projection.
+    fn display_with_framework_outcome(&self) -> ToolDisplay {
+        let mut display = self.display.clone();
+        display.metrics = ToolMetrics {
+            elapsed_ms: Some(self.metrics.elapsed.as_millis() as u64),
+            output_bytes: self.metrics.output_bytes,
+            retry_count: self.metrics.retry_count,
+            effective_tool_name: self.metrics.effective_tool_name.clone(),
+            user_initiated: self.metrics.user_initiated,
+        };
+        if let Some(outcome) = display.outcome.as_mut() {
+            if outcome.duration_ms.is_none() || self.metrics.elapsed != Duration::ZERO {
+                outcome.duration_ms = Some(self.metrics.elapsed.as_millis() as u64);
+            }
+            if outcome.output_bytes.is_none() || self.metrics.output_bytes != 0 {
+                outcome.output_bytes = Some(self.metrics.output_bytes);
+            }
+            let (body_exit_code, body_truncated) = body_terminal_fields(&display.body);
+            if outcome.exit_code.is_none() {
+                outcome.exit_code = body_exit_code;
+            }
+            if outcome.truncated.is_none() {
+                outcome.truncated = body_truncated.or(self.model.truncated.then_some(true));
+            }
+        } else {
+            display.outcome = Some(self.default_display_outcome(&display));
+        }
+        display
+    }
+
+    fn default_display_outcome(&self, display: &ToolDisplay) -> ToolDisplayOutcome {
+        let state = match self.status {
+            ToolStatus::Ok => ToolTerminalState::Succeeded,
+            ToolStatus::Backgrounded => ToolTerminalState::Backgrounded,
+            ToolStatus::Cancelled => ToolTerminalState::Cancelled,
+            ToolStatus::Error | ToolStatus::Partial => {
+                if self
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.kind == ToolErrorKind::Timeout)
+                {
+                    ToolTerminalState::TimedOut
+                } else {
+                    ToolTerminalState::Failed
+                }
+            }
+        };
+        let (exit_code, mut truncated) = body_terminal_fields(&display.body);
+        if truncated.is_none() {
+            truncated = self.model.truncated.then_some(true);
+        }
+        ToolDisplayOutcome {
+            state,
+            exit_code,
+            duration_ms: Some(self.metrics.elapsed.as_millis() as u64),
+            output_bytes: Some(self.metrics.output_bytes),
+            truncated,
+        }
+    }
+}
+
+fn body_terminal_fields(body: &ToolBody) -> (Option<i32>, Option<bool>) {
+    match body {
+        ToolBody::Shell {
+            exit_code,
+            truncated,
+            ..
+        } => (*exit_code, Some(*truncated)),
+        ToolBody::Text { truncated, .. } => (None, Some(*truncated)),
+        _ => (None, None),
     }
 }
 
@@ -274,6 +350,24 @@ fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
                 seed: seed.clone(),
             }),
         },
+        outcome: display.outcome.as_ref().map(to_wire_outcome),
+    }
+}
+
+fn to_wire_outcome(outcome: &ToolDisplayOutcome) -> ToolResultDisplayOutcome {
+    ToolResultDisplayOutcome {
+        state: match outcome.state {
+            ToolTerminalState::Succeeded => ToolResultDisplayOutcomeState::Succeeded,
+            ToolTerminalState::Failed => ToolResultDisplayOutcomeState::Failed,
+            ToolTerminalState::Cancelled => ToolResultDisplayOutcomeState::Cancelled,
+            ToolTerminalState::TimedOut => ToolResultDisplayOutcomeState::TimedOut,
+            ToolTerminalState::Backgrounded => ToolResultDisplayOutcomeState::Backgrounded,
+            ToolTerminalState::Unknown => ToolResultDisplayOutcomeState::Unknown,
+        },
+        exit_code: outcome.exit_code,
+        duration_ms: outcome.duration_ms,
+        output_bytes: outcome.output_bytes,
+        truncated: outcome.truncated,
     }
 }
 
@@ -331,6 +425,24 @@ pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
             },
         },
         metrics: ToolMetrics::default(),
+        outcome: display.outcome.as_ref().map(from_wire_outcome),
+    }
+}
+
+fn from_wire_outcome(outcome: &ToolResultDisplayOutcome) -> ToolDisplayOutcome {
+    ToolDisplayOutcome {
+        state: match outcome.state {
+            ToolResultDisplayOutcomeState::Succeeded => ToolTerminalState::Succeeded,
+            ToolResultDisplayOutcomeState::Failed => ToolTerminalState::Failed,
+            ToolResultDisplayOutcomeState::Cancelled => ToolTerminalState::Cancelled,
+            ToolResultDisplayOutcomeState::TimedOut => ToolTerminalState::TimedOut,
+            ToolResultDisplayOutcomeState::Backgrounded => ToolTerminalState::Backgrounded,
+            ToolResultDisplayOutcomeState::Unknown => ToolTerminalState::Unknown,
+        },
+        exit_code: outcome.exit_code,
+        duration_ms: outcome.duration_ms,
+        output_bytes: outcome.output_bytes,
+        truncated: outcome.truncated,
     }
 }
 
@@ -378,6 +490,100 @@ mod tests {
         let result = scalar.to_tool_result();
         assert_eq!(result.data["data"], serde_json::json!([1, 2, 3]));
         assert_eq!(result.data["details"]["path"], serde_json::json!("a.txt"));
+    }
+
+    #[test]
+    fn to_tool_result_fills_structured_terminal_outcome() {
+        let mut display = ToolDisplay::new(
+            ToolHeader::Shell {
+                command: "sleep 1".into(),
+            },
+            ToolBody::Shell {
+                output: "".into(),
+                exit_code: Some(2),
+                truncated: true,
+            },
+        );
+        display.outcome = Some(ToolDisplayOutcome {
+            state: ToolTerminalState::TimedOut,
+            exit_code: Some(2),
+            duration_ms: None,
+            output_bytes: None,
+            truncated: Some(true),
+        });
+        let mut result = outcome(
+            ToolStatus::Error,
+            Some(ToolError::new(ToolErrorKind::Timeout, "timed out")),
+        );
+        result.display = display;
+        result.metrics.elapsed = Duration::from_millis(1500);
+        result.metrics.output_bytes = 4096;
+
+        let wire = result.to_tool_result();
+        let display = wire.display().expect("display projection");
+        let outcome = display.outcome.as_ref().expect("structured outcome");
+        assert_eq!(
+            outcome.state,
+            ToolResultDisplayOutcomeState::TimedOut,
+            "timeout must not be inferred from summary text"
+        );
+        assert_eq!(outcome.exit_code, Some(2));
+        assert_eq!(outcome.duration_ms, Some(1500));
+        assert_eq!(outcome.output_bytes, Some(4096));
+        assert_eq!(outcome.truncated, Some(true));
+    }
+
+    #[test]
+    fn wire_display_outcome_roundtrips_through_internal_projection() {
+        let wire = ToolResultDisplay {
+            summary: Some("exit 0".into()),
+            diff: None,
+            header: None,
+            body: None,
+            outcome: Some(ToolResultDisplayOutcome {
+                state: ToolResultDisplayOutcomeState::Succeeded,
+                exit_code: Some(0),
+                duration_ms: Some(12),
+                output_bytes: Some(2),
+                truncated: Some(false),
+            }),
+        };
+        let internal = from_wire_display(&wire);
+        let outcome = internal.outcome.expect("internal outcome");
+        assert_eq!(outcome.state, ToolTerminalState::Succeeded);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.duration_ms, Some(12));
+        assert_eq!(outcome.output_bytes, Some(2));
+        assert_eq!(outcome.truncated, Some(false));
+    }
+
+    #[test]
+    fn legacy_result_display_outcome_roundtrips_through_tool_outcome() {
+        let result = qaqh_types::ToolResult::ok("ok").with_display(ToolResultDisplay {
+            summary: Some("exit 0".into()),
+            diff: None,
+            header: None,
+            body: Some(ToolResultDisplayBody::Shell {
+                output: "ok".into(),
+                exit_code: Some(0),
+                truncated: false,
+            }),
+            outcome: Some(ToolResultDisplayOutcome {
+                state: ToolResultDisplayOutcomeState::Succeeded,
+                exit_code: Some(0),
+                duration_ms: Some(5),
+                output_bytes: Some(2),
+                truncated: Some(false),
+            }),
+        });
+        let restored = crate::tool_api::map_tool_result(result)
+            .to_tool_result()
+            .display()
+            .and_then(|display| display.outcome.clone())
+            .expect("outcome survives legacy mapping");
+        assert_eq!(restored.state, ToolResultDisplayOutcomeState::Succeeded);
+        assert_eq!(restored.exit_code, Some(0));
+        assert_eq!(restored.duration_ms, Some(5));
     }
 
     #[test]

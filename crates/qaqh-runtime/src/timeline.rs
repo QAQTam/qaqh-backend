@@ -216,6 +216,14 @@ pub(crate) fn apply_result_metrics(
         effective_tool_name: metrics.effective_tool_name.clone(),
         user_initiated: metrics.user_initiated,
     };
+    if let Some(outcome) = display.outcome.as_mut() {
+        if let Some(elapsed_ms) = metrics.elapsed_ms {
+            outcome.duration_ms = Some(elapsed_ms);
+        }
+        if outcome.output_bytes.is_none() || metrics.output_bytes != 0 {
+            outcome.output_bytes = Some(metrics.output_bytes);
+        }
+    }
 }
 
 /// SDK 内部展示投影 → wire 类型（09-18 契约 §3.4 的唯一映射点）。
@@ -285,6 +293,33 @@ pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> T
             effective_tool_name: display.metrics.effective_tool_name.clone(),
             user_initiated: display.metrics.user_initiated,
         });
+    let outcome = display
+        .outcome
+        .as_ref()
+        .map(|outcome| qaqh_types::ToolResultDisplayOutcome {
+            state: match outcome.state {
+                sdk::ToolTerminalState::Succeeded => {
+                    qaqh_types::ToolResultDisplayOutcomeState::Succeeded
+                }
+                sdk::ToolTerminalState::Failed => qaqh_types::ToolResultDisplayOutcomeState::Failed,
+                sdk::ToolTerminalState::Cancelled => {
+                    qaqh_types::ToolResultDisplayOutcomeState::Cancelled
+                }
+                sdk::ToolTerminalState::TimedOut => {
+                    qaqh_types::ToolResultDisplayOutcomeState::TimedOut
+                }
+                sdk::ToolTerminalState::Backgrounded => {
+                    qaqh_types::ToolResultDisplayOutcomeState::Backgrounded
+                }
+                sdk::ToolTerminalState::Unknown => {
+                    qaqh_types::ToolResultDisplayOutcomeState::Unknown
+                }
+            },
+            exit_code: outcome.exit_code,
+            duration_ms: outcome.duration_ms,
+            output_bytes: outcome.output_bytes,
+            truncated: outcome.truncated,
+        });
 
     TimelineToolDisplay {
         summary: display.summary.clone(),
@@ -292,6 +327,7 @@ pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> T
         header,
         body,
         metrics,
+        outcome,
     }
 }
 
@@ -2166,7 +2202,14 @@ mod display_mapping_tests {
                 truncated: false,
             },
         )
-        .with_summary("exit 0 · bash ls");
+        .with_summary("exit 0 · bash ls")
+        .with_outcome(sdk::ToolDisplayOutcome {
+            state: sdk::ToolTerminalState::Succeeded,
+            exit_code: Some(0),
+            duration_ms: Some(12),
+            output_bytes: Some(2),
+            truncated: Some(false),
+        });
         let wire = wire_display(&display);
 
         assert_eq!(wire.summary.as_deref(), Some("exit 0 · bash ls"));
@@ -2181,6 +2224,13 @@ mod display_mapping_tests {
             })
         ));
         assert!(wire.metrics.is_none(), "metrics 未接线时不得伪造");
+        let outcome = wire.outcome.expect("structured outcome");
+        assert_eq!(
+            outcome.state,
+            qaqh_types::ToolResultDisplayOutcomeState::Succeeded
+        );
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.duration_ms, Some(12));
     }
 
     #[test]
@@ -2197,7 +2247,14 @@ mod display_mapping_tests {
                 truncated: false,
             },
         )
-        .with_summary("exit 0 · bash ls");
+        .with_summary("exit 0 · bash ls")
+        .with_outcome(sdk::ToolDisplayOutcome {
+            state: sdk::ToolTerminalState::Succeeded,
+            exit_code: Some(0),
+            duration_ms: None,
+            output_bytes: None,
+            truncated: Some(false),
+        });
         apply_result_metrics(
             &mut display,
             &qaqh_types::ToolResultMetrics {
@@ -2214,5 +2271,8 @@ mod display_mapping_tests {
         assert_eq!(metrics.output_bytes, 2);
         assert!(metrics.user_initiated);
         assert!(metrics.effective_tool_name.is_none());
+        let outcome = wire.outcome.expect("structured outcome");
+        assert_eq!(outcome.duration_ms, Some(1234));
+        assert_eq!(outcome.output_bytes, Some(2));
     }
 }

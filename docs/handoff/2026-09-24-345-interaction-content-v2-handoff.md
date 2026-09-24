@@ -75,9 +75,10 @@ pin / 配额 / unpin；daemon 覆盖 v2 路由 + 归属 403 + v1 硬切 404。
    切换，属跨仓改动。
 5. 交互正文跨重启持久化：与「pending interaction 跨重启存活」绑定（今天重启后
    `seal_orphan_channel_state` 会把交互收尾成 `Dismissed`），属更大改动。
-6. 其余沿用上一份 handoff 的 alpha 清单（#336 / #339 挂起 / P6 B / v1 cursor 映射 /
-   driver 侧四项 / fence 轮转 / interaction kind 拼写）。V2-C3 replaceable
-   producer 已补，见 `2026-09-24-ringing-v2-alpha-closure-handoff.md` §2.7。
+6. 其余沿用上一份 handoff 的 alpha 清单（#336 / #339 挂起 / P6 B / driver 侧四项 /
+   fence 轮转 / interaction kind 拼写）。V2-C3 replaceable producer 已补，见
+   `2026-09-24-ringing-v2-alpha-closure-handoff.md` §2.7；V2-V1 cursor 映射已随
+   v1 硬切作废，见 `2026-09-24-tool-outcome-p2-v1-cursor-closure-handoff.md` §1。
 
 ## 5. 接手注意
 

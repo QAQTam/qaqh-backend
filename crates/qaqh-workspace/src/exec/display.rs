@@ -5,8 +5,8 @@
 
 use super::direct::ExecOutput;
 use crate::tool_api::{
-    ToolBody, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind, ToolHeader,
-    ToolProjection, ToolStatus,
+    ToolBody, ToolContentBlock, ToolDisplay, ToolDisplayOutcome, ToolError, ToolErrorCode,
+    ToolErrorKind, ToolHeader, ToolProjection, ToolStatus, ToolTerminalState,
 };
 
 #[cfg(test)]
@@ -78,6 +78,17 @@ fn display_from_output(view: &ExecOutput, command: Option<String>) -> ToolDispla
             label: "exec".to_string(),
         });
     let summary = shell_summary(view, command.as_deref());
+    let state = if view.timed_out {
+        ToolTerminalState::TimedOut
+    } else if view.cancelled {
+        ToolTerminalState::Cancelled
+    } else if view.exit_code == Some(0) {
+        ToolTerminalState::Succeeded
+    } else if view.exit_code.is_none() && view.process_id.is_some() {
+        ToolTerminalState::Backgrounded
+    } else {
+        ToolTerminalState::Failed
+    };
     ToolDisplay::new(
         header,
         ToolBody::Shell {
@@ -88,6 +99,13 @@ fn display_from_output(view: &ExecOutput, command: Option<String>) -> ToolDispla
         },
     )
     .with_summary(summary)
+    .with_outcome(ToolDisplayOutcome {
+        state,
+        exit_code: view.exit_code,
+        duration_ms: None,
+        output_bytes: None,
+        truncated: Some(view.truncated),
+    })
 }
 
 /// 终态正文的 `\r` 覆盖归一化（仅展示平面；模型文本不变，契约 §5.2）。
@@ -202,6 +220,10 @@ mod tests {
             Some("exit 0 · bash cargo check")
         );
         assert!(!display.summary.as_deref().unwrap_or("").contains('{'));
+        let outcome = display.outcome.as_ref().expect("structured outcome");
+        assert_eq!(outcome.state, ToolTerminalState::Succeeded);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.truncated, Some(false));
     }
 
     #[test]
@@ -221,10 +243,18 @@ mod tests {
             display.summary.as_deref(),
             Some("backgrounded · pid 42 · cargo test")
         );
+        assert_eq!(
+            display.outcome.as_ref().map(|outcome| outcome.state),
+            Some(ToolTerminalState::Backgrounded)
+        );
 
         let timed_out = r#"{"status":"completed","exit_code":null,"output":"","truncated":true,"timed_out":true}"#;
         let display = project_display(&args, timed_out);
         assert_eq!(display.summary.as_deref(), Some("timeout · cargo test"));
+        let outcome = display.outcome.as_ref().expect("timeout outcome");
+        assert_eq!(outcome.state, ToolTerminalState::TimedOut);
+        assert_eq!(outcome.exit_code, None);
+        assert_eq!(outcome.truncated, Some(true));
     }
 
     #[test]

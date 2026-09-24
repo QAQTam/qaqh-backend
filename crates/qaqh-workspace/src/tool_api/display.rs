@@ -53,6 +53,8 @@ pub struct ToolDisplay {
     pub body: ToolBody,
     /// 由框架填充；工具实现不得决定取值（H4）。
     pub metrics: ToolMetrics,
+    /// 结构化终态；旧 client 忽略即可（#336 P2）。
+    pub outcome: Option<ToolDisplayOutcome>,
 }
 
 impl ToolDisplay {
@@ -73,6 +75,31 @@ impl ToolDisplay {
         self.diff = Some(diff.into());
         self
     }
+
+    pub fn with_outcome(mut self, outcome: ToolDisplayOutcome) -> Self {
+        self.outcome = Some(outcome);
+        self
+    }
+}
+
+/// 展示面终态（SDK 内部类型；wire 映射见 `qaqh-runtime::timeline`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolDisplayOutcome {
+    pub state: ToolTerminalState,
+    pub exit_code: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub output_bytes: Option<u64>,
+    pub truncated: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolTerminalState {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Backgrounded,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
