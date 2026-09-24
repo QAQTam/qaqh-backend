@@ -30,12 +30,16 @@ pub(crate) fn command_fingerprint(
     channel: qaqh_domain::RingingChannel,
     seed: Option<&str>,
     expected_revision: Option<u64>,
+    driver_epoch: Option<u64>,
     command: &qaqh_ringing::RingingCommand,
 ) -> String {
     let payload = serde_json::to_string(&serde_json::json!({
         "channel": channel,
         "seed": seed,
         "expected_revision": expected_revision,
+        // v2-only CAS input: the same command_id submitted against a different
+        // driver epoch is a different payload and must not replay the old ACK.
+        "driver_epoch": driver_epoch,
         "command": command,
     }))
     .unwrap_or_default();
@@ -138,6 +142,7 @@ pub(crate) async fn handle_command(
         env.channel,
         env.seed.as_deref(),
         env.expected_revision,
+        None,
         &env.command,
     );
     let duplicate_check = {
@@ -540,4 +545,35 @@ pub(crate) async fn handle_command(
         .unwrap_or_else(|e| e.into_inner())
         .mark_running(&env.command_id);
     ack_response(StatusCode::OK, accept_ack(env.command_id, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qaqh_domain::{ControlCommand, RingingChannel};
+
+    #[test]
+    fn v2_driver_epoch_is_part_of_the_command_fingerprint() {
+        let command = qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume {
+            seed: "seed-1".into(),
+        });
+        let epoch_one = command_fingerprint(
+            RingingChannel::Control,
+            Some("seed-1"),
+            Some(7),
+            Some(1),
+            &command,
+        );
+        let epoch_two = command_fingerprint(
+            RingingChannel::Control,
+            Some("seed-1"),
+            Some(7),
+            Some(2),
+            &command,
+        );
+        assert_ne!(
+            epoch_one, epoch_two,
+            "same command_id against a new driver epoch is a different payload"
+        );
+    }
 }

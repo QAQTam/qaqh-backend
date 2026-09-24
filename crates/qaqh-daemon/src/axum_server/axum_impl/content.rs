@@ -1,6 +1,7 @@
 //! axum_impl::content — see parent module docs.
 
 use super::*;
+use axum::body::Body;
 use axum::http::HeaderValue;
 
 /// `GET /ringing/v2/content/{content_id}`。
@@ -53,12 +54,79 @@ pub(crate) async fn handle_content_get(
     } else {
         HeaderValue::from_static("application/octet-stream")
     };
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
-        entry.bytes,
-    )
-        .into_response()
+    let total = entry.bytes.len();
+    let range = match parse_byte_range(headers.get(header::RANGE), total) {
+        Ok(range) => range,
+        Err(()) => return range_not_satisfiable(total),
+    };
+    let (status, bytes, content_range) = match range {
+        Some((start, end)) => (
+            StatusCode::PARTIAL_CONTENT,
+            entry.bytes[start..=end].to_vec(),
+            Some(format!("bytes {start}-{end}/{total}")),
+        ),
+        None => (StatusCode::OK, entry.bytes, None),
+    };
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, bytes.len().to_string());
+    if let Some(content_range) = content_range {
+        builder = builder.header(header::CONTENT_RANGE, content_range);
+    }
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Parse one RFC 9110 byte range.
+///
+/// Only a single `bytes=` range is accepted. `bytes=start-`, `bytes=start-end`
+/// and `bytes=-suffix` are supported; multi-range responses are deliberately
+/// rejected because the content endpoint returns the stored object unchanged.
+fn parse_byte_range(
+    value: Option<&HeaderValue>,
+    total: usize,
+) -> Result<Option<(usize, usize)>, ()> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| ())?;
+    let spec = value.strip_prefix("bytes=").ok_or(())?;
+    if spec.is_empty() || spec.contains(',') || total == 0 {
+        return Err(());
+    }
+    let (start, end) = spec.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = end.parse::<usize>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        return Ok(Some((total.saturating_sub(suffix), total - 1)));
+    }
+    let start = start.parse::<usize>().map_err(|_| ())?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<usize>().map_err(|_| ())?.min(total - 1)
+    };
+    if start > end {
+        return Err(());
+    }
+    Ok(Some((start, end)))
+}
+
+fn range_not_satisfiable(total: usize) -> Response {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// BUG-2026-09-13-03：media_type 会直接拼进 GET 响应头（content.rs:40），
@@ -196,5 +264,28 @@ mod tests {
         assert!(!is_valid_media_type("text\u{0}/plain"));
         assert!(!is_valid_media_type("中文/类型"));
         assert!(!is_valid_media_type(""));
+    }
+
+    #[test]
+    fn byte_ranges_are_single_and_inclusive() {
+        let value = |raw: &str| HeaderValue::from_str(raw).expect("header");
+        assert_eq!(parse_byte_range(None, 10), Ok(None));
+        assert_eq!(
+            parse_byte_range(Some(&value("bytes=2-5")), 10),
+            Ok(Some((2, 5)))
+        );
+        assert_eq!(
+            parse_byte_range(Some(&value("bytes=7-")), 10),
+            Ok(Some((7, 9)))
+        );
+        assert_eq!(
+            parse_byte_range(Some(&value("bytes=-3")), 10),
+            Ok(Some((7, 9)))
+        );
+        assert_eq!(parse_byte_range(Some(&value("bytes=20-30")), 10), Err(()));
+        assert_eq!(parse_byte_range(Some(&value("bytes=0-1,4-5")), 10), Err(()));
+        assert_eq!(parse_byte_range(Some(&value("bytes=5-2")), 10), Err(()));
+        assert_eq!(parse_byte_range(Some(&value("items=0-1")), 10), Err(()));
+        assert_eq!(parse_byte_range(Some(&value("bytes=0-0")), 0), Err(()));
     }
 }
