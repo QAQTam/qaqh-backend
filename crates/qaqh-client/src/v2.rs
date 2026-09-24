@@ -108,6 +108,11 @@ pub struct ClientV2ToolState {
 
 pub type ClientV2ConversationState = qaqh_session::projection::ConversationSnapshot;
 
+/// `conversation.state.context[].kind`（typed 快照里逐条上下文项）。
+pub use qaqh_session::projection::ConversationContextKind as ClientV2ConversationContextKind;
+/// `control.state.activity` 的 v2 词汇（idle / running / interrupted）。
+pub use qaqh_session::session_fact_v2::ActivityState as ClientV2ActivityState;
+
 /// Typed authoritative v2 bootstrap.
 pub type ClientV2Bootstrap =
     RingingV2Bootstrap<ClientV2ControlState, ClientV2ConversationState, ClientV2ToolState>;
