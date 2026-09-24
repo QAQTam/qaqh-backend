@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use qaqh_domain::AskAnswer;
 use qaqh_session::canonical::{generate_ulid, sha256_content_hash};
 use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, ContentRef, EventId, InteractionDecision, InteractionKind,
+    ActorKind, ActorRef, ContentHash, ContentRef, EventId, InteractionDecision, InteractionKind,
     InteractionRequested, InteractionResolved,
 };
 use qaqh_types::UsageInfo;
@@ -299,44 +299,69 @@ impl TurnEngine {
             .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
 
         let turn_id = canonical_turn_id(&state.turn_id);
-        let mut requests = Vec::new();
+        // (wire 交互 id, kind, 正文 content_id)。
+        //
+        // 正文 content_id = `sha256(正文 bytes)`，由 hub 在发布同一条域事件时写进
+        // content store（`qaqh_domain::interaction_body` 是两处唯一的序列化来源）。
+        // permission 没有正文可取（它的详情在 tool 频道快照里），保持身份摘要 ref。
+        let mut requests: Vec<(&str, InteractionKind, Option<String>)> = Vec::new();
         requests.extend(
             state
                 .pending_permission_ids
                 .iter()
-                .map(|call_id| (call_id.as_str(), InteractionKind::Permission)),
+                .map(|call_id| (call_id.as_str(), InteractionKind::Permission, None)),
         );
-        requests.extend(
-            state
-                .pending_asks
-                .iter()
-                .map(|ask| (ask.call_id.as_str(), InteractionKind::Ask)),
-        );
-        requests.extend(
-            state
-                .pending_plans
-                .iter()
-                .map(|plan| (plan.call_id.as_str(), InteractionKind::Plan)),
-        );
+        requests.extend(state.pending_asks.iter().map(|ask| {
+            let body = qaqh_domain::interaction_body::ask_body(ask.mode, &ask.questions);
+            (
+                ask.call_id.as_str(),
+                InteractionKind::Ask,
+                Some(qaqh_types::sha256_hex(&body)),
+            )
+        }));
+        requests.extend(state.pending_plans.iter().map(|plan| {
+            let body = qaqh_domain::interaction_body::plan_body(&plan.content, "plan", None);
+            (
+                plan.call_id.as_str(),
+                InteractionKind::Plan,
+                Some(qaqh_types::sha256_hex(&body)),
+            )
+        }));
         if let Some(todo) = &state.pending_todo_activation {
-            requests.push((todo.call_id.as_str(), InteractionKind::Plan));
+            let body =
+                qaqh_domain::interaction_body::plan_body("", "todo_activation", Some(&todo.items));
+            requests.push((
+                todo.call_id.as_str(),
+                InteractionKind::Plan,
+                Some(qaqh_types::sha256_hex(&body)),
+            ));
         }
 
-        for (wire_interaction_id, kind) in requests {
+        for (wire_interaction_id, kind, content_id) in requests {
             let interaction_id = canonical_interaction_id(wire_interaction_id);
             let call_id = canonical_call_id(wire_interaction_id);
-            let request_bytes = serde_json::to_vec(&serde_json::json!({
-                "interaction_id": interaction_id.as_str(),
-                "call_id": call_id.as_str(),
-                "kind": format!("{kind:?}"),
-            }))
-            .unwrap_or_default();
+            let request_ref = match content_id {
+                // canonical ref 的格式校验要求 `sha256:<64 hex>`；content store 的
+                // id 是裸 hex，v2 content 端点负责归一（strip 前缀后查 store）。
+                Some(content_id) => {
+                    ContentRef::new(ContentHash::new(format!("sha256:{content_id}")))
+                }
+                None => {
+                    let request_bytes = serde_json::to_vec(&serde_json::json!({
+                        "interaction_id": interaction_id.as_str(),
+                        "call_id": call_id.as_str(),
+                        "kind": format!("{kind:?}"),
+                    }))
+                    .unwrap_or_default();
+                    ContentRef::new(sha256_content_hash(&request_bytes))
+                }
+            };
             let payload = InteractionRequested {
                 interaction_id,
                 call_id: Some(call_id.clone()),
                 turn_id: turn_id.clone(),
                 kind,
-                request_ref: ContentRef::new(sha256_content_hash(&request_bytes)),
+                request_ref,
                 expires_at_ms: None,
                 requested_at_ms: now,
             };

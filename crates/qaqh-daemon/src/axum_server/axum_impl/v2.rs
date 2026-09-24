@@ -46,6 +46,25 @@ struct V2ToolState {
     tools: Vec<ControlToolState>,
 }
 
+/// canonical `ContentValue` → wire 形态（#345）。
+///
+/// 两侧 serde 判别式一致（`kind` / `data`）；`Unavailable` 的 reason 结构按
+/// 不透明 JSON 透传，不在 wire 层重复建模。
+fn wire_content_value(
+    value: &qaqh_session::session_fact_v2::ContentValue,
+) -> RingingV2ContentValue {
+    use qaqh_session::session_fact_v2::ContentValue;
+    match value {
+        ContentValue::Inline { text } => RingingV2ContentValue::Inline { text: text.clone() },
+        ContentValue::Ref { content_ref } => RingingV2ContentValue::Ref {
+            content_ref: content_ref.hash().as_str().to_string(),
+        },
+        ContentValue::Unavailable(reason) => RingingV2ContentValue::Unavailable(
+            serde_json::to_value(reason).unwrap_or(serde_json::Value::Null),
+        ),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct V2EventsQuery {
     pub since_cursor: Option<String>,
@@ -176,6 +195,15 @@ pub(crate) async fn handle_bootstrap_v2(
                 InteractionKind::Permission => RingingV2InteractionKind::Permission,
                 InteractionKind::Ask => RingingV2InteractionKind::Ask,
                 InteractionKind::Plan => RingingV2InteractionKind::PlanReview,
+            },
+            // #345：ask / plan 的 modal 正文走 content store（ref 指向正文）；
+            // permission 没有可取正文（详情在 tool 频道快照 / timeline 卡里），
+            // 因此**不暴露**那个身份摘要 ref，避免客户端去取一个取不到的东西。
+            request: match interaction.kind {
+                InteractionKind::Permission => None,
+                InteractionKind::Ask | InteractionKind::Plan => {
+                    Some(wire_content_value(&interaction.request))
+                }
             },
         })
         .collect();

@@ -79,6 +79,51 @@ pub fn observe_yield_for_test(
         .map_err(|error| error.to_string())
 }
 
+/// Exercise the production yield observer and durable interaction-request
+/// write path from integration tests（ask 变体，覆盖 #345 的正文 ref）。
+pub fn observe_ask_yield_for_test(
+    engine: &mut TurnEngine,
+    agent: &mut AgentState,
+    turn_id: &str,
+    input_id: &str,
+    pending_call_id: &str,
+    mode: qaqh_domain::AskMode,
+    questions: Vec<qaqh_domain::AskQuestion>,
+) -> Result<(), String> {
+    engine
+        .begin_input(turn_id, input_id)
+        .map_err(|error| error.to_string())?;
+    let mut pending_asks = std::collections::VecDeque::new();
+    pending_asks.push_back(crate::agent::types::PendingAsk {
+        call_id: pending_call_id.to_string(),
+        mode,
+        questions,
+    });
+    engine.suspended = Some(TurnState {
+        session_id: agent.session.seed.clone(),
+        turn_id: turn_id.to_string(),
+        round_num: 0,
+        pending_permission_ids: Vec::new(),
+        deferred_authorized: Vec::new(),
+        tool_call_order: vec![pending_call_id.to_string()],
+        serial_call_ids: HashSet::new(),
+        pending_asks,
+        pending_plans: std::collections::VecDeque::new(),
+        pending_todo_activation: None,
+        usage: None,
+        reason: YieldReason::AskUser,
+    });
+    engine
+        .observe_outcome(
+            agent,
+            &Outcome::YieldToUser {
+                turn_id: turn_id.to_string(),
+                reason: YieldReason::AskUser,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
 /// Exercise the production interaction-resolution write path from integration
 /// tests.
 pub fn record_interaction_resolution_for_test(
