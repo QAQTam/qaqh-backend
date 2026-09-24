@@ -227,10 +227,23 @@ pub enum ToolResultDisplayBody {
         #[serde(default)]
         truncated: bool,
     },
+    /// v2：stdout / stderr 分离展示；旧 client 遇到未知变体应回退旧字段。
+    Streams {
+        stdout: String,
+        stderr: String,
+        #[serde(default)]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default)]
+        interleaved: bool,
+    },
     Subagent {
         name: String,
         seed: String,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -666,6 +679,33 @@ mod tests {
         assert_eq!(value["display"]["outcome"]["exit_code"], 0);
         let restored: ToolResult = serde_json::from_value(value).expect("deserialize display");
         assert_eq!(restored.display(), result.display());
+    }
+
+    #[test]
+    fn streams_display_body_roundtrips_with_separate_output() {
+        let body = ToolResultDisplayBody::Streams {
+            stdout: "out\n".into(),
+            stderr: "err\n".into(),
+            exit_code: Some(1),
+            truncated: false,
+            interleaved: false,
+        };
+        let value = serde_json::to_value(&body).expect("serialize streams");
+        assert_eq!(value["kind"], "streams");
+        assert_eq!(value["stdout"], "out\n");
+        assert_eq!(value["stderr"], "err\n");
+        assert_eq!(value["exit_code"], 1);
+        let restored: ToolResultDisplayBody =
+            serde_json::from_value(value).expect("deserialize streams");
+        assert_eq!(restored, body);
+    }
+
+    #[test]
+    fn unknown_display_body_falls_back_to_unknown() {
+        let body: ToolResultDisplayBody =
+            serde_json::from_value(serde_json::json!({"kind": "hologram", "text": "future"}))
+                .expect("unknown body must not reject the display");
+        assert_eq!(body, ToolResultDisplayBody::Unknown);
     }
 
     #[test]

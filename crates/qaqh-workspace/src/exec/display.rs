@@ -4,6 +4,7 @@
 //! 自己的 canonical JSON 时复用同一投影函数，不做 client 侧 JSON 考古。
 
 use super::direct::ExecOutput;
+use crate::tool_api::display::clamp_display_body;
 use crate::tool_api::{
     ToolBody, ToolContentBlock, ToolDisplay, ToolDisplayOutcome, ToolError, ToolErrorCode,
     ToolErrorKind, ToolHeader, ToolProjection, ToolStatus, ToolTerminalState,
@@ -89,23 +90,43 @@ fn display_from_output(view: &ExecOutput, command: Option<String>) -> ToolDispla
     } else {
         ToolTerminalState::Failed
     };
-    ToolDisplay::new(
-        header,
-        ToolBody::Shell {
-            // 终态正文在后端完成 `\r` 覆盖归一化（§5.2）；模型文本不变。
-            output: normalize_carriage_returns(&view.output),
+    let (body, body_truncated) = if view.stdout.is_empty() && view.stderr.is_empty() {
+        (
+            ToolBody::Shell {
+                // 终态正文在后端完成 `\r` 覆盖归一化（§5.2）；模型文本不变。
+                output: normalize_carriage_returns(&view.output),
+                exit_code: view.exit_code,
+                truncated: view.truncated,
+            },
+            view.truncated,
+        )
+    } else {
+        let (stdout, stdout_truncated) =
+            clamp_display_body(&normalize_carriage_returns(&view.stdout));
+        let (stderr, stderr_truncated) =
+            clamp_display_body(&normalize_carriage_returns(&view.stderr));
+        let truncated = view.truncated || stdout_truncated || stderr_truncated;
+        (
+            ToolBody::Streams {
+                stdout,
+                stderr,
+                exit_code: view.exit_code,
+                truncated,
+                // 当前没有 pipe 层全局序号；两条流已分开，不伪装真实交织顺序。
+                interleaved: false,
+            },
+            truncated,
+        )
+    };
+    ToolDisplay::new(header, body)
+        .with_summary(summary)
+        .with_outcome(ToolDisplayOutcome {
+            state,
             exit_code: view.exit_code,
-            truncated: view.truncated,
-        },
-    )
-    .with_summary(summary)
-    .with_outcome(ToolDisplayOutcome {
-        state,
-        exit_code: view.exit_code,
-        duration_ms: None,
-        output_bytes: None,
-        truncated: Some(view.truncated),
-    })
+            duration_ms: None,
+            output_bytes: None,
+            truncated: Some(body_truncated),
+        })
 }
 
 /// 终态正文的 `\r` 覆盖归一化（仅展示平面；模型文本不变，契约 §5.2）。
@@ -224,6 +245,39 @@ mod tests {
         assert_eq!(outcome.state, ToolTerminalState::Succeeded);
         assert_eq!(outcome.exit_code, Some(0));
         assert_eq!(outcome.truncated, Some(false));
+    }
+
+    #[test]
+    fn exec_display_separates_stdout_and_stderr_for_v2() {
+        let args = serde_json::json!({"command": "sh -c 'echo out; echo err >&2'"});
+        let view = ExecOutput {
+            status: "completed".into(),
+            command: "sh -c 'echo out; echo err >&2'".into(),
+            exit_code: Some(0),
+            output: "err\nout\n".into(),
+            stdout: "out\n".into(),
+            stderr: "err\n".into(),
+            truncated: false,
+            timed_out: false,
+            cancelled: false,
+            process_id: None,
+        };
+        let display = view.display(&args);
+
+        assert_eq!(
+            display.body,
+            ToolBody::Streams {
+                stdout: "out\n".into(),
+                stderr: "err\n".into(),
+                exit_code: Some(0),
+                truncated: false,
+                interleaved: false,
+            }
+        );
+        assert_eq!(
+            display.outcome.as_ref().map(|outcome| outcome.state),
+            Some(ToolTerminalState::Succeeded)
+        );
     }
 
     #[test]

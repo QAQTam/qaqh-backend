@@ -188,6 +188,17 @@ pub enum TimelineToolBody {
         #[serde(default)]
         truncated: bool,
     },
+    /// v2：stdout / stderr 分离展示；旧 client 遇到未知变体应回退旧字段。
+    Streams {
+        stdout: String,
+        stderr: String,
+        #[serde(default)]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default)]
+        interleaved: bool,
+    },
     Subagent {
         name: String,
         seed: String,
@@ -612,6 +623,23 @@ mod display_contract_tests {
         let op: TimelinePathOp =
             serde_json::from_str("\"frobnicate\"").expect("unknown op tolerated");
         assert!(matches!(op, TimelinePathOp::Unknown));
+    }
+
+    #[test]
+    fn streams_body_roundtrips_with_separate_output() {
+        let body = TimelineToolBody::Streams {
+            stdout: "out\n".into(),
+            stderr: "err\n".into(),
+            exit_code: Some(1),
+            truncated: false,
+            interleaved: false,
+        };
+        let json = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(json["kind"], "streams");
+        assert_eq!(json["stdout"], "out\n");
+        assert_eq!(json["stderr"], "err\n");
+        let restored: TimelineToolBody = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, body);
     }
 
     #[test]

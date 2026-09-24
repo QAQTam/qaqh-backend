@@ -150,6 +150,15 @@ pub enum ToolBody {
         exit_code: Option<i32>,
         truncated: bool,
     },
+    /// v2：stdout / stderr 分离展示。`interleaved=false` 表示两条流已分开，
+    /// 不承诺真实交织顺序；旧 client 遇到未知变体时回退 `Shell` / `output`。
+    Streams {
+        stdout: String,
+        stderr: String,
+        exit_code: Option<i32>,
+        truncated: bool,
+        interleaved: bool,
+    },
     Subagent {
         name: String,
         seed: String,
