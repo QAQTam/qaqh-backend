@@ -129,8 +129,8 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
     };
     assert_eq!(classify(delta), "requested");
 
-    // wire 事实：delta 的 kind 是 `plan`，bootstrap 的 pending kind 是
-    // `plan_review` —— 两个枚举都在 client 面可命名，壳层自行映射。
+    // wire 事实：delta 与 bootstrap 的 plan kind 都已统一为 `plan`；两个
+    // Rust 枚举都在 client 面可命名，壳层按类型匹配即可。
     let resolved: ClientV2Payload = serde_json::from_value(serde_json::json!({
         "kind": "control_delta",
         "data": {
