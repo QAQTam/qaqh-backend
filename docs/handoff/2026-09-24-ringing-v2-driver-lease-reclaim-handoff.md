@@ -91,7 +91,10 @@ scripts/v2-smoke.sh  driver auto-reclaim on lease expiry
 
 ## 5. 仍未完成（alpha 迭代清单）
 
-### A. 新发现：actor 退出不释放 canonical writer lease（优先）
+### A. 新发现：actor 退出不释放 canonical writer lease（已修）
+
+> 已由 `docs/handoff/2026-09-24-canonical-writer-fence-release-handoff.md` 修复：
+> `ToolLedger` 现在在 `Drop` 时释放 writer fence。
 
 补坑过程中发现：`ToolLedger::release_writer_lease` **只有 recovery executor 调用**，
 session actor 正常退出/关闭时不释放 writer fence。后果：
