@@ -8,7 +8,6 @@ use std::fmt;
 
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
-use qaqh_domain::RingingChannel;
 use qaqh_ringing::{
     CursorToken, RingingCommandAck, RingingCommandStatus, RingingV2Bootstrap,
     RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandStatus,
@@ -233,18 +232,19 @@ impl Client {
         Ok(bootstrap)
     }
 
-    /// Open a typed v2 per-seed SSE subscription.
+    /// Open the typed v2 per-seed SSE subscription.
+    ///
+    /// 2026-09-24 冻结修订（硬切）：**每 seed 一条流**，不再按 channel 分订阅。
+    /// 事件带 `stream_key`，调用方自行 demux。旧的三条 `subscribe_v2(seed,
+    /// channel, …)` 形态已删除；调用方必须在 `open` 响应里断言
+    /// `capabilities.single_stream == true`。
     pub async fn subscribe_v2(
         &self,
         seed: &str,
-        channel: RingingChannel,
         since_cursor: Option<&CursorToken>,
     ) -> Result<ClientV2Subscription> {
         let state = self.require_v2_session().await?;
-        let path = format!(
-            "{RINGING_V2_BASE_PATH}/sessions/{seed}/events/{}",
-            channel.as_str()
-        );
+        let path = qaqh_ringing::events_path(seed);
         let mut request = self
             .inner
             .http
