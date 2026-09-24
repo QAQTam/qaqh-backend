@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qaqh_ringing::{
     RingingCommandState, RingingCommandStatus, RingingEvent, RingingEventEnvelope,
-    RingingV2AskOutcome, RingingV2CommandResult, RingingV2CommandStatus, RingingV2ExistingCommand,
+    RingingV2AskOutcome, RingingV2CommandResult, RingingV2CommandStatus, RingingV2ExistingResult,
 };
 
 /// 已 accepted 命令的幂等表（有界 TTL；accepted 后断线重试不得重复执行）。
@@ -56,8 +56,8 @@ pub struct ExistingCommandReceipt {
 }
 
 impl ExistingCommandReceipt {
-    pub fn into_existing(self) -> RingingV2ExistingCommand {
-        RingingV2ExistingCommand {
+    pub fn into_existing(self) -> RingingV2ExistingResult {
+        RingingV2ExistingResult::CommandReceipt {
             state: self.state,
             terminal_event_id: self.terminal_event_id,
             error_code: self.error_code,
@@ -592,10 +592,13 @@ mod tests {
             .existing_receipt_for_session("cmd-ask", "session-a")
             .expect("existing receipt");
         assert_eq!(existing.payload_fingerprint, "fp");
-        assert_eq!(
-            existing.into_existing().state,
-            RingingCommandState::Succeeded
-        );
+        assert!(matches!(
+            existing.into_existing(),
+            RingingV2ExistingResult::CommandReceipt {
+                state: RingingCommandState::Succeeded,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -11,8 +11,8 @@ use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIn
 use super::types::{
     ActivityState, ActorRef, AssistantBlockKind, CheckpointId, ContentHash, ContentRef,
     ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind, InputPurpose,
-    InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason, LogId,
-    MAX_SAFE_FACT_SEQ, PolicyDecisionRef, ProjectionSlot, RecoveryAction, RecoveryOutcome,
+    InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason,
+    LogId, MAX_SAFE_FACT_SEQ, PolicyDecisionRef, ProjectionSlot, RecoveryAction, RecoveryOutcome,
     RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId, SessionMetadataPatch,
     SideEffectClass, SubagentTerminalStatus, TitleSource, ToolCallId, ToolError, ToolMetrics,
     ToolReplayCapability, ToolTerminalStatus, TurnError, TurnId, TurnMode, TurnTerminal,
@@ -485,6 +485,9 @@ pub enum ControlDelta {
         revision: u64,
         interaction_id: InteractionId,
         decision: ContentValue,
+        /// Structured verdict; `None` for legacy facts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<InteractionDecision>,
         resolved_by: ActorRef,
         resolution_seq: u64,
     },

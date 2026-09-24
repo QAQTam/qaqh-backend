@@ -71,6 +71,9 @@ mod sse_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
+        let drivers = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_runtime::ringing::RingingDriverStore::new(),
+        ));
         let (shutdown, _) = tokio::sync::watch::channel(false);
         // 与 `axum_tests::test_state` 同源：SessionManager 是进程级单例
         // （`init` 用 `OnceLock::set`，重复调用会 panic）——测试二进制的多个
@@ -81,6 +84,7 @@ mod sse_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("lag-epoch")),
             leases,
+            drivers,
             pending,
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
                 .clone(),
@@ -585,6 +589,9 @@ mod axum_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
+        let drivers = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_runtime::ringing::RingingDriverStore::new(),
+        ));
         let service = TEST_SERVICE
             .get_or_init(|| {
                 super::init_session_manager();
@@ -601,6 +608,7 @@ mod axum_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("test-epoch")),
             leases,
+            drivers,
             pending,
             service,
             token: String::from("test-token"),
@@ -922,9 +930,19 @@ mod axum_tests {
         let ack: RingingV2CommandAck = serde_json::from_slice(&body).unwrap();
         assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
         let existing = ack.existing.expect("replayed ack carries existing receipt");
-        assert_eq!(existing.state, RingingCommandState::Succeeded);
-        assert_eq!(existing.terminal_event_id.as_deref(), Some("evt-replay"));
-        assert_eq!(existing.result, Some(expected.clone()));
+        match existing {
+            qaqh_ringing::RingingV2ExistingResult::CommandReceipt {
+                state,
+                terminal_event_id,
+                result,
+                ..
+            } => {
+                assert_eq!(state, RingingCommandState::Succeeded);
+                assert_eq!(terminal_event_id.as_deref(), Some("evt-replay"));
+                assert_eq!(result, Some(expected.clone()));
+            }
+            other => panic!("expected command_receipt, got {other:?}"),
+        }
 
         let status = Request::builder()
             .uri("/ringing/v2/commands/cmd-replay")
@@ -945,9 +963,7 @@ mod axum_tests {
     #[tokio::test]
     async fn v2_command_replay_with_other_payload_is_conflict() {
         use qaqh_domain::ControlCommand;
-        use qaqh_ringing::{
-            RingingCommand, RingingV2CommandAck, RingingV2CommandEnvelope,
-        };
+        use qaqh_ringing::{RingingCommand, RingingV2CommandAck, RingingV2CommandEnvelope};
 
         let state = test_state();
         let pending = state.pending.clone();
@@ -1006,6 +1022,553 @@ mod axum_tests {
         let ack: RingingV2CommandAck = serde_json::from_slice(&body).unwrap();
         assert_eq!(ack.code.as_deref(), Some("duplicate_command_mismatch"));
         assert!(ack.existing.is_none());
+    }
+
+    #[tokio::test]
+    async fn v2_second_answer_returns_winning_verdict() {
+        use qaqh_domain::ControlCommand;
+        use qaqh_ringing::{
+            RingingCommand, RingingV2AskOutcome, RingingV2CommandAck, RingingV2CommandEnvelope,
+            RingingV2CommandResult, RingingV2ExistingResult,
+        };
+        use qaqh_session::canonical::{
+            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
+            sha256_content_hash,
+        };
+        use qaqh_session::session_fact_v2::{
+            ActorKind, ActorRef, ContentRef, EventId, FactPayload, FactSchema, InteractionDecision,
+            InteractionId, InteractionKind, InteractionRequested, InteractionResolved,
+            SessionCreated, SessionFact, ToolCallId, TurnId,
+        };
+
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
+        let seed = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+        let now = 1_789_830_000_000;
+        let mut store = CanonicalSessionStore::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .unwrap();
+        let lease = store
+            .acquire_writer(WriterId::new("v2-second-answer-test"), now, 60_000)
+            .unwrap();
+
+        let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
+        let call_id = ToolCallId::new(format!("call_{}", generate_ulid()));
+        let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+        let envelope = |ts_ms: i64, payload: FactPayload| SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms,
+            causation_id: None,
+            turn_id: Some(turn_id.clone()),
+            call_id: Some(call_id.clone()),
+            interaction_id: Some(interaction_id.clone()),
+            payload,
+        };
+
+        store
+            .append(
+                &lease,
+                envelope(
+                    now,
+                    FactPayload::SessionCreated(SessionCreated {
+                        created_at_ms: now,
+                        cwd: "/tmp".into(),
+                        model: "test".into(),
+                        parent_session_id: None,
+                        schema_caps: Vec::new(),
+                    }),
+                ),
+                now,
+            )
+            .unwrap();
+        store
+            .append(
+                &lease,
+                envelope(
+                    now + 1,
+                    FactPayload::InteractionRequested(InteractionRequested {
+                        interaction_id: interaction_id.clone(),
+                        call_id: Some(call_id.clone()),
+                        turn_id: turn_id.clone(),
+                        kind: InteractionKind::Ask,
+                        request_ref: ContentRef::new(sha256_content_hash(b"ask-request")),
+                        expires_at_ms: None,
+                        requested_at_ms: now + 1,
+                    }),
+                ),
+                now + 1,
+            )
+            .unwrap();
+        store
+            .append(
+                &lease,
+                envelope(
+                    now + 2,
+                    FactPayload::InteractionResolved(InteractionResolved {
+                        interaction_id: interaction_id.clone(),
+                        decision_ref: ContentRef::new(sha256_content_hash(b"answered")),
+                        decision: Some(InteractionDecision::Answered),
+                        resolved_by: ActorRef {
+                            kind: ActorKind::User,
+                            id: "user".into(),
+                            display_name: None,
+                        },
+                        resolution_seq: 1,
+                        resolved_at_ms: now + 2,
+                    }),
+                ),
+                now + 2,
+            )
+            .unwrap();
+
+        let app = build_router(test_state());
+        let open = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/clients/open")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .body(Body::from(
+                serde_json::to_vec(&qaqh_ringing::RingingV2OpenRequest::new("ci-v2")).unwrap(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(open).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let open: qaqh_ringing::RingingV2OpenResponse = serde_json::from_slice(&body).unwrap();
+
+        let command = RingingV2CommandEnvelope::new(
+            "cmd-second-answer",
+            "ci-v2",
+            RingingCommand::Control(ControlCommand::InteractionAskRespond {
+                interaction_id: interaction_id.as_str().to_string(),
+                answers: Vec::new(),
+            }),
+        )
+        .with_client_session_id(open.client_session_id.clone())
+        .with_seed(seed);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/commands/control")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", open.client_session_id)
+            .body(Body::from(serde_json::to_vec(&command).unwrap()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let ack: RingingV2CommandAck = serde_json::from_slice(&body).unwrap();
+        assert_eq!(ack.code.as_deref(), Some("interaction_already_resolved"));
+        match ack.existing.expect("winning verdict") {
+            RingingV2ExistingResult::InteractionResolved { result } => assert_eq!(
+                result,
+                RingingV2CommandResult::AskResolved {
+                    interaction_id: interaction_id.as_str().to_string(),
+                    outcome: RingingV2AskOutcome::Answered,
+                }
+            ),
+            other => panic!("expected interaction_resolved, got {other:?}"),
+        }
+    }
+
+    async fn open_v2_session(
+        app: axum::Router,
+        client_instance_id: &str,
+    ) -> qaqh_ringing::RingingV2OpenResponse {
+        let open = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/clients/open")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .body(Body::from(
+                serde_json::to_vec(&qaqh_ringing::RingingV2OpenRequest::new(client_instance_id))
+                    .unwrap(),
+            ))
+            .unwrap();
+        let response = app.oneshot(open).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn post_driver(
+        app: axum::Router,
+        seed: &str,
+        action: &str,
+        session_id: &str,
+    ) -> serde_json::Value {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/ringing/v2/sessions/{seed}/driver/{action}"))
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", session_id)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn post_v2_command(
+        app: axum::Router,
+        session_id: &str,
+        envelope: &qaqh_ringing::RingingV2CommandEnvelope,
+    ) -> (StatusCode, qaqh_ringing::RingingV2CommandAck) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/ringing/v2/commands/{}",
+                envelope.channel.as_str()
+            ))
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", session_id)
+            .body(Body::from(serde_json::to_vec(envelope).unwrap()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let ack = serde_json::from_slice(&body).unwrap();
+        (status, ack)
+    }
+
+    #[tokio::test]
+    async fn v2_driver_claim_gates_mutation_commands() {
+        use qaqh_domain::ConversationCommand;
+        use qaqh_ringing::{RingingCommand, RingingV2CommandEnvelope};
+
+        let app = build_router(test_state());
+        let a = open_v2_session(app.clone(), "ci-a").await;
+        let b = open_v2_session(app.clone(), "ci-b").await;
+
+        let claim_a = post_driver(app.clone(), "seed-1", "claim", &a.client_session_id).await;
+        assert_eq!(claim_a["accepted"], true);
+        assert_eq!(claim_a["reason"], "claimed");
+        assert_eq!(claim_a["driver_epoch"], 1);
+        assert_eq!(claim_a["holder"], a.client_session_id);
+
+        let claim_b = post_driver(app.clone(), "seed-1", "claim", &b.client_session_id).await;
+        assert_eq!(claim_b["accepted"], false);
+        assert_eq!(claim_b["reason"], "driver_busy");
+        assert_eq!(claim_b["holder"], a.client_session_id);
+
+        let gated = |command_id: &str, client_session_id: &str| {
+            RingingV2CommandEnvelope::new(
+                command_id,
+                "ci-v2",
+                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
+                    turn_id: None,
+                }),
+            )
+            .with_client_session_id(client_session_id)
+            .with_seed("seed-1")
+        };
+
+        let (_, rejected) = post_v2_command(
+            app.clone(),
+            &b.client_session_id,
+            &gated("cmd-b-cancel", &b.client_session_id),
+        )
+        .await;
+        assert_eq!(rejected.code.as_deref(), Some("not_driver"));
+
+        let (_, allowed) = post_v2_command(
+            app.clone(),
+            &a.client_session_id,
+            &gated("cmd-a-cancel", &a.client_session_id).with_driver_epoch(1),
+        )
+        .await;
+        assert_ne!(allowed.code.as_deref(), Some("not_driver"));
+
+        let release_b = post_driver(app.clone(), "seed-1", "release", &b.client_session_id).await;
+        assert_eq!(release_b["accepted"], false);
+        assert_eq!(release_b["reason"], "not_driver");
+
+        let release_a = post_driver(app.clone(), "seed-1", "release", &a.client_session_id).await;
+        assert_eq!(release_a["accepted"], true);
+        assert_eq!(release_a["reason"], "released");
+        assert_eq!(release_a["driver_epoch"], 2);
+    }
+
+    #[tokio::test]
+    async fn v2_stale_driver_epoch_is_rejected() {
+        use qaqh_domain::ConversationCommand;
+        use qaqh_ringing::{RingingCommand, RingingV2CommandEnvelope};
+
+        let app = build_router(test_state());
+        let a = open_v2_session(app.clone(), "ci-a").await;
+        let claim = post_driver(app.clone(), "seed-1", "claim", &a.client_session_id).await;
+        assert_eq!(claim["driver_epoch"], 1);
+
+        let envelope = |command_id: &str| {
+            RingingV2CommandEnvelope::new(
+                command_id,
+                "ci-v2",
+                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
+                    turn_id: None,
+                }),
+            )
+            .with_client_session_id(a.client_session_id.clone())
+            .with_seed("seed-1")
+        };
+
+        let (_, stale) = post_v2_command(
+            app.clone(),
+            &a.client_session_id,
+            &envelope("cmd-stale").with_driver_epoch(0),
+        )
+        .await;
+        assert_eq!(stale.code.as_deref(), Some("stale_driver_epoch"));
+
+        let (_, current) = post_v2_command(
+            app,
+            &a.client_session_id,
+            &envelope("cmd-current").with_driver_epoch(1),
+        )
+        .await;
+        assert_ne!(current.code.as_deref(), Some("stale_driver_epoch"));
+    }
+
+    #[tokio::test]
+    async fn v2_bootstrap_reports_driver_state() {
+        use qaqh_session::canonical::{
+            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
+        };
+        use qaqh_session::session_fact_v2::{
+            EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
+        };
+
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
+        let seed = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+        let now = 1_789_830_000_000;
+        let mut store = CanonicalSessionStore::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .unwrap();
+        let lease = store
+            .acquire_writer(WriterId::new("v2-driver-bootstrap-test"), now, 60_000)
+            .unwrap();
+        store
+            .append(
+                &lease,
+                SessionFact {
+                    schema: FactSchema::v2(),
+                    session_id: identity.session_id.clone(),
+                    log_id: identity.log_id.clone(),
+                    fact_seq: 0,
+                    event_id: EventId::new(generate_ulid()),
+                    ts_ms: now,
+                    causation_id: None,
+                    turn_id: None,
+                    call_id: None,
+                    interaction_id: None,
+                    payload: FactPayload::SessionCreated(SessionCreated {
+                        created_at_ms: now,
+                        cwd: "/tmp".into(),
+                        model: "test".into(),
+                        parent_session_id: None,
+                        schema_caps: Vec::new(),
+                    }),
+                },
+                now,
+            )
+            .unwrap();
+
+        let app = build_router(test_state());
+        let a = open_v2_session(app.clone(), "ci-a").await;
+        let b = open_v2_session(app.clone(), "ci-b").await;
+        let claim = post_driver(app.clone(), &seed, "claim", &a.client_session_id).await;
+        assert_eq!(claim["accepted"], true);
+
+        let bootstrap = |session_id: String| {
+            let app = app.clone();
+            let seed = seed.clone();
+            async move {
+                let request = Request::builder()
+                    .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+                    .header("authorization", "Bearer test-token")
+                    .header("x-qaqh-client-session-id", session_id)
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+                    .await
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                value["control"]["state"]["driver"].clone()
+            }
+        };
+
+        let holder_view = bootstrap(a.client_session_id.clone()).await;
+        assert_eq!(holder_view["holder"], a.client_session_id);
+        assert_eq!(holder_view["driver_epoch"], 1);
+        assert_eq!(holder_view["can_claim"], false);
+
+        let other_view = bootstrap(b.client_session_id).await;
+        assert_eq!(other_view["holder"], a.client_session_id);
+        assert_eq!(other_view["can_claim"], true);
+    }
+
+    /// V2-R1..R3: a pending interaction survives a reconnect as a stable
+    /// `interaction_id` in bootstrap, for permission / ask / plan alike.
+    #[tokio::test]
+    async fn v2_pending_interactions_survive_reconnect() {
+        use qaqh_session::canonical::{
+            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
+            sha256_content_hash,
+        };
+        use qaqh_session::session_fact_v2::{
+            ContentRef, EventId, FactPayload, FactSchema, InteractionId, InteractionKind,
+            InteractionRequested, SessionCreated, SessionFact, ToolCallId, TurnId,
+        };
+
+        let app = build_router(test_state());
+        let client = open_v2_session(app.clone(), "ci-reconnect").await;
+
+        for (kind, expected_kind) in [
+            (InteractionKind::Permission, "permission"),
+            (InteractionKind::Ask, "ask"),
+            (InteractionKind::Plan, "plan_review"),
+        ] {
+            let sessions_dir = qaqh_types::platform::sessions_dir();
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
+            let seed = dir
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+            let now = 1_789_830_000_000;
+            let mut store = CanonicalSessionStore::open(
+                dir.path(),
+                identity.session_id.clone(),
+                identity.log_id.clone(),
+            )
+            .unwrap();
+            let lease = store
+                .acquire_writer(WriterId::new("v2-reconnect-test"), now, 60_000)
+                .unwrap();
+            let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
+            let call_id = ToolCallId::new(format!("call_{}", generate_ulid()));
+            let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+            let envelope = |ts_ms: i64, payload: FactPayload| SessionFact {
+                schema: FactSchema::v2(),
+                session_id: identity.session_id.clone(),
+                log_id: identity.log_id.clone(),
+                fact_seq: 0,
+                event_id: EventId::new(generate_ulid()),
+                ts_ms,
+                causation_id: None,
+                turn_id: Some(turn_id.clone()),
+                call_id: Some(call_id.clone()),
+                interaction_id: Some(interaction_id.clone()),
+                payload,
+            };
+            store
+                .append(
+                    &lease,
+                    envelope(
+                        now,
+                        FactPayload::SessionCreated(SessionCreated {
+                            created_at_ms: now,
+                            cwd: "/tmp".into(),
+                            model: "test".into(),
+                            parent_session_id: None,
+                            schema_caps: Vec::new(),
+                        }),
+                    ),
+                    now,
+                )
+                .unwrap();
+            store
+                .append(
+                    &lease,
+                    envelope(
+                        now + 1,
+                        FactPayload::InteractionRequested(InteractionRequested {
+                            interaction_id: interaction_id.clone(),
+                            call_id: Some(call_id.clone()),
+                            turn_id: turn_id.clone(),
+                            kind,
+                            request_ref: ContentRef::new(sha256_content_hash(b"pending")),
+                            expires_at_ms: None,
+                            requested_at_ms: now + 1,
+                        }),
+                    ),
+                    now + 1,
+                )
+                .unwrap();
+
+            let bootstrap = |app: axum::Router, seed: String, session_id: String| async move {
+                let request = Request::builder()
+                    .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+                    .header("authorization", "Bearer test-token")
+                    .header("x-qaqh-client-session-id", session_id)
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+                    .await
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                value["control"]["state"]["interactions"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            };
+
+            // Two bootstraps == subscribe / reconnect. The pending set must be
+            // identical and carry the canonical interaction id.
+            let first =
+                bootstrap(app.clone(), seed.clone(), client.client_session_id.clone()).await;
+            let second = bootstrap(app.clone(), seed, client.client_session_id.clone()).await;
+            assert_eq!(first, second, "{kind:?} pending set must be stable");
+            assert_eq!(
+                first.len(),
+                1,
+                "{kind:?} must expose one pending interaction"
+            );
+            assert_eq!(first[0]["interaction_id"], interaction_id.as_str());
+            assert_eq!(first[0]["kind"], expected_kind);
+        }
     }
 
     #[tokio::test]

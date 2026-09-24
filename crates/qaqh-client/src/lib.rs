@@ -38,16 +38,6 @@ pub use remote_path::{display_host, display_path, remote_path_from_display};
 pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
 pub use types::ResetRequired;
-pub use v2::{
-    CLIENT_V2_END_OF_FACT, ClientV2AskOutcome, ClientV2Bootstrap, ClientV2Capabilities,
-    ClientV2CommandAck, ClientV2CommandResult, ClientV2CommandStatus, ClientV2ControlState,
-    ClientV2ConversationState, ClientV2Cursor, ClientV2CursorToken, ClientV2Delivery,
-    ClientV2DriverState, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingCommand,
-    ClientV2InteractionKind, ClientV2Payload, ClientV2PendingInteraction, ClientV2PendingSet,
-    ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey,
-    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH,
-    RINGING_V2_VERSION,
-};
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
     ChannelStatus, CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent,
@@ -58,12 +48,21 @@ pub use types::{
     ProviderToolState, RINGING_SCHEMA, RINGING_VERSION, ReconnectReason, RingingChannelSnapshot,
     RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
     RingingCommandStatus, RingingEvent, RingingEventEnvelope, RingingSessionBootstrap,
-    RoundDeltaKind, SessionActivity,
-    SessionListEntry, SessionMeta, SkillInfo, SkillRuntimeInfo, SkillsStatus, TimelineBlock,
-    TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelineFailure,
-    TimelinePage, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineStatus, TimelineTool,
-    TimelineToolBody, TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics,
-    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand,
-    ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult, ToolStatus,
-    UsageInfo, is_safe_integer,
+    RoundDeltaKind, SessionActivity, SessionListEntry, SessionMeta, SkillInfo, SkillRuntimeInfo,
+    SkillsStatus, TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry,
+    TimelineEvent, TimelineFailure, TimelinePage, TimelinePathOp, TimelineRound, TimelineSnapshot,
+    TimelineStatus, TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader,
+    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn,
+    TimelineTurnState, ToolCommand, ToolContinuation, ToolError, ToolEvent, ToolImage,
+    ToolModelPayload, ToolResult, ToolStatus, UsageInfo, is_safe_integer,
+};
+pub use v2::{
+    CLIENT_V2_END_OF_FACT, ClientV2AskOutcome, ClientV2Bootstrap, ClientV2Capabilities,
+    ClientV2CommandAck, ClientV2CommandResult, ClientV2CommandStatus, ClientV2ControlState,
+    ClientV2ConversationState, ClientV2Cursor, ClientV2CursorToken, ClientV2Delivery,
+    ClientV2DriverState, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingResult,
+    ClientV2InteractionKind, ClientV2Payload, ClientV2PendingInteraction, ClientV2PendingSet,
+    ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey,
+    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH,
+    RINGING_V2_VERSION,
 };

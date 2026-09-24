@@ -127,6 +127,7 @@ fn main() {
                 CommandOptions {
                     command_id: Some(command_id.clone()),
                     expected_revision: None,
+                    driver_epoch: None,
                 },
             )
             .await

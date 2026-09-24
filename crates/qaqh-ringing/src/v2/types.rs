@@ -346,6 +346,11 @@ pub struct RingingV2CommandEnvelope {
     pub seed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
+    /// Driver seat epoch the caller believes it holds. A mismatch is rejected
+    /// with `stale_driver_epoch`; `None` opts out of the epoch guard (used by
+    /// interaction answers, which are not driver-gated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_epoch: Option<u64>,
     pub command: RingingCommand,
 }
 
@@ -364,6 +369,7 @@ impl RingingV2CommandEnvelope {
             client_session_id: String::new(),
             seed: None,
             expected_revision: None,
+            driver_epoch: None,
             command,
         }
     }
@@ -375,6 +381,11 @@ impl RingingV2CommandEnvelope {
 
     pub fn with_seed(mut self, seed: impl Into<String>) -> Self {
         self.seed = Some(seed.into());
+        self
+    }
+
+    pub fn with_driver_epoch(mut self, driver_epoch: u64) -> Self {
+        self.driver_epoch = Some(driver_epoch);
         self
     }
 
@@ -398,6 +409,12 @@ impl RingingV2CommandEnvelope {
             .is_some_and(|value| !is_safe_integer(value))
         {
             return Err("invalid_expected_revision");
+        }
+        if self
+            .driver_epoch
+            .is_some_and(|value| !is_safe_integer(value))
+        {
+            return Err("invalid_driver_epoch");
         }
         if self.seed.is_none()
             && !matches!(
@@ -428,9 +445,9 @@ pub struct RingingV2CommandAck {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
-    /// Already-recorded receipt for a replayed `command_id`.
+    /// Already-recorded outcome this submission collided with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub existing: Option<RingingV2ExistingCommand>,
+    pub existing: Option<RingingV2ExistingResult>,
 }
 
 impl RingingV2CommandAck {
@@ -446,17 +463,26 @@ impl RingingV2CommandAck {
     }
 }
 
-/// Receipt snapshot returned for a replayed `command_id`.
+/// Why a v2 submission collided with an already-recorded outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RingingV2ExistingCommand {
-    pub state: RingingCommandState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_event_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_code: Option<String>,
-    /// Typed terminal payload, when the command produced one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<RingingV2CommandResult>,
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum RingingV2ExistingResult {
+    /// The same `command_id` was submitted again inside the receipt TTL
+    /// (typically because the first ACK was lost).
+    CommandReceipt {
+        state: RingingCommandState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_event_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        /// Typed terminal payload, when the command produced one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<RingingV2CommandResult>,
+    },
+    /// A different command answered an interaction that was already resolved
+    /// (first-answer-wins). Carries the winning verdict so the loser can
+    /// reconcile without string-matching `code`.
+    InteractionResolved { result: RingingV2CommandResult },
 }
 
 /// Typed terminal payload of a command.
@@ -475,6 +501,11 @@ pub enum RingingV2CommandResult {
     },
     /// plan review was resolved by the command that owns this receipt.
     PlanReviewResolved {
+        interaction_id: String,
+        approved: bool,
+    },
+    /// tool permission was resolved by the command that owns this receipt.
+    PermissionResolved {
         interaction_id: String,
         approved: bool,
     },
@@ -699,7 +730,7 @@ mod tests {
             code: None,
             message: Some("duplicate command_id (already completed)".into()),
             retry_after_ms: None,
-            existing: Some(RingingV2ExistingCommand {
+            existing: Some(RingingV2ExistingResult::CommandReceipt {
                 state: RingingCommandState::Succeeded,
                 terminal_event_id: Some("evt-1".into()),
                 error_code: None,
@@ -710,9 +741,33 @@ mod tests {
             }),
         };
         let json = serde_json::to_value(&ack).expect("serialize");
+        assert_eq!(json["existing"]["source"], "command_receipt");
         assert_eq!(json["existing"]["state"], "succeeded");
         assert_eq!(json["existing"]["result"]["kind"], "ask_resolved");
         assert_eq!(json["existing"]["result"]["outcome"], "answered");
+        let back: RingingV2CommandAck = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, ack);
+    }
+
+    #[test]
+    fn v2_command_ack_carries_winning_interaction_verdict() {
+        let ack = RingingV2CommandAck {
+            command_id: "cmd-2".into(),
+            status: RingingCommandAckStatus::Rejected,
+            code: Some("interaction_already_resolved".into()),
+            message: Some("interaction was already resolved".into()),
+            retry_after_ms: None,
+            existing: Some(RingingV2ExistingResult::InteractionResolved {
+                result: RingingV2CommandResult::PermissionResolved {
+                    interaction_id: "int_1".into(),
+                    approved: false,
+                },
+            }),
+        };
+        let json = serde_json::to_value(&ack).expect("serialize");
+        assert_eq!(json["existing"]["source"], "interaction_resolved");
+        assert_eq!(json["existing"]["result"]["kind"], "permission_resolved");
+        assert_eq!(json["existing"]["result"]["approved"], false);
         let back: RingingV2CommandAck = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, ack);
     }

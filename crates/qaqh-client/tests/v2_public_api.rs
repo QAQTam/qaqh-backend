@@ -6,9 +6,10 @@
 use qaqh_client::{
     ClientError, ClientV2AskOutcome, ClientV2Bootstrap, ClientV2CommandAck, ClientV2CommandResult,
     ClientV2CommandStatus, ClientV2ControlState, ClientV2ConversationState, ClientV2Cursor,
-    ClientV2CursorToken, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingCommand,
-    ClientV2Payload, ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2Subscription,
-    ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+    ClientV2CursorToken, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingResult,
+    ClientV2Payload, ClientV2Reset, ClientV2ResetReason, ClientV2SessionState,
+    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH,
+    RINGING_V2_VERSION,
 };
 
 #[test]
@@ -35,7 +36,7 @@ fn v2_surface_is_nameable_from_the_client_root() {
     };
     let _: Option<ClientV2CommandAck> = None;
     let _: Option<ClientV2CommandStatus> = None;
-    let _: Option<ClientV2ExistingCommand> = None;
+    let _: Option<ClientV2ExistingResult> = None;
     assert_eq!(
         serde_json::to_string(&result).expect("json"),
         r#"{"kind":"ask_resolved","interaction_id":"i1","outcome":"answered"}"#
