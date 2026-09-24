@@ -502,6 +502,58 @@ mod axum_tests {
             .unwrap();
         assert_eq!(body.as_ref(), br#"{"kind":"ask","questions":[]}"#);
 
+        // Range：单区间返回 206 + Content-Range，不改变对象内容。
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ringing/v2/content/{content_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("x-qaqh-client-session-id", "cs-owner")
+                    .header("range", "bytes=2-5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        let expected_content_range =
+            format!("bytes 2-5/{}", br#"{"kind":"ask","questions":[]}"#.len());
+        assert_eq!(
+            resp.headers()
+                .get("content-range")
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_content_range.as_str())
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), &br#"{"kind":"ask","questions":[]}"#[2..=5]);
+
+        // 越界 Range 是 416，而不是静默回全量。
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ringing/v2/content/{content_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("x-qaqh-client-session-id", "cs-owner")
+                    .header("range", "bytes=999-1000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        let expected_content_range =
+            format!("bytes */{}", br#"{"kind":"ask","questions":[]}"#.len());
+        assert_eq!(
+            resp.headers()
+                .get("content-range")
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_content_range.as_str())
+        );
+
         // canonical ref 形态（`sha256:<hex>`）也能取到同一条目
         let resp = app
             .clone()
@@ -848,6 +900,7 @@ mod axum_tests {
             envelope.channel,
             envelope.seed.as_deref(),
             envelope.expected_revision,
+            envelope.driver_epoch,
             &envelope.command,
         );
         let expected = RingingV2CommandResult::AskResolved {
@@ -1790,7 +1843,7 @@ mod axum_tests {
         for (kind, expected_kind) in [
             (InteractionKind::Permission, "permission"),
             (InteractionKind::Ask, "ask"),
-            (InteractionKind::Plan, "plan_review"),
+            (InteractionKind::Plan, "plan"),
         ] {
             let sessions_dir = qaqh_types::platform::sessions_dir();
             std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -1896,6 +1949,10 @@ mod axum_tests {
             );
             assert_eq!(first[0]["interaction_id"], interaction_id.as_str());
             assert_eq!(first[0]["kind"], expected_kind);
+            assert_eq!(
+                first[0]["request"]["kind"], "ref",
+                "所有 pending interaction 都必须暴露 canonical 正文 ref"
+            );
 
             // v2 approvals 端点：与旧 v1 端点同形，id 为 canonical 形态。
             let request = Request::builder()
@@ -1929,14 +1986,17 @@ mod axum_tests {
                         interaction_id.as_str(),
                         "ask/plan 以 canonical interaction_id 暴露"
                     );
-                    // approvals 沿用旧 v1 端点词汇：ask / plan（不是 bootstrap 的
-                    // plan_review）。
+                    // bootstrap 与 approvals 统一使用 wire 值 ask / plan。
                     let expected = if kind == InteractionKind::Ask {
                         "ask"
                     } else {
                         "plan"
                     };
                     assert_eq!(value["pending_interaction"]["kind"], expected);
+                    assert!(
+                        value["pending_interaction"]["details"].is_null(),
+                        "测试没有写正文，details 应显式降级为 null"
+                    );
                     assert!(value["pending_permission"].is_null());
                 }
             }
