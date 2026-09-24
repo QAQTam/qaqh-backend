@@ -80,6 +80,18 @@ impl Fixture {
     }
 
     fn envelope(&self, ts_ms: i64, payload: FactPayload) -> SessionFact {
+        self.envelope_with_ids(ts_ms, None, None, payload)
+    }
+
+    /// Same, but with envelope-level turn/call identity (required by payloads
+    /// whose validation cross-checks the envelope).
+    fn envelope_with_ids(
+        &self,
+        ts_ms: i64,
+        turn_id: Option<qaqh_session::session_fact_v2::TurnId>,
+        call_id: Option<qaqh_session::session_fact_v2::ToolCallId>,
+        payload: FactPayload,
+    ) -> SessionFact {
         SessionFact {
             schema: FactSchema::v2(),
             session_id: self.identity.session_id.clone(),
@@ -88,8 +100,8 @@ impl Fixture {
             event_id: EventId::new(generate_ulid()),
             ts_ms,
             causation_id: None,
-            turn_id: None,
-            call_id: None,
+            turn_id,
+            call_id,
             interaction_id: None,
             payload,
         }
@@ -164,12 +176,7 @@ async fn v2_c1_snapshot_subscribe_has_no_gap_or_dup() {
 
     let bootstrap = hub.bootstrap(fixture.path(), "seed").expect("bootstrap");
     let mut subscription = hub
-        .subscribe(
-            fixture.path(),
-            "seed",
-            RingingChannel::Control,
-            Some(&bootstrap.snapshot_cursor),
-        )
+        .subscribe(fixture.path(), "seed", Some(&bootstrap.snapshot_cursor))
         .expect("subscribe");
 
     // No replayed history: the first item must be the live fact below.
@@ -207,12 +214,7 @@ async fn v2_c2_reliable_reconnect_replays_only_after_cursor() {
     let published = fixture.append_and_publish(&hub, fact);
 
     let mut subscription = hub
-        .subscribe(
-            fixture.path(),
-            "seed",
-            RingingChannel::Control,
-            Some(&bootstrap.snapshot_cursor),
-        )
+        .subscribe(fixture.path(), "seed", Some(&bootstrap.snapshot_cursor))
         .expect("subscribe");
 
     // The replay queue holds exactly the post-cursor fact; the next `next()`
@@ -278,12 +280,7 @@ async fn v2_c5_log_id_mismatch_requires_reset() {
     let foreign = CanonicalCursor::snapshot("0198f1a0-0000-7000-8000-0000000000ff", 1);
     let token = CursorToken::encode_snapshot(&foreign).expect("token");
     let mut subscription = hub
-        .subscribe(
-            fixture.path(),
-            "seed",
-            RingingChannel::Control,
-            Some(&token),
-        )
+        .subscribe(fixture.path(), "seed", Some(&token))
         .expect("subscribe");
     match subscription.next().await {
         V2StreamItem::Reset(reset) => {
@@ -309,12 +306,7 @@ async fn v2_c6_cursor_expired_and_unknown_fact() {
     let ahead = CanonicalCursor::snapshot(fixture.identity.log_id.as_str(), 99);
     let ahead_token = CursorToken::encode_snapshot(&ahead).expect("token");
     let mut subscription = hub
-        .subscribe(
-            fixture.path(),
-            "seed",
-            RingingChannel::Control,
-            Some(&ahead_token),
-        )
+        .subscribe(fixture.path(), "seed", Some(&ahead_token))
         .expect("subscribe");
     match subscription.next().await {
         V2StreamItem::Reset(reset) => {
@@ -325,12 +317,7 @@ async fn v2_c6_cursor_expired_and_unknown_fact() {
     }
 
     let garbage = CursorToken::from_opaque("v2.not-a-real-cursor");
-    match hub.subscribe(
-        fixture.path(),
-        "seed",
-        RingingChannel::Control,
-        Some(&garbage),
-    ) {
+    match hub.subscribe(fixture.path(), "seed", Some(&garbage)) {
         Err(V2HubError::InvalidCursor(_)) => {}
         Err(other) => panic!("expected invalid cursor, got {other:?}"),
         Ok(_) => panic!("expected invalid cursor, got a live subscription"),
@@ -349,6 +336,103 @@ fn v2_c7_snapshot_missing_is_reported() {
     }
 }
 
+/// 单流修订（2026-09-24）：**一条** SSE 上收齐 control / conversation / tool
+/// 三类 `stream_key`，且 `(fact_seq, projection_index)` 全局严格递增。
+///
+/// 这是取代 per-channel 订阅的核心断言：客户端不再需要跨流归并。
+#[tokio::test]
+async fn single_stream_carries_all_channels_in_global_order() {
+    use qaqh_session::canonical::sha256_content_hash;
+    use qaqh_session::session_fact_v2::{
+        ActorKind, ActorRef, ContentRef, InputAccepted, InputId, InputKind, InputPurpose,
+        ToolCallDeclared, ToolCallId, TurnId,
+    };
+
+    let mut fixture = Fixture::new("v2-single-stream");
+    fixture.created();
+    let hub = V2ProjectionHub::new("epoch-single");
+    // 从 log 尾部订阅（无 replay），随后 commit 的事实全部走**同一条** live 流。
+    let mut subscription = hub
+        .subscribe(fixture.path(), "seed", None)
+        .expect("subscribe");
+
+    // control: metadata change
+    let meta = fixture.metadata_fact("single-stream");
+    fixture.append_and_publish(&hub, meta);
+    // conversation: InputAccepted（conversation + timeline 两个 delta）
+    let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
+    let call_id = ToolCallId::new(format!("call_{}", generate_ulid()));
+    let input = fixture.envelope_with_ids(
+        NOW_MS + 10,
+        None,
+        None,
+        FactPayload::InputAccepted(InputAccepted {
+            input_id: InputId::new(format!("input_{}", generate_ulid())),
+            input_kind: InputKind::UserText,
+            input_purpose: InputPurpose::TriggerTurn,
+            content_ref: None,
+            inline_text: Some("hello".into()),
+            attachments: Vec::new(),
+            actor: ActorRef {
+                kind: ActorKind::User,
+                id: "local".into(),
+                display_name: None,
+            },
+            client_request_id: None,
+        }),
+    );
+    fixture.append_and_publish(&hub, input);
+    // tool: ToolCallDeclared → TimelineDelta 走 tool 频道
+    let declared = fixture.envelope_with_ids(
+        NOW_MS + 11,
+        Some(turn_id.clone()),
+        Some(call_id.clone()),
+        FactPayload::ToolCallDeclared(ToolCallDeclared {
+            turn_id,
+            call_id,
+            tool_name: "exec".into(),
+            args_ref: ContentRef::new(sha256_content_hash(b"args")),
+            args_hash: sha256_content_hash(b"args"),
+        }),
+    );
+    fixture.append_and_publish(&hub, declared);
+
+    let mut channels = std::collections::BTreeSet::new();
+    let mut last: Option<(u64, Option<u16>)> = None;
+    // 三类事实已 publish；流排空后 `next()` 会阻塞在 live channel 上，
+    // 用 timeout 收尾。
+    for _ in 0..8 {
+        let Ok(item) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), subscription.next()).await
+        else {
+            break;
+        };
+        let V2StreamItem::Event(event) = item else {
+            break;
+        };
+        channels.insert(format!("{:?}", event.stream_key));
+        if let Some(seq) = event.fact_seq {
+            let key = (seq, event.projection_index);
+            if let Some(previous) = last {
+                assert!(key > previous, "单流必须全局有序：{previous:?} → {key:?}");
+            }
+            last = Some(key);
+        }
+    }
+    assert!(
+        channels.iter().any(|key| key.contains("Control")),
+        "缺 control：{channels:?}"
+    );
+    assert!(
+        channels.iter().any(|key| key.contains("Conversation")),
+        "缺 conversation：{channels:?}"
+    );
+    assert!(
+        channels.iter().any(|key| key.contains("Tool")),
+        "缺 tool：{channels:?}"
+    );
+}
+
 /// Live overflow: a subscriber that falls behind the broadcast buffer gets a
 /// `replay_overflow` reset instead of silently skipping events.
 #[tokio::test]
@@ -360,7 +444,7 @@ async fn v2_live_overflow_signals_replay_overflow() {
     // Warm the session so `subscribe` and `publish` share one live channel.
     hub.bootstrap(fixture.path(), "seed").expect("bootstrap");
     let mut subscription = hub
-        .subscribe(fixture.path(), "seed", RingingChannel::Control, None)
+        .subscribe(fixture.path(), "seed", None)
         .expect("subscribe");
 
     for i in 0..6 {

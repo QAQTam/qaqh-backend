@@ -14,7 +14,7 @@ pub use types::{
     RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope,
     RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
     RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingInteraction, RingingV2PendingSet,
-    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey, open_path,
+    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey, events_path, open_path,
 };
 
 /// Ringing v2 wire version.

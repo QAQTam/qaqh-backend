@@ -832,7 +832,7 @@ mod axum_tests {
 
         let events = Request::builder()
             .uri(format!(
-                "/ringing/v2/sessions/{seed}/events/control?since_cursor={snapshot_cursor}"
+                "/ringing/v2/sessions/{seed}/events?since_cursor={snapshot_cursor}"
             ))
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", open.client_session_id)
@@ -1793,7 +1793,7 @@ mod axum_tests {
         // replayed on the control channel.
         let request = Request::builder()
             .uri(format!(
-                "/ringing/v2/sessions/{seed}/events/control?since_cursor={cursor}"
+                "/ringing/v2/sessions/{seed}/events?since_cursor={cursor}"
             ))
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", a.client_session_id.clone())
