@@ -60,6 +60,18 @@ fn first_line(output: &str) -> Option<String> {
         .map(|line| line.chars().take(160).collect())
 }
 
+/// 文件变更工具的展示摘要：只承载路径 + 变更元信息。
+///
+/// 这里刻意不采用 `output` 首行：`output` 是模型面文本，可能自带工具名和
+/// `[OK]` 终态标记；展示面已有 header 与结构化 state，再回捞文本必然重复。
+pub(crate) fn mutation_change_summary(path: &str, added: u32, removed: u32) -> String {
+    if added == 0 && removed == 0 {
+        format!("{path} · no changes")
+    } else {
+        format!("{path} · +{added} -{removed}")
+    }
+}
+
 pub(crate) fn mutation_error(
     code: &str,
     message: impl Into<String>,
@@ -139,6 +151,7 @@ pub(crate) fn mutation_display(
     fallback_path: &str,
     op: crate::tool_api::PathOp,
     label: &'static str,
+    summary: Option<String>,
     output: &str,
     diff: Option<String>,
 ) -> ToolDisplay {
@@ -158,7 +171,7 @@ pub(crate) fn mutation_display(
     };
     let (text, truncated) = crate::tool_api::display::clamp_display_body(output);
     let mut display = ToolDisplay::new(header, ToolBody::Text { text, truncated });
-    display.summary = first_line(output);
+    display.summary = summary;
     display.diff = diff;
     display
 }
@@ -214,11 +227,25 @@ impl ToolProjection for WriteOutput {
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
+        let summary = if self.dry_run {
+            format!(
+                "{} · preview +{} -{}",
+                self.path, self.lines_added, self.lines_removed
+            )
+        } else if self.created {
+            format!(
+                "{} · new · +{} -{}",
+                self.path, self.lines_added, self.lines_removed
+            )
+        } else {
+            mutation_change_summary(&self.path, self.lines_added, self.lines_removed)
+        };
         mutation_display(
             args.get("path").and_then(Value::as_str),
             &self.path,
             crate::tool_api::PathOp::Write,
             "write",
+            Some(summary),
             &self.model_text,
             self.diff.clone(),
         )
@@ -602,6 +629,7 @@ impl ToolProjection for DeleteOutput {
             &self.path,
             crate::tool_api::PathOp::Delete,
             "delete",
+            Some(format!("{} · deleted", self.path)),
             &self.content,
             None,
         )
@@ -989,12 +1017,10 @@ mod tests {
             other => panic!("unexpected write display body: {other:?}"),
         };
         assert_eq!(display_text, outcome.model.text);
-        assert!(
-            outcome
-                .display
-                .summary
-                .as_deref()
-                .is_some_and(|summary| summary.starts_with("[OK] "))
+        let expected_summary = format!("{} · +1 -1", path.to_string_lossy());
+        assert_eq!(
+            outcome.display.summary.as_deref(),
+            Some(expected_summary.as_str())
         );
 
         let result = outcome.to_tool_result();
