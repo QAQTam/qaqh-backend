@@ -142,9 +142,30 @@ alpha 已裁决 v1 端点整体硬切：`/ringing/v1/bootstrap`、`/ringing/v1/e
 因此 V2-V1 不再作为 alpha 验收项实现；没有生产者的映射表只会成为伪造兼容层。
 该裁决与「不留 v1、不做兼容」一致。
 
-## 10. 仍未决（不在本次 alpha 修订）
+## 10. seeded workspace service 写操作纳入 driver gate
+
+`POST /ringing/v2/service/{method}` 不属于三频道 command envelope，但带 seed 的
+写操作必须遵守同一 driver 规则。以下方法在 lease 归属校验后追加 driver gate：
+
+| method | 行为 |
+|---|---|
+| `workspace.set` | 非 live holder → `403 {"code":"not_driver"}` |
+| `workspace.move_session` | 同上 |
+| `workspace.detach` | 同上 |
+| `session.set_tool_mode` | 同上 |
+
+规则：
+
+- 席位未认领时保持兼容期的 permissive 行为；
+- 记录 holder 的 lease 已过期时放行（后续 claim/回收路径处理）；
+- 非 seed-scoped 的全局 workspace registry 写（`workspace.create` /
+  `rename` / `delete`）不在本 gate 内；
+- `workspace.set` / `move_session` / `detach` / `session.set_tool_mode` 的
+  method table 同步改为 `requires_seed`，避免绕过 lease 归属校验。
+
+## 11. 仍未决（不在本次 alpha 修订）
 
 - interaction 正文跨 daemon 重启持久化（与 pending interaction 跨重启存活绑定）；
 - permission 正文 pinned 与终结 unpin（需要一条稳定的权限终结域事件）；
-- driver 回收延迟 / `not_eligible` 优先级 / workspace command gate 集合；
+- driver `not_eligible` 与显式移交优先级策略；
 - 崩溃路径 writer fence 轮转。

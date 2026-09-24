@@ -77,8 +77,8 @@ scripts/v2-smoke.sh <data-root>                         PASS（全阶段，含 r
    `2026-09-24-tool-outcome-p2-v1-cursor-closure-handoff.md` §1）。
 6. **V2-C3 replaceable producer**（已补，见
    `2026-09-24-ringing-v2-alpha-closure-handoff.md` §2.7）。
-7. driver 侧：回收延迟（3s 巡检）、`not_eligible` / 优先级、`driver_epoch` 未进
-   command fingerprint、workspace 命令 gate 集合。
+7. driver 侧：3s 巡检/重启回收与 workspace service gate 已补；仅剩
+   `not_eligible` / 显式移交优先级。
 8. 崩溃路径 fence 轮转（`ToolLedger::Drop` 只覆盖有序退出）。
 9. 两套 interaction kind 拼写不一致（bootstrap `plan_review` vs SSE delta `plan`），
    见 `2026-09-24-323-typed-payload-gap1-handoff.md` §2。

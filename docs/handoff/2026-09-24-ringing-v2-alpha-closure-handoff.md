@@ -137,8 +137,8 @@ body={"kind":"permission","tool_name":"exec",
 
 1. **interaction 正文跨 daemon 重启持久化**：与 pending interaction 跨重启存活绑定；
 2. **permission 正文 pinned 与终结 unpin**：需要稳定的权限终结域事件；
-3. **driver 侧**：回收延迟（3s 巡检）、`not_eligible`/优先级、workspace command
-   gate 集合；
+3. **driver 侧**：3s 巡检、持久化 watch、重启回收和 workspace service gate
+   均已落地；仅剩 `not_eligible` / 显式移交优先级策略待产品裁决。
 4. **崩溃路径 writer fence 轮转**：`ToolLedger::Drop` 只覆盖有序退出；
 5. TUI 侧 6 个 e2e harness 仍打 v1（他们的仓，勿在后端仓改）。
 
