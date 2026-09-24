@@ -6,7 +6,7 @@
 //! `apply_patch`, and `delete` operation with enough content-addressed data to
 //! replay a file back to a requested sequence point.
 //!
-//! Design: `docs/nextdev/SESSION-JOURNAL-PLAN.md`
+//! Design: `docs/current/architecture.md`
 
 use std::fs::OpenOptions;
 use std::io::Write;

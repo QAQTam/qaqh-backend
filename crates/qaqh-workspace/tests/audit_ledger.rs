@@ -1,6 +1,6 @@
 //! 审计账本 v2 端到端验收（工具调用 → 双写账本 → 链校验）。
 //!
-//! 设计：`docs/spec/2026-09-19-审计账本v2-spec.md` §6 验收矩阵。覆盖：
+//! 设计：`docs/current/architecture.md`。覆盖：
 //! 1. 成功调用：v2 记录带主体链（session/call_id）、工具面（category）、
 //!    授权路径（decision=auto）、对象（路径 + after 指纹）；
 //! 2. 被拒调用（Level 1 写操作需审批、通道不可用）：kind=tool_rejected、

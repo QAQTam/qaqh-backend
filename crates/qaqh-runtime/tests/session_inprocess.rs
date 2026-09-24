@@ -222,7 +222,7 @@ fn cross_session_cancel_does_not_leak() {
     registry.shutdown_all();
 }
 
-/// E: idle 卸载 → 重生 → 会话历史连续（docs/memory-governance-plan.md §E）。
+/// E: idle 卸载 → 重生 → 会话历史连续（docs/current/architecture.md）。
 /// 卸载走 registry.close 优雅路径；重生走 spawn_new 的 resume 语义
 /// （load_for_resume + message WAL 重放 + canonical tool recovery）。
 #[test]

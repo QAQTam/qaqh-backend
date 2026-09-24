@@ -1,6 +1,6 @@
 //! QAQ-Harness 配置契约层（wire DTO）。
 //!
-//! 前后端共享的**唯一真相**（PLAN docs/config-revamp-plan.md §2 约束 K1-K4）：
+//! 前后端共享的**唯一真相**（当前架构见 docs/current/architecture.md；K1-K4 约束）：
 //!
 //! - K1 叶子 crate：只依赖 serde，不依赖 runtime/daemon/config 引擎；
 //!   winui / ratatui / web(axum) 三端只依赖本 crate 即可参与配置读写。
@@ -17,7 +17,7 @@
 //! 的 struct 级 `#[serde(default)]` 均已删除——前后端共进退，不存在「另一个版本的
 //! 对方」。删 `default` 不只是减重：留着它会让「旧形状」**静默**变成「一份全默认的
 //! 配置」（实测：未知键被忽略 + 缺字段走 default ⇒ 解析成功但值全错），比失败更糟。
-//! 详见 `docs/spec/2026-09-15-前端契约与client-API稳定性-spec.md` §0b。
+//! 详见 `docs/current/architecture.md`。
 //!
 //! **注意** [`ConfigPatch`] / [`SubagentPatch`] 的 struct 级 `default` **不在此列**：
 //! 那是 K3 合并补丁的语义（字段缺失 = 不动），不是兼容。
@@ -96,7 +96,7 @@ pub struct SubagentDto {
     pub default_tools: Vec<String>,
 }
 
-/// MCP 客户端配置读模型（docs/mcp-client-design.md §6）。
+/// MCP 客户端配置读模型（docs/current/architecture.md）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpDto {
@@ -128,7 +128,7 @@ pub struct McpServerDto {
     pub cwd: String,
 }
 
-/// LSP 客户端配置读模型（docs/lsp-client-design.md §6）。
+/// LSP 客户端配置读模型（docs/current/architecture.md）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LspDto {

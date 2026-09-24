@@ -46,7 +46,7 @@ pub enum ContentBlock {
         /// Base64-encoded image data (raw, without the data URI prefix).
         data: String,
     },
-    /// 磁盘外置的图片引用（A-2 L0：docs/memory-governance-plan.md §A）。
+    /// 磁盘外置的图片引用（A-2 L0：docs/current/architecture.md）。
     ///
     /// 字节存于 `{data_dir}/images/{sha256}.{ext}`（内容寻址、base64 文本
     /// 形态，见 [`crate::image_store`]）；消息历史与内存常驻只携带索引，
