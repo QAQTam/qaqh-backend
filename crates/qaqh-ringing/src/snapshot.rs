@@ -47,64 +47,6 @@ impl RingingChannelSnapshot {
     }
 }
 
-/// 原子恢复一个 session 所需的完整三频道快照。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingSessionBootstrap {
-    pub schema: String,
-    pub version: u32,
-    pub server_epoch: String,
-    pub seed: String,
-    pub control: RingingChannelSnapshot,
-    pub conversation: RingingChannelSnapshot,
-    pub tool: RingingChannelSnapshot,
-}
-
-impl RingingSessionBootstrap {
-    pub fn new(
-        server_epoch: impl Into<String>,
-        seed: impl Into<String>,
-        control: RingingChannelSnapshot,
-        conversation: RingingChannelSnapshot,
-        tool: RingingChannelSnapshot,
-    ) -> Self {
-        Self {
-            schema: RINGING_SCHEMA.to_string(),
-            version: RINGING_VERSION,
-            server_epoch: server_epoch.into(),
-            seed: seed.into(),
-            control,
-            conversation,
-            tool,
-        }
-    }
-
-    /// conversation 频道的**类型化** `state` 视图（前端契约 G1）。
-    ///
-    /// 三端（winui / web / TUI）此前各自手解 `state: Value`，且必然各解各的——
-    /// TUI 的手解至今漏了六个字段而无人察觉。用这里取代手解。
-    ///
-    /// **降级语义**：`qaqh_domain::state` 的字段全部带 `#[serde(default)]`，故形状
-    /// 漂移通常表现为**字段变缺省**而非 `Err`。这不是「静默失败」，而是刻意的
-    /// 前向兼容——漂移由 `qaqh-runtime` 的产出方往返测试兜住（直接拿真实快照断言
-    /// 字段非缺省），不靠运行期报错。`Err` 只在 `state` 根本不是对象等病态情形出现。
-    pub fn conversation_state(
-        &self,
-    ) -> Result<qaqh_domain::state::ConversationState, serde_json::Error> {
-        serde_json::from_value(self.conversation.state.clone())
-    }
-
-    /// control 频道的类型化 `state` 视图。降级语义同 [`Self::conversation_state`]。
-    pub fn control_state(&self) -> Result<qaqh_domain::state::ControlState, serde_json::Error> {
-        serde_json::from_value(self.control.state.clone())
-    }
-
-    /// tool 频道的类型化 `state` 视图。降级语义同 [`Self::conversation_state`]。
-    pub fn tool_state(&self) -> Result<qaqh_domain::state::ToolState, serde_json::Error> {
-        serde_json::from_value(self.tool.state.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

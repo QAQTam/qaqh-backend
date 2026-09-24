@@ -14,7 +14,12 @@
 
 `qaqh-client` 已经**足够承载一个完整前端**（TUI 已 100% 走它，见 §3）。
 
-- **G1 已落地**：三频道快照 `state` 已有权威类型，三端不必再手解。
+> **2026-09-24 修订**：纯 v2 硬切完成——`/ringing/v1/*` 路由全部删除，wire 只有
+> `version = 2`。本文原写「Ringing V1 wire」的段落按本修订理解；§2 保留的是
+> G1 落地**之前**的历史与代价记录，不是当前契约。
+
+- **G1 已落地**：bootstrap 直接返回 typed 三频道快照（v2
+  `ClientV2Bootstrap`），三端不必再手解 `state`。
 - **G2 已落地**：`session.list` 的条目已有权威类型 `qaqh_types::SessionListEntry`，
   产出侧（`qaqh-runtime`）直接返回类型化条目，**手拼键的那一步没有了**。
 - 两个缺口都只剩**一个**动作要继续推：G3 的流程（缺方法按补丁提）。
@@ -114,8 +119,8 @@ C 级至少两处：`SessionMeta` 一族（下述），以及 `ToolResult.diff`�
 | 面 | 内容 | 位置 |
 |---|---|---|
 | 磁盘契约 | `daemon.json` 字段与**兼容解析**（旧 `ws://` 端点必须无损转 `http://`） | `qaqh-types::platform`、`qaqh-client/src/discovery.rs`（`DiscoveryExt::base_url`） |
-| Ringing V1 wire | `schema = "qaqh.Ringing"` / `version = 1`；三频道 `control`/`conversation`/`tool`；SSE 帧 id `<epoch>:<channel>:<seq>`；认证 = `Bearer` + `X-QAQH-Client-Session-Id` 双 header | `qaqh-ringing` |
-| 服务方法名 | `POST /ringing/v1/service/{method}`；方法名词表由 `QueryRequest`/`ActionRequest` 的枚举持有 | `qaqh-client/src/endpoint.rs` |
+| Ringing v2 wire | `schema = "qaqh.Ringing"` / `version = 2`；**每 seed 一条** canonical 事件流 `GET /ringing/v2/sessions/{seed}/events`（事件带 `stream_key`，壳层自行 demux）；typed bootstrap `GET /ringing/v2/sessions/{seed}/bootstrap`；认证 = `Bearer` + `X-QAQH-Client-Session-Id` 双 header | `qaqh-ringing` |
+| 服务方法名 | `POST /ringing/v2/service/{method}`；方法名词表由 `QueryRequest`/`ActionRequest` 的枚举持有 | `qaqh-client/src/endpoint.rs` |
 | 分页元数据语义 | `has_more` / `total_turns` / `truncated_before` 三者分工（§4） | `qaqh-client/src/types.rs::TimelinePage` |
 | 配置契约 | `ConfigDto`（读）/ `ConfigPatch`（写，JSON Merge Patch）——**请直接依赖 `qaqh-config-api`，不要手抄** | `qaqh-config-api` |
 
