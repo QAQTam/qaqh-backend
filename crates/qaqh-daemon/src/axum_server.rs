@@ -27,7 +27,7 @@ mod sse_tests {
     //!
     //! 覆盖真实 handler 路径（`build_router` →
     //! `/ringing/v1/events/{channel}` 与
-    //! `/ringing/v1/sessions/{seed}/timeline/events`）：
+    //! `/ringing/v2/sessions/{seed}/timeline/events`）：
     //! 慢消费者 `Lagged` → `ringing.stream_terminated` 终止帧 → 关流，
     //! 且终止后新订阅仍能正常收流。
     //!
@@ -165,7 +165,7 @@ mod sse_tests {
         >,
     ) {
         let mut builder = Request::builder()
-            .uri(format!("/ringing/v1/sessions/{SEED}/timeline/events"))
+            .uri(format!("/ringing/v2/sessions/{SEED}/timeline/events"))
             .header("authorization", format!("Bearer {TOKEN}"))
             .header("x-qaqh-client-session-id", SESSION);
         if let Some(cursor) = last_event_id {
@@ -736,13 +736,33 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// 纯 v2：timeline 的 v1 路径已硬切（v2 路径见其它 timeline 用例）。
+    #[tokio::test]
+    async fn timeline_v1_routes_are_hard_cut() {
+        let state = test_state();
+        let app = build_router(state);
+        for uri in [
+            "/ringing/v1/sessions/seed-1/timeline",
+            "/ringing/v1/sessions/seed-1/timeline/events",
+        ] {
+            let req = Request::builder()
+                .uri(uri)
+                .header("authorization", "Bearer test-token")
+                .header("x-qaqh-client-session-id", "cs-1")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "uri={uri}");
+        }
+    }
+
     #[tokio::test]
     async fn injected_session_404_short_circuits_timeline_snapshot() {
         let mut state = test_state();
         state.test_hooks = std::sync::Arc::new(TestHooks::for_test_session_404("missing"));
         let app = build_router(state);
         let req = Request::builder()
-            .uri("/ringing/v1/sessions/missing/timeline")
+            .uri("/ringing/v2/sessions/missing/timeline")
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", "cs-test")
             .body(Body::empty())
@@ -2104,7 +2124,7 @@ mod axum_tests {
         state.leases.lock().unwrap().attach_seed("cs-1", "seed-1");
         let app = build_router(state);
         let req = Request::builder()
-            .uri("/ringing/v1/sessions/seed-1/timeline/events")
+            .uri("/ringing/v2/sessions/seed-1/timeline/events")
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", "cs-1")
             .body(Body::empty())
@@ -2252,7 +2272,7 @@ mod axum_tests {
         // not attached
         let app = build_router(state);
         let req = Request::builder()
-            .uri("/ringing/v1/sessions/seed-1/timeline/events")
+            .uri("/ringing/v2/sessions/seed-1/timeline/events")
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", "cs-1")
             .body(Body::empty())
@@ -2328,7 +2348,7 @@ mod axum_tests {
         }
         let app = build_router(state);
         let req = Request::builder()
-            .uri("/ringing/v1/sessions/seed-1/timeline?limit=0")
+            .uri("/ringing/v2/sessions/seed-1/timeline?limit=0")
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", "cs-1")
             .body(Body::empty())

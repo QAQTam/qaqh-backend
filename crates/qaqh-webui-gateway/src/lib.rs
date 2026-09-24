@@ -949,7 +949,7 @@ async fn proxy_timeline_events(
         .daemon
         .get_stream(
             &format!(
-                "/ringing/v1/sessions/{}/timeline/events",
+                "/ringing/v2/sessions/{}/timeline/events",
                 encode_path(&seed)
             ),
             &lease,
@@ -980,7 +980,7 @@ async fn proxy_seeded_get(
     let path = if suffix == "bootstrap" {
         format!("/ringing/v1/sessions/{}/bootstrap", encode_path(&seed))
     } else {
-        format!("/ringing/v1/sessions/{}/timeline", encode_path(&seed))
+        format!("/ringing/v2/sessions/{}/timeline", encode_path(&seed))
     };
     let response = match state.daemon.get(&path, &lease).await {
         Ok(response) => response,
