@@ -66,6 +66,7 @@ pub(crate) use timeline_api::{
 pub(crate) use v2::{
     handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_driver_claim_v2,
     handle_driver_release_v2, handle_events_v2, handle_open_v2, handle_renew_v2,
+    reclaim_dead_driver_seats,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -86,6 +87,12 @@ pub struct AppState {
     pub hub: Arc<RingingHub>,
     pub v2_hub: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
     pub leases: Arc<Mutex<RingingLeaseStore>>,
+    /// Seeds worth scanning for an expired driver seat.
+    ///
+    /// This is a scan list, not seat state: the canonical `DriverChanged` fact
+    /// remains the single source of truth. Entries are added when a seat is
+    /// observed and dropped once the seat is vacant.
+    pub driver_watch: Arc<Mutex<std::collections::HashSet<String>>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
     pub token: String,

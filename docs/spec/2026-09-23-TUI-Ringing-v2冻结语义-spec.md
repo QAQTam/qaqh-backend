@@ -441,6 +441,18 @@ not_driver        daemon 同步裁决：release 方不是 holder
 被占席位时 `accepted = false`；`driver_busy` / `not_driver` 保持稳定语义。
 命令层的 `stale_driver_epoch` 仍由 daemon 依据 canonical 投影同步拒绝。
 
+**lease 过期自动移交**：holder 的 lease 过期后，daemon 的周期回收任务会向
+session actor 转发一条带 `expected_epoch` CAS 的 `DriverRelease`，由 ledger
+追加 `DriverChanged { holder: null, driver_epoch: n+1 }`。
+
+- CAS 保证「回收下发」与「holder 重新认领」竞争时不会误踢新 holder：epoch 已
+  前进则回收变成 no-op（`stale_driver_epoch`），不写 fact。
+- 因此 `holder = null` 有两种到达方式：holder 显式 release，或 lease 过期被回收。
+  客户端不需要区分，只需跟随 `DriverChanged`。
+- daemon 只维护一份「待扫描 seed 列表」（观察/认领过席位时登记），席位真源仍在
+  canonical；daemon 重启后列表为空，此时过期席位在下次 claim 时经
+  `stale_holder` 接管（alpha 待补：启动时重建扫描列表）。
+
 `POST /ringing/v2/sessions/{seed}/driver/release` 只允许当前 holder 调用。
 holder 断线或 lease 过期后，服务端可以按自身策略自动移交，并发布
 `DriverChanged`；TUI 不得本地推测 holder。

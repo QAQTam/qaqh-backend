@@ -110,7 +110,15 @@ pub enum ControlCommand {
         stale_holder: Option<String>,
     },
     /// 释放 v2 driver 席位。`client_session_id` 同样由 daemon 覆写。
-    DriverRelease { client_session_id: String },
+    ///
+    /// `expected_epoch` 是可选 CAS：daemon 的 lease 过期回收在读取席位后异步
+    /// 下发，若期间 holder 已重新认领（epoch 前进），过期的回收必须变成 no-op
+    /// 而不是误释放新席位。
+    DriverRelease {
+        client_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_epoch: Option<u64>,
+    },
     /// 提交 plan review 决策（对应 PlanReviewRequested）。
     PlanReviewRespond {
         interaction_id: String,
