@@ -593,7 +593,7 @@ async fn list_approvals(State(state): State<GatewayState>, headers: HeaderMap) -
     let response = match state
         .daemon
         .get(
-            &format!("/ringing/v1/sessions/{}/approvals", encode_path(&seed)),
+            &format!("/ringing/v2/sessions/{}/approvals", encode_path(&seed)),
             &lease,
         )
         .await
