@@ -100,7 +100,7 @@ pub enum TimelineStatus {
     },
 }
 
-/// Versioned response from `GET /ringing/v1/sessions/{seed}/timeline`.
+/// Versioned response from `GET /ringing/v2/sessions/{seed}/timeline`.
 ///
 /// `snapshot` is the authoritative materialized transcript. Pagination
 /// metadata remains outside it because it describes the current HTTP page,
