@@ -35,24 +35,30 @@ json_get() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
 say "== building daemon =="
 cargo build -q -p qaqh-daemon
 
+start_daemon() {
+    # A stale discovery file from a previous run would make the readiness loop
+    # below succeed against a dead endpoint.
+    mv "$DATA/daemon.json" "$DATA/daemon.json.prev" 2>/dev/null || true
+    # Short lease TTL so the driver-seat reclaim path is reachable in one run.
+    QAQH_DATA_DIR="$DATA" QAQH_TEST_LEASE_TTL_MS=6000 QAQH_TOOL_LEDGER_LEASE_MS=3000 \
+        "$ROOT/target/debug/qaqh-daemon" run > "$DATA/../daemon.out" 2>&1 &
+    DAEMON_PID=$!
+    for _ in $(seq 1 80); do
+        [ -f "$DATA/daemon.json" ] && break
+        sleep 0.25
+    done
+    [ -f "$DATA/daemon.json" ] || fail "daemon did not publish discovery ($DATA/daemon.json)"
+    ENDPOINT="$(json_get "['endpoint']" < "$DATA/daemon.json")"
+    TOKEN="$(json_get "['token']" < "$DATA/daemon.json")"
+}
+stop_daemon() {
+    kill "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+}
+
 say "== starting daemon =="
-# A stale discovery file from a previous run would make the readiness loop
-# below succeed against a dead endpoint.
-mv "$DATA/daemon.json" "$DATA/daemon.json.prev" 2>/dev/null || true
-# Short lease TTL so the driver-seat reclaim path is reachable in one run.
-QAQH_DATA_DIR="$DATA" QAQH_TEST_LEASE_TTL_MS=6000 \
-    "$ROOT/target/debug/qaqh-daemon" run > "$DATA/../daemon.out" 2>&1 &
-DAEMON_PID=$!
+start_daemon
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
-
-for _ in $(seq 1 80); do
-    [ -f "$DATA/daemon.json" ] && break
-    sleep 0.25
-done
-[ -f "$DATA/daemon.json" ] || fail "daemon did not publish discovery ($DATA/daemon.json)"
-
-ENDPOINT="$(json_get "['endpoint']" < "$DATA/daemon.json")"
-TOKEN="$(json_get "['token']" < "$DATA/daemon.json")"
 say "endpoint=$ENDPOINT"
 
 open_client() {
@@ -174,5 +180,20 @@ wait_driver "$A" 3 "$B"
 # A's lease is no longer renewed: the daemon's reclaim task must release the
 # canonical seat on its own (spec §9.3 自动移交), advancing the epoch.
 wait_driver "-" 4 "$B"
+
+say "== driver reclaim after daemon restart =="
+# A's lease expired in the previous phase, so use a fresh client to hold the
+# seat across the restart.
+RESTART_HOLDER="$(open_client smoke-restart)"
+CLAIM_RESTART="$(driver "$RESTART_HOLDER" claim)"
+[ "$(printf '%s' "$CLAIM_RESTART" | json_get "['reason']")" = "claim_requested" ] \
+    || fail "claim before restart"
+wait_driver "$RESTART_HOLDER" 5 "$RESTART_HOLDER"
+stop_daemon
+start_daemon
+# A's lease did not survive the restart. The persisted scan list must reclaim
+# the seat on its own, with no client touching the session first.
+OBSERVER="$(open_client smoke-observer)"
+wait_driver "-" 6 "$OBSERVER"
 
 say "PASS: Ringing v2 real-machine smoke test"

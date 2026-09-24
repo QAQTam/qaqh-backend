@@ -332,13 +332,28 @@ fn holder_is_live(state: &AppState, holder: &str) -> bool {
         .is_active_session(holder)
 }
 
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 /// Remember a seed whose seat is worth scanning for lease expiry.
 fn watch_driver_seat(state: &AppState, seed: &str) {
     state
         .driver_watch
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .insert(seed.to_string());
+        .insert(seed);
+}
+
+fn unwatch_driver_seat(state: &AppState, seed: &str) {
+    state
+        .driver_watch
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(seed);
 }
 
 /// Reclaim driver seats whose holder's lease has expired (spec §9.3 自动移交).
@@ -348,32 +363,32 @@ fn watch_driver_seat(state: &AppState, seed: &str) {
 /// seat moved on in the meantime the release is a no-op instead of kicking the
 /// new holder.
 pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
-    let seeds: Vec<String> = state
+    let seeds = state
         .driver_watch
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .iter()
-        .cloned()
-        .collect();
+        .seeds();
     for seed in seeds {
         let Some(driver) = canonical_driver_state(state, &seed) else {
-            state
-                .driver_watch
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(&seed);
+            // Session gone (or no canonical log): nothing left to scan.
+            unwatch_driver_seat(state, &seed);
             continue;
         };
         let Some(holder) = driver.holder.clone() else {
             // Seat already vacant: stop scanning this seed.
-            state
-                .driver_watch
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(&seed);
+            unwatch_driver_seat(state, &seed);
             continue;
         };
         if holder_is_live(state, &holder) {
+            continue;
+        }
+        let now_ms = unix_millis();
+        if !state
+            .driver_watch
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .reclaim_due(&seed, now_ms)
+        {
             continue;
         }
         let envelope = qaqh_ringing::RingingWorkerCommandEnvelope::new(
@@ -384,13 +399,22 @@ pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
                 expected_epoch: Some(driver.driver_epoch),
             }),
         );
+        state
+            .driver_watch
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .note_reclaim_dispatch(&seed, now_ms);
         match state.service.send_ringing_command(&seed, &envelope) {
             Ok(()) => log::info!(
                 "[ringing-v2] reclaiming driver seat for {seed}: holder lease expired at epoch {}",
                 driver.driver_epoch
             ),
             Err(error) => {
-                log::warn!("[ringing-v2] driver seat reclaim dispatch failed for {seed}: {error}")
+                // The session cannot be reached at all (deleted meta, spawn
+                // failure). Retrying every tick would only spam the log; the
+                // seed is re-registered on the next claim/bootstrap touch.
+                log::warn!("[ringing-v2] driver seat reclaim dropped for {seed}: {error}");
+                unwatch_driver_seat(state, &seed);
             }
         }
     }
