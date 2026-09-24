@@ -235,7 +235,8 @@ impl ServerConnection {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ConnState> {
-        // 锁中毒只可能来自持锁段 panic；仓库惯例 into_inner 继续（backend.rs:235）。
+        // 锁中毒只可能来自持锁段 panic；仓库惯例 into_inner 继续
+        // （见 `qaqh-workspace/src/lib.rs` 的同类处理）。
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

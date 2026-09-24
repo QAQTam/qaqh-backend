@@ -273,7 +273,7 @@ fn direct_exec_inner(
     // Poll child with timeout（子进程句柄唯一持有在注册表，经 try_wait 查询）
     let deadline = start_time + std::time::Duration::from_secs(timeout_secs);
     // 快速移交：子进程存活超过 background_after_secs 即移交后台（不等 timeout）。
-    // 用于拉起长驻服务（serve/daemon/watch）—���调用方希望尽快拿到
+    // 用于拉起长驻服务（serve/daemon/watch）——调用方希望尽快拿到
     // backgrounded tool_result，用 process(action=check/wait/kill) 接管，而不是
     // 死等到 timeout_secs 让 agent loop 阻塞。
     let handoff_deadline =
@@ -291,7 +291,7 @@ fn direct_exec_inner(
                 if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
                     || crate::is_cancel()
                 {
-                    // 取消 = 杀进程树（含后代），��止管道泄漏
+                    // 取消 = 杀进程树（含后代），防止管道泄漏
                     crate::process_registry::ProcessRegistry::kill(proc_id);
                     cancelled = true;
                     break;

@@ -1021,7 +1021,7 @@ impl TurnEngine {
         ctx.agent
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-        // Ringing 双发：InteractionResolved��ask 交互终结）
+        // Ringing 双发：InteractionResolved（ask 交互终结）
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::InteractionResolved {
                 interaction_id: ask_id.to_string(),
