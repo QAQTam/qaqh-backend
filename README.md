@@ -7,7 +7,7 @@ facts、Ringing v2 单流、工具执行、权限/沙箱、compact 和 provider 
 - License MIT
 - 状态：alpha / debug
 - 当前文档基线：`docs/current/`
-- 当前代码基线：`f7d2d8a`
+- 当前代码基线：`2.0.0-alpha2`
 
 ## 当前协议面
 

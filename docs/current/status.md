@@ -1,7 +1,7 @@
 # 当前状态
 
 > 日期：2026-09-25
-> 基线：`f7d2d8a`
+> 基线：`2.0.0-alpha2`
 > 状态：implementation baseline / refactor freeze candidate
 
 ## 1. 当前结论
