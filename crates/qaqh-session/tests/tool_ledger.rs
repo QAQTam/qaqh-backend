@@ -5,10 +5,11 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
-    InteractionExpired, InteractionExpiryReason, InteractionId, InteractionKind,
-    InteractionRequested, InteractionResolved, LogId, PolicyDecisionRef, RecoveryId, RecoveryRef,
-    SessionId, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
-    ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    InteractionDecision, InteractionExpired, InteractionExpiryReason, InteractionId,
+    InteractionKind, InteractionRequested, InteractionResolved, LogId, PolicyDecisionRef,
+    RecoveryId, RecoveryRef, SessionId, SideEffectClass, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    TurnId,
 };
 
 const NOW_MS: i64 = 1_789_830_000_000;
@@ -70,6 +71,7 @@ fn interaction_resolved() -> InteractionResolved {
     InteractionResolved {
         interaction_id: interaction_id(),
         decision_ref: content_ref(4),
+        decision: Some(InteractionDecision::Approved),
         resolved_by: ActorRef {
             kind: ActorKind::User,
             id: "user-1".into(),

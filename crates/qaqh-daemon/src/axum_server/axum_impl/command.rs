@@ -25,6 +25,23 @@ pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> Ringing
     }
 }
 
+/// 命令幂等指纹。v1/v2 handler 必须共用，否则重放判定会在两个协议面漂移。
+pub(crate) fn command_fingerprint(
+    channel: qaqh_domain::RingingChannel,
+    seed: Option<&str>,
+    expected_revision: Option<u64>,
+    command: &qaqh_ringing::RingingCommand,
+) -> String {
+    let payload = serde_json::to_string(&serde_json::json!({
+        "channel": channel,
+        "seed": seed,
+        "expected_revision": expected_revision,
+        "command": command,
+    }))
+    .unwrap_or_default();
+    qaqh_types::sha256_hex(payload.as_bytes())
+}
+
 /// Ack JSON 信封响应（`Content-Type: application/json` 固定）。
 pub(crate) fn ack_response(status: StatusCode, ack: RingingCommandAck) -> Response {
     (
@@ -232,14 +249,12 @@ pub(crate) async fn handle_command(
         );
     }
     // idempotency
-    let fingerprint_payload = serde_json::to_string(&serde_json::json!({
-        "channel": env.channel,
-        "seed": &env.seed,
-        "expected_revision": env.expected_revision,
-        "command": &env.command,
-    }))
-    .unwrap_or_default();
-    let fingerprint = qaqh_types::sha256_hex(fingerprint_payload.as_bytes());
+    let fingerprint = command_fingerprint(
+        env.channel,
+        env.seed.as_deref(),
+        env.expected_revision,
+        &env.command,
+    );
     let duplicate_check = {
         let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
         match pending.record_fingerprint_for_session(&env.command_id, &fingerprint, &session_id) {

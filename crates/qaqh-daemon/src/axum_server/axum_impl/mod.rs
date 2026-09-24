@@ -51,7 +51,9 @@ pub(crate) use auth::{
     get_session_id, is_authorized, lease_required_json, parse_channel, publish_session_created,
     session_close_seed, unauthorized,
 };
-pub(crate) use command::{handle_command, handle_command_status, handle_open, handle_renew};
+pub(crate) use command::{
+    command_fingerprint, handle_command, handle_command_status, handle_open, handle_renew,
+};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
@@ -62,8 +64,8 @@ pub(crate) use timeline_api::{
     handle_bootstrap, handle_pending_approvals, handle_timeline_snapshot,
 };
 pub(crate) use v2::{
-    handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_events_v2,
-    handle_open_v2, handle_renew_v2,
+    handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_driver_claim_v2,
+    handle_driver_release_v2, handle_events_v2, handle_open_v2, handle_renew_v2,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -84,6 +86,7 @@ pub struct AppState {
     pub hub: Arc<RingingHub>,
     pub v2_hub: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
     pub leases: Arc<Mutex<RingingLeaseStore>>,
+    pub drivers: Arc<Mutex<qaqh_runtime::ringing::RingingDriverStore>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
     pub token: String,
@@ -162,6 +165,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/ringing/v2/commands/{id}",
             post(handle_command_v2).get(handle_command_status_v2),
+        )
+        .route(
+            "/ringing/v2/sessions/{seed}/driver/claim",
+            post(handle_driver_claim_v2),
+        )
+        .route(
+            "/ringing/v2/sessions/{seed}/driver/release",
+            post(handle_driver_release_v2),
         )
         .route(
             "/ringing/v1/commands/{id}",

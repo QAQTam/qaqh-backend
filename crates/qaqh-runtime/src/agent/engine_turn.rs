@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use qaqh_domain::AskAnswer;
 use qaqh_session::canonical::{generate_ulid, sha256_content_hash};
 use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, ContentRef, EventId, InteractionKind, InteractionRequested,
-    InteractionResolved,
+    ActorKind, ActorRef, ContentRef, EventId, InteractionDecision, InteractionKind,
+    InteractionRequested, InteractionResolved,
 };
 use qaqh_types::UsageInfo;
 
@@ -26,6 +26,20 @@ use crate::agent::turn_lap::backfill as turn_backfill;
 use crate::agent::turn_lap::gate::{
     GateRequestResult, abort_running_turn, gate_request, provider_for, seal_timeline_terminal_round,
 };
+
+/// Map the runtime's decision string onto the canonical structured verdict.
+///
+/// Unknown strings stay `None` so a future decision kind does not silently
+/// masquerade as an existing one.
+fn structured_interaction_decision(decision: &str) -> Option<InteractionDecision> {
+    match decision {
+        "approved" => Some(InteractionDecision::Approved),
+        "rejected" => Some(InteractionDecision::Rejected),
+        "answered" => Some(InteractionDecision::Answered),
+        "dismissed" => Some(InteractionDecision::Dismissed),
+        _ => None,
+    }
+}
 
 /// Why the turn is being resumed.
 pub enum ResumeReason {
@@ -344,6 +358,8 @@ impl TurnEngine {
         decision: &str,
         causation_id: Option<&str>,
     ) -> Result<(), TurnActorError> {
+        // See `structured_interaction_decision`: the wire decision strings map
+        // onto the canonical enum so replays can return a typed verdict.
         let Some(ledger) = agent
             .tool_ledger_mut()
             .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?
@@ -359,6 +375,7 @@ impl TurnEngine {
         let payload = InteractionResolved {
             interaction_id: canonical_interaction_id(interaction_id),
             decision_ref: ContentRef::new(sha256_content_hash(&decision_bytes)),
+            decision: structured_interaction_decision(decision),
             resolved_by: ActorRef {
                 kind: ActorKind::User,
                 id: "user".into(),
