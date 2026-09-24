@@ -303,14 +303,22 @@ impl TurnEngine {
         //
         // 正文 content_id = `sha256(正文 bytes)`，由 hub 在发布同一条域事件时写进
         // content store（`qaqh_domain::interaction_body` 是两处唯一的序列化来源）。
-        // permission 没有正文可取（它的详情在 tool 频道快照里），保持身份摘要 ref。
+        // ask / plan / permission 都带正文；permission 的详情正文由
+        // `engine_tool` 在请求授权时构造（纯 v2 的 wire 上没有 tool 频道快照）。
         let mut requests: Vec<(&str, InteractionKind, Option<String>)> = Vec::new();
-        requests.extend(
-            state
-                .pending_permission_ids
-                .iter()
-                .map(|call_id| (call_id.as_str(), InteractionKind::Permission, None)),
-        );
+        // permission 的详情正文也走 canonical ref（#345 之后新增）：纯 v2 的 wire
+        // 上没有 tool 频道快照，壳层只能从 content store 取正文渲染授权面板。
+        let permission_bodies: std::collections::HashMap<&str, &Vec<u8>> = state
+            .pending_permission_bodies
+            .iter()
+            .map(|(call_id, body)| (call_id.as_str(), body))
+            .collect();
+        requests.extend(state.pending_permission_ids.iter().map(|call_id| {
+            let content_id = permission_bodies
+                .get(call_id.as_str())
+                .map(|body| qaqh_types::sha256_hex(body));
+            (call_id.as_str(), InteractionKind::Permission, content_id)
+        }));
         requests.extend(state.pending_asks.iter().map(|ask| {
             let body = qaqh_domain::interaction_body::ask_body(ask.mode, &ask.questions);
             (
@@ -778,7 +786,7 @@ impl TurnEngine {
             }
         };
 
-        if active.call_id != ask_id {
+        if !crate::agent::tool_runtime::interaction_id_matches(&active.call_id, ask_id) {
             Self::emit_ask_rejected(ctx, ask_id, "ask_id does not match the active prompt");
             return Outcome::Handled;
         }
@@ -864,7 +872,9 @@ impl TurnEngine {
                             .map(|t| t.call_id.as_str())
                     })
             });
-        if active_id != Some(call_id) {
+        if !active_id
+            .is_some_and(|id| crate::agent::tool_runtime::interaction_id_matches(id, call_id))
+        {
             log::warn!("[TURN] plan response without a suspended review: {call_id}");
             return Outcome::Handled;
         }
@@ -983,7 +993,9 @@ impl TurnEngine {
             .filter(|state| state.reason == YieldReason::AskUser)
             .and_then(|state| state.pending_asks.front())
             .map(|ask| ask.call_id.as_str());
-        if active_id != Some(ask_id) {
+        if !active_id
+            .is_some_and(|id| crate::agent::tool_runtime::interaction_id_matches(id, ask_id))
+        {
             Self::emit_ask_rejected(ctx, ask_id, "ask_id does not match the active prompt");
             return Outcome::Handled;
         }
@@ -1549,6 +1561,7 @@ impl TurnEngine {
                     round_num,
                     usage: last_usage.clone(),
                     pending_permission_ids: Vec::new(),
+                    pending_permission_bodies: Vec::new(),
                     deferred_authorized: Vec::new(),
                     tool_call_order: vec![call_id.clone()],
                     serial_call_ids: HashSet::new(),

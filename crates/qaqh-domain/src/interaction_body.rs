@@ -10,7 +10,7 @@
 //! - `ask` 的 `mode` / `questions` 与 v1 域事件同源，客户端**不需要**再做单/批归一化；
 //! - `plan` 用 `review_type` 区分 `plan_submit` 与 `todo_activation`。
 
-use crate::{AskMode, AskQuestion, PlanReviewItem};
+use crate::{AskMode, AskQuestion, PermissionCategory, PermissionRisk, PlanReviewItem};
 
 /// 交互正文的 media type（content store / v2 content 端点共用）。
 pub const INTERACTION_BODY_MEDIA_TYPE: &str = "application/vnd.qaqh.interaction-request+json";
@@ -43,10 +43,77 @@ pub fn plan_body(
     .unwrap_or_default()
 }
 
+/// permission 交互正文（`kind = "permission"`）。
+///
+/// #345 时 permission 刻意**没有**正文（详情只在 tool 频道快照 / timeline 卡里）。
+/// 纯 v2 之后 wire 上不再有 tool 频道快照，壳层（TUI / webui gateway）只能从
+/// canonical ref 取正文才能渲染授权面板 ⇒ 详情也必须走同一条路。
+/// canonical ref 依赖逐字节一致，故参数与 wire 字段一一对应、不做结构体包装。
+#[allow(clippy::too_many_arguments)]
+pub fn permission_body(
+    tool_name: &str,
+    action_summary: Option<&str>,
+    reason: &str,
+    paths: &[String],
+    category: PermissionCategory,
+    level: u8,
+    risk: PermissionRisk,
+    consequence: &str,
+) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "kind": "permission",
+        "tool_name": tool_name,
+        "action_summary": action_summary,
+        "reason": reason,
+        "paths": paths,
+        "category": category,
+        "level": level,
+        "risk": risk,
+        "consequence": consequence,
+    }))
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn permission_body_carries_the_approval_details() {
+        let paths = vec!["/tmp/x".to_string()];
+        let body = permission_body(
+            "exec",
+            Some("run ls"),
+            "needs shell",
+            &paths,
+            PermissionCategory::Exec,
+            3,
+            PermissionRisk::High,
+            "runs a command",
+        );
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
+        assert_eq!(value["kind"], "permission");
+        assert_eq!(value["tool_name"], "exec");
+        assert_eq!(value["action_summary"], "run ls");
+        assert_eq!(value["category"], "exec");
+        assert_eq!(value["risk"], "high");
+        assert_eq!(value["level"], 3);
+        assert_eq!(value["paths"][0], "/tmp/x");
+        // canonical ref 依赖逐字节一致。
+        assert_eq!(
+            body,
+            permission_body(
+                "exec",
+                Some("run ls"),
+                "needs shell",
+                &paths,
+                PermissionCategory::Exec,
+                3,
+                PermissionRisk::High,
+                "runs a command",
+            )
+        );
+    }
     fn question(id: &str) -> AskQuestion {
         AskQuestion {
             id: id.to_string(),
