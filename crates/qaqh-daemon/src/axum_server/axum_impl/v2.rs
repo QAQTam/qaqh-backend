@@ -4,10 +4,11 @@
 //! `open -> bootstrap -> since_cursor subscribe -> replay -> live`.
 
 use qaqh_ringing::{
-    RINGING_SCHEMA, RINGING_V2_VERSION, RINGING_VERSION, RingingCommandEnvelope,
-    RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandEnvelope,
-    RingingV2DriverState, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingInteraction,
+    RINGING_SCHEMA, RINGING_V2_VERSION, RINGING_VERSION, RingingCommandAckStatus,
+    RingingCommandEnvelope, RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot,
+    RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2DriverState, RingingV2InteractionKind,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    RingingV2PendingInteraction,
 };
 use qaqh_runtime::ringing::V2StreamItem;
 use qaqh_session::projection::{
@@ -317,6 +318,53 @@ pub(crate) async fn handle_command_v2(
             "path channel does not match v2 command envelope",
         );
     }
+    // Idempotent replay: a command_id already inside the receipt TTL must not
+    // re-enter the worker. v2 answers with the recorded terminal outcome
+    // (including the typed payload) instead of the v1 "already accepted"
+    // message, so a client that lost the first ACK can reconcile directly.
+    let fingerprint = command_fingerprint(
+        envelope.channel,
+        envelope.seed.as_deref(),
+        envelope.expected_revision,
+        &envelope.command,
+    );
+    if let Some(existing) = existing_v2_receipt(&state, &headers, &envelope.command_id) {
+        if existing.payload_fingerprint != fingerprint {
+            return json_response(
+                StatusCode::CONFLICT,
+                &RingingV2CommandAck {
+                    command_id: envelope.command_id.clone(),
+                    status: RingingCommandAckStatus::Rejected,
+                    code: Some("duplicate_command_mismatch".into()),
+                    message: Some("command_id was already used with another payload".into()),
+                    retry_after_ms: None,
+                    existing: None,
+                },
+            );
+        }
+        let message = match existing.state {
+            qaqh_ringing::RingingCommandState::Succeeded => {
+                "duplicate command_id (already completed)"
+            }
+            qaqh_ringing::RingingCommandState::Failed => "duplicate command_id (already failed)",
+            qaqh_ringing::RingingCommandState::Rejected => {
+                "duplicate command_id (already rejected)"
+            }
+            qaqh_ringing::RingingCommandState::Accepted
+            | qaqh_ringing::RingingCommandState::Running => "duplicate command_id (in flight)",
+        };
+        return json_response(
+            StatusCode::OK,
+            &RingingV2CommandAck {
+                command_id: envelope.command_id.clone(),
+                status: RingingCommandAckStatus::Accepted,
+                code: None,
+                message: Some(message.into()),
+                retry_after_ms: None,
+                existing: Some(existing.into_existing()),
+            },
+        );
+    }
     let v1 = RingingCommandEnvelope {
         schema: RINGING_SCHEMA.into(),
         version: RINGING_VERSION,
@@ -341,12 +389,59 @@ pub(crate) async fn handle_command_v2(
     handle_command(State(state), headers, Path(id), Bytes::from(body)).await
 }
 
+/// Look up a replayable receipt for the lease named by the request header.
+///
+/// Returns `None` when the header is absent/inactive, so the caller falls
+/// through to the shared command path and its canonical error response.
+fn existing_v2_receipt(
+    state: &AppState,
+    headers: &HeaderMap,
+    command_id: &str,
+) -> Option<qaqh_runtime::ringing::ExistingCommandReceipt> {
+    let session_id = get_session_id(headers)?;
+    let active = state
+        .leases
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_active_session(&session_id);
+    if !active {
+        return None;
+    }
+    state
+        .pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .existing_receipt_for_session(command_id, &session_id)
+}
+
 pub(crate) async fn handle_command_status_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(command_id): Path<String>,
 ) -> Response {
-    handle_command_status(State(state), headers, Path(command_id)).await
+    if !is_authorized(&headers, &state.token) {
+        return unauthorized();
+    }
+    let Some(session_id) = get_session_id(&headers) else {
+        return api_error_response(
+            StatusCode::UNAUTHORIZED,
+            "lease_required",
+            "client session header required",
+        );
+    };
+    let Some(status) = state
+        .pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .v2_status_for_session(&command_id, &session_id)
+    else {
+        return api_error_response(
+            StatusCode::NOT_FOUND,
+            "command_not_found",
+            "command receipt not found",
+        );
+    };
+    json_response(StatusCode::OK, &status)
 }
 
 fn require_v2_lease(state: &AppState, headers: &HeaderMap) -> Option<String> {
