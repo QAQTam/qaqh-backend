@@ -241,6 +241,13 @@ V1_BOOT_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
 [ "$V1_BOOT_STATUS" = "404" ] || fail "v1 bootstrap must be gone (got $V1_BOOT_STATUS)"
 
+say "== v1 channel SSE is hard-cut =="
+# 2026-09-24 硬切：v1 三频道全局流删除，投影事件只从每 seed 一条的 v2 单流来。
+V1_EVENTS_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -N --max-time 2 \
+    "$ENDPOINT/ringing/v1/events/control" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
+[ "$V1_EVENTS_STATUS" = "404" ] || fail "v1 events/{channel} must be gone (got $V1_EVENTS_STATUS)"
+
 say "== driver release (explicit) =="
 renew "$A"
 RELEASE_A="$(driver "$A" release)"
