@@ -72,6 +72,11 @@ impl ToolProjection for EditOutput {
             &self.path,
             crate::tool_api::PathOp::Edit,
             "edit",
+            Some(crate::file_mutate::mutation_change_summary(
+                &self.path,
+                self.lines_added,
+                self.lines_removed,
+            )),
             &self.model_text,
             self.diff.clone(),
         )
