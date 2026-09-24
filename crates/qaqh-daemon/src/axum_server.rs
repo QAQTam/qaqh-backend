@@ -79,9 +79,7 @@ mod sse_tests {
         super::init_session_manager();
         AppState {
             hub,
-            v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new(
-                "lag-epoch",
-            )),
+            v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("lag-epoch")),
             leases,
             pending,
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
@@ -601,9 +599,7 @@ mod axum_tests {
         super::init_session_manager();
         AppState {
             hub,
-            v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new(
-                "test-epoch",
-            )),
+            v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("test-epoch")),
             leases,
             pending,
             service,
@@ -718,7 +714,12 @@ mod axum_tests {
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let seed = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let seed = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
         let now = 1_789_830_000_000;
         let mut store = CanonicalSessionStore::open(
@@ -836,6 +837,175 @@ mod axum_tests {
         let text = String::from_utf8_lossy(&chunk);
         assert!(text.contains("event: ringing.event"), "{text}");
         assert!(text.contains("\"fact_seq\":2"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn v2_command_replay_returns_typed_existing_result() {
+        use qaqh_domain::ControlCommand;
+        use qaqh_ringing::{
+            RingingCommand, RingingCommandAckStatus, RingingCommandState, RingingV2AskOutcome,
+            RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
+        };
+
+        let state = test_state();
+        let pending = state.pending.clone();
+        let app = build_router(state);
+
+        let open = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/clients/open")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .body(Body::from(
+                serde_json::to_vec(&qaqh_ringing::RingingV2OpenRequest::new("ci-v2")).unwrap(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(open).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let open: qaqh_ringing::RingingV2OpenResponse = serde_json::from_slice(&body).unwrap();
+
+        let envelope = RingingV2CommandEnvelope::new(
+            "cmd-replay",
+            "ci-v2",
+            RingingCommand::Control(ControlCommand::SessionResume {
+                seed: "seed-1".into(),
+            }),
+        )
+        .with_client_session_id(open.client_session_id.clone())
+        .with_seed("seed-1");
+        let fingerprint = crate::axum_server::axum_impl::command_fingerprint(
+            envelope.channel,
+            envelope.seed.as_deref(),
+            envelope.expected_revision,
+            &envelope.command,
+        );
+        let expected = RingingV2CommandResult::AskResolved {
+            interaction_id: "ask-1".into(),
+            outcome: RingingV2AskOutcome::Answered,
+        };
+        {
+            let mut pending = pending.lock().unwrap();
+            assert!(
+                pending
+                    .record_fingerprint_for_session(
+                        "cmd-replay",
+                        &fingerprint,
+                        &open.client_session_id
+                    )
+                    .expect("record")
+            );
+            pending.mark_terminal_with_result(
+                "cmd-replay",
+                RingingCommandState::Succeeded,
+                Some("evt-replay".into()),
+                None,
+                Some(expected.clone()),
+            );
+        }
+
+        let replay = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/commands/control")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", open.client_session_id.clone())
+            .body(Body::from(serde_json::to_vec(&envelope).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(replay).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let ack: RingingV2CommandAck = serde_json::from_slice(&body).unwrap();
+        assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
+        let existing = ack.existing.expect("replayed ack carries existing receipt");
+        assert_eq!(existing.state, RingingCommandState::Succeeded);
+        assert_eq!(existing.terminal_event_id.as_deref(), Some("evt-replay"));
+        assert_eq!(existing.result, Some(expected.clone()));
+
+        let status = Request::builder()
+            .uri("/ringing/v2/commands/cmd-replay")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", open.client_session_id)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(status).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let status: qaqh_ringing::RingingV2CommandStatus = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status.state, RingingCommandState::Succeeded);
+        assert_eq!(status.result, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn v2_command_replay_with_other_payload_is_conflict() {
+        use qaqh_domain::ControlCommand;
+        use qaqh_ringing::{
+            RingingCommand, RingingV2CommandAck, RingingV2CommandEnvelope,
+        };
+
+        let state = test_state();
+        let pending = state.pending.clone();
+        let app = build_router(state);
+
+        let open = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/clients/open")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .body(Body::from(
+                serde_json::to_vec(&qaqh_ringing::RingingV2OpenRequest::new("ci-v2")).unwrap(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(open).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let open: qaqh_ringing::RingingV2OpenResponse = serde_json::from_slice(&body).unwrap();
+
+        let envelope = RingingV2CommandEnvelope::new(
+            "cmd-mismatch",
+            "ci-v2",
+            RingingCommand::Control(ControlCommand::SessionResume {
+                seed: "seed-1".into(),
+            }),
+        )
+        .with_client_session_id(open.client_session_id.clone())
+        .with_seed("seed-1");
+        {
+            let mut pending = pending.lock().unwrap();
+            assert!(
+                pending
+                    .record_fingerprint_for_session(
+                        "cmd-mismatch",
+                        "different-fingerprint",
+                        &open.client_session_id
+                    )
+                    .expect("record")
+            );
+        }
+
+        let replay = Request::builder()
+            .method("POST")
+            .uri("/ringing/v2/commands/control")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", open.client_session_id)
+            .body(Body::from(serde_json::to_vec(&envelope).unwrap()))
+            .unwrap();
+        let response = app.oneshot(replay).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let ack: RingingV2CommandAck = serde_json::from_slice(&body).unwrap();
+        assert_eq!(ack.code.as_deref(), Some("duplicate_command_mismatch"));
+        assert!(ack.existing.is_none());
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ use qaqh_domain::state::ControlState;
 use serde::{Deserialize, Serialize};
 
 use crate::command::RingingCommand;
+use crate::envelope::{RingingCommandAckStatus, RingingCommandState};
 use crate::protocol::{RINGING_SCHEMA, is_safe_integer};
 use crate::v2::cursor::{CanonicalCursor, CursorToken};
 use crate::v2::{RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
@@ -410,6 +411,110 @@ impl RingingV2CommandEnvelope {
     }
 }
 
+/// v2 command acknowledgement.
+///
+/// Wire-compatible superset of [`crate::RingingCommandAck`]: the four base
+/// fields keep their names and types, so a v1 ack body still deserializes.
+/// `existing` is populated only when the daemon replays a receipt that is
+/// still inside the idempotency TTL — that is, when the caller re-submitted a
+/// `command_id` it may have lost the ACK for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2CommandAck {
+    pub command_id: String,
+    pub status: RingingCommandAckStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// Already-recorded receipt for a replayed `command_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing: Option<RingingV2ExistingCommand>,
+}
+
+impl RingingV2CommandAck {
+    /// Project the base ack fields back onto the v1 shape.
+    pub fn into_v1(self) -> crate::RingingCommandAck {
+        crate::RingingCommandAck {
+            command_id: self.command_id,
+            status: self.status,
+            code: self.code,
+            message: self.message,
+            retry_after_ms: self.retry_after_ms,
+        }
+    }
+}
+
+/// Receipt snapshot returned for a replayed `command_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2ExistingCommand {
+    pub state: RingingCommandState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Typed terminal payload, when the command produced one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<RingingV2CommandResult>,
+}
+
+/// Typed terminal payload of a command.
+///
+/// Only outcomes a client must be able to reconcile after losing an ACK are
+/// represented. The reliable `causation_id = command_id` event remains the
+/// source of truth; this payload exists so idempotent replay and status polling
+/// do not degrade to string matching on `code`/`message`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RingingV2CommandResult {
+    /// ask_user interaction was resolved by the command that owns this receipt.
+    AskResolved {
+        interaction_id: String,
+        outcome: RingingV2AskOutcome,
+    },
+    /// plan review was resolved by the command that owns this receipt.
+    PlanReviewResolved {
+        interaction_id: String,
+        approved: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RingingV2AskOutcome {
+    Answered,
+    Dismissed,
+}
+
+/// v2 command status. Superset of [`crate::RingingCommandStatus`] with the
+/// typed terminal payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2CommandStatus {
+    pub command_id: String,
+    pub state: RingingCommandState,
+    pub payload_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<RingingV2CommandResult>,
+}
+
+impl RingingV2CommandStatus {
+    /// Project the base status fields back onto the v1 shape.
+    pub fn into_v1(self) -> crate::RingingCommandStatus {
+        crate::RingingCommandStatus {
+            command_id: self.command_id,
+            state: self.state,
+            payload_fingerprint: self.payload_fingerprint,
+            terminal_event_id: self.terminal_event_id,
+            error_code: self.error_code,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RingingV2DriverClaimResponse {
     pub accepted: bool,
@@ -584,6 +689,67 @@ mod tests {
                 .driver_epoch,
             3
         );
+    }
+
+    #[test]
+    fn v2_command_ack_carries_typed_existing_result() {
+        let ack = RingingV2CommandAck {
+            command_id: "cmd-1".into(),
+            status: RingingCommandAckStatus::Accepted,
+            code: None,
+            message: Some("duplicate command_id (already completed)".into()),
+            retry_after_ms: None,
+            existing: Some(RingingV2ExistingCommand {
+                state: RingingCommandState::Succeeded,
+                terminal_event_id: Some("evt-1".into()),
+                error_code: None,
+                result: Some(RingingV2CommandResult::AskResolved {
+                    interaction_id: "i1".into(),
+                    outcome: RingingV2AskOutcome::Answered,
+                }),
+            }),
+        };
+        let json = serde_json::to_value(&ack).expect("serialize");
+        assert_eq!(json["existing"]["state"], "succeeded");
+        assert_eq!(json["existing"]["result"]["kind"], "ask_resolved");
+        assert_eq!(json["existing"]["result"]["outcome"], "answered");
+        let back: RingingV2CommandAck = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, ack);
+    }
+
+    #[test]
+    fn v1_ack_body_deserializes_as_v2_ack_without_existing() {
+        let v1 = crate::RingingCommandAck {
+            command_id: "cmd-1".into(),
+            status: RingingCommandAckStatus::Accepted,
+            code: None,
+            message: None,
+            retry_after_ms: None,
+        };
+        let json = serde_json::to_value(&v1).expect("serialize");
+        let v2: RingingV2CommandAck = serde_json::from_value(json).expect("v2 superset");
+        assert_eq!(v2.command_id, "cmd-1");
+        assert!(v2.existing.is_none());
+    }
+
+    #[test]
+    fn v2_command_status_round_trips_typed_result() {
+        let status = RingingV2CommandStatus {
+            command_id: "cmd-2".into(),
+            state: RingingCommandState::Failed,
+            payload_fingerprint: "fp".into(),
+            terminal_event_id: Some("evt-2".into()),
+            error_code: Some("interaction_already_resolved".into()),
+            result: Some(RingingV2CommandResult::PlanReviewResolved {
+                interaction_id: "i2".into(),
+                approved: false,
+            }),
+        };
+        let json = serde_json::to_value(&status).expect("serialize");
+        assert_eq!(json["result"]["kind"], "plan_review_resolved");
+        assert_eq!(json["result"]["approved"], false);
+        let back: RingingV2CommandStatus = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, status);
     }
 
     #[test]
