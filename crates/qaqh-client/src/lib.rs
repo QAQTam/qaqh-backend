@@ -21,6 +21,7 @@ mod sse_decoder;
 pub mod timeline;
 pub mod types;
 pub mod v2;
+pub mod v2_stream;
 
 pub use client::{
     Client, ClientHandlers, ClientOptions, RemoteEndpoint, StopStatus, runtime_handle,
@@ -60,12 +61,15 @@ pub use v2::{
     CLIENT_V2_END_OF_FACT, ClientV2ActivityState, ClientV2ActorRef, ClientV2AskOutcome,
     ClientV2Bootstrap, ClientV2Capabilities, ClientV2CommandAck, ClientV2CommandResult,
     ClientV2CommandStatus, ClientV2ContentValue, ClientV2ControlDelta, ClientV2ControlState,
-    ClientV2ConversationContextKind, ClientV2ConversationState, ClientV2Cursor,
-    ClientV2CursorToken, ClientV2Delivery, ClientV2DeltaInteractionKind, ClientV2DriverState,
-    ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingResult, ClientV2InteractionDecision,
-    ClientV2InteractionExpiryReason, ClientV2InteractionId, ClientV2InteractionKind,
-    ClientV2Payload, ClientV2PendingContentValue, ClientV2PendingInteraction, ClientV2PendingSet,
-    ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey,
-    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolCallId, ClientV2ToolState,
+    ClientV2ConversationContextKind, ClientV2ConversationDelta, ClientV2ConversationState,
+    ClientV2Cursor, ClientV2CursorToken, ClientV2DeleteReason, ClientV2Delivery,
+    ClientV2DeltaInteractionKind, ClientV2DriverState, ClientV2Event, ClientV2EventEnvelope,
+    ClientV2ExistingResult, ClientV2InteractionDecision, ClientV2InteractionExpiryReason,
+    ClientV2InteractionId, ClientV2InteractionKind, ClientV2MetaDelta, ClientV2Payload,
+    ClientV2PendingContentValue, ClientV2PendingInteraction, ClientV2PendingSet, ClientV2Reset,
+    ClientV2ResetReason, ClientV2ResourceDelta, ClientV2SessionState, ClientV2StreamKey,
+    ClientV2SubagentTerminalStatus, ClientV2Subscription, ClientV2SubscriptionEvent,
+    ClientV2ToolCallId, ClientV2ToolState, ClientV2TurnId, ClientV2TurnTerminal,
     RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
+pub use v2_stream::{V2Stream, V2StreamHandlers, V2StreamStatus};
