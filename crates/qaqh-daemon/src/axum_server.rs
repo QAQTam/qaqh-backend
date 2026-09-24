@@ -816,6 +816,8 @@ mod axum_tests {
             ("POST", "/ringing/v1/clients/open"),
             ("POST", "/ringing/v1/leases/renew"),
             ("POST", "/ringing/v1/service/session.list"),
+            ("POST", "/ringing/v1/commands/control"),
+            ("GET", "/ringing/v1/commands/cmd-1"),
         ] {
             let req = Request::builder()
                 .method(method)
@@ -2172,7 +2174,7 @@ mod axum_tests {
             .unwrap()
             .open("cs-1".into(), "ci-1".into());
         let app = build_router(state.clone());
-        let env = qaqh_ringing::RingingCommandEnvelope::new(
+        let env = qaqh_ringing::RingingV2CommandEnvelope::new(
             "cmd-attach-1",
             "ci-1",
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
@@ -2183,7 +2185,7 @@ mod axum_tests {
         .with_seed("sub-seed-1");
         let req = Request::builder()
             .method("POST")
-            .uri("/ringing/v1/commands/control")
+            .uri("/ringing/v2/commands/control")
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", "cs-1")
             .header("content-type", "application/json")
@@ -2195,7 +2197,7 @@ mod axum_tests {
 
         // 空 seed → Rejected missing_seed，且不产生任何归属。
         let app = build_router(state.clone());
-        let env_bad = qaqh_ringing::RingingCommandEnvelope::new(
+        let env_bad = qaqh_ringing::RingingV2CommandEnvelope::new(
             "cmd-attach-2",
             "ci-1",
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
@@ -2205,7 +2207,7 @@ mod axum_tests {
         .with_client_session_id("cs-1");
         let req = Request::builder()
             .method("POST")
-            .uri("/ringing/v1/commands/control")
+            .uri("/ringing/v2/commands/control")
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", "cs-1")
             .header("content-type", "application/json")
