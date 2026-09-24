@@ -49,7 +49,7 @@ canonical 席位落地后，holder 的 lease 过期只在下一次 claim 时经 
 ```text
 cargo test --workspace -- --test-threads=1            PASS（137 suites，0 failed）
 cargo clippy --workspace --all-targets -- -D warnings PASS
-scripts/v2-smoke.sh                                   PASS（可重复）
+scripts/v2-smoke.sh                                   PASS（可重复，含重启回收阶段）
 ```
 
 smoke 现在把完整生命周期跑一遍（daemon 用 `QAQH_TEST_LEASE_TTL_MS=6000`）：
@@ -75,22 +75,59 @@ qaqh-session  tool_ledger::driver_seat_epoch_is_monotonic_and_survives_reopen
 scripts/v2-smoke.sh  driver auto-reclaim on lease expiry
 ```
 
-## 4. 仍未完成（alpha 迭代清单）
+## 4. 补刀：扫描列表持久化（同日）
 
-1. **daemon 重启后重建扫描列表**：`driver_watch` 是内存列表，重启后为空；此时
-   过期席位要等下一次 claim 走 `stale_holder` 接管。可在启动时对已加载会话做一次
-   惰性扫描，或把扫描列表持久化。
-2. **回收延迟**：受 3s 巡检周期与 lease TTL 影响，席位最长空转 ~TTL+3s。
-   需要更即时可改为 lease 过期事件驱动。
-3. `not_eligible` 与显式移交优先级策略未定义（谁能优先接管）。
-4. `driver_epoch` 未进 command fingerprint。
-5. workspace 类命令的 gate 集合未纳入（当前 gate = Conversation 全量 +
+`driver_watch` 原为纯内存列表，daemon 重启后为空，过期席位要等下一次 claim 走
+`stale_holder` 接管。已改为 **`RingingDriverWatch`（`ringing-driver-watch.json`）**：
+
+- 只在 `<data_dir>` 持久化 **seed 列表**，席位真源仍是 canonical
+  `DriverChanged`；文件不可读时按空列表启动（最坏退化为旧行为）。
+- 席位变空、或 seed 已无法扫描（会话被删）时自动移除，文件自清理。
+- 巡检派发加 **15s 退避**（`RECLAIM_RETRY_COOLDOWN_MS`）：一次派发可能被运行时
+  接受、但在 actor 内被拒（见下），sweep 观测不到失败，没有退避会每 3s 重发并
+  产生一次失败事件。
+- smoke 新增「重启后回收」阶段：持有席位 → kill daemon → 重启 → 不触碰会话，
+  仅靠持久化列表回收（epoch 5 → 6）。
+
+## 5. 仍未完成（alpha 迭代清单）
+
+### A. 新发现：actor 退出不释放 canonical writer lease（优先）
+
+补坑过程中发现：`ToolLedger::release_writer_lease` **只有 recovery executor 调用**，
+session actor 正常退出/关闭时不释放 writer fence。后果：
+
+- daemon 重启后，新进程对该会话的 canonical 写入被上一个进程的 fence 挡住，
+  直到 `tool_ledger_lease_ms()`（默认 **30s**）自然过期；
+- 这不只影响 driver 回收，也影响重启后**该会话的任何 canonical 写入**
+  （tool intent/finished、interaction 等），期间表现为 ledger 不可用。
+
+建议修法：actor 退出路径（`spawn_agent` 返回前 / 会话关闭）调用
+`ledger.release_writer_lease(now)`；同一 writer id 释放自身 fence 是安全的。
+需要单独评估，因为它改变所有会话的 writer 生命周期语义。
+
+当前缓解：smoke 用 `QAQH_TOOL_LEDGER_LEASE_MS=3000` 缩短窗口；回收退避保证不刷屏。
+
+### B. driver 其它
+
+1. **回收延迟**：受 3s 巡检周期 + lease TTL（+ 上面 A 的 fence 窗口）影响。
+   更即时可改为 lease 过期事件驱动。
+2. `not_eligible` 与显式移交优先级策略未定义（谁能优先接管）。
+3. `driver_epoch` 未进 command fingerprint。
+4. workspace 类命令的 gate 集合未纳入（当前 gate = Conversation 全量 +
    session/skill/tool-mode 控制）。
-6. P0-6 剩余 fixture：reliable/replaceable/ephemeral transcript、ResetRequired
-   剩余 reason、permission/plan 并发回答、v1 `Last-Event-ID` → v2 cursor 映射、
-   Windows alpha。
-7. P1 未开工：`/ringing/v2/service/{method}`、`/ringing/v2/content`、
-   timeline v2 完整分页与重连。
+
+### C. P0-6 剩余 fixture
+
+1. reliable / replaceable / ephemeral transcript fixture。
+2. `ResetRequired` 剩余 reason（`cursor_expired` / `snapshot_missing` /
+   `cross_session` / `v1_epoch_mismatch` / `replay_overflow`）。
+3. concurrent answers 的 permission / plan 变体。
+4. **v1 `Last-Event-ID` → v2 cursor 服务端映射**（未实现）。
+5. Windows alpha 共用 fixture。
+
+### D. P1 未开工
+
+`/ringing/v2/service/{method}`、`/ringing/v2/content`、timeline v2 完整分页与重连。
 
 ## 5. 接手注意
 

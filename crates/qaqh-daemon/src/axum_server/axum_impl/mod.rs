@@ -89,10 +89,10 @@ pub struct AppState {
     pub leases: Arc<Mutex<RingingLeaseStore>>,
     /// Seeds worth scanning for an expired driver seat.
     ///
-    /// This is a scan list, not seat state: the canonical `DriverChanged` fact
-    /// remains the single source of truth. Entries are added when a seat is
-    /// observed and dropped once the seat is vacant.
-    pub driver_watch: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// This is a persistent scan list, not seat state: the canonical
+    /// `DriverChanged` fact remains the single source of truth. Entries are
+    /// added when a seat is observed and dropped once the seat is vacant.
+    pub driver_watch: Arc<Mutex<qaqh_runtime::ringing::RingingDriverWatch>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
     pub token: String,
