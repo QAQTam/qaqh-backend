@@ -1,6 +1,6 @@
 //! 引擎 [`Config`](crate::Config) ↔ wire DTO（`qaqh-config-api`）双向映射层。
 //!
-//! PLAN docs/config-revamp-plan.md §2/K1：service 层不再手拼 config json，
+//! 当前架构见 docs/current/architecture.md：service 层不再手拼 config json，
 //! 所有字段同步收敛到本模块的**穷举字面量**里——任何一端新增字段而另一端
 //! 未映射，在此处直接编译失败（S2「人肉同步」病根由编译器接管）。
 //!

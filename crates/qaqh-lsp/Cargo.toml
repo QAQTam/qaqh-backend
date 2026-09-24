@@ -2,7 +2,7 @@
 name = "qaqh-lsp"
 version.workspace = true
 edition.workspace = true
-description = "QAQ-Harness LSP client support — precise code navigation via language servers (docs/lsp-client-design.md)"
+description = "QAQ-Harness LSP client support — precise code navigation via language servers (docs/current/architecture.md)"
 
 [dependencies]
 # LspConfig 三类型消费（qaqh-config；mcp 同款单向依赖）。

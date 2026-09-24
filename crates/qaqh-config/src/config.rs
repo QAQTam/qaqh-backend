@@ -114,13 +114,13 @@ pub struct Config {
     /// daemon 周期任务消费；运行时 Config 承载该值以保证 save 往返不丢
     /// 用户手写配置（save_with 从运行时 Config 全量重构 PersistentConfig）。
     pub session_idle_unload_secs: u64,
-    /// MCP 客户端配置（docs/mcp-client-design.md §6；load 时已 fail-fast 校验）。
+    /// MCP 客户端配置（docs/current/architecture.md；load 时已 fail-fast 校验）。
     pub mcp: McpConfig,
-    /// LSP 客户端配置（docs/lsp-client-design.md §6；load 时已 fail-fast 校验）。
+    /// LSP 客户端配置（docs/current/architecture.md；load 时已 fail-fast 校验）。
     pub lsp: LspConfig,
 }
 
-// ── MCP 客户端配置（docs/mcp-client-design.md §6）──
+// ── MCP 客户端配置（docs/current/architecture.md）──
 
 /// MCP server 传输形态。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -193,7 +193,7 @@ impl Default for McpConfig {
     }
 }
 
-// ── LSP 客户端配置（docs/lsp-client-design.md §6；M1 决策 L1–L6）──
+// ── LSP 客户端配置（docs/current/architecture.md；L1–L6 决策）──
 
 /// 单个 LSP server 的运行时配置（已通过 fail-fast 校验；stdio 唯一形态）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -347,7 +347,7 @@ pub(crate) fn map_mcp_config(
 
 /// PersistentLspConfig → 运行时 [`LspConfig`]，含 fail-fast 校验。
 ///
-/// 校验规则（docs/lsp-client-design.md §6）：
+/// 校验规则（docs/current/architecture.md）：
 /// - server 名非空、仅 `[a-z0-9_-]`、≤64 字符（与 mcp 同规）；
 /// - command 非空（stdio 唯一形态）；
 /// - extensions 条目：去点转小写后非空（空条目即错，不静默丢弃）；

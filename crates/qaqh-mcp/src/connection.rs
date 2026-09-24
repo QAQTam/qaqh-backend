@@ -1,4 +1,4 @@
-//! per-server 连接生命周期（设计 `docs/mcp-client-design.md` §5.1）。
+//! per-server 连接生命周期（设计 `docs/current/architecture.md`）。
 //!
 //! 状态机（语义以设计 §5.1 表格为权威；handover 草图与其冲突处以设计为准）：
 //!
