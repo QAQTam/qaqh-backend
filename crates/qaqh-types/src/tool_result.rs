@@ -135,6 +135,41 @@ pub struct ToolResultDisplay {
     pub header: Option<ToolResultDisplayHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<ToolResultDisplayBody>,
+    /// 结构化终态。旧 client 忽略即可；新 client 不再从文本猜 `[OK]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ToolResultDisplayOutcome>,
+}
+
+/// 展示面终态（#336 P2）。
+///
+/// 这是 `ToolOutcome` 的 wire 投影，不是第二个执行事实源：`state` 由
+/// `ToolStatus` / `ToolErrorKind` 单点派生，`exit_code` / `truncated` 由工具
+/// body 派生，`duration_ms` / `output_bytes` 由框架 metrics 填充。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ToolResultDisplayOutcome {
+    pub state: ToolResultDisplayOutcomeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultDisplayOutcomeState {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Backgrounded,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,10 +653,36 @@ mod tests {
                 text: "typed body".into(),
                 truncated: false,
             }),
+            outcome: Some(ToolResultDisplayOutcome {
+                state: ToolResultDisplayOutcomeState::Succeeded,
+                exit_code: Some(0),
+                duration_ms: Some(12),
+                output_bytes: Some(34),
+                truncated: Some(false),
+            }),
         });
         let value = serde_json::to_value(&result).expect("serialize display");
+        assert_eq!(value["display"]["outcome"]["state"], "succeeded");
+        assert_eq!(value["display"]["outcome"]["exit_code"], 0);
         let restored: ToolResult = serde_json::from_value(value).expect("deserialize display");
         assert_eq!(restored.display(), result.display());
+    }
+
+    #[test]
+    fn unknown_display_outcome_state_is_forward_compatible() {
+        let outcome: ToolResultDisplayOutcome = serde_json::from_value(serde_json::json!({
+            "state": "paused",
+            "exit_code": 7,
+            "truncated": true
+        }))
+        .expect("unknown outcome state must not reject the block");
+        assert_eq!(
+            outcome.state,
+            ToolResultDisplayOutcomeState::Unknown,
+            "future states degrade to Unknown"
+        );
+        assert_eq!(outcome.exit_code, Some(7));
+        assert_eq!(outcome.truncated, Some(true));
     }
 
     #[test]

@@ -52,7 +52,10 @@ pub use context::{
 pub use descriptor::{
     DescriptorError, Namespace, OutputBudget, ToolDescriptor, ToolExposure, ToolName, ToolSource,
 };
-pub use display::{PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolHeader, ToolMetrics};
+pub use display::{
+    PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolHeader, ToolMetrics,
+    ToolTerminalState,
+};
 pub use erased::ErasedTool;
 pub use error::{
     FatalToolError, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError,

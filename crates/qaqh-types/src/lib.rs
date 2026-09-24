@@ -48,7 +48,8 @@ pub use tool_def::{ToolDef, ToolFunction};
 pub use tool_result::{
     ContentRef, TOOL_MODEL_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, ToolContinuation, ToolError,
     ToolImage, ToolModelPayload, ToolResult, ToolResultDisplay, ToolResultDisplayBody,
-    ToolResultDisplayHeader, ToolResultDisplayPathOp, ToolResultMetrics, ToolStatus,
+    ToolResultDisplayHeader, ToolResultDisplayOutcome, ToolResultDisplayOutcomeState,
+    ToolResultDisplayPathOp, ToolResultMetrics, ToolStatus,
 };
 
 // ── Unified arg parsers ──
