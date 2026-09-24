@@ -99,9 +99,38 @@ events.commit.json
 epoch 下提交属于不同 payload，不得重放旧 ACK；v1 面没有该字段，指纹仍以
 `driver_epoch = null` 计算。
 
-## 8. 仍未决（不在本次 alpha 修订）
+## 8. replaceable producer 最小映射
 
-- V2-C3 replaceable 生产 producer；
+V2-C3 不再依赖 wire 类型层自证。同一 canonical fact 可以同时产出：
+
+1. 原有 reliable delta（推进 cursor、完整 replay）；
+2. 一个 replaceable current-value mirror（不推进 cursor）。
+
+本轮只冻结以下当前值语义：
+
+| payload | replaceable identity |
+|---|---|
+| `ControlDelta::Activity` | `control:activity` |
+| `ControlDelta::Round` | `control:round` |
+| `ControlDelta::DriverChanged` | `control:driver` |
+| `ResourceDelta::WorkspaceResourceChanged` | `resource:workspace:{kind}:{id}` |
+| `ResourceDelta::GraphEdge` | `resource:graph:{child_session_id}` |
+
+规则：
+
+- 每个 identity 只保留最新 `revision`，历史不逐条 replay；
+- 订阅建立/重连时，先按 cursor replay reliable，再补发当前 replaceable 值；
+- replaceable 不携带 cursor / projection_index，不参与 cursor 推进；
+- replaceable 当前值从 canonical prefix 重建，不引入第二份持久化状态；
+- `ProjectionPayload::revision()` 修复为读取
+  `payload.data.data.revision`，保证 reliable / replaceable 使用投影 revision，
+  而不是错误回退到 `fact_seq`。
+
+`ephemeral` 仍没有 canonical fact → ephemeral 映射：它按 spec 只属于 live
+连接，不能从 canonical log 重建，因此 V2-C4 继续是 wire 契约测试。
+
+## 9. 仍未决（不在本次 alpha 修订）
+
 - interaction 正文跨 daemon 重启持久化（与 pending interaction 跨重启存活绑定）；
 - permission 正文 pinned 与终结 unpin（需要一条稳定的权限终结域事件）；
 - driver 回收延迟 / `not_eligible` 优先级 / workspace command gate 集合；
