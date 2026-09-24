@@ -72,8 +72,9 @@ mod sse_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
-        let driver_watch =
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let driver_watch = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_runtime::ringing::RingingDriverWatch::new(),
+        ));
         let (shutdown, _) = tokio::sync::watch::channel(false);
         // 与 `axum_tests::test_state` 同源：SessionManager 是进程级单例
         // （`init` 用 `OnceLock::set`，重复调用会 panic）——测试二进制的多个
@@ -589,8 +590,9 @@ mod axum_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
-        let driver_watch =
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let driver_watch = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_runtime::ringing::RingingDriverWatch::new(),
+        ));
         let service = TEST_SERVICE
             .get_or_init(|| {
                 super::init_session_manager();
