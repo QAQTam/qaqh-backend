@@ -979,7 +979,9 @@ fn materialize_canonical_session_in(
         .append(&lease, fact, now_ms)
         .map_err(|error| error.to_string())?;
     store
-        .release_writer(&lease, now_ms)
+        // 释放必须对任何时钟都表现为已过期；写 wall clock 会让落后时钟的读者
+        // 把 fence 看成仍有效（与 ToolLedger::Drop 的释放语义一致）。
+        .release_writer(&lease, i64::MIN)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1009,7 +1011,9 @@ use self::stats::{activity, context_stats, dashboard, load_config};
 #[cfg(test)]
 mod canonical_session_materialization_tests {
     use super::*;
-    use qaqh_session::canonical::{CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE};
+    use qaqh_session::canonical::{
+        CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE, WRITER_FENCE_FILE, WriterFence,
+    };
 
     #[test]
     fn session_creation_materializes_one_canonical_baseline() {
@@ -1018,6 +1022,15 @@ mod canonical_session_materialization_tests {
             .expect("materialize");
         assert!(dir.path().join(CANONICAL_IDENTITY_FILE).exists());
         assert!(dir.path().join(EVENTS_COMMIT_FILE).exists());
+        let fence: WriterFence = serde_json::from_slice(
+            &std::fs::read(dir.path().join(WRITER_FENCE_FILE)).expect("writer fence"),
+        )
+        .expect("decode writer fence");
+        assert_eq!(
+            fence.lease_expires_at_ms,
+            i64::MIN,
+            "released fences must look expired to every reader clock"
+        );
 
         let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
         let facts = CommittedFactReader::open(
