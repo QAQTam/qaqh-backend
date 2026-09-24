@@ -140,6 +140,9 @@ ASK_ID="$(printf '%s' "$INTERACTIONS" | json_get "['ask']['interaction_id']")"
 PERMISSION_CALL="$(printf '%s' "$INTERACTIONS" | json_get "['permission']['call_id']")"
 PLAN_ID="$(printf '%s' "$INTERACTIONS" | json_get "['plan']['interaction_id']")"
 say "seeded canonical log + resolved ask/permission/plan interactions"
+# Seeding appends through the canonical writer and can outlive the short smoke
+# lease on a loaded host; refresh A before the first bootstrap probe.
+renew "$A"
 
 say "== bootstrap =="
 BOOTSTRAP="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
