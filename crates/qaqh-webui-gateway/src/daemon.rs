@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use axum::http::{HeaderMap, header};
-use qaqh_ringing::{ClientOpenRequest, ClientOpenResponse, RINGING_SCHEMA, RINGING_VERSION};
+use qaqh_ringing::{RingingV2OpenRequest, RingingV2OpenResponse};
 use qaqh_types::DaemonDiscovery;
 use reqwest::{Method, Response};
 
@@ -67,21 +67,20 @@ impl DaemonClient {
     pub async fn open(&self, client_instance_id: &str) -> Result<Lease, String> {
         let response = self
             .http
-            .post(format!("{}/ringing/v1/clients/open", self.base_url))
+            .post(format!("{}/ringing/v2/clients/open", self.base_url))
             .bearer_auth(&self.token)
-            .json(&ClientOpenRequest::new(client_instance_id))
+            .json(&RingingV2OpenRequest::new(client_instance_id))
             .send()
             .await
             .map_err(|error| format!("daemon open request failed: {error}"))?;
         if !response.status().is_success() {
             return Err(format!("daemon open returned HTTP {}", response.status()));
         }
-        let open: ClientOpenResponse = response
+        let open: RingingV2OpenResponse = response
             .json()
             .await
             .map_err(|error| format!("decode daemon open response: {error}"))?;
-        if open.schema != RINGING_SCHEMA
-            || open.version != RINGING_VERSION
+        if open.validate().is_err()
             || !open.accepted
             || open.client_session_id.is_empty()
             || open.server_epoch.is_empty()
@@ -101,7 +100,7 @@ impl DaemonClient {
 
     pub async fn renew(&self, lease: &Lease) -> Result<(), String> {
         let response = self
-            .request(Method::POST, "/ringing/v1/leases/renew", Some(lease), None)
+            .request(Method::POST, "/ringing/v2/leases/renew", Some(lease), None)
             .await?;
         if !response.status().is_success() {
             return Err(format!("daemon renew returned HTTP {}", response.status()));
