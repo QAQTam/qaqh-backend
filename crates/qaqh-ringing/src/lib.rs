@@ -44,7 +44,7 @@ pub use protocol::{
     is_safe_integer,
 };
 pub use reset::RingingResetRequired;
-pub use snapshot::{RingingChannelSnapshot, RingingSessionBootstrap};
+pub use snapshot::RingingChannelSnapshot;
 pub use v2::*;
 pub use worker::{
     RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,

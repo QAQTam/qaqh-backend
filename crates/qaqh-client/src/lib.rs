@@ -16,7 +16,6 @@ pub mod endpoint;
 pub mod error;
 pub mod remote_path;
 pub mod session;
-pub mod sse;
 mod sse_decoder;
 pub mod timeline;
 pub mod types;
@@ -29,8 +28,11 @@ pub use client::{
 pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_discovery};
 pub use endpoint::{ActionRequest, QueryRequest};
 pub use error::{ClientError, Result};
-/// 三频道快照 `state` 的类型化视图（前端契约 G1）。三端共用，替代各自手解
-/// `serde_json::Value`——经 [`RingingSessionBootstrap`] 的同名访问器取用。
+/// 领域状态类型（`qaqh_domain::state`）。
+///
+/// 纯 v2 之后**不再**经 v1 bootstrap 的 `state` 访问器取用：v2 bootstrap 直接返回
+/// typed 三频道快照（[`ClientV2Bootstrap`]）。这里保留导出只因为 v1 领域投影仍在
+/// runtime 内部（orphan_seal / timeline）使用，壳层不应再依赖。
 pub use qaqh_domain::state::{
     ControlState, ConversationState, InteractionKind, LastFailure, LastRound, PendingInteraction,
     RunningTool, ToolState,
@@ -38,24 +40,23 @@ pub use qaqh_domain::state::{
 pub use remote_path::{display_host, display_path, remote_path_from_display};
 pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
-pub use types::ResetRequired;
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
-    ChannelStatus, CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent,
-    ConversationCommand, ConversationEvent, ConversationInputPurpose, ConversationMode,
-    DashboardDocument, DashboardTask, Delivery, DomainActivityState, DomainAskQuestion,
-    DomainDashboardSnapshot, DomainError, DomainSessionState, ErrorScope, EventBatch, ImageBlock,
-    MAX_SAFE_INTEGER, NoticeLevel, PermissionCategory, PermissionRisk, PlanReviewItem,
-    ProviderToolState, RINGING_SCHEMA, RINGING_VERSION, ReconnectReason, RingingChannelSnapshot,
-    RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
-    RingingCommandStatus, RingingEvent, RingingEventEnvelope, RingingSessionBootstrap,
-    RoundDeltaKind, SessionActivity, SessionListEntry, SessionMeta, SkillInfo, SkillRuntimeInfo,
-    SkillsStatus, TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry,
-    TimelineEvent, TimelineFailure, TimelinePage, TimelinePathOp, TimelineRound, TimelineSnapshot,
-    TimelineStatus, TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader,
-    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn,
-    TimelineTurnState, ToolCommand, ToolContinuation, ToolError, ToolEvent, ToolImage,
-    ToolModelPayload, ToolResult, ToolStatus, UsageInfo, is_safe_integer,
+    CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
+    ConversationEvent, ConversationInputPurpose, ConversationMode, DashboardDocument,
+    DashboardTask, Delivery, DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot,
+    DomainError, DomainSessionState, ErrorScope, EventBatch, ImageBlock, MAX_SAFE_INTEGER,
+    NoticeLevel, PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState,
+    RINGING_SCHEMA, RINGING_VERSION, ReconnectReason, RingingChannelSnapshot, RingingCommand,
+    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
+    RingingEvent, RingingEventEnvelope, RoundDeltaKind, SessionActivity, SessionListEntry,
+    SessionMeta, SkillInfo, SkillRuntimeInfo, SkillsStatus, TimelineBlock, TimelineBlockKind,
+    TimelineBlockState, TimelineEntry, TimelineEvent, TimelineFailure, TimelinePage,
+    TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineStatus, TimelineTool,
+    TimelineToolBody, TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics,
+    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand,
+    ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult, ToolStatus,
+    UsageInfo, is_safe_integer,
 };
 pub use v2::{
     CLIENT_V2_END_OF_FACT, ClientV2ActivityState, ClientV2ActorRef, ClientV2AskOutcome,

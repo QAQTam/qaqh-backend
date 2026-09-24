@@ -3291,17 +3291,14 @@ mod tests {
             }),
         );
 
-        let boot = qaqh_ringing::RingingSessionBootstrap::new(
-            hub.epoch(),
-            "s",
-            hub.snapshot(RingingChannel::Control, "s"),
-            hub.snapshot(RingingChannel::Conversation, "s"),
-            hub.snapshot(RingingChannel::Tool, "s"),
-        );
+        // 三频道领域快照（`RingingChannelSnapshot` 仍在：orphan_seal 等内部路径用它）。
+        // v1 的 `RingingSessionBootstrap` 包装已随 v1 路由删除，这里按频道快照直接解析。
+        let control_snap = hub.snapshot(RingingChannel::Control, "s");
+        let conversation_snap = hub.snapshot(RingingChannel::Conversation, "s");
+        let tool_snap = hub.snapshot(RingingChannel::Tool, "s");
 
-        let conv: ConversationState = boot
-            .conversation_state()
-            .expect("conversation state 可解析");
+        let conv: ConversationState =
+            serde_json::from_value(conversation_snap.state).expect("conversation state 可解析");
         assert_eq!(
             conv.active_turn.as_deref(),
             Some("t1"),
@@ -3317,7 +3314,8 @@ mod tests {
             "线上键名是 `final`，类型里改名为 is_final —— 本断言防改名改错"
         );
 
-        let ctl: ControlState = boot.control_state().expect("control state 可解析");
+        let ctl: ControlState =
+            serde_json::from_value(control_snap.state).expect("control state 可解析");
         assert_eq!(ctl.activity, Some(qaqh_domain::ActivityState::Working));
         assert_eq!(
             ctl.agent_lifecycle,
@@ -3327,7 +3325,7 @@ mod tests {
         assert_eq!(pending.id, "i1");
         assert_eq!(pending.kind, InteractionKind::Ask);
 
-        let tools: ToolState = boot.tool_state().expect("tool state 可解析");
+        let tools: ToolState = serde_json::from_value(tool_snap.state).expect("tool state 可解析");
         assert_eq!(tools.pending_permission.as_deref(), Some("c2"));
         let running = tools.running.expect("running 应存在");
         assert_eq!(running.len(), 1);
