@@ -169,6 +169,12 @@ pub struct McpConfig {
     /// 默认开启；关闭后仅认 [mcp.servers] 手写面。
     #[serde(default = "default_import_external")]
     pub import_external: bool,
+    /// 是否把 MCP 资源清单注入历史（trailing developer 消息）。缺省 **false**：
+    /// 清单属于「环境能力」而非「对话事实」，注入会随清单变化追加历史并打断
+    /// prefix cache；模型按需调 `mcp list_resources` 拿到的是同一份本地缓存，
+    /// 且不受注入侧的 20 条封顶。开启仅用于调试/兼容。
+    #[serde(default)]
+    pub inject_resource_env_block: bool,
 }
 
 fn default_import_external() -> bool {
@@ -182,6 +188,7 @@ impl Default for McpConfig {
             idle_shutdown_secs: 300,
             servers: std::collections::BTreeMap::new(),
             import_external: default_import_external(),
+            inject_resource_env_block: false,
         }
     }
 }
@@ -334,6 +341,7 @@ pub(crate) fn map_mcp_config(
         idle_shutdown_secs: mcp.idle_shutdown_secs.unwrap_or(300),
         servers,
         import_external: mcp.import_external.unwrap_or(true),
+        inject_resource_env_block: mcp.inject_resource_env_block.unwrap_or(false),
     })
 }
 
@@ -1096,6 +1104,7 @@ falling back to 1 (MaxLockdown)"
                 import_external: Some(self.mcp.import_external),
                 idle_shutdown_secs: (self.mcp.idle_shutdown_secs > 0)
                     .then_some(self.mcp.idle_shutdown_secs),
+                inject_resource_env_block: Some(self.mcp.inject_resource_env_block),
                 servers: (!self.mcp.servers.is_empty()).then(|| {
                     self.mcp
                         .servers
