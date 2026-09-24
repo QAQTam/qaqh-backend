@@ -164,10 +164,7 @@ pub fn build_router(state: AppState) -> Router {
             "/ringing/v2/sessions/{seed}/bootstrap",
             get(handle_bootstrap_v2),
         )
-        .route(
-            "/ringing/v2/sessions/{seed}/events/{channel}",
-            get(handle_events_v2),
-        )
+        .route("/ringing/v2/sessions/{seed}/events", get(handle_events_v2))
         .route(
             "/ringing/v2/commands/{id}",
             post(handle_command_v2).get(handle_command_status_v2),
