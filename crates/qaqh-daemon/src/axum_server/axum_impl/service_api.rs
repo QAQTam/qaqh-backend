@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// `POST /ringing/v1/service/{method}` — 服务面 RPC（Read/Write 两类，
+/// `POST /ringing/v2/service/{method}` — 服务面 RPC（Read/Write 两类，
 /// 方法表见 `qaqh_runtime::ringing::service_methods`）。旧
 /// `/queries/{name}` 与 `/actions/{name}` 双端点已并入此处。
 pub(crate) async fn handle_service(

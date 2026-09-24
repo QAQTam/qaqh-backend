@@ -1,6 +1,6 @@
 //! T-2-1 回归：`fs.list` / `fs.read` 路径白名单（安全审查 P0-1）。
 //!
-//! 入口是 `QaqhService::handle`——daemon `/ringing/v1/service/{method}` 的唯一
+//! 入口是 `QaqhService::handle`——daemon `/ringing/v2/service/{method}` 的唯一
 //! 分发点——因此这里覆盖的是真实服务路径，而不是 `fs_git` 的私有函数。
 //!
 //! 隔离：整个用例把 `QAQH_DATA_DIR` 指向临时目录（`SessionManager::init`

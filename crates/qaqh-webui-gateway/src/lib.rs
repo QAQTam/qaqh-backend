@@ -480,7 +480,7 @@ async fn fetch_sessions(state: &GatewayState, session: &BrowserSession) -> Resul
     let lease = session.lease_snapshot();
     let upstream = state
         .daemon
-        .post_json("/ringing/v1/service/session.list", &lease, &json!({}))
+        .post_json("/ringing/v2/service/session.list", &lease, &json!({}))
         .await
         .map_err(|_| error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"))?;
     if !upstream.status().is_success() {
@@ -1039,7 +1039,7 @@ async fn proxy_service(
     let response = match state
         .daemon
         .post_json(
-            &format!("/ringing/v1/service/{}", encode_path(&method)),
+            &format!("/ringing/v2/service/{}", encode_path(&method)),
             &lease,
             &params,
         )
