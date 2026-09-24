@@ -25,6 +25,26 @@ pub const CONTENT_STORE_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
 /// 默认生命周期（30 分钟）。
 pub const DEFAULT_CONTENT_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// 单会话 pinned 条目上限（#345：pending interaction 正文）。
+///
+/// pinned 条目是「客户端还没有机会读到」的内容——交互正文只有几百字节量级，
+/// 这个额度只用于防跑飞，不是常规容量规划。
+pub const PINNED_MAX_ENTRIES_PER_SEED: usize = 64;
+
+/// 单会话 pinned 字节上限（#345）。
+pub const PINNED_MAX_BYTES_PER_SEED: usize = 4 * 1024 * 1024;
+
+/// pinned 准入失败（#345 fail-closed）：调用方**不得**在正文拿不到的情况下
+/// 继续把交互呈现给用户。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentQuotaExceeded;
+
+impl std::fmt::Display for ContentQuotaExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "content_quota_exceeded")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ContentEntry {
     pub content_id: String,
@@ -33,6 +53,9 @@ pub struct ContentEntry {
     pub bytes: Vec<u8>,
     pub sha256: String,
     pub truncated: bool,
+    /// `true` = 被一个活交互引用：不吃 TTL、不被容量淘汰，直到显式 unpin
+    /// 或会话释放（#345）。
+    pub pinned: bool,
     pub created_at: Instant,
     pub expires_at: Instant,
 }
@@ -65,27 +88,103 @@ impl ContentStore {
                 sha256: content_id.clone(),
                 bytes,
                 truncated,
+                pinned: false,
                 created_at: now,
                 expires_at: now + DEFAULT_CONTENT_TTL,
             },
         );
+        self.evict_over_capacity();
+        content_id
+    }
+
+    /// 存入**被活交互引用**的内容（#345）：不吃 TTL、不被容量淘汰。
+    ///
+    /// 超配额返回 [`ContentQuotaExceeded`]（fail-closed）——调用方必须把交互
+    /// 收尾，而不是呈现一个取不到正文的 modal。
+    pub fn put_pinned(
+        &mut self,
+        seed: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, ContentQuotaExceeded> {
+        let mut pinned_entries = 0usize;
+        let mut pinned_bytes = 0usize;
+        for entry in self.entries.values().filter(|e| e.pinned && e.seed == seed) {
+            pinned_entries += 1;
+            pinned_bytes = pinned_bytes.saturating_add(entry.bytes.len());
+        }
+        if pinned_entries >= PINNED_MAX_ENTRIES_PER_SEED
+            || pinned_bytes.saturating_add(bytes.len()) > PINNED_MAX_BYTES_PER_SEED
+        {
+            return Err(ContentQuotaExceeded);
+        }
+        let content_id = sha256_hex(&bytes);
+        let now = Instant::now();
+        self.entries.insert(
+            content_id.clone(),
+            ContentEntry {
+                content_id: content_id.clone(),
+                seed: seed.to_string(),
+                media_type: media_type.to_string(),
+                sha256: content_id.clone(),
+                bytes,
+                truncated: false,
+                pinned: true,
+                created_at: now,
+                expires_at: now + DEFAULT_CONTENT_TTL,
+            },
+        );
+        self.evict_over_capacity();
+        Ok(content_id)
+    }
+
+    /// 解除 pin：条目回到普通 TTL / 容量淘汰语义。
+    pub fn unpin(&mut self, content_id: &str) -> bool {
+        let Some(entry) = self.entries.get_mut(content_id) else {
+            return false;
+        };
+        if !entry.pinned {
+            return false;
+        }
+        entry.pinned = false;
+        entry.expires_at = Instant::now() + DEFAULT_CONTENT_TTL;
+        true
+    }
+
+    /// 淘汰最早的**未 pin** 条目，直到回到容量上限。全被 pin 时提前退出
+    /// （pinned 额度由 [`put_pinned`] 单独兜底）。
+    fn evict_over_capacity(&mut self) {
         while self.entries.len() > self.max_entries {
-            // 淘汰最早过期条目
             let victim = self
                 .entries
                 .values()
+                .filter(|e| !e.pinned)
                 .min_by_key(|e| e.expires_at)
-                .map(|e| e.content_id.clone())
-                .expect("non-empty");
-            self.entries.remove(&victim);
+                .map(|e| e.content_id.clone());
+            match victim {
+                Some(victim) => {
+                    self.entries.remove(&victim);
+                }
+                None => break,
+            }
         }
-        content_id
     }
 
     /// 读取（校验所有权）。过期条目惰性清理。
     pub fn get(&mut self, seed: &str, content_id: &str) -> Option<ContentEntry> {
         let entry = self.entries.get(content_id)?;
-        if entry.seed != seed || entry.expires_at < Instant::now() {
+        if entry.seed != seed || (!entry.pinned && entry.expires_at < Instant::now()) {
+            self.entries.remove(content_id);
+            return None;
+        }
+        Some(entry.clone())
+    }
+
+    /// 按 id 读取（**不校验所有权**，调用方负责）。v2 的 content 端点不带 seed，
+    /// 由 daemon 拿条目的 `seed` 再校验调用方归属。
+    pub fn get_any(&mut self, content_id: &str) -> Option<ContentEntry> {
+        let entry = self.entries.get(content_id)?;
+        if !entry.pinned && entry.expires_at < Instant::now() {
             self.entries.remove(content_id);
             return None;
         }
@@ -166,5 +265,100 @@ mod tests {
         let entry = store.get("s1", &id).expect("big content readable");
         assert!(entry.truncated);
         assert_eq!(entry.bytes.len(), CONTENT_STORE_THRESHOLD_BYTES);
+    }
+
+    // ── #345：pinned 交互正文 ──
+
+    #[test]
+    fn pinned_entry_survives_ttl_and_capacity_eviction() {
+        let mut store = ContentStore::new();
+        let pinned = store
+            .put_pinned("s1", "application/json", b"{\"kind\":\"ask\"}".to_vec())
+            .expect("pinned admitted");
+        // TTL 到期也不清（pin 到交互终态）。
+        store.entries.get_mut(&pinned).expect("exists").expires_at =
+            Instant::now() - Duration::from_secs(1);
+        assert!(store.get("s1", &pinned).is_some(), "pinned ignores TTL");
+
+        // 容量淘汰只吃未 pin 条目。
+        for index in 0..(store.max_entries + 8) {
+            store.put(
+                "s1",
+                "text/plain",
+                format!("line-{index}").into_bytes(),
+                false,
+            );
+        }
+        assert!(
+            store.get("s1", &pinned).is_some(),
+            "pinned survives eviction"
+        );
+    }
+
+    #[test]
+    fn pinned_quota_is_fail_closed_and_reopens_after_unpin() {
+        let mut store = ContentStore::new();
+        let mut ids = Vec::new();
+        for index in 0..PINNED_MAX_ENTRIES_PER_SEED {
+            let id = store
+                .put_pinned(
+                    "s1",
+                    "application/json",
+                    format!("body-{index}").into_bytes(),
+                )
+                .expect("within entry quota");
+            ids.push(id);
+        }
+        assert_eq!(
+            store.put_pinned("s1", "application/json", b"overflow".to_vec()),
+            Err(ContentQuotaExceeded)
+        );
+        // 其他会话不受影响（配额按 seed 计）。
+        assert!(
+            store
+                .put_pinned("s2", "application/json", b"other".to_vec())
+                .is_ok()
+        );
+        // unpin 之后腾出额度。
+        assert!(store.unpin(&ids[0]));
+        assert!(
+            store
+                .put_pinned("s1", "application/json", b"after-unpin".to_vec())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn pinned_byte_quota_is_enforced() {
+        let mut store = ContentStore::new();
+        store
+            .put_pinned(
+                "s1",
+                "application/octet-stream",
+                vec![0_u8; PINNED_MAX_BYTES_PER_SEED],
+            )
+            .expect("exactly at quota");
+        assert_eq!(
+            store.put_pinned("s1", "application/octet-stream", vec![1_u8]),
+            Err(ContentQuotaExceeded)
+        );
+    }
+
+    #[test]
+    fn unpin_restores_normal_ttl_and_lookup_by_id_ignores_seed() {
+        let mut store = ContentStore::new();
+        let id = store
+            .put_pinned("s1", "application/json", b"body".to_vec())
+            .expect("pinned admitted");
+        // get_any 不校验 seed（所有权由 daemon 校验条目的 seed）。
+        let entry = store.get_any(&id).expect("lookup by id");
+        assert_eq!(entry.seed, "s1");
+        assert!(entry.pinned);
+
+        assert!(store.unpin(&id));
+        assert!(!store.unpin(&id), "second unpin is a no-op");
+        let entry = store.get_any(&id).expect("still readable");
+        assert!(!entry.pinned);
+        assert!(entry.expires_at > Instant::now());
     }
 }

@@ -29,6 +29,7 @@ use qaqh_domain::{ControlCommand, RingingChannel};
 use qaqh_ringing::{
     ClientOpenRequest, ClientOpenResponse, RINGING_SCHEMA, RINGING_VERSION, RingingCommandAck,
     RingingCommandAckStatus, RingingCommandEnvelope, RingingCommandState, RingingResetRequired,
+    RingingV2ContentValue,
 };
 use qaqh_runtime::ringing::{PendingCommandStore, RingingLeaseStore, service_methods};
 use qaqh_runtime::{QaqhService, RingingHub};
@@ -193,8 +194,8 @@ pub fn build_router(state: AppState) -> Router {
             "/ringing/v1/sessions/{seed}/timeline",
             get(handle_timeline_snapshot),
         )
-        .route("/ringing/v1/content/{content_id}", get(handle_content_get))
-        .route("/ringing/v1/content", post(handle_content_upload))
+        .route("/ringing/v2/content/{content_id}", get(handle_content_get))
+        .route("/ringing/v2/content", post(handle_content_upload))
         .route("/ringing/v1/service/{method}", post(handle_service))
         .route("/ringing/v1/events/{channel}", get(handle_events))
         .route(
