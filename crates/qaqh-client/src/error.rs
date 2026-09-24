@@ -78,6 +78,22 @@ impl ClientError {
         }
     }
 
+    /// 会话尚未物化：canonical 目录 / commit marker 还不存在
+    /// （`session_not_found` / `snapshot_missing`）。新建会话在首个 canonical
+    /// 事实落盘前就是这个状态——调用方应**短退避**重试而不是指数退避。
+    pub fn is_session_not_ready(&self) -> bool {
+        match self {
+            Self::Http { status, .. } => *status == 404 || *status == 409,
+            Self::Api { status, code, .. } => {
+                *status == 404
+                    || *status == 409
+                    || code == "session_not_found"
+                    || code == "snapshot_missing"
+            }
+            _ => false,
+        }
+    }
+
     /// 返回服务端终止流的结构化原因；普通传输/协议错误返回 `None`。
     pub fn reconnect_reason(&self) -> Option<ReconnectReason> {
         match self {

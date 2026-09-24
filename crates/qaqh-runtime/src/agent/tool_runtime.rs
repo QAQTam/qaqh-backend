@@ -809,6 +809,16 @@ pub(crate) fn canonical_call_id(wire_call_id: &str) -> ToolCallId {
     ToolCallId::new(format!("call_{}", ulid_from_text(wire_call_id)))
 }
 
+/// 入站 id 是否指向某条挂起的 permission：接受 wire id 本身，**或**它的
+/// canonical 形式。
+///
+/// v2 投影（`ControlDelta::InteractionRequested.call_id` / bootstrap 的
+/// pending interaction）只暴露 canonical id；而挂起表按 wire id 记账。
+/// 两个形态都接受，壳层才能用 v2 拿到的 id 直接答复。
+pub(crate) fn permission_id_matches(stored_wire_id: &str, incoming: &str) -> bool {
+    stored_wire_id == incoming || canonical_call_id(stored_wire_id).as_str() == incoming
+}
+
 pub(crate) fn canonical_turn_id(wire_turn_id: &str) -> TurnId {
     TurnId::new(format!("turn_{}", ulid_from_text(wire_turn_id)))
 }

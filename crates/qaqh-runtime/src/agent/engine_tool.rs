@@ -331,9 +331,11 @@ impl ToolEngine {
         approved: bool,
         trust_folder: bool,
     ) -> PermissionDisposition {
-        let pending = match self.pending.take(tool_call_id) {
-            ApprovalTake::Pending(pending) => pending,
-            ApprovalTake::AlreadyResolved(decision) => {
+        // v2 投影只暴露 canonical call_id；归一回 registry 的 wire key。
+        let resolved = self.pending.resolve_key(tool_call_id);
+        let pending = match resolved.as_deref().map(|key| self.pending.take(key)) {
+            Some(ApprovalTake::Pending(pending)) => pending,
+            Some(ApprovalTake::AlreadyResolved(decision)) => {
                 log::debug!(
                     "[TOOL] duplicate permission response for {tool_call_id}: {}",
                     decision.as_str()
@@ -342,7 +344,7 @@ impl ToolEngine {
                     decision: decision.as_str().to_string(),
                 };
             }
-            ApprovalTake::Missing => {
+            _ => {
                 log::warn!("[TOOL] unknown permission response: {tool_call_id}");
                 return PermissionDisposition::Ignored;
             }

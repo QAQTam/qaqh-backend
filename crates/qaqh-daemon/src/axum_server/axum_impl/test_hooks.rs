@@ -13,7 +13,6 @@ use qaqh_ringing::RingingCommand;
 /// Scope of an injected SSE termination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SseTerminateScope {
-    Channel,
     Timeline,
     Any,
 }
@@ -54,7 +53,6 @@ pub(crate) enum InteractionFault {
 pub(crate) struct TestHooks {
     sse_terminate: Option<SseTerminate>,
     sse_terminate_scope: SseTerminateScope,
-    sse_terminate_channel: Option<RingingChannel>,
     /// Shared by channel and timeline streams: `Scope::Any` matches both, so the
     /// one-shot token must not be consumable once per stream kind.
     sse_terminate_used: AtomicBool,
@@ -73,7 +71,6 @@ impl TestHooks {
         Self {
             sse_terminate: None,
             sse_terminate_scope: SseTerminateScope::Any,
-            sse_terminate_channel: None,
             sse_terminate_used: AtomicBool::new(false),
             timeline_gap: false,
             timeline_gap_used: AtomicBool::new(false),
@@ -101,14 +98,11 @@ impl TestHooks {
         });
         let sse_terminate_scope = match env_string("QAQH_TEST_SSE_TERMINATE_SCOPE")
             .as_deref()
-            .unwrap_or("channel")
+            .unwrap_or("timeline")
         {
-            "timeline" => SseTerminateScope::Timeline,
             "any" => SseTerminateScope::Any,
-            _ => SseTerminateScope::Channel,
+            _ => SseTerminateScope::Timeline,
         };
-        let sse_terminate_channel = env_string("QAQH_TEST_SSE_TERMINATE_CHANNEL")
-            .and_then(|value| parse_channel_name(&value));
         let timeline_gap = env_flag("QAQH_TEST_TIMELINE_GAP");
         let session_404_seed = env_string("QAQH_TEST_SESSION_404_SEED");
         let command_ack = env_string("QAQH_TEST_COMMAND_ACK").and_then(|value| {
@@ -138,7 +132,6 @@ impl TestHooks {
         Self {
             sse_terminate,
             sse_terminate_scope,
-            sse_terminate_channel,
             sse_terminate_used: AtomicBool::new(false),
             timeline_gap,
             timeline_gap_used: AtomicBool::new(false),
@@ -149,22 +142,6 @@ impl TestHooks {
             interaction_fault,
             interaction_fault_used: AtomicBool::new(false),
         }
-    }
-
-    /// Consume the channel-stream termination token, if configured for this
-    /// channel. Returns `None` when the hook is absent, scoped elsewhere, or
-    /// already consumed.
-    pub(crate) fn take_channel_terminate(&self, channel: RingingChannel) -> Option<SseTerminate> {
-        if !matches!(
-            self.sse_terminate_scope,
-            SseTerminateScope::Channel | SseTerminateScope::Any
-        ) || self
-            .sse_terminate_channel
-            .is_some_and(|expected| expected != channel)
-        {
-            return None;
-        }
-        self.take_sse_terminate_once()
     }
 
     /// Shared one-shot consumer for channel and timeline streams.
@@ -281,22 +258,6 @@ impl Default for TestHooks {
 
 #[cfg(test)]
 impl TestHooks {
-    pub(crate) fn for_test_sse_terminate(
-        code: &str,
-        scope: SseTerminateScope,
-        channel: Option<RingingChannel>,
-    ) -> Self {
-        Self {
-            sse_terminate: Some(SseTerminate {
-                code: code.into(),
-                skipped: (code == "lagged").then_some(7),
-            }),
-            sse_terminate_scope: scope,
-            sse_terminate_channel: channel,
-            ..Self::disabled()
-        }
-    }
-
     pub(crate) fn for_test_session_404(seed: &str) -> Self {
         Self {
             session_404_seed: Some(seed.into()),
