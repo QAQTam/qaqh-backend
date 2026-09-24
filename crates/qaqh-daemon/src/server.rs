@@ -168,6 +168,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingLeaseStore::new()));
+    let driver_watch = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let pending_commands = Arc::new(Mutex::new(
         qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
     ));
@@ -211,6 +212,18 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // service.shutdown() (cancel + SessionShutdown + join) → seal orphans →
     // flush timeline persistence.
     spawn_signal_shutdown(shutdown.clone());
+    let app_state = crate::axum_server::AppState {
+        hub: hub.clone(),
+        v2_hub: v2_hub.clone(),
+        leases: ringing_leases.clone(),
+        driver_watch: driver_watch.clone(),
+        pending: pending_commands.clone(),
+        service: service.clone(),
+        token: token.clone(),
+        epoch: epoch.clone(),
+        shutdown: shutdown.clone(),
+        test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),
+    };
     // E: idle 会话卸载周期任务（docs/memory-governance-plan.md §E）。
     // 每 60s 读一次 config（热生效），对空闲超过阈值的 Session worker 走
     // 优雅 close（join + bundle drop + final flush/drain）。registry.close
@@ -259,6 +272,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     {
         let service = service.clone();
         let pending_commands = pending_commands.clone();
+        let app_state = app_state.clone();
         let mut shutdown_rx = shutdown.subscribe();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
@@ -273,6 +287,9 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
                                 std::time::Duration::from_secs(30),
                                 std::time::Duration::from_secs(60),
                             );
+                        // Driver seat reclamation: a holder whose lease expired
+                        // must not keep the seat (spec §9.3 自动移交).
+                        crate::axum_server::reclaim_dead_driver_seats(&app_state);
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -288,17 +305,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // "已写 daemon.json 但 HTTP 未就绪"的假端口而导航失败（白屏/错误页），
     // 也让 ensure_daemon_running 的轮询与真实就绪时刻对齐。
     write_discovery(&discovery)?;
-    let app_state = crate::axum_server::AppState {
-        hub: hub.clone(),
-        v2_hub: v2_hub.clone(),
-        leases: ringing_leases.clone(),
-        pending: pending_commands.clone(),
-        service: service.clone(),
-        token: token.clone(),
-        epoch: epoch.clone(),
-        shutdown: shutdown.clone(),
-        test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),
-    };
     let app = crate::axum_server::build_router(app_state);
     let mut shutdown_rx = shutdown.subscribe();
     axum::serve(

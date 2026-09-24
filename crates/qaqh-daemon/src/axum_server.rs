@@ -3,6 +3,7 @@
 
 mod axum_impl;
 
+pub(crate) use axum_impl::reclaim_dead_driver_seats;
 #[cfg(test)]
 pub(crate) use axum_impl::test_hooks::SseTerminateScope;
 pub(crate) use axum_impl::test_hooks::TestHooks;
@@ -71,6 +72,8 @@ mod sse_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
+        let driver_watch =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let (shutdown, _) = tokio::sync::watch::channel(false);
         // 与 `axum_tests::test_state` 同源：SessionManager 是进程级单例
         // （`init` 用 `OnceLock::set`，重复调用会 panic）——测试二进制的多个
@@ -81,6 +84,7 @@ mod sse_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("lag-epoch")),
             leases,
+            driver_watch,
             pending,
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
                 .clone(),
@@ -585,6 +589,8 @@ mod axum_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
+        let driver_watch =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let service = TEST_SERVICE
             .get_or_init(|| {
                 super::init_session_manager();
@@ -601,6 +607,7 @@ mod axum_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("test-epoch")),
             leases,
+            driver_watch,
             pending,
             service,
             token: String::from("test-token"),
