@@ -175,6 +175,31 @@ pub enum DriverReleaseOutcome {
     },
 }
 
+impl Drop for ToolLedger {
+    /// Release the exclusive writer fence when the ledger owner goes away.
+    ///
+    /// The fence is a lease with a TTL, so a crashed writer still recovers on
+    /// expiry. But an *orderly* exit (actor shutdown, daemon restart, session
+    /// switch, recovery batch) must not make the successor wait out a whole
+    /// lease window: without this, every actor exit blocks the next writer with
+    /// `WriterBusy` for `tool_ledger_lease_ms()` (30s by default), which the
+    /// runtime surfaces as LEDGER_BLOCKED for every canonical write.
+    ///
+    /// Errors are logged and swallowed — `Drop` must not panic, and the fence
+    /// still expires by TTL if this fails.
+    ///
+    /// The release stamp is the minimum `i64` rather than "now": a released
+    /// fence must look expired to *every* reader, including callers that
+    /// compare against a synthetic clock. Stamping the wall clock here could
+    /// actually push the expiry forward relative to such a caller and
+    /// resurrect the fence.
+    fn drop(&mut self) {
+        if let Err(error) = self.store.release_writer(&self.lease, i64::MIN) {
+            log::warn!("[qaqh-session] failed to release canonical writer lease on drop: {error}");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ToolLedger {
     store: CanonicalSessionStore,
