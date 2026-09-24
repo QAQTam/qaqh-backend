@@ -58,8 +58,16 @@ pub use qaqh_session::session_fact_v2::InteractionId as ClientV2InteractionId;
 /// `ClientV2ControlDelta::InteractionRequested.call_id`.
 pub use qaqh_session::session_fact_v2::ToolCallId as ClientV2ToolCallId;
 
-/// `InteractionRequested.request` / `InteractionResolved.decision` 的载荷。
+/// `InteractionRequested.request` / `InteractionResolved.decision` 的载荷
+/// （**SSE control delta** 面，canonical 类型）。
 pub use qaqh_session::session_fact_v2::ContentValue as ClientV2ContentValue;
+
+/// `ClientV2PendingInteraction.request` 的载荷（**bootstrap** 面）。
+///
+/// 与 [`ClientV2ContentValue`] 的 JSON 形态一致（`kind` / `data` 判别式），但
+/// bootstrap 走 wire 层类型（`qaqh-ringing` 不依赖 session crate），所以是两个
+/// 类型；两侧 serde 形态由 daemon 的映射函数保持一致。
+pub use qaqh_ringing::RingingV2ContentValue as ClientV2PendingContentValue;
 
 /// `InteractionResolved.verdict`（结构化裁决；legacy fact 为 `None`）。
 pub use qaqh_session::session_fact_v2::InteractionDecision as ClientV2InteractionDecision;
@@ -567,6 +575,9 @@ mod tests {
             call_id: "c1".into(),
             turn_id: "t1".into(),
             kind: ClientV2InteractionKind::PlanReview,
+            request: Some(ClientV2PendingContentValue::Ref {
+                content_ref: "sha256:abc".into(),
+            }),
         };
         let set: ClientV2PendingSet = vec![pending];
         let driver = ClientV2DriverState {
