@@ -391,6 +391,11 @@ impl ToolProjection for CopyRangeOutput {
             &self.target_path,
             crate::tool_api::PathOp::Write,
             "copy_range",
+            Some(crate::file_mutate::mutation_change_summary(
+                &self.target_path,
+                self.lines_added,
+                self.lines_removed,
+            )),
             &self.model_text,
             self.diff.clone(),
         )

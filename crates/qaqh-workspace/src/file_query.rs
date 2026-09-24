@@ -436,17 +436,33 @@ fn read_display(args: &Value, output: &str) -> ToolDisplay {
             .map(str::to_string)
     };
     match paths {
-        Some(path) => ToolDisplay::new(
-            ToolHeader::Path {
-                path,
-                op: crate::tool_api::PathOp::Read,
-            },
-            ToolBody::Text {
-                text: output.to_string(),
-                truncated: false,
-            },
-        )
-        .with_summary(output.lines().next().unwrap_or_default().to_string()),
+        Some(path) => {
+            let request = args
+                .get("requests")
+                .and_then(Value::as_array)
+                .and_then(|requests| requests.first())
+                .unwrap_or(args);
+            let start = request
+                .get("start_line")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            let summary = match request.get("end_line").and_then(Value::as_u64) {
+                Some(end) => format!("{path} · L{start}-L{end}"),
+                None => format!("{path} · L{start}+"),
+            };
+            let mut display = ToolDisplay::new(
+                ToolHeader::Path {
+                    path,
+                    op: crate::tool_api::PathOp::Read,
+                },
+                ToolBody::Text {
+                    text: output.to_string(),
+                    truncated: false,
+                },
+            );
+            display.summary = Some(summary);
+            display
+        }
         None => ToolDisplay::new(
             ToolHeader::Other {
                 label: "read".to_string(),
@@ -803,6 +819,30 @@ fn multi_line_edit_records_shifts_for_later_reads() {
     let meta = &r2.data["files"][0];
     assert_eq!(meta["corrected"], serde_json::json!(true));
     assert_eq!(meta["line_offset"], serde_json::json!(1));
+}
+
+#[test]
+fn read_display_summary_is_range_metadata_not_body_first_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rs");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    let path = path.to_string_lossy().to_string();
+    let result = exec_read(&serde_json::json!({
+        "path": path,
+        "start_line": 2,
+        "end_line": 3,
+    }));
+    assert!(result.is_success(), "{}", result.model_text());
+    let summary = result
+        .display()
+        .and_then(|display| display.summary.as_deref())
+        .expect("read display summary");
+    assert_eq!(summary, format!("{path} · L2-L3"));
+    assert_ne!(
+        summary,
+        result.model_text().lines().next().unwrap_or_default(),
+        "read summary must not duplicate the body's first line"
+    );
 }
 
 #[test]
