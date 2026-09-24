@@ -456,4 +456,10 @@ fn typed_edit_registration_and_display_are_same_source() {
         other => panic!("unexpected edit display body: {other:?}"),
     };
     assert_eq!(display_text, result.model_text());
+    let expected_summary = format!("{path} · +1 -1");
+    assert_eq!(
+        display.summary.as_deref(),
+        Some(expected_summary.as_str()),
+        "edit display summary must be path metadata, not the [OK] output first line"
+    );
 }
