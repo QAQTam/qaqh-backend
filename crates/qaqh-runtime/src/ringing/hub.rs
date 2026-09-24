@@ -28,7 +28,7 @@ use qaqh_ringing::{
 use qaqh_session::SessionManager;
 use tokio::sync::broadcast;
 
-use super::content_store::{ContentEntry, ContentStore};
+use super::content_store::{ContentEntry, ContentQuotaExceeded, ContentStore};
 use super::journal::{AppendOutcome, CursorExpired, ReliableJournal};
 use super::journal_store::{JournalOp, JournalStore};
 use super::projection::SnapshotProjector;
@@ -372,6 +372,13 @@ pub struct RingingHub {
     /// 收尾据此区分「等待用户响应的活交互」（保护，不 seal）与「daemon 重启
     /// 遗留的幽灵交互」（seal）。worker 死亡/重启路径用 force 无视该守卫。
     pub(super) live_interactions: Mutex<HashMap<String, String>>,
+    /// #345：活交互正文在 content store 里的归属（seed → (interaction_id, content_id)）。
+    ///
+    /// 交互正文是**展示面旁路**（canonical fact 只存 ref）：正文在
+    /// [`RingingHub::put_interaction_content`] 入 store 并 pin，交互
+    /// resolved / expired 时按此表 unpin。表里没有 = 没有正文（permission，
+    /// 或写入时超配额）。
+    pub(super) live_interaction_content: Mutex<HashMap<String, (String, String)>>,
     /// B9/H3：当前进程内存活的 worker（registry 维护）。bootstrap 的
     /// force=false 孤儿收尾在 worker 存活时整体跳过，防止误杀活 turn。
     pub(super) live_workers: Mutex<std::collections::HashSet<String>>,
@@ -604,6 +611,7 @@ impl RingingHub {
             live_channels: Mutex::new(HashMap::new()),
             live_watermark: Mutex::new(HashMap::new()),
             live_interactions: Mutex::new(HashMap::new()),
+            live_interaction_content: Mutex::new(HashMap::new()),
             live_workers: Mutex::new(std::collections::HashSet::new()),
             journal_store,
             journal_writer,
@@ -788,6 +796,9 @@ impl RingingHub {
         if let Ok(mut live) = self.live_interactions.lock() {
             live.remove(seed);
         }
+        if let Ok(mut live) = self.live_interaction_content.lock() {
+            live.remove(seed);
+        }
         if let Ok(mut workers) = self.live_workers.lock() {
             workers.remove(seed);
         }
@@ -820,6 +831,63 @@ impl RingingHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(seed, content_id)
+    }
+
+    /// #345：交互正文入 store 并 pin（v2 content 端点按 id 取，不带 seed）。
+    ///
+    /// 超配额返回 [`ContentQuotaExceeded`]（fail-closed，见 content_store 文档）；
+    /// 调用方不得在写入失败时假装交互正文可用。
+    pub fn put_interaction_content(
+        &self,
+        seed: &str,
+        interaction_id: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, ContentQuotaExceeded> {
+        let content_id = self
+            .content_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put_pinned(seed, media_type, bytes)?;
+        self.live_interaction_content
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                seed.to_string(),
+                (interaction_id.to_string(), content_id.clone()),
+            );
+        Ok(content_id)
+    }
+
+    /// #345：按 content_id 读取（**不校验 seed**）。调用方（daemon）拿条目的
+    /// `seed` 再校验请求方归属——v2 content 端点的 wire 形态不带 seed 参数。
+    pub fn get_content_any(&self, content_id: &str) -> Option<ContentEntry> {
+        self.content_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_any(content_id)
+    }
+
+    /// 解除某交互正文的 pin（交互 resolved / expired）。
+    fn release_interaction_content(&self, seed: &str, interaction_id: &str) {
+        let content_id = {
+            let mut live = self
+                .live_interaction_content
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match live.get(seed) {
+                Some((current, _)) if current == interaction_id => {
+                    live.remove(seed).map(|(_, content_id)| content_id)
+                }
+                _ => None,
+            }
+        };
+        if let Some(content_id) = content_id {
+            self.content_store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .unpin(&content_id);
+        }
     }
 
     /// 顶层锁的 `MutexGuard`（只在测试断言里用；生产路径一律走
@@ -991,6 +1059,9 @@ impl RingingHub {
                         if live.get(seed).is_some_and(|cur| cur == interaction_id) {
                             live.remove(seed);
                         }
+                        drop(live);
+                        // #345：交互终结 → 正文解除 pin，回到普通 TTL/淘汰语义。
+                        self.release_interaction_content(seed, interaction_id);
                     }
                     _ => {}
                 }

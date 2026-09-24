@@ -63,8 +63,8 @@ pub use v2::{
     ClientV2Cursor, ClientV2CursorToken, ClientV2Delivery, ClientV2DeltaInteractionKind,
     ClientV2DriverState, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingResult,
     ClientV2InteractionDecision, ClientV2InteractionExpiryReason, ClientV2InteractionId,
-    ClientV2InteractionKind, ClientV2Payload, ClientV2PendingInteraction, ClientV2PendingSet,
-    ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey,
-    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolCallId, ClientV2ToolState,
-    RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+    ClientV2InteractionKind, ClientV2Payload, ClientV2PendingContentValue,
+    ClientV2PendingInteraction, ClientV2PendingSet, ClientV2Reset, ClientV2ResetReason,
+    ClientV2SessionState, ClientV2StreamKey, ClientV2Subscription, ClientV2SubscriptionEvent,
+    ClientV2ToolCallId, ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };

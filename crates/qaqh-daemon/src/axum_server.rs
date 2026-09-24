@@ -660,6 +660,82 @@ mod axum_tests {
         assert_eq!(value["activities"], serde_json::json!([]));
     }
 
+    /// #345：v2 content 端点按 id 取（不带 seed），归属校验用条目自己的 seed；
+    /// v1 content 路由已硬切。
+    #[tokio::test]
+    async fn v2_content_route_is_seed_free_and_v1_is_hard_cut() {
+        let state = test_state();
+        let app = build_router(state.clone());
+        let content_id = state.hub.put_content(
+            "seed-content",
+            "application/json",
+            br#"{"kind":"ask","questions":[]}"#.to_vec(),
+            false,
+        );
+        {
+            let mut leases = state.leases.lock().unwrap();
+            leases.open("cs-owner".into(), "ci-owner".into());
+            leases.attach_seed("cs-owner", "seed-content");
+            leases.open("cs-other".into(), "ci-other".into());
+            leases.attach_seed("cs-other", "seed-other");
+        }
+
+        let get = |session: &str, path: String| {
+            Request::builder()
+                .uri(path)
+                .header("authorization", "Bearer test-token")
+                .header("x-qaqh-client-session-id", session)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // owner 读：200 + 原文
+        let resp = app
+            .clone()
+            .oneshot(get("cs-owner", format!("/ringing/v2/content/{content_id}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), br#"{"kind":"ask","questions":[]}"#);
+
+        // canonical ref 形态（`sha256:<hex>`）也能取到同一条目
+        let resp = app
+            .clone()
+            .oneshot(get(
+                "cs-owner",
+                format!("/ringing/v2/content/sha256:{content_id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 不拥有该 seed 的会话：403（不泄漏正文）
+        let resp = app
+            .clone()
+            .oneshot(get("cs-other", format!("/ringing/v2/content/{content_id}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 未知 id：404
+        let resp = app
+            .clone()
+            .oneshot(get("cs-owner", "/ringing/v2/content/nope".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // v1 硬切：同一条目在旧路径上不可达
+        let resp = app
+            .oneshot(get("cs-owner", format!("/ringing/v1/content/{content_id}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn injected_session_404_short_circuits_timeline_snapshot() {
         let mut state = test_state();
