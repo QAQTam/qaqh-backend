@@ -716,6 +716,82 @@ fn recovery_batch_seals_only_non_replayable_intents() {
 }
 
 #[test]
+fn driver_seat_epoch_is_monotonic_and_survives_reopen() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+    assert_eq!(ledger.driver_state(), (None, 0));
+
+    let claimed = ledger
+        .claim_driver("cs-a", None, event_id(30), None, NOW_MS)
+        .expect("claim");
+    assert_eq!(
+        claimed,
+        qaqh_session::canonical::DriverClaimOutcome::Claimed { driver_epoch: 1 }
+    );
+    assert_eq!(ledger.driver_state(), (Some("cs-a".into()), 1));
+
+    // Same holder re-claims: idempotent, no new fact, epoch unchanged.
+    assert_eq!(
+        ledger
+            .claim_driver("cs-a", None, event_id(31), None, NOW_MS)
+            .expect("re-claim"),
+        qaqh_session::canonical::DriverClaimOutcome::AlreadyHeld { driver_epoch: 1 }
+    );
+
+    // Another holder without a stale handover is busy.
+    assert_eq!(
+        ledger
+            .claim_driver("cs-b", None, event_id(32), None, NOW_MS)
+            .expect("busy"),
+        qaqh_session::canonical::DriverClaimOutcome::Busy {
+            holder: "cs-a".into(),
+            driver_epoch: 1,
+        }
+    );
+
+    // Takeover is allowed only when the caller names the stale holder.
+    assert_eq!(
+        ledger
+            .claim_driver("cs-b", Some("cs-a"), event_id(33), None, NOW_MS)
+            .expect("takeover"),
+        qaqh_session::canonical::DriverClaimOutcome::Claimed { driver_epoch: 2 }
+    );
+
+    // Non-holder release is rejected; holder release bumps the epoch.
+    assert_eq!(
+        ledger
+            .release_driver("cs-a", event_id(34), None, NOW_MS)
+            .expect("not driver"),
+        qaqh_session::canonical::DriverReleaseOutcome::NotDriver {
+            holder: Some("cs-b".into()),
+            driver_epoch: 2,
+        }
+    );
+    assert_eq!(
+        ledger
+            .release_driver("cs-b", event_id(35), None, NOW_MS)
+            .expect("release"),
+        qaqh_session::canonical::DriverReleaseOutcome::Released { driver_epoch: 3 }
+    );
+
+    // Reopen rebuilds the seat from canonical facts (epoch does not reset).
+    ledger
+        .release_writer_lease(NOW_MS)
+        .expect("release writer lease");
+    drop(ledger);
+    let reopened = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + 1,
+        LEASE_MS,
+    )
+    .expect("reopen");
+    assert_eq!(reopened.driver_state(), (None, 3));
+}
+
+#[test]
 fn ensure_lease_reacquires_after_idle_expiry() {
     let temp = tempfile::tempdir().expect("tempdir");
     let call = call_id(20);

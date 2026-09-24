@@ -496,6 +496,13 @@ pub enum ControlDelta {
         interaction_id: InteractionId,
         reason: InteractionExpiryReason,
     },
+    /// Driver seat handover (`holder = None` = released).
+    DriverChanged {
+        revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<String>,
+        driver_epoch: u64,
+    },
     SessionRecovered {
         revision: u64,
         outcome: RecoveryOutcome,

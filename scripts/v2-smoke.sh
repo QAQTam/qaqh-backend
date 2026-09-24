@@ -21,10 +21,8 @@ export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 
 DATA="${1:-$HOME/.qaqh-v2-smoke/qaqh}"
 mkdir -p "$DATA/sessions"
-# Fresh seed per run: the canonical writer fence is append-only and stays
-# leased for the seeder's TTL, so re-seeding the same dir fails with
-# `WriterBusy` on the second invocation.
-SEED="smoke-$(date +%s)-$$"
+# `SEED` is discovered after `session_create`: the actor can only resume a
+# daemon-created session, so the canonical log is seeded into that directory.
 
 say() { printf '%s\n' "$*"; }
 fail() {
@@ -36,12 +34,11 @@ json_get() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
 
 say "== building daemon =="
 cargo build -q -p qaqh-daemon
-cargo run -q -p qaqh-session --example e2e_seed -- "$DATA/sessions/$SEED" --resolved \
-    > "$DATA/../interaction.txt"
-INTERACTION="$(cat "$DATA/../interaction.txt")"
-say "seeded canonical session $SEED with resolved interaction $INTERACTION"
 
 say "== starting daemon =="
+# A stale discovery file from a previous run would make the readiness loop
+# below succeed against a dead endpoint.
+mv "$DATA/daemon.json" "$DATA/daemon.json.prev" 2>/dev/null || true
 QAQH_DATA_DIR="$DATA" "$ROOT/target/debug/qaqh-daemon" run > "$DATA/../daemon.out" 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
@@ -76,6 +73,23 @@ A="$(open_client smoke-a)"
 B="$(open_client smoke-b)"
 say "clients: a=${A:0:12}… b=${B:0:12}…"
 
+say "== creating session through the daemon =="
+BEFORE="$(ls -1 "$DATA/sessions" 2>/dev/null | grep -v '^index.jsonl$' | sort || true)"
+command "$A" control \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-new-$$\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"command\":{\"channel\":\"control\",\"type\":\"session_create\",\"close_current\":false,\"cwd\":\"/tmp\"}}" \
+    > /dev/null
+AFTER="$(ls -1 "$DATA/sessions" 2>/dev/null | grep -v '^index.jsonl$' | sort || true)"
+SEED="$(comm -13 <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") | head -1)"
+[ -n "$SEED" ] || fail "session_create did not produce a session directory"
+say "session=$SEED"
+
+# The actor can only resume a daemon-created session (meta + message store), so
+# the canonical log is seeded *into* it rather than into a bare directory.
+cargo run -q -p qaqh-session --example e2e_seed -- "$DATA/sessions/$SEED" --resolved \
+    > "$DATA/../interaction.txt"
+INTERACTION="$(cat "$DATA/../interaction.txt")"
+say "seeded canonical log + resolved interaction $INTERACTION"
+
 say "== bootstrap =="
 BOOTSTRAP="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A")"
@@ -84,10 +98,22 @@ BOOTSTRAP="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
 [ "$(printf '%s' "$BOOTSTRAP" | json_get "['control']['state']['driver']['can_claim']")" = "True" ] \
     || fail "driver can_claim before claim"
 
-say "== driver claim / busy / release =="
+say "== driver claim / busy =="
 CLAIM_A="$(driver "$A" claim)"
 [ "$(printf '%s' "$CLAIM_A" | json_get "['accepted']")" = "True" ] || fail "claim a"
-[ "$(printf '%s' "$CLAIM_A" | json_get "['driver_epoch']")" = "1" ] || fail "claim a epoch"
+[ "$(printf '%s' "$CLAIM_A" | json_get "['reason']")" = "claim_requested" ] \
+    || fail "claim a must be a forwarded request (canonical ledger allocates the epoch)"
+# The actor's ToolLedger is the single writer: the authoritative seat arrives
+# as the canonical DriverChanged fact, visible in the next bootstrap.
+DRIVER=""
+for _ in $(seq 1 40); do
+    DRIVER="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
+        -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" \
+        | python3 -c "import json,sys;d=json.load(sys.stdin)['control']['state']['driver'];print(d.get('holder'), d.get('driver_epoch'))")"
+    [ "$DRIVER" = "$A 1" ] && break
+    sleep 0.25
+done
+[ "$DRIVER" = "$A 1" ] || fail "canonical DriverChanged did not land (got: $DRIVER)"
 CLAIM_B="$(driver "$B" claim)"
 [ "$(printf '%s' "$CLAIM_B" | json_get "['reason']")" = "driver_busy" ] || fail "claim b busy"
 

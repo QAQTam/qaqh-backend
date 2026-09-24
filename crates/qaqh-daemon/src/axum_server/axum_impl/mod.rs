@@ -86,7 +86,6 @@ pub struct AppState {
     pub hub: Arc<RingingHub>,
     pub v2_hub: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
     pub leases: Arc<Mutex<RingingLeaseStore>>,
-    pub drivers: Arc<Mutex<qaqh_runtime::ringing::RingingDriverStore>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
     pub token: String,

@@ -274,6 +274,7 @@ impl PendingCommandStore {
                 | qaqh_domain::ControlEvent::PlanReviewResolved { .. }
                 | qaqh_domain::ControlEvent::SkillsUpdated { .. }
                 | qaqh_domain::ControlEvent::SessionStateChanged { .. }
+                | qaqh_domain::ControlEvent::DriverChanged { .. }
                 | qaqh_domain::ControlEvent::OperationCompleted { .. },
             ) => Some((RingingCommandState::Succeeded, None)),
             RingingEvent::Conversation(qaqh_domain::ConversationEvent::TurnFailed {

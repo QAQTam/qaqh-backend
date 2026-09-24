@@ -42,6 +42,14 @@ pub struct ControlInteractionResolution {
     pub resolution_seq: u64,
 }
 
+/// Canonical driver seat state (see `session_fact_v2::DriverChanged`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlDriverState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    pub driver_epoch: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlInteractionState {
     pub interaction_id: InteractionId,
@@ -75,6 +83,8 @@ pub struct ControlSnapshot {
     pub interactions: Vec<ControlInteractionState>,
     pub subagents: Vec<ControlSubagentState>,
     pub last_recovery: Option<RecoveryOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<ControlDriverState>,
     pub revision: u64,
     pub last_fact_seq: u64,
 }
@@ -176,6 +186,17 @@ impl Projection for ControlProjection {
                     verdict: payload.decision,
                     resolved_by: payload.resolved_by.clone(),
                     resolution_seq: payload.resolution_seq,
+                })
+            }
+            FactPayload::DriverChanged(payload) => {
+                self.snapshot.driver = Some(ControlDriverState {
+                    holder: payload.holder.clone(),
+                    driver_epoch: payload.driver_epoch,
+                });
+                Some(ControlDelta::DriverChanged {
+                    revision: self.next_revision(),
+                    holder: payload.holder.clone(),
+                    driver_epoch: payload.driver_epoch,
                 })
             }
             FactPayload::InteractionExpired(payload) => {
