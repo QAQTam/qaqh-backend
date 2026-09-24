@@ -216,7 +216,7 @@ impl TimelineStream {
             }
         }
 
-        let path = format!("/ringing/v1/sessions/{}/timeline/events", self.seed);
+        let path = format!("/ringing/v2/sessions/{}/timeline/events", self.seed);
         let creds = self.session.credentials();
         let mut request = self
             .http
@@ -351,7 +351,7 @@ impl TimelineStream {
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let path = format!("/ringing/v1/sessions/{}/timeline", self.seed);
+        let path = format!("/ringing/v2/sessions/{}/timeline", self.seed);
         let creds = self.session.credentials();
         let response = self
             .http
