@@ -8,7 +8,6 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
-use qaqh_domain::RingingChannel;
 use qaqh_ringing::{
     CanonicalCursor, CursorToken, RingingV2Delivery, RingingV2EventEnvelope, RingingV2ResetReason,
     RingingV2ResetRequired, RingingV2StreamKey,
@@ -84,7 +83,6 @@ struct V2SessionState {
 }
 
 pub struct V2Subscription {
-    channel: RingingChannel,
     replay: VecDeque<V2Envelope>,
     live_rx: broadcast::Receiver<V2Envelope>,
     server_epoch: String,
@@ -196,11 +194,15 @@ impl V2ProjectionHub {
         Ok(state.projections.control.snapshot().driver)
     }
 
+    /// Open a per-seed single stream.
+    ///
+    /// Every event keeps its `stream_key`; the client demuxes. There is no
+    /// per-channel filter any more — see the 2026-09-24 frozen revision
+    /// (`tui-ringing-v2-frozen-2026-09-24-single-stream`).
     pub fn subscribe(
         &self,
         session_dir: impl AsRef<Path>,
         seed: &str,
-        channel: RingingChannel,
         since_cursor: Option<&CursorToken>,
     ) -> Result<V2Subscription, V2HubError> {
         let session_dir = session_dir.as_ref();
@@ -270,13 +272,11 @@ impl V2ProjectionHub {
                 since_fact_seq,
             )?
             .into_iter()
-            .filter(|event| event_channel(event).is_none_or(|candidate| candidate == channel))
             .collect()
         };
         drop(state);
 
         Ok(V2Subscription {
-            channel,
             replay,
             live_rx,
             server_epoch: self.epoch.clone(),
@@ -355,35 +355,30 @@ impl V2Subscription {
         if let Some(event) = self.replay.pop_front() {
             return V2StreamItem::Event(Box::new(event));
         }
-        loop {
-            match self.live_rx.recv().await {
-                Ok(event) => {
-                    if event_channel(&event).is_none_or(|candidate| candidate == self.channel) {
-                        return V2StreamItem::Event(Box::new(event));
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    return V2StreamItem::Reset(RingingV2ResetRequired {
-                        schema: qaqh_ringing::RINGING_SCHEMA.into(),
-                        version: qaqh_ringing::RINGING_V2_VERSION,
-                        server_epoch: self.server_epoch.clone(),
-                        seed: self.seed.clone(),
-                        log_id: Some(self.log_id.as_str().to_string()),
-                        snapshot_cursor: None,
-                        reason: RingingV2ResetReason::ReplayOverflow,
-                    });
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    return V2StreamItem::Reset(RingingV2ResetRequired {
-                        schema: qaqh_ringing::RINGING_SCHEMA.into(),
-                        version: qaqh_ringing::RINGING_V2_VERSION,
-                        server_epoch: self.server_epoch.clone(),
-                        seed: self.seed.clone(),
-                        log_id: Some(self.log_id.as_str().to_string()),
-                        snapshot_cursor: None,
-                        reason: RingingV2ResetReason::PerConnectionOverflow,
-                    });
-                }
+        // 单流：不再按 channel 过滤，收到什么就是什么。
+        match self.live_rx.recv().await {
+            Ok(event) => V2StreamItem::Event(Box::new(event)),
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                V2StreamItem::Reset(RingingV2ResetRequired {
+                    schema: qaqh_ringing::RINGING_SCHEMA.into(),
+                    version: qaqh_ringing::RINGING_V2_VERSION,
+                    server_epoch: self.server_epoch.clone(),
+                    seed: self.seed.clone(),
+                    log_id: Some(self.log_id.as_str().to_string()),
+                    snapshot_cursor: None,
+                    reason: RingingV2ResetReason::ReplayOverflow,
+                })
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                V2StreamItem::Reset(RingingV2ResetRequired {
+                    schema: qaqh_ringing::RINGING_SCHEMA.into(),
+                    version: qaqh_ringing::RINGING_V2_VERSION,
+                    server_epoch: self.server_epoch.clone(),
+                    seed: self.seed.clone(),
+                    log_id: Some(self.log_id.as_str().to_string()),
+                    snapshot_cursor: None,
+                    reason: RingingV2ResetReason::PerConnectionOverflow,
+                })
             }
         }
     }
@@ -523,13 +518,6 @@ fn event_to_envelope(
     })
 }
 
-fn event_channel(event: &V2Envelope) -> Option<RingingChannel> {
-    match &event.stream_key {
-        RingingV2StreamKey::Channel(channel) => Some(*channel),
-        RingingV2StreamKey::Resource { .. } => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,12 +603,7 @@ mod tests {
         let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
         assert_eq!(bootstrap.last_fact_seq, changed.fact_seq);
         let _subscription = hub
-            .subscribe(
-                dir.path(),
-                "seed",
-                RingingChannel::Control,
-                Some(&bootstrap.snapshot_cursor),
-            )
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
             .expect("subscribe");
 
         let replay = replay_after(
@@ -645,7 +628,7 @@ mod tests {
             CanonicalCursor::snapshot("0198f1a0-0000-7000-8000-0000000000ff", changed.fact_seq);
         let token = CursorToken::encode_snapshot(&foreign).expect("token");
         let mut subscription = hub
-            .subscribe(dir.path(), "seed", RingingChannel::Control, Some(&token))
+            .subscribe(dir.path(), "seed", Some(&token))
             .expect("subscribe");
         match subscription.next().await {
             V2StreamItem::Reset(reset) => {
@@ -665,7 +648,7 @@ mod tests {
         let ahead = CanonicalCursor::snapshot(identity.log_id.as_str(), changed.fact_seq + 10);
         let token = CursorToken::encode_snapshot(&ahead).expect("token");
         let mut subscription = hub
-            .subscribe(dir.path(), "seed", RingingChannel::Control, Some(&token))
+            .subscribe(dir.path(), "seed", Some(&token))
             .expect("subscribe");
         match subscription.next().await {
             V2StreamItem::Reset(reset) => {

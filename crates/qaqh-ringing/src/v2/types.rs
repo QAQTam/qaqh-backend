@@ -39,6 +39,17 @@ pub struct RingingV2Capabilities {
     pub timeline: bool,
     pub service: bool,
     pub content: bool,
+    /// 单流订阅能力（2026-09-24 冻结修订，tag
+    /// `tui-ringing-v2-frozen-2026-09-24-single-stream`）。
+    ///
+    /// `true` = `GET /ringing/v2/sessions/{seed}/events` 是**每 seed 一条**流，
+    /// 事件带 `stream_key` 由客户端 demux；per-channel 的 `events/{channel}`
+    /// 已硬切删除（不再返回 404 兼容视图）。
+    ///
+    /// `#[serde(default)]`：旧 client 反序列化新响应时该字段为 `false`，
+    /// 新 client 必须显式断言 `true` 才能假定单流语义。
+    #[serde(default)]
+    pub single_stream: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -568,6 +579,13 @@ pub fn open_path() -> String {
     format!("{RINGING_V2_BASE_PATH}/clients/open")
 }
 
+/// 单流订阅路径（每 seed 一条 SSE；事件带 `stream_key`）。
+///
+/// 2026-09-24 冻结修订：per-channel 的 `events/{channel}` 已硬切删除。
+pub fn events_path(seed: &str) -> String {
+    format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/events")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,6 +832,48 @@ mod tests {
         assert_eq!(RINGING_V2_VERSION, 2);
         assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
         assert_eq!(open_path(), "/ringing/v2/clients/open");
+    }
+
+    /// 单流修订（2026-09-24）：SSE 路径不再带 channel 段。
+    #[test]
+    fn events_path_is_per_seed_single_stream() {
+        assert_eq!(events_path("s1"), "/ringing/v2/sessions/s1/events");
+        assert!(
+            !events_path("s1").contains("/events/"),
+            "不得再出现 per-channel 的 events/{{channel}} 形态"
+        );
+    }
+
+    /// `single_stream` 是增量 capability：旧 client 反序列化缺该字段 → false。
+    #[test]
+    fn single_stream_capability_is_additive_and_defaults_false() {
+        let legacy = serde_json::json!({
+            "subscribe": true,
+            "interact": true,
+            "drive": true,
+            "timeline": true,
+            "service": true,
+            "content": true
+        });
+        let decoded: RingingV2Capabilities =
+            serde_json::from_value(legacy).expect("legacy capability body");
+        assert!(
+            !decoded.single_stream,
+            "缺字段必须是 false（不得被推测为单流）"
+        );
+
+        let current = serde_json::json!({
+            "subscribe": true,
+            "interact": true,
+            "drive": true,
+            "timeline": true,
+            "service": true,
+            "content": true,
+            "single_stream": true
+        });
+        let decoded: RingingV2Capabilities =
+            serde_json::from_value(current).expect("current capability body");
+        assert!(decoded.single_stream);
     }
 
     #[test]
