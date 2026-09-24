@@ -8,7 +8,8 @@
 #   open -> bootstrap -> driver claim/busy -> not_driver gate
 #        -> first-answer-wins typed verdict (ask/permission/plan)
 #        -> reliable reconnect (driver_changed replay)
-#        -> command replay -> command status -> SSE subscribe
+#        -> command replay -> command status -> single-stream SSE subscribe
+#        -> per-channel endpoint hard-cut (404)
 #        -> driver release / lease reclaim / restart reclaim
 #        -> snapshot_missing
 #
@@ -113,6 +114,13 @@ A="$(open_client smoke-a)"
 B="$(open_client smoke-b)"
 say "clients: a=${A:0:12}… b=${B:0:12}…"
 
+say "== open advertises single_stream =="
+OPEN_RAW="$(curl -sS -X POST "$ENDPOINT/ringing/v2/clients/open" \
+    -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -d '{"schema":"qaqh.Ringing","version":2,"client_instance_id":"smoke-cap"}')"
+[ "$(printf '%s' "$OPEN_RAW" | json_get "['capabilities']['single_stream']")" = "True" ] \
+    || fail "open must advertise capabilities.single_stream"
+
 say "== creating session through the daemon =="
 BEFORE="$(ls -1 "$DATA/sessions" 2>/dev/null | grep -v '^index.jsonl$' | sort || true)"
 command "$A" control \
@@ -157,7 +165,7 @@ say "== reliable reconnect replays driver handover =="
 # `CURSOR` was taken before the claim, so the canonical DriverChanged fact must
 # come back as a reliable control event on reconnect.
 HANDOVER="$(curl -sS -N --max-time 3 \
-    "$ENDPOINT/ringing/v2/sessions/$SEED/events/control?since_cursor=$CURSOR" \
+    "$ENDPOINT/ringing/v2/sessions/$SEED/events?since_cursor=$CURSOR" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null | head -c 8192 || true)"
 printf '%s' "$HANDOVER" | grep -q "event: ringing.event" || fail "reliable replay event name"
 printf '%s' "$HANDOVER" | grep -q '"delivery":"reliable"' || fail "reliable replay delivery"
@@ -211,13 +219,20 @@ STATUS="$(curl -sS "$ENDPOINT/ringing/v2/commands/$REPLAY_ID" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A")"
 [ "$(printf '%s' "$STATUS" | json_get "['state']")" = "succeeded" ] || fail "command status"
 
-say "== SSE subscribe =="
+say "== SSE subscribe (single stream) =="
 renew "$A"
 CURSOR="$(printf '%s' "$BOOTSTRAP" | json_get "['snapshot_cursor']")"
 SSE_HEAD="$(curl -sS -i -N --max-time 2 \
-    "$ENDPOINT/ringing/v2/sessions/$SEED/events/control?since_cursor=$CURSOR" \
+    "$ENDPOINT/ringing/v2/sessions/$SEED/events?since_cursor=$CURSOR" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null | head -1 || true)"
 printf '%s' "$SSE_HEAD" | grep -q "200" || fail "SSE subscribe ($SSE_HEAD)"
+
+say "== per-channel endpoint is hard-cut =="
+# 2026-09-24 冻结修订：events/{channel} 已删除（不做兼容过滤视图）。
+OLD_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -N --max-time 2 \
+    "$ENDPOINT/ringing/v2/sessions/$SEED/events/control" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" 2>/dev/null || true)"
+[ "$OLD_STATUS" = "404" ] || fail "events/{channel} must be gone (got $OLD_STATUS)"
 
 say "== driver release (explicit) =="
 renew "$A"
