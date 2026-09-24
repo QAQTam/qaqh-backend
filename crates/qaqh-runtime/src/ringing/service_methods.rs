@@ -58,12 +58,12 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         // workspace
         "workspace.get" => Some(READ_SEEDED),
         "workspace.list" => Some(READ),
-        "workspace.set" => Some(WRITE),
+        "workspace.set" => Some(WRITE_SEEDED),
         "workspace.create" => Some(WRITE),
         "workspace.rename" => Some(WRITE),
         "workspace.delete" => Some(WRITE),
-        "workspace.move_session" => Some(WRITE),
-        "workspace.detach" => Some(WRITE),
+        "workspace.move_session" => Some(WRITE_SEEDED),
+        "workspace.detach" => Some(WRITE_SEEDED),
         // fs
         "fs.list" => Some(READ),
         "fs.read" => Some(READ),
@@ -95,7 +95,7 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "git.commit" => Some(WRITE),
         // subagent / tool mode
         "subagent.spawn" => Some(WRITE),
-        "session.set_tool_mode" => Some(WRITE),
+        "session.set_tool_mode" => Some(WRITE_SEEDED),
         _ => None,
     }
 }
@@ -138,6 +138,17 @@ mod tests {
         assert_eq!(list.kind, MethodKind::Read);
         assert!(list.requires_seed);
         assert!(lookup("todo.set ").is_none(), "方法名不容尾随空格");
+
+        for method in [
+            "workspace.set",
+            "workspace.move_session",
+            "workspace.detach",
+            "session.set_tool_mode",
+        ] {
+            let info = lookup(method).unwrap_or_else(|| panic!("{method} registered"));
+            assert_eq!(info.kind, MethodKind::Write, "{method}");
+            assert!(info.requires_seed, "{method} must require seed ownership");
+        }
     }
 
     fn service() -> &'static QaqhService {

@@ -68,7 +68,7 @@ permission probe 新增真机断言 ⑥：真实 daemon 执行 `echo permission-
 
 - interaction 正文跨 daemon 重启持久化；
 - permission 正文 pinned + 终结 unpin；
-- driver 回收延迟 / `not_eligible` 优先级 / workspace command gate；
+- driver `not_eligible` / 显式移交优先级；
 - 崩溃路径 writer fence 轮转；
 - #336 P3：stdout / stderr 分离（v2 延后）；
 - #339 B 路线 1（独立窗口）。

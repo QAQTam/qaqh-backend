@@ -1244,6 +1244,29 @@ mod axum_tests {
         serde_json::from_slice(&body).unwrap()
     }
 
+    async fn post_v2_service(
+        app: axum::Router,
+        session_id: &str,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/ringing/v2/service/{method}"))
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", session_id)
+            .body(Body::from(serde_json::to_vec(params).unwrap()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&body).unwrap();
+        (status, value)
+    }
+
     async fn post_v2_command(
         app: axum::Router,
         session_id: &str,
@@ -1596,6 +1619,34 @@ mod axum_tests {
         .await;
         assert_ne!(current.code.as_deref(), Some("not_driver"));
         assert_ne!(current.code.as_deref(), Some("stale_driver_epoch"));
+    }
+
+    #[tokio::test]
+    async fn v2_service_workspace_write_is_driver_gated() {
+        let state = test_state();
+        let app = build_router(state.clone());
+        let a = open_v2_session(app.clone(), "ci-a").await;
+        let b = open_v2_session(app.clone(), "ci-b").await;
+        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 1);
+        {
+            let mut leases = state.leases.lock().unwrap();
+            leases.attach_seed(&a.client_session_id, &seed);
+            leases.attach_seed(&b.client_session_id, &seed);
+        }
+        let params = serde_json::json!({"seed": seed, "path": "/tmp/workspace"});
+
+        let (status, rejected) =
+            post_v2_service(app.clone(), &b.client_session_id, "workspace.set", &params).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(rejected["code"], "not_driver");
+
+        let (status, allowed) =
+            post_v2_service(app, &a.client_session_id, "workspace.set", &params).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "the canonical driver must pass the service gate: {allowed}"
+        );
     }
 
     #[tokio::test]

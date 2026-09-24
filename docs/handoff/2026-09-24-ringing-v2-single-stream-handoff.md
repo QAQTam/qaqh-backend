@@ -110,8 +110,8 @@ qaqh-runtime  v2_acceptance_matrix::single_stream_carries_all_channels_in_global
    `2026-09-24-tool-outcome-p2-v1-cursor-closure-handoff.md` §1）。
 4. **V2-C3 replaceable producer**（已补，见
    `2026-09-24-ringing-v2-alpha-closure-handoff.md` §2.7）。
-5. **driver 侧剩余**：回收延迟（3s 巡检）、`not_eligible`/优先级、`driver_epoch`
-   未进 command fingerprint、workspace 命令 gate 集合。
+5. **driver 侧剩余**：3s 巡检/重启回收与 workspace service gate 已补；仅剩
+   `not_eligible` / 显式移交优先级。
 6. **崩溃路径 fence 轮转**：`ToolLedger` 的 `Drop` 只覆盖有序退出。
 7. **#323 缺口 1/3**（TUI typed payload 消费面）。
 

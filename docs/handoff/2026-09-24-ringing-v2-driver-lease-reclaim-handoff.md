@@ -112,12 +112,13 @@ session actor 正常退出/关闭时不释放 writer fence。后果：
 
 ### B. driver 其它
 
-1. **回收延迟**：受 3s 巡检周期 + lease TTL（+ 上面 A 的 fence 窗口）影响。
-   更即时可改为 lease 过期事件驱动。
+1. **回收延迟**：3s 巡检 + 15s 退避已落地；若未来需要更即时，可改为 lease
+   过期事件驱动（不是 alpha 阻塞项）。
 2. `not_eligible` 与显式移交优先级策略未定义（谁能优先接管）。
-3. `driver_epoch` 未进 command fingerprint。
-4. workspace 类命令的 gate 集合未纳入（当前 gate = Conversation 全量 +
-   session/skill/tool-mode 控制）。
+3. `driver_epoch` 已进 command fingerprint（2026-09-24 alpha 收口）。
+4. workspace service 写操作的 gate 已补：
+   `workspace.set` / `move_session` / `detach` / `session.set_tool_mode`
+   在 lease 归属校验后要求 live driver；非 holder 返回 403 `not_driver`。
 
 ### C. P0-6 剩余 fixture
 

@@ -114,13 +114,12 @@ qaqh-daemon   v2_bootstrap_reports_canonical_driver_state
 
 ### A. driver 后续
 
-1. **lease 过期主动移交**：当前只有「下次 claim 时用 `stale_holder` 接管」，
-   没有 daemon 周期巡检主动释放死 holder 并发 `DriverChanged`。规格 §9.3 的
-   「服务端可自动移交」尚未实现。
-2. **优先级/能力策略**：`not_eligible` 与显式移交优先级未定义。
-3. **`driver_epoch` 参与指纹**：当前是准入 guard，不进 command fingerprint。
-4. **workspace 类命令的 gate 集合**：当前 gate = Conversation 全量 +
-   session/skill/tool-mode 控制；workspace 命令面未纳入。
+1. **lease 过期主动移交**：已落地（3s 巡检、CAS、持久化 watch、重启回收；
+   见 `2026-09-24-ringing-v2-driver-lease-reclaim-handoff.md`）。
+2. **优先级/能力策略**：`not_eligible` 与显式移交优先级未定义（仍需裁决）。
+3. **`driver_epoch` 参与指纹**：已落地，见 alpha 收口 §2.6。
+4. **workspace 类命令的 gate 集合**：已补 seed-scoped service 写操作；
+   全局 workspace registry 写不纳入（无 seed 归属）。
 
 ### B. P0-6 剩余 fixture
 
