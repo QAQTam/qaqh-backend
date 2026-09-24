@@ -209,6 +209,25 @@ GATED="$(command "$B" conversation \
     "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"conversation\",\"command_id\":\"smoke-b-cancel\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"conversation\",\"type\":\"conversation_cancel\"}}")"
 [ "$(printf '%s' "$GATED" | json_get "['code']")" = "not_driver" ] || fail "not_driver gate"
 
+say "== workspace service driver gate =="
+# Service RPCs are outside the command envelope; seeded workspace writes must
+# enforce the same live-holder rule after lease ownership is established.
+command "$B" control \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-b-attach\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"seed\":\"$SEED\"}}" \
+    > /dev/null
+B_SERVICE_STATUS="$(curl -sS -o "$DATA/../workspace-b.json" -w '%{http_code}' \
+    -X POST "$ENDPOINT/ringing/v2/service/workspace.set" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $B" \
+    -H 'content-type: application/json' -d "{\"seed\":\"$SEED\",\"path\":\"/tmp\"}")"
+[ "$B_SERVICE_STATUS" = "403" ] || fail "non-driver workspace.set must be 403 (got $B_SERVICE_STATUS)"
+[ "$(json_get "['code']" < "$DATA/../workspace-b.json")" = "not_driver" ] \
+    || fail "non-driver workspace.set code"
+A_SERVICE_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "$ENDPOINT/ringing/v2/service/workspace.set" \
+    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" \
+    -H 'content-type: application/json' -d "{\"seed\":\"$SEED\",\"path\":\"/tmp\"}")"
+[ "$A_SERVICE_STATUS" = "200" ] || fail "driver workspace.set must pass (got $A_SERVICE_STATUS)"
+
 say "== first-answer-wins typed verdict =="
 LOSER="$(command "$B" control \
     "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-answer\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"interaction_ask_respond\",\"interaction_id\":\"$ASK_ID\",\"answers\":[]}}")"

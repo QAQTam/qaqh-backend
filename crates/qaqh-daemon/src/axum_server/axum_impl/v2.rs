@@ -448,7 +448,7 @@ pub(crate) async fn handle_events_v2(
 
 /// Canonical driver seat, or `None` when the session has no `DriverChanged`
 /// fact (or no canonical log at all).
-fn canonical_driver_state(
+pub(crate) fn canonical_driver_state(
     state: &AppState,
     seed: &str,
 ) -> Option<qaqh_session::projection::ControlDriverState> {
@@ -457,7 +457,7 @@ fn canonical_driver_state(
 }
 
 /// Whether a recorded driver still holds a live daemon lease.
-fn holder_is_live(state: &AppState, holder: &str) -> bool {
+pub(crate) fn holder_is_live(state: &AppState, holder: &str) -> bool {
     state
         .leases
         .lock()
