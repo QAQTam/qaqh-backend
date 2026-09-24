@@ -57,12 +57,14 @@ pub use types::{
     ToolModelPayload, ToolResult, ToolStatus, UsageInfo, is_safe_integer,
 };
 pub use v2::{
-    CLIENT_V2_END_OF_FACT, ClientV2AskOutcome, ClientV2Bootstrap, ClientV2Capabilities,
-    ClientV2CommandAck, ClientV2CommandResult, ClientV2CommandStatus, ClientV2ControlState,
-    ClientV2ConversationState, ClientV2Cursor, ClientV2CursorToken, ClientV2Delivery,
+    CLIENT_V2_END_OF_FACT, ClientV2ActorRef, ClientV2AskOutcome, ClientV2Bootstrap,
+    ClientV2Capabilities, ClientV2CommandAck, ClientV2CommandResult, ClientV2CommandStatus,
+    ClientV2ContentValue, ClientV2ControlDelta, ClientV2ControlState, ClientV2ConversationState,
+    ClientV2Cursor, ClientV2CursorToken, ClientV2Delivery, ClientV2DeltaInteractionKind,
     ClientV2DriverState, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingResult,
+    ClientV2InteractionDecision, ClientV2InteractionExpiryReason, ClientV2InteractionId,
     ClientV2InteractionKind, ClientV2Payload, ClientV2PendingInteraction, ClientV2PendingSet,
     ClientV2Reset, ClientV2ResetReason, ClientV2SessionState, ClientV2StreamKey,
-    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolState, RINGING_V2_BASE_PATH,
-    RINGING_V2_VERSION,
+    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolCallId, ClientV2ToolState,
+    RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
