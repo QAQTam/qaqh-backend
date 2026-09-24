@@ -756,6 +756,21 @@ mod axum_tests {
         }
     }
 
+    /// 纯 v2：bootstrap 的 v1 路径已硬切，权威快照只剩 v2 路径。
+    #[tokio::test]
+    async fn bootstrap_v1_route_is_hard_cut() {
+        let state = test_state();
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/ringing/v1/sessions/seed-1/bootstrap")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", "cs-1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn injected_session_404_short_circuits_timeline_snapshot() {
         let mut state = test_state();
