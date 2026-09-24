@@ -191,7 +191,7 @@ pub fn build_router(state: AppState) -> Router {
             get(handle_pending_approvals),
         )
         .route(
-            "/ringing/v1/sessions/{seed}/timeline",
+            "/ringing/v2/sessions/{seed}/timeline",
             get(handle_timeline_snapshot),
         )
         .route("/ringing/v2/content/{content_id}", get(handle_content_get))
@@ -199,7 +199,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ringing/v1/service/{method}", post(handle_service))
         .route("/ringing/v1/events/{channel}", get(handle_events))
         .route(
-            "/ringing/v1/sessions/{seed}/timeline/events",
+            "/ringing/v2/sessions/{seed}/timeline/events",
             get(handle_timeline_events),
         )
         .route("/control/v1/stop", post(handle_stop))
