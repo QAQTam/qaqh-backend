@@ -86,7 +86,7 @@ impl SessionEngine {
     /// 把磁盘配置的热同步字段整体拷入运行中 agent（[`Self::reload_config`] 的
     /// 唯一实现，取所有权避免逐字段 clone）。
     ///
-    /// 2026-08-25 复盘（docs/config-revamp-plan.md §1 R1）：此前手工逐字段
+    /// 2026-08-25 复盘（docs/current/architecture.md）：此前手工逐字段
     /// 拷贝漏掉 `auto_compact_threshold`，压缩 gate（engine_turn.rs:910）读的
     /// 又是 `agent.config.auto_compact_threshold` → 活会话永远按旧阈值提前
     /// 压缩，而 UI/磁盘均已是新值（三方不一致，极难排查）。

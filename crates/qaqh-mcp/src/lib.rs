@@ -1,7 +1,7 @@
 //! qaqh-mcp：QAQ-Harness 的 MCP 客户端支持。
 //!
-//! 设计文档：`docs/mcp-client-design.md`（D1–D6 决策 + §5 核心机制）。
-//! 实施计划：`docs/PLAN.md`（分阶段 PR 与出口命令）。
+//! 设计文档：`docs/current/architecture.md`。
+//! 实施计划：`docs/current/status.md`。
 //!
 //! ## M1-2（PR-M1-2）已落地
 //!
@@ -84,7 +84,7 @@ pub mod bridge_for_tests {
 }
 
 /// M0 起保留的 crate 用途标识。
-pub const CRATE_PURPOSE: &str = "QAQ-Harness MCP client support — see docs/mcp-client-design.md";
+pub const CRATE_PURPOSE: &str = "QAQ-Harness MCP client support — see docs/current/architecture.md";
 
 use std::sync::{Arc, OnceLock, RwLock};
 

@@ -4,7 +4,7 @@
 //! as a child process by PTY harnesses, so env is the only configuration
 //! channel that reaches the real worker without adding test fields to the wire
 //! protocol. The registry is documented in
-//! `docs/spec/2026-09-23-TUI契约测试钩子-spec.md`.
+//! `docs/current/architecture.md`.
 
 /// Whether the deterministic plan-review trigger is enabled.
 ///

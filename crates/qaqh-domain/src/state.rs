@@ -110,7 +110,7 @@ pub struct PendingInteraction {
 /// 挂起交互的类别。
 ///
 /// **没有未知取值兜底臂**（`#[serde(other)] Unknown` 已于 2026-09-15 按兼容政策删除，
-/// 见 `docs/spec/2026-09-15-前端契约与client-API稳定性-spec.md` §0b）：daemon 新增
+/// 见 `docs/current/architecture.md`）：daemon 新增
 /// 类别时旧客户端会**解析失败**而不是安静地变成 `Unknown`。这是刻意的——静默降级会
 /// 让 UI 显示一个**错的**状态，而失败至少是响亮的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

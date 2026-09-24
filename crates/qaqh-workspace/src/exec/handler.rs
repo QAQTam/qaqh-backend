@@ -423,7 +423,7 @@ pub(crate) fn available_shells() -> String {
 /// 孙进程持 fd1/fd2 = 管道写端，孤儿化 reparent 后长期滞留——阶段 2 的
 /// settle 机制保证读线程有界退出，但输出完整性仍以重定向到文件 + 受控移交
 /// （background_after_secs + process 工具）为正道。
-pub(crate) const BACKGROUND_DERIVATION_HINT: &str = "\n[!] 后台派生检测：命令包含 `&`（后台任务）。后台/孙进程可能持有输出管道，导致本结果遗漏其后继输出。长驻服务请改用 background_after_secs 参数移交后台，并以 process 工具（check/wait/kill）接管；后台命令应将 stdout/stderr 重定向到文件（证据：docs/incidents/2026-09-06-fd-hold-repro.md）。\n";
+pub(crate) const BACKGROUND_DERIVATION_HINT: &str = "\n[!] 后台派生检测：命令包含 `&`（后台任务）。后台/孙进程可能持有输出管道，导致本结果遗漏其后继输出。长驻服务请改用 background_after_secs 参数移交后台，并以 process 工具（check/wait/kill）接管；后台命令应将 stdout/stderr 重定向到文件（证据：docs/current/debug-backlog.md）。\n";
 
 /// 检测 shell 命令中的后台派生操作符。
 /// 剥除逻辑与（`&&`）与重定向组合（`>&`/`&>`，覆盖 `2>&1`）后残留的

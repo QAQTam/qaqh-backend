@@ -1,4 +1,4 @@
-//! qaqh-mcp 错误模型（设计 `docs/mcp-client-design.md` §7）。
+//! qaqh-mcp 错误模型（设计 `docs/current/architecture.md`）。
 //!
 //! 全量语义码对齐设计 §7 表格（M1-5 落地）；`Shutdown` 是 `shutting_down`
 //! 闸的拒绝码——设计 §7 未单列，作为闸门码保留；`Busy` 为

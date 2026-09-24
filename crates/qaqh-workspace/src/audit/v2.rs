@@ -1,6 +1,6 @@
 //! Audit v2 —— 结构化、链式、可验证的工具审计账本。
 //!
-//! 设计文档：`docs/spec/2026-09-19-审计账本v2-spec.md`。与 v1 CSV
+//! 设计文档：`docs/current/architecture.md`。与 v1 CSV
 //! （`audit.csv`）**双写**：CSV 保持既有列语义（仅尾部追加新列），v2 是
 //! 主账本——每条事件一行 JSONL，字段自描述、哈希链可验证：
 //!

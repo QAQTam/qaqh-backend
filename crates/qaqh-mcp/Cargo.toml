@@ -2,7 +2,7 @@
 name = "qaqh-mcp"
 version.workspace = true
 edition.workspace = true
-description = "QAQ-Harness MCP client support — dynamic tools/resources from MCP servers (docs/mcp-client-design.md)"
+description = "QAQ-Harness MCP client support — dynamic tools/resources from MCP servers (docs/current/architecture.md)"
 
 [dependencies]
 # McpConfig 三类型消费（PR-M1-1 落地于 qaqh-config；handover §三）

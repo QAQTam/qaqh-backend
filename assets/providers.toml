@@ -1,7 +1,7 @@
 # QAQ-Harness 内置 provider/endpoint 能力基线（T9）。
 # 本文件由 registry.rs 内置表导出生成（example export_providers）；运行时按
 # override > config.toml > assets 优先级合并。
-# 字段缺省 = OpenAI 纯协议语义（见 docs/gateway-core-toml-design.md §3）。
+# 字段缺省 = OpenAI 纯协议语义（见 docs/current/architecture.md）。
 
 [[providers]]
 id = "deepseek"

@@ -3,9 +3,9 @@
 //! 为什么需要（v2.0 重构前置）：v2 计划把 `journal×3 + checkpoint 目录`
 //! 合并为单一 canonical `events.jsonl`，并把重连语义从
 //! `Last-Event-ID` 迁移到 `since_seq` + 原子订阅（见
-//! `docs/plan/2026-09-19-qaqh-v2.0-前瞻设计-plan.md` §2.5 R1/R2）。
+//! `docs/current/architecture.md`）。
 //! 动刀前必须先把**现状重放语义**钉住——本文件是 R1/R2 的行为契约，
-//! 覆盖缺口见 `docs/report/2026-09-19-测试缺口盘点-v2重构前-report.md` §2.1。
+//! 覆盖缺口见 `docs/current/status.md`。
 //!
 //! 锁定的现状语义：
 //! 1. **reliable 等价**：live 订阅序列 == `replay_since(0)`（同 event_id、

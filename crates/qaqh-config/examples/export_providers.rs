@@ -24,7 +24,7 @@ fn main() {
         "# QAQ-Harness 内置 provider/endpoint 能力基线（T9）。\n\
          # 本文件由 registry.rs 内置表导出生成（example export_providers）；运行时按\n\
          # override > config.toml > assets 优先级合并。\n\
-         # 字段缺省 = OpenAI 纯协议语义（见 docs/gateway-core-toml-design.md §3）。\n\n",
+         # 字段缺省 = OpenAI 纯协议语义（见 docs/current/architecture.md）。\n\n",
     );
     out.push_str(&toml::to_string_pretty(&doc).expect("serialize providers"));
     std::fs::write("assets/providers.toml", &out).expect("write providers.toml");

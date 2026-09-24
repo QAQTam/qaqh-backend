@@ -1,7 +1,7 @@
 //! P0-6 Ringing v2 acceptance fixture matrix.
 //!
 //! Drives the real [`V2ProjectionHub`] against seeded canonical facts and
-//! asserts the frozen rows of `docs/spec/2026-09-23-TUI-Ringing-v2冻结语义-spec.md`
+//! asserts the frozen rows of `docs/current/decisions.md`
 //! §13 that are reachable today.
 //!
 //! Rows covered here:

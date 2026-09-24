@@ -4,7 +4,7 @@
 //! `ToolCapabilities` 替换 loop 里的"手工编排"（`serial_call_ids` 分区、
 //! `tool_call_order` 顺序回放、skill effects 顺序应用）。动刀前必须先把
 //! **现状语义**用测试钉住，否则重构无法证明行为等价（见
-//! `docs/report/2026-09-19-测试缺口盘点-v2重构前-report.md` §0 缺口 1）。
+//! `docs/current/status.md`）。
 //!
 //! 本文件锁定的现状语义：
 //! 1. 并行组先跑、串行组后跑：串行项严格在全部并行项结束之后才开始；
