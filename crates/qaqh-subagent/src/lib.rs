@@ -43,8 +43,8 @@ use serde::{Deserialize, Serialize};
 
 mod host;
 pub use host::{
-    ContentRef, EventBatch, ListedAgent, SpawnSubagentRequest, SpawnedSubagent,
-    StartSubagentRequest, SubagentHost, host, install_host,
+    ContentRef, EventBatch, ListedAgent, SendAgentMessageRequest, SentAgentMessage,
+    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost, host, install_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -232,6 +232,190 @@ impl TypedTool for ListAgentsTool {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMessageArgs {
+    to: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AgentMessageOutput {
+    message_id: String,
+    recipient: String,
+    delivery: String,
+}
+
+impl ToolProjection for AgentMessageOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_default(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        Some(match self.delivery.as_str() {
+            "queue" => format!("message queued to {}", self.recipient),
+            "trigger" => format!("task triggered at {}", self.recipient),
+            "interrupt" => format!("interrupt requested for {}", self.recipient),
+            other => format!("{other} message for {}", self.recipient),
+        })
+    }
+
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        let summary = self.summary().unwrap_or_default();
+        ToolDisplay::new(
+            qaqh_workspace::tool_api::ToolHeader::Other {
+                label: "agent-message".to_string(),
+            },
+            qaqh_workspace::tool_api::ToolBody::Text {
+                text: summary.clone(),
+                truncated: false,
+            },
+        )
+        .with_summary(summary)
+    }
+}
+
+pub struct SendMessageTool;
+
+impl TypedTool for SendMessageTool {
+    type Args = AgentMessageArgs;
+    type Output = AgentMessageOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("send_message").expect("valid send_message tool name"),
+            display_name: None,
+            description: "Queue a canonical message to another agent in the current root tree \
+                without starting a turn."
+                .to_string(),
+            input_schema: agent_message_schema("Message to queue."),
+            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
+                .expect("send_message output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Exec,
+            risk: ToolRisk::Administrative,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: AgentMessageArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Queue)
+    }
+}
+
+pub struct FollowupTaskTool;
+
+impl TypedTool for FollowupTaskTool {
+    type Args = AgentMessageArgs;
+    type Output = AgentMessageOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("followup_task").expect("valid followup_task tool name"),
+            display_name: None,
+            description: "Queue a canonical task to another agent and trigger its turn when idle."
+                .to_string(),
+            input_schema: agent_message_schema("Task to deliver."),
+            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
+                .expect("followup_task output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Exec,
+            risk: ToolRisk::Administrative,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: AgentMessageArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Trigger)
+    }
+}
+
+fn agent_message_schema(message_description: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "to": {
+                "type": "string",
+                "description": "Absolute AgentPath or caller-relative path of the recipient."
+            },
+            "message": {
+                "type": "string",
+                "description": message_description
+            }
+        },
+        "required": ["to", "message"],
+        "additionalProperties": false
+    })
+}
+
+fn handle_agent_message(
+    ctx: &ToolCallContext,
+    args: AgentMessageArgs,
+    delivery: qaqh_domain::InterAgentDelivery,
+) -> Result<AgentMessageOutput, ToolExecutionError> {
+    if args.to.trim().is_empty() {
+        return Err(subagent_error(
+            "MISSING_TARGET",
+            "agent message target is required",
+            "Provide an AgentPath such as /root/review_code.",
+        ));
+    }
+    if args.message.trim().is_empty() {
+        return Err(subagent_error(
+            "MISSING_MESSAGE",
+            "agent message body is required",
+            "Provide a non-empty message.",
+        ));
+    }
+    let host = host().ok_or_else(|| {
+        subagent_error(
+            "HOST_UNAVAILABLE",
+            "agent messaging requires the in-process subagent host",
+            "Check that the daemon installed the subagent host.",
+        )
+    })?;
+    let sent = host
+        .send_agent_message(SendAgentMessageRequest {
+            caller_session_id: &ctx.session_id,
+            target: args.to.trim(),
+            text: &args.message,
+            delivery,
+        })
+        .map_err(|error| {
+            subagent_error(
+                "SEND_REJECTED",
+                format!("agent message rejected: {error}"),
+                "Check the recipient path, root ownership and message size.",
+            )
+        })?;
+    Ok(AgentMessageOutput {
+        message_id: sent.message_id,
+        recipient: sent.recipient,
+        delivery: match sent.delivery {
+            qaqh_domain::InterAgentDelivery::Queue => "queue",
+            qaqh_domain::InterAgentDelivery::Trigger => "trigger",
+            qaqh_domain::InterAgentDelivery::Interrupt => "interrupt",
+        }
+        .to_string(),
+    })
+}
+
 pub struct SpawnSubagentTool;
 
 impl TypedTool for SpawnSubagentTool {
@@ -273,6 +457,10 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(SpawnSubagentTool);
     mgr.register_display("list_agents", project_list_agents_display);
     mgr.register_typed(ListAgentsTool);
+    mgr.register_display("send_message", project_agent_message_display);
+    mgr.register_typed(SendMessageTool);
+    mgr.register_display("followup_task", project_agent_message_display);
+    mgr.register_typed(FollowupTaskTool);
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
@@ -428,6 +616,24 @@ fn project_list_agents_display(
         },
         qaqh_workspace::tool_api::ToolBody::Text {
             text: "0 agent(s)".to_string(),
+            truncated: false,
+        },
+    )
+}
+
+fn project_agent_message_display(
+    args: &serde_json::Value,
+    output: &str,
+) -> qaqh_workspace::tool_api::ToolDisplay {
+    if let Ok(output) = serde_json::from_str::<AgentMessageOutput>(output) {
+        return output.display(args);
+    }
+    qaqh_workspace::tool_api::ToolDisplay::new(
+        qaqh_workspace::tool_api::ToolHeader::Other {
+            label: "agent-message".to_string(),
+        },
+        qaqh_workspace::tool_api::ToolBody::Text {
+            text: "agent message rejected".to_string(),
             truncated: false,
         },
     )
@@ -999,6 +1205,25 @@ mod tests {
             handler.input_schema.get("required").is_none(),
             "path_prefix must default to /root"
         );
+    }
+
+    #[test]
+    fn agent_message_tools_are_registered_with_required_fields() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+
+        for name in ["send_message", "followup_task"] {
+            let handler = manager.lookup(name).expect("agent message tool registered");
+            let properties = handler.input_schema["properties"]
+                .as_object()
+                .expect("properties");
+            assert!(properties.contains_key("to"));
+            assert!(properties.contains_key("message"));
+            assert_eq!(
+                handler.input_schema["required"].as_array().map(Vec::len),
+                Some(2)
+            );
+        }
     }
 
     #[test]

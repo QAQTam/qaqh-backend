@@ -81,6 +81,21 @@ pub struct StartSubagentRequest<'a> {
     pub inter_agent: Option<qaqh_domain::InterAgentEnvelope>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SendAgentMessageRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub target: &'a str,
+    pub text: &'a str,
+    pub delivery: qaqh_domain::InterAgentDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentAgentMessage {
+    pub message_id: String,
+    pub recipient: String,
+    pub delivery: qaqh_domain::InterAgentDelivery,
+}
+
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker
 /// 线程的 std 线程模型匹配），由 qaqh-runtime 的 `QaqhService` 提供实现。
 pub trait SubagentHost: Send + Sync {
@@ -105,6 +120,12 @@ pub trait SubagentHost: Send + Sync {
     /// Deliver the initial task after the caller durably recorded the spawn
     /// edge. Implementations own process registration and result collection.
     fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String>;
+
+    /// Deliver a canonical inter-agent message to a loaded target agent.
+    fn send_agent_message(
+        &self,
+        request: SendAgentMessageRequest<'_>,
+    ) -> Result<SentAgentMessage, String>;
 
     /// Roll back a child whose canonical spawn edge could not be committed.
     ///
