@@ -369,6 +369,34 @@ impl AgentRegistry {
         self.agent_catalog.list_prefix(root_session_id, prefix)
     }
 
+    /// List logical agents for a caller, resolving relative prefixes below the
+    /// caller's path and constraining absolute prefixes to the same root tree.
+    pub fn list_agents_for_caller(
+        &mut self,
+        caller_session_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<AgentMetadata>, String> {
+        self.ensure_root_metadata(caller_session_id)?;
+        let caller = self
+            .agent_catalog
+            .get_by_id(caller_session_id)
+            .cloned()
+            .ok_or_else(|| format!("caller agent metadata missing for {caller_session_id}"))?;
+        let prefix = caller
+            .agent_path
+            .resolve(path_prefix)
+            .map_err(|error| format!("invalid path prefix {path_prefix:?}: {error}"))?;
+        if prefix.namespace() != caller.agent_path.namespace() {
+            return Err(format!(
+                "path prefix {prefix} crosses agent namespaces from {}",
+                caller.agent_path
+            ));
+        }
+        Ok(self
+            .agent_catalog
+            .list_prefix(caller.root_session_id.as_str(), &prefix))
+    }
+
     /// Rebuild the canonical agent graph for one root tree.
     pub fn agent_graph_snapshot(
         &self,

@@ -78,10 +78,11 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - 逻辑 agent catalog 与 `/root` 注册（#365 / PR #369）。
   - canonical graph store、递归 loader、post-order cascade（#366 / PR #370）。
   - `SubagentSpawned/Finished` 真实 producer（#367 / PR #371）。
+  - `list_agents` path-prefix 工具面已接入。
 - Phase 2 进行中：
   - canonical `InterAgentCommunication` 与 mailbox projection 已合并（#372 / PR #387）。
   - `spawn_agent` initial message、工具面和 residency reload 分别在 #373-#375。
-- 仍待：`list_agents` path-prefix 工具面、child reload 后 path 恢复。
+- 仍待：child reload 后 path 恢复。
 - Phase 3-7 未开始；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
