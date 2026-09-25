@@ -19,9 +19,9 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::session_fact_v2::{
     AgentPath, ContentRef, EventId, ExecutionId, PolicyDecisionRef, SessionId, SideEffectClass,
-    SubagentFinished, SubagentSpawned, SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-    TurnId,
+    SubagentFinished, SubagentSpawnConfig, SubagentSpawned, SubagentTerminalStatus, ToolCallId,
+    ToolError, ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics,
+    ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 use qaqh_workspace::AuthorizedToolCall;
 use qaqh_workspace::ExecProgressEvent;
@@ -760,6 +760,12 @@ impl ToolRuntime {
                 parent_agent_path,
                 child_agent_path,
                 process_id,
+                spawn_tools,
+                spawn_model,
+                spawn_base_url,
+                spawn_max_tokens,
+                spawn_ephemeral,
+                spawn_timeout_secs,
             } = effect
             else {
                 continue;
@@ -786,6 +792,14 @@ impl ToolRuntime {
                 parent_agent_path: Some(parent_agent_path),
                 child_agent_path: Some(child_agent_path),
                 role: Some(name.clone()),
+                spawn_config: Some(SubagentSpawnConfig {
+                    tools: spawn_tools,
+                    model: spawn_model,
+                    base_url: spawn_base_url,
+                    max_tokens: spawn_max_tokens,
+                    ephemeral: spawn_ephemeral,
+                    timeout_secs: spawn_timeout_secs,
+                }),
                 spawned_at_ms: now,
             };
             {

@@ -649,6 +649,12 @@ pub enum ToolEffect {
         parent_agent_path: String,
         child_agent_path: String,
         process_id: u32,
+        spawn_tools: Vec<String>,
+        spawn_model: Option<String>,
+        spawn_base_url: Option<String>,
+        spawn_max_tokens: Option<u32>,
+        spawn_ephemeral: bool,
+        spawn_timeout_secs: u64,
     },
 }
 

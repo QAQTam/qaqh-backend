@@ -963,6 +963,7 @@ fn subagent_spawn_and_finish_edges_are_idempotent_and_rebuildable() {
             AgentPath::parse_absolute("/root/review").expect("child agent path"),
         ),
         role: Some("review".to_string()),
+        spawn_config: None,
         spawned_at_ms: NOW_MS,
     };
     let mut ledger = open_ledger(temp.path());

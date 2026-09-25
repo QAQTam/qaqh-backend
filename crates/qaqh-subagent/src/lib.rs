@@ -43,8 +43,8 @@ use serde::{Deserialize, Serialize};
 
 mod host;
 pub use host::{
-    ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent, ListedAgent,
-    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
+    ArmSubagentCollectorRequest, ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent,
+    ListedAgent, SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
     StartSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest, host, install_host,
 };
 
@@ -93,6 +93,24 @@ pub struct SpawnSubagentOutput {
     #[serde(skip)]
     #[schemars(skip)]
     parent_session_id: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    spawn_tools: Vec<String>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    spawn_model: Option<String>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    spawn_base_url: Option<String>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    spawn_max_tokens: Option<u32>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    spawn_ephemeral: bool,
+    #[serde(skip)]
+    #[schemars(skip)]
+    spawn_timeout_secs: u64,
 }
 
 impl ToolProjection for SpawnSubagentOutput {
@@ -130,6 +148,12 @@ impl ToolProjection for SpawnSubagentOutput {
             parent_agent_path: self.parent_agent_path.clone(),
             child_agent_path: self.child_agent_path.clone(),
             process_id: self.process_id,
+            spawn_tools: self.spawn_tools.clone(),
+            spawn_model: self.spawn_model.clone(),
+            spawn_base_url: self.spawn_base_url.clone(),
+            spawn_max_tokens: self.spawn_max_tokens,
+            spawn_ephemeral: self.spawn_ephemeral,
+            spawn_timeout_secs: self.spawn_timeout_secs,
         }]
     }
 }
@@ -1071,6 +1095,12 @@ fn handle_spawn_subagent(
         task_text,
         timeout_secs,
         parent_session_id: ctx.session_id.clone(),
+        spawn_tools: tools.clone(),
+        spawn_model: model.map(str::to_string),
+        spawn_base_url: base_url.map(str::to_string),
+        spawn_max_tokens: max_tokens_opt,
+        spawn_ephemeral: false,
+        spawn_timeout_secs: timeout_secs,
     })
 }
 
@@ -1207,6 +1237,45 @@ struct CompletionRoute {
     root_session_id: String,
     parent_agent_path: String,
     child_agent_path: String,
+}
+
+/// Re-arm result collection before a Trigger delivery to a reloaded child.
+///
+/// The original collector exits with the previous turn and closes the child.
+/// Reload restores the actor, so a new collector must subscribe before the
+/// triggering command is written or a fast completion can be missed.
+pub fn arm_subagent_collector(
+    host: Arc<dyn SubagentHost>,
+    request: ArmSubagentCollectorRequest<'_>,
+) -> Result<(), String> {
+    let batch_rx = host.subscribe(request.seed);
+    let transport = Box::new(HostTransport { host, batch_rx }) as Box<dyn SubagentTransport>;
+    let registry_ref = register_subagent_process(&format!("subagent:{}", request.name));
+    let seed = request.seed.to_string();
+    let child_session_id = request.child_session_id.to_string();
+    let name = request.name.to_string();
+    let parent_seed = request.parent_session_id.to_string();
+    let parent_call_id = request.parent_call_id.to_string();
+    let timeout_secs = request.timeout_secs;
+    let route = CompletionRoute {
+        root_session_id: request.root_session_id.to_string(),
+        parent_agent_path: request.parent_agent_path.to_string(),
+        child_agent_path: request.child_agent_path.to_string(),
+    };
+    std::thread::spawn(move || {
+        collect_subagent_result(
+            transport,
+            &seed,
+            &child_session_id,
+            &name,
+            registry_ref,
+            timeout_secs,
+            &parent_seed,
+            &parent_call_id,
+            Some(route),
+        );
+    });
+    Ok(())
 }
 
 /// Background collector: watches the sub-seed's event stream (process-local or
@@ -1672,6 +1741,12 @@ mod tests {
             task_text: "[TASK]\nreview".to_string(),
             timeout_secs: 120,
             parent_session_id: "root-seed".to_string(),
+            spawn_tools: vec![],
+            spawn_model: None,
+            spawn_base_url: None,
+            spawn_max_tokens: None,
+            spawn_ephemeral: false,
+            spawn_timeout_secs: 120,
         };
         let model = match output.model_blocks().into_iter().next() {
             Some(ToolContentBlock::Text { text }) => text,
@@ -1834,6 +1909,86 @@ mod tests {
 
         fn events(&self) -> &mpsc::Receiver<EventBatch> {
             &self.batch_rx
+        }
+    }
+
+    #[derive(Default)]
+    struct CollectorTestHost {
+        sent: Arc<std::sync::Mutex<Vec<(String, RingingCommand)>>>,
+        event_tx: std::sync::Mutex<Option<mpsc::Sender<EventBatch>>>,
+    }
+
+    impl SubagentHost for CollectorTestHost {
+        fn spawn_subagent(
+            &self,
+            _request: SpawnSubagentRequest<'_>,
+        ) -> Result<SpawnedSubagent, String> {
+            Err("not used".to_string())
+        }
+
+        fn list_agents(
+            &self,
+            _caller_session_id: &str,
+            _path_prefix: &str,
+        ) -> Result<Vec<ListedAgent>, String> {
+            Ok(Vec::new())
+        }
+
+        fn start_subagent(&self, _request: StartSubagentRequest<'_>) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn send_agent_message(
+            &self,
+            _request: SendAgentMessageRequest<'_>,
+        ) -> Result<SentAgentMessage, String> {
+            Err("not used".to_string())
+        }
+
+        fn wait_agent(&self, _request: WaitAgentRequest<'_>) -> Result<WaitAgentOutcome, String> {
+            Ok(WaitAgentOutcome::TimedOut {
+                activity_fact_seq: 0,
+            })
+        }
+
+        fn interrupt_agent(
+            &self,
+            _request: InterruptAgentRequest<'_>,
+        ) -> Result<InterruptedAgent, String> {
+            Err("not used".to_string())
+        }
+
+        fn rollback_subagent(&self, _seed: &str, _child_session_id: &str, _process_id: u32) {}
+
+        fn abort_subagent(&self, _seed: &str, _process_id: u32) {}
+
+        fn send_ringing(&self, seed: &str, command: RingingCommand) -> Result<(), String> {
+            self.sent
+                .lock()
+                .expect("test mutex must not be poisoned")
+                .push((seed.to_string(), command));
+            Ok(())
+        }
+
+        fn subscribe(&self, _seed: &str) -> mpsc::Receiver<EventBatch> {
+            let (tx, rx) = mpsc::channel();
+            *self
+                .event_tx
+                .lock()
+                .expect("test mutex must not be poisoned") = Some(tx);
+            rx
+        }
+
+        fn download_content(
+            &self,
+            _seed: &str,
+            _reference: &ContentRef,
+        ) -> Result<Vec<u8>, String> {
+            Err("not used".to_string())
+        }
+
+        fn close(&self, _seed: &str) -> Result<(), String> {
+            Ok(())
         }
     }
 
@@ -2018,5 +2173,61 @@ mod tests {
         assert_eq!(envelope.recipient, "/root");
         assert_eq!(message_id.as_deref(), Some(envelope.message_id.as_str()));
         assert_eq!(terminal.child_session_id, child);
+    }
+
+    #[test]
+    fn reload_collector_routes_completion_before_trigger_delivery() {
+        let host = Arc::new(CollectorTestHost::default());
+        arm_subagent_collector(
+            host.clone(),
+            ArmSubagentCollectorRequest {
+                seed: "reload-child",
+                child_session_id: "reload-child",
+                name: "reload_task",
+                parent_session_id: "reload-parent",
+                parent_call_id: "call_01J00000000000000000000002",
+                timeout_secs: 5,
+                root_session_id: "reload-root",
+                parent_agent_path: "/root",
+                child_agent_path: "/root/reload_task",
+            },
+        )
+        .expect("arm reload collector");
+        let event_tx = host
+            .event_tx
+            .lock()
+            .expect("test mutex must not be poisoned")
+            .take()
+            .expect("collector subscription");
+        event_tx
+            .send(completed_batch("reload-child"))
+            .expect("send completion event");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let sent = host.sent.lock().expect("test mutex must not be poisoned");
+            if sent.iter().any(|(seed, command)| {
+                seed == "reload-parent"
+                    && matches!(
+                        command,
+                        RingingCommand::Conversation(
+                            ConversationCommand::ConversationSendMessage {
+                                input_purpose: qaqh_domain::ConversationInputPurpose::QueueOnly,
+                                inter_agent: Some(envelope),
+                                ..
+                            }
+                        ) if envelope.author == "/root/reload_task"
+                            && envelope.recipient == "/root"
+                    )
+            }) {
+                break;
+            }
+            drop(sent);
+            assert!(
+                Instant::now() < deadline,
+                "reloaded collector did not route queue-only completion"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

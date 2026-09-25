@@ -417,6 +417,26 @@ pub struct WorkspaceResourceChanged {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentSpawnConfig {
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub ephemeral: bool,
+    #[serde(default = "default_subagent_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+const fn default_subagent_timeout_secs() -> u64 {
+    120
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentSpawned {
     pub child_session_id: SessionId,
     pub parent_call_id: ToolCallId,
@@ -426,6 +446,8 @@ pub struct SubagentSpawned {
     pub child_agent_path: Option<AgentPath>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_config: Option<SubagentSpawnConfig>,
     pub spawned_at_ms: i64,
 }
 

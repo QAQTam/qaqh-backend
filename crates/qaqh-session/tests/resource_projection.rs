@@ -62,6 +62,7 @@ fn spawned(ordinal: u64) -> SessionFact {
             parent_agent_path: None,
             child_agent_path: None,
             role: Some("worker".into()),
+            spawn_config: None,
             spawned_at_ms: 1_789_830_000_004,
         }),
     )

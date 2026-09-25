@@ -50,6 +50,7 @@ fn rebuild_from_reader_restores_committed_spawn_edge() {
             parent_agent_path: Some(path("/root")),
             child_agent_path: Some(path("/root/review")),
             role: Some("worker".to_string()),
+            spawn_config: None,
             spawned_at_ms: NOW_MS,
         }),
     };
@@ -91,6 +92,7 @@ fn rebuild_from_reader_fails_closed_without_paths() {
             parent_agent_path: None,
             child_agent_path: None,
             role: None,
+            spawn_config: None,
             spawned_at_ms: NOW_MS,
         }),
     };

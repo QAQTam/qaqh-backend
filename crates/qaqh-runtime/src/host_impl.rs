@@ -8,6 +8,7 @@
 //! 工具 handler 通过该宿主句柄直达进程内 `AgentRegistry` + `RingingHub`，
 //! 不再建立 HTTP/SSE 连接。事件订阅直接走 hub 进程内 broadcast。
 
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,8 @@ use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
 use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE};
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_subagent::{
-    ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent, ListedAgent,
-    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
+    ArmSubagentCollectorRequest, ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent,
+    ListedAgent, SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
     StartSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest,
 };
 
@@ -214,6 +215,35 @@ impl SubagentHost for QaqhService {
             }
             qaqh_domain::InterAgentDelivery::Interrupt => unreachable!(),
         };
+        let arm_spec = if request.delivery == qaqh_domain::InterAgentDelivery::Trigger
+            && !target.agent_path.is_root()
+        {
+            self.registry()?
+                .prepare_collector_arm(target.agent_id.as_str())?
+        } else {
+            None
+        };
+        if let Some(spec) = arm_spec {
+            let collector_host: Arc<dyn SubagentHost> = Arc::new(self.clone());
+            if let Err(error) = qaqh_subagent::arm_subagent_collector(
+                collector_host,
+                ArmSubagentCollectorRequest {
+                    seed: target.agent_id.as_str(),
+                    child_session_id: &spec.child_session_id,
+                    name: &spec.name,
+                    parent_session_id: &spec.parent_session_id,
+                    parent_call_id: &spec.parent_call_id,
+                    timeout_secs: spec.timeout_secs,
+                    root_session_id: &spec.root_session_id,
+                    parent_agent_path: &spec.parent_agent_path,
+                    child_agent_path: &spec.child_agent_path,
+                },
+            ) {
+                self.registry()?
+                    .unmark_collector_armed(target.agent_id.as_str());
+                return Err(format!("arm subagent collector: {error}"));
+            }
+        }
         self.send_ringing(
             target.agent_id.as_str(),
             qaqh_ringing::RingingCommand::Conversation(
@@ -356,13 +386,16 @@ impl SubagentHost for QaqhService {
             delivery: qaqh_domain::InterAgentDelivery::Trigger,
             created_at_ms: (nanos() / 1_000_000) as i64,
         };
+        let child_session_id = request.child_session_id.to_string();
         qaqh_subagent::start_subagent_collector(
             host,
             StartSubagentRequest {
                 inter_agent: Some(envelope),
                 ..request
             },
-        )
+        )?;
+        self.registry()?.mark_collector_armed(&child_session_id);
+        Ok(())
     }
 
     fn rollback_subagent(&self, seed: &str, child_session_id: &str, process_id: u32) {
