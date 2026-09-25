@@ -56,6 +56,12 @@ impl CanonicalSessionIdentity {
         }
     }
 
+    /// Read an existing identity sidecar without creating one.
+    pub fn open(session_dir: impl AsRef<Path>) -> Result<Self, CanonicalIdentityError> {
+        let bytes = fs::read(session_dir.as_ref().join(CANONICAL_IDENTITY_FILE))?;
+        Self::decode(&bytes)
+    }
+
     /// Read the identity sidecar, creating it if absent.
     ///
     /// Creation uses a unique temp file plus a no-clobber hard link, so two

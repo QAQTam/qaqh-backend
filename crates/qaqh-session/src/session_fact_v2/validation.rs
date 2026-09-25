@@ -372,6 +372,35 @@ impl FactPayload {
             Self::SubagentSpawned(payload) => {
                 validate_uuid_v7("child_session_id", payload.child_session_id.as_str())?;
                 validate_prefixed_ulid("parent_call_id", payload.parent_call_id.as_str(), "call_")?;
+                match (&payload.parent_agent_path, &payload.child_agent_path) {
+                    (None, None) => {}
+                    (Some(parent), Some(child)) => {
+                        if parent.namespace() != super::agent::AgentNamespace::Root
+                            || child.namespace() != super::agent::AgentNamespace::Root
+                        {
+                            return Err(ValidationError::InvalidField {
+                                field: "agent_path",
+                                message: "subagent paths must belong to the /root namespace"
+                                    .to_owned(),
+                            });
+                        }
+                        if child.parent().as_ref() != Some(parent) {
+                            return Err(ValidationError::InvalidField {
+                                field: "child_agent_path",
+                                message: "child path must be a direct child of parent path"
+                                    .to_owned(),
+                            });
+                        }
+                    }
+                    _ => {
+                        return Err(ValidationError::InvalidField {
+                            field: "agent_path",
+                            message:
+                                "parent_agent_path and child_agent_path must be present together"
+                                    .to_owned(),
+                        });
+                    }
+                }
             }
             Self::SubagentFinished(payload) => {
                 validate_uuid_v7("child_session_id", payload.child_session_id.as_str())?;
