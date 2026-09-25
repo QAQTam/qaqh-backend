@@ -12,7 +12,8 @@ use qaqh_domain::{
 };
 use qaqh_session::canonical::{generate_ulid, ulid_from_text};
 use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, EventId, InputAccepted, InputId, InputKind, InputPurpose, SessionId,
+    ActorKind, ActorRef, AgentPath, EventId, InputAccepted, InputId, InputKind, InputPurpose,
+    InterAgentCommunication, InterAgentContent, InterAgentDelivery, MessageId, SessionId,
     SubagentFinished, SubagentTerminalStatus, ToolCallId,
 };
 
@@ -56,7 +57,9 @@ impl Loop {
         input_id: &str,
         text: &str,
         purpose: qaqh_domain::ConversationInputPurpose,
-        as_system: bool,
+        input_kind: InputKind,
+        actor: ActorRef,
+        client_request_id: Option<String>,
     ) -> Result<(), String> {
         // Canonical inline content is capped at 8 KiB. Larger payloads must be
         // externalized before this boundary; until that producer exists, do
@@ -82,11 +85,7 @@ impl Loop {
             .map_err(|error| format!("canonical ledger lease failed for input: {error}"))?;
         let payload = InputAccepted {
             input_id: InputId::new(format!("input_{}", ulid_from_text(input_id))),
-            input_kind: if as_system {
-                InputKind::System
-            } else {
-                InputKind::UserText
-            },
+            input_kind,
             input_purpose: match purpose {
                 qaqh_domain::ConversationInputPurpose::TriggerTurn => InputPurpose::TriggerTurn,
                 qaqh_domain::ConversationInputPurpose::QueueOnly => InputPurpose::QueueOnly,
@@ -94,20 +93,73 @@ impl Loop {
             content_ref: None,
             inline_text: Some(text.to_string()),
             attachments: vec![],
-            actor: ActorRef {
-                kind: if as_system {
-                    ActorKind::System
-                } else {
-                    ActorKind::User
-                },
-                id: if as_system { "system" } else { "user" }.to_string(),
-                display_name: None,
-            },
-            client_request_id: Some(input_id.to_string()),
+            actor,
+            client_request_id,
         };
         ledger
             .append_input_accepted(EventId::new(generate_ulid()), payload, now)
             .map_err(|error| format!("canonical input accept append failed: {error}"))?;
+        Ok(())
+    }
+
+    fn record_inter_agent_communication(
+        &mut self,
+        envelope: &qaqh_domain::InterAgentEnvelope,
+        text: &str,
+    ) -> Result<(), String> {
+        if text.len() > 8 * 1024 {
+            return Err(format!(
+                "inter-agent inline content is {} bytes; maximum is {}",
+                text.len(),
+                8 * 1024
+            ));
+        }
+        let author = AgentPath::parse_absolute(&envelope.author)
+            .map_err(|error| format!("invalid author path {}: {error}", envelope.author))?;
+        let recipient = AgentPath::parse_absolute(&envelope.recipient)
+            .map_err(|error| format!("invalid recipient path {}: {error}", envelope.recipient))?;
+        let other_recipients = envelope
+            .other_recipients
+            .iter()
+            .map(|path| {
+                AgentPath::parse_absolute(path)
+                    .map_err(|error| format!("invalid other recipient {path}: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let delivery = match envelope.delivery {
+            qaqh_domain::InterAgentDelivery::Queue => InterAgentDelivery::Queue,
+            qaqh_domain::InterAgentDelivery::Trigger => InterAgentDelivery::Trigger,
+            qaqh_domain::InterAgentDelivery::Interrupt => InterAgentDelivery::Interrupt,
+        };
+        let payload = InterAgentCommunication {
+            message_id: MessageId::new(envelope.message_id.clone()),
+            root_session_id: SessionId::new(envelope.root_session_id.clone()),
+            author,
+            recipient,
+            other_recipients,
+            task_id: envelope.task_id.clone(),
+            content: InterAgentContent::Inline {
+                text: text.to_string(),
+            },
+            reply_to: envelope.reply_to.clone().map(MessageId::new),
+            causation_id: envelope.causation_id.clone().map(EventId::new),
+            delivery,
+            created_at_ms: envelope.created_at_ms,
+        };
+        let now = super::state::agent::unix_ms();
+        let ledger =
+            self.session.agent.tool_ledger_mut().map_err(|error| {
+                format!("canonical ledger unavailable for communication: {error}")
+            })?;
+        let Some(ledger) = ledger else {
+            return Ok(());
+        };
+        ledger
+            .ensure_lease(now, super::state::agent::tool_ledger_lease_ms())
+            .map_err(|error| format!("canonical ledger lease failed for communication: {error}"))?;
+        ledger
+            .append_inter_agent_communication(EventId::new(generate_ulid()), payload, now)
+            .map_err(|error| format!("canonical communication append failed: {error}"))?;
         Ok(())
     }
 
@@ -125,6 +177,7 @@ impl Loop {
                 message_id,
                 input_purpose,
                 as_system,
+                inter_agent,
                 subagent_terminal,
             } => {
                 if let Some(terminal) = subagent_terminal
@@ -141,11 +194,82 @@ impl Loop {
                 if text.is_empty() {
                     return;
                 }
-                let input_id = message_id.as_deref().unwrap_or(command_id).to_string();
-                if as_system {
-                    if let Err(error) =
-                        self.record_input_accepted(&input_id, &text, input_purpose, true)
-                    {
+                let inter_agent = inter_agent.as_ref();
+                let input_id = inter_agent
+                    .map(|envelope| envelope.message_id.clone())
+                    .or(message_id)
+                    .unwrap_or_else(|| command_id.to_string());
+                if let Some(envelope) = inter_agent
+                    && let Err(error) = self.record_inter_agent_communication(envelope, &text)
+                {
+                    self.emit_operation_failed(
+                        command_id,
+                        qaqh_domain::ErrorScope::Conversation,
+                        "inter_agent_communication_append_failed",
+                        &error,
+                    );
+                    return;
+                }
+                let effective_purpose = match inter_agent.map(|envelope| envelope.delivery) {
+                    Some(qaqh_domain::InterAgentDelivery::Queue) => {
+                        qaqh_domain::ConversationInputPurpose::QueueOnly
+                    }
+                    Some(qaqh_domain::InterAgentDelivery::Trigger) | None => input_purpose,
+                    Some(qaqh_domain::InterAgentDelivery::Interrupt) => {
+                        self.emit_operation_failed(
+                            command_id,
+                            qaqh_domain::ErrorScope::Conversation,
+                            "inter_agent_interrupt_not_implemented",
+                            "Interrupt delivery is not implemented yet",
+                        );
+                        return;
+                    }
+                };
+                let (input_kind, actor, client_request_id) = if let Some(envelope) = inter_agent {
+                    (
+                        InputKind::UserText,
+                        ActorRef {
+                            kind: ActorKind::Subagent,
+                            id: envelope.author.clone(),
+                            display_name: None,
+                        },
+                        Some(envelope.message_id.clone()),
+                    )
+                } else if as_system {
+                    (
+                        InputKind::System,
+                        ActorRef {
+                            kind: ActorKind::System,
+                            id: "system".to_string(),
+                            display_name: None,
+                        },
+                        Some(input_id.clone()),
+                    )
+                } else {
+                    (
+                        InputKind::UserText,
+                        ActorRef {
+                            kind: ActorKind::User,
+                            id: "user".to_string(),
+                            display_name: None,
+                        },
+                        Some(input_id.clone()),
+                    )
+                };
+
+                let injection_path = as_system
+                    || inter_agent.is_some_and(|envelope| {
+                        envelope.delivery == qaqh_domain::InterAgentDelivery::Queue
+                    });
+                if injection_path {
+                    if let Err(error) = self.record_input_accepted(
+                        &input_id,
+                        &text,
+                        effective_purpose,
+                        input_kind,
+                        actor,
+                        client_request_id,
+                    ) {
                         self.emit_operation_failed(
                             command_id,
                             qaqh_domain::ErrorScope::Conversation,
@@ -162,7 +286,7 @@ impl Loop {
                         session_id: session_id.to_string(),
                         command_id: command_id.to_string(),
                         input_id,
-                        input_purpose,
+                        input_purpose: effective_purpose,
                         source: SUBAGENT_SOURCE,
                         role: qaqh_types::Message::ROLE_USER,
                         text,
@@ -206,9 +330,14 @@ impl Loop {
                         self.session.agent.msg.remove_last_step_if_incomplete();
                     }
                 }
-                if let Err(error) =
-                    self.record_input_accepted(&input_id, &text, input_purpose, false)
-                {
+                if let Err(error) = self.record_input_accepted(
+                    &input_id,
+                    &text,
+                    effective_purpose,
+                    input_kind,
+                    actor,
+                    client_request_id,
+                ) {
                     self.emit_operation_failed(
                         command_id,
                         qaqh_domain::ErrorScope::Conversation,
