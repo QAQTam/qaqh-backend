@@ -14,8 +14,8 @@ use std::time::Duration;
 use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
 use qaqh_subagent::{
-    ContentRef, EventBatch, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest,
-    SubagentHost,
+    ContentRef, EventBatch, ListedAgent, SpawnSubagentRequest, SpawnedSubagent,
+    StartSubagentRequest, SubagentHost,
 };
 
 use super::QaqhService;
@@ -65,6 +65,32 @@ impl SubagentHost for QaqhService {
             parent_agent_path: spawned.parent_agent_path.as_str().to_string(),
             child_agent_path: spawned.child_agent_path.as_str().to_string(),
         })
+    }
+
+    fn list_agents(
+        &self,
+        caller_session_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<ListedAgent>, String> {
+        let mut registry = self.registry()?;
+        registry
+            .list_agents_for_caller(caller_session_id, path_prefix)
+            .map(|agents| {
+                agents
+                    .into_iter()
+                    .map(|agent| ListedAgent {
+                        root_session_id: agent.root_session_id.as_str().to_string(),
+                        agent_id: agent.agent_id.as_str().to_string(),
+                        agent_path: agent.agent_path.as_str().to_string(),
+                        parent_agent_path: agent
+                            .parent_agent_path
+                            .map(|path| path.as_str().to_string()),
+                        nickname: agent.nickname,
+                        role: agent.role,
+                        created_at_ms: agent.created_at_ms,
+                    })
+                    .collect()
+            })
     }
 
     fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String> {

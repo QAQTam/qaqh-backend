@@ -77,6 +77,29 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     assert_eq!(spawned.parent_agent_path, "/root");
     assert_eq!(spawned.child_agent_path, "/root/review_code");
 
+    let child_only = host
+        .list_agents(&parent, "review_code")
+        .expect("relative prefix must resolve below caller");
+    assert_eq!(child_only.len(), 1);
+    assert_eq!(child_only[0].agent_id, child_session_id);
+    assert_eq!(child_only[0].agent_path, "/root/review_code");
+    assert_eq!(child_only[0].parent_agent_path.as_deref(), Some("/root"));
+
+    let root_tree = host
+        .list_agents(&child_session_id, "/root")
+        .expect("child caller can list its root tree");
+    assert_eq!(root_tree.len(), 2);
+    assert!(root_tree.iter().any(|agent| agent.agent_path == "/root"));
+    assert!(
+        root_tree
+            .iter()
+            .any(|agent| agent.agent_path == "/root/review_code")
+    );
+    assert!(
+        host.list_agents(&parent, "/morpheus").is_err(),
+        "cross-namespace listing must fail closed"
+    );
+
     let parent_identity = CanonicalSessionIdentity::open(data.join("sessions").join(&parent))
         .expect("parent canonical identity");
     let child_dir = data.join("sessions").join(&seed);
