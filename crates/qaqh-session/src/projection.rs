@@ -1,5 +1,6 @@
 //! Rebuildable projection contract and canonical reader harness.
 
+mod agent_graph;
 mod control;
 mod conversation;
 mod meta;
@@ -9,6 +10,10 @@ mod set;
 mod sink;
 mod timeline;
 
+pub use agent_graph::{
+    AgentGraphEdge, AgentGraphEdgeStatus, AgentGraphError, AgentGraphNode, AgentGraphSnapshot,
+    AgentGraphStore,
+};
 pub use control::{
     ControlDriverState, ControlInteractionResolution, ControlInteractionState, ControlProjection,
     ControlRoundState, ControlSnapshot, ControlSubagentState, ControlToolState,

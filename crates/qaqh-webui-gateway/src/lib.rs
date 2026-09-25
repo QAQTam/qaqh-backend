@@ -1602,12 +1602,14 @@ mod tests {
             message_id: None,
             input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
             as_system: true,
+            subagent_terminal: None,
         });
         assert!(sanitize_command(&mut send));
         assert!(matches!(
             send,
             RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                 as_system: false,
+                subagent_terminal: None,
                 ..
             })
         ));

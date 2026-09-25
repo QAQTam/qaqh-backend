@@ -9,8 +9,15 @@ use qaqh_session::actor::{
     ConnectionId, SessionActor, SessionActorEffect, SessionCommand, SubscriptionCommand,
     SubscriptionEffect,
 };
+use qaqh_session::canonical::{
+    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
+    EVENTS_FILE,
+};
+use qaqh_session::projection::AgentGraphSnapshot;
+use qaqh_session::session_fact_v2::{AgentMetadata, AgentPath, FactPayload, SessionId};
 
 use crate::agent::SubagentSpawnSpec;
+use crate::agent_catalog::AgentCatalog;
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
 use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
 use crate::{RingingHub, SessionActivityTracker};
@@ -262,6 +269,23 @@ pub struct AgentInstance {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Logical identity allocated for a newly spawned subagent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedSubagentInfo {
+    pub child_session_id: SessionId,
+    pub parent_agent_path: AgentPath,
+    pub child_agent_path: AgentPath,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SubagentSpawnOptions<'a> {
+    pub(crate) tools: &'a [String],
+    pub(crate) model: Option<&'a str>,
+    pub(crate) base_url: Option<&'a str>,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) ephemeral: bool,
+}
+
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     activity: SessionActivityTracker,
@@ -275,6 +299,8 @@ pub struct AgentRegistry {
     last_spawn: HashMap<String, std::time::Instant>,
     /// P2-5：daemon 级 parent/child edge 与 unload 顺序状态机。
     supervisor: SubagentSupervisor,
+    /// Subagent V2：逻辑 agent metadata；worker handle 仍由 `instances` 管理。
+    agent_catalog: AgentCatalog,
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
@@ -290,6 +316,7 @@ impl AgentRegistry {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
         }
@@ -300,7 +327,115 @@ impl AgentRegistry {
         self.hub = Some(hub);
     }
 
+    /// Register a root session as `/root`.
+    ///
+    /// This is idempotent for the same root session. A conflicting agent id or
+    /// path is rejected instead of silently replacing logical metadata.
+    pub fn register_root_agent(
+        &mut self,
+        seed: &str,
+        created_at_ms: i64,
+    ) -> Result<AgentMetadata, String> {
+        let session_dir = self.sessions.session_path_dir(seed);
+        let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
+            .map_err(|error| format!("open canonical identity for root {seed}: {error}"))?;
+        self.agent_catalog
+            .register_root_with_alias(identity.session_id, Some(seed), created_at_ms)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Read logical metadata by stable `AgentId = session_id`.
+    pub fn agent_metadata(&self, agent_id: &str) -> Option<AgentMetadata> {
+        self.agent_catalog.get_by_id(agent_id).cloned()
+    }
+
+    /// Read logical metadata by tree-relative path.
+    pub fn agent_metadata_by_path(
+        &self,
+        root_session_id: &str,
+        agent_path: &AgentPath,
+    ) -> Option<AgentMetadata> {
+        self.agent_catalog
+            .get_by_path(root_session_id, agent_path)
+            .cloned()
+    }
+
+    /// List logical metadata at or below a path prefix within one root tree.
+    pub fn list_agents_by_path(
+        &self,
+        root_session_id: &str,
+        prefix: &AgentPath,
+    ) -> Vec<AgentMetadata> {
+        self.agent_catalog.list_prefix(root_session_id, prefix)
+    }
+
+    /// Rebuild the canonical agent graph for one root tree.
+    pub fn agent_graph_snapshot(
+        &self,
+        root_session_id: &str,
+    ) -> Result<AgentGraphSnapshot, String> {
+        crate::agent_graph::load_agent_graph(&self.sessions, root_session_id)
+            .map(|graph| graph.snapshot())
+    }
+
+    fn ensure_root_metadata(&mut self, seed: &str) -> Result<(), String> {
+        if seed.is_empty()
+            || self.agent_catalog.get_by_id(seed).is_some()
+            || self.supervisor.parent_of(seed).is_some()
+        {
+            return Ok(());
+        }
+        if self.canonical_parent_session_id(seed)?.is_none() {
+            self.register_root_agent(seed, unix_ms())?;
+        }
+        Ok(())
+    }
+
+    /// Read the `SessionCreated.parent_session_id` recovery hint from the
+    /// canonical log. This is deliberately a hint only: graph ownership is
+    /// established by parent-log `SubagentSpawned` facts in SUBV2-03/04.
+    fn canonical_parent_session_id(&self, seed: &str) -> Result<Option<String>, String> {
+        let session_dir = self.sessions.session_path_dir(seed);
+        if !session_dir.exists() {
+            return Ok(None);
+        }
+        // This is a read-only recovery hint. Do not create the identity
+        // sidecar here: a session directory can legitimately exist before the
+        // canonical baseline has been materialized.
+        if !session_dir.join(CANONICAL_IDENTITY_FILE).exists() {
+            return Ok(None);
+        }
+        let has_events = session_dir.join(EVENTS_FILE).exists();
+        let has_commit = session_dir.join(EVENTS_COMMIT_FILE).exists();
+        if !has_events && !has_commit {
+            // `persist_new_session` creates a metadata-only directory before
+            // the first canonical fact. That is still a root session.
+
+            return Ok(None);
+        }
+        let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
+            .map_err(|error| format!("open canonical identity for {seed}: {error}"))?;
+        let reader = CommittedFactReader::open(
+            &session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .map_err(|error| format!("open committed facts for {seed}: {error}"))?;
+        for fact in reader
+            .read_all()
+            .map_err(|error| format!("read committed facts for {seed}: {error}"))?
+        {
+            if let FactPayload::SessionCreated(created) = fact.payload {
+                return Ok(created
+                    .parent_session_id
+                    .map(|parent| parent.as_str().to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn get_or_spawn(&mut self, seed: &str) -> Result<(), String> {
+        self.ensure_root_metadata(seed)?;
         if self.instances.contains_key(seed) {
             return Ok(());
         }
@@ -360,28 +495,149 @@ impl AgentRegistry {
         base_url: Option<&str>,
         max_tokens: Option<u32>,
     ) -> Result<(), String> {
-        if self.instances.contains_key(seed) {
-            return Err(format!("agent already running for {seed}"));
-        }
         let persist = std::env::var("QAQH_SUBAGENT_PERSIST")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
-        let ephemeral = !persist;
-        // T-1-4：登记「父会话 → 子 seed」。父 seed 取自当前工具线程的运行时
-        // 上下文——`spawn_subagent` handler 运行在父 actor 的工具线程上，
-        // `ActorToolScope` 已把父会话的 `RUNTIME_CTX` 安装到该线程。daemon
-        // RPC `subagent.spawn`（无父上下文）与测试路径读到 None，跳过登记。
+        let options = SubagentSpawnOptions {
+            tools,
+            model,
+            base_url,
+            max_tokens,
+            ephemeral: !persist,
+        };
         let parent_seed = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
+        if parent_seed.is_empty() {
+            let child_dir = self.sessions.session_path_dir(seed);
+            let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
+                .map_err(|error| format!("open child canonical identity for {seed}: {error}"))?;
+            return self.spawn_subagent_internal(
+                seed,
+                &parent_seed,
+                None,
+                child_identity.session_id,
+                options,
+            );
+        }
+        let requested_name = legacy_child_name(seed);
+        self.spawn_subagent_v2(seed, &parent_seed, &requested_name, options)
+            .map(|_| ())
+    }
+
+    /// V2 spawn path: allocate a tree-relative child path, create the actor,
+    /// and register logical metadata before the caller commits the canonical
+    /// `SubagentSpawned` edge.
+    pub(crate) fn spawn_subagent_v2(
+        &mut self,
+        seed: &str,
+        parent_session_id: &str,
+        requested_name: &str,
+        options: SubagentSpawnOptions<'_>,
+    ) -> Result<SpawnedSubagentInfo, String> {
+        if parent_session_id.is_empty() {
+            return Err("subagent v2 requires a parent_session_id".to_string());
+        }
+        self.ensure_root_metadata(parent_session_id)?;
+        let parent = self
+            .agent_catalog
+            .get_by_id(parent_session_id)
+            .cloned()
+            .ok_or_else(|| format!("subagent parent metadata missing for {parent_session_id}"))?;
+        let child_path = parent
+            .agent_path
+            .child(requested_name)
+            .map_err(|error| format!("invalid subagent name {requested_name:?}: {error}"))?;
+        if self
+            .agent_catalog
+            .get_by_path(parent.root_session_id.as_str(), &child_path)
+            .is_some()
+        {
+            return Err(format!(
+                "subagent path {child_path} already exists in root {}",
+                parent.root_session_id
+            ));
+        }
+
+        let parent_dir = self.sessions.session_path_dir(parent_session_id);
+        let parent_identity =
+            CanonicalSessionIdentity::open_or_create(&parent_dir).map_err(|error| {
+                format!("open parent canonical identity for {parent_session_id}: {error}")
+            })?;
+        let child_dir = self.sessions.session_path_dir(seed);
+        let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
+            .map_err(|error| format!("open child canonical identity for {seed}: {error}"))?;
+        let cwd = self
+            .sessions
+            .workspace_cwd(seed)
+            .or_else(|| self.sessions.workspace_cwd(parent_session_id))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "/".to_string());
+        crate::service::materialize_canonical_session_in(
+            &child_dir,
+            &cwd,
+            options.model.unwrap_or("unknown"),
+            Some(parent_identity.session_id.clone()),
+        )?;
+
+        let identity = Some((parent.clone(), child_path.clone()));
+        self.spawn_subagent_internal(
+            seed,
+            parent_session_id,
+            identity,
+            child_identity.session_id.clone(),
+            options,
+        )?;
+        Ok(SpawnedSubagentInfo {
+            child_session_id: child_identity.session_id,
+            parent_agent_path: parent.agent_path,
+            child_agent_path: child_path,
+        })
+    }
+
+    /// Roll back a child registration after its canonical spawn edge failed.
+    ///
+    /// The actor may already exist; closing it is safe, while the durable child
+    /// session remains available for recovery because V2 children are
+    /// persistent.
+    pub fn rollback_subagent(&mut self, seed: &str, child_session_id: &str) {
+        self.agent_catalog.remove(child_session_id);
+        self.close(seed);
+    }
+
+    fn spawn_subagent_internal(
+        &mut self,
+        seed: &str,
+        parent_seed: &str,
+        identity: Option<(AgentMetadata, AgentPath)>,
+        child_session_id: SessionId,
+        options: SubagentSpawnOptions<'_>,
+    ) -> Result<(), String> {
+        let SubagentSpawnOptions {
+            tools,
+            model,
+            base_url,
+            max_tokens,
+            ephemeral,
+        } = options;
+        if self.instances.contains_key(seed) {
+            return Err(format!("agent already running for {seed}"));
+        }
+        if !ephemeral {
+            self.sessions.set_ephemeral(seed, false);
+        }
         let root_seed = if parent_seed.is_empty() {
             seed.to_string()
         } else {
-            self.supervisor.root_of(&parent_seed)
+            self.supervisor.root_of(parent_seed)
         };
         // Durable reservation must exist before the child actor can perform
         // any side effect.
         let reservation = self.reserve_spawn(&root_seed, seed)?;
-        let parent_cancel = self.cancel_for_seed(&parent_seed);
+        let parent_cancel = self.cancel_for_seed(parent_seed);
         if let Err(error) = self.spawn_subagent_inprocess(
             seed,
             SubagentSpawnSpec {
@@ -402,7 +658,7 @@ impl AgentRegistry {
         }
         if !parent_seed.is_empty()
             && parent_seed != seed
-            && let Err(error) = self.link_subagent(&parent_seed, seed)
+            && let Err(error) = self.link_subagent(parent_seed, seed)
         {
             self.close(seed);
             let _ = self.release_spawn(
@@ -412,7 +668,28 @@ impl AgentRegistry {
             );
             return Err(error);
         }
+        if let Some((parent, child_path)) = identity {
+            let metadata = AgentMetadata {
+                root_session_id: parent.root_session_id.clone(),
+                agent_id: child_session_id.clone(),
+                agent_path: child_path,
+                parent_agent_path: Some(parent.agent_path),
+                nickname: None,
+                role: None,
+                created_at_ms: unix_ms(),
+            };
+            if let Err(error) = self.agent_catalog.register_with_alias(metadata, Some(seed)) {
+                self.close(seed);
+                let _ = self.release_spawn(
+                    &root_seed,
+                    &reservation.reservation_id,
+                    ReleaseReason::Reconciliation,
+                );
+                return Err(error.to_string());
+            }
+        }
         if let Err(error) = self.commit_spawn(&root_seed, &reservation.reservation_id) {
+            self.agent_catalog.remove(child_session_id.as_str());
             self.close(seed);
             let _ = self.release_spawn(
                 &root_seed,
@@ -1427,6 +1704,22 @@ fn tail_text(text: &str, max_bytes: usize) -> String {
         .collect()
 }
 
+/// Stable, grammar-valid name for legacy direct `spawn_subagent` callers.
+fn legacy_child_name(seed: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut hasher);
+    format!("sub_{:016x}", hasher.finish())
+}
+
+/// Millisecond wall clock for logical agent registration.
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
 /// Broadcast 命令 id（时间戳十六进制，语义同 service.rs 的 `command_id`）。
 fn broadcast_command_id() -> String {
     let nanos = std::time::SystemTime::now()
@@ -1582,6 +1875,7 @@ mod tests {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
         };
@@ -1683,6 +1977,7 @@ mod tests {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
         };
