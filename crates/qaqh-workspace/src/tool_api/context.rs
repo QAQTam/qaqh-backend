@@ -110,6 +110,9 @@ pub struct ToolCallContext {
     /// This is resolved before execution and carried explicitly so runtime
     /// intent hashing and the exec handler consume the same policy value.
     pub sandbox_spec: SandboxSpec,
+    /// Host-configured default shell for the exec tool. `None` = platform
+    /// priority auto-detection; an explicit exec `shell` argument still wins.
+    pub exec_default_shell: Option<String>,
     /// 生效超时（调用方显式值覆盖 descriptor 默认值；构造后定稿）。
     pub timeout: Duration,
     /// 取消信号（只读）。
@@ -150,6 +153,7 @@ mod tests {
             permission_level: PermissionLevel::ReadFree,
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::workspace_write(PathBuf::from("/tmp/ws")),
+            exec_default_shell: None,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
@@ -173,6 +177,7 @@ mod tests {
             permission_level: PermissionLevel::ReadFree,
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::disabled(),
+            exec_default_shell: None,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,

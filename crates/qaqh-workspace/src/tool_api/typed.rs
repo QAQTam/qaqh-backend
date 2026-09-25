@@ -259,6 +259,7 @@ mod tests {
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
                 "/tmp/ws",
             )),
+            exec_default_shell: None,
             timeout: Duration::from_secs(10),
             cancellation: CancellationToken::new(),
             progress: None,

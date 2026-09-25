@@ -15,7 +15,8 @@ use super::pipe::set_pipe_nonblocking;
 use super::pipe::{PipePumpCtx, Readiness, SEAL_JOIN_BUDGET, spawn_pipe_reader, wait_reader_done};
 use super::truncate::{strip_ansi, token_truncate};
 
-/// Direct command execution: argv array, no shell.
+/// Internal process launch primitive. The argv is always derived from the
+/// selected shell; the public exec tool no longer accepts a direct argv array.
 /// Uses background threads for pipe reading and poll-based timeout.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）

@@ -79,7 +79,23 @@ qaqh-types / qaqh-domain / qaqh-policy / qaqh-sandbox
 ### Tool execution
 
 - `ToolCallContext` 携带 session/workspace/mode/permission/sandbox/cancellation。
+- `ToolCallContext` 同时携带 host 解析出的 exec 默认 shell，确保运行中配置切换即时生效。
+- exec shell 优先级：显式 `shell` 参数 > `[exec].default_shell` > 平台自动探测。
+- 平台自动探测顺序：
+  - Windows：`pwsh` > Git for Windows bash > `powershell` 5.1 > `cmd`；
+  - Linux：`bash` > `zsh` > `sh`；
+  - macOS：`bash` > `zsh`。
+- shell 切换不做语法翻译；命令与所选 shell 不兼容时直接返回 shell 原始错误，由模型自行纠正。
+
+```toml
+[exec]
+# 空值 / "auto" = 按平台优先级自动探测
+default_shell = "auto"
+```
+
 - `ToolResult` 的终态与展示 outcome 已结构化，不再从 `[OK]` 文本反推。
+- exec 只接受 shell `command` 字符串，不再接受直接 `argv`。
+- 进程启动层仍使用 argv，但 argv 只由所选 shell 的 `command` 参数派生，不是公开工具参数。
 - exec 支持 stdout/stderr 分离展示。
 - Linux sandbox 支持 bubblewrap 或 Landlock/seccomp；具体后端由 capability 探测决定。
 

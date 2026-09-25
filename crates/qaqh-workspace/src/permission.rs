@@ -126,7 +126,7 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
 ///
 /// `exec` is the one built-in tool whose effect cannot be inferred from
 /// [`extract_target_paths`]: the command text may write outside `cwd`. Include
-/// the command/argv/args, shell and cwd for informed approval, but deliberately
+/// the command/args, shell and cwd for informed approval, but deliberately
 /// omit `env` and all other arbitrary tool args so the dialog cannot become a
 /// secret-dumping surface.
 pub fn summarize_permission_action(tool_name: &str, args: &serde_json::Value) -> Option<String> {
@@ -142,7 +142,7 @@ pub fn summarize_permission_action(tool_name: &str, args: &serde_json::Value) ->
     {
         parts.push(format!("command: {}", json_display(command)));
     }
-    for key in ["argv", "args"] {
+    for key in ["args"] {
         if let Some(values) = args
             .get(key)
             .and_then(serde_json::Value::as_array)
@@ -992,14 +992,14 @@ mod w3_w7_tests {
     }
 
     #[test]
-    fn exec_permission_action_summary_uses_argv_and_is_bounded() {
-        let argv = vec!["echo"; 3000];
+    fn exec_permission_action_summary_uses_command_and_is_bounded() {
+        let command = "echo ".repeat(3000);
         let summary = summarize_permission_action(
             "exec",
-            &serde_json::json!({ "argv": argv, "cwd": "/repo" }),
+            &serde_json::json!({ "command": command, "cwd": "/repo" }),
         )
-        .expect("argv summary");
-        assert!(summary.starts_with(r#"argv: ["echo", "echo""#), "{summary}");
+        .expect("command summary");
+        assert!(summary.starts_with("command: \"echo echo"), "{summary}");
         assert!(summary.ends_with('…'), "summary must be visibly truncated");
         assert_eq!(summary.chars().count(), 4096);
     }
