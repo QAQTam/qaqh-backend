@@ -635,19 +635,25 @@ pub fn start_subagent_collector(
         parent_session_id,
         parent_call_id,
         process_id,
+        inter_agent,
     } = request;
     let batch_rx = host.subscribe(seed);
     let transport = Box::new(HostTransport {
         host: host.clone(),
         batch_rx,
     }) as Box<dyn SubagentTransport>;
+    let message_id = inter_agent
+        .as_ref()
+        .map(|envelope| envelope.message_id.clone())
+        .unwrap_or_else(|| format!("subagent-task:{seed}"));
     let send = RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
         text: task_text.to_string(),
         images: vec![],
         attachments: None,
-        message_id: Some(format!("subagent-task:{seed}")),
+        message_id: Some(message_id),
         input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
         as_system: false,
+        inter_agent,
         subagent_terminal: None,
     });
     match transport.send_command(seed, send) {
@@ -885,6 +891,7 @@ fn collect_subagent_result(
                 // 以 system 角色注入（而非 user）：模型可见但不等同于用户输入，
                 // 保留 [SUBAGENT ...] 标签供模型区分注入数据与系统指令。
                 as_system: true,
+                inter_agent: None,
                 subagent_terminal: Some(terminal_notification),
             },
         );

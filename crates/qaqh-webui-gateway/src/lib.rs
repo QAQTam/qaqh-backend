@@ -1602,6 +1602,7 @@ mod tests {
             message_id: None,
             input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
             as_system: true,
+            inter_agent: None,
             subagent_terminal: None,
         });
         assert!(sanitize_command(&mut send));
