@@ -641,6 +641,7 @@ pub enum ToolEffect {
     /// `SubagentSpawned` fact before the task is delivered.
     SubagentSpawned {
         seed: String,
+        child_session_id: String,
         name: String,
         task_text: String,
         timeout_secs: u64,

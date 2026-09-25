@@ -272,6 +272,7 @@ pub struct AgentInstance {
 /// Logical identity allocated for a newly spawned subagent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedSubagentInfo {
+    pub child_session_id: SessionId,
     pub parent_agent_path: AgentPath,
     pub child_agent_path: AgentPath,
 }
@@ -282,6 +283,7 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     pub(crate) model: Option<&'a str>,
     pub(crate) base_url: Option<&'a str>,
     pub(crate) max_tokens: Option<u32>,
+    pub(crate) ephemeral: bool,
 }
 
 pub struct AgentRegistry {
@@ -334,8 +336,11 @@ impl AgentRegistry {
         seed: &str,
         created_at_ms: i64,
     ) -> Result<AgentMetadata, String> {
+        let session_dir = self.sessions.session_path_dir(seed);
+        let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
+            .map_err(|error| format!("open canonical identity for root {seed}: {error}"))?;
         self.agent_catalog
-            .register_root(seed, created_at_ms)
+            .register_root_with_alias(identity.session_id, Some(seed), created_at_ms)
             .map_err(|error| error.to_string())
     }
 
@@ -490,17 +495,29 @@ impl AgentRegistry {
         base_url: Option<&str>,
         max_tokens: Option<u32>,
     ) -> Result<(), String> {
+        let persist = std::env::var("QAQH_SUBAGENT_PERSIST")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
         let options = SubagentSpawnOptions {
             tools,
             model,
             base_url,
             max_tokens,
+            ephemeral: !persist,
         };
         let parent_seed = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
         if parent_seed.is_empty() {
-            return self.spawn_subagent_internal(seed, &parent_seed, None, options);
+            let child_dir = self.sessions.session_path_dir(seed);
+            let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
+                .map_err(|error| format!("open child canonical identity for {seed}: {error}"))?;
+            return self.spawn_subagent_internal(
+                seed,
+                &parent_seed,
+                None,
+                child_identity.session_id,
+                options,
+            );
         }
         let requested_name = legacy_child_name(seed);
         self.spawn_subagent_v2(seed, &parent_seed, &requested_name, options)
@@ -541,12 +558,54 @@ impl AgentRegistry {
             ));
         }
 
+        let parent_dir = self.sessions.session_path_dir(parent_session_id);
+        let parent_identity =
+            CanonicalSessionIdentity::open_or_create(&parent_dir).map_err(|error| {
+                format!("open parent canonical identity for {parent_session_id}: {error}")
+            })?;
+        let child_dir = self.sessions.session_path_dir(seed);
+        let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
+            .map_err(|error| format!("open child canonical identity for {seed}: {error}"))?;
+        let cwd = self
+            .sessions
+            .workspace_cwd(seed)
+            .or_else(|| self.sessions.workspace_cwd(parent_session_id))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "/".to_string());
+        crate::service::materialize_canonical_session_in(
+            &child_dir,
+            &cwd,
+            options.model.unwrap_or("unknown"),
+            Some(parent_identity.session_id.clone()),
+        )?;
+
         let identity = Some((parent.clone(), child_path.clone()));
-        self.spawn_subagent_internal(seed, parent_session_id, identity, options)?;
+        self.spawn_subagent_internal(
+            seed,
+            parent_session_id,
+            identity,
+            child_identity.session_id.clone(),
+            options,
+        )?;
         Ok(SpawnedSubagentInfo {
+            child_session_id: child_identity.session_id,
             parent_agent_path: parent.agent_path,
             child_agent_path: child_path,
         })
+    }
+
+    /// Roll back a child registration after its canonical spawn edge failed.
+    ///
+    /// The actor may already exist; closing it is safe, while the durable child
+    /// session remains available for recovery because V2 children are
+    /// persistent.
+    pub fn rollback_subagent(&mut self, seed: &str, child_session_id: &str) {
+        self.agent_catalog.remove(child_session_id);
+        self.close(seed);
     }
 
     fn spawn_subagent_internal(
@@ -554,6 +613,7 @@ impl AgentRegistry {
         seed: &str,
         parent_seed: &str,
         identity: Option<(AgentMetadata, AgentPath)>,
+        child_session_id: SessionId,
         options: SubagentSpawnOptions<'_>,
     ) -> Result<(), String> {
         let SubagentSpawnOptions {
@@ -561,13 +621,14 @@ impl AgentRegistry {
             model,
             base_url,
             max_tokens,
+            ephemeral,
         } = options;
         if self.instances.contains_key(seed) {
             return Err(format!("agent already running for {seed}"));
         }
-        let persist = std::env::var("QAQH_SUBAGENT_PERSIST")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
-        let ephemeral = !persist;
+        if !ephemeral {
+            self.sessions.set_ephemeral(seed, false);
+        }
         let root_seed = if parent_seed.is_empty() {
             seed.to_string()
         } else {
@@ -610,14 +671,14 @@ impl AgentRegistry {
         if let Some((parent, child_path)) = identity {
             let metadata = AgentMetadata {
                 root_session_id: parent.root_session_id.clone(),
-                agent_id: SessionId::new(seed),
+                agent_id: child_session_id.clone(),
                 agent_path: child_path,
                 parent_agent_path: Some(parent.agent_path),
                 nickname: None,
                 role: None,
                 created_at_ms: unix_ms(),
             };
-            if let Err(error) = self.agent_catalog.register(metadata) {
+            if let Err(error) = self.agent_catalog.register_with_alias(metadata, Some(seed)) {
                 self.close(seed);
                 let _ = self.release_spawn(
                     &root_seed,
@@ -628,7 +689,7 @@ impl AgentRegistry {
             }
         }
         if let Err(error) = self.commit_spawn(&root_seed, &reservation.reservation_id) {
-            self.agent_catalog.remove(seed);
+            self.agent_catalog.remove(child_session_id.as_str());
             self.close(seed);
             let _ = self.release_spawn(
                 &root_seed,
