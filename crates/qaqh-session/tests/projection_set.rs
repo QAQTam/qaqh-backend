@@ -30,23 +30,22 @@ fn facts() -> Vec<SessionFact> {
 #[test]
 fn projection_set_publishes_static_slots_for_all_fixtures() {
     let facts = facts();
-    assert_eq!(facts.len(), 21);
+    assert_eq!(facts.len(), 22);
 
     let mut set = ProjectionSet::default();
-    let mut published = [0_usize; 5];
+    let mut published = [0_usize; 6];
 
     for fact in &facts {
         let expected = projection_slots(&fact.payload);
         let deltas = set.apply(fact);
-        let actual: Vec<ProjectionSlot> = deltas.iter().map(|delta| delta.slot).collect();
 
-        assert_eq!(
-            actual.as_slice(),
-            expected,
-            "slot mismatch for {:?}",
-            fact.payload
-        );
         for delta in &deltas {
+            assert!(
+                expected.contains(&delta.slot),
+                "slot mismatch for {:?}: {:?}",
+                fact.payload,
+                delta.slot
+            );
             assert_eq!(delta.payload_slot(), Some(delta.slot));
             published[delta.slot.as_u16() as usize] += 1;
         }
@@ -54,10 +53,10 @@ fn projection_set_publishes_static_slots_for_all_fixtures() {
 
     assert_eq!(
         published,
-        [8, 4, 12, 3, 6],
-        "turn/compaction facts update timeline state but do not publish a timeline slot"
+        [8, 4, 12, 3, 6, 1],
+        "registered slots may stay silent when a reducer has no state change"
     );
-    assert_eq!(set.last_fact_seq(), 21);
+    assert_eq!(set.last_fact_seq(), 22);
 
     let snapshot = set.snapshot();
     assert_eq!(snapshot.conversation.revision, 8);
@@ -68,6 +67,8 @@ fn projection_set_publishes_static_slots_for_all_fixtures() {
     );
     assert_eq!(snapshot.resources.revision, 3);
     assert_eq!(snapshot.meta.revision, 6);
+    assert_eq!(snapshot.mailbox.revision, 1);
+    assert_eq!(snapshot.mailbox.messages.len(), 1);
 
     let rebuilt = ProjectionSet::rebuild(facts.into_iter());
     assert_eq!(snapshot, rebuilt.snapshot());
