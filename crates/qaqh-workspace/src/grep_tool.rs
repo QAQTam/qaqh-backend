@@ -16,6 +16,7 @@ use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContex
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -110,6 +111,25 @@ impl GrepOutput {
         }
         text
     }
+    fn display_summary(&self) -> String {
+        let files = self
+            .matches
+            .iter()
+            .map(|matched| matched.path.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let mut summary = format!(
+            "{} match{} · {} file{}",
+            self.count,
+            if self.count == 1 { "" } else { "es" },
+            files,
+            if files == 1 { "" } else { "s" }
+        );
+        if self.truncated {
+            summary.push_str(" · truncated");
+        }
+        summary
+    }
 }
 
 impl ToolProjection for GrepOutput {
@@ -120,7 +140,7 @@ impl ToolProjection for GrepOutput {
     }
 
     fn summary(&self) -> Option<String> {
-        self.model_text().lines().next().map(str::to_string)
+        Some(self.display_summary())
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
@@ -154,7 +174,7 @@ impl ToolProjection for GrepOutput {
                     truncated: body_truncated,
                 },
             )
-            .with_summary(text.lines().next().unwrap_or_default().to_string()),
+            .with_summary(self.display_summary()),
             None => ToolDisplay::new(
                 ToolHeader::Other {
                     label: "grep".to_string(),
@@ -721,7 +741,12 @@ mod tests {
             "pattern": "TODO",
             "paths": ["src"]
         }));
-        assert_eq!(display.summary.as_deref(), Some("src/a.rs:7:TODO"));
+        assert_eq!(display.summary.as_deref(), Some("1 match · 1 file"));
+        assert_ne!(
+            display.summary.as_deref(),
+            Some(model.lines().next().unwrap_or_default()),
+            "grep summary must be metadata, not the body's first line"
+        );
         assert_eq!(
             display.header,
             ToolHeader::Query {

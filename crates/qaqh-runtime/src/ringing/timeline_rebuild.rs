@@ -353,14 +353,14 @@ fn rebuild_tool(
     if let (Some(display), Some(result)) = (display.as_mut(), result) {
         crate::timeline::apply_result_metrics(display, &result.metrics);
     }
-    let summary = Some(crate::timeline::project_tool_summary(
-        &card.name,
-        state,
-        display
-            .as_ref()
-            .and_then(|display| display.summary.as_deref()),
-        result.map(|result| result.output.as_str()),
-    ));
+    let summary = display.is_none().then(|| {
+        crate::timeline::project_tool_summary(
+            &card.name,
+            state,
+            None,
+            result.map(|result| result.output.as_str()),
+        )
+    });
     TimelineTool {
         tool_call_id: card.id.clone(),
         name: card.name.clone(),
@@ -424,7 +424,10 @@ mod tests {
 
         let tool = rebuild_tool(&card, &[result]);
 
-        assert_eq!(tool.summary.as_deref(), Some("canonical summary"));
+        assert_eq!(
+            tool.summary, None,
+            "canonical display must be the only summary source"
+        );
         let display = tool.display.expect("canonical display");
         assert_eq!(display.summary.as_deref(), Some("canonical summary"));
         assert!(matches!(

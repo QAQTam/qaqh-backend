@@ -653,7 +653,9 @@ impl TimelineAppender {
             return Err(TimelineError::InvalidBlockKind(block_id.to_string()));
         };
         tool.state = state;
-        tool.summary = summary.or_else(|| tool.summary.clone());
+        if tool.display.is_none() {
+            tool.summary = summary.or_else(|| tool.summary.clone());
+        }
         let tool = tool.clone();
         Ok(next_entry(
             timeline,

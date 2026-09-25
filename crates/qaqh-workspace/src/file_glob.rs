@@ -61,6 +61,18 @@ impl GlobOutput {
         }
         text
     }
+
+    fn display_summary(&self) -> String {
+        let mut summary = format!(
+            "{} match{}",
+            self.count,
+            if self.count == 1 { "" } else { "es" }
+        );
+        if self.truncated {
+            summary.push_str(" · truncated");
+        }
+        summary
+    }
 }
 
 impl ToolProjection for GlobOutput {
@@ -71,11 +83,11 @@ impl ToolProjection for GlobOutput {
     }
 
     fn summary(&self) -> Option<String> {
-        self.model_text().lines().next().map(str::to_string)
+        Some(self.display_summary())
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
-        glob_display(args, &self.model_text())
+        glob_display(args, self)
     }
 }
 
@@ -189,8 +201,9 @@ fn glob_root(ctx: &ToolCallContext, raw_path: Option<&str>) -> PathBuf {
     }
 }
 
-fn glob_display(args: &Value, output: &str) -> ToolDisplay {
-    let (glob_body, glob_body_truncated) = crate::tool_api::display::clamp_display_body(output);
+fn glob_display(args: &Value, output: &GlobOutput) -> ToolDisplay {
+    let (glob_body, glob_body_truncated) =
+        crate::tool_api::display::clamp_display_body(&output.model_text());
     let pattern = args
         .get("pattern")
         .and_then(Value::as_str)
@@ -227,7 +240,7 @@ fn glob_display(args: &Value, output: &str) -> ToolDisplay {
             truncated: glob_body_truncated,
         },
     )
-    .with_summary(output.lines().next().unwrap_or_default().to_string())
+    .with_summary(output.display_summary())
 }
 
 fn glob_error(message: impl Into<String>) -> ToolExecutionError {
@@ -496,7 +509,12 @@ mod tests {
         };
         assert_eq!(model, "src/a.rs");
         let display = output.display(&serde_json::json!({"pattern": "**/*.rs"}));
-        assert_eq!(display.summary.as_deref(), Some("src/a.rs"));
+        assert_eq!(display.summary.as_deref(), Some("1 match"));
+        assert_ne!(
+            display.summary.as_deref(),
+            Some(model.lines().next().unwrap_or_default()),
+            "glob summary must be metadata, not the body's first line"
+        );
         assert_eq!(
             display.header,
             ToolHeader::Path {

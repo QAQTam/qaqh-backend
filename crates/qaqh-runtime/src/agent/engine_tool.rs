@@ -29,19 +29,14 @@ fn timeline_tool(
     failure: Option<qaqh_domain::TimelineFailure>,
     display: Option<qaqh_workspace::tool_api::ToolDisplay>,
 ) -> qaqh_domain::TimelineTool {
-    let summary = crate::timeline::project_tool_summary(
-        name,
-        state,
-        display
-            .as_ref()
-            .and_then(|display| display.summary.as_deref()),
-        output.as_deref(),
-    );
+    let summary = display
+        .is_none()
+        .then(|| crate::timeline::project_tool_summary(name, state, None, output.as_deref()));
     qaqh_domain::TimelineTool {
         tool_call_id: tool_call_id.to_string(),
         name: name.to_string(),
         state,
-        summary: Some(summary),
+        summary,
         args_json,
         output,
         diff,
@@ -1161,7 +1156,7 @@ mod display_projection_tests {
     use super::*;
 
     #[test]
-    fn timeline_tool_prefers_declared_display_summary() {
+    fn timeline_tool_uses_display_as_the_only_summary_source() {
         let display = qaqh_workspace::tool_api::ToolDisplay::new(
             qaqh_workspace::tool_api::ToolHeader::Shell {
                 command: "bash ls".into(),
@@ -1183,9 +1178,16 @@ mod display_projection_tests {
             None,
             Some(display),
         );
-        assert_eq!(tool.summary.as_deref(), Some("exit 0 · bash ls"));
-        assert!(tool.display.is_some());
-        assert!(!tool.summary.as_deref().unwrap_or("").contains('{'));
+        assert_eq!(
+            tool.summary, None,
+            "display-backed tools must not double-write summary"
+        );
+        assert_eq!(
+            tool.display
+                .as_ref()
+                .and_then(|display| display.summary.as_deref()),
+            Some("exit 0 · bash ls")
+        );
     }
 
     #[test]
