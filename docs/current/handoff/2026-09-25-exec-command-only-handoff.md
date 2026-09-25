@@ -137,10 +137,9 @@ git diff --check
 
 ## 6. 未决项
 
-- TUI 仓库仍有历史 `argv` 文案/测试 fixture：
-  - `src/app/session.rs` 的动作摘要注释；
-  - `src/app/render_transcript.rs` 的旧展示 fixture。
-  当前只做后端；接入 TUI 时应同步清理。
+- TUI 历史 `argv` 文案/测试 fixture 已同步清理，并已适配当前后端的
+  `TimelineToolDisplay.outcome` 与 stdout/stderr `Streams` body
+  （TUI `de78c65`）。
 - `tools/session-forensics/session_forensics.py` 保留 argv 解析，用于读取历史
   session 日志，不表示当前 exec 支持 argv。
 - sandbox helper 内部协议继续使用 argv，不能随 exec wire 一起删除。
