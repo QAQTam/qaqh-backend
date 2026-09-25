@@ -814,6 +814,7 @@ impl ToolRuntime {
                 parent_session_id: &parent_session_id,
                 parent_call_id: parent_call_id.as_str(),
                 process_id,
+                inter_agent: None,
             }) {
                 let finish_error = Self::append_subagent_finished(
                     ctx,

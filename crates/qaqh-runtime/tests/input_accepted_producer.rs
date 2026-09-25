@@ -4,14 +4,18 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{
-    ControlCommand, ControlEvent, ConversationCommand, ConversationInputPurpose, SessionState,
+    ControlCommand, ControlEvent, ConversationCommand, ConversationInputPurpose,
+    InterAgentDelivery, InterAgentEnvelope, SessionState,
 };
 use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 use qaqh_runtime::agent::loop_core::{Loop, LoopChannels};
 use qaqh_runtime::agent::state::agent::AgentState;
 use qaqh_runtime::agent::types::{WorkerCommand, WriterEvent};
 use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
-use qaqh_session::session_fact_v2::{FactPayload, InputKind, InputPurpose};
+use qaqh_session::projection::{MailboxProjection, Projection};
+use qaqh_session::session_fact_v2::{
+    ActorKind, FactPayload, InputKind, InputPurpose, MailboxMessageState,
+};
 
 fn send_cmd(cmd_tx: &mpsc::SyncSender<WorkerCommand>, seed: &str, command: RingingCommand) {
     let env = RingingWorkerCommandEnvelope::new(seed, "input-accepted-test", command);
@@ -68,6 +72,7 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
     });
 
     let message_id = "msg_01J00000000000000000000001";
+    let inter_agent_message_id = "msg_01J00000000000000000000002";
     let driver = std::thread::spawn(move || {
         send_cmd(
             &cmd_tx,
@@ -102,6 +107,32 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
                 message_id: Some(message_id.into()),
                 input_purpose: ConversationInputPurpose::QueueOnly,
                 as_system: true,
+                inter_agent: None,
+                subagent_terminal: None,
+            }),
+        );
+        send_cmd(
+            &cmd_tx,
+            &seed,
+            RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+                text: "inter-agent input".into(),
+                images: vec![],
+                attachments: None,
+                message_id: Some(inter_agent_message_id.into()),
+                input_purpose: ConversationInputPurpose::QueueOnly,
+                as_system: false,
+                inter_agent: Some(InterAgentEnvelope {
+                    message_id: inter_agent_message_id.into(),
+                    root_session_id: seed.clone(),
+                    author: "/root".into(),
+                    recipient: "/root/review".into(),
+                    other_recipients: vec![],
+                    task_id: None,
+                    reply_to: None,
+                    causation_id: None,
+                    delivery: InterAgentDelivery::Queue,
+                    created_at_ms: 1_789_830_000_000,
+                }),
                 subagent_terminal: None,
             }),
         );
@@ -143,10 +174,48 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
             _ => None,
         })
         .collect();
+    let communications: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match &fact.payload {
+            FactPayload::InterAgentCommunication(payload) => Some(payload),
+            _ => None,
+        })
+        .collect();
 
-    assert_eq!(accepted.len(), 1, "accepted input must be written once");
-    assert_eq!(accepted[0].input_kind, InputKind::System);
-    assert_eq!(accepted[0].input_purpose, InputPurpose::QueueOnly);
-    assert_eq!(accepted[0].inline_text.as_deref(), Some("canonical input"));
-    assert_eq!(accepted[0].client_request_id.as_deref(), Some(message_id));
+    assert_eq!(accepted.len(), 2, "both inputs must be accepted once");
+    let normal = accepted
+        .iter()
+        .find(|payload| payload.client_request_id.as_deref() == Some(message_id))
+        .expect("normal input accepted");
+    assert_eq!(normal.input_kind, InputKind::System);
+    assert_eq!(normal.input_purpose, InputPurpose::QueueOnly);
+    assert_eq!(normal.inline_text.as_deref(), Some("canonical input"));
+
+    assert_eq!(communications.len(), 1);
+    assert_eq!(
+        communications[0].message_id.as_str(),
+        inter_agent_message_id
+    );
+    let inter_agent = accepted
+        .iter()
+        .find(|payload| payload.client_request_id.as_deref() == Some(inter_agent_message_id))
+        .expect("inter-agent input accepted");
+    assert_eq!(inter_agent.input_kind, InputKind::UserText);
+    assert_eq!(inter_agent.input_purpose, InputPurpose::QueueOnly);
+    assert_eq!(
+        inter_agent.inline_text.as_deref(),
+        Some("inter-agent input")
+    );
+    assert_eq!(inter_agent.actor.kind, ActorKind::Subagent);
+    assert_eq!(inter_agent.actor.id, "/root");
+
+    let mut mailbox = MailboxProjection::default();
+    for fact in &facts {
+        mailbox.apply(fact);
+    }
+    assert_eq!(mailbox.pending_count(), 0);
+    assert_eq!(
+        mailbox.snapshot().messages[0].state,
+        MailboxMessageState::Delivered
+    );
 }

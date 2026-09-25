@@ -96,7 +96,39 @@ impl SubagentHost for QaqhService {
     fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String> {
         let host =
             qaqh_subagent::host().ok_or_else(|| "subagent host is not installed".to_string())?;
-        qaqh_subagent::start_subagent_collector(host, request)
+        let metadata = self
+            .registry()?
+            .agent_metadata(request.child_session_id)
+            .ok_or_else(|| {
+                format!(
+                    "subagent metadata missing for child {}",
+                    request.child_session_id
+                )
+            })?;
+        let author = metadata
+            .parent_agent_path
+            .as_ref()
+            .map(|path| path.as_str().to_string())
+            .unwrap_or_else(|| "/root".to_string());
+        let envelope = qaqh_domain::InterAgentEnvelope {
+            message_id: format!("msg_{}", qaqh_session::canonical::generate_ulid()),
+            root_session_id: metadata.root_session_id.as_str().to_string(),
+            author,
+            recipient: metadata.agent_path.as_str().to_string(),
+            other_recipients: vec![],
+            task_id: None,
+            reply_to: None,
+            causation_id: None,
+            delivery: qaqh_domain::InterAgentDelivery::Trigger,
+            created_at_ms: (nanos() / 1_000_000) as i64,
+        };
+        qaqh_subagent::start_subagent_collector(
+            host,
+            StartSubagentRequest {
+                inter_agent: Some(envelope),
+                ..request
+            },
+        )
     }
 
     fn rollback_subagent(&self, seed: &str, child_session_id: &str, process_id: u32) {
