@@ -33,7 +33,6 @@ impl Loop {
                     qaqh_ringing::RingingCommand::Conversation(
                         qaqh_domain::ConversationCommand::ConversationSendMessage {
                             as_system: true,
-                            subagent_terminal: None,
                             ..
                         }
                     )
@@ -312,9 +311,23 @@ impl Loop {
                     message_id,
                     input_purpose,
                     as_system: true,
-                    subagent_terminal: None,
+                    subagent_terminal,
                     ..
                 }) => {
+                    if let Some(notification) = subagent_terminal
+                        && let Err(error) = self.record_subagent_terminal(notification.clone())
+                    {
+                        self.emit_operation_failed(
+                            &env.command_id,
+                            qaqh_domain::ErrorScope::Conversation,
+                            "subagent_finish_append_failed",
+                            &error,
+                        );
+                        continue;
+                    }
+                    if text.is_empty() {
+                        continue;
+                    }
                     let input_id = message_id.clone().unwrap_or_else(|| env.command_id.clone());
                     let injection = Injection {
                         session_id: env.seed.clone(),
@@ -504,6 +517,36 @@ mod tests {
 
     /// 会话切换同样复位取消原因位：新会话/恢复的会话不是「用户取消」的
     /// 会话，否则一次取消会永久压制后续子代理结果注入。
+    #[test]
+    fn structured_terminal_is_an_injection_command() {
+        let command = crate::agent::types::WorkerCommand {
+            frame: qaqh_ringing::RingingWorkerCommandEnvelope::new(
+                SESSION,
+                "cmd-terminal",
+                qaqh_ringing::RingingCommand::Conversation(
+                    qaqh_domain::ConversationCommand::ConversationSendMessage {
+                        text: String::new(),
+                        images: vec![],
+                        attachments: None,
+                        message_id: Some("subagent-terminal:child".to_string()),
+                        input_purpose: qaqh_domain::ConversationInputPurpose::QueueOnly,
+                        as_system: true,
+                        subagent_terminal: Some(qaqh_domain::SubagentTerminalNotification {
+                            child_session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
+                            parent_call_id: "call_01J00000000000000000000000".to_string(),
+                            terminal: qaqh_domain::SubagentTerminalKind::Cancelled,
+                        }),
+                    },
+                ),
+            ),
+            causation: None,
+        };
+        assert!(
+            Loop::is_injection_command(&command),
+            "structured terminal commands must be consumed at lap boundaries"
+        );
+    }
+
     #[test]
     fn session_switch_clears_cancellation_gate() {
         qaqh_workspace::runtime::set_context(SESSION, 4);

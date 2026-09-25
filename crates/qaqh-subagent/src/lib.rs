@@ -72,6 +72,9 @@ pub struct SpawnSubagentOutput {
     status: String,
     process_id: u32,
     seed: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    child_session_id: String,
     name: String,
     parent_agent_path: String,
     child_agent_path: String,
@@ -114,6 +117,7 @@ impl ToolProjection for SpawnSubagentOutput {
     fn effects(&self) -> Vec<qaqh_workspace::ToolEffect> {
         vec![qaqh_workspace::ToolEffect::SubagentSpawned {
             seed: self.seed.clone(),
+            child_session_id: self.child_session_id.clone(),
             name: self.name.clone(),
             task_text: self.task_text.clone(),
             timeout_secs: self.timeout_secs,
@@ -409,6 +413,7 @@ fn handle_spawn_subagent(
         ));
     }
     let seed = spawned.seed;
+    let child_session_id = spawned.child_session_id;
     let parent_agent_path = spawned.parent_agent_path;
     let child_agent_path = spawned.child_agent_path;
 
@@ -428,6 +433,7 @@ fn handle_spawn_subagent(
         status: "ok".to_string(),
         process_id: registry_id,
         seed,
+        child_session_id,
         name,
         parent_agent_path,
         child_agent_path,
@@ -499,6 +505,7 @@ pub fn start_subagent_collector(
 ) -> Result<(), String> {
     let StartSubagentRequest {
         seed,
+        child_session_id,
         name,
         task_text,
         timeout_secs,
@@ -534,6 +541,7 @@ pub fn start_subagent_collector(
 
     let registry_ref = RegistryRef::Local { id: process_id };
     let seed = seed.to_string();
+    let child_session_id = child_session_id.to_string();
     let name = name.to_string();
     let parent_seed = parent_session_id.to_string();
     let parent_call_id = parent_call_id.to_string();
@@ -541,6 +549,7 @@ pub fn start_subagent_collector(
         collect_subagent_result(
             transport,
             &seed,
+            &child_session_id,
             &name,
             registry_ref,
             timeout_secs,
@@ -555,9 +564,11 @@ pub fn start_subagent_collector(
 /// HTTP/SSE, depending on the transport) until a terminal event, a kill
 /// request, or the timeout — mirroring the old stdout-frame collector, but over
 /// the Ringing event plane.
+#[allow(clippy::too_many_arguments)]
 fn collect_subagent_result(
     transport: Box<dyn SubagentTransport>,
     seed: &str,
+    child_session_id: &str,
     name: &str,
     registry_ref: RegistryRef,
     timeout_secs: u64,
@@ -723,7 +734,7 @@ fn collect_subagent_result(
     }
     if !parent_seed.is_empty() {
         let terminal_notification = qaqh_domain::SubagentTerminalNotification {
-            child_session_id: seed.to_string(),
+            child_session_id: child_session_id.to_string(),
             parent_call_id: parent_call_id.to_string(),
             terminal,
         };
@@ -904,6 +915,7 @@ mod tests {
             status: "ok".to_string(),
             process_id: 7,
             seed: "sub-seed".to_string(),
+            child_session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
             name: "review_code".to_string(),
             parent_agent_path: "/root".to_string(),
             child_agent_path: "/root/review_code".to_string(),
@@ -919,6 +931,10 @@ mod tests {
         assert!(model.contains("\"process_id\":7"));
         assert!(model.contains("\"seed\":\"sub-seed\""));
         assert!(model.contains("\"content\":\"Subagent 'review_code' spawned"));
+        assert!(
+            !model.contains("child_session_id"),
+            "canonical child identity is an internal effect, not model-visible JSON"
+        );
         let display = output.display(&serde_json::json!({}));
         assert_eq!(
             display.summary.as_deref(),
@@ -1118,6 +1134,7 @@ mod tests {
         collect_subagent_result(
             transport,
             child,
+            "0198f1a0-0000-7000-8000-000000000003",
             "cancelled_task",
             registry_ref,
             5,
@@ -1143,6 +1160,8 @@ mod tests {
                     }
                 ) if text.is_empty()
                     && terminal.terminal == qaqh_domain::SubagentTerminalKind::Cancelled
+                    && terminal.child_session_id
+                        == "0198f1a0-0000-7000-8000-000000000003"
             ),
             "cancelled child must send an empty structured terminal notification, got {:?}",
             injected[0].1

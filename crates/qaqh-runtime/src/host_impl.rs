@@ -48,6 +48,7 @@ impl SubagentHost for QaqhService {
                 model,
                 base_url,
                 max_tokens,
+                ephemeral: false,
             },
         )?;
         log::info!(
@@ -57,6 +58,7 @@ impl SubagentHost for QaqhService {
         );
         Ok(SpawnedSubagent {
             seed,
+            child_session_id: spawned.child_session_id.as_str().to_string(),
             parent_agent_path: spawned.parent_agent_path.as_str().to_string(),
             child_agent_path: spawned.child_agent_path.as_str().to_string(),
         })
@@ -68,10 +70,25 @@ impl SubagentHost for QaqhService {
         qaqh_subagent::start_subagent_collector(host, request)
     }
 
-    fn abort_subagent(&self, seed: &str, process_id: u32) {
+    fn rollback_subagent(&self, seed: &str, child_session_id: &str, process_id: u32) {
         qaqh_workspace::process_registry::ProcessRegistry::set_answer(
             process_id,
             "[ABORTED] canonical SubagentSpawned edge was not committed".to_string(),
+        );
+        qaqh_workspace::process_registry::ProcessRegistry::mark_exited(process_id, 1);
+        match self.registry() {
+            Ok(mut registry) => registry.rollback_subagent(seed, child_session_id),
+            Err(error) => {
+                log::warn!("[SUBAGENT-HOST] rollback registry unavailable for {seed}: {error}");
+                let _ = self.close(seed);
+            }
+        }
+    }
+
+    fn abort_subagent(&self, seed: &str, process_id: u32) {
+        qaqh_workspace::process_registry::ProcessRegistry::set_answer(
+            process_id,
+            "[ABORTED] subagent closed after canonical spawn edge".to_string(),
         );
         qaqh_workspace::process_registry::ProcessRegistry::mark_exited(process_id, 1);
         if let Err(error) = self.close(seed) {

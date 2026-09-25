@@ -10,7 +10,7 @@ use qaqh_session::canonical::{
     CanonicalSessionIdentity, CanonicalSessionStore, CommittedFactReader, WriterId, generate_ulid,
 };
 use qaqh_session::session_fact_v2::{
-    EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
+    EventId, FactPayload, FactSchema, SessionCreated, SessionFact, SessionId,
 };
 use serde_json::{Value, json};
 
@@ -906,13 +906,14 @@ fn spawn_config_file_poller() {
 /// `SessionCreated`，把「identity 已建但 snapshot 缺失」的瞬态消掉。
 fn materialize_canonical_session(seed: &str, cwd: &str, model: &str) -> Result<(), String> {
     let session_dir = qaqh_types::platform::sessions_dir().join(seed);
-    materialize_canonical_session_in(&session_dir, cwd, model)
+    materialize_canonical_session_in(&session_dir, cwd, model, None)
 }
 
-fn materialize_canonical_session_in(
+pub(crate) fn materialize_canonical_session_in(
     session_dir: &std::path::Path,
     cwd: &str,
     model: &str,
+    parent_session_id: Option<SessionId>,
 ) -> Result<(), String> {
     let identity =
         CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
@@ -971,7 +972,7 @@ fn materialize_canonical_session_in(
             created_at_ms: now_ms,
             cwd,
             model: model.to_string(),
-            parent_session_id: None,
+            parent_session_id,
             schema_caps: Vec::new(),
         }),
     };
@@ -1018,7 +1019,7 @@ mod canonical_session_materialization_tests {
     #[test]
     fn session_creation_materializes_one_canonical_baseline() {
         let dir = tempfile::tempdir().expect("tempdir");
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model")
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
             .expect("materialize");
         assert!(dir.path().join(CANONICAL_IDENTITY_FILE).exists());
         assert!(dir.path().join(EVENTS_COMMIT_FILE).exists());
@@ -1049,7 +1050,7 @@ mod canonical_session_materialization_tests {
         assert_eq!(created.model, "test-model");
 
         // 幂等：重复调用不得追加第二个 SessionCreated。
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model")
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
             .expect("second materialize");
         let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
             .expect("reader")
