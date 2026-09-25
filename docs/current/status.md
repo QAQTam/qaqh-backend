@@ -87,7 +87,8 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - child completion 已改为 queue-only mailbox delivery，不再默认触发父 turn。
   - unloaded child 可由 delivery 经 loaded immediate parent reload，并保留 AgentPath。
   - Trigger delivery 会重新 arm collector，completion 可继续回父 mailbox。
-- 仍待：subagent residency LRU、Team status/residency projection。
+  - idle subagent 已纳入 residency LRU，unload 后仍可经 delivery reload。
+- 仍待：Team status/residency projection。
 - Phase 3-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
