@@ -112,6 +112,16 @@ default_shell = "auto"
 - 当前实现从 Phase 1 开始；完整契约见
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
 
+### Session identity（beta 前迁移）
+
+- `SessionId` 是 canonical UUIDv7，同时是 `AgentId`、wire key、runtime key 和目录名。
+- 新会话必须先分配 `SessionId + LogId`，再创建 `sessions/{session_id}/`。
+- `LogId` 标识 canonical log，独立于 `SessionId`。
+- `seed` 只允许作为迁移期 deprecated alias；新会话必须 `seed == session_id`。
+- 旧 8 位 seed 只能经 legacy resolver 访问，beta 前必须完成目录迁移或删除兼容层。
+- 迁移设计与 beta 门禁见
+  [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
+
 ### Gate
 
 - 位置：`crates/qaqh-gate/`
@@ -123,7 +133,9 @@ default_shell = "auto"
 - `qaqh-gate` 是 runtime 与 provider 之间的边界，不是 agent loop。
 - `mutilAI-SDK` 当前不是运行时依赖；未来只考虑通过 bridge 替换 gate 内部 adapter。
 
-## 3. 存储布局（当前语义）
+## 3. 存储布局
+
+当前兼容布局：
 
 ```text
 {sessions_dir}/{seed}/
@@ -136,6 +148,22 @@ default_shell = "auto"
 ├── meta.json
 └── 其它 projection/cache 文件
 ```
+
+beta 目标布局：
+
+```text
+{sessions_dir}/{session_id}/
+├── canonical-identity.json   # session_id 必须等于目录名；log_id 独立
+├── events.jsonl
+├── events.commit.json
+├── writer-fence.json
+├── messages.jsonl
+├── messages.wal
+├── meta.json
+└── 其它 projection/cache 文件
+```
+
+旧 `{seed}` 目录只能通过迁移 resolver 访问，不能进入新 canonical facts。
 
 `compact-context.json` 已退役，不再是当前存储布局的一部分。
 

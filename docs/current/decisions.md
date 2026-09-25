@@ -123,3 +123,15 @@
 - interrupt 只终止当前 turn，不删除逻辑身份；unloaded agent 仍可被 list。
 - delivery 可以触发 reload，但必须经 loaded immediate parent 做 ownership 校验。
 - V1 `close_agent` 保留兼容；V2 使用 `interrupt_agent` + residency eviction。
+
+## D17. SessionId 是唯一会话主键，seed 必须退场
+
+- `SessionId` 是 canonical UUIDv7，也是 `AgentId`、wire key、runtime key 和目录名。
+- 新会话必须满足 `seed == session_id == sessions/{directory_name}`。
+- 先生成 canonical identity，再创建目录；不得先建目录再生成另一个 `session_id`。
+- `LogId` 继续独立存在，不得与 `SessionId` 合并。
+- `seed` 在迁移期只能是 deprecated alias；旧会话的 8 位 seed 只能经 legacy resolver 读取。
+- beta 前必须删除新 8 位 seed 生成、canonical producer 中的 seed-as-SessionId、
+  wire/runtime 的 seed 语义和旧目录兼容映射。
+- 权威迁移设计：
+  [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
