@@ -154,6 +154,26 @@ pub enum ConversationInputPurpose {
 }
 
 /// Conversation 频道命令。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum SubagentTerminalKind {
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+/// Structured terminal notification carried with a subagent result injection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct SubagentTerminalNotification {
+    pub child_session_id: String,
+    pub parent_call_id: String,
+    pub terminal: SubagentTerminalKind,
+}
+
+/// Conversation 频道命令。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -179,6 +199,10 @@ pub enum ConversationCommand {
         /// todo 模式切换）。false 时行为与普通用户消息完全一致。
         #[serde(default)]
         as_system: bool,
+        /// Structured terminal fact to append before a subagent result is
+        /// injected. This is not parsed from message text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_terminal: Option<SubagentTerminalNotification>,
     },
     /// 取消当前回合（停止 gate 流式输出与工具执行）。
     ConversationCancel {

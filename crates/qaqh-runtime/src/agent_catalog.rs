@@ -224,6 +224,13 @@ impl AgentCatalog {
         self.by_key.get(key)
     }
 
+    /// Remove a registration that was rolled back before its canonical edge
+    /// was committed.
+    pub(crate) fn remove(&mut self, agent_id: &str) -> Option<AgentMetadata> {
+        let key = self.by_id.remove(agent_id)?;
+        self.by_key.remove(&key)
+    }
+
     /// Return metadata at or below `prefix`, ordered by canonical path.
     pub(crate) fn list_prefix(
         &self,
