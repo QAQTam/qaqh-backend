@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::fmt;
 
 use super::types::{
-    ActorRef, ContentHash, ContentRef, FactPayload, FactSchema, MAX_SAFE_FACT_SEQ, RecoveryAction,
-    RecoveryOutcome, RecoveryRef, RecoveryToolCompletion, SessionFact, SessionMetadataPatch,
-    ToolError, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-    TurnError, TurnTerminal,
+    ActorRef, ContentHash, ContentRef, FactPayload, FactSchema, InterAgentContent,
+    MAX_SAFE_FACT_SEQ, RecoveryAction, RecoveryOutcome, RecoveryRef, RecoveryToolCompletion,
+    SessionFact, SessionMetadataPatch, ToolError, ToolIntentPolicyOutcome, ToolMetrics,
+    ToolReplayCapability, ToolTerminalStatus, TurnError, TurnTerminal,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +170,7 @@ impl SessionFact {
                 }
             }
             FactPayload::InputAccepted(_)
+            | FactPayload::InterAgentCommunication(_)
             | FactPayload::SessionRecovered(_)
             | FactPayload::CompactionApplied(_)
             | FactPayload::SessionMetadataChanged(_)
@@ -410,6 +412,60 @@ impl FactPayload {
                 }
                 if let Some(recovery_ref) = &payload.recovery_ref {
                     validate_recovery_ref("recovery_ref", recovery_ref)?;
+                }
+            }
+            Self::InterAgentCommunication(payload) => {
+                validate_prefixed_ulid("message_id", payload.message_id.as_str(), "msg_")?;
+                validate_uuid_v7("root_session_id", payload.root_session_id.as_str())?;
+                if payload.author.namespace() != super::agent::AgentNamespace::Root
+                    || payload.recipient.namespace() != super::agent::AgentNamespace::Root
+                {
+                    return Err(ValidationError::InvalidField {
+                        field: "agent_path",
+                        message: "inter-agent communication paths must belong to /root".to_owned(),
+                    });
+                }
+                let mut recipients = HashSet::new();
+                recipients.insert(payload.recipient.as_str());
+                for recipient in &payload.other_recipients {
+                    if recipient.namespace() != super::agent::AgentNamespace::Root {
+                        return Err(ValidationError::InvalidField {
+                            field: "other_recipients",
+                            message: "inter-agent communication paths must belong to /root"
+                                .to_owned(),
+                        });
+                    }
+                    if !recipients.insert(recipient.as_str()) {
+                        return Err(ValidationError::InvalidField {
+                            field: "other_recipients",
+                            message: "recipient paths must be unique".to_owned(),
+                        });
+                    }
+                }
+                match &payload.content {
+                    InterAgentContent::Inline { text } => {
+                        validate_non_empty("content.text", text)?;
+                        validate_byte_limit("content.text", text, 8 * 1024)?;
+                    }
+                    InterAgentContent::ContentRef { content_ref } => {
+                        validate_content_ref("content.content_ref", content_ref)?;
+                    }
+                }
+                if let Some(task_id) = &payload.task_id {
+                    validate_non_empty("task_id", task_id)?;
+                    validate_byte_limit("task_id", task_id, 256)?;
+                }
+                if let Some(reply_to) = &payload.reply_to {
+                    validate_prefixed_ulid("reply_to", reply_to.as_str(), "msg_")?;
+                }
+                if let Some(causation_id) = &payload.causation_id {
+                    validate_ulid("causation_id", causation_id.as_str())?;
+                }
+                if payload.created_at_ms <= 0 {
+                    return Err(ValidationError::InvalidField {
+                        field: "created_at_ms",
+                        message: "must be positive".to_owned(),
+                    });
                 }
             }
         }

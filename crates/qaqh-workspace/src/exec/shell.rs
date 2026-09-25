@@ -28,6 +28,7 @@ pub(crate) enum Shell {
     Zsh,
     Sh,
     PowerShell,
+    WindowsPowerShell,
     Cmd,
 }
 
@@ -36,13 +37,12 @@ pub(crate) static DETECTED_SHELL: OnceLock<Shell> = OnceLock::new();
 pub(crate) static DETECTED_BASH_PATH: OnceLock<String> = OnceLock::new();
 /// 启动期显式注册的壳路径（`Shell::register_shell`）。
 pub(crate) static REGISTERED_SHELL_PATH: OnceLock<String> = OnceLock::new();
-/// Full path to PowerShell on Windows（pwsh 7 优先，powershell.exe 兜底）。
-static DETECTED_PWSH_PATH: OnceLock<String> = OnceLock::new();
 /// 各壳解析出的可运行候选名缓存（`Some(None)` = 候选集全不可用）。
 /// 必须按壳分槽：Bash/Zsh/Sh 共用同一候选集，但「谁命中了」对每个壳
 /// 是独立事实（容器里只有 `sh` 时，Bash/Zsh 都该落到 `sh`，而不是让
 /// 先探测的一方污染另一方）。
-static RESOLVED_SHELL_NAME: [OnceLock<Option<String>>; 5] = [
+static RESOLVED_SHELL_NAME: [OnceLock<Option<String>>; 6] = [
+    OnceLock::new(),
     OnceLock::new(),
     OnceLock::new(),
     OnceLock::new(),
@@ -62,7 +62,7 @@ impl Shell {
     /// the caller can report a clean error.
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
-            "bash" => {
+            "bash" | "bash4windows" => {
                 #[cfg(windows)]
                 {
                     const WIN_BASH_CANDIDATES: &[&str] = &[
@@ -78,10 +78,7 @@ impl Shell {
                     }
                     if let Some(found) = find_bash_on_path() {
                         DETECTED_BASH_PATH.get_or_init(|| found);
-                        return Some(Shell::Bash);
                     }
-                    // No git bash available — plain `bash` (may be WSL wrapper,
-                    // but the model explicitly asked for bash).
                     Some(Shell::Bash)
                 }
                 #[cfg(not(windows))]
@@ -91,9 +88,35 @@ impl Shell {
             }
             "zsh" => Some(Shell::Zsh),
             "sh" => Some(Shell::Sh),
-            "pwsh" | "powershell" => Some(Shell::PowerShell),
+            "pwsh" => Some(Shell::PowerShell),
+            "powershell" => Some(Shell::WindowsPowerShell),
             "cmd" => Some(Shell::Cmd),
             _ => None,
+        }
+    }
+
+    /// Platform-priority auto-detection candidates.
+    pub(crate) fn auto_candidates() -> &'static [Shell] {
+        #[cfg(windows)]
+        {
+            &[
+                Shell::PowerShell,
+                Shell::Bash,
+                Shell::WindowsPowerShell,
+                Shell::Cmd,
+            ]
+        }
+        #[cfg(target_os = "linux")]
+        {
+            &[Shell::Bash, Shell::Zsh, Shell::Sh]
+        }
+        #[cfg(target_os = "macos")]
+        {
+            &[Shell::Bash, Shell::Zsh]
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        {
+            &[Shell::Bash, Shell::Zsh, Shell::Sh]
         }
     }
 
@@ -113,7 +136,8 @@ impl Shell {
             Shell::Zsh => 1,
             Shell::Sh => 2,
             Shell::PowerShell => 3,
-            Shell::Cmd => 4,
+            Shell::WindowsPowerShell => 4,
+            Shell::Cmd => 5,
         };
         let cache = &RESOLVED_SHELL_NAME[slot];
         if let Some(shell) = cache.get() {
@@ -131,39 +155,44 @@ impl Shell {
     pub(crate) fn detect_uncached() -> Self {
         #[cfg(windows)]
         {
-            // Windows 默认 PowerShell（pwsh 7 优先，Windows 自带 powershell.exe 兜底）；
-            // 模型需要 POSIX 语义时显式传 `shell: "bash"`。
-            if executable_on_path("pwsh") {
-                DETECTED_PWSH_PATH.get_or_init(|| "pwsh".to_string());
+            // Windows 优先级：pwsh 7 > Git for Windows bash > powershell 5.1 > cmd。
+            if Shell::PowerShell.available() {
                 return Shell::PowerShell;
             }
-            if executable_on_path("powershell") {
-                DETECTED_PWSH_PATH.get_or_init(|| "powershell".to_string());
-                return Shell::PowerShell;
-            }
-            // 无 PowerShell（罕见）：退回 Git for Windows / MSYS2 bash，
-            // 避免 WSL wrapper（System32\\bash.exe）。
-            const WIN_BASH_CANDIDATES: &[&str] = &[
-                "C:\\Program Files\\Git\\bin\\bash.exe",
-                "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
-                "C:\\msys64\\usr\\bin\\bash.exe",
-            ];
-            for p in WIN_BASH_CANDIDATES {
-                if std::path::Path::new(p).is_file() {
-                    DETECTED_BASH_PATH.get_or_init(|| p.to_string());
-                    return Shell::Bash;
-                }
-            }
-            if let Some(found) = find_bash_on_path() {
-                DETECTED_BASH_PATH.get_or_init(|| found);
+            if Shell::Bash.available() {
                 return Shell::Bash;
+            }
+            if Shell::WindowsPowerShell.available() {
+                return Shell::WindowsPowerShell;
             }
             Shell::Cmd
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
-            if executable_on_path("bash") {
-                return Shell::Bash;
+            // Linux 优先级：bash > zsh > sh。
+            for shell in [Shell::Bash, Shell::Zsh, Shell::Sh] {
+                if shell.available() {
+                    return shell;
+                }
+            }
+            Shell::Sh
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // macOS 优先级：bash > zsh。
+            for shell in [Shell::Bash, Shell::Zsh] {
+                if shell.available() {
+                    return shell;
+                }
+            }
+            Shell::Bash
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        {
+            for shell in [Shell::Bash, Shell::Zsh, Shell::Sh] {
+                if shell.available() {
+                    return shell;
+                }
             }
             Shell::Sh
         }
@@ -188,10 +217,13 @@ impl Shell {
             Shell::Zsh => resolved.unwrap_or("zsh"),
             Shell::Sh => resolved.unwrap_or("sh"),
             Shell::PowerShell => registered
-                .or_else(|| DETECTED_PWSH_PATH.get())
                 .map(String::as_str)
                 .or(resolved)
                 .unwrap_or("pwsh"),
+            Shell::WindowsPowerShell => registered
+                .map(String::as_str)
+                .or(resolved)
+                .unwrap_or("powershell"),
             Shell::Cmd => resolved.unwrap_or("cmd"),
         }
     }
@@ -203,10 +235,11 @@ impl Shell {
     /// 而派生实际上能跑起来（O-3 的「探测 ≠ 派生」缺口）。
     pub(crate) fn executable_candidates(&self) -> &'static [&'static str] {
         match self {
-            // `sh` 是 POSIX 兜底：bash/zsh 缺失时同一脚本仍能被 POSIX 壳执行。
-            Shell::Bash | Shell::Zsh | Shell::Sh => &["bash", "zsh", "sh", "dash"],
-            // pwsh 7 优先；缺 pwsh 时 Windows 自带 powershell.exe 兜底。
-            Shell::PowerShell => &["pwsh", "powershell"],
+            Shell::Bash => &["bash"],
+            Shell::Zsh => &["zsh"],
+            Shell::Sh => &["sh"],
+            Shell::PowerShell => &["pwsh"],
+            Shell::WindowsPowerShell => &["powershell"],
             Shell::Cmd => &["cmd"],
         }
     }
@@ -215,6 +248,16 @@ impl Shell {
     /// 只看它；否则按候选集探测——与 `derive_exec_args_with` 最终派生的
     /// 可执行名同源，杜绝「探测到的壳」与「实际跑的壳」不一致。
     pub(crate) fn available(&self) -> bool {
+        #[cfg(windows)]
+        if *self == Shell::Bash {
+            if let Some(path) = find_bash_on_path() {
+                DETECTED_BASH_PATH.get_or_init(|| path);
+            }
+            return DETECTED_BASH_PATH
+                .get()
+                .map(|path| std::path::Path::new(path).is_file())
+                .unwrap_or(false);
+        }
         let path = self.path();
         let p = std::path::Path::new(path);
         if p.is_absolute() {
@@ -254,7 +297,7 @@ impl Shell {
                 }
                 v
             }
-            Shell::PowerShell => {
+            Shell::PowerShell | Shell::WindowsPowerShell => {
                 if let Some(a) = args.filter(|a| !a.is_empty()) {
                     // -CommandWithArgs：首参是脚本，后续空格分隔的 CommandParameters 原样进 $args
                     let mut v = vec![

@@ -198,7 +198,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
             "IS_DIRECTORY",
             format!("'{path}' is a directory"),
             Some(
-                "Use exec with argv [\"rg\", \"--files\"] (or [\"ls\", \"-la\"] / [\"cmd\", \"/c\", \"dir\", \"/b\"]) to list directory contents.",
+                "Use exec command \"rg --files\" (or \"ls -la\" / \"dir /b\" on cmd) to list directory contents.",
             ),
             json!({"path": path}),
         ));
@@ -535,6 +535,7 @@ pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
         permission_level: crate::permission::PermissionLevel::ReadFree,
         sandbox: crate::tool_api::SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        exec_default_shell: None,
         timeout: Duration::from_secs(15),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,

@@ -163,7 +163,7 @@ pub fn projection_stream_key(fact: &SessionFact, slot: ProjectionSlot) -> Stream
             FactPayload::WorkspaceResourceChanged(_) => RingingChannel::Tool,
             _ => RingingChannel::Control,
         },
-        ProjectionSlot::Meta => RingingChannel::Control,
+        ProjectionSlot::Meta | ProjectionSlot::Mailbox => RingingChannel::Control,
     };
     StreamKey::Channel(channel)
 }

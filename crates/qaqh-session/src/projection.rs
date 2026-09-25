@@ -3,6 +3,7 @@
 mod agent_graph;
 mod control;
 mod conversation;
+mod mailbox;
 mod meta;
 mod replay;
 mod resource;
@@ -24,6 +25,7 @@ pub use conversation::{
     ConversationToolCallState, ConversationToolResultState, ConversationTurnOutcome,
     ConversationTurnState,
 };
+pub use mailbox::{MailboxProjection, MailboxSnapshot};
 pub use meta::{SessionMetaProjection, SessionMetaSnapshot};
 pub use replay::{
     ReplayOutcome, ReplayWindow, projection_event_id, projection_events_for_fact,
