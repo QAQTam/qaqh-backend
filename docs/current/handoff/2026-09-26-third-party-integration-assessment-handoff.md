@@ -23,10 +23,16 @@ QAQH runtime
 后端只需要在 `qaqh-gate` 内部增加 bridge，保持
 `qaqh-gate::chat_stream` / `StreamEvent` 对 runtime 的契约不变。
 
-`mutil-ai 0.2.1` 本地最新工作区已经从库公共 API 移除 `Agent`、`AgentBuilder`、
-`AgentReply`、`complete_once`、`Tool`、`ToolRegistry` 和 `tool_fn`。最小 agent loop
-只保留在 `examples/minimal_agent.rs`，不是 SDK 公共能力。注意：远端
-`origin/main`（`70127e2`）仍是 0.1 旧状态，尚未包含这次 0.2.1 工作区变更。
+`mutil-ai 0.2.1` 已从库公共 API 移除 `Agent`、`AgentBuilder`、`AgentReply`、
+`complete_once`、`Tool`、`ToolRegistry` 和 `tool_fn`。最小 agent loop 只保留在
+`examples/minimal_agent.rs`，不是 SDK 公共能力。
+
+远端固定引用：
+
+```text
+https://github.com/QAQTam/mutil-ai.git
+commit 7a28b6a7659df69769b28095a94dfdd87eedc79f
+```
 
 `wsbox` 的价值更高但耦合更深：
 
@@ -162,9 +168,8 @@ qaqh_types::Message / ToolDef
 
 ### 4.4 mutil 的风险
 
-- 0.2.1 仍在工作区，尚未提交；API freeze 是“候选”，不是稳定发布。
-- 远端 `origin/main` 仍是 0.1 且导出库级 `Agent`；集成必须明确 pin 本地 0.2.1
-  提交/tag，不能误取远端旧版本。
+- 远端 `origin/main` 已固定到 `7a28b6a`（0.2.1）；集成必须 pin 该 commit，不能取旧
+  0.1 API 假设。
 - `examples/minimal_agent.rs` 里有私有 `Agent` / `ToolRegistry` 示例，不要把它复制进
   后端 runtime；后端已有自己的 turn/tool/permission/canonical 生命周期。
 - 当前 gate 是 callback streaming，mutil 是 async `ModelStream`，需要一层 stream adapter。
@@ -327,7 +332,7 @@ journal / code delta
 ## 8. 接手注意事项
 
 - 不要把 mutil `Agent` 引进 `qaqh-runtime`；0.2.1 已从公共 API 移除，只保留 example。
-- 集成前先固定 mutil 0.2.1 的具体 commit/tag；当前远端 `origin/main` 不包含该版本。
+- 集成时固定 `7a28b6a7659df69769b28095a94dfdd87eedc79f`，不要依赖未固定的 main。
 - 不要让 mutil 类型越过 `qaqh-gate` 公开边界。
 - 不要在 parity 测试前删除旧 gate。
 - 不要把 wsbox 只接到 `exec` 后宣称“所有写入可回滚”；当前 edit/apply_patch 路径仍会绕过。
