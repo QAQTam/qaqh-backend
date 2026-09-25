@@ -74,14 +74,26 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
 - Phase 0 已 accepted：spec、decisions、path grammar、communication shape 和
   canonical producer 设计已冻结。
 - Phase 1 已完成：
-  - `AgentPath` grammar/resolver（#364）。
-  - 逻辑 agent catalog 与 `/root` 注册（#365）。
-  - canonical graph store、递归 loader、post-order cascade（#366）。
-  - `SubagentSpawned/Finished` 真实 producer（#367）。
+  - `AgentPath` grammar/resolver（#364 / PR #368）。
+  - 逻辑 agent catalog 与 `/root` 注册（#365 / PR #369）。
+  - canonical graph store、递归 loader、post-order cascade（#366 / PR #370）。
+  - `SubagentSpawned/Finished` 真实 producer（#367 / PR #371）。
 - Phase 2 进行中：
-  - canonical `InterAgentCommunication` 与 mailbox projection 正在 #372 落地。
+  - canonical `InterAgentCommunication` 与 mailbox projection 已合并（#372 / PR #387）。
   - `spawn_agent` initial message、工具面和 residency reload 分别在 #373-#375。
 - 仍待：`list_agents` path-prefix 工具面、child reload 后 path 恢复。
 - Phase 3-7 未开始；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
+
+## 6. Beta 前身份迁移门禁
+
+- `SessionId` 必须成为唯一会话主键；新会话必须 `seed == session_id`。
+- `sessions/{session_id}` 必须成为默认存储布局。
+- 旧 8 位 seed 只能经 legacy resolver 访问，beta 前删除兼容映射。
+- `SubagentSpawned.child_session_id` 不得再接受 8 位 seed。
+- TUI/WinUI 不得假设 seed 是 8 位 hex。
+- 当前状态：#369/#371 的修复已随 #384/#385/#386 合并；#382 落地身份设计，
+  代码迁移在合并后启动。
+- 权威迁移设计：
+  [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
