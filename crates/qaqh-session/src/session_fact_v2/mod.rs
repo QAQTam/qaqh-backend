@@ -10,7 +10,7 @@ mod types;
 mod validation;
 
 pub use agent::{
-    AGENT_PATH_MORPHEUS, AGENT_PATH_ROOT, AgentNamespace, AgentPath, AgentPathError,
+    AGENT_PATH_MORPHEUS, AGENT_PATH_ROOT, AgentMetadata, AgentNamespace, AgentPath, AgentPathError,
     AgentPathSegmentError,
 };
 pub use projection::{

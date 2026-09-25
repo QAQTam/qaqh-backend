@@ -9,6 +9,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::types::SessionId;
+
 pub const AGENT_PATH_ROOT: &str = "/root";
 pub const AGENT_PATH_MORPHEUS: &str = "/morpheus";
 
@@ -331,6 +333,39 @@ impl<'de> Deserialize<'de> for AgentPath {
     }
 }
 
+/// Durable logical metadata for one agent in a root tree.
+///
+/// This is not a runtime handle. Unloading a worker removes residency, not this
+/// metadata; canonical spawn/finish facts remain the source from which it is
+/// rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMetadata {
+    pub root_session_id: SessionId,
+    pub agent_id: SessionId,
+    pub agent_path: AgentPath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_path: Option<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub created_at_ms: i64,
+}
+
+impl AgentMetadata {
+    pub fn root(root_session_id: SessionId, created_at_ms: i64) -> Self {
+        Self {
+            agent_id: root_session_id.clone(),
+            root_session_id,
+            agent_path: AgentPath::root(),
+            parent_agent_path: None,
+            nickname: None,
+            role: None,
+            created_at_ms,
+        }
+    }
+}
+
 fn validate_segments(segments: &[&str]) -> Result<(), AgentPathError> {
     if segments.len() > MAX_AGENT_PATH_SEGMENTS {
         return Err(AgentPathError::TooManySegments {
@@ -532,5 +567,14 @@ mod tests {
             AgentPathError::RelativeTraversal.code(),
             "agent_path_relative_traversal"
         );
+    }
+
+    #[test]
+    fn root_metadata_uses_agent_id_as_root_session() {
+        let root = AgentMetadata::root(SessionId::new("root-session"), 42);
+        assert_eq!(root.agent_id, root.root_session_id);
+        assert_eq!(root.agent_path, AgentPath::root());
+        assert_eq!(root.parent_agent_path, None);
+        assert_eq!(root.created_at_ms, 42);
     }
 }
