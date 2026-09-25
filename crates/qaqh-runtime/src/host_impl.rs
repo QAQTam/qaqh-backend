@@ -14,8 +14,8 @@ use std::time::Duration;
 use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
 use qaqh_subagent::{
-    ContentRef, EventBatch, ListedAgent, SpawnSubagentRequest, SpawnedSubagent,
-    StartSubagentRequest, SubagentHost,
+    ContentRef, EventBatch, ListedAgent, SendAgentMessageRequest, SentAgentMessage,
+    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
 };
 
 use super::QaqhService;
@@ -91,6 +91,91 @@ impl SubagentHost for QaqhService {
                     })
                     .collect()
             })
+    }
+
+    fn send_agent_message(
+        &self,
+        request: SendAgentMessageRequest<'_>,
+    ) -> Result<SentAgentMessage, String> {
+        if request.text.trim().is_empty() {
+            return Err("agent message text must not be empty".to_string());
+        }
+        if request.text.len() > 8 * 1024 {
+            return Err(format!(
+                "agent message is {} bytes; maximum inline size is {}",
+                request.text.len(),
+                8 * 1024
+            ));
+        }
+        if request.delivery == qaqh_domain::InterAgentDelivery::Interrupt {
+            return Err("interrupt delivery is not implemented yet".to_string());
+        }
+        let (caller, target) = {
+            let mut registry = self.registry()?;
+            let target =
+                registry.resolve_agent_for_caller(request.caller_session_id, request.target)?;
+            let caller = registry
+                .agent_metadata(request.caller_session_id)
+                .ok_or_else(|| {
+                    format!(
+                        "caller agent metadata missing for {}",
+                        request.caller_session_id
+                    )
+                })?;
+            (caller, target)
+        };
+        if caller.agent_id == target.agent_id {
+            return Err("cannot send an agent message to self".to_string());
+        }
+        if request.delivery == qaqh_domain::InterAgentDelivery::Trigger
+            && target.agent_path.is_root()
+            && !caller.agent_path.is_root()
+        {
+            return Err("child agents cannot trigger the root agent".to_string());
+        }
+
+        let message_id = format!("msg_{}", qaqh_session::canonical::generate_ulid());
+        let envelope = qaqh_domain::InterAgentEnvelope {
+            message_id: message_id.clone(),
+            root_session_id: target.root_session_id.as_str().to_string(),
+            author: caller.agent_path.as_str().to_string(),
+            recipient: target.agent_path.as_str().to_string(),
+            other_recipients: vec![],
+            task_id: None,
+            reply_to: None,
+            causation_id: None,
+            delivery: request.delivery,
+            created_at_ms: (nanos() / 1_000_000) as i64,
+        };
+        let input_purpose = match request.delivery {
+            qaqh_domain::InterAgentDelivery::Queue => {
+                qaqh_domain::ConversationInputPurpose::QueueOnly
+            }
+            qaqh_domain::InterAgentDelivery::Trigger => {
+                qaqh_domain::ConversationInputPurpose::TriggerTurn
+            }
+            qaqh_domain::InterAgentDelivery::Interrupt => unreachable!(),
+        };
+        self.send_ringing(
+            target.agent_id.as_str(),
+            qaqh_ringing::RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationSendMessage {
+                    text: request.text.to_string(),
+                    images: vec![],
+                    attachments: None,
+                    message_id: Some(message_id.clone()),
+                    input_purpose,
+                    as_system: false,
+                    inter_agent: Some(envelope),
+                    subagent_terminal: None,
+                },
+            ),
+        )?;
+        Ok(SentAgentMessage {
+            message_id,
+            recipient: target.agent_path.as_str().to_string(),
+            delivery: request.delivery,
+        })
     }
 
     fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String> {
