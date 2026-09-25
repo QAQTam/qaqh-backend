@@ -63,6 +63,15 @@ canonical validation 限制工具名、model/base_url 大小和 timeout 范围�
 - completion 仍以 queue-only `InterAgentCommunication` 投递父 mailbox；
 - collector 结束后 close child，但保留 logical identity。
 
+### 2.4 Subagent idle LRU
+
+`spawn_subagent_inprocess` 现在把同一个 `WorkerLiveness` 同时交给 actor 和
+registry，不再让 `AgentInstance.liveness = None`。因此：
+
+- idle subagent 可独立进入 `unload_idle_sessions` 候选；
+- parent 仍 loaded 时只 unload child，不删除 canonical metadata；
+- 后续 delivery 仍走 parent-owned reload。
+
 ## 3. 验收证据
 
 ```text
@@ -76,12 +85,12 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 - unload 后 child 仍出现在 `list_agents`；
 - Queue/Trigger delivery 经 loaded parent reload；
 - reload 后 child canonical mailbox 收到投递；
+- child 可独立进入 idle-unload 候选，随后仍可 delivery reload；
 - immediate parent unload 后 child delivery fail closed；
 - reload collector 在 Trigger 前 arm，并能把 completion 发回 parent。
 
 ## 4. 未决项
 
-- residency LRU 尚未覆盖 subagent；
 - AgentStatus / Residency 的前端 snapshot/delta 尚未落地；
 - 旧 spawn fact 无 `spawn_config` 时只支持 loaded 生命周期，不支持 reload；
 - steer/interject 和配额扩展仍属后续阶段；
