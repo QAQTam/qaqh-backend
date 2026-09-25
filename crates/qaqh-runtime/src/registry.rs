@@ -16,13 +16,14 @@ use qaqh_session::canonical::{
 use qaqh_session::projection::AgentGraphSnapshot;
 use qaqh_session::session_fact_v2::{
     AgentMetadata, AgentPath, FactPayload, SessionFact, SessionId, SubagentSpawnConfig,
-    SubagentTerminalStatus,
+    SubagentTerminalStatus, TeamAgentResidency,
 };
 use qaqh_subagent::{ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
 use crate::agent::SubagentSpawnSpec;
 use crate::agent_catalog::AgentCatalog;
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
+use crate::ringing::V2ProjectionHub;
 use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
 use crate::{RingingHub, SessionActivityTracker};
 
@@ -330,6 +331,9 @@ pub struct AgentRegistry {
     /// `instances` so `list_agents` reads lifecycle state rather than guessing
     /// from the worker table.
     residency: HashMap<String, ListedAgentResidency>,
+    /// Runtime-only Team residency overlay. It is never persisted: after a
+    /// daemon restart canonical projection rebuilds every agent as unloaded.
+    v2_hub: Option<Arc<V2ProjectionHub>>,
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
@@ -349,6 +353,7 @@ impl AgentRegistry {
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
             residency: HashMap::new(),
+            v2_hub: None,
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
             armed_collectors: HashSet::new(),
@@ -358,6 +363,12 @@ impl AgentRegistry {
     /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。
     pub fn attach_ringing(&mut self, hub: Arc<RingingHub>) {
         self.hub = Some(hub);
+    }
+
+    /// Attach the canonical V2 projection hub used for runtime residency
+    /// overlays and ephemeral `TeamDelta` publication.
+    pub fn attach_v2_projection(&mut self, hub: Arc<V2ProjectionHub>) {
+        self.v2_hub = Some(hub);
     }
 
     /// Register a root session as `/root`.
@@ -468,6 +479,38 @@ impl AgentRegistry {
             .get(agent_id)
             .copied()
             .unwrap_or(ListedAgentResidency::Unloaded)
+    }
+
+    fn set_agent_residency(&mut self, agent_id: &str, residency: ListedAgentResidency) {
+        self.residency.insert(agent_id.to_string(), residency);
+        self.publish_agent_residency(agent_id);
+    }
+
+    fn publish_agent_residency(&self, agent_id: &str) {
+        let Some(hub) = self.v2_hub.as_ref() else {
+            return;
+        };
+        let Some(metadata) = self.agent_catalog.get_by_id(agent_id).cloned() else {
+            return;
+        };
+        let residency = match self.agent_residency(agent_id) {
+            ListedAgentResidency::Loaded => TeamAgentResidency::Loaded,
+            ListedAgentResidency::Unloaded => TeamAgentResidency::Unloaded,
+        };
+        let session_dir = self
+            .sessions
+            .session_path_dir(metadata.root_session_id.as_str());
+        if let Err(error) = hub.set_team_residency(
+            &session_dir,
+            metadata.root_session_id.as_str(),
+            &metadata.agent_id,
+            residency,
+        ) {
+            log::debug!(
+                "[registry] residency overlay unavailable for agent {}: {error}",
+                metadata.agent_path
+            );
+        }
     }
 
     fn listed_agent_status(
@@ -937,6 +980,7 @@ impl AgentRegistry {
                 );
                 return Err(error.to_string());
             }
+            self.publish_agent_residency(child_session_id.as_str());
         }
         if let Err(error) = self.commit_spawn(&root_seed, &reservation.reservation_id) {
             self.agent_catalog.remove(child_session_id.as_str());
@@ -1028,8 +1072,7 @@ impl AgentRegistry {
                 thread: Some(thread),
             },
         );
-        self.residency
-            .insert(seed.to_string(), ListedAgentResidency::Loaded);
+        self.set_agent_residency(seed, ListedAgentResidency::Loaded);
         // T-1-1：子 seed 必须进活表。否则 bootstrap 的
         // `seal_orphan_channel_state(seed, force=false)` 会把它判为孤儿并封禁
         // 其正在进行的 turn（前端据此显示 cancelled），而子 actor 仍在运行并
@@ -1151,8 +1194,7 @@ impl AgentRegistry {
                 thread: Some(thread),
             },
         );
-        self.residency
-            .insert(seed.to_string(), ListedAgentResidency::Loaded);
+        self.set_agent_residency(seed, ListedAgentResidency::Loaded);
         log::info!("[session] spawned in-process actor seed={seed} (no child process)");
         Ok(())
     }
@@ -1500,8 +1542,7 @@ impl AgentRegistry {
     /// Signal, observe terminal, then join one worker. For a child, the parent
     /// edge is closed before the join, which is the P2-5 ordering contract.
     fn finish_for_unload(&mut self, seed: &str, parent: Option<&str>) {
-        self.residency
-            .insert(seed.to_string(), ListedAgentResidency::Unloaded);
+        self.set_agent_residency(seed, ListedAgentResidency::Unloaded);
         if let Some(parent) = parent {
             self.supervisor.cancel_sent(parent, seed);
         }
@@ -2231,6 +2272,68 @@ mod tests {
     }
 
     #[test]
+    fn v2_residency_overlay_tracks_worker_lifecycle() {
+        let root_dir = std::env::temp_dir().join(format!(
+            "qaqh-registry-v2-residency-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            root_dir.join("sessions"),
+            root_dir.join(".active_session"),
+        ));
+        let identity = sessions
+            .allocate_session(None)
+            .expect("allocate root session");
+        let seed = identity.session_id.as_str().to_string();
+        let session_dir = sessions.session_path_dir(&seed);
+        crate::service::materialize_canonical_session_in(&session_dir, "/tmp", "test-model", None)
+            .expect("materialize canonical session");
+
+        let hub = Arc::new(V2ProjectionHub::new("registry-residency-test"));
+        let mut registry = AgentRegistry::new(sessions.clone());
+        registry
+            .register_root_agent(&seed, unix_ms())
+            .expect("register root");
+        registry.attach_v2_projection(hub.clone());
+        registry.get_or_spawn(&seed).expect("spawn root worker");
+
+        let loaded = hub
+            .bootstrap(&session_dir, &seed)
+            .expect("bootstrap loaded root");
+        assert_eq!(
+            loaded
+                .projections
+                .team
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id.as_str() == seed)
+                .expect("root roster entry")
+                .residency,
+            TeamAgentResidency::Loaded
+        );
+
+        registry.close(&seed);
+        let unloaded = hub
+            .bootstrap(&session_dir, &seed)
+            .expect("bootstrap unloaded root");
+        assert_eq!(
+            unloaded
+                .projections
+                .team
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id.as_str() == seed)
+                .expect("root roster entry")
+                .residency,
+            TeamAgentResidency::Unloaded
+        );
+    }
+
+    #[test]
     fn list_agents_uses_explicit_residency_and_parent_terminal_status() {
         use qaqh_session::canonical::{CanonicalLog, WriterId, generate_ulid};
         use qaqh_session::session_fact_v2::{
@@ -2446,6 +2549,7 @@ mod tests {
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
             residency: HashMap::new(),
+            v2_hub: None,
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
             armed_collectors: HashSet::new(),
@@ -2550,6 +2654,7 @@ mod tests {
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
             residency: HashMap::new(),
+            v2_hub: None,
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
             armed_collectors: HashSet::new(),

@@ -108,6 +108,8 @@ default_shell = "auto"
   重建的 parent-child 索引，不是第二可写事实源。
 - `Mailbox` 负责 queue/trigger/interrupt delivery；消息进入 mailbox 不等于模型已读。
 - `Residency` 只描述 loaded/unloaded，与 `AgentStatus` 分离。
+- `Residency` 是 daemon-local runtime overlay，不写 canonical fact；重启重建默认
+  unloaded，当前进程有 resident worker 时才 overlay loaded。
 - `TeamSnapshot/TeamDelta` 是 TUI/WinUI 的唯一 roster/inbox 投影。
 - 当前实现从 Phase 1 开始；完整契约见
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。

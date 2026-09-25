@@ -74,6 +74,36 @@ fn team_projection_tracks_roster_status_residency_and_inbox() {
         team.apply(&spawned(2)),
         Some(TeamDelta::AgentJoined { .. })
     ));
+    let spawned_child = team
+        .snapshot()
+        .agents
+        .into_iter()
+        .find(|agent| agent.agent_id == id(CHILD))
+        .expect("spawned child roster entry");
+    assert_eq!(
+        spawned_child.residency,
+        TeamAgentResidency::Unloaded,
+        "canonical spawn alone must not claim a live worker"
+    );
+    assert!(matches!(
+        team.apply_runtime_residency(&id(CHILD), TeamAgentResidency::Loaded),
+        Some(TeamDelta::AgentResidencyChanged {
+            residency: TeamAgentResidency::Loaded,
+            ..
+        })
+    ));
+    assert!(matches!(
+        team.apply_runtime_residency(&id(CHILD), TeamAgentResidency::Unloaded),
+        Some(TeamDelta::AgentResidencyChanged {
+            residency: TeamAgentResidency::Unloaded,
+            ..
+        })
+    ));
+    assert!(
+        team.apply_runtime_residency(&id(CHILD), TeamAgentResidency::Unloaded)
+            .is_none(),
+        "repeating the same residency must be idempotent"
+    );
     assert!(matches!(
         team.apply(&fact(
             3,

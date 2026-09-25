@@ -3,7 +3,7 @@
 > 日期：2026-09-26
 > 基线：`a623fb6`（`main`）
 > 工作方式：直接在 `main` 推进，不创建 worktree
-> 状态：`list_agents` status/residency 与 parent-owned direct input gate 已完成
+> 状态：`list_agents` status/residency、parent-owned direct input gate 与 runtime residency TeamDelta 已完成
 > 范围：`qaqh-subagent`、`qaqh-runtime`
 
 ## 1. 本次结论
@@ -20,7 +20,8 @@ AgentCatalog metadata
 
 同时，parent-owned child 的 direct/app-server `ConversationSendMessage` 会在
 registry 的 Ringing 命令咽喉处 fail closed，不能借由直连命令绕过 parent
-ownership 或意外 reload child。
+ownership 或意外 reload child。`AgentResidencyChanged` 也已由 runtime overlay
+生产，不再只是未接线的类型契约。
 
 ## 2. 已落地
 
@@ -63,6 +64,26 @@ AND inter_agent == None
 - root direct input 仍走原有路径；
 - `send_message` / `followup_task` / initial task 的 inter-agent 投递不受影响。
 
+### 2.3 Runtime residency overlay / TeamDelta producer
+
+`AgentResidencyChanged` 已从纯类型契约接成真实运行时 producer：
+
+```text
+registry residency transition
+  -> V2ProjectionHub runtime overlay
+  -> TeamProjection::AgentResidencyChanged
+  -> ephemeral TeamDelta
+```
+
+设计约束：
+
+- canonical `SessionCreated` / `SubagentSpawned` 默认 materialize 为 `unloaded`；
+- worker spawn/reload 由 registry overlay `loaded`；
+- unload/close 由 registry overlay `unloaded`；
+- overlay 不写 canonical log，daemon 重启后自然重建为 `unloaded`；
+- 相同 residency 重复设置幂等，不重复发 delta；
+- `V2ProjectionHub` bootstrap snapshot 包含当前进程 overlay。
+
 ## 3. 验收证据
 
 ```text
@@ -78,22 +99,21 @@ cargo test --workspace --offline -- --test-threads=1
 - Queue delivery reload 后恢复 `loaded`；
 - unloaded child 的 parent `SubagentFinished` 收敛为 `completed + unloaded`；
 - direct `ConversationSendMessage { inter_agent: None }` 稳定拒绝；
-- 拒绝 direct input 后 child 保持 `unloaded`，没有被意外 reload。
+- 拒绝 direct input 后 child 保持 `unloaded`，没有被意外 reload；
+- runtime overlay 的 `AgentResidencyChanged` 为 ephemeral TeamDelta；
+- hub bootstrap 能看到当前进程 overlay，新 hub/restart bootstrap 回到 `unloaded`。
 
 ## 4. 未决项
 
-- `TeamDelta::AgentResidencyChanged` 仍没有运行时 producer；当前 list_agents
-  residency 是 registry 显式状态，不是 durable canonical fact。
-- unload 是运行时生命周期，不写 canonical log；daemon 重启后按无 resident
-  worker 重建为 unloaded。
 - depth 与 sender/outbound 配额仍未实现。
 - 大正文 `content_ref` 外置仍未实现。
 - TUI/WinUI 尚未消费 TeamSnapshot/TeamDelta。
+- task board / message board 尚未开始。
 
 ## 5. 接手注意事项
 
 - `unloaded != completed`：residency 变化不能覆盖 canonical terminal status。
 - 不得从 `instances.contains_key` 或进程表推导 `list_agents` residency。
 - child 投递必须保留 `InterAgentEnvelope`；不要为直连 UI 消息添加绕过参数。
-- 后续若把 residency 升级为 canonical fact，必须同时提供重建、冲突校验与
-  `AgentResidencyChanged` delta，不能只补写日志。
+- residency 是 runtime overlay，不得升级为 durable canonical fact；`loaded`
+  会在 daemon 重启后变成错误状态。

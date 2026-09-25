@@ -48,6 +48,29 @@ impl TeamProjection {
         })
     }
 
+    /// Apply a daemon-local residency overlay.
+    ///
+    /// Residency is runtime state: a durable `loaded` fact would be wrong
+    /// after a daemon restart because no worker survives the process. Canonical
+    /// facts therefore materialize agents as `unloaded`, and the live runtime
+    /// overlays `loaded` while a worker is resident.
+    pub fn apply_runtime_residency(
+        &mut self,
+        agent_id: &SessionId,
+        residency: TeamAgentResidency,
+    ) -> Option<TeamDelta> {
+        let agent = self.agent_mut(agent_id)?;
+        if agent.residency == residency {
+            return None;
+        }
+        agent.residency = residency;
+        Some(TeamDelta::AgentResidencyChanged {
+            revision: self.next_revision(),
+            agent_id: agent_id.clone(),
+            residency,
+        })
+    }
+
     fn apply_subagent_finished(
         &mut self,
         payload: &crate::session_fact_v2::SubagentFinished,
@@ -103,7 +126,7 @@ impl Projection for TeamProjection {
                     nickname: None,
                     role: Some("root".to_string()),
                     status: TeamAgentStatus::PendingInit,
-                    residency: TeamAgentResidency::Loaded,
+                    residency: TeamAgentResidency::Unloaded,
                     parent_agent_path: None,
                     current_task_id: None,
                 })
@@ -120,7 +143,7 @@ impl Projection for TeamProjection {
                     nickname: None,
                     role: payload.role.clone(),
                     status: TeamAgentStatus::PendingInit,
-                    residency: TeamAgentResidency::Loaded,
+                    residency: TeamAgentResidency::Unloaded,
                     parent_agent_path: Some(parent_agent_path.clone()),
                     current_task_id: None,
                 })

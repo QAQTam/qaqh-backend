@@ -173,6 +173,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     }
     let service = QaqhService::init(sessions);
     service.attach_ringing(hub.clone());
+    service.attach_v2_projection(v2_hub.clone());
     // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
