@@ -17,6 +17,8 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use qaqh_ringing::RingingCommand;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// 大内容引用与事件批次（宿主实现 `download_content` / 事件流需要；与 trait
 /// 签名同类型），re-export 供 qaqh-runtime 消费。
@@ -34,6 +36,25 @@ pub struct SpawnedSubagent {
     pub child_session_id: String,
     pub parent_agent_path: String,
     pub child_agent_path: String,
+}
+
+/// Logical agent metadata returned by `list_agents`.
+///
+/// This is intentionally independent of runtime handles and session storage:
+/// unloaded agents remain listable as long as their canonical graph metadata
+/// exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ListedAgent {
+    pub root_session_id: String,
+    pub agent_id: String,
+    pub agent_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub created_at_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +89,17 @@ pub trait SubagentHost: Send + Sync {
     /// SessionMeta.cwd）、应用 subagent 工具白名单。返回生成的 seed 与
     /// canonical path；本方法不发送任务。
     fn spawn_subagent(&self, request: SpawnSubagentRequest<'_>) -> Result<SpawnedSubagent, String>;
+
+    /// List logical agents at or below `path_prefix` in the caller's root tree.
+    ///
+    /// Relative prefixes resolve below the caller's `AgentPath`; absolute
+    /// prefixes may select any path in the same root tree. Listing never
+    /// starts or reloads an agent.
+    fn list_agents(
+        &self,
+        caller_session_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<ListedAgent>, String>;
 
     /// Deliver the initial task after the caller durably recorded the spawn
     /// edge. Implementations own process registration and result collection.
