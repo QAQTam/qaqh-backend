@@ -291,6 +291,7 @@ mod tests {
             parent_agent_path: None,
             child_agent_path: None,
             role: None,
+            spawn_config: None,
             spawned_at_ms: 1,
         })
     }
