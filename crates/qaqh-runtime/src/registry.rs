@@ -397,6 +397,35 @@ impl AgentRegistry {
             .list_prefix(caller.root_session_id.as_str(), &prefix))
     }
 
+    /// Resolve a caller-relative or absolute target path within the caller's
+    /// root tree.
+    pub fn resolve_agent_for_caller(
+        &mut self,
+        caller_session_id: &str,
+        target: &str,
+    ) -> Result<AgentMetadata, String> {
+        self.ensure_root_metadata(caller_session_id)?;
+        let caller = self
+            .agent_catalog
+            .get_by_id(caller_session_id)
+            .cloned()
+            .ok_or_else(|| format!("caller agent metadata missing for {caller_session_id}"))?;
+        let target_path = caller
+            .agent_path
+            .resolve(target)
+            .map_err(|error| format!("invalid target agent path {target:?}: {error}"))?;
+        if target_path.namespace() != caller.agent_path.namespace() {
+            return Err(format!(
+                "target {target_path} crosses agent namespaces from {}",
+                caller.agent_path
+            ));
+        }
+        self.agent_catalog
+            .get_by_path(caller.root_session_id.as_str(), &target_path)
+            .cloned()
+            .ok_or_else(|| format!("target agent not found: {target_path}"))
+    }
+
     /// Rebuild the canonical agent graph for one root tree.
     pub fn agent_graph_snapshot(
         &self,
