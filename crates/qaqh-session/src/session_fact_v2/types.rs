@@ -48,6 +48,7 @@ macro_rules! string_id {
 string_id!(SessionId);
 string_id!(LogId);
 string_id!(EventId);
+string_id!(MessageId);
 string_id!(InputId);
 string_id!(TurnId);
 string_id!(ToolCallId);
@@ -170,6 +171,7 @@ pub enum FactPayload {
     WorkspaceResourceChanged(WorkspaceResourceChanged),
     SubagentSpawned(SubagentSpawned),
     SubagentFinished(SubagentFinished),
+    InterAgentCommunication(InterAgentCommunication),
     DriverChanged(DriverChanged),
 }
 
@@ -437,6 +439,56 @@ pub struct SubagentFinished {
     pub finished_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_ref: Option<RecoveryRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterAgentDelivery {
+    Queue,
+    Trigger,
+    Interrupt,
+}
+
+impl InterAgentDelivery {
+    pub const fn triggers_idle_turn(self) -> bool {
+        matches!(self, Self::Trigger | Self::Interrupt)
+    }
+
+    pub const fn interrupts_turn(self) -> bool {
+        matches!(self, Self::Interrupt)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum InterAgentContent {
+    Inline { text: String },
+    ContentRef { content_ref: ContentRef },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterAgentCommunication {
+    pub message_id: MessageId,
+    pub root_session_id: SessionId,
+    pub author: AgentPath,
+    pub recipient: AgentPath,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_recipients: Vec<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub content: InterAgentContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<EventId>,
+    pub delivery: InterAgentDelivery,
+    pub created_at_ms: i64,
+}
+
+impl InterAgentCommunication {
+    pub fn is_for(&self, recipient: &AgentPath) -> bool {
+        &self.recipient == recipient || self.other_recipients.contains(recipient)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -792,4 +844,5 @@ pub enum ProjectionSlot {
     Control = 2,
     Resources = 3,
     Meta = 4,
+    Mailbox = 5,
 }
