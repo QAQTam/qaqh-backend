@@ -43,8 +43,9 @@ use serde::{Deserialize, Serialize};
 
 mod host;
 pub use host::{
-    ContentRef, EventBatch, ListedAgent, SendAgentMessageRequest, SentAgentMessage,
-    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost, host, install_host,
+    ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent, ListedAgent,
+    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
+    StartSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest, host, install_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -53,6 +54,10 @@ pub use host::{
 const SUBAGENT_IDENTITY_PROMPT: &str = "\
 You are a subagent engineer working in QAQ-Harness. Follow the main coding agent's \
 instructions exactly, never take unauthorized actions, and complete the assigned task faithfully.";
+
+const WAIT_AGENT_MIN_TIMEOUT_MS: u64 = 1_000;
+const WAIT_AGENT_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const WAIT_AGENT_MAX_TIMEOUT_MS: u64 = 3_600_000;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -346,6 +351,254 @@ impl TypedTool for FollowupTaskTool {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WaitAgentArgs {
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WaitAgentOutput {
+    message: String,
+    timed_out: bool,
+}
+
+impl ToolProjection for WaitAgentOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_default(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        Some(self.message.clone())
+    }
+
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        let summary = self.summary().unwrap_or_default();
+        ToolDisplay::new(
+            qaqh_workspace::tool_api::ToolHeader::Other {
+                label: "agents".to_string(),
+            },
+            qaqh_workspace::tool_api::ToolBody::Text {
+                text: summary.clone(),
+                truncated: false,
+            },
+        )
+        .with_summary(summary)
+    }
+}
+
+pub struct WaitAgentTool;
+
+impl TypedTool for WaitAgentTool {
+    type Args = WaitAgentArgs;
+    type Output = WaitAgentOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("wait_agent").expect("valid wait_agent tool name"),
+            display_name: None,
+            description: "Wait for a mailbox update from another agent. The wait does not return \
+                message content; queued communications are merged by the runtime at the next \
+                turn boundary."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": WAIT_AGENT_MIN_TIMEOUT_MS,
+                        "maximum": WAIT_AGENT_MAX_TIMEOUT_MS,
+                        "description": "Timeout in milliseconds. Defaults to 30000."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            output_schema: serde_json::to_value(schemars::schema_for!(WaitAgentOutput))
+                .expect("wait_agent output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            // The typed handler enforces the tighter mailbox wait bound. The
+            // descriptor must not kill a valid long wait before it returns.
+            default_timeout: Duration::from_millis(WAIT_AGENT_MAX_TIMEOUT_MS),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: WaitAgentArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let timeout_ms = args.timeout_ms.unwrap_or(WAIT_AGENT_DEFAULT_TIMEOUT_MS);
+        if !(WAIT_AGENT_MIN_TIMEOUT_MS..=WAIT_AGENT_MAX_TIMEOUT_MS).contains(&timeout_ms) {
+            return Err(subagent_error(
+                "INVALID_TIMEOUT",
+                format!(
+                    "wait_agent timeout_ms must be between {WAIT_AGENT_MIN_TIMEOUT_MS} and \
+                     {WAIT_AGENT_MAX_TIMEOUT_MS}"
+                ),
+                "Use a bounded wait timeout.",
+            ));
+        }
+        let host = host().ok_or_else(|| {
+            subagent_error(
+                "HOST_UNAVAILABLE",
+                "wait_agent requires the in-process subagent host",
+                "Check that the daemon installed the subagent host.",
+            )
+        })?;
+        let should_cancel = || ctx.cancellation.is_cancelled();
+        match host
+            .wait_agent(WaitAgentRequest {
+                caller_session_id: &ctx.session_id,
+                timeout: Duration::from_millis(timeout_ms),
+                should_cancel: &should_cancel,
+            })
+            .map_err(|error| {
+                subagent_error(
+                    "WAIT_REJECTED",
+                    format!("wait_agent rejected: {error}"),
+                    "Check that the caller has a committed canonical mailbox.",
+                )
+            })? {
+            WaitAgentOutcome::Activity { .. } => Ok(WaitAgentOutput {
+                message: "Wait completed. Mailbox activity detected.".to_string(),
+                timed_out: false,
+            }),
+            WaitAgentOutcome::TimedOut { .. } => Ok(WaitAgentOutput {
+                message: "Wait timed out.".to_string(),
+                timed_out: true,
+            }),
+            WaitAgentOutcome::Cancelled => Err(subagent_error(
+                "WAIT_CANCELLED",
+                "wait_agent was cancelled",
+                "The surrounding turn was cancelled.",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InterruptAgentArgs {
+    target: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InterruptAgentOutput {
+    recipient: String,
+    previous_status: String,
+}
+
+impl ToolProjection for InterruptAgentOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_default(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        Some(format!(
+            "interrupt requested for {} (was {})",
+            self.recipient, self.previous_status
+        ))
+    }
+
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        let summary = self.summary().unwrap_or_default();
+        ToolDisplay::new(
+            qaqh_workspace::tool_api::ToolHeader::Other {
+                label: "agents".to_string(),
+            },
+            qaqh_workspace::tool_api::ToolBody::Text {
+                text: summary.clone(),
+                truncated: false,
+            },
+        )
+        .with_summary(summary)
+    }
+}
+
+pub struct InterruptAgentTool;
+
+impl TypedTool for InterruptAgentTool {
+    type Args = InterruptAgentArgs;
+    type Output = InterruptAgentOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("interrupt_agent").expect("valid interrupt_agent tool name"),
+            display_name: None,
+            description: "Interrupt an agent's current turn without deleting its identity. The \
+                agent remains available for later messages and follow-up tasks."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute AgentPath or caller-relative target."
+                    }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            }),
+            output_schema: serde_json::to_value(schemars::schema_for!(InterruptAgentOutput))
+                .expect("interrupt_agent output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Exec,
+            risk: ToolRisk::Administrative,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: InterruptAgentArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        if args.target.trim().is_empty() {
+            return Err(subagent_error(
+                "MISSING_TARGET",
+                "interrupt_agent target is required",
+                "Provide an AgentPath such as /root/review_code.",
+            ));
+        }
+        let host = host().ok_or_else(|| {
+            subagent_error(
+                "HOST_UNAVAILABLE",
+                "interrupt_agent requires the in-process subagent host",
+                "Check that the daemon installed the subagent host.",
+            )
+        })?;
+        let interrupted = host
+            .interrupt_agent(InterruptAgentRequest {
+                caller_session_id: &ctx.session_id,
+                target: args.target.trim(),
+            })
+            .map_err(|error| {
+                subagent_error(
+                    "INTERRUPT_REJECTED",
+                    format!("interrupt_agent rejected: {error}"),
+                    "Root and self interrupts are forbidden; check the target path.",
+                )
+            })?;
+        Ok(InterruptAgentOutput {
+            recipient: interrupted.recipient,
+            previous_status: interrupted.previous_status,
+        })
+    }
+}
+
 fn agent_message_schema(message_description: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -461,6 +714,18 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(SendMessageTool);
     mgr.register_display("followup_task", project_agent_message_display);
     mgr.register_typed(FollowupTaskTool);
+    mgr.register_display("wait_agent", project_wait_agent_display);
+    mgr.register_typed(WaitAgentTool);
+    mgr.register_display("interrupt_agent", project_interrupt_agent_display);
+    mgr.register_typed(InterruptAgentTool);
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
@@ -634,6 +899,42 @@ fn project_agent_message_display(
         },
         qaqh_workspace::tool_api::ToolBody::Text {
             text: "agent message rejected".to_string(),
+            truncated: false,
+        },
+    )
+}
+
+fn project_wait_agent_display(
+    args: &serde_json::Value,
+    output: &str,
+) -> qaqh_workspace::tool_api::ToolDisplay {
+    if let Ok(output) = serde_json::from_str::<WaitAgentOutput>(output) {
+        return output.display(args);
+    }
+    qaqh_workspace::tool_api::ToolDisplay::new(
+        qaqh_workspace::tool_api::ToolHeader::Other {
+            label: "agents".to_string(),
+        },
+        qaqh_workspace::tool_api::ToolBody::Text {
+            text: "wait failed".to_string(),
+            truncated: false,
+        },
+    )
+}
+
+fn project_interrupt_agent_display(
+    args: &serde_json::Value,
+    output: &str,
+) -> qaqh_workspace::tool_api::ToolDisplay {
+    if let Ok(output) = serde_json::from_str::<InterruptAgentOutput>(output) {
+        return output.display(args);
+    }
+    qaqh_workspace::tool_api::ToolDisplay::new(
+        qaqh_workspace::tool_api::ToolHeader::Other {
+            label: "agents".to_string(),
+        },
+        qaqh_workspace::tool_api::ToolBody::Text {
+            text: "interrupt rejected".to_string(),
             truncated: false,
         },
     )
@@ -852,6 +1153,11 @@ pub fn start_subagent_collector(
         .as_ref()
         .map(|envelope| envelope.message_id.clone())
         .unwrap_or_else(|| format!("subagent-task:{seed}"));
+    let completion_route = inter_agent.as_ref().map(|envelope| CompletionRoute {
+        root_session_id: envelope.root_session_id.clone(),
+        parent_agent_path: envelope.author.clone(),
+        child_agent_path: envelope.recipient.clone(),
+    });
     let send = RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
         text: task_text.to_string(),
         images: vec![],
@@ -890,9 +1196,17 @@ pub fn start_subagent_collector(
             timeout_secs,
             &parent_seed,
             &parent_call_id,
+            completion_route,
         );
     });
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct CompletionRoute {
+    root_session_id: String,
+    parent_agent_path: String,
+    child_agent_path: String,
 }
 
 /// Background collector: watches the sub-seed's event stream (process-local or
@@ -909,6 +1223,7 @@ fn collect_subagent_result(
     timeout_secs: u64,
     parent_seed: &str,
     parent_call_id: &str,
+    completion_route: Option<CompletionRoute>,
 ) {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut final_answer = String::new();
@@ -1073,6 +1388,27 @@ fn collect_subagent_result(
             parent_call_id: parent_call_id.to_string(),
             terminal,
         };
+        let completion_message_id = if did_cancel {
+            format!("subagent-terminal:{seed}")
+        } else {
+            format!("subagent-result:{seed}")
+        };
+        let completion_inter_agent =
+            completion_route
+                .as_ref()
+                .map(|route| qaqh_domain::InterAgentEnvelope {
+                    message_id: completion_message_id.clone(),
+                    root_session_id: route.root_session_id.clone(),
+                    author: route.child_agent_path.clone(),
+                    recipient: route.parent_agent_path.clone(),
+                    other_recipients: vec![],
+                    task_id: None,
+                    reply_to: None,
+                    causation_id: None,
+                    delivery: qaqh_domain::InterAgentDelivery::Queue,
+                    created_at_ms: unix_ms(),
+                });
+        let v2_delivery = completion_inter_agent.is_some();
         let inject = RingingCommand::Conversation(
             qaqh_domain::ConversationCommand::ConversationSendMessage {
                 text: if did_cancel {
@@ -1084,20 +1420,17 @@ fn collect_subagent_result(
                 },
                 images: vec![],
                 attachments: None,
-                message_id: Some(if did_cancel {
-                    format!("subagent-terminal:{seed}")
-                } else {
-                    format!("subagent-result:{seed}")
-                }),
-                input_purpose: if did_cancel {
+                message_id: Some(completion_message_id),
+                input_purpose: if did_cancel || v2_delivery {
                     qaqh_domain::ConversationInputPurpose::QueueOnly
                 } else {
                     qaqh_domain::ConversationInputPurpose::TriggerTurn
                 },
-                // 以 system 角色注入（而非 user）：模型可见但不等同于用户输入，
-                // 保留 [SUBAGENT ...] 标签供模型区分注入数据与系统指令。
-                as_system: true,
-                inter_agent: None,
+                // V2 results are attributed inter-agent communications and are
+                // queue-only. The legacy fallback keeps its system injection
+                // shape until all callers carry a canonical route.
+                as_system: !v2_delivery,
+                inter_agent: completion_inter_agent,
                 subagent_terminal: Some(terminal_notification),
             },
         );
@@ -1224,6 +1557,46 @@ mod tests {
                 Some(2)
             );
         }
+    }
+
+    #[test]
+    fn wait_agent_schema_is_registered_with_optional_timeout() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+
+        let handler = manager
+            .lookup("wait_agent")
+            .expect("wait_agent should be registered");
+        assert!(
+            handler.input_schema["properties"]
+                .as_object()
+                .expect("properties")
+                .contains_key("timeout_ms")
+        );
+        assert!(
+            handler.input_schema.get("required").is_none(),
+            "timeout_ms must default to the bounded 30s wait"
+        );
+    }
+
+    #[test]
+    fn interrupt_agent_schema_requires_target() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+
+        let handler = manager
+            .lookup("interrupt_agent")
+            .expect("interrupt_agent should be registered");
+        assert!(
+            handler.input_schema["properties"]
+                .as_object()
+                .expect("properties")
+                .contains_key("target")
+        );
+        assert_eq!(
+            handler.input_schema["required"].as_array().map(Vec::len),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1485,6 +1858,31 @@ mod tests {
         }
     }
 
+    fn completed_batch(seed: &str) -> EventBatch {
+        let envelope = qaqh_ringing::RingingEventEnvelope::new(
+            seed,
+            1,
+            1,
+            1,
+            "ev-complete-1",
+            RingingEvent::Conversation(ConversationEvent::TurnCompleted {
+                turn_id: "t1".to_string(),
+                stop_reason: None,
+                usage: None,
+            }),
+        );
+        EventBatch {
+            schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
+            version: qaqh_ringing::protocol::RINGING_VERSION,
+            channel: qaqh_domain::RingingChannel::Conversation,
+            seed: seed.to_string(),
+            server_epoch: "test-epoch".to_string(),
+            from_stream_seq: 1,
+            to_stream_seq: 1,
+            envelopes: vec![envelope],
+        }
+    }
+
     /// T-1-2 回归：collector 收到 `ConversationCancelled` 后**不得**把
     /// `final_answer` 注入父会话。未修复时本测试红：仍向父 seed 发
     /// `ConversationSendMessage { as_system: true }`，父会话被重新开回合
@@ -1517,6 +1915,7 @@ mod tests {
             5,
             parent,
             "call_01J00000000000000000000000",
+            None,
         );
 
         let sent = sent.lock().expect("test mutex must not be poisoned");
@@ -1553,5 +1952,71 @@ mod tests {
             }),
             "子 worker 的自动卸载（SessionClose）不受抑制影响，实测: {sent:?}"
         );
+    }
+
+    #[test]
+    fn completed_collector_delivers_queue_only_inter_agent_result() {
+        use qaqh_workspace::process_registry::ProcessRegistry;
+
+        let child = "0198f1a0-0000-7000-8000-000000000004";
+        let parent = "sub-complete-parent";
+        let (tx, rx) = mpsc::channel::<EventBatch>();
+        tx.send(completed_batch(child))
+            .expect("test channel must not fail");
+
+        let sent: Arc<std::sync::Mutex<Vec<(String, RingingCommand)>>> = Arc::default();
+        let transport = Box::new(RecordingTransport {
+            batch_rx: rx,
+            sent: Arc::clone(&sent),
+        });
+        let registry_ref = RegistryRef::Local {
+            id: ProcessRegistry::register("subagent-complete-queue-only"),
+        };
+
+        collect_subagent_result(
+            transport,
+            child,
+            child,
+            "complete_task",
+            registry_ref,
+            5,
+            parent,
+            "call_01J00000000000000000000001",
+            Some(CompletionRoute {
+                root_session_id: "root-session".to_string(),
+                parent_agent_path: "/root".to_string(),
+                child_agent_path: "/root/complete_task".to_string(),
+            }),
+        );
+
+        let sent = sent.lock().expect("test mutex must not be poisoned");
+        let injected = sent
+            .iter()
+            .find(|(seed, _)| seed == parent)
+            .expect("completion must be delivered to the parent");
+        let RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+            message_id,
+            input_purpose,
+            as_system,
+            inter_agent: Some(envelope),
+            subagent_terminal: Some(terminal),
+            ..
+        }) = &injected.1
+        else {
+            panic!("unexpected completion command: {:?}", injected.1);
+        };
+        assert_eq!(
+            *input_purpose,
+            qaqh_domain::ConversationInputPurpose::QueueOnly
+        );
+        assert!(
+            !*as_system,
+            "V2 completion must use inter-agent attribution"
+        );
+        assert_eq!(envelope.delivery, qaqh_domain::InterAgentDelivery::Queue);
+        assert_eq!(envelope.author, "/root/complete_task");
+        assert_eq!(envelope.recipient, "/root");
+        assert_eq!(message_id.as_deref(), Some(envelope.message_id.as_str()));
+        assert_eq!(terminal.child_session_id, child);
     }
 }

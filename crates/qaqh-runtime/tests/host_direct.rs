@@ -13,7 +13,10 @@ use qaqh_runtime::{QaqhService, RingingHub};
 use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{FactPayload, MailboxMessageState};
-use qaqh_subagent::{SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost};
+use qaqh_subagent::{
+    InterruptAgentRequest, SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost,
+    WaitAgentOutcome, WaitAgentRequest,
+};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -174,6 +177,96 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
         MailboxMessageState::Delivered
     );
 
+    // The parent must be a running actor for wait_agent, matching the real
+    // tool-call path. SessionAttach only materializes the actor; the daemon
+    // lease layer owns its production semantics.
+    host.send_ringing(
+        &parent,
+        qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
+            seed: parent.clone(),
+        }),
+    )
+    .expect("start parent actor before wait_agent");
+
+    let no_cancel = || false;
+    assert_eq!(
+        host.wait_agent(WaitAgentRequest {
+            caller_session_id: &parent,
+            timeout: Duration::from_millis(50),
+            should_cancel: &no_cancel,
+        })
+        .expect("wait_agent timeout must be stable"),
+        WaitAgentOutcome::TimedOut {
+            activity_fact_seq: 0
+        }
+    );
+
+    let waiter_service = service.clone();
+    let waiter_parent = parent.clone();
+    let waiter = std::thread::spawn(move || {
+        let no_cancel = || false;
+        waiter_service.wait_agent(WaitAgentRequest {
+            caller_session_id: &waiter_parent,
+            timeout: Duration::from_secs(2),
+            should_cancel: &no_cancel,
+        })
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &child_session_id,
+        target: "/root",
+        text: "queue-only activity for the waiting parent",
+        delivery: InterAgentDelivery::Queue,
+    })
+    .expect("child sends queue-only mailbox activity to parent");
+    assert!(
+        matches!(
+            waiter.join().expect("wait thread must not panic"),
+            Ok(WaitAgentOutcome::Activity { activity_fact_seq })
+                if activity_fact_seq > 0
+        ),
+        "mailbox activity must wake wait_agent"
+    );
+
+    let interrupted = host
+        .interrupt_agent(InterruptAgentRequest {
+            caller_session_id: &parent,
+            target: "/root/review_code",
+        })
+        .expect("root may interrupt a child turn");
+    assert_eq!(interrupted.recipient, "/root/review_code");
+    assert!(!interrupted.previous_status.is_empty());
+    assert!(
+        host.list_agents(&parent, "/root")
+            .expect("interrupt must retain logical identity")
+            .iter()
+            .any(|agent| agent.agent_id == child_session_id),
+        "interrupt must not unload or delete the child identity"
+    );
+    assert!(
+        host.interrupt_agent(InterruptAgentRequest {
+            caller_session_id: &parent,
+            target: "/root",
+        })
+        .is_err(),
+        "root interrupt must be rejected"
+    );
+    assert!(
+        host.interrupt_agent(InterruptAgentRequest {
+            caller_session_id: &child_session_id,
+            target: "/root/review_code",
+        })
+        .is_err(),
+        "self interrupt must be rejected"
+    );
+    host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &parent,
+        target: "/root/review_code",
+        text: "post-interrupt queue delivery",
+        delivery: InterAgentDelivery::Queue,
+    })
+    .expect("interrupted child must remain available for messages");
+
     // 2. subscribe：从 hub 过滤该 seed 的事件批次（工具 collect 线程消费）。
     let rx = host.subscribe(&seed);
     // 发布一条属于该 seed 的合成事件（等价 actor 事件进入 hub 的路径）。
@@ -206,4 +299,5 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     // 4. close：幂等（已关闭/已退出均返回 Ok，不 panic）。
     host.close(&seed).expect("first close");
     let _ = host.close(&seed); // 第二次幂等
+    host.close(&parent).expect("close parent actor");
 }

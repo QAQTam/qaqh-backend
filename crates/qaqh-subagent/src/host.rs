@@ -15,6 +15,7 @@
 //! spawn 失败——legacy HTTP/SSE 回连降级路径已随 PR-4-2 删除。
 
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use qaqh_ringing::RingingCommand;
 use schemars::JsonSchema;
@@ -96,6 +97,34 @@ pub struct SentAgentMessage {
     pub delivery: qaqh_domain::InterAgentDelivery,
 }
 
+#[derive(Clone)]
+pub struct WaitAgentRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub timeout: Duration,
+    /// Cooperative cancellation probe. The host polls this between reads so a
+    /// cancelled turn does not remain blocked until the wait deadline.
+    pub should_cancel: &'a dyn Fn() -> bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitAgentOutcome {
+    Activity { activity_fact_seq: u64 },
+    TimedOut { activity_fact_seq: u64 },
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterruptAgentRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub target: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptedAgent {
+    pub recipient: String,
+    pub previous_status: String,
+}
+
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker
 /// 线程的 std 线程模型匹配），由 qaqh-runtime 的 `QaqhService` 提供实现。
 pub trait SubagentHost: Send + Sync {
@@ -126,6 +155,19 @@ pub trait SubagentHost: Send + Sync {
         &self,
         request: SendAgentMessageRequest<'_>,
     ) -> Result<SentAgentMessage, String>;
+
+    /// Wait for the caller's mailbox watermark to advance.
+    ///
+    /// This deliberately returns no message body. The runtime merges accepted
+    /// queue-only communications at the next turn/lap boundary.
+    fn wait_agent(&self, request: WaitAgentRequest<'_>) -> Result<WaitAgentOutcome, String>;
+
+    /// Interrupt the target agent's current turn without unloading or deleting
+    /// its logical identity. Root and self interrupts are rejected.
+    fn interrupt_agent(
+        &self,
+        request: InterruptAgentRequest<'_>,
+    ) -> Result<InterruptedAgent, String>;
 
     /// Roll back a child whose canonical spawn edge could not be committed.
     ///
