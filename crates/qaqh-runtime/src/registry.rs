@@ -13,6 +13,7 @@ use qaqh_session::canonical::{
     CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
     EVENTS_FILE,
 };
+use qaqh_session::projection::AgentGraphSnapshot;
 use qaqh_session::session_fact_v2::{AgentMetadata, AgentPath, FactPayload};
 
 use crate::agent::SubagentSpawnSpec;
@@ -346,6 +347,15 @@ impl AgentRegistry {
         prefix: &AgentPath,
     ) -> Vec<AgentMetadata> {
         self.agent_catalog.list_prefix(root_session_id, prefix)
+    }
+
+    /// Rebuild the canonical agent graph for one root tree.
+    pub fn agent_graph_snapshot(
+        &self,
+        root_session_id: &str,
+    ) -> Result<AgentGraphSnapshot, String> {
+        crate::agent_graph::load_agent_graph(&self.sessions, root_session_id)
+            .map(|graph| graph.snapshot())
     }
 
     fn ensure_root_metadata(&mut self, seed: &str) -> Result<(), String> {
