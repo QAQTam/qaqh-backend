@@ -5,10 +5,11 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
-    InteractionDecision, InteractionExpired, InteractionExpiryReason, InteractionId,
-    InteractionKind, InteractionRequested, InteractionResolved, LogId, PolicyDecisionRef,
-    RecoveryId, RecoveryRef, SessionId, SideEffectClass, SubagentFinished, SubagentSpawned,
-    SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
+    InputAccepted, InputId, InputKind, InputPurpose, InterAgentCommunication, InterAgentContent,
+    InterAgentDelivery, InteractionDecision, InteractionExpired, InteractionExpiryReason,
+    InteractionId, InteractionKind, InteractionRequested, InteractionResolved, LogId, MessageId,
+    PolicyDecisionRef, RecoveryId, RecoveryRef, SessionId, SideEffectClass, SubagentFinished,
+    SubagentSpawned, SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
     ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
@@ -91,6 +92,41 @@ fn interaction_expired(reason: InteractionExpiryReason) -> InteractionExpired {
     }
 }
 
+fn input_accepted(text: &str) -> InputAccepted {
+    InputAccepted {
+        input_id: InputId::new("input_01J00000000000000000000001"),
+        input_kind: InputKind::UserText,
+        input_purpose: InputPurpose::TriggerTurn,
+        content_ref: None,
+        inline_text: Some(text.to_string()),
+        attachments: vec![],
+        actor: ActorRef {
+            kind: ActorKind::User,
+            id: "user-1".into(),
+            display_name: None,
+        },
+        client_request_id: Some("msg_01J00000000000000000000001".into()),
+    }
+}
+
+fn communication() -> InterAgentCommunication {
+    InterAgentCommunication {
+        message_id: MessageId::new("msg_01J00000000000000000000001"),
+        root_session_id: session_id(),
+        author: AgentPath::root(),
+        recipient: AgentPath::parse_absolute("/root/review").expect("recipient"),
+        other_recipients: vec![],
+        task_id: None,
+        content: InterAgentContent::Inline {
+            text: "review the diff".into(),
+        },
+        reply_to: None,
+        causation_id: None,
+        delivery: InterAgentDelivery::Trigger,
+        created_at_ms: NOW_MS + 42,
+    }
+}
+
 fn intent(
     call: &ToolCallId,
     execution: &ExecutionId,
@@ -162,6 +198,76 @@ fn open_ledger(dir: &std::path::Path) -> ToolLedger {
         LEASE_MS,
     )
     .expect("open tool ledger")
+}
+
+#[test]
+fn input_and_communication_appends_are_idempotent_and_rebuildable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+
+    let input = input_accepted("hello");
+    let first_input = ledger
+        .append_input_accepted(event_id(70), input.clone(), NOW_MS + 70)
+        .expect("append input");
+    let duplicate_input = ledger
+        .append_input_accepted(event_id(71), input.clone(), NOW_MS + 71)
+        .expect("duplicate input is idempotent");
+    assert_eq!(duplicate_input.fact_seq, first_input.fact_seq);
+
+    let mut conflicting_input = input;
+    conflicting_input.inline_text = Some("different".into());
+    assert!(matches!(
+        ledger.append_input_accepted(event_id(72), conflicting_input, NOW_MS + 72),
+        Err(ToolLedgerError::InputAcceptedConflict { .. })
+    ));
+
+    let message = communication();
+    let first_communication = ledger
+        .append_inter_agent_communication(event_id(73), message.clone(), NOW_MS + 73)
+        .expect("append communication");
+    let duplicate_communication = ledger
+        .append_inter_agent_communication(event_id(74), message.clone(), NOW_MS + 74)
+        .expect("duplicate communication is idempotent");
+    assert_eq!(
+        duplicate_communication.fact_seq,
+        first_communication.fact_seq
+    );
+
+    let mut conflicting_communication = message;
+    conflicting_communication.delivery = InterAgentDelivery::Queue;
+    assert!(matches!(
+        ledger.append_inter_agent_communication(
+            event_id(75),
+            conflicting_communication,
+            NOW_MS + 75
+        ),
+        Err(ToolLedgerError::InterAgentCommunicationConflict { .. })
+    ));
+
+    drop(ledger);
+    let mut reopened = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + LEASE_MS + 1,
+        LEASE_MS,
+    )
+    .expect("reopen ledger");
+    assert_eq!(
+        reopened
+            .append_input_accepted(event_id(76), input_accepted("hello"), NOW_MS + 76)
+            .expect("rebuilt input index")
+            .fact_seq,
+        first_input.fact_seq
+    );
+    assert_eq!(
+        reopened
+            .append_inter_agent_communication(event_id(77), communication(), NOW_MS + 77)
+            .expect("rebuilt communication index")
+            .fact_seq,
+        first_communication.fact_seq
+    );
 }
 
 #[test]

@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::session_fact_v2::{
-    ContentRef, DriverChanged, EventId, ExecutionId, FactPayload, FactSchema, InteractionExpired,
-    InteractionId, InteractionRequested, InteractionResolved, RecoveryRef, SessionFact, SessionId,
-    SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    ContentRef, DriverChanged, EventId, ExecutionId, FactPayload, FactSchema, InputAccepted,
+    InputId, InterAgentCommunication, InteractionExpired, InteractionId, InteractionRequested,
+    InteractionResolved, MessageId, RecoveryRef, SessionFact, SessionId, SessionRecovered,
+    SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished, ToolIntent,
+    ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 use super::{
@@ -155,6 +156,12 @@ pub enum ToolLedgerError {
 
     #[error("subagent {child_session_id} already has a conflicting finished edge")]
     SubagentFinishConflict { child_session_id: SessionId },
+
+    #[error("input {input_id} already has a conflicting accepted fact")]
+    InputAcceptedConflict { input_id: InputId },
+
+    #[error("inter-agent message {message_id} already has a conflicting communication")]
+    InterAgentCommunicationConflict { message_id: MessageId },
 }
 
 /// Outcome of a canonical driver-seat claim.
@@ -221,6 +228,8 @@ pub struct ToolLedger {
     interaction_terminals: HashMap<InteractionId, SessionFact>,
     subagent_spawned: HashMap<SessionId, SessionFact>,
     subagent_finished: HashMap<SessionId, SessionFact>,
+    input_accepteds: HashMap<InputId, SessionFact>,
+    inter_agent_communications: HashMap<MessageId, SessionFact>,
     /// Canonical driver seat, rebuilt from `DriverChanged` facts on open.
     driver_holder: Option<String>,
     driver_epoch: u64,
@@ -257,6 +266,8 @@ impl ToolLedger {
         let mut interaction_terminals = HashMap::new();
         let mut subagent_spawned = HashMap::new();
         let mut subagent_finished = HashMap::new();
+        let mut input_accepteds = HashMap::new();
+        let mut inter_agent_communications = HashMap::new();
         let mut driver_holder = None;
         let mut driver_epoch = 0;
         for fact in reader.read_all()? {
@@ -270,6 +281,8 @@ impl ToolLedger {
                 &mut interaction_terminals,
                 &mut subagent_spawned,
                 &mut subagent_finished,
+                &mut input_accepteds,
+                &mut inter_agent_communications,
                 fact,
             )?;
         }
@@ -284,6 +297,8 @@ impl ToolLedger {
             interaction_terminals,
             subagent_spawned,
             subagent_finished,
+            input_accepteds,
+            inter_agent_communications,
             driver_holder,
             driver_epoch,
         })
@@ -1011,6 +1026,85 @@ impl ToolLedger {
         Ok(outcome.fact)
     }
 
+    /// Durably record an accepted model input.
+    ///
+    /// Repeating the same `input_id` with the same payload is idempotent; a
+    /// conflicting payload for the same input is rejected.
+    pub fn append_input_accepted(
+        &mut self,
+        event_id: EventId,
+        payload: InputAccepted,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let input_id = payload.input_id.clone();
+        if let Some(existing) = self.input_accepteds.get(&input_id) {
+            if matches!(
+                &existing.payload,
+                FactPayload::InputAccepted(existing) if existing == &payload
+            ) {
+                return Ok(existing.clone());
+            }
+            return Err(ToolLedgerError::InputAcceptedConflict { input_id });
+        }
+        let fact =
+            self.build_conversation_fact(event_id, FactPayload::InputAccepted(payload), now_ms);
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        self.input_accepteds.insert(input_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
+    /// Durably record an inter-agent communication before delivery.
+    ///
+    /// Repeating the same `message_id` with the same payload is idempotent; a
+    /// conflicting payload for the same message is rejected.
+    pub fn append_inter_agent_communication(
+        &mut self,
+        event_id: EventId,
+        payload: InterAgentCommunication,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let message_id = payload.message_id.clone();
+        if let Some(existing) = self.inter_agent_communications.get(&message_id) {
+            if matches!(
+                &existing.payload,
+                FactPayload::InterAgentCommunication(existing) if existing == &payload
+            ) {
+                return Ok(existing.clone());
+            }
+            return Err(ToolLedgerError::InterAgentCommunicationConflict { message_id });
+        }
+        let fact = self.build_conversation_fact(
+            event_id,
+            FactPayload::InterAgentCommunication(payload),
+            now_ms,
+        );
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        self.inter_agent_communications
+            .insert(message_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
+    fn build_conversation_fact(
+        &self,
+        event_id: EventId,
+        payload: FactPayload,
+        now_ms: i64,
+    ) -> SessionFact {
+        SessionFact {
+            schema: FactSchema::v2(),
+            session_id: self.session_id.clone(),
+            log_id: self.log_id.clone(),
+            fact_seq: 0,
+            event_id,
+            ts_ms: now_ms,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload,
+        }
+    }
+
     fn interaction_envelope_context(
         &self,
         interaction_id: &InteractionId,
@@ -1076,14 +1170,49 @@ impl ToolLedger {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_fact(
     entries: &mut HashMap<ToolCallId, ToolLedgerEntry>,
     interaction_requests: &mut HashMap<InteractionId, SessionFact>,
     interaction_terminals: &mut HashMap<InteractionId, SessionFact>,
     subagent_spawned: &mut HashMap<SessionId, SessionFact>,
     subagent_finished: &mut HashMap<SessionId, SessionFact>,
+    input_accepteds: &mut HashMap<InputId, SessionFact>,
+    inter_agent_communications: &mut HashMap<MessageId, SessionFact>,
     fact: SessionFact,
 ) -> Result<(), ToolLedgerError> {
+    match &fact.payload {
+        FactPayload::InputAccepted(payload) => {
+            let input_id = payload.input_id.clone();
+            if let Some(existing) = input_accepteds.get(&input_id) {
+                if matches!(
+                    &existing.payload,
+                    FactPayload::InputAccepted(existing) if existing == payload
+                ) {
+                    return Ok(());
+                }
+                return Err(ToolLedgerError::InputAcceptedConflict { input_id });
+            }
+            input_accepteds.insert(input_id, fact);
+            return Ok(());
+        }
+        FactPayload::InterAgentCommunication(payload) => {
+            let message_id = payload.message_id.clone();
+            if let Some(existing) = inter_agent_communications.get(&message_id) {
+                if matches!(
+                    &existing.payload,
+                    FactPayload::InterAgentCommunication(existing) if existing == payload
+                ) {
+                    return Ok(());
+                }
+                return Err(ToolLedgerError::InterAgentCommunicationConflict { message_id });
+            }
+            inter_agent_communications.insert(message_id, fact);
+            return Ok(());
+        }
+        _ => {}
+    }
+
     match &fact.payload {
         FactPayload::SubagentSpawned(payload) => {
             let child_session_id = payload.child_session_id.clone();
