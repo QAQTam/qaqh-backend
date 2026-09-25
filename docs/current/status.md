@@ -92,7 +92,8 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - `list_agents` 已返回显式 status/residency；unloaded agent 仍可见。
   - parent-owned child 已拒绝无 inter-agent metadata 的 direct/app-server 输入。
   - TeamSnapshot / TeamDelta 后端 projection 已接入，roster 与 inbox 可从 canonical facts 重建。
-- 仍待：TUI/WinUI roster/inbox 消费、canonical residency delta、depth/outbound 配额、
+  - runtime residency overlay 已接入；`AgentResidencyChanged` 作为 ephemeral TeamDelta 发布，重启后回到 unloaded。
+- 仍待：TUI/WinUI roster/inbox 消费、depth/outbound 配额、
   大正文 `content_ref` 外置、task board 与 message board。
 - Phase 4 前端壳接入和 Phase 5-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：

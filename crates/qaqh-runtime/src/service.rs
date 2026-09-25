@@ -14,12 +14,14 @@ use qaqh_session::session_fact_v2::{
 };
 use serde_json::{Value, json};
 
+use crate::ringing::V2ProjectionHub;
 use crate::{AgentRegistry, RingingHub};
 
 #[derive(Clone)]
 pub struct QaqhService {
     pub(crate) registry: Arc<Mutex<AgentRegistry>>,
     pub(crate) hub: std::sync::OnceLock<Arc<RingingHub>>,
+    pub(crate) v2_hub: std::sync::OnceLock<Arc<V2ProjectionHub>>,
     /// 会话存储句柄（PR-3-1 注入化：daemon main 装配点 init 后注入，
     /// service 内不再触达会话单例的全局访问器）。
     pub(crate) sessions: Arc<qaqh_session::SessionManager>,
@@ -80,6 +82,7 @@ impl QaqhService {
         Self {
             registry: Arc::new(Mutex::new(AgentRegistry::new(sessions.clone()))),
             hub: std::sync::OnceLock::new(),
+            v2_hub: std::sync::OnceLock::new(),
             sessions,
         }
     }
@@ -91,6 +94,16 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .attach_ringing(hub);
+    }
+
+    /// Attach the canonical V2 projection hub used for runtime residency
+    /// overlays.
+    pub fn attach_v2_projection(&self, hub: Arc<V2ProjectionHub>) {
+        let _ = self.v2_hub.set(hub.clone());
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attach_v2_projection(hub);
     }
 
     /// 转发 Ringing 命令到 agent worker（wire 判别后由 worker reader 解析）。

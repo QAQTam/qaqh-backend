@@ -69,7 +69,8 @@ cargo check --workspace --all-targets --offline
 ## 4. 未决项
 
 - TUI/WinUI 尚未消费 TeamSnapshot/TeamDelta；
-- `TeamDelta::AgentResidencyChanged` 当前作为类型契约保留，运行时 unload 尚无独立 canonical fact；
+- `TeamDelta::AgentResidencyChanged` 已由 runtime residency overlay 生产；
+  canonical facts 默认 materialize 为 unloaded，daemon 重启后不会残留 loaded；
 - task board / message board 尚未开始；
 - steer/interject 与大正文 content_ref 外置仍未完成。
 
