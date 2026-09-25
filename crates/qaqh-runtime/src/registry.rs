@@ -349,7 +349,10 @@ impl AgentRegistry {
     }
 
     fn ensure_root_metadata(&mut self, seed: &str) -> Result<(), String> {
-        if seed.is_empty() || self.agent_catalog.get_by_id(seed).is_some() {
+        if seed.is_empty()
+            || self.agent_catalog.get_by_id(seed).is_some()
+            || self.supervisor.parent_of(seed).is_some()
+        {
             return Ok(());
         }
         if self.canonical_parent_session_id(seed)?.is_none() {
