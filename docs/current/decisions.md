@@ -84,3 +84,10 @@
   - Linux：`bash` > `zsh` > `sh`；
   - macOS：`bash` > `zsh`。
 - 不做跨 shell 命令翻译或兼容降级；不兼容命令由 shell 报错，模型负责修正。
+
+## D12. 工具展示摘要唯一来源
+
+- `display.summary` 只由工具展示投影显式构造，typed 路径不再自动回填模型输出摘要。
+- `display.summary` 不承载工具名、终态标记或正文首行；没有更合适的元信息时保持 `None`。
+- `TimelineTool.summary` 只在 `display` 缺失时作为 legacy fallback；有 `display` 时不双写。
+- 正文只从 `display.body` 或显式 legacy fallback 读取，不再从 `summary` 反推。

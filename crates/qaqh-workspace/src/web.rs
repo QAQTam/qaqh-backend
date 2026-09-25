@@ -42,10 +42,6 @@ impl ToolProjection for WebFetchOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        self.content.lines().next().map(str::to_string)
-    }
-
     fn display(&self, args: &serde_json::Value) -> ToolDisplay {
         let query = args
             .get("url")
@@ -71,8 +67,7 @@ impl ToolProjection for WebFetchOutput {
                     scope,
                 },
                 body,
-            )
-            .with_summary(self.content.lines().next().unwrap_or_default().to_string()),
+            ),
             None => ToolDisplay::new(
                 ToolHeader::Other {
                     label: "web_fetch".to_string(),
@@ -344,7 +339,7 @@ mod tests {
                 scope: Some("page.md".to_string()),
             }
         );
-        assert_eq!(display.summary.as_deref(), Some("page text"));
+        assert_eq!(display.summary, None);
     }
 
     #[test]
