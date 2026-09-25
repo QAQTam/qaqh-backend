@@ -99,6 +99,19 @@ default_shell = "auto"
 - exec 支持 stdout/stderr 分离展示。
 - Linux sandbox 支持 bubblewrap 或 Landlock/seccomp；具体后端由 capability 探测决定。
 
+### Subagent V2（已冻结，分阶段实现）
+
+- `AgentControl` 负责跨 agent 的 spawn / message / interrupt / wait 命令边界。
+- `AgentRegistry` 保存逻辑 agent metadata 与 loaded worker handle 的映射；
+  logical identity 不随 unload 消失。
+- `AgentGraphStore` 是从父 session canonical `SubagentSpawned/Finished` facts
+  重建的 parent-child 索引，不是第二可写事实源。
+- `Mailbox` 负责 queue/trigger/interrupt delivery；消息进入 mailbox 不等于模型已读。
+- `Residency` 只描述 loaded/unloaded，与 `AgentStatus` 分离。
+- `TeamSnapshot/TeamDelta` 是 TUI/WinUI 的唯一 roster/inbox 投影。
+- 当前实现从 Phase 1 开始；完整契约见
+  [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
+
 ### Gate
 
 - 位置：`crates/qaqh-gate/`

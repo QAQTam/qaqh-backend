@@ -1,6 +1,8 @@
 mod activity;
 mod actor;
 pub mod agent;
+mod agent_catalog;
+mod agent_graph;
 mod host_impl;
 pub mod quota_ledger;
 mod registry;

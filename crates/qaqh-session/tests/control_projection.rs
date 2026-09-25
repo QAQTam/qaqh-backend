@@ -202,6 +202,8 @@ fn subagent_spawned(ordinal: u64) -> SessionFact {
         FactPayload::SubagentSpawned(SubagentSpawned {
             child_session_id: child_id(),
             parent_call_id: call_id(),
+            parent_agent_path: None,
+            child_agent_path: None,
             role: Some("worker".into()),
             spawned_at_ms: 1_789_830_000_009,
         }),

@@ -3,7 +3,9 @@
 #    云端 cargo test/clippy 按量计费（NPC 免费但构建测试烧钱），验证一律拉回本地执行。
 #    需要时恢复：stages 内跑 cargo test --workspace --all-targets + clippy -D warnings
 # 2) $：NPC 事件（issue/PR 评论）用自定义镜像；不指定 model = 平台默认免费模型
-# 3) pull_request：NPC 自动代码审查（静态审读 diff，不跑构建）
+#
+# 不注册 pull_request 自动 pipeline：CNB 状态检查不得成为 PR 审批的唯一凭据。
+# 需要 NPC 审查时，由人在 PR 评论中显式触发。
 
 main:
   push:
@@ -31,19 +33,6 @@ $:
       stages:
         - name: npc go
           type: npc:go
-
-  # PR 自动 NPC 预审（免费；产出评论，无写权限诉求）
-  pull_request:
-    - name: npc-auto-review
-      docker:
-        image: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981
-      stages:
-        - name: npc go
-          type: npc:go
-          options:
-            role: reviewer
-            systemPrompt: 你是资深 Rust 代码审查员，重点检查正确性、锁顺序、panic 路径、回归测试覆盖；输出简洁中文意见，阻断问题与建议分列。
-            userPrompt: 审查本次 PR 的代码变更；若无阻断性问题请明确说明可合并。
 
   # wave3 收割：程序化触发 NPC（可信 scope = repo-code:rw），替代评论区勾选「替我上班」
   api_trigger_wm:

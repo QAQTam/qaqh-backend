@@ -4,12 +4,12 @@ use qaqh_session::canonical::{
     CommittedFactReader, ToolLedger, ToolLedgerError, ToolRecoveryDisposition, WriterId,
 };
 use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
+    ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
     InteractionDecision, InteractionExpired, InteractionExpiryReason, InteractionId,
     InteractionKind, InteractionRequested, InteractionResolved, LogId, PolicyDecisionRef,
-    RecoveryId, RecoveryRef, SessionId, SideEffectClass, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-    TurnId,
+    RecoveryId, RecoveryRef, SessionId, SideEffectClass, SubagentFinished, SubagentSpawned,
+    SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
+    ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 const NOW_MS: i64 = 1_789_830_000_000;
@@ -842,4 +842,79 @@ fn ensure_lease_reacquires_after_idle_expiry() {
         )
         .expect("append after reacquire");
     assert!(ledger.get(&call).expect("entry").is_open());
+}
+
+#[test]
+fn subagent_spawn_and_finish_edges_are_idempotent_and_rebuildable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent_call = call_id(99);
+    let child = SessionId::new("0198f1a0-0000-7000-8000-000000000099");
+    let spawned = SubagentSpawned {
+        child_session_id: child.clone(),
+        parent_call_id: parent_call.clone(),
+        parent_agent_path: Some(AgentPath::root()),
+        child_agent_path: Some(
+            AgentPath::parse_absolute("/root/review").expect("child agent path"),
+        ),
+        role: Some("review".to_string()),
+        spawned_at_ms: NOW_MS,
+    };
+    let mut ledger = open_ledger(temp.path());
+    let first = ledger
+        .append_subagent_spawned(event_id(99), spawned.clone(), NOW_MS + 1)
+        .expect("append spawn edge");
+    assert_eq!(
+        ledger
+            .append_subagent_spawned(event_id(100), spawned.clone(), NOW_MS + 2)
+            .expect("idempotent spawn edge"),
+        first
+    );
+
+    let finished = SubagentFinished {
+        child_session_id: child.clone(),
+        parent_call_id: parent_call,
+        status: SubagentTerminalStatus::Completed,
+        result_ref: None,
+        finished_at_ms: NOW_MS + 3,
+        recovery_ref: None,
+    };
+    let terminal = ledger
+        .append_subagent_finished(event_id(101), finished.clone(), NOW_MS + 3)
+        .expect("append finish edge");
+    assert_eq!(
+        ledger
+            .append_subagent_finished(event_id(102), finished.clone(), NOW_MS + 4)
+            .expect("idempotent finish edge"),
+        terminal
+    );
+
+    // Reopen from committed facts and replay both facts. The ledger index must
+    // recover the edge instead of treating them as orphan facts.
+    ledger
+        .release_writer_lease(NOW_MS + 5)
+        .expect("release writer");
+    drop(ledger);
+    let mut reopened = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + 6,
+        LEASE_MS,
+    )
+    .expect("reopen ledger");
+    assert_eq!(
+        reopened
+            .append_subagent_spawned(event_id(103), spawned, NOW_MS + 7)
+            .expect("replay spawn after reopen")
+            .fact_seq,
+        1
+    );
+    assert_eq!(
+        reopened
+            .append_subagent_finished(event_id(104), finished, NOW_MS + 8)
+            .expect("replay finish after reopen")
+            .fact_seq,
+        2
+    );
 }

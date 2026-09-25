@@ -68,3 +68,17 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
 - `mutilAI-SDK` bridge 接入。
 
 具体优先级见 [`debug-backlog.md`](./debug-backlog.md)。
+
+## 5. Subagent V2 实现状态
+
+- Phase 0 已 accepted：spec、decisions、path grammar、communication shape 和
+  canonical producer 设计已冻结。
+- Phase 1 进行中：
+  - `AgentPath` grammar/resolver 已完成（#364 / PR #368）。
+  - 逻辑 agent catalog 与 `/root` 注册已完成（#365 / PR #369）。
+  - canonical graph store、递归 loader、post-order cascade 已完成（#366 / PR #370）。
+  - `SubagentSpawned/Finished` 真实 producer 已接入（#367，当前 stacked PR）。
+  - 仍待：`list_agents` path-prefix 工具面、child reload 后 path 恢复。
+- Phase 2-7 未开始；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
+- 权威计划：
+  [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
