@@ -83,8 +83,8 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - canonical `InterAgentCommunication` 与 mailbox projection 已合并（#372 / PR #387）。
   - canonical `InputAccepted` producer 与 communication append 已接入。
   - subagent initial task 已通过 `InterAgentCommunication` delivery 投递。
-  - `send_message` / `followup_task` / `wait_agent` / `interrupt_agent` 工具面
-    和 residency reload 分别在 #374/#375。
+  - `send_message` / `followup_task` 工具面已接入。
+  - `wait_agent` / `interrupt_agent` 工具面、residency reload 分别在 #374/#375。
 - 仍待：child reload 后 path 恢复。
 - Phase 3-7 未开始；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
