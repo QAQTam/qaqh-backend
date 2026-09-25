@@ -44,8 +44,9 @@ use serde::{Deserialize, Serialize};
 mod host;
 pub use host::{
     ArmSubagentCollectorRequest, ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent,
-    ListedAgent, SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
-    StartSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest, host, install_host,
+    ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
+    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
+    WaitAgentOutcome, WaitAgentRequest, host, install_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。

@@ -79,17 +79,21 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - canonical graph store、递归 loader、post-order cascade（#366 / PR #370）。
   - `SubagentSpawned/Finished` 真实 producer（#367 / PR #371）。
   - `list_agents` path-prefix 工具面已接入。
-- Phase 2 进行中：
+- Phase 2 已完成：
   - canonical `InterAgentCommunication` 与 mailbox projection 已合并（#372 / PR #387）。
   - canonical `InputAccepted` producer 与 communication append 已接入。
   - subagent initial task 已通过 `InterAgentCommunication` delivery 投递。
   - `send_message` / `followup_task` / `wait_agent` / `interrupt_agent` 工具面已接入。
   - child completion 已改为 queue-only mailbox delivery，不再默认触发父 turn。
+- Phase 3 进行中：
   - unloaded child 可由 delivery 经 loaded immediate parent reload，并保留 AgentPath。
   - Trigger delivery 会重新 arm collector，completion 可继续回父 mailbox。
   - idle subagent 已纳入 residency LRU，unload 后仍可经 delivery reload。
+  - `list_agents` 已返回显式 status/residency；unloaded agent 仍可见。
+  - parent-owned child 已拒绝无 inter-agent metadata 的 direct/app-server 输入。
   - TeamSnapshot / TeamDelta 后端 projection 已接入，roster 与 inbox 可从 canonical facts 重建。
-- 仍待：TUI/WinUI roster/inbox 消费、task board 与 message board。
+- 仍待：TUI/WinUI roster/inbox 消费、canonical residency delta、depth/outbound 配额、
+  大正文 `content_ref` 外置、task board 与 message board。
 - Phase 4 前端壳接入和 Phase 5-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。

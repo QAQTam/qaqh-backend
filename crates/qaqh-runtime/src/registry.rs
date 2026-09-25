@@ -15,8 +15,10 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::projection::AgentGraphSnapshot;
 use qaqh_session::session_fact_v2::{
-    AgentMetadata, AgentPath, FactPayload, SessionId, SubagentSpawnConfig,
+    AgentMetadata, AgentPath, FactPayload, SessionFact, SessionId, SubagentSpawnConfig,
+    SubagentTerminalStatus,
 };
+use qaqh_subagent::{ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
 use crate::agent::SubagentSpawnSpec;
 use crate::agent_catalog::AgentCatalog;
@@ -299,6 +301,16 @@ pub(crate) struct CollectorArmSpec {
     pub(crate) child_agent_path: String,
 }
 
+fn listed_terminal_status(status: SubagentTerminalStatus) -> ListedAgentStatus {
+    match status {
+        SubagentTerminalStatus::Completed => ListedAgentStatus::Completed,
+        SubagentTerminalStatus::Failed | SubagentTerminalStatus::TimedOut => {
+            ListedAgentStatus::Errored
+        }
+        SubagentTerminalStatus::Cancelled => ListedAgentStatus::Interrupted,
+    }
+}
+
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     activity: SessionActivityTracker,
@@ -314,6 +326,10 @@ pub struct AgentRegistry {
     supervisor: SubagentSupervisor,
     /// Subagent V2：逻辑 agent metadata；worker handle 仍由 `instances` 管理。
     agent_catalog: AgentCatalog,
+    /// Explicit residency state for logical agents. Kept separate from
+    /// `instances` so `list_agents` reads lifecycle state rather than guessing
+    /// from the worker table.
+    residency: HashMap<String, ListedAgentResidency>,
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
@@ -332,6 +348,7 @@ impl AgentRegistry {
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
+            residency: HashMap::new(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
             armed_collectors: HashSet::new(),
@@ -411,6 +428,165 @@ impl AgentRegistry {
         Ok(self
             .agent_catalog
             .list_prefix(caller.root_session_id.as_str(), &prefix))
+    }
+
+    /// List logical agents with their explicit status and residency snapshot.
+    ///
+    /// Status is rebuilt from canonical facts and overlaid with the current
+    /// activity tracker while loaded. Residency comes from the registry's
+    /// explicit lifecycle map; it is never inferred from the worker table.
+    pub fn list_agents_with_state_for_caller(
+        &mut self,
+        caller_session_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<ListedAgent>, String> {
+        let agents = self.list_agents_for_caller(caller_session_id, path_prefix)?;
+        let mut listed = Vec::with_capacity(agents.len());
+        for agent in agents {
+            let residency = self.agent_residency(agent.agent_id.as_str());
+            let status = self.listed_agent_status(&agent, residency)?;
+            listed.push(ListedAgent {
+                root_session_id: agent.root_session_id.as_str().to_string(),
+                agent_id: agent.agent_id.as_str().to_string(),
+                agent_path: agent.agent_path.as_str().to_string(),
+                parent_agent_path: agent
+                    .parent_agent_path
+                    .as_ref()
+                    .map(|path| path.as_str().to_string()),
+                nickname: agent.nickname.clone(),
+                role: agent.role.clone(),
+                status,
+                residency,
+                created_at_ms: agent.created_at_ms,
+            });
+        }
+        Ok(listed)
+    }
+
+    fn agent_residency(&self, agent_id: &str) -> ListedAgentResidency {
+        self.residency
+            .get(agent_id)
+            .copied()
+            .unwrap_or(ListedAgentResidency::Unloaded)
+    }
+
+    fn listed_agent_status(
+        &self,
+        agent: &AgentMetadata,
+        residency: ListedAgentResidency,
+    ) -> Result<ListedAgentStatus, String> {
+        if residency == ListedAgentResidency::Loaded
+            && let Some(activity) = self.activity.get(agent.agent_id.as_str())
+        {
+            match activity.state {
+                qaqh_domain::ActivityState::Starting => {
+                    return Ok(ListedAgentStatus::PendingInit);
+                }
+                qaqh_domain::ActivityState::Working => {
+                    return Ok(ListedAgentStatus::Running);
+                }
+                qaqh_domain::ActivityState::WaitingUser => {
+                    return Ok(ListedAgentStatus::WaitingUser);
+                }
+                qaqh_domain::ActivityState::Disconnected => {
+                    return Ok(ListedAgentStatus::Shutdown);
+                }
+                qaqh_domain::ActivityState::Idle => {}
+            }
+        }
+
+        // A terminal child fact lives in the parent log. For an unloaded child
+        // it is the authoritative final lifecycle state, even if a later
+        // shutdown attempt emitted a generic turn interruption in the child log.
+        if !agent.agent_path.is_root()
+            && residency == ListedAgentResidency::Unloaded
+            && let Some(status) = self.parent_terminal_status(agent)?
+        {
+            return Ok(status);
+        }
+
+        self.session_canonical_status(agent.agent_id.as_str())
+    }
+
+    fn session_canonical_status(&self, agent_id: &str) -> Result<ListedAgentStatus, String> {
+        let mut status = ListedAgentStatus::PendingInit;
+        for fact in self.read_session_facts(agent_id)? {
+            match &fact.payload {
+                FactPayload::TurnStarted(_) => status = ListedAgentStatus::Running,
+                FactPayload::TurnInterrupted(_) => status = ListedAgentStatus::Interrupted,
+                FactPayload::InteractionRequested(_) => status = ListedAgentStatus::WaitingUser,
+                FactPayload::InteractionResolved(_) | FactPayload::InteractionExpired(_)
+                    if status == ListedAgentStatus::WaitingUser =>
+                {
+                    status = ListedAgentStatus::Running;
+                }
+                FactPayload::TurnFinished(_) if status == ListedAgentStatus::WaitingUser => {
+                    status = ListedAgentStatus::Running;
+                }
+                FactPayload::SubagentFinished(payload) => {
+                    status = listed_terminal_status(payload.status);
+                }
+                FactPayload::SessionDeleted(_) => status = ListedAgentStatus::Shutdown,
+                _ => {}
+            }
+        }
+        Ok(status)
+    }
+
+    fn parent_terminal_status(
+        &self,
+        agent: &AgentMetadata,
+    ) -> Result<Option<ListedAgentStatus>, String> {
+        let parent_path = agent
+            .parent_agent_path
+            .as_ref()
+            .ok_or_else(|| format!("child agent {} has no parent path", agent.agent_id))?;
+        let parent = self
+            .agent_catalog
+            .get_by_path(agent.root_session_id.as_str(), parent_path)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "child agent {} parent metadata missing at {parent_path}",
+                    agent.agent_id
+                )
+            })?;
+        let child_id = SessionId::new(agent.agent_id.as_str());
+        let status = self
+            .read_session_facts(parent.agent_id.as_str())?
+            .into_iter()
+            .rev()
+            .find_map(|fact| match fact.payload {
+                FactPayload::SubagentFinished(payload) if payload.child_session_id == child_id => {
+                    Some(listed_terminal_status(payload.status))
+                }
+                _ => None,
+            });
+        Ok(status)
+    }
+
+    fn read_session_facts(&self, session_id: &str) -> Result<Vec<SessionFact>, String> {
+        let session_dir = self.sessions.session_path_dir(session_id);
+        if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+            return Ok(Vec::new());
+        }
+        let identity = CanonicalSessionIdentity::open(&session_dir)
+            .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
+        if identity.session_id.as_str() != session_id {
+            return Err(format!(
+                "canonical identity for {session_id} is {}",
+                identity.session_id
+            ));
+        }
+        let reader = CommittedFactReader::open(
+            &session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .map_err(|error| format!("open canonical facts for {session_id}: {error}"))?;
+        reader
+            .read_all()
+            .map_err(|error| format!("read canonical facts for {session_id}: {error}"))
     }
 
     /// Resolve a caller-relative or absolute target path within the caller's
@@ -678,6 +854,7 @@ impl AgentRegistry {
     /// persistent.
     pub fn rollback_subagent(&mut self, seed: &str, child_session_id: &str) {
         self.agent_catalog.remove(child_session_id);
+        self.residency.remove(child_session_id);
         self.close(seed);
     }
 
@@ -851,6 +1028,8 @@ impl AgentRegistry {
                 thread: Some(thread),
             },
         );
+        self.residency
+            .insert(seed.to_string(), ListedAgentResidency::Loaded);
         // T-1-1：子 seed 必须进活表。否则 bootstrap 的
         // `seal_orphan_channel_state(seed, force=false)` 会把它判为孤儿并封禁
         // 其正在进行的 turn（前端据此显示 cancelled），而子 actor 仍在运行并
@@ -972,6 +1151,8 @@ impl AgentRegistry {
                 thread: Some(thread),
             },
         );
+        self.residency
+            .insert(seed.to_string(), ListedAgentResidency::Loaded);
         log::info!("[session] spawned in-process actor seed={seed} (no child process)");
         Ok(())
     }
@@ -1150,6 +1331,23 @@ impl AgentRegistry {
         seed: &str,
         env: &qaqh_ringing::RingingWorkerCommandEnvelope,
     ) -> Result<(), String> {
+        if let Some(metadata) = self.agent_catalog.get_by_id(seed)
+            && !metadata.agent_path.is_root()
+            && matches!(
+                &env.command,
+                qaqh_ringing::RingingCommand::Conversation(
+                    qaqh_domain::ConversationCommand::ConversationSendMessage {
+                        inter_agent: None,
+                        ..
+                    }
+                )
+            )
+        {
+            return Err(format!(
+                "parent-owned agent {} rejects direct ConversationSendMessage without inter-agent metadata",
+                metadata.agent_path
+            ));
+        }
         self.ensure_loaded_for_command(seed)?;
         let write = |instance: &AgentInstance| -> Result<(), String> {
             match &instance.transport {
@@ -1302,6 +1500,8 @@ impl AgentRegistry {
     /// Signal, observe terminal, then join one worker. For a child, the parent
     /// edge is closed before the join, which is the P2-5 ordering contract.
     fn finish_for_unload(&mut self, seed: &str, parent: Option<&str>) {
+        self.residency
+            .insert(seed.to_string(), ListedAgentResidency::Unloaded);
         if let Some(parent) = parent {
             self.supervisor.cancel_sent(parent, seed);
         }
@@ -2031,6 +2231,132 @@ mod tests {
     }
 
     #[test]
+    fn list_agents_uses_explicit_residency_and_parent_terminal_status() {
+        use qaqh_session::canonical::{CanonicalLog, WriterId, generate_ulid};
+        use qaqh_session::session_fact_v2::{
+            EventId, FactSchema, SessionCreated, SubagentSpawned, ToolCallId,
+        };
+
+        let root_dir = std::env::temp_dir().join(format!(
+            "qaqh-registry-list-state-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            root_dir.join("sessions"),
+            root_dir.join(".active_session"),
+        ));
+        let root_identity = sessions
+            .allocate_session(None)
+            .expect("allocate root session");
+        let root = root_identity.session_id.as_str().to_string();
+        let child = SessionId::new("0198f1a0-0000-7000-8000-000000000011");
+        let child_path = AgentPath::parse_absolute("/root/review").expect("child path");
+        let now = unix_ms();
+
+        let mut registry = AgentRegistry::new(sessions.clone());
+        registry
+            .register_root_agent(&root, now)
+            .expect("register root metadata");
+        registry
+            .agent_catalog
+            .register(AgentMetadata {
+                root_session_id: SessionId::new(root.clone()),
+                agent_id: child.clone(),
+                agent_path: child_path.clone(),
+                parent_agent_path: Some(AgentPath::root()),
+                nickname: None,
+                role: Some("review".to_string()),
+                created_at_ms: now,
+            })
+            .expect("register child metadata");
+        registry
+            .residency
+            .insert(child.as_str().to_string(), ListedAgentResidency::Unloaded);
+
+        let parent_dir = sessions.session_path_dir(&root);
+        let identity =
+            CanonicalSessionIdentity::open(&parent_dir).expect("open root canonical identity");
+        let mut log = CanonicalLog::open(
+            &parent_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .expect("open root canonical log");
+        let lease = log
+            .acquire_writer(WriterId::new("registry-list-state"), now, 10_000)
+            .expect("acquire writer");
+        for (fact_seq, payload) in [
+            (
+                1,
+                FactPayload::SessionCreated(SessionCreated {
+                    created_at_ms: now,
+                    cwd: "/".to_string(),
+                    model: "test-model".to_string(),
+                    parent_session_id: None,
+                    schema_caps: vec![],
+                }),
+            ),
+            (
+                2,
+                FactPayload::SubagentSpawned(SubagentSpawned {
+                    child_session_id: child.clone(),
+                    parent_call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
+                    parent_agent_path: Some(AgentPath::root()),
+                    child_agent_path: Some(child_path.clone()),
+                    role: Some("review".to_string()),
+                    spawn_config: None,
+                    spawned_at_ms: now,
+                }),
+            ),
+            (
+                3,
+                FactPayload::SubagentFinished(qaqh_session::session_fact_v2::SubagentFinished {
+                    child_session_id: child.clone(),
+                    parent_call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
+                    status: SubagentTerminalStatus::Completed,
+                    result_ref: None,
+                    finished_at_ms: now,
+                    recovery_ref: None,
+                }),
+            ),
+        ] {
+            log.append(
+                &lease,
+                SessionFact {
+                    schema: FactSchema::v2(),
+                    session_id: identity.session_id.clone(),
+                    log_id: identity.log_id.clone(),
+                    fact_seq,
+                    event_id: EventId::new(generate_ulid()),
+                    ts_ms: now,
+                    causation_id: None,
+                    turn_id: None,
+                    call_id: None,
+                    interaction_id: None,
+                    payload,
+                },
+                now,
+            )
+            .expect("append canonical agent fact");
+        }
+        drop(log);
+
+        let listed = registry
+            .list_agents_with_state_for_caller(&root, "/root")
+            .expect("list agents with state");
+        let child_state = listed
+            .iter()
+            .find(|agent| agent.agent_id == child.as_str())
+            .expect("child listing");
+        assert_eq!(child_state.status, ListedAgentStatus::Completed);
+        assert_eq!(child_state.residency, ListedAgentResidency::Unloaded);
+    }
+
+    #[test]
     fn subscription_actor_is_idempotent_and_shutdown_closes_ingress() {
         let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
         let mut instance = AgentInstance {
@@ -2119,6 +2445,7 @@ mod tests {
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
+            residency: HashMap::new(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
             armed_collectors: HashSet::new(),
@@ -2222,6 +2549,7 @@ mod tests {
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
+            residency: HashMap::new(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
             armed_collectors: HashSet::new(),
