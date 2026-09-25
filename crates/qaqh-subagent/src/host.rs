@@ -31,6 +31,7 @@ pub use qaqh_ringing::RingingEventBatch as EventBatch;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedSubagent {
     pub seed: String,
+    pub child_session_id: String,
     pub parent_agent_path: String,
     pub child_agent_path: String,
 }
@@ -49,6 +50,7 @@ pub struct SpawnSubagentRequest<'a> {
 #[derive(Debug, Clone)]
 pub struct StartSubagentRequest<'a> {
     pub seed: &'a str,
+    pub child_session_id: &'a str,
     pub name: &'a str,
     pub task_text: &'a str,
     pub timeout_secs: u64,
@@ -71,7 +73,13 @@ pub trait SubagentHost: Send + Sync {
     /// edge. Implementations own process registration and result collection.
     fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String>;
 
-    /// Close a child whose spawn edge could not be committed.
+    /// Roll back a child whose canonical spawn edge could not be committed.
+    ///
+    /// Unlike [`Self::abort_subagent`], this also removes the logical catalog
+    /// registration because the edge never became authoritative.
+    fn rollback_subagent(&self, seed: &str, child_session_id: &str, process_id: u32);
+
+    /// Close a child after its canonical spawn edge was committed.
     fn abort_subagent(&self, seed: &str, process_id: u32);
 
     /// 进程内直接向指定 seed 的 actor 命令队列发送一条 Ringing 命令
