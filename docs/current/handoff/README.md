@@ -24,6 +24,7 @@ YYYY-MM-DD-<topic>-handoff.md
 - [2026-09-25 BETA-01 Session Identity Foundation](./2026-09-25-beta-01-session-identity-foundation-handoff.md)
 - [2026-09-25 BETA-01 Legacy Session Migration](./2026-09-25-beta-01-legacy-session-migration-handoff.md)
 - [2026-09-26 Subagent V2 Current](./2026-09-26-subagent-v2-current-handoff.md)
+- [2026-09-26 mutilAI-SDK / wsbox 接入评估](./2026-09-26-third-party-integration-assessment-handoff.md)
 
 Subagent V2 的阶段性 handoff 已合并为上面的单份 current handoff；旧分段文档已删除，
 避免同一模块出现多份相互覆盖的交接依据。
