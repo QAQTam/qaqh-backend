@@ -45,6 +45,9 @@ pub enum CanonicalIdentityError {
 
     #[error("canonical session_id and log_id must differ")]
     DuplicateIds,
+
+    #[error("canonical identity already exists with a different session_id")]
+    Conflict,
 }
 
 impl CanonicalSessionIdentity {
@@ -72,15 +75,46 @@ impl CanonicalSessionIdentity {
         let session_dir = session_dir.as_ref();
         fs::create_dir_all(session_dir)?;
         let path = session_dir.join(CANONICAL_IDENTITY_FILE);
-
         match fs::read(&path) {
             Ok(bytes) => return Self::decode(&bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        Self::write_new(session_dir, &Self::new())
+    }
 
-        let identity = Self::new();
-        let bytes = serde_json::to_vec_pretty(&identity)?;
+    /// Install a preallocated identity into a new session directory.
+    ///
+    /// This is the beta identity-unification creation path: the caller chooses
+    /// `SessionId` first, uses it as the directory name, then installs the
+    /// matching sidecar. Reinstalling the same identity is idempotent; a
+    /// conflicting sidecar fails closed.
+    pub fn install(
+        session_dir: impl AsRef<Path>,
+        identity: &Self,
+    ) -> Result<Self, CanonicalIdentityError> {
+        let session_dir = session_dir.as_ref();
+        fs::create_dir_all(session_dir)?;
+        Self::write_new(session_dir, identity)
+    }
+
+    fn write_new(session_dir: &Path, identity: &Self) -> Result<Self, CanonicalIdentityError> {
+        let path = session_dir.join(CANONICAL_IDENTITY_FILE);
+
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let existing = Self::decode(&bytes)?;
+                return if existing == *identity {
+                    Ok(existing)
+                } else {
+                    Err(CanonicalIdentityError::Conflict)
+                };
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let bytes = serde_json::to_vec_pretty(identity)?;
         let temp_path = session_dir.join(format!(
             ".{CANONICAL_IDENTITY_FILE}.{}.{}.tmp",
             std::process::id(),
@@ -106,12 +140,17 @@ impl CanonicalSessionIdentity {
             Ok(()) => {
                 let _ = fs::remove_file(&temp_path);
                 sync_parent_dir(session_dir)?;
-                Ok(identity)
+                Ok(identity.clone())
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 let _ = fs::remove_file(&temp_path);
                 let bytes = fs::read(&path)?;
-                Self::decode(&bytes)
+                let existing = Self::decode(&bytes)?;
+                if existing == *identity {
+                    Ok(existing)
+                } else {
+                    Err(CanonicalIdentityError::Conflict)
+                }
             }
             Err(error) => {
                 let _ = fs::remove_file(&temp_path);
@@ -214,6 +253,28 @@ mod tests {
         assert_ne!(first.session_id.as_str(), first.log_id.as_str());
         assert_eq!(first.session_id.as_str().len(), 36);
         assert_eq!(first.log_id.as_str().len(), 36);
+    }
+
+    #[test]
+    fn preallocated_identity_install_is_idempotent_and_conflict_fails_closed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::new();
+        let session_dir = temp.path().join(identity.session_id.as_str());
+
+        assert_eq!(
+            CanonicalSessionIdentity::install(&session_dir, &identity).expect("install"),
+            identity
+        );
+        assert_eq!(
+            CanonicalSessionIdentity::install(&session_dir, &identity).expect("reinstall"),
+            identity
+        );
+
+        let conflicting = CanonicalSessionIdentity::new();
+        assert!(matches!(
+            CanonicalSessionIdentity::install(&session_dir, &conflicting),
+            Err(CanonicalIdentityError::Conflict)
+        ));
     }
 
     #[test]

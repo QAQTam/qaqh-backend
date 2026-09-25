@@ -795,35 +795,69 @@ impl SessionManager {
         cwd: Option<&str>,
         claimed: impl FnOnce(&str) -> bool,
     ) -> bool {
+        match self.create_new_session(seed, cwd, claimed, None, true) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("[session] create_session: seed {seed} refused: {error}");
+                false
+            }
+        }
+    }
+
+    fn create_new_session(
+        &self,
+        seed: &str,
+        cwd: Option<&str>,
+        claimed: impl FnOnce(&str) -> bool,
+        identity: Option<&CanonicalSessionIdentity>,
+        index_session: bool,
+    ) -> Result<(), String> {
         if seed.is_empty() {
-            log::error!("SessionManager: refusing to create a session with an empty seed");
-            return false;
+            return Err("refusing to create a session with an empty seed".to_string());
         }
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _legacy_writer = LegacyWriterFacade::lock();
         if self.session_dir(seed).is_some() {
-            log::warn!(
-                "[session] create_session: seed {seed} already has a session directory — refusing to overwrite"
-            );
-            return false;
+            return Err("session directory already exists; refusing to overwrite".to_string());
         }
         if !claimed(seed) {
-            log::warn!(
-                "[session] create_session: seed {seed} already claimed elsewhere — refusing to overwrite"
-            );
-            return false;
+            return Err("seed is already claimed elsewhere; refusing to overwrite".to_string());
         }
+
         let dir = self.session_path_dir(seed);
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            log::error!("SessionManager: create session dir {seed} failed: {error}");
-            return false;
+        std::fs::create_dir_all(&self.sessions_dir)
+            .map_err(|error| format!("create sessions dir failed: {error}"))?;
+        std::fs::create_dir(&dir)
+            .map_err(|error| format!("create session dir {} failed: {error}", dir.display()))?;
+
+        let cleanup_identity_dir = |error: String| -> Result<(), String> {
+            if identity.is_some() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            Err(error)
+        };
+
+        if let Some(identity) = identity {
+            if identity.session_id.as_str() != seed {
+                return cleanup_identity_dir(format!(
+                    "canonical identity session_id {} does not match directory {seed}",
+                    identity.session_id
+                ));
+            }
+            if let Err(error) = CanonicalSessionIdentity::install(&dir, identity) {
+                return cleanup_identity_dir(format!(
+                    "install canonical identity for {seed} failed: {error}"
+                ));
+            }
         }
+
         let now = Self::now_epoch();
         let mut meta = store::read_meta(&dir).unwrap_or_default();
         meta.seed = seed.to_string();
         meta.created_at = now;
         meta.updated_at = now;
+        meta.ephemeral = !index_session;
         meta.cwd = cwd.map(|c| crate::grouping::canonical_cwd(std::path::Path::new(c)));
         if !dir.join("messages.jsonl").exists()
             && let Err(error) = store::append_messages(&dir, &[])
@@ -831,14 +865,66 @@ impl SessionManager {
             log::error!("SessionManager: append_messages(initial) failed: {error}");
         }
         if let Err(error) = store::write_meta(&dir, &meta) {
-            log::error!("SessionManager: write_meta(initial) failed: {error}");
-            return false;
+            return cleanup_identity_dir(format!("write_meta(initial) failed: {error}"));
         }
-        store::upsert_index(&self.sessions_dir, &meta);
-        if let Some(cwd) = meta.cwd.as_deref() {
-            crate::grouping::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+        if index_session {
+            store::upsert_index(&self.sessions_dir, &meta);
+            if let Some(cwd) = meta.cwd.as_deref() {
+                crate::grouping::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+            }
         }
-        true
+        Ok(())
+    }
+
+    /// Allocate a canonical `SessionId` and create `sessions/{session_id}`.
+    ///
+    /// This is the beta creation path: identity is allocated first, the
+    /// directory name is the `SessionId`, and `canonical-identity.json` is
+    /// installed before meta or any actor can observe the session.
+    pub fn allocate_session(&self, cwd: Option<&str>) -> Result<CanonicalSessionIdentity, String> {
+        self.allocate_session_with_index(cwd, true)
+    }
+
+    /// Allocate a canonical child session hidden from the ordinary session list.
+    ///
+    /// Subagent sessions still satisfy `seed == session_id == directory` and
+    /// carry the same identity sidecar, but `meta.ephemeral` follows the
+    /// caller's V2 lifecycle policy and the session index is not polluted.
+    pub fn allocate_agent_session(
+        &self,
+        cwd: Option<&str>,
+    ) -> Result<CanonicalSessionIdentity, String> {
+        self.allocate_session_with_index(cwd, false)
+    }
+
+    fn allocate_session_with_index(
+        &self,
+        cwd: Option<&str>,
+        index_session: bool,
+    ) -> Result<CanonicalSessionIdentity, String> {
+        for _ in 0..Self::SEED_ALLOCATION_ATTEMPTS {
+            let identity = CanonicalSessionIdentity::new();
+            let seed = identity.session_id.as_str().to_string();
+            match self.create_new_session(
+                &seed,
+                cwd,
+                |candidate| self.claim_seed(candidate),
+                Some(&identity),
+                index_session,
+            ) {
+                Ok(()) => return Ok(identity),
+                Err(error) => {
+                    self.release_seed_claim(&seed);
+                    log::warn!(
+                        "[session] allocate_session: candidate {seed} failed: {error}; retrying"
+                    );
+                }
+            }
+        }
+        Err(format!(
+            "allocate_session: exhausted {} canonical identity attempts",
+            Self::SEED_ALLOCATION_ATTEMPTS
+        ))
     }
 
     /// 同上，但记录创建时工作目录（workspace 归属基础）：
@@ -2404,6 +2490,61 @@ mod seed_collision_tests {
         assert_eq!(
             manager.load_meta("fresh-seed").expect("fresh meta").seed,
             "fresh-seed"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn allocate_session_uses_canonical_id_for_directory_identity_and_meta() {
+        let (root, manager) = manager();
+
+        let identity = manager.allocate_session(None).expect("allocate session");
+        let session_id = identity.session_id.as_str();
+        let dir = manager.session_path_dir(session_id);
+
+        assert_eq!(session_id.len(), 36, "new session seed must be UUIDv7");
+        assert!(dir.is_dir(), "session directory must use the SessionId");
+        assert_eq!(
+            CanonicalSessionIdentity::open(&dir).expect("read identity"),
+            identity
+        );
+        let meta = manager.load_meta(session_id).expect("load meta");
+        assert_eq!(meta.seed, session_id);
+        assert!(!meta.ephemeral, "normal sessions are indexed and durable");
+        assert_eq!(
+            manager
+                .session_dir_for_id(session_id)
+                .expect("resolve session")
+                .expect("resolved directory"),
+            dir
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn allocate_agent_session_keeps_child_hidden_from_session_index() {
+        let (root, manager) = manager();
+
+        let identity = manager
+            .allocate_agent_session(None)
+            .expect("allocate child session");
+        let session_id = identity.session_id.as_str();
+        let meta = manager.load_meta(session_id).expect("load child meta");
+
+        assert_eq!(meta.seed, session_id);
+        assert!(meta.ephemeral, "unindexed child starts ephemeral");
+        assert!(
+            store::read_index(&manager.sessions_dir)
+                .iter()
+                .all(|entry| entry.seed != session_id),
+            "child session must not pollute the ordinary session index"
+        );
+        assert_eq!(
+            CanonicalSessionIdentity::open(manager.session_path_dir(session_id))
+                .expect("read child identity"),
+            identity
         );
 
         std::fs::remove_dir_all(root).expect("remove test directory");

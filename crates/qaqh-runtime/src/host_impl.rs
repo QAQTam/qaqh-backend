@@ -31,12 +31,15 @@ impl SubagentHost for QaqhService {
             max_tokens,
             workspace,
         } = request;
-        // BUG-2026-09-13-24：与 service.rs `subagent.spawn` 同一命名空间，
-        // 分配时必须跳过已被占用的 seed（与主会话/其它子代理碰撞会写穿目录）。
-        let seed = self.sessions.generate_unique_session_seed();
+        // BUG-2026-09-13-24 + BETA-01：子代理也先分配 canonical identity，
+        // 目录名与 `child_session_id` 必须是同一个 UUID。子代理目录保持
+        // unindexed，由 V2 residency 决定生命周期。
+        let identity = self
+            .sessions
+            .allocate_agent_session(workspace.filter(|w| !w.is_empty() && *w != "."))
+            .map_err(|error| format!("allocate child session failed: {error}"))?;
+        let seed = identity.session_id.as_str().to_string();
         if let Some(workspace) = workspace.filter(|w| !w.is_empty() && *w != ".") {
-            // 子代理继承主代理工作区（写入 meta.cwd，与 daemon `subagent.spawn` action 一致）。
-            self.sessions.set_cwd(&seed, workspace, false);
             log::info!("[SUBAGENT-HOST] inherited workspace for seed={seed}: {workspace}");
         }
         let spawned = self.registry()?.spawn_subagent_v2(

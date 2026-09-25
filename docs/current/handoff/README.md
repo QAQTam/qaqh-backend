@@ -22,5 +22,6 @@ YYYY-MM-DD-<topic>-handoff.md
 - [2026-09-25 CodeGraph 热点与工具侧联调](./2026-09-25-codegraph-hotspot-tool-runtime-handoff.md)
 - [2026-09-25 exec command-only 硬切](./2026-09-25-exec-command-only-handoff.md)
 - [2026-09-25 Subagent V2 Phase 2 Mailbox](./2026-09-25-subagent-v2-phase2-mailbox-handoff.md)
+- [2026-09-25 BETA-01 Session Identity Foundation](./2026-09-25-beta-01-session-identity-foundation-handoff.md)
 
 旧 handoff 已全部归档到 `docs/archive/2026-09/pre-reset/handoff/`，不再作为当前依据。
