@@ -30,8 +30,6 @@ use std::path::PathBuf;
 #[serde(deny_unknown_fields)]
 pub struct ExecArgs {
     #[serde(default)]
-    pub argv: Option<Vec<String>>,
-    #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
     pub args: Option<Vec<String>>,
@@ -59,9 +57,9 @@ impl TypedTool for ExecTool {
         ToolDescriptor {
             name: ToolName::new("exec").expect("valid exec tool name"),
             display_name: None,
-            description: "Run a command. argv = direct exec without a shell; command = shell string (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id."
+            description: "Run a shell command. The command is wrapped by the selected shell (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id."
                 .to_string(),
-            input_schema: exec_schema(true),
+            input_schema: exec_schema(),
             output_schema: serde_json::to_value(schemars::schema_for!(super::direct::ExecOutput))
                 .expect("exec output schema"),
             category: crate::permission::ToolCategory::Exec,
@@ -93,8 +91,72 @@ fn exec_error(code: &str, message: impl Into<String>, hint: Option<&str>) -> Too
     mutation_error(code, message, hint, json!({}))
 }
 
+#[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+fn ensure_shell_available(shell: super::shell::Shell) -> Result<(), ToolExecutionError> {
+    if shell_available(shell) {
+        return Ok(());
+    }
+    Err(exec_error(
+        "SHELL_NOT_FOUND",
+        format!("{} not found on this machine", shell.path()),
+        Some(&format!("available shells: {}", available_shells())),
+    ))
+}
+
+#[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
+fn resolve_shell(
+    ctx: &ToolCallContext,
+    requested: Option<&str>,
+    fixed: Option<super::shell::Shell>,
+) -> Result<super::shell::Shell, ToolExecutionError> {
+    use super::shell::Shell;
+
+    let resolve_named = |name: &str, source: &str| {
+        Shell::from_name(name).ok_or_else(|| {
+            exec_error(
+                "UNKNOWN_SHELL",
+                format!("unknown shell '{name}' from {source}"),
+                Some(
+                    "Use one of: pwsh, powershell, bash, bash4windows, zsh, sh, cmd. The default is auto-detected.",
+                ),
+            )
+        })
+    };
+
+    if let Some(shell) = fixed {
+        return Ok(shell);
+    }
+
+    if let Some(name) = requested.filter(|name| !name.trim().is_empty()) {
+        return resolve_named(name.trim(), "exec shell");
+    }
+
+    if let Some(name) = ctx
+        .exec_default_shell
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("auto"))
+    {
+        return resolve_named(name, "exec.default_shell");
+    }
+
+    if let Some(shell) = Shell::auto_candidates()
+        .iter()
+        .copied()
+        .find(|shell| shell_available(*shell))
+    {
+        return Ok(shell);
+    }
+
+    Err(exec_error(
+        "SHELL_NOT_FOUND",
+        "no supported shell found on this machine",
+        Some("Install one of: pwsh, powershell, bash, zsh, sh, cmd."),
+    ))
+}
+
 #[allow(clippy::too_many_arguments, clippy::result_large_err)] // 参数面来自 exec 的既有 wire 契约；错误边界为冻结 SDK 类型。
-fn run_exec(
+pub(crate) fn run_exec(
     ctx: &ToolCallContext,
     args: ExecArgs,
     fixed: Option<super::shell::Shell>,
@@ -103,87 +165,35 @@ fn run_exec(
     use super::direct::direct_exec_sandboxed;
     use super::shell::Shell;
 
-    // ── Resolve argv ──
-    let shell_command = args.command.clone();
-    let argv: Vec<String> = if let Some(command) = shell_command.as_deref() {
-        if command.is_empty() {
-            return Err(exec_error(
-                "EMPTY_COMMAND",
-                "command string is empty",
-                Some("Provide a shell command string."),
-            ));
-        }
-        let command = normalize_command_rg(command);
-        let shell = match fixed {
-            Some(shell) => {
-                if !shell_available(shell) {
-                    return Err(exec_error(
-                        "SHELL_NOT_FOUND",
-                        format!("{} not found on this machine", shell.path()),
-                        Some(&format!("available shells: {}", available_shells())),
-                    ));
-                }
-                shell
-            }
-            None => match args.shell.as_deref() {
-                Some(name) if !name.is_empty() => match Shell::from_name(name) {
-                    Some(shell) => shell,
-                    None => {
-                        return Err(exec_error(
-                            "UNKNOWN_SHELL",
-                            format!("unknown shell '{name}'"),
-                            Some(
-                                "Use one of: bash, zsh, sh, pwsh, powershell, cmd. The default is auto-detected (pwsh on Windows, bash elsewhere).",
-                            ),
-                        ));
-                    }
-                },
-                _ => Shell::detect(),
-            },
-        };
-        let extra_args = args.args.as_deref().filter(|args| !args.is_empty());
-        if extra_args.is_some() && shell == Shell::Cmd {
-            return Err(exec_error(
-                "ARGS_NOT_SUPPORTED",
-                "args is only supported for bash/zsh/sh ($1/$@) and pwsh -CommandWithArgs ($args)",
-                Some(
-                    "Use exec with shell bash/zsh/sh and args as string array (positional $1...), or shell pwsh.",
-                ),
-            ));
-        }
-        shell.derive_exec_args_with(&command, extra_args)
-    } else {
-        if let Some(name) = args.shell.as_deref().filter(|name| !name.is_empty()) {
-            return Err(exec_error(
-                "ARGV_IGNORES_SHELL",
-                format!("argv mode runs direct exec without a shell; 'shell: {name}' is ignored"),
-                Some("Use command (not argv) to run through a shell, or drop the shell parameter."),
-            ));
-        }
-        if args.args.as_ref().is_some_and(|args| !args.is_empty()) {
-            return Err(exec_error(
-                "ARGV_IGNORES_ARGS",
-                "argv mode runs direct exec without a shell; 'args' only applies to command mode",
-                Some("Use command + args (positional $1... / $args), or drop args."),
-            ));
-        }
-        let Some(mut argv) = args.argv.clone() else {
-            return Err(exec_error(
-                "MISSING_ARGV",
-                "exec requires argv or command",
-                Some(r#"Example: {"argv": ["cargo", "check"]} or {"command": "cargo check"}"#),
-            ));
-        };
-        normalize_rg_argv(&mut argv);
-        argv
-    };
-    if argv.is_empty() {
+    // ── Resolve shell command ──
+    let Some(command) = args.command.as_deref() else {
         return Err(exec_error(
-            "EMPTY_ARGV",
-            "argv array is empty",
-            Some("Provide at least one element."),
+            "MISSING_COMMAND",
+            "exec requires a command string",
+            Some(r#"Example: {"command": "cargo check"}"#),
+        ));
+    };
+    if command.trim().is_empty() {
+        return Err(exec_error(
+            "EMPTY_COMMAND",
+            "command string is empty",
+            Some("Provide a shell command string."),
         ));
     }
+    let shell_command = normalize_command_rg(command);
+    let shell = resolve_shell(ctx, args.shell.as_deref(), fixed)?;
+    let extra_args = args.args.as_deref().filter(|args| !args.is_empty());
+    if extra_args.is_some() && shell == Shell::Cmd {
+        return Err(exec_error(
+            "ARGS_NOT_SUPPORTED",
+            "args is only supported for bash/zsh/sh ($1/$@) and pwsh -CommandWithArgs ($args)",
+            Some(
+                "Use exec with shell bash/zsh/sh and args as string array (positional $1...), or shell pwsh.",
+            ),
+        ));
+    }
+    ensure_shell_available(shell)?;
+    let argv = shell.derive_exec_args_with(&shell_command, extra_args);
 
     // ── Execution limits / cwd / env ──
     let policy_default = crate::tool_side_fold::policy()
@@ -239,10 +249,7 @@ fn run_exec(
     );
     // 观测线纪律（事故 2026-09-02 预防）：检测 shell 命令中的后台派生 `&`，
     // 以强提示引导走 background_after_secs + process 工具的受控路径。
-    if let Some(command) = shell_command.as_deref()
-        && result.status == "completed"
-        && detect_background_derivation(command)
-    {
+    if result.status == "completed" && detect_background_derivation(&shell_command) {
         result.output.push_str(BACKGROUND_DERIVATION_HINT);
     }
     Ok(result)
@@ -281,6 +288,7 @@ fn context_from_legacy(ctx: &ToolCallCtx) -> ToolCallContext {
             SandboxMode::Main
         },
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        exec_default_shell: None,
         timeout: Duration::from_secs(ctx.timeout_secs.unwrap_or(30)),
         cancellation: CancellationToken::from_shared_flag(ctx.cancel.clone()),
         progress: None,
@@ -364,23 +372,6 @@ fn tool_result_from_error(error: ToolError) -> ToolResult {
 }
 
 /// ripgrep `-rn` 习惯陷阱防御（grep 迁移）。
-pub(crate) fn normalize_rg_argv(argv: &mut [String]) {
-    if !matches!(
-        argv.first().map(|p| p.to_lowercase()).as_deref(),
-        Some("rg") | Some("rg.exe")
-    ) {
-        return;
-    }
-    for arg in argv.iter_mut().skip(1) {
-        if let Some(rest) = arg.strip_prefix("-rn") {
-            let cleaned = format!("-n{rest}");
-            log::info!("[exec] rg habit fix (argv): '{arg}' -> '{cleaned}'");
-            *arg = cleaned;
-        }
-    }
-}
-
-/// command 模式版本：在 shell 命令字符串里改写 `rg -rn...` → `rg -n...`。
 pub(crate) fn normalize_command_rg(command: &str) -> String {
     use std::sync::OnceLock;
     static RG_HABIT_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -404,8 +395,11 @@ pub(crate) fn shell_available(shell: super::shell::Shell) -> bool {
 pub(crate) fn available_shells() -> String {
     let mut list = Vec::new();
     for (name, shell) in [
-        ("bash", super::shell::Shell::Bash),
         ("pwsh", super::shell::Shell::PowerShell),
+        ("powershell", super::shell::Shell::WindowsPowerShell),
+        ("bash", super::shell::Shell::Bash),
+        ("zsh", super::shell::Shell::Zsh),
+        ("sh", super::shell::Shell::Sh),
         ("cmd", super::shell::Shell::Cmd),
     ] {
         if shell_available(shell) {
@@ -439,14 +433,9 @@ pub(crate) fn detect_background_derivation(command: &str) -> bool {
 
 // ── Registration ──
 
-/// exec / bash / pwsh 共享的 input schema 模板。
-/// `with_shell` 控制是否暴露 `shell` 参数（仅 exec 通用入口）。
-pub(crate) fn exec_schema(with_shell: bool) -> serde_json::Value {
+/// exec 的 input schema 模板。
+pub(crate) fn exec_schema() -> serde_json::Value {
     let mut props = serde_json::Map::new();
-    props.insert(
-        "argv".into(),
-        serde_json::json!({ "type": "array", "items": {"type": "string"}, "description": "Direct exec without a shell (e.g. [\"cargo\", \"check\"]); must not combine with shell/args" }),
-    );
     props.insert(
         "command".into(),
         serde_json::json!({ "type": "string", "description": "Shell command string (runs via `shell`, default auto-detected)" }),
@@ -455,12 +444,10 @@ pub(crate) fn exec_schema(with_shell: bool) -> serde_json::Value {
         "args".into(),
         serde_json::json!({ "type": "array", "items": {"type": "string"}, "description": "Extra args for command: bash/zsh/sh fills $1/$2/$@ ($0 is placeholder `_`); pwsh fills $args (-CommandWithArgs; read as $args[0]/$args.Count, $argN does not exist). cmd does not support args." }),
     );
-    if with_shell {
-        props.insert(
-            "shell".into(),
-            serde_json::json!({ "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "powershell", "cmd"], "description": "Shell for command (default auto-detected: pwsh on Windows, bash elsewhere)" }),
-        );
-    }
+    props.insert(
+        "shell".into(),
+        serde_json::json!({ "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "powershell", "cmd"], "description": "Shell for command (default auto-detected: pwsh on Windows, bash elsewhere)" }),
+    );
     props.insert(
         "cwd".into(),
         serde_json::json!({"type": "string", "description": "Workdir (default workspace root)"}),
@@ -484,11 +471,7 @@ pub(crate) fn exec_schema(with_shell: bool) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": props,
-        "required": [],
-        "additionalProperties": false,
-        "oneOf": [
-            {"required": ["argv"]},
-            {"required": ["command"]}
-        ]
+        "required": ["command"],
+        "additionalProperties": false
     })
 }

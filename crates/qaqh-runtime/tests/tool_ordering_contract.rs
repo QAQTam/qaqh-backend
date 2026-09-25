@@ -53,6 +53,7 @@ fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecuti
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from(qaqh_workspace::current_workspace()),
             ),
+            exec_default_shell: None,
             timeout: Duration::ZERO,
             cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
             progress: None,
