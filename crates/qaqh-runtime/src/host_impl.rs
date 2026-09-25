@@ -13,19 +13,24 @@ use std::time::Duration;
 
 use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
-use qaqh_subagent::{ContentRef, EventBatch, SubagentHost};
+use qaqh_subagent::{
+    ContentRef, EventBatch, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest,
+    SubagentHost,
+};
 
 use super::QaqhService;
 
 impl SubagentHost for QaqhService {
-    fn spawn_subagent(
-        &self,
-        tools: &[String],
-        model: Option<&str>,
-        base_url: Option<&str>,
-        max_tokens: Option<u32>,
-        workspace: Option<&str>,
-    ) -> Result<String, String> {
+    fn spawn_subagent(&self, request: SpawnSubagentRequest<'_>) -> Result<SpawnedSubagent, String> {
+        let SpawnSubagentRequest {
+            parent_session_id,
+            requested_name,
+            tools,
+            model,
+            base_url,
+            max_tokens,
+            workspace,
+        } = request;
         // BUG-2026-09-13-24：与 service.rs `subagent.spawn` 同一命名空间，
         // 分配时必须跳过已被占用的 seed（与主会话/其它子代理碰撞会写穿目录）。
         let seed = self.sessions.generate_unique_session_seed();
@@ -34,13 +39,44 @@ impl SubagentHost for QaqhService {
             self.sessions.set_cwd(&seed, workspace, false);
             log::info!("[SUBAGENT-HOST] inherited workspace for seed={seed}: {workspace}");
         }
-        self.registry()?
-            .spawn_subagent(&seed, tools, model, base_url, max_tokens)?;
+        let spawned = self.registry()?.spawn_subagent_v2(
+            &seed,
+            parent_session_id,
+            requested_name,
+            crate::registry::SubagentSpawnOptions {
+                tools,
+                model,
+                base_url,
+                max_tokens,
+            },
+        )?;
         log::info!(
-            "[SUBAGENT-HOST] spawned subagent seed={seed} tools={}",
+            "[SUBAGENT-HOST] spawned subagent seed={seed} path={} tools={}",
+            spawned.child_agent_path,
             tools.len()
         );
-        Ok(seed)
+        Ok(SpawnedSubagent {
+            seed,
+            parent_agent_path: spawned.parent_agent_path.as_str().to_string(),
+            child_agent_path: spawned.child_agent_path.as_str().to_string(),
+        })
+    }
+
+    fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String> {
+        let host =
+            qaqh_subagent::host().ok_or_else(|| "subagent host is not installed".to_string())?;
+        qaqh_subagent::start_subagent_collector(host, request)
+    }
+
+    fn abort_subagent(&self, seed: &str, process_id: u32) {
+        qaqh_workspace::process_registry::ProcessRegistry::set_answer(
+            process_id,
+            "[ABORTED] canonical SubagentSpawned edge was not committed".to_string(),
+        );
+        qaqh_workspace::process_registry::ProcessRegistry::mark_exited(process_id, 1);
+        if let Err(error) = self.close(seed) {
+            log::warn!("[SUBAGENT-HOST] abort close failed for {seed}: {error}");
+        }
     }
 
     fn send_ringing(

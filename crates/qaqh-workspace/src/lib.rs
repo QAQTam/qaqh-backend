@@ -637,6 +637,18 @@ pub struct ToolCallCtx {
 #[derive(Clone, Debug)]
 pub enum ToolEffect {
     Skill(qaqh_skills::SkillEffect),
+    /// A subagent actor has been created and is waiting for its canonical
+    /// `SubagentSpawned` fact before the task is delivered.
+    SubagentSpawned {
+        seed: String,
+        name: String,
+        task_text: String,
+        timeout_secs: u64,
+        parent_session_id: String,
+        parent_agent_path: String,
+        child_agent_path: String,
+        process_id: u32,
+    },
 }
 
 impl ToolCallCtx {
