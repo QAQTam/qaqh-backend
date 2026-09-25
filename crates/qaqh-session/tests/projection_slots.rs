@@ -17,11 +17,11 @@ fn payload_lines() -> Vec<&'static str> {
 }
 
 fn expected_slots(kind: &str) -> &'static [ProjectionSlot] {
-    use ProjectionSlot::{Control, Conversation, Mailbox, Meta, Resources, Timeline};
+    use ProjectionSlot::{Control, Conversation, Mailbox, Meta, Resources, Team, Timeline};
     match kind {
-        "session_created" => &[Control, Meta],
-        "input_accepted" => &[Conversation, Timeline, Mailbox],
-        "turn_started" => &[Conversation, Control],
+        "session_created" => &[Control, Meta, Team],
+        "input_accepted" => &[Conversation, Timeline, Mailbox, Team],
+        "turn_started" => &[Conversation, Control, Team],
         "model_round_started" => &[Control],
         "assistant_block_sealed" => &[Conversation, Timeline],
         "tool_call_declared" => &[Conversation, Timeline],
@@ -30,17 +30,17 @@ fn expected_slots(kind: &str) -> &'static [ProjectionSlot] {
         "interaction_requested" => &[Control],
         "interaction_resolved" => &[Control],
         "interaction_expired" => &[Control],
-        "turn_finished" => &[Conversation, Control],
-        "turn_interrupted" => &[Conversation, Control],
-        "session_recovered" => &[Control, Meta],
+        "turn_finished" => &[Conversation, Control, Team],
+        "turn_interrupted" => &[Conversation, Control, Team],
+        "session_recovered" => &[Control, Meta, Team],
         "compaction_applied" => &[Conversation, Meta],
         "session_metadata_changed" => &[Meta],
         "session_title_changed" => &[Meta],
         "session_deleted" => &[Meta],
         "workspace_resource_changed" => &[Resources],
-        "subagent_spawned" => &[Control, Resources],
-        "subagent_finished" => &[Control, Resources],
-        "inter_agent_communication" => &[Mailbox],
+        "subagent_spawned" => &[Control, Resources, Team],
+        "subagent_finished" => &[Control, Resources, Team],
+        "inter_agent_communication" => &[Mailbox, Team],
         other => panic!("unexpected fixture kind: {other}"),
     }
 }
@@ -80,9 +80,10 @@ fn projection_slot_indices_are_the_frozen_repr_values() {
     assert_eq!(ProjectionSlot::Resources.as_u16(), 3);
     assert_eq!(ProjectionSlot::Meta.as_u16(), 4);
     assert_eq!(ProjectionSlot::Mailbox.as_u16(), 5);
+    assert_eq!(ProjectionSlot::Team.as_u16(), 6);
     assert_eq!(MAX_RELIABLE_PROJECTION_INDEX, 65_534);
     assert_eq!(END_OF_FACT, 65_535);
-    let _: ProjectionIndex = ProjectionSlot::Mailbox.as_u16();
+    let _: ProjectionIndex = ProjectionSlot::Team.as_u16();
 }
 
 #[test]

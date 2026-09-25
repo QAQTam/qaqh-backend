@@ -33,7 +33,7 @@ fn projection_set_publishes_static_slots_for_all_fixtures() {
     assert_eq!(facts.len(), 22);
 
     let mut set = ProjectionSet::default();
-    let mut published = [0_usize; 6];
+    let mut published = [0_usize; 7];
 
     for fact in &facts {
         let expected = projection_slots(&fact.payload);
@@ -53,7 +53,7 @@ fn projection_set_publishes_static_slots_for_all_fixtures() {
 
     assert_eq!(
         published,
-        [8, 4, 12, 3, 6, 1],
+        [8, 4, 12, 3, 6, 1, 4],
         "registered slots may stay silent when a reducer has no state change"
     );
     assert_eq!(set.last_fact_seq(), 22);
@@ -69,6 +69,7 @@ fn projection_set_publishes_static_slots_for_all_fixtures() {
     assert_eq!(snapshot.meta.revision, 6);
     assert_eq!(snapshot.mailbox.revision, 1);
     assert_eq!(snapshot.mailbox.messages.len(), 1);
+    assert_eq!(snapshot.team.revision, 4);
 
     let rebuilt = ProjectionSet::rebuild(facts.into_iter());
     assert_eq!(snapshot, rebuilt.snapshot());
