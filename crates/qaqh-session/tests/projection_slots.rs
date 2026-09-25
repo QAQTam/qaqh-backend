@@ -17,10 +17,10 @@ fn payload_lines() -> Vec<&'static str> {
 }
 
 fn expected_slots(kind: &str) -> &'static [ProjectionSlot] {
-    use ProjectionSlot::{Control, Conversation, Meta, Resources, Timeline};
+    use ProjectionSlot::{Control, Conversation, Mailbox, Meta, Resources, Timeline};
     match kind {
         "session_created" => &[Control, Meta],
-        "input_accepted" => &[Conversation, Timeline],
+        "input_accepted" => &[Conversation, Timeline, Mailbox],
         "turn_started" => &[Conversation, Control],
         "model_round_started" => &[Control],
         "assistant_block_sealed" => &[Conversation, Timeline],
@@ -40,6 +40,7 @@ fn expected_slots(kind: &str) -> &'static [ProjectionSlot] {
         "workspace_resource_changed" => &[Resources],
         "subagent_spawned" => &[Control, Resources],
         "subagent_finished" => &[Control, Resources],
+        "inter_agent_communication" => &[Mailbox],
         other => panic!("unexpected fixture kind: {other}"),
     }
 }
@@ -47,7 +48,7 @@ fn expected_slots(kind: &str) -> &'static [ProjectionSlot] {
 #[test]
 fn all_payload_fixtures_have_the_frozen_slot_mapping() {
     let lines = payload_lines();
-    assert_eq!(lines.len(), 21, "fixture must cover all fact kinds");
+    assert_eq!(lines.len(), 22, "fixture must cover all fact kinds");
 
     for line in lines {
         let value: Value = serde_json::from_str(line).expect("parse fixture json");
@@ -78,9 +79,10 @@ fn projection_slot_indices_are_the_frozen_repr_values() {
     assert_eq!(ProjectionSlot::Control.as_u16(), 2);
     assert_eq!(ProjectionSlot::Resources.as_u16(), 3);
     assert_eq!(ProjectionSlot::Meta.as_u16(), 4);
+    assert_eq!(ProjectionSlot::Mailbox.as_u16(), 5);
     assert_eq!(MAX_RELIABLE_PROJECTION_INDEX, 65_534);
     assert_eq!(END_OF_FACT, 65_535);
-    let _: ProjectionIndex = ProjectionSlot::Meta.as_u16();
+    let _: ProjectionIndex = ProjectionSlot::Mailbox.as_u16();
 }
 
 #[test]

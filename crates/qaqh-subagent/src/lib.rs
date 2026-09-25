@@ -961,6 +961,7 @@ mod tests {
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from("/tmp/workspace"),
             ),
+            exec_default_shell: None,
             timeout: Duration::from_secs(180),
             cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
             progress: None,

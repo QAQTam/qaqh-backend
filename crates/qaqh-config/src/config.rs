@@ -1,7 +1,8 @@
 use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
 use qaqh_types::{
-    ConfigStore, PersistentConfig, PersistentLspConfig, PersistentLspServerConfig,
-    PersistentMcpConfig, PersistentMcpServerConfig, PersistentSubagentConfig,
+    ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
+    PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
+    PersistentSubagentConfig,
 };
 use std::collections::HashMap; // still used by profiles
 use std::sync::{Mutex, OnceLock};
@@ -52,6 +53,13 @@ impl Default for SubagentConfig {
     }
 }
 
+/// exec 工具默认执行配置。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExecConfig {
+    /// 用户指定的默认 shell；`None` / 空 / "auto" = 平台优先级自动探测。
+    pub default_shell: Option<String>,
+}
+
 /// Runtime agent configuration built from PersistentConfig + registry.
 ///
 /// This is the fully-resolved config used by the agent at runtime. It combines
@@ -93,6 +101,8 @@ pub struct Config {
     pub notifications_enabled: Option<bool>,
     /// Default configuration for sub-agent spawning.
     pub subagent: SubagentConfig,
+    /// exec tool default shell selection.
+    pub exec: ExecConfig,
     /// Whether the content filter is active.
     pub compliance_enabled: bool,
     /// Additional banned keywords for the content filter.
@@ -605,6 +615,7 @@ impl Default for Config {
             theme: None,
             notifications_enabled: None,
             subagent: SubagentConfig::default(),
+            exec: ExecConfig::default(),
             compliance_enabled: true,
             compliance_extra_keywords: Vec::new(),
             compliance_allowlist: Vec::new(),
@@ -838,6 +849,14 @@ impl Config {
                         .map(String::from)
                         .collect();
                 }
+            }
+
+            // ── exec defaults ──
+            if let Some(exec) = pc.exec {
+                cfg.exec.default_shell = exec.default_shell.and_then(|shell| {
+                    let shell = shell.trim().to_ascii_lowercase();
+                    (!shell.is_empty() && shell != "auto").then_some(shell)
+                });
             }
 
             // ── Compliance ──
@@ -1082,6 +1101,17 @@ falling back to 1 (MaxLockdown)"
                 } else {
                     Some(self.subagent.default_tools.clone())
                 },
+            }),
+            exec: Some(PersistentExecConfig {
+                default_shell: self
+                    .exec
+                    .default_shell
+                    .as_ref()
+                    .filter(|shell| {
+                        let shell = shell.trim();
+                        !shell.is_empty() && !shell.eq_ignore_ascii_case("auto")
+                    })
+                    .cloned(),
             }),
             compliance_enabled: Some(self.compliance_enabled),
             compliance_extra_keywords: if self.compliance_extra_keywords.is_empty() {
@@ -1370,6 +1400,30 @@ mod c3_migration_tests {
             && doc.get("context_limit").is_none()
             && doc.get("endpoint").is_none()
             && doc.get("reasoning_effort").is_none()
+    }
+
+    #[test]
+    fn exec_default_shell_loads_normalizes_and_roundtrips() {
+        let (dir, store, secrets) = setup("exec-shell", "[exec]\ndefault_shell = \"zsh\"\n");
+        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        assert_eq!(cfg.exec.default_shell.as_deref(), Some("zsh"));
+
+        cfg.save_with(&store, &secrets).expect("save");
+        let text = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
+        assert!(text.contains("[exec]"), "{text}");
+        assert!(text.contains("default_shell = \"zsh\""), "{text}");
+
+        let auto = Config {
+            exec: ExecConfig {
+                default_shell: Some("auto".into()),
+            },
+            ..Default::default()
+        };
+        auto.save_with(&store, &secrets).expect("save auto");
+        let reloaded =
+            Config::load_from_paths_with(store, secrets).expect("reload normalized config");
+        assert_eq!(reloaded.exec.default_shell, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 旧形态（纯扁平）：load 即触发一次性迁移——值固化进 profile、顶层剥离；

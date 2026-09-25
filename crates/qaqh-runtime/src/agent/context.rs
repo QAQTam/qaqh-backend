@@ -53,6 +53,7 @@ pub struct RuntimeContext {
     permission_level: u8,
     mode: AgentMode,
     cancellation: CancelToken,
+    exec_default_shell: Option<String>,
 }
 
 impl RuntimeContext {
@@ -62,6 +63,7 @@ impl RuntimeContext {
         session_id: impl Into<String>,
         permission_level: u8,
         cancellation: CancelToken,
+        exec_default_shell: Option<String>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -73,6 +75,7 @@ impl RuntimeContext {
                 _ => AgentMode::Code,
             },
             cancellation,
+            exec_default_shell,
         }
     }
 
@@ -127,6 +130,7 @@ impl RuntimeContext {
                 SandboxKind::Subagent => SandboxMode::Subagent,
             },
             sandbox_spec: SandboxSpec::workspace_write(self.workspace_root.clone()),
+            exec_default_shell: self.exec_default_shell.clone(),
             timeout,
             cancellation: CancellationToken::from_shared_flag(self.cancellation.arc()),
             progress,
@@ -152,6 +156,7 @@ impl TurnContext {
                 ctx.agent.session.seed.clone(),
                 ctx.agent.config.permission_level,
                 ctx.cancel.clone(),
+                ctx.agent.config.exec.default_shell.clone(),
             ),
             turn_id: turn_id.into(),
             round_num,
@@ -197,7 +202,7 @@ mod tests {
 
         let cancel = CancelToken::new();
         let runtime =
-            RuntimeContext::from_legacy_ambient("seed-236".to_string(), 3, cancel.clone());
+            RuntimeContext::from_legacy_ambient("seed-236".to_string(), 3, cancel.clone(), None);
 
         assert_eq!(runtime.session_id(), "seed-236");
         assert_eq!(runtime.workspace_root(), Path::new("/tmp/qaqh-p2-4a"));
@@ -218,8 +223,12 @@ mod tests {
         qaqh_workspace::set_actor_context("/tmp/qaqh-p2-4a-turn", "seed-turn");
         let _guard = AmbientGuard;
 
-        let runtime =
-            RuntimeContext::from_legacy_ambient("seed-turn".to_string(), 4, CancelToken::new());
+        let runtime = RuntimeContext::from_legacy_ambient(
+            "seed-turn".to_string(),
+            4,
+            CancelToken::new(),
+            None,
+        );
         let turn = TurnContext {
             runtime: runtime.clone(),
             turn_id: "turn-236".to_string(),
@@ -240,8 +249,12 @@ mod tests {
         let _guard = AmbientGuard;
 
         let cancel = CancelToken::new();
-        let runtime =
-            RuntimeContext::from_legacy_ambient("seed-tool".to_string(), 3, cancel.clone());
+        let runtime = RuntimeContext::from_legacy_ambient(
+            "seed-tool".to_string(),
+            3,
+            cancel.clone(),
+            Some("zsh".to_string()),
+        );
         let tool_ctx = runtime.tool_call_context(
             "call-248",
             Duration::from_secs(9),
@@ -255,6 +268,7 @@ mod tests {
         assert_eq!(tool_ctx.mode, AgentMode::Plan);
         assert_eq!(tool_ctx.permission_level, PermissionLevel::WorkspaceFree);
         assert_eq!(tool_ctx.sandbox, SandboxMode::Subagent);
+        assert_eq!(tool_ctx.exec_default_shell.as_deref(), Some("zsh"));
         assert_eq!(
             tool_ctx.sandbox_spec().writable_roots,
             vec![PathBuf::from("/tmp/qaqh-p2-4c-b")]

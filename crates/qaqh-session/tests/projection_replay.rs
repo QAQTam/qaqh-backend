@@ -69,17 +69,20 @@ fn all_projection_set_deltas_become_valid_stable_events() {
         let events = projection_events_for_fact(&fact, &deltas).expect("build events");
         let expected_slots = projection_slots(&fact.payload);
 
-        assert_eq!(events.len(), expected_slots.len());
-        for (event, expected_slot) in events.iter().zip(expected_slots) {
+        assert!(events.len() <= expected_slots.len());
+        for event in &events {
             event.validate().expect("event validates");
-            assert_eq!(event.projection_slot, Some(*expected_slot));
+            let expected_slot = event
+                .projection_slot
+                .expect("reliable projection event carries a slot");
+            assert!(expected_slots.contains(&expected_slot));
             assert_eq!(event.projection_index, Some(expected_slot.as_u16()));
             assert_eq!(event.source_event_id, fact.event_id);
             assert_eq!(event.source_fact_seq, fact.fact_seq);
-            assert_eq!(event.event_id, projection_event_id(&fact, *expected_slot));
+            assert_eq!(event.event_id, projection_event_id(&fact, expected_slot));
             assert_eq!(
                 event.stream_key,
-                projection_stream_key(&fact, *expected_slot)
+                projection_stream_key(&fact, expected_slot)
             );
             let cursor = event
                 .delivery
@@ -92,7 +95,7 @@ fn all_projection_set_deltas_become_valid_stable_events() {
         }
     }
 
-    assert_eq!(total_events, 33);
+    assert_eq!(total_events, 34);
 }
 
 #[test]

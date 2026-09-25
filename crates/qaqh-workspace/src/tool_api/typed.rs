@@ -104,10 +104,7 @@ fn project_output<O: ToolProjection>(
     let blocks = output.model_blocks();
     let model_text = model_text_for(output, &blocks);
     let output_value = serde_json::to_value(output).unwrap_or(serde_json::Value::Null);
-    let mut display = output.display(args);
-    if display.summary.is_none() {
-        display.summary = output.summary();
-    }
+    let display = output.display(args);
     let output_bytes = model_text.len() as u64;
     let status = output.status();
     let error = output.error();
@@ -208,6 +205,12 @@ mod tests {
     }
 
     impl ToolProjection for EchoOutput {
+        fn model_blocks(&self) -> Vec<ToolContentBlock> {
+            vec![ToolContentBlock::Text {
+                text: self.text.clone(),
+            }]
+        }
+
         fn summary(&self) -> Option<String> {
             Some(self.text.clone())
         }
@@ -259,6 +262,7 @@ mod tests {
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
                 "/tmp/ws",
             )),
+            exec_default_shell: None,
             timeout: Duration::from_secs(10),
             cancellation: CancellationToken::new(),
             progress: None,
@@ -285,5 +289,21 @@ mod tests {
             .run(&ctx(), EchoArgs { text: "hi".into() })
             .expect("run ok");
         assert_eq!(output.summary().as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn typed_display_summary_is_not_backfilled_from_model_output() {
+        let output = EchoOutput { text: "hi".into() };
+        let outcome = project_output(
+            &output,
+            &serde_json::json!({}),
+            crate::tool_api::ToolCallSource::Model,
+            Duration::ZERO,
+        );
+        assert_eq!(outcome.model.text, "hi");
+        assert_eq!(
+            outcome.display.summary, None,
+            "display.summary must be explicitly constructed by the tool projector"
+        );
     }
 }

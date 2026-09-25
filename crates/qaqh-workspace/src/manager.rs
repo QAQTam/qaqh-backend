@@ -692,7 +692,7 @@ pub(crate) fn extract_files_affected(_tool_name: &str, args: &serde_json::Value)
 /// through to the old unconditional `true` and short-circuited the block.
 ///
 /// Exec/Net destructive tools (`exec`) declare no `path` at all by design
-/// (`command`/`argv`, workdir defaults to the workspace root); failing them
+/// (`command`, workdir defaults to the workspace root); failing them
 /// closed here would block the tool at every permission level, so their
 /// containment stays with the permission layer (`classify_risk` already reports
 /// Exec/Net as [`crate::PermissionRisk::High`]). Tools that never touch the file
@@ -880,7 +880,7 @@ mod tests {
             "c1".to_string(),
             "exec",
             "exec",
-            serde_json::json!({"argv": ["echo", "hi"]}),
+            serde_json::json!({"command": "echo hi"}),
             None,
             None,
         );

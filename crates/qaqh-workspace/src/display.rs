@@ -273,7 +273,7 @@ pub(crate) fn project_process(args: &serde_json::Value, output: &str) -> ToolDis
         .filter(|value| !value.is_empty())
         .unwrap_or("process");
     let view = json_view(output);
-    let summary = json_string(view.as_ref(), &["content", "message", "status"]);
+    let summary = json_string(view.as_ref(), &["status"]);
     let display = ToolDisplay::new(
         ToolHeader::Other {
             label: format!("process {action}"),
@@ -464,7 +464,12 @@ mod tests {
         let output =
             crate::json_ok(json!({"content": "process 12: completed", "status": "completed"}));
         let process = project_process(&json!({"action": "check", "id": 12}), &output);
-        assert_eq!(process.summary.as_deref(), Some("process 12: completed"));
+        assert_eq!(process.summary.as_deref(), Some("completed"));
+        assert_ne!(
+            process.summary.as_deref(),
+            Some("process 12: completed"),
+            "process summary must be status metadata, not the body's first line"
+        );
 
         let fallback = fallback_display("exec-ish", "{\"message\":\"json\"}");
         assert_eq!(fallback.summary, None);

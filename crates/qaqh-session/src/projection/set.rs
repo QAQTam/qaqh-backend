@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::session_fact_v2::{ProjectionPayload, ProjectionSlot, SessionFact, projection_slots};
 
 use super::{
-    ControlProjection, ControlSnapshot, ConversationProjection, ConversationSnapshot, Projection,
-    ResourceProjection, ResourceSnapshot, SessionMetaProjection, SessionMetaSnapshot,
-    TimelineProjection, TimelineSnapshot,
+    ControlProjection, ControlSnapshot, ConversationProjection, ConversationSnapshot,
+    MailboxProjection, MailboxSnapshot, Projection, ResourceProjection, ResourceSnapshot,
+    SessionMetaProjection, SessionMetaSnapshot, TimelineProjection, TimelineSnapshot,
 };
 
 /// A reliable projection delta paired with its frozen static slot.
@@ -25,6 +25,8 @@ pub struct ProjectionSetSnapshot {
     pub control: ControlSnapshot,
     pub resources: ResourceSnapshot,
     pub meta: SessionMetaSnapshot,
+    #[serde(default)]
+    pub mailbox: MailboxSnapshot,
 }
 
 /// All projections for one session, applied in frozen slot order.
@@ -35,6 +37,7 @@ pub struct ProjectionSet {
     pub control: ControlProjection,
     pub resources: ResourceProjection,
     pub meta: SessionMetaProjection,
+    pub mailbox: MailboxProjection,
 }
 
 impl ProjectionSet {
@@ -87,6 +90,14 @@ impl ProjectionSet {
                 ProjectionPayload::MetaDelta(delta),
             );
         }
+        if let Some(delta) = self.mailbox.apply(fact) {
+            push_allowed(
+                &mut deltas,
+                allowed_slots,
+                ProjectionSlot::Mailbox,
+                ProjectionPayload::MailboxDelta(delta),
+            );
+        }
 
         deltas
     }
@@ -98,6 +109,7 @@ impl ProjectionSet {
             control: self.control.snapshot(),
             resources: self.resources.snapshot(),
             meta: self.meta.snapshot(),
+            mailbox: self.mailbox.snapshot(),
         }
     }
 
@@ -108,6 +120,7 @@ impl ProjectionSet {
             self.control.last_fact_seq(),
             self.resources.last_fact_seq(),
             self.meta.last_fact_seq(),
+            self.mailbox.last_fact_seq(),
         ]
         .into_iter()
         .max()
@@ -142,6 +155,7 @@ impl ProjectionSetDelta {
             ProjectionPayload::ControlDelta(_) => Some(ProjectionSlot::Control),
             ProjectionPayload::ResourceDelta(_) => Some(ProjectionSlot::Resources),
             ProjectionPayload::MetaDelta(_) => Some(ProjectionSlot::Meta),
+            ProjectionPayload::MailboxDelta(_) => Some(ProjectionSlot::Mailbox),
             ProjectionPayload::AuditRef(_) | ProjectionPayload::Unknown(_) => None,
         }
     }

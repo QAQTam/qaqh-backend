@@ -58,6 +58,8 @@
 
 - `ToolResult` 状态是终态唯一真相。
 - 展示层使用结构化 `outcome`。
+- exec 只接受 shell `command` 字符串；直接 `argv` 模式已移除。
+- 进程启动层收到的 argv 必须由所选 shell 从 `command` 派生。
 - exec stdout/stderr 分离展示，不伪装交织顺序。
 - 不从 summary 文本反推执行结果。
 
