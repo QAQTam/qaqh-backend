@@ -52,8 +52,10 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     let host: &dyn SubagentHost = &service;
 
     // 1. spawn：返回合法 seed/path；不经过 daemon HTTP/SSE。
-    let parent = qaqh_session::SessionManager::global().generate_unique_session_seed();
-    qaqh_session::SessionManager::global().persist_new_session(&parent);
+    let parent_identity = qaqh_session::SessionManager::global()
+        .allocate_session(None)
+        .expect("allocate canonical parent session");
+    let parent = parent_identity.session_id.as_str().to_string();
     let spawned = host
         .spawn_subagent(SpawnSubagentRequest {
             parent_session_id: &parent,
@@ -68,16 +70,15 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     let seed = spawned.seed;
     let child_session_id = spawned.child_session_id;
     assert!(!seed.is_empty(), "host spawn must return a non-empty seed");
-    assert_ne!(
+    assert_eq!(
         child_session_id, seed,
-        "canonical child id must not reuse the legacy directory seed"
+        "beta identity requires seed == child_session_id == directory"
     );
     assert_eq!(spawned.parent_agent_path, "/root");
     assert_eq!(spawned.child_agent_path, "/root/review_code");
 
-    let parent_identity =
-        CanonicalSessionIdentity::open_or_create(data.join("sessions").join(&parent))
-            .expect("parent canonical identity");
+    let parent_identity = CanonicalSessionIdentity::open(data.join("sessions").join(&parent))
+        .expect("parent canonical identity");
     let child_dir = data.join("sessions").join(&seed);
     let child_identity =
         CanonicalSessionIdentity::open_or_create(&child_dir).expect("child canonical identity");
