@@ -7,9 +7,50 @@ use super::types::*;
 
 use super::injection::{Injection, InjectionPriority, InjectionSemantics, SUBAGENT_SOURCE};
 use super::turn_actor::TurnCancellation;
-use qaqh_domain::{ConversationCommand, DomainEvent};
+use qaqh_domain::{
+    ConversationCommand, DomainEvent, SubagentTerminalKind, SubagentTerminalNotification,
+};
+use qaqh_session::canonical::generate_ulid;
+use qaqh_session::session_fact_v2::{
+    EventId, SessionId, SubagentFinished, SubagentTerminalStatus, ToolCallId,
+};
 
 impl Loop {
+    fn record_subagent_terminal(&mut self, notification: SubagentTerminalNotification) {
+        let status = match notification.terminal {
+            SubagentTerminalKind::Completed => SubagentTerminalStatus::Completed,
+            SubagentTerminalKind::Failed => SubagentTerminalStatus::Failed,
+            SubagentTerminalKind::Cancelled => SubagentTerminalStatus::Cancelled,
+            SubagentTerminalKind::TimedOut => SubagentTerminalStatus::TimedOut,
+        };
+        let now = super::state::agent::unix_ms();
+        let ledger = match self.session.agent.tool_ledger_mut() {
+            Ok(Some(ledger)) => ledger,
+            Ok(None) => return,
+            Err(error) => {
+                log::warn!("[SUBAGENT] canonical ledger unavailable for finish: {error}");
+                return;
+            }
+        };
+        if let Err(error) = ledger.ensure_lease(now, super::state::agent::tool_ledger_lease_ms()) {
+            log::warn!("[SUBAGENT] canonical ledger lease failed for finish: {error}");
+            return;
+        }
+        let payload = SubagentFinished {
+            child_session_id: SessionId::new(notification.child_session_id),
+            parent_call_id: ToolCallId::new(notification.parent_call_id),
+            status,
+            result_ref: None,
+            finished_at_ms: now,
+            recovery_ref: None,
+        };
+        if let Err(error) =
+            ledger.append_subagent_finished(EventId::new(generate_ulid()), payload, now)
+        {
+            log::warn!("[SUBAGENT] canonical finish append failed: {error}");
+        }
+    }
+
     pub(super) fn on_conversation(
         &mut self,
         command: ConversationCommand,
@@ -24,7 +65,14 @@ impl Loop {
                 message_id,
                 input_purpose,
                 as_system,
+                subagent_terminal,
             } => {
+                if let Some(terminal) = subagent_terminal {
+                    self.record_subagent_terminal(terminal);
+                }
+                if text.is_empty() {
+                    return;
+                }
                 let input_id = message_id.as_deref().unwrap_or(command_id).to_string();
                 if as_system {
                     // 统一注入入口：时序决策（compact 进行中 / turn 运行

@@ -677,6 +677,7 @@ impl AgentState {
         for effect in effects {
             let result = match effect {
                 qaqh_workspace::ToolEffect::Skill(effect) => self.skills.apply_tool_effect(effect),
+                qaqh_workspace::ToolEffect::SubagentSpawned { .. } => Ok(()),
             };
             if let Err(error) = result {
                 log::warn!("cannot apply skill effect: {error}");
