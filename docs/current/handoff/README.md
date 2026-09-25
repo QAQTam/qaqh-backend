@@ -21,16 +21,9 @@ YYYY-MM-DD-<topic>-handoff.md
 
 - [2026-09-25 CodeGraph 热点与工具侧联调](./2026-09-25-codegraph-hotspot-tool-runtime-handoff.md)
 - [2026-09-25 exec command-only 硬切](./2026-09-25-exec-command-only-handoff.md)
-- [2026-09-25 Subagent V2 Phase 2 Mailbox](./2026-09-25-subagent-v2-phase2-mailbox-handoff.md)
 - [2026-09-25 BETA-01 Session Identity Foundation](./2026-09-25-beta-01-session-identity-foundation-handoff.md)
 - [2026-09-25 BETA-01 Legacy Session Migration](./2026-09-25-beta-01-legacy-session-migration-handoff.md)
-- [2026-09-25 Subagent V2 list_agents](./2026-09-25-subagent-v2-list-agents-handoff.md)
-- [2026-09-25 Subagent V2 Canonical Input Producer](./2026-09-25-subv2-input-accepted-producer-handoff.md)
-- [2026-09-25 Subagent V2 Initial Task Mailbox](./2026-09-25-subv2-initial-task-mailbox-handoff.md)
-- [2026-09-25 Subagent V2 Agent Message Tools](./2026-09-25-subv2-agent-message-tools-handoff.md)
-- [2026-09-25 Subagent V2 Wait / Interrupt / Queue-only Completion](./2026-09-25-subv2-wait-interrupt-completion-handoff.md)
-- [2026-09-25 Subagent V2 Residency / Reload](./2026-09-25-subv2-residency-reload-handoff.md)
-- [2026-09-25 Subagent V2 Team Projection](./2026-09-25-subv2-team-projection-handoff.md)
-- [2026-09-26 Subagent V2 Agent State / Direct Input](./2026-09-26-subv2-agent-state-direct-input-handoff.md)
+- [2026-09-26 Subagent V2 Current](./2026-09-26-subagent-v2-current-handoff.md)
 
-旧 handoff 已全部归档到 `docs/archive/2026-09/pre-reset/handoff/`，不再作为当前依据。
+Subagent V2 的阶段性 handoff 已合并为上面的单份 current handoff；旧分段文档已删除，
+避免同一模块出现多份相互覆盖的交接依据。

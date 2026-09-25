@@ -98,6 +98,8 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
 - Phase 4 前端壳接入和 Phase 5-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
+- 当前交接：
+  [`handoff/2026-09-26-subagent-v2-current-handoff.md`](./handoff/2026-09-26-subagent-v2-current-handoff.md)。
 
 ## 6. Beta 前身份迁移门禁
 
