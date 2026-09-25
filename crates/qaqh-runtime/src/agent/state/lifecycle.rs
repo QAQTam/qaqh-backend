@@ -338,7 +338,15 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
             );
             log::warn!("[LIFECYCLE] load failed for {s}, generating new seed");
             match agent.session_manager.as_ref() {
-                Some(manager) => manager.generate_unique_session_seed(),
+                Some(manager) => match manager.allocate_session(None) {
+                    Ok(identity) => identity.session_id.as_str().to_string(),
+                    Err(error) => {
+                        log::error!(
+                            "[LIFECYCLE] canonical fallback allocation failed for {s}: {error}"
+                        );
+                        return false;
+                    }
+                },
                 None => qaqh_session::generate_unique_seed(|seed| {
                     qaqh_types::platform::sessions_dir().join(seed).exists()
                 }),
@@ -378,9 +386,21 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
     true
 }
 
-/// Create a brand-new session with a fresh seed, clearing all prior state.
+/// Create a brand-new session with a fresh canonical identity, clearing all
+/// prior state.
 pub fn create_session(agent: &mut AgentState) {
-    agent.session.seed = qaqh_session::generate_seed();
+    let seed = match agent.session_manager.as_ref() {
+        Some(manager) => match manager.allocate_session(None) {
+            Ok(identity) => identity.session_id.as_str().to_string(),
+            Err(error) => {
+                log::error!("[LIFECYCLE] canonical session allocation failed: {error}");
+                return;
+            }
+        },
+        // Ephemeral/no-manager tests keep the in-memory legacy path.
+        None => qaqh_session::generate_seed(),
+    };
+    agent.session.seed = seed;
     agent.session.created_at = qaqh_session::now_epoch();
     agent.session.reset_usage();
     agent.session.from_resume = false;

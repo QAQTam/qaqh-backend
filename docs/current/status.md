@@ -93,7 +93,11 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
 - 旧 8 位 seed 只能经 legacy resolver 访问，beta 前删除兼容映射。
 - `SubagentSpawned.child_session_id` 不得再接受 8 位 seed。
 - TUI/WinUI 不得假设 seed 是 8 位 hex。
-- 当前状态：#369/#371 的修复已随 #384/#385/#386 合并；#382 落地身份设计，
-  代码迁移在合并后启动。
+- 当前状态：
+  - #369/#371 的修复已随 #384/#385/#386 合并；#382 身份设计已合并。
+  - canonical identity 预分配基础切片已实现：普通会话和子代理生产创建路径先分配
+    `SessionId`，再以同一值作为 `seed`、目录名和 canonical id。
+  - 仍待：旧目录 resolver/迁移、wire/runtime 字段改名、TUI/WinUI 假设清理，
+    以及删除剩余 `generate_seed()` 兼容路径。
 - 权威迁移设计：
   [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
