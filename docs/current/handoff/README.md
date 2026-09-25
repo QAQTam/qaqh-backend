@@ -24,5 +24,6 @@ YYYY-MM-DD-<topic>-handoff.md
 - [2026-09-25 Subagent V2 Phase 2 Mailbox](./2026-09-25-subagent-v2-phase2-mailbox-handoff.md)
 - [2026-09-25 BETA-01 Session Identity Foundation](./2026-09-25-beta-01-session-identity-foundation-handoff.md)
 - [2026-09-25 BETA-01 Legacy Session Migration](./2026-09-25-beta-01-legacy-session-migration-handoff.md)
+- [2026-09-25 Subagent V2 list_agents](./2026-09-25-subagent-v2-list-agents-handoff.md)
 
 旧 handoff 已全部归档到 `docs/archive/2026-09/pre-reset/handoff/`，不再作为当前依据。
