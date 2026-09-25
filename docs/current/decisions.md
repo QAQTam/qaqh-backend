@@ -72,3 +72,52 @@
 - `docs/current/` 是唯一当前权威文档区。
 - `docs/archive/` 只用于历史追溯。
 - 旧文档中的“未完成/待办/计划”不能直接当作当前状态。
+
+## D11. exec shell 选择
+
+- 配置文件支持 `[exec].default_shell`；空值 / `"auto"` = 平台自动探测。
+- 调用级显式 `shell` 参数优先于配置默认值。
+- 自动探测顺序：
+  - Windows：`pwsh` > Git for Windows bash > `powershell` 5.1 > `cmd`；
+  - Linux：`bash` > `zsh` > `sh`；
+  - macOS：`bash` > `zsh`。
+- 不做跨 shell 命令翻译或兼容降级；不兼容命令由 shell 报错，模型负责修正。
+
+## D12. 工具展示摘要唯一来源
+
+- `display.summary` 只由工具展示投影显式构造，typed 路径不再自动回填模型输出摘要。
+- `display.summary` 不承载工具名、终态标记或正文首行；没有更合适的元信息时保持 `None`。
+- `TimelineTool.summary` 只在 `display` 缺失时作为 legacy fallback；有 `display` 时不双写。
+- 正文只从 `display.body` 或显式 legacy fallback 读取，不再从 `summary` 反推。
+
+## D13. Agent identity 与 delivery 分层
+
+- `AgentId = session_id`，必须全局稳定、可持久化，不随 loaded/unloaded 改变。
+- `AgentPath` 是模型可读的 tree address；格式冻结为 `/root[/<segment>]*`，
+  segment 只允许 `[a-z0-9_]`，保留 `root`、`.`、`..`。
+- 相对 path 只能向当前节点子树解析；跨分支必须使用 absolute path。
+- 注入/反注入只负责 delivery，不能替代 AgentPath、graph 或 task 归属。
+- 默认只允许同一 root tree 内通信；默认 max depth 为 1，配置可提高到 2。
+
+## D14. AgentGraph 与 canonical facts
+
+- parent-child edge 的权威事实是父 session canonical log 中的
+  `SubagentSpawned/Finished`；`AgentGraphStore`、projection 和 SQLite 只做可重建索引。
+- 每个 child 最多一个 parent，禁止 cycle；edge 不因 runtime unload 而删除。
+- `SessionCreated.parent_session_id` 只作恢复 hint，不能取代 canonical edge。
+- graph 读取或重建失败时必须 fail closed，不得猜 topology。
+
+## D15. Mailbox 与 delivery
+
+- 消息接受不等于模型已读；`InterAgentCommunication` 必须显式携带 author、
+  recipient、task、trigger 语义。
+- V1 只冻结 `queue`、`trigger`、`interrupt`；`steer/interject` 留到第二阶段。
+- completion result 默认 queue-only 进入父 mailbox，不得无界触发父 turn。
+- wire 上的 `@` 必须是结构化 mention；不得靠正文 regex 推断收件人。
+
+## D16. Status 与 Residency 分离
+
+- `unloaded != completed`；`completed != closed`。
+- interrupt 只终止当前 turn，不删除逻辑身份；unloaded agent 仍可被 list。
+- delivery 可以触发 reload，但必须经 loaded immediate parent 做 ownership 校验。
+- V1 `close_agent` 保留兼容；V2 使用 `interrupt_agent` + residency eviction。
