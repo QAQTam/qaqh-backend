@@ -827,6 +827,7 @@ mod tests {
             // ToolEffect / SkillEffect 目前均为单变体 enum，此臂已穷尽；
             // 若未来新增变体，单臂 match 编译失败即强制此处显式处理。
             crate::ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(activation)) => activation,
+            other => panic!("unexpected typed skill effect: {other:?}"),
         };
         assert_eq!(activation.metadata.name, "typed-skill");
         assert!(activation.body.contains("Typed instructions"));

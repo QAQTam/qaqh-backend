@@ -42,7 +42,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 mod host;
-pub use host::{ContentRef, EventBatch, SubagentHost, host, install_host};
+pub use host::{
+    ContentRef, EventBatch, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest,
+    SubagentHost, host, install_host,
+};
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
 /// 子代理的 base system prompt（`backend_prompt.md`）与主代理同源（同 config
@@ -69,8 +72,22 @@ pub struct SpawnSubagentOutput {
     status: String,
     process_id: u32,
     seed: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    child_session_id: String,
     name: String,
+    parent_agent_path: String,
+    child_agent_path: String,
     content: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    task_text: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    timeout_secs: u64,
+    #[serde(skip)]
+    #[schemars(skip)]
+    parent_session_id: String,
 }
 
 impl ToolProjection for SpawnSubagentOutput {
@@ -95,6 +112,20 @@ impl ToolProjection for SpawnSubagentOutput {
             },
         )
         .with_summary(self.content.clone())
+    }
+
+    fn effects(&self) -> Vec<qaqh_workspace::ToolEffect> {
+        vec![qaqh_workspace::ToolEffect::SubagentSpawned {
+            seed: self.seed.clone(),
+            child_session_id: self.child_session_id.clone(),
+            name: self.name.clone(),
+            task_text: self.task_text.clone(),
+            timeout_secs: self.timeout_secs,
+            parent_session_id: self.parent_session_id.clone(),
+            parent_agent_path: self.parent_agent_path.clone(),
+            child_agent_path: self.child_agent_path.clone(),
+            process_id: self.process_id,
+        }]
     }
 }
 
@@ -290,6 +321,7 @@ fn handle_spawn_subagent(
         .filter(|value| !value.is_empty())
         .unwrap_or("sub")
         .to_string();
+    validate_agent_name(&name)?;
     let task = args.task_description;
     let context = args.context.unwrap_or_default();
 
@@ -347,112 +379,88 @@ fn handle_spawn_subagent(
         Some(max_tokens)
     };
 
-    // ── 1. 选择传输：宿主直连（进程内，无 HTTP/SSE 回环）。──
-    let (seed, transport): (String, Box<dyn SubagentTransport>) = if let Some(host) = host() {
-        log::info!(
-            "[SUBAGENT] '{name}' using in-process host direct transport (tools={})",
-            tools.len()
-        );
-        let seed = match host.spawn_subagent(
-            &tools,
-            model,
-            base_url,
-            max_tokens_opt,
-            workspace.as_deref(),
-        ) {
-            Ok(seed) if !seed.is_empty() => seed,
-            Ok(_) => {
-                return Err(subagent_error(
-                    "SPAWN_ERROR",
-                    "spawn_subagent: host returned empty seed",
-                    "Check host/daemon logs.",
-                ));
-            }
-            Err(error) => {
-                return Err(subagent_error(
-                    "SPAWN_ERROR",
-                    format!("spawn_subagent: host rejected spawn: {error}"),
-                    "Check that the daemon can start subagent actors.",
-                ));
-            }
-        };
-        let batch_rx = host.subscribe(&seed);
-        (
-            seed,
-            Box::new(HostTransport { host, batch_rx }) as Box<dyn SubagentTransport>,
-        )
-    } else {
-        return Err(subagent_error(
+    // ── 1. Create the child actor only. The task is delivered by the runtime
+    // after the canonical `SubagentSpawned` edge is committed. ──
+    let host = host().ok_or_else(|| {
+        subagent_error(
             "HOST_UNAVAILABLE",
             "spawn_subagent: no in-process subagent host installed",
             "Subagent spawning requires the daemon host (install_host).",
+        )
+    })?;
+    let spawned = host
+        .spawn_subagent(SpawnSubagentRequest {
+            parent_session_id: &ctx.session_id,
+            requested_name: &name,
+            tools: &tools,
+            model,
+            base_url,
+            max_tokens: max_tokens_opt,
+            workspace: workspace.as_deref(),
+        })
+        .map_err(|error| {
+            subagent_error(
+                "SPAWN_ERROR",
+                format!("spawn_subagent: host rejected spawn: {error}"),
+                "Check that the daemon can start subagent actors.",
+            )
+        })?;
+    if spawned.seed.is_empty() {
+        return Err(subagent_error(
+            "SPAWN_ERROR",
+            "spawn_subagent: host returned empty seed",
+            "Check host/daemon logs.",
         ));
-    };
-    log::info!("[SUBAGENT] '{name}' worker seed={seed}");
-
-    // ── 2. Send the task. ──
-    let send = RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
-        text: task_text,
-        images: vec![],
-        attachments: None,
-        message_id: Some(format!("subagent-task:{seed}")),
-        input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
-        as_system: false,
-    });
-    match transport.send_command(&seed, send) {
-        Ok(true) => {}
-        Ok(false) => {
-            transport.close();
-            return Err(subagent_error(
-                "SEND_REJECTED",
-                "spawn_subagent: daemon rejected task send",
-                "Check daemon/worker logs for lease or state conflicts.",
-            ));
-        }
-        Err(error) => {
-            transport.close();
-            return Err(subagent_error(
-                "SEND_ERROR",
-                format!("spawn_subagent: send task: {error}"),
-                "Check daemon/worker logs.",
-            ));
-        }
     }
-    log::info!("[SUBAGENT] '{name}' task delivered to {seed} (accepted)");
+    let seed = spawned.seed;
+    let child_session_id = spawned.child_session_id;
+    let parent_agent_path = spawned.parent_agent_path;
+    let child_agent_path = spawned.child_agent_path;
 
-    // ── 3. Register the process and collect the result in the background. ──
-    //
-    // 子代理与 exec 的 process 工具都运行在 daemon actor 进程内，共享同一个
-    // ProcessRegistry。最终结果仍经 Ringing 注入主代理会话回传。
+    // ── 2. Register the process record. The runtime starts the collector
+    // only after committing the canonical edge. ──
     let registry_ref = register_subagent_process(&format!("subagent:{name}"));
     let registry_id = registry_ref.id();
-    // 主代理会话 seed 由显式上下文提供，collect 完成后把最终作答注入主会话。
-    let parent_seed = ctx.session_id.clone();
-    let name_bg = name.clone();
-    let seed_bg = seed.clone();
-    std::thread::spawn(move || {
-        collect_subagent_result(
-            transport,
-            &seed_bg,
-            &name_bg,
-            registry_ref,
-            timeout_secs,
-            &parent_seed,
-        );
-    });
 
-    log::info!("[SUBAGENT] '{name}' spawned (seed={seed}, process={registry_id})");
+    log::info!(
+        "[SUBAGENT] '{name}' actor created (seed={seed}, path={child_agent_path}, process={registry_id}); awaiting canonical edge"
+    );
     let content = format!(
-        "Subagent '{name}' spawned (process {registry_id}); the final answer will be injected into the conversation as a [SUBAGENT] system message when it completes."
+        "Subagent '{name}' spawned at {child_agent_path} (process {registry_id}); the task starts after the canonical spawn edge is committed."
     );
     Ok(SpawnSubagentOutput {
         timeis: qaqh_workspace::now_utc8(),
         status: "ok".to_string(),
         process_id: registry_id,
         seed,
+        child_session_id,
         name,
+        parent_agent_path,
+        child_agent_path,
         content,
+        task_text,
+        timeout_secs,
+        parent_session_id: ctx.session_id.clone(),
     })
+}
+
+fn validate_agent_name(name: &str) -> Result<(), ToolExecutionError> {
+    if name.is_empty()
+        || name.len() > 64
+        || matches!(name, "root" | "." | "..")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(subagent_error(
+            "INVALID_AGENT_NAME",
+            format!(
+                "spawn_subagent: invalid agent_name {name:?}; use lowercase [a-z0-9_] segments"
+            ),
+            "Use a verb+task name such as 'review_code' or 'explore_task'.",
+        ));
+    }
+    Ok(())
 }
 
 fn subagent_error(
@@ -485,23 +493,94 @@ fn spawn_subagent_schema() -> serde_json::Value {
     })
 }
 
+/// Start task delivery and the background result collector.
+///
+/// The caller must have committed the canonical `SubagentSpawned` edge first.
+/// Process registration is intentionally done by the tool handler before this
+/// function is called, so a failed edge commit can abort without leaking a
+/// running task.
+pub fn start_subagent_collector(
+    host: Arc<dyn SubagentHost>,
+    request: StartSubagentRequest<'_>,
+) -> Result<(), String> {
+    let StartSubagentRequest {
+        seed,
+        child_session_id,
+        name,
+        task_text,
+        timeout_secs,
+        parent_session_id,
+        parent_call_id,
+        process_id,
+    } = request;
+    let batch_rx = host.subscribe(seed);
+    let transport = Box::new(HostTransport {
+        host: host.clone(),
+        batch_rx,
+    }) as Box<dyn SubagentTransport>;
+    let send = RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+        text: task_text.to_string(),
+        images: vec![],
+        attachments: None,
+        message_id: Some(format!("subagent-task:{seed}")),
+        input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
+        as_system: false,
+        subagent_terminal: None,
+    });
+    match transport.send_command(seed, send) {
+        Ok(true) => {}
+        Ok(false) => {
+            transport.close();
+            return Err("daemon rejected subagent task send".to_string());
+        }
+        Err(error) => {
+            transport.close();
+            return Err(format!("send subagent task: {error}"));
+        }
+    }
+
+    let registry_ref = RegistryRef::Local { id: process_id };
+    let seed = seed.to_string();
+    let child_session_id = child_session_id.to_string();
+    let name = name.to_string();
+    let parent_seed = parent_session_id.to_string();
+    let parent_call_id = parent_call_id.to_string();
+    std::thread::spawn(move || {
+        collect_subagent_result(
+            transport,
+            &seed,
+            &child_session_id,
+            &name,
+            registry_ref,
+            timeout_secs,
+            &parent_seed,
+            &parent_call_id,
+        );
+    });
+    Ok(())
+}
+
 /// Background collector: watches the sub-seed's event stream (process-local or
 /// HTTP/SSE, depending on the transport) until a terminal event, a kill
 /// request, or the timeout — mirroring the old stdout-frame collector, but over
 /// the Ringing event plane.
+#[allow(clippy::too_many_arguments)]
 fn collect_subagent_result(
     transport: Box<dyn SubagentTransport>,
     seed: &str,
+    child_session_id: &str,
     name: &str,
     registry_ref: RegistryRef,
     timeout_secs: u64,
     parent_seed: &str,
+    parent_call_id: &str,
 ) {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut final_answer = String::new();
     let mut exit_code: i32 = 0;
     let mut did_finish = false;
     let mut did_cancel = false;
+    let mut terminal = qaqh_domain::SubagentTerminalKind::Completed;
     // 诊断：是否收到过子 seed 的任意事件（用于区分"子代理一开始就死了"
     // 与"中途卡死"——worker 侧 [SUBAGENT-WORKER] 日志 + 落盘开关配合）。
     let mut first_event_logged = false;
@@ -517,6 +596,7 @@ fn collect_subagent_result(
                 log::warn!("[SUBAGENT] '{name}' cancel send failed: {e}");
             }
             final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
+            terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
             did_cancel = true;
             break;
         }
@@ -566,6 +646,7 @@ fn collect_subagent_result(
                             log::warn!("[SUBAGENT] '{name}' turn failed: {error:?}");
                             final_answer = format!("[SUBAGENT '{name}' ERROR] {error:?}");
                             exit_code = 1;
+                            terminal = qaqh_domain::SubagentTerminalKind::Failed;
                             did_finish = true;
                         }
                         RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
@@ -573,6 +654,7 @@ fn collect_subagent_result(
                         }) => {
                             log::info!("[SUBAGENT] '{name}' conversation cancelled");
                             final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
+                            terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
                             did_cancel = true;
                         }
                         // 控制面失败（compact 拒绝注入、lease 拒绝等）：此前被
@@ -604,6 +686,7 @@ fn collect_subagent_result(
                     }
                     final_answer = format!("[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]");
                     exit_code = 1;
+                    terminal = qaqh_domain::SubagentTerminalKind::TimedOut;
                     did_finish = true;
                 }
             }
@@ -613,6 +696,7 @@ fn collect_subagent_result(
                     "[SUBAGENT] '{name}' event stream closed, partial answer_len={}",
                     final_answer.len()
                 );
+                terminal = qaqh_domain::SubagentTerminalKind::Failed;
                 did_finish = true;
             }
         }
@@ -624,15 +708,20 @@ fn collect_subagent_result(
     // 主代理 idle 时这条消息触发新回合（模型自动看到子代理结果并继续）；
     // 主代理仍在运行中则进入回合 lap 边界的见缝插针通道。注入被 daemon 拒绝
     // （lease/compact 等）时重试一次并告警，避免静默丢失。
-    let (state_tag, header) = if did_cancel {
-        ("cancelled", format!("subagent '{name}' cancelled"))
-    } else if exit_code != 0 {
-        (
+    let (state_tag, header) = match terminal {
+        qaqh_domain::SubagentTerminalKind::Completed => {
+            ("completed", format!("subagent '{name}' completed"))
+        }
+        qaqh_domain::SubagentTerminalKind::Failed => (
             "error",
             format!("subagent '{name}' failed (exit={exit_code})"),
-        )
-    } else {
-        ("completed", format!("subagent '{name}' completed"))
+        ),
+        qaqh_domain::SubagentTerminalKind::Cancelled => {
+            ("cancelled", format!("subagent '{name}' cancelled"))
+        }
+        qaqh_domain::SubagentTerminalKind::TimedOut => {
+            ("timeout", format!("subagent '{name}' timed out"))
+        }
     };
     // T-1-2：被取消的子代理不得把结果注入父会话。取消是终态——父会话可能
     // 正是被用户取消（或本 collector 的 kill/timeout 路径）而停下的，注入会
@@ -640,31 +729,40 @@ fn collect_subagent_result(
     // `final_answer` 当作模型输入。仅留日志痕迹，不注入、不留存正文。
     if did_cancel {
         log::info!(
-            "[SUBAGENT] '{name}' cancelled — result injection suppressed (answer_len={answer_len})"
+            "[SUBAGENT] '{name}' cancelled — result body suppressed (answer_len={answer_len}); terminal edge will still be reported"
         );
     }
-    if !parent_seed.is_empty() && !did_cancel {
-        // 注入到主代理会话。主代理 idle 时该消息触发新回合；运行中则进入
-        // cmd_rx 排队 / lap 边界见缝插针通道。daemon 的 Accepted ACK 只代表
-        // "已转发"，不代表 worker 落地；worker 侧的 compact 拒绝已改为延迟处理
-        // （loop_core deferral），此处再对转发级瞬时失败（daemon 写 stdin 阻塞 /
-        // lease 波动 / 网络抖动）做带退避重试，避免一次失败就静默丢弃子代理结果。
-        //
-        // 401 lease_required 根因：collect 的 client 只 attach 了子 seed，向主
-        // seed 发命令需先建立 owns 关系（SessionResume）。每次重试前重新 attach
-        // （SessionResume 幂等），覆盖 lease 过期后的恢复。
+    if !parent_seed.is_empty() {
+        let terminal_notification = qaqh_domain::SubagentTerminalNotification {
+            child_session_id: child_session_id.to_string(),
+            parent_call_id: parent_call_id.to_string(),
+            terminal,
+        };
         let inject = RingingCommand::Conversation(
             qaqh_domain::ConversationCommand::ConversationSendMessage {
-                text: format!(
-                    "<qaqh_subagent_result name=\"{name}\" state=\"{state_tag}\" exit=\"{exit_code}\">\n{header}\n{final_answer}\n</qaqh_subagent_result>"
-                ),
+                text: if did_cancel {
+                    String::new()
+                } else {
+                    format!(
+                        "<qaqh_subagent_result name=\"{name}\" state=\"{state_tag}\" exit=\"{exit_code}\">\n{header}\n{final_answer}\n</qaqh_subagent_result>"
+                    )
+                },
                 images: vec![],
                 attachments: None,
-                message_id: Some(format!("subagent-result:{seed}")),
-                input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
+                message_id: Some(if did_cancel {
+                    format!("subagent-terminal:{seed}")
+                } else {
+                    format!("subagent-result:{seed}")
+                }),
+                input_purpose: if did_cancel {
+                    qaqh_domain::ConversationInputPurpose::QueueOnly
+                } else {
+                    qaqh_domain::ConversationInputPurpose::TriggerTurn
+                },
                 // 以 system 角色注入（而非 user）：模型可见但不等同于用户输入，
                 // 保留 [SUBAGENT ...] 标签供模型区分注入数据与系统指令。
                 as_system: true,
+                subagent_terminal: Some(terminal_notification),
             },
         );
         let mut accepted = false;
@@ -817,8 +915,14 @@ mod tests {
             status: "ok".to_string(),
             process_id: 7,
             seed: "sub-seed".to_string(),
+            child_session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
             name: "review_code".to_string(),
+            parent_agent_path: "/root".to_string(),
+            child_agent_path: "/root/review_code".to_string(),
             content: "Subagent 'review_code' spawned (process 7)".to_string(),
+            task_text: "[TASK]\nreview".to_string(),
+            timeout_secs: 120,
+            parent_session_id: "root-seed".to_string(),
         };
         let model = match output.model_blocks().into_iter().next() {
             Some(ToolContentBlock::Text { text }) => text,
@@ -827,6 +931,10 @@ mod tests {
         assert!(model.contains("\"process_id\":7"));
         assert!(model.contains("\"seed\":\"sub-seed\""));
         assert!(model.contains("\"content\":\"Subagent 'review_code' spawned"));
+        assert!(
+            !model.contains("child_session_id"),
+            "canonical child identity is an internal effect, not model-visible JSON"
+        );
         let display = output.display(&serde_json::json!({}));
         assert_eq!(
             display.summary.as_deref(),
@@ -1023,13 +1131,40 @@ mod tests {
             id: ProcessRegistry::register("subagent-cancel-no-inject"),
         };
 
-        collect_subagent_result(transport, child, "cancelled_task", registry_ref, 5, parent);
+        collect_subagent_result(
+            transport,
+            child,
+            "0198f1a0-0000-7000-8000-000000000003",
+            "cancelled_task",
+            registry_ref,
+            5,
+            parent,
+            "call_01J00000000000000000000000",
+        );
 
         let sent = sent.lock().expect("test mutex must not be poisoned");
         let injected: Vec<_> = sent.iter().filter(|(seed, _)| seed == parent).collect();
+        assert_eq!(
+            injected.len(),
+            1,
+            "cancelled child must send exactly one terminal notification"
+        );
         assert!(
-            injected.is_empty(),
-            "取消后不得向父会话注入任何命令，实测: {injected:?}"
+            matches!(
+                &injected[0].1,
+                RingingCommand::Conversation(
+                    qaqh_domain::ConversationCommand::ConversationSendMessage {
+                        text,
+                        subagent_terminal: Some(terminal),
+                        ..
+                    }
+                ) if text.is_empty()
+                    && terminal.terminal == qaqh_domain::SubagentTerminalKind::Cancelled
+                    && terminal.child_session_id
+                        == "0198f1a0-0000-7000-8000-000000000003"
+            ),
+            "cancelled child must send an empty structured terminal notification, got {:?}",
+            injected[0].1
         );
         assert!(
             sent.iter().any(|(seed, command)| {
