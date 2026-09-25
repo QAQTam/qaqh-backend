@@ -10,9 +10,14 @@ use std::time::Duration;
 
 use qaqh_domain::{ControlEvent, DomainEvent, InterAgentDelivery, RingingChannel, SessionState};
 use qaqh_runtime::{QaqhService, RingingHub};
-use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::canonical::{
+    CanonicalLog, CanonicalSessionIdentity, CommittedFactReader, WriterId, generate_ulid,
+};
 use qaqh_session::projection::{MailboxProjection, Projection};
-use qaqh_session::session_fact_v2::{FactPayload, MailboxMessageState};
+use qaqh_session::session_fact_v2::{
+    AgentPath, EventId, FactPayload, FactSchema, MailboxMessageState, SessionCreated, SessionFact,
+    SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId,
+};
 use qaqh_subagent::{
     InterruptAgentRequest, SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost,
     WaitAgentOutcome, WaitAgentRequest,
@@ -300,4 +305,207 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     host.close(&seed).expect("first close");
     let _ = host.close(&seed); // 第二次幂等
     host.close(&parent).expect("close parent actor");
+}
+
+#[test]
+fn delivery_reloads_unloaded_child_through_loaded_parent() {
+    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let root = std::env::temp_dir().join(format!(
+        "qaqh-host-reload-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).expect("test setup must not fail");
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    unsafe {
+        std::env::set_var("QAQH_DATA_DIR", &data);
+    }
+    qaqh_workspace::set_workspace(&ws.to_string_lossy());
+
+    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+        data.join("sessions"),
+        data.join(".active_session"),
+    ));
+    let service = QaqhService::init(sessions.clone());
+    let hub = Arc::new(RingingHub::new("qaqh-host-reload-test"));
+    service.attach_ringing(hub.clone());
+    let host: &dyn SubagentHost = &service;
+
+    let parent_identity = sessions
+        .allocate_session(None)
+        .expect("allocate canonical parent session");
+    let parent = parent_identity.session_id.as_str().to_string();
+    let spawned = host
+        .spawn_subagent(SpawnSubagentRequest {
+            parent_session_id: &parent,
+            requested_name: "reload_task",
+            tools: &["read_file".to_string()],
+            model: Some("test-model"),
+            base_url: None,
+            max_tokens: Some(2048),
+            workspace: None,
+        })
+        .expect("spawn child before unload");
+    let child = spawned.child_session_id.clone();
+    let child_path = spawned.child_agent_path.clone();
+    assert_eq!(child, spawned.seed);
+
+    let parent_dir = sessions.session_path_dir(&parent);
+    let parent_canonical = CanonicalSessionIdentity::open(&parent_dir).expect("parent identity");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let mut log = CanonicalLog::open(
+        &parent_dir,
+        parent_canonical.session_id.clone(),
+        parent_canonical.log_id.clone(),
+    )
+    .expect("open parent canonical log");
+    let lease = log
+        .acquire_writer(WriterId::new("host-direct-reload"), now, 10_000)
+        .expect("acquire parent writer");
+    log.append(
+        &lease,
+        SessionFact {
+            schema: FactSchema::v2(),
+            session_id: parent_canonical.session_id.clone(),
+            log_id: parent_canonical.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SessionCreated(SessionCreated {
+                created_at_ms: now,
+                cwd: "/".to_string(),
+                model: "test-model".to_string(),
+                parent_session_id: None,
+                schema_caps: vec![],
+            }),
+        },
+        now,
+    )
+    .expect("append parent SessionCreated");
+    log.append(
+        &lease,
+        SessionFact {
+            schema: FactSchema::v2(),
+            session_id: parent_canonical.session_id.clone(),
+            log_id: parent_canonical.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SubagentSpawned(SubagentSpawned {
+                child_session_id: SessionId::new(child.clone()),
+                parent_call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
+                parent_agent_path: Some(AgentPath::root()),
+                child_agent_path: Some(
+                    AgentPath::parse_absolute(&child_path).expect("canonical child path"),
+                ),
+                role: Some("reload_task".to_string()),
+                spawn_config: Some(SubagentSpawnConfig {
+                    tools: vec!["read_file".to_string()],
+                    model: Some("test-model".to_string()),
+                    base_url: None,
+                    max_tokens: Some(2048),
+                    ephemeral: false,
+                    timeout_secs: 120,
+                }),
+                spawned_at_ms: now,
+            }),
+        },
+        now,
+    )
+    .expect("append canonical spawn config");
+    drop(log);
+
+    host.send_ringing(
+        &parent,
+        qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
+            seed: parent.clone(),
+        }),
+    )
+    .expect("start parent actor");
+    host.close(&child).expect("unload child");
+    assert!(
+        host.list_agents(&parent, "/root")
+            .expect("list after unload")
+            .iter()
+            .any(|agent| agent.agent_id == child && agent.agent_path == child_path),
+        "unloaded child must retain logical metadata"
+    );
+
+    host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &parent,
+        target: &child_path,
+        text: "reload and deliver",
+        delivery: InterAgentDelivery::Trigger,
+    })
+    .expect("delivery must reload child through loaded parent");
+
+    // The original collector ended when the child unloaded. A Trigger delivery
+    // must arm a new collector before the turn so terminal activity can route
+    // back to the parent mailbox.
+    hub.publish_with_causation(
+        &child,
+        DomainEvent::Conversation(qaqh_domain::ConversationEvent::TurnCompleted {
+            turn_id: "t1".to_string(),
+            stop_reason: None,
+            usage: None,
+        }),
+        None,
+    );
+
+    let child_dir = sessions.session_path_dir(&child);
+    let child_canonical = CanonicalSessionIdentity::open(&child_dir).expect("child identity");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let facts = CommittedFactReader::open(
+            &child_dir,
+            child_canonical.session_id.clone(),
+            child_canonical.log_id.clone(),
+        )
+        .expect("child reader")
+        .read_all()
+        .expect("child facts");
+        if facts.iter().any(|fact| {
+            matches!(
+                &fact.payload,
+                FactPayload::InterAgentCommunication(payload)
+                    if payload.recipient.as_str() == child_path
+            )
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for reloaded child delivery"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    host.close(&child).expect("unload reloaded child");
+    host.close(&parent).expect("unload parent");
+    assert!(
+        host.send_agent_message(SendAgentMessageRequest {
+            caller_session_id: &parent,
+            target: &child_path,
+            text: "must not reload through unloaded parent",
+            delivery: InterAgentDelivery::Queue,
+        })
+        .is_err(),
+        "child reload must fail closed when immediate parent is unloaded"
+    );
 }

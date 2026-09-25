@@ -85,9 +85,10 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - subagent initial task 已通过 `InterAgentCommunication` delivery 投递。
   - `send_message` / `followup_task` / `wait_agent` / `interrupt_agent` 工具面已接入。
   - child completion 已改为 queue-only mailbox delivery，不再默认触发父 turn。
-  - residency reload 与 parent ownership 留在 #375。
-- 仍待：child reload 后 path 恢复。
-- Phase 3-7 未开始；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
+  - unloaded child 可由 delivery 经 loaded immediate parent reload，并保留 AgentPath。
+  - Trigger delivery 会重新 arm collector，completion 可继续回父 mailbox。
+- 仍待：subagent residency LRU、Team status/residency projection。
+- Phase 3-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
 
