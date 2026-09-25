@@ -426,10 +426,6 @@ impl ToolProjection for JournalOutput {
                 truncated: false,
             },
         )
-        .with_summary(
-            self.summary()
-                .unwrap_or_else(|| format!("journal {action}")),
-        )
     }
 }
 
@@ -956,6 +952,10 @@ mod tests {
             assert_eq!(result.data["action"], serde_json::json!("query"));
             assert_eq!(result.data["steps"].as_array().map(Vec::len), Some(1));
             let display = result.display().expect("typed display");
+            assert_eq!(
+                display.summary, None,
+                "journal summary must not duplicate the body"
+            );
             let display_text = match &display.body {
                 Some(qaqh_types::ToolResultDisplayBody::Text { text, .. }) => text,
                 other => panic!("unexpected journal display body: {other:?}"),

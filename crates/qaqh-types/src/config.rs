@@ -87,6 +87,10 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_path: Option<String>,
 
+    /// exec 工具的默认 shell。`None` / 空 / "auto" = 平台优先级自动探测。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<PersistentExecConfig>,
+
     /// Auto-compact threshold: fraction of context_limit (0.0-1.0).
     /// When total tokens exceed context_limit * threshold, compact is triggered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +103,14 @@ pub struct PersistentConfig {
     /// LSP 客户端配置（docs/current/architecture.md；全部 Option）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsp: Option<PersistentLspConfig>,
+}
+
+/// Persistence-friendly exec defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistentExecConfig {
+    /// `None` / empty / "auto" = platform priority auto-detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<String>,
 }
 
 /// Persistence-friendly subagent config with all-Option fields.
