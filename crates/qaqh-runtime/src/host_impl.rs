@@ -9,16 +9,74 @@
 //! 不再建立 HTTP/SSE 连接。事件订阅直接走 hub 进程内 broadcast。
 
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
+use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE};
+use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_subagent::{
-    ContentRef, EventBatch, ListedAgent, SendAgentMessageRequest, SentAgentMessage,
-    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
+    ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent, ListedAgent,
+    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
+    StartSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest,
 };
 
 use super::QaqhService;
+
+impl QaqhService {
+    /// Read mailbox activity strictly after `after_fact_seq`.
+    ///
+    /// Returns `(mailbox_activity_fact_seq, committed_fact_seq)`. Reopening the
+    /// reader each poll intentionally follows the durable commit marker rather
+    /// than an in-memory cache, so queue-only delivery is observable even when
+    /// the caller is blocked inside a tool.
+    fn mailbox_activity_after(
+        &self,
+        session_id: &str,
+        after_fact_seq: Option<u64>,
+    ) -> Result<(u64, u64), String> {
+        let session_dir = self
+            .sessions
+            .session_dir_for_id(session_id)?
+            .ok_or_else(|| format!("mailbox session {session_id} has no canonical directory"))?;
+        let identity = CanonicalSessionIdentity::open(&session_dir)
+            .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
+        if identity.session_id.as_str() != session_id {
+            return Err(format!(
+                "mailbox session {session_id} identity is {}",
+                identity.session_id
+            ));
+        }
+        // A freshly allocated session can exist before its actor appends the
+        // first canonical fact. Treat that as an empty mailbox rather than a
+        // recovery error; the next poll will observe the newly committed marker.
+        if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+            return Ok((0, after_fact_seq.unwrap_or(0)));
+        }
+        let reader = CommittedFactReader::open(
+            &session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .map_err(|error| format!("open canonical facts for {session_id}: {error}"))?;
+        let facts = match after_fact_seq {
+            Some(fact_seq) => reader
+                .read_after(fact_seq)
+                .map_err(|error| format!("read canonical facts for {session_id}: {error}"))?,
+            None => reader
+                .read_all()
+                .map_err(|error| format!("read canonical facts for {session_id}: {error}"))?,
+        };
+        let mut mailbox = MailboxProjection::default();
+        for fact in &facts {
+            mailbox.apply(fact);
+        }
+        Ok((
+            mailbox.last_activity_fact_seq(),
+            reader.committed().committed_fact_seq,
+        ))
+    }
+}
 
 impl SubagentHost for QaqhService {
     fn spawn_subagent(&self, request: SpawnSubagentRequest<'_>) -> Result<SpawnedSubagent, String> {
@@ -175,6 +233,97 @@ impl SubagentHost for QaqhService {
             message_id,
             recipient: target.agent_path.as_str().to_string(),
             delivery: request.delivery,
+        })
+    }
+
+    fn wait_agent(&self, request: WaitAgentRequest<'_>) -> Result<WaitAgentOutcome, String> {
+        let WaitAgentRequest {
+            caller_session_id,
+            timeout,
+            should_cancel,
+        } = request;
+        let (baseline_activity, mut cursor) =
+            self.mailbox_activity_after(caller_session_id, None)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if should_cancel() {
+                return Ok(WaitAgentOutcome::Cancelled);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(WaitAgentOutcome::TimedOut {
+                    activity_fact_seq: baseline_activity,
+                });
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            std::thread::sleep(remaining.min(Duration::from_millis(25)));
+
+            let (activity_fact_seq, committed_fact_seq) =
+                self.mailbox_activity_after(caller_session_id, Some(cursor))?;
+            cursor = committed_fact_seq;
+            if activity_fact_seq > baseline_activity {
+                return Ok(WaitAgentOutcome::Activity { activity_fact_seq });
+            }
+        }
+    }
+
+    fn interrupt_agent(
+        &self,
+        request: InterruptAgentRequest<'_>,
+    ) -> Result<InterruptedAgent, String> {
+        let mut registry = self.registry()?;
+        let caller = registry
+            .list_agents_for_caller(request.caller_session_id, "/root")
+            .and_then(|agents| {
+                agents
+                    .into_iter()
+                    .find(|agent| agent.agent_id.as_str() == request.caller_session_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "caller agent metadata missing for {}",
+                            request.caller_session_id
+                        )
+                    })
+            })?;
+        let target =
+            registry.resolve_agent_for_caller(request.caller_session_id, request.target)?;
+        if caller.agent_id == target.agent_id {
+            return Err("cannot interrupt self".to_string());
+        }
+        if target.agent_path.is_root() {
+            return Err("cannot interrupt the root agent".to_string());
+        }
+
+        let target_id = target.agent_id.as_str();
+        if !registry.is_running(target_id) {
+            return Ok(InterruptedAgent {
+                recipient: target.agent_path.as_str().to_string(),
+                previous_status: "unloaded".to_string(),
+            });
+        }
+        let previous_status = registry
+            .activity(target_id)
+            .map(|activity| match activity.state {
+                qaqh_domain::ActivityState::Starting => "starting",
+                qaqh_domain::ActivityState::Idle => "idle",
+                qaqh_domain::ActivityState::Working => "working",
+                qaqh_domain::ActivityState::WaitingUser => "waiting_user",
+                qaqh_domain::ActivityState::Disconnected => "disconnected",
+            })
+            .unwrap_or("running")
+            .to_string();
+        let command_id = format!("interrupt-{:x}", nanos());
+        let env = RingingWorkerCommandEnvelope::new(
+            target_id,
+            command_id,
+            qaqh_ringing::RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
+            ),
+        );
+        registry.send_ringing(target_id, &env)?;
+        Ok(InterruptedAgent {
+            recipient: target.agent_path.as_str().to_string(),
+            previous_status,
         })
     }
 
