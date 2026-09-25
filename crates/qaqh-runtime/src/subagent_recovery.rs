@@ -288,6 +288,8 @@ mod tests {
         FactPayload::SubagentSpawned(SubagentSpawned {
             child_session_id: child.clone(),
             parent_call_id: qaqh_session::session_fact_v2::ToolCallId::new("call-1"),
+            parent_agent_path: None,
+            child_agent_path: None,
             role: None,
             spawned_at_ms: 1,
         })
