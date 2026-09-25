@@ -122,6 +122,8 @@
 - `unloaded != completed`；`completed != closed`。
 - interrupt 只终止当前 turn，不删除逻辑身份；unloaded agent 仍可被 list。
 - delivery 可以触发 reload，但必须经 loaded immediate parent 做 ownership 校验。
+- residency 是 daemon-local runtime overlay，不是 durable canonical fact；canonical
+  重建默认 unloaded，`loaded` 只在当前进程有 resident worker 时成立。
 - V1 `close_agent` 保留兼容；V2 使用 `interrupt_agent` + residency eviction。
 
 ## D17. SessionId 是唯一会话主键，seed 必须退场
