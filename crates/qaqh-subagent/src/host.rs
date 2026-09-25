@@ -24,21 +24,63 @@ pub use qaqh_domain::ContentRef;
 // PR-4-2：`EventBatch` 即 ringing 规范类型（此前经 qaqh-client 转手）。
 pub use qaqh_ringing::RingingEventBatch as EventBatch;
 
+/// Result of creating an in-process subagent actor.
+///
+/// The actor is not yet running its task. The caller must durably record the
+/// `SubagentSpawned` edge before invoking [`SubagentHost::start_subagent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedSubagent {
+    pub seed: String,
+    pub child_session_id: String,
+    pub parent_agent_path: String,
+    pub child_agent_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnSubagentRequest<'a> {
+    pub parent_session_id: &'a str,
+    pub requested_name: &'a str,
+    pub tools: &'a [String],
+    pub model: Option<&'a str>,
+    pub base_url: Option<&'a str>,
+    pub max_tokens: Option<u32>,
+    pub workspace: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartSubagentRequest<'a> {
+    pub seed: &'a str,
+    pub child_session_id: &'a str,
+    pub name: &'a str,
+    pub task_text: &'a str,
+    pub timeout_secs: u64,
+    pub parent_session_id: &'a str,
+    pub parent_call_id: &'a str,
+    pub process_id: u32,
+}
+
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker
 /// 线程的 std 线程模型匹配），由 qaqh-runtime 的 `QaqhService` 提供实现。
 pub trait SubagentHost: Send + Sync {
     /// 生成新 seed 并在宿主进程内注册一个 in-process 子代理 actor。
     ///
     /// 与 daemon `subagent.spawn` action 等价：继承 workspace（写入
-    /// SessionMeta.cwd）、应用 subagent 工具白名单。返回生成的 seed。
-    fn spawn_subagent(
-        &self,
-        tools: &[String],
-        model: Option<&str>,
-        base_url: Option<&str>,
-        max_tokens: Option<u32>,
-        workspace: Option<&str>,
-    ) -> Result<String, String>;
+    /// SessionMeta.cwd）、应用 subagent 工具白名单。返回生成的 seed 与
+    /// canonical path；本方法不发送任务。
+    fn spawn_subagent(&self, request: SpawnSubagentRequest<'_>) -> Result<SpawnedSubagent, String>;
+
+    /// Deliver the initial task after the caller durably recorded the spawn
+    /// edge. Implementations own process registration and result collection.
+    fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String>;
+
+    /// Roll back a child whose canonical spawn edge could not be committed.
+    ///
+    /// Unlike [`Self::abort_subagent`], this also removes the logical catalog
+    /// registration because the edge never became authoritative.
+    fn rollback_subagent(&self, seed: &str, child_session_id: &str, process_id: u32);
+
+    /// Close a child after its canonical spawn edge was committed.
+    fn abort_subagent(&self, seed: &str, process_id: u32);
 
     /// 进程内直接向指定 seed 的 actor 命令队列发送一条 Ringing 命令
     /// （等价 HTTP attach + send_command，但进程内无 lease/owns 语义）。

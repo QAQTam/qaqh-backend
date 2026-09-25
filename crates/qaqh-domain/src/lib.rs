@@ -27,7 +27,7 @@ pub mod timeline;
 pub use channel::RingingChannel;
 pub use command::{
     AskAnswer, ControlCommand, ConversationCommand, ConversationInputPurpose, ConversationMode,
-    DomainCommand, ImageBlock, ToolCommand,
+    DomainCommand, ImageBlock, SubagentTerminalKind, SubagentTerminalNotification, ToolCommand,
 };
 pub use delivery::Delivery;
 pub use event::{

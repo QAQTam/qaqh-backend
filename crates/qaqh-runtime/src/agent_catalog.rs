@@ -114,29 +114,52 @@ impl std::error::Error for AgentCatalogError {}
 pub(crate) struct AgentCatalog {
     by_key: BTreeMap<AgentKey, AgentMetadata>,
     by_id: HashMap<String, AgentKey>,
+    /// Transitional wire aliases (legacy seed -> canonical agent id key).
+    aliases: HashMap<String, AgentKey>,
 }
 
 impl AgentCatalog {
+    #[cfg(test)]
     pub(crate) fn register_root(
         &mut self,
         root_session_id: &str,
         created_at_ms: i64,
     ) -> Result<AgentMetadata, AgentCatalogError> {
-        let root = AgentMetadata::root(
+        self.register_root_with_alias(
             qaqh_session::session_fact_v2::SessionId::new(root_session_id),
+            None,
             created_at_ms,
-        );
-        match self.register(root.clone()) {
+        )
+    }
+
+    pub(crate) fn register_root_with_alias(
+        &mut self,
+        agent_id: qaqh_session::session_fact_v2::SessionId,
+        alias: Option<&str>,
+        created_at_ms: i64,
+    ) -> Result<AgentMetadata, AgentCatalogError> {
+        let root = AgentMetadata::root(agent_id.clone(), created_at_ms);
+        match self.register_with_alias(root.clone(), alias) {
             Ok(metadata) => Ok(metadata),
             Err(AgentCatalogError::DuplicateAgentPath { .. }) => {
-                let key = AgentKey::new(root_session_id, AgentPath::root());
+                let key = AgentKey::new(agent_id.as_str(), AgentPath::root());
                 if let Some(existing) = self.by_key.get(&key)
                     && existing.agent_id == root.agent_id
                 {
+                    if let Some(alias) = alias {
+                        if let Some(existing_key) = self.aliases.get(alias)
+                            && existing_key != &key
+                        {
+                            return Err(AgentCatalogError::DuplicateAgentId {
+                                agent_id: alias.to_string(),
+                            });
+                        }
+                        self.aliases.insert(alias.to_string(), key);
+                    }
                     return Ok(existing.clone());
                 }
                 Err(AgentCatalogError::DuplicateAgentPath {
-                    root_session_id: root_session_id.to_string(),
+                    root_session_id: agent_id.as_str().to_string(),
                     agent_path: AgentPath::root(),
                 })
             }
@@ -144,9 +167,18 @@ impl AgentCatalog {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn register(
         &mut self,
         metadata: AgentMetadata,
+    ) -> Result<AgentMetadata, AgentCatalogError> {
+        self.register_with_alias(metadata, None)
+    }
+
+    pub(crate) fn register_with_alias(
+        &mut self,
+        metadata: AgentMetadata,
+        alias: Option<&str>,
     ) -> Result<AgentMetadata, AgentCatalogError> {
         if metadata.agent_id.as_str().is_empty() {
             return Err(AgentCatalogError::EmptyAgentId);
@@ -185,6 +217,16 @@ impl AgentCatalog {
         );
         if let Some(existing) = self.by_key.get(&key) {
             if existing == &metadata {
+                if let Some(alias) = alias {
+                    if let Some(existing_key) = self.aliases.get(alias)
+                        && existing_key != &key
+                    {
+                        return Err(AgentCatalogError::DuplicateAgentId {
+                            agent_id: alias.to_string(),
+                        });
+                    }
+                    self.aliases.insert(alias.to_string(), key);
+                }
                 return Ok(existing.clone());
             }
             return Err(AgentCatalogError::DuplicateAgentPath {
@@ -203,9 +245,20 @@ impl AgentCatalog {
                 agent_id: metadata.agent_id.as_str().to_string(),
             });
         }
+        if let Some(alias) = alias
+            && let Some(existing_key) = self.aliases.get(alias)
+            && existing_key != &key
+        {
+            return Err(AgentCatalogError::DuplicateAgentId {
+                agent_id: alias.to_string(),
+            });
+        }
 
         self.by_id
             .insert(metadata.agent_id.as_str().to_string(), key.clone());
+        if let Some(alias) = alias {
+            self.aliases.insert(alias.to_string(), key.clone());
+        }
         self.by_key.insert(key, metadata.clone());
         Ok(metadata)
     }
@@ -220,8 +273,22 @@ impl AgentCatalog {
     }
 
     pub(crate) fn get_by_id(&self, agent_id: &str) -> Option<&AgentMetadata> {
-        let key = self.by_id.get(agent_id)?;
+        let key = self
+            .by_id
+            .get(agent_id)
+            .or_else(|| self.aliases.get(agent_id))?;
         self.by_key.get(key)
+    }
+
+    /// Remove a registration that was rolled back before its canonical edge
+    /// was committed.
+    pub(crate) fn remove(&mut self, agent_id: &str) -> Option<AgentMetadata> {
+        let key = self
+            .by_id
+            .remove(agent_id)
+            .or_else(|| self.aliases.get(agent_id).cloned())?;
+        self.aliases.retain(|_, existing| existing != &key);
+        self.by_key.remove(&key)
     }
 
     /// Return metadata at or below `prefix`, ordered by canonical path.
@@ -368,6 +435,45 @@ mod tests {
             .map(|metadata| metadata.agent_path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(paths, vec!["/root/review", "/root/review/tests"]);
+    }
+
+    #[test]
+    fn wire_seed_aliases_resolve_canonical_ids_and_remove_together() {
+        let mut catalog = AgentCatalog::default();
+        let root = SessionId::new("0198f1a0-0000-7000-8000-000000000001");
+        let child = SessionId::new("0198f1a0-0000-7000-8000-000000000003");
+        catalog
+            .register_root_with_alias(root.clone(), Some("root-seed"), 1)
+            .expect("root");
+        catalog
+            .register_with_alias(
+                AgentMetadata {
+                    root_session_id: root.clone(),
+                    agent_id: child.clone(),
+                    agent_path: path("/root/review"),
+                    parent_agent_path: Some(path("/root")),
+                    nickname: None,
+                    role: None,
+                    created_at_ms: 2,
+                },
+                Some("child-seed"),
+            )
+            .expect("child");
+
+        assert_eq!(
+            catalog.get_by_id("root-seed").expect("root alias").agent_id,
+            root
+        );
+        assert_eq!(
+            catalog
+                .get_by_id("child-seed")
+                .expect("child alias")
+                .agent_id,
+            child.clone()
+        );
+        catalog.remove(child.as_str()).expect("remove child");
+        assert!(catalog.get_by_id("child-seed").is_none());
+        assert!(catalog.get_by_id(child.as_str()).is_none());
     }
 
     #[test]

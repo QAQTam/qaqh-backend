@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use qaqh_domain::{ControlEvent, DomainEvent, RingingChannel, SessionState};
 use qaqh_runtime::{QaqhService, RingingHub};
-use qaqh_subagent::SubagentHost;
+use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::session_fact_v2::FactPayload;
+use qaqh_subagent::{SpawnSubagentRequest, SubagentHost};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -49,11 +51,53 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     service.attach_ringing(hub.clone());
     let host: &dyn SubagentHost = &service;
 
-    // 1. spawn：返回合法 seed；不经过 daemon HTTP/SSE。
-    let seed = host
-        .spawn_subagent(&[], None, None, None, None)
+    // 1. spawn：返回合法 seed/path；不经过 daemon HTTP/SSE。
+    let parent = qaqh_session::SessionManager::global().generate_unique_session_seed();
+    qaqh_session::SessionManager::global().persist_new_session(&parent);
+    let spawned = host
+        .spawn_subagent(SpawnSubagentRequest {
+            parent_session_id: &parent,
+            requested_name: "review_code",
+            tools: &[],
+            model: None,
+            base_url: None,
+            max_tokens: None,
+            workspace: None,
+        })
         .expect("host spawn_subagent must succeed");
+    let seed = spawned.seed;
+    let child_session_id = spawned.child_session_id;
     assert!(!seed.is_empty(), "host spawn must return a non-empty seed");
+    assert_ne!(
+        child_session_id, seed,
+        "canonical child id must not reuse the legacy directory seed"
+    );
+    assert_eq!(spawned.parent_agent_path, "/root");
+    assert_eq!(spawned.child_agent_path, "/root/review_code");
+
+    let parent_identity =
+        CanonicalSessionIdentity::open_or_create(data.join("sessions").join(&parent))
+            .expect("parent canonical identity");
+    let child_dir = data.join("sessions").join(&seed);
+    let child_identity =
+        CanonicalSessionIdentity::open_or_create(&child_dir).expect("child canonical identity");
+    assert_eq!(child_identity.session_id.as_str(), child_session_id);
+    let child_facts = CommittedFactReader::open(
+        &child_dir,
+        child_identity.session_id.clone(),
+        child_identity.log_id.clone(),
+    )
+    .expect("child reader")
+    .read_all()
+    .expect("child facts");
+    assert!(
+        child_facts.iter().any(|fact| matches!(
+            &fact.payload,
+            FactPayload::SessionCreated(created)
+                if created.parent_session_id.as_ref() == Some(&parent_identity.session_id)
+        )),
+        "child SessionCreated must carry the canonical parent hint"
+    );
 
     // 2. subscribe：从 hub 过滤该 seed 的事件批次（工具 collect 线程消费）。
     let rx = host.subscribe(&seed);
