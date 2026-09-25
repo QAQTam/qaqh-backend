@@ -9,8 +9,11 @@ use qaqh_session::actor::{
     ConnectionId, SessionActor, SessionActorEffect, SessionCommand, SubscriptionCommand,
     SubscriptionEffect,
 };
+use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::session_fact_v2::{AgentMetadata, AgentPath, FactPayload};
 
 use crate::agent::SubagentSpawnSpec;
+use crate::agent_catalog::AgentCatalog;
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
 use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
 use crate::{RingingHub, SessionActivityTracker};
@@ -275,6 +278,8 @@ pub struct AgentRegistry {
     last_spawn: HashMap<String, std::time::Instant>,
     /// P2-5：daemon 级 parent/child edge 与 unload 顺序状态机。
     supervisor: SubagentSupervisor,
+    /// Subagent V2：逻辑 agent metadata；worker handle 仍由 `instances` 管理。
+    agent_catalog: AgentCatalog,
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
@@ -290,6 +295,7 @@ impl AgentRegistry {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
         }
@@ -300,7 +306,86 @@ impl AgentRegistry {
         self.hub = Some(hub);
     }
 
+    /// Register a root session as `/root`.
+    ///
+    /// This is idempotent for the same root session. A conflicting agent id or
+    /// path is rejected instead of silently replacing logical metadata.
+    pub fn register_root_agent(
+        &mut self,
+        seed: &str,
+        created_at_ms: i64,
+    ) -> Result<AgentMetadata, String> {
+        self.agent_catalog
+            .register_root(seed, created_at_ms)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Read logical metadata by stable `AgentId = session_id`.
+    pub fn agent_metadata(&self, agent_id: &str) -> Option<AgentMetadata> {
+        self.agent_catalog.get_by_id(agent_id).cloned()
+    }
+
+    /// Read logical metadata by tree-relative path.
+    pub fn agent_metadata_by_path(
+        &self,
+        root_session_id: &str,
+        agent_path: &AgentPath,
+    ) -> Option<AgentMetadata> {
+        self.agent_catalog
+            .get_by_path(root_session_id, agent_path)
+            .cloned()
+    }
+
+    /// List logical metadata at or below a path prefix within one root tree.
+    pub fn list_agents_by_path(
+        &self,
+        root_session_id: &str,
+        prefix: &AgentPath,
+    ) -> Vec<AgentMetadata> {
+        self.agent_catalog.list_prefix(root_session_id, prefix)
+    }
+
+    fn ensure_root_metadata(&mut self, seed: &str) -> Result<(), String> {
+        if seed.is_empty() || self.agent_catalog.get_by_id(seed).is_some() {
+            return Ok(());
+        }
+        if self.canonical_parent_session_id(seed)?.is_none() {
+            self.register_root_agent(seed, unix_ms())?;
+        }
+        Ok(())
+    }
+
+    /// Read the `SessionCreated.parent_session_id` recovery hint from the
+    /// canonical log. This is deliberately a hint only: graph ownership is
+    /// established by parent-log `SubagentSpawned` facts in SUBV2-03/04.
+    fn canonical_parent_session_id(&self, seed: &str) -> Result<Option<String>, String> {
+        let session_dir = self.sessions.session_path_dir(seed);
+        if !session_dir.exists() {
+            return Ok(None);
+        }
+        let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
+            .map_err(|error| format!("open canonical identity for {seed}: {error}"))?;
+        let reader = CommittedFactReader::open(
+            &session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .map_err(|error| format!("open committed facts for {seed}: {error}"))?;
+        for fact in reader
+            .read_all()
+            .map_err(|error| format!("read committed facts for {seed}: {error}"))?
+        {
+            if let FactPayload::SessionCreated(created) = fact.payload {
+                return Ok(created
+                    .parent_session_id
+                    .map(|parent| parent.as_str().to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn get_or_spawn(&mut self, seed: &str) -> Result<(), String> {
+        self.ensure_root_metadata(seed)?;
         if self.instances.contains_key(seed) {
             return Ok(());
         }
@@ -373,6 +458,9 @@ impl AgentRegistry {
         let parent_seed = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
+        if !parent_seed.is_empty() {
+            self.ensure_root_metadata(&parent_seed)?;
+        }
         let root_seed = if parent_seed.is_empty() {
             seed.to_string()
         } else {
@@ -1427,6 +1515,14 @@ fn tail_text(text: &str, max_bytes: usize) -> String {
         .collect()
 }
 
+/// Millisecond wall clock for logical agent registration.
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
 /// Broadcast 命令 id（时间戳十六进制，语义同 service.rs 的 `command_id`）。
 fn broadcast_command_id() -> String {
     let nanos = std::time::SystemTime::now()
@@ -1582,6 +1678,7 @@ mod tests {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
         };
@@ -1683,6 +1780,7 @@ mod tests {
             shutting_down: false,
             last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
+            agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
         };
