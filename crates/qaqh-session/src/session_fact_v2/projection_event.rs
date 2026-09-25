@@ -7,16 +7,17 @@ use qaqh_domain::RingingChannel;
 use qaqh_types::UsageInfo;
 use serde::{Deserialize, Serialize};
 
+use super::agent::AgentPath;
 use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex};
 use super::types::{
     ActivityState, ActorRef, AssistantBlockKind, CheckpointId, ContentHash, ContentRef,
     ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind, InputPurpose,
-    InterAgentCommunication, InteractionDecision, InteractionExpiryReason, InteractionId,
-    InteractionKind, InterruptReason, LogId, MAX_SAFE_FACT_SEQ, MessageId, PolicyDecisionRef,
-    ProjectionSlot, RecoveryAction, RecoveryOutcome, RecoveryRef, ResourceId, ResourceKind,
-    SessionFact, SessionId, SessionMetadataPatch, SideEffectClass, SubagentTerminalStatus,
-    TitleSource, ToolCallId, ToolError, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-    TurnError, TurnId, TurnMode, TurnTerminal,
+    InterAgentCommunication, InterAgentDelivery, InteractionDecision, InteractionExpiryReason,
+    InteractionId, InteractionKind, InterruptReason, LogId, MAX_SAFE_FACT_SEQ, MessageId,
+    PolicyDecisionRef, ProjectionSlot, RecoveryAction, RecoveryOutcome, RecoveryRef, ResourceId,
+    ResourceKind, SessionFact, SessionId, SessionMetadataPatch, SideEffectClass,
+    SubagentTerminalStatus, TitleSource, ToolCallId, ToolError, ToolMetrics, ToolReplayCapability,
+    ToolTerminalStatus, TurnError, TurnId, TurnMode, TurnTerminal,
 };
 use super::validation::ValidationError;
 
@@ -285,6 +286,7 @@ pub enum ProjectionPayload {
     ResourceDelta(ResourceDelta),
     MetaDelta(MetaDelta),
     MailboxDelta(MailboxDelta),
+    TeamDelta(TeamDelta),
     AuditRef(AuditRef),
     Unknown(UnknownProjection),
 }
@@ -311,6 +313,7 @@ impl ProjectionPayload {
             Self::ResourceDelta(_) => Some(ProjectionSlot::Resources),
             Self::MetaDelta(_) => Some(ProjectionSlot::Meta),
             Self::MailboxDelta(_) => Some(ProjectionSlot::Mailbox),
+            Self::TeamDelta(_) => Some(ProjectionSlot::Team),
             Self::AuditRef(_) | Self::Unknown(_) => None,
         }
     }
@@ -338,6 +341,89 @@ pub struct MailboxMessage {
     pub state: MailboxMessageState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_fact_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamAgentStatus {
+    PendingInit,
+    Running,
+    WaitingUser,
+    Interrupted,
+    Completed,
+    Errored,
+    Shutdown,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamAgentResidency {
+    Loaded,
+    Unloaded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamAgentSnapshot {
+    pub agent_id: SessionId,
+    pub agent_path: AgentPath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub status: TeamAgentStatus,
+    pub residency: TeamAgentResidency,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_path: Option<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamInboxSummary {
+    pub message_id: MessageId,
+    pub author: AgentPath,
+    pub recipient: AgentPath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub delivery: InterAgentDelivery,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum TeamDelta {
+    AgentJoined {
+        revision: u64,
+        agent: Box<TeamAgentSnapshot>,
+    },
+    AgentStatusChanged {
+        revision: u64,
+        agent_id: SessionId,
+        status: TeamAgentStatus,
+    },
+    AgentResidencyChanged {
+        revision: u64,
+        agent_id: SessionId,
+        residency: TeamAgentResidency,
+    },
+    AgentMessageQueued {
+        revision: u64,
+        message: Box<TeamInboxSummary>,
+    },
+    AgentMessageDelivered {
+        revision: u64,
+        message_id: MessageId,
+    },
+    AgentInterrupted {
+        revision: u64,
+        agent_id: SessionId,
+    },
+    AgentCompleted {
+        revision: u64,
+        agent_id: SessionId,
+        status: TeamAgentStatus,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

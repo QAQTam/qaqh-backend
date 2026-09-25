@@ -95,7 +95,7 @@ fn all_projection_set_deltas_become_valid_stable_events() {
         }
     }
 
-    assert_eq!(total_events, 34);
+    assert_eq!(total_events, 38);
 }
 
 #[test]

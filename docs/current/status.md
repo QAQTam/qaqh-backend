@@ -88,8 +88,9 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - unloaded child 可由 delivery 经 loaded immediate parent reload，并保留 AgentPath。
   - Trigger delivery 会重新 arm collector，completion 可继续回父 mailbox。
   - idle subagent 已纳入 residency LRU，unload 后仍可经 delivery reload。
-- 仍待：Team status/residency projection。
-- Phase 3-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
+  - TeamSnapshot / TeamDelta 后端 projection 已接入，roster 与 inbox 可从 canonical facts 重建。
+- 仍待：TUI/WinUI roster/inbox 消费、task board 与 message board。
+- Phase 4 前端壳接入和 Phase 5-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
 
