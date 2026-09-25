@@ -2,7 +2,7 @@
 
 > 日期：2026-09-25
 > 基线：`qaqh-backend@2f362e0`（`origin/main`）
-> 状态：draft
+> 状态：accepted
 > 适用：`qaqh-subagent`、`qaqh-runtime`、`qaqh-session`、`qaqh-ringing`、`qaqh-client`、`qaqh-daemon`；消费侧包括 `qaqh-tui-app`、`qaqh-winui-app`
 > 参考实现：OpenAI Codex `multi_agent_v2`（`myXCode` upstream 历史）
 
@@ -374,12 +374,30 @@ TeamDelta {
 
 ## 7. 重写阶段
 
-### Phase 0：文档与类型冻结
+### Phase 0：文档与类型冻结（2026-09-25 accepted）
 
 - 写本 spec 的 accepted 版本。
 - 在 `decisions.md` 增加 AgentPath、AgentGraph、Mailbox、Residency 决策。
 - 冻结 `AgentPath` grammar 和 `InterAgentCommunication` 形状。
 - 补 `SubagentSpawned/Finished` 的真实 producer 设计。
+
+Phase 0 的 producer 冻结如下：
+
+1. `spawn_subagent` 在父 session 的某个 `ToolIntent.call_id` 下执行；父
+   `session_id` 和 `call_id` 是 edge fact 的权威归属。
+2. 工具 handler 只负责向宿主申请 child identity；宿主返回
+   `child_session_id + child_agent_path`，不得在 handler 内另造事实。
+3. runtime 在 child actor 已创建、task 尚未发送前，使用父 session 的
+   `ToolLedger` 写入 `SubagentSpawned`。写入失败必须关闭 child 并让工具失败，
+   不得留下无 canonical edge 的可运行 child。
+4. child 的 `SessionCreated.parent_session_id` 只是便于单 session 恢复的
+   denormalized hint；parent-child edge 的权威仍是父 log 的
+   `SubagentSpawned/Finished`。
+5. child 终态由 runtime 从 child canonical terminal fact 映射为父 log 的
+   `SubagentFinished`；同一 `child_session_id` 的重复同值事实幂等，冲突状态
+   稳定拒绝。
+6. daemon 重启时从父 log 重建 graph。只有父 log 与 child log 均存在且 edge
+   匹配时才恢复为 loaded；edge 缺失、冲突或无法读取时必须 fail closed。
 
 ### Phase 1：Canonical identity + graph
 
@@ -529,18 +547,16 @@ V2 启用后：
 
 ---
 
-## 11. 待裁决
+## 11. 已裁决
 
-1. qaqh 默认 max depth 是否保持 1，还是直接允许 2？
-   - 建议：默认 1，配置可开 2。
-2. child 是否能 `followup_task` 同级？
-   - 建议：同 root tree 内允许，但不得 trigger root。
-3. task board 是否进 root canonical log？
-   - 建议：另开 Team canonical aggregate，不混 session log；需单独 spec。
-4. message board 是否必须持久化 inbox/unread？
-   - 建议：post 持久化；notification 只保证 running，unread 由前端 projection 计算。
-5. V2 是否完全删除 `close_agent`？
-   - 建议：V1 保留；V2 只保留 `interrupt_agent` + residency eviction。
+以下按建议冻结；实现不得自行改变默认值：
+
+1. qaqh 默认 max depth 保持 `1`，配置可开 `2`。
+2. child 可在同一 root tree 内 `followup_task` 同级，但不得 trigger root。
+3. task board 另开 Team canonical aggregate，不混 session log；需单独 spec。
+4. message board post 持久化；notification 只保证 running，unread 由前端
+   projection 计算。
+5. V1 `close_agent` 保留兼容；V2 只保留 `interrupt_agent` + residency eviction。
 
 ---
 
@@ -549,7 +565,7 @@ V2 启用后：
 本 spec accepted 后：
 
 1. 新权威文档固定为：
-   `docs/current/spec/2026-09-25-subagent-v2-spec.md`。
+   `docs/current/spec/2026-09-25-subagent-v2-rewrite-spec.md`。
 2. 旧 subagent 相关文档全部归档，不再作为当前依据。
 3. `docs/current/decisions.md` 新增 AgentPath / AgentGraph / Mailbox / Residency 决策。
 4. `docs/current/architecture.md` 增加 AgentControl、AgentRegistry、AgentGraphStore、Mailbox、Residency 组件。
