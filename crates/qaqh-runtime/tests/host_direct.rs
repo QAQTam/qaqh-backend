@@ -450,10 +450,10 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     host.send_agent_message(SendAgentMessageRequest {
         caller_session_id: &parent,
         target: &child_path,
-        text: "reload and deliver",
+        text: "reload and trigger",
         delivery: InterAgentDelivery::Trigger,
     })
-    .expect("delivery must reload child through loaded parent");
+    .expect("trigger delivery must reload child through loaded parent");
 
     // The original collector ended when the child unloaded. A Trigger delivery
     // must arm a new collector before the turn so terminal activity can route
