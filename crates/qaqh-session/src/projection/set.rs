@@ -7,7 +7,8 @@ use crate::session_fact_v2::{ProjectionPayload, ProjectionSlot, SessionFact, pro
 use super::{
     ControlProjection, ControlSnapshot, ConversationProjection, ConversationSnapshot,
     MailboxProjection, MailboxSnapshot, Projection, ResourceProjection, ResourceSnapshot,
-    SessionMetaProjection, SessionMetaSnapshot, TimelineProjection, TimelineSnapshot,
+    SessionMetaProjection, SessionMetaSnapshot, TeamProjection, TeamSnapshot, TimelineProjection,
+    TimelineSnapshot,
 };
 
 /// A reliable projection delta paired with its frozen static slot.
@@ -27,6 +28,8 @@ pub struct ProjectionSetSnapshot {
     pub meta: SessionMetaSnapshot,
     #[serde(default)]
     pub mailbox: MailboxSnapshot,
+    #[serde(default)]
+    pub team: TeamSnapshot,
 }
 
 /// All projections for one session, applied in frozen slot order.
@@ -38,6 +41,7 @@ pub struct ProjectionSet {
     pub resources: ResourceProjection,
     pub meta: SessionMetaProjection,
     pub mailbox: MailboxProjection,
+    pub team: TeamProjection,
 }
 
 impl ProjectionSet {
@@ -98,6 +102,14 @@ impl ProjectionSet {
                 ProjectionPayload::MailboxDelta(delta),
             );
         }
+        if let Some(delta) = self.team.apply(fact) {
+            push_allowed(
+                &mut deltas,
+                allowed_slots,
+                ProjectionSlot::Team,
+                ProjectionPayload::TeamDelta(delta),
+            );
+        }
 
         deltas
     }
@@ -110,6 +122,7 @@ impl ProjectionSet {
             resources: self.resources.snapshot(),
             meta: self.meta.snapshot(),
             mailbox: self.mailbox.snapshot(),
+            team: self.team.snapshot(),
         }
     }
 
@@ -121,6 +134,7 @@ impl ProjectionSet {
             self.resources.last_fact_seq(),
             self.meta.last_fact_seq(),
             self.mailbox.last_fact_seq(),
+            self.team.last_fact_seq(),
         ]
         .into_iter()
         .max()
@@ -156,6 +170,7 @@ impl ProjectionSetDelta {
             ProjectionPayload::ResourceDelta(_) => Some(ProjectionSlot::Resources),
             ProjectionPayload::MetaDelta(_) => Some(ProjectionSlot::Meta),
             ProjectionPayload::MailboxDelta(_) => Some(ProjectionSlot::Mailbox),
+            ProjectionPayload::TeamDelta(_) => Some(ProjectionSlot::Team),
             ProjectionPayload::AuditRef(_) | ProjectionPayload::Unknown(_) => None,
         }
     }
