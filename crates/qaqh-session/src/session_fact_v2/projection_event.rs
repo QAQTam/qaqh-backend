@@ -11,11 +11,12 @@ use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIn
 use super::types::{
     ActivityState, ActorRef, AssistantBlockKind, CheckpointId, ContentHash, ContentRef,
     ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind, InputPurpose,
-    InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason,
-    LogId, MAX_SAFE_FACT_SEQ, PolicyDecisionRef, ProjectionSlot, RecoveryAction, RecoveryOutcome,
-    RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId, SessionMetadataPatch,
-    SideEffectClass, SubagentTerminalStatus, TitleSource, ToolCallId, ToolError, ToolMetrics,
-    ToolReplayCapability, ToolTerminalStatus, TurnError, TurnId, TurnMode, TurnTerminal,
+    InterAgentCommunication, InteractionDecision, InteractionExpiryReason, InteractionId,
+    InteractionKind, InterruptReason, LogId, MAX_SAFE_FACT_SEQ, MessageId, PolicyDecisionRef,
+    ProjectionSlot, RecoveryAction, RecoveryOutcome, RecoveryRef, ResourceId, ResourceKind,
+    SessionFact, SessionId, SessionMetadataPatch, SideEffectClass, SubagentTerminalStatus,
+    TitleSource, ToolCallId, ToolError, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    TurnError, TurnId, TurnMode, TurnTerminal,
 };
 use super::validation::ValidationError;
 
@@ -283,6 +284,7 @@ pub enum ProjectionPayload {
     ControlDelta(ControlDelta),
     ResourceDelta(ResourceDelta),
     MetaDelta(MetaDelta),
+    MailboxDelta(MailboxDelta),
     AuditRef(AuditRef),
     Unknown(UnknownProjection),
 }
@@ -308,6 +310,7 @@ impl ProjectionPayload {
             Self::ControlDelta(_) => Some(ProjectionSlot::Control),
             Self::ResourceDelta(_) => Some(ProjectionSlot::Resources),
             Self::MetaDelta(_) => Some(ProjectionSlot::Meta),
+            Self::MailboxDelta(_) => Some(ProjectionSlot::Mailbox),
             Self::AuditRef(_) | Self::Unknown(_) => None,
         }
     }
@@ -319,6 +322,36 @@ pub enum ContentValue {
     Inline { text: String },
     Ref { content_ref: ContentRef },
     Unavailable(ContentUnavailable),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxMessageState {
+    Queued,
+    Delivered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxMessage {
+    pub communication: InterAgentCommunication,
+    pub fact_seq: u64,
+    pub state: MailboxMessageState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_fact_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum MailboxDelta {
+    Queued {
+        revision: u64,
+        message: Box<MailboxMessage>,
+    },
+    Delivered {
+        revision: u64,
+        message_id: MessageId,
+        delivered_fact_seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
