@@ -8,11 +8,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use qaqh_domain::{ControlEvent, DomainEvent, RingingChannel, SessionState};
+use qaqh_domain::{ControlEvent, DomainEvent, InterAgentDelivery, RingingChannel, SessionState};
 use qaqh_runtime::{QaqhService, RingingHub};
 use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
-use qaqh_session::session_fact_v2::FactPayload;
-use qaqh_subagent::{SpawnSubagentRequest, SubagentHost};
+use qaqh_session::projection::{MailboxProjection, Projection};
+use qaqh_session::session_fact_v2::{FactPayload, MailboxMessageState};
+use qaqh_subagent::{SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -121,6 +122,56 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
                 if created.parent_session_id.as_ref() == Some(&parent_identity.session_id)
         )),
         "child SessionCreated must carry the canonical parent hint"
+    );
+
+    let sent = host
+        .send_agent_message(SendAgentMessageRequest {
+            caller_session_id: &parent,
+            target: "/root/review_code",
+            text: "queued inter-agent message",
+            delivery: InterAgentDelivery::Queue,
+        })
+        .expect("send_agent_message");
+    assert_eq!(sent.recipient, "/root/review_code");
+    assert_eq!(sent.delivery, InterAgentDelivery::Queue);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let delivered_facts = loop {
+        let facts = CommittedFactReader::open(
+            &child_dir,
+            child_identity.session_id.clone(),
+            child_identity.log_id.clone(),
+        )
+        .expect("child reader")
+        .read_all()
+        .expect("child facts");
+        let has_communication = facts
+            .iter()
+            .any(|fact| matches!(&fact.payload, FactPayload::InterAgentCommunication(_)));
+        let has_input = facts.iter().any(|fact| {
+            matches!(
+                &fact.payload,
+                FactPayload::InputAccepted(payload)
+                    if payload.client_request_id.as_deref() == Some(sent.message_id.as_str())
+            )
+        });
+        if has_communication && has_input {
+            break facts;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for child mailbox delivery"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let mut mailbox = MailboxProjection::default();
+    for fact in &delivered_facts {
+        mailbox.apply(fact);
+    }
+    assert_eq!(mailbox.pending_count(), 0);
+    assert_eq!(
+        mailbox.snapshot().messages[0].state,
+        MailboxMessageState::Delivered
     );
 
     // 2. subscribe：从 hub 过滤该 seed 的事件批次（工具 collect 线程消费）。

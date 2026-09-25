@@ -27,5 +27,6 @@ YYYY-MM-DD-<topic>-handoff.md
 - [2026-09-25 Subagent V2 list_agents](./2026-09-25-subagent-v2-list-agents-handoff.md)
 - [2026-09-25 Subagent V2 Canonical Input Producer](./2026-09-25-subv2-input-accepted-producer-handoff.md)
 - [2026-09-25 Subagent V2 Initial Task Mailbox](./2026-09-25-subv2-initial-task-mailbox-handoff.md)
+- [2026-09-25 Subagent V2 Agent Message Tools](./2026-09-25-subv2-agent-message-tools-handoff.md)
 
 旧 handoff 已全部归档到 `docs/archive/2026-09/pre-reset/handoff/`，不再作为当前依据。
