@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use qaqh_domain::{ControlEvent, DomainEvent, RingingChannel, SessionState};
 use qaqh_runtime::{QaqhService, RingingHub};
-use qaqh_subagent::SubagentHost;
+use qaqh_subagent::{SpawnSubagentRequest, SubagentHost};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -49,11 +49,24 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     service.attach_ringing(hub.clone());
     let host: &dyn SubagentHost = &service;
 
-    // 1. spawn：返回合法 seed；不经过 daemon HTTP/SSE。
-    let seed = host
-        .spawn_subagent(&[], None, None, None, None)
+    // 1. spawn：返回合法 seed/path；不经过 daemon HTTP/SSE。
+    let parent = qaqh_session::SessionManager::global().generate_unique_session_seed();
+    qaqh_session::SessionManager::global().persist_new_session(&parent);
+    let spawned = host
+        .spawn_subagent(SpawnSubagentRequest {
+            parent_session_id: &parent,
+            requested_name: "review_code",
+            tools: &[],
+            model: None,
+            base_url: None,
+            max_tokens: None,
+            workspace: None,
+        })
         .expect("host spawn_subagent must succeed");
+    let seed = spawned.seed;
     assert!(!seed.is_empty(), "host spawn must return a non-empty seed");
+    assert_eq!(spawned.parent_agent_path, "/root");
+    assert_eq!(spawned.child_agent_path, "/root/review_code");
 
     // 2. subscribe：从 hub 过滤该 seed 的事件批次（工具 collect 线程消费）。
     let rx = host.subscribe(&seed);

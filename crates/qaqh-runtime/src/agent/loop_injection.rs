@@ -33,6 +33,7 @@ impl Loop {
                     qaqh_ringing::RingingCommand::Conversation(
                         qaqh_domain::ConversationCommand::ConversationSendMessage {
                             as_system: true,
+                            subagent_terminal: None,
                             ..
                         }
                     )
@@ -311,6 +312,7 @@ impl Loop {
                     message_id,
                     input_purpose,
                     as_system: true,
+                    subagent_terminal: None,
                     ..
                 }) => {
                     let input_id = message_id.clone().unwrap_or_else(|| env.command_id.clone());
@@ -486,6 +488,7 @@ mod tests {
                 message_id: None,
                 input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
                 as_system: false,
+                subagent_terminal: None,
             },
             "cmd-user",
             SESSION,

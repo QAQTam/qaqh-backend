@@ -113,6 +113,7 @@ fn main() {
                     message_id: None,
                     input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
                     as_system: false,
+                    subagent_terminal: None,
                 }),
                 CommandOptions {
                     command_id: Some(command_id.clone()),
