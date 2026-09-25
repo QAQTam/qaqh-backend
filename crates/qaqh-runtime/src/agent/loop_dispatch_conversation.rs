@@ -16,7 +16,10 @@ use qaqh_session::session_fact_v2::{
 };
 
 impl Loop {
-    fn record_subagent_terminal(&mut self, notification: SubagentTerminalNotification) {
+    pub(super) fn record_subagent_terminal(
+        &mut self,
+        notification: SubagentTerminalNotification,
+    ) -> Result<(), String> {
         let status = match notification.terminal {
             SubagentTerminalKind::Completed => SubagentTerminalStatus::Completed,
             SubagentTerminalKind::Failed => SubagentTerminalStatus::Failed,
@@ -24,18 +27,15 @@ impl Loop {
             SubagentTerminalKind::TimedOut => SubagentTerminalStatus::TimedOut,
         };
         let now = super::state::agent::unix_ms();
-        let ledger = match self.session.agent.tool_ledger_mut() {
-            Ok(Some(ledger)) => ledger,
-            Ok(None) => return,
-            Err(error) => {
-                log::warn!("[SUBAGENT] canonical ledger unavailable for finish: {error}");
-                return;
-            }
-        };
-        if let Err(error) = ledger.ensure_lease(now, super::state::agent::tool_ledger_lease_ms()) {
-            log::warn!("[SUBAGENT] canonical ledger lease failed for finish: {error}");
-            return;
-        }
+        let ledger = self
+            .session
+            .agent
+            .tool_ledger_mut()
+            .map_err(|error| format!("canonical ledger unavailable for finish: {error}"))?
+            .ok_or_else(|| "canonical ledger is not initialized for finish".to_string())?;
+        ledger
+            .ensure_lease(now, super::state::agent::tool_ledger_lease_ms())
+            .map_err(|error| format!("canonical ledger lease failed for finish: {error}"))?;
         let payload = SubagentFinished {
             child_session_id: SessionId::new(notification.child_session_id),
             parent_call_id: ToolCallId::new(notification.parent_call_id),
@@ -44,11 +44,10 @@ impl Loop {
             finished_at_ms: now,
             recovery_ref: None,
         };
-        if let Err(error) =
-            ledger.append_subagent_finished(EventId::new(generate_ulid()), payload, now)
-        {
-            log::warn!("[SUBAGENT] canonical finish append failed: {error}");
-        }
+        ledger
+            .append_subagent_finished(EventId::new(generate_ulid()), payload, now)
+            .map_err(|error| format!("canonical finish append failed: {error}"))?;
+        Ok(())
     }
 
     pub(super) fn on_conversation(
@@ -67,8 +66,16 @@ impl Loop {
                 as_system,
                 subagent_terminal,
             } => {
-                if let Some(terminal) = subagent_terminal {
-                    self.record_subagent_terminal(terminal);
+                if let Some(terminal) = subagent_terminal
+                    && let Err(error) = self.record_subagent_terminal(terminal)
+                {
+                    self.emit_operation_failed(
+                        command_id,
+                        qaqh_domain::ErrorScope::Conversation,
+                        "subagent_finish_append_failed",
+                        &error,
+                    );
+                    return;
                 }
                 if text.is_empty() {
                     return;

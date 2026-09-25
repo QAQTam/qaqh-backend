@@ -752,6 +752,7 @@ impl ToolRuntime {
         for effect in spawn_effects {
             let qaqh_workspace::ToolEffect::SubagentSpawned {
                 seed,
+                child_session_id,
                 name,
                 task_text,
                 timeout_secs,
@@ -763,11 +764,10 @@ impl ToolRuntime {
             else {
                 continue;
             };
+            let host = qaqh_subagent::host()
+                .ok_or_else(|| "subagent host unavailable before spawn edge commit".to_string())?;
             if parent_session_id != ctx.agent.session.seed {
-                let host = qaqh_subagent::host();
-                if let Some(host) = host {
-                    host.abort_subagent(&seed, process_id);
-                }
+                host.rollback_subagent(&seed, &child_session_id, process_id);
                 return Err(format!(
                     "subagent spawn parent mismatch: effect={parent_session_id}, active={}",
                     ctx.agent.session.seed
@@ -778,7 +778,7 @@ impl ToolRuntime {
             let child_agent_path = AgentPath::parse_absolute(&child_agent_path)
                 .map_err(|error| format!("invalid child agent path: {error}"))?;
             let parent_call_id = canonical_call_id(call_id);
-            let child_session_id = SessionId::new(&seed);
+            let child_session_id = SessionId::new(child_session_id);
             let now = unix_ms();
             let payload = SubagentSpawned {
                 child_session_id: child_session_id.clone(),
@@ -797,25 +797,17 @@ impl ToolRuntime {
                 ledger
                     .ensure_lease(now, tool_ledger_lease_ms())
                     .map_err(|error| format!("subagent ledger lease failed: {error}"))?;
-                ledger
-                    .append_subagent_spawned(EventId::new(generate_ulid()), payload, now)
-                    .map_err(|error| format!("append SubagentSpawned failed: {error}"))?;
+                if let Err(error) =
+                    ledger.append_subagent_spawned(EventId::new(generate_ulid()), payload, now)
+                {
+                    host.rollback_subagent(&seed, child_session_id.as_str(), process_id);
+                    return Err(format!("append SubagentSpawned failed: {error}"));
+                }
             }
 
-            let host = match qaqh_subagent::host() {
-                Some(host) => host,
-                None => {
-                    let _ = Self::append_subagent_finished_best_effort(
-                        ctx,
-                        &child_session_id,
-                        parent_call_id,
-                        SubagentTerminalStatus::Failed,
-                    );
-                    return Err("subagent host unavailable after spawn edge commit".to_string());
-                }
-            };
             if let Err(error) = host.start_subagent(qaqh_subagent::StartSubagentRequest {
                 seed: &seed,
+                child_session_id: child_session_id.as_str(),
                 name: &name,
                 task_text: &task_text,
                 timeout_secs,
@@ -823,20 +815,26 @@ impl ToolRuntime {
                 parent_call_id: parent_call_id.as_str(),
                 process_id,
             }) {
-                let _ = Self::append_subagent_finished_best_effort(
+                let finish_error = Self::append_subagent_finished(
                     ctx,
                     &child_session_id,
                     canonical_call_id(call_id),
                     SubagentTerminalStatus::Failed,
-                );
+                )
+                .err();
                 host.abort_subagent(&seed, process_id);
-                return Err(format!("start subagent {seed}: {error}"));
+                return Err(match finish_error {
+                    Some(finish_error) => format!(
+                        "start subagent {seed}: {error}; append SubagentFinished failed: {finish_error}"
+                    ),
+                    None => format!("start subagent {seed}: {error}"),
+                });
             }
         }
         Ok(())
     }
 
-    fn append_subagent_finished_best_effort(
+    fn append_subagent_finished(
         ctx: &mut RingContext,
         child_session_id: &SessionId,
         parent_call_id: ToolCallId,
