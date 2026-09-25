@@ -31,5 +31,6 @@ YYYY-MM-DD-<topic>-handoff.md
 - [2026-09-25 Subagent V2 Wait / Interrupt / Queue-only Completion](./2026-09-25-subv2-wait-interrupt-completion-handoff.md)
 - [2026-09-25 Subagent V2 Residency / Reload](./2026-09-25-subv2-residency-reload-handoff.md)
 - [2026-09-25 Subagent V2 Team Projection](./2026-09-25-subv2-team-projection-handoff.md)
+- [2026-09-26 Subagent V2 Agent State / Direct Input](./2026-09-26-subv2-agent-state-direct-input-handoff.md)
 
 旧 handoff 已全部归档到 `docs/archive/2026-09/pre-reset/handoff/`，不再作为当前依据。
