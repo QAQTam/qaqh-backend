@@ -78,6 +78,7 @@ pub struct StartSubagentRequest<'a> {
     pub parent_session_id: &'a str,
     pub parent_call_id: &'a str,
     pub process_id: u32,
+    pub inter_agent: Option<qaqh_domain::InterAgentEnvelope>,
 }
 
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker

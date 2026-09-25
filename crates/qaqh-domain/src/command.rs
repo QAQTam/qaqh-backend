@@ -173,7 +173,41 @@ pub struct SubagentTerminalNotification {
     pub terminal: SubagentTerminalKind,
 }
 
+/// Delivery semantics for an inter-agent communication.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum InterAgentDelivery {
+    Queue,
+    #[default]
+    Trigger,
+    Interrupt,
+}
+
+/// Wire-safe inter-agent communication metadata attached to a conversation
+/// message. Canonical content is the command's `text`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct InterAgentEnvelope {
+    pub message_id: String,
+    pub root_session_id: String,
+    pub author: String,
+    pub recipient: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_recipients: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<String>,
+    #[serde(default)]
+    pub delivery: InterAgentDelivery,
+    pub created_at_ms: i64,
+}
+
 /// Conversation 频道命令。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -199,6 +233,11 @@ pub enum ConversationCommand {
         /// todo 模式切换）。false 时行为与普通用户消息完全一致。
         #[serde(default)]
         as_system: bool,
+        /// Canonical inter-agent communication metadata. When present, the
+        /// target session writes `InterAgentCommunication` before
+        /// `InputAccepted`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inter_agent: Option<InterAgentEnvelope>,
         /// Structured terminal fact to append before a subagent result is
         /// injected. This is not parsed from message text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +292,7 @@ pub enum ToolCommand {
 }
 
 /// 统一领域命令入口。`channel()` 决定命令进入哪个 actor/router。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]

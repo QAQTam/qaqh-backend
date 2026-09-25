@@ -501,6 +501,7 @@ mod tests {
                 message_id: None,
                 input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
                 as_system: false,
+                inter_agent: None,
                 subagent_terminal: None,
             },
             "cmd-user",
@@ -531,6 +532,7 @@ mod tests {
                         message_id: Some("subagent-terminal:child".to_string()),
                         input_purpose: qaqh_domain::ConversationInputPurpose::QueueOnly,
                         as_system: true,
+                        inter_agent: None,
                         subagent_terminal: Some(qaqh_domain::SubagentTerminalNotification {
                             child_session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
                             parent_call_id: "call_01J00000000000000000000000".to_string(),
