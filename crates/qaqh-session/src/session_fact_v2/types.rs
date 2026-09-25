@@ -867,4 +867,5 @@ pub enum ProjectionSlot {
     Resources = 3,
     Meta = 4,
     Mailbox = 5,
+    Team = 6,
 }

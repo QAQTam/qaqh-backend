@@ -283,11 +283,20 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
         }),
         None,
     );
-    let batch = rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("subscribe must deliver the seed's event batch");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let batch = loop {
+        let batch = rx
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("subscribe must deliver the seed's event batch");
+        if batch.channel == RingingChannel::Control {
+            break batch;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the synthetic control batch"
+        );
+    };
     assert_eq!(batch.seed, seed, "batch must carry the sub seed");
-    assert_eq!(batch.channel, RingingChannel::Control);
     assert!(
         batch.envelopes.iter().any(|env| env.seed == seed),
         "batch must contain the published envelope"
