@@ -313,6 +313,37 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    /// 把会话账户从 legacy seed 改名为 canonical session id。
+    ///
+    /// 目录迁移时调用。若新 id 已存在于某个 workspace，则删除旧 id，避免同一
+    /// 会话被登记两次；否则在原位置替换，保持手动排序。
+    pub fn rename_session(&self, old_seed: &str, new_session_id: &str) -> Result<(), String> {
+        if old_seed == new_session_id {
+            return Ok(());
+        }
+        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let target_already_present = items
+            .iter()
+            .any(|w| w.session_ids.iter().any(|id| id == new_session_id));
+        let mut changed = false;
+        for workspace in items.iter_mut() {
+            if target_already_present {
+                let before = workspace.session_ids.len();
+                workspace.session_ids.retain(|id| id != old_seed);
+                changed |= workspace.session_ids.len() != before;
+            } else if let Some(position) =
+                workspace.session_ids.iter().position(|id| id == old_seed)
+            {
+                workspace.session_ids[position] = new_session_id.to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist(&items)?;
+        }
+        Ok(())
+    }
+
     /// 把会话从所有 workspace 账户移除（会话删除时由 SessionManager 调用）。
     pub fn remove_session(&self, seed: &str) {
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -461,6 +492,31 @@ mod tests {
 
         store.delete(&ws_a.id).expect("delete a");
         assert_eq!(store.list().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_session_preserves_workspace_order() {
+        let store = reset_store();
+        let dir = fixture_dir().join("rename-session");
+        std::fs::create_dir_all(&dir).expect("mkdir rename-session");
+        let workspace = store
+            .create(dir.to_str().expect("path"), &[])
+            .expect("create workspace");
+        store.attach_by_cwd("legacy", dir.to_str().expect("path"));
+        store.attach_by_cwd("sibling", dir.to_str().expect("path"));
+
+        store
+            .rename_session("legacy", "canonical")
+            .expect("rename session");
+        let listed = store.list();
+        let ids = &listed
+            .iter()
+            .find(|entry| entry.id == workspace.id)
+            .expect("workspace")
+            .session_ids;
+        assert_eq!(ids, &vec!["canonical".to_string(), "sibling".to_string()]);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
