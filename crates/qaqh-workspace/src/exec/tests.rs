@@ -1,5 +1,7 @@
 use std::sync::{Arc, atomic::AtomicU64};
+use std::time::Duration;
 
+use crate::tool_api::ToolExecutionError;
 use crate::tool_api::ToolProjection;
 use crate::{ExecOutputStream, ExecProgressEvent};
 
@@ -15,7 +17,11 @@ impl Shell {
 #[test]
 fn shell_from_name_resolves_known_shells() {
     assert_eq!(Shell::from_name("pwsh"), Some(Shell::PowerShell));
-    assert_eq!(Shell::from_name("powershell"), Some(Shell::PowerShell));
+    assert_eq!(
+        Shell::from_name("powershell"),
+        Some(Shell::WindowsPowerShell)
+    );
+    assert_eq!(Shell::from_name("bash4windows"), Some(Shell::Bash));
     assert_eq!(Shell::from_name("cmd"), Some(Shell::Cmd));
     assert_eq!(Shell::from_name("zsh"), Some(Shell::Zsh));
     assert_eq!(Shell::from_name("sh"), Some(Shell::Sh));
@@ -25,33 +31,103 @@ fn shell_from_name_resolves_known_shells() {
 }
 
 #[test]
-fn rg_habit_fix_argv_mode() {
-    // grep 习惯组合 -rn / -rni / -rnl → rg 正确写法（-n 前缀）
-    let mut argv = vec!["rg".into(), "-rn".into(), "pattern".into()];
-    normalize_rg_argv(&mut argv);
-    assert_eq!(argv, vec!["rg", "-n", "pattern"]);
+fn platform_shell_priority_is_fixed() {
+    #[cfg(windows)]
+    assert_eq!(
+        Shell::auto_candidates(),
+        &[
+            Shell::PowerShell,
+            Shell::Bash,
+            Shell::WindowsPowerShell,
+            Shell::Cmd
+        ]
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        Shell::auto_candidates(),
+        &[Shell::Bash, Shell::Zsh, Shell::Sh]
+    );
+    #[cfg(target_os = "macos")]
+    assert_eq!(Shell::auto_candidates(), &[Shell::Bash, Shell::Zsh]);
+}
 
-    let mut argv = vec!["rg".into(), "-rni".into(), "pattern".into()];
-    normalize_rg_argv(&mut argv);
-    assert_eq!(argv, vec!["rg", "-ni", "pattern"]);
+fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::ToolCallContext {
+    let workspace_root = std::env::current_dir().expect("test cwd");
+    crate::tool_api::ToolCallContext {
+        call_id: "exec-shell-config-test".to_string(),
+        session_id: "exec-shell-config-seed".to_string(),
+        workspace_root: workspace_root.clone(),
+        mode: crate::tool_api::AgentMode::Code,
+        permission_level: crate::permission::PermissionLevel::Unrestricted,
+        sandbox: crate::tool_api::SandboxMode::Main,
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        exec_default_shell: exec_default_shell.map(str::to_string),
+        timeout: Duration::from_secs(30),
+        cancellation: crate::tool_api::CancellationToken::new(),
+        progress: None,
+        source: crate::tool_api::ToolCallSource::Model,
+    }
+}
 
-    let mut argv = vec!["rg.exe".into(), "-rnl".into()];
-    normalize_rg_argv(&mut argv);
-    assert_eq!(argv, vec!["rg.exe", "-nl"]);
+fn shell_test_args(command: &str, shell: Option<&str>) -> super::handler::ExecArgs {
+    let mut value = serde_json::json!({ "command": command });
+    if let Some(shell) = shell {
+        value["shell"] = serde_json::json!(shell);
+    }
+    serde_json::from_value(value).expect("exec args")
+}
 
-    // 合法用法不受影响：-r 单独（--replace 等待参数）、长选项、非 rg 程序
-    let mut argv = vec!["rg".into(), "-r".into(), "x".into(), "pat".into()];
-    normalize_rg_argv(&mut argv);
-    assert_eq!(argv, vec!["rg", "-r", "x", "pat"]);
+#[test]
+fn exec_uses_configured_default_shell() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(Some("bash"));
+    let output = run_exec(
+        &ctx,
+        shell_test_args("echo configured-shell-ok", None),
+        None,
+        None,
+    )
+    .expect("configured shell execution");
+    assert!(
+        output.stdout.contains("configured-shell-ok"),
+        "stdout: {:?}",
+        output.stdout
+    );
+}
 
-    let mut argv = vec!["rg".into(), "--replace".into(), "x".into()];
-    normalize_rg_argv(&mut argv);
-    assert_eq!(argv, vec!["rg", "--replace", "x"]);
+#[test]
+fn explicit_shell_overrides_configured_default_shell() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(Some("not-a-shell"));
+    let output = run_exec(
+        &ctx,
+        shell_test_args("echo explicit-shell-ok", Some("bash")),
+        None,
+        None,
+    )
+    .expect("explicit shell execution");
+    assert!(
+        output.stdout.contains("explicit-shell-ok"),
+        "stdout: {:?}",
+        output.stdout
+    );
+}
 
-    // grep 的 -rn 是合法组合，不处理
-    let mut argv = vec!["grep".into(), "-rn".into(), "pat".into()];
-    normalize_rg_argv(&mut argv);
-    assert_eq!(argv, vec!["grep", "-rn", "pat"]);
+#[test]
+fn invalid_configured_default_shell_fails_closed() {
+    let ctx = shell_test_context(Some("not-a-shell"));
+    let error = run_exec(&ctx, shell_test_args("echo must-not-run", None), None, None)
+        .expect_err("invalid configured shell must fail");
+    match error {
+        ToolExecutionError::Recoverable(error) => {
+            assert_eq!(error.code.as_str(), "UNKNOWN_SHELL")
+        }
+        ToolExecutionError::Fatal(error) => panic!("unexpected fatal: {error:?}"),
+    }
 }
 
 #[test]
@@ -547,7 +623,7 @@ fn grandchild_holding_pipe_write_end_collects_bounded() {
 fn truncated_output_instructs_the_model_to_retry_narrowly() {
     let text = "token ".repeat(1_000);
     let truncated = token_truncate(&text, 10);
-    assert!(truncated.contains("Call exec again with narrower argv or a filtering command."));
+    assert!(truncated.contains("Call exec again with a narrower command or a filtering pipeline."));
 }
 
 #[test]
@@ -1187,7 +1263,7 @@ fn exec_registered_alone_with_shell_param() {
     let exec = &defs[0];
     assert_eq!(exec.function.name, "exec");
     let props = exec.function.parameters.get("properties").unwrap();
-    // exec 必须暴露 shell 参数（含 powershell 别名）+ argv/command 双模式。
+    // exec 必须暴露 shell 参数（含 powershell 别名）且只接受 shell command。
     let shell_enum = props["shell"]["enum"].as_array().expect("shell enum");
     for name in ["bash", "zsh", "sh", "pwsh", "powershell", "cmd"] {
         assert!(
@@ -1196,11 +1272,19 @@ fn exec_registered_alone_with_shell_param() {
         );
     }
     assert!(props.get("command").is_some());
-    assert!(props.get("argv").is_some());
-    assert!(props.get("args").is_some());
-    // description 必须讲清 argv 无 shell（防误导回归）。
     assert!(
-        exec.function.description.contains("without a shell"),
+        props.get("argv").is_none(),
+        "argv support must stay removed"
+    );
+    assert!(props.get("args").is_some());
+    assert_eq!(
+        exec.function.parameters.get("required"),
+        Some(&serde_json::json!(["command"]))
+    );
+    assert!(
+        exec.function
+            .description
+            .contains("wrapped by the selected shell"),
         "desc: {}",
         exec.function.description
     );
@@ -1233,47 +1317,32 @@ fn pwsh_tool_executes_command_through_fixed_shell() {
 }
 
 #[test]
-fn exec_argv_mode_still_direct_exec() {
-    // argv 模式与 shell 无关：exec 直接跑程序（无包装）。
-    #[cfg(windows)]
-    let argv = serde_json::json!(["cmd", "/c", "echo", "shell-tool-ok"]);
-    #[cfg(not(windows))]
-    let argv = serde_json::json!(["echo", "shell-tool-ok"]);
+fn exec_rejects_removed_argv_and_requires_command() {
     let ctx = make_ctx(
         "exec",
-        serde_json::json!({ "argv": argv, "cwd": std::env::current_dir().unwrap() }),
+        serde_json::json!({ "argv": ["echo", "hi"], "cwd": std::env::current_dir().unwrap() }),
     );
     let r = handle_run_exec(ctx);
-    assert!(r.is_success(), "model text: {}", r.model_text());
-}
-
-#[test]
-fn exec_argv_rejects_shell_and_args_params() {
-    // argv + shell/args 同传是模型误解：显式拒绝（ARGV_IGNORES_*），不静默忽略。
-    let ctx = make_ctx(
-        "exec",
-        serde_json::json!({ "argv": ["echo", "hi"], "shell": "bash", "cwd": std::env::current_dir().unwrap() }),
-    );
-    let r = handle_run_exec(ctx);
-    assert!(!r.is_success(), "argv + shell must fail");
+    assert!(!r.is_success(), "removed argv must fail");
     assert!(
         r.error
             .as_ref()
-            .is_some_and(|e| e.code == "ARGV_IGNORES_SHELL"),
+            .is_some_and(|e| e.code == "INVALID_ARGUMENTS"),
         "error code: {:?}, model text: {}",
         r.error,
         r.model_text()
     );
+
     let ctx = make_ctx(
         "exec",
-        serde_json::json!({ "argv": ["echo", "hi"], "args": ["x"], "cwd": std::env::current_dir().unwrap() }),
+        serde_json::json!({ "cwd": std::env::current_dir().unwrap() }),
     );
     let r = handle_run_exec(ctx);
-    assert!(!r.is_success(), "argv + args must fail");
+    assert!(!r.is_success(), "missing command must fail");
     assert!(
         r.error
             .as_ref()
-            .is_some_and(|e| e.code == "ARGV_IGNORES_ARGS"),
+            .is_some_and(|e| e.code == "MISSING_COMMAND"),
         "error code: {:?}, model text: {}",
         r.error,
         r.model_text()

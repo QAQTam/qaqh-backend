@@ -147,18 +147,16 @@ fn marker_bash_args(path: &std::path::Path) -> serde_json::Value {
     {
         let path = path.to_string_lossy().replace('\'', "''");
         json!({
-            "argv": [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                format!("Set-Content -LiteralPath '{path}' -Value done"),
-            ]
+            "command": format!("Set-Content -LiteralPath '{path}' -Value done"),
+            "shell": "pwsh",
         })
     }
     #[cfg(not(windows))]
     {
         json!({
-            "argv": ["sh", "-c", "printf done > \"$1\"", "sh", path.to_string_lossy()]
+            "command": "printf done > \"$1\"",
+            "args": [path.to_string_lossy()],
+            "shell": "sh",
         })
     }
 }
@@ -699,7 +697,7 @@ fn llm_four_pending_bash_calls_defer_execution_until_all_resolved() {
                 let summary = action_summary
                     .as_deref()
                     .expect("exec permission must carry an action summary");
-                assert!(summary.contains("argv: ["), "{summary}");
+                assert!(summary.contains("command: "), "{summary}");
             }
             let mut ids = permissions
                 .into_iter()

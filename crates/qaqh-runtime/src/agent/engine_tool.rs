@@ -193,6 +193,7 @@ impl ToolEngine {
             ctx.agent.session.seed.clone(),
             ctx.agent.config.permission_level,
             ctx.cancel.clone(),
+            ctx.agent.config.exec.default_shell.clone(),
         );
         let tool_context = runtime.tool_call_context(
             id,

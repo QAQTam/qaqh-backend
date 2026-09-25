@@ -35,6 +35,7 @@ fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecuti
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from(qaqh_workspace::current_workspace()),
             ),
+            exec_default_shell: None,
             timeout: Duration::ZERO,
             cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
             progress: None,
@@ -130,7 +131,7 @@ fn store_with_pending_batch(seed: &str) -> MessageStore {
         .map(|id| ContentBlock::ToolUse {
             id: (*id).to_string(),
             name: "exec".into(),
-            input: serde_json::json!({"argv": ["sh", "-c", "true"]}),
+            input: serde_json::json!({"command": "true"}),
         })
         .collect();
     let turn_completed = store.push_assistant(assistant);
@@ -216,14 +217,9 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
         // 时（≈0.9s），第 2..4 个仍在执行 —— 取消点因此必然落在**批执行中途**。
         let delay = format!("sleep {};", 0.9 + 0.7 * index as f64);
         let args = serde_json::json!({
-            "argv": [
-                "sh",
-                "-c",
-                format!("{delay} printf '%s\\n' \"$1\" >> \"$2\""),
-                "sh",
-                id,
-                side_effects.to_string_lossy(),
-            ],
+            "command": format!("{delay} printf '%s\\n' \"$1\" >> \"$2\""),
+            "args": [id, side_effects.to_string_lossy()],
+            "shell": "sh",
             "timeout_secs": 30,
         });
         let admission = qaqh_workspace::authorize_call(&agent.session.seed, id, "exec", &args, 4);

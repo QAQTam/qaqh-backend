@@ -297,6 +297,7 @@ mod tests {
             permission_level: crate::permission::PermissionLevel::ReadFree,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
+            exec_default_shell: None,
             timeout: Duration::from_secs(30),
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,

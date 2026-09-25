@@ -58,6 +58,8 @@
 
 - `ToolResult` 状态是终态唯一真相。
 - 展示层使用结构化 `outcome`。
+- exec 只接受 shell `command` 字符串；直接 `argv` 模式已移除。
+- 进程启动层收到的 argv 必须由所选 shell 从 `command` 派生。
 - exec stdout/stderr 分离展示，不伪装交织顺序。
 - 不从 summary 文本反推执行结果。
 
@@ -72,3 +74,13 @@
 - `docs/current/` 是唯一当前权威文档区。
 - `docs/archive/` 只用于历史追溯。
 - 旧文档中的“未完成/待办/计划”不能直接当作当前状态。
+
+## D11. exec shell 选择
+
+- 配置文件支持 `[exec].default_shell`；空值 / `"auto"` = 平台自动探测。
+- 调用级显式 `shell` 参数优先于配置默认值。
+- 自动探测顺序：
+  - Windows：`pwsh` > Git for Windows bash > `powershell` 5.1 > `cmd`；
+  - Linux：`bash` > `zsh` > `sh`；
+  - macOS：`bash` > `zsh`。
+- 不做跨 shell 命令翻译或兼容降级；不兼容命令由 shell 报错，模型负责修正。

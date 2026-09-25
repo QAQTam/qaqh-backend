@@ -61,6 +61,7 @@ pub fn execute_authorized(
             SandboxMode::Main
         },
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        exec_default_shell: None,
         timeout: Duration::ZERO,
         cancellation,
         progress: None,
@@ -967,6 +968,7 @@ mod tests {
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
                 workspace.path().to_path_buf(),
             ),
+            exec_default_shell: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1018,6 +1020,7 @@ mod tests {
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
                 workspace.path().to_path_buf(),
             ),
+            exec_default_shell: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1060,6 +1063,7 @@ mod tests {
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
                 crate::runtime::active_workspace_root(),
             ),
+            exec_default_shell: None,
             timeout: Duration::ZERO,
             cancellation,
             progress: None,

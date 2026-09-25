@@ -38,10 +38,10 @@ fn write_error(path: &str, error: &std::io::Error) -> String {
     use std::io::ErrorKind;
     let hint = match error.kind() {
         ErrorKind::NotFound => {
-            "The parent directory may not exist. Use exec with argv [\"ls\", \"-la\"] to inspect it, and create the directory first."
+            "The parent directory may not exist. Use exec command \"ls -la\" to inspect it, and create the directory first."
         }
         ErrorKind::PermissionDenied => {
-            "The target is not writable (read-only attribute or missing permissions). Check with exec argv [\"ls\", \"-la\"], and remove the read-only flag if needed."
+            "The target is not writable (read-only attribute or missing permissions). Check with exec command \"ls -la\", and remove the read-only flag if needed."
         }
         ErrorKind::IsADirectory => {
             "The target path is a directory, not a file. Use delete first, or write to a file path instead."
@@ -674,7 +674,7 @@ impl TypedTool for DeleteTool {
             return Err(mutation_error(
                 "NOT_FOUND",
                 format!("NOT_FOUND: {path} does not exist"),
-                Some("Use exec with argv [\"ls\", \"-la\"] to verify."),
+                Some("Use exec command \"ls -la\" to verify."),
                 json!({"path": &path}),
             ));
         }
@@ -751,7 +751,7 @@ impl TypedTool for DeleteTool {
                     path: path.clone(),
                     content: format!("Moved to trash: {trash_path}"),
                     hint: Some(format!(
-                        "Restore with exec argv [\"mv\", \"{}\", \"{}\"]",
+                        "Restore with exec command \"mv '{}' '{}'\"",
                         trash_path_abs.display(),
                         path
                     )),
@@ -764,7 +764,7 @@ impl TypedTool for DeleteTool {
                         "CROSS_DEVICE_DIR",
                         "Cannot trash directory across devices",
                         Some(&format!(
-                            "Use exec with argv [\"rm\", \"-rf\", \"{}\"] for cross-device deletion.",
+                            "Use exec command \"rm -rf '{}'\" for cross-device deletion.",
                             path
                         )),
                         json!({"path": &path}),
@@ -801,7 +801,7 @@ impl TypedTool for DeleteTool {
                             path: path.clone(),
                             content: format!("Moved to trash (cross-device): {trash_path}"),
                             hint: Some(format!(
-                                "Restore with exec argv [\"cp\", \"{}\", \"{}\"]",
+                                "Restore with exec command \"cp '{}' '{}'\"",
                                 trash_path_abs.display(),
                                 path
                             )),
@@ -892,6 +892,7 @@ pub(crate) fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCall
             SandboxMode::Main
         },
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        exec_default_shell: None,
         timeout,
         cancellation,
         progress: None,
@@ -921,6 +922,7 @@ mod tests {
             permission_level: TestPermissionLevel::ReadFree,
             sandbox: TestSandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
+            exec_default_shell: None,
             timeout: Duration::from_secs(30),
             cancellation: TestCancellationToken::new(),
             progress: None,
