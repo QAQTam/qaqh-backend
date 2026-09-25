@@ -43,8 +43,8 @@ use serde::{Deserialize, Serialize};
 
 mod host;
 pub use host::{
-    ContentRef, EventBatch, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest,
-    SubagentHost, host, install_host,
+    ContentRef, EventBatch, ListedAgent, SpawnSubagentRequest, SpawnedSubagent,
+    StartSubagentRequest, SubagentHost, host, install_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -129,6 +129,109 @@ impl ToolProjection for SpawnSubagentOutput {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListAgentsArgs {
+    #[serde(default)]
+    path_prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListAgentsOutput {
+    agents: Vec<ListedAgent>,
+}
+
+impl ToolProjection for ListAgentsOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_default(),
+        }]
+    }
+
+    fn summary(&self) -> Option<String> {
+        Some(format!("{} agent(s)", self.agents.len()))
+    }
+
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        ToolDisplay::new(
+            qaqh_workspace::tool_api::ToolHeader::Other {
+                label: "agents".to_string(),
+            },
+            qaqh_workspace::tool_api::ToolBody::Text {
+                text: self.summary().unwrap_or_default(),
+                truncated: false,
+            },
+        )
+        .with_summary(self.summary().unwrap_or_default())
+    }
+}
+
+pub struct ListAgentsTool;
+
+impl TypedTool for ListAgentsTool {
+    type Args = ListAgentsArgs;
+    type Output = ListAgentsOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("list_agents").expect("valid list_agents tool name"),
+            display_name: None,
+            description: "List logical agents at or below a path prefix in the current root \
+                tree. Defaults to /root. Relative prefixes resolve below the caller."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Absolute or caller-relative AgentPath prefix. Defaults to /root."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            output_schema: serde_json::to_value(schemars::schema_for!(ListAgentsOutput))
+                .expect("list_agents output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: ListAgentsArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let path_prefix = args
+            .path_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|prefix| !prefix.is_empty())
+            .unwrap_or("/root");
+        let host = host().ok_or_else(|| {
+            subagent_error(
+                "HOST_UNAVAILABLE",
+                "list_agents: no in-process subagent host installed",
+                "Agent discovery requires the daemon host (install_host).",
+            )
+        })?;
+        let agents = host
+            .list_agents(&ctx.session_id, path_prefix)
+            .map_err(|error| {
+                subagent_error(
+                    "LIST_ERROR",
+                    format!("list_agents: {error}"),
+                    "Check that the path prefix names a valid AgentPath in the current root tree.",
+                )
+            })?;
+        Ok(ListAgentsOutput { agents })
+    }
+}
+
 pub struct SpawnSubagentTool;
 
 impl TypedTool for SpawnSubagentTool {
@@ -168,6 +271,8 @@ impl TypedTool for SpawnSubagentTool {
 pub fn register(mgr: &mut ToolManager) {
     mgr.register_display("spawn_subagent", project_subagent_display);
     mgr.register_typed(SpawnSubagentTool);
+    mgr.register_display("list_agents", project_list_agents_display);
+    mgr.register_typed(ListAgentsTool);
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
@@ -306,6 +411,24 @@ fn project_subagent_display(
         qaqh_workspace::tool_api::ToolBody::Subagent {
             name: name.to_string(),
             seed: String::new(),
+        },
+    )
+}
+
+fn project_list_agents_display(
+    args: &serde_json::Value,
+    output: &str,
+) -> qaqh_workspace::tool_api::ToolDisplay {
+    if let Ok(output) = serde_json::from_str::<ListAgentsOutput>(output) {
+        return output.display(args);
+    }
+    qaqh_workspace::tool_api::ToolDisplay::new(
+        qaqh_workspace::tool_api::ToolHeader::Other {
+            label: "agents".to_string(),
+        },
+        qaqh_workspace::tool_api::ToolBody::Text {
+            text: "0 agent(s)".to_string(),
+            truncated: false,
         },
     )
 }
@@ -848,6 +971,27 @@ mod tests {
 
         assert!(!properties.contains_key("api_key"));
         assert!(!handler.input_schema.to_string().contains("--api-key"));
+    }
+
+    #[test]
+    fn list_agents_schema_is_registered_and_path_prefix_is_optional() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+
+        let handler = manager
+            .lookup("list_agents")
+            .expect("list_agents should be registered");
+        assert_eq!(handler.input_schema["type"], "object");
+        assert!(
+            handler.input_schema["properties"]
+                .as_object()
+                .expect("properties")
+                .contains_key("path_prefix")
+        );
+        assert!(
+            handler.input_schema.get("required").is_none(),
+            "path_prefix must default to /root"
+        );
     }
 
     #[test]
