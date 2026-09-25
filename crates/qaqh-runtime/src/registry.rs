@@ -812,6 +812,7 @@ impl AgentRegistry {
         let actor_spec = spec.clone();
         let tools_len = spec.tools.len();
         let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
+        let liveness_for_registry = std::sync::Arc::clone(&liveness);
         // T-1-5：worker 退出即摘除活表（与 T-1-1 的 spawn 登记成对）。
         // `live_workers` 此前只靠 `forget_seed`（会话关闭）清理，子代理 actor
         // 自然退出后条目永留——bootstrap 的孤儿收尾因此永远跳过该 seed。
@@ -845,7 +846,7 @@ impl AgentRegistry {
                 },
                 kind: AgentKind::Subagent(spec),
                 subscription_actor: SessionActor::new(16),
-                liveness: None,
+                liveness: Some(liveness_for_registry),
                 reader: Some(reader),
                 thread: Some(thread),
             },
@@ -1521,9 +1522,6 @@ impl AgentRegistry {
             .instances
             .iter()
             .filter_map(|(seed, instance)| {
-                if !matches!(instance.kind, AgentKind::Session) {
-                    return None;
-                }
                 let liveness = instance.liveness.as_ref()?;
                 (liveness.unloadable() && liveness.idle_secs() >= idle_secs).then(|| seed.clone())
             })

@@ -450,10 +450,31 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     host.send_agent_message(SendAgentMessageRequest {
         caller_session_id: &parent,
         target: &child_path,
+        text: "reload without starting a turn",
+        delivery: InterAgentDelivery::Queue,
+    })
+    .expect("queue delivery must reload child through loaded parent");
+    std::thread::sleep(Duration::from_millis(1_500));
+    let unloaded = service.unload_idle_sessions(1);
+    assert!(
+        unloaded.iter().any(|seed| seed == &child),
+        "idle reloaded child must be an unload candidate: {unloaded:?}"
+    );
+    host.send_ringing(
+        &parent,
+        qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
+            seed: parent.clone(),
+        }),
+    )
+    .expect("ensure parent is loaded after idle sweep");
+
+    host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &parent,
+        target: &child_path,
         text: "reload and trigger",
         delivery: InterAgentDelivery::Trigger,
     })
-    .expect("trigger delivery must reload child through loaded parent");
+    .expect("trigger delivery must reload child again through loaded parent");
 
     // The original collector ended when the child unloaded. A Trigger delivery
     // must arm a new collector before the turn so terminal activity can route
