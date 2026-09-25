@@ -81,6 +81,7 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - `list_agents` path-prefix 工具面已接入。
 - Phase 2 进行中：
   - canonical `InterAgentCommunication` 与 mailbox projection 已合并（#372 / PR #387）。
+  - canonical `InputAccepted` producer 与 communication append 已接入。
   - `spawn_agent` initial message、工具面和 residency reload 分别在 #373-#375。
 - 仍待：child reload 后 path 恢复。
 - Phase 3-7 未开始；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。

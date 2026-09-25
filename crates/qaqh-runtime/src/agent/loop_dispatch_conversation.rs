@@ -10,9 +10,10 @@ use super::turn_actor::TurnCancellation;
 use qaqh_domain::{
     ConversationCommand, DomainEvent, SubagentTerminalKind, SubagentTerminalNotification,
 };
-use qaqh_session::canonical::generate_ulid;
+use qaqh_session::canonical::{generate_ulid, ulid_from_text};
 use qaqh_session::session_fact_v2::{
-    EventId, SessionId, SubagentFinished, SubagentTerminalStatus, ToolCallId,
+    ActorKind, ActorRef, EventId, InputAccepted, InputId, InputKind, InputPurpose, SessionId,
+    SubagentFinished, SubagentTerminalStatus, ToolCallId,
 };
 
 impl Loop {
@@ -50,6 +51,66 @@ impl Loop {
         Ok(())
     }
 
+    fn record_input_accepted(
+        &mut self,
+        input_id: &str,
+        text: &str,
+        purpose: qaqh_domain::ConversationInputPurpose,
+        as_system: bool,
+    ) -> Result<(), String> {
+        // Canonical inline content is capped at 8 KiB. Larger payloads must be
+        // externalized before this boundary; until that producer exists, do
+        // not fabricate a dangling content_ref.
+        if text.len() > 8 * 1024 {
+            log::warn!(
+                "[INPUT] canonical InputAccepted skipped for oversized input {input_id} ({} bytes)",
+                text.len()
+            );
+            return Ok(());
+        }
+        let now = super::state::agent::unix_ms();
+        let ledger = self
+            .session
+            .agent
+            .tool_ledger_mut()
+            .map_err(|error| format!("canonical ledger unavailable for input: {error}"))?;
+        let Some(ledger) = ledger else {
+            return Ok(());
+        };
+        ledger
+            .ensure_lease(now, super::state::agent::tool_ledger_lease_ms())
+            .map_err(|error| format!("canonical ledger lease failed for input: {error}"))?;
+        let payload = InputAccepted {
+            input_id: InputId::new(format!("input_{}", ulid_from_text(input_id))),
+            input_kind: if as_system {
+                InputKind::System
+            } else {
+                InputKind::UserText
+            },
+            input_purpose: match purpose {
+                qaqh_domain::ConversationInputPurpose::TriggerTurn => InputPurpose::TriggerTurn,
+                qaqh_domain::ConversationInputPurpose::QueueOnly => InputPurpose::QueueOnly,
+            },
+            content_ref: None,
+            inline_text: Some(text.to_string()),
+            attachments: vec![],
+            actor: ActorRef {
+                kind: if as_system {
+                    ActorKind::System
+                } else {
+                    ActorKind::User
+                },
+                id: if as_system { "system" } else { "user" }.to_string(),
+                display_name: None,
+            },
+            client_request_id: Some(input_id.to_string()),
+        };
+        ledger
+            .append_input_accepted(EventId::new(generate_ulid()), payload, now)
+            .map_err(|error| format!("canonical input accept append failed: {error}"))?;
+        Ok(())
+    }
+
     pub(super) fn on_conversation(
         &mut self,
         command: ConversationCommand,
@@ -82,6 +143,17 @@ impl Loop {
                 }
                 let input_id = message_id.as_deref().unwrap_or(command_id).to_string();
                 if as_system {
+                    if let Err(error) =
+                        self.record_input_accepted(&input_id, &text, input_purpose, true)
+                    {
+                        self.emit_operation_failed(
+                            command_id,
+                            qaqh_domain::ErrorScope::Conversation,
+                            "input_accept_append_failed",
+                            &error,
+                        );
+                        return;
+                    }
                     // 统一注入入口：时序决策（compact 进行中 / turn 运行
                     // 中 / idle）全部由 inject() 负责；compact 窗口不拒绝
                     // 不丢弃（入 Deferred 队列，compact 完成后开新 turn），
@@ -133,6 +205,17 @@ impl Loop {
                         );
                         self.session.agent.msg.remove_last_step_if_incomplete();
                     }
+                }
+                if let Err(error) =
+                    self.record_input_accepted(&input_id, &text, input_purpose, false)
+                {
+                    self.emit_operation_failed(
+                        command_id,
+                        qaqh_domain::ErrorScope::Conversation,
+                        "input_accept_append_failed",
+                        &error,
+                    );
+                    return;
                 }
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,
