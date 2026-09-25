@@ -13,8 +13,8 @@ use thiserror::Error;
 use crate::session_fact_v2::{
     ContentRef, DriverChanged, EventId, ExecutionId, FactPayload, FactSchema, InteractionExpired,
     InteractionId, InteractionRequested, InteractionResolved, RecoveryRef, SessionFact, SessionId,
-    SessionRecovered, ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics,
-    ToolReplayCapability, ToolTerminalStatus, TurnId,
+    SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 use super::{
@@ -146,6 +146,15 @@ pub enum ToolLedgerError {
 
     #[error("tool call {call_id} reconciliation terminal cannot be backgrounded")]
     ReconciliationTerminalInvalid { call_id: ToolCallId },
+
+    #[error("subagent {child_session_id} already has a conflicting spawn edge")]
+    SubagentSpawnConflict { child_session_id: SessionId },
+
+    #[error("subagent {child_session_id} has no canonical spawn edge")]
+    SubagentSpawnMissing { child_session_id: SessionId },
+
+    #[error("subagent {child_session_id} already has a conflicting finished edge")]
+    SubagentFinishConflict { child_session_id: SessionId },
 }
 
 /// Outcome of a canonical driver-seat claim.
@@ -210,6 +219,8 @@ pub struct ToolLedger {
     entries: HashMap<ToolCallId, ToolLedgerEntry>,
     interaction_requests: HashMap<InteractionId, SessionFact>,
     interaction_terminals: HashMap<InteractionId, SessionFact>,
+    subagent_spawned: HashMap<SessionId, SessionFact>,
+    subagent_finished: HashMap<SessionId, SessionFact>,
     /// Canonical driver seat, rebuilt from `DriverChanged` facts on open.
     driver_holder: Option<String>,
     driver_epoch: u64,
@@ -244,6 +255,8 @@ impl ToolLedger {
         let mut entries = HashMap::new();
         let mut interaction_requests = HashMap::new();
         let mut interaction_terminals = HashMap::new();
+        let mut subagent_spawned = HashMap::new();
+        let mut subagent_finished = HashMap::new();
         let mut driver_holder = None;
         let mut driver_epoch = 0;
         for fact in reader.read_all()? {
@@ -255,6 +268,8 @@ impl ToolLedger {
                 &mut entries,
                 &mut interaction_requests,
                 &mut interaction_terminals,
+                &mut subagent_spawned,
+                &mut subagent_finished,
                 fact,
             )?;
         }
@@ -267,6 +282,8 @@ impl ToolLedger {
             entries,
             interaction_requests,
             interaction_terminals,
+            subagent_spawned,
+            subagent_finished,
             driver_holder,
             driver_epoch,
         })
@@ -928,6 +945,72 @@ impl ToolLedger {
         Ok(outcome.fact)
     }
 
+    /// Durably append the parent edge for a spawned subagent.
+    ///
+    /// Repeating the same edge is idempotent; a conflicting edge for the same
+    /// child is rejected. The envelope `call_id` is the parent tool call.
+    pub fn append_subagent_spawned(
+        &mut self,
+        event_id: EventId,
+        payload: SubagentSpawned,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let child_session_id = payload.child_session_id.clone();
+        if let Some(existing) = self.subagent_spawned.get(&child_session_id) {
+            if subagent_spawned_matches(existing, &payload) {
+                return Ok(existing.clone());
+            }
+            return Err(ToolLedgerError::SubagentSpawnConflict { child_session_id });
+        }
+        let fact = self.build_fact(
+            event_id,
+            None,
+            payload.parent_call_id.clone(),
+            FactPayload::SubagentSpawned(payload),
+            now_ms,
+        );
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        self.subagent_spawned
+            .insert(child_session_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
+    /// Durably close the parent edge for a subagent terminal.
+    ///
+    /// The spawn edge must exist first. Repeating the same terminal is
+    /// idempotent; a conflicting terminal is rejected.
+    pub fn append_subagent_finished(
+        &mut self,
+        event_id: EventId,
+        payload: SubagentFinished,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let child_session_id = payload.child_session_id.clone();
+        let Some(spawned) = self.subagent_spawned.get(&child_session_id) else {
+            return Err(ToolLedgerError::SubagentSpawnMissing { child_session_id });
+        };
+        if !subagent_spawn_matches_finish(spawned, &payload) {
+            return Err(ToolLedgerError::SubagentFinishConflict { child_session_id });
+        }
+        if let Some(existing) = self.subagent_finished.get(&child_session_id) {
+            if subagent_finished_matches(existing, &payload) {
+                return Ok(existing.clone());
+            }
+            return Err(ToolLedgerError::SubagentFinishConflict { child_session_id });
+        }
+        let fact = self.build_fact(
+            event_id,
+            None,
+            payload.parent_call_id.clone(),
+            FactPayload::SubagentFinished(payload),
+            now_ms,
+        );
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        self.subagent_finished
+            .insert(child_session_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
     fn interaction_envelope_context(
         &self,
         interaction_id: &InteractionId,
@@ -997,8 +1080,42 @@ fn index_fact(
     entries: &mut HashMap<ToolCallId, ToolLedgerEntry>,
     interaction_requests: &mut HashMap<InteractionId, SessionFact>,
     interaction_terminals: &mut HashMap<InteractionId, SessionFact>,
+    subagent_spawned: &mut HashMap<SessionId, SessionFact>,
+    subagent_finished: &mut HashMap<SessionId, SessionFact>,
     fact: SessionFact,
 ) -> Result<(), ToolLedgerError> {
+    match &fact.payload {
+        FactPayload::SubagentSpawned(payload) => {
+            let child_session_id = payload.child_session_id.clone();
+            if let Some(existing) = subagent_spawned.get(&child_session_id) {
+                if subagent_spawned_matches(existing, payload) {
+                    return Ok(());
+                }
+                return Err(ToolLedgerError::SubagentSpawnConflict { child_session_id });
+            }
+            subagent_spawned.insert(child_session_id, fact);
+            return Ok(());
+        }
+        FactPayload::SubagentFinished(payload) => {
+            let child_session_id = payload.child_session_id.clone();
+            let Some(spawned) = subagent_spawned.get(&child_session_id) else {
+                return Err(ToolLedgerError::SubagentSpawnMissing { child_session_id });
+            };
+            if !subagent_spawn_matches_finish(spawned, payload) {
+                return Err(ToolLedgerError::SubagentFinishConflict { child_session_id });
+            }
+            if let Some(existing) = subagent_finished.get(&child_session_id) {
+                if subagent_finished_matches(existing, payload) {
+                    return Ok(());
+                }
+                return Err(ToolLedgerError::SubagentFinishConflict { child_session_id });
+            }
+            subagent_finished.insert(child_session_id, fact);
+            return Ok(());
+        }
+        _ => {}
+    }
+
     match &fact.payload {
         FactPayload::ToolIntent(payload) => {
             let entry = entries.entry(payload.call_id.clone()).or_default();
@@ -1072,6 +1189,39 @@ fn index_fact(
         _ => {}
     }
     Ok(())
+}
+
+fn subagent_spawned_matches(existing: &SessionFact, incoming: &SubagentSpawned) -> bool {
+    matches!(
+        &existing.payload,
+        FactPayload::SubagentSpawned(existing)
+            if existing.child_session_id == incoming.child_session_id
+                && existing.parent_call_id == incoming.parent_call_id
+                && existing.parent_agent_path == incoming.parent_agent_path
+                && existing.child_agent_path == incoming.child_agent_path
+                && existing.role == incoming.role
+    )
+}
+
+fn subagent_spawn_matches_finish(existing: &SessionFact, incoming: &SubagentFinished) -> bool {
+    matches!(
+        &existing.payload,
+        FactPayload::SubagentSpawned(existing)
+            if existing.child_session_id == incoming.child_session_id
+                && existing.parent_call_id == incoming.parent_call_id
+    )
+}
+
+fn subagent_finished_matches(existing: &SessionFact, incoming: &SubagentFinished) -> bool {
+    matches!(
+        &existing.payload,
+        FactPayload::SubagentFinished(existing)
+            if existing.child_session_id == incoming.child_session_id
+                && existing.parent_call_id == incoming.parent_call_id
+                && existing.status == incoming.status
+                && existing.result_ref == incoming.result_ref
+                && existing.recovery_ref == incoming.recovery_ref
+    )
 }
 
 fn interaction_resolution_matches(existing: &FactPayload, incoming: &InteractionResolved) -> bool {
