@@ -21,9 +21,12 @@ QAQH runtime
 ```
 
 后端只需要在 `qaqh-gate` 内部增加 bridge，保持
-`qaqh-gate::chat_stream` / `StreamEvent` 对 runtime 的契约不变。不要采用 mutil 自带的
-`Agent` 循环，否则会把 provider SDK 扩散进 agent loop、tool execution 和 canonical
-persistence。
+`qaqh-gate::chat_stream` / `StreamEvent` 对 runtime 的契约不变。
+
+`mutil-ai 0.2.1` 本地最新工作区已经从库公共 API 移除 `Agent`、`AgentBuilder`、
+`AgentReply`、`complete_once`、`Tool`、`ToolRegistry` 和 `tool_fn`。最小 agent loop
+只保留在 `examples/minimal_agent.rs`，不是 SDK 公共能力。注意：远端
+`origin/main`（`70127e2`）仍是 0.1 旧状态，尚未包含这次 0.2.1 工作区变更。
 
 `wsbox` 的价值更高但耦合更深：
 
@@ -47,15 +50,19 @@ qaqh-workspace exec/edit/apply_patch/file_mutate
 ```text
 codegraph init -y /home/qaqtamsy/项目/mutilAI-SDK
 codegraph init -y /home/qaqtamsy/项目/wsbox
+codegraph sync /home/qaqtamsy/项目/mutilAI-SDK
 codegraph sync /home/qaqtamsy/项目/qaqh-backend
 ```
+
+第二次 `mutilAI-SDK sync` 是因为本地 0.2.1 工作区随后移除了库级
+`agent.rs` / `tool.rs`；索引已按最新工作区更新。
 
 结果：
 
 | 项目 | 文件 | 节点 | 边 | 语言 |
 |---|---:|---:|---:|---|
 | `qaqh-backend` | 456 | 12,579 | 50,722 | Rust 为主，含 TS/TSX/YAML 等 |
-| `mutilAI-SDK` | 47 | 1,546 | 5,869 | Rust |
+| `mutilAI-SDK` | 45 | 1,521 | 5,622 | Rust |
 | `wsbox` | 24 | 820 | 2,889 | Rust + YAML |
 
 三个索引均为 CodeGraph 1.6.0、extraction version 25、`complete`，无 pending refs。
@@ -102,7 +109,8 @@ CodeGraph `impact ModelAdapter --depth 3`：
 - `src/lib.rs`
 - streaming / retry / cancellation / endpoint tests
 
-这说明 mutil 自己内部有完整 agent-loop 能力，但后端不需要接管这部分。
+这说明 mutil 0.2.1 的内部核心集中在 provider/adapter/normalization；最小 agent loop
+只在 example 中演示，不应作为后端 runtime 的接入面。
 
 ### 4.2 后端现有 gate 边界
 
@@ -154,8 +162,11 @@ qaqh_types::Message / ToolDef
 
 ### 4.4 mutil 的风险
 
-- 0.2 仍在工作区，尚未提交；API freeze 是“候选”，不是稳定发布。
-- mutil 自带的 `Agent`、tool loop 与后端 runtime 重叠，必须明确禁用。
+- 0.2.1 仍在工作区，尚未提交；API freeze 是“候选”，不是稳定发布。
+- 远端 `origin/main` 仍是 0.1 且导出库级 `Agent`；集成必须明确 pin 本地 0.2.1
+  提交/tag，不能误取远端旧版本。
+- `examples/minimal_agent.rs` 里有私有 `Agent` / `ToolRegistry` 示例，不要把它复制进
+  后端 runtime；后端已有自己的 turn/tool/permission/canonical 生命周期。
 - 当前 gate 是 callback streaming，mutil 是 async `ModelStream`，需要一层 stream adapter。
 - 后端已有 OpenAI Chat / Responses / Anthropic；mutil 额外支持 Gemini，但需要逐协议 parity。
 - 现有后端 tool parser / DSML / XML fallback 不在 mutil 范围内，不能误删。
@@ -315,7 +326,8 @@ journal / code delta
 
 ## 8. 接手注意事项
 
-- 不要把 mutil `Agent` 引进 `qaqh-runtime`；只使用 adapter / normalization / stream。
+- 不要把 mutil `Agent` 引进 `qaqh-runtime`；0.2.1 已从公共 API 移除，只保留 example。
+- 集成前先固定 mutil 0.2.1 的具体 commit/tag；当前远端 `origin/main` 不包含该版本。
 - 不要让 mutil 类型越过 `qaqh-gate` 公开边界。
 - 不要在 parity 测试前删除旧 gate。
 - 不要把 wsbox 只接到 `exec` 后宣称“所有写入可回滚”；当前 edit/apply_patch 路径仍会绕过。
