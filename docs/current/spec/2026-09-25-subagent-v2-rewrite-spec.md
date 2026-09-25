@@ -133,7 +133,10 @@ AgentId = session_id
 - 全局稳定；
 - 可持久化；
 - 不随 loaded/unloaded 改变；
-- 不作为模型首选寻址方式，但保留为 fallback / 审计键。
+- 不作为模型首选寻址方式，但保留为 fallback / 审计键；
+- 必须是 canonical UUIDv7，不能是 8 位 seed；
+- seed 退场前必须满足 `seed == session_id`，迁移设计见
+  [`2026-09-25-session-identity-unification.md`](./2026-09-25-session-identity-unification.md)。
 
 ### 3.2 AgentPath
 
@@ -385,11 +388,12 @@ Phase 0 的 producer 冻结如下：
 
 1. `spawn_subagent` 在父 session 的某个 `ToolIntent.call_id` 下执行；父
    `session_id` 和 `call_id` 是 edge fact 的权威归属。
-2. 工具 handler 只负责向宿主申请 child identity；宿主返回
-   `child_session_id + child_agent_path`，不得在 handler 内另造事实。
-3. runtime 在 child actor 已创建、task 尚未发送前，使用父 session 的
-   `ToolLedger` 写入 `SubagentSpawned`。写入失败必须关闭 child 并让工具失败，
-   不得留下无 canonical edge 的可运行 child。
+2. 工具 handler 只负责向宿主申请 child identity；宿主必须返回 canonical
+   `child_session_id`（UUIDv7）与 `child_agent_path`，不得在 handler 内另造事实。
+   seed 退场前，child 的 `seed` 必须等于 `child_session_id`。
+3. runtime 在 child canonical session 已 materialize、actor 已创建、task
+   尚未发送前，使用父 session 的 `ToolLedger` 写入 `SubagentSpawned`。写入失败
+   必须关闭 child 并让工具失败，不得留下无 canonical edge 的可运行 child。
 4. child 的 `SessionCreated.parent_session_id` 只是便于单 session 恢复的
    denormalized hint；parent-child edge 的权威仍是父 log 的
    `SubagentSpawned/Finished`。
