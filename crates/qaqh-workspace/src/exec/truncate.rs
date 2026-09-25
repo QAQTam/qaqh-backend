@@ -62,7 +62,7 @@ pub(crate) fn token_truncate(text: &str, max_tokens: u32) -> String {
     if head_end >= tail_start {
         let end = find_token_boundary(text, max_tokens);
         format!(
-            "{}\n...[TRUNCATED: {}/{} tokens. Call exec again with narrower argv or a filtering command.]",
+            "{}\n...[TRUNCATED: {}/{} tokens. Call exec again with a narrower command or a filtering pipeline.]",
             text.get(..end).expect("token boundary is a char boundary"),
             max_tokens,
             total
@@ -72,7 +72,7 @@ pub(crate) fn token_truncate(text: &str, max_tokens: u32) -> String {
             .get(tail_start..)
             .expect("token boundary is a char boundary");
         format!(
-            "{}\n\n...[TRUNCATED: {}/{} tokens, {} lines dropped. Call exec again with narrower argv or a filtering command.]\n\n{}",
+            "{}\n\n...[TRUNCATED: {}/{} tokens, {} lines dropped. Call exec again with a narrower command or a filtering pipeline.]\n\n{}",
             text.get(..head_end)
                 .expect("token boundary is a char boundary"),
             max_tokens,

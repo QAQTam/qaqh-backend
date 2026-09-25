@@ -186,12 +186,6 @@ fn short_command(command: &str) -> String {
 }
 
 fn command_from_args(args: &serde_json::Value) -> Option<String> {
-    if let Some(argv) = args.get("argv").and_then(|value| value.as_array()) {
-        let parts: Vec<&str> = argv.iter().filter_map(|value| value.as_str()).collect();
-        if !parts.is_empty() {
-            return Some(parts.join(" "));
-        }
-    }
     let command = args.get("command").and_then(|value| value.as_str())?;
     let mut rendered = String::new();
     if let Some(shell) = args
@@ -282,7 +276,7 @@ mod tests {
 
     #[test]
     fn exec_display_maps_backgrounded_and_timeout_without_fake_exit_code() {
-        let args = serde_json::json!({"argv": ["cargo", "test"]});
+        let args = serde_json::json!({"command": "cargo test"});
         let backgrounded = r#"{"status":"completed","exit_code":null,"output":"","truncated":false,"timed_out":false,"process_id":42}"#;
         let display = project_display(&args, backgrounded);
         assert_eq!(

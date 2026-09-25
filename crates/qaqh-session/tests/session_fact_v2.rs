@@ -53,7 +53,7 @@ mod session_fact_v2 {
         #[test]
         fn all_variants_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             let lines = payload_lines();
-            assert_eq!(lines.len(), 21);
+            assert_eq!(lines.len(), 22);
 
             for line in lines {
                 let expected: Value = serde_json::from_str(line)?;
@@ -97,6 +97,7 @@ mod session_fact_v2 {
                 "workspace_resource_changed",
                 "subagent_spawned",
                 "subagent_finished",
+                "inter_agent_communication",
             ];
 
             let mut actual_kinds = BTreeSet::new();

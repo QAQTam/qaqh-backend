@@ -108,6 +108,7 @@ impl SessionEngine {
         agent.config.context_window = cfg.context_window;
         agent.config.auto_compact_threshold = cfg.auto_compact_threshold;
         agent.config.permission_level = cfg.permission_level;
+        agent.config.exec = cfg.exec;
         // (provider, endpoint) 解析随配置刷新（PR-1-9：engines 只读字段）。
         agent.refresh_endpoint_spec();
         // 图片能力快照随配置刷新（PR-1-10：工具调用路径零磁盘读）。
@@ -135,6 +136,9 @@ mod tests {
             context_window: Some(1_500_000),
             auto_compact_threshold: 0.95,
             permission_level: 3,
+            exec: qaqh_config::config::ExecConfig {
+                default_shell: Some("zsh".into()),
+            },
             ..Default::default()
         };
         let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config {
@@ -165,5 +169,6 @@ mod tests {
         // R1 主角：阈值必须随 reload 同步到运行中会话。
         assert!((agent.config.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(agent.config.permission_level, 3);
+        assert_eq!(agent.config.exec.default_shell.as_deref(), Some("zsh"));
     }
 }

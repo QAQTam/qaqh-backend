@@ -13,6 +13,12 @@ pub const END_OF_FACT: ProjectionIndex = u16::MAX;
 
 const CONVERSATION_TIMELINE: &[ProjectionSlot] =
     &[ProjectionSlot::Conversation, ProjectionSlot::Timeline];
+const CONVERSATION_TIMELINE_MAILBOX: &[ProjectionSlot] = &[
+    ProjectionSlot::Conversation,
+    ProjectionSlot::Timeline,
+    ProjectionSlot::Mailbox,
+];
+const MAILBOX_ONLY: &[ProjectionSlot] = &[ProjectionSlot::Mailbox];
 const CONVERSATION_CONTROL: &[ProjectionSlot] =
     &[ProjectionSlot::Conversation, ProjectionSlot::Control];
 const CONVERSATION_META: &[ProjectionSlot] = &[ProjectionSlot::Conversation, ProjectionSlot::Meta];
@@ -32,7 +38,7 @@ impl ProjectionSlot {
 pub fn projection_slots(payload: &FactPayload) -> &'static [ProjectionSlot] {
     match payload {
         FactPayload::SessionCreated(_) => CONTROL_META,
-        FactPayload::InputAccepted(_) => CONVERSATION_TIMELINE,
+        FactPayload::InputAccepted(_) => CONVERSATION_TIMELINE_MAILBOX,
         FactPayload::TurnStarted(_) => CONVERSATION_CONTROL,
         FactPayload::ModelRoundStarted(_) => CONTROL_ONLY,
         FactPayload::AssistantBlockSealed(_) => CONVERSATION_TIMELINE,
@@ -53,5 +59,6 @@ pub fn projection_slots(payload: &FactPayload) -> &'static [ProjectionSlot] {
         FactPayload::WorkspaceResourceChanged(_) => RESOURCES_ONLY,
         FactPayload::SubagentSpawned(_) => CONTROL_RESOURCES,
         FactPayload::SubagentFinished(_) => CONTROL_RESOURCES,
+        FactPayload::InterAgentCommunication(_) => MAILBOX_ONLY,
     }
 }

@@ -326,6 +326,11 @@ mod tests {
         assert_eq!(model, output.0.to_string());
         assert_eq!(output.summary().as_deref(), Some("process 7: running"));
         let display = output.display(&serde_json::json!({"action": "check", "id": 7}));
-        assert_eq!(display.summary.as_deref(), Some("process 7: running"));
+        assert_eq!(display.summary.as_deref(), Some("ok"));
+        assert_ne!(
+            display.summary.as_deref(),
+            Some("process 7: running"),
+            "process summary must be status metadata, not the body's first line"
+        );
     }
 }

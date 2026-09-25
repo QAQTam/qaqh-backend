@@ -155,7 +155,7 @@ pub enum Admission {
 ///
 /// Approval consumes the challenge, making the grant single-use by type.
 pub struct PermissionChallenge {
-    context: ToolCallContext,
+    context: Box<ToolCallContext>,
     tool_name: String,
     action: String,
     normalized_args: serde_json::Value,
@@ -179,7 +179,7 @@ impl PermissionChallenge {
         consequence: String,
     ) -> Self {
         Self {
-            context,
+            context: Box::new(context),
             tool_name: invocation.tool_name,
             action: invocation.action,
             normalized_args: invocation.args,
@@ -267,7 +267,7 @@ impl PermissionChallenge {
         if self.is_expired(ttl) {
             return Err(ApprovalError::Expired);
         }
-        let context = self.context;
+        let context = *self.context;
         let invocation = ToolInvocation {
             session_id: context.session_id.clone(),
             call_id: context.call_id.clone(),
@@ -316,6 +316,7 @@ fn legacy_tool_call_context(
             SandboxMode::Main
         },
         sandbox_spec: SandboxSpec::workspace_write(workspace_root.to_path_buf()),
+        exec_default_shell: None,
         timeout: Duration::ZERO,
         cancellation,
         progress: None,

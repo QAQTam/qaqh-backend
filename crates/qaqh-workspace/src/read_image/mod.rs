@@ -154,7 +154,10 @@ impl ToolProjection for ReadImageOutput {
     }
 
     fn summary(&self) -> Option<String> {
-        self.model_text.lines().next().map(str::to_string)
+        Some(format!(
+            "{}x{} · {}",
+            self.width, self.height, self.mime_type
+        ))
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
