@@ -9,6 +9,7 @@
 //! A central `index.json` enables fast listing.
 
 use qaqh_types::{Message, SessionMeta};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -19,6 +20,26 @@ use crate::canonical::{CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity};
 use crate::store;
 
 static INSTANCE: OnceLock<Arc<SessionManager>> = OnceLock::new();
+const IDENTITY_MIGRATION_JOURNAL: &str = ".identity-migration.json";
+const LEGACY_IDENTITY_INDEX: &str = ".legacy-session-ids.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IdentityMigration {
+    legacy_seed: String,
+    session_id: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct IdentityMigrationJournal {
+    #[serde(default)]
+    pending: Vec<IdentityMigration>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LegacyIdentityIndex {
+    #[serde(default)]
+    aliases: HashMap<String, String>,
+}
 
 /// 测试专用 seed 候选源（生产恒为 `None`）。见
 /// [`SessionManager::allocate_seed`] 的碰撞回归说明。
@@ -175,6 +196,9 @@ impl SessionManager {
         crate::migrate::run(&mgr.sessions_dir);
         // Workspace 注册表与 session 存储同根（组织语义，与运行环境 workspace 解耦）。
         crate::grouping::WorkspaceStore::init(data_dir);
+        if let Err(error) = mgr.migrate_legacy_session_dirs() {
+            log::error!("[MIGRATE] session identity migration failed: {error}");
+        }
         INSTANCE
             .set(Arc::new(mgr))
             .expect("SessionManager already initialized");
@@ -1262,6 +1286,347 @@ impl SessionManager {
     /// Clear the active session marker.
     pub fn clear_active(&self) {
         let _ = std::fs::remove_file(&self.active_path);
+    }
+
+    // ── Session identity migration ──
+
+    /// Resolve a legacy directory seed to its canonical identity.
+    ///
+    /// This is the read-only compatibility boundary: it never creates an
+    /// identity and never enters new canonical facts.
+    pub fn canonical_identity_for_seed(
+        &self,
+        seed: &str,
+    ) -> Result<Option<CanonicalSessionIdentity>, String> {
+        let dir = self.session_path_dir(seed);
+        if dir.is_dir() && dir.join(CANONICAL_IDENTITY_FILE).exists() {
+            return CanonicalSessionIdentity::open(&dir)
+                .map(Some)
+                .map_err(|error| format!("read canonical identity at {}: {error}", dir.display()));
+        }
+
+        let index = self.read_legacy_identity_index()?;
+        let Some(session_id) = index.aliases.get(seed) else {
+            return Ok(None);
+        };
+        let target = self.session_path_dir(session_id);
+        if !target.is_dir() || !target.join(CANONICAL_IDENTITY_FILE).exists() {
+            return Err(format!(
+                "legacy seed {seed} maps to missing canonical session {session_id}"
+            ));
+        }
+        let identity = CanonicalSessionIdentity::open(&target)
+            .map_err(|error| format!("read canonical identity at {}: {error}", target.display()))?;
+        if identity.session_id.as_str() != session_id {
+            return Err(format!(
+                "legacy seed {seed} maps to {session_id}, but {} contains {}",
+                target.display(),
+                identity.session_id
+            ));
+        }
+        Ok(Some(identity))
+    }
+
+    /// Recover pending migrations and rename every legacy session directory to
+    /// `sessions/{session_id}`.
+    ///
+    /// The journal is written before rename. A crash at any point is resumed by
+    /// the next startup: either the rename is replayed, or a completed rename is
+    /// followed by meta/index/active/workspace repair.
+    pub fn migrate_legacy_session_dirs(&self) -> Result<usize, String> {
+        let mut migrated = self.recover_identity_migration_journal()?;
+        let mut first_error: Option<String> = None;
+        fn record_error(first_error: &mut Option<String>, error: String) {
+            log::error!("[MIGRATE] {error}");
+            if first_error.is_none() {
+                *first_error = Some(error);
+            }
+        }
+
+        let entries = match std::fs::read_dir(&self.sessions_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(migrated),
+            Err(error) => {
+                return Err(format!(
+                    "read sessions dir {}: {error}",
+                    self.sessions_dir.display()
+                ));
+            }
+        };
+
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read session dir entry: {error}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("read session dir type: {error}"))?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if !path.join(CANONICAL_IDENTITY_FILE).exists() {
+                continue;
+            }
+            let Some(legacy_seed) = path.file_name().and_then(|name| name.to_str()) else {
+                log::warn!(
+                    "[MIGRATE] skipping non-UTF-8 session directory {}",
+                    path.display()
+                );
+                continue;
+            };
+            if legacy_seed.starts_with('.') {
+                continue;
+            }
+            let identity = match CanonicalSessionIdentity::open(&path) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    record_error(
+                        &mut first_error,
+                        format!("read canonical identity at {}: {error}", path.display()),
+                    );
+                    continue;
+                }
+            };
+            let session_id = identity.session_id.as_str();
+            if legacy_seed == session_id {
+                continue;
+            }
+            let target = self.session_path_dir(session_id);
+            if target.exists() {
+                record_error(
+                    &mut first_error,
+                    format!(
+                        "identity migration conflict: both {} and {} exist",
+                        path.display(),
+                        target.display()
+                    ),
+                );
+                continue;
+            }
+            if let Err(error) = self.enqueue_identity_migration(legacy_seed, session_id) {
+                record_error(&mut first_error, error);
+                continue;
+            }
+            if let Err(error) = self.apply_identity_migration(legacy_seed, session_id) {
+                record_error(&mut first_error, error);
+                continue;
+            }
+            if let Err(error) = self.remove_identity_migration(legacy_seed, session_id) {
+                record_error(&mut first_error, error);
+                continue;
+            }
+            migrated += 1;
+            log::info!("[MIGRATE] renamed legacy session directory {legacy_seed} -> {session_id}");
+        }
+
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(migrated)
+        }
+    }
+
+    fn recover_identity_migration_journal(&self) -> Result<usize, String> {
+        let journal = self.read_identity_migration_journal()?;
+        let mut recovered = 0usize;
+        for pending in journal.pending.clone() {
+            let legacy_dir = self.session_path_dir(&pending.legacy_seed);
+            let target_dir = self.session_path_dir(&pending.session_id);
+            if !legacy_dir.is_dir() && !target_dir.is_dir() {
+                return Err(format!(
+                    "identity migration journal entry has no source or target: {} -> {}",
+                    pending.legacy_seed, pending.session_id
+                ));
+            }
+            self.apply_identity_migration(&pending.legacy_seed, &pending.session_id)?;
+            self.remove_identity_migration(&pending.legacy_seed, &pending.session_id)?;
+            recovered += 1;
+            log::info!(
+                "[MIGRATE] recovered session identity migration {} -> {}",
+                pending.legacy_seed,
+                pending.session_id
+            );
+        }
+        Ok(recovered)
+    }
+
+    fn apply_identity_migration(&self, legacy_seed: &str, session_id: &str) -> Result<(), String> {
+        let legacy_dir = self.session_path_dir(legacy_seed);
+        let target_dir = self.session_path_dir(session_id);
+
+        if legacy_dir.is_dir() {
+            if target_dir.exists() {
+                return Err(format!(
+                    "identity migration conflict: both {} and {} exist",
+                    legacy_dir.display(),
+                    target_dir.display()
+                ));
+            }
+            std::fs::rename(&legacy_dir, &target_dir).map_err(|error| {
+                format!(
+                    "rename legacy session {} -> {} failed: {error}",
+                    legacy_dir.display(),
+                    target_dir.display()
+                )
+            })?;
+            self.sync_sessions_dir()?;
+        }
+
+        if !target_dir.is_dir() {
+            return Err(format!(
+                "identity migration target missing: {}",
+                target_dir.display()
+            ));
+        }
+        let identity = CanonicalSessionIdentity::open(&target_dir)
+            .map_err(|error| format!("read migrated identity: {error}"))?;
+        if identity.session_id.as_str() != session_id {
+            return Err(format!(
+                "identity migration target {} contains session_id {}, expected {session_id}",
+                target_dir.display(),
+                identity.session_id
+            ));
+        }
+
+        let mut meta = store::read_meta(&target_dir).ok_or_else(|| {
+            format!(
+                "identity migration target has no readable meta.json: {}",
+                target_dir.display()
+            )
+        })?;
+        meta.seed = session_id.to_string();
+        store::write_meta(&target_dir, &meta)?;
+        store::remove_from_index(&self.sessions_dir, legacy_seed);
+        store::upsert_index(&self.sessions_dir, &meta);
+        if self.active_seed().as_deref() == Some(legacy_seed) {
+            std::fs::write(&self.active_path, session_id)
+                .map_err(|error| format!("update active session marker: {error}"))?;
+        }
+        if let Some(workspaces) = crate::grouping::WorkspaceStore::try_global() {
+            workspaces.rename_session(legacy_seed, session_id)?;
+        }
+        self.set_legacy_identity_alias(legacy_seed, session_id)?;
+        Ok(())
+    }
+
+    fn enqueue_identity_migration(
+        &self,
+        legacy_seed: &str,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let mut journal = self.read_identity_migration_journal()?;
+        if let Some(existing) = journal
+            .pending
+            .iter()
+            .find(|entry| entry.legacy_seed == legacy_seed)
+        {
+            if existing.session_id != session_id {
+                return Err(format!(
+                    "identity migration journal conflict for {legacy_seed}: {} vs {session_id}",
+                    existing.session_id
+                ));
+            }
+            return Ok(());
+        }
+        journal.pending.push(IdentityMigration {
+            legacy_seed: legacy_seed.to_string(),
+            session_id: session_id.to_string(),
+        });
+        self.write_identity_migration_journal(&journal)
+    }
+
+    fn remove_identity_migration(&self, legacy_seed: &str, session_id: &str) -> Result<(), String> {
+        let mut journal = self.read_identity_migration_journal()?;
+        journal
+            .pending
+            .retain(|entry| !(entry.legacy_seed == legacy_seed && entry.session_id == session_id));
+        self.write_identity_migration_journal(&journal)
+    }
+
+    fn read_identity_migration_journal(&self) -> Result<IdentityMigrationJournal, String> {
+        let path = self.sessions_dir.join(IDENTITY_MIGRATION_JOURNAL);
+        match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parse {}: {error}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(IdentityMigrationJournal::default())
+            }
+            Err(error) => Err(format!("read {}: {error}", path.display())),
+        }
+    }
+
+    fn write_identity_migration_journal(
+        &self,
+        journal: &IdentityMigrationJournal,
+    ) -> Result<(), String> {
+        let path = self.sessions_dir.join(IDENTITY_MIGRATION_JOURNAL);
+        if journal.pending.is_empty() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("remove {}: {error}", path.display())),
+            }
+            return self.sync_sessions_dir();
+        }
+
+        let tmp = self
+            .sessions_dir
+            .join(format!("{IDENTITY_MIGRATION_JOURNAL}.tmp"));
+        let bytes = serde_json::to_vec_pretty(journal)
+            .map_err(|error| format!("serialize identity migration journal: {error}"))?;
+        std::fs::write(&tmp, bytes).map_err(|error| format!("write {}: {error}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|error| format!("rename {} -> {}: {error}", tmp.display(), path.display()))?;
+        self.sync_sessions_dir()
+    }
+
+    fn read_legacy_identity_index(&self) -> Result<LegacyIdentityIndex, String> {
+        let path = self.sessions_dir.join(LEGACY_IDENTITY_INDEX);
+        match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parse {}: {error}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(LegacyIdentityIndex::default())
+            }
+            Err(error) => Err(format!("read {}: {error}", path.display())),
+        }
+    }
+
+    fn set_legacy_identity_alias(&self, legacy_seed: &str, session_id: &str) -> Result<(), String> {
+        let mut index = self.read_legacy_identity_index()?;
+        if let Some(existing) = index.aliases.get(legacy_seed) {
+            if existing != session_id {
+                return Err(format!(
+                    "legacy identity alias conflict for {legacy_seed}: {existing} vs {session_id}"
+                ));
+            }
+            return Ok(());
+        }
+        index
+            .aliases
+            .insert(legacy_seed.to_string(), session_id.to_string());
+
+        let path = self.sessions_dir.join(LEGACY_IDENTITY_INDEX);
+        let tmp = self
+            .sessions_dir
+            .join(format!("{LEGACY_IDENTITY_INDEX}.tmp"));
+        let bytes = serde_json::to_vec_pretty(&index)
+            .map_err(|error| format!("serialize legacy identity index: {error}"))?;
+        std::fs::write(&tmp, bytes).map_err(|error| format!("write {}: {error}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|error| format!("rename {} -> {}: {error}", tmp.display(), path.display()))?;
+        self.sync_sessions_dir()
+    }
+
+    #[cfg(unix)]
+    fn sync_sessions_dir(&self) -> Result<(), String> {
+        std::fs::File::open(&self.sessions_dir)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|error| format!("sync sessions dir: {error}"))
+    }
+
+    #[cfg(not(unix))]
+    fn sync_sessions_dir(&self) -> Result<(), String> {
+        Ok(())
     }
 
     // ── Helpers ──
@@ -2545,6 +2910,155 @@ mod seed_collision_tests {
             CanonicalSessionIdentity::open(manager.session_path_dir(session_id))
                 .expect("read child identity"),
             identity
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    fn write_legacy_identity_session(
+        manager: &SessionManager,
+        legacy_seed: &str,
+    ) -> CanonicalSessionIdentity {
+        let dir = manager.session_path_dir(legacy_seed);
+        std::fs::create_dir_all(&dir).expect("create legacy session dir");
+        let identity = CanonicalSessionIdentity::new();
+        CanonicalSessionIdentity::install(&dir, &identity).expect("install legacy identity");
+        let meta = SessionMeta {
+            seed: legacy_seed.to_string(),
+            created_at: 1,
+            updated_at: 1,
+            ..Default::default()
+        };
+        store::write_meta(&dir, &meta).expect("write legacy meta");
+        store::append_messages(&dir, &[]).expect("write legacy messages");
+        store::upsert_index(&manager.sessions_dir, &meta);
+        identity
+    }
+
+    #[test]
+    fn legacy_session_directory_migrates_to_canonical_id_and_is_idempotent() {
+        let (root, manager) = manager();
+        let legacy_seed = "deadbeef";
+        let identity = write_legacy_identity_session(&manager, legacy_seed);
+        manager.set_active_seed(legacy_seed);
+
+        assert_eq!(
+            manager
+                .migrate_legacy_session_dirs()
+                .expect("migrate legacy session"),
+            1
+        );
+        let session_id = identity.session_id.as_str().to_string();
+        let target = manager.session_path_dir(&session_id);
+
+        assert!(!manager.session_path_dir(legacy_seed).exists());
+        assert!(target.is_dir());
+        assert_eq!(
+            manager
+                .canonical_identity_for_seed(legacy_seed)
+                .expect("resolve legacy seed"),
+            Some(identity)
+        );
+        assert_eq!(
+            manager
+                .load_meta(&session_id)
+                .expect("load migrated meta")
+                .seed,
+            session_id
+        );
+        assert_eq!(manager.active_seed().as_deref(), Some(session_id.as_str()));
+        let indexed = store::read_index(&manager.sessions_dir);
+        assert!(indexed.iter().any(|entry| entry.seed == session_id));
+        assert!(indexed.iter().all(|entry| entry.seed != legacy_seed));
+
+        assert_eq!(
+            manager
+                .migrate_legacy_session_dirs()
+                .expect("second migration"),
+            0,
+            "migration must be idempotent"
+        );
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn interrupted_identity_migration_recovers_after_rename() {
+        let (root, manager) = manager();
+        let legacy_seed = "cafebabe";
+        let identity = CanonicalSessionIdentity::new();
+        let session_id = identity.session_id.as_str().to_string();
+        let target = manager.session_path_dir(&session_id);
+        std::fs::create_dir_all(&target).expect("create target dir");
+        CanonicalSessionIdentity::install(&target, &identity).expect("install identity");
+        store::write_meta(
+            &target,
+            &SessionMeta {
+                seed: legacy_seed.to_string(),
+                created_at: 1,
+                updated_at: 1,
+                ..Default::default()
+            },
+        )
+        .expect("write pre-repair meta");
+        manager
+            .enqueue_identity_migration(legacy_seed, &session_id)
+            .expect("write migration journal");
+
+        assert_eq!(
+            manager
+                .migrate_legacy_session_dirs()
+                .expect("recover interrupted migration"),
+            1
+        );
+        assert_eq!(
+            manager
+                .load_meta(&session_id)
+                .expect("load repaired meta")
+                .seed,
+            session_id
+        );
+        assert_eq!(
+            manager
+                .canonical_identity_for_seed(legacy_seed)
+                .expect("resolve recovered alias"),
+            Some(identity)
+        );
+        assert!(
+            manager
+                .read_identity_migration_journal()
+                .expect("read journal")
+                .pending
+                .is_empty()
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn migration_continues_after_conflicting_legacy_directory() {
+        let (root, manager) = manager();
+        let good = write_legacy_identity_session(&manager, "feedface");
+
+        let conflict = CanonicalSessionIdentity::new();
+        let conflict_seed = "badc0ffe";
+        let conflict_legacy = manager.session_path_dir(conflict_seed);
+        std::fs::create_dir_all(&conflict_legacy).expect("create conflicting legacy dir");
+        CanonicalSessionIdentity::install(&conflict_legacy, &conflict)
+            .expect("install conflicting identity");
+        std::fs::create_dir_all(manager.session_path_dir(conflict.session_id.as_str()))
+            .expect("create conflicting target dir");
+
+        let error = manager
+            .migrate_legacy_session_dirs()
+            .expect_err("conflicting legacy session must be reported");
+        assert!(error.contains("conflict"), "unexpected error: {error}");
+        assert!(
+            manager.session_path_dir(good.session_id.as_str()).is_dir(),
+            "a conflict must not block unrelated migrations"
+        );
+        assert!(
+            conflict_legacy.is_dir(),
+            "conflicting legacy directory must remain untouched"
         );
 
         std::fs::remove_dir_all(root).expect("remove test directory");

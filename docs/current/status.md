@@ -97,7 +97,9 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - #369/#371 的修复已随 #384/#385/#386 合并；#382 身份设计已合并。
   - canonical identity 预分配基础切片已实现：普通会话和子代理生产创建路径先分配
     `SessionId`，再以同一值作为 `seed`、目录名和 canonical id。
-  - 仍待：旧目录 resolver/迁移、wire/runtime 字段改名、TUI/WinUI 假设清理，
-    以及删除剩余 `generate_seed()` 兼容路径。
+  - 旧目录 resolver 与启动时原子迁移已实现：迁移 journal 可恢复，
+    `legacy_seed -> session_id` alias 保留只读兼容窗口。
+  - 仍待：wire/runtime 字段改名、TUI/WinUI 假设清理，以及删除剩余
+    `generate_seed()` 兼容路径。
 - 权威迁移设计：
   [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
