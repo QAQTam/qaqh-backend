@@ -7,6 +7,8 @@
 pub use qaqh_types::UsageInfo;
 use serde::{Deserialize, Serialize};
 
+use super::agent::AgentPath;
+
 pub const SESSION_FACT_SCHEMA: &str = "qaqh.session-fact/v2";
 pub const SESSION_FACT_SCHEMA_NAME: &str = "qaqh.session-fact";
 pub const SESSION_FACT_SCHEMA_VERSION: u16 = 2;
@@ -416,6 +418,10 @@ pub struct WorkspaceResourceChanged {
 pub struct SubagentSpawned {
     pub child_session_id: SessionId,
     pub parent_call_id: ToolCallId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_path: Option<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_agent_path: Option<AgentPath>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub spawned_at_ms: i64,
