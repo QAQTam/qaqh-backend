@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, OnceLock};
@@ -14,7 +14,9 @@ use qaqh_session::canonical::{
     EVENTS_FILE,
 };
 use qaqh_session::projection::AgentGraphSnapshot;
-use qaqh_session::session_fact_v2::{AgentMetadata, AgentPath, FactPayload, SessionId};
+use qaqh_session::session_fact_v2::{
+    AgentMetadata, AgentPath, FactPayload, SessionId, SubagentSpawnConfig,
+};
 
 use crate::agent::SubagentSpawnSpec;
 use crate::agent_catalog::AgentCatalog;
@@ -286,6 +288,17 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     pub(crate) ephemeral: bool,
 }
 
+pub(crate) struct CollectorArmSpec {
+    pub(crate) child_session_id: String,
+    pub(crate) name: String,
+    pub(crate) parent_session_id: String,
+    pub(crate) parent_call_id: String,
+    pub(crate) timeout_secs: u64,
+    pub(crate) root_session_id: String,
+    pub(crate) parent_agent_path: String,
+    pub(crate) child_agent_path: String,
+}
+
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     activity: SessionActivityTracker,
@@ -304,6 +317,8 @@ pub struct AgentRegistry {
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
+    /// Child result collectors currently armed for a running/reloaded turn.
+    armed_collectors: HashSet<String>,
 }
 
 impl AgentRegistry {
@@ -319,6 +334,7 @@ impl AgentRegistry {
             agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
+            armed_collectors: HashSet::new(),
         }
     }
 
@@ -959,13 +975,181 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Materialize the delivery target without turning a logical child into a
+    /// root session. Roots use the ordinary get-or-spawn path; children reload
+    /// only through a loaded immediate parent and reuse the durable spawn
+    /// config recorded in the parent's canonical `SubagentSpawned` fact.
+    fn ensure_loaded_for_command(&mut self, seed: &str) -> Result<(), String> {
+        if self.instances.contains_key(seed) {
+            return Ok(());
+        }
+        let Some(metadata) = self.agent_catalog.get_by_id(seed).cloned() else {
+            return self.get_or_spawn(seed);
+        };
+        if metadata.agent_path.is_root() {
+            return self.get_or_spawn(seed);
+        }
+        let parent_path = metadata
+            .parent_agent_path
+            .as_ref()
+            .ok_or_else(|| format!("child agent {seed} has no parent path"))?;
+        let parent = self
+            .agent_catalog
+            .get_by_path(metadata.root_session_id.as_str(), parent_path)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "child agent {seed} parent metadata missing at {parent_path} in root {}",
+                    metadata.root_session_id
+                )
+            })?;
+        if !self.instances.contains_key(parent.agent_id.as_str()) {
+            return Err(format!(
+                "child agent {seed} cannot reload: immediate parent {} is unloaded",
+                parent.agent_path
+            ));
+        }
+        let (config, _) = self.subagent_spawn_config(parent.agent_id.as_str(), seed)?;
+        self.reload_subagent_internal(seed, parent.agent_id.as_str(), config)
+    }
+
+    pub(crate) fn subagent_spawn_config(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<(SubagentSpawnConfig, String), String> {
+        let parent_dir = self.sessions.session_path_dir(parent_id);
+        let identity = CanonicalSessionIdentity::open(&parent_dir)
+            .map_err(|error| format!("open parent canonical identity for {parent_id}: {error}"))?;
+        let reader = CommittedFactReader::open(
+            &parent_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .map_err(|error| format!("open parent canonical facts for {parent_id}: {error}"))?;
+        let child_id = SessionId::new(child_id);
+        reader
+            .read_all()
+            .map_err(|error| format!("read parent canonical facts for {parent_id}: {error}"))?
+            .into_iter()
+            .rev()
+            .find_map(|fact| match fact.payload {
+                FactPayload::SubagentSpawned(payload) if payload.child_session_id == child_id => {
+                    payload
+                        .spawn_config
+                        .map(|config| (config, payload.parent_call_id.as_str().to_string()))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "child agent {child_id} has no canonical spawn config in parent {parent_id}"
+                )
+            })
+    }
+
+    pub(crate) fn prepare_collector_arm(
+        &mut self,
+        child_id: &str,
+    ) -> Result<Option<CollectorArmSpec>, String> {
+        if self.armed_collectors.contains(child_id) {
+            return Ok(None);
+        }
+        let child = self
+            .agent_catalog
+            .get_by_id(child_id)
+            .cloned()
+            .ok_or_else(|| format!("child agent metadata missing for {child_id}"))?;
+        if child.agent_path.is_root() {
+            return Ok(None);
+        }
+        let parent_path = child
+            .parent_agent_path
+            .as_ref()
+            .ok_or_else(|| format!("child agent {child_id} has no parent path"))?;
+        let parent = self
+            .agent_catalog
+            .get_by_path(child.root_session_id.as_str(), parent_path)
+            .cloned()
+            .ok_or_else(|| format!("child agent {child_id} parent metadata missing"))?;
+        if !self.instances.contains_key(parent.agent_id.as_str()) {
+            return Err(format!(
+                "child agent {child_id} collector cannot arm: parent {} is unloaded",
+                parent.agent_path
+            ));
+        }
+        let (config, parent_call_id) =
+            self.subagent_spawn_config(parent.agent_id.as_str(), child_id)?;
+        self.armed_collectors.insert(child_id.to_string());
+        Ok(Some(CollectorArmSpec {
+            child_session_id: child.agent_id.as_str().to_string(),
+            name: child.role.clone().unwrap_or_else(|| {
+                child
+                    .agent_path
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("subagent")
+                    .to_string()
+            }),
+            parent_session_id: parent.agent_id.as_str().to_string(),
+            parent_call_id,
+            timeout_secs: config.timeout_secs,
+            root_session_id: child.root_session_id.as_str().to_string(),
+            parent_agent_path: parent.agent_path.as_str().to_string(),
+            child_agent_path: child.agent_path.as_str().to_string(),
+        }))
+    }
+
+    pub(crate) fn mark_collector_armed(&mut self, child_id: &str) {
+        self.armed_collectors.insert(child_id.to_string());
+    }
+
+    pub(crate) fn unmark_collector_armed(&mut self, child_id: &str) {
+        self.armed_collectors.remove(child_id);
+    }
+
+    fn reload_subagent_internal(
+        &mut self,
+        seed: &str,
+        parent_id: &str,
+        config: SubagentSpawnConfig,
+    ) -> Result<(), String> {
+        if self.instances.contains_key(seed) {
+            return Ok(());
+        }
+        if !config.ephemeral {
+            self.sessions.set_ephemeral(seed, false);
+        }
+        let parent_cancel = self.cancel_for_seed(parent_id);
+        self.spawn_subagent_inprocess(
+            seed,
+            SubagentSpawnSpec {
+                tools: config.tools,
+                model: config.model,
+                base_url: config.base_url,
+                max_tokens: config.max_tokens,
+                ephemeral: config.ephemeral,
+            },
+            parent_cancel,
+        )?;
+        if let Err(error) = self.link_subagent(parent_id, seed) {
+            self.close(seed);
+            return Err(format!(
+                "reload child {seed} failed to restore parent edge: {error}"
+            ));
+        }
+        log::info!("[registry] reloaded child agent {seed} through loaded parent {parent_id}");
+        Ok(())
+    }
+
     /// 发送 Ringing worker 命令帧（携带 `wire` 判别字段；worker reader 按 wire 解析）。
     pub fn send_ringing(
         &mut self,
         seed: &str,
         env: &qaqh_ringing::RingingWorkerCommandEnvelope,
     ) -> Result<(), String> {
-        self.get_or_spawn(seed)?;
+        self.ensure_loaded_for_command(seed)?;
         let write = |instance: &AgentInstance| -> Result<(), String> {
             match &instance.transport {
                 AgentTransport::InProcess { cmd_tx, cancel } => {
@@ -1009,16 +1193,18 @@ impl AgentRegistry {
             .get(seed)
             .map(AgentInstance::kind_name)
             .unwrap_or(AgentKind::Session);
-        let parent_cancel = self
-            .supervisor
-            .parent_of(seed)
+        let parent = self.supervisor.parent_of(seed);
+        let parent_cancel = parent
             .as_ref()
             .and_then(|parent| self.cancel_for_seed(parent));
         self.close(seed);
         match kind {
             AgentKind::Session => self.get_or_spawn(seed)?,
             AgentKind::Subagent(spec) => {
-                self.spawn_subagent_inprocess(seed, spec, parent_cancel)?
+                self.spawn_subagent_inprocess(seed, spec, parent_cancel)?;
+                if let Some(parent) = parent {
+                    self.link_subagent(&parent, seed)?;
+                }
             }
         }
         write(self.instances.get(seed).expect("respawned instance"))
@@ -1102,12 +1288,14 @@ impl AgentRegistry {
             let parent = self.supervisor.parent_of(&child);
             self.finish_for_unload(&child, parent.as_deref());
             self.supervisor.unlink(&child);
+            self.armed_collectors.remove(&child);
         }
 
         let parent = self.supervisor.parent_of(seed);
         self.finish_for_unload(seed, parent.as_deref());
         self.supervisor.unlink(seed);
         self.supervisor.parent_unload_ack(seed);
+        self.armed_collectors.remove(seed);
     }
 
     /// Signal, observe terminal, then join one worker. For a child, the parent
@@ -1935,6 +2123,7 @@ mod tests {
             agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
+            armed_collectors: HashSet::new(),
         };
         let connection_id = ConnectionId::new("connection-registry");
 
@@ -2037,6 +2226,7 @@ mod tests {
             agent_catalog: AgentCatalog::default(),
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
+            armed_collectors: HashSet::new(),
         };
         registry
             .link_subagent("parent-seed", "child-seed")

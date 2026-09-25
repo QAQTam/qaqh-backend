@@ -403,6 +403,41 @@ impl FactPayload {
                         });
                     }
                 }
+                if let Some(config) = &payload.spawn_config {
+                    if config.tools.len() > 256 {
+                        return Err(ValidationError::InvalidField {
+                            field: "spawn_config.tools",
+                            message: "must contain at most 256 tools".to_owned(),
+                        });
+                    }
+                    for tool in &config.tools {
+                        if tool.is_empty() {
+                            return Err(ValidationError::InvalidField {
+                                field: "spawn_config.tools",
+                                message: "tool names must not be empty".to_owned(),
+                            });
+                        }
+                        validate_byte_limit("spawn_config.tools", tool, 256)?;
+                    }
+                    if let Some(model) = &config.model {
+                        validate_byte_limit("spawn_config.model", model, 4 * 1024)?;
+                    }
+                    if let Some(base_url) = &config.base_url {
+                        validate_byte_limit("spawn_config.base_url", base_url, 4 * 1024)?;
+                    }
+                    if config.max_tokens == Some(0) {
+                        return Err(ValidationError::InvalidField {
+                            field: "spawn_config.max_tokens",
+                            message: "must be greater than zero".to_owned(),
+                        });
+                    }
+                    if !(1..=3600).contains(&config.timeout_secs) {
+                        return Err(ValidationError::InvalidField {
+                            field: "spawn_config.timeout_secs",
+                            message: "must be between 1 and 3600".to_owned(),
+                        });
+                    }
+                }
             }
             Self::SubagentFinished(payload) => {
                 validate_uuid_v7("child_session_id", payload.child_session_id.as_str())?;

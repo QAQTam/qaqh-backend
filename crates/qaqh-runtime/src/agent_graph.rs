@@ -165,6 +165,7 @@ mod tests {
                             AgentPath::parse_absolute("/root/review").expect("child path"),
                         ),
                         role: Some("review".to_string()),
+                        spawn_config: None,
                         spawned_at_ms: NOW_MS,
                     }),
                 ),

@@ -125,6 +125,19 @@ pub struct InterruptedAgent {
     pub previous_status: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ArmSubagentCollectorRequest<'a> {
+    pub seed: &'a str,
+    pub child_session_id: &'a str,
+    pub name: &'a str,
+    pub parent_session_id: &'a str,
+    pub parent_call_id: &'a str,
+    pub timeout_secs: u64,
+    pub root_session_id: &'a str,
+    pub parent_agent_path: &'a str,
+    pub child_agent_path: &'a str,
+}
+
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker
 /// 线程的 std 线程模型匹配），由 qaqh-runtime 的 `QaqhService` 提供实现。
 pub trait SubagentHost: Send + Sync {
