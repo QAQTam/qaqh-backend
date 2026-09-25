@@ -14,7 +14,7 @@ use qaqh_ringing::{
 };
 use qaqh_session::canonical::{
     CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
-    EVENTS_FILE,
+    EVENTS_FILE, generate_ulid,
 };
 use qaqh_session::projection::{
     ControlDriverState, ControlInteractionState, Projection, ProjectionSet, ProjectionSetSnapshot,
@@ -23,6 +23,7 @@ use qaqh_session::projection::{
 };
 use qaqh_session::session_fact_v2::{
     Delivery, LogId, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
+    TeamAgentResidency, TeamDelta,
 };
 use tokio::sync::broadcast;
 
@@ -80,6 +81,9 @@ struct V2Session {
 struct V2SessionState {
     last_fact_seq: u64,
     projections: ProjectionSet,
+    /// Daemon-local residency overlays keyed by agent id. These deliberately do
+    /// not persist across process restart: no worker survives the daemon.
+    runtime_residency: HashMap<SessionId, TeamAgentResidency>,
     replaceables: BTreeMap<String, ProjectionEvent>,
     live_tx: broadcast::Sender<V2Envelope>,
 }
@@ -194,6 +198,41 @@ impl V2ProjectionHub {
             .lock()
             .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
         Ok(state.projections.control.snapshot().driver)
+    }
+
+    /// Overlay daemon-local worker residency for one logical agent.
+    ///
+    /// The overlay is intentionally ephemeral: `loaded` is never written to
+    /// the canonical log, so restart/bootstrap rebuilds as `unloaded` until a
+    /// worker is actually resident again. A changed overlay is broadcast as a
+    /// Team `AgentResidencyChanged` delta.
+    pub fn set_team_residency(
+        &self,
+        session_dir: impl AsRef<Path>,
+        seed: &str,
+        agent_id: &SessionId,
+        residency: TeamAgentResidency,
+    ) -> Result<(), V2HubError> {
+        let session_dir = session_dir.as_ref();
+        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
+        let session = self.session_for(session_dir, session_id, log_id)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        state.runtime_residency.insert(agent_id.clone(), residency);
+        let Some(delta) = state
+            .projections
+            .team
+            .apply_runtime_residency(agent_id, residency)
+        else {
+            return Ok(());
+        };
+        let last_fact_seq = state.last_fact_seq;
+        if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
+            let _ = state.live_tx.send(envelope);
+        }
+        Ok(())
     }
 
     /// Open a per-seed single stream.
@@ -349,6 +388,21 @@ impl ProjectionSink for V2ProjectionHub {
             let _ = state.projections.apply(fact);
             state.last_fact_seq = fact.fact_seq;
         }
+        let overlays: Vec<_> = state
+            .runtime_residency
+            .iter()
+            .map(|(agent_id, residency)| (agent_id.clone(), *residency))
+            .collect();
+        let mut overlay_deltas = Vec::new();
+        for (agent_id, residency) in overlays {
+            if let Some(delta) = state
+                .projections
+                .team
+                .apply_runtime_residency(&agent_id, residency)
+            {
+                overlay_deltas.push(delta);
+            }
+        }
         for event in events {
             if matches!(event.delivery, Delivery::Replaceable { .. })
                 && let Some(identity) = replaceable_identity(&event.payload)
@@ -359,6 +413,13 @@ impl ProjectionSink for V2ProjectionHub {
                 continue;
             };
             let _ = state.live_tx.send(envelope);
+        }
+        for delta in overlay_deltas {
+            if let Some(envelope) =
+                ephemeral_team_envelope(&self.epoch, seed, state.last_fact_seq, delta)
+            {
+                let _ = state.live_tx.send(envelope);
+            }
         }
     }
 }
@@ -444,6 +505,7 @@ fn load_session_state(
     Ok(V2SessionState {
         last_fact_seq,
         projections,
+        runtime_residency: HashMap::new(),
         replaceables,
         live_tx,
     })
@@ -483,6 +545,26 @@ fn replay_after(
         }
     }
     Ok(replay)
+}
+
+fn ephemeral_team_envelope(
+    server_epoch: &str,
+    seed: &str,
+    last_fact_seq: u64,
+    delta: TeamDelta,
+) -> Option<V2Envelope> {
+    let event = ProjectionEvent {
+        event_id: qaqh_session::session_fact_v2::EventId::new(generate_ulid()),
+        source_fact_seq: last_fact_seq.max(1),
+        source_event_id: qaqh_session::session_fact_v2::EventId::new(generate_ulid()),
+        causation_id: None,
+        stream_key: StreamKey::Channel(qaqh_domain::RingingChannel::Control),
+        delivery: Delivery::Ephemeral,
+        projection_slot: None,
+        projection_index: None,
+        payload: ProjectionPayload::TeamDelta(delta),
+    };
+    event_to_envelope(server_epoch, seed, &event)
 }
 
 fn event_to_envelope(
@@ -553,8 +635,9 @@ mod tests {
         CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
     };
     use qaqh_session::session_fact_v2::{
-        EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
-        SessionMetadataChanged, SessionMetadataPatch,
+        AgentPath, EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
+        SessionMetadataChanged, SessionMetadataPatch, SubagentSpawned, TeamAgentResidency,
+        TeamDelta, ToolCallId,
     };
 
     fn append_two_facts(
@@ -620,6 +703,140 @@ mod tests {
             .expect("append changed")
             .fact;
         (created, changed)
+    }
+
+    fn append_spawned_child(
+        dir: &Path,
+        identity: &CanonicalSessionIdentity,
+        child: &SessionId,
+    ) -> SessionFact {
+        let now = 1_789_830_000_100;
+        let mut store =
+            CanonicalSessionStore::open(dir, identity.session_id.clone(), identity.log_id.clone())
+                .expect("open store");
+        let lease = store
+            .acquire_writer(WriterId::new("v2-hub-residency-test"), now, 60_000)
+            .expect("writer lease");
+        let created = SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SessionCreated(SessionCreated {
+                created_at_ms: now,
+                cwd: "/tmp".into(),
+                model: "test".into(),
+                parent_session_id: None,
+                schema_caps: Vec::new(),
+            }),
+        };
+        store.append(&lease, created, now).expect("append created");
+        let spawned = SessionFact {
+            schema: FactSchema::v2(),
+            session_id: identity.session_id.clone(),
+            log_id: identity.log_id.clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now + 1,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SubagentSpawned(SubagentSpawned {
+                child_session_id: child.clone(),
+                parent_call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
+                parent_agent_path: Some(AgentPath::root()),
+                child_agent_path: Some(
+                    AgentPath::parse_absolute("/root/review").expect("child path"),
+                ),
+                role: Some("review".to_string()),
+                spawn_config: None,
+                spawned_at_ms: now + 1,
+            }),
+        };
+        store
+            .append(&lease, spawned, now + 1)
+            .expect("append spawned")
+            .fact
+    }
+
+    #[tokio::test]
+    async fn runtime_residency_overlay_updates_snapshot_and_emits_team_delta() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let child = SessionId::new("0198f1a0-0000-7000-8000-000000000011");
+        append_spawned_child(dir.path(), &identity, &child);
+
+        let hub = Arc::new(V2ProjectionHub::new("epoch-residency"));
+        let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
+        let child_snapshot = bootstrap
+            .projections
+            .team
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == child)
+            .expect("child snapshot");
+        assert_eq!(child_snapshot.residency, TeamAgentResidency::Unloaded);
+
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+        hub.set_team_residency(dir.path(), "seed", &child, TeamAgentResidency::Loaded)
+            .expect("set runtime residency");
+
+        let loaded = hub.bootstrap(dir.path(), "seed").expect("loaded bootstrap");
+        assert_eq!(
+            loaded
+                .projections
+                .team
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == child)
+                .expect("loaded child")
+                .residency,
+            TeamAgentResidency::Loaded
+        );
+        loop {
+            match subscription.next().await {
+                V2StreamItem::Event(envelope)
+                    if matches!(
+                        &envelope.payload,
+                        ProjectionPayload::TeamDelta(TeamDelta::AgentResidencyChanged {
+                            residency: TeamAgentResidency::Loaded,
+                            ..
+                        })
+                    ) =>
+                {
+                    assert_eq!(envelope.delivery, RingingV2Delivery::Ephemeral);
+                    break;
+                }
+                V2StreamItem::Event(_) => continue,
+                other => panic!("expected ephemeral residency event, got {other:?}"),
+            }
+        }
+
+        let restarted = Arc::new(V2ProjectionHub::new("epoch-restarted"));
+        let rebuilt = restarted
+            .bootstrap(dir.path(), "seed")
+            .expect("restart bootstrap");
+        assert_eq!(
+            rebuilt
+                .projections
+                .team
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == child)
+                .expect("rebuilt child")
+                .residency,
+            TeamAgentResidency::Unloaded,
+            "runtime residency must not survive daemon restart"
+        );
     }
 
     #[test]
