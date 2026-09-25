@@ -39,6 +39,37 @@ pub struct SpawnedSubagent {
     pub child_agent_path: String,
 }
 
+/// Explicit logical status exposed by `list_agents`.
+///
+/// `Completed` describes the last terminal lifecycle fact, while
+/// [`ListedAgentResidency::Unloaded`] only means that no worker is resident.
+/// The two values must not be collapsed into a single "closed" state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListedAgentStatus {
+    #[default]
+    PendingInit,
+    Running,
+    WaitingUser,
+    Interrupted,
+    Completed,
+    Errored,
+    Shutdown,
+    NotFound,
+}
+
+/// Whether an agent worker is resident in the daemon.
+///
+/// This is an explicit registry state, not a `SessionManager` or process-table
+/// guess. Unloaded agents remain listable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListedAgentResidency {
+    Loaded,
+    #[default]
+    Unloaded,
+}
+
 /// Logical agent metadata returned by `list_agents`.
 ///
 /// This is intentionally independent of runtime handles and session storage:
@@ -55,6 +86,8 @@ pub struct ListedAgent {
     pub nickname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    pub status: ListedAgentStatus,
+    pub residency: ListedAgentResidency,
     pub created_at_ms: i64,
 }
 

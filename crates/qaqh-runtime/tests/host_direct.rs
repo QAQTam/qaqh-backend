@@ -19,8 +19,8 @@ use qaqh_session::session_fact_v2::{
     SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId,
 };
 use qaqh_subagent::{
-    InterruptAgentRequest, SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost,
-    WaitAgentOutcome, WaitAgentRequest,
+    InterruptAgentRequest, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
+    SpawnSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest,
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -93,6 +93,8 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     assert_eq!(child_only[0].agent_id, child_session_id);
     assert_eq!(child_only[0].agent_path, "/root/review_code");
     assert_eq!(child_only[0].parent_agent_path.as_deref(), Some("/root"));
+    assert_eq!(child_only[0].status, ListedAgentStatus::PendingInit);
+    assert_eq!(child_only[0].residency, ListedAgentResidency::Loaded);
 
     let root_tree = host
         .list_agents(&child_session_id, "/root")
@@ -448,12 +450,45 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     )
     .expect("start parent actor");
     host.close(&child).expect("unload child");
+    let listed_after_unload = host
+        .list_agents(&parent, "/root")
+        .expect("list after unload");
+    let child_after_unload = listed_after_unload
+        .iter()
+        .find(|agent| agent.agent_id == child && agent.agent_path == child_path)
+        .expect("unloaded child must retain logical metadata");
+    assert_eq!(child_after_unload.residency, ListedAgentResidency::Unloaded);
+    assert_eq!(child_after_unload.status, ListedAgentStatus::PendingInit);
+
+    let direct_input = host.send_ringing(
+        &child,
+        qaqh_ringing::RingingCommand::Conversation(
+            qaqh_domain::ConversationCommand::ConversationSendMessage {
+                text: "direct app-server input must be rejected".to_string(),
+                images: vec![],
+                attachments: None,
+                message_id: Some(format!("msg_{}", generate_ulid())),
+                input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
+                as_system: false,
+                inter_agent: None,
+                subagent_terminal: None,
+            },
+        ),
+    );
     assert!(
+        direct_input
+            .as_ref()
+            .is_err_and(|error| error.contains("rejects direct ConversationSendMessage")),
+        "parent-owned child must reject direct input: {direct_input:?}"
+    );
+    assert_eq!(
         host.list_agents(&parent, "/root")
-            .expect("list after unload")
-            .iter()
-            .any(|agent| agent.agent_id == child && agent.agent_path == child_path),
-        "unloaded child must retain logical metadata"
+            .expect("direct input must not reload the child")
+            .into_iter()
+            .find(|agent| agent.agent_id == child)
+            .expect("child remains listable")
+            .residency,
+        ListedAgentResidency::Unloaded
     );
 
     host.send_agent_message(SendAgentMessageRequest {
@@ -463,11 +498,28 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
         delivery: InterAgentDelivery::Queue,
     })
     .expect("queue delivery must reload child through loaded parent");
+    let reloaded = host
+        .list_agents(&parent, "/root")
+        .expect("list after queue reload")
+        .into_iter()
+        .find(|agent| agent.agent_id == child)
+        .expect("reloaded child remains listable");
+    assert_eq!(reloaded.residency, ListedAgentResidency::Loaded);
+    assert_eq!(reloaded.status, ListedAgentStatus::PendingInit);
     std::thread::sleep(Duration::from_millis(1_500));
     let unloaded = service.unload_idle_sessions(1);
     assert!(
         unloaded.iter().any(|seed| seed == &child),
         "idle reloaded child must be an unload candidate: {unloaded:?}"
+    );
+    assert_eq!(
+        host.list_agents(&parent, "/root")
+            .expect("list after idle unload")
+            .into_iter()
+            .find(|agent| agent.agent_id == child)
+            .expect("idle-unloaded child remains listable")
+            .residency,
+        ListedAgentResidency::Unloaded
     );
     host.send_ringing(
         &parent,
