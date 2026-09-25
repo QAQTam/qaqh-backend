@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use qaqh_message::legacy_writer::LegacyWriterFacade;
 
+use crate::canonical::{CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity};
 use crate::store;
 
 static INSTANCE: OnceLock<Arc<SessionManager>> = OnceLock::new();
@@ -728,6 +729,22 @@ impl SessionManager {
     pub fn is_ephemeral(&self, seed: &str) -> bool {
         self.session_dir(seed).is_some()
             && self.load_meta(seed).map(|m| m.ephemeral).unwrap_or(false)
+    }
+
+    /// Mark a session's cleanup policy without adding it to the session index.
+    ///
+    /// V2 subagents are durable canonical sessions but remain hidden from the
+    /// ordinary session list. Their close path must therefore retain the
+    /// directory while `ephemeral` stays false.
+    pub fn set_ephemeral(&self, seed: &str, ephemeral: bool) {
+        self.with_meta_locked(seed, true, |dir, meta| {
+            if meta.seed.is_empty() {
+                meta.seed = seed.to_string();
+            }
+            meta.ephemeral = ephemeral;
+            meta.updated_at = Self::now_epoch();
+            let _ = store::write_meta(dir, meta);
+        });
     }
 
     /// 上下文统计快照（可再生缓存）。写入 meta.json；只有正规会话
@@ -1458,6 +1475,45 @@ impl SessionManager {
     /// 会话目录路径（测试/诊断用）：`sessions/{seed}`，不要求目录存在。
     pub fn session_path_dir(&self, seed: &str) -> PathBuf {
         self.sessions_dir.join(seed)
+    }
+
+    /// Resolve a canonical `SessionId` to its seed-keyed session directory.
+    ///
+    /// BETA-01 will eventually make the directory name equal the canonical id.
+    /// Until then, the identity sidecar is the only durable mapping and this
+    /// resolver scans for it without creating missing identities.
+    pub fn session_dir_for_id(&self, session_id: &str) -> Result<Option<PathBuf>, String> {
+        let direct = self.session_path_dir(session_id);
+        if direct.is_dir()
+            && direct.join(CANONICAL_IDENTITY_FILE).exists()
+            && CanonicalSessionIdentity::open(&direct)
+                .map_err(|error| {
+                    format!("read canonical identity at {}: {error}", direct.display())
+                })?
+                .session_id
+                .as_str()
+                == session_id
+        {
+            return Ok(Some(direct));
+        }
+
+        let entries = std::fs::read_dir(&self.sessions_dir).map_err(|error| {
+            format!("read sessions dir {}: {error}", self.sessions_dir.display())
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read session dir entry: {error}"))?;
+            let path = entry.path();
+            if !path.is_dir() || !path.join(CANONICAL_IDENTITY_FILE).exists() {
+                continue;
+            }
+            let identity = CanonicalSessionIdentity::open(&path).map_err(|error| {
+                format!("read canonical identity at {}: {error}", path.display())
+            })?;
+            if identity.session_id.as_str() == session_id {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     fn session_dir(&self, seed: &str) -> Option<PathBuf> {
