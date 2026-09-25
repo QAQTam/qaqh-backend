@@ -9,7 +9,10 @@ use qaqh_session::actor::{
     ConnectionId, SessionActor, SessionActorEffect, SessionCommand, SubscriptionCommand,
     SubscriptionEffect,
 };
-use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::canonical::{
+    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
+    EVENTS_FILE,
+};
 use qaqh_session::session_fact_v2::{AgentMetadata, AgentPath, FactPayload};
 
 use crate::agent::SubagentSpawnSpec;
@@ -361,6 +364,17 @@ impl AgentRegistry {
     fn canonical_parent_session_id(&self, seed: &str) -> Result<Option<String>, String> {
         let session_dir = self.sessions.session_path_dir(seed);
         if !session_dir.exists() {
+            return Ok(None);
+        }
+        // This is a read-only recovery hint. Do not create the identity
+        // sidecar here: a session directory can legitimately exist before the
+        // canonical baseline has been materialized.
+        if !session_dir.join(CANONICAL_IDENTITY_FILE).exists() {
+            return Ok(None);
+        }
+        let has_events = session_dir.join(EVENTS_FILE).exists();
+        let has_commit = session_dir.join(EVENTS_COMMIT_FILE).exists();
+        if !has_events && !has_commit {
             return Ok(None);
         }
         let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
