@@ -18,9 +18,10 @@ use qaqh_session::canonical::{
     ToolLedgerError, generate_ulid, sha256_content_hash, ulid_from_text,
 };
 use qaqh_session::session_fact_v2::{
-    ContentRef, EventId, ExecutionId, PolicyDecisionRef, SideEffectClass, ToolCallId, ToolError,
-    ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
-    ToolTerminalStatus, TurnId,
+    AgentPath, ContentRef, EventId, ExecutionId, PolicyDecisionRef, SessionId, SideEffectClass,
+    SubagentFinished, SubagentSpawned, SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    TurnId,
 };
 use qaqh_workspace::AuthorizedToolCall;
 use qaqh_workspace::ExecProgressEvent;
@@ -731,6 +732,140 @@ impl ToolRuntime {
             .expect("single tool runtime run must produce one result")
     }
 
+    /// Commit subagent spawn edges before the tool's `ToolFinished` fact, then
+    /// start task delivery. A failure closes the child and fails the tool.
+    fn apply_subagent_spawn_effects(
+        ctx: &mut RingContext,
+        call_id: &str,
+        result: &mut qaqh_workspace::execution::ToolExecResult,
+    ) -> Result<(), String> {
+        let mut spawn_effects = Vec::new();
+        result.skill_effects.retain(|effect| {
+            if matches!(effect, qaqh_workspace::ToolEffect::SubagentSpawned { .. }) {
+                spawn_effects.push(effect.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        for effect in spawn_effects {
+            let qaqh_workspace::ToolEffect::SubagentSpawned {
+                seed,
+                child_session_id,
+                name,
+                task_text,
+                timeout_secs,
+                parent_session_id,
+                parent_agent_path,
+                child_agent_path,
+                process_id,
+            } = effect
+            else {
+                continue;
+            };
+            let host = qaqh_subagent::host()
+                .ok_or_else(|| "subagent host unavailable before spawn edge commit".to_string())?;
+            if parent_session_id != ctx.agent.session.seed {
+                host.rollback_subagent(&seed, &child_session_id, process_id);
+                return Err(format!(
+                    "subagent spawn parent mismatch: effect={parent_session_id}, active={}",
+                    ctx.agent.session.seed
+                ));
+            }
+            let parent_agent_path = AgentPath::parse_absolute(&parent_agent_path)
+                .map_err(|error| format!("invalid parent agent path: {error}"))?;
+            let child_agent_path = AgentPath::parse_absolute(&child_agent_path)
+                .map_err(|error| format!("invalid child agent path: {error}"))?;
+            let parent_call_id = canonical_call_id(call_id);
+            let child_session_id = SessionId::new(child_session_id);
+            let now = unix_ms();
+            let payload = SubagentSpawned {
+                child_session_id: child_session_id.clone(),
+                parent_call_id: parent_call_id.clone(),
+                parent_agent_path: Some(parent_agent_path),
+                child_agent_path: Some(child_agent_path),
+                role: Some(name.clone()),
+                spawned_at_ms: now,
+            };
+            {
+                let ledger = ctx
+                    .agent
+                    .tool_ledger_mut()
+                    .map_err(|error| format!("subagent ledger unavailable: {error}"))?
+                    .ok_or_else(|| "subagent ledger is not initialized".to_string())?;
+                ledger
+                    .ensure_lease(now, tool_ledger_lease_ms())
+                    .map_err(|error| format!("subagent ledger lease failed: {error}"))?;
+                if let Err(error) =
+                    ledger.append_subagent_spawned(EventId::new(generate_ulid()), payload, now)
+                {
+                    host.rollback_subagent(&seed, child_session_id.as_str(), process_id);
+                    return Err(format!("append SubagentSpawned failed: {error}"));
+                }
+            }
+
+            if let Err(error) = host.start_subagent(qaqh_subagent::StartSubagentRequest {
+                seed: &seed,
+                child_session_id: child_session_id.as_str(),
+                name: &name,
+                task_text: &task_text,
+                timeout_secs,
+                parent_session_id: &parent_session_id,
+                parent_call_id: parent_call_id.as_str(),
+                process_id,
+            }) {
+                let finish_error = Self::append_subagent_finished(
+                    ctx,
+                    &child_session_id,
+                    canonical_call_id(call_id),
+                    SubagentTerminalStatus::Failed,
+                )
+                .err();
+                host.abort_subagent(&seed, process_id);
+                return Err(match finish_error {
+                    Some(finish_error) => format!(
+                        "start subagent {seed}: {error}; append SubagentFinished failed: {finish_error}"
+                    ),
+                    None => format!("start subagent {seed}: {error}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn append_subagent_finished(
+        ctx: &mut RingContext,
+        child_session_id: &SessionId,
+        parent_call_id: ToolCallId,
+        status: SubagentTerminalStatus,
+    ) -> Result<(), String> {
+        let now = unix_ms();
+        let ledger = ctx
+            .agent
+            .tool_ledger_mut()
+            .map_err(|error| format!("subagent ledger unavailable: {error}"))?
+            .ok_or_else(|| "subagent ledger is not initialized".to_string())?;
+        ledger
+            .ensure_lease(now, tool_ledger_lease_ms())
+            .map_err(|error| format!("subagent ledger lease failed: {error}"))?;
+        ledger
+            .append_subagent_finished(
+                EventId::new(generate_ulid()),
+                SubagentFinished {
+                    child_session_id: child_session_id.clone(),
+                    parent_call_id,
+                    status,
+                    result_ref: None,
+                    finished_at_ms: now,
+                    recovery_ref: None,
+                },
+                now,
+            )
+            .map_err(|error| format!("append SubagentFinished failed: {error}"))?;
+        Ok(())
+    }
+
     /// 排空本批进度并 join 所有 worker，保持调用方传入的顺序。
     pub(crate) fn collect(
         ctx: &mut RingContext,
@@ -756,6 +891,12 @@ impl ToolRuntime {
                     Ok(result) => ToolRunOutcome::Completed(Box::new(result)),
                     Err(_) => ToolRunOutcome::Panicked,
                 };
+                let mut outcome = outcome;
+                if let ToolRunOutcome::Completed(result) = &mut outcome
+                    && let Err(error) = Self::apply_subagent_spawn_effects(ctx, &call_id, result)
+                {
+                    outcome = ToolRunOutcome::LedgerFailed(error);
+                }
                 if let Some(ledger_run) = ledger
                     && let Err(error) =
                         Self::append_finished(ctx, &call_id, &ledger_run, &outcome, turn_id)

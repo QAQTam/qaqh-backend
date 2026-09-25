@@ -190,6 +190,7 @@ fn cmd_user_input(text: &str) -> RingingCommand {
         message_id: None,
         input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
         as_system: false,
+        subagent_terminal: None,
     })
 }
 
@@ -202,6 +203,7 @@ fn cmd_system_inject(text: &str) -> RingingCommand {
         message_id: None,
         input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
         as_system: true,
+        subagent_terminal: None,
     })
 }
 
