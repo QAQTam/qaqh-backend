@@ -62,7 +62,7 @@ pub(crate) use timeline_api::handle_timeline_snapshot;
 pub(crate) use v2::{
     handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_driver_claim_v2,
     handle_driver_release_v2, handle_events_v2, handle_open_v2, handle_pending_approvals_v2,
-    handle_renew_v2, reclaim_dead_driver_seats,
+    handle_renew_v2, handle_team_snapshot_v2, reclaim_dead_driver_seats,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -145,6 +145,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/ringing/v2/sessions/{seed}/bootstrap",
             get(handle_bootstrap_v2),
+        )
+        .route(
+            "/ringing/v2/sessions/{seed}/team",
+            get(handle_team_snapshot_v2),
         )
         .route("/ringing/v2/sessions/{seed}/events", get(handle_events_v2))
         .route(

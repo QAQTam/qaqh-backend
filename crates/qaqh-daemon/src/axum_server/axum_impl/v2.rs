@@ -273,6 +273,47 @@ pub(crate) async fn handle_bootstrap_v2(
     json_response(StatusCode::OK, &response)
 }
 
+/// `GET /ringing/v2/sessions/{seed}/team` — team roster + task board snapshot.
+///
+/// Team agents are rebuilt from the session canonical log; tasks come from the
+/// root tree's separate team aggregate. Task deltas are delivered on the
+/// per-seed single stream as `ProjectionPayload::TeamDelta`.
+pub(crate) async fn handle_team_snapshot_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(seed): Path<String>,
+) -> Response {
+    if !is_authorized(&headers, &state.token) {
+        return unauthorized();
+    }
+    if require_v2_lease(&state, &headers).is_none() {
+        return lease_required_v2();
+    }
+    if seed.trim().is_empty() {
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+    }
+    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
+    let team = match state.v2_hub.bootstrap(&session_dir, &seed) {
+        Ok(bootstrap) => bootstrap.projections.team,
+        Err(error) => return v2_hub_error_response(error),
+    };
+    let tasks = match state.service.task_board_snapshot(&seed) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return api_error_response(StatusCode::BAD_REQUEST, "team_unavailable", &error);
+        }
+    };
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "schema": "qaqh.ringing.team/v1",
+            "seed": seed,
+            "team": team,
+            "tasks": tasks,
+        }),
+    )
+}
+
 /// `GET /ringing/v2/sessions/{seed}/approvals` — 本地浏览器网关的待审批投影。
 ///
 /// 纯 v2：pending 集合来自 canonical control 投影（只取未 resolved / 未 expired 的
