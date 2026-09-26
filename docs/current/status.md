@@ -95,10 +95,11 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - runtime residency overlay 已接入；`AgentResidencyChanged` 作为 ephemeral TeamDelta 发布，重启后回到 unloaded。
   - max depth 默认 1 可配置；sender-target in-flight 与 sender outbound 配额已接入。
   - broadcast / `@all` 默认拒绝；`close_agent` 已不在 V2 工具表。
-- 仍待：TUI/WinUI roster/inbox 消费、task board runtime tools/wire、
+- 仍待：TUI/WinUI roster/inbox 消费、task board daemon projection wire、
   message board；大正文 `content_ref` 已落地。
-- Task board canonical foundation（types / reducer / durable TeamStore）已落地，
-  spec 见 [`spec/2026-09-26-team-task-board.md`](./spec/2026-09-26-team-task-board.md)。
+- Task board canonical foundation（types / reducer / durable TeamStore）与 runtime
+  tools（`task_create` / `task_claim` / `task_update` / `task_close` / `task_list`）
+  已落地，spec 见 [`spec/2026-09-26-team-task-board.md`](./spec/2026-09-26-team-task-board.md)。
 - Phase 4 前端壳接入和 Phase 5-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。

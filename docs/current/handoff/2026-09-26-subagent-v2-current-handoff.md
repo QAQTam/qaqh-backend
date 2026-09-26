@@ -257,9 +257,12 @@ cargo test --workspace --offline -- --test-threads=1
 - TEAM-01a/b：`qaqh-session::team` canonical types、state-machine reducer、
   durable append-only TeamStore（`team.json` / `events.jsonl` / `events.commit` /
   `events.lock`），覆盖 create/claim/release/dependency/artifact/acceptance/
-  complete/close/cancel 与 torn-tail replay。
+  complete/close/cancel 与 torn-tail replay；
+- TEAM-01c：`TaskBoardHost` + 5 个 runtime 工具（`task_create` / `task_claim` /
+  `task_update` / `task_close` / `task_list`），按 caller root tree 打开 team store，
+  root 初始化 `TeamCreated`，task 数量上限 1024。
 
-仍未完成：TEAM-01c runtime task tools、TEAM-01d daemon projection wire、
+仍未完成：TEAM-01d daemon projection wire（TeamSnapshot/TeamDelta 扩展）、
 TEAM-01e TUI/WinUI 消费。
 
 ### P2：Message board
