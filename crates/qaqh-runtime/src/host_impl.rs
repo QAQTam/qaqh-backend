@@ -20,16 +20,23 @@ use qaqh_session::canonical::{
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{
     AgentPath, ContentHash, ContentRef as CanonicalContentRef, EventId, LogId, SessionId,
-    TeamTaskArtifact, TeamTaskSnapshot,
+    TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot, TeamBoardSubscription,
+    TeamBoardSubscriptionTarget, TeamBoardThread, TeamTaskArtifact, TeamTaskSnapshot,
 };
 use qaqh_session::team::{
-    TaskAcceptanceSet, TaskArtifactAttached, TaskCancelled, TaskClaimed, TaskClosed, TaskCompleted,
-    TaskCreated, TaskDependencyAdded, TaskId, TaskReleased, TaskState, TeamActor, TeamCreated,
-    TeamFact, TeamId, TeamPayload, TeamStore, new_team_schema,
+    BoardFact, BoardId, BoardPayload, BoardStore, BoardSubscriptionTarget, ChannelCreated,
+    ChannelId, PostCreated, PostId, SubscriptionChanged, TaskAcceptanceSet, TaskArtifactAttached,
+    TaskCancelled, TaskClaimed, TaskClosed, TaskCompleted, TaskCreated, TaskDependencyAdded,
+    TaskId, TaskReleased, TaskState, TeamActor, TeamCreated, TeamFact, TeamId, TeamPayload,
+    TeamStore, ThreadCreated, ThreadId, new_board_schema, new_team_schema,
 };
 use qaqh_subagent::{
-    ArmSubagentCollectorRequest, ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent,
-    ListedAgent, SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
+    ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
+    BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
+    BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
+    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest, ContentRef, EventBatch,
+    InterruptAgentRequest, InterruptedAgent, ListedAgent, ListedAgentResidency, ListedAgentStatus,
+    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
     StartSubagentRequest, SubagentHost, TaskBoardArtifact, TaskBoardHost, TaskBoardTask,
     TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
     TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
@@ -735,6 +742,165 @@ impl TaskBoardHost for QaqhService {
     }
 }
 
+impl BoardHost for QaqhService {
+    fn board_channel_create(
+        &self,
+        request: BoardChannelCreateRequest<'_>,
+    ) -> Result<BoardChannel, String> {
+        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let channel_id = ChannelId::generate();
+        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let root = store.board_id().as_str().to_string();
+        store
+            .append(board_fact(
+                &root,
+                actor.clone(),
+                BoardPayload::ChannelCreated(ChannelCreated {
+                    channel_id: channel_id.clone(),
+                    name: request.name.to_string(),
+                    topic: request.topic.map(str::to_string),
+                    created_by: actor,
+                    created_at_ms: unix_ms(),
+                }),
+            ))
+            .map_err(|error| format!("board_channel_create failed: {error}"))?;
+        self.publish_board_change(&root, &store);
+        find_board_channel(&store, channel_id.as_str())
+    }
+
+    fn board_thread_create(
+        &self,
+        request: BoardThreadCreateRequest<'_>,
+    ) -> Result<BoardThread, String> {
+        let task_id = request.task_id.map(TaskId::new);
+        if let Some(task_id) = &task_id {
+            self.require_task_exists(request.caller_session_id, task_id.as_str())?;
+        }
+        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let thread_id = ThreadId::generate();
+        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let root = store.board_id().as_str().to_string();
+        store
+            .append(board_fact(
+                &root,
+                actor.clone(),
+                BoardPayload::ThreadCreated(ThreadCreated {
+                    thread_id: thread_id.clone(),
+                    channel_id: ChannelId::new(request.channel_id),
+                    title: request.title.to_string(),
+                    task_id,
+                    created_by: actor,
+                    created_at_ms: unix_ms(),
+                }),
+            ))
+            .map_err(|error| format!("board_thread_create failed: {error}"))?;
+        self.publish_board_change(&root, &store);
+        find_board_thread(&store, thread_id.as_str())
+    }
+
+    fn board_post(&self, request: BoardPostRequest<'_>) -> Result<BoardPostOutcome, String> {
+        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let post_id = PostId::generate();
+        let (post, targets) = {
+            let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+            let thread = store
+                .snapshot()
+                .threads
+                .iter()
+                .find(|thread| thread.thread_id.as_str() == request.thread_id)
+                .cloned()
+                .ok_or_else(|| format!("board thread not found: {}", request.thread_id))?;
+            let requested_task = request.task_id.map(TaskId::new);
+            let task_id = match (&thread.task_id, requested_task) {
+                (Some(thread_task), Some(post_task)) if thread_task != &post_task => {
+                    return Err(format!(
+                        "post task {post_task} does not match thread task {thread_task}"
+                    ));
+                }
+                (Some(thread_task), _) => Some(thread_task.clone()),
+                (None, post_task) => post_task,
+            };
+            if let Some(task_id) = &task_id {
+                self.require_task_exists(request.caller_session_id, task_id.as_str())?;
+            }
+            let root = store.board_id().as_str().to_string();
+            store
+                .append(board_fact(
+                    &root,
+                    actor.clone(),
+                    BoardPayload::PostCreated(PostCreated {
+                        post_id: post_id.clone(),
+                        thread_id: thread.thread_id.clone(),
+                        task_id: task_id.clone(),
+                        author: actor.clone(),
+                        body: request.body.to_string(),
+                        created_at_ms: unix_ms(),
+                        reply_to: None,
+                    }),
+                ))
+                .map_err(|error| format!("board_post failed: {error}"))?;
+            self.publish_board_change(&root, &store);
+            let post = find_board_post(&store, post_id.as_str())?;
+            let targets = board_notification_targets(
+                &store.snapshot(),
+                &thread.channel_id,
+                &thread.thread_id,
+                actor.agent_path.as_str(),
+            );
+            (post, targets)
+        };
+        let (notified, skipped) = self.notify_board_post(request.caller_session_id, &post, targets);
+        Ok(BoardPostOutcome {
+            post,
+            notified,
+            skipped,
+        })
+    }
+
+    fn board_subscribe(
+        &self,
+        request: BoardSubscriptionRequest<'_>,
+    ) -> Result<BoardSubscription, String> {
+        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let target = match request.target_kind {
+            BoardSubscriptionTargetKind::Channel => BoardSubscriptionTarget::Channel {
+                channel_id: ChannelId::new(request.target_id),
+            },
+            BoardSubscriptionTargetKind::Thread => BoardSubscriptionTarget::Thread {
+                thread_id: ThreadId::new(request.target_id),
+            },
+        };
+        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let root = store.board_id().as_str().to_string();
+        store
+            .append(board_fact(
+                &root,
+                actor.clone(),
+                BoardPayload::SubscriptionChanged(SubscriptionChanged {
+                    target: target.clone(),
+                    subscriber: actor.clone(),
+                    subscribed: request.action == BoardSubscriptionAction::Subscribe,
+                    updated_at_ms: unix_ms(),
+                }),
+            ))
+            .map_err(|error| format!("board_subscribe failed: {error}"))?;
+        self.publish_board_change(&root, &store);
+        find_board_subscription(&store, &target, actor.agent_path.as_str())
+    }
+
+    fn board_list(&self, request: BoardListRequest<'_>) -> Result<BoardSnapshot, String> {
+        let (store, _actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let store = store.lock().unwrap_or_else(|error| error.into_inner());
+        board_snapshot_view(
+            &store.snapshot(),
+            request.channel_id,
+            request.thread_id,
+            request.include_posts,
+            request.post_limit,
+        )
+    }
+}
+
 impl QaqhService {
     fn task_store_for_caller(
         &self,
@@ -813,6 +979,150 @@ impl QaqhService {
             log::warn!("[team] task delta publish failed for {root_session_id}: {error}");
         }
     }
+
+    fn board_store_for_caller(
+        &self,
+        caller_session_id: &str,
+    ) -> Result<(Arc<std::sync::Mutex<BoardStore>>, TeamActor), String> {
+        let (root_session_id, caller_actor) = {
+            let registry = self.registry()?;
+            let caller = registry
+                .agent_metadata(caller_session_id)
+                .ok_or_else(|| format!("caller agent metadata missing for {caller_session_id}"))?;
+            let actor = TeamActor::new(caller.agent_path.clone(), Some(caller.agent_id.clone()));
+            (caller.root_session_id.as_str().to_string(), actor)
+        };
+        let mut stores = self
+            .board_stores
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = stores.get(&root_session_id) {
+            return Ok((Arc::clone(store), caller_actor));
+        }
+        let dir = self
+            .sessions
+            .data_dir()
+            .join("team")
+            .join(&root_session_id)
+            .join("board");
+        let mut store = BoardStore::open_or_create(
+            dir,
+            BoardId::new(SessionId::new(root_session_id.clone())),
+            unix_ms(),
+        )
+        .map_err(|error| format!("open message board for {root_session_id}: {error}"))?;
+        if store.snapshot().board_id.is_none() {
+            let root_actor = TeamActor::new(
+                AgentPath::root(),
+                Some(SessionId::new(root_session_id.clone())),
+            );
+            store
+                .append(board_fact(
+                    &root_session_id,
+                    root_actor,
+                    BoardPayload::BoardCreated(qaqh_session::team::BoardCreated {
+                        root_session_id: SessionId::new(root_session_id.clone()),
+                        created_at_ms: unix_ms(),
+                    }),
+                ))
+                .map_err(|error| {
+                    format!("initialize message board for {root_session_id}: {error}")
+                })?;
+        }
+        let store = Arc::new(std::sync::Mutex::new(store));
+        stores.insert(root_session_id, Arc::clone(&store));
+        Ok((store, caller_actor))
+    }
+
+    fn require_task_exists(&self, caller_session_id: &str, task_id: &str) -> Result<(), String> {
+        let (store, _actor) = self.task_store_for_caller(caller_session_id)?;
+        let store = store.lock().unwrap_or_else(|error| error.into_inner());
+        find_task(&store, task_id).map(|_| ())
+    }
+
+    /// Snapshot the caller's root message board for the daemon team endpoint.
+    #[doc(hidden)]
+    pub fn board_snapshot(&self, caller_session_id: &str) -> Result<TeamBoardSnapshot, String> {
+        let (store, _actor) = self.board_store_for_caller(caller_session_id)?;
+        let store = store.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(board_to_wire(&store.snapshot()))
+    }
+
+    fn publish_board_change(&self, root_session_id: &str, store: &BoardStore) {
+        let Some(v2_hub) = self.v2_hub.get() else {
+            return;
+        };
+        let session_dir = self.sessions.session_path_dir(root_session_id);
+        if let Err(error) = v2_hub.publish_board_change(
+            &session_dir,
+            root_session_id,
+            board_to_wire(&store.snapshot()),
+        ) {
+            log::warn!("[team] board delta publish failed for {root_session_id}: {error}");
+        }
+    }
+
+    fn notify_board_post(
+        &self,
+        caller_session_id: &str,
+        post: &BoardPost,
+        targets: Vec<String>,
+    ) -> (Vec<String>, Vec<BoardNotificationSkip>) {
+        let agents = match self.list_agents(caller_session_id, "/root") {
+            Ok(agents) => agents,
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    targets
+                        .into_iter()
+                        .map(|agent| BoardNotificationSkip {
+                            agent,
+                            reason: format!("list agents failed: {error}"),
+                        })
+                        .collect(),
+                );
+            }
+        };
+        let text = board_notification_text(post);
+        let mut notified = Vec::new();
+        let mut skipped = Vec::new();
+        for target in targets {
+            let Some(agent) = agents.iter().find(|agent| agent.agent_path == target) else {
+                skipped.push(BoardNotificationSkip {
+                    agent: target,
+                    reason: "agent not found".to_string(),
+                });
+                continue;
+            };
+            if agent.status != ListedAgentStatus::Running {
+                skipped.push(BoardNotificationSkip {
+                    agent: target,
+                    reason: "agent is not running".to_string(),
+                });
+                continue;
+            }
+            if agent.residency != ListedAgentResidency::Loaded {
+                skipped.push(BoardNotificationSkip {
+                    agent: target,
+                    reason: "agent is not loaded".to_string(),
+                });
+                continue;
+            }
+            match self.send_agent_message(SendAgentMessageRequest {
+                caller_session_id,
+                target: &target,
+                text: &text,
+                delivery: qaqh_domain::InterAgentDelivery::Queue,
+            }) {
+                Ok(_) => notified.push(target),
+                Err(error) => skipped.push(BoardNotificationSkip {
+                    agent: target,
+                    reason: error,
+                }),
+            }
+        }
+        (notified, skipped)
+    }
 }
 
 fn team_fact(root_session_id: &str, actor: TeamActor, payload: TeamPayload) -> TeamFact {
@@ -827,6 +1137,367 @@ fn team_fact(root_session_id: &str, actor: TeamActor, payload: TeamPayload) -> T
         causation_id: None,
         actor,
         payload,
+    }
+}
+
+fn board_fact(root_session_id: &str, actor: TeamActor, payload: BoardPayload) -> BoardFact {
+    BoardFact {
+        schema: new_board_schema(),
+        board_id: BoardId::new(SessionId::new(root_session_id)),
+        // The store owns log identity and overwrites this placeholder.
+        log_id: LogId::new(""),
+        fact_seq: 0,
+        event_id: EventId::new(generate_ulid()),
+        ts_ms: unix_ms(),
+        causation_id: None,
+        actor,
+        payload,
+    }
+}
+
+fn find_board_channel(store: &BoardStore, channel_id: &str) -> Result<BoardChannel, String> {
+    store
+        .snapshot()
+        .channels
+        .iter()
+        .find(|channel| channel.channel_id.as_str() == channel_id)
+        .map(board_channel_to_dto)
+        .ok_or_else(|| format!("board channel not found: {channel_id}"))
+}
+
+fn find_board_thread(store: &BoardStore, thread_id: &str) -> Result<BoardThread, String> {
+    store
+        .snapshot()
+        .threads
+        .iter()
+        .find(|thread| thread.thread_id.as_str() == thread_id)
+        .map(board_thread_to_dto)
+        .ok_or_else(|| format!("board thread not found: {thread_id}"))
+}
+
+fn find_board_post(store: &BoardStore, post_id: &str) -> Result<BoardPost, String> {
+    store
+        .snapshot()
+        .posts
+        .iter()
+        .find(|post| post.post_id.as_str() == post_id)
+        .map(board_post_to_dto)
+        .ok_or_else(|| format!("board post not found: {post_id}"))
+}
+
+fn find_board_subscription(
+    store: &BoardStore,
+    target: &BoardSubscriptionTarget,
+    subscriber: &str,
+) -> Result<BoardSubscription, String> {
+    store
+        .snapshot()
+        .subscriptions
+        .iter()
+        .find(|subscription| {
+            &subscription.target == target
+                && subscription.subscriber.agent_path.as_str() == subscriber
+        })
+        .map(board_subscription_to_dto)
+        .ok_or_else(|| "board subscription not found after append".to_string())
+}
+
+fn board_snapshot_view(
+    snapshot: &qaqh_session::team::BoardSnapshot,
+    channel_id: Option<&str>,
+    thread_id: Option<&str>,
+    include_posts: bool,
+    post_limit: Option<usize>,
+) -> Result<BoardSnapshot, String> {
+    let requested_channel = channel_id.map(ChannelId::new);
+    let requested_thread = thread_id.map(ThreadId::new);
+    let selected_thread = match &requested_thread {
+        Some(thread_id) => Some(
+            snapshot
+                .threads
+                .iter()
+                .find(|thread| &thread.thread_id == thread_id)
+                .cloned()
+                .ok_or_else(|| format!("board thread not found: {thread_id}"))?,
+        ),
+        None => None,
+    };
+    if let (Some(channel_id), Some(thread)) = (&requested_channel, &selected_thread)
+        && &thread.channel_id != channel_id
+    {
+        return Err(format!(
+            "board thread {} does not belong to channel {}",
+            thread.thread_id, channel_id
+        ));
+    }
+    let selected_channel = requested_channel.clone().or_else(|| {
+        selected_thread
+            .as_ref()
+            .map(|thread| thread.channel_id.clone())
+    });
+    if let Some(channel_id) = &selected_channel
+        && !snapshot
+            .channels
+            .iter()
+            .any(|channel| &channel.channel_id == channel_id)
+    {
+        return Err(format!("board channel not found: {channel_id}"));
+    }
+
+    let channels = snapshot
+        .channels
+        .iter()
+        .filter(|channel| {
+            selected_channel
+                .as_ref()
+                .is_none_or(|selected| &channel.channel_id == selected)
+        })
+        .map(board_channel_to_dto)
+        .collect::<Vec<_>>();
+    let threads = snapshot
+        .threads
+        .iter()
+        .filter(|thread| {
+            selected_channel
+                .as_ref()
+                .is_none_or(|selected| &thread.channel_id == selected)
+                && requested_thread
+                    .as_ref()
+                    .is_none_or(|selected| &thread.thread_id == selected)
+        })
+        .map(board_thread_to_dto)
+        .collect::<Vec<_>>();
+
+    let limit = match post_limit {
+        Some(0) => return Err("board post_limit must be at least 1".to_string()),
+        Some(limit) if limit > 200 => {
+            return Err("board post_limit must be at most 200".to_string());
+        }
+        Some(limit) => limit,
+        None => 50,
+    };
+    let thread_ids = threads
+        .iter()
+        .map(|thread| thread.thread_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut posts = if include_posts {
+        snapshot
+            .posts
+            .iter()
+            .filter(|post| thread_ids.contains(post.thread_id.as_str()))
+            .map(board_post_to_dto)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if posts.len() > limit {
+        posts.drain(0..posts.len() - limit);
+    }
+
+    let subscriptions = snapshot
+        .subscriptions
+        .iter()
+        .filter(|subscription| match &subscription.target {
+            BoardSubscriptionTarget::Channel { channel_id } => selected_channel
+                .as_ref()
+                .is_none_or(|selected| selected == channel_id),
+            BoardSubscriptionTarget::Thread { thread_id } => {
+                requested_thread
+                    .as_ref()
+                    .is_none_or(|selected| selected == thread_id)
+                    && selected_channel.as_ref().is_none_or(|selected| {
+                        snapshot.threads.iter().any(|thread| {
+                            &thread.thread_id == thread_id && &thread.channel_id == selected
+                        })
+                    })
+            }
+        })
+        .map(board_subscription_to_dto)
+        .collect::<Vec<_>>();
+
+    Ok(BoardSnapshot {
+        board_id: snapshot.board_id.as_ref().map(|id| id.as_str().to_string()),
+        revision: snapshot.revision,
+        last_fact_seq: snapshot.last_fact_seq,
+        channels,
+        threads,
+        posts,
+        subscriptions,
+    })
+}
+
+fn board_channel_to_dto(channel: &qaqh_session::team::BoardChannelView) -> BoardChannel {
+    BoardChannel {
+        channel_id: channel.channel_id.as_str().to_string(),
+        name: channel.name.clone(),
+        topic: channel.topic.clone(),
+        created_by: channel.created_by.agent_path.as_str().to_string(),
+        created_at_ms: channel.created_at_ms,
+    }
+}
+
+fn board_thread_to_dto(thread: &qaqh_session::team::BoardThreadView) -> BoardThread {
+    BoardThread {
+        thread_id: thread.thread_id.as_str().to_string(),
+        channel_id: thread.channel_id.as_str().to_string(),
+        title: thread.title.clone(),
+        task_id: thread
+            .task_id
+            .as_ref()
+            .map(|task_id| task_id.as_str().to_string()),
+        created_by: thread.created_by.agent_path.as_str().to_string(),
+        created_at_ms: thread.created_at_ms,
+        post_count: thread.post_count,
+    }
+}
+
+fn board_post_to_dto(post: &qaqh_session::team::BoardPostView) -> BoardPost {
+    BoardPost {
+        post_id: post.post_id.as_str().to_string(),
+        thread_id: post.thread_id.as_str().to_string(),
+        task_id: post
+            .task_id
+            .as_ref()
+            .map(|task_id| task_id.as_str().to_string()),
+        author: post.author.agent_path.as_str().to_string(),
+        body: post.body.clone(),
+        created_at_ms: post.created_at_ms,
+        reply_to: post
+            .reply_to
+            .as_ref()
+            .map(|post_id| post_id.as_str().to_string()),
+    }
+}
+
+fn board_subscription_to_dto(
+    subscription: &qaqh_session::team::BoardSubscriptionView,
+) -> BoardSubscription {
+    let target = match &subscription.target {
+        BoardSubscriptionTarget::Channel { channel_id } => {
+            qaqh_subagent::BoardSubscriptionTarget::Channel {
+                channel_id: channel_id.as_str().to_string(),
+            }
+        }
+        BoardSubscriptionTarget::Thread { thread_id } => {
+            qaqh_subagent::BoardSubscriptionTarget::Thread {
+                thread_id: thread_id.as_str().to_string(),
+            }
+        }
+    };
+    BoardSubscription {
+        target,
+        subscriber: subscription.subscriber.agent_path.as_str().to_string(),
+        subscribed: subscription.subscribed,
+        updated_at_ms: subscription.updated_at_ms,
+    }
+}
+
+fn board_notification_targets(
+    snapshot: &qaqh_session::team::BoardSnapshot,
+    channel_id: &ChannelId,
+    thread_id: &ThreadId,
+    author: &str,
+) -> Vec<String> {
+    let mut targets = std::collections::BTreeSet::new();
+    for subscription in &snapshot.subscriptions {
+        if !subscription.subscribed {
+            continue;
+        }
+        let matches = match &subscription.target {
+            BoardSubscriptionTarget::Channel {
+                channel_id: subscribed,
+            } => subscribed == channel_id,
+            BoardSubscriptionTarget::Thread {
+                thread_id: subscribed,
+            } => subscribed == thread_id,
+        };
+        if matches && subscription.subscriber.agent_path.as_str() != author {
+            targets.insert(subscription.subscriber.agent_path.as_str().to_string());
+        }
+    }
+    targets.into_iter().collect()
+}
+
+fn board_notification_text(post: &BoardPost) -> String {
+    let task_id = post.task_id.as_deref().unwrap_or("-");
+    format!(
+        "[message_board]\npost_id: {}\nthread_id: {}\ntask_id: {}\n\n{}",
+        post.post_id, post.thread_id, task_id, post.body
+    )
+}
+
+fn board_to_wire(snapshot: &qaqh_session::team::BoardSnapshot) -> TeamBoardSnapshot {
+    TeamBoardSnapshot {
+        board_id: snapshot.board_id.as_ref().map(|id| id.0.clone()),
+        revision: snapshot.revision,
+        last_fact_seq: snapshot.last_fact_seq,
+        channels: snapshot
+            .channels
+            .iter()
+            .map(|channel| TeamBoardChannel {
+                channel_id: channel.channel_id.as_str().to_string(),
+                name: channel.name.clone(),
+                topic: channel.topic.clone(),
+                created_by: channel.created_by.agent_path.clone(),
+                created_at_ms: channel.created_at_ms,
+            })
+            .collect(),
+        threads: snapshot
+            .threads
+            .iter()
+            .map(|thread| TeamBoardThread {
+                thread_id: thread.thread_id.as_str().to_string(),
+                channel_id: thread.channel_id.as_str().to_string(),
+                title: thread.title.clone(),
+                task_id: thread
+                    .task_id
+                    .as_ref()
+                    .map(|task_id| task_id.as_str().to_string()),
+                created_by: thread.created_by.agent_path.clone(),
+                created_at_ms: thread.created_at_ms,
+                post_count: thread.post_count,
+            })
+            .collect(),
+        posts: snapshot
+            .posts
+            .iter()
+            .map(|post| TeamBoardPost {
+                post_id: post.post_id.as_str().to_string(),
+                thread_id: post.thread_id.as_str().to_string(),
+                task_id: post
+                    .task_id
+                    .as_ref()
+                    .map(|task_id| task_id.as_str().to_string()),
+                author: post.author.agent_path.clone(),
+                body: post.body.clone(),
+                created_at_ms: post.created_at_ms,
+                reply_to: post
+                    .reply_to
+                    .as_ref()
+                    .map(|post_id| post_id.as_str().to_string()),
+            })
+            .collect(),
+        subscriptions: snapshot
+            .subscriptions
+            .iter()
+            .map(|subscription| TeamBoardSubscription {
+                target: match &subscription.target {
+                    BoardSubscriptionTarget::Channel { channel_id } => {
+                        TeamBoardSubscriptionTarget::Channel {
+                            channel_id: channel_id.as_str().to_string(),
+                        }
+                    }
+                    BoardSubscriptionTarget::Thread { thread_id } => {
+                        TeamBoardSubscriptionTarget::Thread {
+                            thread_id: thread_id.as_str().to_string(),
+                        }
+                    }
+                },
+                subscriber: subscription.subscriber.agent_path.clone(),
+                subscribed: subscription.subscribed,
+                updated_at_ms: subscription.updated_at_ms,
+            })
+            .collect(),
     }
 }
 
