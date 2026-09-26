@@ -3299,7 +3299,7 @@ mod tests {
         hub.publish(
             "s",
             DomainEvent::Control(ControlEvent::SessionActivityChanged {
-                seed: "s".into(),
+                session_id: "s".into(),
                 state: qaqh_domain::ActivityState::Working,
                 turn_id: Some("t1".into()),
                 seq: 1,

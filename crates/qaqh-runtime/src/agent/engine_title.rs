@@ -90,7 +90,7 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
                     format!("w-title-{seq}"),
                     qaqh_domain::DomainEvent::Control(
                         qaqh_domain::ControlEvent::SessionMetaChanged {
-                            seed: seed_for_env,
+                            session_id: seed_for_env,
                             title: Some(title),
                         },
                     )
@@ -119,7 +119,7 @@ fn apply_fallback_title(ctx: &mut RingContext<'_>, seed: &str, first_user: &str)
     ctx.agent.session.title = Some(fallback.clone());
     ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
         qaqh_domain::ControlEvent::SessionMetaChanged {
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
             title: Some(fallback.clone()),
         },
     ));

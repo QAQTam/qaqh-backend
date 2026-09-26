@@ -201,7 +201,7 @@ impl QaqhService {
             let _ = hub.publish_with_causation(
                 seed,
                 qaqh_domain::DomainEvent::Control(qaqh_domain::ControlEvent::SessionStateChanged {
-                    seed: seed.to_string(),
+                    session_id: seed.to_string(),
                     state: qaqh_domain::SessionState::Closed,
                 }),
                 causation_id,
@@ -248,7 +248,7 @@ impl QaqhService {
                     seed,
                     qaqh_domain::DomainEvent::Control(
                         qaqh_domain::ControlEvent::SessionStateChanged {
-                            seed: seed.to_string(),
+                            session_id: seed.to_string(),
                             state: qaqh_domain::SessionState::Closed,
                         },
                     ),

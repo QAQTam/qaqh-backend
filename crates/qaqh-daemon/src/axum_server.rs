@@ -891,7 +891,7 @@ mod axum_tests {
             "cmd-replay",
             "ci-v2",
             RingingCommand::Control(ControlCommand::SessionResume {
-                seed: "seed-1".into(),
+                session_id: "seed-1".into(),
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
@@ -1001,7 +1001,7 @@ mod axum_tests {
             "cmd-mismatch",
             "ci-v2",
             RingingCommand::Control(ControlCommand::SessionResume {
-                seed: "seed-1".into(),
+                session_id: "seed-1".into(),
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
@@ -2108,7 +2108,7 @@ mod axum_tests {
             "cmd-attach-1",
             "ci-1",
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
-                seed: "sub-seed-1".into(),
+                session_id: "sub-seed-1".into(),
             }),
         )
         .with_client_session_id("cs-1")
@@ -2131,7 +2131,7 @@ mod axum_tests {
             "cmd-attach-2",
             "ci-1",
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
-                seed: String::new(),
+                session_id: String::new(),
             }),
         )
         .with_client_session_id("cs-1");
