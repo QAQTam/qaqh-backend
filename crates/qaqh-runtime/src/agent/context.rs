@@ -153,7 +153,7 @@ impl TurnContext {
     pub fn from_legacy(ctx: &RingContext<'_>, turn_id: impl Into<String>, round_num: u32) -> Self {
         Self {
             runtime: RuntimeContext::from_legacy_ambient(
-                ctx.agent.session.seed.clone(),
+                ctx.agent.session.session_id.clone(),
                 ctx.agent.config.permission_level,
                 ctx.cancel.clone(),
                 ctx.agent.config.exec.default_shell.clone(),

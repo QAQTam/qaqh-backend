@@ -57,7 +57,7 @@ impl Loop {
     }
 
     pub(super) fn injection_session_matches(&self, command_session_id: &str) -> bool {
-        let current_session_id = &self.session.agent.session.seed;
+        let current_session_id = &self.session.agent.session.session_id;
         current_session_id.is_empty()
             || command_session_id.is_empty()
             || command_session_id == current_session_id
@@ -89,11 +89,11 @@ impl Loop {
             log::warn!(
                 "[INJECT] rejected injection for stale session (command={}, current={})",
                 injection.session_id,
-                self.session.agent.session.seed
+                self.session.agent.session.session_id
             );
             return;
         }
-        let session_id = self.session.agent.session.seed.clone();
+        let session_id = self.session.agent.session.session_id.clone();
         if session_id.is_empty() {
             log::warn!(
                 "[INJECT] rejected injection without an active session (command_id={})",
@@ -140,18 +140,18 @@ impl Loop {
     /// Keep the idle path's existing immediate turn semantics while using the
     /// bus to claim the command id exactly once for this session.
     pub(super) fn claim_injection(&mut self, injection: &Injection, command_id: &str) -> bool {
-        if self.session.agent.session.seed.is_empty() {
+        if self.session.agent.session.session_id.is_empty() {
             return true;
         }
         if !self.injection_session_matches(&injection.session_id) {
             log::warn!(
                 "[INJECT] ignored idle injection for stale session (command={}, current={})",
                 injection.session_id,
-                self.session.agent.session.seed
+                self.session.agent.session.session_id
             );
             return false;
         }
-        let session_id = self.session.agent.session.seed.clone();
+        let session_id = self.session.agent.session.session_id.clone();
         self.injection_bus.switch_session(&session_id);
         let mut claimed = injection.clone();
         claimed.session_id = session_id.clone();
@@ -259,7 +259,7 @@ impl Loop {
     /// Hand bus records to ContextFlow only at a lap boundary. ContextFlow
     /// remains responsible for the actual store write and write ordering.
     pub(super) fn drain_injections(&mut self) {
-        let session_id = self.session.agent.session.seed.clone();
+        let session_id = self.session.agent.session.session_id.clone();
         self.injection_bus.switch_session(&session_id);
         let records = self
             .injection_bus
@@ -306,7 +306,7 @@ impl Loop {
         use qaqh_domain::ConversationCommand;
         use qaqh_ringing::RingingCommand;
         self.injection_bus
-            .switch_session(&self.session.agent.session.seed);
+            .switch_session(&self.session.agent.session.session_id);
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             let env = cmd.frame;
             match &env.command {
@@ -402,7 +402,7 @@ mod tests {
         let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config::default());
         agent.ephemeral = true;
         agent.session_manager = None;
-        agent.session.seed = SESSION.to_string();
+        agent.session.session_id = SESSION.to_string();
         let lp = Loop::from_channels(
             agent,
             channels.cmd_rx,

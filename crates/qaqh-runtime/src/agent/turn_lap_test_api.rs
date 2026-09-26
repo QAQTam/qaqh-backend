@@ -55,7 +55,7 @@ pub fn observe_yield_for_test(
         .begin_input(turn_id, input_id)
         .map_err(|error| error.to_string())?;
     engine.suspended = Some(TurnState {
-        session_id: agent.session.seed.clone(),
+        session_id: agent.session.session_id.clone(),
         turn_id: turn_id.to_string(),
         round_num: 0,
         pending_permission_ids: vec![pending_call_id.to_string()],
@@ -101,7 +101,7 @@ pub fn observe_ask_yield_for_test(
         questions,
     });
     engine.suspended = Some(TurnState {
-        session_id: agent.session.seed.clone(),
+        session_id: agent.session.session_id.clone(),
         turn_id: turn_id.to_string(),
         round_num: 0,
         pending_permission_ids: Vec::new(),
@@ -140,7 +140,7 @@ pub fn observe_permission_yield_for_test(
         .begin_input(turn_id, input_id)
         .map_err(|error| error.to_string())?;
     engine.suspended = Some(TurnState {
-        session_id: agent.session.seed.clone(),
+        session_id: agent.session.session_id.clone(),
         turn_id: turn_id.to_string(),
         round_num: 0,
         pending_permission_ids: vec![pending_call_id.to_string()],

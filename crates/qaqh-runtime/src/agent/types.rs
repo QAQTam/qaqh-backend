@@ -601,9 +601,9 @@ impl SessionBundle {
     /// Called on TurnComplete and before session switch.
     pub fn flush(&mut self) {
         self.agent.session.skills = self.agent.skills.session_state();
-        if !self.agent.ephemeral && !self.agent.session.seed.is_empty() {
+        if !self.agent.ephemeral && !self.agent.session.session_id.is_empty() {
             let skills = self.agent.session.skills.clone();
-            let seed = self.agent.session.seed.clone();
+            let seed = self.agent.session.session_id.clone();
             self.agent
                 .enqueue_meta_op(crate::agent::state::agent::MetaOp::PersistSkills {
                     seed,
@@ -614,7 +614,7 @@ impl SessionBundle {
             &self.agent.config.model,
             &self.agent.config.reasoning_effort,
         );
-        self.stats.flush(&self.agent.session.seed);
+        self.stats.flush(&self.agent.session.session_id);
     }
 }
 

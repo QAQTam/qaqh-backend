@@ -772,11 +772,11 @@ impl ToolRuntime {
             };
             let host = qaqh_subagent::host()
                 .ok_or_else(|| "subagent host unavailable before spawn edge commit".to_string())?;
-            if parent_session_id != ctx.agent.session.seed {
+            if parent_session_id != ctx.agent.session.session_id {
                 host.rollback_subagent(&seed, &child_session_id, process_id);
                 return Err(format!(
                     "subagent spawn parent mismatch: effect={parent_session_id}, active={}",
-                    ctx.agent.session.seed
+                    ctx.agent.session.session_id
                 ));
             }
             let parent_agent_path = AgentPath::parse_absolute(&parent_agent_path)
@@ -1236,7 +1236,7 @@ fn backfill_executed_result(
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardUpdated {
                 hp_connected: true,
-                session_seed: ctx.agent.session.seed.clone(),
+                session_seed: ctx.agent.session.session_id.clone(),
                 tool_calls_total: 0,
                 tool_failures: 0,
                 current_phase: "single".into(),
@@ -1245,7 +1245,7 @@ fn backfill_executed_result(
         ));
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardSnapshot {
-                snapshot: dashboard::build_snapshot(ctx.agent.session.seed.clone()),
+                snapshot: dashboard::build_snapshot(ctx.agent.session.session_id.clone()),
             },
         ));
     }

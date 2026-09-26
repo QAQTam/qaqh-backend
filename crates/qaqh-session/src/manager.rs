@@ -671,7 +671,7 @@ impl SessionManager {
     pub fn persist_skills(&self, seed: &str, skills: qaqh_types::SkillSessionStateV2) {
         self.with_meta_locked(seed, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -688,7 +688,7 @@ impl SessionManager {
     pub fn persist_frozen_annotation(&self, seed: &str, annotation: &str) {
         self.with_meta_locked(seed, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -704,8 +704,8 @@ impl SessionManager {
     /// 实例——实例启停由调用方（daemon 拦截层）负责。
     pub fn set_archived(&self, seed: &str, archived: bool) {
         self.with_meta_locked(seed, false, |dir, meta| {
-            if meta.seed.is_empty() {
-                meta.seed = seed.to_string();
+            if meta.session_id.is_empty() {
+                meta.session_id = seed.to_string();
             }
             meta.archived = archived;
             meta.updated_at = Self::now_epoch();
@@ -726,8 +726,8 @@ impl SessionManager {
             return;
         }
         self.with_meta_locked(seed, true, |dir, meta| {
-            if meta.seed.is_empty() {
-                meta.seed = seed.to_string();
+            if meta.session_id.is_empty() {
+                meta.session_id = seed.to_string();
             }
             meta.cwd = Some(crate::grouping::canonical_cwd(std::path::Path::new(cwd)));
             // 非索引会话（子代理继承 workspace 等临时场景）= 临时会话：关闭时
@@ -762,8 +762,8 @@ impl SessionManager {
     /// directory while `ephemeral` stays false.
     pub fn set_ephemeral(&self, seed: &str, ephemeral: bool) {
         self.with_meta_locked(seed, true, |dir, meta| {
-            if meta.seed.is_empty() {
-                meta.seed = seed.to_string();
+            if meta.session_id.is_empty() {
+                meta.session_id = seed.to_string();
             }
             meta.ephemeral = ephemeral;
             meta.updated_at = Self::now_epoch();
@@ -776,8 +776,8 @@ impl SessionManager {
     /// 子代理 worker 的 dashboard/compact 路径不会污染会话列表。
     pub fn set_context_stats(&self, seed: &str, stats: &serde_json::Value) {
         self.with_meta_locked(seed, true, |dir, meta| {
-            if meta.seed.is_empty() {
-                meta.seed = seed.to_string();
+            if meta.session_id.is_empty() {
+                meta.session_id = seed.to_string();
             }
             meta.context_stats = Some(stats.clone());
             meta.updated_at = Self::now_epoch();
@@ -878,7 +878,7 @@ impl SessionManager {
 
         let now = Self::now_epoch();
         let mut meta = store::read_meta(&dir).unwrap_or_default();
-        meta.seed = seed.to_string();
+        meta.session_id = seed.to_string();
         meta.created_at = now;
         meta.updated_at = now;
         meta.ephemeral = !index_session;
@@ -957,7 +957,7 @@ impl SessionManager {
     pub fn persist_new_session_with_cwd(&self, seed: &str, cwd: Option<&str>) {
         self.with_meta_locked(seed, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             meta.created_at = now;
             meta.updated_at = now;
             meta.cwd = cwd.map(|c| crate::grouping::canonical_cwd(std::path::Path::new(c)));
@@ -981,7 +981,7 @@ impl SessionManager {
         cache_reported_requests: u32,
     ) {
         self.with_meta_locked(seed, true, |dir, meta| {
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             meta.updated_at = Self::now_epoch();
             meta.usage_totals = totals;
             meta.last_usage = last_usage;
@@ -996,7 +996,7 @@ impl SessionManager {
     pub fn save_one(&self, seed: &str, msg: &Message) {
         self.with_meta_locked(seed, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -1030,7 +1030,7 @@ impl SessionManager {
     ) {
         let now = Self::now_epoch();
         self.with_meta_locked(seed, false, |dir, meta| {
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -1051,7 +1051,7 @@ impl SessionManager {
     /// 写 meta + index（daemon 的 `list()` 每次读盘，无需跨进程通知即可见）。
     pub fn update_title(&self, seed: &str, title: &str) {
         self.with_meta_locked(seed, false, |dir, meta| {
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             meta.title = Some(title.to_string());
             meta.updated_at = Self::now_epoch();
             if let Err(e) = store::write_meta(dir, meta) {
@@ -1118,7 +1118,7 @@ impl SessionManager {
         // 化击穿 provider 前缀缓存）、归档/临时标记丢失。新增持久化字段
         // 默认自动继承，不再依赖维护者记得在这里补一行。
         let mut meta = existing.clone();
-        meta.seed = seed.to_string();
+        meta.session_id = seed.to_string();
         meta.created_at = created_at;
         meta.updated_at = now;
         meta.model = model.to_string();
@@ -1194,7 +1194,7 @@ impl SessionManager {
                 let Some(covered) = compact_covered_through_msg_id else {
                     return;
                 };
-                meta.seed = seed.to_string();
+                meta.session_id = seed.to_string();
                 meta.updated_at = now;
                 meta.compact_covered_through_msg_id = Some(covered);
                 if let Err(e) = store::write_meta(dir, meta) {
@@ -1235,7 +1235,7 @@ impl SessionManager {
                 meta.created_at = now;
             }
             let last_summary = Self::extract_summary(new_messages);
-            meta.seed = seed.to_string();
+            meta.session_id = seed.to_string();
             meta.updated_at = now;
             meta.model = model.to_string();
             meta.effort = effort.map(String::from);
@@ -1493,7 +1493,7 @@ impl SessionManager {
                 target_dir.display()
             )
         })?;
-        meta.seed = session_id.to_string();
+        meta.session_id = session_id.to_string();
         store::write_meta(&target_dir, &meta)?;
         store::remove_from_index(&self.sessions_dir, legacy_seed);
         store::upsert_index(&self.sessions_dir, &meta);
@@ -1781,7 +1781,7 @@ impl SessionManager {
             || self.session_dir(seed).is_some()
             || store::read_index(&self.sessions_dir)
                 .iter()
-                .any(|m| m.seed == seed)
+                .any(|m| m.session_id == seed)
     }
 
     /// Generate a session seed that does not collide with any existing
@@ -2137,9 +2137,9 @@ mod skill_persistence_tests {
 
         let listed = manager.list();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].seed, "file-only");
+        assert_eq!(listed[0].session_id, "file-only");
         let (meta, messages) = manager.load("file-only").expect("file snapshot");
-        assert_eq!(meta.seed, "file-only");
+        assert_eq!(meta.session_id, "file-only");
         assert!(messages.is_empty());
 
         std::fs::remove_dir_all(root).expect("remove test directory");
@@ -2152,7 +2152,7 @@ mod skill_persistence_tests {
         manager.update_meta("seed", "model", None, 0, 1);
         manager.save_full("seed", &[Message::user("hello")], "model", None, 0, 1);
         let meta = manager.load_meta("seed").expect("metadata");
-        assert_eq!(meta.seed, "seed");
+        assert_eq!(meta.session_id, "seed");
         assert_eq!(meta.skills, state());
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
@@ -2757,7 +2757,7 @@ mod seed_collision_tests {
         store::write_meta(
             &existing_dir,
             &SessionMeta {
-                seed: "deadbeef".into(),
+                session_id: "deadbeef".into(),
                 created_at: 1234,
                 cwd: Some("D:/old-project".into()),
                 ..Default::default()
@@ -2824,7 +2824,7 @@ mod seed_collision_tests {
         store::write_meta(
             &dir,
             &SessionMeta {
-                seed: "occupied".into(),
+                session_id: "occupied".into(),
                 created_at: 777,
                 cwd: Some("D:/kept".into()),
                 ..Default::default()
@@ -2861,7 +2861,10 @@ mod seed_collision_tests {
             "rejected seed must not be materialized nor claimed"
         );
         assert_eq!(
-            manager.load_meta("fresh-seed").expect("fresh meta").seed,
+            manager
+                .load_meta("fresh-seed")
+                .expect("fresh meta")
+                .session_id,
             "fresh-seed"
         );
 
@@ -2883,7 +2886,7 @@ mod seed_collision_tests {
             identity
         );
         let meta = manager.load_meta(session_id).expect("load meta");
-        assert_eq!(meta.seed, session_id);
+        assert_eq!(meta.session_id, session_id);
         assert!(!meta.ephemeral, "normal sessions are indexed and durable");
         assert_eq!(
             manager
@@ -2906,12 +2909,12 @@ mod seed_collision_tests {
         let session_id = identity.session_id.as_str();
         let meta = manager.load_meta(session_id).expect("load child meta");
 
-        assert_eq!(meta.seed, session_id);
+        assert_eq!(meta.session_id, session_id);
         assert!(meta.ephemeral, "unindexed child starts ephemeral");
         assert!(
             store::read_index(&manager.sessions_dir)
                 .iter()
-                .all(|entry| entry.seed != session_id),
+                .all(|entry| entry.session_id != session_id),
             "child session must not pollute the ordinary session index"
         );
         assert_eq!(
@@ -2932,7 +2935,7 @@ mod seed_collision_tests {
         let identity = CanonicalSessionIdentity::new();
         CanonicalSessionIdentity::install(&dir, &identity).expect("install legacy identity");
         let meta = SessionMeta {
-            seed: legacy_seed.to_string(),
+            session_id: legacy_seed.to_string(),
             created_at: 1,
             updated_at: 1,
             ..Default::default()
@@ -2971,13 +2974,13 @@ mod seed_collision_tests {
             manager
                 .load_meta(&session_id)
                 .expect("load migrated meta")
-                .seed,
+                .session_id,
             session_id
         );
         assert_eq!(manager.active_seed().as_deref(), Some(session_id.as_str()));
         let indexed = store::read_index(&manager.sessions_dir);
-        assert!(indexed.iter().any(|entry| entry.seed == session_id));
-        assert!(indexed.iter().all(|entry| entry.seed != legacy_seed));
+        assert!(indexed.iter().any(|entry| entry.session_id == session_id));
+        assert!(indexed.iter().all(|entry| entry.session_id != legacy_seed));
 
         assert_eq!(
             manager
@@ -3001,7 +3004,7 @@ mod seed_collision_tests {
         store::write_meta(
             &target,
             &SessionMeta {
-                seed: legacy_seed.to_string(),
+                session_id: legacy_seed.to_string(),
                 created_at: 1,
                 updated_at: 1,
                 ..Default::default()
@@ -3022,7 +3025,7 @@ mod seed_collision_tests {
             manager
                 .load_meta(&session_id)
                 .expect("load repaired meta")
-                .seed,
+                .session_id,
             session_id
         );
         assert_eq!(
@@ -3088,7 +3091,7 @@ mod seed_collision_tests {
         store::write_meta(
             &sentinel_dir,
             &SessionMeta {
-                seed: sentinel.into(),
+                session_id: sentinel.into(),
                 created_at: 4242,
                 cwd: Some("D:/sentinel-project".into()),
                 ..Default::default()
@@ -3201,7 +3204,7 @@ mod seed_collision_tests {
             if *ok {
                 assert!(!seed.is_empty(), "created allocation must carry a seed");
                 let meta = manager.load_meta(seed).expect("created seed has meta");
-                assert_eq!(meta.seed, *seed, "created meta must be self-owned");
+                assert_eq!(meta.session_id, *seed, "created meta must be self-owned");
             }
         }
         // 关键断言：失败者只能是「显式放弃（seed 为空 + false）」，
@@ -3234,7 +3237,7 @@ mod seed_collision_tests {
         store::upsert_index(
             &manager.sessions_dir,
             &SessionMeta {
-                seed: "dddddddd".into(),
+                session_id: "dddddddd".into(),
                 created_at: 5,
                 ..Default::default()
             },
@@ -3308,7 +3311,7 @@ mod save_full_meta_preservation_tests {
 
         // 先落一份字段齐全的既有 meta（模拟真实会话的持久化状态）。
         let existing = SessionMeta {
-            seed: seed.into(),
+            session_id: seed.into(),
             created_at: 1000,
             updated_at: 2000,
             model: "test-model".into(),

@@ -118,7 +118,7 @@ pub(crate) fn emit_completed_tool_round(
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardUpdated {
                 hp_connected: true,
-                session_seed: ctx.agent.session.seed.clone(),
+                session_seed: ctx.agent.session.session_id.clone(),
                 tool_calls_total: 0,
                 tool_failures: 0,
                 current_phase: "single".into(),
@@ -127,7 +127,7 @@ pub(crate) fn emit_completed_tool_round(
         ));
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardSnapshot {
-                snapshot: dashboard::build_snapshot(ctx.agent.session.seed.clone()),
+                snapshot: dashboard::build_snapshot(ctx.agent.session.session_id.clone()),
             },
         ));
     }

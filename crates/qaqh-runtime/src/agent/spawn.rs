@@ -114,7 +114,7 @@ pub(crate) fn spawn_agent(
                 spec.base_url.as_deref(),
                 spec.max_tokens,
             );
-            agent.session.seed = seed.to_string();
+            agent.session.session_id = seed.to_string();
             agent.session.created_at = qaqh_session::SessionManager::now_epoch();
             log::info!(
                 "[SUBAGENT-ACTOR] starting in-process subagent seed={seed} tools={:?} ephemeral={}",
@@ -131,7 +131,7 @@ pub(crate) fn spawn_agent(
                 agent.session.resume_seed = Some(resume.clone());
             }
             if let Some(ref new) = new_seed {
-                agent.session.seed = new.clone();
+                agent.session.session_id = new.clone();
                 agent.session.created_at = qaqh_session::SessionManager::now_epoch();
             }
             // Carry the timeline turn-count floor per-agent instead of via

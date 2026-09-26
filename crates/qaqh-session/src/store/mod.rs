@@ -351,7 +351,7 @@ fn read_merged_index(sessions_dir: &Path) -> Vec<SessionMeta> {
         lines += 1;
         match serde_json::from_str::<IndexOp>(trimmed) {
             Ok(IndexOp::Upsert { meta }) => {
-                by_seed.insert(meta.seed.clone(), *meta);
+                by_seed.insert(meta.session_id.clone(), *meta);
             }
             Ok(IndexOp::Remove { seed }) => {
                 by_seed.remove(&seed);
@@ -467,7 +467,7 @@ mod tests {
 
     fn meta(seed: &str, updated: u64) -> SessionMeta {
         SessionMeta {
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
             updated_at: updated,
             ..SessionMeta::default()
         }
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(
             read_index(&dir)
                 .iter()
-                .find(|m| m.seed == "a")
+                .find(|m| m.session_id == "a")
                 .unwrap()
                 .updated_at,
             3
@@ -511,7 +511,7 @@ mod tests {
         remove_from_index(&dir, "a");
         let after = read_index(&dir);
         assert_eq!(after.len(), 1, "tombstone removes the seed");
-        assert_eq!(after[0].seed, "b");
+        assert_eq!(after[0].session_id, "b");
         // tombstone 后再 upsert 复活。
         upsert_index(&dir, &meta("a", 9));
         assert_eq!(read_index(&dir).len(), 2);
@@ -529,7 +529,7 @@ mod tests {
         remove_from_index(&dir, "cold");
         let read = read_index(&dir);
         assert_eq!(read.len(), 1, "merge collapses to latest per seed");
-        assert_eq!(read[0].seed, "hot");
+        assert_eq!(read[0].session_id, "hot");
         assert_eq!(read[0].updated_at, 1199);
         // compact 后日志行数收缩（每 seed ≤ 1 行 + 可能的后续 append）。
         let lines = fs::read_to_string(index_log_path(&dir))
@@ -551,7 +551,7 @@ mod tests {
         fs::write(&path, body).unwrap();
         let read = read_index(&dir);
         assert_eq!(read.len(), 1, "torn tail must be skipped");
-        assert_eq!(read[0].seed, "a");
+        assert_eq!(read[0].session_id, "a");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

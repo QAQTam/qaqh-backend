@@ -367,7 +367,12 @@ fn auto_discover_seed(discovery: &qaqh_types::DaemonDiscovery) -> Result<String,
     };
     let seeds: Vec<&str> = entries
         .iter()
-        .filter_map(|entry| entry.get("seed").and_then(|v| v.as_str()))
+        .filter_map(|entry| {
+            entry
+                .get("session_id")
+                .or_else(|| entry.get("seed"))
+                .and_then(|v| v.as_str())
+        })
         .collect();
     match seeds.as_slice() {
         [only] => Ok((*only).to_string()),

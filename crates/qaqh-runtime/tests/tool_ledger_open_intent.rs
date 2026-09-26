@@ -238,7 +238,7 @@ fn open_non_replay_intent_is_sealed_and_handler_never_runs() {
     std::thread::sleep(Duration::from_millis(20));
 
     let mut agent = AgentState::init("open-intent-test", qaqh_config::Config::default());
-    agent.session.seed = seed.to_string();
+    agent.session.session_id = seed.to_string();
     agent.ephemeral = false;
     agent.config.permission_level = 4;
     agent.msg = store_with_tool_use(seed, call_id, "open_intent_probe");

@@ -61,7 +61,8 @@ impl Default for SkillSessionStateV2 {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMeta {
     // ── Persisted fields ──
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub created_at: u64,
     pub updated_at: u64,
     pub model: String,
@@ -239,7 +240,7 @@ impl SessionMeta {
                 None => trimmed.to_owned(),
             };
         }
-        self.seed.clone()
+        self.session_id.clone()
     }
 }
 
@@ -276,7 +277,7 @@ mod tests {
     /// 每个可序列化字段都非缺省的 meta——用于 wire 契约锁。
     fn fully_populated_meta() -> SessionMeta {
         SessionMeta {
-            seed: "0123abcd".into(),
+            session_id: "0123abcd".into(),
             created_at: 1,
             updated_at: 2,
             model: "m1".into(),
@@ -345,7 +346,7 @@ mod tests {
             "message_count",
             "mode",
             "model",
-            "seed",
+            "session_id",
             "skills",
             "title",
             "tool_mode",
@@ -421,7 +422,7 @@ mod tests {
     #[test]
     fn display_title_prefers_title_then_cwd_tail_then_seed() {
         let mut meta = SessionMeta {
-            seed: "0123abcd".into(),
+            session_id: "0123abcd".into(),
             title: Some("Bun 引导 daemon".into()),
             cwd: Some("/home/me/proj".into()),
             last_summary: "修复 SSE 解码".into(),
@@ -440,6 +441,19 @@ mod tests {
         // 都没有 → seed。**last_summary 全程不参与**。
         meta.cwd = None;
         assert_eq!(meta.display_title(), "0123abcd");
+    }
+
+    #[test]
+    fn session_meta_serializes_session_id_and_accepts_legacy_seed() {
+        let legacy: SessionMeta = serde_json::from_str(
+            r#"{"seed":"legacy-session","created_at":1,"updated_at":1,"model":"m","message_count":0}"#,
+        )
+        .expect("legacy seed must deserialize");
+        assert_eq!(legacy.session_id, "legacy-session");
+
+        let wire = serde_json::to_value(&legacy).expect("serialize");
+        assert_eq!(wire["session_id"], "legacy-session");
+        assert!(wire.get("seed").is_none(), "seed must not be emitted");
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub(crate) fn load_session_workspace(agent: &AgentState) {
     let cwd = agent
         .session_manager
         .as_ref()
-        .and_then(|sm| sm.workspace_cwd(&agent.session.seed))
+        .and_then(|sm| sm.workspace_cwd(&agent.session.session_id))
         .unwrap_or_default();
     qaqh_workspace::workspace::set_process_workspace(if cwd.is_empty() { "." } else { &cwd });
 }
@@ -23,7 +23,7 @@ fn enable_message_wal(agent: &mut AgentState) {
     if agent.ephemeral {
         return;
     }
-    let session_dir = qaqh_types::platform::sessions_dir().join(&agent.session.seed);
+    let session_dir = qaqh_types::platform::sessions_dir().join(&agent.session.session_id);
     agent.msg.enable_wal(&session_dir);
 }
 
@@ -172,7 +172,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 agent.session.from_resume = true;
                 agent.session.tokens = agent.session.usage_totals.total_tokens.into();
                 let (msg, repairs) = qaqh_message::MessageStore::from_messages(
-                    &agent.session.seed,
+                    &agent.session.session_id,
                     &active_messages,
                     effective_compact_skip,
                 );
@@ -238,12 +238,15 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 // P3：canonical ToolIntent/ToolFinished 修正 [RESTORE] 占位符
                 // 语义（"未执行" → "已开始/已有终态、结果未持久化"）。旧
                 // tool_outbox.wal 仅作为历史会话迁移 fallback 读取，不再写入。
-                crate::agent::tool_recovery::reconcile_store(&mut agent.msg, &agent.session.seed);
+                crate::agent::tool_recovery::reconcile_store(
+                    &mut agent.msg,
+                    &agent.session.session_id,
+                );
                 // 重建 read_image 图片注册表：registry 是内存态，daemon 重启
                 // 后会丢失；但上传图片本就以 ContentBlock::Image 持久化在
                 // user 消息里。按活跃视图的时序重放注册，使 [Image #N] 占位
                 // 引用（gate 投影按同一视图顺序编号）在重启后依然成立。
-                qaqh_workspace::read_image::reset_images(&agent.session.seed);
+                qaqh_workspace::read_image::reset_images(&agent.session.session_id);
                 for message in active_messages {
                     if message.role != "user" {
                         continue;
@@ -253,7 +256,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                             // 旧会话 inline Image：借重建时机外置落盘（内容寻址幂等）。
                             qaqh_types::ContentBlock::Image { mime_type, data } => {
                                 qaqh_workspace::read_image::store_image(
-                                    &agent.session.seed,
+                                    &agent.session.session_id,
                                     mime_type,
                                     data,
                                 );
@@ -263,7 +266,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                                 sha256, mime_type, ..
                             } => {
                                 qaqh_workspace::read_image::register_image_ref(
-                                    &agent.session.seed,
+                                    &agent.session.session_id,
                                     mime_type,
                                     sha256,
                                 );
@@ -282,7 +285,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                     .msg
                     .remove_system_messages_by_prefix("Available skills");
 
-                qaqh_workspace::workspace::set_current_session(&agent.session.seed);
+                qaqh_workspace::workspace::set_current_session(&agent.session.session_id);
                 load_session_workspace(agent);
                 // BUG-2026-09-12-05：读 TLS 优先的 current_workspace 而非进程
                 // 全局——多 actor daemon 中全局恒空，skills 工作区会锚到
@@ -307,15 +310,15 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 let tool_mode = agent.session.tool_mode.clone();
                 let custom_tools = agent.session.custom_tools.clone();
                 agent.apply_tool_mode(&tool_mode, &custom_tools);
-                if let Err(error) = recover_canonical_tool_ledger(&agent.session.seed) {
+                if let Err(error) = recover_canonical_tool_ledger(&agent.session.session_id) {
                     log::error!(
                         "[recovery] canonical tool ledger recovery failed for {}: {error}",
-                        agent.session.seed
+                        agent.session.session_id
                     );
                 }
                 log::info!(
                     "qaqh-agent: restored session {} ({} msgs, {} tokens)",
-                    agent.session.seed,
+                    agent.session.session_id,
                     agent.msg.message_count(),
                     agent.session.tokens
                 );
@@ -354,7 +357,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
     };
 
     // Create fresh session (either no restore_seed, or restore failed)
-    agent.session.seed = seed.clone();
+    agent.session.session_id = seed.clone();
     agent.session.created_at = qaqh_session::now_epoch();
     agent.session.reset_usage();
     agent.session.from_resume = false;
@@ -364,7 +367,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
         qaqh_message::MessageStore::new(&seed)
     };
     enable_message_wal(agent);
-    qaqh_workspace::workspace::set_current_session(&agent.session.seed);
+    qaqh_workspace::workspace::set_current_session(&agent.session.session_id);
     load_session_workspace(agent);
     let workspace = qaqh_workspace::CURRENT_WORKSPACE
         .read()
@@ -380,7 +383,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
     agent
         .msg
         .flush_meta(&agent.config.model, &agent.config.reasoning_effort);
-    log::info!("qaqh-agent: new session {}", agent.session.seed);
+    log::info!("qaqh-agent: new session {}", agent.session.session_id);
     true
 }
 
@@ -401,17 +404,17 @@ pub fn create_session(agent: &mut AgentState) {
             .as_str()
             .to_string(),
     };
-    agent.session.seed = seed;
+    agent.session.session_id = seed;
     agent.session.created_at = qaqh_session::now_epoch();
     agent.session.reset_usage();
     agent.session.from_resume = false;
     agent.msg = if agent.ephemeral {
-        qaqh_message::MessageStore::new_ephemeral(&agent.session.seed)
+        qaqh_message::MessageStore::new_ephemeral(&agent.session.session_id)
     } else {
-        qaqh_message::MessageStore::new(&agent.session.seed)
+        qaqh_message::MessageStore::new(&agent.session.session_id)
     };
     enable_message_wal(agent);
-    qaqh_workspace::workspace::set_current_session(&agent.session.seed);
+    qaqh_workspace::workspace::set_current_session(&agent.session.session_id);
     load_session_workspace(agent);
     // BUG-2026-09-12-05：同 resume/new 路径，改读 TLS 优先快照。
     let workspace = qaqh_workspace::current_workspace();
@@ -425,7 +428,7 @@ pub fn create_session(agent: &mut AgentState) {
     agent
         .msg
         .flush_meta(&agent.config.model, &agent.config.reasoning_effort);
-    log::info!("qaqh-agent: new session {}", agent.session.seed);
+    log::info!("qaqh-agent: new session {}", agent.session.session_id);
 }
 
 /// Create a new session with a pre-set seed (from CLI --seed).
@@ -434,12 +437,12 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
     agent.session.reset_usage();
     agent.session.from_resume = false;
     agent.msg = if agent.ephemeral {
-        qaqh_message::MessageStore::new_ephemeral(&agent.session.seed)
+        qaqh_message::MessageStore::new_ephemeral(&agent.session.session_id)
     } else {
-        qaqh_message::MessageStore::new(&agent.session.seed)
+        qaqh_message::MessageStore::new(&agent.session.session_id)
     };
     enable_message_wal(agent);
-    qaqh_workspace::workspace::set_current_session(&agent.session.seed);
+    qaqh_workspace::workspace::set_current_session(&agent.session.session_id);
     load_session_workspace(agent);
     // BUG-2026-09-12-05：同 resume/new 路径，改读 TLS 优先快照。
     let workspace = qaqh_workspace::current_workspace();
@@ -454,7 +457,7 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
     if let Some(meta) = agent
         .session_manager
         .as_ref()
-        .and_then(|sm| sm.load_meta(&agent.session.seed))
+        .and_then(|sm| sm.load_meta(&agent.session.session_id))
         && !meta.tool_mode.is_empty()
     {
         agent.apply_tool_mode(&meta.tool_mode, &meta.custom_tools);
@@ -467,7 +470,7 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
         .flush_meta(&agent.config.model, &agent.config.reasoning_effort);
     log::info!(
         "qaqh-agent: new session with preset seed {}",
-        agent.session.seed
+        agent.session.session_id
     );
 }
 

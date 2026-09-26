@@ -33,7 +33,7 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
     if ctx.agent.ephemeral {
         return;
     }
-    let seed = ctx.agent.session.seed.clone();
+    let seed = ctx.agent.session.session_id.clone();
     if seed.is_empty() {
         return;
     }
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn fallback_title_is_applied_once_and_frozen() {
         let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config::default());
-        agent.session.seed = "seed-title".to_string();
+        agent.session.session_id = "seed-title".to_string();
         agent.msg.push_user("## 修复标题生成链路");
         let emitter = RecordingEmitter::default();
         let cancel = crate::agent::types::CancelToken::new();

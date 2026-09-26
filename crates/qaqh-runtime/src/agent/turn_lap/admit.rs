@@ -254,7 +254,7 @@ pub(crate) fn admit_and_dispatch(
             None
         };
         *suspended = Some(TurnState {
-            session_id: ctx.agent.session.seed.clone(),
+            session_id: ctx.agent.session.session_id.clone(),
             turn_id: turn_id.to_string(),
             round_num,
             pending_permission_ids: admission.pending_permission_ids,
@@ -359,7 +359,7 @@ pub(crate) fn admit_and_dispatch(
             None
         };
         *suspended = Some(TurnState {
-            session_id: ctx.agent.session.seed.clone(),
+            session_id: ctx.agent.session.session_id.clone(),
             turn_id: turn_id.to_string(),
             round_num,
             pending_permission_ids: admission.pending_permission_ids,

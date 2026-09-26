@@ -275,23 +275,23 @@ impl AgentState {
     /// canonical facts. All other failures are surfaced to the caller so the
     /// execution boundary can fail closed before spawning a handler.
     pub(crate) fn tool_ledger_mut(&mut self) -> Result<Option<&mut ToolLedger>, ToolLedgerError> {
-        if self.ephemeral || self.session.seed.is_empty() {
+        if self.ephemeral || self.session.session_id.is_empty() {
             return Ok(None);
         }
 
-        if self.tool_ledger_seed.as_deref() != Some(self.session.seed.as_str()) {
+        if self.tool_ledger_seed.as_deref() != Some(self.session.session_id.as_str()) {
             self.tool_ledger = None;
             self.tool_ledger_seed = None;
         }
 
         if self.tool_ledger.is_none() {
-            let session_dir = qaqh_types::platform::sessions_dir().join(&self.session.seed);
+            let session_dir = qaqh_types::platform::sessions_dir().join(&self.session.session_id);
             let identity = CanonicalSessionIdentity::open_or_create(&session_dir)?;
             let now_ms = unix_ms();
             let writer_id = WriterId::new(format!(
                 "agent-{}-{}",
                 std::process::id(),
-                self.session.seed
+                self.session.session_id
             ));
             let ledger = ToolLedger::open(
                 &session_dir,
@@ -302,7 +302,7 @@ impl AgentState {
                 tool_ledger_lease_ms(),
             )?;
             self.tool_ledger = Some(ledger);
-            self.tool_ledger_seed = Some(self.session.seed.clone());
+            self.tool_ledger_seed = Some(self.session.session_id.clone());
         }
 
         Ok(self.tool_ledger.as_mut())
@@ -369,7 +369,7 @@ impl AgentState {
             qaqh_config::registry::protocol_for(&self.config.provider_id, &self.config.endpoint);
         format!(
             "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            self.session.seed,
+            self.session.session_id,
             self.config.provider_id,
             self.config.endpoint,
             self.config.base_url,
@@ -627,9 +627,9 @@ impl AgentState {
             // with the byte-identical prefix. Written through the MetaOp queue
             // (same path as PersistSkills) to keep the single-writer ordering.
             self.session.frozen_annotation = Some(text.clone());
-            if !self.ephemeral && !self.session.seed.is_empty() {
+            if !self.ephemeral && !self.session.session_id.is_empty() {
                 self.enqueue_meta_op(MetaOp::PersistFrozenAnnotation {
-                    seed: self.session.seed.clone(),
+                    seed: self.session.session_id.clone(),
                     annotation: text.clone(),
                 });
             }
@@ -1176,7 +1176,7 @@ mod tests {
     #[test]
     fn api_usage_matches_only_the_prepared_request_that_produced_it() {
         let mut agent = AgentState::new(qaqh_config::Config::default());
-        agent.session.seed = "token-session".into();
+        agent.session.session_id = "token-session".into();
         let original = vec![qaqh_types::Message::user(&"original request ".repeat(80))];
         let original_raw = agent.estimate_prepared_request(&original, None).raw_tokens;
         let observed = original_raw.saturating_add(40);
@@ -1199,7 +1199,7 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)] // AgentState::new 有构造逻辑，非纯 Default
     fn compact_request_usage_cannot_pollute_normal_request_context() {
         let mut agent = AgentState::new(qaqh_config::Config::default());
-        agent.session.seed = "token-session".into();
+        agent.session.session_id = "token-session".into();
         let normal = vec![qaqh_types::Message::user(&"normal request ".repeat(80))];
         let compact = vec![qaqh_types::Message::user("[COMPACT] summarize history")];
         let normal_raw = agent.estimate_prepared_request(&normal, None).raw_tokens;
@@ -1224,7 +1224,7 @@ mod tests {
             ..Default::default()
         };
         let mut agent = AgentState::new(config);
-        agent.session.seed = "token-session".into();
+        agent.session.session_id = "token-session".into();
 
         let before = vec![qaqh_types::Message::user(&"large context ".repeat(400))];
         let before_raw = agent.estimate_prepared_request(&before, None).raw_tokens;

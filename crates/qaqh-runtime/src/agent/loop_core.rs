@@ -225,8 +225,8 @@ impl Loop {
         // 仍为空；用 resume_seed 兜底，避免 PacedEmitter 以空 seed 构造
         // （Ringing 事件信封会被 daemon 按 seed 过滤丢弃）。init_session
         // 完成后还会经 sync_emitter_seed 再次同步权威值。
-        let seed = if !agent.session.seed.is_empty() {
-            agent.session.seed.clone()
+        let seed = if !agent.session.session_id.is_empty() {
+            agent.session.session_id.clone()
         } else {
             agent.session.resume_seed.clone().unwrap_or_default()
         };
@@ -389,7 +389,7 @@ impl Loop {
     /// 之前调用；否则事件携带旧/空 seed，被 daemon SSE 的 owns_seed
     /// 过滤丢弃，前端收不到流式输出。
     pub(super) fn sync_emitter_seed(&mut self) {
-        let seed = self.session.agent.session.seed.clone();
+        let seed = self.session.agent.session.session_id.clone();
         self.paced_emitter.set_seed(&seed);
         self.injection_bus.switch_session(&seed);
     }
@@ -492,14 +492,14 @@ impl Loop {
     /// Initialize session state from pre-set seed (CLI args --seed / --resume-seed).
     fn init_session(&mut self) {
         let resume_seed = self.session.agent.session.resume_seed.take();
-        let has_seed = !self.session.agent.session.seed.is_empty();
+        let has_seed = !self.session.agent.session.session_id.is_empty();
 
         if let Some(seed) = resume_seed {
             if self
                 .lifecycle
                 .resume_session(&mut self.session.agent, &self.cancel, &seed)
             {
-                // init_session 已把 agent.session.seed 设为权威值（恢复成功
+                // init_session 已把 agent.session.session_id 设为权威值（恢复成功
                 // 为原 seed，fallback 为新 seed）；此后 Ringing 事件必须携带它。
                 self.sync_emitter_seed();
                 // legacy SessionRestored 已退役：Ringing 恢复由 daemon bootstrap 快照承担。
@@ -516,7 +516,7 @@ impl Loop {
             self.lifecycle
                 .create_session_with_seed(&mut self.session.agent, &self.cancel);
             self.sync_emitter_seed();
-            let seed = self.session.agent.session.seed.clone();
+            let seed = self.session.agent.session.session_id.clone();
             self.paced_emitter
                 .emit_domain(qaqh_domain::DomainEvent::Control(
                     qaqh_domain::ControlEvent::SessionStateChanged {

@@ -390,7 +390,7 @@ pub(crate) fn gate_request(
         tools,
         ctx.agent.config.max_tokens,
         Some(ctx.agent.config.reasoning_effort.clone()),
-        Some(ctx.agent.session.seed.clone()),
+        Some(ctx.agent.session.session_id.clone()),
         Some(&cancel_arc),
         &mut |event| match event {
             qaqh_gate::StreamEvent::ContentDelta(d) => {
@@ -497,7 +497,7 @@ pub(crate) fn gate_request(
                     if !ctx.agent.ephemeral {
                         ctx.agent.enqueue_meta_op(
                             crate::agent::state::agent::MetaOp::PersistUsage {
-                                seed: ctx.agent.session.seed.clone(),
+                                seed: ctx.agent.session.session_id.clone(),
                                 totals: ctx.agent.session.usage_totals.clone(),
                                 last_usage: ctx.agent.session.last_usage.clone(),
                                 requests: ctx.agent.session.usage_requests,
@@ -741,7 +741,7 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             p.thinking_budget_large = endpoint.thinking_budget_large;
         }
         return p
-            .with_opencode_headers(&ctx.agent.session.seed, request_tag)
+            .with_opencode_headers(&ctx.agent.session.session_id, request_tag)
             .with_retry(retry.clone());
     }
     if is_responses {
@@ -764,14 +764,14 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
         }
         // Muse Spark 专项：物理前缀缓存 + 关明文回放 + 放宽档位至 xhigh
         if p.model.contains("muse-spark") {
-            p.prompt_cache_key = Some(ctx.agent.session.seed.clone());
+            p.prompt_cache_key = Some(ctx.agent.session.session_id.clone());
             p.responses_compat.echo_reasoning_content = false;
             p.responses_compat.send_include = false;
             p.responses_compat.effort_max = "xhigh".into();
             p.responses_compat.web_search = false;
             p.responses_compat.echo_web_search_call = false;
         }
-        p.with_opencode_headers(&ctx.agent.session.seed, request_tag)
+        p.with_opencode_headers(&ctx.agent.session.session_id, request_tag)
             .with_retry(retry.clone())
     } else {
         let mut p = qaqh_gate::ProviderConfig::openai(
@@ -800,7 +800,7 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             p.supports_reasoning_content = endpoint.supports_reasoning_content;
             p.require_provider_parameters = endpoint.require_provider_parameters;
         }
-        p.with_opencode_headers(&ctx.agent.session.seed, request_tag)
+        p.with_opencode_headers(&ctx.agent.session.session_id, request_tag)
             .with_retry(retry.clone())
     }
 }

@@ -23,7 +23,7 @@ fn yield_persists_canonical_interaction_request() {
     let wire_turn = "turn-interaction-request";
     let wire_call = "call-interaction-request";
     let mut agent = AgentState::init("interaction-request-test", qaqh_config::Config::default());
-    agent.session.seed = seed.to_string();
+    agent.session.session_id = seed.to_string();
     agent.ephemeral = false;
 
     let mut engine = TurnEngine::new();

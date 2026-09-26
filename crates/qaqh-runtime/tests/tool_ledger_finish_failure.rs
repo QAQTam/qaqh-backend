@@ -214,7 +214,7 @@ fn fenced_finish_keeps_intent_open_and_recovers_as_indeterminate() {
     let identity = CanonicalSessionIdentity::open_or_create(&session_dir).expect("identity");
 
     let mut agent = AgentState::init("fenced-finish-test", qaqh_config::Config::default());
-    agent.session.seed = seed.to_string();
+    agent.session.session_id = seed.to_string();
     agent.ephemeral = false;
     agent.config.permission_level = 4;
     agent.msg = store_with_tool_use(seed, call_id, "fenced_finish_probe");

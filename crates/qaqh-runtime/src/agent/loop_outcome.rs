@@ -112,7 +112,7 @@ impl Loop {
         {
             return;
         }
-        let session_id = self.session.agent.session.seed.clone();
+        let session_id = self.session.agent.session.session_id.clone();
         self.injection_bus.switch_session(&session_id);
         let records = self.injection_bus.drain();
         for record in records {
@@ -229,7 +229,7 @@ impl Loop {
             let pending_compact_id = compact_id.clone();
             let (tx, rx) = mpsc::channel();
             let event_tx = self.event_tx.clone();
-            let compact_seed = self.session.agent.session.seed.clone();
+            let compact_seed = self.session.agent.session.session_id.clone();
             let worker_causation = causation.clone();
             match std::thread::Builder::new()
                 .name("compact-worker".into())
@@ -312,7 +312,10 @@ impl Loop {
             self.paced_emitter
                 .emit_domain(qaqh_domain::DomainEvent::Conversation(
                     qaqh_domain::ConversationEvent::CompactFinished {
-                        compact_id: format!("compact-skipped-{}", self.session.agent.session.seed),
+                        compact_id: format!(
+                            "compact-skipped-{}",
+                            self.session.agent.session.session_id
+                        ),
                         status: qaqh_domain::CompactStatus::Skipped,
                         summary_chars: Some(0),
                         turns_compacted: Some(0),
