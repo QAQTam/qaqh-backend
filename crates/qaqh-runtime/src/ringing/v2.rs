@@ -23,7 +23,7 @@ use qaqh_session::projection::{
 };
 use qaqh_session::session_fact_v2::{
     Delivery, LogId, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
-    TeamAgentResidency, TeamDelta, TeamTaskSnapshot,
+    TeamAgentResidency, TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot,
 };
 use tokio::sync::broadcast;
 
@@ -88,6 +88,8 @@ struct V2SessionState {
     live_tx: broadcast::Sender<V2Envelope>,
     /// Monotonic revision for ephemeral task board deltas.
     task_revision: u64,
+    /// Monotonic revision for ephemeral message board snapshot deltas.
+    board_revision: u64,
 }
 
 pub struct V2Subscription {
@@ -259,6 +261,36 @@ impl V2ProjectionHub {
         let delta = TeamDelta::TaskChanged {
             revision: state.task_revision,
             task: Box::new(task),
+        };
+        let last_fact_seq = state.last_fact_seq;
+        if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
+            let _ = state.live_tx.send(envelope);
+        }
+        Ok(())
+    }
+
+    /// Broadcast an ephemeral message board snapshot on the root session's stream.
+    ///
+    /// The board is a separate canonical aggregate, so its facts do not advance
+    /// the session `last_fact_seq`. Clients recover the full board from the
+    /// daemon team endpoint and replace their local snapshot on this delta.
+    pub fn publish_board_change(
+        &self,
+        session_dir: impl AsRef<Path>,
+        seed: &str,
+        board: TeamBoardSnapshot,
+    ) -> Result<(), V2HubError> {
+        let session_dir = session_dir.as_ref();
+        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
+        let session = self.session_for(session_dir, session_id, log_id)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        state.board_revision = state.board_revision.saturating_add(1);
+        let delta = TeamDelta::BoardChanged {
+            revision: state.board_revision,
+            board: Box::new(board),
         };
         let last_fact_seq = state.last_fact_seq;
         if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
@@ -541,6 +573,7 @@ fn load_session_state(
         replaceables,
         live_tx,
         task_revision: 0,
+        board_revision: 0,
     })
 }
 
@@ -670,7 +703,7 @@ mod tests {
     use qaqh_session::session_fact_v2::{
         AgentPath, EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
         SessionMetadataChanged, SessionMetadataPatch, SubagentSpawned, TeamAgentResidency,
-        TeamDelta, TeamTaskSnapshot, ToolCallId,
+        TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot, ToolCallId,
     };
 
     fn append_two_facts(
@@ -912,6 +945,46 @@ mod tests {
                     }
                 }
                 other => panic!("expected task delta, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn board_delta_is_published_on_the_session_stream() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let _ = append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-board-delta"));
+        let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+        let board = TeamBoardSnapshot {
+            board_id: Some(identity.session_id.clone()),
+            revision: 1,
+            last_fact_seq: 1,
+            channels: vec![],
+            threads: vec![],
+            posts: vec![],
+            subscriptions: vec![],
+        };
+        hub.publish_board_change(dir.path(), "seed", board.clone())
+            .expect("publish board delta");
+        loop {
+            match subscription.next().await {
+                V2StreamItem::Event(envelope) => {
+                    if let ProjectionPayload::TeamDelta(TeamDelta::BoardChanged {
+                        revision,
+                        board: received,
+                    }) = &envelope.payload
+                    {
+                        assert_eq!(*revision, 1);
+                        assert_eq!(received.board_id, board.board_id);
+                        assert_eq!(envelope.delivery, RingingV2Delivery::Ephemeral);
+                        break;
+                    }
+                }
+                other => panic!("expected board delta, got {other:?}"),
             }
         }
     }
