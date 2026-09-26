@@ -1,8 +1,8 @@
 # 当前状态
 
-> 日期：2026-09-25
-> 基线：`2.0.0-alpha2`
-> 状态：implementation baseline / refactor freeze candidate
+> 日期：2026-09-26
+> 基线：`2.0.0-alpha3`
+> 状态：alpha3 released checkpoint / refactor freeze candidate
 
 ## 1. 当前结论
 
@@ -114,11 +114,11 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   配额与 `steer_agent` / `interject_agent` 工具已落地；`interrupt` 仍是唯一
   取消 turn 的 delivery。spec 见
   [`spec/2026-09-26-steer-interject.md`](./spec/2026-09-26-steer-interject.md)。
-- Phase 4 前端壳接入、TEAM-01e / BOARD-01d / SUBV2-11d 前端消费仍未完成；
-  不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
-  **Phase 4 的唯一后端阻塞已解除**：`qaqh-client` 现在导出 Team projection
-  typed 面（`Client::team_v2` + `ClientV2Team*` 类型 + 契约锁测试），
-  TUI / WinUI 可直接开工。工作拆分与不变量见
+- Phase 4 / TEAM-01e / BOARD-01d / SUBV2-11d 的 TUI/WinUI 消费已同步完成；
+  alpha3 检查点闭环。不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
+  **Phase 4 的后端契约已闭环**：`qaqh-client` 导出 Team projection typed 面
+  （`Client::team_v2` + `ClientV2Team*` 类型 + 契约锁测试），TUI / WinUI
+  已按该契约完成消费。工作拆分与不变量见
   [`coordination/2026-09-26-phase4-roster-inbox.md`](./coordination/2026-09-26-phase4-roster-inbox.md)。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
@@ -154,22 +154,29 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
 - [x] Phase 5 task board backend
 - [x] Phase 6 message board backend
 - [x] Phase 7 steer / interject backend
-- [ ] Phase 4 roster / inbox / child transcript 前端消费
-- [ ] TEAM-01e task board 前端消费
-- [ ] BOARD-01d message board 前端消费
-- [ ] SUBV2-11d steer / interject / interrupt 前端区分
-- [ ] `2.0.0-alpha2` -> `2.0.0-alpha3`、release notes、smoke
+- [x] Phase 4 roster / inbox / child transcript 前端消费
+- [x] TEAM-01e task board 前端消费
+- [x] BOARD-01d message board 前端消费
+- [x] SUBV2-11d steer / interject / interrupt 前端区分
+- [x] `2.0.0-alpha2` -> `2.0.0-alpha3`、release notes、smoke
+
+发布说明：[`releases/2026-09-26-alpha3.md`](./releases/2026-09-26-alpha3.md)。
+
+最终门禁：
+
+```text
+cargo fmt --all -- --check                                      PASS
+cargo clippy --workspace --all-targets --offline -- -D warnings PASS
+cargo test --workspace --offline -- --test-threads=1            PASS
+
+QAQH_SMOKE_LEASE_TTL_MS=30000 ./scripts/v2-smoke.sh ...         PASS
+./scripts/v2-content-probe.sh ...                                PASS
+QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ... PASS
+./scripts/v2-compact-probe.sh ...                                PASS
+```
 
 身份迁移是 Beta 硬门禁，不属于 alpha3 的 Subagent V2 检查点；不得因此把
 legacy seed 带进新 roster / mailbox / Team projection。
-
-后端冻结验证（`106493c`）：
-
-```text
-cargo fmt --all -- --check                              PASS
-cargo clippy --workspace --all-targets --offline -- -D warnings  PASS
-cargo test --workspace --offline -- --test-threads=1    PASS
-```
 
 新增 V2 工具后，默认 prompt + tool defs 预算从 20k 调整为 22k 字符
 （约 5.5k tokens），仍由 `prompt_and_tool_defs_char_budget` 守住。

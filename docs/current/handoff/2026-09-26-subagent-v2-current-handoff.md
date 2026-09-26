@@ -1,10 +1,10 @@
 # Subagent V2 Current Handoff
 
 > 日期：2026-09-26
-> 基线：`5deb970`（`main`）
+> 基线：`2.0.0-alpha3`
 > 工作方式：直接在 `main` 推进，不创建 worktree
-> 状态：Phase 0-7 后端完成；Phase 4 / TEAM-01e / BOARD-01d / SUBV2-11d 前端待接；Beta 身份迁移待做
-> 范围：`qaqh-domain`、`qaqh-session`、`qaqh-subagent`、`qaqh-runtime`、`qaqh-daemon`
+> 状态：alpha3 released checkpoint；Phase 0-7 backend + TUI/WinUI 消费完成；Beta 身份迁移待做
+> 范围：`qaqh-domain`、`qaqh-session`、`qaqh-subagent`、`qaqh-runtime`、`qaqh-daemon`、`qaqh-client`
 
 ## 1. 一句话状态
 
@@ -20,9 +20,10 @@ canonical agent tree
   + status/residency Team projection
 ```
 
-当前后端主链路可运行、可重建、可测试。剩余缺口是 TUI/WinUI 对
-Team projection、task board、message board、steer/interject 的消费，以及
-Beta 前的身份迁移与 legacy seed 删除。
+当前 alpha3 主链路已完成并冻结。剩余工作转入 Beta 硬门禁：身份迁移、
+legacy resolver 删除、Windows 实机验证与 debug backlog。
+
+发布说明：[`releases/2026-09-26-alpha3.md`](../releases/2026-09-26-alpha3.md)。
 
 ## 2. 已完成能力
 

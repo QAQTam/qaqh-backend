@@ -1,7 +1,7 @@
 # Current Docs
 
-> 日期：2026-09-25
-> 基线：`2.0.0-alpha2`
+> 日期：2026-09-26
+> 基线：`2.0.0-alpha3`
 > 状态：当前权威文档集
 
 ## 当前文档
@@ -11,6 +11,7 @@
 | [`architecture.md`](./architecture.md) | 当前代码分层、存储、协议与运行时职责 |
 | [`decisions.md`](./decisions.md) | 已冻结、不得随意回退的架构决策 |
 | [`status.md`](./status.md) | 当前完成度、门禁基线与收工判断 |
+| [`releases/2026-09-26-alpha3.md`](./releases/2026-09-26-alpha3.md) | alpha3 发布说明与迁移注意 |
 | [`debug-backlog.md`](./debug-backlog.md) | 当前未完成事项、debug 优先级与延后项 |
 | [`handoff/README.md`](./handoff/README.md) | 新交接文档规则 |
 | [`spec/README.md`](./spec/README.md) | 新 spec 规则 |
