@@ -3,7 +3,8 @@
 //! 由 `loop_core.rs` 拆分（Phase 2-5）：`impl Loop` 跨文件块，对外 API 不变。
 
 use super::injection::{
-    EnqueueResult, Injection, InjectionPriority, InjectionSemantics, SUBAGENT_SOURCE,
+    EnqueueResult, Injection, InjectionPriority, InjectionSemantics, MAX_INTERJECT_PER_SAFE_POINT,
+    MAX_STEER_PER_SAFE_POINT, SUBAGENT_SOURCE,
 };
 use super::loop_core::Loop;
 use super::loop_core::parse_subagent_status_tag;
@@ -187,8 +188,12 @@ impl Loop {
     pub fn inject(&mut self, injection: Injection) -> Option<Outcome> {
         let command_id = injection.command_id.clone();
         let text = injection.text.clone();
-        let queue_only =
-            injection.input_purpose == qaqh_domain::ConversationInputPurpose::QueueOnly;
+        let queue_only = matches!(
+            injection.input_purpose,
+            qaqh_domain::ConversationInputPurpose::QueueOnly
+                | qaqh_domain::ConversationInputPurpose::Steer
+                | qaqh_domain::ConversationInputPurpose::Interject
+        );
 
         if queue_only {
             self.absorb_injection(injection);
@@ -256,7 +261,9 @@ impl Loop {
     pub(super) fn drain_injections(&mut self) {
         let session_id = self.session.agent.session.seed.clone();
         self.injection_bus.switch_session(&session_id);
-        let records = self.injection_bus.drain();
+        let records = self
+            .injection_bus
+            .drain_limited(MAX_STEER_PER_SAFE_POINT, MAX_INTERJECT_PER_SAFE_POINT);
         if records.is_empty() {
             return;
         }
@@ -337,7 +344,7 @@ impl Loop {
                         source: SUBAGENT_SOURCE,
                         role: qaqh_types::Message::ROLE_USER,
                         text: text.clone(),
-                        priority: InjectionPriority::Normal,
+                        priority: injection_priority(*input_purpose),
                         semantics: InjectionSemantics::NextTurn,
                     };
                     let _ = self.inject(injection);
@@ -358,6 +365,17 @@ impl Loop {
     }
 
     // ═══════════════════════════════════════════════════
+}
+
+pub(super) fn injection_priority(
+    purpose: qaqh_domain::ConversationInputPurpose,
+) -> InjectionPriority {
+    match purpose {
+        qaqh_domain::ConversationInputPurpose::TriggerTurn
+        | qaqh_domain::ConversationInputPurpose::QueueOnly => InjectionPriority::Normal,
+        qaqh_domain::ConversationInputPurpose::Steer => InjectionPriority::Steer,
+        qaqh_domain::ConversationInputPurpose::Interject => InjectionPriority::Interject,
+    }
 }
 
 #[cfg(test)]

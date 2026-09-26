@@ -469,6 +469,8 @@ pub enum InterAgentDelivery {
     Queue,
     Trigger,
     Interrupt,
+    Steer,
+    Interject,
 }
 
 impl InterAgentDelivery {
@@ -478,6 +480,10 @@ impl InterAgentDelivery {
 
     pub const fn interrupts_turn(self) -> bool {
         matches!(self, Self::Interrupt)
+    }
+
+    pub const fn is_safe_point_only(self) -> bool {
+        matches!(self, Self::Queue | Self::Steer | Self::Interject)
     }
 }
 
@@ -696,6 +702,8 @@ pub enum InputKind {
 pub enum InputPurpose {
     TriggerTurn,
     QueueOnly,
+    Steer,
+    Interject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
