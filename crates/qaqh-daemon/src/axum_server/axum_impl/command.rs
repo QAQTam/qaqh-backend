@@ -140,7 +140,7 @@ pub(crate) async fn handle_command(
     // idempotency
     let fingerprint = command_fingerprint(
         env.channel,
-        env.seed.as_deref(),
+        env.session_id.as_deref(),
         env.expected_revision,
         None,
         &env.command,
@@ -226,7 +226,7 @@ pub(crate) async fn handle_command(
         seed: close_seed,
     }) = &env.command
     {
-        let close_seed = session_close_seed(close_seed, &env.seed);
+        let close_seed = session_close_seed(close_seed, &env.session_id);
         if close_seed.is_empty() {
             state
                 .pending
@@ -289,7 +289,7 @@ pub(crate) async fn handle_command(
             ControlCommand::SessionDelete { seed } => ("delete", seed),
             _ => unreachable!(),
         };
-        let target = session_close_seed(target, &env.seed);
+        let target = session_close_seed(target, &env.session_id);
         if target.is_empty() {
             state
                 .pending
@@ -505,7 +505,7 @@ pub(crate) async fn handle_command(
         _ => {}
     }
     // generic worker dispatch
-    let seed = env.seed.clone().unwrap_or_default();
+    let seed = env.session_id.clone().unwrap_or_default();
     let mut worker_command = env.command.clone();
     if let Err(code) = hydrate_attachment_previews(&state.hub, &seed, &mut worker_command) {
         state

@@ -302,9 +302,9 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
             "timed out waiting for the synthetic control batch"
         );
     };
-    assert_eq!(batch.seed, seed, "batch must carry the sub seed");
+    assert_eq!(batch.session_id, seed, "batch must carry the sub seed");
     assert!(
-        batch.envelopes.iter().any(|env| env.seed == seed),
+        batch.envelopes.iter().any(|env| env.session_id == seed),
         "batch must contain the published envelope"
     );
 

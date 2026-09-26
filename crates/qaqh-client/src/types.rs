@@ -178,7 +178,7 @@ pub fn envelope_to_batch(
         schema: RINGING_SCHEMA.to_string(),
         version: RINGING_VERSION,
         channel,
-        seed: envelope.seed.clone(),
+        session_id: envelope.session_id.clone(),
         server_epoch,
         from_stream_seq: seq,
         to_stream_seq: seq,

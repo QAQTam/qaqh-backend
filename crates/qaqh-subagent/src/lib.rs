@@ -1415,7 +1415,7 @@ fn collect_subagent_result(
         }
         match transport.events().recv_timeout(Duration::from_millis(300)) {
             Ok(batch) => {
-                if batch.seed != seed {
+                if batch.session_id != seed {
                     continue;
                 }
                 if !first_event_logged && !batch.envelopes.is_empty() {
@@ -2137,7 +2137,7 @@ mod tests {
             schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
             version: qaqh_ringing::protocol::RINGING_VERSION,
             channel: qaqh_domain::RingingChannel::Conversation,
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
             server_epoch: "test-epoch".to_string(),
             from_stream_seq: 1,
             to_stream_seq: 1,
@@ -2162,7 +2162,7 @@ mod tests {
             schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
             version: qaqh_ringing::protocol::RINGING_VERSION,
             channel: qaqh_domain::RingingChannel::Conversation,
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
             server_epoch: "test-epoch".to_string(),
             from_stream_seq: 1,
             to_stream_seq: 1,

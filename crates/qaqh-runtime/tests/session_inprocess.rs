@@ -105,7 +105,7 @@ fn session_spawns_inprocess_and_receives_created_event() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.seed == seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == seed => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..
@@ -289,7 +289,7 @@ fn idle_unload_then_respawn_preserves_history() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.seed == seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == seed => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..

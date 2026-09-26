@@ -331,7 +331,7 @@ fn v2_c4_ephemeral_is_cursorless_and_unreplayable() {
         schema: qaqh_ringing::RINGING_SCHEMA.into(),
         version: qaqh_ringing::RINGING_V2_VERSION,
         server_epoch: "epoch".into(),
-        seed: "seed".into(),
+        session_id: "seed".into(),
         event_id: "evt-ephemeral".into(),
         stream_key: qaqh_ringing::RingingV2StreamKey::Channel(RingingChannel::Conversation),
         delivery: RingingV2Delivery::Ephemeral,
@@ -374,7 +374,7 @@ async fn v2_c5_log_id_mismatch_requires_reset() {
     match subscription.next().await {
         V2StreamItem::Reset(reset) => {
             assert_eq!(reset.reason, RingingV2ResetReason::LogIdMismatch);
-            assert_eq!(reset.seed, "seed");
+            assert_eq!(reset.session_id, "seed");
             assert!(
                 reset.snapshot_cursor.is_some(),
                 "reset must hand back a usable rebaseline cursor"

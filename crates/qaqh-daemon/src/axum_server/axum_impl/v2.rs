@@ -249,7 +249,7 @@ pub(crate) async fn handle_bootstrap_v2(
             schema: RINGING_SCHEMA.into(),
             version: RINGING_V2_VERSION,
             server_epoch: bootstrap.server_epoch,
-            seed: bootstrap.seed,
+            session_id: bootstrap.session_id,
             snapshot_cursor: bootstrap.snapshot_cursor,
             control: RingingV2ChannelSnapshot {
                 channel: RingingChannel::Control,
@@ -313,7 +313,7 @@ pub(crate) async fn handle_team_snapshot_v2(
         StatusCode::OK,
         &serde_json::json!({
             "schema": "qaqh.ringing.team/v1",
-            "seed": seed,
+            "session_id": seed,
             "team": team,
             "tasks": tasks,
             "board": board,
@@ -886,7 +886,7 @@ pub(crate) async fn handle_command_v2(
     // message, so a client that lost the first ACK can reconcile directly.
     let fingerprint = command_fingerprint(
         envelope.channel,
-        envelope.seed.as_deref(),
+        envelope.session_id.as_deref(),
         envelope.expected_revision,
         envelope.driver_epoch,
         &envelope.command,
@@ -933,7 +933,7 @@ pub(crate) async fn handle_command_v2(
     // with the winning result instead of dispatching a command the worker can
     // only reject with a bare `interaction_already_resolved`.
     if require_v2_lease(&state, &headers).is_some()
-        && let Some(seed) = envelope.seed.as_deref()
+        && let Some(seed) = envelope.session_id.as_deref()
         && let Some(existing) = resolved_interaction_existing(&state, seed, &envelope.command)
     {
         return json_response(
@@ -948,7 +948,7 @@ pub(crate) async fn handle_command_v2(
             },
         );
     }
-    if let Some(seed) = envelope.seed.as_deref()
+    if let Some(seed) = envelope.session_id.as_deref()
         && let Some(mut rejection) = driver_admission(
             &state,
             &headers,
@@ -964,7 +964,7 @@ pub(crate) async fn handle_command_v2(
     // never trusted, so a direct `driver_claim` submission cannot claim a seat
     // on behalf of another lease.
     if let Some(caller) = require_v2_lease(&state, &headers) {
-        let seed = envelope.seed.clone();
+        let seed = envelope.session_id.clone();
         match &mut envelope.command {
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::DriverClaim {
                 client_session_id,
@@ -997,7 +997,7 @@ pub(crate) async fn handle_command_v2(
         command_id: envelope.command_id,
         client_instance_id: envelope.client_instance_id,
         client_session_id: envelope.client_session_id,
-        seed: envelope.seed,
+        session_id: envelope.session_id,
         expected_revision: envelope.expected_revision,
         command: envelope.command,
     };

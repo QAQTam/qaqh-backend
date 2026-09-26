@@ -458,7 +458,7 @@ impl Loop {
                 Ok(f) => {
                     log::info!(
                         "[AGENT] received worker command frame: seed={} cmd={}",
-                        f.frame.seed,
+                        f.frame.session_id,
                         f.frame.command_id
                     );
                     f
@@ -630,7 +630,7 @@ impl Loop {
             panic!("injected engine panic for command {command_id}");
         }
 
-        let command_session_id = env.seed.clone();
+        let command_session_id = env.session_id.clone();
 
         match env.command {
             RingingCommand::Control(command) => {
