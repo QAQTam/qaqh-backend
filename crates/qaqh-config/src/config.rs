@@ -31,6 +31,15 @@ pub struct SubagentConfig {
     /// Default tool allowlist. Empty = all tools available.
     #[serde(default)]
     pub default_tools: Vec<String>,
+    /// Maximum subagent tree depth. Default 1 (root -> child only).
+    #[serde(default = "default_subagent_max_depth")]
+    pub max_depth: u32,
+    /// Max queued messages from one sender to one recipient. 0 = unlimited.
+    #[serde(default = "default_subagent_message_in_flight")]
+    pub message_in_flight_per_pair: u64,
+    /// Max cumulative outbound message attempts per sender. 0 = unlimited.
+    #[serde(default = "default_subagent_message_outbound")]
+    pub message_outbound_per_sender: u64,
 }
 
 fn default_subagent_max_tokens() -> u32 {
@@ -38,6 +47,15 @@ fn default_subagent_max_tokens() -> u32 {
 }
 fn default_subagent_timeout() -> u64 {
     120
+}
+fn default_subagent_max_depth() -> u32 {
+    1
+}
+fn default_subagent_message_in_flight() -> u64 {
+    16
+}
+fn default_subagent_message_outbound() -> u64 {
+    1024
 }
 
 impl Default for SubagentConfig {
@@ -49,6 +67,9 @@ impl Default for SubagentConfig {
             max_tokens: 4096,
             timeout_secs: 120,
             default_tools: vec!["read".into(), "exec".into()],
+            max_depth: 1,
+            message_in_flight_per_pair: 16,
+            message_outbound_per_sender: 1024,
         }
     }
 }
@@ -849,6 +870,15 @@ impl Config {
                         .map(String::from)
                         .collect();
                 }
+                if let Some(depth) = s.max_depth {
+                    cfg.subagent.max_depth = depth;
+                }
+                if let Some(limit) = s.message_in_flight_per_pair {
+                    cfg.subagent.message_in_flight_per_pair = limit;
+                }
+                if let Some(limit) = s.message_outbound_per_sender {
+                    cfg.subagent.message_outbound_per_sender = limit;
+                }
             }
 
             // ── exec defaults ──
@@ -1101,6 +1131,9 @@ falling back to 1 (MaxLockdown)"
                 } else {
                     Some(self.subagent.default_tools.clone())
                 },
+                max_depth: Some(self.subagent.max_depth),
+                message_in_flight_per_pair: Some(self.subagent.message_in_flight_per_pair),
+                message_outbound_per_sender: Some(self.subagent.message_outbound_per_sender),
             }),
             exec: Some(PersistentExecConfig {
                 default_shell: self

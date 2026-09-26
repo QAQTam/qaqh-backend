@@ -69,6 +69,9 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
             max_tokens: u64::from(cfg.subagent.max_tokens),
             timeout_secs: cfg.subagent.timeout_secs,
             default_tools: cfg.subagent.default_tools.clone(),
+            max_depth: u64::from(cfg.subagent.max_depth),
+            message_in_flight_per_pair: cfg.subagent.message_in_flight_per_pair,
+            message_outbound_per_sender: cfg.subagent.message_outbound_per_sender,
         },
         mcp: McpDto {
             enabled: cfg.mcp.enabled,
@@ -198,6 +201,15 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         if let Some(v) = &sub.default_tools {
             // 允许空数组（= 全部工具可用）；工具名归一化在 load 路径统一做。
             cfg.subagent.default_tools = v.clone();
+        }
+        if let Some(v) = sub.max_depth {
+            cfg.subagent.max_depth = u32::try_from(v).unwrap_or(u32::MAX);
+        }
+        if let Some(v) = sub.message_in_flight_per_pair {
+            cfg.subagent.message_in_flight_per_pair = v;
+        }
+        if let Some(v) = sub.message_outbound_per_sender {
+            cfg.subagent.message_outbound_per_sender = v;
         }
     }
     Ok(())
