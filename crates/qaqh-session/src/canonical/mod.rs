@@ -21,7 +21,7 @@ pub use clock::{
 };
 pub use identity::{
     CANONICAL_IDENTITY_FILE, CANONICAL_IDENTITY_SCHEMA, CanonicalIdentityError,
-    CanonicalSessionIdentity, generate_ulid, ulid_from_text,
+    CanonicalSessionIdentity, generate_session_id, generate_ulid, ulid_from_text,
 };
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
