@@ -193,7 +193,12 @@ impl InjectionBus {
                     steer_count += 1;
                     selected.push(injection);
                 }
-                _ => deferred.push_back(injection),
+                InjectionPriority::Interject | InjectionPriority::Steer => {
+                    deferred.push_back(injection);
+                }
+                InjectionPriority::Normal | InjectionPriority::Deferred => {
+                    selected.push(injection);
+                }
             }
         }
         self.pending = deferred;
