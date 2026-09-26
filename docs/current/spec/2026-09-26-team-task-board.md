@@ -2,7 +2,7 @@
 
 > 日期：2026-09-26
 > 基线：`ab42663`（`main`）
-> 状态：accepted；TEAM-01a/b（types + reducer + durable store）已实现
+> 状态：accepted；TEAM-01a/b/c（types + reducer + durable store + runtime tools）已实现
 > 上游：`2026-09-25-subagent-v2-rewrite-spec.md` Phase 5 / TEAM-01
 > 范围：`qaqh-session` team aggregate；本 spec 不覆盖 TUI/WinUI 渲染
 
