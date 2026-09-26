@@ -217,9 +217,12 @@ mod tests {
             identity_chars <= 128,
             "identity prompt too long: {identity_chars}"
         );
+        // V2 adds task board, message board, and steer/interject tools. Keep the
+        // full default surface under ~5.5k tokens while allowing those tools to
+        // retain precise model-facing descriptions.
         assert!(
-            system_chars + tools_chars < 20_000,
-            "prompt+tools exceeds 20k chars: {}",
+            system_chars + tools_chars < 22_000,
+            "prompt+tools exceeds 22k chars: {}",
             system_chars + tools_chars
         );
     }
