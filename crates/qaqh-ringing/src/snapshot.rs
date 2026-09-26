@@ -16,7 +16,8 @@ pub struct RingingChannelSnapshot {
     pub schema: String,
     pub version: u32,
     pub channel: RingingChannel,
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     /// 快照覆盖到的 stream_seq 基线（其后的可靠事件需从 cursor 回放）。
     #[cfg_attr(feature = "ts", ts(as = "u32"))]
     pub baseline_stream_seq: u64,
@@ -29,7 +30,7 @@ pub struct RingingChannelSnapshot {
 impl RingingChannelSnapshot {
     pub fn new(
         channel: RingingChannel,
-        seed: impl Into<String>,
+        session_id: impl Into<String>,
         baseline_stream_seq: u64,
         state_revision: u64,
         state: serde_json::Value,
@@ -38,7 +39,7 @@ impl RingingChannelSnapshot {
             schema: RINGING_SCHEMA.to_string(),
             version: RINGING_VERSION,
             channel,
-            seed: seed.into(),
+            session_id: session_id.into(),
             baseline_stream_seq,
             state_revision,
             snapshot_version: 1,

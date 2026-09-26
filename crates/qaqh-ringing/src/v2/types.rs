@@ -108,7 +108,8 @@ pub struct RingingV2EventEnvelope<P> {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub event_id: String,
     pub stream_key: RingingV2StreamKey,
     pub delivery: RingingV2Delivery,
@@ -136,7 +137,7 @@ impl<P> RingingV2EventEnvelope<P> {
         if self.schema != RINGING_SCHEMA
             || self.version != RINGING_V2_VERSION
             || self.server_epoch.trim().is_empty()
-            || self.seed.trim().is_empty()
+            || self.session_id.trim().is_empty()
             || self.event_id.trim().is_empty()
             || self
                 .causation_id
@@ -230,7 +231,8 @@ pub struct RingingV2ResetRequired {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +245,7 @@ impl RingingV2ResetRequired {
         if self.schema != RINGING_SCHEMA
             || self.version != RINGING_V2_VERSION
             || self.server_epoch.trim().is_empty()
-            || self.seed.trim().is_empty()
+            || self.session_id.trim().is_empty()
         {
             return Err("invalid_reset_required");
         }
@@ -337,7 +339,8 @@ pub struct RingingV2Bootstrap<C, V, T> {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub snapshot_cursor: CursorToken,
     pub control: RingingV2ChannelSnapshot<C>,
     pub conversation: RingingV2ChannelSnapshot<V>,
@@ -349,7 +352,7 @@ impl<C, V, T> RingingV2Bootstrap<C, V, T> {
         if self.schema != RINGING_SCHEMA
             || self.version != RINGING_V2_VERSION
             || self.server_epoch.trim().is_empty()
-            || self.seed.trim().is_empty()
+            || self.session_id.trim().is_empty()
         {
             return Err("invalid_v2_bootstrap");
         }
@@ -384,7 +387,8 @@ pub struct RingingV2CommandEnvelope {
     pub client_instance_id: String,
     pub client_session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<String>,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
     /// Driver seat epoch the caller believes it holds. A mismatch is rejected
@@ -408,7 +412,7 @@ impl RingingV2CommandEnvelope {
             command_id: command_id.into(),
             client_instance_id: client_instance_id.into(),
             client_session_id: String::new(),
-            seed: None,
+            session_id: None,
             expected_revision: None,
             driver_epoch: None,
             command,
@@ -420,9 +424,14 @@ impl RingingV2CommandEnvelope {
         self
     }
 
-    pub fn with_seed(mut self, seed: impl Into<String>) -> Self {
-        self.seed = Some(seed.into());
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
+    }
+
+    /// Deprecated compatibility alias for pre-beta callers.
+    pub fn with_seed(self, session_id: impl Into<String>) -> Self {
+        self.with_session_id(session_id)
     }
 
     pub fn with_driver_epoch(mut self, driver_epoch: u64) -> Self {
@@ -442,7 +451,7 @@ impl RingingV2CommandEnvelope {
         if self.channel != self.command.channel() {
             return Err("channel_mismatch");
         }
-        if self.seed.as_deref().is_some_and(str::is_empty) {
+        if self.session_id.as_deref().is_some_and(str::is_empty) {
             return Err("invalid_seed");
         }
         if self
@@ -457,7 +466,7 @@ impl RingingV2CommandEnvelope {
         {
             return Err("invalid_driver_epoch");
         }
-        if self.seed.is_none()
+        if self.session_id.is_none()
             && !matches!(
                 self.command,
                 RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate { .. })
@@ -628,7 +637,7 @@ mod tests {
             schema: RINGING_SCHEMA.into(),
             version: RINGING_V2_VERSION,
             server_epoch: "epoch-1".into(),
-            seed: "seed-1".into(),
+            session_id: "seed-1".into(),
             event_id: "event-1".into(),
             stream_key: RingingV2StreamKey::Channel(RingingChannel::Control),
             delivery: RingingV2Delivery::Reliable,
@@ -682,7 +691,7 @@ mod tests {
             schema: RINGING_SCHEMA.into(),
             version: RINGING_V2_VERSION,
             server_epoch: "epoch-1".into(),
-            seed: "seed-1".into(),
+            session_id: "seed-1".into(),
             snapshot_cursor: CursorToken::encode_snapshot(&CanonicalCursor::snapshot("log-1", 42))
                 .expect("cursor"),
             control: RingingV2ChannelSnapshot {
@@ -717,7 +726,7 @@ mod tests {
             "schema": RINGING_SCHEMA,
             "version": RINGING_V2_VERSION,
             "server_epoch": "epoch-1",
-            "seed": "seed-1",
+            "session_id": "seed-1",
             "snapshot_cursor": token,
             "control": {
                 "channel": "control",
@@ -916,7 +925,7 @@ mod tests {
             seed: "seed-1".into(),
         });
         let mut envelope = RingingV2CommandEnvelope::new("cmd-1", "instance-1", command);
-        envelope = envelope.with_seed("seed-1");
+        envelope = envelope.with_session_id("seed-1");
         assert_eq!(envelope.validate(), Err("invalid_v2_command_envelope"));
         envelope = envelope.with_client_session_id("session-1");
         envelope.validate().expect("valid v2 command envelope");

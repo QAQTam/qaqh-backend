@@ -42,7 +42,7 @@ mod tests {
             .expect("read")
             .expect("frame");
         assert_eq!(frame.command_id, "cmd-1");
-        assert_eq!(frame.seed, "s1");
+        assert_eq!(frame.session_id, "s1");
     }
 
     #[test]

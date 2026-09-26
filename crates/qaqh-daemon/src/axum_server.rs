@@ -804,7 +804,7 @@ mod axum_tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["version"], 2);
-        assert_eq!(value["seed"], seed);
+        assert_eq!(value["session_id"], seed);
         assert_eq!(value["control"]["state"]["revision"], 1);
         let snapshot_cursor = value["snapshot_cursor"].as_str().unwrap().to_string();
         assert!(snapshot_cursor.starts_with("v2."));
@@ -898,7 +898,7 @@ mod axum_tests {
         .with_seed("seed-1");
         let fingerprint = crate::axum_server::axum_impl::command_fingerprint(
             envelope.channel,
-            envelope.seed.as_deref(),
+            envelope.session_id.as_deref(),
             envelope.expected_revision,
             envelope.driver_epoch,
             &envelope.command,

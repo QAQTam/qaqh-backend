@@ -278,13 +278,13 @@ mod tests {
         let mut filtered = replay;
         filtered
             .events
-            .retain(|e| leases_guard.owns_seed("cs-1", &e.seed));
+            .retain(|e| leases_guard.owns_seed("cs-1", &e.session_id));
         filtered
             .resets
-            .retain(|r| leases_guard.owns_seed("cs-1", &r.seed));
+            .retain(|r| leases_guard.owns_seed("cs-1", &r.session_id));
         assert_eq!(filtered.events.len(), 1);
-        assert_eq!(filtered.events[0].seed, "seed-a");
+        assert_eq!(filtered.events[0].session_id, "seed-a");
         assert_eq!(filtered.resets.len(), 1);
-        assert_eq!(filtered.resets[0].seed, "seed-a");
+        assert_eq!(filtered.resets[0].session_id, "seed-a");
     }
 }
