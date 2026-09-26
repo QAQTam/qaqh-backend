@@ -9,6 +9,17 @@ mod projection;
 mod store;
 mod types;
 
+pub mod board;
+
+pub use board::{
+    BOARD_COMMIT_FILE, BOARD_EVENTS_FILE, BOARD_FACT_SCHEMA, BOARD_FACT_VERSION,
+    BOARD_IDENTITY_FILE, BOARD_IDENTITY_SCHEMA, BOARD_LOCK_FILE, BoardAppendOutcome,
+    BoardChannelView, BoardCreated, BoardDelta, BoardFact, BoardId, BoardPayload, BoardPostView,
+    BoardProjection, BoardSnapshot, BoardStore, BoardSubscriptionTarget, BoardSubscriptionView,
+    BoardThreadView, ChannelCreated, ChannelId, MAX_BOARD_CHANNELS, MAX_BOARD_POSTS,
+    MAX_BOARD_SUBSCRIPTIONS, MAX_BOARD_THREADS, PostCreated, PostId, SubscriptionChanged,
+    ThreadCreated, ThreadId, new_board_schema,
+};
 pub use error::{TeamError, TeamResult};
 pub use projection::{TaskBoardDelta, TaskBoardProjection, TaskBoardSnapshot, TaskView};
 pub use store::{
