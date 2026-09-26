@@ -58,8 +58,8 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
 
 以下进入 debug/backlog，不再阻塞重构收工：
 
-- interaction 跨 daemon 重启持久化；
-- permission 正文 pin/unpin；
+- interaction 跨 daemon 重启**继续执行**（正文已 durable，pending turn resume 仍需产品裁决）；
+- permission 正文 pin/unpin（正文已 pin，ToolFinished 终结路径已接入）；
 - driver `not_eligible` / 显式移交优先级；
 - sandbox fallback 与 Linux 读隔离/cgroup；
 - Windows 实机验证；
