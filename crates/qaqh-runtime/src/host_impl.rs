@@ -544,7 +544,7 @@ impl SubagentHost for QaqhService {
                     loop {
                         match hub_rx.try_recv() {
                             Ok(env) => {
-                                if env.seed != seed {
+                                if env.session_id != seed {
                                     continue;
                                 }
                                 let batch = envelope_to_batch(channel, env, &epoch);
@@ -1631,7 +1631,7 @@ fn envelope_to_batch(
         schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
         version: qaqh_ringing::protocol::RINGING_VERSION,
         channel,
-        seed: env.seed.clone(),
+        session_id: env.session_id.clone(),
         server_epoch: server_epoch.to_string(),
         from_stream_seq: seq,
         to_stream_seq: seq,

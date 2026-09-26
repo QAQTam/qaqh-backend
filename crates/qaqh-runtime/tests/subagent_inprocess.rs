@@ -90,7 +90,7 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.seed == seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == seed => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..
@@ -142,7 +142,7 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let mut saw_second_created = false;
     while Instant::now() < second_deadline {
         match event_rx.recv_timeout(second_deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.seed == queued_seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == queued_seed => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..
@@ -293,7 +293,7 @@ fn parent_cancel_propagates_to_children() {
     while Instant::now() < deadline {
         match child_events.try_recv() {
             Ok(envelope)
-                if envelope.seed == child
+                if envelope.session_id == child
                     && matches!(
                         envelope.event,
                         RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. })

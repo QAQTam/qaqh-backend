@@ -20,7 +20,8 @@ pub struct RingingEventEnvelope {
     /// 可靠性等级：由领域事件定义显式声明，wire 不决定。
     pub delivery: Delivery,
     /// 会话标识。
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     /// 每 (server_epoch, channel) 全局递增，供单条 SSE 连接恢复。
     #[cfg_attr(feature = "ts", ts(as = "u32"))]
     pub stream_seq: u64,
@@ -54,7 +55,7 @@ pub struct RingingEventEnvelope {
 impl RingingEventEnvelope {
     /// 构造信封并强制 channel 与事件一致。
     pub fn new(
-        seed: impl Into<String>,
+        session_id: impl Into<String>,
         stream_seq: u64,
         channel_seq: u64,
         session_seq: u64,
@@ -64,7 +65,7 @@ impl RingingEventEnvelope {
         let delivery = event.delivery();
         Self {
             delivery,
-            seed: seed.into(),
+            session_id: session_id.into(),
             stream_seq,
             channel_seq,
             session_seq,
@@ -93,7 +94,7 @@ impl RingingEventEnvelope {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.seed.is_empty()
+        if self.session_id.is_empty()
             || self.event_id.is_empty()
             || !is_safe_integer(self.stream_seq)
             || !is_safe_integer(self.channel_seq)
@@ -120,7 +121,8 @@ pub struct RingingCommandEnvelope {
     /// open 成功后由 daemon 签发的连接级身份。
     pub client_session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<String>,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: Option<String>,
     /// 乐观并发修订（可选）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(as = "u32"))]
@@ -142,15 +144,20 @@ impl RingingCommandEnvelope {
             command_id: command_id.into(),
             client_instance_id: client_instance_id.into(),
             client_session_id: String::new(),
-            seed: None,
+            session_id: None,
             expected_revision: None,
             command,
         }
     }
 
-    pub fn with_seed(mut self, seed: impl Into<String>) -> Self {
-        self.seed = Some(seed.into());
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
+    }
+
+    /// Deprecated compatibility alias for pre-beta callers.
+    pub fn with_seed(self, session_id: impl Into<String>) -> Self {
+        self.with_session_id(session_id)
     }
 
     pub fn with_client_session_id(mut self, client_session_id: impl Into<String>) -> Self {
@@ -171,10 +178,10 @@ impl RingingCommandEnvelope {
         if self.client_session_id.is_empty() {
             return Err("lease_required");
         }
-        if self.seed.as_deref().is_some_and(str::is_empty) {
+        if self.session_id.as_deref().is_some_and(str::is_empty) {
             return Err("invalid_envelope");
         }
-        if self.seed.is_none()
+        if self.session_id.is_none()
             && !matches!(
                 self.command,
                 RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate { .. })
@@ -246,7 +253,8 @@ pub struct RingingEventBatch {
     pub schema: String,
     pub version: u32,
     pub channel: RingingChannel,
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub server_epoch: String,
     #[cfg_attr(feature = "ts", ts(as = "u32"))]
     pub from_stream_seq: u64,
@@ -275,7 +283,7 @@ impl RingingEventBatch {
         }
         for (index, envelope) in self.envelopes.iter().enumerate() {
             envelope.validate()?;
-            if envelope.seed != self.seed
+            if envelope.session_id != self.session_id
                 || envelope.stream_seq
                     != self
                         .from_stream_seq
@@ -327,7 +335,7 @@ mod tests {
         let cmd = RingingCommand::Conversation(ConversationCommand::ConversationSetMode {
             mode: ConversationMode::Plan,
         });
-        let env = RingingCommandEnvelope::new("cmd-1", "client-a", cmd).with_seed("s1");
+        let env = RingingCommandEnvelope::new("cmd-1", "client-a", cmd).with_session_id("s1");
         let json = serde_json::to_string(&env).expect("serialize");
         assert!(json.contains("\"command_id\":\"cmd-1\""));
         let back: RingingCommandEnvelope = serde_json::from_str(&json).expect("deserialize");
@@ -353,7 +361,7 @@ mod tests {
     fn batch_round_trip() {
         let batch = RingingEventBatch {
             channel: RingingChannel::Conversation,
-            seed: "s1".into(),
+            session_id: "s1".into(),
             schema: RINGING_SCHEMA.into(),
             version: RINGING_VERSION,
             from_stream_seq: 1,
