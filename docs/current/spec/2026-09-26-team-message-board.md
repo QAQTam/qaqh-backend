@@ -2,7 +2,7 @@
 
 > 日期：2026-09-26
 > 基线：`0151249`（`main`）
-> 状态：accepted；BOARD-01 backend 实施中
+> 状态：accepted；BOARD-01a/b/c backend 已完成；BOARD-01d TUI/WinUI 待接
 > 上游：`2026-09-25-subagent-v2-rewrite-spec.md` Phase 6 / BOARD-01
 > 范围：`qaqh-session` board aggregate、`qaqh-runtime` host/wire；本 spec 不覆盖
 > TUI/WinUI 渲染

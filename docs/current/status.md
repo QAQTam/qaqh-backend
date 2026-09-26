@@ -95,14 +95,22 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   - runtime residency overlay 已接入；`AgentResidencyChanged` 作为 ephemeral TeamDelta 发布，重启后回到 unloaded。
   - max depth 默认 1 可配置；sender-target in-flight 与 sender outbound 配额已接入。
   - broadcast / `@all` 默认拒绝；`close_agent` 已不在 V2 工具表。
-- 仍待：TUI/WinUI roster/inbox 与 task board 消费、message board；
+- 仍待：TUI/WinUI roster/inbox、task board 与 message board 消费；
   大正文 `content_ref` 已落地。
 - Task board backend 已完成：canonical foundation（types / reducer / durable
   TeamStore）、runtime tools（`task_create` / `task_claim` / `task_update` /
   `task_close` / `task_list`）、daemon team snapshot endpoint 与
   `TeamDelta::TaskChanged` 单流 delta。spec 见
   [`spec/2026-09-26-team-task-board.md`](./spec/2026-09-26-team-task-board.md)。
-- Phase 4 前端壳接入和 Phase 5-7 未完成；不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
+- Message board backend 已完成：独立 `BoardFact` / `BoardStore`（channel /
+  thread / post / subscription、torn-tail replay）、runtime tools
+  （`board_channel_create` / `board_thread_create` / `board_post` /
+  `board_subscribe` / `board_list`）、`/team` board snapshot 与
+  `TeamDelta::BoardChanged` 单流 delta。notification 只对 running + loaded
+  subscriber 做 queue-only best-effort，不启动 idle agent。spec 见
+  [`spec/2026-09-26-team-message-board.md`](./spec/2026-09-26-team-message-board.md)。
+- Phase 4 前端壳接入、TEAM-01e / BOARD-01d 前端消费和 Phase 7 未完成；
+  不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
 - 当前交接：
