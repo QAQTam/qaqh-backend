@@ -275,6 +275,21 @@ cargo test --workspace --offline -- --test-threads=1
 - missed notification 不保证补发；
 - 与 task board 通过 `task_id` 关联。
 
+已落地：
+
+- spec：[`2026-09-26-team-message-board.md`](../spec/2026-09-26-team-message-board.md)；
+- BOARD-01a：`qaqh-session::team::board` 独立 `BoardFact` / `BoardStore`，
+  覆盖 channel / thread / post / subscription、torn-tail replay 与资源上限；
+- BOARD-01b：`BoardHost` + 5 个 runtime 工具（`board_channel_create` /
+  `board_thread_create` / `board_post` / `board_subscribe` / `board_list`），
+  按 caller root tree 打开 board aggregate，并校验同 tree `task_id`；
+- BOARD-01c：`GET /ringing/v2/sessions/{seed}/team` 增加 `board` snapshot；
+  `TeamDelta::BoardChanged` 作为 ephemeral delta 在单流发布；
+- notification 仅向 running + loaded subscriber 做 queue-only best-effort，
+  post 先 durable，通知失败/跳过不回滚；idle/unloaded agent 不启动。
+
+仍未完成：BOARD-01d TUI/WinUI board 渲染与 unread 水位。
+
 ### P3：Steer / Interject
 
 - 在 queue / trigger / interrupt 稳定后实现；
