@@ -326,6 +326,8 @@ fn parent_close_cancels_and_joins_child_tree() {
     let hub = Arc::new(RingingHub::new("subagent-parent-close-tree-test"));
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
+    // This test intentionally builds a grandchild tree; opt into depth 2.
+    registry.set_max_depth(2);
 
     qaqh_workspace::runtime::clear_context();
     registry
@@ -635,6 +637,36 @@ fn spawn_rejected_before_side_effect_when_quota_exhausted() {
     let snapshot = registry.quota_snapshot(&parent).expect("quota snapshot");
     assert_eq!(snapshot.held, 0);
     assert_eq!(snapshot.committed, 0);
+
+    registry.shutdown_all();
+}
+
+/// Phase 3：默认 max depth = 1，child 不能继续 spawn grandchild。
+#[test]
+fn spawn_rejects_grandchild_at_default_max_depth() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-depth-test");
+    let parent = format!("depth-parent-{}", std::process::id());
+    let child = format!("depth-child-{}", std::process::id());
+    let grandchild = format!("depth-grandchild-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-depth-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(hub);
+    registry.set_max_depth(1);
+
+    qaqh_workspace::runtime::clear_context();
+    registry.spawn_new(&parent).expect("spawn parent session");
+    spawn_linked_subagent(&mut registry, &parent, &child);
+
+    qaqh_workspace::runtime::set_context(&child, 4);
+    let result = registry.spawn_subagent(&grandchild, &[], None, None, None);
+    qaqh_workspace::runtime::clear_context();
+
+    assert!(result.is_err(), "grandchild must exceed max depth 1");
+    assert!(
+        !registry.is_running(&grandchild),
+        "rejected grandchild must not leave an actor"
+    );
 
     registry.shutdown_all();
 }

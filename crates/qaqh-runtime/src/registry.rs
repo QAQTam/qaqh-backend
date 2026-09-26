@@ -337,6 +337,15 @@ pub struct AgentRegistry {
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
+    /// Subagent V2：树深上限。root depth = 0；默认 1（只允许 root -> child）。
+    max_depth: usize,
+    /// Subagent V2：同一 sender-target 的 queued message 上限。0 = unlimited。
+    message_in_flight_per_pair: u64,
+    /// Subagent V2：单个 sender 的累计 outbound attempt 上限。0 = unlimited。
+    message_outbound_per_sender: u64,
+    /// Runtime-only outbound attempt counters: root -> author path -> count.
+    /// 消息配额是安全阀，不要求跨 daemon 重启持久化。
+    outbound_attempts: HashMap<String, HashMap<String, u64>>,
     /// Child result collectors currently armed for a running/reloaded turn.
     armed_collectors: HashSet<String>,
 }
@@ -356,6 +365,10 @@ impl AgentRegistry {
             v2_hub: None,
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
+            max_depth: 1,
+            message_in_flight_per_pair: 16,
+            message_outbound_per_sender: 1024,
+            outbound_attempts: HashMap::new(),
             armed_collectors: HashSet::new(),
         }
     }
@@ -835,6 +848,14 @@ impl AgentRegistry {
             .get_by_id(parent_session_id)
             .cloned()
             .ok_or_else(|| format!("subagent parent metadata missing for {parent_session_id}"))?;
+        if parent.agent_path.depth() >= self.max_depth {
+            return Err(format!(
+                "subagent max depth {} reached at parent {} (depth {})",
+                self.max_depth,
+                parent.agent_path,
+                parent.agent_path.depth()
+            ));
+        }
         let child_path = parent
             .agent_path
             .child(requested_name)
@@ -1605,6 +1626,48 @@ impl AgentRegistry {
     pub fn set_quota_limits(&mut self, limits: QuotaLimits) {
         self.quota_limits = limits;
         self.quota_ledgers.clear();
+    }
+
+    /// Set the maximum subagent tree depth. `1` means root may spawn children,
+    /// but children may not spawn grandchildren.
+    pub fn set_max_depth(&mut self, max_depth: usize) {
+        self.max_depth = max_depth.max(1);
+    }
+
+    /// Set message safety-valve limits. `0` means unlimited.
+    pub fn set_message_quota_limits(&mut self, in_flight_per_pair: u64, outbound_per_sender: u64) {
+        self.message_in_flight_per_pair = in_flight_per_pair;
+        self.message_outbound_per_sender = outbound_per_sender;
+    }
+
+    /// Admit one inter-agent send after the caller has resolved the target and
+    /// computed the current canonical in-flight count.
+    pub(crate) fn admit_outbound_message(
+        &mut self,
+        root_session_id: &str,
+        author_path: &str,
+        in_flight: u64,
+    ) -> Result<(), String> {
+        if self.message_in_flight_per_pair > 0 && in_flight >= self.message_in_flight_per_pair {
+            return Err(format!(
+                "message in-flight limit {} reached for {author_path}",
+                self.message_in_flight_per_pair
+            ));
+        }
+        let attempts = self
+            .outbound_attempts
+            .entry(root_session_id.to_string())
+            .or_default()
+            .entry(author_path.to_string())
+            .or_insert(0);
+        if self.message_outbound_per_sender > 0 && *attempts >= self.message_outbound_per_sender {
+            return Err(format!(
+                "outbound message limit {} reached for {author_path}",
+                self.message_outbound_per_sender
+            ));
+        }
+        *attempts = attempts.saturating_add(1);
+        Ok(())
     }
 
     /// P2-7 test/ops view for one root ledger.
@@ -2544,6 +2607,10 @@ mod tests {
             v2_hub: None,
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
+            max_depth: 1,
+            message_in_flight_per_pair: 16,
+            message_outbound_per_sender: 1024,
+            outbound_attempts: HashMap::new(),
             armed_collectors: HashSet::new(),
         };
         let connection_id = ConnectionId::new("connection-registry");
@@ -2649,6 +2716,10 @@ mod tests {
             v2_hub: None,
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
+            max_depth: 1,
+            message_in_flight_per_pair: 16,
+            message_outbound_per_sender: 1024,
+            outbound_attempts: HashMap::new(),
             armed_collectors: HashSet::new(),
         };
         registry
@@ -2763,6 +2834,41 @@ mod tests {
                 }
             ) if turn_id == "t1" && user_text == "hi"
         ));
+    }
+
+    #[test]
+    fn message_quota_rejects_in_flight_and_outbound_over_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            temp.path().join("sessions"),
+            temp.path().join("active.json"),
+        ));
+        let mut registry = AgentRegistry::new(sessions);
+        registry.set_message_quota_limits(2, 3);
+
+        assert!(
+            registry.admit_outbound_message("root", "/root", 2).is_err(),
+            "in-flight at limit must reject"
+        );
+        assert!(registry.admit_outbound_message("root", "/root", 0).is_ok());
+        assert!(registry.admit_outbound_message("root", "/root", 0).is_ok());
+        assert!(registry.admit_outbound_message("root", "/root", 0).is_ok());
+        assert!(
+            registry.admit_outbound_message("root", "/root", 0).is_err(),
+            "outbound at limit must reject"
+        );
+        assert!(
+            registry
+                .admit_outbound_message("root", "/root/child", 0)
+                .is_ok(),
+            "each author has its own outbound budget"
+        );
+        assert!(
+            registry
+                .admit_outbound_message("root-2", "/root", 0)
+                .is_ok(),
+            "each root tree has its own outbound budget"
+        );
     }
 
     #[test]

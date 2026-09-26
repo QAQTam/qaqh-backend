@@ -130,6 +130,12 @@ impl Loop {
         envelope: &qaqh_domain::InterAgentEnvelope,
         text: &str,
     ) -> Result<(), String> {
+        if !envelope.other_recipients.is_empty() {
+            return Err(
+                "broadcast is disabled: inter-agent messages must have exactly one recipient"
+                    .to_string(),
+            );
+        }
         let content = if text.len() > 8 * 1024 {
             InterAgentContent::ContentRef {
                 content_ref: self.externalize_canonical_content(session_id, text)?,

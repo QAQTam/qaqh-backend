@@ -94,6 +94,27 @@ pub struct SubagentDto {
     pub timeout_secs: u64,
     /// 空数组 = 全部工具可用（配置语义，非缺省）。
     pub default_tools: Vec<String>,
+    /// Maximum subagent tree depth. Default 1.
+    #[serde(default = "default_subagent_max_depth")]
+    pub max_depth: u64,
+    /// Max queued messages from one sender to one recipient. 0 = unlimited.
+    #[serde(default = "default_subagent_message_in_flight")]
+    pub message_in_flight_per_pair: u64,
+    /// Max cumulative outbound message attempts per sender. 0 = unlimited.
+    #[serde(default = "default_subagent_message_outbound")]
+    pub message_outbound_per_sender: u64,
+}
+
+fn default_subagent_max_depth() -> u64 {
+    1
+}
+
+fn default_subagent_message_in_flight() -> u64 {
+    16
+}
+
+fn default_subagent_message_outbound() -> u64 {
+    1024
 }
 
 /// MCP 客户端配置读模型（docs/current/architecture.md）。
@@ -227,6 +248,12 @@ pub struct SubagentPatch {
     /// 允许空数组（= 全部工具可用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_in_flight_per_pair: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_outbound_per_sender: Option<u64>,
 }
 
 impl ConfigPatch {
@@ -276,6 +303,11 @@ impl ConfigPatch {
                 && v == 0
             {
                 return Err("subagent.timeoutSecs 必须大于 0".to_string());
+            }
+            if let Some(v) = sub.max_depth
+                && !(1..=16).contains(&v)
+            {
+                return Err(format!("subagent.maxDepth 仅允许 1..=16，收到 {v}"));
             }
         }
         Ok(())

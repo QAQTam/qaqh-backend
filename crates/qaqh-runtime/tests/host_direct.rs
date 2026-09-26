@@ -591,3 +591,87 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
         "child reload must fail closed when immediate parent is unloaded"
     );
 }
+
+#[test]
+fn broadcast_targets_and_outbound_quota_are_rejected() {
+    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let root = std::env::temp_dir().join(format!(
+        "qaqh-host-quota-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).expect("test setup must not fail");
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    unsafe {
+        std::env::set_var("QAQH_DATA_DIR", &data);
+    }
+    qaqh_workspace::set_workspace(&ws.to_string_lossy());
+
+    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+        data.join("sessions"),
+        data.join(".active_session"),
+    ));
+    let service = QaqhService::init(sessions.clone());
+    let hub = Arc::new(RingingHub::new("qaqh-host-quota-test"));
+    service.attach_ringing(hub);
+    let host: &dyn SubagentHost = &service;
+
+    let parent_identity = sessions
+        .allocate_session(None)
+        .expect("allocate canonical parent session");
+    let parent = parent_identity.session_id.as_str().to_string();
+    let spawned = host
+        .spawn_subagent(SpawnSubagentRequest {
+            parent_session_id: &parent,
+            requested_name: "quota_child",
+            tools: &[],
+            model: None,
+            base_url: None,
+            max_tokens: None,
+            workspace: None,
+        })
+        .expect("spawn child for quota test");
+    let child = spawned.child_session_id;
+
+    let broadcast_error = host
+        .send_agent_message(SendAgentMessageRequest {
+            caller_session_id: &parent,
+            target: "@all",
+            text: "broadcast",
+            delivery: InterAgentDelivery::Queue,
+        })
+        .expect_err("broadcast target must be rejected");
+    assert!(
+        broadcast_error.contains("broadcast"),
+        "unexpected broadcast error: {broadcast_error}"
+    );
+
+    service.set_message_quota_limits(0, 1);
+    host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &parent,
+        target: "/root/quota_child",
+        text: "first message",
+        delivery: InterAgentDelivery::Queue,
+    })
+    .expect("first send must be within quota");
+    let quota_error = host
+        .send_agent_message(SendAgentMessageRequest {
+            caller_session_id: &parent,
+            target: "/root/quota_child",
+            text: "second message",
+            delivery: InterAgentDelivery::Queue,
+        })
+        .expect_err("second send must hit the outbound quota");
+    assert!(
+        quota_error.contains("outbound message limit"),
+        "unexpected quota error: {quota_error}"
+    );
+
+    host.close(&child).expect("close child");
+    host.close(&parent).expect("close parent");
+}
