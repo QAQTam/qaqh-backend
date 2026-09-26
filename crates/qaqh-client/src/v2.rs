@@ -95,6 +95,46 @@ pub use qaqh_session::session_fact_v2::ActorRef as ClientV2ActorRef;
 /// `InteractionExpired.reason`。
 pub use qaqh_session::session_fact_v2::InteractionExpiryReason as ClientV2InteractionExpiryReason;
 
+/// **Team projection**：TUI/WinUI 的 roster / inbox 唯一权威投影。
+///
+/// 出处：`docs/current/architecture.md` —— `TeamSnapshot/TeamDelta` 是
+/// TUI/WinUI 的唯一 roster/inbox 投影。壳层**不得**再从 `spawn_subagent`
+/// 工具卡 JSON 推导 agent 身份。
+///
+/// 快照来自 `GET /ringing/v2/sessions/{seed}/team`（[`Client::team_v2`]），
+/// 之后的增量来自 per-seed 单流的 [`ClientV2Payload::TeamDelta`]。
+pub use qaqh_session::projection::TeamSnapshot as ClientV2TeamSnapshot;
+/// agent residency（loaded / unloaded）。**`unloaded != completed != closed`**。
+pub use qaqh_session::session_fact_v2::TeamAgentResidency as ClientV2TeamAgentResidency;
+/// roster 里一个 agent 的快照：`agent_path` 为主键，`nickname` 只是显示辅助。
+pub use qaqh_session::session_fact_v2::TeamAgentSnapshot as ClientV2TeamAgentSnapshot;
+/// agent 生命周期状态（idle / running / interrupted / completed）。
+pub use qaqh_session::session_fact_v2::TeamAgentStatus as ClientV2TeamAgentStatus;
+/// message board 快照（`/team` 的 `board` 字段）。
+pub use qaqh_session::session_fact_v2::TeamBoardSnapshot as ClientV2TeamBoardSnapshot;
+/// 单流上的 Team 增量。
+pub use qaqh_session::session_fact_v2::TeamDelta as ClientV2TeamDelta;
+/// inbox 里一条待投递消息的摘要：author / recipient / task / delivery。
+pub use qaqh_session::session_fact_v2::TeamInboxSummary as ClientV2TeamInboxSummary;
+/// 单条 task（`TeamDelta::TaskChanged.task`）。
+pub use qaqh_session::session_fact_v2::TeamTaskSnapshot as ClientV2TeamTaskSnapshot;
+/// task board 快照（`/team` 的 `tasks` 字段）。
+pub use qaqh_session::team::TaskBoardSnapshot as ClientV2TaskBoardSnapshot;
+
+/// `GET /ringing/v2/sessions/{seed}/team` 的 typed 响应。
+///
+/// 一次拿到三份快照：roster + inbox（`team`）、task board（`tasks`）、
+/// message board（`board`）。Phase 4（roster/inbox）、TEAM-01e（task board）与
+/// BOARD-01d（message board）消费的都是这一个端点，避免壳层各拉一次。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientV2TeamResponse {
+    pub schema: String,
+    pub seed: String,
+    pub team: ClientV2TeamSnapshot,
+    pub tasks: ClientV2TaskBoardSnapshot,
+    pub board: ClientV2TeamBoardSnapshot,
+}
+
 /// Typed v2 SSE envelope.
 pub type ClientV2Event = RingingV2EventEnvelope<ClientV2Payload>;
 
@@ -490,6 +530,29 @@ impl Client {
         Ok(response.json().await?)
     }
 
+    /// `GET /ringing/v2/sessions/{seed}/team`。
+    ///
+    /// Team projection 快照：roster（以 `AgentPath` 为主）+ inbox + task board +
+    /// message board。deltas 在 per-seed 单流上以
+    /// [`ClientV2Payload::TeamDelta`] 到达；壳层应当 **先拉一次快照、再应用
+    /// delta**，不要只靠 delta 增量拼状态。
+    pub async fn team_v2(&self, seed: &str) -> Result<ClientV2TeamResponse> {
+        let state = self.require_v2_session().await?;
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/team");
+        let response = self
+            .inner
+            .http
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(api_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
     /// Typed v2 service RPC. The caller selects the response type; control
     /// flow never falls back to `serde_json::Value`.
     pub async fn service_v2<P, T>(&self, method: &str, params: P) -> Result<T>
@@ -585,6 +648,122 @@ pub use qaqh_ringing::{
 mod tests {
     use super::*;
     use qaqh_ringing::RingingV2Delivery;
+
+    /// Team projection 的 wire 形状必须和 daemon `/team` 端点逐字对齐。
+    ///
+    /// 这条测试是 TUI/WinUI Phase 4（roster / inbox）的**契约锁**：壳层不能直接
+    /// 依赖 `qaqh-session`（静态门禁 G1），只能经 `qaqh-client` 拿类型，所以
+    /// 这里少一个字段/改一个键名，前端就会在编译期或运行期直接断。
+    #[test]
+    fn team_response_matches_daemon_wire_shape() {
+        let payload = serde_json::json!({
+            "schema": "qaqh.ringing.team/v1",
+            "seed": "0199a0f0-0000-7000-8000-000000000001",
+            "team": {
+                "root_session_id": "0199a0f0-0000-7000-8000-000000000001",
+                "agents": [
+                    {
+                        "agent_id": "0199a0f0-0000-7000-8000-000000000001",
+                        "agent_path": "/root",
+                        "nickname": "main",
+                        "status": "running",
+                        "residency": "loaded"
+                    },
+                    {
+                        "agent_id": "0199a0f0-0000-7000-8000-000000000002",
+                        "agent_path": "/root/writer",
+                        "nickname": "writer",
+                        "parent_agent_path": "/root",
+                        "status": "completed",
+                        "residency": "unloaded"
+                    }
+                ],
+                "unread_messages": [
+                    {
+                        "message_id": "msg-1",
+                        "author": "/root/writer",
+                        "recipient": "/root",
+                        "task_id": "task-1",
+                        "delivery": "queue",
+                        "created_at_ms": 1_759_000_000_000i64
+                    }
+                ],
+                "revision": 7,
+                "last_fact_seq": 42
+            },
+            "tasks": {
+                "root_session_id": null,
+                "tasks": [],
+                "revision": 0,
+                "last_fact_seq": 0
+            },
+            "board": {
+                "revision": 0,
+                "last_fact_seq": 0,
+                "channels": [],
+                "threads": [],
+                "posts": [],
+                "subscriptions": []
+            }
+        });
+
+        let response: ClientV2TeamResponse =
+            serde_json::from_value(payload).expect("daemon /team 形状必须能反序列化");
+        assert_eq!(response.schema, "qaqh.ringing.team/v1");
+        assert_eq!(response.team.agents.len(), 2);
+
+        // roster 以 AgentPath 为主、nickname 为辅。
+        let child = &response.team.agents[1];
+        assert_eq!(child.agent_path.as_str(), "/root/writer");
+        assert_eq!(child.nickname.as_deref(), Some("writer"));
+        assert_eq!(
+            child.parent_agent_path.as_ref().map(|p| p.as_str()),
+            Some("/root")
+        );
+
+        // unloaded != completed：两者是**两个正交字段**，前端不能把 unloaded 画成 deleted。
+        assert_eq!(child.residency, ClientV2TeamAgentResidency::Unloaded);
+        assert_eq!(child.status, ClientV2TeamAgentStatus::Completed);
+
+        // inbox 必须带 author / recipient / task / delivery 四要素。
+        let inbox = &response.team.unread_messages[0];
+        assert_eq!(inbox.author.as_str(), "/root/writer");
+        assert_eq!(inbox.recipient.as_str(), "/root");
+        assert_eq!(inbox.task_id.as_deref(), Some("task-1"));
+        assert_eq!(
+            inbox.delivery,
+            qaqh_session::session_fact_v2::InterAgentDelivery::Queue
+        );
+    }
+
+    /// 壳层必须能**命名** TeamDelta 的变体（这是 TUI 之前做不到的事：类型没导出）。
+    #[test]
+    fn team_delta_variants_are_nameable_from_the_client_surface() {
+        let delta = ClientV2TeamDelta::AgentResidencyChanged {
+            revision: 3,
+            agent_id: qaqh_session::session_fact_v2::SessionId::new(
+                "0199a0f0-0000-7000-8000-000000000002",
+            ),
+            residency: ClientV2TeamAgentResidency::Unloaded,
+        };
+        let value = serde_json::to_value(&delta).expect("json");
+        assert_eq!(value["kind"], "agent_residency_changed");
+        assert_eq!(value["data"]["residency"], "unloaded");
+
+        // 同一个 delta 也能从 `ClientV2Payload` 里取出来并匹配。
+        let payload: ClientV2Payload = serde_json::from_value(serde_json::json!({
+            "kind": "team_delta",
+            "data": value,
+        }))
+        .expect("payload");
+        match payload {
+            ClientV2Payload::TeamDelta(ClientV2TeamDelta::AgentResidencyChanged {
+                residency,
+                ..
+            }) => assert_eq!(residency, ClientV2TeamAgentResidency::Unloaded),
+            other => panic!("expected TeamDelta, got {other:?}"),
+        }
+    }
 
     #[test]
     fn public_v2_surface_is_typed() {

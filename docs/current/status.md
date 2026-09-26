@@ -116,6 +116,10 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   [`spec/2026-09-26-steer-interject.md`](./spec/2026-09-26-steer-interject.md)。
 - Phase 4 前端壳接入、TEAM-01e / BOARD-01d / SUBV2-11d 前端消费仍未完成；
   不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
+  **Phase 4 的唯一后端阻塞已解除**：`qaqh-client` 现在导出 Team projection
+  typed 面（`Client::team_v2` + `ClientV2Team*` 类型 + 契约锁测试），
+  TUI / WinUI 可直接开工。工作拆分与不变量见
+  [`coordination/2026-09-26-phase4-roster-inbox.md`](./coordination/2026-09-26-phase4-roster-inbox.md)。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。
 - 当前交接：
