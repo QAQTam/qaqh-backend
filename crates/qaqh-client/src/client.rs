@@ -436,7 +436,7 @@ impl Client {
             .send_command(
                 Some(seed),
                 RingingCommand::Control(ControlCommand::SessionResume {
-                    seed: seed.to_string(),
+                    session_id: seed.to_string(),
                 }),
                 CommandOptions::default(),
             )

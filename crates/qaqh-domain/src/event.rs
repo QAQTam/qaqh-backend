@@ -111,8 +111,9 @@ pub enum ActivityState {
 /// 刻意不加 ts-rs 导出（维持零前端曝光现状，bindings 数不变）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionActivity {
-    /// Session identifier (8 hex chars).
-    pub seed: String,
+    /// Session identifier.
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     /// Current lifecycle state.
     pub state: ActivityState,
     /// Active turn ID, if a turn is in progress or suspended.
@@ -178,7 +179,8 @@ pub struct DashboardTask {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct DashboardSnapshot {
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub documents: Vec<DashboardDocument>,
     pub recent_edits: Vec<String>,
     pub tasks: Vec<DashboardTask>,
@@ -554,7 +556,11 @@ impl ToolEvent {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ControlEvent {
     /// 会话生命周期状态变更。
-    SessionStateChanged { seed: String, state: SessionState },
+    SessionStateChanged {
+        #[serde(rename = "session_id", alias = "seed")]
+        session_id: String,
+        state: SessionState,
+    },
     /// 全局配置已变更（P2-D2）：`rev` = daemon 侧配置版本（每次 config.save
     /// 自增）。消费者收到后重拉 `config.load`；seed 惯例为空串（全局广播，
     /// 与 SessionStateChanged 的 per-seed 区分）。T20 axum SSE 同源复用。
@@ -562,7 +568,8 @@ pub enum ControlEvent {
     ConfigChanged { rev: u64 },
     /// 会话活动状态变更（WaitingUser 汇总 interaction/permission 挂起）。
     SessionActivityChanged {
-        seed: String,
+        #[serde(rename = "session_id", alias = "seed")]
+        session_id: String,
         state: ActivityState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
@@ -573,7 +580,8 @@ pub enum ControlEvent {
     },
     /// 会话元数据变更（标题生成/重命名）——前端收到后重拉 session.list。
     SessionMetaChanged {
-        seed: String,
+        #[serde(rename = "session_id", alias = "seed")]
+        session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
@@ -582,7 +590,8 @@ pub enum ControlEvent {
     /// 会话仪表盘（replaceable，覆盖式）。
     DashboardUpdated {
         hp_connected: bool,
-        session_seed: String,
+        #[serde(rename = "session_id", alias = "session_seed")]
+        session_id: String,
         tool_calls_total: u32,
         tool_failures: u32,
         current_phase: String,
@@ -656,7 +665,8 @@ pub enum ControlEvent {
     /// 回合状态机、不进模型上下文。`state` 为注入标签原样
     /// （COMPLETED / ERROR / TIMEOUT / CANCELLED）。
     SubagentStatus {
-        seed: String,
+        #[serde(rename = "session_id", alias = "seed")]
+        session_id: String,
         name: String,
         state: String,
     },
@@ -826,7 +836,7 @@ mod tests {
         assert_eq!(
             ControlEvent::DashboardUpdated {
                 hp_connected: true,
-                session_seed: "s".into(),
+                session_id: "s".into(),
                 tool_calls_total: 0,
                 tool_failures: 0,
                 current_phase: "idle".into(),

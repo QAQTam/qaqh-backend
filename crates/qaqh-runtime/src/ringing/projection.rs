@@ -310,7 +310,7 @@ mod tests {
             RingingChannel::Control,
             "s",
             &ev(ControlEvent::SessionStateChanged {
-                seed: "s".into(),
+                session_id: "s".into(),
                 state: SessionState::Created,
             }),
         );
@@ -411,7 +411,7 @@ mod tests {
             RingingChannel::Control,
             "s",
             &DomainEvent::Control(ControlEvent::SessionActivityChanged {
-                seed: "s".into(),
+                session_id: "s".into(),
                 state: ActivityState::WaitingUser,
                 turn_id: Some("t".into()),
                 seq: 1,

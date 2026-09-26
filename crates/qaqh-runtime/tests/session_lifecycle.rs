@@ -175,7 +175,9 @@ fn cmd_session_create() -> RingingCommand {
 }
 
 fn cmd_session_resume(seed: &str) -> RingingCommand {
-    RingingCommand::Control(ControlCommand::SessionResume { seed: seed.into() })
+    RingingCommand::Control(ControlCommand::SessionResume {
+        session_id: seed.into(),
+    })
 }
 
 fn cmd_session_shutdown() -> RingingCommand {
@@ -271,7 +273,9 @@ fn create_session_emits_session_state() {
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
         assert!(!seed.is_empty());
@@ -319,7 +323,9 @@ fn send_message_triggers_turn_lifecycle() {
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
 
@@ -419,7 +425,9 @@ fn system_injection_lands_inside_running_turn() {
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
 
@@ -536,7 +544,9 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
 

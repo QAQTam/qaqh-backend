@@ -100,7 +100,9 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             _ => unreachable!(),
         };
 

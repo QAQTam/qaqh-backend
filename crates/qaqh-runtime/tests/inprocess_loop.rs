@@ -92,7 +92,9 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
         assert!(!seed.is_empty());

@@ -547,7 +547,9 @@ async fn attach_seed(
     session.replace_lease(lease.clone());
     session.set_active_seed(None);
 
-    let command = RingingCommand::Control(ControlCommand::SessionAttach { seed: seed.clone() });
+    let command = RingingCommand::Control(ControlCommand::SessionAttach {
+        session_id: seed.clone(),
+    });
     let envelope =
         RingingV2CommandEnvelope::new(session::random_token(), client_instance_id, command)
             .with_client_session_id(lease.client_session_id.clone())

@@ -14,9 +14,9 @@ pub fn publish_activity(hub: Option<&RingingHub>, activity: &SessionActivity) {
         return;
     };
     let _ = hub.publish_with_causation(
-        &activity.seed,
+        &activity.session_id,
         DomainEvent::Control(ControlEvent::SessionActivityChanged {
-            seed: activity.seed.clone(),
+            session_id: activity.session_id.clone(),
             state: activity.state,
             turn_id: activity.turn_id.clone(),
             seq: activity.seq,
@@ -99,7 +99,7 @@ impl SessionActivityTracker {
         let generation = previous.map_or(1, |value| value.generation.saturating_add(1));
         let seq = previous.map_or(1, |value| value.activity.seq.saturating_add(1));
         let activity = SessionActivity {
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
             state: ActivityState::Starting,
             turn_id: None,
             seq,
@@ -195,7 +195,7 @@ impl SessionActivityTracker {
     pub fn snapshot(&self) -> Vec<SessionActivity> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut values: Vec<_> = inner.values().map(|value| value.activity.clone()).collect();
-        values.sort_by(|a, b| a.seed.cmp(&b.seed));
+        values.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         values
     }
 }
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn session_activity_json_shape_is_frozen() {
         let activity = SessionActivity {
-            seed: "abcd1234".into(),
+            session_id: "abcd1234".into(),
             state: ActivityState::WaitingUser,
             turn_id: Some("turn-9".into()),
             seq: 7,
@@ -227,11 +227,11 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&activity).unwrap(),
-            r#"{"seed":"abcd1234","state":"waiting_user","turn_id":"turn-9","seq":7,"updated_at":1700000000000}"#
+            r#"{"session_id":"abcd1234","state":"waiting_user","turn_id":"turn-9","seq":7,"updated_at":1700000000000}"#
         );
         // turn_id 为 None 时字段整体缺席（skip_serializing_if）。
         let idle = SessionActivity {
-            seed: "abcd1234".into(),
+            session_id: "abcd1234".into(),
             state: ActivityState::Idle,
             turn_id: None,
             seq: 8,
@@ -239,10 +239,10 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&idle).unwrap(),
-            r#"{"seed":"abcd1234","state":"idle","seq":8,"updated_at":1700000000001}"#
+            r#"{"session_id":"abcd1234","state":"idle","seq":8,"updated_at":1700000000001}"#
         );
         // 旧样本解析 → 序列化 → 再解析字段保全。
-        let legacy = r#"{"seed":"abcd1234","state":"working","seq":3,"updated_at":42}"#;
+        let legacy = r#"{"session_id":"abcd1234","state":"working","seq":3,"updated_at":42}"#;
         let parsed: SessionActivity = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.state, ActivityState::Working);
         assert_eq!(parsed.turn_id, None);

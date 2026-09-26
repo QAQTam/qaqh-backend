@@ -520,7 +520,7 @@ impl Loop {
             self.paced_emitter
                 .emit_domain(qaqh_domain::DomainEvent::Control(
                     qaqh_domain::ControlEvent::SessionStateChanged {
-                        seed: seed.clone(),
+                        session_id: seed.clone(),
                         state: qaqh_domain::SessionState::Created,
                     },
                 ));
