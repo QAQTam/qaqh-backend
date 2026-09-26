@@ -42,11 +42,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 mod host;
+mod task_tools;
 pub use host::{
     ArmSubagentCollectorRequest, ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent,
     ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
     SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
-    WaitAgentOutcome, WaitAgentRequest, host, install_host,
+    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
+    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
+    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, host, install_host, install_task_host,
+    task_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -743,6 +747,11 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(WaitAgentTool);
     mgr.register_display("interrupt_agent", project_interrupt_agent_display);
     mgr.register_typed(InterruptAgentTool);
+    mgr.register_typed(task_tools::TaskCreateTool);
+    mgr.register_typed(task_tools::TaskClaimTool);
+    mgr.register_typed(task_tools::TaskUpdateTool);
+    mgr.register_typed(task_tools::TaskCloseTool);
+    mgr.register_typed(task_tools::TaskListTool);
 }
 
 fn unix_ms() -> i64 {
@@ -1670,6 +1679,33 @@ mod tests {
         assert_eq!(
             handler.input_schema["required"].as_array().map(Vec::len),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn task_tools_are_registered_with_closed_schemas() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+
+        for name in [
+            "task_create",
+            "task_claim",
+            "task_update",
+            "task_close",
+            "task_list",
+        ] {
+            let handler = manager
+                .lookup(name)
+                .unwrap_or_else(|| panic!("{name} should be registered"));
+            assert_eq!(
+                handler.input_schema["additionalProperties"],
+                serde_json::json!(false),
+                "{name} must reject unknown fields"
+            );
+        }
+        assert!(
+            manager.lookup("task_list").is_some(),
+            "task_list read surface must be registered"
         );
     }
 

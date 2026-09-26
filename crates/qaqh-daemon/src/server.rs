@@ -177,6 +177,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
+    qaqh_subagent::install_task_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingLeaseStore::new()));
     // Persisted so a restart still reclaims seats whose holder lease expired
     // while the daemon was down.
