@@ -325,18 +325,16 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 return true;
             }
             // Directory exists but meta or messages are corrupt — generate a
-            // fresh seed so we don't overwrite the corrupted files.
+            // fresh canonical session id so we don't overwrite the corrupted
+            // files.
             //
-            // BUG-2026-09-13-24：这条回退路径也**必须**做碰撞检查。旧实现
-            // 直接 `generate_seed()`：若新 seed 撞上另一条既有会话目录，
-            // 后续 flush 会写穿它——正是我们要避免的静默数据损坏。优先经
-            // 注入的 session manager 取唯一 seed（临时/无 manager 时退回
-            // 无管理器版本，此时 store 也是 ephemeral，不落盘）。
+            // The no-manager fallback is test/ephemeral-only; it still uses a
+            // UUIDv7 SessionId rather than reviving the legacy 8-hex seed.
             log::error!(
                 "qaqh-agent: session {} load failed (corrupt?) — creating fresh session",
                 s
             );
-            log::warn!("[LIFECYCLE] load failed for {s}, generating new seed");
+            log::warn!("[LIFECYCLE] load failed for {s}, allocating a fresh session id");
             match agent.session_manager.as_ref() {
                 Some(manager) => match manager.allocate_session(None) {
                     Ok(identity) => identity.session_id.as_str().to_string(),
@@ -347,9 +345,9 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                         return false;
                     }
                 },
-                None => qaqh_session::generate_unique_seed(|seed| {
-                    qaqh_types::platform::sessions_dir().join(seed).exists()
-                }),
+                None => qaqh_session::canonical::generate_session_id()
+                    .as_str()
+                    .to_string(),
             }
         }
         None => return false,
@@ -397,8 +395,11 @@ pub fn create_session(agent: &mut AgentState) {
                 return;
             }
         },
-        // Ephemeral/no-manager tests keep the in-memory legacy path.
-        None => qaqh_session::generate_seed(),
+        // Ephemeral/no-manager tests keep the in-memory path, but the id is
+        // still a canonical UUIDv7 SessionId.
+        None => qaqh_session::canonical::generate_session_id()
+            .as_str()
+            .to_string(),
     };
     agent.session.seed = seed;
     agent.session.created_at = qaqh_session::now_epoch();
