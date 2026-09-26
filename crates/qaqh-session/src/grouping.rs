@@ -231,9 +231,9 @@ impl WorkspaceStore {
             if belongs
                 && !items
                     .iter()
-                    .any(|w| w.session_ids.iter().any(|s| s == &meta.seed))
+                    .any(|w| w.session_ids.iter().any(|s| s == &meta.session_id))
             {
-                session_ids.push(meta.seed.clone());
+                session_ids.push(meta.session_id.clone());
             }
         }
         let ws = WorkspaceMeta {

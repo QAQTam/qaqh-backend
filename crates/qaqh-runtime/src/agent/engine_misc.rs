@@ -76,14 +76,14 @@ impl MiscEngine {
         // Dashboard 刷新走注入句柄直写（&AgentState 不可变借用，且该写是
         // 覆盖式快照、无 dispatch 时序约束，不入 MetaOp 队列——PR-1-5）。
         if let Some(sm) = agent.session_manager.as_ref() {
-            sm.set_context_stats(&agent.session.seed, &stats);
+            sm.set_context_stats(&agent.session.session_id, &stats);
         }
 
         // Ringing 双发：DashboardUpdated（replaceable 覆盖）
         emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardUpdated {
                 hp_connected: true,
-                session_seed: agent.session.seed.clone(),
+                session_seed: agent.session.session_id.clone(),
                 tool_calls_total: 0,
                 tool_failures: 0,
                 current_phase: "single".into(),
@@ -92,7 +92,7 @@ impl MiscEngine {
         ));
         emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardSnapshot {
-                snapshot: dashboard::build_snapshot(agent.session.seed.clone()),
+                snapshot: dashboard::build_snapshot(agent.session.session_id.clone()),
             },
         ));
     }
@@ -106,9 +106,9 @@ impl MiscEngine {
             _ => 0,
         };
         qaqh_workspace::runtime::set_mode(m);
-        if !agent.session.seed.is_empty() {
+        if !agent.session.session_id.is_empty() {
             agent.enqueue_meta_op(MetaOp::PersistMode {
-                seed: agent.session.seed.clone(),
+                seed: agent.session.session_id.clone(),
                 mode: m,
             });
         }

@@ -514,7 +514,7 @@ fn session_new_never_reuses_an_existing_seed_directory() {
         }
         // 该 seed 目录必须属于它自己：新建 metas 的 cwd 是本次的 cwd。
         let meta = sessions.load_meta(&seed).expect("fresh meta");
-        assert_eq!(meta.seed, seed, "meta must be self-owned");
+        assert_eq!(meta.session_id, seed, "meta must be self-owned");
         let expected_cwd = std::fs::canonicalize(&ws)
             .expect("canonicalize ws")
             .to_string_lossy()
