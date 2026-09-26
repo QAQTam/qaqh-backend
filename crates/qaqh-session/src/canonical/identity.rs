@@ -179,6 +179,11 @@ impl Default for CanonicalSessionIdentity {
     }
 }
 
+/// Generate a canonical UUIDv7 session identifier.
+pub fn generate_session_id() -> SessionId {
+    SessionId::new(Uuid::now_v7().to_string())
+}
+
 /// Generate a Crockford-base32 ULID-shaped identifier from UUIDv7 bytes.
 ///
 /// Canonical event/execution IDs require the ULID alphabet and length. UUIDv7
