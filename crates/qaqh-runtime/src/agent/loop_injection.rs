@@ -392,6 +392,7 @@ mod tests {
             CancelToken::new(),
             channels.writer_dead,
             Arc::new(crate::agent::liveness::WorkerLiveness::new()),
+            None,
         );
         (lp, event_rx)
     }

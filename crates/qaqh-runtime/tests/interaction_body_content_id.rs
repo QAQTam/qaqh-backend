@@ -99,7 +99,7 @@ fn ask_request_ref_matches_interaction_body_content_id() {
     let entry = hub
         .get_content_any(&expected_id)
         .expect("ref resolves to stored body");
-    assert_eq!(entry.seed, seed);
+    assert_eq!(entry.owners, vec![seed.to_string()]);
     assert!(
         entry.pinned,
         "interaction body must stay pinned while pending"

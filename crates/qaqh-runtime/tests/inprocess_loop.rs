@@ -122,6 +122,7 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
         channels.cancel,
         channels.writer_dead,
         std::sync::Arc::new(qaqh_runtime::agent::liveness::WorkerLiveness::new()),
+        None,
     );
     lp.run();
 

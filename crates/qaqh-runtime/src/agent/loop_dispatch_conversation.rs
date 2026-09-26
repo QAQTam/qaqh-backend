@@ -12,9 +12,9 @@ use qaqh_domain::{
 };
 use qaqh_session::canonical::{generate_ulid, ulid_from_text};
 use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, AgentPath, EventId, InputAccepted, InputId, InputKind, InputPurpose,
-    InterAgentCommunication, InterAgentContent, InterAgentDelivery, MessageId, SessionId,
-    SubagentFinished, SubagentTerminalStatus, ToolCallId,
+    ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, InputAccepted, InputId,
+    InputKind, InputPurpose, InterAgentCommunication, InterAgentContent, InterAgentDelivery,
+    MessageId, SessionId, SubagentFinished, SubagentTerminalStatus, ToolCallId,
 };
 
 impl Loop {
@@ -52,8 +52,10 @@ impl Loop {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_input_accepted(
         &mut self,
+        session_id: &str,
         input_id: &str,
         text: &str,
         purpose: qaqh_domain::ConversationInputPurpose,
@@ -61,16 +63,18 @@ impl Loop {
         actor: ActorRef,
         client_request_id: Option<String>,
     ) -> Result<(), String> {
-        // Canonical inline content is capped at 8 KiB. Larger payloads must be
-        // externalized before this boundary; until that producer exists, do
-        // not fabricate a dangling content_ref.
-        if text.len() > 8 * 1024 {
-            log::warn!(
-                "[INPUT] canonical InputAccepted skipped for oversized input {input_id} ({} bytes)",
-                text.len()
-            );
-            return Ok(());
-        }
+        // Canonical inline content is capped at 8 KiB. Larger payloads are
+        // externalized to the durable content store and referenced by
+        // content_ref; never skip the canonical fact or fabricate a dangling
+        // ref.
+        let (content_ref, inline_text) = if text.len() > 8 * 1024 {
+            (
+                Some(self.externalize_canonical_content(session_id, text)?),
+                None,
+            )
+        } else {
+            (None, Some(text.to_string()))
+        };
         let now = super::state::agent::unix_ms();
         let ledger = self
             .session
@@ -90,8 +94,8 @@ impl Loop {
                 qaqh_domain::ConversationInputPurpose::TriggerTurn => InputPurpose::TriggerTurn,
                 qaqh_domain::ConversationInputPurpose::QueueOnly => InputPurpose::QueueOnly,
             },
-            content_ref: None,
-            inline_text: Some(text.to_string()),
+            content_ref,
+            inline_text,
             attachments: vec![],
             actor,
             client_request_id,
@@ -102,18 +106,39 @@ impl Loop {
         Ok(())
     }
 
+    /// Externalize oversized canonical text into the durable content store.
+    ///
+    /// The ref is `sha256:<hex>` to match the canonical schema; the v2 content
+    /// endpoint strips the prefix before looking up the store.
+    fn externalize_canonical_content(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<ContentRef, String> {
+        let hub = self.hub.as_ref().ok_or_else(|| {
+            "content store unavailable; cannot externalize oversized canonical content".to_string()
+        })?;
+        let content_id = hub.put_content(session_id, "text/plain", text.as_bytes().to_vec(), false);
+        Ok(ContentRef::new(ContentHash::new(format!(
+            "sha256:{content_id}"
+        ))))
+    }
+
     fn record_inter_agent_communication(
         &mut self,
+        session_id: &str,
         envelope: &qaqh_domain::InterAgentEnvelope,
         text: &str,
     ) -> Result<(), String> {
-        if text.len() > 8 * 1024 {
-            return Err(format!(
-                "inter-agent inline content is {} bytes; maximum is {}",
-                text.len(),
-                8 * 1024
-            ));
-        }
+        let content = if text.len() > 8 * 1024 {
+            InterAgentContent::ContentRef {
+                content_ref: self.externalize_canonical_content(session_id, text)?,
+            }
+        } else {
+            InterAgentContent::Inline {
+                text: text.to_string(),
+            }
+        };
         let author = AgentPath::parse_absolute(&envelope.author)
             .map_err(|error| format!("invalid author path {}: {error}", envelope.author))?;
         let recipient = AgentPath::parse_absolute(&envelope.recipient)
@@ -138,9 +163,7 @@ impl Loop {
             recipient,
             other_recipients,
             task_id: envelope.task_id.clone(),
-            content: InterAgentContent::Inline {
-                text: text.to_string(),
-            },
+            content,
             reply_to: envelope.reply_to.clone().map(MessageId::new),
             causation_id: envelope.causation_id.clone().map(EventId::new),
             delivery,
@@ -200,7 +223,8 @@ impl Loop {
                     .or(message_id)
                     .unwrap_or_else(|| command_id.to_string());
                 if let Some(envelope) = inter_agent
-                    && let Err(error) = self.record_inter_agent_communication(envelope, &text)
+                    && let Err(error) =
+                        self.record_inter_agent_communication(session_id, envelope, &text)
                 {
                     self.emit_operation_failed(
                         command_id,
@@ -263,6 +287,7 @@ impl Loop {
                     });
                 if injection_path {
                     if let Err(error) = self.record_input_accepted(
+                        session_id,
                         &input_id,
                         &text,
                         effective_purpose,
@@ -331,6 +356,7 @@ impl Loop {
                     }
                 }
                 if let Err(error) = self.record_input_accepted(
+                    session_id,
                     &input_id,
                     &text,
                     effective_purpose,

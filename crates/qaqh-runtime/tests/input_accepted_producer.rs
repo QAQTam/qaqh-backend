@@ -1,6 +1,6 @@
 //! Verifies that accepted conversation input reaches the canonical log.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{
@@ -14,7 +14,7 @@ use qaqh_runtime::agent::types::{WorkerCommand, WriterEvent};
 use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{
-    ActorKind, FactPayload, InputKind, InputPurpose, MailboxMessageState,
+    ActorKind, FactPayload, InputKind, InputPurpose, InterAgentContent, MailboxMessageState,
 };
 
 fn send_cmd(cmd_tx: &mpsc::SyncSender<WorkerCommand>, seed: &str, command: RingingCommand) {
@@ -73,6 +73,13 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
 
     let message_id = "msg_01J00000000000000000000001";
     let inter_agent_message_id = "msg_01J00000000000000000000002";
+    let oversized_inter_agent = "inter-agent input ".repeat(600);
+    let oversized_inter_agent_for_thread = oversized_inter_agent.clone();
+    let hub = Arc::new(qaqh_runtime::RingingHub::with_persistence(
+        "input-accepted-content-epoch",
+        tmp.path().join("ringing"),
+    ));
+    let hub_for_loop = Arc::clone(&hub);
     let driver = std::thread::spawn(move || {
         send_cmd(
             &cmd_tx,
@@ -115,7 +122,7 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
             &cmd_tx,
             &seed,
             RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
-                text: "inter-agent input".into(),
+                text: oversized_inter_agent_for_thread,
                 images: vec![],
                 attachments: None,
                 message_id: Some(inter_agent_message_id.into()),
@@ -151,6 +158,7 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
         channels.cancel,
         channels.writer_dead,
         std::sync::Arc::new(qaqh_runtime::agent::liveness::WorkerLiveness::new()),
+        Some(hub_for_loop),
     );
     lp.run();
 
@@ -196,16 +204,39 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
         communications[0].message_id.as_str(),
         inter_agent_message_id
     );
+    let communication_ref = match &communications[0].content {
+        InterAgentContent::ContentRef { content_ref } => content_ref,
+        InterAgentContent::Inline { text } => {
+            panic!(
+                "oversized inter-agent message stayed inline: {} bytes",
+                text.len()
+            )
+        }
+    };
+    let communication_store_id = communication_ref
+        .hash()
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("canonical content refs carry the sha256 prefix");
+    assert_eq!(
+        hub.get_content_any(communication_store_id)
+            .expect("inter-agent content resolves")
+            .bytes,
+        oversized_inter_agent.as_bytes()
+    );
+
     let inter_agent = accepted
         .iter()
         .find(|payload| payload.client_request_id.as_deref() == Some(inter_agent_message_id))
         .expect("inter-agent input accepted");
     assert_eq!(inter_agent.input_kind, InputKind::UserText);
     assert_eq!(inter_agent.input_purpose, InputPurpose::QueueOnly);
-    assert_eq!(
-        inter_agent.inline_text.as_deref(),
-        Some("inter-agent input")
-    );
+    assert!(inter_agent.inline_text.is_none());
+    let input_ref = inter_agent
+        .content_ref
+        .as_ref()
+        .expect("oversized InputAccepted carries content_ref");
+    assert_eq!(input_ref, communication_ref);
     assert_eq!(inter_agent.actor.kind, ActorKind::Subagent);
     assert_eq!(inter_agent.actor.id, "/root");
 

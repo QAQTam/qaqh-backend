@@ -88,6 +88,7 @@ pub(crate) fn run_actor(
     cancel: crate::agent::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     liveness: std::sync::Arc<crate::agent::liveness::WorkerLiveness>,
+    hub: Option<Arc<RingingHub>>,
 ) {
     let is_subagent = matches!(&kind, ActorKind::Subagent(_));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -99,7 +100,16 @@ pub(crate) fn run_actor(
             qaqh_workspace::authorization::set_subagent_sandbox(true);
         }
 
-        crate::agent::spawn_agent(&seed, kind, cmd_rx, event_tx, cancel, writer_dead, liveness);
+        crate::agent::spawn_agent(
+            &seed,
+            kind,
+            cmd_rx,
+            event_tx,
+            cancel,
+            writer_dead,
+            liveness,
+            hub,
+        );
 
         qaqh_workspace::clear_actor_context();
         cleanup_actor_state(is_subagent);
@@ -124,6 +134,7 @@ pub(crate) fn run_subagent_actor(
     cancel: crate::agent::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     liveness: std::sync::Arc<crate::agent::liveness::WorkerLiveness>,
+    hub: Option<Arc<RingingHub>>,
 ) {
     run_actor(
         seed,
@@ -133,6 +144,7 @@ pub(crate) fn run_subagent_actor(
         cancel,
         writer_dead,
         liveness,
+        hub,
     );
 }
 
@@ -148,6 +160,7 @@ pub(crate) fn run_session_actor(
     cancel: crate::agent::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     liveness: std::sync::Arc<crate::agent::liveness::WorkerLiveness>,
+    hub: Option<Arc<RingingHub>>,
 ) {
     run_actor(
         seed,
@@ -161,6 +174,7 @@ pub(crate) fn run_session_actor(
         cancel,
         writer_dead,
         liveness,
+        hub,
     );
 }
 

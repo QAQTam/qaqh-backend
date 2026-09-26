@@ -61,6 +61,7 @@ use super::injection::InjectionBus;
 use super::lifecycle_port::{LifecyclePort, RuntimeLifecyclePort};
 use super::paced_emitter::PacedEmitter;
 use super::types::*;
+use crate::RingingHub;
 use crate::agent::state::agent::AgentState;
 
 pub fn ringing_command_is_interrupt(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> bool {
@@ -203,6 +204,11 @@ pub struct Loop {
     /// enters a production binary and is unreachable from the wire.
     #[cfg(test)]
     pub(super) panic_on_command_id: Option<String>,
+
+    /// Daemon-side Ringing hub for durable content externalization. `None`
+    /// in isolated unit tests; oversized canonical payloads then fail closed
+    /// instead of being silently skipped.
+    pub(super) hub: Option<Arc<RingingHub>>,
 }
 
 impl Loop {
@@ -213,6 +219,7 @@ impl Loop {
         cancel: CancelToken,
         writer_dead: Arc<AtomicBool>,
         liveness: std::sync::Arc<super::liveness::WorkerLiveness>,
+        hub: Option<Arc<RingingHub>>,
     ) -> Self {
         // resume 模式下 `--resume-seed` 只写入 resume_seed 字段，seed 此时
         // 仍为空；用 resume_seed 兜底，避免 PacedEmitter 以空 seed 构造
@@ -248,6 +255,7 @@ impl Loop {
             lifecycle,
             #[cfg(test)]
             panic_on_command_id: None,
+            hub,
         }
     }
 
@@ -718,6 +726,7 @@ mod drain_dispatch_safety_tests {
             CancelToken::new(),
             channels.writer_dead,
             liveness,
+            None,
         );
         (lp, cmd_tx)
     }
