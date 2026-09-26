@@ -77,6 +77,55 @@ impl QaqhService {
             reader.committed().committed_fact_seq,
         ))
     }
+
+    /// Count queued messages from `author` to `recipient` in the target's
+    /// canonical mailbox.
+    ///
+    /// This is the authoritative in-flight signal for the Phase 3 message
+    /// quota: an `InterAgentCommunication` is in-flight until the matching
+    /// `InputAccepted` is committed. The target log is read on demand because
+    /// sends are a tool-call path, not a hot loop.
+    fn count_in_flight_messages(
+        &self,
+        target_session_id: &str,
+        author: &str,
+        recipient: &str,
+    ) -> Result<u64, String> {
+        let Some(session_dir) = self.sessions.session_dir_for_id(target_session_id)? else {
+            return Ok(0);
+        };
+        if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+            return Ok(0);
+        }
+        let identity = CanonicalSessionIdentity::open(&session_dir)
+            .map_err(|error| format!("open canonical identity for {target_session_id}: {error}"))?;
+        if identity.session_id.as_str() != target_session_id {
+            return Err(format!(
+                "mailbox session {target_session_id} identity is {}",
+                identity.session_id
+            ));
+        }
+        let reader = CommittedFactReader::open(
+            &session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+        )
+        .map_err(|error| format!("open canonical facts for {target_session_id}: {error}"))?;
+        let facts = reader
+            .read_all()
+            .map_err(|error| format!("read canonical facts for {target_session_id}: {error}"))?;
+        let mut mailbox = MailboxProjection::default();
+        for fact in &facts {
+            mailbox.apply(fact);
+        }
+        Ok(mailbox
+            .pending()
+            .filter(|message| {
+                message.communication.author.as_str() == author
+                    && message.communication.recipient.as_str() == recipient
+            })
+            .count() as u64)
+    }
 }
 
 impl SubagentHost for QaqhService {
@@ -142,6 +191,12 @@ impl SubagentHost for QaqhService {
         if request.text.trim().is_empty() {
             return Err("agent message text must not be empty".to_string());
         }
+        let target_ref = request.target.trim();
+        if target_ref.starts_with('@') {
+            return Err(format!(
+                "broadcast target {target_ref:?} is not supported; send to one agent at a time"
+            ));
+        }
         if request.delivery == qaqh_domain::InterAgentDelivery::Interrupt {
             return Err("interrupt delivery is not implemented yet".to_string());
         }
@@ -167,6 +222,22 @@ impl SubagentHost for QaqhService {
             && !caller.agent_path.is_root()
         {
             return Err("child agents cannot trigger the root agent".to_string());
+        }
+
+        // Phase 3 quota: in-flight is derived from the target's canonical
+        // mailbox; outbound attempts are a runtime safety-valve counter.
+        let in_flight = self.count_in_flight_messages(
+            target.agent_id.as_str(),
+            caller.agent_path.as_str(),
+            target.agent_path.as_str(),
+        )?;
+        {
+            let mut registry = self.registry()?;
+            registry.admit_outbound_message(
+                caller.root_session_id.as_str(),
+                caller.agent_path.as_str(),
+                in_flight,
+            )?;
         }
 
         let message_id = format!("msg_{}", qaqh_session::canonical::generate_ulid());
