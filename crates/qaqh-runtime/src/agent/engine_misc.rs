@@ -83,7 +83,7 @@ impl MiscEngine {
         emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardUpdated {
                 hp_connected: true,
-                session_seed: agent.session.session_id.clone(),
+                session_id: agent.session.session_id.clone(),
                 tool_calls_total: 0,
                 tool_failures: 0,
                 current_phase: "single".into(),

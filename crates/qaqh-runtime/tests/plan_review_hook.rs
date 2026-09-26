@@ -193,7 +193,7 @@ fn expect_session_created(receiver: &std::sync::mpsc::Receiver<RingingEvent>) ->
             })
         )
     }) {
-        RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+        RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => session_id,
         other => panic!("expected SessionStateChanged(Created), got {other:?}"),
     }
 }

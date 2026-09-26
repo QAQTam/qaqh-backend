@@ -355,7 +355,7 @@ fn close_session_cleans_per_seed_resident_state() {
     let _ = hub.publish(
         &seed,
         qaqh_domain::DomainEvent::Control(ControlEvent::SessionStateChanged {
-            seed: seed.clone(),
+            session_id: seed.clone(),
             state: SessionState::Resumed,
         }),
     );

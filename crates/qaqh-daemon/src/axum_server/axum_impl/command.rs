@@ -223,7 +223,7 @@ pub(crate) async fn handle_command(
     }
     // SessionClose
     if let qaqh_ringing::RingingCommand::Control(ControlCommand::SessionClose {
-        seed: close_seed,
+        session_id: close_seed,
     }) = &env.command
     {
         let close_seed = session_close_seed(close_seed, &env.session_id);
@@ -284,9 +284,9 @@ pub(crate) async fn handle_command(
     ) = &env.command
     {
         let (op, target) = match cmd {
-            ControlCommand::SessionArchive { seed } => ("archive", seed),
-            ControlCommand::SessionUnarchive { seed } => ("unarchive", seed),
-            ControlCommand::SessionDelete { seed } => ("delete", seed),
+            ControlCommand::SessionArchive { session_id } => ("archive", session_id),
+            ControlCommand::SessionUnarchive { session_id } => ("unarchive", session_id),
+            ControlCommand::SessionDelete { session_id } => ("delete", session_id),
             _ => unreachable!(),
         };
         let target = session_close_seed(target, &env.session_id);
@@ -412,7 +412,9 @@ pub(crate) async fn handle_command(
                 .mark_terminal(&env.command_id, RingingCommandState::Succeeded, None, None);
             return ack_response(StatusCode::OK, accept_ack(env.command_id, None));
         }
-        qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume { seed }) => {
+        qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume {
+            session_id: target_session_id,
+        }) => {
             // BUG-2026-09-12-10：attach 必须先于（较慢的）worker 拉起副作用。
             // 前端切会话后会并行 fetch bootstrap/timeline，若 attach 晚于
             // service.handle 完成，这些请求会撞进「尚未 attach」的窗口拿 401。
@@ -420,7 +422,7 @@ pub(crate) async fn handle_command(
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .attach_seed(&session_id, seed);
+                .attach_seed(&session_id, target_session_id);
             if !attached {
                 state
                     .pending
@@ -438,7 +440,7 @@ pub(crate) async fn handle_command(
             }
             if let Err(e) = state
                 .service
-                .handle("session.resume", &serde_json::json!({"seed": seed}))
+                .handle("session.resume", &serde_json::json!({"seed": session_id}))
             {
                 state
                     .pending
@@ -459,8 +461,10 @@ pub(crate) async fn handle_command(
         }
         // 仅 attach（无 actor 副作用）：供前端订阅子代理等只读观测 seed 的
         // timeline/频道流。与 SessionResume 的差异见 ControlCommand 文档。
-        qaqh_ringing::RingingCommand::Control(ControlCommand::SessionAttach { seed }) => {
-            if seed.is_empty() {
+        qaqh_ringing::RingingCommand::Control(ControlCommand::SessionAttach {
+            session_id: target_session_id,
+        }) => {
+            if target_session_id.is_empty() {
                 state
                     .pending
                     .lock()
@@ -479,7 +483,7 @@ pub(crate) async fn handle_command(
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .attach_seed(&session_id, seed);
+                .attach_seed(&session_id, target_session_id);
             if !attached {
                 state
                     .pending
@@ -555,7 +559,7 @@ mod tests {
     #[test]
     fn v2_driver_epoch_is_part_of_the_command_fingerprint() {
         let command = qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume {
-            seed: "seed-1".into(),
+            session_id: "seed-1".into(),
         });
         let epoch_one = command_fingerprint(
             RingingChannel::Control,
