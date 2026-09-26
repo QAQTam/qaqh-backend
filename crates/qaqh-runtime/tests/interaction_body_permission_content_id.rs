@@ -84,23 +84,28 @@ fn permission_request_ref_matches_interaction_body_content_id() {
         "canonical request_ref must be the permission body's content id"
     );
 
-    // registry::stash_interaction_body 走的就是这条写入路径（unpinned + TTL）：
-    // 同一份 bytes 必须得到同一个 content_id，ref 才解析得到正文。
+    // registry::stash_interaction_body 走的就是这条写入路径（pinned + pin_key）：
+    // 同一份 bytes 必须得到同一个 content_id，ref 才解析得到正文；ToolFinished
+    // 到达时 hub 按同一个 canonical interaction id 解除 pin。
     let hub = qaqh_runtime::RingingHub::new("perm-body-epoch");
-    let stored_id = hub.put_content(
-        seed,
-        interaction_body::INTERACTION_BODY_MEDIA_TYPE,
-        body.clone(),
-        false,
-    );
+    let canonical_interaction_id =
+        format!("int_{}", qaqh_session::canonical::ulid_from_text(wire_call));
+    let stored_id = hub
+        .put_interaction_content(
+            seed,
+            &canonical_interaction_id,
+            interaction_body::INTERACTION_BODY_MEDIA_TYPE,
+            body.clone(),
+        )
+        .expect("permission body admitted");
     assert_eq!(stored_id, expected_id);
     let entry = hub
         .get_content_any(&expected_id)
         .expect("ref resolves to stored body");
-    assert_eq!(entry.seed, seed);
+    assert_eq!(entry.owners, vec![seed.to_string()]);
     assert_eq!(entry.bytes, body);
     assert!(
-        !entry.pinned,
-        "permission body is TTL-backed, not pinned (no domain event to unpin on)"
+        entry.pinned,
+        "permission body is pinned until ToolFinished unpins it"
     );
 }

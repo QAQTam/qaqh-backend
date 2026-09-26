@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use qaqh_domain::{
     ControlEvent, ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineEntry,
+    ToolEvent,
 };
 use qaqh_ringing::{
     RingingChannelSnapshot, RingingEvent, RingingEventEnvelope, RingingResetRequired,
@@ -556,6 +557,10 @@ impl RingingHub {
     }
 
     fn with_options(epoch: String, root: Option<PathBuf>) -> Self {
+        let content_store = match root.as_ref() {
+            Some(root) => ContentStore::with_root(root.join("content")),
+            None => ContentStore::new(),
+        };
         let timeline_store = root
             .as_ref()
             .and_then(|root| match TimelineStore::new(root) {
@@ -605,7 +610,7 @@ impl RingingHub {
             disk_seeds: Mutex::new(HashMap::new()),
             disk_timeline_seeds: Mutex::new(HashSet::new()),
             lazy_loads: Mutex::new(HashMap::new()),
-            content_store: Mutex::new(ContentStore::new()),
+            content_store: Mutex::new(content_store),
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             live_channels: Mutex::new(HashMap::new()),
@@ -848,7 +853,7 @@ impl RingingHub {
             .content_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .put_pinned(seed, media_type, bytes)?;
+            .put_pinned_for(seed, media_type, bytes, Some(interaction_id))?;
         self.live_interaction_content
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -868,7 +873,10 @@ impl RingingHub {
             .get_any(content_id)
     }
 
-    /// 解除某交互正文的 pin（交互 resolved / expired）。
+    /// 解除某交互正文的 pin（交互 resolved / expired / permission tool finished）。
+    ///
+    /// 先走内存活表（当前进程路径），再按持久化的 pin_key 兜底——daemon 重启后
+    /// 活表为空，但 metadata 里仍记录着 interaction_id，孤儿收尾时也能释放 pin。
     fn release_interaction_content(&self, seed: &str, interaction_id: &str) {
         let content_id = {
             let mut live = self
@@ -888,6 +896,11 @@ impl RingingHub {
                 .unwrap_or_else(|e| e.into_inner())
                 .unpin(&content_id);
         }
+        // 重启后 live 表为空，按 pin_key 兜底解除。幂等：已 unpin 时返回 0。
+        self.content_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unpin_key(seed, interaction_id);
     }
 
     /// 顶层锁的 `MutexGuard`（只在测试断言里用；生产路径一律走
@@ -1062,6 +1075,14 @@ impl RingingHub {
                         drop(live);
                         // #345：交互终结 → 正文解除 pin，回到普通 TTL/淘汰语义。
                         self.release_interaction_content(seed, interaction_id);
+                    }
+                    // permission 的正文用 canonical interaction id 作为 pin_key；
+                    // 权限答复本身没有 Ringing 终态事件，工具完成/取消就是它的
+                    // 终结信号（拒绝路径同样会落到 ToolFinished(Cancelled/Denied)）。
+                    RingingEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
+                        let interaction_id =
+                            crate::agent::tool_runtime::canonical_interaction_id(tool_call_id);
+                        self.release_interaction_content(seed, interaction_id.as_str());
                     }
                     _ => {}
                 }
@@ -3545,6 +3566,44 @@ mod tests {
         // 其他 seed 的常驻状态不受影响。
         hub.publish("s2", round_delta(2));
         assert!(holds_seed(&hub, "s2"));
+    }
+
+    #[test]
+    fn persisted_content_survives_hub_restart_and_unpins_by_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (plain, pinned) = {
+            let hub = RingingHub::with_persistence("epoch-content-1", tmp.path());
+            let plain = hub.put_content("s1", "text/plain", b"persisted".to_vec(), false);
+            let pinned = hub
+                .put_interaction_content(
+                    "s1",
+                    "int_ask_restart",
+                    "application/json",
+                    b"{\"kind\":\"ask\"}".to_vec(),
+                )
+                .expect("pinned content admitted");
+            (plain, pinned)
+        };
+
+        let hub = RingingHub::with_persistence("epoch-content-2", tmp.path());
+        let entry = hub
+            .get_content("s1", &plain)
+            .expect("plain content survives hub restart");
+        assert_eq!(entry.bytes, b"persisted");
+        let entry = hub
+            .get_content_any(&pinned)
+            .expect("pinned content survives hub restart");
+        assert!(entry.pinned);
+        assert_eq!(entry.owners, vec!["s1".to_string()]);
+
+        // 重启后 live_interaction_content 为空，release 仍按持久化的 pin_key
+        // 解除 pin（否则 pending interaction 的正文会永久占额度）。
+        hub.release_interaction_content("s1", "int_ask_restart");
+        assert!(
+            !hub.get_content_any(&pinned)
+                .expect("unpinned content remains readable")
+                .pinned
+        );
     }
 
     /// BUG-2026-09-12-12（issue #31）：分片环必须随会话关闭回收，否则

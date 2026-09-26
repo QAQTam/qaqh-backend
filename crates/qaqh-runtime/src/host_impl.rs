@@ -142,13 +142,6 @@ impl SubagentHost for QaqhService {
         if request.text.trim().is_empty() {
             return Err("agent message text must not be empty".to_string());
         }
-        if request.text.len() > 8 * 1024 {
-            return Err(format!(
-                "agent message is {} bytes; maximum inline size is {}",
-                request.text.len(),
-                8 * 1024
-            ));
-        }
         if request.delivery == qaqh_domain::InterAgentDelivery::Interrupt {
             return Err("interrupt delivery is not implemented yet".to_string());
         }

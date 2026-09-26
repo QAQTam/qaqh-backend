@@ -31,11 +31,13 @@ pub(crate) async fn handle_content_get(
     let Some(entry) = state.hub.get_content_any(store_id) else {
         return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
     };
-    let owns = state
-        .leases
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .owns_seed(&session_id, &entry.seed);
+    let owns = {
+        let mut leases = state.leases.lock().unwrap_or_else(|e| e.into_inner());
+        entry
+            .owners
+            .iter()
+            .any(|owner| leases.owns_seed(&session_id, owner))
+    };
     if !owns {
         return (
             StatusCode::FORBIDDEN,
