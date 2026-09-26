@@ -79,8 +79,14 @@ impl QaqhService {
         // 不带 subagent 注册器：设置页勾选的是子代理可用工具，spawn_subagent
         // 本身不属于子代理工具集。
         qaqh_workspace::runtime::init_tools("daemon", &[], vec![]);
+        let mut registry = AgentRegistry::new(sessions.clone());
+        registry.set_max_depth(config.subagent.max_depth as usize);
+        registry.set_message_quota_limits(
+            config.subagent.message_in_flight_per_pair,
+            config.subagent.message_outbound_per_sender,
+        );
         Self {
-            registry: Arc::new(Mutex::new(AgentRegistry::new(sessions.clone()))),
+            registry: Arc::new(Mutex::new(registry)),
             hub: std::sync::OnceLock::new(),
             v2_hub: std::sync::OnceLock::new(),
             sessions,
@@ -94,6 +100,24 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .attach_ringing(hub);
+    }
+
+    /// Test/ops hook: override the subagent tree depth limit.
+    #[doc(hidden)]
+    pub fn set_max_depth(&self, max_depth: usize) {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_max_depth(max_depth);
+    }
+
+    /// Test/ops hook: override the inter-agent message safety-valve limits.
+    #[doc(hidden)]
+    pub fn set_message_quota_limits(&self, in_flight_per_pair: u64, outbound_per_sender: u64) {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_message_quota_limits(in_flight_per_pair, outbound_per_sender);
     }
 
     /// Attach the canonical V2 projection hub used for runtime residency

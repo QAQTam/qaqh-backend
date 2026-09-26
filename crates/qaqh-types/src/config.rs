@@ -137,6 +137,15 @@ pub struct PersistentSubagentConfig {
     /// Default tool allowlist for subagents. Empty = all tools available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_tools: Option<Vec<String>>,
+    /// Maximum subagent tree depth. `None` = default (1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+    /// Max queued messages from one sender to one recipient. `None` = default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_in_flight_per_pair: Option<u64>,
+    /// Max cumulative outbound message attempts per sender. `None` = default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_outbound_per_sender: Option<u64>,
 }
 
 /// MCP 客户端配置持久层（docs/current/architecture.md；全部 Option）。

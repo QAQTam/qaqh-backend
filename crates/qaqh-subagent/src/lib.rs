@@ -1654,6 +1654,10 @@ mod tests {
         let mut manager = ToolManager::new();
         register(&mut manager);
 
+        assert!(
+            manager.lookup("close_agent").is_none(),
+            "V2 must not expose the legacy close_agent delete tool"
+        );
         let handler = manager
             .lookup("interrupt_agent")
             .expect("interrupt_agent should be registered");
