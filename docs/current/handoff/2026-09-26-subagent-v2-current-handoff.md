@@ -3,7 +3,7 @@
 > 日期：2026-09-26
 > 基线：`cced3c7`（`main`）
 > 工作方式：直接在 `main` 推进，不创建 worktree
-> 状态：Phase 0-2 完成；Phase 3 核心完成；Team projection 后端完成；Phase 4 前端待接
+> 状态：Phase 0-3 完成；Team projection 后端完成；Phase 4 前端待接
 > 范围：`qaqh-domain`、`qaqh-session`、`qaqh-subagent`、`qaqh-runtime`、`qaqh-daemon`
 
 ## 1. 一句话状态
@@ -162,6 +162,21 @@ AND inter_agent == None
 - overlay 不写 canonical log；daemon 重启后自然回到 `unloaded`。
 - 相同 residency 重复设置幂等。
 
+### 2.10 Phase 3 配额与树深
+
+- `subagent.maxDepth` 默认 1，可配置（`qaqh-config` / `qaqh-config-api`）。
+  - root depth = 0；`maxDepth = 1` 允许 root spawn child，拒绝 grandchild。
+  - `AgentRegistry::set_max_depth` 是唯一运行时入口。
+- `subagent.messageInFlightPerPair` 默认 16，0 = unlimited。
+  - in-flight 从目标 canonical mailbox 的 queued `InterAgentCommunication`
+    （尚无匹配 `InputAccepted`）实时计算，不维护第二事实源。
+- `subagent.messageOutboundPerSender` 默认 1024，0 = unlimited。
+  - 按 root tree + author AgentPath 计 runtime attempt；daemon 重启后重置。
+- `@all` / 其他 `@` broadcast target 在 host 入口稳定拒绝；
+  `InterAgentCommunication.other_recipients` 非空在 canonical producer 入口拒绝。
+- `close_agent` 已不在 V2 工具表；`interrupt_agent` 保留逻辑身份，
+  residency eviction 另行发生。
+
 ## 3. 当前验证门禁
 
 最近一次全量验证：
@@ -182,6 +197,10 @@ cargo test --workspace --offline -- --test-threads=1
 - idle LRU unload + reload；
 - `list_agents` status/residency；
 - parent-owned direct input reject；
+- max depth 1 拒绝 grandchild；depth 2 显式 opt-in 后 cascade close 通过；
+- message in-flight / outbound 超限稳定拒绝；
+- broadcast `@all` 与 `other_recipients` 拒绝；
+- `close_agent` 不在 V2 工具表，`interrupt_agent` 保留身份；
 - Team reducer、ProjectionSet、runtime residency overlay；
 - daemon restart 后 residency 回到 unloaded。
 
@@ -201,14 +220,17 @@ cargo test --workspace --offline -- --test-threads=1
 需要产品裁决「重启即 dismiss」或单独实现 turn resume。详见
 [`2026-09-26-durable-content-store-handoff.md`](./2026-09-26-durable-content-store-handoff.md)。
 
-### P0：Phase 3 收尾
+### P0：Phase 3 收尾（已完成）
 
-- max depth 默认 1，可配置；
-- sender-target in-flight 上限；
-- sender outbound attempt 上限；
+- max depth 默认 1，可配置；默认拒绝 grandchild；
+- sender-target in-flight 上限（从 canonical mailbox 实时计算）；
+- sender outbound attempt 上限（runtime safety-valve counter）；
 - broadcast / `@all` 默认拒绝；
-- V2 停用 legacy `close_agent` 删除语义；
-- 保留兼容层，但新路径只使用 `interrupt_agent + residency eviction`。
+- V2 工具表不再提供 legacy `close_agent`；`interrupt_agent` + residency eviction
+  是唯一终止语义。
+
+剩余边界：outbound attempt 计数不跨 daemon 重启持久化（安全阀语义），in-flight
+以目标 canonical mailbox 为准，不在 send 入口维护第二事实源。
 
 ### P1：Phase 4 前端 Team projection
 
