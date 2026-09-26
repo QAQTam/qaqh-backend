@@ -12,9 +12,9 @@ use qaqh_client::{
     ClientV2Payload, ClientV2Reset, ClientV2ResetReason, ClientV2SessionState,
     ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2TaskBoardSnapshot,
     ClientV2TeamAgentResidency, ClientV2TeamAgentSnapshot, ClientV2TeamAgentStatus,
-    ClientV2TeamBoardSnapshot, ClientV2TeamDelta, ClientV2TeamInboxSummary, ClientV2TeamResponse,
-    ClientV2TeamSnapshot, ClientV2TeamTaskSnapshot, ClientV2ToolCallId, ClientV2ToolState,
-    RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+    ClientV2TeamBoardSnapshot, ClientV2TeamDelivery, ClientV2TeamDelta, ClientV2TeamInboxSummary,
+    ClientV2TeamResponse, ClientV2TeamSnapshot, ClientV2TeamTaskSnapshot, ClientV2ToolCallId,
+    ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
 
 #[test]
@@ -211,6 +211,7 @@ fn team_projection_is_consumable_from_the_client_root() {
                 let _: &str = message.author.as_str();
                 let _: &str = message.recipient.as_str();
                 let _: &Option<String> = &message.task_id;
+                let _: ClientV2TeamDelivery = message.delivery;
                 "queued"
             }
             ClientV2TeamDelta::AgentMessageDelivered { message_id, .. } => {
