@@ -722,6 +722,11 @@ fn task_board_host_round_trips_task_lifecycle() {
         .expect("create task");
     assert_eq!(task.state, "open");
     assert_eq!(task.claim_epoch, 0);
+    let snapshot = service
+        .task_board_snapshot(&parent)
+        .expect("daemon task board snapshot");
+    assert_eq!(snapshot.tasks.len(), 1);
+    assert_eq!(snapshot.tasks[0].task_id.as_str(), task.task_id);
 
     let claimed = task_host
         .task_claim(TaskClaimRequest {

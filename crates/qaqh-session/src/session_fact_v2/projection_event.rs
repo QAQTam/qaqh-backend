@@ -391,6 +391,33 @@ pub struct TeamInboxSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamTaskArtifact {
+    pub content_ref: ContentRef,
+    pub media_type: String,
+    pub added_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamTaskSnapshot {
+    pub task_id: String,
+    pub title: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<AgentPath>,
+    pub claim_epoch: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<TeamTaskArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_ref: Option<ContentRef>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum TeamDelta {
     AgentJoined {
@@ -423,6 +450,10 @@ pub enum TeamDelta {
         revision: u64,
         agent_id: SessionId,
         status: TeamAgentStatus,
+    },
+    TaskChanged {
+        revision: u64,
+        task: Box<TeamTaskSnapshot>,
     },
 }
 
