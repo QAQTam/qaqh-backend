@@ -138,3 +138,21 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
     `generate_seed()` 兼容路径。
 - 权威迁移设计：
   [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
+
+## 7. Alpha3 发布检查点
+
+判定条件：Subagent V2 Phase 0-7 的 backend + TUI/WinUI 消费全部完成。
+
+- [x] Phase 0-3 backend
+- [x] Team projection backend
+- [x] Phase 5 task board backend
+- [x] Phase 6 message board backend
+- [x] Phase 7 steer / interject backend
+- [ ] Phase 4 roster / inbox / child transcript 前端消费
+- [ ] TEAM-01e task board 前端消费
+- [ ] BOARD-01d message board 前端消费
+- [ ] SUBV2-11d steer / interject / interrupt 前端区分
+- [ ] `2.0.0-alpha2` -> `2.0.0-alpha3`、release notes、smoke
+
+身份迁移是 Beta 硬门禁，不属于 alpha3 的 Subagent V2 检查点；不得因此把
+legacy seed 带进新 roster / mailbox / Team projection。
