@@ -1928,6 +1928,14 @@ impl SessionManager {
         self.sessions_dir.join(seed)
     }
 
+    /// Data root that contains `sessions/`, `team/`, `quota/` and other
+    /// canonical aggregates.
+    pub fn data_dir(&self) -> &std::path::Path {
+        self.sessions_dir
+            .parent()
+            .unwrap_or(self.sessions_dir.as_path())
+    }
+
     /// Resolve a canonical `SessionId` to its seed-keyed session directory.
     ///
     /// BETA-01 will eventually make the directory name equal the canonical id.

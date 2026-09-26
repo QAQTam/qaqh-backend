@@ -14,12 +14,24 @@ use std::time::{Duration, Instant};
 
 use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
-use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE};
+use qaqh_session::canonical::{
+    CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE, generate_ulid,
+};
 use qaqh_session::projection::{MailboxProjection, Projection};
+use qaqh_session::session_fact_v2::{
+    AgentPath, ContentHash, ContentRef as CanonicalContentRef, EventId, LogId, SessionId,
+};
+use qaqh_session::team::{
+    TaskAcceptanceSet, TaskArtifactAttached, TaskCancelled, TaskClaimed, TaskClosed, TaskCompleted,
+    TaskCreated, TaskDependencyAdded, TaskId, TaskReleased, TaskState, TeamActor, TeamCreated,
+    TeamFact, TeamId, TeamPayload, TeamStore, new_team_schema,
+};
 use qaqh_subagent::{
     ArmSubagentCollectorRequest, ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent,
     ListedAgent, SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
-    StartSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest,
+    StartSubagentRequest, SubagentHost, TaskBoardArtifact, TaskBoardHost, TaskBoardTask,
+    TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
+    TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
 };
 
 use super::QaqhService;
@@ -561,6 +573,306 @@ impl SubagentHost for QaqhService {
     }
 }
 
+const MAX_TASKS_PER_ROOT: usize = 1024;
+
+impl TaskBoardHost for QaqhService {
+    fn task_create(&self, request: TaskCreateRequest<'_>) -> Result<TaskBoardTask, String> {
+        if request.title.trim().is_empty() {
+            return Err("task title must not be empty".to_string());
+        }
+        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
+        let description_ref = request
+            .description_ref
+            .map(canonical_content_ref)
+            .transpose()?;
+        let task_id = TaskId::generate();
+        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+        if store.snapshot().tasks.len() >= MAX_TASKS_PER_ROOT {
+            return Err(format!(
+                "task board limit {MAX_TASKS_PER_ROOT} reached for this root tree"
+            ));
+        }
+        let root = store.team_id().as_str().to_string();
+        store
+            .append(team_fact(
+                &root,
+                actor.clone(),
+                TeamPayload::TaskCreated(TaskCreated {
+                    task_id: task_id.clone(),
+                    title: request.title.to_string(),
+                    description_ref,
+                    created_by: actor,
+                    created_at_ms: unix_ms(),
+                }),
+            ))
+            .map_err(|error| format!("task_create failed: {error}"))?;
+        find_task(&store, task_id.as_str())
+    }
+
+    fn task_claim(&self, request: TaskClaimRequest<'_>) -> Result<TaskBoardTask, String> {
+        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
+        let task_id = TaskId::new(request.task_id);
+        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let current = find_task(&store, task_id.as_str())?;
+        let root = store.team_id().as_str().to_string();
+        let payload = match request.action {
+            TaskClaimAction::Claim => TeamPayload::TaskClaimed(TaskClaimed {
+                task_id: task_id.clone(),
+                owner: actor.clone(),
+                claim_epoch: current.claim_epoch.saturating_add(1),
+                claimed_at_ms: unix_ms(),
+            }),
+            TaskClaimAction::Release => TeamPayload::TaskReleased(TaskReleased {
+                task_id: task_id.clone(),
+                owner: actor.clone(),
+                claim_epoch: current.claim_epoch,
+                reason: request.reason.unwrap_or("released").to_string(),
+                released_at_ms: unix_ms(),
+            }),
+        };
+        store
+            .append(team_fact(&root, actor, payload))
+            .map_err(|error| format!("task_claim failed: {error}"))?;
+        find_task(&store, task_id.as_str())
+    }
+
+    fn task_update(&self, request: TaskUpdateRequest<'_>) -> Result<TaskBoardTask, String> {
+        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
+        let task_id = TaskId::new(request.task_id);
+        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let _ = find_task(&store, task_id.as_str())?;
+        let root = store.team_id().as_str().to_string();
+        let payload = match request.action {
+            TaskUpdateAction::AddDependency => {
+                let depends_on = request
+                    .depends_on
+                    .ok_or_else(|| "task_update add_dependency requires depends_on".to_string())?;
+                TeamPayload::TaskDependencyAdded(TaskDependencyAdded {
+                    task_id: task_id.clone(),
+                    depends_on: TaskId::new(depends_on),
+                    added_at_ms: unix_ms(),
+                })
+            }
+            TaskUpdateAction::AttachArtifact => {
+                let artifact_ref = request.artifact_ref.ok_or_else(|| {
+                    "task_update attach_artifact requires artifact_ref".to_string()
+                })?;
+                let media_type = request
+                    .media_type
+                    .ok_or_else(|| "task_update attach_artifact requires media_type".to_string())?;
+                TeamPayload::TaskArtifactAttached(TaskArtifactAttached {
+                    task_id: task_id.clone(),
+                    artifact_ref: canonical_content_ref(artifact_ref)?,
+                    media_type: media_type.to_string(),
+                    added_at_ms: unix_ms(),
+                })
+            }
+            TaskUpdateAction::SetAcceptance => {
+                let acceptance = request
+                    .acceptance
+                    .ok_or_else(|| "task_update set_acceptance requires acceptance".to_string())?;
+                TeamPayload::TaskAcceptanceSet(TaskAcceptanceSet {
+                    task_id: task_id.clone(),
+                    acceptance: acceptance.to_vec(),
+                    updated_at_ms: unix_ms(),
+                })
+            }
+        };
+        store
+            .append(team_fact(&root, actor, payload))
+            .map_err(|error| format!("task_update failed: {error}"))?;
+        find_task(&store, task_id.as_str())
+    }
+
+    fn task_close(&self, request: TaskCloseRequest<'_>) -> Result<TaskBoardTask, String> {
+        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
+        let task_id = TaskId::new(request.task_id);
+        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let current = find_task(&store, task_id.as_str())?;
+        let root = store.team_id().as_str().to_string();
+        let payload = match request.action {
+            TaskCloseAction::Complete => TeamPayload::TaskCompleted(TaskCompleted {
+                task_id: task_id.clone(),
+                owner: actor.clone(),
+                claim_epoch: current.claim_epoch,
+                result_ref: request.result_ref.map(canonical_content_ref).transpose()?,
+                completed_at_ms: unix_ms(),
+            }),
+            TaskCloseAction::Close => TeamPayload::TaskClosed(TaskClosed {
+                task_id: task_id.clone(),
+                closed_by: actor.clone(),
+                closed_at_ms: unix_ms(),
+            }),
+            TaskCloseAction::Cancel => TeamPayload::TaskCancelled(TaskCancelled {
+                task_id: task_id.clone(),
+                cancelled_by: actor.clone(),
+                reason: request.reason.unwrap_or("cancelled").to_string(),
+                cancelled_at_ms: unix_ms(),
+            }),
+        };
+        store
+            .append(team_fact(&root, actor, payload))
+            .map_err(|error| format!("task_close failed: {error}"))?;
+        find_task(&store, task_id.as_str())
+    }
+
+    fn task_list(&self, request: TaskListRequest<'_>) -> Result<Vec<TaskBoardTask>, String> {
+        let (store, _actor) = self.task_store_for_caller(request.caller_session_id)?;
+        let store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let state_filter = request.state.map(parse_task_state).transpose()?;
+        Ok(store
+            .snapshot()
+            .tasks
+            .iter()
+            .filter(|task| state_filter.is_none_or(|state| task.state == state))
+            .map(task_to_dto)
+            .collect())
+    }
+}
+
+impl QaqhService {
+    fn task_store_for_caller(
+        &self,
+        caller_session_id: &str,
+    ) -> Result<(Arc<std::sync::Mutex<TeamStore>>, TeamActor), String> {
+        let (root_session_id, caller_actor) = {
+            let registry = self.registry()?;
+            let caller = registry
+                .agent_metadata(caller_session_id)
+                .ok_or_else(|| format!("caller agent metadata missing for {caller_session_id}"))?;
+            let actor = TeamActor::new(caller.agent_path.clone(), Some(caller.agent_id.clone()));
+            (caller.root_session_id.as_str().to_string(), actor)
+        };
+        let mut stores = self
+            .task_stores
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = stores.get(&root_session_id) {
+            return Ok((Arc::clone(store), caller_actor));
+        }
+        let dir = self.sessions.data_dir().join("team").join(&root_session_id);
+        let mut store = TeamStore::open_or_create(
+            dir,
+            TeamId::new(SessionId::new(root_session_id.clone())),
+            unix_ms(),
+        )
+        .map_err(|error| format!("open task board for {root_session_id}: {error}"))?;
+        if store.snapshot().team_id.is_none() {
+            let root_actor = TeamActor::new(
+                AgentPath::root(),
+                Some(SessionId::new(root_session_id.clone())),
+            );
+            store
+                .append(team_fact(
+                    &root_session_id,
+                    root_actor,
+                    TeamPayload::TeamCreated(TeamCreated {
+                        root_session_id: SessionId::new(root_session_id.clone()),
+                        created_at_ms: unix_ms(),
+                    }),
+                ))
+                .map_err(|error| format!("initialize task board for {root_session_id}: {error}"))?;
+        }
+        let store = Arc::new(std::sync::Mutex::new(store));
+        stores.insert(root_session_id, Arc::clone(&store));
+        Ok((store, caller_actor))
+    }
+}
+
+fn team_fact(root_session_id: &str, actor: TeamActor, payload: TeamPayload) -> TeamFact {
+    TeamFact {
+        schema: new_team_schema(),
+        team_id: TeamId::new(SessionId::new(root_session_id)),
+        // The store owns log identity and overwrites this placeholder.
+        log_id: LogId::new(""),
+        fact_seq: 0,
+        event_id: EventId::new(generate_ulid()),
+        ts_ms: unix_ms(),
+        causation_id: None,
+        actor,
+        payload,
+    }
+}
+
+fn canonical_content_ref(raw: &str) -> Result<CanonicalContentRef, String> {
+    let raw = raw.trim();
+    let hex = raw.strip_prefix("sha256:").unwrap_or(raw);
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "content ref {raw:?} must be a 64-hex sha256 content id"
+        ));
+    }
+    Ok(CanonicalContentRef::new(ContentHash::new(format!(
+        "sha256:{}",
+        hex.to_ascii_lowercase()
+    ))))
+}
+
+fn find_task(store: &TeamStore, task_id: &str) -> Result<TaskBoardTask, String> {
+    store
+        .snapshot()
+        .tasks
+        .iter()
+        .find(|task| task.task_id.as_str() == task_id)
+        .map(task_to_dto)
+        .ok_or_else(|| format!("task not found: {task_id}"))
+}
+
+fn task_to_dto(task: &qaqh_session::team::TaskView) -> TaskBoardTask {
+    TaskBoardTask {
+        task_id: task.task_id.as_str().to_string(),
+        title: task.title.clone(),
+        state: task_state_name(task.state).to_string(),
+        owner: task
+            .owner
+            .as_ref()
+            .map(|owner| owner.agent_path.as_str().to_string()),
+        claim_epoch: task.claim_epoch,
+        depends_on: task
+            .depends_on
+            .iter()
+            .map(|task_id| task_id.as_str().to_string())
+            .collect(),
+        artifacts: task
+            .artifacts
+            .iter()
+            .map(|artifact| TaskBoardArtifact {
+                content_id: artifact.artifact_ref.hash().as_str().to_string(),
+                media_type: artifact.media_type.clone(),
+                added_at_ms: artifact.added_at_ms,
+            })
+            .collect(),
+        acceptance: task.acceptance.clone(),
+        result_ref: task
+            .result_ref
+            .as_ref()
+            .map(|content_ref| content_ref.hash().as_str().to_string()),
+        created_at_ms: task.created_at_ms,
+        updated_at_ms: task.updated_at_ms,
+    }
+}
+
+fn task_state_name(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Open => "open",
+        TaskState::Claimed => "claimed",
+        TaskState::Completed => "completed",
+        TaskState::Closed => "closed",
+        TaskState::Cancelled => "cancelled",
+    }
+}
+
+fn parse_task_state(state: &str) -> Result<TaskState, String> {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "open" => Ok(TaskState::Open),
+        "claimed" => Ok(TaskState::Claimed),
+        "completed" => Ok(TaskState::Completed),
+        "closed" => Ok(TaskState::Closed),
+        "cancelled" | "canceled" => Ok(TaskState::Cancelled),
+        other => Err(format!("unknown task state {other:?}")),
+    }
+}
+
 /// 把单条 hub 事件信封包装为规范 EventBatch（与 client 的 `envelope_to_batch` 同构）。
 fn envelope_to_batch(
     channel: RingingChannel,
@@ -585,4 +897,8 @@ fn nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn unix_ms() -> i64 {
+    (nanos() / 1_000_000).min(i64::MAX as u128) as i64
 }

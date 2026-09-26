@@ -20,7 +20,9 @@ use qaqh_session::session_fact_v2::{
 };
 use qaqh_subagent::{
     InterruptAgentRequest, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
-    SpawnSubagentRequest, SubagentHost, WaitAgentOutcome, WaitAgentRequest,
+    SpawnSubagentRequest, SubagentHost, TaskBoardHost, TaskClaimAction, TaskClaimRequest,
+    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
+    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -673,5 +675,110 @@ fn broadcast_targets_and_outbound_quota_are_rejected() {
     );
 
     host.close(&child).expect("close child");
+    host.close(&parent).expect("close parent");
+}
+
+#[test]
+fn task_board_host_round_trips_task_lifecycle() {
+    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let root = std::env::temp_dir().join(format!(
+        "qaqh-host-task-board-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).expect("test setup must not fail");
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    unsafe {
+        std::env::set_var("QAQH_DATA_DIR", &data);
+    }
+    qaqh_workspace::set_workspace(&ws.to_string_lossy());
+
+    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+        data.join("sessions"),
+        data.join(".active_session"),
+    ));
+    let service = QaqhService::init(sessions.clone());
+    let host: &dyn SubagentHost = &service;
+    let parent_identity = sessions
+        .allocate_session(None)
+        .expect("allocate canonical parent session");
+    let parent = parent_identity.session_id.as_str().to_string();
+    // Register root metadata in the agent catalog.
+    host.list_agents(&parent, "/root")
+        .expect("root metadata registration");
+
+    let task_host: &dyn TaskBoardHost = &service;
+    let task = task_host
+        .task_create(TaskCreateRequest {
+            caller_session_id: &parent,
+            title: "wire the task board",
+            description_ref: None,
+        })
+        .expect("create task");
+    assert_eq!(task.state, "open");
+    assert_eq!(task.claim_epoch, 0);
+
+    let claimed = task_host
+        .task_claim(TaskClaimRequest {
+            caller_session_id: &parent,
+            task_id: &task.task_id,
+            action: TaskClaimAction::Claim,
+            reason: None,
+        })
+        .expect("claim task");
+    assert_eq!(claimed.state, "claimed");
+    assert_eq!(claimed.claim_epoch, 1);
+    assert_eq!(claimed.owner.as_deref(), Some("/root"));
+
+    let acceptance = vec!["tests pass".to_string()];
+    let updated = task_host
+        .task_update(TaskUpdateRequest {
+            caller_session_id: &parent,
+            task_id: &task.task_id,
+            action: TaskUpdateAction::SetAcceptance,
+            depends_on: None,
+            artifact_ref: None,
+            media_type: None,
+            acceptance: Some(&acceptance),
+        })
+        .expect("set acceptance");
+    assert_eq!(updated.acceptance, acceptance);
+
+    let completed = task_host
+        .task_close(TaskCloseRequest {
+            caller_session_id: &parent,
+            task_id: &task.task_id,
+            action: TaskCloseAction::Complete,
+            result_ref: None,
+            reason: None,
+        })
+        .expect("complete task");
+    assert_eq!(completed.state, "completed");
+
+    let listed = task_host
+        .task_list(TaskListRequest {
+            caller_session_id: &parent,
+            state: Some("completed"),
+        })
+        .expect("list completed tasks");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].task_id, task.task_id);
+
+    let closed = task_host
+        .task_close(TaskCloseRequest {
+            caller_session_id: &parent,
+            task_id: &task.task_id,
+            action: TaskCloseAction::Close,
+            result_ref: None,
+            reason: None,
+        })
+        .expect("close task");
+    assert_eq!(closed.state, "closed");
+
     host.close(&parent).expect("close parent");
 }
