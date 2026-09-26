@@ -134,8 +134,10 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
     `SessionId`，再以同一值作为 `seed`、目录名和 canonical id。
   - 旧目录 resolver 与启动时原子迁移已实现：迁移 journal 可恢复，
     `legacy_seed -> session_id` alias 保留只读兼容窗口。
-  - 仍待：wire/runtime 字段改名、TUI/WinUI 假设清理，以及删除剩余
-    `generate_seed()` 兼容路径。
+  - runtime 生产路径已不再调用 `generate_seed()` / `generate_unique_seed()`；
+    无 manager 的 ephemeral 路径也改用 canonical UUIDv7 SessionId。
+  - 仍待：wire/runtime 字段改名、TUI/WinUI 假设清理，以及删除
+    `qaqh-session` 内剩余的 legacy seed allocator / resolver。
 - 权威迁移设计：
   [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
 
