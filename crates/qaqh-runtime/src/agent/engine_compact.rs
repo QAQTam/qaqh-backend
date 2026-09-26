@@ -335,7 +335,7 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
     // 统一数据源：上下文统计并入 meta.json（原 context_stats.json 退役）。
     // 覆盖式快照写，无 dispatch 时序约束，走注入句柄直写（PR-1-5）。
     if let Some(sm) = ctx.agent.session_manager.as_ref() {
-        sm.set_context_stats(&ctx.agent.session.seed, &stats);
+        sm.set_context_stats(&ctx.agent.session.session_id, &stats);
     }
 
     // Ringing 双发：CompactFinished（成功/零压缩如实区分终态）
@@ -381,7 +381,7 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
 /// 两者都非致命：读失败（无会话/无 todo.json）时静默跳过，不阻断压缩。
 /// 无内容时返回空串，调用方模板中的占位会退化为一个空行。
 fn build_navigation_anchors(ctx: &RingContext) -> String {
-    build_navigation_anchors_for(&ctx.agent.session.seed)
+    build_navigation_anchors_for(&ctx.agent.session.session_id)
 }
 
 /// 锚点构造主体（与 `RingContext` 解耦，便于单测直接调用）。

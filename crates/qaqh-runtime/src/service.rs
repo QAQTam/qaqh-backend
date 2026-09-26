@@ -368,8 +368,9 @@ impl QaqhService {
                 // `SessionMeta` + 运行期字段。此前这里也是手拼 `value["running"]`，
                 // 且不带 `workspace_id`——同一个形状两处各拼一次，正是漂移的温床。
                 let entry = qaqh_types::SessionListEntry {
-                    running: self.registry()?.is_running(&meta.seed),
-                    workspace_id: qaqh_session::WorkspaceStore::global().workspace_of(&meta.seed),
+                    running: self.registry()?.is_running(&meta.session_id),
+                    workspace_id: qaqh_session::WorkspaceStore::global()
+                        .workspace_of(&meta.session_id),
                     meta,
                 };
                 Ok(serde_json::to_value(entry).map_err(err)?)
@@ -751,8 +752,8 @@ impl QaqhService {
             .list()
             .into_iter()
             .map(|meta| {
-                let running = registry.is_running(&meta.seed);
-                let workspace_id = workspaces.workspace_of(&meta.seed);
+                let running = registry.is_running(&meta.session_id);
+                let workspace_id = workspaces.workspace_of(&meta.session_id);
                 qaqh_types::SessionListEntry {
                     meta,
                     running,

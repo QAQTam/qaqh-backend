@@ -296,7 +296,7 @@ fn run_batch<F: FnOnce(&Path)>(
     qaqh_workspace::runtime::init_tools(label, &[register_probe], vec![]);
     qaqh_workspace::clear_cancel();
     let mut agent = AgentState::init("tool-ordering-test", qaqh_config::Config::default());
-    agent.session.seed = seed.clone();
+    agent.session.session_id = seed.clone();
     agent.ephemeral = true;
     agent.config.permission_level = 4;
     let tool_uses: Vec<(&str, &str)> = calls
