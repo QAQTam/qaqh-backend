@@ -41,16 +41,21 @@ use qaqh_workspace::{ToolManager, ToolRisk};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+mod board_tools;
 mod host;
 mod task_tools;
 pub use host::{
-    ArmSubagentCollectorRequest, ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent,
-    ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
-    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
-    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
-    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
-    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, host, install_host, install_task_host,
-    task_host,
+    ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
+    BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
+    BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
+    BoardSubscriptionTarget, BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
+    ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent, ListedAgent,
+    ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage,
+    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost, TaskBoardArtifact,
+    TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest, TaskCloseAction,
+    TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction, TaskUpdateRequest,
+    WaitAgentOutcome, WaitAgentRequest, board_host, host, install_board_host, install_host,
+    install_task_host, task_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -752,6 +757,11 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(task_tools::TaskUpdateTool);
     mgr.register_typed(task_tools::TaskCloseTool);
     mgr.register_typed(task_tools::TaskListTool);
+    mgr.register_typed(board_tools::BoardChannelCreateTool);
+    mgr.register_typed(board_tools::BoardThreadCreateTool);
+    mgr.register_typed(board_tools::BoardPostTool);
+    mgr.register_typed(board_tools::BoardSubscribeTool);
+    mgr.register_typed(board_tools::BoardListTool);
 }
 
 fn unix_ms() -> i64 {
@@ -1693,6 +1703,11 @@ mod tests {
             "task_update",
             "task_close",
             "task_list",
+            "board_channel_create",
+            "board_thread_create",
+            "board_post",
+            "board_subscribe",
+            "board_list",
         ] {
             let handler = manager
                 .lookup(name)

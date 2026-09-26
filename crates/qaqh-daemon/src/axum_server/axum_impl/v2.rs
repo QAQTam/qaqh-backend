@@ -273,11 +273,11 @@ pub(crate) async fn handle_bootstrap_v2(
     json_response(StatusCode::OK, &response)
 }
 
-/// `GET /ringing/v2/sessions/{seed}/team` — team roster + task board snapshot.
+/// `GET /ringing/v2/sessions/{seed}/team` — team roster + task/message board snapshots.
 ///
-/// Team agents are rebuilt from the session canonical log; tasks come from the
-/// root tree's separate team aggregate. Task deltas are delivered on the
-/// per-seed single stream as `ProjectionPayload::TeamDelta`.
+/// Team agents are rebuilt from the session canonical log; tasks and board
+/// entries come from the root tree's separate team aggregates. Deltas are
+/// delivered on the per-seed single stream as `ProjectionPayload::TeamDelta`.
 pub(crate) async fn handle_team_snapshot_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -303,6 +303,12 @@ pub(crate) async fn handle_team_snapshot_v2(
             return api_error_response(StatusCode::BAD_REQUEST, "team_unavailable", &error);
         }
     };
+    let board = match state.service.board_snapshot(&seed) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return api_error_response(StatusCode::BAD_REQUEST, "board_unavailable", &error);
+        }
+    };
     json_response(
         StatusCode::OK,
         &serde_json::json!({
@@ -310,6 +316,7 @@ pub(crate) async fn handle_team_snapshot_v2(
             "seed": seed,
             "team": team,
             "tasks": tasks,
+            "board": board,
         }),
     )
 }

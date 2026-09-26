@@ -19,10 +19,12 @@ use qaqh_session::session_fact_v2::{
     SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId,
 };
 use qaqh_subagent::{
-    InterruptAgentRequest, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
-    SpawnSubagentRequest, SubagentHost, TaskBoardHost, TaskClaimAction, TaskClaimRequest,
-    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
-    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
+    BoardChannelCreateRequest, BoardHost, BoardListRequest, BoardPostRequest,
+    BoardSubscriptionAction, BoardSubscriptionRequest, BoardSubscriptionTargetKind,
+    BoardThreadCreateRequest, InterruptAgentRequest, ListedAgentResidency, ListedAgentStatus,
+    SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost, TaskBoardHost, TaskClaimAction,
+    TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest,
+    TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -785,5 +787,127 @@ fn task_board_host_round_trips_task_lifecycle() {
         .expect("close task");
     assert_eq!(closed.state, "closed");
 
+    host.close(&parent).expect("close parent");
+}
+
+#[test]
+fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
+    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let root = std::env::temp_dir().join(format!(
+        "qaqh-host-board-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).expect("test setup must not fail");
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    unsafe {
+        std::env::set_var("QAQH_DATA_DIR", &data);
+    }
+    qaqh_workspace::set_workspace(&ws.to_string_lossy());
+
+    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+        data.join("sessions"),
+        data.join(".active_session"),
+    ));
+    let service = QaqhService::init(sessions.clone());
+    let host: &dyn SubagentHost = &service;
+    let board_host: &dyn BoardHost = &service;
+    let parent_identity = sessions
+        .allocate_session(None)
+        .expect("allocate canonical parent session");
+    let parent = parent_identity.session_id.as_str().to_string();
+    host.list_agents(&parent, "/root")
+        .expect("root metadata registration");
+
+    let channel = board_host
+        .board_channel_create(BoardChannelCreateRequest {
+            caller_session_id: &parent,
+            name: "coordination",
+            topic: Some("host test"),
+        })
+        .expect("create board channel");
+    let thread = board_host
+        .board_thread_create(BoardThreadCreateRequest {
+            caller_session_id: &parent,
+            channel_id: &channel.channel_id,
+            title: "host test thread",
+            task_id: None,
+        })
+        .expect("create board thread");
+
+    let spawned = host
+        .spawn_subagent(SpawnSubagentRequest {
+            parent_session_id: &parent,
+            requested_name: "board_listener",
+            tools: &[],
+            model: None,
+            base_url: None,
+            max_tokens: None,
+            workspace: None,
+        })
+        .expect("spawn idle board subscriber");
+    let child = spawned.child_session_id.clone();
+    let child_path = spawned.child_agent_path.clone();
+
+    let subscription = board_host
+        .board_subscribe(BoardSubscriptionRequest {
+            caller_session_id: &child,
+            target_kind: BoardSubscriptionTargetKind::Thread,
+            target_id: &thread.thread_id,
+            action: BoardSubscriptionAction::Subscribe,
+        })
+        .expect("subscribe idle child");
+    assert!(subscription.subscribed);
+
+    let outcome = board_host
+        .board_post(BoardPostRequest {
+            caller_session_id: &parent,
+            thread_id: &thread.thread_id,
+            body: "persist this post",
+            task_id: None,
+        })
+        .expect("post must persist even when subscriber is idle");
+    assert!(outcome.notified.is_empty());
+    assert_eq!(outcome.skipped.len(), 1);
+    assert_eq!(outcome.skipped[0].agent, child_path);
+    assert_eq!(outcome.skipped[0].reason, "agent is not running");
+
+    let listed = board_host
+        .board_list(BoardListRequest {
+            caller_session_id: &parent,
+            channel_id: Some(&channel.channel_id),
+            thread_id: Some(&thread.thread_id),
+            include_posts: true,
+            post_limit: Some(10),
+        })
+        .expect("list board");
+    assert_eq!(listed.channels.len(), 1);
+    assert_eq!(listed.threads.len(), 1);
+    assert_eq!(listed.posts.len(), 1);
+    assert_eq!(listed.posts[0].body, "persist this post");
+
+    let child_dir = sessions.session_path_dir(&child);
+    let child_identity = CanonicalSessionIdentity::open(&child_dir).expect("child identity");
+    let facts = CommittedFactReader::open(
+        &child_dir,
+        child_identity.session_id.clone(),
+        child_identity.log_id.clone(),
+    )
+    .expect("child reader")
+    .read_all()
+    .expect("child facts");
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| matches!(&fact.payload, FactPayload::InterAgentCommunication(_))),
+        "idle subscriber must not receive a notification or start a turn"
+    );
+
+    host.close(&child).expect("close child");
     host.close(&parent).expect("close parent");
 }

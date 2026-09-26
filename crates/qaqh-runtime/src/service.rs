@@ -28,6 +28,9 @@ pub struct QaqhService {
     /// Per-root task board stores, opened lazily.
     pub(crate) task_stores:
         Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<qaqh_session::team::TeamStore>>>>>,
+    /// Per-root message board stores, opened lazily.
+    pub(crate) board_stores:
+        Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<qaqh_session::team::BoardStore>>>>>,
 }
 
 impl QaqhService {
@@ -94,6 +97,7 @@ impl QaqhService {
             v2_hub: std::sync::OnceLock::new(),
             sessions,
             task_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            board_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 

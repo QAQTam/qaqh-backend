@@ -199,6 +199,87 @@ pub struct TaskBoardArtifact {
     pub added_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BoardChannel {
+    pub channel_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    pub created_by: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BoardThread {
+    pub thread_id: String,
+    pub channel_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub created_by: String,
+    pub created_at_ms: i64,
+    pub post_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BoardPost {
+    pub post_id: String,
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub author: String,
+    pub body: String,
+    pub created_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BoardSubscriptionTarget {
+    Channel { channel_id: String },
+    Thread { thread_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BoardSubscription {
+    pub target: BoardSubscriptionTarget,
+    pub subscriber: String,
+    pub subscribed: bool,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BoardSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<String>,
+    pub revision: u64,
+    pub last_fact_seq: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<BoardChannel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub threads: Vec<BoardThread>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posts: Vec<BoardPost>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<BoardSubscription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BoardNotificationSkip {
+    pub agent: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BoardPostOutcome {
+    pub post: BoardPost,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notified: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<BoardNotificationSkip>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskClaimAction {
@@ -263,6 +344,60 @@ pub struct TaskListRequest<'a> {
     pub state: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardSubscriptionAction {
+    Subscribe,
+    Unsubscribe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardSubscriptionTargetKind {
+    Channel,
+    Thread,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoardChannelCreateRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub name: &'a str,
+    pub topic: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoardThreadCreateRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub channel_id: &'a str,
+    pub title: &'a str,
+    pub task_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoardPostRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub thread_id: &'a str,
+    pub body: &'a str,
+    pub task_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoardSubscriptionRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub target_kind: BoardSubscriptionTargetKind,
+    pub target_id: &'a str,
+    pub action: BoardSubscriptionAction,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoardListRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub channel_id: Option<&'a str>,
+    pub thread_id: Option<&'a str>,
+    pub include_posts: bool,
+    pub post_limit: Option<usize>,
+}
+
 /// In-process task board host. The team aggregate is keyed by the caller's
 /// root session id; implementations must reject cross-tree access.
 pub trait TaskBoardHost: Send + Sync {
@@ -283,6 +418,37 @@ pub fn install_task_host(host: Arc<dyn TaskBoardHost>) {
 /// Return the installed task board host, if any.
 pub fn task_host() -> Option<Arc<dyn TaskBoardHost>> {
     TASK_HOST.get().cloned()
+}
+
+/// In-process message board host. The board aggregate is keyed by the caller's
+/// root session id; implementations must reject cross-tree access.
+pub trait BoardHost: Send + Sync {
+    fn board_channel_create(
+        &self,
+        request: BoardChannelCreateRequest<'_>,
+    ) -> Result<BoardChannel, String>;
+    fn board_thread_create(
+        &self,
+        request: BoardThreadCreateRequest<'_>,
+    ) -> Result<BoardThread, String>;
+    fn board_post(&self, request: BoardPostRequest<'_>) -> Result<BoardPostOutcome, String>;
+    fn board_subscribe(
+        &self,
+        request: BoardSubscriptionRequest<'_>,
+    ) -> Result<BoardSubscription, String>;
+    fn board_list(&self, request: BoardListRequest<'_>) -> Result<BoardSnapshot, String>;
+}
+
+static BOARD_HOST: OnceLock<Arc<dyn BoardHost>> = OnceLock::new();
+
+/// Install the process-wide message board host. Idempotent: the first host wins.
+pub fn install_board_host(host: Arc<dyn BoardHost>) {
+    let _ = BOARD_HOST.set(host);
+}
+
+/// Return the installed message board host, if any.
+pub fn board_host() -> Option<Arc<dyn BoardHost>> {
+    BOARD_HOST.get().cloned()
 }
 
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker
