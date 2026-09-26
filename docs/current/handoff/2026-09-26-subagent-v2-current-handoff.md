@@ -187,23 +187,19 @@ cargo test --workspace --offline -- --test-threads=1
 
 ## 4. 接下来优先级
 
-### P0：持久化 content store + 大正文 `content_ref`
+### P0：持久化 content store + 大正文 `content_ref`（已完成主体）
 
-当前限制：
+已于 `2480575` 落地：
 
-- 超过 8 KiB 的普通输入跳过 canonical `InputAccepted`；
-- 超过 8 KiB 的 inter-agent message 直接拒绝；
-- ask/plan interaction 正文在内存 content store，daemon 重启丢失；
-- permission 正文 pin/unpin 语义未收口。
+- durable content store（metadata/body 落盘、懒加载 body、引用计数、TTL/pin）；
+- `InputAccepted` 大正文外置为 `content_ref`，不再跳过 canonical fact；
+- `InterAgentCommunication` 大正文外置为 `content_ref`，不再直接拒绝；
+- ask / plan / permission 正文 pin；permission 在 `ToolFinished` 终结时 unpin；
+- 重启后按持久化 `pin_key` unpin。
 
-建议一次性完成：
-
-1. durable content store；
-2. `content_ref` producer / download；
-3. `InputAccepted` 大正文外置；
-4. `InterAgentCommunication` 大正文外置；
-5. interaction / permission pin、unpin、重启恢复；
-6. 清理“跳过 canonical fact”的降级路径。
+仍未完成的是「重启后挂起 turn 继续执行」：orphan seal 仍按 dismiss 收尾，
+需要产品裁决「重启即 dismiss」或单独实现 turn resume。详见
+[`2026-09-26-durable-content-store-handoff.md`](./2026-09-26-durable-content-store-handoff.md)。
 
 ### P0：Phase 3 收尾
 

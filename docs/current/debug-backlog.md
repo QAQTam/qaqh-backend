@@ -11,22 +11,22 @@
 
 ### 1. Interaction 跨 daemon 重启持久化
 
-**问题**
+**已完成**
 
-- ask / plan 正文当前写入内存 `ContentStore` 并 pin。
-- daemon 重启后内存 store 丢失。
-- orphan seal 会把无终态的 pending interaction 收成 `Dismissed`。
+- content store 已持久化：正文、media_type、TTL、pinned、pin_key 重启后仍在。
+- ask / plan / permission 正文重启后仍可通过 content 端点读取。
+- 大正文 `InputAccepted` / `InterAgentCommunication` 已外置为 `content_ref`。
 
-**影响**
+**仍未完成：重启后挂起 turn 无法继续**
 
-- 重启前未回答的 ask/plan/permission 无法在新 daemon 中继续。
-- 与“断线重连可恢复 pending modal”的语义不一致。
+- orphan seal 仍会把无终态的 pending interaction 收成 `Dismissed`。
+- 原因是 turn actor / tool engine 的挂起状态在内存中，当前没有 turn resume 路径。
+- 正文不再丢失，但交互本身不会恢复为 pending。
 
-**需要裁决/实现**
+**需要产品裁决**
 
-- 持久化 content store，或
-- 将 pending interaction 正文纳入 durable session 数据，或
-- 明确产品语义：重启即 dismiss。
+- 明确「daemon 重启即 dismiss pending interaction」，或
+- 实现 turn resume：从 canonical facts 重建挂起 tool batch / interaction 并恢复 actor。
 
 **代码入口**
 
@@ -37,15 +37,17 @@
 
 ### 2. Permission 正文 pin / 终结 unpin
 
-**问题**
+**已完成**
 
-- ask/plan 正文会 pin；permission 正文当前走普通 TTL。
-- 极端容量压力下，permission modal 正文可能在客户端读取前被淘汰。
+- permission 正文与 ask / plan 一样进入 content store 并 pin。
+- pin_key = `canonical_interaction_id(tool_call_id)`；hub 在发布同一 tool_call_id 的
+  `ToolFinished` 时解除 pin。
+- 重启后 live 表为空时，`unpin_key` 仍可按持久化的 pin_key 释放。
 
-**需要**
+**剩余边界**
 
-- 为 permission 终结路径提供稳定 unpin 语义，或
-- 明确 permission 正文允许 TTL 淘汰并接受 404 降级。
+- 若未来出现「permission resolved 但不产生 ToolFinished」的新路径，需要补对应
+  unpin 事件；否则 pin 会保留到 session close。
 
 ### 3. Sandbox fallback 安全语义
 
