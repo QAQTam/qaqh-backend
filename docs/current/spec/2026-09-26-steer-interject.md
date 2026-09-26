@@ -2,7 +2,7 @@
 
 > 日期：2026-09-26
 > 基线：`a154242`（`main`）
-> 状态：accepted；SUBV2-11 实施中
+> 状态：accepted；SUBV2-11a/b/c backend 已完成；SUBV2-11d TUI/WinUI 待接
 > 上游：`2026-09-25-subagent-v2-rewrite-spec.md` Phase 7 / SUBV2-11
 > 范围：`qaqh-domain`、`qaqh-session`、`qaqh-runtime`、`qaqh-subagent`
 
