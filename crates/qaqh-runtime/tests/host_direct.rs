@@ -911,3 +911,155 @@ fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
     host.close(&child).expect("close child");
     host.close(&parent).expect("close parent");
 }
+
+#[test]
+fn steer_and_interject_are_canonical_safe_point_deliveries() {
+    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let root = std::env::temp_dir().join(format!(
+        "qaqh-host-steer-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).expect("test setup must not fail");
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    unsafe {
+        std::env::set_var("QAQH_DATA_DIR", &data);
+    }
+    qaqh_workspace::set_workspace(&ws.to_string_lossy());
+
+    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+        data.join("sessions"),
+        data.join(".active_session"),
+    ));
+    let service = QaqhService::init(sessions.clone());
+    let hub = Arc::new(RingingHub::new("qaqh-host-steer-test"));
+    service.attach_ringing(hub);
+    let host: &dyn SubagentHost = &service;
+
+    let parent_identity = sessions
+        .allocate_session(None)
+        .expect("allocate canonical parent session");
+    let parent = parent_identity.session_id.as_str().to_string();
+    host.list_agents(&parent, "/root")
+        .expect("root metadata registration");
+    let spawned = host
+        .spawn_subagent(SpawnSubagentRequest {
+            parent_session_id: &parent,
+            requested_name: "steer_target",
+            tools: &[],
+            model: None,
+            base_url: None,
+            max_tokens: None,
+            workspace: None,
+        })
+        .expect("spawn steer target");
+    let child = spawned.child_session_id.clone();
+    let child_path = spawned.child_agent_path.clone();
+
+    let steer = host
+        .send_agent_message(SendAgentMessageRequest {
+            caller_session_id: &parent,
+            target: &child_path,
+            text: "steer toward the safer path",
+            delivery: InterAgentDelivery::Steer,
+        })
+        .expect("steer delivery");
+    assert_eq!(steer.delivery, InterAgentDelivery::Steer);
+    let interject = host
+        .send_agent_message(SendAgentMessageRequest {
+            caller_session_id: &parent,
+            target: &child_path,
+            text: "urgent correction",
+            delivery: InterAgentDelivery::Interject,
+        })
+        .expect("interject delivery");
+    assert_eq!(interject.delivery, InterAgentDelivery::Interject);
+
+    let child_dir = sessions.session_path_dir(&child);
+    let child_identity = CanonicalSessionIdentity::open(&child_dir).expect("child identity");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let facts = loop {
+        let facts = CommittedFactReader::open(
+            &child_dir,
+            child_identity.session_id.clone(),
+            child_identity.log_id.clone(),
+        )
+        .expect("child reader")
+        .read_all()
+        .expect("child facts");
+        let has_steer = facts.iter().any(|fact| {
+            matches!(
+                &fact.payload,
+                FactPayload::InterAgentCommunication(payload)
+                    if payload.message_id.as_str() == steer.message_id
+                        && payload.delivery
+                            == qaqh_session::session_fact_v2::InterAgentDelivery::Steer
+            )
+        });
+        let has_interject = facts.iter().any(|fact| {
+            matches!(
+                &fact.payload,
+                FactPayload::InterAgentCommunication(payload)
+                    if payload.message_id.as_str() == interject.message_id
+                        && payload.delivery
+                            == qaqh_session::session_fact_v2::InterAgentDelivery::Interject
+            )
+        });
+        let accepted = facts.iter().any(|fact| {
+            matches!(
+                &fact.payload,
+                FactPayload::InputAccepted(payload)
+                    if payload.client_request_id.as_deref() == Some(steer.message_id.as_str())
+                        && payload.input_purpose
+                            == qaqh_session::session_fact_v2::InputPurpose::Steer
+            )
+        }) && facts.iter().any(|fact| {
+            matches!(
+                &fact.payload,
+                FactPayload::InputAccepted(payload)
+                    if payload.client_request_id.as_deref() == Some(interject.message_id.as_str())
+                        && payload.input_purpose
+                            == qaqh_session::session_fact_v2::InputPurpose::Interject
+            )
+        });
+        if has_steer && has_interject && accepted {
+            break facts;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for canonical steer/interject acceptance"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(facts.iter().any(|fact| matches!(
+        &fact.payload,
+        FactPayload::InterAgentCommunication(payload)
+            if payload.delivery == qaqh_session::session_fact_v2::InterAgentDelivery::Steer
+    )));
+
+    let root_steer = host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &child,
+        target: "/root",
+        text: "child must not steer root",
+        delivery: InterAgentDelivery::Steer,
+    });
+    assert!(root_steer.is_err(), "child steer to root must fail closed");
+    let root_interject = host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &child,
+        target: "/root",
+        text: "child must not interject root",
+        delivery: InterAgentDelivery::Interject,
+    });
+    assert!(
+        root_interject.is_err(),
+        "child interject to root must fail closed"
+    );
+
+    host.close(&child).expect("close child");
+    host.close(&parent).expect("close parent");
+}

@@ -151,6 +151,10 @@ pub enum ConversationInputPurpose {
     TriggerTurn,
     /// Persist/deliver the message without starting a turn.
     QueueOnly,
+    /// Merge the message at the next safe point of a running turn.
+    Steer,
+    /// Merge the message with highest priority at the next safe point.
+    Interject,
 }
 
 /// Conversation 频道命令。
@@ -182,6 +186,8 @@ pub enum InterAgentDelivery {
     #[default]
     Trigger,
     Interrupt,
+    Steer,
+    Interject,
 }
 
 /// Wire-safe inter-agent communication metadata attached to a conversation
