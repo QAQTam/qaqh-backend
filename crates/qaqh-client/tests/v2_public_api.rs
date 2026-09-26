@@ -10,7 +10,10 @@ use qaqh_client::{
     ClientV2DeltaInteractionKind, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingResult,
     ClientV2InteractionDecision, ClientV2InteractionExpiryReason, ClientV2InteractionId,
     ClientV2Payload, ClientV2Reset, ClientV2ResetReason, ClientV2SessionState,
-    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2ToolCallId, ClientV2ToolState,
+    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2TaskBoardSnapshot,
+    ClientV2TeamAgentResidency, ClientV2TeamAgentSnapshot, ClientV2TeamAgentStatus,
+    ClientV2TeamBoardSnapshot, ClientV2TeamDelta, ClientV2TeamInboxSummary, ClientV2TeamResponse,
+    ClientV2TeamSnapshot, ClientV2TeamTaskSnapshot, ClientV2ToolCallId, ClientV2ToolState,
     RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
 
@@ -163,6 +166,89 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
         panic!("expected control_delta, got {expired:?}");
     };
     assert_eq!(classify(delta), "expired");
+}
+
+/// Phase 4（roster / inbox）：壳层必须能只靠 `qaqh-client` **命名并 match**
+/// Team projection。
+///
+/// `TeamSnapshot/TeamDelta` 是 TUI/WinUI 的唯一 roster/inbox 投影
+/// （`docs/current/architecture.md`），而壳层不能依赖 `qaqh-session`
+/// （静态门禁 G1）。只导出 `ClientV2Payload` 不够——match 枚举变体必须写出
+/// 枚举名，所以这些类型必须从 client 根导出。
+#[test]
+fn team_projection_is_consumable_from_the_client_root() {
+    // 快照面：`Client::team_v2` 的返回类型 + roster / inbox / board 各层类型。
+    let _: Option<ClientV2TeamResponse> = None;
+    let _: Option<ClientV2TeamSnapshot> = None;
+    let _: Option<ClientV2TeamAgentSnapshot> = None;
+    let _: Option<ClientV2TeamAgentStatus> = None;
+    let _: Option<ClientV2TeamAgentResidency> = None;
+    let _: Option<ClientV2TeamInboxSummary> = None;
+    let _: Option<ClientV2TaskBoardSnapshot> = None;
+    let _: Option<ClientV2TeamTaskSnapshot> = None;
+    let _: Option<ClientV2TeamBoardSnapshot> = None;
+
+    fn classify(delta: &ClientV2TeamDelta) -> &'static str {
+        match delta {
+            ClientV2TeamDelta::AgentJoined { agent, .. } => {
+                let _: &ClientV2TeamAgentSnapshot = agent;
+                // roster 以 AgentPath 为主、nickname 为辅。
+                let _: &str = agent.agent_path.as_str();
+                let _: &Option<String> = &agent.nickname;
+                "joined"
+            }
+            ClientV2TeamDelta::AgentStatusChanged { status, .. } => {
+                let _: &ClientV2TeamAgentStatus = status;
+                "status"
+            }
+            ClientV2TeamDelta::AgentResidencyChanged { residency, .. } => {
+                // unloaded 是 residency，不是 status；前端不能画成 deleted。
+                let _: &ClientV2TeamAgentResidency = residency;
+                "residency"
+            }
+            ClientV2TeamDelta::AgentMessageQueued { message, .. } => {
+                let _: &ClientV2TeamInboxSummary = message;
+                let _: &str = message.author.as_str();
+                let _: &str = message.recipient.as_str();
+                let _: &Option<String> = &message.task_id;
+                "queued"
+            }
+            ClientV2TeamDelta::AgentMessageDelivered { message_id, .. } => {
+                let _: &str = message_id.as_str();
+                "delivered"
+            }
+            ClientV2TeamDelta::AgentInterrupted { .. } => "interrupted",
+            ClientV2TeamDelta::AgentCompleted { status, .. } => {
+                let _: &ClientV2TeamAgentStatus = status;
+                "completed"
+            }
+            ClientV2TeamDelta::TaskChanged { task, .. } => {
+                let _: &ClientV2TeamTaskSnapshot = task;
+                "task"
+            }
+            ClientV2TeamDelta::BoardChanged { board, .. } => {
+                let _: &ClientV2TeamBoardSnapshot = board;
+                "board"
+            }
+        }
+    }
+
+    let payload: ClientV2Payload = serde_json::from_value(serde_json::json!({
+        "kind": "team_delta",
+        "data": {
+            "kind": "agent_residency_changed",
+            "data": {
+                "revision": 9,
+                "agent_id": "0199a0f0-0000-7000-8000-000000000002",
+                "residency": "unloaded"
+            }
+        }
+    }))
+    .expect("decode team_delta payload");
+    let ClientV2Payload::TeamDelta(delta) = &payload else {
+        panic!("expected team_delta, got {payload:?}");
+    };
+    assert_eq!(classify(delta), "residency");
 }
 
 #[test]
