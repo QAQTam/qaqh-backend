@@ -73,6 +73,7 @@ pub fn spawn_pipe_loop(
         channels.cancel,
         channels.writer_dead,
         std::sync::Arc::new(qaqh_runtime::agent::liveness::WorkerLiveness::new()),
+        None,
     )
 }
 
