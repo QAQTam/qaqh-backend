@@ -155,6 +155,12 @@ fn delivery_policy_is_explicit() {
     assert!(!InterAgentDelivery::Trigger.interrupts_turn());
     assert!(InterAgentDelivery::Interrupt.triggers_idle_turn());
     assert!(InterAgentDelivery::Interrupt.interrupts_turn());
+    assert!(!InterAgentDelivery::Steer.triggers_idle_turn());
+    assert!(!InterAgentDelivery::Steer.interrupts_turn());
+    assert!(InterAgentDelivery::Steer.is_safe_point_only());
+    assert!(!InterAgentDelivery::Interject.triggers_idle_turn());
+    assert!(!InterAgentDelivery::Interject.interrupts_turn());
+    assert!(InterAgentDelivery::Interject.is_safe_point_only());
 }
 
 #[test]
