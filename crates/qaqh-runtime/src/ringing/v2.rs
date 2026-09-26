@@ -61,7 +61,7 @@ impl std::error::Error for V2HubError {}
 #[derive(Debug, Clone)]
 pub struct V2BootstrapSnapshot {
     pub server_epoch: String,
-    pub seed: String,
+    pub session_id: String,
     pub log_id: LogId,
     pub snapshot_cursor: CursorToken,
     pub last_fact_seq: u64,
@@ -96,7 +96,7 @@ pub struct V2Subscription {
     replay: VecDeque<V2Envelope>,
     live_rx: broadcast::Receiver<V2Envelope>,
     server_epoch: String,
-    seed: String,
+    session_id: String,
     log_id: LogId,
     initial_reset: Option<RingingV2ResetRequired>,
 }
@@ -157,7 +157,7 @@ impl V2ProjectionHub {
             .map_err(|error| V2HubError::InvalidCursor(error.to_string()))?;
         Ok(V2BootstrapSnapshot {
             server_epoch: self.epoch.clone(),
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
             log_id,
             snapshot_cursor,
             last_fact_seq: state.last_fact_seq,
@@ -340,7 +340,7 @@ impl V2ProjectionHub {
                             schema: qaqh_ringing::RINGING_SCHEMA.into(),
                             version: qaqh_ringing::RINGING_V2_VERSION,
                             server_epoch: self.epoch.clone(),
-                            seed: seed.to_string(),
+                            session_id: seed.to_string(),
                             log_id: Some(log_id.as_str().to_string()),
                             snapshot_cursor: snapshot_cursor.clone(),
                             reason: RingingV2ResetReason::LogIdMismatch,
@@ -353,7 +353,7 @@ impl V2ProjectionHub {
                             schema: qaqh_ringing::RINGING_SCHEMA.into(),
                             version: qaqh_ringing::RINGING_V2_VERSION,
                             server_epoch: self.epoch.clone(),
-                            seed: seed.to_string(),
+                            session_id: seed.to_string(),
                             log_id: Some(log_id.as_str().to_string()),
                             snapshot_cursor: snapshot_cursor.clone(),
                             reason: RingingV2ResetReason::UnknownFact,
@@ -394,7 +394,7 @@ impl V2ProjectionHub {
             replay,
             live_rx,
             server_epoch: self.epoch.clone(),
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
             log_id,
             initial_reset,
         })
@@ -504,7 +504,7 @@ impl V2Subscription {
                     schema: qaqh_ringing::RINGING_SCHEMA.into(),
                     version: qaqh_ringing::RINGING_V2_VERSION,
                     server_epoch: self.server_epoch.clone(),
-                    seed: self.seed.clone(),
+                    session_id: self.session_id.clone(),
                     log_id: Some(self.log_id.as_str().to_string()),
                     snapshot_cursor: None,
                     reason: RingingV2ResetReason::ReplayOverflow,
@@ -515,7 +515,7 @@ impl V2Subscription {
                     schema: qaqh_ringing::RINGING_SCHEMA.into(),
                     version: qaqh_ringing::RINGING_V2_VERSION,
                     server_epoch: self.server_epoch.clone(),
-                    seed: self.seed.clone(),
+                    session_id: self.session_id.clone(),
                     log_id: Some(self.log_id.as_str().to_string()),
                     snapshot_cursor: None,
                     reason: RingingV2ResetReason::PerConnectionOverflow,
@@ -676,7 +676,7 @@ fn event_to_envelope(
         schema: qaqh_ringing::RINGING_SCHEMA.into(),
         version: qaqh_ringing::RINGING_V2_VERSION,
         server_epoch: server_epoch.to_string(),
-        seed: seed.to_string(),
+        session_id: seed.to_string(),
         event_id: event.event_id.as_str().to_string(),
         stream_key,
         delivery,
@@ -1028,7 +1028,7 @@ mod tests {
         match subscription.next().await {
             V2StreamItem::Reset(reset) => {
                 assert_eq!(reset.reason, RingingV2ResetReason::LogIdMismatch);
-                assert_eq!(reset.seed, "seed");
+                assert_eq!(reset.session_id, "seed");
             }
             other => panic!("expected log_id reset, got {other:?}"),
         }

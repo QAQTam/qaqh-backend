@@ -13,7 +13,8 @@ use crate::event::RingingEvent;
 /// daemon → agent 命令消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingWorkerCommandEnvelope {
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub command_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
@@ -22,12 +23,12 @@ pub struct RingingWorkerCommandEnvelope {
 
 impl RingingWorkerCommandEnvelope {
     pub fn new(
-        seed: impl Into<String>,
+        session_id: impl Into<String>,
         command_id: impl Into<String>,
         command: RingingCommand,
     ) -> Self {
         Self {
-            seed: seed.into(),
+            session_id: session_id.into(),
             command_id: command_id.into(),
             expected_revision: None,
             command,
@@ -43,7 +44,8 @@ impl RingingWorkerCommandEnvelope {
 /// agent → daemon 事件消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingWorkerEventEnvelope {
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub event_id: String,
     /// 因果来源 command_id（Ringing 命令执行期间产出的事件携带）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,9 +54,13 @@ pub struct RingingWorkerEventEnvelope {
 }
 
 impl RingingWorkerEventEnvelope {
-    pub fn new(seed: impl Into<String>, event_id: impl Into<String>, event: RingingEvent) -> Self {
+    pub fn new(
+        session_id: impl Into<String>,
+        event_id: impl Into<String>,
+        event: RingingEvent,
+    ) -> Self {
         Self {
-            seed: seed.into(),
+            session_id: session_id.into(),
             event_id: event_id.into(),
             causation_id: None,
             event,
@@ -71,7 +77,8 @@ impl RingingWorkerEventEnvelope {
 /// Timeline writer 赋予）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingTimelineIntentEnvelope {
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub intent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub causation_id: Option<String>,
@@ -80,12 +87,12 @@ pub struct RingingTimelineIntentEnvelope {
 
 impl RingingTimelineIntentEnvelope {
     pub fn new(
-        seed: impl Into<String>,
+        session_id: impl Into<String>,
         intent_id: impl Into<String>,
         intent: qaqh_domain::TimelineIntent,
     ) -> Self {
         Self {
-            seed: seed.into(),
+            session_id: session_id.into(),
             intent_id: intent_id.into(),
             causation_id: None,
             intent,

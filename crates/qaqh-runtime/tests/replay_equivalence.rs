@@ -249,7 +249,11 @@ fn channel_replay_merges_seeds_in_stream_order() {
 
     let replay = hub.replay_channel_since(RingingChannel::Tool, 0, false);
     assert!(replay.resets.is_empty(), "窗口内不得出现 reset 信号");
-    let seeds: Vec<&str> = replay.events.iter().map(|e| e.seed.as_str()).collect();
+    let seeds: Vec<&str> = replay
+        .events
+        .iter()
+        .map(|e| e.session_id.as_str())
+        .collect();
     assert_eq!(
         seeds,
         vec!["s1", "s2", "s1", "s2"],
@@ -282,7 +286,7 @@ fn cursor_expired_signals_reset_path() {
     // 频道级路径给出 reset 信号而非静默半截回放。
     let channel = hub.replay_channel_since(RingingChannel::Tool, 0, false);
     assert!(
-        channel.resets.iter().any(|reset| reset.seed == "s1"),
+        channel.resets.iter().any(|reset| reset.session_id == "s1"),
         "频道级重放必须对该 seed 发出 RingingResetRequired"
     );
 }

@@ -337,7 +337,7 @@ impl Loop {
                     }
                     let input_id = message_id.clone().unwrap_or_else(|| env.command_id.clone());
                     let injection = Injection {
-                        session_id: env.seed.clone(),
+                        session_id: env.session_id.clone(),
                         command_id: env.command_id.clone(),
                         input_id,
                         input_purpose: *input_purpose,

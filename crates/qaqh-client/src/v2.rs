@@ -131,7 +131,8 @@ pub use qaqh_session::team::TaskBoardSnapshot as ClientV2TaskBoardSnapshot;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientV2TeamResponse {
     pub schema: String,
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     pub team: ClientV2TeamSnapshot,
     pub tasks: ClientV2TaskBoardSnapshot,
     pub board: ClientV2TeamBoardSnapshot,
@@ -660,7 +661,7 @@ mod tests {
     fn team_response_matches_daemon_wire_shape() {
         let payload = serde_json::json!({
             "schema": "qaqh.ringing.team/v1",
-            "seed": "0199a0f0-0000-7000-8000-000000000001",
+            "session_id": "0199a0f0-0000-7000-8000-000000000001",
             "team": {
                 "root_session_id": "0199a0f0-0000-7000-8000-000000000001",
                 "agents": [
@@ -712,6 +713,7 @@ mod tests {
         let response: ClientV2TeamResponse =
             serde_json::from_value(payload).expect("daemon /team 形状必须能反序列化");
         assert_eq!(response.schema, "qaqh.ringing.team/v1");
+        assert_eq!(response.session_id, "0199a0f0-0000-7000-8000-000000000001");
         assert_eq!(response.team.agents.len(), 2);
 
         // roster 以 AgentPath 为主、nickname 为辅。

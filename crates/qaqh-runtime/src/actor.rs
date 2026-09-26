@@ -53,18 +53,21 @@ fn publish_worker_event(
     };
     match event {
         crate::agent::types::WriterEvent::Timeline(env) => {
-            if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
-                log::error!("[timeline] rejected intent for {}: {error}", env.seed);
+            if let Err(error) = hub.publish_timeline(&env.session_id, env.intent) {
+                log::error!("[timeline] rejected intent for {}: {error}", env.session_id);
             }
         }
         crate::agent::types::WriterEvent::Ringing(env) => {
             let domain: qaqh_domain::DomainEvent = env.event.into();
             // #345：交互正文（ask/plan）在发布前入 content store 并 pin——canonical
             // fact 里只有 ref，正文走展示面旁路。
-            crate::registry::stash_interaction_body(hub, &env.seed, &domain);
-            let domain = crate::registry::externalize_large_content(hub, &env.seed, domain);
-            let _ =
-                hub.publish_with_causation(&env.seed, domain.clone(), env.causation_id.as_deref());
+            crate::registry::stash_interaction_body(hub, &env.session_id, &domain);
+            let domain = crate::registry::externalize_large_content(hub, &env.session_id, domain);
+            let _ = hub.publish_with_causation(
+                &env.session_id,
+                domain.clone(),
+                env.causation_id.as_deref(),
+            );
             if let Some(observe) = crate::activity::domain_activity_observe(&domain)
                 && let Some(activity) = activity.observe(seed, generation, &observe)
             {

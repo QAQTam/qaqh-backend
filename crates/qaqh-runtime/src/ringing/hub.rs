@@ -1174,7 +1174,7 @@ impl RingingHub {
     fn fanout(&self, channel: RingingChannel, envelope: &RingingEventEnvelope) {
         {
             let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(tx) = live.get(&(channel, envelope.seed.clone())) {
+            if let Some(tx) = live.get(&(channel, envelope.session_id.clone())) {
                 let _ = tx.send(envelope.clone());
             }
             // 即使该 seed 此刻无订阅者（分片不存在），水位也要抬：水位表达的
@@ -2119,7 +2119,7 @@ mod tests {
         );
         match outcome {
             PublishOutcome::Published { envelope } => {
-                assert_eq!(envelope.seed, "s1");
+                assert_eq!(envelope.session_id, "s1");
                 assert_eq!(envelope.stream_seq, 1);
                 assert_eq!(envelope.channel_seq, 1);
                 assert_eq!(envelope.session_seq, 1);
@@ -2232,8 +2232,8 @@ mod tests {
         // stream_seq 全局递增，跨 seed 合并后按序排列
         assert_eq!(replay.events[0].stream_seq, 1);
         assert_eq!(replay.events[1].stream_seq, 2);
-        assert_eq!(replay.events[0].seed, "s1");
-        assert_eq!(replay.events[1].seed, "s2");
+        assert_eq!(replay.events[0].session_id, "s1");
+        assert_eq!(replay.events[1].session_id, "s2");
 
         // 无 cursor 的新连接跳过可靠历史（只回放 replaceable 值）：
         // 历史由 bootstrap 快照承担，防止幽灵事件先于快照到达前端。
@@ -2257,7 +2257,7 @@ mod tests {
         }
         let replayed = hub2.replay_channel_since(RingingChannel::Tool, 0, false);
         assert!(!replayed.resets.is_empty());
-        assert_eq!(replayed.resets[0].seed, "s1");
+        assert_eq!(replayed.resets[0].session_id, "s1");
         assert!(replayed.resets[0].earliest_available_seq > 1);
     }
 
@@ -2333,7 +2333,7 @@ mod tests {
         let received = idle_rx
             .try_recv()
             .expect("旁观会话不应 Lagged，必须收到自己的事件");
-        assert_eq!(received.seed, "idle");
+        assert_eq!(received.session_id, "idle");
     }
 
     /// BUG-2026-09-12-12（issue #31）回归 2：分片后单会话订阅者收到的**内容与
@@ -2361,7 +2361,7 @@ mod tests {
         }
         assert_eq!(got.len(), expected.len(), "s-a 只应收到自己的事件");
         for (g, e) in got.iter().zip(expected.iter()) {
-            assert_eq!(g.seed, "s-a");
+            assert_eq!(g.session_id, "s-a");
             assert_eq!(g.event_id, e.event_id, "事件内容/标识必须一致");
             assert_eq!(g.stream_seq, e.stream_seq, "顺序必须一致");
         }
@@ -2384,7 +2384,7 @@ mod tests {
         let mut seeds = HashSet::new();
         for _ in 0..2 {
             let env = rx.try_recv().expect("频道聚合视图应收到两个 seed 的事件");
-            seeds.insert(env.seed);
+            seeds.insert(env.session_id);
         }
         assert!(
             seeds.contains("s-a") && seeds.contains("s-b"),
@@ -2401,7 +2401,7 @@ mod tests {
             DomainEvent::Conversation(ConversationEvent::ConversationCancelled { turn_id: None }),
         );
         let env = rx.blocking_recv().expect("live event");
-        assert_eq!(env.seed, "s");
+        assert_eq!(env.session_id, "s");
     }
 
     #[test]

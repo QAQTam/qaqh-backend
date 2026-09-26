@@ -236,7 +236,7 @@ pub(crate) mod pure_tests {
         publish_session_created(&hub, "s-created", "cmd-create");
         let replay = hub.replay_channel_since(RingingChannel::Control, 0, false);
         assert_eq!(replay.events.len(), 1);
-        assert_eq!(replay.events[0].seed, "s-created");
+        assert_eq!(replay.events[0].session_id, "s-created");
         assert_eq!(replay.events[0].causation_id.as_deref(), Some("cmd-create"));
         assert!(matches!(
             &replay.events[0].event,

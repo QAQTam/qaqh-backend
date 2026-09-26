@@ -15,7 +15,8 @@ use qaqh_domain::RingingChannel;
 pub struct RingingResetRequired {
     pub channel: RingingChannel,
     /// 需要重新拉取 snapshot 的会话。
-    pub seed: String,
+    #[serde(rename = "session_id", alias = "seed")]
+    pub session_id: String,
     /// 服务端该 seed+channel 仍可回放的最早 stream_seq。
     #[cfg_attr(feature = "ts", ts(as = "u32"))]
     pub earliest_available_seq: u64,
@@ -24,12 +25,12 @@ pub struct RingingResetRequired {
 impl RingingResetRequired {
     pub fn new(
         channel: RingingChannel,
-        seed: impl Into<String>,
+        session_id: impl Into<String>,
         earliest_available_seq: u64,
     ) -> Self {
         Self {
             channel,
-            seed: seed.into(),
+            session_id: session_id.into(),
             earliest_available_seq,
         }
     }
@@ -44,7 +45,7 @@ mod tests {
         let reset = RingingResetRequired::new(RingingChannel::Tool, "s1", 42);
         let json = serde_json::to_string(&reset).expect("serialize");
         assert!(json.contains("\"channel\":\"tool\""));
-        assert!(json.contains("\"seed\":\"s1\""));
+        assert!(json.contains("\"session_id\":\"s1\""));
         assert!(json.contains("\"earliest_available_seq\":42"));
         let back: RingingResetRequired = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, reset);
