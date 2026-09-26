@@ -1050,6 +1050,7 @@ impl AgentRegistry {
                     cancel,
                     writer_dead,
                     liveness,
+                    hub_for_worker.clone(),
                 );
                 if let Some(hub) = hub_for_worker.as_ref() {
                     hub.mark_worker_dead(&dead_seed);
@@ -1162,6 +1163,7 @@ impl AgentRegistry {
         let new_seed_owned = new_seed.map(str::to_string);
         let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
         let liveness_for_registry = std::sync::Arc::clone(&liveness);
+        let hub_for_worker = self.hub.clone();
         let thread = std::thread::Builder::new()
             .name(format!("qaqh-session-{actor_seed}"))
             .spawn(move || {
@@ -1175,6 +1177,7 @@ impl AgentRegistry {
                     cancel,
                     writer_dead,
                     liveness,
+                    hub_for_worker,
                 );
             })
             .map_err(|e| format!("spawn in-process session {seed}: {e}"))?;
@@ -2038,13 +2041,14 @@ pub(crate) fn stash_interaction_body(
     event: &qaqh_domain::DomainEvent,
 ) {
     use qaqh_domain::{ControlEvent, ToolEvent, interaction_body};
-    // (content store 的交互 key, 正文 bytes, 是否 pin)。
+    // (content store 的交互 key, 正文 bytes)。
     //
     // ask / plan 用 wire interaction_id 作 key 并 pin（resolve 时按同一个 key unpin）。
-    // permission 用 canonical interaction_id 作 key 且**不 pin**：纯 v2 的 wire 上
-    // 没有 tool 频道快照，详情只能从正文取；而拒绝/过期路径没有可挂 unpin 的域事件，
-    // 走 30min TTL 的普通条目反而不会泄漏 pin 配额。
-    let (interaction_id, bytes, pinned) = match event {
+    // permission 用 canonical interaction_id 作 key 并 pin：纯 v2 的 wire 上没有
+    // tool 频道快照，详情只能从正文取；终结信号是同一 tool_call_id 的 ToolFinished
+    // （grant/reject/cancel 都会落到该终态），hub 在发布 ToolFinished 时按 canonical
+    // interaction id 解除 pin。重启后 live 表为空，pin_key 持久化兜底。
+    let (interaction_id, bytes) = match event {
         qaqh_domain::DomainEvent::Control(ControlEvent::InteractionRequested {
             interaction_id,
             mode,
@@ -2053,7 +2057,6 @@ pub(crate) fn stash_interaction_body(
         }) => (
             interaction_id.clone(),
             interaction_body::ask_body(*mode, questions),
-            true,
         ),
         qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewRequested {
             interaction_id,
@@ -2064,7 +2067,6 @@ pub(crate) fn stash_interaction_body(
         }) => (
             interaction_id.clone(),
             interaction_body::plan_body(plan_content, review_type, todo_items.as_deref()),
-            true,
         ),
         qaqh_domain::DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
             tool_call_id,
@@ -2091,19 +2093,9 @@ pub(crate) fn stash_interaction_body(
                 *risk,
                 consequence,
             ),
-            false,
         ),
         _ => return,
     };
-    if !pinned {
-        hub.put_content(
-            seed,
-            interaction_body::INTERACTION_BODY_MEDIA_TYPE,
-            bytes,
-            false,
-        );
-        return;
-    }
     match hub.put_interaction_content(
         seed,
         &interaction_id,
