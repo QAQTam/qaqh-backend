@@ -87,7 +87,7 @@ fn ten_parallel_reads_same_file() {
         loop {
             match event_rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(RingingEvent::Control(ControlEvent::SessionStateChanged {
-                    seed: s,
+                    session_id: s,
                     state: SessionState::Created,
                 })) => {
                     seed = s;

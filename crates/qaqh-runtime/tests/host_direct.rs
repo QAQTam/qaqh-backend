@@ -194,7 +194,7 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     host.send_ringing(
         &parent,
         qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
-            seed: parent.clone(),
+            session_id: parent.clone(),
         }),
     )
     .expect("start parent actor before wait_agent");
@@ -284,7 +284,7 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     hub.publish_with_causation(
         &seed,
         DomainEvent::Control(ControlEvent::SessionStateChanged {
-            seed: seed.clone(),
+            session_id: seed.clone(),
             state: SessionState::Created,
         }),
         None,
@@ -449,7 +449,7 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     host.send_ringing(
         &parent,
         qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
-            seed: parent.clone(),
+            session_id: parent.clone(),
         }),
     )
     .expect("start parent actor");
@@ -528,7 +528,7 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     host.send_ringing(
         &parent,
         qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
-            seed: parent.clone(),
+            session_id: parent.clone(),
         }),
     )
     .expect("ensure parent is loaded after idle sweep");

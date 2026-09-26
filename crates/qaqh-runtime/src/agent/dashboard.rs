@@ -8,7 +8,7 @@
 /// `Agent2Ui::Dashboard` schema to new consumers.
 pub fn build_snapshot(seed: String) -> qaqh_domain::DashboardSnapshot {
     qaqh_domain::DashboardSnapshot {
-        seed: seed.clone(),
+        session_id: seed.clone(),
         documents: qaqh_workspace::dashboard::build_documents(),
         recent_edits: qaqh_workspace::dashboard::build_recent_edits(),
         tasks: qaqh_workspace::dashboard::build_tasks_for(&seed),

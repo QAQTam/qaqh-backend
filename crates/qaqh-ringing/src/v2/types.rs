@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn command_envelope_requires_v2_identity() {
         let command = RingingCommand::Control(ControlCommand::SessionResume {
-            seed: "seed-1".into(),
+            session_id: "seed-1".into(),
         });
         let mut envelope = RingingV2CommandEnvelope::new("cmd-1", "instance-1", command);
         envelope = envelope.with_session_id("seed-1");

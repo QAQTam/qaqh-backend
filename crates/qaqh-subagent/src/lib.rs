@@ -1648,7 +1648,7 @@ fn collect_subagent_result(
     if let Err(e) = transport.send_command(
         seed,
         RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose {
-            seed: seed.to_string(),
+            session_id: seed.to_string(),
         }),
     ) {
         log::warn!("[SUBAGENT] '{name}' close worker {seed} failed: {e}");

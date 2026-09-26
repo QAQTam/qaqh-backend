@@ -163,7 +163,9 @@ fn cmd_session_create(close_current: bool) -> RingingCommand {
 }
 
 fn cmd_session_resume(seed: &str) -> RingingCommand {
-    RingingCommand::Control(ControlCommand::SessionResume { seed: seed.into() })
+    RingingCommand::Control(ControlCommand::SessionResume {
+        session_id: seed.into(),
+    })
 }
 
 fn cmd_session_shutdown() -> RingingCommand {
@@ -508,7 +510,9 @@ fn run_case_with_delay(
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
         qaqh_workspace::set_workspace(&workspace.to_string_lossy());

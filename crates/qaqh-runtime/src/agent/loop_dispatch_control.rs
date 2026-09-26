@@ -101,23 +101,23 @@ impl Loop {
                 self.sync_emitter_seed();
                 self.paced_emitter.emit_domain(DomainEvent::Control(
                     qaqh_domain::ControlEvent::SessionStateChanged {
-                        seed: self.session.agent.session.session_id.clone(),
+                        session_id: self.session.agent.session.session_id.clone(),
                         state: qaqh_domain::SessionState::Created,
                     },
                 ));
                 self.misc
                     .emit_dashboard(&self.session.agent, &self.paced_emitter);
             }
-            ControlCommand::SessionResume { seed } => {
+            ControlCommand::SessionResume { session_id } => {
                 self.prepare_session_switch();
                 if self
                     .lifecycle
-                    .resume_session(&mut self.session.agent, &self.cancel, &seed)
+                    .resume_session(&mut self.session.agent, &self.cancel, &session_id)
                 {
                     self.sync_emitter_seed();
                     self.paced_emitter.emit_domain(DomainEvent::Control(
                         qaqh_domain::ControlEvent::SessionStateChanged {
-                            seed,
+                            session_id,
                             state: qaqh_domain::SessionState::Resumed,
                         },
                     ));

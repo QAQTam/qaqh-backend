@@ -74,7 +74,7 @@ impl Loop {
             self.paced_emitter
                 .emit_domain(qaqh_domain::DomainEvent::Control(
                     qaqh_domain::ControlEvent::SubagentStatus {
-                        seed: session_id.to_string(),
+                        session_id: session_id.to_string(),
                         name,
                         state,
                     },

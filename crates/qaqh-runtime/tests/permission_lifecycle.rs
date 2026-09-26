@@ -397,7 +397,9 @@ fn run_case(
                 })
             )
         }) {
-            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            RingingEvent::Control(ControlEvent::SessionStateChanged { session_id, .. }) => {
+                session_id
+            }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
         // Session creation restores a persisted workspace. Tests need the

@@ -292,7 +292,7 @@ pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> T
         }),
         sdk::ToolBody::Subagent { name, seed } => Some(TimelineToolBody::Subagent {
             name: name.clone(),
-            seed: seed.clone(),
+            session_id: seed.clone(),
         }),
     };
 
