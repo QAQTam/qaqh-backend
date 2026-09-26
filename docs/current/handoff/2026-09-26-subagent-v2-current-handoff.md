@@ -260,10 +260,12 @@ cargo test --workspace --offline -- --test-threads=1
   complete/close/cancel 与 torn-tail replay；
 - TEAM-01c：`TaskBoardHost` + 5 个 runtime 工具（`task_create` / `task_claim` /
   `task_update` / `task_close` / `task_list`），按 caller root tree 打开 team store，
-  root 初始化 `TeamCreated`，task 数量上限 1024。
+  root 初始化 `TeamCreated`，task 数量上限 1024；
+- TEAM-01d：`GET /ringing/v2/sessions/{seed}/team` 返回 team roster +
+  task board snapshot；`TeamDelta::TaskChanged` 作为 ephemeral delta 在单流发布；
+  task board backend 已可供 TUI/WinUI 消费。
 
-仍未完成：TEAM-01d daemon projection wire（TeamSnapshot/TeamDelta 扩展）、
-TEAM-01e TUI/WinUI 消费。
+仍未完成：TEAM-01e TUI/WinUI 渲染与 `@` mention 结构化接入。
 
 ### P2：Message board
 
