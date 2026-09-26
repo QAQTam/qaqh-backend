@@ -113,7 +113,8 @@
 
 - 消息接受不等于模型已读；`InterAgentCommunication` 必须显式携带 author、
   recipient、task、trigger 语义。
-- V1 只冻结 `queue`、`trigger`、`interrupt`；`steer/interject` 留到第二阶段。
+- `queue`、`trigger`、`interrupt` 为 V1；第二阶段增加 `steer` / `interject`，
+  但 `interrupt` 仍是唯一取消当前 turn 的 delivery。
 - completion result 默认 queue-only 进入父 mailbox，不得无界触发父 turn。
 - wire 上的 `@` 必须是结构化 mention；不得靠正文 regex 推断收件人。
 
@@ -137,3 +138,12 @@
   wire/runtime 的 seed 语义和旧目录兼容映射。
 - 权威迁移设计：
   [`spec/2026-09-25-session-identity-unification.md`](./spec/2026-09-25-session-identity-unification.md)。
+
+## D18. Steer / Interject safe point
+
+- safe point = 工具批完成、tool results 已写回、下一次模型请求之前。
+- `steer` / `interject` 不取消 turn、不中止工具；`interrupt` 才是取消原语。
+- 同一 safe point 顺序固定为 `interject -> steer -> queue`，同优先级保持 FIFO。
+- idle 时 steer/interject 只进 mailbox，不启动 turn。
+- 单 safe point 最多合并 8 条 steer / 4 条 interject；溢出保留到下一 safe point。
+- 非 root agent 不得向 root steer/interject。

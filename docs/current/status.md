@@ -109,7 +109,12 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
   `TeamDelta::BoardChanged` 单流 delta。notification 只对 running + loaded
   subscriber 做 queue-only best-effort，不启动 idle agent。spec 见
   [`spec/2026-09-26-team-message-board.md`](./spec/2026-09-26-team-message-board.md)。
-- Phase 4 前端壳接入、TEAM-01e / BOARD-01d 前端消费和 Phase 7 未完成；
+- Phase 7 backend 已完成：`steer` / `interject` delivery、canonical
+  `InputPurpose`、safe-point 优先级（interject -> steer -> queue）、单 lap
+  配额与 `steer_agent` / `interject_agent` 工具已落地；`interrupt` 仍是唯一
+  取消 turn 的 delivery。spec 见
+  [`spec/2026-09-26-steer-interject.md`](./spec/2026-09-26-steer-interject.md)。
+- Phase 4 前端壳接入、TEAM-01e / BOARD-01d / SUBV2-11d 前端消费仍未完成；
   不得用 legacy result injection 或工具卡 JSON 冒充 V2 完成。
 - 权威计划：
   [`spec/2026-09-25-subagent-v2-rewrite-spec.md`](./spec/2026-09-25-subagent-v2-rewrite-spec.md)。

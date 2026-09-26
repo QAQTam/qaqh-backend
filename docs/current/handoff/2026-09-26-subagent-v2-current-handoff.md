@@ -298,6 +298,21 @@ cargo test --workspace --offline -- --test-threads=1
 - 配额；
 - 防止 agent 互喷。
 
+已落地：
+
+- spec：[`2026-09-26-steer-interject.md`](../spec/2026-09-26-steer-interject.md)；
+- SUBV2-11a：`InterAgentDelivery::{Steer, Interject}` 与
+  `ConversationInputPurpose` / canonical `InputPurpose` 扩展；
+- SUBV2-11b：safe point 固定为“工具批完成、下一模型请求前”，同 lap 排序为
+  `interject -> steer -> queue`，单 safe point 上限为 8 steer / 4 interject，
+  超出部分保留到下一 safe point；
+- SUBV2-11c：`steer_agent` / `interject_agent` 工具、canonical
+  `InterAgentCommunication` + `InputAccepted`、child -> root steer/interject
+  安全门；
+- `interrupt` 仍是唯一取消当前 turn 的 delivery；steer/interject 不中止工具批。
+
+仍未完成：SUBV2-11d TUI/WinUI 区分展示 steer / interject / interrupt。
+
 ### P3：Beta 身份迁移
 
 - wire/runtime 从 `seed` 改名 `session_id`；
