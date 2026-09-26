@@ -251,6 +251,17 @@ cargo test --workspace --offline -- --test-threads=1
 - artifact / acceptance；
 - 与 message 通过 `task_id` 绑定。
 
+已落地：
+
+- spec：[`2026-09-26-team-task-board.md`](../spec/2026-09-26-team-task-board.md)；
+- TEAM-01a/b：`qaqh-session::team` canonical types、state-machine reducer、
+  durable append-only TeamStore（`team.json` / `events.jsonl` / `events.commit` /
+  `events.lock`），覆盖 create/claim/release/dependency/artifact/acceptance/
+  complete/close/cancel 与 torn-tail replay。
+
+仍未完成：TEAM-01c runtime task tools、TEAM-01d daemon projection wire、
+TEAM-01e TUI/WinUI 消费。
+
 ### P2：Message board
 
 - channel / thread / post / subscription；
