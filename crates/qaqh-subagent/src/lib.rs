@@ -385,6 +385,74 @@ impl TypedTool for FollowupTaskTool {
     }
 }
 
+pub struct SteerAgentTool;
+
+impl TypedTool for SteerAgentTool {
+    type Args = AgentMessageArgs;
+    type Output = AgentMessageOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("steer_agent").expect("valid steer_agent tool name"),
+            display_name: None,
+            description: "Merge a steering message into the target's current turn at the next safe point. Does not start an idle turn."
+                .to_string(),
+            input_schema: agent_message_schema("Steering guidance."),
+            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
+                .expect("steer_agent output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Exec,
+            risk: ToolRisk::Administrative,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: AgentMessageArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Steer)
+    }
+}
+
+pub struct InterjectAgentTool;
+
+impl TypedTool for InterjectAgentTool {
+    type Args = AgentMessageArgs;
+    type Output = AgentMessageOutput;
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: ToolName::new("interject_agent").expect("valid interject_agent tool name"),
+            display_name: None,
+            description: "Merge an urgent correction into the target's current turn at the next safe point. Does not cancel the turn or start an idle turn."
+                .to_string(),
+            input_schema: agent_message_schema("Urgent correction."),
+            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
+                .expect("interject_agent output schema"),
+            category: qaqh_workspace::permission::ToolCategory::Exec,
+            risk: ToolRisk::Administrative,
+            default_timeout: Duration::from_secs(30),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
+        }
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: AgentMessageArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Interject)
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitAgentArgs {
@@ -698,6 +766,8 @@ fn handle_agent_message(
             qaqh_domain::InterAgentDelivery::Queue => "queue",
             qaqh_domain::InterAgentDelivery::Trigger => "trigger",
             qaqh_domain::InterAgentDelivery::Interrupt => "interrupt",
+            qaqh_domain::InterAgentDelivery::Steer => "steer",
+            qaqh_domain::InterAgentDelivery::Interject => "interject",
         }
         .to_string(),
     })
@@ -748,6 +818,10 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(SendMessageTool);
     mgr.register_display("followup_task", project_agent_message_display);
     mgr.register_typed(FollowupTaskTool);
+    mgr.register_display("steer_agent", project_agent_message_display);
+    mgr.register_typed(SteerAgentTool);
+    mgr.register_display("interject_agent", project_agent_message_display);
+    mgr.register_typed(InterjectAgentTool);
     mgr.register_display("wait_agent", project_wait_agent_display);
     mgr.register_typed(WaitAgentTool);
     mgr.register_display("interrupt_agent", project_interrupt_agent_display);
@@ -1708,6 +1782,8 @@ mod tests {
             "board_post",
             "board_subscribe",
             "board_list",
+            "steer_agent",
+            "interject_agent",
         ] {
             let handler = manager
                 .lookup(name)

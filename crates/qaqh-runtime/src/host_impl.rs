@@ -243,6 +243,14 @@ impl SubagentHost for QaqhService {
         {
             return Err("child agents cannot trigger the root agent".to_string());
         }
+        if matches!(
+            request.delivery,
+            qaqh_domain::InterAgentDelivery::Steer | qaqh_domain::InterAgentDelivery::Interject
+        ) && target.agent_path.is_root()
+            && !caller.agent_path.is_root()
+        {
+            return Err("child agents cannot steer or interject into the root agent".to_string());
+        }
 
         // Phase 3 quota: in-flight is derived from the target's canonical
         // mailbox; outbound attempts are a runtime safety-valve counter.
@@ -279,6 +287,10 @@ impl SubagentHost for QaqhService {
             }
             qaqh_domain::InterAgentDelivery::Trigger => {
                 qaqh_domain::ConversationInputPurpose::TriggerTurn
+            }
+            qaqh_domain::InterAgentDelivery::Steer => qaqh_domain::ConversationInputPurpose::Steer,
+            qaqh_domain::InterAgentDelivery::Interject => {
+                qaqh_domain::ConversationInputPurpose::Interject
             }
             qaqh_domain::InterAgentDelivery::Interrupt => unreachable!(),
         };

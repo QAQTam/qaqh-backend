@@ -17,8 +17,26 @@ pub const SUBAGENT_SOURCE: &str = "subagent";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionPriority {
     Normal,
+    Steer,
+    Interject,
     Deferred,
 }
+
+impl InjectionPriority {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Interject => 0,
+            Self::Steer => 1,
+            Self::Normal => 2,
+            Self::Deferred => 3,
+        }
+    }
+}
+
+/// Maximum steer messages merged into one safe point.
+pub const MAX_STEER_PER_SAFE_POINT: usize = 8;
+/// Maximum interject messages merged into one safe point.
+pub const MAX_INTERJECT_PER_SAFE_POINT: usize = 4;
 
 /// Injection semantics. Only `NextTurn` exists this round; `Interrupt` /
 /// `Inline` are reserved for future sources.
@@ -146,10 +164,40 @@ impl InjectionBus {
         EnqueueResult::Queued
     }
 
-    /// Take pending records in submission order. Seen command ids stay marked
+    /// Take pending records in priority order. Seen command ids stay marked
     /// so a replay after the boundary cannot submit a second message.
     pub fn drain(&mut self) -> Vec<Injection> {
-        self.pending.drain(..).collect()
+        let mut records = self.pending.drain(..).collect::<Vec<_>>();
+        records.sort_by_key(|injection| injection.priority.rank());
+        records
+    }
+
+    /// Take at most `max_steer` steer and `max_interject` interject records.
+    ///
+    /// Records over the safe-point limits remain queued for the next boundary.
+    /// This keeps a single model request from absorbing an unbounded burst.
+    pub fn drain_limited(&mut self, max_steer: usize, max_interject: usize) -> Vec<Injection> {
+        let mut records = self.pending.drain(..).collect::<Vec<_>>();
+        records.sort_by_key(|injection| injection.priority.rank());
+        let mut selected = Vec::new();
+        let mut deferred = VecDeque::new();
+        let mut steer_count = 0usize;
+        let mut interject_count = 0usize;
+        for injection in records {
+            match injection.priority {
+                InjectionPriority::Interject if interject_count < max_interject => {
+                    interject_count += 1;
+                    selected.push(injection);
+                }
+                InjectionPriority::Steer if steer_count < max_steer => {
+                    steer_count += 1;
+                    selected.push(injection);
+                }
+                _ => deferred.push_back(injection),
+            }
+        }
+        self.pending = deferred;
+        selected
     }
 
     pub fn pending_len(&self) -> usize {
@@ -161,7 +209,11 @@ impl InjectionBus {
 mod tests {
     use super::*;
 
-    fn injection(session_id: &str, command_id: &str, text: &str) -> Injection {
+    fn injection(
+        session_id: &str,
+        command_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Injection {
         Injection::new(session_id, command_id, text)
     }
 
@@ -243,6 +295,73 @@ mod tests {
             EnqueueResult::Queued
         );
         assert_eq!(bus.drain()[0].session_id, "session-b");
+    }
+
+    #[test]
+    fn safe_point_delivery_orders_interject_then_steer_then_normal() {
+        let mut bus = InjectionBus::new();
+        bus.switch_session("session-a");
+        let normal = Injection {
+            priority: InjectionPriority::Normal,
+            ..injection("session-a", "cmd-normal", "normal")
+        };
+        let steer = Injection {
+            priority: InjectionPriority::Steer,
+            ..injection("session-a", "cmd-steer", "steer")
+        };
+        let interject = Injection {
+            priority: InjectionPriority::Interject,
+            ..injection("session-a", "cmd-interject", "interject")
+        };
+
+        assert_eq!(bus.enqueue(normal), EnqueueResult::Queued);
+        assert_eq!(bus.enqueue(steer), EnqueueResult::Queued);
+        assert_eq!(bus.enqueue(interject), EnqueueResult::Queued);
+
+        let drained = bus.drain();
+        assert_eq!(drained[0].priority, InjectionPriority::Interject);
+        assert_eq!(drained[1].priority, InjectionPriority::Steer);
+        assert_eq!(drained[2].priority, InjectionPriority::Normal);
+    }
+
+    #[test]
+    fn safe_point_limits_leave_overflow_queued() {
+        let mut bus = InjectionBus::new();
+        bus.switch_session("session-a");
+        for index in 0..3 {
+            let injection = Injection {
+                priority: InjectionPriority::Interject,
+                ..injection(
+                    "session-a",
+                    format!("cmd-interject-{index}"),
+                    format!("interject {index}"),
+                )
+            };
+            assert_eq!(bus.enqueue(injection), EnqueueResult::Queued);
+        }
+        for index in 0..3 {
+            let injection = Injection {
+                priority: InjectionPriority::Steer,
+                ..injection(
+                    "session-a",
+                    format!("cmd-steer-{index}"),
+                    format!("steer {index}"),
+                )
+            };
+            assert_eq!(bus.enqueue(injection), EnqueueResult::Queued);
+        }
+
+        let first = bus.drain_limited(1, 1);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].priority, InjectionPriority::Interject);
+        assert_eq!(first[1].priority, InjectionPriority::Steer);
+        assert_eq!(bus.pending_len(), 4);
+
+        let second = bus.drain_limited(1, 1);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].priority, InjectionPriority::Interject);
+        assert_eq!(second[1].priority, InjectionPriority::Steer);
+        assert_eq!(bus.pending_len(), 2);
     }
 
     #[test]

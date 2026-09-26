@@ -5,7 +5,7 @@
 use super::loop_core::Loop;
 use super::types::*;
 
-use super::injection::{Injection, InjectionPriority, InjectionSemantics, SUBAGENT_SOURCE};
+use super::injection::{Injection, InjectionSemantics, SUBAGENT_SOURCE};
 use super::turn_actor::TurnCancellation;
 use qaqh_domain::{
     ConversationCommand, DomainEvent, SubagentTerminalKind, SubagentTerminalNotification,
@@ -93,6 +93,8 @@ impl Loop {
             input_purpose: match purpose {
                 qaqh_domain::ConversationInputPurpose::TriggerTurn => InputPurpose::TriggerTurn,
                 qaqh_domain::ConversationInputPurpose::QueueOnly => InputPurpose::QueueOnly,
+                qaqh_domain::ConversationInputPurpose::Steer => InputPurpose::Steer,
+                qaqh_domain::ConversationInputPurpose::Interject => InputPurpose::Interject,
             },
             content_ref,
             inline_text,
@@ -161,6 +163,8 @@ impl Loop {
             qaqh_domain::InterAgentDelivery::Queue => InterAgentDelivery::Queue,
             qaqh_domain::InterAgentDelivery::Trigger => InterAgentDelivery::Trigger,
             qaqh_domain::InterAgentDelivery::Interrupt => InterAgentDelivery::Interrupt,
+            qaqh_domain::InterAgentDelivery::Steer => InterAgentDelivery::Steer,
+            qaqh_domain::InterAgentDelivery::Interject => InterAgentDelivery::Interject,
         };
         let payload = InterAgentCommunication {
             message_id: MessageId::new(envelope.message_id.clone()),
@@ -244,6 +248,12 @@ impl Loop {
                     Some(qaqh_domain::InterAgentDelivery::Queue) => {
                         qaqh_domain::ConversationInputPurpose::QueueOnly
                     }
+                    Some(qaqh_domain::InterAgentDelivery::Steer) => {
+                        qaqh_domain::ConversationInputPurpose::Steer
+                    }
+                    Some(qaqh_domain::InterAgentDelivery::Interject) => {
+                        qaqh_domain::ConversationInputPurpose::Interject
+                    }
                     Some(qaqh_domain::InterAgentDelivery::Trigger) | None => input_purpose,
                     Some(qaqh_domain::InterAgentDelivery::Interrupt) => {
                         self.emit_operation_failed(
@@ -289,7 +299,12 @@ impl Loop {
 
                 let injection_path = as_system
                     || inter_agent.is_some_and(|envelope| {
-                        envelope.delivery == qaqh_domain::InterAgentDelivery::Queue
+                        matches!(
+                            envelope.delivery,
+                            qaqh_domain::InterAgentDelivery::Queue
+                                | qaqh_domain::InterAgentDelivery::Steer
+                                | qaqh_domain::InterAgentDelivery::Interject
+                        )
                     });
                 if injection_path {
                     if let Err(error) = self.record_input_accepted(
@@ -321,7 +336,7 @@ impl Loop {
                         source: SUBAGENT_SOURCE,
                         role: qaqh_types::Message::ROLE_USER,
                         text,
-                        priority: InjectionPriority::Normal,
+                        priority: super::loop_injection::injection_priority(effective_purpose),
                         semantics: InjectionSemantics::NextTurn,
                     };
                     if let Some(outcome) = self.inject(injection) {
