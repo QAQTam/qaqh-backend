@@ -25,6 +25,9 @@ pub struct QaqhService {
     /// 会话存储句柄（PR-3-1 注入化：daemon main 装配点 init 后注入，
     /// service 内不再触达会话单例的全局访问器）。
     pub(crate) sessions: Arc<qaqh_session::SessionManager>,
+    /// Per-root task board stores, opened lazily.
+    pub(crate) task_stores:
+        Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<qaqh_session::team::TeamStore>>>>>,
 }
 
 impl QaqhService {
@@ -90,6 +93,7 @@ impl QaqhService {
             hub: std::sync::OnceLock::new(),
             v2_hub: std::sync::OnceLock::new(),
             sessions,
+            task_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 

@@ -171,6 +171,120 @@ pub struct ArmSubagentCollectorRequest<'a> {
     pub child_agent_path: &'a str,
 }
 
+/// Task board task projection exposed to tools and the daemon wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskBoardTask {
+    pub task_id: String,
+    pub title: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub claim_epoch: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<TaskBoardArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_ref: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskBoardArtifact {
+    pub content_id: String,
+    pub media_type: String,
+    pub added_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskClaimAction {
+    Claim,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskUpdateAction {
+    AddDependency,
+    AttachArtifact,
+    SetAcceptance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCloseAction {
+    Complete,
+    Close,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskCreateRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub title: &'a str,
+    pub description_ref: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskClaimRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub task_id: &'a str,
+    pub action: TaskClaimAction,
+    pub reason: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskUpdateRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub task_id: &'a str,
+    pub action: TaskUpdateAction,
+    pub depends_on: Option<&'a str>,
+    pub artifact_ref: Option<&'a str>,
+    pub media_type: Option<&'a str>,
+    pub acceptance: Option<&'a [String]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskCloseRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub task_id: &'a str,
+    pub action: TaskCloseAction,
+    pub result_ref: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskListRequest<'a> {
+    pub caller_session_id: &'a str,
+    pub state: Option<&'a str>,
+}
+
+/// In-process task board host. The team aggregate is keyed by the caller's
+/// root session id; implementations must reject cross-tree access.
+pub trait TaskBoardHost: Send + Sync {
+    fn task_create(&self, request: TaskCreateRequest<'_>) -> Result<TaskBoardTask, String>;
+    fn task_claim(&self, request: TaskClaimRequest<'_>) -> Result<TaskBoardTask, String>;
+    fn task_update(&self, request: TaskUpdateRequest<'_>) -> Result<TaskBoardTask, String>;
+    fn task_close(&self, request: TaskCloseRequest<'_>) -> Result<TaskBoardTask, String>;
+    fn task_list(&self, request: TaskListRequest<'_>) -> Result<Vec<TaskBoardTask>, String>;
+}
+
+static TASK_HOST: OnceLock<Arc<dyn TaskBoardHost>> = OnceLock::new();
+
+/// Install the process-wide task board host. Idempotent: the first host wins.
+pub fn install_task_host(host: Arc<dyn TaskBoardHost>) {
+    let _ = TASK_HOST.set(host);
+}
+
+/// Return the installed task board host, if any.
+pub fn task_host() -> Option<Arc<dyn TaskBoardHost>> {
+    TASK_HOST.get().cloned()
+}
+
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker
 /// 线程的 std 线程模型匹配），由 qaqh-runtime 的 `QaqhService` 提供实现。
 pub trait SubagentHost: Send + Sync {
