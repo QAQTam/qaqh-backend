@@ -322,6 +322,12 @@ cargo test --workspace --offline -- --test-threads=1
 - 删除 legacy alias / migration resolver；
 - 清理旧目录与 legacy writer。
 
+已推进：
+
+- runtime 生产路径已不再调用 `generate_seed()` / `generate_unique_seed()`；
+- 无 manager 的 ephemeral session 也使用 canonical UUIDv7 `SessionId`；
+- legacy seed allocator / resolver 仍保留在 `qaqh-session`，供旧会话兼容窗口使用。
+
 ## 5. 关键文件
 
 - `crates/qaqh-session/src/session_fact_v2/agent.rs`
