@@ -104,6 +104,8 @@ pub use qaqh_session::session_fact_v2::InteractionExpiryReason as ClientV2Intera
 /// 快照来自 `GET /ringing/v2/sessions/{seed}/team`（[`Client::team_v2`]），
 /// 之后的增量来自 per-seed 单流的 [`ClientV2Payload::TeamDelta`]。
 pub use qaqh_session::projection::TeamSnapshot as ClientV2TeamSnapshot;
+/// inbox 消息的投递语义（queue / trigger / interrupt / steer / interject）。
+pub use qaqh_session::session_fact_v2::InterAgentDelivery as ClientV2TeamDelivery;
 /// agent residency（loaded / unloaded）。**`unloaded != completed != closed`**。
 pub use qaqh_session::session_fact_v2::TeamAgentResidency as ClientV2TeamAgentResidency;
 /// roster 里一个 agent 的快照：`agent_path` 为主键，`nickname` 只是显示辅助。
