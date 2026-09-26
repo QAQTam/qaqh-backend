@@ -156,3 +156,14 @@ QAQH_CONTENT_PROBE_MODE=permission ./scripts/v2-content-probe.sh ...
 
 身份迁移是 Beta 硬门禁，不属于 alpha3 的 Subagent V2 检查点；不得因此把
 legacy seed 带进新 roster / mailbox / Team projection。
+
+后端冻结验证（`106493c`）：
+
+```text
+cargo fmt --all -- --check                              PASS
+cargo clippy --workspace --all-targets --offline -- -D warnings  PASS
+cargo test --workspace --offline -- --test-threads=1    PASS
+```
+
+新增 V2 工具后，默认 prompt + tool defs 预算从 20k 调整为 22k 字符
+（约 5.5k tokens），仍由 `prompt_and_tool_defs_char_budget` 守住。
