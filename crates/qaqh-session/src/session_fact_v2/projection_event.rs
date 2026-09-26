@@ -418,6 +418,72 @@ pub struct TeamTaskSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamBoardChannel {
+    pub channel_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    pub created_by: AgentPath,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamBoardThread {
+    pub thread_id: String,
+    pub channel_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub created_by: AgentPath,
+    pub created_at_ms: i64,
+    pub post_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamBoardPost {
+    pub post_id: String,
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub author: AgentPath,
+    pub body: String,
+    pub created_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TeamBoardSubscriptionTarget {
+    Channel { channel_id: String },
+    Thread { thread_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamBoardSubscription {
+    pub target: TeamBoardSubscriptionTarget,
+    pub subscriber: AgentPath,
+    pub subscribed: bool,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamBoardSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<SessionId>,
+    pub revision: u64,
+    pub last_fact_seq: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<TeamBoardChannel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub threads: Vec<TeamBoardThread>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posts: Vec<TeamBoardPost>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<TeamBoardSubscription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum TeamDelta {
     AgentJoined {
@@ -454,6 +520,10 @@ pub enum TeamDelta {
     TaskChanged {
         revision: u64,
         task: Box<TeamTaskSnapshot>,
+    },
+    BoardChanged {
+        revision: u64,
+        board: Box<TeamBoardSnapshot>,
     },
 }
 
