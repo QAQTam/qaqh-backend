@@ -23,7 +23,7 @@ use qaqh_session::projection::{
 };
 use qaqh_session::session_fact_v2::{
     Delivery, LogId, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
-    TeamAgentResidency, TeamDelta,
+    TeamAgentResidency, TeamDelta, TeamTaskSnapshot,
 };
 use tokio::sync::broadcast;
 
@@ -86,6 +86,8 @@ struct V2SessionState {
     runtime_residency: HashMap<SessionId, TeamAgentResidency>,
     replaceables: BTreeMap<String, ProjectionEvent>,
     live_tx: broadcast::Sender<V2Envelope>,
+    /// Monotonic revision for ephemeral task board deltas.
+    task_revision: u64,
 }
 
 pub struct V2Subscription {
@@ -227,6 +229,36 @@ impl V2ProjectionHub {
             .apply_runtime_residency(agent_id, residency)
         else {
             return Ok(());
+        };
+        let last_fact_seq = state.last_fact_seq;
+        if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
+            let _ = state.live_tx.send(envelope);
+        }
+        Ok(())
+    }
+
+    /// Broadcast an ephemeral task board delta on the root session's stream.
+    ///
+    /// The task board is a separate canonical aggregate, so its facts do not
+    /// advance the session `last_fact_seq`. Clients recover the full board
+    /// from the daemon team endpoint and apply these deltas afterwards.
+    pub fn publish_task_delta(
+        &self,
+        session_dir: impl AsRef<Path>,
+        seed: &str,
+        task: TeamTaskSnapshot,
+    ) -> Result<(), V2HubError> {
+        let session_dir = session_dir.as_ref();
+        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
+        let session = self.session_for(session_dir, session_id, log_id)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        state.task_revision = state.task_revision.saturating_add(1);
+        let delta = TeamDelta::TaskChanged {
+            revision: state.task_revision,
+            task: Box::new(task),
         };
         let last_fact_seq = state.last_fact_seq;
         if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
@@ -508,6 +540,7 @@ fn load_session_state(
         runtime_residency: HashMap::new(),
         replaceables,
         live_tx,
+        task_revision: 0,
     })
 }
 
@@ -637,7 +670,7 @@ mod tests {
     use qaqh_session::session_fact_v2::{
         AgentPath, EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
         SessionMetadataChanged, SessionMetadataPatch, SubagentSpawned, TeamAgentResidency,
-        TeamDelta, ToolCallId,
+        TeamDelta, TeamTaskSnapshot, ToolCallId,
     };
 
     fn append_two_facts(
@@ -837,6 +870,50 @@ mod tests {
             TeamAgentResidency::Unloaded,
             "runtime residency must not survive daemon restart"
         );
+    }
+
+    #[tokio::test]
+    async fn task_delta_is_published_on_the_session_stream() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let _ = append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-task-delta"));
+        let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+        let task = TeamTaskSnapshot {
+            task_id: "task_01J00000000000000000000000".into(),
+            title: "ship it".into(),
+            state: "open".into(),
+            owner: None,
+            claim_epoch: 0,
+            depends_on: vec![],
+            artifacts: vec![],
+            acceptance: vec![],
+            result_ref: None,
+            created_at_ms: 1_789_830_000_000,
+            updated_at_ms: 1_789_830_000_000,
+        };
+        hub.publish_task_delta(dir.path(), "seed", task.clone())
+            .expect("publish task delta");
+        loop {
+            match subscription.next().await {
+                V2StreamItem::Event(envelope) => {
+                    if let ProjectionPayload::TeamDelta(TeamDelta::TaskChanged {
+                        revision,
+                        task: received,
+                    }) = &envelope.payload
+                    {
+                        assert_eq!(*revision, 1);
+                        assert_eq!(received.task_id, task.task_id);
+                        assert_eq!(envelope.delivery, RingingV2Delivery::Ephemeral);
+                        break;
+                    }
+                }
+                other => panic!("expected task delta, got {other:?}"),
+            }
+        }
     }
 
     #[test]

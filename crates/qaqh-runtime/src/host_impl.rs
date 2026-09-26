@@ -20,6 +20,7 @@ use qaqh_session::canonical::{
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{
     AgentPath, ContentHash, ContentRef as CanonicalContentRef, EventId, LogId, SessionId,
+    TeamTaskArtifact, TeamTaskSnapshot,
 };
 use qaqh_session::team::{
     TaskAcceptanceSet, TaskArtifactAttached, TaskCancelled, TaskClaimed, TaskClosed, TaskCompleted,
@@ -606,6 +607,7 @@ impl TaskBoardHost for QaqhService {
                 }),
             ))
             .map_err(|error| format!("task_create failed: {error}"))?;
+        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -633,6 +635,7 @@ impl TaskBoardHost for QaqhService {
         store
             .append(team_fact(&root, actor, payload))
             .map_err(|error| format!("task_claim failed: {error}"))?;
+        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -681,6 +684,7 @@ impl TaskBoardHost for QaqhService {
         store
             .append(team_fact(&root, actor, payload))
             .map_err(|error| format!("task_update failed: {error}"))?;
+        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -713,6 +717,7 @@ impl TaskBoardHost for QaqhService {
         store
             .append(team_fact(&root, actor, payload))
             .map_err(|error| format!("task_close failed: {error}"))?;
+        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -776,6 +781,37 @@ impl QaqhService {
         let store = Arc::new(std::sync::Mutex::new(store));
         stores.insert(root_session_id, Arc::clone(&store));
         Ok((store, caller_actor))
+    }
+
+    /// Snapshot the caller's root task board for the daemon team endpoint.
+    #[doc(hidden)]
+    pub fn task_board_snapshot(
+        &self,
+        caller_session_id: &str,
+    ) -> Result<qaqh_session::team::TaskBoardSnapshot, String> {
+        let (store, _actor) = self.task_store_for_caller(caller_session_id)?;
+        let store = store.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(store.snapshot())
+    }
+
+    fn publish_task_change(&self, root_session_id: &str, store: &TeamStore, task_id: &str) {
+        let snapshot = store.snapshot();
+        let Some(task) = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.task_id.as_str() == task_id)
+        else {
+            return;
+        };
+        let Some(v2_hub) = self.v2_hub.get() else {
+            return;
+        };
+        let session_dir = self.sessions.session_path_dir(root_session_id);
+        if let Err(error) =
+            v2_hub.publish_task_delta(&session_dir, root_session_id, task_view_to_wire(task))
+        {
+            log::warn!("[team] task delta publish failed for {root_session_id}: {error}");
+        }
     }
 }
 
@@ -859,6 +895,34 @@ fn task_state_name(state: TaskState) -> &'static str {
         TaskState::Completed => "completed",
         TaskState::Closed => "closed",
         TaskState::Cancelled => "cancelled",
+    }
+}
+
+fn task_view_to_wire(task: &qaqh_session::team::TaskView) -> TeamTaskSnapshot {
+    TeamTaskSnapshot {
+        task_id: task.task_id.as_str().to_string(),
+        title: task.title.clone(),
+        state: task_state_name(task.state).to_string(),
+        owner: task.owner.as_ref().map(|owner| owner.agent_path.clone()),
+        claim_epoch: task.claim_epoch,
+        depends_on: task
+            .depends_on
+            .iter()
+            .map(|task_id| task_id.as_str().to_string())
+            .collect(),
+        artifacts: task
+            .artifacts
+            .iter()
+            .map(|artifact| TeamTaskArtifact {
+                content_ref: artifact.artifact_ref.clone(),
+                media_type: artifact.media_type.clone(),
+                added_at_ms: artifact.added_at_ms,
+            })
+            .collect(),
+        acceptance: task.acceptance.clone(),
+        result_ref: task.result_ref.clone(),
+        created_at_ms: task.created_at_ms,
+        updated_at_ms: task.updated_at_ms,
     }
 }
 
