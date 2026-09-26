@@ -101,7 +101,7 @@ impl Loop {
                 self.sync_emitter_seed();
                 self.paced_emitter.emit_domain(DomainEvent::Control(
                     qaqh_domain::ControlEvent::SessionStateChanged {
-                        seed: self.session.agent.session.seed.clone(),
+                        seed: self.session.agent.session.session_id.clone(),
                         state: qaqh_domain::SessionState::Created,
                     },
                 ));

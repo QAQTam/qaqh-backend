@@ -551,7 +551,7 @@ impl TurnEngine {
             Some(s) => s,
             None => return Outcome::Error("No suspended turn to resume".into()),
         };
-        if saved.session_id != ctx.agent.session.seed {
+        if saved.session_id != ctx.agent.session.session_id {
             log::warn!("[TURN] refusing to resume stale turn {}", saved.turn_id);
             return Outcome::Handled;
         }
@@ -575,7 +575,7 @@ impl TurnEngine {
         let stale = self
             .suspended
             .as_ref()
-            .is_some_and(|s| s.session_id != ctx.agent.session.seed);
+            .is_some_and(|s| s.session_id != ctx.agent.session.session_id);
         if !stale {
             return false;
         }
@@ -1307,7 +1307,7 @@ impl TurnEngine {
     ) {
         let mut messages = ctx.agent.build_context();
         dump_request_log(
-            &ctx.agent.session.seed,
+            &ctx.agent.session.session_id,
             ctx.agent.msg.context_revision(),
             ctx.agent.msg.turn_count(),
             ctx.agent.msg.trailing_messages().len(),
@@ -1557,7 +1557,7 @@ impl TurnEngine {
                     content: content.clone(),
                 });
                 self.suspended = Some(TurnState {
-                    session_id: ctx.agent.session.seed.clone(),
+                    session_id: ctx.agent.session.session_id.clone(),
                     turn_id: turn_id.clone(),
                     round_num,
                     usage: last_usage.clone(),

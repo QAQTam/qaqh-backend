@@ -251,7 +251,7 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
         .expect("session dir configured once");
 
     let mut agent = AgentState::init("tool-ledger-test", qaqh_config::Config::default());
-    agent.session.seed = seed.clone();
+    agent.session.session_id = seed.clone();
     agent.ephemeral = false;
     agent.config.permission_level = 4;
     agent.msg = store_with_tool_use(&seed, "call-ledger-1", "ledger_probe");

@@ -206,7 +206,7 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    agent.session.seed = seed.clone();
+    agent.session.session_id = seed.clone();
     agent.ephemeral = true;
     agent.config.permission_level = 4;
     agent.msg = store_with_pending_batch(&seed);
@@ -222,13 +222,14 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
             "shell": "sh",
             "timeout_secs": 30,
         });
-        let admission = qaqh_workspace::authorize_call(&agent.session.seed, id, "exec", &args, 4);
+        let admission =
+            qaqh_workspace::authorize_call(&agent.session.session_id, id, "exec", &args, 4);
         match admission {
             qaqh_workspace::Admission::Authorized(auth) => {
                 admitted.push(qaqh_runtime::agent::types::AdmittedTool {
                     call_id: (*id).to_string(),
                     auth: Box::new(auth),
-                    scope: tool_scope(id, &agent.session.seed),
+                    scope: tool_scope(id, &agent.session.session_id),
                 })
             }
             _ => panic!("call {index} ({id}) must be authorized"),

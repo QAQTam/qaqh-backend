@@ -111,11 +111,11 @@ mod tests {
         let port = RuntimeLifecyclePort::new(liveness);
         let mut agent = AgentState::new(qaqh_config::Config::default());
         agent.ephemeral = true;
-        agent.session.seed = "seed-240".to_string();
+        agent.session.session_id = "seed-240".to_string();
 
         port.create_session_with_seed(&mut agent, &CancelToken::new());
 
-        assert_eq!(agent.session.seed, "seed-240");
+        assert_eq!(agent.session.session_id, "seed-240");
         assert_eq!(agent.msg.turn_count(), 0);
     }
 }

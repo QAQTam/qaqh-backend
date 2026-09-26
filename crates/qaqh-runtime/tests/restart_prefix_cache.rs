@@ -97,7 +97,7 @@ fn create_agent(root: &PathBuf, ws: &str) -> AgentState {
     qaqh_workspace::set_workspace(ws);
     qaqh_runtime::agent::state::lifecycle::create_session(&mut agent);
     assert!(
-        !agent.session.seed.is_empty(),
+        !agent.session.session_id.is_empty(),
         "create session must assign a seed"
     );
     agent
@@ -118,7 +118,7 @@ fn prefix_cache_consistency_across_restarts() {
     // ════ 场景 A：多次重启，无追加 → 上下文逐字节复现 ════
     {
         let mut agent = create_agent(&root, &ws);
-        let seed = agent.session.seed.clone();
+        let seed = agent.session.session_id.clone();
         seed_turn_1(&mut agent);
         // build_context 生成并冻结 [Environment] annotation；
         // flush_meta 把 pending_save 缓冲转为 PersistOp（真实循环中由
@@ -163,7 +163,7 @@ fn prefix_cache_consistency_across_restarts() {
     // ════ 场景 B：重启后追加新回合 → 前缀字节不变 + 仅尾部增长 ════
     {
         let mut agent = create_agent(&root, &ws);
-        let seed = agent.session.seed.clone();
+        let seed = agent.session.session_id.clone();
         seed_turn_1(&mut agent);
         agent.build_context();
         agent
@@ -218,7 +218,7 @@ fn prefix_cache_consistency_across_restarts() {
     // ════ 场景 C：中断恢复（孤儿 tool_use）→ 修复一次，其后稳定 ════
     {
         let mut agent = create_agent(&root, &ws);
-        let seed = agent.session.seed.clone();
+        let seed = agent.session.session_id.clone();
         agent.msg.push_user("run the tool");
         let assistant = Message {
             msg_id: None,

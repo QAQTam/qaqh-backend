@@ -114,7 +114,7 @@ fn migrate_one(dir: &Path, toml_path: &Path) -> Result<String, String> {
 
     // Write meta.json
     let meta = SessionMeta {
-        seed: legacy.seed.clone(),
+        session_id: legacy.seed.clone(),
         created_at: legacy.created_at,
         updated_at: legacy.updated_at,
         model: legacy.model.clone(),
