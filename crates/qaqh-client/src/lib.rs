@@ -71,7 +71,7 @@ pub use v2::{
     ClientV2ResetReason, ClientV2ResourceDelta, ClientV2SessionState, ClientV2StreamKey,
     ClientV2SubagentTerminalStatus, ClientV2Subscription, ClientV2SubscriptionEvent,
     ClientV2TaskBoardSnapshot, ClientV2TeamAgentResidency, ClientV2TeamAgentSnapshot,
-    ClientV2TeamAgentStatus, ClientV2TeamBoardSnapshot, ClientV2TeamDelta,
+    ClientV2TeamAgentStatus, ClientV2TeamBoardSnapshot, ClientV2TeamDelivery, ClientV2TeamDelta,
     ClientV2TeamInboxSummary, ClientV2TeamResponse, ClientV2TeamSnapshot, ClientV2TeamTaskSnapshot,
     ClientV2ToolCallId, ClientV2ToolState, ClientV2TurnId, ClientV2TurnTerminal,
     RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
