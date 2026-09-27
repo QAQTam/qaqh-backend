@@ -542,7 +542,7 @@ impl Client {
         if let Some(prev) = guard.remove(seed) {
             let _ = prev.stop_tx.send(true);
             let _ = prev.status.send_replace(Some(TimelineStatus::Closed {
-                seed: seed.to_string(),
+                session_id: seed.to_string(),
                 reason: "re-activated".into(),
             }));
         }
@@ -565,7 +565,7 @@ impl Client {
         let task = tokio::spawn(async move {
             stream.run(stop_rx, session_stop).await;
             let _ = task_status_tx.send_replace(Some(TimelineStatus::Closed {
-                seed: seed_owned,
+                session_id: seed_owned,
                 reason: "stream ended".into(),
             }));
         });
@@ -618,7 +618,7 @@ impl Client {
         if let Some(handle) = handle {
             let _ = handle.stop_tx.send(true);
             let _ = handle.status.send_replace(Some(TimelineStatus::Closed {
-                seed: seed.to_string(),
+                session_id: seed.to_string(),
                 reason: "deactivated".into(),
             }));
         }
