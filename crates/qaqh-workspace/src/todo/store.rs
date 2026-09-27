@@ -24,17 +24,17 @@ pub(crate) fn todo_path() -> Option<std::path::PathBuf> {
 }
 
 /// Session-aware read: direct path `sessions/{seed}/todo.json` (no thread-local).
-pub(crate) fn todo_path_for(seed: &str) -> std::path::PathBuf {
+pub(crate) fn todo_path_for(session_id: &str) -> std::path::PathBuf {
     qaqh_types::platform::sessions_dir()
-        .join(seed)
+        .join(session_id)
         .join("todo.json")
 }
 
-pub(crate) fn read_store_for(seed: &str) -> Result<TodoStore, String> {
-    if seed.is_empty() {
+pub(crate) fn read_store_for(session_id: &str) -> Result<TodoStore, String> {
+    if session_id.is_empty() {
         return Err("no active session".into());
     }
-    let path = todo_path_for(seed);
+    let path = todo_path_for(session_id);
     if !path.exists() {
         return Ok(TodoStore {
             items: Vec::new(),
@@ -52,9 +52,9 @@ pub(crate) fn read_store_for(seed: &str) -> Result<TodoStore, String> {
 }
 
 /// Session-aware variant: load TodoStore for an explicit seed (no RUNTIME_CTX).
-pub fn load_todo_for(seed: &str) -> Result<TodoStore, String> {
+pub fn load_todo_for(session_id: &str) -> Result<TodoStore, String> {
     let _guard = TODO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    read_store_for(seed)
+    read_store_for(session_id)
 }
 
 /// Public API: load the TodoStore from disk (used by GoalEngine).
@@ -72,14 +72,14 @@ pub fn save_todo(store: &TodoStore) -> Result<(), String> {
 }
 
 /// Session-scoped todo status for the frontend Todo panel.
-pub fn todo_status_value(seed: &str) -> Result<serde_json::Value, String> {
-    if seed.is_empty() {
+pub fn todo_status_value(session_id: &str) -> Result<serde_json::Value, String> {
+    if session_id.is_empty() {
         return Ok(serde_json::Value::Null);
     }
     // Serialise with writer to avoid reading a half-renamed tmp.
     let _guard = TODO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = qaqh_types::platform::sessions_dir()
-        .join(seed)
+        .join(session_id)
         .join("todo.json");
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -124,20 +124,20 @@ pub fn todo_status_value(seed: &str) -> Result<serde_json::Value, String> {
     }))
 }
 
-pub fn todo_status_json(seed: &str) -> Result<String, String> {
-    serde_json::to_string(&todo_status_value(seed)?).map_err(|e| format!("todo: {e}"))
+pub fn todo_status_json(session_id: &str) -> Result<String, String> {
+    serde_json::to_string(&todo_status_value(session_id)?).map_err(|e| format!("todo: {e}"))
 }
 
 /// Direct cancel by session seed — no runtime context needed.
-pub fn todo_cancel_value(seed: &str, id: &str) -> Result<serde_json::Value, String> {
-    if seed.is_empty() {
+pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value, String> {
+    if session_id.is_empty() {
         return Err(json_err_string("INVALID_INPUT", "no active session", ""));
     }
     let _guard = TODO_LOCK
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
     let path = qaqh_types::platform::sessions_dir()
-        .join(seed)
+        .join(session_id)
         .join("todo.json");
     if !path.exists() {
         return Err(json_err_string(
@@ -178,8 +178,8 @@ pub fn todo_cancel_value(seed: &str, id: &str) -> Result<serde_json::Value, Stri
     }))
 }
 
-pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
-    serde_json::to_string(&todo_cancel_value(seed, id)?).map_err(|e| format!("todo: {e}"))
+pub fn todo_cancel_json(session_id: &str, id: &str) -> Result<String, String> {
+    serde_json::to_string(&todo_cancel_value(session_id, id)?).map_err(|e| format!("todo: {e}"))
 }
 
 pub(crate) fn read_store() -> Result<TodoStore, String> {
@@ -228,10 +228,10 @@ pub(crate) fn todo_item_json(item: &TodoItem) -> serde_json::Value {
 }
 
 /// Atomic write: temporary file → rename.
-pub(crate) fn write_store_for(seed: &str, store: &TodoStore) -> Result<(), String> {
+pub(crate) fn write_store_for(session_id: &str, store: &TodoStore) -> Result<(), String> {
     // 注意：本函数不加 TODO_LOCK——工具路径在持锁状态下调用它；
     // 锁由公共入口 load_todo/save_todo 负责（W2），内部调用方须已持锁。
-    let path = todo_path_for(seed);
+    let path = todo_path_for(session_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create todo directory: {e}"))?;
     }
@@ -243,10 +243,10 @@ pub(crate) fn write_store_for(seed: &str, store: &TodoStore) -> Result<(), Strin
 }
 
 pub(crate) fn write_store(store: &TodoStore) -> Result<(), String> {
-    let seed = crate::runtime::context()
+    let session_id = crate::runtime::context()
         .map(|ctx| ctx.active_session)
         .unwrap_or_default();
-    write_store_for(&seed, store)
+    write_store_for(&session_id, store)
 }
 
 pub(crate) fn normalize_current_id(store: &mut TodoStore) {

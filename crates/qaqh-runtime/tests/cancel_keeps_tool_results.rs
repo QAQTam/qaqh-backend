@@ -23,11 +23,11 @@ use qaqh_runtime::agent::turn_lap_test_api::execute_admitted_batch;
 use qaqh_runtime::agent::types::{Emitter, LoopPhase, PendingState, RingContext, StatsCollector};
 use qaqh_types::{ContentBlock, Message};
 
-fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
+fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
     qaqh_workspace::runtime::ToolExecutionScope::capture(
         qaqh_workspace::tool_api::ToolCallContext {
             call_id: call_id.to_string(),
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             workspace_root: std::path::PathBuf::from(qaqh_workspace::current_workspace()),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
@@ -117,8 +117,8 @@ impl Emitter for RecordingEmitter {
 ///
 /// 返回的 store 只含已批准的 assistant step：4 个 tool_use 尚无结果，
 /// 正是 deferred 批执行前的状态。
-fn store_with_pending_batch(seed: &str) -> MessageStore {
-    let mut store = MessageStore::new(seed);
+fn store_with_pending_batch(session_id: &str) -> MessageStore {
+    let mut store = MessageStore::new(session_id);
     store.push_user("run four commands");
     let mut assistant = Message {
         msg_id: None,
@@ -199,17 +199,17 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
     let mut agent = AgentState::init("cancel-keeps-results-test", qaqh_config::Config::default());
     // 每次运行用独立 seed：canonical ledger 按 session 隔离，复用 seed 会让
     // 上一个用例的 intent 泄漏进本次（`seal_unexecuted_as_cancelled` 会据此跳过）。
-    let seed = format!(
+    let session_id = format!(
         "cancel-keeps-results-{label}-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    agent.session.session_id = seed.clone();
+    agent.session.session_id = session_id.clone();
     agent.ephemeral = true;
     agent.config.permission_level = 4;
-    agent.msg = store_with_pending_batch(&seed);
+    agent.msg = store_with_pending_batch(&session_id);
 
     let mut admitted = Vec::new();
     for (index, id) in CALL_IDS.iter().enumerate() {

@@ -61,7 +61,7 @@ impl Default for SkillSessionStateV2 {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMeta {
     // ── Persisted fields ──
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub created_at: u64,
     pub updated_at: u64,
@@ -134,7 +134,7 @@ pub struct SessionMeta {
     // ── Runtime fields (not persisted) ──
     /// If set, this seed is passed as a CLI argument to the agent subprocess for auto-restore on startup.
     #[serde(skip)]
-    pub resume_seed: Option<String>,
+    pub resume_session: Option<String>,
     /// Cumulative tokens consumed across all turns.
     #[serde(skip)]
     pub tokens: u64,
@@ -301,7 +301,7 @@ mod tests {
             title: Some("Bun 引导 daemon".into()),
             cwd: Some("F:\\code\\qaqh".into()),
             context_stats: Some(serde_json::json!({ "tokens": 1 })),
-            resume_seed: Some("skip-me".into()),
+            resume_session: Some("skip-me".into()),
             tokens: 8,
             from_resume: true,
         }
@@ -420,7 +420,7 @@ mod tests {
 
     /// 展示标题口径（G2 一并定死，三端共用）。
     #[test]
-    fn display_title_prefers_title_then_cwd_tail_then_seed() {
+    fn display_title_prefers_title_then_cwd_tail_then_session() {
         let mut meta = SessionMeta {
             session_id: "0123abcd".into(),
             title: Some("Bun 引导 daemon".into()),
@@ -444,15 +444,15 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_serializes_session_id_and_accepts_legacy_seed() {
-        let legacy: SessionMeta = serde_json::from_str(
-            r#"{"seed":"legacy-session","created_at":1,"updated_at":1,"model":"m","message_count":0}"#,
+    fn session_meta_serializes_session_id() {
+        let meta: SessionMeta = serde_json::from_str(
+            r#"{"session_id":"s-1","created_at":1,"updated_at":1,"model":"m","message_count":0}"#,
         )
-        .expect("legacy seed must deserialize");
-        assert_eq!(legacy.session_id, "legacy-session");
+        .expect("session meta must deserialize");
+        assert_eq!(meta.session_id, "s-1");
 
-        let wire = serde_json::to_value(&legacy).expect("serialize");
-        assert_eq!(wire["session_id"], "legacy-session");
+        let wire = serde_json::to_value(&meta).expect("serialize");
+        assert_eq!(wire["session_id"], "s-1");
         assert!(wire.get("seed").is_none(), "seed must not be emitted");
     }
 
@@ -460,7 +460,7 @@ mod tests {
     fn legacy_session_metadata_defaults_to_empty_skill_state_v2() {
         let meta: SessionMeta = serde_json::from_str(
             r#"{
-            "seed":"s","created_at":0,"updated_at":0,"model":"m",
+            "session_id":"s","created_at":0,"updated_at":0,"model":"m",
             "message_count":0,"turn_count":0,"last_summary":"","compact_skip":0,"mode":0
         }"#,
         )
@@ -475,7 +475,7 @@ mod tests {
         // 旧 meta.json 无 tool_mode/custom_tools → 零迁移兼容（standard）。
         let meta: SessionMeta = serde_json::from_str(
             r#"{
-            "seed":"s","created_at":0,"updated_at":0,"model":"m",
+            "session_id":"s","created_at":0,"updated_at":0,"model":"m",
             "message_count":0,"turn_count":0,"last_summary":"","compact_skip":0,"mode":1
         }"#,
         )
@@ -530,7 +530,7 @@ mod tests {
         // 旧 meta.json 无 frozen_annotation → None（零迁移，恢复后重新生成）。
         let legacy: SessionMeta = serde_json::from_str(
             r#"{
-            "seed":"s","created_at":0,"updated_at":0,"model":"m","message_count":0
+            "session_id":"s","created_at":0,"updated_at":0,"model":"m","message_count":0
         }"#,
         )
         .unwrap();

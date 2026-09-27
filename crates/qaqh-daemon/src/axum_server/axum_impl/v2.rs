@@ -155,7 +155,7 @@ pub(crate) async fn handle_renew_v2(State(state): State<AppState>, headers: Head
 pub(crate) async fn handle_bootstrap_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
@@ -163,11 +163,11 @@ pub(crate) async fn handle_bootstrap_v2(
     let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
     };
-    if seed.trim().is_empty() {
+    if session_id.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
-    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
-    let bootstrap = match state.v2_hub.bootstrap(&session_dir, &seed) {
+    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
+    let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             return v2_hub_error_response(error);
@@ -205,7 +205,7 @@ pub(crate) async fn handle_bootstrap_v2(
         })
         .collect();
     let driver = {
-        let driver = canonical_driver_state(&state, &seed);
+        let driver = canonical_driver_state(&state, &session_id);
         let holder = driver.as_ref().and_then(|driver| driver.holder.clone());
         let driver_epoch = driver
             .as_ref()
@@ -216,7 +216,7 @@ pub(crate) async fn handle_bootstrap_v2(
         if holder.is_some() {
             // Observers keep the seat on the reclaim scan list too, so an
             // expired holder is released even if nobody claims afterwards.
-            watch_driver_seat(&state, &seed);
+            watch_driver_seat(&state, &session_id);
         }
         let effective_holder = holder.filter(|holder| holder_is_live(&state, holder));
         Some(RingingV2DriverState {
@@ -281,7 +281,7 @@ pub(crate) async fn handle_bootstrap_v2(
 pub(crate) async fn handle_team_snapshot_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
@@ -289,21 +289,21 @@ pub(crate) async fn handle_team_snapshot_v2(
     if require_v2_lease(&state, &headers).is_none() {
         return lease_required_v2();
     }
-    if seed.trim().is_empty() {
+    if session_id.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
-    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
-    let team = match state.v2_hub.bootstrap(&session_dir, &seed) {
+    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
+    let team = match state.v2_hub.bootstrap(&session_dir, &session_id) {
         Ok(bootstrap) => bootstrap.projections.team,
         Err(error) => return v2_hub_error_response(error),
     };
-    let tasks = match state.service.task_board_snapshot(&seed) {
+    let tasks = match state.service.task_board_snapshot(&session_id) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return api_error_response(StatusCode::BAD_REQUEST, "team_unavailable", &error);
         }
     };
-    let board = match state.service.board_snapshot(&seed) {
+    let board = match state.service.board_snapshot(&session_id) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return api_error_response(StatusCode::BAD_REQUEST, "board_unavailable", &error);
@@ -313,7 +313,7 @@ pub(crate) async fn handle_team_snapshot_v2(
         StatusCode::OK,
         &serde_json::json!({
             "schema": "qaqh.ringing.team/v1",
-            "session_id": seed,
+            "session_id": session_id,
             "team": team,
             "tasks": tasks,
             "board": board,
@@ -336,7 +336,7 @@ pub(crate) async fn handle_team_snapshot_v2(
 pub(crate) async fn handle_pending_approvals_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
@@ -344,11 +344,11 @@ pub(crate) async fn handle_pending_approvals_v2(
     if require_v2_lease(&state, &headers).is_none() {
         return lease_required_v2();
     }
-    if seed.trim().is_empty() {
+    if session_id.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
-    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
-    let bootstrap = match state.v2_hub.bootstrap(&session_dir, &seed) {
+    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
+    let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
         Ok(bootstrap) => bootstrap,
         Err(error) => return v2_hub_error_response(error),
     };
@@ -442,7 +442,7 @@ fn interaction_body_value(state: &AppState, request: &ContentValue) -> Option<se
 pub(crate) async fn handle_events_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
     Query(query): Query<V2EventsQuery>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
@@ -451,15 +451,18 @@ pub(crate) async fn handle_events_v2(
     if require_v2_lease(&state, &headers).is_none() {
         return lease_required_v2();
     }
-    if seed.trim().is_empty() {
+    if session_id.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
     let cursor = query
         .since_cursor
         .as_deref()
         .map(qaqh_ringing::CursorToken::from_opaque);
-    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
-    let mut subscription = match state.v2_hub.subscribe(&session_dir, &seed, cursor.as_ref()) {
+    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
+    let mut subscription = match state
+        .v2_hub
+        .subscribe(&session_dir, &session_id, cursor.as_ref())
+    {
         Ok(subscription) => subscription,
         Err(error) => return v2_hub_error_response(error),
     };
@@ -498,10 +501,14 @@ pub(crate) async fn handle_events_v2(
 /// fact (or no canonical log at all).
 pub(crate) fn canonical_driver_state(
     state: &AppState,
-    seed: &str,
+    session_id: &str,
 ) -> Option<qaqh_session::projection::ControlDriverState> {
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
-    state.v2_hub.driver_state(&session_dir, seed).ok().flatten()
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
+    state
+        .v2_hub
+        .driver_state(&session_dir, session_id)
+        .ok()
+        .flatten()
 }
 
 /// Whether a recorded driver still holds a live daemon lease.
@@ -521,20 +528,20 @@ fn unix_millis() -> u64 {
 }
 
 /// Remember a seed whose seat is worth scanning for lease expiry.
-fn watch_driver_seat(state: &AppState, seed: &str) {
+fn watch_driver_seat(state: &AppState, session_id: &str) {
     state
         .driver_watch
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .insert(seed);
+        .insert(session_id);
 }
 
-fn unwatch_driver_seat(state: &AppState, seed: &str) {
+fn unwatch_driver_seat(state: &AppState, session_id: &str) {
     state
         .driver_watch
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .remove(seed);
+        .remove(session_id);
 }
 
 /// Reclaim driver seats whose holder's lease has expired (spec §9.3 自动移交).
@@ -544,20 +551,20 @@ fn unwatch_driver_seat(state: &AppState, seed: &str) {
 /// seat moved on in the meantime the release is a no-op instead of kicking the
 /// new holder.
 pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
-    let seeds = state
+    let sessions = state
         .driver_watch
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .seeds();
-    for seed in seeds {
-        let Some(driver) = canonical_driver_state(state, &seed) else {
+        .sessions();
+    for session_id in sessions {
+        let Some(driver) = canonical_driver_state(state, &session_id) else {
             // Session gone (or no canonical log): nothing left to scan.
-            unwatch_driver_seat(state, &seed);
+            unwatch_driver_seat(state, &session_id);
             continue;
         };
         let Some(holder) = driver.holder.clone() else {
             // Seat already vacant: stop scanning this seed.
-            unwatch_driver_seat(state, &seed);
+            unwatch_driver_seat(state, &session_id);
             continue;
         };
         if holder_is_live(state, &holder) {
@@ -568,12 +575,12 @@ pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
             .driver_watch
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .reclaim_due(&seed, now_ms)
+            .reclaim_due(&session_id, now_ms)
         {
             continue;
         }
         let envelope = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-            seed.as_str(),
+            session_id.as_str(),
             qaqh_session::canonical::generate_ulid(),
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::DriverRelease {
                 client_session_id: holder,
@@ -584,18 +591,18 @@ pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
             .driver_watch
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .note_reclaim_dispatch(&seed, now_ms);
-        match state.service.send_ringing_command(&seed, &envelope) {
+            .note_reclaim_dispatch(&session_id, now_ms);
+        match state.service.send_ringing_command(&session_id, &envelope) {
             Ok(()) => log::info!(
-                "[ringing-v2] reclaiming driver seat for {seed}: holder lease expired at epoch {}",
+                "[ringing-v2] reclaiming driver seat for {session_id}: holder lease expired at epoch {}",
                 driver.driver_epoch
             ),
             Err(error) => {
                 // The session cannot be reached at all (deleted meta, spawn
                 // failure). Retrying every tick would only spam the log; the
                 // seed is re-registered on the next claim/bootstrap touch.
-                log::warn!("[ringing-v2] driver seat reclaim dropped for {seed}: {error}");
-                unwatch_driver_seat(state, &seed);
+                log::warn!("[ringing-v2] driver seat reclaim dropped for {session_id}: {error}");
+                unwatch_driver_seat(state, &session_id);
             }
         }
     }
@@ -610,7 +617,7 @@ pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
 async fn forward_driver_command(
     state: &AppState,
     headers: &HeaderMap,
-    seed: &str,
+    session_id: &str,
     caller: &str,
     command: qaqh_domain::ControlCommand,
 ) -> Response {
@@ -626,7 +633,7 @@ async fn forward_driver_command(
         qaqh_ringing::RingingCommand::Control(command),
     )
     .with_client_session_id(caller)
-    .with_seed(seed);
+    .with_session(session_id);
     let body = match serde_json::to_vec(&envelope) {
         Ok(body) => body,
         Err(error) => {
@@ -649,7 +656,7 @@ async fn forward_driver_command(
 pub(crate) async fn handle_driver_claim_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
@@ -657,11 +664,11 @@ pub(crate) async fn handle_driver_claim_v2(
     let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
     };
-    if seed.trim().is_empty() {
+    if session_id.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
-    watch_driver_seat(&state, &seed);
-    let current = canonical_driver_state(&state, &seed);
+    watch_driver_seat(&state, &session_id);
+    let current = canonical_driver_state(&state, &session_id);
     let holder = current.as_ref().and_then(|driver| driver.holder.clone());
     let driver_epoch = current
         .as_ref()
@@ -698,7 +705,7 @@ pub(crate) async fn handle_driver_claim_v2(
     let dispatch = forward_driver_command(
         &state,
         &headers,
-        &seed,
+        &session_id,
         &caller,
         qaqh_domain::ControlCommand::DriverClaim {
             client_session_id: caller.clone(),
@@ -724,7 +731,7 @@ pub(crate) async fn handle_driver_claim_v2(
 pub(crate) async fn handle_driver_release_v2(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
@@ -732,10 +739,10 @@ pub(crate) async fn handle_driver_release_v2(
     let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
     };
-    if seed.trim().is_empty() {
+    if session_id.trim().is_empty() {
         return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
     }
-    let current = canonical_driver_state(&state, &seed);
+    let current = canonical_driver_state(&state, &session_id);
     let holder = current.as_ref().and_then(|driver| driver.holder.clone());
     let driver_epoch = current
         .as_ref()
@@ -755,7 +762,7 @@ pub(crate) async fn handle_driver_release_v2(
     let dispatch = forward_driver_command(
         &state,
         &headers,
-        &seed,
+        &session_id,
         &caller,
         qaqh_domain::ControlCommand::DriverRelease {
             client_session_id: caller.clone(),
@@ -810,21 +817,21 @@ fn driver_gated(command: &qaqh_ringing::RingingCommand) -> bool {
 fn driver_admission(
     state: &AppState,
     headers: &HeaderMap,
-    seed: &str,
+    session_id: &str,
     command: &qaqh_ringing::RingingCommand,
     driver_epoch: Option<u64>,
 ) -> Option<RingingV2CommandAck> {
     if !driver_gated(command) {
         return None;
     }
-    let session_id = require_v2_lease(state, headers)?;
-    let driver = canonical_driver_state(state, seed)?;
+    let client_session_id = require_v2_lease(state, headers)?;
+    let driver = canonical_driver_state(state, session_id)?;
     let holder = driver.holder?;
     if !holder_is_live(state, &holder) {
         return None;
     }
     let epoch = driver.driver_epoch;
-    if holder != session_id {
+    if holder != client_session_id {
         return Some(RingingV2CommandAck {
             command_id: String::new(),
             status: RingingCommandAckStatus::Rejected,
@@ -933,8 +940,8 @@ pub(crate) async fn handle_command_v2(
     // with the winning result instead of dispatching a command the worker can
     // only reject with a bare `interaction_already_resolved`.
     if require_v2_lease(&state, &headers).is_some()
-        && let Some(seed) = envelope.session_id.as_deref()
-        && let Some(existing) = resolved_interaction_existing(&state, seed, &envelope.command)
+        && let Some(session_id) = envelope.session_id.as_deref()
+        && let Some(existing) = resolved_interaction_existing(&state, session_id, &envelope.command)
     {
         return json_response(
             StatusCode::OK,
@@ -948,11 +955,11 @@ pub(crate) async fn handle_command_v2(
             },
         );
     }
-    if let Some(seed) = envelope.session_id.as_deref()
+    if let Some(session_id) = envelope.session_id.as_deref()
         && let Some(mut rejection) = driver_admission(
             &state,
             &headers,
-            seed,
+            session_id,
             &envelope.command,
             envelope.driver_epoch,
         )
@@ -964,16 +971,16 @@ pub(crate) async fn handle_command_v2(
     // never trusted, so a direct `driver_claim` submission cannot claim a seat
     // on behalf of another lease.
     if let Some(caller) = require_v2_lease(&state, &headers) {
-        let seed = envelope.session_id.clone();
+        let session_id = envelope.session_id.clone();
         match &mut envelope.command {
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::DriverClaim {
                 client_session_id,
                 stale_holder,
             }) => {
                 *client_session_id = caller;
-                *stale_holder = seed
+                *stale_holder = session_id
                     .as_deref()
-                    .and_then(|seed| canonical_driver_state(&state, seed))
+                    .and_then(|session_id| canonical_driver_state(&state, session_id))
                     .and_then(|driver| driver.holder)
                     .filter(|holder| !holder_is_live(&state, holder));
             }
@@ -982,9 +989,9 @@ pub(crate) async fn handle_command_v2(
                 expected_epoch,
             }) => {
                 *client_session_id = caller;
-                *expected_epoch = seed
+                *expected_epoch = session_id
                     .as_deref()
-                    .and_then(|seed| canonical_driver_state(&state, seed))
+                    .and_then(|session_id| canonical_driver_state(&state, session_id))
                     .map(|driver| driver.driver_epoch);
             }
             _ => {}
@@ -1043,12 +1050,15 @@ fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<Interact
 /// command falls through to the worker's existing rejection path.
 fn resolved_interaction_existing(
     state: &AppState,
-    seed: &str,
+    session_id: &str,
     command: &qaqh_ringing::RingingCommand,
 ) -> Option<RingingV2ExistingResult> {
     let target = interaction_target(command)?;
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
-    let interactions = state.v2_hub.control_interactions(&session_dir, seed).ok()?;
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
+    let interactions = state
+        .v2_hub
+        .control_interactions(&session_dir, session_id)
+        .ok()?;
     let interaction = match target {
         InteractionTarget::InteractionId(id) => interactions
             .iter()

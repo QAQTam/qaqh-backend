@@ -363,9 +363,9 @@ fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
                 truncated: *truncated,
                 interleaved: *interleaved,
             }),
-            ToolBody::Subagent { name, seed } => Some(ToolResultDisplayBody::Subagent {
+            ToolBody::Subagent { name, session_id } => Some(ToolResultDisplayBody::Subagent {
                 name: name.clone(),
-                seed: seed.clone(),
+                session_id: session_id.clone(),
             }),
         },
         outcome: display.outcome.as_ref().map(to_wire_outcome),
@@ -450,9 +450,9 @@ pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
                 truncated: *truncated,
                 interleaved: *interleaved,
             },
-            Some(ToolResultDisplayBody::Subagent { name, seed }) => ToolBody::Subagent {
+            Some(ToolResultDisplayBody::Subagent { name, session_id }) => ToolBody::Subagent {
                 name: name.clone(),
-                seed: seed.clone(),
+                session_id: session_id.clone(),
             },
             Some(ToolResultDisplayBody::Unknown) => ToolBody::None,
         },

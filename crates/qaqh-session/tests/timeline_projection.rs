@@ -42,8 +42,8 @@ fn call_id() -> ToolCallId {
     ToolCallId::new("call_01J00000000000000000000000")
 }
 
-fn content_ref(seed: u8) -> ContentRef {
-    ContentRef::new(ContentHash::new(format!("sha256:{seed:064x}")))
+fn content_ref(session_id: u8) -> ContentRef {
+    ContentRef::new(ContentHash::new(format!("sha256:{session_id:064x}")))
 }
 
 fn recovery_ref() -> RecoveryRef {

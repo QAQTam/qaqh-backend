@@ -137,7 +137,7 @@ impl Turn {
 
 #[allow(clippy::type_complexity)]
 pub struct MessageStore {
-    seed: String,
+    session_id: String,
     system_messages: Vec<Message>,
     /// Trailing injections (persisted): subagent reports, skills envelopes.
     /// Written exactly once at arrival; never re-injected, never removed while
@@ -199,7 +199,7 @@ pub struct MessageStore {
 impl std::fmt::Debug for MessageStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessageStore")
-            .field("seed", &self.seed)
+            .field("seed", &self.session_id)
             .field("turns", &self.turns.len())
             .field("cancelled", &self.cancelled)
             .field("compact_skip", &self.compact_skip)
@@ -215,7 +215,7 @@ impl std::fmt::Debug for MessageStore {
 impl Clone for MessageStore {
     fn clone(&self) -> Self {
         Self {
-            seed: self.seed.clone(),
+            session_id: self.session_id.clone(),
             system_messages: self.system_messages.clone(),
             trailing_messages: self.trailing_messages.clone(),
             deferred_trailing: Vec::new(),
@@ -238,9 +238,9 @@ impl Clone for MessageStore {
 }
 
 impl MessageStore {
-    pub fn new(seed: &str) -> Self {
+    pub fn new(session_id: &str) -> Self {
         Self {
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             system_messages: Vec::new(),
             trailing_messages: Vec::new(),
             deferred_trailing: Vec::new(),
@@ -262,14 +262,14 @@ impl MessageStore {
     }
 
     /// Create a MessageStore that never persists to disk (subagent / disposable worker).
-    pub fn new_ephemeral(seed: &str) -> Self {
-        let mut s = Self::new(seed);
+    pub fn new_ephemeral(session_id: &str) -> Self {
+        let mut s = Self::new(session_id);
         s.ephemeral = true;
         s
     }
 
-    pub fn seed(&self) -> &str {
-        &self.seed
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub fn context_revision(&self) -> u64 {
@@ -315,7 +315,7 @@ impl MessageStore {
     /// injected session manager in enqueue order (byte-identical to the old
     /// synchronous write order).
     pub fn flush_meta(&mut self, model: &str, effort: &str) {
-        if self.seed.is_empty() || self.ephemeral {
+        if self.session_id.is_empty() || self.ephemeral {
             return;
         }
         // BUG-2026-09-13-04：记住最近一次 flush 的身份字段，供后续防御性
@@ -326,7 +326,7 @@ impl MessageStore {
         if !self.pending_save.is_empty() {
             let batch = std::mem::take(&mut self.pending_save);
             ops.push(PersistOp::Append {
-                seed: self.seed.clone(),
+                session_id: self.session_id.clone(),
                 messages: batch,
                 model: model.to_string(),
                 effort: Some(effort.to_string()),
@@ -336,7 +336,7 @@ impl MessageStore {
             });
         } else {
             ops.push(PersistOp::UpdateMeta {
-                seed: self.seed.clone(),
+                session_id: self.session_id.clone(),
                 model: model.to_string(),
                 effort: Some(effort.to_string()),
                 compact_skip: self.persisted_compact_skip(),
@@ -360,11 +360,17 @@ impl MessageStore {
                     _ => continue,
                 }
                 if let Err(error) = wal.log_op(op) {
-                    log::error!("MessageStore: WAL log_op failed for {}: {error}", self.seed);
+                    log::error!(
+                        "MessageStore: WAL log_op failed for {}: {error}",
+                        self.session_id
+                    );
                 }
             }
             if logged_message_op && let Err(error) = wal.sync() {
-                log::error!("MessageStore: WAL sync failed for {}: {error}", self.seed);
+                log::error!(
+                    "MessageStore: WAL sync failed for {}: {error}",
+                    self.session_id
+                );
             }
         }
         self.pending_persist.extend(ops);
@@ -380,7 +386,10 @@ impl MessageStore {
         match crate::wal::WalWriter::open(session_dir) {
             Ok(writer) => self.wal = Some(writer),
             Err(error) => {
-                log::error!("MessageStore: WAL open failed for {}: {error}", self.seed)
+                log::error!(
+                    "MessageStore: WAL open failed for {}: {error}",
+                    self.session_id
+                )
             }
         }
     }
@@ -394,7 +403,7 @@ impl MessageStore {
         {
             log::error!(
                 "MessageStore: WAL checkpoint failed for {}: {error}",
-                self.seed
+                self.session_id
             );
         }
     }
@@ -746,7 +755,7 @@ impl MessageStore {
                     "[store] push_image_to_last_user: user msg already flushed; queuing SaveFull rewrite"
                 );
                 self.pending_persist.push(PersistOp::SaveFull {
-                    seed: self.seed.clone(),
+                    session_id: self.session_id.clone(),
                     messages: self.to_vec(),
                     model: self.last_flush_model.0.clone(),
                     effort: self.last_flush_model.1.clone(),
@@ -1210,7 +1219,7 @@ impl MessageStore {
     /// No-op if the session seed has not been initialized yet. Enqueues a
     /// [`PersistOp`] for host-side execution (see [`Self::flush_meta`]).
     pub fn snapshot_full(&mut self, model: &str, effort: &str) {
-        if self.seed.is_empty() || self.ephemeral {
+        if self.session_id.is_empty() || self.ephemeral {
             return;
         }
         let msgs = self.to_vec();
@@ -1227,7 +1236,7 @@ impl MessageStore {
         self.compact_skip = 0;
         self.compact_covered_through_msg_id = compact_covered_through_msg_id;
         self.pending_persist.push(PersistOp::SaveFull {
-            seed: self.seed.clone(),
+            session_id: self.session_id.clone(),
             messages: msgs,
             model: model.to_string(),
             effort: Some(effort.to_string()),
@@ -1247,8 +1256,12 @@ impl MessageStore {
 
     /// Reconstruct the internal turn/step structure by replaying saved messages
     /// through `push_user` / `push_assistant` / `push_tool_result`.
-    pub fn from_messages(seed: &str, msgs: &[Message], compact_skip: usize) -> (Self, Vec<String>) {
-        let mut store = Self::new(seed);
+    pub fn from_messages(
+        session_id: &str,
+        msgs: &[Message],
+        compact_skip: usize,
+    ) -> (Self, Vec<String>) {
+        let mut store = Self::new(session_id);
         store.compact_skip = compact_skip;
         store.replaying = true;
         let mut repairs = Vec::new();

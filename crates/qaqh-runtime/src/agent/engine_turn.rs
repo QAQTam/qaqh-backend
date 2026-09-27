@@ -53,7 +53,7 @@ pub enum ResumeReason {
 /// "落盘 ≠ 传输"分叉点（例如 trailing 注入已持久化但模型请求未携带）。
 /// 默认关闭，无任何正常路径开销。
 fn dump_request_log(
-    seed: &str,
+    session_id: &str,
     rev: u64,
     turns: usize,
     trailing: usize,
@@ -67,10 +67,12 @@ fn dump_request_log(
     }) {
         return;
     }
-    if seed.is_empty() {
+    if session_id.is_empty() {
         return;
     }
-    let dir = qaqh_types::platform::data_dir().join("sessions").join(seed);
+    let dir = qaqh_types::platform::data_dir()
+        .join("sessions")
+        .join(session_id);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }

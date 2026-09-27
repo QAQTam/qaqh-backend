@@ -145,17 +145,17 @@ fn next_command_id() -> u64 {
     NEXT.fetch_add(1, Ordering::SeqCst)
 }
 
-fn send_cmd(w: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
-    send_cmd_with_id(w, seed, &format!("c{}", next_command_id()), command);
+fn send_cmd(w: &mut os_pipe::PipeWriter, session_id: &str, command: RingingCommand) {
+    send_cmd_with_id(w, session_id, &format!("c{}", next_command_id()), command);
 }
 
 fn send_cmd_with_id(
     w: &mut os_pipe::PipeWriter,
-    seed: &str,
+    session_id: &str,
     command_id: &str,
     command: RingingCommand,
 ) {
-    let env = RingingWorkerCommandEnvelope::new(seed, command_id, command);
+    let env = RingingWorkerCommandEnvelope::new(session_id, command_id, command);
     writeln!(
         w,
         "{}",
@@ -174,9 +174,9 @@ fn cmd_session_create() -> RingingCommand {
     })
 }
 
-fn cmd_session_resume(seed: &str) -> RingingCommand {
+fn cmd_session_resume(session_id: &str) -> RingingCommand {
     RingingCommand::Control(ControlCommand::SessionResume {
-        session_id: seed.into(),
+        session_id: session_id.into(),
     })
 }
 
@@ -264,7 +264,7 @@ fn create_session_emits_session_state() {
 
     let drv = thread::spawn(move || {
         send_cmd(&mut iw, "", cmd_session_create());
-        let seed = match expect(&rx, Duration::from_secs(10), |e| {
+        let session_id = match expect(&rx, Duration::from_secs(10), |e| {
             matches!(
                 e,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -278,8 +278,8 @@ fn create_session_emits_session_state() {
             }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
-        assert!(!seed.is_empty());
-        send_cmd(&mut iw, &seed, cmd_session_shutdown());
+        assert!(!session_id.is_empty());
+        send_cmd(&mut iw, &session_id, cmd_session_shutdown());
     });
     lp.run();
     drv.join().unwrap();
@@ -314,7 +314,7 @@ fn send_message_triggers_turn_lifecycle() {
     let drv = thread::spawn(move || {
         // Step 1: create session
         send_cmd(&mut iw, "", cmd_session_create());
-        let seed = match expect(&rx, Duration::from_secs(10), |e| {
+        let session_id = match expect(&rx, Duration::from_secs(10), |e| {
             matches!(
                 e,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -330,7 +330,7 @@ fn send_message_triggers_turn_lifecycle() {
         };
 
         // Step 2: send a user message (this is what the frontend does)
-        send_cmd(&mut iw, &seed, cmd_user_input("Hi!"));
+        send_cmd(&mut iw, &session_id, cmd_user_input("Hi!"));
 
         // Step 3: verify the full turn lifecycle
         expect(&rx, Duration::from_secs(15), |e| {
@@ -361,7 +361,7 @@ fn send_message_triggers_turn_lifecycle() {
             )
         });
 
-        send_cmd(&mut iw, &seed, cmd_session_shutdown());
+        send_cmd(&mut iw, &session_id, cmd_session_shutdown());
     });
     lp.run();
     drv.join().unwrap();
@@ -416,7 +416,7 @@ fn system_injection_lands_inside_running_turn() {
 
     let drv = thread::spawn(move || {
         send_cmd(&mut iw, "", cmd_session_create());
-        let seed = match expect(&rx, Duration::from_secs(10), |e| {
+        let session_id = match expect(&rx, Duration::from_secs(10), |e| {
             matches!(
                 e,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -431,7 +431,7 @@ fn system_injection_lands_inside_running_turn() {
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
 
-        send_cmd(&mut iw, &seed, cmd_user_input("Run the probe tool"));
+        send_cmd(&mut iw, &session_id, cmd_user_input("Run the probe tool"));
         expect(&rx, Duration::from_secs(15), |e| {
             matches!(
                 e,
@@ -443,20 +443,20 @@ fn system_injection_lands_inside_running_turn() {
         //    工具执行完的 lap 边界被 drain_pending_injections 吸收 ──
         send_cmd_with_id(
             &mut iw,
-            &seed,
+            &session_id,
             "subagent-probe-1",
             cmd_system_inject("[SUBAGENT 'probe' COMPLETED]\n\nprobe answer"),
         );
         // Same command_id with different text must be ignored by the bus.
         send_cmd_with_id(
             &mut iw,
-            &seed,
+            &session_id,
             "subagent-probe-1",
             cmd_system_inject("[SUBAGENT 'probe' COMPLETED]\n\nduplicate answer"),
         );
         send_cmd_with_id(
             &mut iw,
-            &seed,
+            &session_id,
             "subagent-probe-2",
             cmd_system_inject("[SUBAGENT 'probe-2' COMPLETED]\n\nsecond answer"),
         );
@@ -503,7 +503,7 @@ fn system_injection_lands_inside_running_turn() {
             bodies[1]
         );
 
-        send_cmd(&mut iw, &seed, cmd_session_shutdown());
+        send_cmd(&mut iw, &session_id, cmd_session_shutdown());
     });
     lp.run();
     drv.join().unwrap();
@@ -535,7 +535,7 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
 
     let drv = thread::spawn(move || {
         send_cmd(&mut iw, "", cmd_session_create());
-        let seed = match expect(&rx, Duration::from_secs(10), |e| {
+        let session_id = match expect(&rx, Duration::from_secs(10), |e| {
             matches!(
                 e,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -552,8 +552,8 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
 
         // Session switch + 紧接的 Ringing send：切换完成后 send 必须到达 provider
         // （Ringing 命令经 deferred 队列保留，不丢）。
-        send_cmd(&mut iw, &seed, cmd_session_resume(&seed));
-        send_cmd(&mut iw, &seed, cmd_user_input("Hi after resume"));
+        send_cmd(&mut iw, &session_id, cmd_session_resume(&session_id));
+        send_cmd(&mut iw, &session_id, cmd_user_input("Hi after resume"));
 
         let deadline = Instant::now() + Duration::from_secs(15);
         while mock.requests.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
@@ -564,7 +564,7 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
             1,
             "queued send must reach the provider"
         );
-        send_cmd(&mut iw, &seed, cmd_session_shutdown());
+        send_cmd(&mut iw, &session_id, cmd_session_shutdown());
     });
     lp.run();
     drv.join().unwrap();

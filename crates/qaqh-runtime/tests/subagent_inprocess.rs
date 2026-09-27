@@ -65,7 +65,7 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let _root = init_env("subagent-inprocess-test");
     let process_tools = qaqh_workspace::runtime::process_all_tool_names();
 
-    let seed = format!("sub-inproc-{}", std::process::id());
+    let session_id = format!("sub-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-inprocess-test"));
     let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -80,9 +80,12 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     registry.attach_ringing(hub);
 
     registry
-        .spawn_subagent(&seed, &[], None, None, None)
+        .spawn_subagent(&session_id, &[], None, None, None)
         .expect("spawn in-process subagent");
-    assert!(registry.is_running(&seed), "registry must track the actor");
+    assert!(
+        registry.is_running(&session_id),
+        "registry must track the actor"
+    );
 
     // The actor emits SessionStateChanged(Created) through the same hub path as
     // a process worker's stdout reader. Its private ToolManager is visible to
@@ -90,7 +93,7 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == session_id => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..
@@ -122,15 +125,15 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     // thread-local state), not queue behind a process-wide serialization lock.
     // shutdown_all must signal every instance before joining any of them, or
     // this test hangs.
-    let queued_seed = format!("sub-concurrent-{}", std::process::id());
+    let queued_session = format!("sub-concurrent-{}", std::process::id());
     registry
-        .spawn_subagent(&queued_seed, &[], None, None, None)
+        .spawn_subagent(&queued_session, &[], None, None, None)
         .expect("spawn concurrent in-process subagent");
-    assert!(registry.is_running(&queued_seed));
+    assert!(registry.is_running(&queued_session));
     // Both actors alive at once proves concurrency (previously the second
     // actor blocked on SUBAGENT_ACTOR_SERIAL until the first exited).
     assert!(
-        registry.is_running(&seed) && registry.is_running(&queued_seed),
+        registry.is_running(&session_id) && registry.is_running(&queued_session),
         "concurrent subagents must both be running"
     );
 
@@ -142,7 +145,7 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let mut saw_second_created = false;
     while Instant::now() < second_deadline {
         match event_rx.recv_timeout(second_deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == queued_seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == queued_session => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..
@@ -162,8 +165,8 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     );
 
     registry.shutdown_all();
-    assert!(!registry.is_running(&seed));
-    assert!(!registry.is_running(&queued_seed));
+    assert!(!registry.is_running(&session_id));
+    assert!(!registry.is_running(&queued_session));
 }
 
 #[test]
@@ -203,24 +206,24 @@ fn spawn_subagent_does_not_go_through_process_spawn() {
 fn spawn_subagent_registers_liveness() {
     let _test_lock = test_guard();
     let _root = init_env("subagent-liveness-test");
-    let seed = format!("sub-live-{}", std::process::id());
+    let session_id = format!("sub-live-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-liveness-test"));
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(Arc::clone(&hub));
 
     registry
-        .spawn_subagent(&seed, &[], None, None, None)
+        .spawn_subagent(&session_id, &[], None, None, None)
         .expect("spawn in-process subagent");
 
     // 构造可观察的「无终态 running 状态」：一个已开但未收尾的 turn。
     hub.publish(
-        &seed,
+        &session_id,
         DomainEvent::Conversation(ConversationEvent::TurnStarted {
             turn_id: "t1".into(),
             user_text: "hello".into(),
         }),
     );
-    let before = hub.snapshot(RingingChannel::Conversation, &seed);
+    let before = hub.snapshot(RingingChannel::Conversation, &session_id);
     assert_eq!(
         before.state.get("active_turn").and_then(|v| v.as_str()),
         Some("t1"),
@@ -229,11 +232,11 @@ fn spawn_subagent_registers_liveness() {
 
     // 活 worker 在册 → bootstrap 收尾（force=false）必须整体跳过。
     assert!(
-        !hub.seal_orphan_channel_state(&seed, false),
+        !hub.seal_orphan_channel_state(&session_id, false),
         "活 worker 的 seed 不得被 bootstrap 收尾（本 seed 必须已在 live_workers）"
     );
 
-    let after = hub.snapshot(RingingChannel::Conversation, &seed);
+    let after = hub.snapshot(RingingChannel::Conversation, &session_id);
     assert_eq!(
         after.state.get("active_turn").and_then(|v| v.as_str()),
         Some("t1"),
@@ -570,21 +573,21 @@ fn parent_idle_unload_cancels_and_joins_child_tree() {
 fn childless_close_remains_working_and_idempotent() {
     let _test_lock = test_guard();
     let _root = init_env("subagent-childless-close-test");
-    let seed = format!("sub-childless-{}", std::process::id());
+    let session_id = format!("sub-childless-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-childless-close-test"));
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
 
     qaqh_workspace::runtime::clear_context();
     registry
-        .spawn_subagent(&seed, &[], None, None, None)
+        .spawn_subagent(&session_id, &[], None, None, None)
         .expect("spawn childless subagent");
-    assert!(registry.is_running(&seed));
+    assert!(registry.is_running(&session_id));
 
-    registry.close(&seed);
-    assert!(!registry.is_running(&seed));
+    registry.close(&session_id);
+    assert!(!registry.is_running(&session_id));
 
-    registry.close(&seed);
+    registry.close(&session_id);
 }
 
 /// P2-7：spawn 必须先取得 durable reservation，成功后提交。

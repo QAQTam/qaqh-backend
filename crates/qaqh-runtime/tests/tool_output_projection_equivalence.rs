@@ -19,9 +19,9 @@ fn isolate_data_root() -> tempfile::TempDir {
 #[test]
 fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
     let _home = isolate_data_root();
-    let seed = "typed-output-equivalence";
-    qaqh_workspace::runtime::init_tools(seed, &[], vec![]);
-    qaqh_workspace::runtime::set_context(seed, 1);
+    let session_id = "typed-output-equivalence";
+    qaqh_workspace::runtime::init_tools(session_id, &[], vec![]);
+    qaqh_workspace::runtime::set_context(session_id, 1);
 
     let args = json!({
         "items": [
@@ -29,7 +29,7 @@ fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
         ]
     });
     let ctx = qaqh_workspace::runtime::ToolCtx {
-        session_id: seed.into(),
+        session_id: session_id.into(),
         permission_level: 1,
         mode: 0,
         workspace_root: None,

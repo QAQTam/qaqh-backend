@@ -12,31 +12,31 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use crate::agent::{ActorKind, SubagentSpawnSpec};
 use crate::{RingingHub, SessionActivityTracker};
 
-fn short_seed(seed: &str) -> String {
-    seed.chars().take(8).collect()
+fn short_session(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
 }
 
 /// Channel-side Ringing event consumer for an in-process actor.
 pub(crate) fn run_inprocess_event_reader(
     event_rx: Receiver<crate::agent::types::WriterEvent>,
-    seed: String,
+    session_id: String,
     generation: u64,
     activity: SessionActivityTracker,
     hub: Option<Arc<RingingHub>>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for event in event_rx {
-            publish_worker_event(hub.as_deref(), &activity, &seed, generation, event);
+            publish_worker_event(hub.as_deref(), &activity, &session_id, generation, event);
         }
     }));
     if let Err(panic) = result {
         log::error!(
             "[AGENT:{}] in-process event reader panicked: {:?}",
-            short_seed(&seed),
+            short_session(&session_id),
             panic
         );
     }
-    if let Some(update) = activity.disconnect(&seed, generation) {
+    if let Some(update) = activity.disconnect(&session_id, generation) {
         crate::activity::publish_activity(hub.as_deref(), &update);
     }
 }
@@ -44,7 +44,7 @@ pub(crate) fn run_inprocess_event_reader(
 fn publish_worker_event(
     hub: Option<&RingingHub>,
     activity: &SessionActivityTracker,
-    seed: &str,
+    session_id: &str,
     generation: u64,
     event: crate::agent::types::WriterEvent,
 ) {
@@ -69,7 +69,7 @@ fn publish_worker_event(
                 env.causation_id.as_deref(),
             );
             if let Some(observe) = crate::activity::domain_activity_observe(&domain)
-                && let Some(activity) = activity.observe(seed, generation, &observe)
+                && let Some(activity) = activity.observe(session_id, generation, &observe)
             {
                 crate::activity::publish_activity(Some(hub), &activity);
             }
@@ -84,7 +84,7 @@ fn publish_worker_event(
 /// itself live behind [`crate::agent::spawn_agent`] (PR-2-3).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_actor(
-    seed: String,
+    session_id: String,
     kind: ActorKind,
     cmd_rx: Receiver<crate::agent::types::WorkerCommand>,
     event_tx: SyncSender<crate::agent::types::WriterEvent>,
@@ -97,14 +97,14 @@ pub(crate) fn run_actor(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Per-actor state is thread-local in qaqh-workspace, so actors no
         // longer need a process-wide serialization lock to run concurrently.
-        qaqh_workspace::set_actor_context("", &seed);
+        qaqh_workspace::set_actor_context("", &session_id);
 
         if is_subagent {
             qaqh_workspace::authorization::set_subagent_sandbox(true);
         }
 
         crate::agent::spawn_agent(
-            &seed,
+            &session_id,
             kind,
             cmd_rx,
             event_tx,
@@ -116,21 +116,25 @@ pub(crate) fn run_actor(
 
         qaqh_workspace::clear_actor_context();
         cleanup_actor_state(is_subagent);
-        log::info!("[ACTOR] in-process agent {seed} exited");
+        log::info!("[ACTOR] in-process agent {session_id} exited");
     }));
 
     if let Err(panic) = result {
         // Failure must not leak actor tooling/sandbox state to the daemon.
         qaqh_workspace::clear_actor_context();
         cleanup_actor_state(is_subagent);
-        log::error!("[ACTOR] in-process agent {} panicked: {:?}", seed, panic);
+        log::error!(
+            "[ACTOR] in-process agent {} panicked: {:?}",
+            session_id,
+            panic
+        );
     }
 }
 
 /// Knife-1 step-1 subagent actor wrapper.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_subagent_actor(
-    seed: String,
+    session_id: String,
     spec: SubagentSpawnSpec,
     cmd_rx: Receiver<crate::agent::types::WorkerCommand>,
     event_tx: SyncSender<crate::agent::types::WriterEvent>,
@@ -140,7 +144,7 @@ pub(crate) fn run_subagent_actor(
     hub: Option<Arc<RingingHub>>,
 ) {
     run_actor(
-        seed,
+        session_id,
         ActorKind::Subagent(spec),
         cmd_rx,
         event_tx,
@@ -154,9 +158,9 @@ pub(crate) fn run_subagent_actor(
 /// Knife-1 step-2a session actor wrapper.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_session_actor(
-    seed: String,
-    resume_seed: Option<String>,
-    new_seed: Option<String>,
+    session_id: String,
+    resume_session: Option<String>,
+    new_session: Option<String>,
     timeline_turn_count: u64,
     cmd_rx: Receiver<crate::agent::types::WorkerCommand>,
     event_tx: SyncSender<crate::agent::types::WriterEvent>,
@@ -166,10 +170,10 @@ pub(crate) fn run_session_actor(
     hub: Option<Arc<RingingHub>>,
 ) {
     run_actor(
-        seed,
+        session_id,
         ActorKind::Session {
-            resume_seed,
-            new_seed,
+            resume_session,
+            new_session,
             timeline_turn_count,
         },
         cmd_rx,

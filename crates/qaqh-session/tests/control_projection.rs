@@ -46,8 +46,8 @@ fn child_id() -> SessionId {
     SessionId::new("0198f1a0-0000-7000-8000-000000000003")
 }
 
-fn content_ref(seed: u8) -> ContentRef {
-    ContentRef::new(ContentHash::new(format!("sha256:{seed:064x}")))
+fn content_ref(session_id: u8) -> ContentRef {
+    ContentRef::new(ContentHash::new(format!("sha256:{session_id:064x}")))
 }
 
 fn turn_started(ordinal: u64) -> SessionFact {

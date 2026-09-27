@@ -13,11 +13,11 @@ use qaqh_session::session_fact_v2::{FactPayload, SessionFact, SessionId};
 
 pub(crate) fn load_agent_graph(
     sessions: &SessionManager,
-    root_seed: &str,
+    root_session: &str,
 ) -> Result<AgentGraphStore, String> {
-    let root_dir = sessions.session_path_dir(root_seed);
+    let root_dir = sessions.session_path_dir(root_session);
     let root_identity = CanonicalSessionIdentity::open(&root_dir)
-        .map_err(|error| format!("open root canonical identity for {root_seed}: {error}"))?;
+        .map_err(|error| format!("open root canonical identity for {root_session}: {error}"))?;
     let root_id = root_identity.session_id;
     let mut graph = AgentGraphStore::new(root_id.clone());
     let mut pending = VecDeque::from([root_id.clone()]);
@@ -111,7 +111,7 @@ mod tests {
     const LEASE_MS: i64 = 10_000;
 
     #[test]
-    fn rebuilds_from_legacy_seed_directories_via_identity_sidecars() {
+    fn rebuilds_from_legacy_session_directories_via_identity_sidecars() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");

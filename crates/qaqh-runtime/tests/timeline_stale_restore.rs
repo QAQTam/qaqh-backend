@@ -59,10 +59,10 @@ fn three_turn_messages() -> (Vec<Message>, usize) {
     (messages, 3)
 }
 
-fn timeline_path(root: &std::path::Path, seed: &str) -> PathBuf {
+fn timeline_path(root: &std::path::Path, session_id: &str) -> PathBuf {
     root.join("ringing")
         .join("ringing-timeline")
-        .join(format!("{seed}.json"))
+        .join(format!("{session_id}.json"))
 }
 
 fn write_timeline_record(path: &std::path::Path, body: serde_json::Value) {
@@ -74,16 +74,16 @@ fn write_timeline_record(path: &std::path::Path, body: serde_json::Value) {
 #[test]
 fn stale_timeline_snapshot_is_rebuilt_from_messages_instead_of_restored() {
     let root = shared_root();
-    let seed = "stale-timeline-seed";
+    let session_id = "stale-timeline-seed";
     let (messages, turn_count) = three_turn_messages();
-    SessionManager::global().save_append(seed, &messages, "test-model", None, 0, turn_count);
+    SessionManager::global().save_append(session_id, &messages, "test-model", None, 0, turn_count);
 
     // 事故快照形状：合法 JSON、单回合、空 rounds、watermark=2。
-    let path = timeline_path(&root, seed);
+    let path = timeline_path(&root, session_id);
     write_timeline_record(
         &path,
         serde_json::json!({
-            "seed": seed,
+            "session_id": session_id,
             "snapshot": {
                 "watermark": 2,
                 "turns": [{
@@ -101,7 +101,7 @@ fn stale_timeline_snapshot_is_rebuilt_from_messages_instead_of_restored() {
 
     let hub = RingingHub::with_persistence("epoch-stale", root.join("ringing"))
         .with_sessions(SessionManager::global());
-    let snapshot = hub.timeline_snapshot(seed).expect("timeline present");
+    let snapshot = hub.timeline_snapshot(session_id).expect("timeline present");
     assert_eq!(
         snapshot.turns.len(),
         3,
@@ -127,7 +127,7 @@ fn stale_timeline_snapshot_is_rebuilt_from_messages_instead_of_restored() {
     drop(hub);
     let hub = RingingHub::with_persistence("epoch-stale-2", root.join("ringing"))
         .with_sessions(SessionManager::global());
-    let reopened = hub.timeline_snapshot(seed).expect("timeline present");
+    let reopened = hub.timeline_snapshot(session_id).expect("timeline present");
     assert_eq!(reopened.turns.len(), 3);
     assert_eq!(
         reopened.turns.last().map(|turn| turn.user_text.as_str()),
@@ -138,17 +138,17 @@ fn stale_timeline_snapshot_is_rebuilt_from_messages_instead_of_restored() {
 #[test]
 fn windowed_but_tail_consistent_snapshot_is_restored_without_rebuild() {
     let root = shared_root();
-    let seed = "fresh-timeline-seed";
+    let session_id = "fresh-timeline-seed";
     let (messages, turn_count) = three_turn_messages();
-    SessionManager::global().save_append(seed, &messages, "test-model", None, 0, turn_count);
+    SessionManager::global().save_append(session_id, &messages, "test-model", None, 0, turn_count);
 
     // 窗口化快照：只有最后两个回合（回合数 < turn_count），但尾部与归档一致。
     // watermark 是"未被重建"的硬证据：重建会重新分配 seq（并重新物化新 turn）。
-    let path = timeline_path(&root, seed);
+    let path = timeline_path(&root, session_id);
     write_timeline_record(
         &path,
         serde_json::json!({
-            "seed": seed,
+            "session_id": session_id,
             "snapshot": {
                 "watermark": 4242,
                 "turns": [
@@ -164,7 +164,7 @@ fn windowed_but_tail_consistent_snapshot_is_restored_without_rebuild() {
 
     let hub = RingingHub::with_persistence("epoch-fresh", root.join("ringing"))
         .with_sessions(SessionManager::global());
-    let snapshot = hub.timeline_snapshot(seed).expect("timeline present");
+    let snapshot = hub.timeline_snapshot(session_id).expect("timeline present");
     assert_eq!(
         snapshot.watermark, 4242,
         "尾部一致的快照必须原样装载（重建会自激重写长会话）"

@@ -95,8 +95,8 @@ fn init_process() {
     });
 }
 
-fn store_with_tool_use(seed: &str, call_id: &str, tool_name: &str) -> MessageStore {
-    let mut store = MessageStore::new(seed);
+fn store_with_tool_use(session_id: &str, call_id: &str, tool_name: &str) -> MessageStore {
+    let mut store = MessageStore::new(session_id);
     store.push_user("run the ledger probe");
     let mut assistant = Message {
         msg_id: None,
@@ -114,11 +114,11 @@ fn store_with_tool_use(seed: &str, call_id: &str, tool_name: &str) -> MessageSto
     store
 }
 
-fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
+fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
     qaqh_workspace::runtime::ToolExecutionScope::capture(
         qaqh_workspace::tool_api::ToolCallContext {
             call_id: call_id.to_string(),
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             workspace_root: PathBuf::from(qaqh_workspace::current_workspace()),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
@@ -170,9 +170,9 @@ fn run_admitted_batch(
     )
 }
 
-fn admitted_call(seed: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
+fn admitted_call(session_id: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
     let args = serde_json::json!({"call": call_id});
-    let auth = match qaqh_workspace::authorize_call(seed, call_id, tool_name, &args, 4) {
+    let auth = match qaqh_workspace::authorize_call(session_id, call_id, tool_name, &args, 4) {
         qaqh_workspace::Admission::Authorized(auth) => auth,
         qaqh_workspace::Admission::ApprovalRequired(_) => {
             panic!("call {call_id} unexpectedly requires approval")
@@ -184,12 +184,12 @@ fn admitted_call(seed: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
     AdmittedTool {
         call_id: call_id.to_string(),
         auth: Box::new(auth),
-        scope: tool_scope(call_id, seed),
+        scope: tool_scope(call_id, session_id),
     }
 }
 
-fn run_call(agent: &mut AgentState, seed: &str, call_id: &str, tool_name: &str) -> bool {
-    let admitted = admitted_call(seed, call_id, tool_name);
+fn run_call(agent: &mut AgentState, session_id: &str, call_id: &str, tool_name: &str) -> bool {
+    let admitted = admitted_call(session_id, call_id, tool_name);
     run_admitted_batch(
         agent,
         admitted,
@@ -238,26 +238,26 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     qaqh_workspace::set_workspace(&workspace.path().to_string_lossy());
 
-    let seed = format!(
+    let session_id = format!(
         "tool-ledger-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0)
     );
-    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
+    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     SESSION_DIR
         .set(session_dir.clone())
         .expect("session dir configured once");
 
     let mut agent = AgentState::init("tool-ledger-test", qaqh_config::Config::default());
-    agent.session.session_id = seed.clone();
+    agent.session.session_id = session_id.clone();
     agent.ephemeral = false;
     agent.config.permission_level = 4;
-    agent.msg = store_with_tool_use(&seed, "call-ledger-1", "ledger_probe");
+    agent.msg = store_with_tool_use(&session_id, "call-ledger-1", "ledger_probe");
 
     assert!(
-        run_call(&mut agent, &seed, "call-ledger-1", "ledger_probe"),
+        run_call(&mut agent, &session_id, "call-ledger-1", "ledger_probe"),
         "first execution must complete"
     );
     let first_result = tool_result(&agent.msg, "call-ledger-1");
@@ -314,9 +314,9 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
 
     // Replay the same call in the same actor. The ledger terminal is the
     // execution guard: the handler counter must not move.
-    agent.msg = store_with_tool_use(&seed, "call-ledger-1", "ledger_probe");
+    agent.msg = store_with_tool_use(&session_id, "call-ledger-1", "ledger_probe");
     assert!(
-        run_call(&mut agent, &seed, "call-ledger-1", "ledger_probe"),
+        run_call(&mut agent, &session_id, "call-ledger-1", "ledger_probe"),
         "blocked replay still produces a normal tool result"
     );
     assert_eq!(
@@ -334,14 +334,14 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
     // A serial tail cancelled before spawn must be sealed as Cancelled without
     // leaving an orphan ToolIntent behind for recovery to interpret.
     let cancelled_call = "call-ledger-cancelled-tail";
-    agent.msg = store_with_tool_use(&seed, cancelled_call, "ledger_probe");
+    agent.msg = store_with_tool_use(&session_id, cancelled_call, "ledger_probe");
     let cancel = CancelToken::new();
     cancel.set();
     let serial = HashSet::from([cancelled_call.to_string()]);
     assert!(
         !run_admitted_batch(
             &mut agent,
-            admitted_call(&seed, cancelled_call, "ledger_probe"),
+            admitted_call(&session_id, cancelled_call, "ledger_probe"),
             vec![cancelled_call.to_string()],
             serial,
             cancel,

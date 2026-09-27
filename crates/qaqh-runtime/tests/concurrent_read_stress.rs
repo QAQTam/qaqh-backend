@@ -60,8 +60,9 @@ fn ten_parallel_reads_same_file() {
     });
 
     let handle = std::thread::spawn(move || {
-        fn send_cmd(w: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
-            let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", rand_id()), command);
+        fn send_cmd(w: &mut os_pipe::PipeWriter, session_id: &str, command: RingingCommand) {
+            let env =
+                RingingWorkerCommandEnvelope::new(session_id, format!("c{}", rand_id()), command);
             writeln!(w, "{}", serde_json::to_string(&env).unwrap()).unwrap();
             w.flush().unwrap();
         }
@@ -83,14 +84,14 @@ fn ten_parallel_reads_same_file() {
         );
 
         // Wait for SessionStateChanged(Created)
-        let mut seed = String::new();
+        let mut session_id = String::new();
         loop {
             match event_rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(RingingEvent::Control(ControlEvent::SessionStateChanged {
                     session_id: s,
                     state: SessionState::Created,
                 })) => {
-                    seed = s;
+                    session_id = s;
                     break;
                 }
                 Ok(_) => {}
@@ -98,7 +99,7 @@ fn ten_parallel_reads_same_file() {
             }
         }
         assert!(
-            !seed.is_empty(),
+            !session_id.is_empty(),
             "SessionStateChanged(Created) not received"
         );
 
@@ -106,7 +107,7 @@ fn ten_parallel_reads_same_file() {
         for i in 0..10 {
             send_cmd(
                 &mut input_writer,
-                &seed,
+                &session_id,
                 RingingCommand::Tool(ToolCommand::ToolInvoke {
                     tool_call_id: format!("tc_{i}"),
                     name: "read".into(),

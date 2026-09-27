@@ -32,7 +32,7 @@ pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
 fn injected_termination_event(
     fault: &SseTerminate,
     channel: Option<&str>,
-    seed: Option<&str>,
+    session_id: Option<&str>,
 ) -> Event {
     let mut payload = serde_json::json!({
         "code": fault.code,
@@ -41,8 +41,8 @@ fn injected_termination_event(
     if let Some(channel) = channel {
         payload["channel"] = serde_json::Value::String(channel.to_string());
     }
-    if let Some(seed) = seed {
-        payload["seed"] = serde_json::Value::String(seed.to_string());
+    if let Some(session_id) = session_id {
+        payload["session_id"] = serde_json::Value::String(session_id.to_string());
     }
     if let Some(skipped) = fault.skipped {
         payload["skipped"] = serde_json::Value::from(skipped);
@@ -55,9 +55,9 @@ fn injected_termination_event(
 fn injected_termination_response(
     fault: SseTerminate,
     channel: Option<&str>,
-    seed: Option<&str>,
+    session_id: Option<&str>,
 ) -> Response {
-    let event = injected_termination_event(&fault, channel, seed);
+    let event = injected_termination_event(&fault, channel, session_id);
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
     tokio::spawn(async move {
         let _ = tx.send(Ok(event)).await;
@@ -65,12 +65,16 @@ fn injected_termination_response(
     Sse::new(ReceiverStream::new(rx)).into_response()
 }
 
-fn timeline_entry_to_event(epoch: &str, seed: &str, entry: &qaqh_domain::TimelineEntry) -> Event {
+fn timeline_entry_to_event(
+    epoch: &str,
+    session_id: &str,
+    entry: &qaqh_domain::TimelineEntry,
+) -> Event {
     let data = serde_json::json!({
         "schema": "qaqh.Ringing",
         "version": 1,
         "server_epoch": epoch,
-        "seed": seed,
+        "session_id": session_id,
         "entry": entry,
     });
     Event::default()
@@ -97,18 +101,18 @@ fn timeline_entry_to_event(epoch: &str, seed: &str, entry: &qaqh_domain::Timelin
 #[allow(clippy::too_many_arguments)]
 fn should_deliver_timeline_live(
     live: &qaqh_runtime::TimelineLiveEntry,
+    client_session_id: &str,
     session_id: &str,
-    seed: &str,
     after: u64,
     replayed: &HashSet<u64>,
     leases: &Arc<Mutex<RingingLeaseStore>>,
 ) -> bool {
     // 1) 逐事件归属复查（吊销后立即截断）
-    if live.seed != seed
+    if live.session_id != session_id
         || !leases
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .owns_seed(session_id, &live.seed)
+            .owns_session(client_session_id, &live.session_id)
     {
         return false;
     }
@@ -119,29 +123,29 @@ fn should_deliver_timeline_live(
 pub(crate) async fn handle_timeline_events(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let Some(session_id) = get_session_id(&headers) else {
+    let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
-    if seed.is_empty() {
-        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    if session_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing session_id").into_response();
     }
-    if state.test_hooks.session_is_404(&seed) {
-        return session_not_found_response(&seed);
+    if state.test_hooks.session_is_404(&session_id) {
+        return session_not_found_response(&session_id);
     }
     if let Some(fault) = state.test_hooks.take_timeline_terminate() {
-        return injected_termination_response(fault, Some("timeline"), Some(&seed));
+        return injected_termination_response(fault, Some("timeline"), Some(&session_id));
     }
     if !state
         .leases
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .owns_seed(&session_id, &seed)
+        .owns_session(&client_session_id, &session_id)
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -158,12 +162,12 @@ pub(crate) async fn handle_timeline_events(
         .unwrap_or("");
     let after = parse_timeline_cursor(last_event_id, &state.epoch);
     let rx = state.hub.subscribe_timeline();
-    let replay = state.hub.timeline_replay_since(&seed, after);
+    let replay = state.hub.timeline_replay_since(&session_id, after);
     let replayed: HashSet<u64> = replay.iter().map(|e| e.timeline_seq).collect();
     let epoch = state.epoch.clone();
     let leases = state.leases.clone();
-    let seed_clone = seed.clone();
-    let session_id_clone = session_id.clone();
+    let session_clone = session_id.clone();
+    let client_session_id_clone = client_session_id.clone();
     let inject_timeline_gap = state.test_hooks.take_timeline_gap();
 
     let (tx, rx_stream) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(128);
@@ -180,7 +184,7 @@ pub(crate) async fn handle_timeline_events(
                 gap_remaining -= 1;
                 continue;
             }
-            let ev = timeline_entry_to_event(&epoch, &seed_clone, &entry);
+            let ev = timeline_entry_to_event(&epoch, &session_clone, &entry);
             if tx.send(Ok(ev)).await.is_err() {
                 return;
             }
@@ -194,8 +198,8 @@ pub(crate) async fn handle_timeline_events(
                     // with this stream's seed.
                     if !should_deliver_timeline_live(
                         &live,
-                        &session_id_clone,
-                        &seed_clone,
+                        &client_session_id_clone,
+                        &session_clone,
                         after,
                         &replayed,
                         &leases,
@@ -209,11 +213,11 @@ pub(crate) async fn handle_timeline_events(
                     if !leases
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .is_active_session(&session_id_clone)
+                        .is_active_session(&client_session_id_clone)
                     {
                         break;
                     }
-                    let ev = timeline_entry_to_event(&epoch, &seed_clone, &live.entry);
+                    let ev = timeline_entry_to_event(&epoch, &session_clone, &live.entry);
                     if tx.send(Ok(ev)).await.is_err() {
                         break;
                     }
@@ -222,12 +226,12 @@ pub(crate) async fn handle_timeline_events(
                     // BUG-2026-09-12-11：与（已删除的）v1 频道流同款处理——
                     // 补日志并下发终止帧，让客户端 re-baseline。
                     log::warn!(
-                        "[sse] timeline {seed_clone} stream lagged: {skipped} entries skipped; terminating for client re-baseline"
+                        "[sse] timeline {session_clone} stream lagged: {skipped} entries skipped; terminating for client re-baseline"
                     );
                     let ev = Event::default().event("ringing.stream_terminated").data(
                         serde_json::json!({
                             "code": "lagged",
-                            "seed": seed_clone.as_str(),
+                            "session_id": session_clone.as_str(),
                             "skipped": skipped,
                             "message": "server event buffer overflow; reconnect to re-baseline",
                         })
@@ -258,9 +262,9 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn live(seed: &str, seq: u64) -> qaqh_runtime::TimelineLiveEntry {
+    fn live(session_id: &str, seq: u64) -> qaqh_runtime::TimelineLiveEntry {
         qaqh_runtime::TimelineLiveEntry {
-            seed: seed.into(),
+            session_id: session_id.into(),
             entry: qaqh_domain::TimelineEntry {
                 timeline_seq: seq,
                 turn_id: "t1".into(),
@@ -272,12 +276,12 @@ mod tests {
         }
     }
 
-    fn store_with_seed() -> Arc<Mutex<RingingLeaseStore>> {
+    fn store_with_session() -> Arc<Mutex<RingingLeaseStore>> {
         let leases = Arc::new(Mutex::new(RingingLeaseStore::new()));
         {
             let mut g = leases.lock().unwrap();
             g.open("cs-1".into(), "ci-1".into());
-            assert!(g.attach_seed("cs-1", "seed-a"));
+            assert!(g.attach_session("cs-1", "seed-a"));
         }
         leases
     }
@@ -285,8 +289,8 @@ mod tests {
     /// BUG-2026-09-13-10 回归：长连接中途 seed 级吊销（detach_seed）后，
     /// 同连接后续事件必须立即截断，不得继续投递。
     #[test]
-    fn timeline_live_is_truncated_after_seed_revoked() {
-        let leases = store_with_seed();
+    fn timeline_live_is_truncated_after_session_revoked() {
+        let leases = store_with_session();
         let after = 0;
         let replayed = HashSet::new();
 
@@ -303,7 +307,7 @@ mod tests {
         );
 
         // 中途吊销（session close / delete → detach_seed）；lease 本身仍活跃。
-        leases.lock().unwrap().detach_seed("cs-1", "seed-a");
+        leases.lock().unwrap().detach_session("cs-1", "seed-a");
         assert!(
             leases.lock().unwrap().is_active_session("cs-1"),
             "precondition: lease 仍活跃——旧逻辑正是因此放行"
@@ -333,7 +337,7 @@ mod tests {
         );
 
         // 重新 attach 后恢复投递
-        leases.lock().unwrap().attach_seed("cs-1", "seed-a");
+        leases.lock().unwrap().attach_session("cs-1", "seed-a");
         assert!(
             should_deliver_timeline_live(
                 &live("seed-a", 3),
@@ -351,7 +355,7 @@ mod tests {
     /// 旧连接必须被截断；新 cs 未 attach 前同样不投递。
     #[test]
     fn timeline_live_is_truncated_after_renegotiation() {
-        let leases = store_with_seed();
+        let leases = store_with_session();
         let after = 0;
         let replayed = HashSet::new();
 
@@ -388,7 +392,7 @@ mod tests {
             ),
             "新 cs 未 attach 不投递"
         );
-        leases.lock().unwrap().attach_seed("cs-2", "seed-a");
+        leases.lock().unwrap().attach_session("cs-2", "seed-a");
         assert!(should_deliver_timeline_live(
             &live("seed-a", 4),
             "cs-2",

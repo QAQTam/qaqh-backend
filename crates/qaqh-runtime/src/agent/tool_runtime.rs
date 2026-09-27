@@ -751,7 +751,7 @@ impl ToolRuntime {
 
         for effect in spawn_effects {
             let qaqh_workspace::ToolEffect::SubagentSpawned {
-                seed,
+                session_id,
                 child_session_id,
                 name,
                 task_text,
@@ -773,7 +773,7 @@ impl ToolRuntime {
             let host = qaqh_subagent::host()
                 .ok_or_else(|| "subagent host unavailable before spawn edge commit".to_string())?;
             if parent_session_id != ctx.agent.session.session_id {
-                host.rollback_subagent(&seed, &child_session_id, process_id);
+                host.rollback_subagent(&session_id, &child_session_id, process_id);
                 return Err(format!(
                     "subagent spawn parent mismatch: effect={parent_session_id}, active={}",
                     ctx.agent.session.session_id
@@ -814,13 +814,13 @@ impl ToolRuntime {
                 if let Err(error) =
                     ledger.append_subagent_spawned(EventId::new(generate_ulid()), payload, now)
                 {
-                    host.rollback_subagent(&seed, child_session_id.as_str(), process_id);
+                    host.rollback_subagent(&session_id, child_session_id.as_str(), process_id);
                     return Err(format!("append SubagentSpawned failed: {error}"));
                 }
             }
 
             if let Err(error) = host.start_subagent(qaqh_subagent::StartSubagentRequest {
-                seed: &seed,
+                session_id: &session_id,
                 child_session_id: child_session_id.as_str(),
                 name: &name,
                 task_text: &task_text,
@@ -837,12 +837,12 @@ impl ToolRuntime {
                     SubagentTerminalStatus::Failed,
                 )
                 .err();
-                host.abort_subagent(&seed, process_id);
+                host.abort_subagent(&session_id, process_id);
                 return Err(match finish_error {
                     Some(finish_error) => format!(
-                        "start subagent {seed}: {error}; append SubagentFinished failed: {finish_error}"
+                        "start subagent {session_id}: {error}; append SubagentFinished failed: {finish_error}"
                     ),
-                    None => format!("start subagent {seed}: {error}"),
+                    None => format!("start subagent {session_id}: {error}"),
                 });
             }
         }

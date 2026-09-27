@@ -18,18 +18,18 @@ fn main() {
         let client = Client::connect_async(ClientOptions {
             handlers: ClientHandlers {
                 on_liveness: std::sync::Arc::new(|| {}),
-                on_v2_event: std::sync::Arc::new(|seed, event| {
+                on_v2_event: std::sync::Arc::new(|session_id, event| {
                     println!(
-                        "[event] seed={seed} id={} delivery={:?} cursor={:?}",
+                        "[event] seed={session_id} id={} delivery={:?} cursor={:?}",
                         event.event_id,
                         event.delivery,
                         event.cursor.as_ref().map(|c| c.as_str()),
                     );
                 }),
-                on_v2_reset: std::sync::Arc::new(|seed, reset| {
-                    println!("[reset] seed={seed} reason={:?}", reset.reason);
+                on_v2_reset: std::sync::Arc::new(|session_id, reset| {
+                    println!("[reset] seed={session_id} reason={:?}", reset.reason);
                 }),
-                on_v2_status: std::sync::Arc::new(|seed, status| {
+                on_v2_status: std::sync::Arc::new(|session_id, status| {
                     let state = match &status {
                         V2StreamStatus::Connecting => "connecting".to_string(),
                         V2StreamStatus::Open { cursor, .. } => format!("open cursor={cursor:?}"),
@@ -38,7 +38,7 @@ fn main() {
                         }
                         V2StreamStatus::Closed { reason } => format!("closed: {reason}"),
                     };
-                    println!("[status] {seed} {state}");
+                    println!("[status] {session_id} {state}");
                 }),
                 ..Default::default()
             },

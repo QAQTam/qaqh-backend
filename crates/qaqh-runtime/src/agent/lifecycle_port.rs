@@ -17,8 +17,13 @@ pub(crate) trait LifecyclePort {
     fn dispatch_finished(&self, suspended: bool);
 
     fn create_session(&self, agent: &mut AgentState, cancel: &CancelToken);
-    fn create_session_with_seed(&self, agent: &mut AgentState, cancel: &CancelToken);
-    fn resume_session(&self, agent: &mut AgentState, cancel: &CancelToken, seed: &str) -> bool;
+    fn create_session_with_session(&self, agent: &mut AgentState, cancel: &CancelToken);
+    fn resume_session(
+        &self,
+        agent: &mut AgentState,
+        cancel: &CancelToken,
+        session_id: &str,
+    ) -> bool;
     fn reload_config(&self, agent: &mut AgentState, cancel: &CancelToken);
 
     fn turn_completed(&self, ctx: &mut RingContext<'_>);
@@ -55,12 +60,17 @@ impl LifecyclePort for RuntimeLifecyclePort {
         self.session.create(agent, cancel);
     }
 
-    fn create_session_with_seed(&self, agent: &mut AgentState, cancel: &CancelToken) {
-        self.session.create_with_seed(agent, cancel);
+    fn create_session_with_session(&self, agent: &mut AgentState, cancel: &CancelToken) {
+        self.session.create_with_session(agent, cancel);
     }
 
-    fn resume_session(&self, agent: &mut AgentState, cancel: &CancelToken, seed: &str) -> bool {
-        self.session.resume(agent, seed, cancel)
+    fn resume_session(
+        &self,
+        agent: &mut AgentState,
+        cancel: &CancelToken,
+        session_id: &str,
+    ) -> bool {
+        self.session.resume(agent, session_id, cancel)
     }
 
     fn reload_config(&self, agent: &mut AgentState, cancel: &CancelToken) {
@@ -104,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn create_session_with_seed_keeps_seed_and_resets_store() {
+    fn create_session_with_session_keeps_session_and_resets_store() {
         qaqh_workspace::set_actor_context("", "seed-240");
         let _guard = ActorContextGuard;
         let liveness = Arc::new(WorkerLiveness::new());
@@ -113,7 +123,7 @@ mod tests {
         agent.ephemeral = true;
         agent.session.session_id = "seed-240".to_string();
 
-        port.create_session_with_seed(&mut agent, &CancelToken::new());
+        port.create_session_with_session(&mut agent, &CancelToken::new());
 
         assert_eq!(agent.session.session_id, "seed-240");
         assert_eq!(agent.msg.turn_count(), 0);

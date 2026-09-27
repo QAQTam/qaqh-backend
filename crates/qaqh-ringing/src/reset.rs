@@ -15,7 +15,7 @@ use qaqh_domain::RingingChannel;
 pub struct RingingResetRequired {
     pub channel: RingingChannel,
     /// 需要重新拉取 snapshot 的会话。
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     /// 服务端该 seed+channel 仍可回放的最早 stream_seq。
     #[cfg_attr(feature = "ts", ts(as = "u32"))]

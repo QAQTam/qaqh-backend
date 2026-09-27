@@ -98,7 +98,7 @@ impl Loop {
                 self.prepare_session_switch();
                 self.lifecycle
                     .create_session(&mut self.session.agent, &self.cancel);
-                self.sync_emitter_seed();
+                self.sync_emitter_session();
                 self.paced_emitter.emit_domain(DomainEvent::Control(
                     qaqh_domain::ControlEvent::SessionStateChanged {
                         session_id: self.session.agent.session.session_id.clone(),
@@ -114,7 +114,7 @@ impl Loop {
                     .lifecycle
                     .resume_session(&mut self.session.agent, &self.cancel, &session_id)
                 {
-                    self.sync_emitter_seed();
+                    self.sync_emitter_session();
                     self.paced_emitter.emit_domain(DomainEvent::Control(
                         qaqh_domain::ControlEvent::SessionStateChanged {
                             session_id,

@@ -36,7 +36,7 @@ pub struct ApprovalChallenge {
     pub id: String,
     pub kind: ApprovalKind,
     pub source_id: String,
-    pub seed: String,
+    pub session_id: String,
     pub details: Value,
     pub issued_at: Instant,
 }
@@ -145,7 +145,7 @@ mod tests {
             id: "challenge".into(),
             kind,
             source_id: "canonical-id".into(),
-            seed: "0123abcd".into(),
+            session_id: "0123abcd".into(),
             details: json!({}),
             issued_at: Instant::now(),
         }

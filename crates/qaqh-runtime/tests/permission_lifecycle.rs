@@ -170,8 +170,9 @@ fn next_command_id() -> u64 {
     NEXT.fetch_add(1, Ordering::SeqCst)
 }
 
-fn send_cmd(writer: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
-    let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", next_command_id()), command);
+fn send_cmd(writer: &mut os_pipe::PipeWriter, session_id: &str, command: RingingCommand) {
+    let env =
+        RingingWorkerCommandEnvelope::new(session_id, format!("c{}", next_command_id()), command);
     writeln!(
         writer,
         "{}",
@@ -388,7 +389,7 @@ fn run_case(
     let workspace = workspace.to_path_buf();
     let driver = thread::spawn(move || {
         send_cmd(&mut input_writer, "", cmd_session_create(false));
-        let seed = match expect_event(&event_rx, Duration::from_secs(5), |event| {
+        let session_id = match expect_event(&event_rx, Duration::from_secs(5), |event| {
             matches!(
                 event,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -408,7 +409,7 @@ fn run_case(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             test(&mut input_writer, &event_rx)
         }));
-        send_cmd(&mut input_writer, &seed, cmd_session_shutdown());
+        send_cmd(&mut input_writer, &session_id, cmd_session_shutdown());
         if let Err(payload) = outcome {
             std::panic::resume_unwind(payload);
         }

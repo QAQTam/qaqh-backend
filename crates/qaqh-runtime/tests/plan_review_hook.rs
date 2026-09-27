@@ -121,8 +121,9 @@ fn next_command_id() -> u64 {
     NEXT.fetch_add(1, Ordering::SeqCst)
 }
 
-fn send_cmd(writer: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
-    let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", next_command_id()), command);
+fn send_cmd(writer: &mut os_pipe::PipeWriter, session_id: &str, command: RingingCommand) {
+    let env =
+        RingingWorkerCommandEnvelope::new(session_id, format!("c{}", next_command_id()), command);
     writeln!(
         writer,
         "{}",
@@ -378,9 +379,9 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
     let timeline_assertions = timeline_intents.clone();
     let driver = thread::spawn(move || {
         send_cmd(&mut input_writer, "", cmd_session_create());
-        let seed = expect_session_created(&event_rx);
+        let session_id = expect_session_created(&event_rx);
 
-        send_cmd(&mut input_writer, &seed, cmd_user_input("first"));
+        send_cmd(&mut input_writer, &session_id, cmd_user_input("first"));
         let (first_id, _, first_content) = expect_plan_review(&event_rx);
         assert_eq!(first_content, "hook test plan");
         assert_plan_tool_block_opened(&timeline_assertions, &first_id);
@@ -391,7 +392,7 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
         );
         send_cmd(
             &mut input_writer,
-            &seed,
+            &session_id,
             cmd_plan_respond(&first_id, true, None),
         );
         expect_turn_completed(&event_rx);
@@ -401,19 +402,19 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
             TimelineToolState::Succeeded,
         );
 
-        send_cmd(&mut input_writer, &seed, cmd_user_input("second"));
+        send_cmd(&mut input_writer, &session_id, cmd_user_input("second"));
         let (second_id, _, second_content) = expect_plan_review(&event_rx);
         assert_eq!(second_content, "hook test plan");
         assert_plan_tool_block_opened(&timeline_assertions, &second_id);
         send_cmd(
             &mut input_writer,
-            &seed,
+            &session_id,
             cmd_plan_respond(&second_id, false, Some("not this time")),
         );
         expect_turn_completed(&event_rx);
         assert_plan_tool_terminal(&timeline_assertions, &second_id, TimelineToolState::Failed);
 
-        send_cmd(&mut input_writer, &seed, cmd_session_shutdown());
+        send_cmd(&mut input_writer, &session_id, cmd_session_shutdown());
     });
 
     agent_loop.run();

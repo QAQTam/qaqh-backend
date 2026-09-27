@@ -22,17 +22,17 @@ use std::path::Path;
 pub enum MetaOp {
     /// Title update (instant truncation path; the async LLM override writes
     /// through the injected handle directly — it runs off-dispatch).
-    UpdateTitle { seed: String, title: String },
+    UpdateTitle { session_id: String, title: String },
     /// Context statistics merged into meta.json (dashboard surface).
     SetContextStats {
-        seed: String,
+        session_id: String,
         stats: serde_json::Value,
     },
     /// Internal tool-mode code persisted to meta.json.
-    PersistMode { seed: String, mode: u8 },
+    PersistMode { session_id: String, mode: u8 },
     /// Usage totals after a provider round.
     PersistUsage {
-        seed: String,
+        session_id: String,
         totals: qaqh_types::UsageInfo,
         last_usage: Option<qaqh_types::UsageInfo>,
         requests: u32,
@@ -40,13 +40,16 @@ pub enum MetaOp {
     },
     /// Skills session state (TurnComplete / session switch).
     PersistSkills {
-        seed: String,
+        session_id: String,
         skills: qaqh_skills::SkillSessionStateV2,
     },
     /// Frozen [Environment] annotation (P0 cache fix). Written once when
     /// build_context first generates it, so a daemon restart resumes with the
     /// byte-identical prefix instead of regenerating the annotation.
-    PersistFrozenAnnotation { seed: String, annotation: String },
+    PersistFrozenAnnotation {
+        session_id: String,
+        annotation: String,
+    },
 }
 
 // 工具模式档位、白名单、模型面投影的唯一契约已收敛到 qaqh-types。
@@ -211,7 +214,7 @@ pub struct AgentState {
     tool_ledger: Option<ToolLedger>,
     /// Seed that owns `tool_ledger`; guards against stale reuse when the
     /// same `AgentState` is rebound to another session.
-    tool_ledger_seed: Option<String>,
+    tool_ledger_session: Option<String>,
     /// Loop bookkeeping queue (PR-1-5 / B6): title / context-stats / mode /
     /// usage / skills writes, drained by [`Self::drain_persist_ops`].
     pub pending_meta_ops: Vec<MetaOp>,
@@ -255,7 +258,7 @@ impl AgentState {
             last_mcp_env_block: None,
             session_manager: SessionManager::try_global(),
             tool_ledger: None,
-            tool_ledger_seed: None,
+            tool_ledger_session: None,
             pending_meta_ops: Vec::new(),
             endpoint_spec: None,
         };
@@ -279,9 +282,9 @@ impl AgentState {
             return Ok(None);
         }
 
-        if self.tool_ledger_seed.as_deref() != Some(self.session.session_id.as_str()) {
+        if self.tool_ledger_session.as_deref() != Some(self.session.session_id.as_str()) {
             self.tool_ledger = None;
-            self.tool_ledger_seed = None;
+            self.tool_ledger_session = None;
         }
 
         if self.tool_ledger.is_none() {
@@ -302,7 +305,7 @@ impl AgentState {
                 tool_ledger_lease_ms(),
             )?;
             self.tool_ledger = Some(ledger);
-            self.tool_ledger_seed = Some(self.session.session_id.clone());
+            self.tool_ledger_session = Some(self.session.session_id.clone());
         }
 
         Ok(self.tool_ledger.as_mut())
@@ -629,7 +632,7 @@ impl AgentState {
             self.session.frozen_annotation = Some(text.clone());
             if !self.ephemeral && !self.session.session_id.is_empty() {
                 self.enqueue_meta_op(MetaOp::PersistFrozenAnnotation {
-                    seed: self.session.session_id.clone(),
+                    session_id: self.session.session_id.clone(),
                     annotation: text.clone(),
                 });
             }
@@ -838,27 +841,30 @@ impl AgentState {
 /// Every variant must replay the exact call the engine used to make inline.
 fn execute_meta_op(op: &MetaOp, sm: &SessionManager) {
     match op {
-        MetaOp::UpdateTitle { seed, title } => sm.update_title(seed, title),
-        MetaOp::SetContextStats { seed, stats } => sm.set_context_stats(seed, stats),
-        MetaOp::PersistMode { seed, mode } => sm.persist_mode(seed, *mode),
+        MetaOp::UpdateTitle { session_id, title } => sm.update_title(session_id, title),
+        MetaOp::SetContextStats { session_id, stats } => sm.set_context_stats(session_id, stats),
+        MetaOp::PersistMode { session_id, mode } => sm.persist_mode(session_id, *mode),
         MetaOp::PersistUsage {
-            seed,
+            session_id,
             totals,
             last_usage,
             requests,
             cache_reported_requests,
         } => sm.persist_usage(
-            seed,
+            session_id,
             totals.clone(),
             last_usage.clone(),
             *requests,
             *cache_reported_requests,
         ),
-        MetaOp::PersistSkills { seed, skills } => {
-            sm.persist_skills(seed, skills.clone());
+        MetaOp::PersistSkills { session_id, skills } => {
+            sm.persist_skills(session_id, skills.clone());
         }
-        MetaOp::PersistFrozenAnnotation { seed, annotation } => {
-            sm.persist_frozen_annotation(seed, annotation);
+        MetaOp::PersistFrozenAnnotation {
+            session_id,
+            annotation,
+        } => {
+            sm.persist_frozen_annotation(session_id, annotation);
         }
     }
 }

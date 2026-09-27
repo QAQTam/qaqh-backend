@@ -205,8 +205,11 @@ fn retain_legacy_records(session_dir: &Path, keep: &[String]) {
 /// when no canonical state exists for that call, then retained until the
 /// refined message is durably saved so an immediate crash cannot lose the
 /// "execution started" fact.
-pub fn reconcile_store(store: &mut qaqh_message::MessageStore, seed: &str) {
-    reconcile_store_in(&qaqh_types::platform::sessions_dir().join(seed), store);
+pub fn reconcile_store(store: &mut qaqh_message::MessageStore, session_id: &str) {
+    reconcile_store_in(
+        &qaqh_types::platform::sessions_dir().join(session_id),
+        store,
+    );
 }
 
 /// Directory-injected variant for tests and non-standard data roots.

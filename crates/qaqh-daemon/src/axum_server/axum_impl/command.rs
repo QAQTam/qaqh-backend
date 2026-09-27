@@ -28,14 +28,14 @@ pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> Ringing
 /// 命令幂等指纹。v1/v2 handler 必须共用，否则重放判定会在两个协议面漂移。
 pub(crate) fn command_fingerprint(
     channel: qaqh_domain::RingingChannel,
-    seed: Option<&str>,
+    session_id: Option<&str>,
     expected_revision: Option<u64>,
     driver_epoch: Option<u64>,
     command: &qaqh_ringing::RingingCommand,
 ) -> String {
     let payload = serde_json::to_string(&serde_json::json!({
         "channel": channel,
-        "seed": seed,
+        "seed": session_id,
         "expected_revision": expected_revision,
         // v2-only CAS input: the same command_id submitted against a different
         // driver epoch is a different payload and must not replay the old ACK.
@@ -223,11 +223,11 @@ pub(crate) async fn handle_command(
     }
     // SessionClose
     if let qaqh_ringing::RingingCommand::Control(ControlCommand::SessionClose {
-        session_id: close_seed,
+        session_id: close_session,
     }) = &env.command
     {
-        let close_seed = session_close_seed(close_seed, &env.session_id);
-        if close_seed.is_empty() {
+        let close_session = session_close_session(close_session, &env.session_id);
+        if close_session.is_empty() {
             state
                 .pending
                 .lock()
@@ -247,11 +247,13 @@ pub(crate) async fn handle_command(
         // registry 锁阻塞其它 RPC。
         let close_result = {
             let service = state.service.clone();
-            let seed = close_seed.clone();
+            let session_id = close_session.clone();
             let command_id = env.command_id.clone();
-            tokio::task::spawn_blocking(move || service.close_session(&seed, Some(&command_id)))
-                .await
-                .unwrap_or_else(|e| Err(format!("close join error: {e}")))
+            tokio::task::spawn_blocking(move || {
+                service.close_session(&session_id, Some(&command_id))
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("close join error: {e}")))
         };
         if let Err(error) = close_result {
             state
@@ -268,7 +270,7 @@ pub(crate) async fn handle_command(
             .leases
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .detach_seed(&session_id, &close_seed);
+            .detach_session(&session_id, &close_session);
         state
             .pending
             .lock()
@@ -289,7 +291,7 @@ pub(crate) async fn handle_command(
             ControlCommand::SessionDelete { session_id } => ("delete", session_id),
             _ => unreachable!(),
         };
-        let target = session_close_seed(target, &env.session_id);
+        let target = session_close_session(target, &env.session_id);
         if target.is_empty() {
             state
                 .pending
@@ -346,7 +348,7 @@ pub(crate) async fn handle_command(
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .detach_seed(&session_id, &target);
+                .detach_session(&session_id, &target);
         }
         state
             .pending
@@ -374,20 +376,15 @@ pub(crate) async fn handle_command(
                     );
                 }
             };
-            let created_seed = created.as_str().map(str::to_string).or_else(|| {
-                created
-                    .get("seed")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            });
-            if let Some(seed) = created_seed {
+            let created_session = created.as_str().map(str::to_string);
+            if let Some(session_id) = created_session {
                 // BUG-2026-09-12-10：attach 失败（lease 已死）必须显式 401，
                 // 而不是静默 ack 200 让前端进入「无归属」状态。
                 let attached = state
                     .leases
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .attach_seed(&session_id, &seed);
+                    .attach_session(&session_id, &session_id);
                 if !attached {
                     state
                         .pending
@@ -403,7 +400,7 @@ pub(crate) async fn handle_command(
                         ),
                     );
                 }
-                publish_session_created(&state.hub, &seed, &env.command_id);
+                publish_session_created(&state.hub, &session_id, &env.command_id);
             }
             state
                 .pending
@@ -422,7 +419,7 @@ pub(crate) async fn handle_command(
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .attach_seed(&session_id, target_session_id);
+                .attach_session(&session_id, target_session_id);
             if !attached {
                 state
                     .pending
@@ -438,10 +435,10 @@ pub(crate) async fn handle_command(
                     ),
                 );
             }
-            if let Err(e) = state
-                .service
-                .handle("session.resume", &serde_json::json!({"seed": session_id}))
-            {
+            if let Err(e) = state.service.handle(
+                "session.resume",
+                &serde_json::json!({"session_id": session_id}),
+            ) {
                 state
                     .pending
                     .lock()
@@ -483,7 +480,7 @@ pub(crate) async fn handle_command(
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .attach_seed(&session_id, target_session_id);
+                .attach_session(&session_id, target_session_id);
             if !attached {
                 state
                     .pending
@@ -509,9 +506,9 @@ pub(crate) async fn handle_command(
         _ => {}
     }
     // generic worker dispatch
-    let seed = env.session_id.clone().unwrap_or_default();
+    let session_id = env.session_id.clone().unwrap_or_default();
     let mut worker_command = env.command.clone();
-    if let Err(code) = hydrate_attachment_previews(&state.hub, &seed, &mut worker_command) {
+    if let Err(code) = hydrate_attachment_previews(&state.hub, &session_id, &mut worker_command) {
         state
             .pending
             .lock()
@@ -527,12 +524,12 @@ pub(crate) async fn handle_command(
         );
     }
     let worker_env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-        seed.as_str(),
+        session_id.as_str(),
         env.command_id.clone(),
         worker_command,
     )
     .with_expected_revision(env.expected_revision);
-    if let Err(e) = state.service.send_ringing_command(&seed, &worker_env) {
+    if let Err(e) = state.service.send_ringing_command(&session_id, &worker_env) {
         state
             .pending
             .lock()

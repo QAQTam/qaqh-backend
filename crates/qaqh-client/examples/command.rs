@@ -20,9 +20,9 @@ use qaqh_client::{
 fn main() {
     let handlers = ClientHandlers {
         on_liveness: std::sync::Arc::new(|| {}),
-        on_v2_event: Arc::new(|seed, event| {
+        on_v2_event: Arc::new(|session_id, event| {
             println!(
-                "[event] seed={seed} id={} delivery={:?}",
+                "[event] seed={session_id} id={} delivery={:?}",
                 event.event_id, event.delivery
             );
             if let Ok(v) = serde_json::to_value(&event.payload) {
@@ -30,11 +30,11 @@ fn main() {
                 println!("[event]   kind={kind}");
             }
         }),
-        on_v2_reset: Arc::new(|seed, reset| {
-            println!("[reset] seed={seed} reason={:?}", reset.reason);
+        on_v2_reset: Arc::new(|session_id, reset| {
+            println!("[reset] seed={session_id} reason={:?}", reset.reason);
         }),
-        on_v2_status: Arc::new(|seed, status| {
-            println!("[status] seed={seed} status={status:?}");
+        on_v2_status: Arc::new(|session_id, status| {
+            println!("[status] seed={session_id} status={status:?}");
         }),
         ..Default::default()
     };
@@ -56,19 +56,19 @@ fn main() {
             .await
             .expect("session.list");
         println!("[query] session.list = {sessions}");
-        let first_seed = |v: &serde_json::Value| -> Option<String> {
+        let first_session = |v: &serde_json::Value| -> Option<String> {
             let arr = v
                 .as_array()
                 .or_else(|| v.get("sessions").and_then(|s| s.as_array()))?;
             arr.first()
-                .and_then(|s| s.get("seed"))
+                .and_then(|s| s.get("session_id"))
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
         };
-        let mut seed = first_seed(&sessions);
+        let mut session_id = first_session(&sessions);
 
         // 2. Create a session when none exists (control channel command).
-        if seed.is_none() {
+        if session_id.is_none() {
             let ack = client
                 .send_command(
                     None,
@@ -90,22 +90,22 @@ fn main() {
                     .query(QueryRequest::SessionList)
                     .await
                     .expect("session.list re-query");
-                if let Some(s) = first_seed(&sessions) {
-                    seed = Some(s);
+                if let Some(s) = first_session(&sessions) {
+                    session_id = Some(s);
                     break;
                 }
             }
         }
-        let seed = seed.expect("session seed");
+        let session_id = session_id.expect("session seed");
 
         // 3. Attach the seed (Ringing v1: session_resume records ownership),
         //    then send a conversation message (conversation channel).
-        client.attach(&seed).await.expect("attach");
-        println!("[cmd] attached session {seed}");
+        client.attach(&session_id).await.expect("attach");
+        println!("[cmd] attached session {session_id}");
         let command_id = uuid::Uuid::new_v4().to_string();
         let ack = client
             .send_command(
-                Some(&seed),
+                Some(&session_id),
                 RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                     text: "请执行一次文件编辑（edit 工具）：在 ../qaqh-winui-app/apps/winui/src/diff_drawer.rs 的顶部模块文档注释里追加一行：//! V4 链路验证 #2：总结行修复后的真实 edit 工具事件。只做这一个改动，不要改其他文件。".to_string(),
                     images: vec![],

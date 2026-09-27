@@ -2,6 +2,10 @@
 
 use serde_json::Value;
 
+/// 会话键提取统一走服务面契约模块，避免 daemon 与 runtime 各自实现回退。
+/// 写端发 `session_id`，读端回退 legacy `seed`（BETA-01 Phase D）。
+pub(crate) use crate::ringing::service_methods::{scope_session_param_value, session_param};
+
 pub(crate) fn value2<'a>(params: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
     params.get(snake).or_else(|| params.get(camel))
 }

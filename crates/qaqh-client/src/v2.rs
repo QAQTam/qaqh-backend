@@ -131,7 +131,7 @@ pub use qaqh_session::team::TaskBoardSnapshot as ClientV2TaskBoardSnapshot;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientV2TeamResponse {
     pub schema: String,
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub team: ClientV2TeamSnapshot,
     pub tasks: ClientV2TaskBoardSnapshot,
@@ -321,9 +321,9 @@ impl Client {
     }
 
     /// `GET /ringing/v2/sessions/{seed}/bootstrap`.
-    pub async fn bootstrap_v2(&self, seed: &str) -> Result<ClientV2Bootstrap> {
+    pub async fn bootstrap_v2(&self, session_id: &str) -> Result<ClientV2Bootstrap> {
         let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/bootstrap");
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/bootstrap");
         let response = self
             .inner
             .http
@@ -350,11 +350,11 @@ impl Client {
     /// `capabilities.single_stream == true`。
     pub async fn subscribe_v2(
         &self,
-        seed: &str,
+        session_id: &str,
         since_cursor: Option<&CursorToken>,
     ) -> Result<ClientV2Subscription> {
         let state = self.require_v2_session().await?;
-        let path = qaqh_ringing::events_path(seed);
+        let path = qaqh_ringing::events_path(session_id);
         let mut request = self
             .inner
             .http
@@ -378,12 +378,12 @@ impl Client {
     /// Submit a v2 command with an explicit v2 lease identity.
     pub async fn send_command_v2(
         &self,
-        seed: Option<&str>,
+        session_id: Option<&str>,
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingCommandAck> {
         Ok(self
-            .send_command_v2_typed(seed, command, options)
+            .send_command_v2_typed(session_id, command, options)
             .await?
             .into_v1())
     }
@@ -393,7 +393,7 @@ impl Client {
     /// v1-shaped compatibility surface.
     pub async fn send_command_v2_typed(
         &self,
-        seed: Option<&str>,
+        session_id: Option<&str>,
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingV2CommandAck> {
@@ -401,12 +401,12 @@ impl Client {
         let command_id = options
             .command_id
             .unwrap_or_else(qaqh_session::canonical::generate_ulid);
-        let session_id = state.client_session_id.clone();
+        let client_session_id = state.client_session_id.clone();
         let mut payload =
             RingingV2CommandEnvelope::new(command_id.clone(), state.client_instance_id, command)
-                .with_client_session_id(session_id.clone());
-        if let Some(seed) = seed {
-            payload = payload.with_seed(seed);
+                .with_client_session_id(client_session_id.clone());
+        if let Some(session_id) = session_id {
+            payload = payload.with_session(session_id);
         }
         payload.expected_revision = options.expected_revision;
         payload.driver_epoch = options.driver_epoch;
@@ -424,7 +424,7 @@ impl Client {
             .bearer_auth(&self.credentials().token)
             // daemon 的 lease 判定只看 header（信封里的 client_session_id 不参与
             // 鉴权）——漏这个头会稳定拿 401 lease_required。
-            .header("X-QAQH-Client-Session-Id", &session_id)
+            .header("X-QAQH-Client-Session-Id", &client_session_id)
             .json(&payload)
             .send()
             .await?;
@@ -467,9 +467,9 @@ impl Client {
     }
 
     /// `POST /ringing/v2/sessions/{seed}/driver/claim`.
-    pub async fn claim_driver(&self, seed: &str) -> Result<RingingV2DriverClaimResponse> {
+    pub async fn claim_driver(&self, session_id: &str) -> Result<RingingV2DriverClaimResponse> {
         let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/driver/claim");
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/driver/claim");
         let response = self
             .inner
             .http
@@ -485,9 +485,9 @@ impl Client {
     }
 
     /// `POST /ringing/v2/sessions/{seed}/driver/release`.
-    pub async fn release_driver(&self, seed: &str) -> Result<RingingV2DriverReleaseResponse> {
+    pub async fn release_driver(&self, session_id: &str) -> Result<RingingV2DriverReleaseResponse> {
         let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/driver/release");
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/driver/release");
         let response = self
             .inner
             .http
@@ -505,12 +505,12 @@ impl Client {
     /// `GET /ringing/v2/sessions/{seed}/timeline`.
     pub async fn timeline_v2(
         &self,
-        seed: &str,
+        session_id: &str,
         before_index: Option<usize>,
         limit: Option<usize>,
     ) -> Result<TimelinePage> {
         let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/timeline");
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/timeline");
         let mut query = Vec::new();
         if let Some(before_index) = before_index {
             query.push(("before_index", before_index.to_string()));
@@ -539,9 +539,9 @@ impl Client {
     /// message board。deltas 在 per-seed 单流上以
     /// [`ClientV2Payload::TeamDelta`] 到达；壳层应当 **先拉一次快照、再应用
     /// delta**，不要只靠 delta 增量拼状态。
-    pub async fn team_v2(&self, seed: &str) -> Result<ClientV2TeamResponse> {
+    pub async fn team_v2(&self, session_id: &str) -> Result<ClientV2TeamResponse> {
         let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/team");
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/team");
         let response = self
             .inner
             .http

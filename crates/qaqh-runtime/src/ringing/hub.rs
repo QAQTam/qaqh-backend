@@ -116,7 +116,7 @@ pub struct ChannelReplay {
 }
 
 #[derive(Debug)]
-pub(super) struct SeedChannelState {
+pub(super) struct SessionChannelState {
     router: ChannelRouter,
     journal: ReliableJournal,
     projection: SnapshotProjector,
@@ -132,7 +132,7 @@ pub(super) struct SeedChannelState {
 pub(super) struct TimelinePersistence {
     pub(super) wake: mpsc::Sender<()>,
     /// 结构事件（BlockSealed/RoundSealed/BlockCheckpoint…）→ 1s 合并窗口。
-    pub(super) pending_seeds: Arc<Mutex<HashSet<String>>>,
+    pub(super) pending_sessions: Arc<Mutex<HashSet<String>>>,
     /// 回合边界（TurnSealed）→ 优先排空，且立即唤醒 worker。
     ///
     /// 与 `pending_seeds` 由**同一个 worker 线程**处理、terminal 每轮先 drain，
@@ -140,11 +140,11 @@ pub(super) struct TimelinePersistence {
     /// 让旧快照盖过 terminal 边界。崩溃窗口从 0 变为毫秒级（与既有
     /// BlockSealed/RoundSealed 异步窗口同量级），显式同步边界
     /// （`flush_timeline_persistence` / `Drop` / 优雅关闭）仍是 fail-closed。
-    pub(super) terminal_seeds: Arc<Mutex<HashSet<String>>>,
+    pub(super) terminal_sessions: Arc<Mutex<HashSet<String>>>,
     pub(super) join: Option<JoinHandle<()>>,
 }
 
-impl SeedChannelState {
+impl SessionChannelState {
     fn new(channel: RingingChannel) -> Self {
         Self {
             router: ChannelRouter::new(channel),
@@ -158,7 +158,7 @@ impl SeedChannelState {
     }
 
     /// 从持久化 op 序列重建（与 live publish 路径相同的重放语义）。
-    fn with_ops(channel: RingingChannel, seed: &str, ops: &[JournalOp]) -> Self {
+    fn with_ops(channel: RingingChannel, session_id: &str, ops: &[JournalOp]) -> Self {
         let mut state = Self::new(channel);
         for op in ops {
             match op {
@@ -171,7 +171,7 @@ impl SeedChannelState {
                         }
                         RingingEvent::Tool(event) => DomainEvent::Tool(event.clone()),
                     };
-                    state.projection.apply(channel, seed, &domain);
+                    state.projection.apply(channel, session_id, &domain);
                     match envelope.delivery {
                         Delivery::Reliable => {
                             let _ = state.journal.append(envelope);
@@ -205,7 +205,7 @@ impl SeedChannelState {
 /// publish 会被串行化），同时保证「摘除瞬间已在途的持槽者」继续操作同一实例；
 /// 摘除后槽由在途者自然释放，期间的并发 publish 会在表里重新 insert 一个
 /// 新槽（与 `forget_seed` 的既有竞态语义一致：调用方保证已 join worker）。
-type SeedChannelSlot = Arc<Mutex<SeedChannelState>>;
+type SessionChannelSlot = Arc<Mutex<SessionChannelState>>;
 
 /// 一个频道的全部 seed 分片（BUG-2026-09-13-33）。
 ///
@@ -215,23 +215,23 @@ type SeedChannelSlot = Arc<Mutex<SeedChannelState>>;
 /// 要消除的「跨会话内存态共享单锁」。
 #[derive(Debug, Default)]
 pub(super) struct ChannelShards {
-    seeds: RwLock<HashMap<String, SeedChannelSlot>>,
+    sessions: RwLock<HashMap<String, SessionChannelSlot>>,
 }
 
 impl ChannelShards {
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.seeds
+        self.sessions
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .is_empty()
     }
 
-    fn contains(&self, seed: &str) -> bool {
-        self.seeds
+    fn contains(&self, session_id: &str) -> bool {
+        self.sessions
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .contains_key(seed)
+            .contains_key(session_id)
     }
 
     /// 取（必要时登记）该 seed 的槽。
@@ -240,54 +240,54 @@ impl ChannelShards {
     /// 的保证点。登记是一次短写锁 + 一次 `SeedChannelState::new`，不含任何
     /// I/O；并发首访同一 seed 时可能重复构造 state，最终只保留一个（未被保留
     /// 的那个在 `insert` 后即被丢弃，不会有第二个线程继续写它）。
-    fn slot(&self, channel: RingingChannel, seed: &str) -> SeedChannelSlot {
+    fn slot(&self, channel: RingingChannel, session_id: &str) -> SessionChannelSlot {
         if let Some(slot) = self
-            .seeds
+            .sessions
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(seed)
+            .get(session_id)
         {
             return Arc::clone(slot);
         }
-        let mut seeded = self.seeds.write().unwrap_or_else(|e| e.into_inner());
+        let mut seeded = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         Arc::clone(
             seeded
-                .entry(seed.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(SeedChannelState::new(channel)))),
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(SessionChannelState::new(channel)))),
         )
     }
 
     /// 只读查找：不登记（回放/快照等只读路径不得因查询而建条目）。
-    fn slot_if_present(&self, seed: &str) -> Option<SeedChannelSlot> {
-        self.seeds
+    fn slot_if_present(&self, session_id: &str) -> Option<SessionChannelSlot> {
+        self.sessions
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(seed)
+            .get(session_id)
             .map(Arc::clone)
     }
 
     /// 登记一个**已构造好**的 state（懒加载重放路径用，避免重放两遍）。
-    fn slot_with(&self, seed: &str, state: SeedChannelState) -> SeedChannelSlot {
-        let mut seeded = self.seeds.write().unwrap_or_else(|e| e.into_inner());
+    fn slot_with(&self, session_id: &str, state: SessionChannelState) -> SessionChannelSlot {
+        let mut seeded = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         Arc::clone(
             seeded
-                .entry(seed.to_string())
+                .entry(session_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(state))),
         )
     }
 
     /// 摘除某 seed 的槽（`forget_seed` 用）；返回是否摘除成功。
-    fn remove(&self, seed: &str) -> bool {
-        self.seeds
+    fn remove(&self, session_id: &str) -> bool {
+        self.sessions
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(seed)
+            .remove(session_id)
             .is_some()
     }
 
     /// 该频道下已登记的 seed（回放/快照遍历用）。
-    fn seed_keys(&self) -> Vec<String> {
-        self.seeds
+    fn session_keys(&self) -> Vec<String> {
+        self.sessions
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .keys()
@@ -302,9 +302,9 @@ pub struct RingingHub {
     pub(super) sequencer: Sequencer,
     /// 磁盘持久化 seed 清单（懒加载索引；`ensure_seed_loaded` 按需重放）。
     /// 启动时 `load_persisted` 只扫描清单，不加载任何历史。
-    pub(super) disk_seeds: Mutex<HashMap<RingingChannel, HashSet<String>>>,
+    pub(super) disk_sessions: Mutex<HashMap<RingingChannel, HashSet<String>>>,
     /// 磁盘 timeline seed 清单（懒加载索引；`ensure_timeline_loaded` 按需恢复）。
-    pub(super) disk_timeline_seeds: Mutex<HashSet<String>>,
+    pub(super) disk_timeline_sessions: Mutex<HashSet<String>>,
     /// 懒加载串行化（per-seed）：防止并发首访**同一** seed 时双重重放/恢复。
     /// Phase 1（2026-09-11）：全局 `Mutex<()>` → 锁表。原全局锁下 session A
     /// 的 journal 重放（28 秒级）会阻塞 B~Z 的 timeline 快照装载，是多
@@ -412,37 +412,37 @@ const JOURNAL_WRITE_QUEUE_CAPACITY: usize = 4096;
 pub(super) enum JournalWriteOp {
     Append {
         channel: RingingChannel,
-        seed: String,
+        session_id: String,
         envelope: RingingEventEnvelope,
     },
     Checkpoint {
         channel: RingingChannel,
-        seed: String,
+        session_id: String,
         identity: String,
         stream_seq: u64,
     },
     Compact {
         channel: RingingChannel,
-        seed: String,
+        session_id: String,
         turn_id: String,
         round_num: u32,
     },
     Replaceable {
         channel: RingingChannel,
-        seed: String,
+        session_id: String,
         identity: String,
         envelope: RingingEventEnvelope,
     },
     RemoveReplaceable {
         channel: RingingChannel,
-        seed: String,
+        session_id: String,
         identity: String,
     },
     /// 整文件重写：`envelopes`/`checkpoints` 为投递时点的内存 journal 快照
     /// （克隆在 `channels` 锁内完成，stat/序列化/写盘全部在锁外）。
     Rewrite {
         channel: RingingChannel,
-        seed: String,
+        session_id: String,
         envelopes: Vec<RingingEventEnvelope>,
         checkpoints: Vec<(String, u64)>,
     },
@@ -463,66 +463,66 @@ fn journal_writer_loop(
         match op {
             JournalWriteOp::Append {
                 channel,
-                seed,
+                session_id,
                 envelope,
             } => {
-                if let Err(error) = store.append(channel, &seed, &envelope) {
+                if let Err(error) = store.append(channel, &session_id, &envelope) {
                     log::warn!("[ringing] journal append failed: {error}");
                 }
             }
             JournalWriteOp::Checkpoint {
                 channel,
-                seed,
+                session_id,
                 identity,
                 stream_seq,
             } => {
-                if let Err(error) = store.checkpoint(channel, &seed, &identity, stream_seq) {
+                if let Err(error) = store.checkpoint(channel, &session_id, &identity, stream_seq) {
                     log::warn!("[ringing] journal checkpoint persist failed: {error}");
                 }
             }
             JournalWriteOp::Compact {
                 channel,
-                seed,
+                session_id,
                 turn_id,
                 round_num,
             } => {
-                if let Err(error) = store.compact(channel, &seed, &turn_id, round_num) {
+                if let Err(error) = store.compact(channel, &session_id, &turn_id, round_num) {
                     log::warn!("[ringing] journal compact persist failed: {error}");
                 }
             }
             JournalWriteOp::Replaceable {
                 channel,
-                seed,
+                session_id,
                 identity,
                 envelope,
             } => {
-                if let Err(error) = store.replaceable(channel, &seed, &identity, &envelope) {
+                if let Err(error) = store.replaceable(channel, &session_id, &identity, &envelope) {
                     log::warn!("[ringing] replaceable slot persist failed: {error}");
                 }
             }
             JournalWriteOp::RemoveReplaceable {
                 channel,
-                seed,
+                session_id,
                 identity,
             } => {
-                if let Err(error) = store.remove_replaceable(channel, &seed, &identity) {
+                if let Err(error) = store.remove_replaceable(channel, &session_id, &identity) {
                     log::warn!("[ringing] replaceable slot cleanup failed: {error}");
                 }
             }
             JournalWriteOp::Rewrite {
                 channel,
-                seed,
+                session_id,
                 envelopes,
                 checkpoints,
-            } => match store.file_size(channel, &seed) {
+            } => match store.file_size(channel, &session_id) {
                 Ok(size) if size >= journal_rewrite_threshold() => {
-                    match store.rewrite(channel, &seed, &envelopes, &checkpoints) {
+                    match store.rewrite(channel, &session_id, &envelopes, &checkpoints) {
                         Ok(()) => log::info!(
-                            "[ringing] journal rewritten for {seed}: {size} bytes -> {} entries",
+                            "[ringing] journal rewritten for {session_id}: {size} bytes -> {} entries",
                             envelopes.len()
                         ),
                         Err(error) => {
-                            log::warn!("[ringing] journal rewrite failed for {seed}: {error}")
+                            log::warn!("[ringing] journal rewrite failed for {session_id}: {error}")
                         }
                     }
                 }
@@ -607,8 +607,8 @@ impl RingingHub {
         Self {
             epoch,
             sequencer: Sequencer::new(),
-            disk_seeds: Mutex::new(HashMap::new()),
-            disk_timeline_seeds: Mutex::new(HashSet::new()),
+            disk_sessions: Mutex::new(HashMap::new()),
+            disk_timeline_sessions: Mutex::new(HashSet::new()),
             lazy_loads: Mutex::new(HashMap::new()),
             content_store: Mutex::new(content_store),
             channels: Mutex::new(HashMap::new()),
@@ -635,26 +635,26 @@ impl RingingHub {
     /// 时由 `ensure_seed_loaded` 从磁盘按需恢复。冷启动开销从"全量读取
     /// 全部 jsonl"降为"遍历目录"，历史会话不再常驻内存。
     fn load_persisted(&self) {
-        let seeds = {
+        let sessions = {
             let guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
-                Some(store) => store.list_seeds(),
+                Some(store) => store.list_sessions(),
                 None => HashMap::new(),
             }
         };
-        let total: usize = seeds.values().map(HashSet::len).sum();
-        *self.disk_seeds.lock().unwrap_or_else(|e| e.into_inner()) = seeds;
+        let total: usize = sessions.values().map(HashSet::len).sum();
+        *self.disk_sessions.lock().unwrap_or_else(|e| e.into_inner()) = sessions;
         log::info!("[ringing] lazy journal index ready: {total} persisted seeds on disk");
     }
 
     /// 懒加载串行化锁（per-seed）：同一 seed 的首访重放/恢复互斥，不同 seed
     /// 并行。锁表插入在锁外——`entry().or_insert_with` 的短暂 map 锁只与
     /// 其他锁表访问竞争，不与任何装载 I/O 竞争。
-    pub(super) fn lazy_load_lock(&self, seed: &str) -> Arc<Mutex<()>> {
+    pub(super) fn lazy_load_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
         self.lazy_loads
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(seed.to_string())
+            .entry(session_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
@@ -668,21 +668,25 @@ impl RingingHub {
     ///
     /// - Err：磁盘加载失败（fail-closed，R3）——调用方不得以全新空状态
     ///   继续发布/回放，否则重启后序号永久冲突。
-    fn ensure_seed_loaded(&self, channel: RingingChannel, seed: &str) -> Result<(), String> {
-        let lock = self.lazy_load_lock(seed);
+    fn ensure_session_loaded(
+        &self,
+        channel: RingingChannel,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let lock = self.lazy_load_lock(session_id);
         let _serial = lock.lock().unwrap_or_else(|e| e.into_inner());
         let loaded = self
             .channel_shards(channel)
-            .is_some_and(|shards| shards.contains(seed));
+            .is_some_and(|shards| shards.contains(session_id));
         if loaded {
             return Ok(());
         }
         let on_disk = self
-            .disk_seeds
+            .disk_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&channel)
-            .is_some_and(|seeds| seeds.contains(seed));
+            .is_some_and(|sessions| sessions.contains(session_id));
         if !on_disk {
             return Ok(());
         }
@@ -695,15 +699,15 @@ impl RingingHub {
             // 那会让该 seed 以 seq=1 重新发布，重启重放后永久乱序重复。
             let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
             match guard.as_mut() {
-                Some(store) => match store.load_seed(channel, seed) {
+                Some(store) => match store.load_session(channel, session_id) {
                     Ok(ops) => ops,
                     Err(error) => {
                         log::error!(
-                            "[ringing] lazy load failed for {seed} on {}: {error}",
+                            "[ringing] lazy load failed for {session_id} on {}: {error}",
                             channel.as_str()
                         );
                         return Err(format!(
-                            "lazy load failed for {seed} on {}: {error}",
+                            "lazy load failed for {session_id} on {}: {error}",
                             channel.as_str()
                         ));
                     }
@@ -714,10 +718,10 @@ impl RingingHub {
         if ops.is_empty() {
             // 清单存在但无任何可重放操作（空/损坏）：插入空 state 防反复扫描。
             self.shards_for(channel)
-                .slot_with(seed, SeedChannelState::new(channel));
+                .slot_with(session_id, SessionChannelState::new(channel));
             return Ok(());
         }
-        let state = SeedChannelState::with_ops(channel, seed, &ops);
+        let state = SessionChannelState::with_ops(channel, session_id, &ops);
         // 精确恢复序号（比启动水位更完整：channel/session seq 一并恢复）。
         let (mut max_stream, mut max_channel, mut max_session) = (0, 0, 0);
         for op in &ops {
@@ -728,12 +732,12 @@ impl RingingHub {
             }
         }
         self.sequencer
-            .seed(channel, seed, max_stream, max_channel, max_session);
+            .session_id(channel, session_id, max_stream, max_channel, max_session);
         // 超大历史文件加载即压缩（冷路径：同步执行，不走写队列）。
-        self.rewrite_oversized_now(channel, seed, &state);
-        self.shards_for(channel).slot_with(seed, state);
+        self.rewrite_oversized_now(channel, session_id, &state);
+        self.shards_for(channel).slot_with(session_id, state);
         log::info!(
-            "[ringing] lazily loaded {seed} on {}: {} ops",
+            "[ringing] lazily loaded {session_id} on {}: {} ops",
             channel.as_str(),
             ops.len()
         );
@@ -755,18 +759,18 @@ impl RingingHub {
     /// 调用方必须在 `ensure_seed_loaded` 完成之后调用（本函数内部 publish 会
     /// 再次调用 `ensure_seed_loaded`，重入同 seed 的 lazy_load 锁会死锁）。
     /// B9/H3：registry 在 spawn 成功/worker 关闭时维护活表。
-    pub fn mark_worker_live(&self, seed: &str) {
+    pub fn mark_worker_live(&self, session_id: &str) {
         self.live_workers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(seed.to_string());
+            .insert(session_id.to_string());
     }
 
-    pub fn mark_worker_dead(&self, seed: &str) {
+    pub fn mark_worker_dead(&self, session_id: &str) {
         self.live_workers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(seed);
+            .remove(session_id);
     }
 
     /// D-1：会话关闭后丢弃该 seed 的全部常驻内存态（channel×seed 的
@@ -777,7 +781,7 @@ impl RingingHub {
     /// 调用约束：必须晚于该 seed 的终态（Closed）发布，否则 publish 会触发
     /// lazy-load 把刚丢弃的状态原样重建回来；且调用方必须已 join worker，
     /// 避免存活 worker 继续写回脏状态。
-    pub fn forget_seed(&self, seed: &str) {
+    pub fn forget_session(&self, session_id: &str) {
         // 锁序：先取 `channels` 顶层锁取出分片快照，**释放后再**逐个摘除
         // 槽表条目——顶层锁与槽表锁永不重叠持有（见 `channels` 字段锁序注释）。
         // 摘除不在槽锁内进行：已在途的持槽者继续操作同一实例，摘除后由它自然
@@ -790,25 +794,25 @@ impl RingingHub {
             .cloned()
             .collect();
         for shard in shards {
-            shard.remove(seed);
+            shard.remove(session_id);
         }
         // BUG-2026-09-12-12：连同该 seed 的实时分片环一并丢弃，避免会话关闭
         // 后分片表随历史会话数无限增长（订阅者持有的 Receiver 仍可读完已缓冲
         // 事件，`broadcast` 只在所有接收端释放后才真正回收）。
         if let Ok(mut live) = self.live.lock() {
-            live.retain(|(_, shard_seed), _| shard_seed != seed);
+            live.retain(|(_, shard_session), _| shard_session != session_id);
         }
         if let Ok(mut live) = self.live_interactions.lock() {
-            live.remove(seed);
+            live.remove(session_id);
         }
         if let Ok(mut live) = self.live_interaction_content.lock() {
-            live.remove(seed);
+            live.remove(session_id);
         }
         if let Ok(mut workers) = self.live_workers.lock() {
-            workers.remove(seed);
+            workers.remove(session_id);
         }
         if let Ok(mut content) = self.content_store.lock() {
-            content.release_session(seed);
+            content.release_session(session_id);
         }
     }
 
@@ -819,7 +823,7 @@ impl RingingHub {
     /// 大内容外置：存入（返回 content_id）。
     pub fn put_content(
         &self,
-        seed: &str,
+        session_id: &str,
         media_type: &str,
         bytes: Vec<u8>,
         truncated: bool,
@@ -827,15 +831,15 @@ impl RingingHub {
         self.content_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .put(seed, media_type, bytes, truncated)
+            .put(session_id, media_type, bytes, truncated)
     }
 
     /// 大内容外置：读取（校验会话所有权 + TTL）。
-    pub fn get_content(&self, seed: &str, content_id: &str) -> Option<ContentEntry> {
+    pub fn get_content(&self, session_id: &str, content_id: &str) -> Option<ContentEntry> {
         self.content_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(seed, content_id)
+            .get(session_id, content_id)
     }
 
     /// #345：交互正文入 store 并 pin（v2 content 端点按 id 取，不带 seed）。
@@ -844,7 +848,7 @@ impl RingingHub {
     /// 调用方不得在写入失败时假装交互正文可用。
     pub fn put_interaction_content(
         &self,
-        seed: &str,
+        session_id: &str,
         interaction_id: &str,
         media_type: &str,
         bytes: Vec<u8>,
@@ -853,12 +857,12 @@ impl RingingHub {
             .content_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .put_pinned_for(seed, media_type, bytes, Some(interaction_id))?;
+            .put_pinned_for(session_id, media_type, bytes, Some(interaction_id))?;
         self.live_interaction_content
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(
-                seed.to_string(),
+                session_id.to_string(),
                 (interaction_id.to_string(), content_id.clone()),
             );
         Ok(content_id)
@@ -877,15 +881,15 @@ impl RingingHub {
     ///
     /// 先走内存活表（当前进程路径），再按持久化的 pin_key 兜底——daemon 重启后
     /// 活表为空，但 metadata 里仍记录着 interaction_id，孤儿收尾时也能释放 pin。
-    fn release_interaction_content(&self, seed: &str, interaction_id: &str) {
+    fn release_interaction_content(&self, session_id: &str, interaction_id: &str) {
         let content_id = {
             let mut live = self
                 .live_interaction_content
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            match live.get(seed) {
+            match live.get(session_id) {
                 Some((current, _)) if current == interaction_id => {
-                    live.remove(seed).map(|(_, content_id)| content_id)
+                    live.remove(session_id).map(|(_, content_id)| content_id)
                 }
                 _ => None,
             }
@@ -900,7 +904,7 @@ impl RingingHub {
         self.content_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .unpin_key(seed, interaction_id);
+            .unpin_key(session_id, interaction_id);
     }
 
     /// 顶层锁的 `MutexGuard`（只在测试断言里用；生产路径一律走
@@ -935,26 +939,30 @@ impl RingingHub {
     }
 
     /// 该 (channel, seed) 的分片槽（不存在则登记空 state）。
-    fn seed_slot(&self, channel: RingingChannel, seed: &str) -> Arc<Mutex<SeedChannelState>> {
-        self.shards_for(channel).slot(channel, seed)
+    fn session_slot(
+        &self,
+        channel: RingingChannel,
+        session_id: &str,
+    ) -> Arc<Mutex<SessionChannelState>> {
+        self.shards_for(channel).slot(channel, session_id)
     }
 
     /// 发布领域事件（worker 事件入口调用）。
-    pub fn publish(&self, seed: &str, event: DomainEvent) -> PublishOutcome {
-        self.publish_with_causation(seed, event, None)
+    pub fn publish(&self, session_id: &str, event: DomainEvent) -> PublishOutcome {
+        self.publish_with_causation(session_id, event, None)
     }
 
     /// 发布领域事件并附加因果来源（Ringing command_id）。
     pub fn publish_with_causation(
         &self,
-        seed: &str,
+        session_id: &str,
         event: DomainEvent,
         causation: Option<&str>,
     ) -> PublishOutcome {
         let channel = event.channel();
         // P1: 懒加载——publish 前确保该 seed 历史已重放入内存，防止新事件
         // 的序号与磁盘历史冲突（sequencer 水位随后续加载精确恢复）。
-        if let Err(error) = self.ensure_seed_loaded(channel, seed) {
+        if let Err(error) = self.ensure_session_loaded(channel, session_id) {
             // R3：fail-closed——加载失败不得以全新空状态继续发布。
             log::error!("[ringing] publish fail-closed (load error): {error}");
             return PublishOutcome::Backpressure;
@@ -966,11 +974,11 @@ impl RingingHub {
         //
         // BUG-2026-09-13-33：临界区从「全局 channels 锁」收窄为
         // per-(channel, seed) 槽锁——不同会话/频道不再互相串行。
-        let slot = self.seed_slot(channel, seed);
+        let slot = self.session_slot(channel, session_id);
         let mut st = slot.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
 
-        let (stream_seq, channel_seq, session_seq) = self.sequencer.next(channel, seed);
+        let (stream_seq, channel_seq, session_seq) = self.sequencer.next(channel, session_id);
         if !is_safe_integer(stream_seq)
             || !is_safe_integer(channel_seq)
             || !is_safe_integer(session_seq)
@@ -982,13 +990,13 @@ impl RingingHub {
             "{}-{}-{}-{}",
             self.epoch,
             channel.as_str(),
-            seed,
+            session_id,
             stream_seq
         );
 
         // 幂等：journal 侧 event_id 去重（replaceable 也检查，防重复投递）
         let envelope = RingingEventEnvelope::new(
-            seed,
+            session_id,
             stream_seq,
             channel_seq,
             session_seq,
@@ -1000,8 +1008,8 @@ impl RingingHub {
             None => envelope,
         };
 
-        let state_changed = st.projection.apply(channel, seed, &event);
-        let revision = st.projection.revision(channel, seed);
+        let state_changed = st.projection.apply(channel, session_id, &event);
+        let revision = st.projection.revision(channel, session_id);
         // server_ts：服务器发布时间（unix ms），端到端延迟诊断用。
         let mut envelope = envelope.with_server_ts(unix_ms());
         if state_changed {
@@ -1014,7 +1022,7 @@ impl RingingHub {
                 match st.journal.append(&envelope) {
                     AppendOutcome::Duplicate => return PublishOutcome::Duplicate,
                     AppendOutcome::Appended => {
-                        self.persist_append(channel, seed, st, &envelope);
+                        self.persist_append(channel, session_id, st, &envelope);
                         // RoundCompleted 是该 round 的权威终态（携带完整 thinking/answer），
                         // 折叠该 round 的增量可控制 journal 用量，且回放安全：
                         // 客户端要么已有增量（随后被快照覆盖），要么直接拿到全量快照。
@@ -1026,18 +1034,18 @@ impl RingingHub {
                         {
                             let removed = st.journal.compact_round_deltas(turn_id, *round_num);
                             if removed > 0 {
-                                self.persist_compact(channel, seed, st, turn_id, *round_num);
+                                self.persist_compact(channel, session_id, st, turn_id, *round_num);
                             }
                         }
                         // P0: 磁盘收敛检查脱离 RoundCompleted 依赖——轮次未完成
                         // 时 delta 持续 append 也必须有兜底重写（pending 门控）。
-                        self.schedule_rewrite_if_oversized(channel, seed, st);
+                        self.schedule_rewrite_if_oversized(channel, session_id, st);
                     }
                 }
                 for key in terminal_replaceable_keys(&envelope.event) {
                     st.router.flush_replaceable(&key);
                     st.replaceable_since_checkpoint.remove(&key);
-                    self.persist_remove_replaceable(channel, seed, st, &format!("{key:?}"));
+                    self.persist_remove_replaceable(channel, session_id, st, &format!("{key:?}"));
                 }
                 // 活交互登记：当前进程发布的 InteractionRequested/PlanReviewRequested
                 // 进入内存表，resolved 时移除。daemon 重启后表为空 → journal 重放的
@@ -1055,7 +1063,7 @@ impl RingingHub {
                         self.live_interactions
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .insert(seed.to_string(), interaction_id.clone());
+                            .insert(session_id.to_string(), interaction_id.clone());
                     }
                     RingingEvent::Control(ControlEvent::InteractionResolved {
                         interaction_id,
@@ -1069,12 +1077,15 @@ impl RingingHub {
                             .live_interactions
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
-                        if live.get(seed).is_some_and(|cur| cur == interaction_id) {
-                            live.remove(seed);
+                        if live
+                            .get(session_id)
+                            .is_some_and(|cur| cur == interaction_id)
+                        {
+                            live.remove(session_id);
                         }
                         drop(live);
                         // #345：交互终结 → 正文解除 pin，回到普通 TTL/淘汰语义。
-                        self.release_interaction_content(seed, interaction_id);
+                        self.release_interaction_content(session_id, interaction_id);
                     }
                     // permission 的正文用 canonical interaction id 作为 pin_key；
                     // 权限答复本身没有 Ringing 终态事件，工具完成/取消就是它的
@@ -1082,7 +1093,7 @@ impl RingingHub {
                     RingingEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
                         let interaction_id =
                             crate::agent::tool_runtime::canonical_interaction_id(tool_call_id);
-                        self.release_interaction_content(seed, interaction_id.as_str());
+                        self.release_interaction_content(session_id, interaction_id.as_str());
                     }
                     _ => {}
                 }
@@ -1114,7 +1125,7 @@ impl RingingHub {
                             if should_persist {
                                 self.persist_replaceable(
                                     channel,
-                                    seed,
+                                    session_id,
                                     st,
                                     &format!("{key:?}"),
                                     &envelope,
@@ -1139,10 +1150,10 @@ impl RingingHub {
     pub fn subscribe(
         &self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
     ) -> broadcast::Receiver<RingingEventEnvelope> {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        live.entry((channel, seed.to_string()))
+        live.entry((channel, session_id.to_string()))
             .or_insert_with(|| broadcast::channel(LIVE_BROADCAST_CAPACITY).0)
             .subscribe()
     }
@@ -1210,17 +1221,17 @@ impl RingingHub {
     pub fn replay_since(
         &self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         after_stream_seq: u64,
     ) -> Result<Vec<RingingEventEnvelope>, CursorExpired> {
         // R3：加载失败时让客户端走 reset→snapshot 路径，而非回放半截状态。
-        self.ensure_seed_loaded(channel, seed)
+        self.ensure_session_loaded(channel, session_id)
             .map_err(|_| CursorExpired {
                 earliest_available_seq: 0,
             })?;
         let slot = self
             .channel_shards(channel)
-            .and_then(|shards| shards.slot_if_present(seed))
+            .and_then(|shards| shards.slot_if_present(session_id))
             .ok_or(CursorExpired {
                 earliest_available_seq: 0,
             })?;
@@ -1264,8 +1275,8 @@ impl RingingHub {
         let mut replay = ChannelReplay::default();
         // 逐 seed 取/放槽锁：任何时候最多持有一把槽锁，杜绝多槽锁交叉死锁
         //（锁序注释第 3 条）。
-        for seed in shards.seed_keys() {
-            let Some(slot) = shards.slot_if_present(&seed) else {
+        for session_id in shards.session_keys() {
+            let Some(slot) = shards.slot_if_present(&session_id) else {
                 continue;
             };
             let st = slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -1277,7 +1288,7 @@ impl RingingHub {
                     }) => {
                         replay.resets.push(RingingResetRequired::new(
                             channel,
-                            seed.clone(),
+                            session_id.clone(),
                             earliest_available_seq,
                         ));
                     }
@@ -1297,25 +1308,25 @@ impl RingingHub {
 
     /// 读取某频道的领域快照（v1 bootstrap 路由已删除；本方法是 orphan_seal 等
     /// 内部路径与产出方往返测试的读入口）。
-    pub fn snapshot(&self, channel: RingingChannel, seed: &str) -> RingingChannelSnapshot {
+    pub fn snapshot(&self, channel: RingingChannel, session_id: &str) -> RingingChannelSnapshot {
         // R3：只读路径加载失败时降级为空快照/零水位，不阻断读取。
-        let _ = self.ensure_seed_loaded(channel, seed);
+        let _ = self.ensure_session_loaded(channel, session_id);
         self.channel_shards(channel)
-            .and_then(|shards| shards.slot_if_present(seed))
+            .and_then(|shards| shards.slot_if_present(session_id))
             .map(|slot| {
                 let st = slot.lock().unwrap_or_else(|e| e.into_inner());
                 st.projection
-                    .snapshot_for(channel, seed, st.last_stream_seq)
+                    .snapshot_for(channel, session_id, st.last_stream_seq)
             })
-            .unwrap_or_else(|| SnapshotProjector::new().snapshot_for(channel, seed, 0))
+            .unwrap_or_else(|| SnapshotProjector::new().snapshot_for(channel, session_id, 0))
     }
 
     /// Conversation 频道完整快照：领域投影摘要 + 持久化消息构建的 turns。
-    pub fn conversation_snapshot(&self, seed: &str) -> RingingChannelSnapshot {
-        let mut snap = self.snapshot(RingingChannel::Conversation, seed);
+    pub fn conversation_snapshot(&self, session_id: &str) -> RingingChannelSnapshot {
+        let mut snap = self.snapshot(RingingChannel::Conversation, session_id);
         if let Some(state) = super::conversation_snapshot::persisted_conversation_state(
             self.sessions.as_deref(),
-            seed,
+            session_id,
         ) {
             merge_persisted_conversation_state(&mut snap.state, state);
         }
@@ -1323,22 +1334,28 @@ impl RingingHub {
     }
 
     /// 记 replaceable checkpoint（稀疏）。
-    pub fn checkpoint(&self, channel: RingingChannel, seed: &str, identity: &str, stream_seq: u64) {
+    pub fn checkpoint(
+        &self,
+        channel: RingingChannel,
+        session_id: &str,
+        identity: &str,
+        stream_seq: u64,
+    ) {
         // R3：只读路径加载失败时降级为空快照/零水位，不阻断读取。
-        let _ = self.ensure_seed_loaded(channel, seed);
-        let slot = self.seed_slot(channel, seed);
+        let _ = self.ensure_session_loaded(channel, session_id);
+        let slot = self.session_slot(channel, session_id);
         let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *guard;
         st.last_stream_seq = st.last_stream_seq.max(stream_seq);
         st.journal.checkpoint_replaceable(identity, stream_seq);
-        self.persist_checkpoint(channel, seed, st, identity, stream_seq);
+        self.persist_checkpoint(channel, session_id, st, identity, stream_seq);
     }
 
-    pub fn last_stream_seq(&self, channel: RingingChannel, seed: &str) -> u64 {
+    pub fn last_stream_seq(&self, channel: RingingChannel, session_id: &str) -> u64 {
         // R3：只读路径加载失败时降级为空快照/零水位，不阻断读取。
-        let _ = self.ensure_seed_loaded(channel, seed);
+        let _ = self.ensure_session_loaded(channel, session_id);
         self.channel_shards(channel)
-            .and_then(|shards| shards.slot_if_present(seed))
+            .and_then(|shards| shards.slot_if_present(session_id))
             .map(|slot| {
                 slot.lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1354,7 +1371,7 @@ impl RingingHub {
 
     /// 投递写操作给 journal 写线程。队列满时丢弃并标记该 seed 需要重写收敛
     /// ——内存 journal 才是权威，重写会把丢掉的条目补回磁盘。
-    fn enqueue_journal(&self, st: &mut SeedChannelState, op: JournalWriteOp) {
+    fn enqueue_journal(&self, st: &mut SessionChannelState, op: JournalWriteOp) {
         let Some(writer) = self.journal_writer.as_ref() else {
             return;
         };
@@ -1384,15 +1401,15 @@ impl RingingHub {
     fn persist_append(
         &self,
         channel: RingingChannel,
-        seed: &str,
-        st: &mut SeedChannelState,
+        session_id: &str,
+        st: &mut SessionChannelState,
         envelope: &RingingEventEnvelope,
     ) {
         self.enqueue_journal(
             st,
             JournalWriteOp::Append {
                 channel,
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 envelope: envelope.clone(),
             },
         );
@@ -1401,8 +1418,8 @@ impl RingingHub {
     fn persist_compact(
         &self,
         channel: RingingChannel,
-        seed: &str,
-        st: &mut SeedChannelState,
+        session_id: &str,
+        st: &mut SessionChannelState,
         turn_id: &str,
         round_num: u32,
     ) {
@@ -1410,7 +1427,7 @@ impl RingingHub {
             st,
             JournalWriteOp::Compact {
                 channel,
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 round_num,
             },
@@ -1428,8 +1445,8 @@ impl RingingHub {
     fn schedule_rewrite_if_oversized(
         &self,
         channel: RingingChannel,
-        seed: &str,
-        st: &mut SeedChannelState,
+        session_id: &str,
+        st: &mut SessionChannelState,
     ) {
         let Some(writer) = self.journal_writer.as_ref() else {
             return;
@@ -1440,7 +1457,7 @@ impl RingingHub {
             return;
         };
         let Some(store) = guard.as_mut() else { return };
-        let pending = store.pending_bytes(channel, seed);
+        let pending = store.pending_bytes(channel, session_id);
         if st.rewrite_inflight {
             // 写线程完成重写后会把 pending 清零；据此解除在途标志。
             if pending < journal_rewrite_threshold() {
@@ -1461,7 +1478,7 @@ impl RingingHub {
             .collect();
         match writer.try_send(JournalWriteOp::Rewrite {
             channel,
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             envelopes,
             checkpoints,
         }) {
@@ -1472,17 +1489,22 @@ impl RingingHub {
             Err(_) => {
                 // 队列满：保留 needs_rewrite，下次 append 重试。
                 st.needs_rewrite = true;
-                log::warn!("[ringing] journal rewrite deferred for {seed}: write queue full");
+                log::warn!("[ringing] journal rewrite deferred for {session_id}: write queue full");
             }
         }
     }
 
     /// 冷路径（懒加载首访）：同步执行收敛重写——此时该 seed 尚无并发发布者，
     /// 且写线程队列中不存在本 seed 的待写条目（调用方先 flush 队列）。
-    fn rewrite_oversized_now(&self, channel: RingingChannel, seed: &str, st: &SeedChannelState) {
+    fn rewrite_oversized_now(
+        &self,
+        channel: RingingChannel,
+        session_id: &str,
+        st: &SessionChannelState,
+    ) {
         let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
         let Some(store) = guard.as_mut() else { return };
-        let size = match store.file_size(channel, seed) {
+        let size = match store.file_size(channel, session_id) {
             Ok(size) => size,
             Err(_) => return,
         };
@@ -1496,11 +1518,11 @@ impl RingingHub {
             .iter()
             .map(|(key, seq)| (key.clone(), *seq))
             .collect();
-        if let Err(error) = store.rewrite(channel, seed, &envelopes, &checkpoints) {
-            log::warn!("[ringing] journal rewrite failed for {seed}: {error}");
+        if let Err(error) = store.rewrite(channel, session_id, &envelopes, &checkpoints) {
+            log::warn!("[ringing] journal rewrite failed for {session_id}: {error}");
         } else {
             log::info!(
-                "[ringing] journal rewritten for {seed}: {} bytes -> {} entries",
+                "[ringing] journal rewritten for {session_id}: {} bytes -> {} entries",
                 size,
                 envelopes.len()
             );
@@ -1565,8 +1587,8 @@ impl RingingHub {
     fn persist_checkpoint(
         &self,
         channel: RingingChannel,
-        seed: &str,
-        st: &mut SeedChannelState,
+        session_id: &str,
+        st: &mut SessionChannelState,
         identity: &str,
         stream_seq: u64,
     ) {
@@ -1574,7 +1596,7 @@ impl RingingHub {
             st,
             JournalWriteOp::Checkpoint {
                 channel,
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 identity: identity.to_string(),
                 stream_seq,
             },
@@ -1584,8 +1606,8 @@ impl RingingHub {
     fn persist_replaceable(
         &self,
         channel: RingingChannel,
-        seed: &str,
-        st: &mut SeedChannelState,
+        session_id: &str,
+        st: &mut SessionChannelState,
         identity: &str,
         envelope: &RingingEventEnvelope,
     ) {
@@ -1593,7 +1615,7 @@ impl RingingHub {
             st,
             JournalWriteOp::Replaceable {
                 channel,
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 identity: identity.to_string(),
                 envelope: envelope.clone(),
             },
@@ -1603,15 +1625,15 @@ impl RingingHub {
     fn persist_remove_replaceable(
         &self,
         channel: RingingChannel,
-        seed: &str,
-        st: &mut SeedChannelState,
+        session_id: &str,
+        st: &mut SessionChannelState,
         identity: &str,
     ) {
         self.enqueue_journal(
             st,
             JournalWriteOp::RemoveReplaceable {
                 channel,
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 identity: identity.to_string(),
             },
         );
@@ -1630,20 +1652,20 @@ impl Drop for RingingHub {
         if let Some(writer) = self.journal_writer.as_ref() {
             // 锁序：先摘出槽表快照（拓扑序摘取，释放注册表相关锁），再逐个取
             // 槽锁——`channels` 顶层锁 / 槽表锁与槽锁**从不重叠持有**。
-            let mut pending: Vec<(RingingChannel, String, SeedChannelSlot)> = Vec::new();
+            let mut pending: Vec<(RingingChannel, String, SessionChannelSlot)> = Vec::new();
             for (channel, shards) in self
                 .channels
                 .get_mut()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
             {
-                for seed in shards.seed_keys() {
-                    if let Some(slot) = shards.slot_if_present(&seed) {
-                        pending.push((*channel, seed, slot));
+                for session_id in shards.session_keys() {
+                    if let Some(slot) = shards.slot_if_present(&session_id) {
+                        pending.push((*channel, session_id, slot));
                     }
                 }
             }
-            for (channel, seed, slot) in pending {
+            for (channel, session_id, slot) in pending {
                 let st = slot.lock().unwrap_or_else(|e| e.into_inner());
                 if !st.needs_rewrite {
                     continue;
@@ -1658,7 +1680,7 @@ impl Drop for RingingHub {
                 drop(st);
                 let _ = writer.send(JournalWriteOp::Rewrite {
                     channel,
-                    seed,
+                    session_id,
                     envelopes,
                     checkpoints,
                 });
@@ -1701,7 +1723,7 @@ mod tests {
     #[test]
     fn persisted_conversation_metadata_survives_projection_overlay() {
         let mut projected = serde_json::json!({
-            "seed": "s",
+            "session_id": "s",
             "channel": "conversation",
             "revision": 7,
             "compact_status": "running"
@@ -1751,9 +1773,9 @@ mod tests {
         })
     }
 
-    fn publish_open_tool_turn(hub: &RingingHub, seed: &str, turn_id: &str, progress: &str) {
+    fn publish_open_tool_turn(hub: &RingingHub, session_id: &str, turn_id: &str, progress: &str) {
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::TurnOpened {
                 turn_id: turn_id.into(),
                 user_text: format!("question-{turn_id}"),
@@ -1761,7 +1783,7 @@ mod tests {
         )
         .unwrap();
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockOpened {
                 turn_id: turn_id.into(),
                 round_num: 0,
@@ -1787,7 +1809,7 @@ mod tests {
         )
         .unwrap();
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::ToolProgress {
                 turn_id: turn_id.into(),
                 round_num: 0,
@@ -1799,7 +1821,7 @@ mod tests {
         )
         .unwrap();
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::ToolUpdated {
                 turn_id: turn_id.into(),
                 round_num: 0,
@@ -1825,10 +1847,10 @@ mod tests {
         .unwrap();
     }
 
-    fn publish_tool_turn(hub: &RingingHub, seed: &str, turn_id: &str, progress: &str) {
-        publish_open_tool_turn(hub, seed, turn_id, progress);
+    fn publish_tool_turn(hub: &RingingHub, session_id: &str, turn_id: &str, progress: &str) {
+        publish_open_tool_turn(hub, session_id, turn_id, progress);
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockSealed {
                 turn_id: turn_id.into(),
                 round_num: 0,
@@ -1837,7 +1859,7 @@ mod tests {
         )
         .unwrap();
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::RoundSealed {
                 turn_id: turn_id.into(),
                 round_num: 0,
@@ -1846,7 +1868,7 @@ mod tests {
         )
         .unwrap();
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::TurnSealed {
                 turn_id: turn_id.into(),
                 state: qaqh_domain::TimelineTurnState::Completed,
@@ -2206,7 +2228,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_replay_merges_seeds_and_signals_reset() {
+    fn channel_replay_merges_sessions_and_signals_reset() {
         let hub = RingingHub::new("epoch-1");
         hub.publish(
             "s1",
@@ -2292,7 +2314,7 @@ mod tests {
     fn checkpoint_records_sparse_progress() {
         let hub = RingingHub::new("epoch-1");
         hub.checkpoint(RingingChannel::Tool, "s", "tool:c1", 7);
-        let slot = hub.seed_slot(RingingChannel::Tool, "s");
+        let slot = hub.session_slot(RingingChannel::Tool, "s");
         let st = slot.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(st.journal.checkpoints().get("tool:c1"), Some(&7));
     }
@@ -2304,7 +2326,7 @@ mod tests {
     /// 空闲会话）推向 Lagged；修复后：按 (channel, seed) 分片，风暴只填自己的
     /// 分片，旁观者分片水位不受影响。
     #[test]
-    fn session_storm_does_not_lag_other_seeds() {
+    fn session_storm_does_not_lag_other_sessions() {
         let hub = RingingHub::new("epoch-shard");
         // 两个会话各自订阅（分片后 seed 作用域）。
         let mut storm_rx = hub.subscribe(RingingChannel::Conversation, "storm");
@@ -2339,7 +2361,7 @@ mod tests {
     /// BUG-2026-09-12-12（issue #31）回归 2：分片后单会话订阅者收到的**内容与
     /// 顺序**与修复前（频道级流 + seed 过滤）逐字节一致。
     #[test]
-    fn sharded_broadcast_preserves_order_and_content_per_seed() {
+    fn sharded_broadcast_preserves_order_and_content_per_session() {
         let hub = RingingHub::new("epoch-order");
         let mut rx = hub.subscribe(RingingChannel::Conversation, "s-a");
 
@@ -2375,20 +2397,20 @@ mod tests {
     /// BUG-2026-09-12-12（issue #31）回归 3：跨会话频道级聚合视图仍能看到全部
     /// seed 的事件（多 seed 消费者语义不变：如命令回执观察者）。
     #[test]
-    fn channel_aggregate_subscription_still_sees_every_seed() {
+    fn channel_aggregate_subscription_still_sees_every_session() {
         let hub = RingingHub::new("epoch-all");
         let mut rx = hub.subscribe_channel(RingingChannel::Conversation);
         let _ = hub.publish("s-a", round_delta(1));
         let _ = hub.publish("s-b", round_delta(2));
 
-        let mut seeds = HashSet::new();
+        let mut sessions = HashSet::new();
         for _ in 0..2 {
             let env = rx.try_recv().expect("频道聚合视图应收到两个 seed 的事件");
-            seeds.insert(env.session_id);
+            sessions.insert(env.session_id);
         }
         assert!(
-            seeds.contains("s-a") && seeds.contains("s-b"),
-            "got {seeds:?}"
+            sessions.contains("s-a") && sessions.contains("s-b"),
+            "got {sessions:?}"
         );
     }
 
@@ -2554,7 +2576,7 @@ mod tests {
         hub.flush_timeline_persistence();
         let persisted = TimelineStore::new(&root)
             .unwrap()
-            .load_seed("s")
+            .load_session("s")
             .expect("turn-sealed snapshot persisted at the explicit sync boundary");
         assert_eq!(persisted.snapshot.watermark, 6);
         assert_eq!(
@@ -2614,7 +2636,7 @@ mod tests {
         hub.flush_timeline_persistence();
         let persisted = TimelineStore::new(&root)
             .unwrap()
-            .load_seed("s")
+            .load_session("s")
             .expect("persisted snapshot");
         let persisted_tool = persisted.snapshot.turns[0].rounds[0].blocks[0]
             .tool
@@ -2752,7 +2774,7 @@ mod tests {
         hub.flush_timeline_persistence();
         let persisted = TimelineStore::new(&root)
             .unwrap()
-            .load_seed("stale")
+            .load_session("stale")
             .unwrap()
             .snapshot;
         assert_eq!(persisted.turns[0].user_text, "second");
@@ -3045,7 +3067,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_only_seed_is_restored_on_first_load_without_a_journal() {
+    fn cache_only_session_is_restored_on_first_load_without_a_journal() {
         // timeline-journal 移除后：`ringing-timeline/{seed}.json` 是恢复的唯一
         // 权威。仅有快照文件（无任何 jsonl）的 seed 必须能直接 restore，
         // 且装载过程不得再在磁盘上生成 `timeline-journal/` 目录。
@@ -3524,7 +3546,7 @@ mod tests {
     }
 
     #[test]
-    fn forget_seed_drops_per_seed_resident_state() {
+    fn forget_session_drops_per_session_resident_state() {
         let hub = RingingHub::new("forget-seed-test");
         hub.publish("s1", round_delta(1));
         hub.mark_worker_live("s1");
@@ -3534,16 +3556,16 @@ mod tests {
             .insert("s1".to_string(), "interaction-1".to_string());
         let content_id = hub.put_content("s1", "text/plain", b"hello".to_vec(), false);
         assert!(hub.get_content("s1", &content_id).is_some());
-        let holds_seed = |hub: &RingingHub, seed: &str| {
+        let holds_session = |hub: &RingingHub, session_id: &str| {
             hub.channel_state()
                 .values()
-                .any(|shards| shards.contains(seed))
+                .any(|shards| shards.contains(session_id))
         };
-        assert!(holds_seed(&hub, "s1"));
+        assert!(holds_session(&hub, "s1"));
 
-        hub.forget_seed("s1");
+        hub.forget_session("s1");
 
-        assert!(!holds_seed(&hub, "s1"), "channels state must be dropped");
+        assert!(!holds_session(&hub, "s1"), "channels state must be dropped");
         assert!(
             !hub.live_workers
                 .lock()
@@ -3565,7 +3587,7 @@ mod tests {
 
         // 其他 seed 的常驻状态不受影响。
         hub.publish("s2", round_delta(2));
-        assert!(holds_seed(&hub, "s2"));
+        assert!(holds_session(&hub, "s2"));
     }
 
     #[test]
@@ -3609,11 +3631,11 @@ mod tests {
     /// BUG-2026-09-12-12（issue #31）：分片环必须随会话关闭回收，否则
     /// 「每历史会话一个环」会让内存随会话数单调增长。
     #[test]
-    fn forget_seed_drops_live_shard_ring() {
+    fn forget_session_drops_live_shard_ring() {
         let hub = RingingHub::new("forget-shard");
         let _rx_a = hub.subscribe(RingingChannel::Conversation, "s1");
         let _rx_b = hub.subscribe(RingingChannel::Conversation, "s2");
-        let shard_seeds = |hub: &RingingHub| -> HashSet<(RingingChannel, String)> {
+        let shard_sessions = |hub: &RingingHub| -> HashSet<(RingingChannel, String)> {
             hub.live
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -3621,23 +3643,23 @@ mod tests {
                 .cloned()
                 .collect()
         };
-        assert!(shard_seeds(&hub).contains(&(RingingChannel::Conversation, "s1".into())));
+        assert!(shard_sessions(&hub).contains(&(RingingChannel::Conversation, "s1".into())));
 
-        hub.forget_seed("s1");
+        hub.forget_session("s1");
 
-        let seeds = shard_seeds(&hub);
+        let sessions = shard_sessions(&hub);
         assert!(
-            !seeds.contains(&(RingingChannel::Conversation, "s1".into())),
+            !sessions.contains(&(RingingChannel::Conversation, "s1".into())),
             "关闭会话的分片环必须回收"
         );
         assert!(
-            seeds.contains(&(RingingChannel::Conversation, "s2".into())),
+            sessions.contains(&(RingingChannel::Conversation, "s2".into())),
             "其他会话的分片环不受影响"
         );
     }
 
     #[test]
-    fn per_seed_lazy_loads_do_not_block_each_other() {
+    fn per_session_lazy_loads_do_not_block_each_other() {
         // Phase 1 回归：懒加载锁必须 per-seed。持有 seed A 的锁时，seed B
         // 的锁必须立即可取（原全局 `Mutex<()>` 下 B 会阻塞到 A 释放——
         // 多 session 前端卡顿的直接根因 A2）。
@@ -3679,7 +3701,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_first_access_of_same_seed_loads_exactly_once() {
+    fn concurrent_first_access_of_same_session_loads_exactly_once() {
         // Phase 1 回归：并发首访同一 seed 时，per-seed 锁保证只有一个线程
         // 执行装载，其余等待后命中已装载状态直接返回（不双重重放）。
         let root = temp_root("per-seed-race");
@@ -3742,8 +3764,12 @@ mod lock_sharding_tests {
     }
 
     /// 取某 (channel, seed) 的分片槽（测试断言用；生产路径不暴露）。
-    fn slot(hub: &RingingHub, channel: RingingChannel, seed: &str) -> Arc<Mutex<SeedChannelState>> {
-        hub.seed_slot(channel, seed)
+    fn slot(
+        hub: &RingingHub,
+        channel: RingingChannel,
+        session_id: &str,
+    ) -> Arc<Mutex<SessionChannelState>> {
+        hub.session_slot(channel, session_id)
     }
 
     /// 红→绿 1：持有 (Conversation, seed-a) 的分片锁时，其他 (channel, seed)
@@ -3753,7 +3779,7 @@ mod lock_sharding_tests {
     /// 锁**才能登记/取号/提交，而该锁正被主线程持有，于是阻塞到超时；分片后
     /// seed-b 走另一个槽，完全不受影响。
     #[test]
-    fn per_seed_channel_state_locks_do_not_block_each_other() {
+    fn per_session_channel_state_locks_do_not_block_each_other() {
         let hub = Arc::new(RingingHub::new("epoch-shard"));
         hub.publish("seed-a", round_delta(1));
 
@@ -3787,7 +3813,7 @@ mod lock_sharding_tests {
     /// 红→绿 1b：持有 (Conversation, seed-a) 的槽锁时，**其他频道**的读
     /// （`last_stream_seq`）必须立即可完成。未修复时读也要取全局锁 → 阻塞。
     #[test]
-    fn other_channel_reads_are_not_blocked_by_a_held_seed_shard() {
+    fn other_channel_reads_are_not_blocked_by_a_held_session_shard() {
         let hub = Arc::new(RingingHub::new("epoch-shard-read"));
         hub.publish("seed-a", round_delta(1));
         hub.publish(
@@ -3823,7 +3849,7 @@ mod lock_sharding_tests {
     /// `Arc` 指针）无法区分「锁表存在」与「锁真的不共享」。为避免 CI 抖动
     /// 造成假红，取各侧 min-of-3 与 0.9x 余量。
     #[test]
-    fn concurrent_publish_across_seeds_does_not_degrade() {
+    fn concurrent_publish_across_sessions_does_not_degrade() {
         const THREADS: usize = 8;
         const PER_THREAD: usize = 400;
 
@@ -3835,10 +3861,10 @@ mod lock_sharding_tests {
                 let hub = Arc::clone(&hub);
                 let barrier = Arc::clone(&barrier);
                 joins.push(std::thread::spawn(move || {
-                    let seed = format!("scale-{index}");
+                    let session_id = format!("scale-{index}");
                     barrier.wait();
                     for i in 0..PER_THREAD {
-                        hub.publish(&seed, round_delta(i as u64));
+                        hub.publish(&session_id, round_delta(i as u64));
                     }
                 }));
             }
@@ -3852,9 +3878,9 @@ mod lock_sharding_tests {
             let hub = RingingHub::new("epoch-serial");
             let start = Instant::now();
             for index in 0..THREADS {
-                let seed = format!("scale-{index}");
+                let session_id = format!("scale-{index}");
                 for i in 0..PER_THREAD {
-                    hub.publish(&seed, round_delta(i as u64));
+                    hub.publish(&session_id, round_delta(i as u64));
                 }
             }
             (THREADS * PER_THREAD) as f64 / start.elapsed().as_secs_f64()
@@ -3902,14 +3928,14 @@ mod lock_sharding_tests {
     #[test]
     fn sharded_sequences_stay_unique_and_dense() {
         let hub = Arc::new(RingingHub::new("epoch-inv"));
-        let seeds: Vec<String> = (0..4).map(|i| format!("inv-{i}")).collect();
+        let sessions: Vec<String> = (0..4).map(|i| format!("inv-{i}")).collect();
         let mut joins = Vec::new();
-        for seed in &seeds {
+        for session_id in &sessions {
             let hub = Arc::clone(&hub);
-            let seed = seed.clone();
+            let session_id = session_id.clone();
             joins.push(std::thread::spawn(move || {
                 for i in 0..50 {
-                    hub.publish(&seed, round_delta(i));
+                    hub.publish(&session_id, round_delta(i));
                 }
             }));
         }
@@ -3918,9 +3944,9 @@ mod lock_sharding_tests {
         }
 
         let mut stream_seqs = Vec::new();
-        for seed in &seeds {
+        for session_id in &sessions {
             let replay = hub
-                .replay_since(RingingChannel::Conversation, seed, 0)
+                .replay_since(RingingChannel::Conversation, session_id, 0)
                 .expect("replay");
             let mut channel_seqs: Vec<u64> = replay.iter().map(|e| e.channel_seq).collect();
             assert_eq!(channel_seqs.len(), 50, "each seed keeps its own history");
@@ -3944,7 +3970,7 @@ mod lock_sharding_tests {
     /// 不变量 2：`forget_seed` 与并发发布不得 panic，且遗忘后该 seed 常驻态
     /// 不再出现在任何分片。
     #[test]
-    fn forget_seed_races_with_publishers_without_panic() {
+    fn forget_session_races_with_publishers_without_panic() {
         let hub = Arc::new(RingingHub::new("epoch-forget-race"));
         let stop = Arc::new(AtomicUsize::new(0));
         let mut joins = Vec::new();
@@ -3952,14 +3978,14 @@ mod lock_sharding_tests {
             let hub = Arc::clone(&hub);
             let stop = Arc::clone(&stop);
             joins.push(std::thread::spawn(move || {
-                let seed = format!("race-{index}");
+                let session_id = format!("race-{index}");
                 while stop.load(Ordering::Relaxed) == 0 {
-                    hub.publish(&seed, round_delta(1));
+                    hub.publish(&session_id, round_delta(1));
                 }
             }));
         }
         for _ in 0..20 {
-            hub.forget_seed("race-0");
+            hub.forget_session("race-0");
             std::thread::yield_now();
         }
         stop.store(1, Ordering::Relaxed);
@@ -3970,7 +3996,7 @@ mod lock_sharding_tests {
 
     /// 不变量 3：跨频道 replay 仍按 stream_seq 合并排序（分片不得打乱回放序）。
     #[test]
-    fn channel_replay_still_merges_across_seeds_in_stream_order() {
+    fn channel_replay_still_merges_across_sessions_in_stream_order() {
         let hub = RingingHub::new("epoch-replay-order");
         hub.publish("a", round_delta(1));
         hub.publish("b", round_delta(2));
@@ -4004,13 +4030,13 @@ impl RingingHub {
     pub fn overflow_channel_live(
         &self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         first_seq: u64,
         count: u64,
     ) {
         for seq in first_seq..first_seq + count {
             let env = RingingEventEnvelope::new(
-                seed,
+                session_id,
                 seq,
                 seq,
                 seq,

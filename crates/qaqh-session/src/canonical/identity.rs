@@ -287,7 +287,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             temp.path().join(CANONICAL_IDENTITY_FILE),
-            r#"{"schema":"qaqh.canonical-identity/v1","session_id":"seed-a","log_id":"seed-b"}"#,
+            r#"{"schema":"qaqh.canonical-identity/v1","session_id":"session_id-a","log_id":"session_id-b"}"#,
         )
         .expect("write invalid identity");
         assert!(CanonicalSessionIdentity::open_or_create(temp.path()).is_err());

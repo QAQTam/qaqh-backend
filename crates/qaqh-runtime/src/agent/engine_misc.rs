@@ -108,7 +108,7 @@ impl MiscEngine {
         qaqh_workspace::runtime::set_mode(m);
         if !agent.session.session_id.is_empty() {
             agent.enqueue_meta_op(MetaOp::PersistMode {
-                seed: agent.session.session_id.clone(),
+                session_id: agent.session.session_id.clone(),
                 mode: m,
             });
         }

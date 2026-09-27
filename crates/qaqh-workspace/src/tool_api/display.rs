@@ -161,7 +161,7 @@ pub enum ToolBody {
     },
     Subagent {
         name: String,
-        seed: String,
+        session_id: String,
     },
 }
 

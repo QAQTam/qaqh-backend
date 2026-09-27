@@ -48,19 +48,22 @@ pub(crate) fn parse_channel(s: &str) -> Option<RingingChannel> {
     }
 }
 
-pub(crate) fn session_close_seed(close_seed: &str, envelope_seed: &Option<String>) -> String {
-    if !close_seed.is_empty() {
-        close_seed.to_string()
+pub(crate) fn session_close_session(
+    close_session: &str,
+    envelope_session: &Option<String>,
+) -> String {
+    if !close_session.is_empty() {
+        close_session.to_string()
     } else {
-        envelope_seed.clone().unwrap_or_default()
+        envelope_session.clone().unwrap_or_default()
     }
 }
 
-pub(crate) fn publish_session_created(hub: &RingingHub, seed: &str, command_id: &str) {
+pub(crate) fn publish_session_created(hub: &RingingHub, session_id: &str, command_id: &str) {
     let _ = hub.publish_with_causation(
-        seed,
+        session_id,
         qaqh_domain::DomainEvent::Control(qaqh_domain::ControlEvent::SessionStateChanged {
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             state: qaqh_domain::SessionState::Created,
         }),
         Some(command_id),

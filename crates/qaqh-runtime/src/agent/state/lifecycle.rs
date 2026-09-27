@@ -32,14 +32,14 @@ fn enable_message_wal(agent: &mut AgentState) {
 /// Legacy sessions without a canonical identity/events log are left untouched.
 /// Once a canonical log exists, recovery is fail-closed: a failure is logged
 /// and the later ToolRuntime admission will still reject an open intent.
-fn recover_canonical_tool_ledger(seed: &str) -> Result<(), String> {
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
-    recover_canonical_tool_ledger_in(&session_dir, seed)
+fn recover_canonical_tool_ledger(session_id: &str) -> Result<(), String> {
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
+    recover_canonical_tool_ledger_in(&session_dir, session_id)
 }
 
 fn recover_canonical_tool_ledger_in(
     session_dir: &std::path::Path,
-    seed: &str,
+    session_id: &str,
 ) -> Result<(), String> {
     use qaqh_session::canonical::{
         CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_FILE,
@@ -102,7 +102,7 @@ fn recover_canonical_tool_ledger_in(
         session_dir,
         identity.session_id,
         identity.log_id,
-        WriterId::new(format!("recovery-{}-{}", std::process::id(), seed)),
+        WriterId::new(format!("recovery-{}-{}", std::process::id(), session_id)),
         super::agent::unix_ms(),
         super::agent::tool_ledger_lease_ms(),
     )
@@ -110,14 +110,14 @@ fn recover_canonical_tool_ledger_in(
     match outcome {
         RecoveryExecutionOutcome::Recovered(execution) => {
             log::info!(
-                "[recovery] canonical tool ledger recovered for {seed}: {} action(s), intent_removed={}",
+                "[recovery] canonical tool ledger recovered for {session_id}: {} action(s), intent_removed={}",
                 execution.actions.len(),
                 execution.intent_removed
             );
         }
         RecoveryExecutionOutcome::Pending { dispositions } => {
             log::warn!(
-                "[recovery] canonical tool ledger for {seed} still has {} replay/reconcile disposition(s)",
+                "[recovery] canonical tool ledger for {session_id} still has {} replay/reconcile disposition(s)",
                 dispositions.len()
             );
         }
@@ -132,8 +132,8 @@ fn recover_canonical_tool_ledger_in(
 /// On failure (file missing or corrupt), generates a fresh seed and
 /// creates a new session as fallback. Returns `false` only when
 /// `restore_seed` is `None`.
-pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool {
-    let seed = match restore_seed {
+pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bool {
+    let session_id = match restore_session {
         Some(s) => {
             log::info!("[LIFECYCLE] init_session: loading seed={s}");
             // Fast check: if the session directory doesn't exist at all, fail early
@@ -357,14 +357,14 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
     };
 
     // Create fresh session (either no restore_seed, or restore failed)
-    agent.session.session_id = seed.clone();
+    agent.session.session_id = session_id.clone();
     agent.session.created_at = qaqh_session::now_epoch();
     agent.session.reset_usage();
     agent.session.from_resume = false;
     agent.msg = if agent.ephemeral {
-        qaqh_message::MessageStore::new_ephemeral(&seed)
+        qaqh_message::MessageStore::new_ephemeral(&session_id)
     } else {
-        qaqh_message::MessageStore::new(&seed)
+        qaqh_message::MessageStore::new(&session_id)
     };
     enable_message_wal(agent);
     qaqh_workspace::workspace::set_current_session(&agent.session.session_id);
@@ -390,7 +390,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
 /// Create a brand-new session with a fresh canonical identity, clearing all
 /// prior state.
 pub fn create_session(agent: &mut AgentState) {
-    let seed = match agent.session_manager.as_ref() {
+    let session_id = match agent.session_manager.as_ref() {
         Some(manager) => match manager.allocate_session(None) {
             Ok(identity) => identity.session_id.as_str().to_string(),
             Err(error) => {
@@ -404,7 +404,7 @@ pub fn create_session(agent: &mut AgentState) {
             .as_str()
             .to_string(),
     };
-    agent.session.session_id = seed;
+    agent.session.session_id = session_id;
     agent.session.created_at = qaqh_session::now_epoch();
     agent.session.reset_usage();
     agent.session.from_resume = false;
@@ -433,7 +433,7 @@ pub fn create_session(agent: &mut AgentState) {
 
 /// Create a new session with a pre-set seed (from CLI --seed).
 /// Unlike create_session, this does NOT generate a new seed.
-pub fn create_session_with_seed(agent: &mut AgentState) {
+pub fn create_session_with_session(agent: &mut AgentState) {
     agent.session.reset_usage();
     agent.session.from_resume = false;
     agent.msg = if agent.ephemeral {

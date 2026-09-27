@@ -108,23 +108,31 @@ impl QueryRequest {
                 }
                 ("fs.read", params)
             }
-            // 线上参数键保持 "seed"：RPC 协议未版本化，改名只在 Rust API 层。
+            // 线上参数键统一 `session_id`（BETA-01 Phase D）。daemon 侧
+            // `session_param_value` 会回退读取 legacy `seed`，旧客户端仍可用。
             Self::SessionDashboard { session_id } => {
-                ("session.dashboard", json!({ "seed": session_id }))
+                ("session.dashboard", json!({ "session_id": session_id }))
             }
-            Self::TodoStatus { session_id } => ("todo.status", json!({ "seed": session_id })),
-            Self::SessionMeta { session_id } => ("session.meta", json!({ "seed": session_id })),
-            Self::PlanRead { session_id } => ("plan.read", json!({ "seed": session_id })),
+            Self::TodoStatus { session_id } => ("todo.status", json!({ "session_id": session_id })),
+            Self::SessionMeta { session_id } => {
+                ("session.meta", json!({ "session_id": session_id }))
+            }
+            Self::PlanRead { session_id } => ("plan.read", json!({ "session_id": session_id })),
             Self::PlanContextStats { session_id } => {
-                ("plan.context_stats", json!({ "seed": session_id }))
+                ("plan.context_stats", json!({ "session_id": session_id }))
             }
             Self::StatsTokenUsage { days } => ("stats.token_usage", json!({ "days": days })),
-            Self::GitDiff { session_id } => ("git.diff", json!({ "seed": session_id })),
-            Self::GitBranch { session_id } => ("git.branch", json!({ "seed": session_id })),
-            Self::GitBranches { session_id } => ("git.branches", json!({ "seed": session_id })),
-            Self::GitFileDiff { session_id, file_path } => (
+            Self::GitDiff { session_id } => ("git.diff", json!({ "session_id": session_id })),
+            Self::GitBranch { session_id } => ("git.branch", json!({ "session_id": session_id })),
+            Self::GitBranches { session_id } => {
+                ("git.branches", json!({ "session_id": session_id }))
+            }
+            Self::GitFileDiff {
+                session_id,
+                file_path,
+            } => (
                 "git.file_diff",
-                json!({ "seed": session_id, "file_path": file_path }),
+                json!({ "session_id": session_id, "file_path": file_path }),
             ),
         }
     }
@@ -133,14 +141,14 @@ impl QueryRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionRequest {
     SkillsOperation {
-        seed: String,
+        session_id: String,
         operation_id: String,
         action: String,
         name: String,
         expected_revision: u64,
     },
     SkillsReload {
-        seed: String,
+        session_id: String,
     },
     ConfigSave {
         fields: Value,
@@ -158,7 +166,7 @@ pub enum ActionRequest {
         name: String,
     },
     WorkspaceSet {
-        seed: String,
+        session_id: String,
         path: String,
     },
     /// 注册一个目录为 UI 工作区（组织语义；daemon `workspace.create`）。
@@ -176,24 +184,24 @@ pub enum ActionRequest {
     },
     /// 把会话移入指定工作区（daemon `workspace.move_session`）。
     WorkspaceMoveSession {
-        seed: String,
+        session_id: String,
         workspace_id: String,
     },
     /// 把会话移出工作区 → 未分组（daemon `workspace.detach`）。
     WorkspaceDetach {
-        seed: String,
+        session_id: String,
     },
     /// 切换会话工具模式（standard/minimal/custom，PLAN-TOOL-MODES.md）。
     /// daemon 侧先持久化 meta.json（persist_tool_mode）再经 Control 频道
     /// 下发 worker 应用（set_allowed_tools + tool_defs 刷新）。
     SessionSetToolMode {
-        seed: String,
+        session_id: String,
         tool_mode: String,
         custom_tools: Vec<String>,
     },
     /// Spawn an isolated subagent worker (daemon `subagent.spawn`). Returns
-    /// `{ "seed": "<8-hex>" }`; the caller then attaches the seed and drives
-    /// it with ordinary Ringing commands/events.
+    /// `{ "session_id": "<uuid>" }`; the caller then attaches that session and
+    /// drives it with ordinary Ringing commands/events.
     SubagentSpawn {
         /// Tool allowlist (empty = all tools available).
         tools: Vec<String>,
@@ -211,13 +219,13 @@ pub enum ActionRequest {
     },
     /// 切换 Git 分支（daemon `git.switch_branch`）。
     GitSwitchBranch {
-        seed: String,
+        session_id: String,
         branch: String,
         stash: bool,
     },
     /// 提交当前 Git working tree（daemon `git.commit`）。
     GitCommit {
-        seed: String,
+        session_id: String,
         message: String,
     },
 }
@@ -226,7 +234,7 @@ impl ActionRequest {
     pub(crate) fn into_parts(self) -> (&'static str, Value) {
         match self {
             Self::SkillsOperation {
-                seed,
+                session_id,
                 operation_id,
                 action,
                 name,
@@ -234,14 +242,16 @@ impl ActionRequest {
             } => (
                 "skills.operation",
                 json!({
-                    "seed": seed,
+                    "session_id": session_id,
                     "operationId": operation_id,
                     "action": action,
                     "name": name,
                     "expectedRevision": expected_revision,
                 }),
             ),
-            Self::SkillsReload { seed } => ("skills.reload", json!({ "seed": seed })),
+            Self::SkillsReload { session_id } => {
+                ("skills.reload", json!({ "session_id": session_id }))
+            }
             Self::ConfigSave { fields } => ("config.save", fields),
             Self::ConfigSetPermissionLevel { level } => {
                 ("config.set_permission_level", json!({ "level": level }))
@@ -249,27 +259,33 @@ impl ActionRequest {
             Self::ProfileApply { name } => ("profile.apply", json!({ "name": name })),
             Self::ProfileSaveCurrent { name } => ("profile.save_current", json!({ "name": name })),
             Self::ProfileDelete { name } => ("profile.delete", json!({ "name": name })),
-            Self::WorkspaceSet { seed, path } => {
-                ("workspace.set", json!({ "seed": seed, "path": path }))
-            }
+            Self::WorkspaceSet { session_id, path } => (
+                "workspace.set",
+                json!({ "session_id": session_id, "path": path }),
+            ),
             Self::WorkspaceCreate { path } => ("workspace.create", json!({ "path": path })),
             Self::WorkspaceRename { id, title } => {
                 ("workspace.rename", json!({ "id": id, "title": title }))
             }
             Self::WorkspaceDelete { id } => ("workspace.delete", json!({ "id": id })),
-            Self::WorkspaceMoveSession { seed, workspace_id } => (
+            Self::WorkspaceMoveSession {
+                session_id,
+                workspace_id,
+            } => (
                 "workspace.move_session",
-                json!({ "seed": seed, "workspace_id": workspace_id }),
+                json!({ "session_id": session_id, "workspace_id": workspace_id }),
             ),
-            Self::WorkspaceDetach { seed } => ("workspace.detach", json!({ "seed": seed })),
+            Self::WorkspaceDetach { session_id } => {
+                ("workspace.detach", json!({ "session_id": session_id }))
+            }
             Self::SessionSetToolMode {
-                seed,
+                session_id,
                 tool_mode,
                 custom_tools,
             } => (
                 "session.set_tool_mode",
                 json!({
-                    "seed": seed,
+                    "session_id": session_id,
                     "tool_mode": tool_mode,
                     "custom_tools": custom_tools,
                 }),
@@ -297,16 +313,20 @@ impl ActionRequest {
                 ("subagent.spawn", params)
             }
             Self::GitSwitchBranch {
-                seed,
+                session_id,
                 branch,
                 stash,
             } => (
                 "git.switch_branch",
-                json!({ "seed": seed, "branch": branch, "stash": stash }),
+                json!({ "session_id": session_id, "branch": branch, "stash": stash }),
             ),
-            Self::GitCommit { seed, message } => {
-                ("git.commit", json!({ "seed": seed, "message": message }))
-            }
+            Self::GitCommit {
+                session_id,
+                message,
+            } => (
+                "git.commit",
+                json!({ "session_id": session_id, "message": message }),
+            ),
         }
     }
 }
@@ -318,13 +338,13 @@ mod tests {
     #[test]
     fn session_set_tool_mode_uses_action_route() {
         let (name, params) = ActionRequest::SessionSetToolMode {
-            seed: "s1".into(),
+            session_id: "s1".into(),
             tool_mode: "minimal".into(),
             custom_tools: vec!["exec".into(), "edit".into()],
         }
         .into_parts();
         assert_eq!(name, "session.set_tool_mode");
-        assert_eq!(params["seed"], "s1");
+        assert_eq!(params["session_id"], "s1");
         assert_eq!(params["tool_mode"], "minimal");
         assert_eq!(params["custom_tools"][0], "exec");
     }
@@ -332,18 +352,18 @@ mod tests {
     #[test]
     fn workspace_set_is_an_action_not_a_query() {
         let (name, params) = ActionRequest::WorkspaceSet {
-            seed: "s1".into(),
+            session_id: "s1".into(),
             path: "C:/work".into(),
         }
         .into_parts();
         assert_eq!(name, "workspace.set");
-        assert_eq!(params["seed"], "s1");
+        assert_eq!(params["session_id"], "s1");
     }
 
     #[test]
     fn git_write_variants_are_actions() {
         let (name, params) = ActionRequest::GitSwitchBranch {
-            seed: "s".into(),
+            session_id: "s".into(),
             branch: "main".into(),
             stash: true,
         }
@@ -351,16 +371,19 @@ mod tests {
         assert_eq!(name, "git.switch_branch");
         assert_eq!(
             params,
-            json!({ "seed": "s", "branch": "main", "stash": true })
+            json!({ "session_id": "s", "branch": "main", "stash": true })
         );
 
         let (name, params) = ActionRequest::GitCommit {
-            seed: "s".into(),
+            session_id: "s".into(),
             message: "checkpoint".into(),
         }
         .into_parts();
         assert_eq!(name, "git.commit");
-        assert_eq!(params, json!({ "seed": "s", "message": "checkpoint" }));
+        assert_eq!(
+            params,
+            json!({ "session_id": "s", "message": "checkpoint" })
+        );
     }
 
     #[test]
@@ -370,19 +393,107 @@ mod tests {
         assert_eq!(params, json!({}));
     }
 
-    /// `session.dashboard` / `todo.status` 是 seed 域只读方法（服务端早已实现，
+    /// `session.dashboard` / `todo.status` 是会话域只读方法（服务端早已实现，
     /// 此前客户端封闭枚举缺这两个变体 → TUI 只能自建 `service(method, params)`
     /// 泛型逃生口）。
     #[test]
     fn session_scoped_queries_carry_session_id() {
-        let (name, params) =
-            QueryRequest::SessionDashboard { session_id: "s1".into() }.into_parts();
+        let (name, params) = QueryRequest::SessionDashboard {
+            session_id: "s1".into(),
+        }
+        .into_parts();
         assert_eq!(name, "session.dashboard");
-        assert_eq!(params, json!({ "seed": "s1" }));
+        assert_eq!(params, json!({ "session_id": "s1" }));
 
-        let (name, params) = QueryRequest::TodoStatus { session_id: "s2".into() }.into_parts();
+        let (name, params) = QueryRequest::TodoStatus {
+            session_id: "s2".into(),
+        }
+        .into_parts();
         assert_eq!(name, "todo.status");
-        assert_eq!(params, json!({ "seed": "s2" }));
+        assert_eq!(params, json!({ "session_id": "s2" }));
+    }
+
+    /// **Phase D 写端契约**：所有会话域 RPC 只发 `session_id`，不得再发 legacy
+    /// `seed`（读端回退由 daemon 侧 `session_param_value` 承担）。
+    #[test]
+    fn session_scoped_requests_never_emit_legacy_session_key() {
+        let requests = [
+            QueryRequest::SessionDashboard {
+                session_id: "s".into(),
+            },
+            QueryRequest::TodoStatus {
+                session_id: "s".into(),
+            },
+            QueryRequest::SessionMeta {
+                session_id: "s".into(),
+            },
+            QueryRequest::PlanRead {
+                session_id: "s".into(),
+            },
+            QueryRequest::PlanContextStats {
+                session_id: "s".into(),
+            },
+            QueryRequest::GitDiff {
+                session_id: "s".into(),
+            },
+            QueryRequest::GitBranch {
+                session_id: "s".into(),
+            },
+            QueryRequest::GitBranches {
+                session_id: "s".into(),
+            },
+            QueryRequest::GitFileDiff {
+                session_id: "s".into(),
+                file_path: "f".into(),
+            },
+        ];
+        for request in requests {
+            let (name, params) = request.into_parts();
+            assert_eq!(params["session_id"], "s", "{name} 必须发 session_id");
+            assert!(
+                params.get("seed").is_none(),
+                "{name} 不得再发 legacy seed 键"
+            );
+        }
+
+        let actions = [
+            ActionRequest::SkillsReload {
+                session_id: "s".into(),
+            },
+            ActionRequest::WorkspaceSet {
+                session_id: "s".into(),
+                path: "/".into(),
+            },
+            ActionRequest::WorkspaceMoveSession {
+                session_id: "s".into(),
+                workspace_id: "w".into(),
+            },
+            ActionRequest::WorkspaceDetach {
+                session_id: "s".into(),
+            },
+            ActionRequest::SessionSetToolMode {
+                session_id: "s".into(),
+                tool_mode: "minimal".into(),
+                custom_tools: vec![],
+            },
+            ActionRequest::GitSwitchBranch {
+                session_id: "s".into(),
+                branch: "main".into(),
+                stash: false,
+            },
+            ActionRequest::GitCommit {
+                session_id: "s".into(),
+                message: "m".into(),
+            },
+        ];
+        for action in actions {
+            let (name, params) = action.into_parts();
+            assert_eq!(params["session_id"], "s", "{name} 必须发 session_id");
+            assert!(
+                params.get("seed").is_none(),
+                "{name} 不得再发 legacy seed 键"
+            );
+        }
     }
 
     #[test]
@@ -445,7 +556,10 @@ mod tests {
         }
         .into_parts();
         assert_eq!(name, "git.file_diff");
-        assert_eq!(params, json!({ "seed": "s", "file_path": "src/lib.rs" }));
+        assert_eq!(
+            params,
+            json!({ "session_id": "s", "file_path": "src/lib.rs" })
+        );
 
         let (name, params) = QueryRequest::StatsTokenUsage { days: 30 }.into_parts();
         assert_eq!(name, "stats.token_usage");
@@ -534,20 +648,22 @@ mod tests {
     fn all_action_requests() -> Vec<ActionRequest> {
         let all = vec![
             ActionRequest::SkillsOperation {
-                seed: "s".into(),
+                session_id: "s".into(),
                 operation_id: "op".into(),
                 action: "activate".into(),
                 name: "n".into(),
                 expected_revision: 0,
             },
-            ActionRequest::SkillsReload { seed: "s".into() },
+            ActionRequest::SkillsReload {
+                session_id: "s".into(),
+            },
             ActionRequest::ConfigSave { fields: json!({}) },
             ActionRequest::ConfigSetPermissionLevel { level: 1 },
             ActionRequest::ProfileApply { name: "p".into() },
             ActionRequest::ProfileSaveCurrent { name: "p".into() },
             ActionRequest::ProfileDelete { name: "p".into() },
             ActionRequest::WorkspaceSet {
-                seed: "s".into(),
+                session_id: "s".into(),
                 path: "/".into(),
             },
             ActionRequest::WorkspaceCreate { path: "/".into() },
@@ -557,12 +673,14 @@ mod tests {
             },
             ActionRequest::WorkspaceDelete { id: "w".into() },
             ActionRequest::WorkspaceMoveSession {
-                seed: "s".into(),
+                session_id: "s".into(),
                 workspace_id: "w".into(),
             },
-            ActionRequest::WorkspaceDetach { seed: "s".into() },
+            ActionRequest::WorkspaceDetach {
+                session_id: "s".into(),
+            },
             ActionRequest::SessionSetToolMode {
-                seed: "s".into(),
+                session_id: "s".into(),
                 tool_mode: "minimal".into(),
                 custom_tools: vec![],
             },
@@ -574,12 +692,12 @@ mod tests {
                 workspace: None,
             },
             ActionRequest::GitSwitchBranch {
-                seed: "s".into(),
+                session_id: "s".into(),
                 branch: "main".into(),
                 stash: false,
             },
             ActionRequest::GitCommit {
-                seed: "s".into(),
+                session_id: "s".into(),
                 message: "checkpoint".into(),
             },
         ];

@@ -36,7 +36,7 @@ pub(crate) async fn handle_content_get(
         entry
             .owners
             .iter()
-            .any(|owner| leases.owns_seed(&session_id, owner))
+            .any(|owner| leases.owns_session(&session_id, owner))
     };
     if !owns {
         return (
@@ -148,7 +148,7 @@ pub(crate) async fn handle_content_upload(
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let Some(session_id) = get_session_id(&headers) else {
+    let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
     let Some(ct) = headers
@@ -165,7 +165,7 @@ pub(crate) async fn handle_content_upload(
         return (StatusCode::BAD_REQUEST, "multipart boundary required").into_response();
     };
     let delimiter = [b"--".as_slice(), boundary.as_slice()].concat();
-    let mut seed: Option<String> = None;
+    let mut session_id_part: Option<String> = None;
     let mut media_type: Option<String> = None;
     let mut content: Option<Vec<u8>> = None;
     // Split on the exact boundary without interpreting arbitrary binary bytes.
@@ -195,14 +195,14 @@ pub(crate) async fn handle_content_upload(
             continue;
         };
         match name {
-            "seed" => seed = String::from_utf8(value.to_vec()).ok(),
+            "session_id" => session_id_part = String::from_utf8(value.to_vec()).ok(),
             "media_type" => media_type = String::from_utf8(value.to_vec()).ok(),
             "content" => content = Some(value.to_vec()),
             _ => {}
         }
     }
-    let Some(seed) = seed.filter(|s| !s.is_empty()) else {
-        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    let Some(session_id) = session_id_part.filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "missing session_id").into_response();
     };
     let Some(content) = content else {
         return (StatusCode::BAD_REQUEST, "missing file part").into_response();
@@ -217,7 +217,7 @@ pub(crate) async fn handle_content_upload(
         .leases
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .owns_seed(&session_id, &seed);
+        .owns_session(&client_session_id, &session_id);
     if !owns {
         return (
             StatusCode::FORBIDDEN,
@@ -228,7 +228,7 @@ pub(crate) async fn handle_content_upload(
     }
     let content_id = state
         .hub
-        .put_content(&seed, &media_type, content.clone(), false);
+        .put_content(&session_id, &media_type, content.clone(), false);
     let resp = serde_json::json!({
         "content_id": content_id.clone(),
         "media_type": media_type,

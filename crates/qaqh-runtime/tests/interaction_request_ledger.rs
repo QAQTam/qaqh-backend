@@ -19,11 +19,11 @@ fn yield_persists_canonical_interaction_request() {
     }
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
 
-    let seed = "interaction-request-ledger";
+    let session_id = "interaction-request-ledger";
     let wire_turn = "turn-interaction-request";
     let wire_call = "call-interaction-request";
     let mut agent = AgentState::init("interaction-request-test", qaqh_config::Config::default());
-    agent.session.session_id = seed.to_string();
+    agent.session.session_id = session_id.to_string();
     agent.ephemeral = false;
 
     let mut engine = TurnEngine::new();
@@ -36,7 +36,7 @@ fn yield_persists_canonical_interaction_request() {
     )
     .expect("persist yield");
 
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
     let identity = CanonicalSessionIdentity::open_or_create(&session_dir).expect("identity");
     let facts = CommittedFactReader::open(
         &session_dir,

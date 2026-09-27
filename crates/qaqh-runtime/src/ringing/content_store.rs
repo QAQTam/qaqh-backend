@@ -39,10 +39,10 @@ pub const DEFAULT_CONTENT_TTL: Duration = Duration::from_secs(30 * 60);
 ///
 /// pinned 条目是「客户端还没有机会读到」的内容——交互正文只有几百字节量级，
 /// 这个额度只用于防跑飞，不是常规容量规划。
-pub const PINNED_MAX_ENTRIES_PER_SEED: usize = 64;
+pub const PINNED_MAX_ENTRIES_PER_SESSION: usize = 64;
 
 /// 单会话 pinned 字节上限（#345）。
-pub const PINNED_MAX_BYTES_PER_SEED: usize = 4 * 1024 * 1024;
+pub const PINNED_MAX_BYTES_PER_SESSION: usize = 4 * 1024 * 1024;
 
 /// pinned 准入失败（#345 fail-closed）：调用方**不得**在正文拿不到的情况下
 /// 继续把交互呈现给用户。
@@ -77,8 +77,8 @@ pub struct ContentEntry {
 }
 
 impl ContentEntry {
-    pub fn is_owned_by(&self, seed: &str) -> bool {
-        self.owners.iter().any(|owner| owner == seed)
+    pub fn is_owned_by(&self, session_id: &str) -> bool {
+        self.owners.iter().any(|owner| owner == session_id)
     }
 }
 
@@ -141,10 +141,16 @@ impl ContentStore {
     }
 
     /// 存入内容。返回 content_id（正文的 SHA-256 hex）。
-    pub fn put(&mut self, seed: &str, media_type: &str, bytes: Vec<u8>, truncated: bool) -> String {
+    pub fn put(
+        &mut self,
+        session_id: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        truncated: bool,
+    ) -> String {
         self.sweep_expired();
         let content_id = sha256_hex(&bytes);
-        self.upsert(seed, media_type, bytes, truncated, false, None);
+        self.upsert(session_id, media_type, bytes, truncated, false, None);
         self.evict_over_capacity();
         content_id
     }
@@ -155,18 +161,18 @@ impl ContentStore {
     /// 收尾，而不是呈现一个取不到正文的 modal。
     pub fn put_pinned(
         &mut self,
-        seed: &str,
+        session_id: &str,
         media_type: &str,
         bytes: Vec<u8>,
     ) -> Result<String, ContentQuotaExceeded> {
-        self.put_pinned_for(seed, media_type, bytes, None)
+        self.put_pinned_for(session_id, media_type, bytes, None)
     }
 
     /// 与 [`Self::put_pinned`] 相同，但额外记录业务 pin 键（交互 id）。
     /// 重启后 [`Self::unpin_key`] 仍能按同一个键解除 pin。
     pub fn put_pinned_for(
         &mut self,
-        seed: &str,
+        session_id: &str,
         media_type: &str,
         bytes: Vec<u8>,
         pin_key: Option<&str>,
@@ -176,17 +182,17 @@ impl ContentStore {
         let mut pinned_entries = 0usize;
         let mut pinned_bytes = 0usize;
         for entry in self.entries.values().filter(|entry| {
-            entry.pinned && entry.is_owned_by(seed) && entry.content_id != content_id
+            entry.pinned && entry.is_owned_by(session_id) && entry.content_id != content_id
         }) {
             pinned_entries += 1;
             pinned_bytes = pinned_bytes.saturating_add(entry.size_bytes);
         }
-        if pinned_entries >= PINNED_MAX_ENTRIES_PER_SEED
-            || pinned_bytes.saturating_add(bytes.len()) > PINNED_MAX_BYTES_PER_SEED
+        if pinned_entries >= PINNED_MAX_ENTRIES_PER_SESSION
+            || pinned_bytes.saturating_add(bytes.len()) > PINNED_MAX_BYTES_PER_SESSION
         {
             return Err(ContentQuotaExceeded);
         }
-        self.upsert(seed, media_type, bytes, false, true, pin_key);
+        self.upsert(session_id, media_type, bytes, false, true, pin_key);
         self.evict_over_capacity();
         Ok(content_id)
     }
@@ -213,12 +219,14 @@ impl ContentStore {
     ///
     /// 这是重启恢复路径：`live_interaction_content` 内存表在重启后为空，
     /// 但仍能通过磁盘 metadata 里的 `pin_key` 找到正文并 unpin。
-    pub fn unpin_key(&mut self, seed: &str, pin_key: &str) -> usize {
+    pub fn unpin_key(&mut self, session_id: &str, pin_key: &str) -> usize {
         let ids: Vec<String> = self
             .entries
             .values()
             .filter(|entry| {
-                entry.pinned && entry.is_owned_by(seed) && entry.pin_key.as_deref() == Some(pin_key)
+                entry.pinned
+                    && entry.is_owned_by(session_id)
+                    && entry.pin_key.as_deref() == Some(pin_key)
             })
             .map(|entry| entry.content_id.clone())
             .collect();
@@ -232,9 +240,9 @@ impl ContentStore {
     }
 
     /// 读取（校验所有权）。过期条目惰性清理。
-    pub fn get(&mut self, seed: &str, content_id: &str) -> Option<ContentEntry> {
+    pub fn get(&mut self, session_id: &str, content_id: &str) -> Option<ContentEntry> {
         let entry = self.get_internal(content_id)?;
-        if entry.is_owned_by(seed) {
+        if entry.is_owned_by(session_id) {
             Some(entry)
         } else {
             None
@@ -248,11 +256,11 @@ impl ContentStore {
     }
 
     /// 会话关闭/切流时释放该会话内容。仅当最后一个 owner 释放时删除磁盘文件。
-    pub fn release_session(&mut self, seed: &str) -> usize {
+    pub fn release_session(&mut self, session_id: &str) -> usize {
         let ids: Vec<String> = self
             .entries
             .values()
-            .filter(|entry| entry.is_owned_by(seed))
+            .filter(|entry| entry.is_owned_by(session_id))
             .map(|entry| entry.content_id.clone())
             .collect();
         let mut removed = 0;
@@ -261,7 +269,7 @@ impl ContentStore {
                 let Some(entry) = self.entries.get_mut(&content_id) else {
                     continue;
                 };
-                entry.owners.retain(|owner| owner != seed);
+                entry.owners.retain(|owner| owner != session_id);
                 entry.owners.clone()
             };
             if owners.is_empty() {
@@ -284,7 +292,7 @@ impl ContentStore {
 
     fn upsert(
         &mut self,
-        seed: &str,
+        session_id: &str,
         media_type: &str,
         bytes: Vec<u8>,
         truncated: bool,
@@ -312,8 +320,8 @@ impl ContentStore {
                     bytes_loaded: false,
                     size_bytes,
                 });
-            if !entry.is_owned_by(seed) {
-                entry.owners.push(seed.to_string());
+            if !entry.is_owned_by(session_id) {
+                entry.owners.push(session_id.to_string());
             }
             if pinned {
                 entry.pinned = true;
@@ -706,7 +714,7 @@ mod tests {
     fn pinned_quota_is_fail_closed_and_reopens_after_unpin() {
         let mut store = ContentStore::new();
         let mut ids = Vec::new();
-        for index in 0..PINNED_MAX_ENTRIES_PER_SEED {
+        for index in 0..PINNED_MAX_ENTRIES_PER_SESSION {
             let id = store
                 .put_pinned(
                     "s1",
@@ -742,7 +750,7 @@ mod tests {
             .put_pinned(
                 "s1",
                 "application/octet-stream",
-                vec![0_u8; PINNED_MAX_BYTES_PER_SEED],
+                vec![0_u8; PINNED_MAX_BYTES_PER_SESSION],
             )
             .expect("exactly at quota");
         assert_eq!(
@@ -752,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn unpin_restores_normal_ttl_and_lookup_by_id_ignores_seed() {
+    fn unpin_restores_normal_ttl_and_lookup_by_id_ignores_session() {
         let mut store = ContentStore::new();
         let id = store
             .put_pinned("s1", "application/json", b"body".to_vec())

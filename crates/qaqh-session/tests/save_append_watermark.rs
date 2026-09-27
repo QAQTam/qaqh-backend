@@ -69,14 +69,14 @@ fn max_msg_id_matches_full_scan() {
 #[test]
 fn repeated_appends_do_not_rescan_the_archive() {
     let (root, sm) = manager();
-    let seed = "hot-seed";
-    let dir = root.join("sessions").join(seed);
+    let session_id = "hot-seed";
+    let dir = root.join("sessions").join(session_id);
 
     // 先落一份大归档（约 5 MB 级），再反复小批 append。
     let bulk: Vec<Message> = (1..=60_000)
         .map(|i| id_msg(i, "0123456789abcdef0123456789abcdef"))
         .collect();
-    sm.save_append(seed, &bulk, "m", None, 0, 1);
+    sm.save_append(session_id, &bulk, "m", None, 0, 1);
     // 逼出一次身份失效（外部 writer 追加）：水位必须自愈而非退化。
     store::append_one(&dir, &id_msg(60_001, "external-tail")).expect("external tail");
     let base = archive_bytes(&dir);
@@ -90,7 +90,7 @@ fn repeated_appends_do_not_rescan_the_archive() {
     let scans_before = store::scan_count(&dir);
     let mut next_id = 60_002;
     for _ in 0..50 {
-        sm.save_append(seed, &[id_msg(next_id, "batch")], "m", None, 0, 2);
+        sm.save_append(session_id, &[id_msg(next_id, "batch")], "m", None, 0, 2);
         let batch_index = next_id - 60_001;
         assert_eq!(
             store::scan_count(&dir) - scans_before,
@@ -113,17 +113,31 @@ fn repeated_appends_do_not_rescan_the_archive() {
 #[test]
 fn append_idempotency_survives_watermark_cache() {
     let (root, sm) = manager();
-    let seed = "idem";
-    let dir = root.join("sessions").join(seed);
+    let session_id = "idem";
+    let dir = root.join("sessions").join(session_id);
 
-    sm.save_append(seed, &[id_msg(1, "a"), id_msg(2, "b")], "m", None, 0, 1);
+    sm.save_append(
+        session_id,
+        &[id_msg(1, "a"), id_msg(2, "b")],
+        "m",
+        None,
+        0,
+        1,
+    );
     let lines_before = std::fs::read_to_string(dir.join("messages.jsonl"))
         .expect("archive")
         .lines()
         .count();
 
     // 同一批重放（WAL replay 场景）：必须被过滤，不新增行。
-    sm.save_append(seed, &[id_msg(1, "a"), id_msg(2, "b")], "m", None, 0, 1);
+    sm.save_append(
+        session_id,
+        &[id_msg(1, "a"), id_msg(2, "b")],
+        "m",
+        None,
+        0,
+        1,
+    );
     let lines_after = std::fs::read_to_string(dir.join("messages.jsonl"))
         .expect("archive")
         .lines()
@@ -131,7 +145,7 @@ fn append_idempotency_survives_watermark_cache() {
     assert_eq!(lines_before, lines_after, "重复 msg_id 必须幂等过滤");
 
     // 新 id 仍能写入。
-    sm.save_append(seed, &[id_msg(3, "c")], "m", None, 0, 2);
+    sm.save_append(session_id, &[id_msg(3, "c")], "m", None, 0, 2);
     assert_eq!(
         std::fs::read_to_string(dir.join("messages.jsonl"))
             .expect("archive")
@@ -146,10 +160,10 @@ fn append_idempotency_survives_watermark_cache() {
 #[test]
 fn external_tail_append_invalidates_watermark() {
     let (root, sm) = manager();
-    let seed = "external";
-    let dir = root.join("sessions").join(seed);
+    let session_id = "external";
+    let dir = root.join("sessions").join(session_id);
 
-    sm.save_append(seed, &[id_msg(1, "a")], "m", None, 0, 1);
+    sm.save_append(session_id, &[id_msg(1, "a")], "m", None, 0, 1);
     assert_eq!(store::watermark_msg_id(&dir), 1);
 
     // 绕过 SessionManager 直接追加一行（模拟第二 writer）。
@@ -161,7 +175,7 @@ fn external_tail_append_invalidates_watermark() {
         "归档长度变化必须作废缓存并重建水位"
     );
     // 幂等判据随之更新：重复的 99 不再落盘。
-    sm.save_append(seed, &[id_msg(99, "external")], "m", None, 0, 2);
+    sm.save_append(session_id, &[id_msg(99, "external")], "m", None, 0, 2);
     assert_eq!(
         std::fs::read_to_string(dir.join("messages.jsonl"))
             .expect("archive")
@@ -171,9 +185,9 @@ fn external_tail_append_invalidates_watermark() {
     );
 
     // save_full（undo/compact 全量重写）后水位必须重基，不得残留旧高水位。
-    sm.save_full(seed, &[id_msg(1, "a")], "m", None, 0, 1);
+    sm.save_full(session_id, &[id_msg(1, "a")], "m", None, 0, 1);
     assert_eq!(store::watermark_msg_id(&dir), 1, "全量重写后水位重基");
-    sm.save_append(seed, &[id_msg(2, "b")], "m", None, 0, 2);
+    sm.save_append(session_id, &[id_msg(2, "b")], "m", None, 0, 2);
     assert_eq!(
         std::fs::read_to_string(dir.join("messages.jsonl"))
             .expect("archive")
@@ -189,13 +203,13 @@ fn external_tail_append_invalidates_watermark() {
 #[test]
 fn delete_then_recreate_starts_from_scratch() {
     let (root, sm) = manager();
-    let seed = "recycled";
-    let dir = root.join("sessions").join(seed);
+    let session_id = "recycled";
+    let dir = root.join("sessions").join(session_id);
 
-    sm.save_append(seed, &[id_msg(500, "old")], "m", None, 0, 1);
-    sm.delete(seed).expect("delete");
-    sm.persist_new_session(seed);
-    sm.save_append(seed, &[id_msg(1, "new")], "m", None, 0, 1);
+    sm.save_append(session_id, &[id_msg(500, "old")], "m", None, 0, 1);
+    sm.delete(session_id).expect("delete");
+    sm.persist_new_session(session_id);
+    sm.save_append(session_id, &[id_msg(1, "new")], "m", None, 0, 1);
 
     assert_eq!(
         std::fs::read_to_string(dir.join("messages.jsonl"))
@@ -212,10 +226,17 @@ fn delete_then_recreate_starts_from_scratch() {
 #[test]
 fn torn_tail_line_does_not_lower_watermark() {
     let (root, sm) = manager();
-    let seed = "torn";
-    let dir = root.join("sessions").join(seed);
+    let session_id = "torn";
+    let dir = root.join("sessions").join(session_id);
 
-    sm.save_append(seed, &[id_msg(1, "a"), id_msg(2, "b")], "m", None, 0, 1);
+    sm.save_append(
+        session_id,
+        &[id_msg(1, "a"), id_msg(2, "b")],
+        "m",
+        None,
+        0,
+        1,
+    );
     {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()

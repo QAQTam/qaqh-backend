@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn late_seed_without_eviction_replays_fully() {
+    fn late_session_without_eviction_replays_fully() {
         // 全局 stream_seq 下，某 seed 的首事件可能是 2/3/…；cursor=0 时
         // 该 seed 没有淘汰过任何事件，必须完整回放而不是误报 reset。
         let mut journal = ReliableJournal::new();

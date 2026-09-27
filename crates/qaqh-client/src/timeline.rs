@@ -46,7 +46,7 @@ fn observe_epoch(last_epoch: &mut Option<String>, server_epoch: &str) -> bool {
 /// and gap recovery. Created by `Client::activate_timeline` and run as a
 /// background task; callbacks fire on the tokio side.
 pub struct TimelineStream {
-    seed: String,
+    session_id: String,
     http: reqwest::Client,
     /// Read on every connect: endpoint + Bearer token + (server_epoch,
     /// client_session_id). A daemon restart swaps the endpoint and token, so
@@ -73,7 +73,7 @@ pub struct TimelineStream {
 impl TimelineStream {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        seed: String,
+        session_id: String,
         http: reqwest::Client,
         session: Arc<RingingSession>,
         on_entry: Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
@@ -84,7 +84,7 @@ impl TimelineStream {
         status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     ) -> Self {
         Self {
-            seed,
+            session_id,
             http,
             session,
             on_entry,
@@ -141,24 +141,24 @@ impl TimelineStream {
                         match self.recover_gap().await {
                             Ok(()) => log::info!(
                                 "[qaqh-client] timeline {} gap recovered at cursor {}",
-                                self.seed,
+                                self.session_id,
                                 self.cursor
                             ),
                             Err(recovery_err) => log::warn!(
                                 "[qaqh-client] timeline {} gap snapshot recovery failed: {recovery_err}",
-                                self.seed
+                                self.session_id
                             ),
                         }
                     }
                     self.set_status(TimelineStatus::Reconnecting {
-                        session_id: self.seed.clone(),
+                        session_id: self.session_id.clone(),
                         retry_ms,
                         cursor: self.cursor,
                         reason: err.reconnect_reason(),
                     });
                     log::warn!(
                         "[qaqh-client] timeline {} reconnect in {retry_ms}ms: {err}",
-                        self.seed
+                        self.session_id
                     );
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_millis(retry_ms)) => {}
@@ -170,7 +170,7 @@ impl TimelineStream {
             }
         }
         self.set_status(TimelineStatus::Closed {
-            session_id: self.seed.clone(),
+            session_id: self.session_id.clone(),
             reason: "stopped".into(),
         });
     }
@@ -182,7 +182,7 @@ impl TimelineStream {
         retry_ms: &mut u64,
     ) -> Result<()> {
         self.set_status(TimelineStatus::Connecting {
-            session_id: self.seed.clone(),
+            session_id: self.session_id.clone(),
         });
         let state = self
             .session
@@ -199,7 +199,7 @@ impl TimelineStream {
                 match self.recover_gap().await {
                     Ok(()) => log::info!(
                         "[qaqh-client] timeline {} re-baselined after session re-negotiation (cursor {})",
-                        self.seed,
+                        self.session_id,
                         self.cursor
                     ),
                     Err(recovery_err) => {
@@ -208,7 +208,7 @@ impl TimelineStream {
                         // error 死循环。
                         log::warn!(
                             "[qaqh-client] timeline {} re-baseline failed ({recovery_err}); replaying from head",
-                            self.seed
+                            self.session_id
                         );
                         self.cursor = 0;
                     }
@@ -216,7 +216,7 @@ impl TimelineStream {
             }
         }
 
-        let path = format!("/ringing/v2/sessions/{}/timeline/events", self.seed);
+        let path = format!("/ringing/v2/sessions/{}/timeline/events", self.session_id);
         let creds = self.session.credentials();
         let mut request = self
             .http
@@ -241,7 +241,7 @@ impl TimelineStream {
         // BUG-2026-09-12-10：连接成功即复位退避（与频道流同款修复）。
         *retry_ms = RETRY_BASE_MS;
         self.set_status(TimelineStatus::Open {
-            session_id: self.seed.clone(),
+            session_id: self.session_id.clone(),
             server_epoch: state.server_epoch.clone(),
             cursor: self.cursor,
         });
@@ -312,7 +312,7 @@ impl TimelineStream {
             .map_err(|e| ClientError::Protocol(format!("bad timeline frame: {e}")))?;
         if parsed.schema != qaqh_ringing::RINGING_SCHEMA
             || parsed.version != qaqh_ringing::RINGING_VERSION
-            || parsed.session_id != self.seed
+            || parsed.session_id != self.session_id
             || parsed.server_epoch != server_epoch
         {
             return Err(ClientError::Protocol(
@@ -338,7 +338,7 @@ impl TimelineStream {
             });
         }
         self.cursor = parsed.entry.timeline_seq;
-        (self.on_entry)(self.seed.clone(), parsed.entry);
+        (self.on_entry)(self.session_id.clone(), parsed.entry);
         Ok(())
     }
 
@@ -351,7 +351,7 @@ impl TimelineStream {
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let path = format!("/ringing/v2/sessions/{}/timeline", self.seed);
+        let path = format!("/ringing/v2/sessions/{}/timeline", self.session_id);
         let creds = self.session.credentials();
         let response = self
             .http
@@ -367,7 +367,7 @@ impl TimelineStream {
             });
         }
         let page: TimelinePage = response.json().await?;
-        page.validate_for(&self.seed)
+        page.validate_for(&self.session_id)
             .map_err(ClientError::Protocol)?;
         self.cursor = page.snapshot.watermark;
         (self.on_snapshot)(page);
@@ -421,7 +421,7 @@ mod tests {
             .dispatch(
                 frame(
                     "ringing.stream_terminated",
-                    r#"{"code":"lagged","seed":"seed-1","skipped":9}"#,
+                    r#"{"code":"lagged","session_id":"session_id-1","skipped":9}"#,
                 ),
                 "epoch-1",
             )

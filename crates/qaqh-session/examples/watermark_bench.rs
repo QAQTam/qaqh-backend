@@ -44,8 +44,8 @@ fn main() {
     );
 
     for (label, target) in SIZES {
-        let seed = format!("bench-{target}");
-        let dir = sessions_dir.join(&seed);
+        let session_id = format!("bench-{target}");
+        let dir = sessions_dir.join(&session_id);
         SessionManager::init_for_test(root.clone());
         let sm = SessionManager::new_for_test(sessions_dir.clone(), root.join(".active_session"));
 
@@ -53,7 +53,7 @@ fn main() {
         let line_bytes = serde_json::to_string(&message(1)).expect("serialize").len() + 1;
         let lines = target / line_bytes;
         let batch: Vec<Message> = (1..=lines as u64).map(message).collect();
-        sm.save_append(&seed, &batch, "m", None, 0, 1);
+        sm.save_append(&session_id, &batch, "m", None, 0, 1);
         let actual = std::fs::metadata(dir.join("messages.jsonl"))
             .map(|m| m.len())
             .unwrap_or(0);
@@ -85,7 +85,7 @@ fn main() {
         let mut best_c = f64::MAX;
         for _ in 0..BATCHES {
             let started = Instant::now();
-            sm.save_append(&seed, &[message(next_id)], "m", None, 0, 2);
+            sm.save_append(&session_id, &[message(next_id)], "m", None, 0, 2);
             best_c = best_c.min(started.elapsed().as_secs_f64() * 1e3);
         }
         assert_eq!(store::max_msg_id(&dir), next_id, "水位必须与权威扫描一致");

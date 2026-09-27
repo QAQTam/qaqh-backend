@@ -413,7 +413,7 @@ fn rotate_stale_writer_fences_in(sessions_dir: &Path) {
         {
             continue;
         }
-        let seed = entry.file_name().to_string_lossy().into_owned();
+        let session_id = entry.file_name().to_string_lossy().into_owned();
         let result = (|| -> Result<(), String> {
             let identity = CanonicalSessionIdentity::open_or_create(&dir)
                 .map_err(|error| error.to_string())?;
@@ -431,7 +431,11 @@ fn rotate_stale_writer_fences_in(sessions_dir: &Path) {
             let now_ms = system_time_ms();
             let lease = log
                 .rotate_writer_fence(
-                    WriterId::new(format!("daemon-startup-{}-{}", std::process::id(), seed)),
+                    WriterId::new(format!(
+                        "daemon-startup-{}-{}",
+                        std::process::id(),
+                        session_id
+                    )),
                     generation_epoch,
                     fencing_token,
                     now_ms,
@@ -441,13 +445,13 @@ fn rotate_stale_writer_fences_in(sessions_dir: &Path) {
             log.release_writer(&lease, i64::MIN)
                 .map_err(|error| error.to_string())?;
             log::info!(
-                "[ringing-v2] rotated stale writer fence for {seed}: generation {} -> {generation_epoch}",
+                "[ringing-v2] rotated stale writer fence for {session_id}: generation {} -> {generation_epoch}",
                 fence.generation_epoch
             );
             Ok(())
         })();
         if let Err(error) = result {
-            log::warn!("[ringing-v2] writer fence rotation skipped for {seed}: {error}");
+            log::warn!("[ringing-v2] writer fence rotation skipped for {session_id}: {error}");
         }
     }
 }

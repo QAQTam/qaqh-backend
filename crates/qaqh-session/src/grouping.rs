@@ -182,12 +182,12 @@ impl WorkspaceStore {
     }
 
     /// 某会话当前归属的 workspace id（无 = 未分组）。
-    pub fn workspace_of(&self, seed: &str) -> Option<String> {
+    pub fn workspace_of(&self, session_id: &str) -> Option<String> {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .find(|w| w.session_ids.iter().any(|s| s == seed))
+            .find(|w| w.session_ids.iter().any(|s| s == session_id))
             .map(|w| w.id.clone())
     }
 
@@ -275,24 +275,24 @@ impl WorkspaceStore {
 
     /// 把会话放入 cwd 匹配的 workspace（自动归属；新会话创建时调用）。
     /// 不匹配返回 None（保持未分组）；已归属其他 workspace 则迁移。
-    pub fn attach_by_cwd(&self, seed: &str, cwd: &str) -> Option<String> {
+    pub fn attach_by_cwd(&self, session_id: &str, cwd: &str) -> Option<String> {
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let target = items.iter().find(|w| cwd_belongs(cwd, &w.path))?.id.clone();
         for w in items.iter_mut() {
-            w.session_ids.retain(|s| s != seed);
+            w.session_ids.retain(|s| s != session_id);
         }
         let ws = items
             .iter_mut()
             .find(|w| w.id == target)
             .expect("target workspace vanished");
-        ws.session_ids.push(seed.to_string());
+        ws.session_ids.push(session_id.to_string());
         let out = ws.id.clone();
         self.save(&items);
         Some(out)
     }
 
     /// 显式把会话移入指定 workspace（D5 菜单移动）；原归属自动移除。
-    pub fn move_session(&self, seed: &str, to_ws_id: &str) -> Result<(), String> {
+    pub fn move_session(&self, session_id: &str, to_ws_id: &str) -> Result<(), String> {
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !items.iter().any(|w| w.id == to_ws_id) {
             return Err(format!(
@@ -300,14 +300,14 @@ impl WorkspaceStore {
             ));
         }
         for w in items.iter_mut() {
-            w.session_ids.retain(|s| s != seed);
+            w.session_ids.retain(|s| s != session_id);
         }
         let ws = items
             .iter_mut()
             .find(|w| w.id == to_ws_id)
             .expect("target workspace vanished");
-        if !ws.session_ids.iter().any(|s| s == seed) {
-            ws.session_ids.push(seed.to_string());
+        if !ws.session_ids.iter().any(|s| s == session_id) {
+            ws.session_ids.push(session_id.to_string());
         }
         self.save(&items);
         Ok(())
@@ -317,8 +317,8 @@ impl WorkspaceStore {
     ///
     /// 目录迁移时调用。若新 id 已存在于某个 workspace，则删除旧 id，避免同一
     /// 会话被登记两次；否则在原位置替换，保持手动排序。
-    pub fn rename_session(&self, old_seed: &str, new_session_id: &str) -> Result<(), String> {
-        if old_seed == new_session_id {
+    pub fn rename_session(&self, old_session: &str, new_session_id: &str) -> Result<(), String> {
+        if old_session == new_session_id {
             return Ok(());
         }
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -329,10 +329,12 @@ impl WorkspaceStore {
         for workspace in items.iter_mut() {
             if target_already_present {
                 let before = workspace.session_ids.len();
-                workspace.session_ids.retain(|id| id != old_seed);
+                workspace.session_ids.retain(|id| id != old_session);
                 changed |= workspace.session_ids.len() != before;
-            } else if let Some(position) =
-                workspace.session_ids.iter().position(|id| id == old_seed)
+            } else if let Some(position) = workspace
+                .session_ids
+                .iter()
+                .position(|id| id == old_session)
             {
                 workspace.session_ids[position] = new_session_id.to_string();
                 changed = true;
@@ -345,12 +347,12 @@ impl WorkspaceStore {
     }
 
     /// 把会话从所有 workspace 账户移除（会话删除时由 SessionManager 调用）。
-    pub fn remove_session(&self, seed: &str) {
+    pub fn remove_session(&self, session_id: &str) {
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         for w in items.iter_mut() {
             let before = w.session_ids.len();
-            w.session_ids.retain(|s| s != seed);
+            w.session_ids.retain(|s| s != session_id);
             changed |= w.session_ids.len() != before;
         }
         if changed {

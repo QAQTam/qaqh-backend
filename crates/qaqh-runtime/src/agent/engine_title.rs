@@ -33,8 +33,8 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
     if ctx.agent.ephemeral {
         return;
     }
-    let seed = ctx.agent.session.session_id.clone();
-    if seed.is_empty() {
+    let session_id = ctx.agent.session.session_id.clone();
+    if session_id.is_empty() {
         return;
     }
     // 首条用户消息（title 的语义锚点 = 用户首次表达的需求）。
@@ -47,7 +47,7 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
     }
 
     // ── ① 立即：截断标题（instant 可见）──
-    let _ = apply_fallback_title(ctx, &seed, first_user);
+    let _ = apply_fallback_title(ctx, &session_id, first_user);
 
     // ── ② 异步：LLM 总结覆盖（失败/超时保持截断版）──
     let provider = build_provider(ctx);
@@ -79,18 +79,18 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
             }
             // 覆盖截断版（同一次生成流程，未冻结）。
             if let Some(sm) = session_manager {
-                sm.update_title(&seed, &title);
+                sm.update_title(&session_id, &title);
             }
             if let Some(tx) = event_tx {
                 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let seed_for_env = seed.clone();
+                let session_for_env = session_id.clone();
                 let env = qaqh_ringing::RingingWorkerEventEnvelope::new(
-                    &seed,
+                    &session_id,
                     format!("w-title-{seq}"),
                     qaqh_domain::DomainEvent::Control(
                         qaqh_domain::ControlEvent::SessionMetaChanged {
-                            session_id: seed_for_env,
+                            session_id: session_for_env,
                             title: Some(title),
                         },
                     )
@@ -106,20 +106,24 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
 
 /// Apply the synchronous fallback title. Returns the title applied to the
 /// session, or `None` when the session was already frozen.
-fn apply_fallback_title(ctx: &mut RingContext<'_>, seed: &str, first_user: &str) -> Option<String> {
+fn apply_fallback_title(
+    ctx: &mut RingContext<'_>,
+    session_id: &str,
+    first_user: &str,
+) -> Option<String> {
     if ctx.agent.session.title.is_some() {
         return None;
     }
     let fallback = truncate_title(first_user);
     ctx.agent
         .enqueue_meta_op(crate::agent::state::agent::MetaOp::UpdateTitle {
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             title: fallback.clone(),
         });
     ctx.agent.session.title = Some(fallback.clone());
     ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
         qaqh_domain::ControlEvent::SessionMetaChanged {
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             title: Some(fallback.clone()),
         },
     ));

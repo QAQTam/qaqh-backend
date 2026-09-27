@@ -9,7 +9,6 @@
 //! A central `index.json` enables fast listing.
 
 use qaqh_types::{Message, SessionMeta};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,51 +19,6 @@ use crate::canonical::{CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity};
 use crate::store;
 
 static INSTANCE: OnceLock<Arc<SessionManager>> = OnceLock::new();
-const IDENTITY_MIGRATION_JOURNAL: &str = ".identity-migration.json";
-const LEGACY_IDENTITY_INDEX: &str = ".legacy-session-ids.json";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct IdentityMigration {
-    legacy_seed: String,
-    session_id: String,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct IdentityMigrationJournal {
-    #[serde(default)]
-    pending: Vec<IdentityMigration>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct LegacyIdentityIndex {
-    #[serde(default)]
-    aliases: HashMap<String, String>,
-}
-
-/// 测试专用 seed 候选源（生产恒为 `None`）。见
-/// [`SessionManager::allocate_seed`] 的碰撞回归说明。
-type SeedSource = Option<fn() -> String>;
-static SEED_SOURCE: OnceLock<Mutex<SeedSource>> = OnceLock::new();
-
-/// 从一个可注入候选源里取第一个「未占用」的 seed。
-///
-/// 这是 `try_generate_unique_seed` 的可注入版本：候选序列由 `source` 决定，
-/// 碰撞检查仍是同一份 `is_taken`——因此测试可以通过固定候选序列
-/// （如 [已占用, 已占用, 空闲]）**确定性复现碰撞重试**。
-fn generate_from_source(
-    mut source: impl FnMut() -> String,
-    mut is_taken: impl FnMut(&str) -> bool,
-) -> String {
-    for _ in 0..SessionManager::SEED_ALLOCATION_ATTEMPTS {
-        let candidate = source();
-        if !is_taken(&candidate) {
-            return candidate;
-        }
-        log::warn!("[session] injected seed candidate {candidate} collided — retrying");
-    }
-    log::error!("[session] injected seed source produced only collisions — falling back to random");
-    SessionManager::generate_seed()
-}
 
 /// Derive the model-visible view from the immutable archive.
 ///
@@ -176,7 +130,7 @@ pub struct SessionManager {
     /// 磁盘目录与索引只能表达「其它进程/历史是否用过这个 id」，无法表达
     /// 「本进程刚分配、目录已建但调用方尚未确认接受」的中间态——没有它
     /// 就会出现「分配器认为空闲、保险丝认为被占」的自相矛盾。
-    claimed_seeds: Mutex<std::collections::HashSet<String>>,
+    claimed_sessions: Mutex<std::collections::HashSet<String>>,
 }
 
 impl SessionManager {
@@ -189,16 +143,11 @@ impl SessionManager {
         let mgr = Self {
             active_path: data_dir.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
-            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+            claimed_sessions: Mutex::new(std::collections::HashSet::new()),
             sessions_dir,
         };
-        // Migrate old TOML sessions on first startup of v0.4.0
-        crate::migrate::run(&mgr.sessions_dir);
         // Workspace 注册表与 session 存储同根（组织语义，与运行环境 workspace 解耦）。
         crate::grouping::WorkspaceStore::init(data_dir);
-        if let Err(error) = mgr.migrate_legacy_session_dirs() {
-            log::error!("[MIGRATE] session identity migration failed: {error}");
-        }
         INSTANCE
             .set(Arc::new(mgr))
             .expect("SessionManager already initialized");
@@ -215,7 +164,7 @@ impl SessionManager {
             sessions_dir,
             active_path,
             session_locks: Mutex::new(HashMap::new()),
-            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+            claimed_sessions: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -280,22 +229,22 @@ impl SessionManager {
     }
 
     /// Delete a session: removes the session directory and its index entry.
-    pub fn delete(&self, seed: &str) -> Result<(), String> {
-        let dir = self.session_path_dir(seed);
+    pub fn delete(&self, session_id: &str) -> Result<(), String> {
+        let dir = self.session_path_dir(session_id);
         // 水位缓存按**目录路径**键控（不依赖目录是否存在），所以失效必须
         // 先于删除、且不因目录查询失败而跳过——否则同 seed 重建会读到旧
         // 水位，把新会话的低 msg_id 首批全部误判为已归档。
         store::invalidate_watermark(&dir);
         let dir = self
-            .session_dir(seed)
-            .ok_or_else(|| format!("Session not found: {seed}"))?;
+            .session_dir(session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
 
         let _legacy_writer = LegacyWriterFacade::lock();
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete session: {e}"))?;
 
-        store::remove_from_index(&self.sessions_dir, seed);
+        store::remove_from_index(&self.sessions_dir, session_id);
         // 同步清理 workspace 账户（会话删除后不留悬空引用）。
-        crate::grouping::WorkspaceStore::global().remove_session(seed);
+        crate::grouping::WorkspaceStore::global().remove_session(session_id);
         // D-4：释放 per-seed 锁槽位与占用登记。两者都以 seed 为键、只在
         // 创建/首次取锁时插入，删除路径若不回收，长驻 daemon 每删一个会话就
         // 永久多留一条（无界增长；`release_seed_claim` 清的是另一个 map）。
@@ -303,18 +252,18 @@ impl SessionManager {
         self.session_locks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(seed);
-        self.release_seed_claim(seed);
+            .remove(session_id);
+        self.release_session_claim(session_id);
 
-        log::info!("SessionManager: deleted session {seed}");
+        log::info!("SessionManager: deleted session {session_id}");
         Ok(())
     }
 
     // ── Load / Save ──
 
     /// Read the persisted JSONL files for a session.
-    pub fn load(&self, seed: &str) -> Option<(SessionMeta, Vec<Message>)> {
-        self.snapshot_from_files(seed).ok()
+    pub fn load(&self, session_id: &str) -> Option<(SessionMeta, Vec<Message>)> {
+        self.snapshot_from_files(session_id).ok()
     }
 
     /// Load the immutable archive and the active model view derived from it.
@@ -332,18 +281,21 @@ impl SessionManager {
     /// needs complete history). Projection-only consumers (timeline rebuild)
     /// should use [`Self::load_archive_tail`] instead — bounded tail read, no
     /// full-file cost.
-    pub fn load_for_resume(&self, seed: &str) -> Option<(SessionMeta, Vec<Message>, Vec<Message>)> {
+    pub fn load_for_resume(
+        &self,
+        session_id: &str,
+    ) -> Option<(SessionMeta, Vec<Message>, Vec<Message>)> {
         // L2 recovery: fold any un-drained WAL ops into the archive BEFORE any
         // consumer projects from it (worker resume, conversation snapshot,
         // timeline rebuild all funnel through here). Idempotent — see
         // `replay_message_wal`.
-        self.replay_message_wal(seed);
-        let (meta, archive_messages) = self.load(seed)?;
+        self.replay_message_wal(session_id);
+        let (meta, archive_messages) = self.load(session_id)?;
         let active_messages = match derive_active_messages(&meta, &archive_messages) {
             Ok(messages) => messages,
             Err(error) => {
                 log::error!(
-                    "SessionManager: compact watermark for {seed} is invalid ({error}) \
+                    "SessionManager: compact watermark for {session_id} is invalid ({error}) \
                      — refusing full-history fallback"
                 );
                 return None;
@@ -361,14 +313,18 @@ impl SessionManager {
     ///
     /// 返回 `None` 表示磁盘上无该会话（区别于“有会话但尾部为空”——那返回
     /// 空 Vec）。WAL fold 与 `load_for_resume` 相同，先折幂等。
-    pub fn load_recent_for_projection(&self, seed: &str, recent: usize) -> Option<Vec<Message>> {
-        self.replay_message_wal(seed);
-        let meta = self.load_meta(seed)?;
+    pub fn load_recent_for_projection(
+        &self,
+        session_id: &str,
+        recent: usize,
+    ) -> Option<Vec<Message>> {
+        self.replay_message_wal(session_id);
+        let meta = self.load_meta(session_id)?;
         if meta.compact_covered_through_msg_id.is_some() {
-            let (_, _, active_messages) = self.load_for_resume(seed)?;
+            let (_, _, active_messages) = self.load_for_resume(session_id)?;
             return Some(active_messages);
         }
-        let dir = self.session_path_dir(seed);
+        let dir = self.session_path_dir(session_id);
         let messages =
             crate::store::bounded_read::read_messages_tail(&dir.join("messages.jsonl"), recent);
         Some(
@@ -399,10 +355,10 @@ impl SessionManager {
     ///
     /// 语义边界与 `load_recent_for_projection` 相同：`None` = 磁盘上无该会话
     /// （区别于「有会话但尾部为空」——那返回空 Vec）。WAL 同样先折（幂等）。
-    pub fn load_archive_tail(&self, seed: &str, recent: usize) -> Option<Vec<Message>> {
-        self.replay_message_wal(seed);
-        self.session_dir(seed)?;
-        let dir = self.session_path_dir(seed);
+    pub fn load_archive_tail(&self, session_id: &str, recent: usize) -> Option<Vec<Message>> {
+        self.replay_message_wal(session_id);
+        self.session_dir(session_id)?;
+        let dir = self.session_path_dir(session_id);
         Some(
             crate::store::bounded_read::read_messages_tail(&dir.join("messages.jsonl"), recent)
                 .into_iter()
@@ -418,7 +374,7 @@ impl SessionManager {
     pub fn apply_persist_op(&self, op: &qaqh_message::PersistOp) {
         match op {
             qaqh_message::PersistOp::Append {
-                seed,
+                session_id,
                 messages,
                 model,
                 effort,
@@ -427,7 +383,7 @@ impl SessionManager {
                 turn_count,
             } => {
                 self.save_append_with_watermark(
-                    seed,
+                    session_id,
                     messages,
                     model,
                     effort.as_deref(),
@@ -437,16 +393,22 @@ impl SessionManager {
                 );
             }
             qaqh_message::PersistOp::UpdateMeta {
-                seed,
+                session_id,
                 model,
                 effort,
                 compact_skip,
                 turn_count,
             } => {
-                self.update_meta(seed, model, effort.as_deref(), *compact_skip, *turn_count);
+                self.update_meta(
+                    session_id,
+                    model,
+                    effort.as_deref(),
+                    *compact_skip,
+                    *turn_count,
+                );
             }
             qaqh_message::PersistOp::SaveFull {
-                seed,
+                session_id,
                 messages,
                 model,
                 effort,
@@ -455,7 +417,7 @@ impl SessionManager {
                 turn_count,
             } => {
                 self.save_full_with_watermark(
-                    seed,
+                    session_id,
                     messages,
                     model,
                     effort.as_deref(),
@@ -480,8 +442,8 @@ impl SessionManager {
     /// Single-writer invariant: a non-empty WAL implies the previous worker
     /// died before draining, so no live writer exists for this seed while
     /// replay runs. Per-op application still takes the per-seed lock.
-    fn replay_message_wal(&self, seed: &str) {
-        let dir = self.session_path_dir(seed);
+    fn replay_message_wal(&self, session_id: &str) {
+        let dir = self.session_path_dir(session_id);
         let mut reader = match qaqh_message::wal::open_reader(&dir) {
             Ok(Some(reader)) => reader,
             Ok(None) => return,
@@ -491,7 +453,7 @@ impl SessionManager {
                 // replayable once the fault clears; a fresh WAL is never
                 // installed over unread ops.
                 log::error!(
-                    "SessionManager: cannot open WAL for {seed} ({error}) — skipping replay, \
+                    "SessionManager: cannot open WAL for {session_id} ({error}) — skipping replay, \
                      log kept for the next attempt"
                 );
                 return;
@@ -508,7 +470,7 @@ impl SessionManager {
                     // *before* the checkpoint. Truncating here would destroy the
                     // ops the fault hid — this is the bug the issue reports.
                     log::error!(
-                        "SessionManager: WAL read for {seed} failed after {} op(s) ({error}) — \
+                        "SessionManager: WAL read for {session_id} failed after {} op(s) ({error}) — \
                          applying the valid prefix and keeping the log",
                         reader.prefix_len()
                     );
@@ -520,11 +482,11 @@ impl SessionManager {
             return;
         }
         log::info!(
-            "SessionManager: replaying {} WAL op(s) for {seed}",
+            "SessionManager: replaying {} WAL op(s) for {session_id}",
             ops.len()
         );
         let mut applied_max_msg_id = self
-            .load(seed)
+            .load(session_id)
             .map(|(_, messages)| {
                 messages
                     .iter()
@@ -536,7 +498,7 @@ impl SessionManager {
         for op in ops {
             match op {
                 qaqh_message::PersistOp::Append {
-                    seed: op_seed,
+                    session_id: op_session,
                     messages,
                     model,
                     effort,
@@ -559,7 +521,7 @@ impl SessionManager {
                             .unwrap_or(0),
                     );
                     self.apply_persist_op(&qaqh_message::PersistOp::Append {
-                        seed: op_seed,
+                        session_id: op_session,
                         messages: fresh,
                         model,
                         effort,
@@ -579,13 +541,13 @@ impl SessionManager {
         // Clean read: the ops were applied, so truncate the log. A failure here
         // only costs a redundant (idempotent) replay next time.
         if let Err(error) = qaqh_message::wal::checkpoint_file(&dir) {
-            log::error!("SessionManager: WAL checkpoint for {seed} failed: {error}");
+            log::error!("SessionManager: WAL checkpoint for {session_id} failed: {error}");
         }
     }
 
     /// Check whether a session exists on disk.
-    pub fn exists(&self, seed: &str) -> bool {
-        if self.session_dir(seed).is_some() {
+    pub fn exists(&self, session_id: &str) -> bool {
+        if self.session_dir(session_id).is_some() {
             return true;
         }
         false
@@ -593,8 +555,8 @@ impl SessionManager {
 
     /// Load only metadata (fast, no message parsing). JSON remains primary
     /// until the DB-primary readiness gate is explicitly promoted.
-    pub fn load_meta(&self, seed: &str) -> Option<SessionMeta> {
-        if let Some(dir) = self.session_dir(seed)
+    pub fn load_meta(&self, session_id: &str) -> Option<SessionMeta> {
+        if let Some(dir) = self.session_dir(session_id)
             && let Some(meta) = store::read_meta(&dir)
         {
             return Some(meta);
@@ -605,8 +567,8 @@ impl SessionManager {
     /// 解析会话运行环境工作目录（PR-3-3 宿主注入的解析权威）：meta.cwd 优先，
     /// 旧 `workspace.txt` 惰性迁移（原子写 meta + 删 txt，两进程竞争幂等）。
     /// 宿主（agent loop / service）经注入句柄调用后把值注入 workspace。
-    pub fn workspace_cwd(&self, seed: &str) -> Option<String> {
-        let meta = self.load_meta(seed)?;
+    pub fn workspace_cwd(&self, session_id: &str) -> Option<String> {
+        let meta = self.load_meta(session_id)?;
         if let Some(cwd) = meta.cwd.as_deref().filter(|c| !c.is_empty()) {
             // 存量修复：历史版本在非 Windows 上写入的 `\` 形态（事故
             // 692d1605 meta.json 反斜杠 cwd，2026-09-06 排查项）。
@@ -614,7 +576,7 @@ impl SessionManager {
         }
         // 惰性迁移：旧 workspace.txt → meta.cwd
         let txt_path = qaqh_types::platform::sessions_dir()
-            .join(seed)
+            .join(session_id)
             .join("workspace.txt");
         let legacy = std::fs::read_to_string(&txt_path).ok()?;
         let legacy = legacy.trim().to_string();
@@ -622,15 +584,15 @@ impl SessionManager {
             return None;
         }
         let canonical = crate::grouping::canonical_cwd(std::path::Path::new(&legacy));
-        self.set_cwd(seed, &canonical, true);
+        self.set_cwd(session_id, &canonical, true);
         let _ = std::fs::remove_file(&txt_path);
         Some(canonical)
     }
 
     /// Persist agent mode to meta.json without rewriting messages.
     /// Called when the user switches PLAN/CODE mode so it survives agent restart.
-    pub fn persist_mode(&self, seed: &str, mode: u8) {
-        self.with_meta_locked(seed, false, |dir, meta| {
+    pub fn persist_mode(&self, session_id: &str, mode: u8) {
+        self.with_meta_locked(session_id, false, |dir, meta| {
             meta.mode = mode;
             let _ = store::write_meta(dir, meta);
         });
@@ -645,11 +607,11 @@ impl SessionManager {
     /// 空串统一规范化为 "standard"（旧会话零迁移语义显式落盘）。
     pub fn persist_tool_mode(
         &self,
-        seed: &str,
+        session_id: &str,
         tool_mode: &str,
         custom_tools: &[String],
     ) -> Result<(), String> {
-        self.with_meta_locked(seed, true, |dir, meta| {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             let normalized = if tool_mode.is_empty() {
                 "standard"
             } else {
@@ -661,17 +623,17 @@ impl SessionManager {
             store::write_meta(dir, meta)?;
             store::upsert_index(&self.sessions_dir, meta);
             log::info!(
-                "[TOOL MODE] persisted {normalized} for {seed} ({} custom tools)",
+                "[TOOL MODE] persisted {normalized} for {session_id} ({} custom tools)",
                 custom_tools.len()
             );
             Ok(())
         })
     }
 
-    pub fn persist_skills(&self, seed: &str, skills: qaqh_types::SkillSessionStateV2) {
-        self.with_meta_locked(seed, true, |dir, meta| {
+    pub fn persist_skills(&self, session_id: &str, skills: qaqh_types::SkillSessionStateV2) {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.session_id = seed.to_string();
+            meta.session_id = session_id.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -685,10 +647,10 @@ impl SessionManager {
     /// Persist the frozen [Environment] annotation (P0 cache fix). Written
     /// once per session by the agent loop, replayed into `AgentState` on
     /// resume so the first user message keeps its byte-identical prefix.
-    pub fn persist_frozen_annotation(&self, seed: &str, annotation: &str) {
-        self.with_meta_locked(seed, true, |dir, meta| {
+    pub fn persist_frozen_annotation(&self, session_id: &str, annotation: &str) {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.session_id = seed.to_string();
+            meta.session_id = session_id.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -702,10 +664,10 @@ impl SessionManager {
     /// 设置会话归档标记（标签 × 归档 / 左侧列表恢复）。
     /// 仅改 meta.json（atomic replace-write），不触碰消息文件与 registry
     /// 实例——实例启停由调用方（daemon 拦截层）负责。
-    pub fn set_archived(&self, seed: &str, archived: bool) {
-        self.with_meta_locked(seed, false, |dir, meta| {
+    pub fn set_archived(&self, session_id: &str, archived: bool) {
+        self.with_meta_locked(session_id, false, |dir, meta| {
             if meta.session_id.is_empty() {
-                meta.session_id = seed.to_string();
+                meta.session_id = session_id.to_string();
             }
             meta.archived = archived;
             meta.updated_at = Self::now_epoch();
@@ -719,15 +681,15 @@ impl SessionManager {
     /// 已退役（读取侧惰性迁移，见 [`Self::workspace_cwd`]）。
     /// 仅改 meta.json（atomic replace-write）；`index` 控制是否同步会话索引
     /// （子代理 ephemeral，不进列表）。
-    pub fn set_cwd(&self, seed: &str, cwd: &str, index: bool) {
+    pub fn set_cwd(&self, session_id: &str, cwd: &str, index: bool) {
         // 空 cwd 双保险：canonical_cwd("") = "" 会清掉已有工作区（前端重启后
         // 回空 cwd 的 bug 通道）；空串直接忽略，永不破坏现有归属。
         if cwd.trim().is_empty() {
             return;
         }
-        self.with_meta_locked(seed, true, |dir, meta| {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             if meta.session_id.is_empty() {
-                meta.session_id = seed.to_string();
+                meta.session_id = session_id.to_string();
             }
             meta.cwd = Some(crate::grouping::canonical_cwd(std::path::Path::new(cwd)));
             // 非索引会话（子代理继承 workspace 等临时场景）= 临时会话：关闭时
@@ -743,16 +705,19 @@ impl SessionManager {
             // 立即反映分组，否则左侧恒显未分组（两套工作区不通根因）。
             // `index=false` 为子代理临时会话，不进组织归属。
             if index && let Some(cwd) = meta.cwd.as_deref() {
-                crate::grouping::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+                crate::grouping::WorkspaceStore::global().attach_by_cwd(session_id, cwd);
             }
         });
     }
 
     /// 该 seed 是否为临时会话（子代理）：meta 存在且标记 ephemeral。
     /// 目录缺失（已清理）视为非临时，避免误触发删除路径。
-    pub fn is_ephemeral(&self, seed: &str) -> bool {
-        self.session_dir(seed).is_some()
-            && self.load_meta(seed).map(|m| m.ephemeral).unwrap_or(false)
+    pub fn is_ephemeral(&self, session_id: &str) -> bool {
+        self.session_dir(session_id).is_some()
+            && self
+                .load_meta(session_id)
+                .map(|m| m.ephemeral)
+                .unwrap_or(false)
     }
 
     /// Mark a session's cleanup policy without adding it to the session index.
@@ -760,10 +725,10 @@ impl SessionManager {
     /// V2 subagents are durable canonical sessions but remain hidden from the
     /// ordinary session list. Their close path must therefore retain the
     /// directory while `ephemeral` stays false.
-    pub fn set_ephemeral(&self, seed: &str, ephemeral: bool) {
-        self.with_meta_locked(seed, true, |dir, meta| {
+    pub fn set_ephemeral(&self, session_id: &str, ephemeral: bool) {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             if meta.session_id.is_empty() {
-                meta.session_id = seed.to_string();
+                meta.session_id = session_id.to_string();
             }
             meta.ephemeral = ephemeral;
             meta.updated_at = Self::now_epoch();
@@ -774,10 +739,10 @@ impl SessionManager {
     /// 上下文统计快照（可再生缓存）。写入 meta.json；只有正规会话
     /// （`created_at > 0`，即 persist_new_session 建立过）才同步索引——
     /// 子代理 worker 的 dashboard/compact 路径不会污染会话列表。
-    pub fn set_context_stats(&self, seed: &str, stats: &serde_json::Value) {
-        self.with_meta_locked(seed, true, |dir, meta| {
+    pub fn set_context_stats(&self, session_id: &str, stats: &serde_json::Value) {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             if meta.session_id.is_empty() {
-                meta.session_id = seed.to_string();
+                meta.session_id = session_id.to_string();
             }
             meta.context_stats = Some(stats.clone());
             meta.updated_at = Self::now_epoch();
@@ -797,8 +762,8 @@ impl SessionManager {
     /// ⚠ BUG-2026-09-13-24：本方法**无条件覆盖**既有 meta（created_at/cwd
     /// 等）。调用方必须先确认 seed 未被占用（[`Self::is_seed_taken`]/
     /// [`Self::allocate_seed`]），否则会把新会话写进旧会话目录。
-    pub fn persist_new_session(&self, seed: &str) {
-        self.persist_new_session_with_cwd(seed, None);
+    pub fn persist_new_session(&self, session_id: &str) {
+        self.persist_new_session_with_cwd(session_id, None);
     }
 
     /// 仅当 `seed` 未被占用时创建新会话目录 + 初始 meta。
@@ -807,22 +772,22 @@ impl SessionManager {
     /// 并且**一个字节都不写**（不覆盖既有 meta、不追加 messages.jsonl）。
     /// 检查与落盘在 per-seed 锁内串行，并可选的 `claimed` 钩子在同一把锁
     /// 内二次校验（供调用方维护进程内占用集，见 `QaqhService`）。
-    pub fn persist_new_session_if_absent(&self, seed: &str, cwd: Option<&str>) -> bool {
-        self.persist_new_session_if_absent_with(seed, cwd, |_| true)
+    pub fn persist_new_session_if_absent(&self, session_id: &str, cwd: Option<&str>) -> bool {
+        self.persist_new_session_if_absent_with(session_id, cwd, |_| true)
     }
 
     /// [`Self::persist_new_session_if_absent`] 的可注入版本：`claimed` 在
     /// 锁内、落盘前被调用，返回 `false` 视为「已被占用」，本次创建放弃。
     pub fn persist_new_session_if_absent_with(
         &self,
-        seed: &str,
+        session_id: &str,
         cwd: Option<&str>,
         claimed: impl FnOnce(&str) -> bool,
     ) -> bool {
-        match self.create_new_session(seed, cwd, claimed, None, true) {
+        match self.create_new_session(session_id, cwd, claimed, None, true) {
             Ok(()) => true,
             Err(error) => {
-                log::warn!("[session] create_session: seed {seed} refused: {error}");
+                log::warn!("[session] create_session: seed {session_id} refused: {error}");
                 false
             }
         }
@@ -830,26 +795,26 @@ impl SessionManager {
 
     fn create_new_session(
         &self,
-        seed: &str,
+        session_id: &str,
         cwd: Option<&str>,
         claimed: impl FnOnce(&str) -> bool,
         identity: Option<&CanonicalSessionIdentity>,
         index_session: bool,
     ) -> Result<(), String> {
-        if seed.is_empty() {
+        if session_id.is_empty() {
             return Err("refusing to create a session with an empty seed".to_string());
         }
-        let lock = self.session_lock(seed);
+        let lock = self.session_lock(session_id);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _legacy_writer = LegacyWriterFacade::lock();
-        if self.session_dir(seed).is_some() {
+        if self.session_dir(session_id).is_some() {
             return Err("session directory already exists; refusing to overwrite".to_string());
         }
-        if !claimed(seed) {
+        if !claimed(session_id) {
             return Err("seed is already claimed elsewhere; refusing to overwrite".to_string());
         }
 
-        let dir = self.session_path_dir(seed);
+        let dir = self.session_path_dir(session_id);
         std::fs::create_dir_all(&self.sessions_dir)
             .map_err(|error| format!("create sessions dir failed: {error}"))?;
         std::fs::create_dir(&dir)
@@ -863,22 +828,22 @@ impl SessionManager {
         };
 
         if let Some(identity) = identity {
-            if identity.session_id.as_str() != seed {
+            if identity.session_id.as_str() != session_id {
                 return cleanup_identity_dir(format!(
-                    "canonical identity session_id {} does not match directory {seed}",
+                    "canonical identity session_id {} does not match directory {session_id}",
                     identity.session_id
                 ));
             }
             if let Err(error) = CanonicalSessionIdentity::install(&dir, identity) {
                 return cleanup_identity_dir(format!(
-                    "install canonical identity for {seed} failed: {error}"
+                    "install canonical identity for {session_id} failed: {error}"
                 ));
             }
         }
 
         let now = Self::now_epoch();
         let mut meta = store::read_meta(&dir).unwrap_or_default();
-        meta.session_id = seed.to_string();
+        meta.session_id = session_id.to_string();
         meta.created_at = now;
         meta.updated_at = now;
         meta.ephemeral = !index_session;
@@ -894,7 +859,7 @@ impl SessionManager {
         if index_session {
             store::upsert_index(&self.sessions_dir, &meta);
             if let Some(cwd) = meta.cwd.as_deref() {
-                crate::grouping::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+                crate::grouping::WorkspaceStore::global().attach_by_cwd(session_id, cwd);
             }
         }
         Ok(())
@@ -926,38 +891,38 @@ impl SessionManager {
         cwd: Option<&str>,
         index_session: bool,
     ) -> Result<CanonicalSessionIdentity, String> {
-        for _ in 0..Self::SEED_ALLOCATION_ATTEMPTS {
+        for _ in 0..Self::SESSION_ALLOCATION_ATTEMPTS {
             let identity = CanonicalSessionIdentity::new();
-            let seed = identity.session_id.as_str().to_string();
+            let session_id = identity.session_id.as_str().to_string();
             match self.create_new_session(
-                &seed,
+                &session_id,
                 cwd,
-                |candidate| self.claim_seed(candidate),
+                |candidate| self.claim_session(candidate),
                 Some(&identity),
                 index_session,
             ) {
                 Ok(()) => return Ok(identity),
                 Err(error) => {
-                    self.release_seed_claim(&seed);
+                    self.release_session_claim(&session_id);
                     log::warn!(
-                        "[session] allocate_session: candidate {seed} failed: {error}; retrying"
+                        "[session] allocate_session: candidate {session_id} failed: {error}; retrying"
                     );
                 }
             }
         }
         Err(format!(
             "allocate_session: exhausted {} canonical identity attempts",
-            Self::SEED_ALLOCATION_ATTEMPTS
+            Self::SESSION_ALLOCATION_ATTEMPTS
         ))
     }
 
     /// 同上，但记录创建时工作目录（workspace 归属基础）：
     /// canonicalize 成功存 canonical 路径，失败存原样字符串；
     /// cwd 命中某 workspace 路径时自动 attach（D1 双轨自动侧）。
-    pub fn persist_new_session_with_cwd(&self, seed: &str, cwd: Option<&str>) {
-        self.with_meta_locked(seed, true, |dir, meta| {
+    pub fn persist_new_session_with_cwd(&self, session_id: &str, cwd: Option<&str>) {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.session_id = seed.to_string();
+            meta.session_id = session_id.to_string();
             meta.created_at = now;
             meta.updated_at = now;
             meta.cwd = cwd.map(|c| crate::grouping::canonical_cwd(std::path::Path::new(c)));
@@ -967,21 +932,21 @@ impl SessionManager {
             let _ = store::write_meta(dir, meta);
             store::upsert_index(&self.sessions_dir, meta);
             if let Some(cwd) = meta.cwd.as_deref() {
-                crate::grouping::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+                crate::grouping::WorkspaceStore::global().attach_by_cwd(session_id, cwd);
             }
         });
     }
 
     pub fn persist_usage(
         &self,
-        seed: &str,
+        session_id: &str,
         totals: qaqh_types::UsageInfo,
         last_usage: Option<qaqh_types::UsageInfo>,
         requests: u32,
         cache_reported_requests: u32,
     ) {
-        self.with_meta_locked(seed, true, |dir, meta| {
-            meta.session_id = seed.to_string();
+        self.with_meta_locked(session_id, true, |dir, meta| {
+            meta.session_id = session_id.to_string();
             meta.updated_at = Self::now_epoch();
             meta.usage_totals = totals;
             meta.last_usage = last_usage;
@@ -993,10 +958,10 @@ impl SessionManager {
     }
 
     /// Append a single message to JSONL immediately (per-message persistence).
-    pub fn save_one(&self, seed: &str, msg: &Message) {
-        self.with_meta_locked(seed, true, |dir, meta| {
+    pub fn save_one(&self, session_id: &str, msg: &Message) {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             let now = Self::now_epoch();
-            meta.session_id = seed.to_string();
+            meta.session_id = session_id.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -1022,15 +987,15 @@ impl SessionManager {
     /// Update session metadata and index after messages have been appended.
     pub fn update_meta(
         &self,
-        seed: &str,
+        session_id: &str,
         model: &str,
         effort: Option<&str>,
         compact_skip: usize,
         turn_count: usize,
     ) {
         let now = Self::now_epoch();
-        self.with_meta_locked(seed, false, |dir, meta| {
-            meta.session_id = seed.to_string();
+        self.with_meta_locked(session_id, false, |dir, meta| {
+            meta.session_id = session_id.to_string();
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -1049,9 +1014,9 @@ impl SessionManager {
 
     /// 更新会话标题（冻结语义：调用方负责只在首轮后调用一次；幂等覆盖）。
     /// 写 meta + index（daemon 的 `list()` 每次读盘，无需跨进程通知即可见）。
-    pub fn update_title(&self, seed: &str, title: &str) {
-        self.with_meta_locked(seed, false, |dir, meta| {
-            meta.session_id = seed.to_string();
+    pub fn update_title(&self, session_id: &str, title: &str) {
+        self.with_meta_locked(session_id, false, |dir, meta| {
+            meta.session_id = session_id.to_string();
             meta.title = Some(title.to_string());
             meta.updated_at = Self::now_epoch();
             if let Err(e) = store::write_meta(dir, meta) {
@@ -1066,7 +1031,7 @@ impl SessionManager {
     /// Used for initial save or after undo/image repair.
     pub fn save_full(
         &self,
-        seed: &str,
+        session_id: &str,
         messages: &[Message],
         model: &str,
         effort: Option<&str>,
@@ -1074,7 +1039,7 @@ impl SessionManager {
         turn_count: usize,
     ) {
         self.save_full_with_watermark(
-            seed,
+            session_id,
             messages,
             model,
             effort,
@@ -1090,7 +1055,7 @@ impl SessionManager {
     #[allow(clippy::too_many_arguments)]
     pub fn save_full_with_watermark(
         &self,
-        seed: &str,
+        session_id: &str,
         messages: &[Message],
         model: &str,
         effort: Option<&str>,
@@ -1098,15 +1063,18 @@ impl SessionManager {
         compact_covered_through_msg_id: Option<u64>,
         turn_count: usize,
     ) {
-        let lock = self.session_lock(seed);
+        let lock = self.session_lock(session_id);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let now = Self::now_epoch();
-        let dir = self.session_path_dir(seed);
+        let dir = self.session_path_dir(session_id);
         let _ = std::fs::create_dir_all(&dir);
 
-        let created_at = self.load_meta(seed).map(|m| m.created_at).unwrap_or(now);
+        let created_at = self
+            .load_meta(session_id)
+            .map(|m| m.created_at)
+            .unwrap_or(now);
 
-        let existing = self.load_meta(seed).unwrap_or_default();
+        let existing = self.load_meta(session_id).unwrap_or_default();
         let last_summary = Self::extract_summary(messages);
 
         // BUG-2026-09-13-05：整条继承既有 meta，再覆写本次调用真正拥有的字
@@ -1118,7 +1086,7 @@ impl SessionManager {
         // 化击穿 provider 前缀缓存）、归档/临时标记丢失。新增持久化字段
         // 默认自动继承，不再依赖维护者记得在这里补一行。
         let mut meta = existing.clone();
-        meta.session_id = seed.to_string();
+        meta.session_id = session_id.to_string();
         meta.created_at = created_at;
         meta.updated_at = now;
         meta.model = model.to_string();
@@ -1154,7 +1122,7 @@ impl SessionManager {
     /// Updates meta and index.
     pub fn save_append(
         &self,
-        seed: &str,
+        session_id: &str,
         new_messages: &[Message],
         model: &str,
         effort: Option<&str>,
@@ -1162,7 +1130,7 @@ impl SessionManager {
         turn_count: usize,
     ) {
         self.save_append_with_watermark(
-            seed,
+            session_id,
             new_messages,
             model,
             effort,
@@ -1177,7 +1145,7 @@ impl SessionManager {
     #[allow(clippy::too_many_arguments)]
     pub fn save_append_with_watermark(
         &self,
-        seed: &str,
+        session_id: &str,
         new_messages: &[Message],
         model: &str,
         effort: Option<&str>,
@@ -1186,7 +1154,7 @@ impl SessionManager {
         turn_count: usize,
     ) {
         let now = Self::now_epoch();
-        self.with_meta_locked(seed, true, |dir, meta| {
+        self.with_meta_locked(session_id, true, |dir, meta| {
             // A WAL replay can arrive after the summary bytes were appended but
             // before meta.json was updated. In that case the message batch is
             // already archived, but the watermark still must be applied.
@@ -1194,7 +1162,7 @@ impl SessionManager {
                 let Some(covered) = compact_covered_through_msg_id else {
                     return;
                 };
-                meta.session_id = seed.to_string();
+                meta.session_id = session_id.to_string();
                 meta.updated_at = now;
                 meta.compact_covered_through_msg_id = Some(covered);
                 if let Err(e) = store::write_meta(dir, meta) {
@@ -1235,7 +1203,7 @@ impl SessionManager {
                 meta.created_at = now;
             }
             let last_summary = Self::extract_summary(new_messages);
-            meta.session_id = seed.to_string();
+            meta.session_id = session_id.to_string();
             meta.updated_at = now;
             meta.model = model.to_string();
             meta.effort = effort.map(String::from);
@@ -1266,7 +1234,7 @@ impl SessionManager {
     // ── Active session ──
 
     /// Read the currently active session seed.
-    pub fn active_seed(&self) -> Option<String> {
+    pub fn active_session(&self) -> Option<String> {
         std::fs::read_to_string(&self.active_path)
             .ok()
             .map(|s| s.trim().to_string())
@@ -1274,11 +1242,11 @@ impl SessionManager {
     }
 
     /// Set the active session seed (persisted to disk).
-    pub fn set_active_seed(&self, seed: &str) {
+    pub fn set_active_session(&self, session_id: &str) {
         if let Some(parent) = self.active_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if std::fs::write(&self.active_path, seed).is_err() {
+        if std::fs::write(&self.active_path, session_id).is_err() {
             log::error!("SessionManager: failed to write active session file");
         }
     }
@@ -1294,339 +1262,17 @@ impl SessionManager {
     ///
     /// This is the read-only compatibility boundary: it never creates an
     /// identity and never enters new canonical facts.
-    pub fn canonical_identity_for_seed(
+    pub fn canonical_identity_for_session(
         &self,
-        seed: &str,
+        session_id: &str,
     ) -> Result<Option<CanonicalSessionIdentity>, String> {
-        let dir = self.session_path_dir(seed);
+        let dir = self.session_path_dir(session_id);
         if dir.is_dir() && dir.join(CANONICAL_IDENTITY_FILE).exists() {
             return CanonicalSessionIdentity::open(&dir)
                 .map(Some)
                 .map_err(|error| format!("read canonical identity at {}: {error}", dir.display()));
         }
-
-        let index = self.read_legacy_identity_index()?;
-        let Some(session_id) = index.aliases.get(seed) else {
-            return Ok(None);
-        };
-        let target = self.session_path_dir(session_id);
-        if !target.is_dir() || !target.join(CANONICAL_IDENTITY_FILE).exists() {
-            return Err(format!(
-                "legacy seed {seed} maps to missing canonical session {session_id}"
-            ));
-        }
-        let identity = CanonicalSessionIdentity::open(&target)
-            .map_err(|error| format!("read canonical identity at {}: {error}", target.display()))?;
-        if identity.session_id.as_str() != session_id {
-            return Err(format!(
-                "legacy seed {seed} maps to {session_id}, but {} contains {}",
-                target.display(),
-                identity.session_id
-            ));
-        }
-        Ok(Some(identity))
-    }
-
-    /// Recover pending migrations and rename every legacy session directory to
-    /// `sessions/{session_id}`.
-    ///
-    /// The journal is written before rename. A crash at any point is resumed by
-    /// the next startup: either the rename is replayed, or a completed rename is
-    /// followed by meta/index/active/workspace repair.
-    pub fn migrate_legacy_session_dirs(&self) -> Result<usize, String> {
-        let mut migrated = self.recover_identity_migration_journal()?;
-        let mut first_error: Option<String> = None;
-        fn record_error(first_error: &mut Option<String>, error: String) {
-            log::error!("[MIGRATE] {error}");
-            if first_error.is_none() {
-                *first_error = Some(error);
-            }
-        }
-
-        let entries = match std::fs::read_dir(&self.sessions_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(migrated),
-            Err(error) => {
-                return Err(format!(
-                    "read sessions dir {}: {error}",
-                    self.sessions_dir.display()
-                ));
-            }
-        };
-
-        for entry in entries {
-            let entry = entry.map_err(|error| format!("read session dir entry: {error}"))?;
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("read session dir type: {error}"))?;
-            if !file_type.is_dir() {
-                continue;
-            }
-            let path = entry.path();
-            if !path.join(CANONICAL_IDENTITY_FILE).exists() {
-                continue;
-            }
-            let Some(legacy_seed) = path.file_name().and_then(|name| name.to_str()) else {
-                log::warn!(
-                    "[MIGRATE] skipping non-UTF-8 session directory {}",
-                    path.display()
-                );
-                continue;
-            };
-            if legacy_seed.starts_with('.') {
-                continue;
-            }
-            let identity = match CanonicalSessionIdentity::open(&path) {
-                Ok(identity) => identity,
-                Err(error) => {
-                    record_error(
-                        &mut first_error,
-                        format!("read canonical identity at {}: {error}", path.display()),
-                    );
-                    continue;
-                }
-            };
-            let session_id = identity.session_id.as_str();
-            if legacy_seed == session_id {
-                continue;
-            }
-            let target = self.session_path_dir(session_id);
-            if target.exists() {
-                record_error(
-                    &mut first_error,
-                    format!(
-                        "identity migration conflict: both {} and {} exist",
-                        path.display(),
-                        target.display()
-                    ),
-                );
-                continue;
-            }
-            if let Err(error) = self.enqueue_identity_migration(legacy_seed, session_id) {
-                record_error(&mut first_error, error);
-                continue;
-            }
-            if let Err(error) = self.apply_identity_migration(legacy_seed, session_id) {
-                record_error(&mut first_error, error);
-                continue;
-            }
-            if let Err(error) = self.remove_identity_migration(legacy_seed, session_id) {
-                record_error(&mut first_error, error);
-                continue;
-            }
-            migrated += 1;
-            log::info!("[MIGRATE] renamed legacy session directory {legacy_seed} -> {session_id}");
-        }
-
-        if let Some(error) = first_error {
-            Err(error)
-        } else {
-            Ok(migrated)
-        }
-    }
-
-    fn recover_identity_migration_journal(&self) -> Result<usize, String> {
-        let journal = self.read_identity_migration_journal()?;
-        let mut recovered = 0usize;
-        for pending in journal.pending.clone() {
-            let legacy_dir = self.session_path_dir(&pending.legacy_seed);
-            let target_dir = self.session_path_dir(&pending.session_id);
-            if !legacy_dir.is_dir() && !target_dir.is_dir() {
-                return Err(format!(
-                    "identity migration journal entry has no source or target: {} -> {}",
-                    pending.legacy_seed, pending.session_id
-                ));
-            }
-            self.apply_identity_migration(&pending.legacy_seed, &pending.session_id)?;
-            self.remove_identity_migration(&pending.legacy_seed, &pending.session_id)?;
-            recovered += 1;
-            log::info!(
-                "[MIGRATE] recovered session identity migration {} -> {}",
-                pending.legacy_seed,
-                pending.session_id
-            );
-        }
-        Ok(recovered)
-    }
-
-    fn apply_identity_migration(&self, legacy_seed: &str, session_id: &str) -> Result<(), String> {
-        let legacy_dir = self.session_path_dir(legacy_seed);
-        let target_dir = self.session_path_dir(session_id);
-
-        if legacy_dir.is_dir() {
-            if target_dir.exists() {
-                return Err(format!(
-                    "identity migration conflict: both {} and {} exist",
-                    legacy_dir.display(),
-                    target_dir.display()
-                ));
-            }
-            std::fs::rename(&legacy_dir, &target_dir).map_err(|error| {
-                format!(
-                    "rename legacy session {} -> {} failed: {error}",
-                    legacy_dir.display(),
-                    target_dir.display()
-                )
-            })?;
-            self.sync_sessions_dir()?;
-        }
-
-        if !target_dir.is_dir() {
-            return Err(format!(
-                "identity migration target missing: {}",
-                target_dir.display()
-            ));
-        }
-        let identity = CanonicalSessionIdentity::open(&target_dir)
-            .map_err(|error| format!("read migrated identity: {error}"))?;
-        if identity.session_id.as_str() != session_id {
-            return Err(format!(
-                "identity migration target {} contains session_id {}, expected {session_id}",
-                target_dir.display(),
-                identity.session_id
-            ));
-        }
-
-        let mut meta = store::read_meta(&target_dir).ok_or_else(|| {
-            format!(
-                "identity migration target has no readable meta.json: {}",
-                target_dir.display()
-            )
-        })?;
-        meta.session_id = session_id.to_string();
-        store::write_meta(&target_dir, &meta)?;
-        store::remove_from_index(&self.sessions_dir, legacy_seed);
-        store::upsert_index(&self.sessions_dir, &meta);
-        if self.active_seed().as_deref() == Some(legacy_seed) {
-            std::fs::write(&self.active_path, session_id)
-                .map_err(|error| format!("update active session marker: {error}"))?;
-        }
-        if let Some(workspaces) = crate::grouping::WorkspaceStore::try_global() {
-            workspaces.rename_session(legacy_seed, session_id)?;
-        }
-        self.set_legacy_identity_alias(legacy_seed, session_id)?;
-        Ok(())
-    }
-
-    fn enqueue_identity_migration(
-        &self,
-        legacy_seed: &str,
-        session_id: &str,
-    ) -> Result<(), String> {
-        let mut journal = self.read_identity_migration_journal()?;
-        if let Some(existing) = journal
-            .pending
-            .iter()
-            .find(|entry| entry.legacy_seed == legacy_seed)
-        {
-            if existing.session_id != session_id {
-                return Err(format!(
-                    "identity migration journal conflict for {legacy_seed}: {} vs {session_id}",
-                    existing.session_id
-                ));
-            }
-            return Ok(());
-        }
-        journal.pending.push(IdentityMigration {
-            legacy_seed: legacy_seed.to_string(),
-            session_id: session_id.to_string(),
-        });
-        self.write_identity_migration_journal(&journal)
-    }
-
-    fn remove_identity_migration(&self, legacy_seed: &str, session_id: &str) -> Result<(), String> {
-        let mut journal = self.read_identity_migration_journal()?;
-        journal
-            .pending
-            .retain(|entry| !(entry.legacy_seed == legacy_seed && entry.session_id == session_id));
-        self.write_identity_migration_journal(&journal)
-    }
-
-    fn read_identity_migration_journal(&self) -> Result<IdentityMigrationJournal, String> {
-        let path = self.sessions_dir.join(IDENTITY_MIGRATION_JOURNAL);
-        match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|error| format!("parse {}: {error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(IdentityMigrationJournal::default())
-            }
-            Err(error) => Err(format!("read {}: {error}", path.display())),
-        }
-    }
-
-    fn write_identity_migration_journal(
-        &self,
-        journal: &IdentityMigrationJournal,
-    ) -> Result<(), String> {
-        let path = self.sessions_dir.join(IDENTITY_MIGRATION_JOURNAL);
-        if journal.pending.is_empty() {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("remove {}: {error}", path.display())),
-            }
-            return self.sync_sessions_dir();
-        }
-
-        let tmp = self
-            .sessions_dir
-            .join(format!("{IDENTITY_MIGRATION_JOURNAL}.tmp"));
-        let bytes = serde_json::to_vec_pretty(journal)
-            .map_err(|error| format!("serialize identity migration journal: {error}"))?;
-        std::fs::write(&tmp, bytes).map_err(|error| format!("write {}: {error}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|error| format!("rename {} -> {}: {error}", tmp.display(), path.display()))?;
-        self.sync_sessions_dir()
-    }
-
-    fn read_legacy_identity_index(&self) -> Result<LegacyIdentityIndex, String> {
-        let path = self.sessions_dir.join(LEGACY_IDENTITY_INDEX);
-        match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|error| format!("parse {}: {error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(LegacyIdentityIndex::default())
-            }
-            Err(error) => Err(format!("read {}: {error}", path.display())),
-        }
-    }
-
-    fn set_legacy_identity_alias(&self, legacy_seed: &str, session_id: &str) -> Result<(), String> {
-        let mut index = self.read_legacy_identity_index()?;
-        if let Some(existing) = index.aliases.get(legacy_seed) {
-            if existing != session_id {
-                return Err(format!(
-                    "legacy identity alias conflict for {legacy_seed}: {existing} vs {session_id}"
-                ));
-            }
-            return Ok(());
-        }
-        index
-            .aliases
-            .insert(legacy_seed.to_string(), session_id.to_string());
-
-        let path = self.sessions_dir.join(LEGACY_IDENTITY_INDEX);
-        let tmp = self
-            .sessions_dir
-            .join(format!("{LEGACY_IDENTITY_INDEX}.tmp"));
-        let bytes = serde_json::to_vec_pretty(&index)
-            .map_err(|error| format!("serialize legacy identity index: {error}"))?;
-        std::fs::write(&tmp, bytes).map_err(|error| format!("write {}: {error}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|error| format!("rename {} -> {}: {error}", tmp.display(), path.display()))?;
-        self.sync_sessions_dir()
-    }
-
-    #[cfg(unix)]
-    fn sync_sessions_dir(&self) -> Result<(), String> {
-        std::fs::File::open(&self.sessions_dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|error| format!("sync sessions dir: {error}"))
-    }
-
-    #[cfg(not(unix))]
-    fn sync_sessions_dir(&self) -> Result<(), String> {
-        Ok(())
+        Ok(None)
     }
 
     // ── Helpers ──
@@ -1634,134 +1280,22 @@ impl SessionManager {
     /// Maximum seed-allocation attempts before the counter fallback kicks in.
     /// 2^32 的 id 空间下连续 64 次随机命中同一批既有 seed 是病态事件，但
     /// 一旦发生必须收敛而不是无限重试。
-    const SEED_ALLOCATION_ATTEMPTS: usize = 64;
-
-    /// 顺序回退最多扫描的候选数（有界，避免 id 空间接近占满时退化为
-    /// 2^32 次查询的病态阻塞）。
-    const SEED_SEQUENTIAL_SCAN_LIMIT: usize = 4096;
-
-    /// Generate a new session seed (8 hex chars from hashed time + PID).
-    ///
-    /// BUG-2026-09-13-24：这是**无碰撞检查**的原语（32 位截断哈希），
-    /// 碰撞会命中既有会话目录，从而写穿旧会话的 meta/messages。新会话
-    /// 分配一律走 [`Self::generate_unique_seed`] / [`Self::allocate_seed`]。
-    pub fn generate_seed() -> String {
-        let mut h = Self::seed_hasher(&Self::seed_nonce());
-        Self::seed_from_hasher(&mut h)
-    }
-
-    /// 每次调用都不同的 64 位 nonce：时间戳纳秒数 + 进程 id + 进程内
-    /// 单调计数器。
-    ///
-    /// 原实现只哈希 (nanos, pid)：Windows 的 `SystemTime` 时钟粒度可达
-    /// 毫秒级，同一 tick 内连续两次调用会得到**逐位相同**的哈希——碰撞
-    /// 不再是概率事件而是必然事件（同 tick 内的 `session.new` 会直接
-    /// 复用上一个 seed）。计数器使同 tick 内也不可能重复。
-    fn seed_nonce() -> u128 {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        // 计数器折叠纳秒低位：纳秒低位本就在同 tick 内原地踏步。
-        (nanos & !0xffff) | (sequence & 0xffff)
-    }
-
-    fn seed_hasher(nonce: &u128) -> std::collections::hash_map::DefaultHasher {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        nonce.hash(&mut h);
-        std::process::id().hash(&mut h);
-        let _ = h.finish();
-        h
-    }
-
-    /// 把 hasher 状态折叠成 8 位十六进制 seed（32 位 id 空间，形态不变）。
-    fn seed_from_hasher(h: &mut std::collections::hash_map::DefaultHasher) -> String {
-        use std::hash::Hasher;
-        let h = std::mem::replace(h, Self::seed_hasher(&0));
-        let v = h.finish();
-        let mixed = (v as u32) ^ ((v >> 32) as u32);
-        format!("{:08x}", mixed)
-    }
-
-    /// 在给定 id 空间内重试生成 seed，直到 `is_taken` 为 false。
-    ///
-    /// id 空间耗尽时（随机候选 64 次 + 顺序候选 4096 次全部被占）返回随机
-    /// 兜底值。**新会话分配必须走 [`Self::try_generate_unique_seed`] /
-    /// [`Self::allocate_unique_session_seed`]**（显式失败），本便捷入口仅供
-    /// 不落盘的调用方（子代理 ephemeral seed）使用。
-    pub fn generate_unique_seed(is_taken: impl FnMut(&str) -> bool) -> String {
-        Self::try_generate_unique_seed(is_taken, Self::SEED_SEQUENTIAL_SCAN_LIMIT)
-            .unwrap_or_else(Self::generate_seed)
-    }
-
-    /// 带显式失败的 seed 分配：先重试 64 次随机候选，再在 `scan_limit` 个
-    /// 顺序候选内回退。
-    ///
-    /// 顺序回退必须**有界**：2^32 空间接近占满时，无界扫描会退化成数亿次
-    /// 磁盘/索引查询，把"生成 seed"变成分钟级阻塞。返回 `None` 表示该上限
-    /// 内无可用候选，调用方必须显式报错，**绝不能**把碰撞候选当成功返回。
-    pub fn try_generate_unique_seed(
-        mut is_taken: impl FnMut(&str) -> bool,
-        scan_limit: usize,
-    ) -> Option<String> {
-        for _ in 0..Self::SEED_ALLOCATION_ATTEMPTS {
-            let candidate = Self::generate_seed();
-            if !is_taken(&candidate) {
-                return Some(candidate);
-            }
-            log::warn!("[session] seed candidate {candidate} collided — retrying");
-        }
-        // 病态回退：随机空间连续不可用时逐号递增，但有界收敛。
-        for offset in 0..scan_limit as u64 {
-            let candidate = format!("{:08x}", offset as u32);
-            if !is_taken(&candidate) {
-                log::warn!(
-                    "[session] seed allocation fell back to sequential candidate {candidate} \
-                     after {} random collisions",
-                    Self::SEED_ALLOCATION_ATTEMPTS
-                );
-                return Some(candidate);
-            }
-        }
-        log::error!(
-            "[session] seed id space exhausted: {} random candidates and {scan_limit} sequential \
-             candidates are all taken",
-            Self::SEED_ALLOCATION_ATTEMPTS
-        );
-        None
-    }
-
-    /// 失败即 `Err` 的分配入口：调用方（`session.new`）必须把 id 空间耗尽
-    /// 变成显式错误，而不是悄悄复用别人的目录。
-    pub fn allocate_unique_session_seed(&self) -> Result<String, String> {
-        Self::try_generate_unique_seed(
-            |candidate| self.is_seed_taken(candidate),
-            Self::SEED_SEQUENTIAL_SCAN_LIMIT,
-        )
-        .ok_or_else(|| {
-            "session seed space exhausted: no unused seed available — refusing to reuse an existing session"
-                .to_string()
-        })
-    }
+    const SESSION_ALLOCATION_ATTEMPTS: usize = 64;
 
     /// 尝试把 `seed` 登记为本进程占用。返回 `false` 表示已被本进程占用。
-    pub fn claim_seed(&self, seed: &str) -> bool {
-        self.claimed_seeds
+    pub fn claim_session(&self, session_id: &str) -> bool {
+        self.claimed_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(seed.to_string())
+            .insert(session_id.to_string())
     }
 
     /// 释放本进程占用登记（会话删除/分配失败回滚）。
-    pub fn release_seed_claim(&self, seed: &str) {
-        self.claimed_seeds
+    pub fn release_session_claim(&self, session_id: &str) {
+        self.claimed_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(seed);
+            .remove(session_id);
     }
 
     /// 该 seed 是否已被占用：
@@ -1770,103 +1304,18 @@ impl SessionManager {
     /// 目录检查覆盖「刚 persist 但 meta 尚未可读」的窗口；索引检查覆盖
     /// 「目录已删、索引尚未 compact」的幽灵 seed——复用幽灵 id 会让新会话
     /// 继承旧索引条目的身份。
-    pub fn is_seed_taken(&self, seed: &str) -> bool {
-        if seed.is_empty() {
+    pub fn is_session_taken(&self, session_id: &str) -> bool {
+        if session_id.is_empty() {
             return true;
         }
-        self.claimed_seeds
+        self.claimed_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .contains(seed)
-            || self.session_dir(seed).is_some()
+            .contains(session_id)
+            || self.session_dir(session_id).is_some()
             || store::read_index(&self.sessions_dir)
                 .iter()
-                .any(|m| m.session_id == seed)
-    }
-
-    /// Generate a session seed that does not collide with any existing
-    /// session directory, index entry, or in-process claim
-    /// (BUG-2026-09-13-24).
-    pub fn generate_unique_session_seed(&self) -> String {
-        Self::generate_unique_seed(|candidate| self.is_seed_taken(candidate))
-    }
-
-    /// **原子**分配一个新会话 seed、登记占用并落盘初始 meta。
-    ///
-    /// 碰撞检查、占用登记与落盘收在同一个 per-seed 锁内：并发的
-    /// `session.new` 不可能拿到同一个 seed，也不可能在选中后才发现目录
-    /// 已被别人写入（这正是旧 `persist_new_session` 的写穿路径——它无条件
-    /// 覆盖既有 meta 的 created_at/cwd）。
-    ///
-    /// 返回 `(seed, 是否为全新会话)`。`created == false` 表示 seed 空间耗尽
-    /// 或落盘失败，此时不会覆盖既有会话，调用方应显式报错而不是继续 spawn。
-    ///
-    /// **重试语义（返工修复）**：候选选择发生在 per-seed 锁**之外**，因此
-    /// 两个并发分配器可能在都还没登记占用时选中**同一个候选**（Windows
-    /// 毫秒级时钟粒度下同 tick 连续调用会得到逐位相同的候选）。此时
-    /// `persist_new_session_if_absent_with` 会让其中一个落败。旧实现把落败
-    /// 当终局返回 `(seed, false)` → `session.new` 直接报错，明明 id 空间还
-    /// 空着却创建不出会话。现在落败即**换候选重试**，只有候选空间真的耗尽
-    /// （或落盘 IO 连续失败）才返回失败。
-    pub fn allocate_seed(&self, cwd: Option<&str>) -> (String, bool) {
-        // 重试上限：候选源可注入（测试用），注入源与真实随机源共用同一套
-        // 「生成 → 锁内校验 → 落盘」流程，因此碰撞回归可以在 CI 上
-        // **确定性复现**，而不是靠 2^32 分之一的随机概率。
-        for _ in 0..Self::SEED_ALLOCATION_ATTEMPTS {
-            // 候选源可注入（测试用）：默认 = 真实随机 + 碰撞重试。
-            let seed = match Self::seed_source() {
-                Some(source) => {
-                    generate_from_source(source, |candidate| self.is_seed_taken(candidate))
-                }
-                None => match self.allocate_unique_session_seed() {
-                    Ok(seed) => seed,
-                    Err(error) => {
-                        log::error!("[session] allocate_seed: {error}");
-                        return (String::new(), false);
-                    }
-                },
-            };
-            let created = self.persist_new_session_if_absent_with(&seed, cwd, |candidate| {
-                self.claim_seed(candidate)
-            });
-            if created {
-                return (seed, true);
-            }
-            // 落败：候选可能在「选中 → 落盘」之间被别人抢走（并发同候选），
-            // 或者磁盘上本就有该目录（幽灵/残留）。释放占用登记后换候选重试，
-            // 而不是把失败直接抛给调用方。
-            self.release_seed_claim(&seed);
-            log::warn!(
-                "[session] allocate_seed: candidate {seed} lost the claim race — retrying with a fresh candidate"
-            );
-        }
-        log::error!(
-            "[session] allocate_seed: exhausted {} candidates — refusing to reuse an existing session",
-            Self::SEED_ALLOCATION_ATTEMPTS
-        );
-        (String::new(), false)
-    }
-
-    /// 测试专用：把 seed 候选源固定为闭包（每次调用产出一个候选）。
-    ///
-    /// 生产代码从不设置，默认 `None` = 真实随机源。用 `#[doc(hidden)]`
-    /// 暴露给集成测试（跨 crate 的 `#[cfg(test)]` 不可见），命名带
-    /// `_for_test` 后缀以免被误用为生产 API。
-    #[doc(hidden)]
-    pub fn set_seed_source_for_test(source: Option<fn() -> String>) {
-        *SEED_SOURCE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = source;
-    }
-
-    fn seed_source() -> Option<fn() -> String> {
-        SEED_SOURCE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .copied()
+                .any(|m| m.session_id == session_id)
     }
 
     /// Current UNIX epoch.
@@ -1888,44 +1337,44 @@ impl SessionManager {
     /// conditional in `set_cwd`/`set_context_stats`).
     fn with_meta_locked<R>(
         &self,
-        seed: &str,
+        session_id: &str,
         create_dir: bool,
         f: impl FnOnce(&PathBuf, &mut SessionMeta) -> R,
     ) -> R {
-        let lock = self.session_lock(seed);
+        let lock = self.session_lock(session_id);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _legacy_writer = LegacyWriterFacade::lock();
-        let dir = self.session_path_dir(seed);
+        let dir = self.session_path_dir(session_id);
         if create_dir {
             let _ = std::fs::create_dir_all(&dir);
         }
-        let mut meta = self.load_meta(seed).unwrap_or_default();
+        let mut meta = self.load_meta(session_id).unwrap_or_default();
         f(&dir, &mut meta)
     }
 
     // ── Private ──
 
-    fn session_lock(&self, seed: &str) -> Arc<Mutex<()>> {
+    fn session_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.session_locks.lock().unwrap_or_else(|e| e.into_inner());
         locks
-            .entry(seed.to_string())
+            .entry(session_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
 
-    fn snapshot_from_files(&self, seed: &str) -> Result<(SessionMeta, Vec<Message>), String> {
+    fn snapshot_from_files(&self, session_id: &str) -> Result<(SessionMeta, Vec<Message>), String> {
         let dir = self
-            .session_dir(seed)
-            .ok_or_else(|| format!("session directory is missing: {seed}"))?;
+            .session_dir(session_id)
+            .ok_or_else(|| format!("session directory is missing: {session_id}"))?;
         let meta = store::read_meta(&dir)
-            .ok_or_else(|| format!("meta.json is missing or unreadable: {seed}"))?;
+            .ok_or_else(|| format!("meta.json is missing or unreadable: {session_id}"))?;
         let messages = read_messages_without_deduplication(&dir.join("messages.jsonl"))?;
         Ok((meta, messages))
     }
 
     /// 会话目录路径（测试/诊断用）：`sessions/{seed}`，不要求目录存在。
-    pub fn session_path_dir(&self, seed: &str) -> PathBuf {
-        self.sessions_dir.join(seed)
+    pub fn session_path_dir(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir.join(session_id)
     }
 
     /// Data root that contains `sessions/`, `team/`, `quota/` and other
@@ -1975,8 +1424,8 @@ impl SessionManager {
         Ok(None)
     }
 
-    fn session_dir(&self, seed: &str) -> Option<PathBuf> {
-        let dir = self.session_path_dir(seed);
+    fn session_dir(&self, session_id: &str) -> Option<PathBuf> {
+        let dir = self.session_path_dir(session_id);
         if dir.exists() && dir.is_dir() {
             Some(dir)
         } else {
@@ -2046,7 +1495,7 @@ mod session_lock_gc_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
-            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+            claimed_sessions: Mutex::new(std::collections::HashSet::new()),
         };
         // `delete()` 会经 `WorkspaceStore::global()` 摘除账户；该单例是进程级
         // `OnceLock`，其它用例可能已初始化 → 重复初始化会 panic，忽略即可。
@@ -2111,7 +1560,7 @@ mod skill_persistence_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
-            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+            claimed_sessions: Mutex::new(std::collections::HashSet::new()),
         };
         (root, manager)
     }
@@ -2390,7 +1839,7 @@ mod wal_recovery_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
-            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+            claimed_sessions: Mutex::new(std::collections::HashSet::new()),
         };
         (root, manager)
     }
@@ -2404,9 +1853,9 @@ mod wal_recovery_tests {
         }
     }
 
-    fn append_op(seed: &str, messages: Vec<Message>) -> PersistOp {
+    fn append_op(session_id: &str, messages: Vec<Message>) -> PersistOp {
         PersistOp::Append {
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             messages,
             model: "m".into(),
             effort: None,
@@ -2432,23 +1881,23 @@ mod wal_recovery_tests {
     #[test]
     fn io_fault_during_wal_replay_never_checkpoints_the_log() {
         let (root, manager) = manager();
-        let seed = "wal-io-fault";
-        let dir = root.join("sessions").join(seed);
+        let session_id = "wal-io-fault";
+        let dir = root.join("sessions").join(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        manager.save_full(seed, &[user_msg(1, "archived")], "m", None, 0, 1);
+        manager.save_full(session_id, &[user_msg(1, "archived")], "m", None, 0, 1);
         // 前两条 op 可读，第三条处在 IO 故障之后。
         write_wal(
             &dir,
             &[
-                append_op(seed, vec![user_msg(2, "readable-a")]),
-                append_op(seed, vec![user_msg(3, "readable-b")]),
-                append_op(seed, vec![user_msg(4, "behind-the-fault")]),
+                append_op(session_id, vec![user_msg(2, "readable-a")]),
+                append_op(session_id, vec![user_msg(3, "readable-b")]),
+                append_op(session_id, vec![user_msg(4, "behind-the-fault")]),
             ],
         );
         // 故障点设在第 2 条 op 之后：前两条可读，第三条不可读。
         let fault_at = qaqh_message::wal_fault::prefix_bytes(
             2,
-            &append_op(seed, vec![user_msg(2, "readable-a")]),
+            &append_op(session_id, vec![user_msg(2, "readable-a")]),
         );
         let _armed = qaqh_message::wal_fault::arm(qaqh_message::wal_fault::FaultPlan {
             pass: 2,
@@ -2456,7 +1905,7 @@ mod wal_recovery_tests {
             kind: std::io::ErrorKind::Other,
         });
 
-        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        let (_, messages, _) = manager.load_for_resume(session_id).expect("resume");
 
         // 1) 可读前缀已应用（fail-open 的“应用”部分保留）。
         assert_eq!(
@@ -2488,8 +1937,8 @@ mod wal_recovery_tests {
     #[test]
     fn wal_replay_applies_watermark_when_summary_is_already_archived() {
         let (root, manager) = manager();
-        let seed = "wal-compact-watermark";
-        let dir = root.join("sessions").join(seed);
+        let session_id = "wal-compact-watermark";
+        let dir = root.join("sessions").join(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let mut system = user_msg(1, "system");
         system.role = "system".into();
@@ -2500,16 +1949,16 @@ mod wal_recovery_tests {
             user_msg(4, "two"),
             user_msg(5, "reply two"),
         ];
-        manager.save_full(seed, &archive, "m", None, 0, 2);
+        manager.save_full(session_id, &archive, "m", None, 0, 2);
         let summary = user_msg(6, "[Compacted 1 turns]\nsummary");
-        manager.save_append(seed, std::slice::from_ref(&summary), "m", None, 0, 2);
+        manager.save_append(session_id, std::slice::from_ref(&summary), "m", None, 0, 2);
 
         // Simulate the crash window: summary bytes reached the archive, but
         // meta.json still lacks the watermark and the op remains in WAL.
         write_wal(
             &dir,
             &[PersistOp::Append {
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 messages: vec![summary],
                 model: "m".into(),
                 effort: None,
@@ -2519,7 +1968,7 @@ mod wal_recovery_tests {
             }],
         );
 
-        let (meta, _, active) = manager.load_for_resume(seed).expect("resume");
+        let (meta, _, active) = manager.load_for_resume(session_id).expect("resume");
         assert_eq!(meta.compact_covered_through_msg_id, Some(3));
         assert_eq!(active.len(), 4, "system + summary + two kept messages");
         assert!(qaqh_message::is_compaction_summary(&active[1]));
@@ -2529,25 +1978,25 @@ mod wal_recovery_tests {
     #[test]
     fn un_drained_wal_ops_are_replayed_into_the_archive() {
         let (root, manager) = manager();
-        let seed = "wal-replay";
-        let dir = root.join("sessions").join(seed);
+        let session_id = "wal-replay";
+        let dir = root.join("sessions").join(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        manager.save_full(seed, &[user_msg(1, "archived")], "m", None, 0, 1);
+        manager.save_full(session_id, &[user_msg(1, "archived")], "m", None, 0, 1);
         write_wal(
             &dir,
             &[append_op(
-                seed,
+                session_id,
                 vec![user_msg(2, "round-a"), user_msg(3, "round-b")],
             )],
         );
 
-        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        let (_, messages, _) = manager.load_for_resume(session_id).expect("resume");
         assert_eq!(messages.len(), 3, "WAL ops must fold into the archive");
         assert_eq!(messages[1].msg_id, Some(2));
 
         // The WAL is checkpointed after replay: a second load must not
         // duplicate, and the log file is back to a bare header.
-        let (_, again, _) = manager.load_for_resume(seed).expect("resume again");
+        let (_, again, _) = manager.load_for_resume(session_id).expect("resume again");
         assert_eq!(again.len(), 3);
         assert!(qaqh_message::wal::read_ops(&dir).is_empty());
         std::fs::remove_dir_all(root).expect("remove test directory");
@@ -2556,24 +2005,24 @@ mod wal_recovery_tests {
     #[test]
     fn crash_between_apply_and_checkpoint_converges() {
         let (root, manager) = manager();
-        let seed = "wal-dedupe";
-        let dir = root.join("sessions").join(seed);
+        let session_id = "wal-dedupe";
+        let dir = root.join("sessions").join(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        manager.save_full(seed, &[user_msg(1, "archived")], "m", None, 0, 1);
+        manager.save_full(session_id, &[user_msg(1, "archived")], "m", None, 0, 1);
         // Op applied to the archive, WAL checkpoint never ran (crash window).
         manager.apply_persist_op(&append_op(
-            seed,
+            session_id,
             vec![user_msg(2, "applied-but-wal-not-cleared")],
         ));
         write_wal(
             &dir,
             &[append_op(
-                seed,
+                session_id,
                 vec![user_msg(2, "applied-but-wal-not-cleared")],
             )],
         );
 
-        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        let (_, messages, _) = manager.load_for_resume(session_id).expect("resume");
         assert_eq!(
             messages.len(),
             2,
@@ -2588,12 +2037,12 @@ mod wal_recovery_tests {
     #[test]
     fn save_append_is_idempotent_against_already_archived_msg_ids() {
         let (root, manager) = manager();
-        let seed = "append-dedupe";
-        let dir = root.join("sessions").join(seed);
+        let session_id = "append-dedupe";
+        let dir = root.join("sessions").join(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
         // 模拟 replay 先写入了 system(1) + user(2)。
         manager.apply_persist_op(&append_op(
-            seed,
+            session_id,
             vec![
                 {
                     let mut m = user_msg(1, "system text");
@@ -2605,7 +2054,7 @@ mod wal_recovery_tests {
         ));
         // live drain 的同一批消息（相同 msg_id、相同字节）随后到达。
         manager.save_append(
-            seed,
+            session_id,
             &[
                 {
                     let mut m = user_msg(1, "system text");
@@ -2620,7 +2069,7 @@ mod wal_recovery_tests {
             1,
         );
 
-        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        let (_, messages, _) = manager.load_for_resume(session_id).expect("resume");
         assert_eq!(
             messages.len(),
             2,
@@ -2628,14 +2077,14 @@ mod wal_recovery_tests {
         );
         // 混合批次：一条重复 + 一条全新 → 只追加全新的那条。
         manager.save_append(
-            seed,
+            session_id,
             &[user_msg(2, "first user"), user_msg(3, "second user")],
             "m",
             None,
             2,
             2,
         );
-        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        let (_, messages, _) = manager.load_for_resume(session_id).expect("resume");
         assert_eq!(
             messages.len(),
             3,
@@ -2650,11 +2099,11 @@ mod wal_recovery_tests {
     #[test]
     fn read_side_dedupes_repeated_msg_ids_keep_first() {
         let (root, manager) = manager();
-        let seed = "read-dedupe";
-        let dir = root.join("sessions").join(seed);
+        let session_id = "read-dedupe";
+        let dir = root.join("sessions").join(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
         manager.apply_persist_op(&append_op(
-            seed,
+            session_id,
             vec![user_msg(1, "first user"), user_msg(2, "second user")],
         ));
         // 模拟历史双写：归档尾部追加重复行（同 msg_id 同字节）。
@@ -2672,7 +2121,7 @@ mod wal_recovery_tests {
             }
         }
 
-        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        let (_, messages, _) = manager.load_for_resume(session_id).expect("resume");
         assert_eq!(
             messages.len(),
             2,
@@ -2686,11 +2135,14 @@ mod wal_recovery_tests {
     #[test]
     fn torn_wal_tail_preserves_prefix() {
         let (root, manager) = manager();
-        let seed = "wal-torn";
-        let dir = root.join("sessions").join(seed);
+        let session_id = "wal-torn";
+        let dir = root.join("sessions").join(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        manager.save_full(seed, &[user_msg(1, "archived")], "m", None, 0, 1);
-        write_wal(&dir, &[append_op(seed, vec![user_msg(2, "complete-line")])]);
+        manager.save_full(session_id, &[user_msg(1, "archived")], "m", None, 0, 1);
+        write_wal(
+            &dir,
+            &[append_op(session_id, vec![user_msg(2, "complete-line")])],
+        );
         let wal_path = dir.join("messages.wal");
         {
             use std::io::Write as _;
@@ -2702,7 +2154,7 @@ mod wal_recovery_tests {
                 .expect("write torn tail");
         }
 
-        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        let (_, messages, _) = manager.load_for_resume(session_id).expect("resume");
         assert_eq!(
             messages.len(),
             2,
@@ -2713,7 +2165,7 @@ mod wal_recovery_tests {
 }
 
 #[cfg(test)]
-mod seed_collision_tests {
+mod session_collision_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -2735,7 +2187,7 @@ mod seed_collision_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
-            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+            claimed_sessions: Mutex::new(std::collections::HashSet::new()),
         };
         // `attach_by_cwd` 需要 WorkspaceStore（进程内单例：其它用例可能
         // 已初始化过 → 忽略重复初始化）。
@@ -2745,10 +2197,10 @@ mod seed_collision_tests {
         (root, manager)
     }
 
-    /// BUG-2026-09-13-24 核心回归：分配器在候选 seed 已被占用时必须换一个
-    /// 候选，而不是把新会话写进旧会话目录（旧实现无条件覆盖既有 meta）。
+    /// BUG-2026-09-13-24 核心回归：canonical 分配器不得复用已被占用的会话
+    /// 目录，也不得把新会话写进旧会话目录（旧实现无条件覆盖既有 meta）。
     #[test]
-    fn unique_seed_allocation_retries_on_collision() {
+    fn allocation_never_writes_through_an_occupied_session() {
         let (root, manager) = manager();
 
         // 预置一个「已存在」的会话，模拟碰撞目标。
@@ -2770,36 +2222,17 @@ mod seed_collision_tests {
         )
         .expect("write old messages");
 
-        // 闭包对 "deadbeef" 恒判「已占用」：分配器必须重试到别的候选，
-        // 并且绝不返回被占用的那个。
-        let mut attempts = 0usize;
-        let chosen = SessionManager::generate_unique_seed(|candidate| {
-            attempts += 1;
-            candidate == "deadbeef" || manager.is_seed_taken(candidate)
-        });
+        // 已占用的 "deadbeef" 目录不得被复用：canonical 分配必须给出一个
+        // 全新的 UUIDv7 会话，且既有目录/索引视为已占用。
+        let identity = manager.allocate_session(None).expect("allocate session");
+        let chosen = identity.session_id.as_str().to_string();
         assert_ne!(
             chosen, "deadbeef",
-            "allocator must skip colliding candidates"
+            "allocator must not reuse an occupied session id"
         );
-        assert!(!manager.is_seed_taken(&chosen));
-        assert!(attempts >= 1, "collision probe must run at least once");
-
-        // 顺序回退路径：只放行 8 位十六进制号 "00000003"，随机候选必然
-        // 全部碰撞（32 位空间里随机命中该值的概率可忽略）→ 有界回退必须
-        // 选到它，而不是无界扫描或放弃碰撞检查。
-        let sequential =
-            SessionManager::try_generate_unique_seed(|candidate| candidate != "00000003", 16);
-        assert_eq!(
-            sequential.as_deref(),
-            Some("00000003"),
-            "bounded sequential fallback must pick the next free id"
-        );
-
-        // 极端病态：整个候选空间都判「已占用」时必须**显式失败**（返回
-        // None），而不是无限扫描或把碰撞候选当成功值返回。
         assert!(
-            SessionManager::try_generate_unique_seed(|_| true, 16).is_none(),
-            "an exhausted id space must fail explicitly, not loop forever"
+            manager.is_session_taken(&chosen),
+            "an allocated session must be claimed"
         );
 
         // 旧会话目录与旧 meta 必须逐字节不变（未被写穿）。
@@ -2816,7 +2249,7 @@ mod seed_collision_tests {
 
     /// 占用即拒绝：`persist_new_session_if_absent` 对既有 seed 不写一个字节。
     #[test]
-    fn create_session_refuses_to_overwrite_existing_seed() {
+    fn create_session_refuses_to_overwrite_existing_session() {
         let (root, manager) = manager();
 
         manager.persist_new_session("occupied");
@@ -2847,17 +2280,17 @@ mod seed_collision_tests {
 
         // 全新 seed 正常创建（带占用钩子时占用登记同样生效）。
         assert!(
-            manager.persist_new_session_if_absent_with("fresh-seed", None, |seed| {
-                manager.claim_seed(seed)
+            manager.persist_new_session_if_absent_with("fresh-seed", None, |session_id| {
+                manager.claim_session(session_id)
             })
         );
-        assert!(manager.is_seed_taken("fresh-seed"));
+        assert!(manager.is_session_taken("fresh-seed"));
         assert!(
             !manager.persist_new_session_if_absent_with("fresh-seed-2", None, |_| false),
             "caller-side claim rejection must abort creation"
         );
         assert!(
-            !manager.is_seed_taken("fresh-seed-2"),
+            !manager.is_session_taken("fresh-seed-2"),
             "rejected seed must not be materialized nor claimed"
         );
         assert_eq!(
@@ -2926,163 +2359,10 @@ mod seed_collision_tests {
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
-    fn write_legacy_identity_session(
-        manager: &SessionManager,
-        legacy_seed: &str,
-    ) -> CanonicalSessionIdentity {
-        let dir = manager.session_path_dir(legacy_seed);
-        std::fs::create_dir_all(&dir).expect("create legacy session dir");
-        let identity = CanonicalSessionIdentity::new();
-        CanonicalSessionIdentity::install(&dir, &identity).expect("install legacy identity");
-        let meta = SessionMeta {
-            session_id: legacy_seed.to_string(),
-            created_at: 1,
-            updated_at: 1,
-            ..Default::default()
-        };
-        store::write_meta(&dir, &meta).expect("write legacy meta");
-        store::append_messages(&dir, &[]).expect("write legacy messages");
-        store::upsert_index(&manager.sessions_dir, &meta);
-        identity
-    }
-
+    /// 回归（BUG-2026-09-13-24）：分配新会话时**已占用的会话目录逐字节不变**
+    /// —— 旧实现（无碰撞检查 + 无条件覆盖）会把新会话写进既有目录。
     #[test]
-    fn legacy_session_directory_migrates_to_canonical_id_and_is_idempotent() {
-        let (root, manager) = manager();
-        let legacy_seed = "deadbeef";
-        let identity = write_legacy_identity_session(&manager, legacy_seed);
-        manager.set_active_seed(legacy_seed);
-
-        assert_eq!(
-            manager
-                .migrate_legacy_session_dirs()
-                .expect("migrate legacy session"),
-            1
-        );
-        let session_id = identity.session_id.as_str().to_string();
-        let target = manager.session_path_dir(&session_id);
-
-        assert!(!manager.session_path_dir(legacy_seed).exists());
-        assert!(target.is_dir());
-        assert_eq!(
-            manager
-                .canonical_identity_for_seed(legacy_seed)
-                .expect("resolve legacy seed"),
-            Some(identity)
-        );
-        assert_eq!(
-            manager
-                .load_meta(&session_id)
-                .expect("load migrated meta")
-                .session_id,
-            session_id
-        );
-        assert_eq!(manager.active_seed().as_deref(), Some(session_id.as_str()));
-        let indexed = store::read_index(&manager.sessions_dir);
-        assert!(indexed.iter().any(|entry| entry.session_id == session_id));
-        assert!(indexed.iter().all(|entry| entry.session_id != legacy_seed));
-
-        assert_eq!(
-            manager
-                .migrate_legacy_session_dirs()
-                .expect("second migration"),
-            0,
-            "migration must be idempotent"
-        );
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    #[test]
-    fn interrupted_identity_migration_recovers_after_rename() {
-        let (root, manager) = manager();
-        let legacy_seed = "cafebabe";
-        let identity = CanonicalSessionIdentity::new();
-        let session_id = identity.session_id.as_str().to_string();
-        let target = manager.session_path_dir(&session_id);
-        std::fs::create_dir_all(&target).expect("create target dir");
-        CanonicalSessionIdentity::install(&target, &identity).expect("install identity");
-        store::write_meta(
-            &target,
-            &SessionMeta {
-                session_id: legacy_seed.to_string(),
-                created_at: 1,
-                updated_at: 1,
-                ..Default::default()
-            },
-        )
-        .expect("write pre-repair meta");
-        manager
-            .enqueue_identity_migration(legacy_seed, &session_id)
-            .expect("write migration journal");
-
-        assert_eq!(
-            manager
-                .migrate_legacy_session_dirs()
-                .expect("recover interrupted migration"),
-            1
-        );
-        assert_eq!(
-            manager
-                .load_meta(&session_id)
-                .expect("load repaired meta")
-                .session_id,
-            session_id
-        );
-        assert_eq!(
-            manager
-                .canonical_identity_for_seed(legacy_seed)
-                .expect("resolve recovered alias"),
-            Some(identity)
-        );
-        assert!(
-            manager
-                .read_identity_migration_journal()
-                .expect("read journal")
-                .pending
-                .is_empty()
-        );
-
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    #[test]
-    fn migration_continues_after_conflicting_legacy_directory() {
-        let (root, manager) = manager();
-        let good = write_legacy_identity_session(&manager, "feedface");
-
-        let conflict = CanonicalSessionIdentity::new();
-        let conflict_seed = "badc0ffe";
-        let conflict_legacy = manager.session_path_dir(conflict_seed);
-        std::fs::create_dir_all(&conflict_legacy).expect("create conflicting legacy dir");
-        CanonicalSessionIdentity::install(&conflict_legacy, &conflict)
-            .expect("install conflicting identity");
-        std::fs::create_dir_all(manager.session_path_dir(conflict.session_id.as_str()))
-            .expect("create conflicting target dir");
-
-        let error = manager
-            .migrate_legacy_session_dirs()
-            .expect_err("conflicting legacy session must be reported");
-        assert!(error.contains("conflict"), "unexpected error: {error}");
-        assert!(
-            manager.session_path_dir(good.session_id.as_str()).is_dir(),
-            "a conflict must not block unrelated migrations"
-        );
-        assert!(
-            conflict_legacy.is_dir(),
-            "conflicting legacy directory must remain untouched"
-        );
-
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    /// **确定性**碰撞回归（BUG-2026-09-13-24）：通过注入候选源强制
-    /// `allocate_seed` 的第一个候选就是已占用的 sentinel seed。
-    ///
-    /// 未修复的实现（`generate_seed` 无碰撞检查 + `persist_new_session`
-    /// 无条件覆盖）在此输入下必然把新会话写进 sentinel 目录 —— 本测试
-    /// 会在断言 `chosen != sentinel` / sentinel meta 未变处失败。
-    #[test]
-    fn allocate_seed_retries_injected_collision_and_preserves_sentinel() {
+    fn allocation_preserves_an_occupied_sentinel_session() {
         let (root, manager) = manager();
 
         let sentinel = "c0ffee01";
@@ -3103,28 +2383,16 @@ mod seed_collision_tests {
         let msgs_before =
             std::fs::read_to_string(sentinel_dir.join("messages.jsonl")).expect("msgs");
 
-        // 注入：候选源第一次返回 sentinel（必碰撞），之后返回真实随机 seed。
-        static COLLIDE_ONCE: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(true);
-        COLLIDE_ONCE.store(true, std::sync::atomic::Ordering::SeqCst);
-        fn injected() -> String {
-            if COLLIDE_ONCE.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                return "c0ffee01".to_string();
-            }
-            SessionManager::generate_seed()
-        }
-        SessionManager::set_seed_source_for_test(Some(injected));
+        // canonical 分配必须给出一个与 sentinel 不同的全新会话，且不得
+        // 触碰既有目录。
+        let identity = manager
+            .allocate_session(Some("D:/new-project"))
+            .expect("allocate session");
+        let chosen = identity.session_id.as_str().to_string();
 
-        let (chosen, created) = manager.allocate_seed(Some("D:/new-project"));
-        SessionManager::set_seed_source_for_test(None);
-
-        assert!(
-            created,
-            "allocation must succeed after retrying the collision"
-        );
         assert_ne!(
             chosen, sentinel,
-            "allocator must retry a colliding candidate instead of reusing it"
+            "allocator must not reuse an occupied session id"
         );
         // Windows 上 cwd 经 PathBuf 规范化后是反斜杠（D:\new-project）；
         // 语义相同即通过，分隔符差异不属于本测试的关注点。
@@ -3155,36 +2423,13 @@ mod seed_collision_tests {
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
-    /// 并发回归（BUG-2026-09-13-24 返工）：**真实生产路径**（无注入源）
-    /// 上并发 `allocate_seed` 不得出现「两个线程都通过碰撞检查 → 一个落
-    /// 盘失败 → `session.new` 直接报错」的窗口。
-    ///
-    /// 复现手法：把候选生成钉死为同一个值（等价于 Windows 毫秒时钟粒度
-    /// 下同 tick 连续调用），并发调用 `allocate_seed`。修复前必现
-    /// 「胜者 1 个 + 败者返回 `("", false)` 或空 seed 错误」；修复后
-    /// 败者必须**重试到新候选**并成功创建自己的会话。
+    /// 并发回归（BUG-2026-09-13-24）：并发调用 canonical `allocate_session`
+    /// 必须每个线程都成功创建自己的会话，且互不重复——不得出现「两个线程
+    /// 都通过占用检查 → 一个落盘失败 → 调用方直接报错」的窗口。
     #[test]
-    fn concurrent_allocate_seed_never_fails_on_a_repeated_candidate() {
+    fn concurrent_allocate_session_never_fails() {
         let (root, manager) = manager();
         let manager = std::sync::Arc::new(manager);
-
-        // RAII：无论成功/panic 都必须解除注入源——它是进程级单例，
-        // 残留会让同进程其它用例吃到固定候选（与集成测试同一类串扰）。
-        struct SeedSourceGuard;
-        impl Drop for SeedSourceGuard {
-            fn drop(&mut self) {
-                SessionManager::set_seed_source_for_test(None);
-            }
-        }
-        let _guard = SeedSourceGuard;
-
-        // 与生产一致的候选重复来源：注入源每次返回同一个候选值，
-        // 但 `generate_from_source` 的重试上限把它耗尽后回退随机值——
-        // 因此这里并发调用的窗口正是「选中候选 → 落盘」之间。
-        fn repeated() -> String {
-            "baadf00d".to_string()
-        }
-        SessionManager::set_seed_source_for_test(Some(repeated));
 
         let threads = 4;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
@@ -3194,51 +2439,55 @@ mod seed_collision_tests {
             let barrier = barrier.clone();
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
-                manager.allocate_seed(Some("D:/concurrent"))
+                manager
+                    .allocate_session(Some("D:/concurrent"))
+                    .map(|identity| identity.session_id.as_str().to_string())
             }));
         }
-        let results: Vec<(String, bool)> = handles
+        let created: Vec<String> = handles
             .into_iter()
             .map(|handle| handle.join().expect("join allocation thread"))
+            .map(|result| result.expect("every concurrent allocation must succeed"))
             .collect();
 
-        let created: Vec<&(String, bool)> =
-            results.iter().filter(|(_, created)| *created).collect();
-        assert!(
-            !created.is_empty(),
-            "at least one allocation must succeed: {results:?}"
+        assert_eq!(
+            created.len(),
+            threads,
+            "every concurrent allocation must succeed: {created:?}"
         );
-        for (seed, ok) in &results {
-            if *ok {
-                assert!(!seed.is_empty(), "created allocation must carry a seed");
-                let meta = manager.load_meta(seed).expect("created seed has meta");
-                assert_eq!(meta.session_id, *seed, "created meta must be self-owned");
-            }
+        for session_id in &created {
+            assert!(
+                !session_id.is_empty(),
+                "created allocation must carry a session id"
+            );
+            let meta = manager
+                .load_meta(session_id)
+                .expect("created session has meta");
+            assert_eq!(
+                meta.session_id, *session_id,
+                "created meta must be self-owned"
+            );
         }
-        // 关键断言：失败者只能是「显式放弃（seed 为空 + false）」，
-        // 且必须**仍然存在可用候选**时不得整体失败——
-        // 修复前的表现是败者拿到 seed 但 created=false（调用方报错）。
-        for (seed, ok) in &results {
-            if !*ok {
-                assert!(
-                    seed.is_empty(),
-                    "a losing allocator must not report a seed it did not create: {seed}"
-                );
-            }
-        }
+        // 并发分配必须互不重复。
+        let unique: std::collections::HashSet<&String> = created.iter().collect();
+        assert_eq!(
+            unique.len(),
+            created.len(),
+            "concurrent allocations must be unique"
+        );
 
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
-    /// `allocate_seed` 端到端：分配结果一定未被占用，且落盘时确实创建了
+    /// canonical 分配端到端：分配结果一定未被占用，且落盘时确实创建了
     /// 新会话（而不是复用/写穿既有目录）。
     #[test]
-    fn allocate_seed_never_returns_an_occupied_seed() {
+    fn allocate_session_never_returns_an_occupied_session() {
         let (root, manager) = manager();
 
         // 先占用一批 seed。
-        for seed in ["aaaaaaaa", "bbbbbbbb", "cccccccc"] {
-            manager.persist_new_session(seed);
+        for session_id in ["aaaaaaaa", "bbbbbbbb", "cccccccc"] {
+            manager.persist_new_session(session_id);
         }
         // 索引登记但磁盘无目录的幽灵 seed（目录已删、索引尚未 compact）——
         // 复用该 seed 会让新会话继承旧索引条目的身份，故也必须视为已占用。
@@ -3253,27 +2502,26 @@ mod seed_collision_tests {
 
         let mut allocated: Vec<String> = Vec::new();
         for _ in 0..32 {
-            let (seed, created) = manager.allocate_seed(None);
+            let identity = manager
+                .allocate_session(None)
+                .expect("allocation must succeed in a nearly empty id space");
+            let session_id = identity.session_id.as_str().to_string();
             assert!(
-                created,
-                "allocation must succeed in a nearly empty id space"
+                !allocated.contains(&session_id),
+                "allocated session ids must be unique within the process"
             );
             assert!(
-                !allocated.contains(&seed),
-                "allocated seeds must be unique within the process"
+                manager.session_dir(&session_id).is_some(),
+                "allocated session must be materialized on disk"
             );
             assert!(
-                manager.session_dir(&seed).is_some(),
-                "allocated seed must be materialized on disk"
+                manager.is_session_taken(&session_id),
+                "an allocated session must be claimed (never re-handed out)"
             );
-            assert!(
-                manager.is_seed_taken(&seed),
-                "an allocated seed must be claimed (never re-handed out)"
-            );
-            allocated.push(seed);
+            allocated.push(session_id);
         }
         // 幽灵 seed（索引有、目录无）同样不能再被分配。
-        assert!(!allocated.iter().any(|seed| seed == "dddddddd"));
+        assert!(!allocated.iter().any(|session_id| session_id == "dddddddd"));
 
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
@@ -3302,7 +2550,7 @@ mod save_full_meta_preservation_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
-            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+            claimed_sessions: Mutex::new(std::collections::HashSet::new()),
         };
         (root, manager)
     }
@@ -3313,13 +2561,13 @@ mod save_full_meta_preservation_tests {
     #[test]
     fn save_full_preserves_all_persisted_meta_fields() {
         let (_root, manager) = manager();
-        let seed = "savefull-meta-seed";
-        let dir = manager.session_path_dir(seed);
+        let session_id = "savefull-meta-seed";
+        let dir = manager.session_path_dir(session_id);
         std::fs::create_dir_all(&dir).expect("mkdir");
 
         // 先落一份字段齐全的既有 meta（模拟真实会话的持久化状态）。
         let existing = SessionMeta {
-            session_id: seed.into(),
+            session_id: session_id.into(),
             created_at: 1000,
             updated_at: 2000,
             model: "test-model".into(),
@@ -3345,9 +2593,9 @@ mod save_full_meta_preservation_tests {
 
         // 模拟 undo/compact 路径：save_full 全量重写。
         let messages = vec![qaqh_types::Message::user("hello")];
-        manager.save_full(seed, &messages, "new-model", Some("high"), 0, 1);
+        manager.save_full(session_id, &messages, "new-model", Some("high"), 0, 1);
 
-        let saved = manager.load_meta(seed).expect("reload meta");
+        let saved = manager.load_meta(session_id).expect("reload meta");
         // 覆写字段按本次调用更新。
         assert_eq!(saved.model, "new-model");
         assert_eq!(saved.effort.as_deref(), Some("high"));

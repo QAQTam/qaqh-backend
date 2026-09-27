@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_seed_aliases_resolve_canonical_ids_and_remove_together() {
+    fn wire_session_aliases_resolve_canonical_ids_and_remove_together() {
         let mut catalog = AgentCatalog::default();
         let root = SessionId::new("0198f1a0-0000-7000-8000-000000000001");
         let child = SessionId::new("0198f1a0-0000-7000-8000-000000000003");

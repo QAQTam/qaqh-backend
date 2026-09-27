@@ -28,9 +28,9 @@ fn temp_root(tag: &str) -> PathBuf {
     root
 }
 
-fn open_text_block(hub: &RingingHub, seed: &str, turn: &str) {
+fn open_text_block(hub: &RingingHub, session_id: &str, turn: &str) {
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnOpened {
             turn_id: turn.into(),
             user_text: "probe".into(),
@@ -38,7 +38,7 @@ fn open_text_block(hub: &RingingHub, seed: &str, turn: &str) {
     )
     .expect("turn opened");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockOpened {
             turn_id: turn.into(),
             round_num: 0,
@@ -50,8 +50,9 @@ fn open_text_block(hub: &RingingHub, seed: &str, turn: &str) {
     .expect("block opened");
 }
 
-fn snapshot_path(root: &Path, seed: &str) -> PathBuf {
-    root.join("ringing-timeline").join(format!("{seed}.json"))
+fn snapshot_path(root: &Path, session_id: &str) -> PathBuf {
+    root.join("ringing-timeline")
+        .join(format!("{session_id}.json"))
 }
 
 /// 从 SSE 流（live broadcast + 回放尾）忠实重建块文本的消费者。
@@ -102,8 +103,8 @@ impl TranscriptConsumer {
 fn checkpoint_delivers_only_the_text_added_since_the_last_emit() {
     let root = temp_root("incremental");
     let hub = RingingHub::with_persistence("ckpt-epoch-incremental", &root);
-    let seed = "seed-incremental";
-    open_text_block(&hub, seed, "t1");
+    let session_id = "seed-incremental";
+    open_text_block(&hub, session_id, "t1");
 
     let chunk = "a".repeat(4096);
     let mut published = String::new();
@@ -115,7 +116,7 @@ fn checkpoint_delivers_only_the_text_added_since_the_last_emit() {
     for index in 0..8 {
         published.push_str(&chunk);
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockCheckpoint {
                 turn_id: "t1".into(),
                 round_num: 0,
@@ -128,7 +129,7 @@ fn checkpoint_delivers_only_the_text_added_since_the_last_emit() {
 
     // 内容未变化的重复 checkpoint：不得再发任何余量。
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockCheckpoint {
             turn_id: "t1".into(),
             round_num: 0,
@@ -176,14 +177,14 @@ fn checkpoint_delivers_only_the_text_added_since_the_last_emit() {
 fn checkpoint_self_heals_when_the_text_is_not_an_append() {
     let root = temp_root("self-heal");
     let hub = RingingHub::with_persistence("ckpt-epoch-self-heal", &root);
-    let seed = "seed-self-heal";
-    open_text_block(&hub, seed, "t1");
+    let session_id = "seed-self-heal";
+    open_text_block(&hub, session_id, "t1");
     let mut rx = hub.subscribe_timeline();
 
     // 1) 追平路径：deltas 逐条送达后，checkpoint 只补余量。
     for delta in ["hel", "lo ", "wor"] {
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::TextDelta {
                 turn_id: "t1".into(),
                 round_num: 0,
@@ -195,7 +196,7 @@ fn checkpoint_self_heals_when_the_text_is_not_an_append() {
     }
     let full = "hello world".to_string();
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockCheckpoint {
             turn_id: "t1".into(),
             round_num: 0,
@@ -220,7 +221,7 @@ fn checkpoint_self_heals_when_the_text_is_not_an_append() {
     // 2) 降级路径：文本被改成非追加式（乱序/整流）→ 必须全量覆盖，consumer 自愈。
     let rewritten = "rewritten from scratch".to_string();
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockCheckpoint {
             turn_id: "t1".into(),
             round_num: 0,
@@ -245,7 +246,7 @@ fn checkpoint_self_heals_when_the_text_is_not_an_append() {
     // 3) 降级后写侧重基线：下一次仍是增量。
     let incremental = format!("{rewritten}+tail");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockCheckpoint {
             turn_id: "t1".into(),
             round_num: 0,
@@ -275,8 +276,8 @@ fn checkpoint_self_heals_when_the_text_is_not_an_append() {
 fn checkpoint_write_amplification_does_not_grow_with_block_length() {
     let root = temp_root("amplification");
     let hub = RingingHub::with_persistence("ckpt-epoch-amp", &root);
-    let seed = "seed-amp";
-    open_text_block(&hub, seed, "t1");
+    let session_id = "seed-amp";
+    open_text_block(&hub, session_id, "t1");
 
     const CHUNK: usize = 8 * 1024;
     const STEPS: usize = 32;
@@ -288,7 +289,7 @@ fn checkpoint_write_amplification_does_not_grow_with_block_length() {
 
     // 先把块填到 4 MiB（首次 checkpoint 走"从空串追加"路径，仍是增量形态）。
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockCheckpoint {
             turn_id: "t1".into(),
             round_num: 0,
@@ -306,7 +307,7 @@ fn checkpoint_write_amplification_does_not_grow_with_block_length() {
         let owned = std::mem::take(&mut text);
         let started = Instant::now();
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockCheckpoint {
                 turn_id: "t1".into(),
                 round_num: 0,
@@ -317,7 +318,7 @@ fn checkpoint_write_amplification_does_not_grow_with_block_length() {
         .expect("checkpoint");
         publish += started.elapsed();
         text = hub
-            .timeline_snapshot(seed)
+            .timeline_snapshot(session_id)
             .and_then(|snapshot| {
                 snapshot.turns.first().and_then(|turn| {
                     turn.rounds
@@ -353,8 +354,8 @@ fn checkpoint_write_amplification_does_not_grow_with_block_length() {
 fn turn_sealed_does_not_flush_the_snapshot_on_the_publisher_thread() {
     let root = temp_root("async-seal");
     let hub = RingingHub::with_persistence("ckpt-epoch-async-seal", &root);
-    let seed = "seed-async-seal";
-    open_text_block(&hub, seed, "t1");
+    let session_id = "seed-async-seal";
+    open_text_block(&hub, session_id, "t1");
 
     // 灌到 ~2 MiB 块文本（快照同量级）。
     const CHUNK: usize = 64 * 1024;
@@ -363,7 +364,7 @@ fn turn_sealed_does_not_flush_the_snapshot_on_the_publisher_thread() {
     for _ in 0..32 {
         text.push_str(&chunk);
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockCheckpoint {
                 turn_id: "t1".into(),
                 round_num: 0,
@@ -375,12 +376,12 @@ fn turn_sealed_does_not_flush_the_snapshot_on_the_publisher_thread() {
     }
     // 先让异步 worker 把 2 MiB 快照写下去，确保 seal 时磁盘上已有大文件。
     hub.flush_timeline_persistence();
-    let warm = std::fs::metadata(snapshot_path(&root, seed))
+    let warm = std::fs::metadata(snapshot_path(&root, session_id))
         .expect("snapshot after flush")
         .len();
 
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockSealed {
             turn_id: "t1".into(),
             round_num: 0,
@@ -389,7 +390,7 @@ fn turn_sealed_does_not_flush_the_snapshot_on_the_publisher_thread() {
     )
     .expect("block sealed");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::RoundSealed {
             turn_id: "t1".into(),
             round_num: 0,
@@ -400,7 +401,7 @@ fn turn_sealed_does_not_flush_the_snapshot_on_the_publisher_thread() {
 
     let started = Instant::now();
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnSealed {
             turn_id: "t1".into(),
             state: TimelineTurnState::Completed,
@@ -423,7 +424,7 @@ fn turn_sealed_does_not_flush_the_snapshot_on_the_publisher_thread() {
     // 崩溃一致性 / fail-closed：显式同步边界返回后，sealed turn 必须已落盘。
     hub.flush_timeline_persistence();
     let persisted: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(snapshot_path(&root, seed)).expect("snapshot persisted after flush"),
+        &std::fs::read(snapshot_path(&root, session_id)).expect("snapshot persisted after flush"),
     )
     .expect("snapshot json");
     let turn = &persisted["snapshot"]["turns"][0];
@@ -450,8 +451,8 @@ fn turn_sealed_does_not_flush_the_snapshot_on_the_publisher_thread() {
 fn snapshot_size_tracks_the_materialized_text() {
     let root = temp_root("snapshot-size");
     let hub = RingingHub::with_persistence("ckpt-epoch-size", &root);
-    let seed = "seed-size";
-    open_text_block(&hub, seed, "t1");
+    let session_id = "seed-size";
+    open_text_block(&hub, session_id, "t1");
 
     const CHUNK: usize = 64 * 1024;
     const CHECKPOINTS: usize = 32; // 2 MiB 块文本
@@ -460,7 +461,7 @@ fn snapshot_size_tracks_the_materialized_text() {
     for _ in 0..CHECKPOINTS {
         text.push_str(&chunk);
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockCheckpoint {
                 turn_id: "t1".into(),
                 round_num: 0,
@@ -471,7 +472,7 @@ fn snapshot_size_tracks_the_materialized_text() {
         .expect("checkpoint");
     }
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockSealed {
             turn_id: "t1".into(),
             round_num: 0,
@@ -480,7 +481,7 @@ fn snapshot_size_tracks_the_materialized_text() {
     )
     .expect("block sealed");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::RoundSealed {
             turn_id: "t1".into(),
             round_num: 0,
@@ -489,7 +490,7 @@ fn snapshot_size_tracks_the_materialized_text() {
     )
     .expect("round sealed");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnSealed {
             turn_id: "t1".into(),
             state: TimelineTurnState::Completed,
@@ -499,7 +500,7 @@ fn snapshot_size_tracks_the_materialized_text() {
     .expect("turn sealed");
     hub.flush_timeline_persistence();
 
-    let size = std::fs::metadata(snapshot_path(&root, seed))
+    let size = std::fs::metadata(snapshot_path(&root, session_id))
         .expect("snapshot")
         .len();
     let ratio = size as f64 / text.len() as f64;
@@ -525,8 +526,8 @@ fn snapshot_size_tracks_the_materialized_text() {
 fn terminal_persistence_stays_ordered_against_later_writes() {
     let root = temp_root("ordering");
     let hub = RingingHub::with_persistence("ckpt-epoch-ordering", &root);
-    let seed = "seed-ordering";
-    open_text_block(&hub, seed, "t1");
+    let session_id = "seed-ordering";
+    open_text_block(&hub, session_id, "t1");
     for intent in [
         TimelineIntent::BlockSealed {
             turn_id: "t1".into(),
@@ -539,10 +540,11 @@ fn terminal_persistence_stays_ordered_against_later_writes() {
             is_final: true,
         },
     ] {
-        hub.publish_timeline(seed, intent).expect("seal round");
+        hub.publish_timeline(session_id, intent)
+            .expect("seal round");
     }
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnSealed {
             turn_id: "t1".into(),
             state: TimelineTurnState::Completed,
@@ -551,10 +553,10 @@ fn terminal_persistence_stays_ordered_against_later_writes() {
     )
     .expect("turn sealed");
     // terminal 之后立刻写下一个回合：必须一起落盘，且 t1 已 sealed。
-    open_text_block(&hub, seed, "t2");
+    open_text_block(&hub, session_id, "t2");
     hub.flush_timeline_persistence();
 
-    let raw = std::fs::read(snapshot_path(&root, seed)).expect("snapshot");
+    let raw = std::fs::read(snapshot_path(&root, session_id)).expect("snapshot");
     let persisted: serde_json::Value = serde_json::from_slice(&raw).expect("json");
     let turns = persisted["snapshot"]["turns"].as_array().expect("turns");
     assert_eq!(turns.len(), 2, "the later turn must not be lost");
@@ -585,8 +587,8 @@ fn terminal_persistence_stays_ordered_against_later_writes() {
 fn terminal_then_later_write_both_survive_without_explicit_flush() {
     let root = temp_root("ordering-race");
     let hub = RingingHub::with_persistence("ckpt-epoch-race", &root);
-    let seed = "seed-ordering-race";
-    open_text_block(&hub, seed, "t1");
+    let session_id = "seed-ordering-race";
+    open_text_block(&hub, session_id, "t1");
     for intent in [
         TimelineIntent::BlockSealed {
             turn_id: "t1".into(),
@@ -599,10 +601,11 @@ fn terminal_then_later_write_both_survive_without_explicit_flush() {
             is_final: true,
         },
     ] {
-        hub.publish_timeline(seed, intent).expect("seal round");
+        hub.publish_timeline(session_id, intent)
+            .expect("seal round");
     }
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnSealed {
             turn_id: "t1".into(),
             state: TimelineTurnState::Completed,
@@ -613,9 +616,9 @@ fn terminal_then_later_write_both_survive_without_explicit_flush() {
 
     // terminal 入队后立刻写 t2：BlockCheckpoint 是持久化触发事件（软窗口），
     // 与 terminal 队列在同一 worker 上串行处理。
-    open_text_block(&hub, seed, "t2");
+    open_text_block(&hub, session_id, "t2");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockCheckpoint {
             turn_id: "t2".into(),
             round_num: 0,
@@ -626,7 +629,7 @@ fn terminal_then_later_write_both_survive_without_explicit_flush() {
     .expect("t2 checkpoint");
 
     // 不调 flush：轮询等待 worker 自然落盘（软窗口 1s，给 10s 上限）。
-    let path = snapshot_path(&root, seed);
+    let path = snapshot_path(&root, session_id);
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last = String::new();
     let persisted: serde_json::Value = loop {

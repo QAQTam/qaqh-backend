@@ -225,12 +225,12 @@ impl Loop {
         // 仍为空；用 resume_seed 兜底，避免 PacedEmitter 以空 seed 构造
         // （Ringing 事件信封会被 daemon 按 seed 过滤丢弃）。init_session
         // 完成后还会经 sync_emitter_seed 再次同步权威值。
-        let seed = if !agent.session.session_id.is_empty() {
+        let session_id = if !agent.session.session_id.is_empty() {
             agent.session.session_id.clone()
         } else {
-            agent.session.resume_seed.clone().unwrap_or_default()
+            agent.session.resume_session.clone().unwrap_or_default()
         };
-        let paced_emitter = PacedEmitter::new(seed, event_tx.clone(), writer_dead.clone());
+        let paced_emitter = PacedEmitter::new(session_id, event_tx.clone(), writer_dead.clone());
 
         let mut flow = qaqh_message::ContextFlow::new();
         qaqh_message::builtin::register_all(&mut flow);
@@ -388,10 +388,10 @@ impl Loop {
     /// 必须在任何会话创建/恢复（含 auto-create）之后、后续 emit_domain
     /// 之前调用；否则事件携带旧/空 seed，被 daemon SSE 的 owns_seed
     /// 过滤丢弃，前端收不到流式输出。
-    pub(super) fn sync_emitter_seed(&mut self) {
-        let seed = self.session.agent.session.session_id.clone();
-        self.paced_emitter.set_seed(&seed);
-        self.injection_bus.switch_session(&seed);
+    pub(super) fn sync_emitter_session(&mut self) {
+        let session_id = self.session.agent.session.session_id.clone();
+        self.paced_emitter.set_session(&session_id);
+        self.injection_bus.switch_session(&session_id);
     }
 
     /// Extract a human-readable message from a panic payload.
@@ -491,17 +491,17 @@ impl Loop {
 
     /// Initialize session state from pre-set seed (CLI args --seed / --resume-seed).
     fn init_session(&mut self) {
-        let resume_seed = self.session.agent.session.resume_seed.take();
-        let has_seed = !self.session.agent.session.session_id.is_empty();
+        let resume_session = self.session.agent.session.resume_session.take();
+        let has_session = !self.session.agent.session.session_id.is_empty();
 
-        if let Some(seed) = resume_seed {
+        if let Some(session_id) = resume_session {
             if self
                 .lifecycle
-                .resume_session(&mut self.session.agent, &self.cancel, &seed)
+                .resume_session(&mut self.session.agent, &self.cancel, &session_id)
             {
                 // init_session 已把 agent.session.session_id 设为权威值（恢复成功
                 // 为原 seed，fallback 为新 seed）；此后 Ringing 事件必须携带它。
-                self.sync_emitter_seed();
+                self.sync_emitter_session();
                 // legacy SessionRestored 已退役：Ringing 恢复由 daemon bootstrap 快照承担。
             }
             self.misc
@@ -512,15 +512,15 @@ impl Loop {
                         state: qaqh_domain::AgentLifecycleState::Ready,
                     },
                 ));
-        } else if has_seed && !self.session.agent.session.from_resume {
+        } else if has_session && !self.session.agent.session.from_resume {
             self.lifecycle
-                .create_session_with_seed(&mut self.session.agent, &self.cancel);
-            self.sync_emitter_seed();
-            let seed = self.session.agent.session.session_id.clone();
+                .create_session_with_session(&mut self.session.agent, &self.cancel);
+            self.sync_emitter_session();
+            let session_id = self.session.agent.session.session_id.clone();
             self.paced_emitter
                 .emit_domain(qaqh_domain::DomainEvent::Control(
                     qaqh_domain::ControlEvent::SessionStateChanged {
-                        session_id: seed.clone(),
+                        session_id: session_id.clone(),
                         state: qaqh_domain::SessionState::Created,
                     },
                 ));
@@ -787,7 +787,7 @@ mod drain_dispatch_safety_tests {
         let snap = snapshot.clone();
         let live = liveness.clone();
         lp.session.agent.enqueue_meta_op(MetaOp::PersistMode {
-            seed: "test-seed".into(),
+            session_id: "test-seed".into(),
             mode: 1,
         });
         lp.safe_dispatch(move |this| {
@@ -812,7 +812,7 @@ mod drain_dispatch_safety_tests {
 
         // 先入队一条 MetaOp，模拟 panic 前已产生的持久化工作。
         lp.session.agent.enqueue_meta_op(MetaOp::PersistMode {
-            seed: "test-seed".into(),
+            session_id: "test-seed".into(),
             mode: 1,
         });
         assert_eq!(lp.session.agent.pending_meta_ops.len(), 1);

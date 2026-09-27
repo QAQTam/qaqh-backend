@@ -86,7 +86,7 @@ pub struct SpawnSubagentOutput {
     timeis: String,
     status: String,
     process_id: u32,
-    seed: String,
+    session_id: String,
     #[serde(skip)]
     #[schemars(skip)]
     child_session_id: String,
@@ -141,7 +141,7 @@ impl ToolProjection for SpawnSubagentOutput {
             },
             qaqh_workspace::tool_api::ToolBody::Subagent {
                 name: self.name.clone(),
-                seed: self.seed.clone(),
+                session_id: self.session_id.clone(),
             },
         )
         .with_summary(self.content.clone())
@@ -149,7 +149,7 @@ impl ToolProjection for SpawnSubagentOutput {
 
     fn effects(&self) -> Vec<qaqh_workspace::ToolEffect> {
         vec![qaqh_workspace::ToolEffect::SubagentSpawned {
-            seed: self.seed.clone(),
+            session_id: self.session_id.clone(),
             child_session_id: self.child_session_id.clone(),
             name: self.name.clone(),
             task_text: self.task_text.clone(),
@@ -915,11 +915,12 @@ fn register_subagent_process(name: &str) -> RegistryRef {
 /// - [`HostTransport`]：进程内直连（无 lease / 无 HTTP），由 daemon 装配宿主。
 trait SubagentTransport: Send {
     /// 向某 seed 发送命令。返回是否被 accepted。
-    fn send_command(&self, seed: &str, command: RingingCommand) -> Result<bool, String>;
+    fn send_command(&self, session_id: &str, command: RingingCommand) -> Result<bool, String>;
     /// 读取外置大内容。
-    fn download_content(&self, seed: &str, reference: &ContentRef) -> Result<Vec<u8>, String>;
+    fn download_content(&self, session_id: &str, reference: &ContentRef)
+    -> Result<Vec<u8>, String>;
     /// 建立 attachment / lease（HTTP 路径需要；宿主直连为 no-op）。
-    fn attach(&self, seed: &str) -> Result<(), String>;
+    fn attach(&self, session_id: &str) -> Result<(), String>;
     /// 关闭客户端连接（宿主直连为 no-op）。
     fn close(&self);
     /// 该 seed 的实时事件批次流。
@@ -933,25 +934,29 @@ struct HostTransport {
 }
 
 impl SubagentTransport for HostTransport {
-    fn send_command(&self, seed: &str, command: RingingCommand) -> Result<bool, String> {
+    fn send_command(&self, session_id: &str, command: RingingCommand) -> Result<bool, String> {
         // SessionClose 由 daemon registry 拦截处理（loop_core 会忽略该命令），
         // 进程内宿主直接执行 close（registry + 临时会话清理），语义一致。
         if matches!(
             &command,
             RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose { .. })
         ) {
-            self.host.close(seed)?;
+            self.host.close(session_id)?;
             return Ok(true);
         }
-        self.host.send_ringing(seed, command)?;
+        self.host.send_ringing(session_id, command)?;
         Ok(true)
     }
 
-    fn download_content(&self, seed: &str, reference: &ContentRef) -> Result<Vec<u8>, String> {
-        self.host.download_content(seed, reference)
+    fn download_content(
+        &self,
+        session_id: &str,
+        reference: &ContentRef,
+    ) -> Result<Vec<u8>, String> {
+        self.host.download_content(session_id, reference)
     }
 
-    fn attach(&self, _seed: &str) -> Result<(), String> {
+    fn attach(&self, _session: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -981,7 +986,7 @@ fn project_subagent_display(
         },
         qaqh_workspace::tool_api::ToolBody::Subagent {
             name: name.to_string(),
-            seed: String::new(),
+            session_id: String::new(),
         },
     )
 }
@@ -1153,14 +1158,14 @@ fn handle_spawn_subagent(
                 "Check that the daemon can start subagent actors.",
             )
         })?;
-    if spawned.seed.is_empty() {
+    if spawned.session_id.is_empty() {
         return Err(subagent_error(
             "SPAWN_ERROR",
             "spawn_subagent: host returned empty seed",
             "Check host/daemon logs.",
         ));
     }
-    let seed = spawned.seed;
+    let session_id = spawned.session_id;
     let child_session_id = spawned.child_session_id;
     let parent_agent_path = spawned.parent_agent_path;
     let child_agent_path = spawned.child_agent_path;
@@ -1171,7 +1176,7 @@ fn handle_spawn_subagent(
     let registry_id = registry_ref.id();
 
     log::info!(
-        "[SUBAGENT] '{name}' actor created (seed={seed}, path={child_agent_path}, process={registry_id}); awaiting canonical edge"
+        "[SUBAGENT] '{name}' actor created (seed={session_id}, path={child_agent_path}, process={registry_id}); awaiting canonical edge"
     );
     let content = format!(
         "Subagent '{name}' spawned at {child_agent_path} (process {registry_id}); the task starts after the canonical spawn edge is committed."
@@ -1180,7 +1185,7 @@ fn handle_spawn_subagent(
         timeis: qaqh_workspace::now_utc8(),
         status: "ok".to_string(),
         process_id: registry_id,
-        seed,
+        session_id,
         child_session_id,
         name,
         parent_agent_path,
@@ -1258,7 +1263,7 @@ pub fn start_subagent_collector(
     request: StartSubagentRequest<'_>,
 ) -> Result<(), String> {
     let StartSubagentRequest {
-        seed,
+        session_id,
         child_session_id,
         name,
         task_text,
@@ -1268,7 +1273,7 @@ pub fn start_subagent_collector(
         process_id,
         inter_agent,
     } = request;
-    let batch_rx = host.subscribe(seed);
+    let batch_rx = host.subscribe(session_id);
     let transport = Box::new(HostTransport {
         host: host.clone(),
         batch_rx,
@@ -1276,7 +1281,7 @@ pub fn start_subagent_collector(
     let message_id = inter_agent
         .as_ref()
         .map(|envelope| envelope.message_id.clone())
-        .unwrap_or_else(|| format!("subagent-task:{seed}"));
+        .unwrap_or_else(|| format!("subagent-task:{session_id}"));
     let completion_route = inter_agent.as_ref().map(|envelope| CompletionRoute {
         root_session_id: envelope.root_session_id.clone(),
         parent_agent_path: envelope.author.clone(),
@@ -1292,7 +1297,7 @@ pub fn start_subagent_collector(
         inter_agent,
         subagent_terminal: None,
     });
-    match transport.send_command(seed, send) {
+    match transport.send_command(session_id, send) {
         Ok(true) => {}
         Ok(false) => {
             transport.close();
@@ -1305,20 +1310,20 @@ pub fn start_subagent_collector(
     }
 
     let registry_ref = RegistryRef::Local { id: process_id };
-    let seed = seed.to_string();
+    let session_id = session_id.to_string();
     let child_session_id = child_session_id.to_string();
     let name = name.to_string();
-    let parent_seed = parent_session_id.to_string();
+    let parent_session = parent_session_id.to_string();
     let parent_call_id = parent_call_id.to_string();
     std::thread::spawn(move || {
         collect_subagent_result(
             transport,
-            &seed,
+            &session_id,
             &child_session_id,
             &name,
             registry_ref,
             timeout_secs,
-            &parent_seed,
+            &parent_session,
             &parent_call_id,
             completion_route,
         );
@@ -1342,13 +1347,13 @@ pub fn arm_subagent_collector(
     host: Arc<dyn SubagentHost>,
     request: ArmSubagentCollectorRequest<'_>,
 ) -> Result<(), String> {
-    let batch_rx = host.subscribe(request.seed);
+    let batch_rx = host.subscribe(request.session_id);
     let transport = Box::new(HostTransport { host, batch_rx }) as Box<dyn SubagentTransport>;
     let registry_ref = register_subagent_process(&format!("subagent:{}", request.name));
-    let seed = request.seed.to_string();
+    let session_id = request.session_id.to_string();
     let child_session_id = request.child_session_id.to_string();
     let name = request.name.to_string();
-    let parent_seed = request.parent_session_id.to_string();
+    let parent_session = request.parent_session_id.to_string();
     let parent_call_id = request.parent_call_id.to_string();
     let timeout_secs = request.timeout_secs;
     let route = CompletionRoute {
@@ -1359,12 +1364,12 @@ pub fn arm_subagent_collector(
     std::thread::spawn(move || {
         collect_subagent_result(
             transport,
-            &seed,
+            &session_id,
             &child_session_id,
             &name,
             registry_ref,
             timeout_secs,
-            &parent_seed,
+            &parent_session,
             &parent_call_id,
             Some(route),
         );
@@ -1379,12 +1384,12 @@ pub fn arm_subagent_collector(
 #[allow(clippy::too_many_arguments)]
 fn collect_subagent_result(
     transport: Box<dyn SubagentTransport>,
-    seed: &str,
+    session_id: &str,
     child_session_id: &str,
     name: &str,
     registry_ref: RegistryRef,
     timeout_secs: u64,
-    parent_seed: &str,
+    parent_session: &str,
     parent_call_id: &str,
     completion_route: Option<CompletionRoute>,
 ) {
@@ -1405,7 +1410,7 @@ fn collect_subagent_result(
             let cancel = RingingCommand::Conversation(
                 qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
             );
-            if let Err(e) = transport.send_command(seed, cancel) {
+            if let Err(e) = transport.send_command(session_id, cancel) {
                 log::warn!("[SUBAGENT] '{name}' cancel send failed: {e}");
             }
             final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
@@ -1415,7 +1420,7 @@ fn collect_subagent_result(
         }
         match transport.events().recv_timeout(Duration::from_millis(300)) {
             Ok(batch) => {
-                if batch.session_id != seed {
+                if batch.session_id != session_id {
                     continue;
                 }
                 if !first_event_logged && !batch.envelopes.is_empty() {
@@ -1441,7 +1446,8 @@ fn collect_subagent_result(
                                     final_answer = answer;
                                 }
                             } else if let Some(reference) = output_ref
-                                && let Ok(bytes) = transport.download_content(seed, &reference)
+                                && let Ok(bytes) =
+                                    transport.download_content(session_id, &reference)
                             {
                                 final_answer = String::from_utf8_lossy(&bytes).to_string();
                             }
@@ -1494,7 +1500,7 @@ fn collect_subagent_result(
                     let cancel = RingingCommand::Conversation(
                         qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
                     );
-                    if let Err(e) = transport.send_command(seed, cancel) {
+                    if let Err(e) = transport.send_command(session_id, cancel) {
                         log::warn!("[SUBAGENT] '{name}' timeout cancel send failed: {e}");
                     }
                     final_answer = format!("[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]");
@@ -1545,16 +1551,16 @@ fn collect_subagent_result(
             "[SUBAGENT] '{name}' cancelled — result body suppressed (answer_len={answer_len}); terminal edge will still be reported"
         );
     }
-    if !parent_seed.is_empty() {
+    if !parent_session.is_empty() {
         let terminal_notification = qaqh_domain::SubagentTerminalNotification {
             child_session_id: child_session_id.to_string(),
             parent_call_id: parent_call_id.to_string(),
             terminal,
         };
         let completion_message_id = if did_cancel {
-            format!("subagent-terminal:{seed}")
+            format!("subagent-terminal:{session_id}")
         } else {
-            format!("subagent-result:{seed}")
+            format!("subagent-result:{session_id}")
         };
         let completion_inter_agent =
             completion_route
@@ -1608,13 +1614,13 @@ fn collect_subagent_result(
                 ));
             }
             // attach（HTTP/lease 语义；宿主直连为 no-op，覆盖 lease 过期后的恢复）。
-            if let Err(e) = transport.attach(parent_seed) {
+            if let Err(e) = transport.attach(parent_session) {
                 log::warn!(
-                    "[SUBAGENT] '{name}' attach parent {parent_seed} for inject (attempt {}): {e}",
+                    "[SUBAGENT] '{name}' attach parent {parent_session} for inject (attempt {}): {e}",
                     attempt + 1
                 );
             }
-            match transport.send_command(parent_seed, inject.clone()) {
+            match transport.send_command(parent_session, inject.clone()) {
                 Ok(true) => {
                     accepted = true;
                     break;
@@ -1646,19 +1652,19 @@ fn collect_subagent_result(
     // 拦截：registry.close → SessionShutdown 帧 → worker 优雅退出）。
     // 失败仅告警：结果已注入主会话 + 终态已回写注册表，残留不丢数据。
     if let Err(e) = transport.send_command(
-        seed,
+        session_id,
         RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose {
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
         }),
     ) {
-        log::warn!("[SUBAGENT] '{name}' close worker {seed} failed: {e}");
+        log::warn!("[SUBAGENT] '{name}' close worker {session_id} failed: {e}");
     } else {
-        log::info!("[SUBAGENT] '{name}' sub agent {seed} closed (auto-unload)");
+        log::info!("[SUBAGENT] '{name}' sub agent {session_id} closed (auto-unload)");
     }
 
     transport.close();
     log::info!(
-        "[SUBAGENT] '{name}' collector complete (seed={seed}), answer_len={answer_len}, exit={exit_code}, cancelled={did_cancel}, first_event={first_event_logged}"
+        "[SUBAGENT] '{name}' collector complete (seed={session_id}), answer_len={answer_len}, exit={exit_code}, cancelled={did_cancel}, first_event={first_event_logged}"
     );
 }
 
@@ -1864,7 +1870,7 @@ mod tests {
             timeis: "UTC+8 2026-09-23 12:00".to_string(),
             status: "ok".to_string(),
             process_id: 7,
-            seed: "sub-seed".to_string(),
+            session_id: "sub-seed".to_string(),
             child_session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
             name: "review_code".to_string(),
             parent_agent_path: "/root".to_string(),
@@ -1885,7 +1891,7 @@ mod tests {
             _ => panic!("subagent output must have a text model block"),
         };
         assert!(model.contains("\"process_id\":7"));
-        assert!(model.contains("\"seed\":\"sub-seed\""));
+        assert!(model.contains("\"session_id\":\"sub-seed\""));
         assert!(model.contains("\"content\":\"Subagent 'review_code' spawned"));
         assert!(
             !model.contains("child_session_id"),
@@ -1897,9 +1903,9 @@ mod tests {
             Some("Subagent 'review_code' spawned (process 7)")
         );
         match display.body {
-            qaqh_workspace::tool_api::ToolBody::Subagent { name, seed } => {
+            qaqh_workspace::tool_api::ToolBody::Subagent { name, session_id } => {
                 assert_eq!(name, "review_code");
-                assert_eq!(seed, "sub-seed");
+                assert_eq!(session_id, "sub-seed");
             }
             other => panic!("unexpected subagent display body: {other:?}"),
         }
@@ -2017,23 +2023,23 @@ mod tests {
     }
 
     impl SubagentTransport for RecordingTransport {
-        fn send_command(&self, seed: &str, command: RingingCommand) -> Result<bool, String> {
+        fn send_command(&self, session_id: &str, command: RingingCommand) -> Result<bool, String> {
             self.sent
                 .lock()
                 .expect("test mutex must not be poisoned")
-                .push((seed.to_string(), command));
+                .push((session_id.to_string(), command));
             Ok(true)
         }
 
         fn download_content(
             &self,
-            _seed: &str,
+            _session: &str,
             _reference: &ContentRef,
         ) -> Result<Vec<u8>, String> {
             Err("no externalized content in this test".into())
         }
 
-        fn attach(&self, _seed: &str) -> Result<(), String> {
+        fn attach(&self, _session: &str) -> Result<(), String> {
             Ok(())
         }
 
@@ -2090,19 +2096,19 @@ mod tests {
             Err("not used".to_string())
         }
 
-        fn rollback_subagent(&self, _seed: &str, _child_session_id: &str, _process_id: u32) {}
+        fn rollback_subagent(&self, _session: &str, _child_session_id: &str, _process_id: u32) {}
 
-        fn abort_subagent(&self, _seed: &str, _process_id: u32) {}
+        fn abort_subagent(&self, _session: &str, _process_id: u32) {}
 
-        fn send_ringing(&self, seed: &str, command: RingingCommand) -> Result<(), String> {
+        fn send_ringing(&self, session_id: &str, command: RingingCommand) -> Result<(), String> {
             self.sent
                 .lock()
                 .expect("test mutex must not be poisoned")
-                .push((seed.to_string(), command));
+                .push((session_id.to_string(), command));
             Ok(())
         }
 
-        fn subscribe(&self, _seed: &str) -> mpsc::Receiver<EventBatch> {
+        fn subscribe(&self, _session: &str) -> mpsc::Receiver<EventBatch> {
             let (tx, rx) = mpsc::channel();
             *self
                 .event_tx
@@ -2113,20 +2119,20 @@ mod tests {
 
         fn download_content(
             &self,
-            _seed: &str,
+            _session: &str,
             _reference: &ContentRef,
         ) -> Result<Vec<u8>, String> {
             Err("not used".to_string())
         }
 
-        fn close(&self, _seed: &str) -> Result<(), String> {
+        fn close(&self, _session: &str) -> Result<(), String> {
             Ok(())
         }
     }
 
-    fn cancelled_batch(seed: &str) -> EventBatch {
+    fn cancelled_batch(session_id: &str) -> EventBatch {
         let envelope = qaqh_ringing::RingingEventEnvelope::new(
-            seed,
+            session_id,
             1,
             1,
             1,
@@ -2137,7 +2143,7 @@ mod tests {
             schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
             version: qaqh_ringing::protocol::RINGING_VERSION,
             channel: qaqh_domain::RingingChannel::Conversation,
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             server_epoch: "test-epoch".to_string(),
             from_stream_seq: 1,
             to_stream_seq: 1,
@@ -2145,9 +2151,9 @@ mod tests {
         }
     }
 
-    fn completed_batch(seed: &str) -> EventBatch {
+    fn completed_batch(session_id: &str) -> EventBatch {
         let envelope = qaqh_ringing::RingingEventEnvelope::new(
-            seed,
+            session_id,
             1,
             1,
             1,
@@ -2162,7 +2168,7 @@ mod tests {
             schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
             version: qaqh_ringing::protocol::RINGING_VERSION,
             channel: qaqh_domain::RingingChannel::Conversation,
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             server_epoch: "test-epoch".to_string(),
             from_stream_seq: 1,
             to_stream_seq: 1,
@@ -2206,7 +2212,10 @@ mod tests {
         );
 
         let sent = sent.lock().expect("test mutex must not be poisoned");
-        let injected: Vec<_> = sent.iter().filter(|(seed, _)| seed == parent).collect();
+        let injected: Vec<_> = sent
+            .iter()
+            .filter(|(session_id, _)| session_id == parent)
+            .collect();
         assert_eq!(
             injected.len(),
             1,
@@ -2230,8 +2239,8 @@ mod tests {
             injected[0].1
         );
         assert!(
-            sent.iter().any(|(seed, command)| {
-                seed == child
+            sent.iter().any(|(session_id, command)| {
+                session_id == child
                     && matches!(
                         command,
                         RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose { .. })
@@ -2279,7 +2288,7 @@ mod tests {
         let sent = sent.lock().expect("test mutex must not be poisoned");
         let injected = sent
             .iter()
-            .find(|(seed, _)| seed == parent)
+            .find(|(session_id, _)| session_id == parent)
             .expect("completion must be delivered to the parent");
         let RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
             message_id,
@@ -2313,7 +2322,7 @@ mod tests {
         arm_subagent_collector(
             host.clone(),
             ArmSubagentCollectorRequest {
-                seed: "reload-child",
+                session_id: "reload-child",
                 child_session_id: "reload-child",
                 name: "reload_task",
                 parent_session_id: "reload-parent",
@@ -2338,8 +2347,8 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let sent = host.sent.lock().expect("test mutex must not be poisoned");
-            if sent.iter().any(|(seed, command)| {
-                seed == "reload-parent"
+            if sent.iter().any(|(session_id, command)| {
+                session_id == "reload-parent"
                     && matches!(
                         command,
                         RingingCommand::Conversation(

@@ -201,7 +201,7 @@ pub enum TimelineToolBody {
     },
     Subagent {
         name: String,
-        #[serde(rename = "session_id", alias = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
     },
     #[serde(other)]

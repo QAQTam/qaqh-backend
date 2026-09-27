@@ -19,9 +19,9 @@ impl RingingHub {
     /// seal 顺序遵循 TimelineAppender 契约：先 seal 全部 open block，再 seal
     /// 全部未 seal round（is_final=true，这是该 turn 的最后一轮），最后将 turn
     /// seal 为 Cancelled。幂等：已 seal 的 turn 直接跳过。返回是否有变更。
-    pub fn seal_orphan_running_turns(&self, seed: &str) -> bool {
+    pub fn seal_orphan_running_turns(&self, session_id: &str) -> bool {
         let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(snapshot) = appender.snapshot(seed) else {
+        let Some(snapshot) = appender.snapshot(session_id) else {
             return false;
         };
         let mut changed = false;
@@ -31,11 +31,15 @@ impl RingingHub {
                     if block.state == TimelineBlockState::Sealed {
                         continue;
                     }
-                    match appender.seal_block(seed, &turn.turn_id, round.round_num, &block.block_id)
-                    {
+                    match appender.seal_block(
+                        session_id,
+                        &turn.turn_id,
+                        round.round_num,
+                        &block.block_id,
+                    ) {
                         Ok(_) => changed = true,
                         Err(error) => log::warn!(
-                            "[timeline] orphan seal block failed for {seed} {}: {error}",
+                            "[timeline] orphan seal block failed for {session_id} {}: {error}",
                             block.block_id
                         ),
                     }
@@ -45,17 +49,17 @@ impl RingingHub {
                 if round.sealed {
                     continue;
                 }
-                match appender.seal_round(seed, &turn.turn_id, round.round_num, true) {
+                match appender.seal_round(session_id, &turn.turn_id, round.round_num, true) {
                     Ok(_) => changed = true,
                     Err(error) => log::warn!(
-                        "[timeline] orphan seal round failed for {seed} {}/{}: {error}",
+                        "[timeline] orphan seal round failed for {session_id} {}/{}: {error}",
                         turn.turn_id,
                         round.round_num
                     ),
                 }
             }
             match appender.seal_turn_with_state(
-                seed,
+                session_id,
                 &turn.turn_id,
                 TimelineTurnState::Cancelled,
                 Some(TimelineFailure {
@@ -67,17 +71,17 @@ impl RingingHub {
             ) {
                 Ok(_) => changed = true,
                 Err(error) => log::warn!(
-                    "[timeline] orphan seal turn failed for {seed} {}: {error}",
+                    "[timeline] orphan seal turn failed for {session_id} {}: {error}",
                     turn.turn_id
                 ),
             }
         }
         drop(appender);
-        self.offload_all_sealed_turns(seed);
+        self.offload_all_sealed_turns(session_id);
         changed
     }
 
-    pub fn seal_orphan_channel_state(&self, seed: &str, force: bool) -> bool {
+    pub fn seal_orphan_channel_state(&self, session_id: &str, force: bool) -> bool {
         // B9/H3 liveness gate：force=false 的 bootstrap 路径在 worker 仍
         // 存活时整体跳过——活 worker 的 running/pending 状态不是孤儿。
         if !force
@@ -85,16 +89,16 @@ impl RingingHub {
                 .live_workers
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .contains(seed)
+                .contains(session_id)
         {
-            log::info!("[ringing] worker alive for {seed}; skipping bootstrap orphan seal");
+            log::info!("[ringing] worker alive for {session_id}; skipping bootstrap orphan seal");
             return false;
         }
 
         let mut changed = false;
 
         // 1) conversation：active_turn 无终态（journal 重放后仍有值）→ 取消。
-        let conv = self.snapshot(RingingChannel::Conversation, seed);
+        let conv = self.snapshot(RingingChannel::Conversation, session_id);
         if let Some(turn_id) = conv
             .state
             .get("active_turn")
@@ -102,10 +106,10 @@ impl RingingHub {
             .filter(|s| !s.is_empty())
         {
             log::info!(
-                "[ringing] sealing orphan active turn {turn_id} for {seed} (no terminal event)"
+                "[ringing] sealing orphan active turn {turn_id} for {session_id} (no terminal event)"
             );
             let _ = self.publish_with_causation(
-                seed,
+                session_id,
                 DomainEvent::Conversation(ConversationEvent::ConversationCancelled {
                     turn_id: Some(turn_id.to_string()),
                 }),
@@ -117,7 +121,7 @@ impl RingingHub {
         // 2) conversation compact：CompactStarted 无 CompactFinished → 失败。
         //    压缩 worker 的网络请求与结果仅存于旧进程内存，daemon/worker
         //    恢复后不可能继续；必须经正常终态事件收敛 journal、snapshot 和 SSE。
-        let conv = self.snapshot(RingingChannel::Conversation, seed);
+        let conv = self.snapshot(RingingChannel::Conversation, session_id);
         if conv.state.get("compact_status").and_then(|v| v.as_str()) == Some("running") {
             let compact_id = conv
                 .state
@@ -127,10 +131,10 @@ impl RingingHub {
                 .unwrap_or("orphan-compact")
                 .to_string();
             log::info!(
-                "[ringing] sealing orphan compact {compact_id} for {seed} (worker operation cannot resume)"
+                "[ringing] sealing orphan compact {compact_id} for {session_id} (worker operation cannot resume)"
             );
             let _ = self.publish_with_causation(
-                seed,
+                session_id,
                 DomainEvent::Conversation(ConversationEvent::CompactFinished {
                     compact_id,
                     status: CompactStatus::Failed,
@@ -145,7 +149,7 @@ impl RingingHub {
 
         // 3) tool：running 列表 + pending_permission 无 ToolFinished 终态 → 取消。
         //    兼容旧投影的字符串数组与当前的对象数组两种格式。
-        let tool = self.snapshot(RingingChannel::Tool, seed);
+        let tool = self.snapshot(RingingChannel::Tool, session_id);
         let mut orphans: Vec<(String, String, u32)> = Vec::new();
         if let Some(running) = tool.state.get("running").and_then(|v| v.as_array()) {
             for entry in running {
@@ -181,9 +185,11 @@ impl RingingHub {
             orphans.push((id.to_string(), String::new(), 0));
         }
         for (tool_call_id, turn_id, round_num) in orphans {
-            log::info!("[ringing] sealing orphan tool {tool_call_id} for {seed} (no ToolFinished)");
+            log::info!(
+                "[ringing] sealing orphan tool {tool_call_id} for {session_id} (no ToolFinished)"
+            );
             let _ = self.publish_with_causation(
-                seed,
+                session_id,
                 DomainEvent::Tool(ToolEvent::ToolFinished {
                     tool_call_id,
                     turn_id,
@@ -201,7 +207,7 @@ impl RingingHub {
         //    守卫：当前进程发布、仍在等待用户响应的活交互不 seal——bootstrap
         //    路径（force=false）会误杀 1ms 前刚发布的 ask（「ask 弹不出」根因）；
         //    force=true（worker 死亡/重启的 registry 收尾路径）无视守卫强制收尾。
-        let control = self.snapshot(RingingChannel::Control, seed);
+        let control = self.snapshot(RingingChannel::Control, session_id);
         if let Some(id) = control
             .state
             .get("pending_interaction")
@@ -212,16 +218,18 @@ impl RingingHub {
                 .live_interactions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get(seed)
+                .get(session_id)
                 .is_some_and(|cur| cur == id);
             if is_live && !force {
                 log::info!(
-                    "[ringing] keeping live interaction {id} for {seed} (awaiting user response)"
+                    "[ringing] keeping live interaction {id} for {session_id} (awaiting user response)"
                 );
             } else {
-                log::info!("[ringing] sealing orphan interaction {id} for {seed} (no resolution)");
+                log::info!(
+                    "[ringing] sealing orphan interaction {id} for {session_id} (no resolution)"
+                );
                 let _ = self.publish_with_causation(
-                    seed,
+                    session_id,
                     DomainEvent::Control(ControlEvent::InteractionResolved {
                         interaction_id: id.to_string(),
                         resolution: AskResolution::Dismissed,
@@ -234,8 +242,8 @@ impl RingingHub {
                     .live_interactions
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                if live.get(seed).is_some_and(|cur| cur == id) {
-                    live.remove(seed);
+                if live.get(session_id).is_some_and(|cur| cur == id) {
+                    live.remove(session_id);
                 }
                 drop(live);
                 changed = true;
@@ -253,19 +261,19 @@ impl RingingHub {
     /// 只覆盖已加载 seed 的当前状态：磁盘上未加载的 seed 由下次
     /// `ensure_timeline_loaded` 启动时收尾（懒加载路径自带孤儿 seal）。
     pub fn seal_all_orphans(&self) {
-        let seeds: Vec<String> = self
-            .disk_timeline_seeds
+        let sessions: Vec<String> = self
+            .disk_timeline_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .cloned()
             .collect();
-        for seed in &seeds {
-            if self.seal_orphan_running_turns(seed) {
-                log::info!("[timeline] sealed orphan turn(s) for {seed} at shutdown");
+        for session_id in &sessions {
+            if self.seal_orphan_running_turns(session_id) {
+                log::info!("[timeline] sealed orphan turn(s) for {session_id} at shutdown");
             }
-            if self.seal_orphan_channel_state(seed, true) {
-                log::info!("[ringing] sealed orphan channel state for {seed} at shutdown");
+            if self.seal_orphan_channel_state(session_id, true) {
+                log::info!("[ringing] sealed orphan channel state for {session_id} at shutdown");
             }
         }
     }

@@ -31,12 +31,12 @@ fn data_dir() -> PathBuf {
     .clone()
 }
 
-fn session_dir(seed: &str) -> PathBuf {
-    data_dir().join("sessions").join(seed)
+fn session_dir(session_id: &str) -> PathBuf {
+    data_dir().join("sessions").join(session_id)
 }
 
-fn jsonl_of(seed: &str) -> Vec<u8> {
-    std::fs::read(session_dir(seed).join("messages.jsonl")).unwrap_or_default()
+fn jsonl_of(session_id: &str) -> Vec<u8> {
+    std::fs::read(session_dir(session_id).join("messages.jsonl")).unwrap_or_default()
 }
 
 fn assistant(text: &str) -> Message {
@@ -61,7 +61,7 @@ fn drain(store: &mut MessageStore) {
         let sm = SessionManager::global();
         match &op {
             PersistOp::Append {
-                seed,
+                session_id,
                 messages,
                 model,
                 effort,
@@ -69,7 +69,7 @@ fn drain(store: &mut MessageStore) {
                 compact_covered_through_msg_id,
                 turn_count,
             } => sm.save_append_with_watermark(
-                seed,
+                session_id,
                 messages,
                 model,
                 effort.as_deref(),
@@ -78,14 +78,20 @@ fn drain(store: &mut MessageStore) {
                 *turn_count,
             ),
             PersistOp::UpdateMeta {
-                seed,
+                session_id,
                 model,
                 effort,
                 compact_skip,
                 turn_count,
-            } => sm.update_meta(seed, model, effort.as_deref(), *compact_skip, *turn_count),
+            } => sm.update_meta(
+                session_id,
+                model,
+                effort.as_deref(),
+                *compact_skip,
+                *turn_count,
+            ),
             PersistOp::SaveFull {
-                seed,
+                session_id,
                 messages,
                 model,
                 effort,
@@ -93,7 +99,7 @@ fn drain(store: &mut MessageStore) {
                 compact_covered_through_msg_id,
                 turn_count,
             } => sm.save_full_with_watermark(
-                seed,
+                session_id,
                 messages,
                 model,
                 effort.as_deref(),
@@ -128,7 +134,7 @@ fn flush_ops_enqueue_in_legacy_call_order() {
     assert_eq!(ops.len(), 1, "no checkpoint → Append only");
     match &ops[0] {
         PersistOp::Append {
-            seed,
+            session_id,
             messages,
             model,
             effort,
@@ -136,7 +142,7 @@ fn flush_ops_enqueue_in_legacy_call_order() {
             compact_covered_through_msg_id,
             turn_count,
         } => {
-            assert_eq!(seed, "ops-order-seed");
+            assert_eq!(session_id, "ops-order-seed");
             assert_eq!(model, "model-a");
             assert_eq!(effort.as_deref(), Some("high"));
             assert_eq!(*compact_skip, 0);
@@ -192,17 +198,17 @@ fn flush_ops_enqueue_in_legacy_call_order() {
 #[test]
 fn shadow_flush_jsonl_bytes_identical() {
     data_dir();
-    let seed_legacy = "shadow-legacy-seed";
-    let seed_queue = "shadow-queue-seed";
-    let _ = std::fs::remove_dir_all(session_dir(seed_legacy));
-    let _ = std::fs::remove_dir_all(session_dir(seed_queue));
+    let session_legacy = "shadow-legacy-seed";
+    let session_queue = "shadow-queue-seed";
+    let _ = std::fs::remove_dir_all(session_dir(session_legacy));
+    let _ = std::fs::remove_dir_all(session_dir(session_queue));
 
     // ── Legacy path: the inline call sequence pre-PR-1-6 flush_meta made,
     //    with the same message construction the store performs internally
     //    (Message::user/assistant clones stamped with monotonic msg_id).
     let sm = SessionManager::global();
     sm.save_append(
-        seed_legacy,
+        session_legacy,
         &[
             stamped(Message::user("first"), 1),
             stamped(assistant("reply"), 2),
@@ -213,19 +219,19 @@ fn shadow_flush_jsonl_bytes_identical() {
         1,
     );
     sm.save_append(
-        seed_legacy,
+        session_legacy,
         &[stamped(Message::user("second"), 3)],
         "model-a",
         Some("high"),
         0,
         2,
     );
-    sm.update_meta(seed_legacy, "model-a", Some("high"), 0, 2);
+    sm.update_meta(session_legacy, "model-a", Some("high"), 0, 2);
 
     // ── New path: same conversation through the enqueue queue. The queue is
     //    deliberately drained only at the end — batching must not change the
     //    write order or the bytes.
-    let mut store = MessageStore::new(seed_queue);
+    let mut store = MessageStore::new(session_queue);
     store.push_user("first");
     store.push_assistant(assistant("reply"));
     store.flush_meta("model-a", "high");
@@ -235,8 +241,8 @@ fn shadow_flush_jsonl_bytes_identical() {
     drain(&mut store);
 
     assert_eq!(
-        jsonl_of(seed_legacy),
-        jsonl_of(seed_queue),
+        jsonl_of(session_legacy),
+        jsonl_of(session_queue),
         "messages.jsonl must be byte-identical between the legacy inline path and the queue path"
     );
 }
@@ -244,15 +250,15 @@ fn shadow_flush_jsonl_bytes_identical() {
 #[test]
 fn legacy_session_dir_replays_and_appends_byte_identical() {
     data_dir();
-    let seed_legacy = "replay-legacy-seed";
-    let seed_replay = "replay-new-seed";
-    let _ = std::fs::remove_dir_all(session_dir(seed_legacy));
-    let _ = std::fs::remove_dir_all(session_dir(seed_replay));
+    let session_legacy = "replay-legacy-seed";
+    let session_replay = "replay-new-seed";
+    let _ = std::fs::remove_dir_all(session_dir(session_legacy));
+    let _ = std::fs::remove_dir_all(session_dir(session_replay));
 
     // ── Old daemon wrote a session synchronously: two turns.
     let sm = SessionManager::global();
     sm.save_append(
-        seed_legacy,
+        session_legacy,
         &[
             stamped(Message::user("u1"), 1),
             stamped(assistant("a1"), 2),
@@ -268,14 +274,14 @@ fn legacy_session_dir_replays_and_appends_byte_identical() {
     // ── The same session directory is now taken over by the new code
     //    (resume = same dir, new writer): copy the legacy artifacts, replay,
     //    continue.
-    let legacy_dir = session_dir(seed_legacy);
-    let replay_dir = session_dir(seed_replay);
+    let legacy_dir = session_dir(session_legacy);
+    let replay_dir = session_dir(session_replay);
     std::fs::create_dir_all(&replay_dir).unwrap();
     for file in ["messages.jsonl", "meta.json"] {
         std::fs::copy(legacy_dir.join(file), replay_dir.join(file)).unwrap();
     }
-    let (_, msgs) = sm.load(seed_replay).expect("legacy session loads");
-    let (mut store, repairs) = MessageStore::from_messages(seed_replay, &msgs, 0);
+    let (_, msgs) = sm.load(session_replay).expect("legacy session loads");
+    let (mut store, repairs) = MessageStore::from_messages(session_replay, &msgs, 0);
     assert!(
         repairs.is_empty(),
         "clean legacy dir must replay without repairs"
@@ -288,7 +294,7 @@ fn legacy_session_dir_replays_and_appends_byte_identical() {
     // ── The legacy daemon continuing the same conversation would have
     //    appended exactly these rows.
     sm.save_append(
-        seed_legacy,
+        session_legacy,
         &[stamped(Message::user("u3"), 5), stamped(assistant("a3"), 6)],
         "model-a",
         Some("high"),
@@ -297,8 +303,8 @@ fn legacy_session_dir_replays_and_appends_byte_identical() {
     );
 
     assert_eq!(
-        jsonl_of(seed_legacy),
-        jsonl_of(seed_replay),
+        jsonl_of(session_legacy),
+        jsonl_of(session_replay),
         "replay + queue-append must be byte-identical to the legacy continuation"
     );
     assert_eq!(

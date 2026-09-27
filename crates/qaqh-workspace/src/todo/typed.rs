@@ -257,7 +257,7 @@ impl ToolProjection for TodoUpdateOutput {
     }
 }
 
-pub fn todo_list_for_typed(seed: &str, args: &Value) -> Result<TodoListOutput, String> {
+pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOutput, String> {
     let args: TodoListArgs = serde_json::from_value(args.clone()).map_err(|error| {
         crate::json_err_string(
             "INVALID_INPUT",
@@ -265,7 +265,7 @@ pub fn todo_list_for_typed(seed: &str, args: &Value) -> Result<TodoListOutput, S
             "Use {\"status\": \"idle|in_progress|completed|cancelled\"} or omit it.",
         )
     })?;
-    let store = read_store_for(seed)?;
+    let store = read_store_for(session_id)?;
     let filter = args
         .status
         .as_deref()
@@ -301,11 +301,11 @@ pub fn todo_list_for_typed(seed: &str, args: &Value) -> Result<TodoListOutput, S
 }
 
 /// `todo_write` 的 canonical mutation 路径。
-pub fn todo_write_for_typed(seed: &str, args: &Value) -> Result<TodoWriteOutput, String> {
+pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteOutput, String> {
     let _guard = TODO_LOCK
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
-    let mut store = read_store_for(seed)?;
+    let mut store = read_store_for(session_id)?;
     let incoming = parse_write_items(args)?;
 
     // ID 解析三态：显式引用（必须已存在）→ 原样保留；缺省 → next_id 高水位
@@ -352,7 +352,7 @@ pub fn todo_write_for_typed(seed: &str, args: &Value) -> Result<TodoWriteOutput,
     let replaced = store.items.len();
     store.items = next_items;
     normalize_current_id(&mut store);
-    write_store_for(seed, &store)?;
+    write_store_for(session_id, &store)?;
 
     let current_id = store
         .items
@@ -376,11 +376,11 @@ pub fn todo_write_for_typed(seed: &str, args: &Value) -> Result<TodoWriteOutput,
 ///
 /// 保留既有三种输入形态：单条 `{id,status,evidence?}`、`ids` 批量状态、
 /// `updates` 并行条目；工具面仍由 `TodoUpdateArgs` 限制为单条。
-pub fn todo_update_for_typed(seed: &str, args: &Value) -> Result<TodoUpdateOutput, String> {
+pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdateOutput, String> {
     let _guard = TODO_LOCK
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
-    let mut store = read_store_for(seed)?;
+    let mut store = read_store_for(session_id)?;
 
     /// 一次变更（支持单条 / ids 批量 / updates 并行三种来源）。
     /// status 为 None 表示纯编辑（title/description/evidence）。
@@ -572,7 +572,7 @@ pub fn todo_update_for_typed(seed: &str, args: &Value) -> Result<TodoUpdateOutpu
     }
 
     normalize_current_id(&mut store);
-    write_store_for(seed, &store)?;
+    write_store_for(session_id, &store)?;
 
     if pending.len() == 1 && updated.len() == 1 {
         // 单条路径保持兼容返回（V1 客户端/前端依赖 item + message）。
@@ -600,13 +600,15 @@ pub fn todo_update_for_typed(seed: &str, args: &Value) -> Result<TodoUpdateOutpu
 }
 
 /// service 面直接返回 canonical Value，避免 `parse_json_string`。
-pub fn todo_list_value_for(seed: &str, args: &Value) -> Result<Value, String> {
-    // service 信封把 seed 与业务参数放在同一对象；typed args 只接受 status。
+pub fn todo_list_value_for(session_id: &str, args: &Value) -> Result<Value, String> {
+    // service 信封把会话键与业务参数放在同一对象；typed args 只接受 status，
+    // 且 `TodoListArgs` 开了 `deny_unknown_fields`——会话键必须剥掉，
+    // 否则 `todo.list` 会以 `invalid todo_list args` 失败。
     let mut tool_args = args.clone();
     if let Some(object) = tool_args.as_object_mut() {
-        object.remove("seed");
+        object.remove("session_id");
     }
-    todo_list_for_typed(seed, &tool_args)?.to_envelope_value()
+    todo_list_for_typed(session_id, &tool_args)?.to_envelope_value()
 }
 
 fn recoverable(error: String) -> ToolExecutionError {

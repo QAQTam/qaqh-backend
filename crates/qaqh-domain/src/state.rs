@@ -11,7 +11,7 @@
 //! 三段 `state` 只有三处写入方，逐字段对应如下（`grep -rnE 'state\["[a-z_]+"\]\s*=[^=]'
 //! crates/qaqh-runtime/src/ringing/` 实测：30 处写入**全部**在 `projection.rs`）：
 //!
-//! 1. `projection.rs::SnapshotProjector::snapshot_for` 的初值 —— 仅 `seed` / `channel` / `revision`
+//! 1. `projection.rs::SnapshotProjector::snapshot_for` 的初值 —— 仅 `session_id` / `channel` / `revision`
 //!    （三者均由快照信封承载，故**不在**本模块的类型里重复）；
 //! 2. `projection.rs::fold` —— 事件折叠，下面每个字段的文档注明了它属于哪个频道的
 //!    哪个事件分支；

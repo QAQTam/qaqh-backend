@@ -36,12 +36,12 @@ fn event_id(ordinal: u64) -> EventId {
     EventId::new(format!("01J{ordinal:023}"))
 }
 
-fn content_hash(seed: u8) -> ContentHash {
-    ContentHash::new(format!("sha256:{seed:064x}"))
+fn content_hash(session_id: u8) -> ContentHash {
+    ContentHash::new(format!("sha256:{session_id:064x}"))
 }
 
-fn content_ref(seed: u8) -> ContentRef {
-    ContentRef::new(content_hash(seed))
+fn content_ref(session_id: u8) -> ContentRef {
+    ContentRef::new(content_hash(session_id))
 }
 
 fn recovery_ref() -> RecoveryRef {

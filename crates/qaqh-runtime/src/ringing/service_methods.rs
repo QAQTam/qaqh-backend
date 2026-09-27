@@ -23,26 +23,46 @@ pub enum MethodKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodInfo {
     pub kind: MethodKind,
-    /// 要求 `seed` 参数并做 lease 归属校验（Read 中带会话作用域的子集；
-    /// Write 一律在 params 携带 seed 时校验归属）。
-    pub requires_seed: bool,
+    /// 要求会话参数并做 lease 归属校验（Read 中带会话作用域的子集；
+    /// Write 一律在 params 携带会话键时校验归属）。
+    pub requires_session: bool,
+}
+
+/// 服务面会话参数键。
+pub const SESSION_PARAM: &str = "session_id";
+
+/// 从服务面 params 取会话键。
+pub fn session_param_value(params: &Value) -> Option<&str> {
+    params.get(SESSION_PARAM).and_then(Value::as_str)
+}
+
+/// 取会话键并要求存在，缺失时报 `missing string parameter: session_id`。
+pub fn session_param(params: &Value) -> Result<String, String> {
+    session_param_value(params)
+        .map(str::to_string)
+        .ok_or_else(|| format!("missing string parameter: {SESSION_PARAM}"))
+}
+
+/// fs 远端作用域键。
+pub fn scope_session_param_value(params: &Value) -> Option<&str> {
+    params.get("scope_session_id").and_then(Value::as_str)
 }
 
 const READ: MethodInfo = MethodInfo {
     kind: MethodKind::Read,
-    requires_seed: false,
+    requires_session: false,
 };
 const READ_SEEDED: MethodInfo = MethodInfo {
     kind: MethodKind::Read,
-    requires_seed: true,
+    requires_session: true,
 };
 const WRITE: MethodInfo = MethodInfo {
     kind: MethodKind::Write,
-    requires_seed: false,
+    requires_session: false,
 };
 const WRITE_SEEDED: MethodInfo = MethodInfo {
     kind: MethodKind::Write,
-    requires_seed: true,
+    requires_session: true,
 };
 
 /// 方法表：未列出的名字返回 `None`（HTTP 404）。
@@ -125,6 +145,47 @@ pub fn dispatch(service: &QaqhService, method: &str, params: &Value) -> Result<V
 mod tests {
     use super::*;
 
+    /// 服务面会话键只认 `session_id`：legacy `seed` 已随 Phase E 退场。
+    #[test]
+    fn session_param_only_accepts_session_id() {
+        let modern = serde_json::json!({ "session_id": "new" });
+        assert_eq!(session_param_value(&modern), Some("new"));
+        assert_eq!(session_param(&modern).unwrap(), "new");
+
+        // 旧键不再被接受。
+        let legacy = serde_json::json!({ "seed": "old" });
+        assert_eq!(session_param_value(&legacy), None);
+        assert!(session_param(&legacy).is_err());
+
+        // 两个都在时也只取 `session_id`。
+        let both = serde_json::json!({ "session_id": "new", "seed": "old" });
+        assert_eq!(session_param_value(&both), Some("new"));
+
+        assert_eq!(session_param_value(&serde_json::json!({})), None);
+        assert!(session_param(&serde_json::json!({})).is_err());
+    }
+
+    /// fs 作用域键同款：只认 `scope_session_id`。
+    #[test]
+    fn scope_session_param_only_accepts_scope_session_id() {
+        assert_eq!(
+            scope_session_param_value(&serde_json::json!({ "scope_session_id": "new" })),
+            Some("new")
+        );
+        assert_eq!(
+            scope_session_param_value(&serde_json::json!({ "scope_seed": "old" })),
+            None
+        );
+        assert_eq!(
+            scope_session_param_value(&serde_json::json!({
+                "scope_session_id": "new",
+                "scope_seed": "old"
+            })),
+            Some("new")
+        );
+        assert_eq!(scope_session_param_value(&serde_json::json!({})), None);
+    }
+
     // SessionManager 是全局单例，同一测试进程只能 init 一次；
     // 用 OnceLock 共享一个 service 实例（并行测试也不会重复初始化）。
     static SERVICE: std::sync::OnceLock<QaqhService> = std::sync::OnceLock::new();
@@ -133,10 +194,10 @@ mod tests {
     fn todo_cli_methods_are_registered() {
         let set = lookup("todo.set").expect("todo.set registered");
         assert_eq!(set.kind, MethodKind::Write);
-        assert!(set.requires_seed, "todo.set 必须携带 seed 并做归属校验");
+        assert!(set.requires_session, "todo.set 必须携带 seed 并做归属校验");
         let list = lookup("todo.list").expect("todo.list registered");
         assert_eq!(list.kind, MethodKind::Read);
-        assert!(list.requires_seed);
+        assert!(list.requires_session);
         assert!(lookup("todo.set ").is_none(), "方法名不容尾随空格");
 
         for method in [
@@ -147,7 +208,10 @@ mod tests {
         ] {
             let info = lookup(method).unwrap_or_else(|| panic!("{method} registered"));
             assert_eq!(info.kind, MethodKind::Write, "{method}");
-            assert!(info.requires_seed, "{method} must require seed ownership");
+            assert!(
+                info.requires_session,
+                "{method} must require seed ownership"
+            );
         }
     }
 
@@ -189,9 +253,9 @@ mod tests {
     fn read_methods_carry_read_kind() {
         let info = lookup("session.list").expect("listed");
         assert_eq!(info.kind, MethodKind::Read);
-        assert!(!info.requires_seed);
+        assert!(!info.requires_session);
         let info = lookup("session.meta").expect("listed");
-        assert!(info.requires_seed);
+        assert!(info.requires_session);
     }
 
     #[test]

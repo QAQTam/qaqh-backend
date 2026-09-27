@@ -63,10 +63,10 @@ fn tool_prepared(call_id: &str, args_so_far: &str) -> DomainEvent {
 }
 
 /// 发布并返回信封（断言必须真的 Published）。
-fn publish(hub: &RingingHub, seed: &str, event: DomainEvent) -> RingingEventEnvelope {
-    match hub.publish(seed, event) {
+fn publish(hub: &RingingHub, session_id: &str, event: DomainEvent) -> RingingEventEnvelope {
+    match hub.publish(session_id, event) {
         PublishOutcome::Published { envelope } => envelope,
-        other => panic!("publish must succeed for {seed}, got {other:?}"),
+        other => panic!("publish must succeed for {session_id}, got {other:?}"),
     }
 }
 
@@ -240,7 +240,7 @@ fn restart_preserves_reliable_sequence() {
 
 /// 5. 频道级重放：跨 seed 按 stream_seq 升序合并（SSE 重连的频道视图）。
 #[test]
-fn channel_replay_merges_seeds_in_stream_order() {
+fn channel_replay_merges_sessions_in_stream_order() {
     let hub = RingingHub::new("epoch-1");
     publish(&hub, "s1", tool_started("a1"));
     publish(&hub, "s2", tool_started("b1"));
@@ -249,13 +249,13 @@ fn channel_replay_merges_seeds_in_stream_order() {
 
     let replay = hub.replay_channel_since(RingingChannel::Tool, 0, false);
     assert!(replay.resets.is_empty(), "窗口内不得出现 reset 信号");
-    let seeds: Vec<&str> = replay
+    let sessions: Vec<&str> = replay
         .events
         .iter()
         .map(|e| e.session_id.as_str())
         .collect();
     assert_eq!(
-        seeds,
+        sessions,
         vec!["s1", "s2", "s1", "s2"],
         "频道级重放必须按发布序（stream_seq 升序）跨 seed 合并"
     );

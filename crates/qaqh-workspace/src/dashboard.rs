@@ -61,8 +61,8 @@ pub fn build_tasks() -> Vec<DashboardTask> {
         .unwrap_or_default()
 }
 
-pub fn build_tasks_for(seed: &str) -> Vec<DashboardTask> {
-    load_todo_for(seed)
+pub fn build_tasks_for(session_id: &str) -> Vec<DashboardTask> {
+    load_todo_for(session_id)
         .map(|store| store.items.iter().map(dashboard_task).collect())
         .unwrap_or_default()
 }
@@ -73,8 +73,8 @@ pub fn build_current_todo_id() -> Option<String> {
         .and_then(|store| store.current_id)
 }
 
-pub fn build_current_todo_id_for(seed: &str) -> Option<String> {
-    crate::todo::load_todo_for(seed)
+pub fn build_current_todo_id_for(session_id: &str) -> Option<String> {
+    crate::todo::load_todo_for(session_id)
         .ok()
         .and_then(|store| store.current_id)
 }

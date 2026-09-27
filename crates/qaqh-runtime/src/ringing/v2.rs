@@ -43,9 +43,14 @@ pub enum V2HubError {
 impl std::fmt::Display for V2HubError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SessionMissing(seed) => write!(formatter, "session {seed} has no canonical log"),
-            Self::SnapshotMissing(seed) => {
-                write!(formatter, "session {seed} has no committed snapshot cursor")
+            Self::SessionMissing(session_id) => {
+                write!(formatter, "session {session_id} has no canonical log")
+            }
+            Self::SnapshotMissing(session_id) => {
+                write!(
+                    formatter,
+                    "session {session_id} has no committed snapshot cursor"
+                )
             }
             Self::Canonical(message) => write!(formatter, "canonical log error: {message}"),
             Self::InvalidCursor(message) => write!(formatter, "invalid v2 cursor: {message}"),
@@ -140,24 +145,24 @@ impl V2ProjectionHub {
     pub fn bootstrap(
         &self,
         session_dir: impl AsRef<Path>,
-        seed: &str,
+        session_id: &str,
     ) -> Result<V2BootstrapSnapshot, V2HubError> {
         let session_dir = session_dir.as_ref();
-        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
-        let session = self.session_for(session_dir, session_id, log_id.clone())?;
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id.clone())?;
         let state = session
             .state
             .lock()
             .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
         if state.last_fact_seq == 0 {
-            return Err(V2HubError::SnapshotMissing(seed.to_string()));
+            return Err(V2HubError::SnapshotMissing(session_id.to_string()));
         }
         let cursor = CanonicalCursor::snapshot(log_id.as_str(), state.last_fact_seq);
         let snapshot_cursor = CursorToken::encode_snapshot(&cursor)
             .map_err(|error| V2HubError::InvalidCursor(error.to_string()))?;
         Ok(V2BootstrapSnapshot {
             server_epoch: self.epoch.clone(),
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             log_id,
             snapshot_cursor,
             last_fact_seq: state.last_fact_seq,
@@ -173,11 +178,11 @@ impl V2ProjectionHub {
     pub fn control_interactions(
         &self,
         session_dir: impl AsRef<Path>,
-        seed: &str,
+        session_id: &str,
     ) -> Result<Vec<ControlInteractionState>, V2HubError> {
         let session_dir = session_dir.as_ref();
-        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
-        let session = self.session_for(session_dir, session_id, log_id)?;
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
         let state = session
             .state
             .lock()
@@ -192,11 +197,11 @@ impl V2ProjectionHub {
     pub fn driver_state(
         &self,
         session_dir: impl AsRef<Path>,
-        seed: &str,
+        session_id: &str,
     ) -> Result<Option<ControlDriverState>, V2HubError> {
         let session_dir = session_dir.as_ref();
-        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
-        let session = self.session_for(session_dir, session_id, log_id)?;
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
         let state = session
             .state
             .lock()
@@ -213,13 +218,13 @@ impl V2ProjectionHub {
     pub fn set_team_residency(
         &self,
         session_dir: impl AsRef<Path>,
-        seed: &str,
+        session_id: &str,
         agent_id: &SessionId,
         residency: TeamAgentResidency,
     ) -> Result<(), V2HubError> {
         let session_dir = session_dir.as_ref();
-        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
-        let session = self.session_for(session_dir, session_id, log_id)?;
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
         let mut state = session
             .state
             .lock()
@@ -233,7 +238,9 @@ impl V2ProjectionHub {
             return Ok(());
         };
         let last_fact_seq = state.last_fact_seq;
-        if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
+        if let Some(envelope) =
+            ephemeral_team_envelope(&self.epoch, session_id, last_fact_seq, delta)
+        {
             let _ = state.live_tx.send(envelope);
         }
         Ok(())
@@ -247,12 +254,12 @@ impl V2ProjectionHub {
     pub fn publish_task_delta(
         &self,
         session_dir: impl AsRef<Path>,
-        seed: &str,
+        session_id: &str,
         task: TeamTaskSnapshot,
     ) -> Result<(), V2HubError> {
         let session_dir = session_dir.as_ref();
-        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
-        let session = self.session_for(session_dir, session_id, log_id)?;
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
         let mut state = session
             .state
             .lock()
@@ -263,7 +270,9 @@ impl V2ProjectionHub {
             task: Box::new(task),
         };
         let last_fact_seq = state.last_fact_seq;
-        if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
+        if let Some(envelope) =
+            ephemeral_team_envelope(&self.epoch, session_id, last_fact_seq, delta)
+        {
             let _ = state.live_tx.send(envelope);
         }
         Ok(())
@@ -277,12 +286,12 @@ impl V2ProjectionHub {
     pub fn publish_board_change(
         &self,
         session_dir: impl AsRef<Path>,
-        seed: &str,
+        session_id: &str,
         board: TeamBoardSnapshot,
     ) -> Result<(), V2HubError> {
         let session_dir = session_dir.as_ref();
-        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
-        let session = self.session_for(session_dir, session_id, log_id)?;
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
         let mut state = session
             .state
             .lock()
@@ -293,7 +302,9 @@ impl V2ProjectionHub {
             board: Box::new(board),
         };
         let last_fact_seq = state.last_fact_seq;
-        if let Some(envelope) = ephemeral_team_envelope(&self.epoch, seed, last_fact_seq, delta) {
+        if let Some(envelope) =
+            ephemeral_team_envelope(&self.epoch, session_id, last_fact_seq, delta)
+        {
             let _ = state.live_tx.send(envelope);
         }
         Ok(())
@@ -307,12 +318,13 @@ impl V2ProjectionHub {
     pub fn subscribe(
         &self,
         session_dir: impl AsRef<Path>,
-        seed: &str,
+        session_id: &str,
         since_cursor: Option<&CursorToken>,
     ) -> Result<V2Subscription, V2HubError> {
         let session_dir = session_dir.as_ref();
-        let (session_id, log_id) = resolve_identity(session_dir, seed)?;
-        let session = self.session_for(session_dir, session_id.clone(), log_id.clone())?;
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session =
+            self.session_for(session_dir, canonical_session_id.clone(), log_id.clone())?;
         let state = session
             .state
             .lock()
@@ -340,7 +352,7 @@ impl V2ProjectionHub {
                             schema: qaqh_ringing::RINGING_SCHEMA.into(),
                             version: qaqh_ringing::RINGING_V2_VERSION,
                             server_epoch: self.epoch.clone(),
-                            session_id: seed.to_string(),
+                            session_id: session_id.to_string(),
                             log_id: Some(log_id.as_str().to_string()),
                             snapshot_cursor: snapshot_cursor.clone(),
                             reason: RingingV2ResetReason::LogIdMismatch,
@@ -353,7 +365,7 @@ impl V2ProjectionHub {
                             schema: qaqh_ringing::RINGING_SCHEMA.into(),
                             version: qaqh_ringing::RINGING_V2_VERSION,
                             server_epoch: self.epoch.clone(),
-                            session_id: seed.to_string(),
+                            session_id: session_id.to_string(),
                             log_id: Some(log_id.as_str().to_string()),
                             snapshot_cursor: snapshot_cursor.clone(),
                             reason: RingingV2ResetReason::UnknownFact,
@@ -371,7 +383,7 @@ impl V2ProjectionHub {
         } else {
             replay_after(
                 session_dir,
-                &session_id,
+                &canonical_session_id,
                 &log_id,
                 &self.epoch,
                 since_fact_seq,
@@ -383,7 +395,7 @@ impl V2ProjectionHub {
             // Replaceable history is never replayed. Reconnect/rebaseline gets
             // only the latest value for each stable identity.
             for event in state.replaceables.values() {
-                if let Some(envelope) = event_to_envelope(&self.epoch, seed, event) {
+                if let Some(envelope) = event_to_envelope(&self.epoch, session_id, event) {
                     replay.push_back(envelope);
                 }
             }
@@ -394,7 +406,7 @@ impl V2ProjectionHub {
             replay,
             live_rx,
             server_epoch: self.epoch.clone(),
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             log_id,
             initial_reset,
         })
@@ -434,18 +446,18 @@ impl V2ProjectionHub {
 
 impl ProjectionSink for V2ProjectionHub {
     fn publish(&self, session_dir: &Path, fact: &SessionFact, events: &[ProjectionEvent]) {
-        let seed = session_dir
+        let session_id = session_dir
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
         let Ok(session) =
             self.session_for(session_dir, fact.session_id.clone(), fact.log_id.clone())
         else {
-            log::error!("[ringing-v2] failed to load session {seed} for projection publish");
+            log::error!("[ringing-v2] failed to load session {session_id} for projection publish");
             return;
         };
         let Ok(mut state) = session.state.lock() else {
-            log::error!("[ringing-v2] projection state lock poisoned for {seed}");
+            log::error!("[ringing-v2] projection state lock poisoned for {session_id}");
             return;
         };
         if state.last_fact_seq < fact.fact_seq {
@@ -473,14 +485,14 @@ impl ProjectionSink for V2ProjectionHub {
             {
                 state.replaceables.insert(identity, event.clone());
             }
-            let Some(envelope) = event_to_envelope(&self.epoch, seed, event) else {
+            let Some(envelope) = event_to_envelope(&self.epoch, session_id, event) else {
                 continue;
             };
             let _ = state.live_tx.send(envelope);
         }
         for delta in overlay_deltas {
             if let Some(envelope) =
-                ephemeral_team_envelope(&self.epoch, seed, state.last_fact_seq, delta)
+                ephemeral_team_envelope(&self.epoch, session_id, state.last_fact_seq, delta)
             {
                 let _ = state.live_tx.send(envelope);
             }
@@ -525,11 +537,14 @@ impl V2Subscription {
     }
 }
 
-fn resolve_identity(session_dir: &Path, seed: &str) -> Result<(SessionId, LogId), V2HubError> {
+fn resolve_identity(
+    session_dir: &Path,
+    session_id: &str,
+) -> Result<(SessionId, LogId), V2HubError> {
     if !session_dir.join(CANONICAL_IDENTITY_FILE).exists()
         && !session_dir.join(EVENTS_FILE).exists()
     {
-        return Err(V2HubError::SessionMissing(seed.to_string()));
+        return Err(V2HubError::SessionMissing(session_id.to_string()));
     }
     let identity = CanonicalSessionIdentity::open_or_create(session_dir)
         .map_err(|error| V2HubError::Canonical(error.to_string()))?;
@@ -537,7 +552,7 @@ fn resolve_identity(session_dir: &Path, seed: &str) -> Result<(SessionId, LogId)
     // There is no snapshot cursor to hand out yet, so surface the documented
     // `snapshot_missing` reason rather than a generic canonical error.
     if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
-        return Err(V2HubError::SnapshotMissing(seed.to_string()));
+        return Err(V2HubError::SnapshotMissing(session_id.to_string()));
     }
     Ok((identity.session_id, identity.log_id))
 }
@@ -615,7 +630,7 @@ fn replay_after(
 
 fn ephemeral_team_envelope(
     server_epoch: &str,
-    seed: &str,
+    session_id: &str,
     last_fact_seq: u64,
     delta: TeamDelta,
 ) -> Option<V2Envelope> {
@@ -630,12 +645,12 @@ fn ephemeral_team_envelope(
         projection_index: None,
         payload: ProjectionPayload::TeamDelta(delta),
     };
-    event_to_envelope(server_epoch, seed, &event)
+    event_to_envelope(server_epoch, session_id, &event)
 }
 
 fn event_to_envelope(
     server_epoch: &str,
-    seed: &str,
+    session_id: &str,
     event: &ProjectionEvent,
 ) -> Option<V2Envelope> {
     let stream_key = match &event.stream_key {
@@ -676,7 +691,7 @@ fn event_to_envelope(
         schema: qaqh_ringing::RINGING_SCHEMA.into(),
         version: qaqh_ringing::RINGING_V2_VERSION,
         server_epoch: server_epoch.to_string(),
-        session_id: seed.to_string(),
+        session_id: session_id.to_string(),
         event_id: event.event_id.as_str().to_string(),
         stream_key,
         delivery,

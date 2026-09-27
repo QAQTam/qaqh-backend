@@ -60,14 +60,17 @@ pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<Path
 fn path_allowed(
     sessions: &qaqh_session::SessionManager,
     path: &Path,
-    scope_seed: Option<&str>,
+    scope_session: Option<&str>,
 ) -> bool {
     if is_sensitive_session_path(path) {
         return false;
     }
     let normalized = normalize_lexically(&resolve_target_path(path.to_path_buf()));
-    if let Some(seed) = scope_seed {
-        let Some(cwd) = sessions.workspace_cwd(seed).filter(|cwd| !cwd.is_empty()) else {
+    if let Some(session_id) = scope_session {
+        let Some(cwd) = sessions
+            .workspace_cwd(session_id)
+            .filter(|cwd| !cwd.is_empty())
+        else {
             return false;
         };
         let scoped_root = normalize_lexically(&resolve_target_path(PathBuf::from(
@@ -95,13 +98,13 @@ fn forbidden(kind: &str, path: &str) -> String {
 pub(crate) fn list_remote_directory(
     sessions: &qaqh_session::SessionManager,
     path: &str,
-    scope_seed: Option<&str>,
+    scope_session: Option<&str>,
 ) -> Result<Value, String> {
     let dir = std::path::Path::new(path);
     if !is_absolute_like(path) {
         return Err("fs.list requires an absolute path".to_string());
     }
-    if !path_allowed(sessions, dir, scope_seed) {
+    if !path_allowed(sessions, dir, scope_session) {
         return Err(forbidden("fs.list", path));
     }
     let mut entries: Vec<Value> = Vec::new();
@@ -163,13 +166,13 @@ pub(crate) fn read_remote_file(
     sessions: &qaqh_session::SessionManager,
     path: &str,
     max_bytes: u64,
-    scope_seed: Option<&str>,
+    scope_session: Option<&str>,
 ) -> Result<Value, String> {
     let file_path = std::path::Path::new(path);
     if !is_absolute_like(path) {
         return Err("fs.read requires an absolute path".to_string());
     }
-    if !path_allowed(sessions, file_path, scope_seed) {
+    if !path_allowed(sessions, file_path, scope_session) {
         return Err(forbidden("fs.read", path));
     }
     let meta = std::fs::metadata(file_path).map_err(|e| format!("fs.read {path}: {e}"))?;
@@ -192,24 +195,24 @@ pub(crate) fn read_remote_file(
     }))
 }
 
-pub(crate) fn workspace(sessions: &qaqh_session::SessionManager, seed: &str) -> String {
-    if seed.is_empty() {
+pub(crate) fn workspace(sessions: &qaqh_session::SessionManager, session_id: &str) -> String {
+    if session_id.is_empty() {
         return String::new();
     }
     // 统一数据源：meta.cwd（workspace.txt 退役，读取侧惰性迁移）。
-    sessions.workspace_cwd(seed).unwrap_or_default()
+    sessions.workspace_cwd(session_id).unwrap_or_default()
 }
 
 pub(crate) fn git<F>(
     sessions: &qaqh_session::SessionManager,
-    seed: &str,
+    session_id: &str,
     operation: F,
     empty: Value,
 ) -> Result<Value, String>
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
-    let workspace = workspace(sessions, seed);
+    let workspace = workspace(sessions, session_id);
     if workspace.is_empty() {
         return Ok(empty);
     }
@@ -217,8 +220,11 @@ where
     serde_json::from_str(&value).or_else(|_| Ok(json!(value)))
 }
 
-pub(crate) fn qaqh_dir(sessions: &qaqh_session::SessionManager, seed: &str) -> std::path::PathBuf {
-    let workspace = workspace(sessions, seed);
+pub(crate) fn qaqh_dir(
+    sessions: &qaqh_session::SessionManager,
+    session_id: &str,
+) -> std::path::PathBuf {
+    let workspace = workspace(sessions, session_id);
     if workspace.is_empty() || workspace == "." {
         qaqh_types::platform::data_dir().join("workspace")
     } else {

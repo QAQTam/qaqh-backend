@@ -25,11 +25,16 @@ impl SnapshotProjector {
 
     /// 应用领域事件并更新该 seed+channel 的领域状态。
     /// 返回是否发生状态变更（用于决定是否 bump state_revision）。
-    pub fn apply(&mut self, channel: RingingChannel, seed: &str, event: &DomainEvent) -> bool {
-        let key = (channel, seed.to_string());
+    pub fn apply(
+        &mut self,
+        channel: RingingChannel,
+        session_id: &str,
+        event: &DomainEvent,
+    ) -> bool {
+        let key = (channel, session_id.to_string());
         let entry = self.state.entry(key.clone()).or_insert_with(|| {
             serde_json::json!({
-                "seed": seed,
+                "session_id": session_id,
                 "channel": channel.as_str(),
                 "revision": 0,
             })
@@ -47,31 +52,31 @@ impl SnapshotProjector {
     pub fn snapshot_for(
         &self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         baseline_stream_seq: u64,
     ) -> RingingChannelSnapshot {
         let state = self
             .state
-            .get(&(channel, seed.to_string()))
+            .get(&(channel, session_id.to_string()))
             .cloned()
             .unwrap_or_else(|| {
                 serde_json::json!({
-                    "seed": seed,
+                    "session_id": session_id,
                     "channel": channel.as_str(),
                     "revision": 0,
                 })
             });
         let revision = self
             .revisions
-            .get(&(channel, seed.to_string()))
+            .get(&(channel, session_id.to_string()))
             .copied()
             .unwrap_or(0);
-        RingingChannelSnapshot::new(channel, seed, baseline_stream_seq, revision, state)
+        RingingChannelSnapshot::new(channel, session_id, baseline_stream_seq, revision, state)
     }
 
-    pub fn revision(&self, channel: RingingChannel, seed: &str) -> u64 {
+    pub fn revision(&self, channel: RingingChannel, session_id: &str) -> u64 {
         self.revisions
-            .get(&(channel, seed.to_string()))
+            .get(&(channel, session_id.to_string()))
             .copied()
             .unwrap_or(0)
     }
@@ -444,33 +449,33 @@ mod tests {
 /// 这里额外过滤是为了**既有归档**：已落盘的旧会话不会因写侧修复而自愈，
 /// 必须让每次 reload 的投影面也看不见它们。
 pub fn build_turns_from_messages(
-    seed: &str,
+    session_id: &str,
     messages: &[qaqh_types::Message],
     start: Option<usize>,
     max_count: Option<usize>,
 ) -> Vec<qaqh_domain::TurnData> {
-    project_turns_from_messages(seed, messages, start, max_count).1
+    project_turns_from_messages(session_id, messages, start, max_count).1
 }
 
 /// Return both the total persisted turn count and the requested UI window.
 pub fn project_turns_from_messages(
-    seed: &str,
+    session_id: &str,
     messages: &[qaqh_types::Message],
     start: Option<usize>,
     max_count: Option<usize>,
 ) -> (usize, Vec<qaqh_domain::TurnData>) {
-    let (store, _) = qaqh_message::MessageStore::from_messages(seed, messages, 0);
+    let (store, _) = qaqh_message::MessageStore::from_messages(session_id, messages, 0);
     let total = store.turns().len();
     (total, build_turns(store.turns(), start, max_count))
 }
 
 /// Build only the tail window used by a cold daemon Snapshot.
 pub fn project_recent_turns_from_messages(
-    seed: &str,
+    session_id: &str,
     messages: &[qaqh_types::Message],
     max_count: usize,
 ) -> (usize, Vec<qaqh_domain::TurnData>) {
-    let (store, _) = qaqh_message::MessageStore::from_messages(seed, messages, 0);
+    let (store, _) = qaqh_message::MessageStore::from_messages(session_id, messages, 0);
     let total = store.turns().len();
     let start = total.saturating_sub(max_count);
     (

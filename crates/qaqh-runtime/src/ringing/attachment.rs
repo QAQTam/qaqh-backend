@@ -12,7 +12,7 @@ use crate::RingingHub;
 /// attachments.
 pub fn hydrate_attachment_previews(
     hub: &RingingHub,
-    seed: &str,
+    session_id: &str,
     command: &mut qaqh_ringing::RingingCommand,
 ) -> Result<(), String> {
     let qaqh_ringing::RingingCommand::Conversation(
@@ -32,7 +32,7 @@ pub fn hydrate_attachment_previews(
     let mut parts = vec!["[Files]".to_string()];
     for reference in references {
         let entry = hub
-            .get_content(seed, &reference.content_id)
+            .get_content(session_id, &reference.content_id)
             .ok_or_else(|| "attachment_not_found".to_string())?;
         if entry.sha256 != reference.sha256 || entry.media_type != reference.media_type {
             return Err("attachment_mismatch".into());

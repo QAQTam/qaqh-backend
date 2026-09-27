@@ -17,8 +17,8 @@ use qaqh_runtime::agent::types::{WorkerCommand, WriterEvent};
 static SESSION_INIT: Once = Once::new();
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-fn send_cmd(cmd_tx: &mpsc::SyncSender<WorkerCommand>, seed: &str, command: RingingCommand) {
-    let env = RingingWorkerCommandEnvelope::new(seed, "inproc-cmd", command);
+fn send_cmd(cmd_tx: &mpsc::SyncSender<WorkerCommand>, session_id: &str, command: RingingCommand) {
+    let env = RingingWorkerCommandEnvelope::new(session_id, "inproc-cmd", command);
     cmd_tx
         .send(WorkerCommand {
             frame: env,
@@ -83,7 +83,7 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
                 custom_tools: Vec::new(),
             }),
         );
-        let seed = match expect(&event_rx, Duration::from_secs(10), |event| {
+        let session_id = match expect(&event_rx, Duration::from_secs(10), |event| {
             matches!(
                 event,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -97,14 +97,14 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
             }
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
-        assert!(!seed.is_empty());
+        assert!(!session_id.is_empty());
 
         // Interrupt frames still set the shared cancel token before the command
         // enters the queue; SessionShutdown is the loop's normal exit signal.
         assert!(
             qaqh_runtime::agent::loop_core::ringing_command_is_interrupt(
                 &RingingWorkerCommandEnvelope::new(
-                    &seed,
+                    &session_id,
                     "inproc-shutdown",
                     RingingCommand::Control(ControlCommand::SessionShutdown)
                 )
@@ -112,7 +112,7 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
         );
         send_cmd(
             &cmd_tx,
-            &seed,
+            &session_id,
             RingingCommand::Control(ControlCommand::SessionShutdown),
         );
     });

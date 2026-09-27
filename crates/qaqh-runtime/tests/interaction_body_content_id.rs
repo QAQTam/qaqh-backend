@@ -22,7 +22,7 @@ fn ask_request_ref_matches_interaction_body_content_id() {
     }
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
 
-    let seed = "ask-body-content-id";
+    let session_id = "ask-body-content-id";
     let wire_turn = "turn-ask-body";
     let wire_call = "call-ask-body";
     let mode = AskMode::Batch;
@@ -42,7 +42,7 @@ fn ask_request_ref_matches_interaction_body_content_id() {
     ];
 
     let mut agent = AgentState::init("ask-body-test", qaqh_config::Config::default());
-    agent.session.session_id = seed.to_string();
+    agent.session.session_id = session_id.to_string();
     agent.ephemeral = false;
 
     let mut engine = TurnEngine::new();
@@ -57,7 +57,7 @@ fn ask_request_ref_matches_interaction_body_content_id() {
     )
     .expect("persist ask yield");
 
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
     let identity = CanonicalSessionIdentity::open_or_create(&session_dir).expect("identity");
     let facts = CommittedFactReader::open(
         &session_dir,
@@ -89,7 +89,7 @@ fn ask_request_ref_matches_interaction_body_content_id() {
     let hub = qaqh_runtime::RingingHub::new("ask-body-epoch");
     let stored_id = hub
         .put_interaction_content(
-            seed,
+            session_id,
             wire_call,
             interaction_body::INTERACTION_BODY_MEDIA_TYPE,
             body,
@@ -99,7 +99,7 @@ fn ask_request_ref_matches_interaction_body_content_id() {
     let entry = hub
         .get_content_any(&expected_id)
         .expect("ref resolves to stored body");
-    assert_eq!(entry.owners, vec![seed.to_string()]);
+    assert_eq!(entry.owners, vec![session_id.to_string()]);
     assert!(
         entry.pinned,
         "interaction body must stay pinned while pending"

@@ -105,8 +105,9 @@ impl Drop for MockServer {
 // Ringing 命令发送 helper（M3：legacy Ui2Agent 输入已拆除）
 // ═══════════════════════════════════════════════════════
 
-fn send_cmd(writer: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
-    let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", next_command_id()), command);
+fn send_cmd(writer: &mut os_pipe::PipeWriter, session_id: &str, command: RingingCommand) {
+    let env =
+        RingingWorkerCommandEnvelope::new(session_id, format!("c{}", next_command_id()), command);
     writeln!(
         writer,
         "{}",
@@ -162,9 +163,9 @@ fn cmd_session_create(close_current: bool) -> RingingCommand {
     })
 }
 
-fn cmd_session_resume(seed: &str) -> RingingCommand {
+fn cmd_session_resume(session_id: &str) -> RingingCommand {
     RingingCommand::Control(ControlCommand::SessionResume {
-        session_id: seed.into(),
+        session_id: session_id.into(),
     })
 }
 
@@ -501,7 +502,7 @@ fn run_case_with_delay(
     let workspace = temp.path().to_path_buf();
     let driver = thread::spawn(move || {
         send_cmd(&mut input_writer, "", cmd_session_create(false));
-        let seed = match expect_event(&event_rx, Duration::from_secs(5), |event| {
+        let session_id = match expect_event(&event_rx, Duration::from_secs(5), |event| {
             matches!(
                 event,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -516,13 +517,13 @@ fn run_case_with_delay(
             other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
         qaqh_workspace::set_workspace(&workspace.to_string_lossy());
-        let seed_for_shutdown = seed.clone();
+        let session_for_shutdown = session_id.clone();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            test(&mut input_writer, &event_rx, request_count, seed)
+            test(&mut input_writer, &event_rx, request_count, session_id)
         }));
         send_cmd(
             &mut input_writer,
-            &seed_for_shutdown,
+            &session_for_shutdown,
             cmd_session_shutdown(),
         );
         if let Err(payload) = outcome {
@@ -606,21 +607,25 @@ fn batch_ask_waits_for_every_answer_and_writes_one_exact_result() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("ask me"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("ask me"));
             let (_, mode, requested) = expect_interaction_requested(receiver, "ask-batch");
             assert_eq!(mode, AskMode::Batch);
             assert_eq!(requested.len(), 2);
 
             // 部分答案 → 拒绝（batch 需要全部）
-            send_cmd(writer, &seed, cmd_ask_respond("ask-batch", &[("q1", "A")]));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_ask_respond("ask-batch", &[("q1", "A")]),
+            );
             expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
             // 完整答案 → resolved
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("ask-batch", &[("q1", "A"), ("q2", "D")]),
             );
             expect_interaction_resolved(receiver, "ask-batch", AskResolution::Answered);
@@ -675,15 +680,23 @@ fn multiple_ask_calls_are_presented_sequentially_before_one_resume() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("ask twice"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("ask twice"));
             expect_interaction_requested(receiver, "ask-1");
-            send_cmd(writer, &seed, cmd_ask_respond("ask-1", &[("q1", "A")]));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_ask_respond("ask-1", &[("q1", "A")]),
+            );
             expect_interaction_resolved(receiver, "ask-1", AskResolution::Answered);
             expect_interaction_requested(receiver, "ask-2");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send_cmd(writer, &seed, cmd_ask_respond("ask-2", &[("q1", "B")]));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_ask_respond("ask-2", &[("q1", "B")]),
+            );
             expect_interaction_resolved(receiver, "ask-2", AskResolution::Answered);
             let events = collect_through_terminal(receiver);
             let finished = tool_finished_ids(&events);
@@ -715,8 +728,8 @@ fn invalid_or_stale_responses_do_not_consume_the_active_ask() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("validate identity"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("validate identity"));
             expect_interaction_requested(receiver, "active-ask");
 
             let invalid: [(&str, &[(&str, &str)]); 4] = [
@@ -726,12 +739,16 @@ fn invalid_or_stale_responses_do_not_consume_the_active_ask() {
                 ("active-ask", &[("q1", "B")]),
             ];
             for (ask_id, answers) in invalid {
-                send_cmd(writer, &seed, cmd_ask_respond(ask_id, answers));
+                send_cmd(writer, &session_id, cmd_ask_respond(ask_id, answers));
                 expect_operation_failed(receiver, "ask_rejected");
                 assert_eq!(request_count.load(Ordering::SeqCst), 1);
             }
 
-            send_cmd(writer, &seed, cmd_ask_respond("active-ask", &[("q1", "A")]));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_ask_respond("active-ask", &[("q1", "A")]),
+            );
             expect_interaction_resolved(receiver, "active-ask", AskResolution::Answered);
             collect_through_terminal(receiver);
         },
@@ -751,12 +768,12 @@ fn duplicate_ask_resolution_is_rejected_after_terminal_without_modal_replay() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("resolve once"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("resolve once"));
             expect_interaction_requested(receiver, "duplicate-ask");
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("duplicate-ask", &[("q1", "A")]),
             );
             expect_interaction_resolved(receiver, "duplicate-ask", AskResolution::Answered);
@@ -779,7 +796,7 @@ fn duplicate_ask_resolution_is_rejected_after_terminal_without_modal_replay() {
 
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("duplicate-ask", &[("q1", "A")]),
             );
             expect_operation_failed(receiver, "interaction_already_resolved");
@@ -801,15 +818,15 @@ fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
             final_round("fresh turn finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("start dismiss case"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("start dismiss case"));
             expect_interaction_requested(receiver, "dismiss-ask");
 
-            send_cmd(writer, &seed, cmd_ask_dismiss("stale-dismiss"));
+            send_cmd(writer, &session_id, cmd_ask_dismiss("stale-dismiss"));
             expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send_cmd(writer, &seed, cmd_ask_dismiss("dismiss-ask"));
+            send_cmd(writer, &session_id, cmd_ask_dismiss("dismiss-ask"));
             expect_interaction_resolved(receiver, "dismiss-ask", AskResolution::Dismissed);
             let aborted = collect_through_terminal(receiver);
             assert!(aborted.iter().any(|event| matches!(
@@ -819,7 +836,7 @@ fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
                 ) if stop_reason.as_deref() == Some("cancelled")
             )));
 
-            send_cmd(writer, &seed, cmd_user_input("fresh input"));
+            send_cmd(writer, &session_id, cmd_user_input("fresh input"));
             let fresh = collect_through_terminal(receiver);
             assert!(fresh.iter().any(|event| matches!(
                 event,
@@ -848,18 +865,22 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("read then ask"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("read then ask"));
             expect_permission_requested(receiver, "read-call");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send_cmd(writer, &seed, cmd_permission_respond("read-call", true));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_permission_respond("read-call", true),
+            );
             expect_interaction_requested(receiver, "ask-after-read");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("ask-after-read", &[("q1", "yes")]),
             );
             let events = collect_through_terminal(receiver);
@@ -890,21 +911,29 @@ fn every_permission_resolves_before_the_queued_ask_is_presented() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("approve both then ask"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("approve both then ask"));
             for expected in ["read-one", "read-two"] {
                 expect_permission_requested(receiver, expected);
             }
 
-            send_cmd(writer, &seed, cmd_permission_respond("read-one", true));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_permission_respond("read-one", true),
+            );
             assert_no_turn_advance(receiver, Duration::from_millis(250));
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send_cmd(writer, &seed, cmd_permission_respond("read-two", true));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_permission_respond("read-two", true),
+            );
             expect_interaction_requested(receiver, "ask-after-two-reads");
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("ask-after-two-reads", &[("q1", "yes")]),
             );
             let events = collect_through_terminal(receiver);
@@ -924,11 +953,11 @@ fn cancel_aborts_one_suspended_turn_and_invalidates_its_ask_id() {
             json!({"question":"Wait?", "options":["yes"], "allow_custom":false}),
         )])],
         1,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("start cancel case"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("start cancel case"));
             expect_interaction_requested(receiver, "cancel-ask");
 
-            send_cmd(writer, &seed, cmd_cancel());
+            send_cmd(writer, &session_id, cmd_cancel());
             let aborted = collect_until_quiet(receiver, Duration::from_millis(500));
             assert_eq!(
                 terminal_count(&aborted),
@@ -942,7 +971,7 @@ fn cancel_aborts_one_suspended_turn_and_invalidates_its_ask_id() {
 
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("cancel-ask", &[("q1", "yes")]),
             );
             expect_operation_failed(receiver, "ask_rejected");
@@ -964,10 +993,14 @@ fn new_session_invalidates_the_suspended_ask() {
             final_round("stale answer was consumed"),
         ],
         1,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("start new-session case"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_user_input("start new-session case"),
+            );
             expect_interaction_requested(receiver, "new-session-ask");
-            send_cmd(writer, &seed, cmd_session_create(true));
+            send_cmd(writer, &session_id, cmd_session_create(true));
             expect_event(receiver, Duration::from_secs(5), |event| {
                 matches!(
                     event,
@@ -979,7 +1012,7 @@ fn new_session_invalidates_the_suspended_ask() {
             });
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("new-session-ask", &[("q1", "yes")]),
             );
             expect_operation_failed(receiver, "ask_rejected");
@@ -1001,10 +1034,14 @@ fn resume_session_invalidates_the_suspended_ask() {
             final_round("stale answer was consumed"),
         ],
         1,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("start resume-session case"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_user_input("start resume-session case"),
+            );
             expect_interaction_requested(receiver, "resume-session-ask");
-            send_cmd(writer, &seed, cmd_session_resume(&seed));
+            send_cmd(writer, &session_id, cmd_session_resume(&session_id));
             expect_event(receiver, Duration::from_secs(5), |event| {
                 matches!(
                     event,
@@ -1016,7 +1053,7 @@ fn resume_session_invalidates_the_suspended_ask() {
             });
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("resume-session-ask", &[("q1", "yes")]),
             );
             expect_operation_failed(receiver, "ask_rejected");
@@ -1035,10 +1072,10 @@ fn undo_invalidates_the_suspended_ask() {
             json!({"question":"Undo?", "options":["yes"], "allow_custom":false}),
         )])],
         1,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("start undo case"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("start undo case"));
             let (turn_id, _, _) = expect_interaction_requested(receiver, "undo-ask");
-            send_cmd(writer, &seed, cmd_undo(&turn_id));
+            send_cmd(writer, &session_id, cmd_undo(&turn_id));
             // undo 完成后不再有 legacy SessionRestored；Ringing 侧以
             // OperationCompleted 表达，前端随后自行重拉 bootstrap 快照。
             expect_event(receiver, Duration::from_secs(5), |event| {
@@ -1047,7 +1084,11 @@ fn undo_invalidates_the_suspended_ask() {
                     RingingEvent::Control(ControlEvent::OperationCompleted { .. })
                 )
             });
-            send_cmd(writer, &seed, cmd_ask_respond("undo-ask", &[("q1", "yes")]));
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_ask_respond("undo-ask", &[("q1", "yes")]),
+            );
             expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
         },
@@ -1061,16 +1102,16 @@ fn cancel_during_gate_emits_exactly_one_terminal_transaction() {
         vec![final_round("too late")],
         Duration::from_millis(300),
         1,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("cancel during gate"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("cancel during gate"));
             expect_turn_started(receiver);
             let deadline = Instant::now() + Duration::from_secs(5);
             while request_count.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
-            send_cmd(writer, &seed, cmd_cancel());
-            send_cmd(writer, &seed, cmd_cancel());
+            send_cmd(writer, &session_id, cmd_cancel());
+            send_cmd(writer, &session_id, cmd_cancel());
             let events = collect_until_quiet(receiver, Duration::from_millis(500));
             assert_eq!(
                 terminal_count(&events),
@@ -1094,16 +1135,20 @@ fn stale_undo_does_not_consume_the_active_ask() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, seed| {
-            send_cmd(writer, &seed, cmd_user_input("validate undo identity"));
+        |writer, receiver, request_count, session_id| {
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_user_input("validate undo identity"),
+            );
             expect_interaction_requested(receiver, "undo-identity-ask");
-            send_cmd(writer, &seed, cmd_undo("stale-turn"));
+            send_cmd(writer, &session_id, cmd_undo("stale-turn"));
             expect_operation_failed(receiver, "undo_conflict");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
             send_cmd(
                 writer,
-                &seed,
+                &session_id,
                 cmd_ask_respond("undo-identity-ask", &[("q1", "yes")]),
             );
             expect_interaction_resolved(receiver, "undo-identity-ask", AskResolution::Answered);

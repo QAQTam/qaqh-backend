@@ -90,11 +90,18 @@ fn reload_hub(root: &Path, epoch: &str) -> RingingHub {
 #[test]
 fn interrupted_reload_history_has_no_hanging_tool_use() {
     let root = shared_root();
-    let seed = "hanging-tooluse-reload";
-    let control_seed = "hanging-tooluse-reload-control";
-    SessionManager::global().save_append(seed, &interrupted_archive(), "test-model", None, 0, 1);
+    let session_id = "hanging-tooluse-reload";
+    let control_session = "hanging-tooluse-reload-control";
     SessionManager::global().save_append(
-        control_seed,
+        session_id,
+        &interrupted_archive(),
+        "test-model",
+        None,
+        0,
+        1,
+    );
+    SessionManager::global().save_append(
+        control_session,
         &complete_tool_archive(),
         "test-model",
         None,
@@ -105,7 +112,7 @@ fn interrupted_reload_history_has_no_hanging_tool_use() {
     // ── 中断会话：reload（首次装载 → timeline 缺失 → 从 messages.jsonl 重建）──
     let hub = reload_hub(&root, "epoch-hanging-1");
     let snapshot = hub
-        .timeline_snapshot(seed)
+        .timeline_snapshot(session_id)
         .expect("timeline must be rebuilt from messages.jsonl");
     assert_eq!(snapshot.turns.len(), 1);
     let round_blocs = &snapshot.turns[0].rounds[0].blocks;
@@ -130,7 +137,7 @@ fn interrupted_reload_history_has_no_hanging_tool_use() {
     );
 
     // conversation 快照（前端 bootstrap 的 turns）同样不得出现悬挂 tool_calls。
-    let conversation = hub.conversation_snapshot(seed);
+    let conversation = hub.conversation_snapshot(session_id);
     let turns = conversation.state["turns"]
         .as_array()
         .expect("persisted turns in conversation snapshot")
@@ -147,13 +154,13 @@ fn interrupted_reload_history_has_no_hanging_tool_use() {
 
     // ── 第二次 reload：结果必须与首次一致（幂等，不因重建而变）──
     let reopened = reload_hub(&root, "epoch-hanging-2")
-        .timeline_snapshot(seed)
+        .timeline_snapshot(session_id)
         .expect("timeline present after rebuild");
     assert_eq!(reopened, snapshot, "second reload must be identical");
 
     // ── control 组：完整工具环照常回放，过滤不误伤 ──
     let control = reload_hub(&root, "epoch-hanging-3")
-        .timeline_snapshot(control_seed)
+        .timeline_snapshot(control_session)
         .expect("control timeline present");
     let control_tools = control.turns[0].rounds[0]
         .blocks

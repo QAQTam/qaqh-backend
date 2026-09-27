@@ -6,12 +6,12 @@
 
 /// Builds the native replaceable dashboard record without exposing the legacy
 /// `Agent2Ui::Dashboard` schema to new consumers.
-pub fn build_snapshot(seed: String) -> qaqh_domain::DashboardSnapshot {
+pub fn build_snapshot(session_id: String) -> qaqh_domain::DashboardSnapshot {
     qaqh_domain::DashboardSnapshot {
-        session_id: seed.clone(),
+        session_id: session_id.clone(),
         documents: qaqh_workspace::dashboard::build_documents(),
         recent_edits: qaqh_workspace::dashboard::build_recent_edits(),
-        tasks: qaqh_workspace::dashboard::build_tasks_for(&seed),
-        current_todo_id: qaqh_workspace::dashboard::build_current_todo_id_for(&seed),
+        tasks: qaqh_workspace::dashboard::build_tasks_for(&session_id),
+        current_todo_id: qaqh_workspace::dashboard::build_current_todo_id_for(&session_id),
     }
 }

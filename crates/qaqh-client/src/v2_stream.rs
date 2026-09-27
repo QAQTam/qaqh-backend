@@ -54,7 +54,7 @@ pub struct V2StreamHandlers {
 
 /// 一条 seed 的常驻 v2 单流。
 pub struct V2Stream {
-    seed: String,
+    session_id: String,
     client: Client,
     handlers: V2StreamHandlers,
     /// 已接受的 canonical cursor（只有 reliable 事件推进）。
@@ -64,9 +64,9 @@ pub struct V2Stream {
 }
 
 impl V2Stream {
-    pub fn new(seed: impl Into<String>, client: Client, handlers: V2StreamHandlers) -> Self {
+    pub fn new(session_id: impl Into<String>, client: Client, handlers: V2StreamHandlers) -> Self {
         Self {
-            seed: seed.into(),
+            session_id: session_id.into(),
             client,
             handlers,
             cursor: None,
@@ -96,15 +96,18 @@ impl V2Stream {
                         // 会话尚未物化（新建会话在首个 canonical 事实落盘前
                         // 404/409）是**正常瞬态**：报 `Connecting`（不抬流告警），
                         // 短退避重试到物化为止。
-                        (self.handlers.on_status)(self.seed.clone(), V2StreamStatus::Connecting);
+                        (self.handlers.on_status)(
+                            self.session_id.clone(),
+                            V2StreamStatus::Connecting,
+                        );
                         log::debug!(
                             "[qaqh-client] v2 stream {} waiting for session to materialize: {err}",
-                            self.seed
+                            self.session_id
                         );
                     } else {
                         let reason = err.reconnect_reason();
                         (self.handlers.on_status)(
-                            self.seed.clone(),
+                            self.session_id.clone(),
                             V2StreamStatus::Reconnecting {
                                 retry_ms,
                                 reason,
@@ -113,7 +116,7 @@ impl V2Stream {
                         );
                         log::warn!(
                             "[qaqh-client] v2 stream {} reconnect in {retry_ms}ms: {err}",
-                            self.seed
+                            self.session_id
                         );
                     }
                     tokio::select! {
@@ -138,7 +141,7 @@ impl V2Stream {
         session_stop: &mut watch::Receiver<bool>,
         retry_ms: &mut u64,
     ) -> Result<()> {
-        (self.handlers.on_status)(self.seed.clone(), V2StreamStatus::Connecting);
+        (self.handlers.on_status)(self.session_id.clone(), V2StreamStatus::Connecting);
         let server_epoch = self
             .client
             .v2_session_state()
@@ -154,17 +157,17 @@ impl V2Stream {
         // snapshot cursor，再从它订阅。**不能**裸订阅——服务端把「无 cursor」
         // 解释为「只看 live」，会静默丢掉 snapshot 与订阅之间的所有事实。
         if self.cursor.is_none() {
-            let bootstrap = self.client.bootstrap_v2(&self.seed).await?;
+            let bootstrap = self.client.bootstrap_v2(&self.session_id).await?;
             self.cursor = Some(bootstrap.snapshot_cursor.clone());
         }
 
         let mut subscription = self
             .client
-            .subscribe_v2(&self.seed, self.cursor.as_ref())
+            .subscribe_v2(&self.session_id, self.cursor.as_ref())
             .await?;
         *retry_ms = RETRY_BASE_MS;
         (self.handlers.on_status)(
-            self.seed.clone(),
+            self.session_id.clone(),
             V2StreamStatus::Open {
                 server_epoch,
                 cursor: self.cursor.as_ref().map(|c| c.as_str().to_string()),
@@ -201,14 +204,14 @@ impl V2Stream {
                             {
                                 self.cursor = Some(cursor);
                             }
-                            (self.handlers.on_event)(self.seed.clone(), *event);
+                            (self.handlers.on_event)(self.session_id.clone(), *event);
                             (self.handlers.on_liveness)();
                         }
                         Some(ClientV2SubscriptionEvent::Reset(reset)) => {
                             // 服务端发完 reset 即断流；把 cursor 对齐到 reset 携带的
                             // snapshot（若没有就归零，由上层重新 bootstrap）。
                             self.cursor = reset.snapshot_cursor.clone();
-                            (self.handlers.on_reset)(self.seed.clone(), reset);
+                            (self.handlers.on_reset)(self.session_id.clone(), reset);
                             return Ok(());
                         }
                         None => {

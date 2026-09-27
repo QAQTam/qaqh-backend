@@ -11,12 +11,12 @@ use serde_json::json;
 /// `sessions` 为 None（测试/未装配）等价于旧 `try_global()` 为空：返回 `None`。
 pub fn persisted_conversation_state(
     sessions: Option<&SessionManager>,
-    seed: &str,
+    session_id: &str,
 ) -> Option<serde_json::Value> {
-    let (meta, _archive_messages, active_messages) = sessions?.load_for_resume(seed)?;
+    let (meta, _archive_messages, active_messages) = sessions?.load_for_resume(session_id)?;
     // 与 worker resume 同一基线：活跃视图已由归档摘要 + 水位派生。
     let (total, turns) =
-        super::projection::project_turns_from_messages(seed, &active_messages, None, None);
+        super::projection::project_turns_from_messages(session_id, &active_messages, None, None);
     // 恢复 Info 面板所需元数据：model 以会话实际使用过的为准（meta.json 持久化），
     // 老会话可能为空，回退到当前配置；context_limit 未持久化，取当前配置。
     let config = qaqh_config::Config::load().unwrap_or_default();
