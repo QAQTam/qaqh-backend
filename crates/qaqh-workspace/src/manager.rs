@@ -403,9 +403,9 @@ impl ToolManager {
         self.allowed = if known.is_empty() { None } else { Some(known) };
     }
 
-    pub fn apply_init(&mut self, allowed_tools: Vec<String>, session_seed: &str) {
+    pub fn apply_init(&mut self, allowed_tools: Vec<String>, session_id: &str) {
         self.set_allowed(allowed_tools);
-        crate::set_current_session(session_seed);
+        crate::set_current_session(session_id);
     }
 
     pub fn all_defs(&self) -> Vec<qaqh_types::ToolDef> {

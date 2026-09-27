@@ -422,7 +422,7 @@ pub trait Emitter {
     /// 同步当前会话 seed（Ringing 事件信封的路由键）。
     /// 会话创建/恢复后必须调用，否则事件被 daemon 按 seed 过滤丢弃。
     /// 默认空实现：未持有 seed 的 emitter（测试 mock）无需处理。
-    fn set_seed(&self, _seed: &str) {}
+    fn set_session(&self, _session: &str) {}
 
     /// 后台线程（标题生成等）直发 writer 通道的句柄；未持有（测试 mock）
     /// 返回 None——调用方降级为仅主线程事件。
@@ -519,11 +519,11 @@ impl StatsCollector {
         self.code_stats.push(delta);
     }
     /// Persist accumulated deltas to disk. Clears the in-memory buffer.
-    pub fn flush(&mut self, seed: &str) {
-        if self.code_stats.is_empty() || seed.is_empty() {
+    pub fn flush(&mut self, session_id: &str) {
+        if self.code_stats.is_empty() || session_id.is_empty() {
             return;
         }
-        let dir = qaqh_types::platform::sessions_dir().join(seed);
+        let dir = qaqh_types::platform::sessions_dir().join(session_id);
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("code_stats.jsonl");
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -603,10 +603,10 @@ impl SessionBundle {
         self.agent.session.skills = self.agent.skills.session_state();
         if !self.agent.ephemeral && !self.agent.session.session_id.is_empty() {
             let skills = self.agent.session.skills.clone();
-            let seed = self.agent.session.session_id.clone();
+            let session_id = self.agent.session.session_id.clone();
             self.agent
                 .enqueue_meta_op(crate::agent::state::agent::MetaOp::PersistSkills {
-                    seed,
+                    session_id,
                     skills,
                 });
         }

@@ -64,7 +64,7 @@ mod sse_tests {
         {
             let mut g = leases.lock().unwrap();
             g.open(SESSION.into(), "ci-lag".into());
-            g.attach_seed(SESSION, SEED);
+            g.attach_session(SESSION, SEED);
         }
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
@@ -224,7 +224,7 @@ mod sse_tests {
         let data = terminated.expect("timeline termination frame must arrive");
         let v: serde_json::Value = serde_json::from_str(&data).expect("valid json payload");
         assert_eq!(v["code"], "lagged");
-        assert_eq!(v["seed"], SEED);
+        assert_eq!(v["session_id"], SEED);
         assert!(
             v["skipped"].as_u64().unwrap_or(0) > 0,
             "payload must carry the skipped count: {data}"
@@ -344,7 +344,7 @@ mod sse_tests {
     }
 
     #[tokio::test]
-    async fn injected_timeline_gap_does_not_leak_foreign_seed_entries() {
+    async fn injected_timeline_gap_does_not_leak_foreign_session_entries() {
         let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
         let mut state = test_state_with_hub(hub.clone());
         state.test_hooks = std::sync::Arc::new(TestHooks::for_test_timeline_gap());
@@ -464,7 +464,7 @@ mod axum_tests {
     /// #345：v2 content 端点按 id 取（不带 seed），归属校验用条目自己的 seed；
     /// v1 content 路由已硬切。
     #[tokio::test]
-    async fn v2_content_route_is_seed_free_and_v1_is_hard_cut() {
+    async fn v2_content_route_is_session_free_and_v1_is_hard_cut() {
         let state = test_state();
         let app = build_router(state.clone());
         let content_id = state.hub.put_content(
@@ -476,9 +476,9 @@ mod axum_tests {
         {
             let mut leases = state.leases.lock().unwrap();
             leases.open("cs-owner".into(), "ci-owner".into());
-            leases.attach_seed("cs-owner", "seed-content");
+            leases.attach_session("cs-owner", "seed-content");
             leases.open("cs-other".into(), "ci-other".into());
-            leases.attach_seed("cs-other", "seed-other");
+            leases.attach_session("cs-other", "seed-other");
         }
 
         let get = |session: &str, path: String| {
@@ -734,7 +734,7 @@ mod axum_tests {
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let seed = dir
+        let session_id = dir
             .path()
             .file_name()
             .unwrap()
@@ -792,7 +792,7 @@ mod axum_tests {
         let open: qaqh_ringing::RingingV2OpenResponse = serde_json::from_slice(&body).unwrap();
 
         let bootstrap = Request::builder()
-            .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+            .uri(format!("/ringing/v2/sessions/{session_id}/bootstrap"))
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", open.client_session_id.clone())
             .body(Body::empty())
@@ -804,7 +804,7 @@ mod axum_tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["version"], 2);
-        assert_eq!(value["session_id"], seed);
+        assert_eq!(value["session_id"], session_id);
         assert_eq!(value["control"]["state"]["revision"], 1);
         let snapshot_cursor = value["snapshot_cursor"].as_str().unwrap().to_string();
         assert!(snapshot_cursor.starts_with("v2."));
@@ -843,7 +843,7 @@ mod axum_tests {
 
         let events = Request::builder()
             .uri(format!(
-                "/ringing/v2/sessions/{seed}/events?since_cursor={snapshot_cursor}"
+                "/ringing/v2/sessions/{session_id}/events?since_cursor={snapshot_cursor}"
             ))
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", open.client_session_id)
@@ -895,7 +895,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
-        .with_seed("seed-1");
+        .with_session("seed-1");
         let fingerprint = crate::axum_server::axum_impl::command_fingerprint(
             envelope.channel,
             envelope.session_id.as_deref(),
@@ -1005,7 +1005,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
-        .with_seed("seed-1");
+        .with_session("seed-1");
         {
             let mut pending = pending.lock().unwrap();
             assert!(
@@ -1057,7 +1057,7 @@ mod axum_tests {
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let seed = dir
+        let session_id = dir
             .path()
             .file_name()
             .unwrap()
@@ -1173,7 +1173,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
-        .with_seed(seed);
+        .with_session(session_id);
         let request = Request::builder()
             .method("POST")
             .uri("/ringing/v2/commands/control")
@@ -1225,15 +1225,15 @@ mod axum_tests {
 
     async fn post_driver(
         app: axum::Router,
-        seed: &str,
-        action: &str,
         session_id: &str,
+        action: &str,
+        client_session_id: &str,
     ) -> serde_json::Value {
         let request = Request::builder()
             .method("POST")
-            .uri(format!("/ringing/v2/sessions/{seed}/driver/{action}"))
+            .uri(format!("/ringing/v2/sessions/{session_id}/driver/{action}"))
             .header("authorization", "Bearer test-token")
-            .header("x-qaqh-client-session-id", session_id)
+            .header("x-qaqh-client-session-id", client_session_id)
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
@@ -1293,7 +1293,7 @@ mod axum_tests {
     }
 
     /// Seed a canonical session carrying a `DriverChanged` fact.
-    fn seed_canonical_driver_session(
+    fn session_canonical_driver_session(
         holder: Option<&str>,
         driver_epoch: u64,
     ) -> (tempfile::TempDir, String) {
@@ -1307,7 +1307,7 @@ mod axum_tests {
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let seed = dir
+        let session_id = dir
             .path()
             .file_name()
             .unwrap()
@@ -1369,12 +1369,12 @@ mod axum_tests {
                 )
                 .unwrap();
         }
-        (dir, seed)
+        (dir, session_id)
     }
 
     /// Seed a canonical session carrying a *resolved* interaction of `kind`
     /// with a typed `decision`, for the concurrent-answer (V2-R4) fixtures.
-    fn seed_resolved_interaction_session(
+    fn session_resolved_interaction_session(
         kind: qaqh_session::session_fact_v2::InteractionKind,
         decision: qaqh_session::session_fact_v2::InteractionDecision,
         tag: &str,
@@ -1397,7 +1397,7 @@ mod axum_tests {
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let seed = dir
+        let session_id = dir
             .path()
             .file_name()
             .unwrap()
@@ -1485,7 +1485,7 @@ mod axum_tests {
                 now + 2,
             )
             .unwrap();
-        (dir, seed, interaction_id, call_id)
+        (dir, session_id, interaction_id, call_id)
     }
 
     /// V2-R4 for permission and plan: a second answer for an already-resolved
@@ -1504,7 +1504,7 @@ mod axum_tests {
 
         // (kind, winning decision, second-answer command, expected typed result)
         let permission = {
-            let (dir, seed, interaction_id, call_id) = seed_resolved_interaction_session(
+            let (dir, session_id, interaction_id, call_id) = session_resolved_interaction_session(
                 InteractionKind::Permission,
                 InteractionDecision::Approved,
                 "v2-permission-fixture",
@@ -1519,7 +1519,7 @@ mod axum_tests {
                 }),
             )
             .with_client_session_id(client.client_session_id.clone())
-            .with_seed(seed);
+            .with_session(session_id);
             let expected = RingingV2CommandResult::PermissionResolved {
                 interaction_id: interaction_id.as_str().to_string(),
                 approved: true,
@@ -1527,7 +1527,7 @@ mod axum_tests {
             (dir, command, expected)
         };
         let plan = {
-            let (dir, seed, interaction_id, _call_id) = seed_resolved_interaction_session(
+            let (dir, session_id, interaction_id, _call_id) = session_resolved_interaction_session(
                 InteractionKind::Plan,
                 InteractionDecision::Rejected,
                 "v2-plan-fixture",
@@ -1543,7 +1543,7 @@ mod axum_tests {
                 }),
             )
             .with_client_session_id(client.client_session_id.clone())
-            .with_seed(seed);
+            .with_session(session_id);
             let expected = RingingV2CommandResult::PlanReviewResolved {
                 interaction_id: interaction_id.as_str().to_string(),
                 approved: false,
@@ -1581,9 +1581,9 @@ mod axum_tests {
         let a = open_v2_session(app.clone(), "ci-a").await;
         let b = open_v2_session(app.clone(), "ci-b").await;
         // Canonical seat held by `a`, whose lease is live.
-        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 1);
+        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 1);
 
-        let gated = |command_id: &str, session_id: &str| {
+        let gated = |command_id: &str, client_session_id: &str| {
             RingingV2CommandEnvelope::new(
                 command_id,
                 "ci-v2",
@@ -1591,8 +1591,8 @@ mod axum_tests {
                     turn_id: None,
                 }),
             )
-            .with_client_session_id(session_id)
-            .with_seed(seed.clone())
+            .with_client_session_id(client_session_id)
+            .with_session(session_id.clone())
         };
 
         let (_, rejected) = post_v2_command(
@@ -1627,13 +1627,13 @@ mod axum_tests {
         let app = build_router(state.clone());
         let a = open_v2_session(app.clone(), "ci-a").await;
         let b = open_v2_session(app.clone(), "ci-b").await;
-        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 1);
+        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 1);
         {
             let mut leases = state.leases.lock().unwrap();
-            leases.attach_seed(&a.client_session_id, &seed);
-            leases.attach_seed(&b.client_session_id, &seed);
+            leases.attach_session(&a.client_session_id, &session_id);
+            leases.attach_session(&b.client_session_id, &session_id);
         }
-        let params = serde_json::json!({"seed": seed, "path": "/tmp/workspace"});
+        let params = serde_json::json!({"session_id": session_id, "path": "/tmp/workspace"});
 
         let (status, rejected) =
             post_v2_service(app.clone(), &b.client_session_id, "workspace.set", &params).await;
@@ -1654,20 +1654,20 @@ mod axum_tests {
         let app = build_router(test_state());
         let a = open_v2_session(app.clone(), "ci-a").await;
         let b = open_v2_session(app.clone(), "ci-b").await;
-        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 1);
+        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 1);
 
-        let busy = post_driver(app.clone(), &seed, "claim", &b.client_session_id).await;
+        let busy = post_driver(app.clone(), &session_id, "claim", &b.client_session_id).await;
         assert_eq!(busy["accepted"], false);
         assert_eq!(busy["reason"], "driver_busy");
         assert_eq!(busy["holder"], a.client_session_id);
         assert_eq!(busy["driver_epoch"], 1);
 
-        let already = post_driver(app.clone(), &seed, "claim", &a.client_session_id).await;
+        let already = post_driver(app.clone(), &session_id, "claim", &a.client_session_id).await;
         assert_eq!(already["accepted"], true);
         assert_eq!(already["reason"], "already_holder");
         assert_eq!(already["driver_epoch"], 1);
 
-        let not_driver = post_driver(app, &seed, "release", &b.client_session_id).await;
+        let not_driver = post_driver(app, &session_id, "release", &b.client_session_id).await;
         assert_eq!(not_driver["accepted"], false);
         assert_eq!(not_driver["reason"], "not_driver");
     }
@@ -1677,16 +1677,16 @@ mod axum_tests {
         let app = build_router(test_state());
         let a = open_v2_session(app.clone(), "ci-a").await;
         let b = open_v2_session(app.clone(), "ci-b").await;
-        let (_dir, seed) = seed_canonical_driver_session(Some(&a.client_session_id), 3);
+        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 3);
 
-        let bootstrap = |session_id: String| {
+        let bootstrap = |client_session_id: String| {
             let app = app.clone();
-            let seed = seed.clone();
+            let session_id = session_id.clone();
             async move {
                 let request = Request::builder()
-                    .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+                    .uri(format!("/ringing/v2/sessions/{session_id}/bootstrap"))
                     .header("authorization", "Bearer test-token")
-                    .header("x-qaqh-client-session-id", session_id)
+                    .header("x-qaqh-client-session-id", client_session_id)
                     .body(Body::empty())
                     .unwrap();
                 let response = app.oneshot(request).await.unwrap();
@@ -1722,7 +1722,7 @@ mod axum_tests {
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let seed = dir
+        let session_id = dir
             .path()
             .file_name()
             .unwrap()
@@ -1732,7 +1732,7 @@ mod axum_tests {
         CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
 
         let request = Request::builder()
-            .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+            .uri(format!("/ringing/v2/sessions/{session_id}/bootstrap"))
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", client.client_session_id)
             .body(Body::empty())
@@ -1766,7 +1766,7 @@ mod axum_tests {
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let seed = dir
+        let session_id = dir
             .path()
             .file_name()
             .unwrap()
@@ -1815,7 +1815,7 @@ mod axum_tests {
 
         // Snapshot cursor taken *before* the handover.
         let bootstrap = Request::builder()
-            .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+            .uri(format!("/ringing/v2/sessions/{session_id}/bootstrap"))
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", a.client_session_id.clone())
             .body(Body::empty())
@@ -1856,7 +1856,7 @@ mod axum_tests {
         // replayed on the control channel.
         let request = Request::builder()
             .uri(format!(
-                "/ringing/v2/sessions/{seed}/events?since_cursor={cursor}"
+                "/ringing/v2/sessions/{session_id}/events?since_cursor={cursor}"
             ))
             .header("authorization", "Bearer test-token")
             .header("x-qaqh-client-session-id", a.client_session_id.clone())
@@ -1899,7 +1899,7 @@ mod axum_tests {
             let sessions_dir = qaqh_types::platform::sessions_dir();
             std::fs::create_dir_all(&sessions_dir).unwrap();
             let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-            let seed = dir
+            let session_id = dir
                 .path()
                 .file_name()
                 .unwrap()
@@ -1967,11 +1967,11 @@ mod axum_tests {
                 )
                 .unwrap();
 
-            let bootstrap = |app: axum::Router, seed: String, session_id: String| async move {
+            let bootstrap = |app: axum::Router, session_id: String, client_session_id: String| async move {
                 let request = Request::builder()
-                    .uri(format!("/ringing/v2/sessions/{seed}/bootstrap"))
+                    .uri(format!("/ringing/v2/sessions/{session_id}/bootstrap"))
                     .header("authorization", "Bearer test-token")
-                    .header("x-qaqh-client-session-id", session_id)
+                    .header("x-qaqh-client-session-id", client_session_id)
                     .body(Body::empty())
                     .unwrap();
                 let response = app.oneshot(request).await.unwrap();
@@ -1988,10 +1988,18 @@ mod axum_tests {
 
             // Two bootstraps == subscribe / reconnect. The pending set must be
             // identical and carry the canonical interaction id.
-            let first =
-                bootstrap(app.clone(), seed.clone(), client.client_session_id.clone()).await;
-            let second =
-                bootstrap(app.clone(), seed.clone(), client.client_session_id.clone()).await;
+            let first = bootstrap(
+                app.clone(),
+                session_id.clone(),
+                client.client_session_id.clone(),
+            )
+            .await;
+            let second = bootstrap(
+                app.clone(),
+                session_id.clone(),
+                client.client_session_id.clone(),
+            )
+            .await;
             assert_eq!(first, second, "{kind:?} pending set must be stable");
             assert_eq!(
                 first.len(),
@@ -2007,7 +2015,7 @@ mod axum_tests {
 
             // v2 approvals 端点：与旧 v1 端点同形，id 为 canonical 形态。
             let request = Request::builder()
-                .uri(format!("/ringing/v2/sessions/{seed}/approvals"))
+                .uri(format!("/ringing/v2/sessions/{session_id}/approvals"))
                 .header("authorization", "Bearer test-token")
                 .header("x-qaqh-client-session-id", client.client_session_id.clone())
                 .body(Body::empty())
@@ -2077,7 +2085,11 @@ mod axum_tests {
             .lock()
             .unwrap()
             .open("cs-1".into(), "ci-1".into());
-        state.leases.lock().unwrap().attach_seed("cs-1", "seed-1");
+        state
+            .leases
+            .lock()
+            .unwrap()
+            .attach_session("cs-1", "seed-1");
         let app = build_router(state);
         let req = Request::builder()
             .uri("/ringing/v2/sessions/seed-1/timeline/events")
@@ -2096,7 +2108,7 @@ mod axum_tests {
     /// SessionAttach：仅 lease attach，不触碰 actor。attach 后 owns_seed 放行
     /// timeline/频道读取；空 seed 被拒（missing_seed）。
     #[tokio::test]
-    async fn session_attach_grants_seed_ownership_without_actor_side_effects() {
+    async fn session_attach_grants_session_ownership_without_actor_side_effects() {
         let state = test_state();
         state
             .leases
@@ -2112,7 +2124,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id("cs-1")
-        .with_seed("sub-seed-1");
+        .with_session("sub-seed-1");
         let req = Request::builder()
             .method("POST")
             .uri("/ringing/v2/commands/control")
@@ -2123,7 +2135,13 @@ mod axum_tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(state.leases.lock().unwrap().owns_seed("cs-1", "sub-seed-1"));
+        assert!(
+            state
+                .leases
+                .lock()
+                .unwrap()
+                .owns_session("cs-1", "sub-seed-1")
+        );
 
         // 空 seed → Rejected missing_seed，且不产生任何归属。
         let app = build_router(state.clone());
@@ -2145,13 +2163,13 @@ mod axum_tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert!(!state.leases.lock().unwrap().owns_seed("cs-1", ""));
+        assert!(!state.leases.lock().unwrap().owns_session("cs-1", ""));
     }
 
     /// todo CLI 路线：WRITE_SEEDED 调用在 lease 未 attach seed 时必须 401
     /// （拒绝发生在 dispatch 之前，不触碰磁盘）。
     #[tokio::test]
-    async fn todo_set_requires_seed_ownership() {
+    async fn todo_set_requires_session_ownership() {
         let state = test_state();
         state
             .leases
@@ -2166,7 +2184,7 @@ mod axum_tests {
             .header("x-qaqh-client-session-id", "cs-1")
             .header("content-type", "application/json")
             .body(Body::from(
-                serde_json::json!({"seed": "seed-1", "id": "T1", "status": "completed"})
+                serde_json::json!({"session_id": "seed-1", "id": "T1", "status": "completed"})
                     .to_string(),
             ))
             .unwrap();
@@ -2175,9 +2193,11 @@ mod axum_tests {
     }
 
     /// 纯 v2：open 不再带 attach_seed，归属由 `session_attach` 命令建立；
-    /// attach 后同 seed 的 READ_SEEDED 调用放行（todo.list 只读，读不到即空表）。
+    /// attach 后同会话的 READ_SEEDED 调用放行（todo.list 只读，读不到即空表）。
+    ///
+    /// BETA-01 Phase D：服务面会话键写端为 `session_id`。
     #[tokio::test]
-    async fn todo_list_allowed_after_seed_attached() {
+    async fn todo_list_allowed_after_session_attached() {
         let state = test_state();
         let app = build_router(state);
         let open_req = Request::builder()
@@ -2218,8 +2238,8 @@ mod axum_tests {
                     "command_id": "cli-attach-test",
                     "client_instance_id": "ci-cli",
                     "client_session_id": session_id,
-                    "seed": "seed-1",
-                    "command": {"channel": "control", "type": "session_attach", "seed": "seed-1"},
+                    "session_id": "seed-1",
+                    "command": {"channel": "control", "type": "session_attach", "session_id": "seed-1"},
                 })
                 .to_string(),
             ))
@@ -2233,7 +2253,7 @@ mod axum_tests {
             .header("x-qaqh-client-session-id", &session_id)
             .header("content-type", "application/json")
             .body(Body::from(
-                serde_json::json!({"seed": "seed-1"}).to_string(),
+                serde_json::json!({"session_id": "seed-1"}).to_string(),
             ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2241,7 +2261,7 @@ mod axum_tests {
     }
 
     #[tokio::test]
-    async fn timeline_events_requires_seed_ownership() {
+    async fn timeline_events_requires_session_ownership() {
         let state = test_state();
         state
             .leases
@@ -2312,7 +2332,11 @@ mod axum_tests {
             .lock()
             .unwrap()
             .open("cs-1".into(), "ci-1".into());
-        state.leases.lock().unwrap().attach_seed("cs-1", "seed-1");
+        state
+            .leases
+            .lock()
+            .unwrap()
+            .attach_session("cs-1", "seed-1");
         for i in 1..=3 {
             state
                 .hub

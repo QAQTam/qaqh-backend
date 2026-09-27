@@ -43,9 +43,9 @@ fn measure_single_thread() -> f64 {
     let hub = Arc::new(RingingHub::new("lockbench-1"));
     let start = Instant::now();
     for index in 0..THREADS {
-        let seed = format!("bench-{index}");
+        let session_id = format!("bench-{index}");
         for i in 0..PER_THREAD {
-            hub.publish(&seed, delta(i as u64));
+            hub.publish(&session_id, delta(i as u64));
         }
     }
     let elapsed = start.elapsed();
@@ -61,10 +61,10 @@ fn measure_multi_thread() -> f64 {
         let hub = Arc::clone(&hub);
         let barrier = Arc::clone(&barrier);
         joins.push(std::thread::spawn(move || {
-            let seed = format!("bench-{index}");
+            let session_id = format!("bench-{index}");
             barrier.wait();
             for i in 0..PER_THREAD {
-                hub.publish(&seed, delta(i as u64));
+                hub.publish(&session_id, delta(i as u64));
             }
         }));
     }

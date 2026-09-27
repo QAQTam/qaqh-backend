@@ -255,7 +255,7 @@ enum AgentKind {
 }
 
 pub struct AgentInstance {
-    seed: String,
+    session_id: String,
     transport: AgentTransport,
     kind: AgentKind,
     /// P2-2d-b migration bridge: daemon-side logical subscription mailbox.
@@ -390,14 +390,14 @@ impl AgentRegistry {
     /// path is rejected instead of silently replacing logical metadata.
     pub fn register_root_agent(
         &mut self,
-        seed: &str,
+        session_id: &str,
         created_at_ms: i64,
     ) -> Result<AgentMetadata, String> {
-        let session_dir = self.sessions.session_path_dir(seed);
+        let session_dir = self.sessions.session_path_dir(session_id);
         let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
-            .map_err(|error| format!("open canonical identity for root {seed}: {error}"))?;
+            .map_err(|error| format!("open canonical identity for root {session_id}: {error}"))?;
         self.agent_catalog
-            .register_root_with_alias(identity.session_id, Some(seed), created_at_ms)
+            .register_root_with_alias(identity.session_id, Some(session_id), created_at_ms)
             .map_err(|error| error.to_string())
     }
 
@@ -683,15 +683,15 @@ impl AgentRegistry {
             .map(|graph| graph.snapshot())
     }
 
-    fn ensure_root_metadata(&mut self, seed: &str) -> Result<(), String> {
-        if seed.is_empty()
-            || self.agent_catalog.get_by_id(seed).is_some()
-            || self.supervisor.parent_of(seed).is_some()
+    fn ensure_root_metadata(&mut self, session_id: &str) -> Result<(), String> {
+        if session_id.is_empty()
+            || self.agent_catalog.get_by_id(session_id).is_some()
+            || self.supervisor.parent_of(session_id).is_some()
         {
             return Ok(());
         }
-        if self.canonical_parent_session_id(seed)?.is_none() {
-            self.register_root_agent(seed, unix_ms())?;
+        if self.canonical_parent_session_id(session_id)?.is_none() {
+            self.register_root_agent(session_id, unix_ms())?;
         }
         Ok(())
     }
@@ -699,8 +699,8 @@ impl AgentRegistry {
     /// Read the `SessionCreated.parent_session_id` recovery hint from the
     /// canonical log. This is deliberately a hint only: graph ownership is
     /// established by parent-log `SubagentSpawned` facts in SUBV2-03/04.
-    fn canonical_parent_session_id(&self, seed: &str) -> Result<Option<String>, String> {
-        let session_dir = self.sessions.session_path_dir(seed);
+    fn canonical_parent_session_id(&self, session_id: &str) -> Result<Option<String>, String> {
+        let session_dir = self.sessions.session_path_dir(session_id);
         if !session_dir.exists() {
             return Ok(None);
         }
@@ -719,16 +719,16 @@ impl AgentRegistry {
             return Ok(None);
         }
         let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
-            .map_err(|error| format!("open canonical identity for {seed}: {error}"))?;
+            .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
         let reader = CommittedFactReader::open(
             &session_dir,
             identity.session_id.clone(),
             identity.log_id.clone(),
         )
-        .map_err(|error| format!("open committed facts for {seed}: {error}"))?;
+        .map_err(|error| format!("open committed facts for {session_id}: {error}"))?;
         for fact in reader
             .read_all()
-            .map_err(|error| format!("read committed facts for {seed}: {error}"))?
+            .map_err(|error| format!("read committed facts for {session_id}: {error}"))?
         {
             if let FactPayload::SessionCreated(created) = fact.payload {
                 return Ok(created
@@ -739,32 +739,32 @@ impl AgentRegistry {
         Ok(None)
     }
 
-    pub fn get_or_spawn(&mut self, seed: &str) -> Result<(), String> {
-        self.ensure_root_metadata(seed)?;
-        if self.instances.contains_key(seed) {
+    pub fn get_or_spawn(&mut self, session_id: &str) -> Result<(), String> {
+        self.ensure_root_metadata(session_id)?;
+        if self.instances.contains_key(session_id) {
             return Ok(());
         }
         // B9/R2：收尾必须在 spawn 之前——新 worker 线程一启动就可能发布
         // 新 ask/TurnOpened，force 收尾若晚于 spawn 会误杀活交互。
         if let Some(hub) = self.hub.as_ref() {
-            hub.seal_orphan_running_turns(seed);
-            hub.seal_orphan_channel_state(seed, true);
-            hub.mark_worker_live(seed);
+            hub.seal_orphan_running_turns(session_id);
+            hub.seal_orphan_channel_state(session_id, true);
+            hub.mark_worker_live(session_id);
         }
-        self.spawn(seed, None)?;
+        self.spawn(session_id, None)?;
         // Diagnostic: the timeline snapshot is a best-effort async checkpoint
         // and a daemon restart can drop its tail. When it lags the message
         // store (meta.turn_count), the resumed transcript misses turns — the
         // frontend now backfills them from the Ringing conversation store, so
         // this is informational but valuable for restart forensics.
         if let Some(hub) = self.hub.as_ref()
-            && let Some(meta) = self.sessions.load_meta(seed)
-            && let Some(snapshot) = hub.timeline_snapshot(seed)
+            && let Some(meta) = self.sessions.load_meta(session_id)
+            && let Some(snapshot) = hub.timeline_snapshot(session_id)
         {
             let snapshot_turns = snapshot.turns.len();
             if snapshot_turns != meta.turn_count {
                 log::warn!(
-                    "[timeline] snapshot turns ({snapshot_turns}) != meta.turn_count ({}) for {seed}; transcript backfills from the conversation store",
+                    "[timeline] snapshot turns ({snapshot_turns}) != meta.turn_count ({}) for {session_id}; transcript backfills from the conversation store",
                     meta.turn_count
                 );
             }
@@ -776,11 +776,11 @@ impl AgentRegistry {
         Ok(())
     }
 
-    pub fn spawn_new(&mut self, seed: &str) -> Result<(), String> {
-        if self.instances.contains_key(seed) {
-            return Err(format!("agent already running for {seed}"));
+    pub fn spawn_new(&mut self, session_id: &str) -> Result<(), String> {
+        if self.instances.contains_key(session_id) {
+            return Err(format!("agent already running for {session_id}"));
         }
-        self.spawn_with(seed, Some(seed), &[])
+        self.spawn_with(session_id, Some(session_id), &[])
     }
 
     /// Spawn an isolated subagent worker **inside the daemon process**.
@@ -794,7 +794,7 @@ impl AgentRegistry {
     /// so the daemon publishes events and commands unchanged.
     pub fn spawn_subagent(
         &mut self,
-        seed: &str,
+        session_id: &str,
         tools: &[String],
         model: Option<&str>,
         base_url: Option<&str>,
@@ -809,23 +809,25 @@ impl AgentRegistry {
             max_tokens,
             ephemeral: !persist,
         };
-        let parent_seed = qaqh_workspace::runtime::context()
+        let parent_session = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
-        if parent_seed.is_empty() {
-            let child_dir = self.sessions.session_path_dir(seed);
-            let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
-                .map_err(|error| format!("open child canonical identity for {seed}: {error}"))?;
+        if parent_session.is_empty() {
+            let child_dir = self.sessions.session_path_dir(session_id);
+            let child_identity =
+                CanonicalSessionIdentity::open_or_create(&child_dir).map_err(|error| {
+                    format!("open child canonical identity for {session_id}: {error}")
+                })?;
             return self.spawn_subagent_internal(
-                seed,
-                &parent_seed,
+                session_id,
+                &parent_session,
                 None,
                 child_identity.session_id,
                 options,
             );
         }
-        let requested_name = legacy_child_name(seed);
-        self.spawn_subagent_v2(seed, &parent_seed, &requested_name, options)
+        let requested_name = legacy_child_name(session_id);
+        self.spawn_subagent_v2(session_id, &parent_session, &requested_name, options)
             .map(|_| ())
     }
 
@@ -834,7 +836,7 @@ impl AgentRegistry {
     /// `SubagentSpawned` edge.
     pub(crate) fn spawn_subagent_v2(
         &mut self,
-        seed: &str,
+        session_id: &str,
         parent_session_id: &str,
         requested_name: &str,
         options: SubagentSpawnOptions<'_>,
@@ -876,12 +878,12 @@ impl AgentRegistry {
             CanonicalSessionIdentity::open_or_create(&parent_dir).map_err(|error| {
                 format!("open parent canonical identity for {parent_session_id}: {error}")
             })?;
-        let child_dir = self.sessions.session_path_dir(seed);
+        let child_dir = self.sessions.session_path_dir(session_id);
         let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
-            .map_err(|error| format!("open child canonical identity for {seed}: {error}"))?;
+            .map_err(|error| format!("open child canonical identity for {session_id}: {error}"))?;
         let cwd = self
             .sessions
-            .workspace_cwd(seed)
+            .workspace_cwd(session_id)
             .or_else(|| self.sessions.workspace_cwd(parent_session_id))
             .or_else(|| {
                 std::env::current_dir()
@@ -898,7 +900,7 @@ impl AgentRegistry {
 
         let identity = Some((parent.clone(), child_path.clone()));
         self.spawn_subagent_internal(
-            seed,
+            session_id,
             parent_session_id,
             identity,
             child_identity.session_id.clone(),
@@ -916,16 +918,16 @@ impl AgentRegistry {
     /// The actor may already exist; closing it is safe, while the durable child
     /// session remains available for recovery because V2 children are
     /// persistent.
-    pub fn rollback_subagent(&mut self, seed: &str, child_session_id: &str) {
+    pub fn rollback_subagent(&mut self, session_id: &str, child_session_id: &str) {
         self.agent_catalog.remove(child_session_id);
         self.residency.remove(child_session_id);
-        self.close(seed);
+        self.close(session_id);
     }
 
     fn spawn_subagent_internal(
         &mut self,
-        seed: &str,
-        parent_seed: &str,
+        session_id: &str,
+        parent_session: &str,
         identity: Option<(AgentMetadata, AgentPath)>,
         child_session_id: SessionId,
         options: SubagentSpawnOptions<'_>,
@@ -937,23 +939,23 @@ impl AgentRegistry {
             max_tokens,
             ephemeral,
         } = options;
-        if self.instances.contains_key(seed) {
-            return Err(format!("agent already running for {seed}"));
+        if self.instances.contains_key(session_id) {
+            return Err(format!("agent already running for {session_id}"));
         }
         if !ephemeral {
-            self.sessions.set_ephemeral(seed, false);
+            self.sessions.set_ephemeral(session_id, false);
         }
-        let root_seed = if parent_seed.is_empty() {
-            seed.to_string()
+        let root_session = if parent_session.is_empty() {
+            session_id.to_string()
         } else {
-            self.supervisor.root_of(parent_seed)
+            self.supervisor.root_of(parent_session)
         };
         // Durable reservation must exist before the child actor can perform
         // any side effect.
-        let reservation = self.reserve_spawn(&root_seed, seed)?;
-        let parent_cancel = self.cancel_for_seed(parent_seed);
+        let reservation = self.reserve_spawn(&root_session, session_id)?;
+        let parent_cancel = self.cancel_for_session(parent_session);
         if let Err(error) = self.spawn_subagent_inprocess(
-            seed,
+            session_id,
             SubagentSpawnSpec {
                 tools: tools.to_vec(),
                 model: model.map(str::to_string),
@@ -964,19 +966,19 @@ impl AgentRegistry {
             parent_cancel,
         ) {
             let _ = self.release_spawn(
-                &root_seed,
+                &root_session,
                 &reservation.reservation_id,
                 ReleaseReason::Cancelled,
             );
             return Err(error);
         }
-        if !parent_seed.is_empty()
-            && parent_seed != seed
-            && let Err(error) = self.link_subagent(parent_seed, seed)
+        if !parent_session.is_empty()
+            && parent_session != session_id
+            && let Err(error) = self.link_subagent(parent_session, session_id)
         {
-            self.close(seed);
+            self.close(session_id);
             let _ = self.release_spawn(
-                &root_seed,
+                &root_session,
                 &reservation.reservation_id,
                 ReleaseReason::Cancelled,
             );
@@ -992,10 +994,13 @@ impl AgentRegistry {
                 role: None,
                 created_at_ms: unix_ms(),
             };
-            if let Err(error) = self.agent_catalog.register_with_alias(metadata, Some(seed)) {
-                self.close(seed);
+            if let Err(error) = self
+                .agent_catalog
+                .register_with_alias(metadata, Some(session_id))
+            {
+                self.close(session_id);
                 let _ = self.release_spawn(
-                    &root_seed,
+                    &root_session,
                     &reservation.reservation_id,
                     ReleaseReason::Reconciliation,
                 );
@@ -1003,11 +1008,11 @@ impl AgentRegistry {
             }
             self.publish_agent_residency(child_session_id.as_str());
         }
-        if let Err(error) = self.commit_spawn(&root_seed, &reservation.reservation_id) {
+        if let Err(error) = self.commit_spawn(&root_session, &reservation.reservation_id) {
             self.agent_catalog.remove(child_session_id.as_str());
-            self.close(seed);
+            self.close(session_id);
             let _ = self.release_spawn(
-                &root_seed,
+                &root_session,
                 &reservation.reservation_id,
                 ReleaseReason::Reconciliation,
             );
@@ -1018,16 +1023,16 @@ impl AgentRegistry {
 
     fn spawn_subagent_inprocess(
         &mut self,
-        seed: &str,
+        session_id: &str,
         spec: SubagentSpawnSpec,
         parent_cancel: Option<crate::agent::types::CancelToken>,
     ) -> Result<(), String> {
-        if self.instances.contains_key(seed) {
-            return Err(format!("agent already running for {seed}"));
+        if self.instances.contains_key(session_id) {
+            return Err(format!("agent already running for {session_id}"));
         }
         self.last_spawn
-            .insert(seed.to_string(), std::time::Instant::now());
-        let (generation, _) = self.activity.begin(seed);
+            .insert(session_id.to_string(), std::time::Instant::now());
+        let (generation, _) = self.activity.begin(session_id);
 
         let channels = crate::agent::loop_core::LoopChannels::new();
         let crate::agent::loop_core::LoopChannels {
@@ -1041,16 +1046,20 @@ impl AgentRegistry {
         let cancel = parent_cancel.map_or(cancel, |parent| parent.child());
         let cancel_for_sender = cancel.clone();
 
-        let event_seed = seed.to_string();
+        let event_session = session_id.to_string();
         let activity = self.activity.clone();
         let hub = self.hub.clone();
         let reader = std::thread::spawn(move || {
             crate::actor::run_inprocess_event_reader(
-                event_rx, event_seed, generation, activity, hub,
+                event_rx,
+                event_session,
+                generation,
+                activity,
+                hub,
             );
         });
 
-        let actor_seed = seed.to_string();
+        let actor_session = session_id.to_string();
         let actor_spec = spec.clone();
         let tools_len = spec.tools.len();
         let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
@@ -1059,12 +1068,12 @@ impl AgentRegistry {
         // `live_workers` 此前只靠 `forget_seed`（会话关闭）清理，子代理 actor
         // 自然退出后条目永留——bootstrap 的孤儿收尾因此永远跳过该 seed。
         let hub_for_worker = self.hub.clone();
-        let dead_seed = seed.to_string();
+        let dead_session = session_id.to_string();
         let thread = std::thread::Builder::new()
-            .name(format!("qaqh-subagent-{actor_seed}"))
+            .name(format!("qaqh-subagent-{actor_session}"))
             .spawn(move || {
                 crate::actor::run_subagent_actor(
-                    actor_seed,
+                    actor_session,
                     actor_spec,
                     cmd_rx,
                     event_tx,
@@ -1074,15 +1083,15 @@ impl AgentRegistry {
                     hub_for_worker.clone(),
                 );
                 if let Some(hub) = hub_for_worker.as_ref() {
-                    hub.mark_worker_dead(&dead_seed);
+                    hub.mark_worker_dead(&dead_session);
                 }
             })
-            .map_err(|e| format!("spawn in-process subagent {seed}: {e}"))?;
+            .map_err(|e| format!("spawn in-process subagent {session_id}: {e}"))?;
 
         self.instances.insert(
-            seed.to_string(),
+            session_id.to_string(),
             AgentInstance {
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 transport: AgentTransport::InProcess {
                     cmd_tx,
                     cancel: cancel_for_sender,
@@ -1094,45 +1103,45 @@ impl AgentRegistry {
                 thread: Some(thread),
             },
         );
-        self.set_agent_residency(seed, ListedAgentResidency::Loaded);
+        self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
         // T-1-1：子 seed 必须进活表。否则 bootstrap 的
         // `seal_orphan_channel_state(seed, force=false)` 会把它判为孤儿并封禁
         // 其正在进行的 turn（前端据此显示 cancelled），而子 actor 仍在运行并
         // 继续发布事件——即「已判定 cancel 的子代理复活」。
         if let Some(hub) = self.hub.as_ref() {
-            hub.mark_worker_live(seed);
+            hub.mark_worker_live(session_id);
         }
         log::info!(
-            "[subagent] spawned in-process actor seed={seed} tools={tools_len} (no child process)"
+            "[subagent] spawned in-process actor seed={session_id} tools={tools_len} (no child process)"
         );
         Ok(())
     }
 
-    fn spawn(&mut self, seed: &str, new_seed: Option<&str>) -> Result<(), String> {
-        self.spawn_with(seed, new_seed, &[])
+    fn spawn(&mut self, session_id: &str, new_session: Option<&str>) -> Result<(), String> {
+        self.spawn_with(session_id, new_session, &[])
     }
 
     fn spawn_with(
         &mut self,
-        seed: &str,
-        new_seed: Option<&str>,
+        session_id: &str,
+        new_session: Option<&str>,
         extra_args: &[String],
     ) -> Result<(), String> {
-        self.spawn_session_inprocess(seed, new_seed, extra_args)
+        self.spawn_session_inprocess(session_id, new_session, extra_args)
     }
 
     fn spawn_session_inprocess(
         &mut self,
-        seed: &str,
-        new_seed: Option<&str>,
+        session_id: &str,
+        new_session: Option<&str>,
         _extra_args: &[String],
     ) -> Result<(), String> {
-        if self.instances.contains_key(seed) {
-            return Err(format!("agent already running for {seed}"));
+        if self.instances.contains_key(session_id) {
+            return Err(format!("agent already running for {session_id}"));
         }
         self.last_spawn
-            .insert(seed.to_string(), std::time::Instant::now());
-        let (generation, _) = self.activity.begin(seed);
+            .insert(session_id.to_string(), std::time::Instant::now());
+        let (generation, _) = self.activity.begin(session_id);
 
         let channels = crate::agent::loop_core::LoopChannels::new();
         let crate::agent::loop_core::LoopChannels {
@@ -1145,21 +1154,25 @@ impl AgentRegistry {
         } = channels;
         let cancel_for_sender = cancel.clone();
 
-        let event_seed = seed.to_string();
+        let event_session = session_id.to_string();
         let activity = self.activity.clone();
         let hub = self.hub.clone();
         let reader = std::thread::spawn(move || {
             crate::actor::run_inprocess_event_reader(
-                event_rx, event_seed, generation, activity, hub,
+                event_rx,
+                event_session,
+                generation,
+                activity,
+                hub,
             );
         });
 
         // Resume worker: timeline is the authoritative turn ledger. The meta
         // turn_count can lag the timeline after a daemon restart, so the actor
         // must start its turn allocator above any timeline turn already sealed.
-        let timeline_turn_count = if new_seed.is_none() {
+        let timeline_turn_count = if new_session.is_none() {
             if let Some(hub) = self.hub.as_ref()
-                && let Some(snapshot) = hub.timeline_snapshot(seed)
+                && let Some(snapshot) = hub.timeline_snapshot(session_id)
             {
                 snapshot
                     .turns
@@ -1175,23 +1188,23 @@ impl AgentRegistry {
             0
         };
 
-        let actor_seed = seed.to_string();
-        let resume_seed = if new_seed.is_none() {
-            Some(seed.to_string())
+        let actor_session = session_id.to_string();
+        let resume_session = if new_session.is_none() {
+            Some(session_id.to_string())
         } else {
             None
         };
-        let new_seed_owned = new_seed.map(str::to_string);
+        let new_session_owned = new_session.map(str::to_string);
         let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
         let liveness_for_registry = std::sync::Arc::clone(&liveness);
         let hub_for_worker = self.hub.clone();
         let thread = std::thread::Builder::new()
-            .name(format!("qaqh-session-{actor_seed}"))
+            .name(format!("qaqh-session-{actor_session}"))
             .spawn(move || {
                 crate::actor::run_session_actor(
-                    actor_seed,
-                    resume_seed,
-                    new_seed_owned,
+                    actor_session,
+                    resume_session,
+                    new_session_owned,
                     timeline_turn_count,
                     cmd_rx,
                     event_tx,
@@ -1201,12 +1214,12 @@ impl AgentRegistry {
                     hub_for_worker,
                 );
             })
-            .map_err(|e| format!("spawn in-process session {seed}: {e}"))?;
+            .map_err(|e| format!("spawn in-process session {session_id}: {e}"))?;
 
         self.instances.insert(
-            seed.to_string(),
+            session_id.to_string(),
             AgentInstance {
-                seed: seed.to_string(),
+                session_id: session_id.to_string(),
                 transport: AgentTransport::InProcess {
                     cmd_tx,
                     cancel: cancel_for_sender,
@@ -1218,8 +1231,8 @@ impl AgentRegistry {
                 thread: Some(thread),
             },
         );
-        self.set_agent_residency(seed, ListedAgentResidency::Loaded);
-        log::info!("[session] spawned in-process actor seed={seed} (no child process)");
+        self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
+        log::info!("[session] spawned in-process actor seed={session_id} (no child process)");
         Ok(())
     }
 
@@ -1227,38 +1240,38 @@ impl AgentRegistry {
     /// root session. Roots use the ordinary get-or-spawn path; children reload
     /// only through a loaded immediate parent and reuse the durable spawn
     /// config recorded in the parent's canonical `SubagentSpawned` fact.
-    fn ensure_loaded_for_command(&mut self, seed: &str) -> Result<(), String> {
-        if self.instances.contains_key(seed) {
+    fn ensure_loaded_for_command(&mut self, session_id: &str) -> Result<(), String> {
+        if self.instances.contains_key(session_id) {
             return Ok(());
         }
-        let Some(metadata) = self.agent_catalog.get_by_id(seed).cloned() else {
-            return self.get_or_spawn(seed);
+        let Some(metadata) = self.agent_catalog.get_by_id(session_id).cloned() else {
+            return self.get_or_spawn(session_id);
         };
         if metadata.agent_path.is_root() {
-            return self.get_or_spawn(seed);
+            return self.get_or_spawn(session_id);
         }
         let parent_path = metadata
             .parent_agent_path
             .as_ref()
-            .ok_or_else(|| format!("child agent {seed} has no parent path"))?;
+            .ok_or_else(|| format!("child agent {session_id} has no parent path"))?;
         let parent = self
             .agent_catalog
             .get_by_path(metadata.root_session_id.as_str(), parent_path)
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "child agent {seed} parent metadata missing at {parent_path} in root {}",
+                    "child agent {session_id} parent metadata missing at {parent_path} in root {}",
                     metadata.root_session_id
                 )
             })?;
         if !self.instances.contains_key(parent.agent_id.as_str()) {
             return Err(format!(
-                "child agent {seed} cannot reload: immediate parent {} is unloaded",
+                "child agent {session_id} cannot reload: immediate parent {} is unloaded",
                 parent.agent_path
             ));
         }
-        let (config, _) = self.subagent_spawn_config(parent.agent_id.as_str(), seed)?;
-        self.reload_subagent_internal(seed, parent.agent_id.as_str(), config)
+        let (config, _) = self.subagent_spawn_config(parent.agent_id.as_str(), session_id)?;
+        self.reload_subagent_internal(session_id, parent.agent_id.as_str(), config)
     }
 
     pub(crate) fn subagent_spawn_config(
@@ -1359,19 +1372,19 @@ impl AgentRegistry {
 
     fn reload_subagent_internal(
         &mut self,
-        seed: &str,
+        session_id: &str,
         parent_id: &str,
         config: SubagentSpawnConfig,
     ) -> Result<(), String> {
-        if self.instances.contains_key(seed) {
+        if self.instances.contains_key(session_id) {
             return Ok(());
         }
         if !config.ephemeral {
-            self.sessions.set_ephemeral(seed, false);
+            self.sessions.set_ephemeral(session_id, false);
         }
-        let parent_cancel = self.cancel_for_seed(parent_id);
+        let parent_cancel = self.cancel_for_session(parent_id);
         self.spawn_subagent_inprocess(
-            seed,
+            session_id,
             SubagentSpawnSpec {
                 tools: config.tools,
                 model: config.model,
@@ -1381,23 +1394,25 @@ impl AgentRegistry {
             },
             parent_cancel,
         )?;
-        if let Err(error) = self.link_subagent(parent_id, seed) {
-            self.close(seed);
+        if let Err(error) = self.link_subagent(parent_id, session_id) {
+            self.close(session_id);
             return Err(format!(
-                "reload child {seed} failed to restore parent edge: {error}"
+                "reload child {session_id} failed to restore parent edge: {error}"
             ));
         }
-        log::info!("[registry] reloaded child agent {seed} through loaded parent {parent_id}");
+        log::info!(
+            "[registry] reloaded child agent {session_id} through loaded parent {parent_id}"
+        );
         Ok(())
     }
 
     /// 发送 Ringing worker 命令帧（携带 `wire` 判别字段；worker reader 按 wire 解析）。
     pub fn send_ringing(
         &mut self,
-        seed: &str,
+        session_id: &str,
         env: &qaqh_ringing::RingingWorkerCommandEnvelope,
     ) -> Result<(), String> {
-        if let Some(metadata) = self.agent_catalog.get_by_id(seed)
+        if let Some(metadata) = self.agent_catalog.get_by_id(session_id)
             && !metadata.agent_path.is_root()
             && matches!(
                 &env.command,
@@ -1414,7 +1429,7 @@ impl AgentRegistry {
                 metadata.agent_path
             ));
         }
-        self.ensure_loaded_for_command(seed)?;
+        self.ensure_loaded_for_command(session_id)?;
         let write = |instance: &AgentInstance| -> Result<(), String> {
             match &instance.transport {
                 AgentTransport::InProcess { cmd_tx, cancel } => {
@@ -1425,7 +1440,7 @@ impl AgentRegistry {
                     // 置进程级 flag——那会误伤其它会话的在途工具。
                     if crate::agent::loop_core::ringing_command_is_interrupt(env) {
                         cancel.set();
-                        qaqh_workspace::set_session_cancel(seed, true);
+                        qaqh_workspace::set_session_cancel(session_id, true);
                     }
                     let cmd = crate::agent::types::WorkerCommand {
                         frame: env.clone(),
@@ -1437,7 +1452,7 @@ impl AgentRegistry {
                 }
             }
         };
-        if write(self.instances.get(seed).expect("spawned instance")).is_ok() {
+        if write(self.instances.get(session_id).expect("spawned instance")).is_ok() {
             // T-1-4：父会话取消传播到它派生的子 seed。放在投递成功之后——
             // 取消帧确实进入了父 worker 才谈得上「取消已经发生」。registry
             // 是 Ringing 命令的唯一咽喉（daemon RPC、宿主直连、广播都经此），
@@ -1449,45 +1464,45 @@ impl AgentRegistry {
                     qaqh_domain::ConversationCommand::ConversationCancel { .. }
                 )
             ) {
-                self.cancel_subagent_children(seed);
+                self.cancel_subagent_children(session_id);
             }
             return Ok(());
         }
         let kind = self
             .instances
-            .get(seed)
+            .get(session_id)
             .map(AgentInstance::kind_name)
             .unwrap_or(AgentKind::Session);
-        let parent = self.supervisor.parent_of(seed);
+        let parent = self.supervisor.parent_of(session_id);
         let parent_cancel = parent
             .as_ref()
-            .and_then(|parent| self.cancel_for_seed(parent));
-        self.close(seed);
+            .and_then(|parent| self.cancel_for_session(parent));
+        self.close(session_id);
         match kind {
-            AgentKind::Session => self.get_or_spawn(seed)?,
+            AgentKind::Session => self.get_or_spawn(session_id)?,
             AgentKind::Subagent(spec) => {
-                self.spawn_subagent_inprocess(seed, spec, parent_cancel)?;
+                self.spawn_subagent_inprocess(session_id, spec, parent_cancel)?;
                 if let Some(parent) = parent {
-                    self.link_subagent(&parent, seed)?;
+                    self.link_subagent(&parent, session_id)?;
                 }
             }
         }
-        write(self.instances.get(seed).expect("respawned instance"))
+        write(self.instances.get(session_id).expect("respawned instance"))
     }
 
     /// 向所有活跃 worker（含子代理）广播同一条 Ringing 命令。
     /// 只发给已运行的实例，不触发 spawn。返回失败项列表（seed: error）。
     pub fn broadcast_ringing(&mut self, command: &qaqh_ringing::RingingCommand) -> Vec<String> {
-        let seeds: Vec<String> = self.instances.keys().cloned().collect();
+        let sessions: Vec<String> = self.instances.keys().cloned().collect();
         let mut failed = Vec::new();
-        for seed in seeds {
+        for session_id in sessions {
             let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-                &seed,
+                &session_id,
                 broadcast_command_id(),
                 command.clone(),
             );
-            if let Err(error) = self.send_ringing(&seed, &env) {
-                failed.push(format!("{seed}: {error}"));
+            if let Err(error) = self.send_ringing(&session_id, &env) {
+                failed.push(format!("{session_id}: {error}"));
             }
         }
         failed
@@ -1495,14 +1510,14 @@ impl AgentRegistry {
 
     pub fn subscribe_channel(
         &mut self,
-        seed: &str,
+        session_id: &str,
         connection_id: ConnectionId,
         channel: RingingChannel,
     ) -> Result<bool, String> {
         let instance = self
             .instances
-            .get_mut(seed)
-            .ok_or_else(|| format!("session {seed} is not running"))?;
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} is not running"))?;
         match instance.apply_subscription(SubscriptionCommand::Subscribe {
             connection_id,
             channel,
@@ -1514,14 +1529,14 @@ impl AgentRegistry {
 
     pub fn unsubscribe_channel(
         &mut self,
-        seed: &str,
+        session_id: &str,
         connection_id: ConnectionId,
         channel: RingingChannel,
     ) -> Result<bool, String> {
         let instance = self
             .instances
-            .get_mut(seed)
-            .ok_or_else(|| format!("session {seed} is not running"))?;
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} is not running"))?;
         match instance.apply_subscription(SubscriptionCommand::Unsubscribe {
             connection_id,
             channel,
@@ -1533,10 +1548,10 @@ impl AgentRegistry {
 
     pub fn connection_closed(
         &mut self,
-        seed: &str,
+        session_id: &str,
         connection_id: ConnectionId,
     ) -> Result<usize, String> {
-        let Some(instance) = self.instances.get_mut(seed) else {
+        let Some(instance) = self.instances.get_mut(session_id) else {
             return Ok(0);
         };
         match instance
@@ -1547,8 +1562,8 @@ impl AgentRegistry {
         }
     }
 
-    pub fn close(&mut self, seed: &str) {
-        let descendants = self.supervisor.begin_unload(seed);
+    pub fn close(&mut self, session_id: &str) {
+        let descendants = self.supervisor.begin_unload(session_id);
         for child in descendants {
             let parent = self.supervisor.parent_of(&child);
             self.finish_for_unload(&child, parent.as_deref());
@@ -1556,43 +1571,43 @@ impl AgentRegistry {
             self.armed_collectors.remove(&child);
         }
 
-        let parent = self.supervisor.parent_of(seed);
-        self.finish_for_unload(seed, parent.as_deref());
-        self.supervisor.unlink(seed);
-        self.supervisor.parent_unload_ack(seed);
-        self.armed_collectors.remove(seed);
+        let parent = self.supervisor.parent_of(session_id);
+        self.finish_for_unload(session_id, parent.as_deref());
+        self.supervisor.unlink(session_id);
+        self.supervisor.parent_unload_ack(session_id);
+        self.armed_collectors.remove(session_id);
     }
 
     /// Signal, observe terminal, then join one worker. For a child, the parent
     /// edge is closed before the join, which is the P2-5 ordering contract.
-    fn finish_for_unload(&mut self, seed: &str, parent: Option<&str>) {
-        self.set_agent_residency(seed, ListedAgentResidency::Unloaded);
+    fn finish_for_unload(&mut self, session_id: &str, parent: Option<&str>) {
+        self.set_agent_residency(session_id, ListedAgentResidency::Unloaded);
         if let Some(parent) = parent {
-            self.supervisor.cancel_sent(parent, seed);
+            self.supervisor.cancel_sent(parent, session_id);
         }
-        let Some(mut instance) = self.instances.remove(seed) else {
+        let Some(mut instance) = self.instances.remove(session_id) else {
             if let Some(parent) = parent {
-                self.supervisor.child_terminal(parent, seed);
-                self.supervisor.parent_subagent_finished(parent, seed);
-                self.supervisor.child_joined(parent, seed);
+                self.supervisor.child_terminal(parent, session_id);
+                self.supervisor.parent_subagent_finished(parent, session_id);
+                self.supervisor.child_joined(parent, session_id);
             }
-            qaqh_workspace::remove_session_cancel(seed);
+            qaqh_workspace::remove_session_cancel(session_id);
             return;
         };
 
         instance.signal_shutdown();
-        if !instance.wait_until_stopped(seed) {
-            log::warn!("[registry] worker {seed} did not stop before join timeout");
+        if !instance.wait_until_stopped(session_id) {
+            log::warn!("[registry] worker {session_id} did not stop before join timeout");
         }
         if let Some(parent) = parent {
-            self.supervisor.child_terminal(parent, seed);
-            self.supervisor.parent_subagent_finished(parent, seed);
+            self.supervisor.child_terminal(parent, session_id);
+            self.supervisor.parent_subagent_finished(parent, session_id);
         }
         instance.finish_shutdown();
         if let Some(parent) = parent {
-            self.supervisor.child_joined(parent, seed);
+            self.supervisor.child_joined(parent, session_id);
         }
-        qaqh_workspace::remove_session_cancel(seed);
+        qaqh_workspace::remove_session_cancel(session_id);
     }
 
     /// T-1-4：登记父会话 → 子代理的派生关系（幂等）。
@@ -1605,11 +1620,11 @@ impl AgentRegistry {
         self.supervisor.children_of(parent)
     }
 
-    fn cancel_for_seed(&self, seed: &str) -> Option<crate::agent::types::CancelToken> {
-        if seed.is_empty() {
+    fn cancel_for_session(&self, session_id: &str) -> Option<crate::agent::types::CancelToken> {
+        if session_id.is_empty() {
             return None;
         }
-        self.instances.get(seed).map(|instance| {
+        self.instances.get(session_id).map(|instance| {
             let AgentTransport::InProcess { cancel, .. } = &instance.transport;
             cancel.clone()
         })
@@ -1808,10 +1823,10 @@ impl AgentRegistry {
     #[doc(hidden)]
     pub fn worker_liveness(
         &self,
-        seed: &str,
+        session_id: &str,
     ) -> Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>> {
         self.instances
-            .get(seed)
+            .get(session_id)
             .and_then(|instance| instance.liveness.clone())
     }
 
@@ -1828,22 +1843,23 @@ impl AgentRegistry {
         let unloadable: Vec<String> = self
             .instances
             .iter()
-            .filter_map(|(seed, instance)| {
+            .filter_map(|(session_id, instance)| {
                 let liveness = instance.liveness.as_ref()?;
-                (liveness.unloadable() && liveness.idle_secs() >= idle_secs).then(|| seed.clone())
+                (liveness.unloadable() && liveness.idle_secs() >= idle_secs)
+                    .then(|| session_id.clone())
             })
             .collect();
         let mut unloaded = Vec::new();
-        for seed in unloadable {
+        for session_id in unloadable {
             let idle = self
                 .instances
-                .get(&seed)
+                .get(&session_id)
                 .and_then(|instance| instance.liveness.as_ref())
                 .map(|liveness| liveness.idle_secs())
                 .unwrap_or(0);
-            log::info!("[registry] idle unload seed={seed} idle={idle}s");
-            self.close(&seed);
-            unloaded.push(seed);
+            log::info!("[registry] idle unload seed={session_id} idle={idle}s");
+            self.close(&session_id);
+            unloaded.push(session_id);
         }
         unloaded
     }
@@ -1855,16 +1871,16 @@ impl AgentRegistry {
         let mut roots: Vec<String> = self
             .instances
             .keys()
-            .filter(|seed| {
+            .filter(|session_id| {
                 self.supervisor
-                    .parent_of(seed)
+                    .parent_of(session_id)
                     .is_none_or(|parent| !self.instances.contains_key(&parent))
             })
             .cloned()
             .collect();
         roots.sort();
-        for seed in roots {
-            self.close(&seed);
+        for session_id in roots {
+            self.close(&session_id);
         }
         // Defensive fallback for an instance whose edge state was already
         // removed before shutdown.
@@ -1889,57 +1905,59 @@ impl AgentRegistry {
             .instances
             .iter()
             .filter(|(_, instance)| instance.is_dead())
-            .filter(|(seed, _)| {
-                self.supervisor.parent_of(seed).is_none_or(|parent| {
+            .filter(|(session_id, _)| {
+                self.supervisor.parent_of(session_id).is_none_or(|parent| {
                     !self
                         .instances
                         .get(&parent)
                         .is_some_and(AgentInstance::is_dead)
                 })
             })
-            .map(|(seed, instance)| {
+            .map(|(session_id, instance)| {
                 let parent_cancel = self
                     .supervisor
-                    .parent_of(seed)
+                    .parent_of(session_id)
                     .as_ref()
-                    .and_then(|parent| self.cancel_for_seed(parent));
-                (seed.clone(), instance.kind_name(), parent_cancel)
+                    .and_then(|parent| self.cancel_for_session(parent));
+                (session_id.clone(), instance.kind_name(), parent_cancel)
             })
             .collect();
-        for (seed, kind, parent_cancel) in dead {
+        for (session_id, kind, parent_cancel) in dead {
             // 退避：同一 seed 最近 1 秒内刚 spawn 过（例如刚拉起又立刻崩溃）
             // 则跳过本轮，避免无意义的重启风暴。
             if self
                 .last_spawn
-                .get(&seed)
+                .get(&session_id)
                 .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
             {
-                log::warn!("[AGENT:{seed}] worker exited immediately after spawn; backing off");
+                log::warn!(
+                    "[AGENT:{session_id}] worker exited immediately after spawn; backing off"
+                );
                 continue;
             }
-            if !self.children_of(&seed).is_empty() {
+            if !self.children_of(&session_id).is_empty() {
                 log::warn!(
-                    "[AGENT:{seed}] dead parent detected; closing child tree before respawn"
+                    "[AGENT:{session_id}] dead parent detected; closing child tree before respawn"
                 );
             }
-            self.close(&seed);
-            log::warn!("[AGENT:{seed}] in-process worker died; respawning");
+            self.close(&session_id);
+            log::warn!("[AGENT:{session_id}] in-process worker died; respawning");
             // B9/R2：先 seal 后 spawn——新 worker 线程一启动就可能发布
             // 新 ask/TurnOpened，晚于 spawn 的 force 收尾会误杀活交互。
             if let Some(hub) = self.hub.as_ref() {
-                hub.seal_orphan_running_turns(&seed);
+                hub.seal_orphan_running_turns(&session_id);
                 // force=true：旧 worker 已死亡，挂起交互必为孤儿。
-                hub.seal_orphan_channel_state(&seed, true);
-                hub.mark_worker_live(&seed);
+                hub.seal_orphan_channel_state(&session_id, true);
+                hub.mark_worker_live(&session_id);
             }
             let spawned = match kind {
-                AgentKind::Session => self.spawn(&seed, None),
+                AgentKind::Session => self.spawn(&session_id, None),
                 AgentKind::Subagent(spec) => {
-                    self.spawn_subagent_inprocess(&seed, spec, parent_cancel)
+                    self.spawn_subagent_inprocess(&session_id, spec, parent_cancel)
                 }
             };
             if let Err(error) = spawned {
-                log::error!("[AGENT:{seed}] respawn failed: {error}");
+                log::error!("[AGENT:{session_id}] respawn failed: {error}");
             }
         }
     }
@@ -1948,31 +1966,33 @@ impl AgentRegistry {
         self.activity.snapshot()
     }
 
-    pub fn activity(&self, seed: &str) -> Option<qaqh_domain::SessionActivity> {
-        self.activity.get(seed)
+    pub fn activity(&self, session_id: &str) -> Option<qaqh_domain::SessionActivity> {
+        self.activity.get(session_id)
     }
 
-    pub fn is_running(&self, seed: &str) -> bool {
-        self.instances.contains_key(seed)
+    pub fn is_running(&self, session_id: &str) -> bool {
+        self.instances.contains_key(session_id)
     }
 
     /// Test/ops hook: whether the worker's loop thread has exited without
     /// having been reaped by `close` or `respawn_dead_agents`.
     #[doc(hidden)]
-    pub fn worker_finished(&self, seed: &str) -> bool {
-        self.instances.get(seed).is_some_and(AgentInstance::is_dead)
+    pub fn worker_finished(&self, session_id: &str) -> bool {
+        self.instances
+            .get(session_id)
+            .is_some_and(AgentInstance::is_dead)
     }
 
     /// 向所有存活 agent 广播同一 Ringing 命令。
     pub fn send_ringing_all(&mut self, command: qaqh_ringing::RingingCommand) {
-        let seeds: Vec<_> = self.instances.keys().cloned().collect();
-        for seed in seeds {
+        let sessions: Vec<_> = self.instances.keys().cloned().collect();
+        for session_id in sessions {
             let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-                seed.clone(),
+                session_id.clone(),
                 "daemon-broadcast",
                 command.clone(),
             );
-            let _ = self.send_ringing(&seed, &env);
+            let _ = self.send_ringing(&session_id, &env);
         }
     }
 }
@@ -2015,13 +2035,13 @@ impl AgentInstance {
                 .is_none_or(std::thread::JoinHandle::is_finished)
     }
 
-    fn wait_until_stopped(&self, seed: &str) -> bool {
+    fn wait_until_stopped(&self, session_id: &str) -> bool {
         const TERMINAL_WAIT: Duration = Duration::from_secs(30);
         let deadline = Instant::now() + TERMINAL_WAIT;
         while !self.is_fully_stopped() {
             if Instant::now() >= deadline {
                 log::error!(
-                    "[registry] child {seed} terminal observation timed out after {TERMINAL_WAIT:?}"
+                    "[registry] child {session_id} terminal observation timed out after {TERMINAL_WAIT:?}"
                 );
                 return false;
             }
@@ -2042,7 +2062,7 @@ impl AgentInstance {
         let _ = self.subscription_actor.step();
         // 优雅关闭：agent 侧只识别 Ringing 帧（legacy Ui2Agent 已拆除）。
         let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-            self.seed.clone(),
+            self.session_id.clone(),
             "daemon-shutdown",
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionShutdown),
         );
@@ -2055,7 +2075,7 @@ impl AgentInstance {
                 // 会话的工具线程不可见（is_cancel 先读会话键控表），却会在
                 // daemon 侧残留全局脏标记（C2 同源问题），已废弃。
                 cancel.set();
-                qaqh_workspace::set_session_cancel(&self.seed, true);
+                qaqh_workspace::set_session_cancel(&self.session_id, true);
                 let cmd = crate::agent::types::WorkerCommand {
                     frame: env,
                     causation: Some("daemon-shutdown".into()),
@@ -2080,7 +2100,7 @@ impl AgentInstance {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        log::info!("stopped agent {}", self.seed);
+        log::info!("stopped agent {}", self.session_id);
     }
 
     fn shutdown(mut self) {
@@ -2100,7 +2120,7 @@ impl AgentInstance {
 /// 且交互终结即释放，正常会话不可能触达。
 pub(crate) fn stash_interaction_body(
     hub: &RingingHub,
-    seed: &str,
+    session_id: &str,
     event: &qaqh_domain::DomainEvent,
 ) {
     use qaqh_domain::{ControlEvent, ToolEvent, interaction_body};
@@ -2160,16 +2180,16 @@ pub(crate) fn stash_interaction_body(
         _ => return,
     };
     match hub.put_interaction_content(
-        seed,
+        session_id,
         &interaction_id,
         interaction_body::INTERACTION_BODY_MEDIA_TYPE,
         bytes,
     ) {
         Ok(content_id) => log::debug!(
-            "[ringing] interaction body stashed for {seed}/{interaction_id} -> {content_id}"
+            "[ringing] interaction body stashed for {session_id}/{interaction_id} -> {content_id}"
         ),
         Err(error) => log::error!(
-            "[ringing] interaction body rejected for {seed}/{interaction_id}: {error} \
+            "[ringing] interaction body rejected for {session_id}/{interaction_id}: {error} \
              (client will 404 the request ref)"
         ),
     }
@@ -2177,7 +2197,7 @@ pub(crate) fn stash_interaction_body(
 
 pub(crate) fn externalize_large_content(
     hub: &RingingHub,
-    seed: &str,
+    session_id: &str,
     event: qaqh_domain::DomainEvent,
 ) -> qaqh_domain::DomainEvent {
     let qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
@@ -2198,7 +2218,12 @@ pub(crate) fn externalize_large_content(
             result,
         });
     }
-    let content_id = hub.put_content(seed, "text/plain", full_text.as_bytes().to_vec(), true);
+    let content_id = hub.put_content(
+        session_id,
+        "text/plain",
+        full_text.as_bytes().to_vec(),
+        true,
+    );
     // 保留尾部（命令输出通常尾部才是结论），但展示行取**全文开头**——
     // 取 tail 的前 512 字符只会得到输出中段，作为 summary 毫无意义。
     let tail = tail_text(full_text, CONTENT_TAIL_BYTES);
@@ -2244,10 +2269,10 @@ fn tail_text(text: &str, max_bytes: usize) -> String {
 }
 
 /// Stable, grammar-valid name for legacy direct `spawn_subagent` callers.
-fn legacy_child_name(seed: &str) -> String {
+fn legacy_child_name(session_id: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    seed.hash(&mut hasher);
+    session_id.hash(&mut hasher);
     format!("sub_{:016x}", hasher.finish())
 }
 
@@ -2343,21 +2368,23 @@ mod tests {
         let identity = sessions
             .allocate_session(None)
             .expect("allocate root session");
-        let seed = identity.session_id.as_str().to_string();
-        let session_dir = sessions.session_path_dir(&seed);
+        let session_id = identity.session_id.as_str().to_string();
+        let session_dir = sessions.session_path_dir(&session_id);
         crate::service::materialize_canonical_session_in(&session_dir, "/tmp", "test-model", None)
             .expect("materialize canonical session");
 
         let hub = Arc::new(V2ProjectionHub::new("registry-residency-test"));
         let mut registry = AgentRegistry::new(sessions.clone());
         registry
-            .register_root_agent(&seed, unix_ms())
+            .register_root_agent(&session_id, unix_ms())
             .expect("register root");
         registry.attach_v2_projection(hub.clone());
-        registry.get_or_spawn(&seed).expect("spawn root worker");
+        registry
+            .get_or_spawn(&session_id)
+            .expect("spawn root worker");
 
         let loaded = hub
-            .bootstrap(&session_dir, &seed)
+            .bootstrap(&session_dir, &session_id)
             .expect("bootstrap loaded root");
         assert_eq!(
             loaded
@@ -2365,15 +2392,15 @@ mod tests {
                 .team
                 .agents
                 .iter()
-                .find(|agent| agent.agent_id.as_str() == seed)
+                .find(|agent| agent.agent_id.as_str() == session_id)
                 .expect("root roster entry")
                 .residency,
             TeamAgentResidency::Loaded
         );
 
-        registry.close(&seed);
+        registry.close(&session_id);
         let unloaded = hub
-            .bootstrap(&session_dir, &seed)
+            .bootstrap(&session_dir, &session_id)
             .expect("bootstrap unloaded root");
         assert_eq!(
             unloaded
@@ -2381,7 +2408,7 @@ mod tests {
                 .team
                 .agents
                 .iter()
-                .find(|agent| agent.agent_id.as_str() == seed)
+                .find(|agent| agent.agent_id.as_str() == session_id)
                 .expect("root roster entry")
                 .residency,
             TeamAgentResidency::Unloaded
@@ -2518,7 +2545,7 @@ mod tests {
     fn subscription_actor_is_idempotent_and_shutdown_closes_ingress() {
         let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
         let mut instance = AgentInstance {
-            seed: "seed-subscription".into(),
+            session_id: "seed-subscription".into(),
             transport: AgentTransport::InProcess {
                 cmd_tx,
                 cancel: crate::agent::types::CancelToken::new(),
@@ -2583,7 +2610,7 @@ mod tests {
         ));
         let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
         let instance = AgentInstance {
-            seed: "seed-registry".into(),
+            session_id: "seed-registry".into(),
             transport: AgentTransport::InProcess {
                 cmd_tx,
                 cancel: crate::agent::types::CancelToken::new(),
@@ -2671,7 +2698,7 @@ mod tests {
         let (parent_tx, parent_rx) = std::sync::mpsc::sync_channel(4);
         let (child_tx, child_rx) = std::sync::mpsc::sync_channel(4);
         let parent = AgentInstance {
-            seed: "parent-seed".into(),
+            session_id: "parent-seed".into(),
             transport: AgentTransport::InProcess {
                 cmd_tx: parent_tx,
                 cancel: parent_cancel.clone(),
@@ -2683,7 +2710,7 @@ mod tests {
             thread: None,
         };
         let child = AgentInstance {
-            seed: "child-seed".into(),
+            session_id: "child-seed".into(),
             transport: AgentTransport::InProcess {
                 cmd_tx: child_tx,
                 cancel: child_cancel.clone(),

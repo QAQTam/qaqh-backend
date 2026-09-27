@@ -13,7 +13,7 @@ use crate::event::RingingEvent;
 /// daemon → agent 命令消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingWorkerCommandEnvelope {
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub command_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,7 +44,7 @@ impl RingingWorkerCommandEnvelope {
 /// agent → daemon 事件消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingWorkerEventEnvelope {
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub event_id: String,
     /// 因果来源 command_id（Ringing 命令执行期间产出的事件携带）。
@@ -77,7 +77,7 @@ impl RingingWorkerEventEnvelope {
 /// Timeline writer 赋予）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingTimelineIntentEnvelope {
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub intent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

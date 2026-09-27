@@ -58,7 +58,7 @@ pub(crate) struct TestHooks {
     sse_terminate_used: AtomicBool,
     timeline_gap: bool,
     timeline_gap_used: AtomicBool,
-    session_404_seed: Option<String>,
+    session_404_session: Option<String>,
     command_ack: Option<CommandAckFault>,
     command_ack_channel: Option<RingingChannel>,
     command_ack_target: CommandAckTarget,
@@ -74,7 +74,7 @@ impl TestHooks {
             sse_terminate_used: AtomicBool::new(false),
             timeline_gap: false,
             timeline_gap_used: AtomicBool::new(false),
-            session_404_seed: None,
+            session_404_session: None,
             command_ack: None,
             command_ack_channel: None,
             command_ack_target: CommandAckTarget::InteractionResponses,
@@ -104,7 +104,7 @@ impl TestHooks {
             _ => SseTerminateScope::Timeline,
         };
         let timeline_gap = env_flag("QAQH_TEST_TIMELINE_GAP");
-        let session_404_seed = env_string("QAQH_TEST_SESSION_404_SEED");
+        let session_404_session = env_string("QAQH_TEST_SESSION_404_SEED");
         let command_ack = env_string("QAQH_TEST_COMMAND_ACK").and_then(|value| {
             if value.eq_ignore_ascii_case("hang") {
                 Some(CommandAckFault::Hang)
@@ -135,7 +135,7 @@ impl TestHooks {
             sse_terminate_used: AtomicBool::new(false),
             timeline_gap,
             timeline_gap_used: AtomicBool::new(false),
-            session_404_seed,
+            session_404_session,
             command_ack,
             command_ack_channel,
             command_ack_target,
@@ -169,10 +169,10 @@ impl TestHooks {
         self.timeline_gap && !self.timeline_gap_used.swap(true, Ordering::AcqRel)
     }
 
-    pub(crate) fn session_is_404(&self, seed: &str) -> bool {
-        self.session_404_seed
+    pub(crate) fn session_is_404(&self, session_id: &str) -> bool {
+        self.session_404_session
             .as_deref()
-            .is_some_and(|configured| configured == "*" || configured == seed)
+            .is_some_and(|configured| configured == "*" || configured == session_id)
     }
 
     pub(crate) fn take_interaction_fault(
@@ -258,9 +258,9 @@ impl Default for TestHooks {
 
 #[cfg(test)]
 impl TestHooks {
-    pub(crate) fn for_test_session_404(seed: &str) -> Self {
+    pub(crate) fn for_test_session_404(session_id: &str) -> Self {
         Self {
-            session_404_seed: Some(seed.into()),
+            session_404_session: Some(session_id.into()),
             ..Self::disabled()
         }
     }
@@ -426,16 +426,16 @@ mod tests {
     }
 
     #[test]
-    fn session_404_matches_exact_seed_or_wildcard() {
+    fn session_404_matches_exact_session_or_wildcard() {
         let exact = TestHooks {
-            session_404_seed: Some("seed-sub".into()),
+            session_404_session: Some("seed-sub".into()),
             ..TestHooks::disabled()
         };
         assert!(exact.session_is_404("seed-sub"));
         assert!(!exact.session_is_404("seed-root"));
 
         let wildcard = TestHooks {
-            session_404_seed: Some("*".into()),
+            session_404_session: Some("*".into()),
             ..TestHooks::disabled()
         };
         assert!(wildcard.session_is_404("anything"));

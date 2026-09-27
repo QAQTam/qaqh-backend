@@ -33,7 +33,7 @@ pub use qaqh_ringing::RingingEventBatch as EventBatch;
 /// `SubagentSpawned` edge before invoking [`SubagentHost::start_subagent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedSubagent {
-    pub seed: String,
+    pub session_id: String,
     pub child_session_id: String,
     pub parent_agent_path: String,
     pub child_agent_path: String,
@@ -104,7 +104,7 @@ pub struct SpawnSubagentRequest<'a> {
 
 #[derive(Debug, Clone)]
 pub struct StartSubagentRequest<'a> {
-    pub seed: &'a str,
+    pub session_id: &'a str,
     pub child_session_id: &'a str,
     pub name: &'a str,
     pub task_text: &'a str,
@@ -160,7 +160,7 @@ pub struct InterruptedAgent {
 
 #[derive(Debug, Clone)]
 pub struct ArmSubagentCollectorRequest<'a> {
-    pub seed: &'a str,
+    pub session_id: &'a str,
     pub child_session_id: &'a str,
     pub name: &'a str,
     pub parent_session_id: &'a str,
@@ -499,24 +499,25 @@ pub trait SubagentHost: Send + Sync {
     ///
     /// Unlike [`Self::abort_subagent`], this also removes the logical catalog
     /// registration because the edge never became authoritative.
-    fn rollback_subagent(&self, seed: &str, child_session_id: &str, process_id: u32);
+    fn rollback_subagent(&self, session_id: &str, child_session_id: &str, process_id: u32);
 
     /// Close a child after its canonical spawn edge was committed.
-    fn abort_subagent(&self, seed: &str, process_id: u32);
+    fn abort_subagent(&self, session_id: &str, process_id: u32);
 
     /// 进程内直接向指定 seed 的 actor 命令队列发送一条 Ringing 命令
     /// （等价 HTTP attach + send_command，但进程内无 lease/owns 语义）。
-    fn send_ringing(&self, seed: &str, command: RingingCommand) -> Result<(), String>;
+    fn send_ringing(&self, session_id: &str, command: RingingCommand) -> Result<(), String>;
 
     /// 订阅某 seed 的实时事件批次流（等价 SSE 单条连接；宿主内部按 seed
     /// 过滤后以 `EventBatch` 聚合）。返回 std mpsc receiver，供 std 线程消费。
-    fn subscribe(&self, seed: &str) -> std::sync::mpsc::Receiver<EventBatch>;
+    fn subscribe(&self, session_id: &str) -> std::sync::mpsc::Receiver<EventBatch>;
 
     /// 进程内读取外置大内容（等价 HTTP `download_content`）。
-    fn download_content(&self, seed: &str, reference: &ContentRef) -> Result<Vec<u8>, String>;
+    fn download_content(&self, session_id: &str, reference: &ContentRef)
+    -> Result<Vec<u8>, String>;
 
     /// 进程内关闭子代理 worker（等价 HTTP `SessionClose`）。
-    fn close(&self, seed: &str) -> Result<(), String>;
+    fn close(&self, session_id: &str) -> Result<(), String>;
 }
 
 /// 进程级宿主安装位。多个 actor 并发调用 `host()` 读取；daemon 只安装一次。

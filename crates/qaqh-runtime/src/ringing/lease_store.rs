@@ -24,7 +24,7 @@ fn lease_ttl_ms() -> u64 {
 #[derive(Debug, Default)]
 pub struct RingingLeaseStore {
     leases: HashMap<String, LeaseEntry>,
-    seed_leases: HashMap<String, HashSet<String>>,
+    session_leases: HashMap<String, HashSet<String>>,
     /// `client_session_id` → `client_instance_id` 索引（BUG-2026-09-12-10）：
     /// 让 `is_active_session` / `owns_seed` 等热路径查询保持 O(1)，
     /// 避免每次调用做全表扫描（SSE 每事件都会经过 `owns_seed`）。
@@ -51,7 +51,7 @@ impl RingingLeaseStore {
         if let Some(old) = self.leases.get(&client_instance_id)
             && old.client_session_id != client_session_id
         {
-            self.seed_leases.remove(&old.client_session_id);
+            self.session_leases.remove(&old.client_session_id);
             self.by_session.remove(&old.client_session_id);
         }
         self.by_session
@@ -65,22 +65,22 @@ impl RingingLeaseStore {
         );
     }
 
-    pub fn attach_seed(&mut self, client_session_id: &str, seed: &str) -> bool {
-        if !self.is_active_session(client_session_id) || seed.is_empty() {
+    pub fn attach_session(&mut self, client_session_id: &str, session_id: &str) -> bool {
+        if !self.is_active_session(client_session_id) || session_id.is_empty() {
             return false;
         }
-        self.seed_leases
+        self.session_leases
             .entry(client_session_id.to_string())
             .or_default()
-            .insert(seed.to_string());
+            .insert(session_id.to_string());
         true
     }
 
-    pub fn detach_seed(&mut self, client_session_id: &str, seed: &str) {
-        if let Some(seeds) = self.seed_leases.get_mut(client_session_id) {
-            seeds.remove(seed);
-            if seeds.is_empty() {
-                self.seed_leases.remove(client_session_id);
+    pub fn detach_session(&mut self, client_session_id: &str, session_id: &str) {
+        if let Some(sessions) = self.session_leases.get_mut(client_session_id) {
+            sessions.remove(session_id);
+            if sessions.is_empty() {
+                self.session_leases.remove(client_session_id);
             }
         }
     }
@@ -93,23 +93,23 @@ impl RingingLeaseStore {
     ///
     /// 活跃性由调用方在同临界区内用 `is_active_session` 判定（跳过活跃检查
     /// 会让过期/重新协商后的僵尸身份仍能读到归属——见 BUG-2026-09-12-10）。
-    pub fn owned_seeds(&self, client_session_id: &str) -> HashSet<String> {
-        self.seed_leases
+    pub fn owned_sessions(&self, client_session_id: &str) -> HashSet<String> {
+        self.session_leases
             .get(client_session_id)
             .cloned()
             .unwrap_or_default()
     }
 
-    pub fn owns_seed(&mut self, client_session_id: &str, seed: &str) -> bool {
+    pub fn owns_session(&mut self, client_session_id: &str, session_id: &str) -> bool {
         // BUG-2026-09-12-10：不再在热路径上做 expire() 全表扫描（每次还分配
         // 一个 HashSet）；过期即失效改由 is_active_session 惰性判定，GC 交给
         // open()。同时要求活跃性——否则重新协商后的旧 cs（已不在 leases）
         // 会继续通过归属检查（僵尸身份仍能读 timeline）。
         self.is_active_session(client_session_id)
             && self
-                .seed_leases
+                .session_leases
                 .get(client_session_id)
-                .is_some_and(|seeds| seeds.contains(seed))
+                .is_some_and(|sessions| sessions.contains(session_id))
     }
 
     /// 续租（按 client_session_id 反查）；过期/未知会话返回 false。
@@ -132,7 +132,7 @@ impl RingingLeaseStore {
         if expired {
             self.leases.remove(&instance);
             self.by_session.remove(client_session_id);
-            self.seed_leases.remove(client_session_id);
+            self.session_leases.remove(client_session_id);
             return false;
         }
         true
@@ -149,7 +149,7 @@ impl RingingLeaseStore {
         for (instance, session) in expired {
             self.leases.remove(&instance);
             self.by_session.remove(&session);
-            self.seed_leases.remove(&session);
+            self.session_leases.remove(&session);
         }
     }
 
@@ -204,33 +204,33 @@ mod tests {
     fn renegotiation_drops_old_session_ownership_and_activity_is_required() {
         let mut store = RingingLeaseStore::new();
         store.open("cs-1".into(), "ci-1".into());
-        assert!(store.attach_seed("cs-1", "seed-a"));
-        assert!(store.owns_seed("cs-1", "seed-a"));
+        assert!(store.attach_session("cs-1", "seed-a"));
+        assert!(store.owns_session("cs-1", "seed-a"));
 
         // 重新协商：同 instance 换新 cs（BUG-2026-09-12-10 修复点 1）
         store.open("cs-2".into(), "ci-1".into());
         assert!(
-            !store.owns_seed("cs-1", "seed-a"),
+            !store.owns_session("cs-1", "seed-a"),
             "旧 cs 在重新协商后必须失去 seed 归属（僵尸身份）"
         );
         assert!(
-            !store.owns_seed("cs-2", "seed-a"),
+            !store.owns_session("cs-2", "seed-a"),
             "新 cs 不自动继承归属，须由客户端重放 attach"
         );
-        assert!(store.attach_seed("cs-2", "seed-a"));
-        assert!(store.owns_seed("cs-2", "seed-a"));
+        assert!(store.attach_session("cs-2", "seed-a"));
+        assert!(store.owns_session("cs-2", "seed-a"));
 
         // 过期即失效（惰性判定，不依赖热路径 GC；修复点 2）
         store.set_expiry_for_test("ci-1", Instant::now() - Duration::from_secs(1));
         assert!(
-            !store.owns_seed("cs-2", "seed-a"),
+            !store.owns_session("cs-2", "seed-a"),
             "过期 lease 不得再通过归属检查"
         );
         assert!(!store.is_active_session("cs-2"));
     }
 
     #[test]
-    fn sse_replay_is_scoped_to_session_seed_leases() {
+    fn sse_replay_is_scoped_to_session_session_leases() {
         use crate::ringing::hub::ChannelReplay;
         use qaqh_domain::RingingChannel;
         use qaqh_ringing::{RingingEvent, RingingEventEnvelope, RingingResetRequired};
@@ -238,7 +238,7 @@ mod tests {
 
         let leases = Arc::new(Mutex::new(RingingLeaseStore::new()));
         leases.lock().unwrap().open("cs-1".into(), "ci-1".into());
-        assert!(leases.lock().unwrap().attach_seed("cs-1", "seed-a"));
+        assert!(leases.lock().unwrap().attach_session("cs-1", "seed-a"));
 
         let event_a = RingingEventEnvelope::new(
             "seed-a",
@@ -278,10 +278,10 @@ mod tests {
         let mut filtered = replay;
         filtered
             .events
-            .retain(|e| leases_guard.owns_seed("cs-1", &e.session_id));
+            .retain(|e| leases_guard.owns_session("cs-1", &e.session_id));
         filtered
             .resets
-            .retain(|r| leases_guard.owns_seed("cs-1", &r.session_id));
+            .retain(|r| leases_guard.owns_session("cs-1", &r.session_id));
         assert_eq!(filtered.events.len(), 1);
         assert_eq!(filtered.events[0].session_id, "seed-a");
         assert_eq!(filtered.resets.len(), 1);

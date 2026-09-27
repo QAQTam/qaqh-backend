@@ -155,10 +155,10 @@ fn replay_filter_lease_lock_hold_time() {
         for i in 0..LEASES {
             let cs = format!("cs-{i}");
             g.open(cs.clone(), format!("ci-{i}"));
-            g.attach_seed(&cs, &format!("seed-{i}"));
+            g.attach_session(&cs, &format!("seed-{i}"));
         }
     }
-    let seeds: Vec<String> = (0..REPLAY)
+    let sessions: Vec<String> = (0..REPLAY)
         .map(|i| format!("seed-{}", i % LEASES))
         .collect();
 
@@ -166,7 +166,10 @@ fn replay_filter_lease_lock_hold_time() {
     let t0 = Instant::now();
     {
         let mut g = leases.lock().unwrap();
-        let kept = seeds.iter().filter(|s| g.owns_seed("cs-0", s)).count();
+        let kept = sessions
+            .iter()
+            .filter(|s| g.owns_session("cs-0", s))
+            .count();
         let _ = kept;
     }
     let before = t0.elapsed();
@@ -175,16 +178,16 @@ fn replay_filter_lease_lock_hold_time() {
     let t1 = Instant::now();
     let owned = {
         let g = leases.lock().unwrap();
-        g.owned_seeds("cs-0")
+        g.owned_sessions("cs-0")
     };
     let lock_hold = t1.elapsed();
-    let kept = seeds.iter().filter(|s| owned.contains(*s)).count();
+    let kept = sessions.iter().filter(|s| owned.contains(*s)).count();
     let total_after = t1.elapsed();
     let _ = kept;
 
     println!(
         "── 回放过滤租约锁（L={LEASES} 租约，R={REPLAY} 事件）──\n\
-         修复前：单次持锁 {:.1}ms（锁内 R 次 owns_seed）\n\
+         修复前：单次持锁 {:.1}ms（锁内 R 次 owns_session）\n\
          修复后：持锁 {:.3}ms + 锁外过滤，合计 {:.1}ms\n\
          持锁时间下降 {:.0}×",
         ms(before),

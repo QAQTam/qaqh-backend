@@ -24,8 +24,8 @@ pub fn qaqh_dir() -> PathBuf {
 }
 
 /// Bind the global session identifier used by tools and code-delta tracking.
-pub fn set_current_session(seed: &str) {
-    crate::set_current_session(seed);
+pub fn set_current_session(session_id: &str) {
+    crate::set_current_session(session_id);
 }
 
 /// Update tool path resolution (and, when safe, the process cwd).

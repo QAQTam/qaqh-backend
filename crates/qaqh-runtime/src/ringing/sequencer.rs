@@ -26,7 +26,7 @@ use qaqh_domain::RingingChannel;
 
 /// per-(channel, seed) 序号表的分片数。2 的幂：取模用位与。
 /// 16 分片在「会话数 ≤ 数十」的真实负载下已能摊开争用，且内存开销可忽略。
-const SEED_SHARDS: usize = 16;
+const SESSION_SHARDS: usize = 16;
 
 #[derive(Debug, Default)]
 struct PerSeed {
@@ -35,7 +35,7 @@ struct PerSeed {
     state_revision: u64,
 }
 
-type SeedShard = Mutex<HashMap<(RingingChannel, String), PerSeed>>;
+type SessionShard = Mutex<HashMap<(RingingChannel, String), PerSeed>>;
 
 /// FNV-1a：稳定哈希（跨进程/跨版本一致，便于诊断复现；`HashMap` 的
 /// `RandomState` 每次进程随机，不可用于固定分片）。
@@ -54,14 +54,14 @@ pub struct Sequencer {
     stream_seq: Mutex<HashMap<RingingChannel, u64>>,
     /// per-(channel, seed) 序号表的分片。**实例私有**（不是进程级 static）：
     /// 每个 `RingingHub` 持有独立序号空间，`Sequencer::new()` 必须从零开始。
-    seed_shards: Box<[SeedShard; SEED_SHARDS]>,
+    session_shards: Box<[SessionShard; SESSION_SHARDS]>,
 }
 
 impl Default for Sequencer {
     fn default() -> Self {
         Self {
             stream_seq: Mutex::new(HashMap::new()),
-            seed_shards: Box::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
+            session_shards: Box::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
         }
     }
 }
@@ -72,27 +72,31 @@ impl Sequencer {
     }
 
     /// `(channel, seed)` → 分片下标（FNV-1a 稳定哈希）。
-    fn shard_index(channel: RingingChannel, seed: &str) -> usize {
+    fn shard_index(channel: RingingChannel, session_id: &str) -> usize {
         let mut hash = fnv1a(channel.as_str().as_bytes());
         hash = hash
             .wrapping_mul(0x0000_0100_0000_01b3)
-            .wrapping_add(fnv1a(seed.as_bytes()));
-        (hash as usize) & (SEED_SHARDS - 1)
+            .wrapping_add(fnv1a(session_id.as_bytes()));
+        (hash as usize) & (SESSION_SHARDS - 1)
     }
 
     /// 取分片 + 该分片内的查表键。
-    fn shard(&self, channel: RingingChannel, seed: &str) -> (&SeedShard, (RingingChannel, String)) {
+    fn shard(
+        &self,
+        channel: RingingChannel,
+        session_id: &str,
+    ) -> (&SessionShard, (RingingChannel, String)) {
         (
-            &self.seed_shards[Self::shard_index(channel, seed)],
-            (channel, seed.to_string()),
+            &self.session_shards[Self::shard_index(channel, session_id)],
+            (channel, session_id.to_string()),
         )
     }
 
     /// 从持久化 journal 装载后恢复序号（取历史最大值，`next` 继续递增）。
-    pub fn seed(
+    pub fn session_id(
         &self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         stream_seq: u64,
         channel_seq: u64,
         session_seq: u64,
@@ -102,7 +106,7 @@ impl Sequencer {
         *entry = (*entry).max(stream_seq);
         drop(streams);
 
-        let (shard, key) = self.shard(channel, seed);
+        let (shard, key) = self.shard(channel, session_id);
         let mut per = shard.lock().unwrap_or_else(|e| e.into_inner());
         let entry = per.entry(key).or_default();
         entry.channel_seq = entry.channel_seq.max(channel_seq);
@@ -110,14 +114,14 @@ impl Sequencer {
     }
 
     /// 分配一组序号（stream/channel/session 各自独立递增）。
-    pub fn next(&self, channel: RingingChannel, seed: &str) -> (u64, u64, u64) {
+    pub fn next(&self, channel: RingingChannel, session_id: &str) -> (u64, u64, u64) {
         let mut streams = self.stream_seq.lock().unwrap_or_else(|e| e.into_inner());
         let s = streams.entry(channel).or_default();
         *s = s.saturating_add(1);
         let stream_seq = *s;
         drop(streams);
 
-        let (shard, key) = self.shard(channel, seed);
+        let (shard, key) = self.shard(channel, session_id);
         let mut per = shard.lock().unwrap_or_else(|e| e.into_inner());
         let entry = per.entry(key).or_default();
         entry.channel_seq = entry.channel_seq.saturating_add(1);
@@ -126,16 +130,16 @@ impl Sequencer {
     }
 
     /// 领域状态修订号递增（terminal / revision 变更事件时调用）。
-    pub fn bump_revision(&self, channel: RingingChannel, seed: &str) -> u64 {
-        let (shard, key) = self.shard(channel, seed);
+    pub fn bump_revision(&self, channel: RingingChannel, session_id: &str) -> u64 {
+        let (shard, key) = self.shard(channel, session_id);
         let mut per = shard.lock().unwrap_or_else(|e| e.into_inner());
         let entry = per.entry(key).or_default();
         entry.state_revision = entry.state_revision.saturating_add(1);
         entry.state_revision
     }
 
-    pub fn current_revision(&self, channel: RingingChannel, seed: &str) -> u64 {
-        let (shard, key) = self.shard(channel, seed);
+    pub fn current_revision(&self, channel: RingingChannel, session_id: &str) -> u64 {
+        let (shard, key) = self.shard(channel, session_id);
         let per = shard.lock().unwrap_or_else(|e| e.into_inner());
         per.get(&key).map(|e| e.state_revision).unwrap_or(0)
     }
@@ -146,7 +150,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sequences_are_per_channel_and_per_seed() {
+    fn sequences_are_per_channel_and_per_session() {
         let seq = Sequencer::new();
         let (s1, c1, ss1) = seq.next(RingingChannel::Tool, "a");
         let (s2, c2, ss2) = seq.next(RingingChannel::Tool, "a");
@@ -154,12 +158,12 @@ mod tests {
         let (s4, c4, _) = seq.next(RingingChannel::Control, "a");
         assert_eq!((s1, c1, ss1), (1, 1, 1));
         assert_eq!((s2, c2, ss2), (2, 2, 2));
-        assert_eq!((s3, c3), (3, 1)); // seed b 独立 channel_seq
+        assert_eq!((s3, c3), (3, 1)); // session_id b 独立 channel_seq
         assert_eq!((s4, c4), (1, 1)); // Control 频道独立 stream_seq
     }
 
     #[test]
-    fn revision_is_per_seed_channel() {
+    fn revision_is_per_session_channel() {
         let seq = Sequencer::new();
         assert_eq!(seq.bump_revision(RingingChannel::Conversation, "s"), 1);
         assert_eq!(seq.bump_revision(RingingChannel::Conversation, "s"), 2);
@@ -173,9 +177,9 @@ mod tests {
         // 同 key 恒映射同分片；不同 seed 应摊到多个分片（不是退化成单锁）。
         let mut used = std::collections::HashSet::new();
         for i in 0..64 {
-            let seed = format!("seed-{i}");
-            let first = Sequencer::shard_index(RingingChannel::Conversation, &seed);
-            let second = Sequencer::shard_index(RingingChannel::Conversation, &seed);
+            let session_id = format!("seed-{i}");
+            let first = Sequencer::shard_index(RingingChannel::Conversation, &session_id);
+            let second = Sequencer::shard_index(RingingChannel::Conversation, &session_id);
             assert_eq!(first, second, "same key must map to the same shard");
             used.insert(first);
         }
@@ -193,9 +197,9 @@ mod tests {
         for index in 0..8 {
             let seq = std::sync::Arc::clone(&seq);
             joins.push(std::thread::spawn(move || {
-                let seed = format!("conc-{index}");
+                let session_id = format!("conc-{index}");
                 for _ in 0..500 {
-                    let _ = seq.next(RingingChannel::Conversation, &seed);
+                    let _ = seq.next(RingingChannel::Conversation, &session_id);
                 }
             }));
         }

@@ -221,13 +221,13 @@ pub use qaqh_types::{
 pub static CANCEL: AtomicBool = AtomicBool::new(false);
 pub static CURRENT_SESSION: Mutex<Option<String>> = Mutex::new(None);
 
-pub fn set_current_session(seed: &str) {
+pub fn set_current_session(session_id: &str) {
     if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
-        ACTOR_SESSION.with(|slot| *slot.borrow_mut() = Some(seed.to_string()));
+        ACTOR_SESSION.with(|slot| *slot.borrow_mut() = Some(session_id.to_string()));
         return;
     }
     let mut guard = CURRENT_SESSION.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(seed.to_string());
+    *guard = Some(session_id.to_string());
 }
 
 pub static CURRENT_WORKSPACE: RwLock<String> = RwLock::new(String::new());
@@ -640,7 +640,7 @@ pub enum ToolEffect {
     /// A subagent actor has been created and is waiting for its canonical
     /// `SubagentSpawned` fact before the task is delivered.
     SubagentSpawned {
-        seed: String,
+        session_id: String,
         child_session_id: String,
         name: String,
         task_text: String,

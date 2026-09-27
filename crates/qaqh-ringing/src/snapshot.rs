@@ -16,7 +16,7 @@ pub struct RingingChannelSnapshot {
     pub schema: String,
     pub version: u32,
     pub channel: RingingChannel,
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     /// 快照覆盖到的 stream_seq 基线（其后的可靠事件需从 cursor 回放）。
     #[cfg_attr(feature = "ts", ts(as = "u32"))]

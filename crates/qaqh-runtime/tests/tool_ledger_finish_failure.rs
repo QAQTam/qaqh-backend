@@ -72,8 +72,8 @@ fn probe(_ctx: ToolCallCtx) -> ToolResult {
     ToolResult::ok("handler completed before terminal write")
 }
 
-fn store_with_tool_use(seed: &str, call_id: &str, tool_name: &str) -> MessageStore {
-    let mut store = MessageStore::new(seed);
+fn store_with_tool_use(session_id: &str, call_id: &str, tool_name: &str) -> MessageStore {
+    let mut store = MessageStore::new(session_id);
     store.push_user("run the fenced finish probe");
     let assistant = Message {
         msg_id: None,
@@ -90,11 +90,11 @@ fn store_with_tool_use(seed: &str, call_id: &str, tool_name: &str) -> MessageSto
     store
 }
 
-fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
+fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
     qaqh_workspace::runtime::ToolExecutionScope::capture(
         qaqh_workspace::tool_api::ToolCallContext {
             call_id: call_id.to_string(),
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             workspace_root: PathBuf::from(qaqh_workspace::current_workspace()),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
@@ -111,9 +111,9 @@ fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecuti
     )
 }
 
-fn admitted_call(seed: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
+fn admitted_call(session_id: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
     let args = serde_json::json!({"call": call_id});
-    let auth = match qaqh_workspace::authorize_call(seed, call_id, tool_name, &args, 4) {
+    let auth = match qaqh_workspace::authorize_call(session_id, call_id, tool_name, &args, 4) {
         qaqh_workspace::Admission::Authorized(auth) => auth,
         qaqh_workspace::Admission::ApprovalRequired(_) => {
             panic!("call {call_id} unexpectedly requires approval")
@@ -125,7 +125,7 @@ fn admitted_call(seed: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
     AdmittedTool {
         call_id: call_id.to_string(),
         auth: Box::new(auth),
-        scope: tool_scope(call_id, seed),
+        scope: tool_scope(call_id, session_id),
     }
 }
 
@@ -145,7 +145,7 @@ impl Emitter for RecordingEmitter {
     }
 }
 
-fn run_call(agent: &mut AgentState, seed: &str, call_id: &str, tool_name: &str) -> bool {
+fn run_call(agent: &mut AgentState, session_id: &str, call_id: &str, tool_name: &str) -> bool {
     let emitter = RecordingEmitter::default();
     let cancel = CancelToken::new();
     let mut phase = LoopPhase::ToolsRunning;
@@ -167,7 +167,7 @@ fn run_call(agent: &mut AgentState, seed: &str, call_id: &str, tool_name: &str) 
     execute_admitted_batch(
         &mut ctx,
         &tool,
-        vec![admitted_call(seed, call_id, tool_name)],
+        vec![admitted_call(session_id, call_id, tool_name)],
         &[call_id.to_string()],
         &HashSet::new(),
         "turn-fenced-finish",
@@ -205,22 +205,22 @@ fn fenced_finish_keeps_intent_open_and_recovers_as_indeterminate() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     qaqh_workspace::set_workspace(&workspace.path().to_string_lossy());
 
-    let seed = "tool-ledger-fenced-finish";
+    let session_id = "tool-ledger-fenced-finish";
     let call_id = "call-fenced-finish";
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
     SESSION_DIR
         .set(session_dir.clone())
         .expect("session dir configured once");
     let identity = CanonicalSessionIdentity::open_or_create(&session_dir).expect("identity");
 
     let mut agent = AgentState::init("fenced-finish-test", qaqh_config::Config::default());
-    agent.session.session_id = seed.to_string();
+    agent.session.session_id = session_id.to_string();
     agent.ephemeral = false;
     agent.config.permission_level = 4;
-    agent.msg = store_with_tool_use(seed, call_id, "fenced_finish_probe");
+    agent.msg = store_with_tool_use(session_id, call_id, "fenced_finish_probe");
 
     assert!(
-        run_call(&mut agent, seed, call_id, "fenced_finish_probe"),
+        run_call(&mut agent, session_id, call_id, "fenced_finish_probe"),
         "ledger failure is a completed tool round with an error result"
     );
     let result = tool_result(&agent.msg, call_id);

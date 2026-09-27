@@ -17,8 +17,8 @@ pub(crate) enum ActorKind {
     /// A normal session worker resumed with an existing seed or created with a
     /// preset seed.
     Session {
-        resume_seed: Option<String>,
-        new_seed: Option<String>,
+        resume_session: Option<String>,
+        new_session: Option<String>,
         timeline_turn_count: u64,
     },
     Subagent(SubagentSpawnSpec),
@@ -70,7 +70,7 @@ fn apply_subagent_config(
 /// kind 覆写（subagent 配置 / session seed）→ [`Loop`]。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_agent(
-    seed: &str,
+    session_id: &str,
     kind: ActorKind,
     cmd_rx: Receiver<WorkerCommand>,
     event_tx: SyncSender<WriterEvent>,
@@ -101,7 +101,7 @@ pub(crate) fn spawn_agent(
         // Empty allowlist means all tools for normal sessions.
         ActorKind::Session { .. } => Vec::new(),
     };
-    manager.apply_init(allowed_tools, seed);
+    manager.apply_init(allowed_tools, session_id);
     qaqh_workspace::runtime::install_actor_tool_manager(manager);
     agent.tool_defs = qaqh_workspace::runtime::all_tools();
 
@@ -114,23 +114,23 @@ pub(crate) fn spawn_agent(
                 spec.base_url.as_deref(),
                 spec.max_tokens,
             );
-            agent.session.session_id = seed.to_string();
+            agent.session.session_id = session_id.to_string();
             agent.session.created_at = qaqh_session::SessionManager::now_epoch();
             log::info!(
-                "[SUBAGENT-ACTOR] starting in-process subagent seed={seed} tools={:?} ephemeral={}",
+                "[SUBAGENT-ACTOR] starting in-process subagent seed={session_id} tools={:?} ephemeral={}",
                 spec.tools,
                 spec.ephemeral
             );
         }
         ActorKind::Session {
-            resume_seed,
-            new_seed,
+            resume_session,
+            new_session,
             timeline_turn_count,
         } => {
-            if let Some(ref resume) = resume_seed {
-                agent.session.resume_seed = Some(resume.clone());
+            if let Some(ref resume) = resume_session {
+                agent.session.resume_session = Some(resume.clone());
             }
-            if let Some(ref new) = new_seed {
+            if let Some(ref new) = new_session {
                 agent.session.session_id = new.clone();
                 agent.session.created_at = qaqh_session::SessionManager::now_epoch();
             }
@@ -138,7 +138,7 @@ pub(crate) fn spawn_agent(
             // a process env var, so concurrent actors each see their own.
             agent.timeline_turn_count = timeline_turn_count;
             log::info!(
-                "[SESSION-ACTOR] starting in-process session seed={seed} resume={resume_seed:?} new={new_seed:?}"
+                "[SESSION-ACTOR] starting in-process session seed={session_id} resume={resume_session:?} new={new_session:?}"
             );
         }
     }

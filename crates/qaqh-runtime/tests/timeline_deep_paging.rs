@@ -47,14 +47,23 @@ fn turns_messages(n: usize) -> Vec<Message> {
 fn deep_paging_reaches_the_oldest_archived_turn() {
     let root = temp_root("paging");
     SessionManager::init(root.clone());
-    let seed = "deep-paging-seed";
-    SessionManager::global().save_append(seed, &turns_messages(60), "test-model", None, 0, 60);
+    let session_id = "deep-paging-seed";
+    SessionManager::global().save_append(
+        session_id,
+        &turns_messages(60),
+        "test-model",
+        None,
+        0,
+        60,
+    );
 
     let hub = RingingHub::with_persistence("epoch-deep", root.join("ringing"))
         .with_sessions(SessionManager::global());
 
     // 常驻窗口 = 最近 40 轮，id 由全局序号派生 → t21..t60
-    let snapshot = hub.timeline_snapshot(seed).expect("rebuilt from archive");
+    let snapshot = hub
+        .timeline_snapshot(session_id)
+        .expect("rebuilt from archive");
     assert_eq!(
         snapshot.turns.len(),
         40,
@@ -68,17 +77,23 @@ fn deep_paging_reaches_the_oldest_archived_turn() {
     assert_eq!(snapshot.turns.last().unwrap().turn_id, "t60");
 
     // 深翻页：从窗口最旧一端往回，一页一页翻到第 1 轮。
-    let (page, start, capped) = hub.archive_turn_page(seed, 21, 10).expect("archive page");
+    let (page, start, capped) = hub
+        .archive_turn_page(session_id, 21, 10)
+        .expect("archive page");
     assert!(!capped, "60 轮远在 4000 条消息的上限之内");
     assert_eq!(start, 11);
     assert_eq!(page.first().unwrap().turn_id, "t12");
     assert_eq!(page.last().unwrap().turn_id, "t21");
 
-    let (page, start, _) = hub.archive_turn_page(seed, 11, 10).expect("archive page");
+    let (page, start, _) = hub
+        .archive_turn_page(session_id, 11, 10)
+        .expect("archive page");
     assert_eq!(start, 1);
     assert_eq!(page.first().unwrap().turn_id, "t2");
 
-    let (page, start, capped) = hub.archive_turn_page(seed, 1, 10).expect("archive page");
+    let (page, start, capped) = hub
+        .archive_turn_page(session_id, 1, 10)
+        .expect("archive page");
     assert_eq!(start, 0, "翻到第 1 轮即历史起点");
     assert!(!capped);
     assert_eq!(page.first().unwrap().turn_id, "t1");

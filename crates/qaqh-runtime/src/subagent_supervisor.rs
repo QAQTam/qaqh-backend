@@ -74,7 +74,7 @@ impl SubagentSupervisor {
         if self
             .descendants_postorder(child)
             .iter()
-            .any(|seed| seed == parent)
+            .any(|session_id| session_id == parent)
         {
             return Err(format!(
                 "subagent edge would create a cycle: {parent} -> {child}"
@@ -120,8 +120,8 @@ impl SubagentSupervisor {
         self.parent_of.get(child).cloned()
     }
 
-    pub(crate) fn root_of(&self, seed: &str) -> String {
-        let mut current = seed.to_string();
+    pub(crate) fn root_of(&self, session_id: &str) -> String {
+        let mut current = session_id.to_string();
         let mut seen = HashSet::new();
         while seen.insert(current.clone()) {
             let Some(parent) = self.parent_of.get(&current) else {

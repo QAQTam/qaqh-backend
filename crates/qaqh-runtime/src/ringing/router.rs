@@ -58,8 +58,8 @@ impl ReplaceableKey {
         ReplaceableKey::CompactProgress(compact_id.to_string())
     }
 
-    pub fn dashboard(seed: &str) -> Self {
-        ReplaceableKey::Dashboard(seed.to_string())
+    pub fn dashboard(session_id: &str) -> Self {
+        ReplaceableKey::Dashboard(session_id.to_string())
     }
 }
 
@@ -291,8 +291,8 @@ mod tests {
     use super::*;
     use qaqh_domain::{ConversationEvent, DomainEvent, ToolEvent};
 
-    fn env_for(seed: &str, seq: u64, event: DomainEvent) -> RingingEventEnvelope {
-        RingingEventEnvelope::new(seed, seq, seq, seq, format!("e{seq}"), event.into())
+    fn env_for(session_id: &str, seq: u64, event: DomainEvent) -> RingingEventEnvelope {
+        RingingEventEnvelope::new(session_id, seq, seq, seq, format!("e{seq}"), event.into())
     }
 
     #[test]

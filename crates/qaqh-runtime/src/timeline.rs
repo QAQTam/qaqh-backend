@@ -18,7 +18,7 @@ use qaqh_domain::{
 /// this seed; no per-channel sequence is exposed to a transcript consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineLiveEntry {
-    pub seed: String,
+    pub session_id: String,
     pub entry: TimelineEntry,
 }
 
@@ -290,9 +290,9 @@ pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> T
             truncated: *truncated,
             interleaved: *interleaved,
         }),
-        sdk::ToolBody::Subagent { name, seed } => Some(TimelineToolBody::Subagent {
+        sdk::ToolBody::Subagent { name, session_id } => Some(TimelineToolBody::Subagent {
             name: name.clone(),
-            session_id: seed.clone(),
+            session_id: session_id.clone(),
         }),
     };
 
@@ -366,7 +366,7 @@ fn retain_utf8_tail(value: &mut String, max_bytes: usize) -> bool {
 }
 
 #[derive(Default)]
-struct SeedTimeline {
+struct SessionTimeline {
     next_seq: u64,
     turns: BTreeMap<String, TimelineTurn>,
     /// 回放尾：只在尾部追加、只在头部驱逐，故用 `VecDeque` 使两端均摊 O(1)
@@ -387,7 +387,7 @@ struct SeedTimeline {
 /// makes accidental concurrent producers impossible without an explicit queue.
 #[derive(Default)]
 pub struct TimelineAppender {
-    seeds: HashMap<String, SeedTimeline>,
+    sessions: HashMap<String, SessionTimeline>,
 }
 
 impl TimelineAppender {
@@ -396,19 +396,19 @@ impl TimelineAppender {
     }
 
     /// 该 seed 的 timeline 是否已在内存（懒加载索引检查用）。
-    pub fn contains(&self, seed: &str) -> bool {
-        self.seeds.contains_key(seed)
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.sessions.contains_key(session_id)
     }
 
     pub fn open_turn(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: impl Into<String>,
         user_text: impl Into<String>,
     ) -> Result<TimelineEntry, TimelineError> {
         let turn_id = turn_id.into();
         let user_text = user_text.into();
-        let timeline = self.seeds.entry(seed.to_string()).or_default();
+        let timeline = self.sessions.entry(session_id.to_string()).or_default();
         if timeline.turns.contains_key(&turn_id) {
             // Reopen allowance: the message store is the authoritative history
             // and counts every turn, while meta.turn_count only persists on
@@ -489,7 +489,7 @@ impl TimelineAppender {
 
     pub fn open_block(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         block_id: impl Into<String>,
@@ -500,7 +500,7 @@ impl TimelineAppender {
         if (kind == TimelineBlockKind::Tool) != tool.is_some() {
             return Err(TimelineError::InvalidBlockShape(block_id));
         }
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let round = ensure_round_mut(timeline, turn_id, round_num)?;
         if round.sealed {
             return Err(TimelineError::SealedRound {
@@ -530,14 +530,14 @@ impl TimelineAppender {
 
     pub fn append_text(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         block_id: &str,
         fragment_seq: u64,
         delta: impl Into<String>,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let key = (turn_id.to_string(), round_num, block_id.to_string());
         let expected = *timeline.next_fragment.get(&key).unwrap_or(&0);
         if fragment_seq != expected {
@@ -593,13 +593,13 @@ impl TimelineAppender {
     /// validate against the monotonic counter.
     pub fn checkpoint_block(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         block_id: &str,
         text: impl Into<String>,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
         let block = block_mut(round, block_id)?;
         if block.state == TimelineBlockState::Sealed {
@@ -636,14 +636,14 @@ impl TimelineAppender {
 
     pub fn update_tool(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         block_id: &str,
         state: TimelineToolState,
         summary: Option<String>,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
         let block = block_mut(round, block_id)?;
         if block.state == TimelineBlockState::Sealed {
@@ -673,13 +673,13 @@ impl TimelineAppender {
     /// execution progress and a pending permission record).
     pub fn replace_tool(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         block_id: &str,
         mut next_tool: TimelineTool,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
         let block = block_mut(round, block_id)?;
         if block.state == TimelineBlockState::Sealed {
@@ -727,7 +727,7 @@ impl TimelineAppender {
     #[allow(clippy::too_many_arguments)] // stream/bytes_total 为 09-18 契约新增；参数面塑形另立项（PLAN D-5）
     pub fn append_tool_progress(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         block_id: &str,
@@ -735,7 +735,7 @@ impl TimelineAppender {
         stream: Option<String>,
         bytes_total: u64,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
         let block = block_mut(round, block_id)?;
         if block.state == TimelineBlockState::Sealed {
@@ -773,12 +773,12 @@ impl TimelineAppender {
     /// producer's ordered intent into a numbered transcript record.
     pub fn apply_intent(
         &mut self,
-        seed: &str,
+        session_id: &str,
         intent: TimelineIntent,
     ) -> Result<TimelineEntry, TimelineError> {
         match intent {
             TimelineIntent::TurnOpened { turn_id, user_text } => {
-                self.open_turn(seed, turn_id, user_text)
+                self.open_turn(session_id, turn_id, user_text)
             }
             TimelineIntent::BlockOpened {
                 turn_id,
@@ -786,7 +786,7 @@ impl TimelineAppender {
                 block_id,
                 kind,
                 tool,
-            } => self.open_block(seed, &turn_id, round_num, block_id, kind, tool),
+            } => self.open_block(session_id, &turn_id, round_num, block_id, kind, tool),
             TimelineIntent::TextDelta {
                 turn_id,
                 round_num,
@@ -794,8 +794,8 @@ impl TimelineAppender {
                 delta,
             } => {
                 let fragment_seq = self
-                    .seeds
-                    .get(seed)
+                    .sessions
+                    .get(session_id)
                     .and_then(|timeline| {
                         timeline
                             .next_fragment
@@ -803,20 +803,27 @@ impl TimelineAppender {
                     })
                     .copied()
                     .unwrap_or(0);
-                self.append_text(seed, &turn_id, round_num, &block_id, fragment_seq, delta)
+                self.append_text(
+                    session_id,
+                    &turn_id,
+                    round_num,
+                    &block_id,
+                    fragment_seq,
+                    delta,
+                )
             }
             TimelineIntent::BlockCheckpoint {
                 turn_id,
                 round_num,
                 block_id,
                 text,
-            } => self.checkpoint_block(seed, &turn_id, round_num, &block_id, text),
+            } => self.checkpoint_block(session_id, &turn_id, round_num, &block_id, text),
             TimelineIntent::ToolUpdated {
                 turn_id,
                 round_num,
                 block_id,
                 tool,
-            } => self.replace_tool(seed, &turn_id, round_num, &block_id, tool),
+            } => self.replace_tool(session_id, &turn_id, round_num, &block_id, tool),
             TimelineIntent::ToolProgress {
                 turn_id,
                 round_num,
@@ -825,7 +832,7 @@ impl TimelineAppender {
                 stream,
                 bytes_total,
             } => self.append_tool_progress(
-                seed,
+                session_id,
                 &turn_id,
                 round_num,
                 &block_id,
@@ -837,28 +844,28 @@ impl TimelineAppender {
                 turn_id,
                 round_num,
                 block_id,
-            } => self.seal_block(seed, &turn_id, round_num, &block_id),
+            } => self.seal_block(session_id, &turn_id, round_num, &block_id),
             TimelineIntent::RoundSealed {
                 turn_id,
                 round_num,
                 is_final,
-            } => self.seal_round(seed, &turn_id, round_num, is_final),
+            } => self.seal_round(session_id, &turn_id, round_num, is_final),
             TimelineIntent::TurnSealed {
                 turn_id,
                 state,
                 failure,
-            } => self.seal_turn_with_state(seed, &turn_id, state, failure),
+            } => self.seal_turn_with_state(session_id, &turn_id, state, failure),
         }
     }
 
     pub fn seal_block(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         block_id: &str,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
         let block = block_mut(round, block_id)?;
         block.state = TimelineBlockState::Sealed;
@@ -874,12 +881,12 @@ impl TimelineAppender {
 
     pub fn seal_round(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
         is_final: bool,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
         if round
             .blocks
@@ -901,18 +908,22 @@ impl TimelineAppender {
         ))
     }
 
-    pub fn seal_turn(&mut self, seed: &str, turn_id: &str) -> Result<TimelineEntry, TimelineError> {
-        self.seal_turn_with_state(seed, turn_id, TimelineTurnState::Completed, None)
+    pub fn seal_turn(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<TimelineEntry, TimelineError> {
+        self.seal_turn_with_state(session_id, turn_id, TimelineTurnState::Completed, None)
     }
 
     pub fn seal_turn_with_state(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         state: TimelineTurnState,
         failure: Option<qaqh_domain::TimelineFailure>,
     ) -> Result<TimelineEntry, TimelineError> {
-        let timeline = self.timeline_mut(seed)?;
+        let timeline = self.timeline_mut(session_id)?;
         let turn = timeline
             .turns
             .get_mut(turn_id)
@@ -948,29 +959,31 @@ impl TimelineAppender {
 
     /// 开启 turn-seal 卸载。实际写盘由 hub 在 timeline/store 两把锁之外完成，
     /// 成功后才调用 `mark_offloaded_if_current` 把内存对象壳化。
-    pub fn enable_offload(&mut self, seed: &str) {
-        self.seeds
-            .entry(seed.to_string())
+    pub fn enable_offload(&mut self, session_id: &str) {
+        self.sessions
+            .entry(session_id.to_string())
             .or_default()
             .offload_enabled = true;
     }
 
     /// 已 seal、尚未卸载的 turn id 快照，用于加载后渐进回填侧车。
-    pub fn sealed_turn_ids(&self, seed: &str) -> Vec<String> {
-        self.seeds.get(seed).map_or_else(Vec::new, |timeline| {
-            timeline
-                .turns
-                .values()
-                .filter(|turn| turn.sealed && !turn.offloaded)
-                .map(|turn| turn.turn_id.clone())
-                .collect()
-        })
+    pub fn sealed_turn_ids(&self, session_id: &str) -> Vec<String> {
+        self.sessions
+            .get(session_id)
+            .map_or_else(Vec::new, |timeline| {
+                timeline
+                    .turns
+                    .values()
+                    .filter(|turn| turn.sealed && !turn.offloaded)
+                    .map(|turn| turn.turn_id.clone())
+                    .collect()
+            })
     }
 
     /// 返回可写入侧车的完整 turn 快照。调用方必须在释放 timeline 锁后写盘，
     /// 再以 `created_seq` 做代际校验，避免 reopen 后旧写入误壳化新 turn。
-    pub fn offload_candidate(&self, seed: &str, turn_id: &str) -> Option<TimelineTurn> {
-        let timeline = self.seeds.get(seed)?;
+    pub fn offload_candidate(&self, session_id: &str, turn_id: &str) -> Option<TimelineTurn> {
+        let timeline = self.sessions.get(session_id)?;
         if !timeline.offload_enabled {
             return None;
         }
@@ -982,11 +995,11 @@ impl TimelineAppender {
     /// `created_seq` 不匹配，旧写入不得影响当前内存状态。
     pub fn mark_offloaded_if_current(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         created_seq: u64,
     ) -> bool {
-        let Some(timeline) = self.seeds.get_mut(seed) else {
+        let Some(timeline) = self.sessions.get_mut(session_id) else {
             return false;
         };
         let Some(turn) = timeline.turns.get_mut(turn_id) else {
@@ -1000,19 +1013,21 @@ impl TimelineAppender {
         true
     }
 
-    pub fn replay_since(&self, seed: &str, watermark: u64) -> Vec<TimelineEntry> {
-        self.seeds.get(seed).map_or_else(Vec::new, |timeline| {
-            timeline
-                .journal
-                .iter()
-                .filter(|entry| entry.timeline_seq > watermark)
-                .cloned()
-                .collect()
-        })
+    pub fn replay_since(&self, session_id: &str, watermark: u64) -> Vec<TimelineEntry> {
+        self.sessions
+            .get(session_id)
+            .map_or_else(Vec::new, |timeline| {
+                timeline
+                    .journal
+                    .iter()
+                    .filter(|entry| entry.timeline_seq > watermark)
+                    .cloned()
+                    .collect()
+            })
     }
 
-    pub fn snapshot(&self, seed: &str) -> Option<TimelineSnapshot> {
-        self.seeds.get(seed).map(|timeline| {
+    pub fn snapshot(&self, session_id: &str) -> Option<TimelineSnapshot> {
+        self.sessions.get(session_id).map(|timeline| {
             let mut turns: Vec<TimelineTurn> = timeline.turns.values().cloned().collect();
             // turns 存于 HashMap（无序）——按 created_seq 排序（TurnOpened
             // entry 的 seq，权威时间序）；旧磁盘数据 created_seq=0 时退化为
@@ -1033,7 +1048,7 @@ impl TimelineAppender {
     /// solely for replay after a reconnect watermark.
     pub fn restore(
         &mut self,
-        seed: String,
+        session_id: String,
         snapshot: TimelineSnapshot,
         journal: Vec<TimelineEntry>,
     ) {
@@ -1055,9 +1070,9 @@ impl TimelineAppender {
             }
             journal_bytes += journal_entry_payload_bytes(&entry.event);
         }
-        self.seeds.insert(
-            seed,
-            SeedTimeline {
+        self.sessions.insert(
+            session_id,
+            SessionTimeline {
                 next_seq: snapshot.watermark,
                 turns: snapshot
                     .turns
@@ -1072,10 +1087,10 @@ impl TimelineAppender {
         );
     }
 
-    fn timeline_mut(&mut self, seed: &str) -> Result<&mut SeedTimeline, TimelineError> {
-        self.seeds
-            .get_mut(seed)
-            .ok_or_else(|| TimelineError::MissingTurn(format!("seed:{seed}")))
+    fn timeline_mut(&mut self, session_id: &str) -> Result<&mut SessionTimeline, TimelineError> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| TimelineError::MissingTurn(format!("seed:{session_id}")))
     }
 }
 
@@ -1087,7 +1102,7 @@ fn turn_num(id: &str) -> u64 {
 }
 
 fn next_entry(
-    timeline: &mut SeedTimeline,
+    timeline: &mut SessionTimeline,
     turn_id: String,
     round_num: Option<u32>,
     event: TimelineEvent,
@@ -1126,7 +1141,7 @@ fn journal_entry_payload_bytes(event: &TimelineEvent) -> u64 {
 ///
 /// 两端均摊 O(1)（`pop_front`），与 journal 的 FIFO 语义一致——`Vec::remove(0)`
 /// 会让每条越过上限的事件 memmove 整个窗口，实测 52–83× 阶跃且全程持锁。
-fn enforce_journal_budget(timeline: &mut SeedTimeline) {
+fn enforce_journal_budget(timeline: &mut SessionTimeline) {
     let entry_limit = crate::ringing::persistence_policy::MAX_TIMELINE_JOURNAL_ENTRIES;
     let byte_limit = crate::ringing::persistence_policy::journal_byte_limit();
     while timeline.journal.len() > entry_limit || timeline.journal_bytes > byte_limit {
@@ -1162,7 +1177,7 @@ fn offload_turn_blocks(turn: &mut TimelineTurn) {
 }
 
 fn existing_round_mut<'a>(
-    timeline: &'a mut SeedTimeline,
+    timeline: &'a mut SessionTimeline,
     turn_id: &str,
     round_num: u32,
 ) -> Result<&'a mut TimelineRound, TimelineError> {
@@ -1182,7 +1197,7 @@ fn existing_round_mut<'a>(
 }
 
 fn ensure_round_mut<'a>(
-    timeline: &'a mut SeedTimeline,
+    timeline: &'a mut SessionTimeline,
     turn_id: &str,
     round_num: u32,
 ) -> Result<&'a mut TimelineRound, TimelineError> {
@@ -2125,8 +2140,8 @@ mod tests {
             + "diff".len()
             + "progress".len();
         assert!(expected > 0);
-        let seed = restored.seeds.get("s").unwrap();
-        assert_eq!(seed.journal_bytes, expected as u64);
+        let session_id = restored.sessions.get("s").unwrap();
+        assert_eq!(session_id.journal_bytes, expected as u64);
     }
 
     /// 8192 条上限之上的摊还成本必须与上限之内同阶（O(1)），且驱逐只丢最老前缀。

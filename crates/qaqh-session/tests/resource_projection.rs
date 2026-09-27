@@ -26,8 +26,8 @@ fn resource_id() -> ResourceId {
     ResourceId::new("res_01J00000000000000000000000")
 }
 
-fn summary_ref(seed: u8) -> ContentRef {
-    ContentRef::new(ContentHash::new(format!("sha256:{seed:064x}")))
+fn summary_ref(session_id: u8) -> ContentRef {
+    ContentRef::new(ContentHash::new(format!("sha256:{session_id:064x}")))
 }
 
 fn workspace(

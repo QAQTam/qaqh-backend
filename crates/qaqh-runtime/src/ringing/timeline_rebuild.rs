@@ -32,24 +32,24 @@ const REBUILD_RECENT_TURNS: usize = 40;
 /// 但 `load_archive_tail` 会过滤 `[Compacted N turns]`，不会把它当成真实回合显示。
 pub fn rebuild_timeline_snapshot(
     sessions: Option<&SessionManager>,
-    seed: &str,
+    session_id: &str,
 ) -> Option<(TimelineSnapshot, Vec<qaqh_domain::TimelineEntry>)> {
     let manager = sessions?;
     // 200 条消息 ≈ 多轮对话（含工具往返），足够投影出 ~40 turn 窗口。
-    let messages = manager.load_archive_tail(seed, 200)?;
+    let messages = manager.load_archive_tail(session_id, 200)?;
     if messages.is_empty() {
         return None;
     }
     let (_, turns) = super::projection::project_recent_turns_from_messages(
-        seed,
+        session_id,
         &messages,
         REBUILD_RECENT_TURNS,
     );
     // 这个窗口是会话的**最后** N 轮，故全局基址 = 真实回合总数 - 窗口大小。
     // `meta.turn_count` 是权威的真实回合数（timeline_api 的 total_turns 同源）。
-    let total = manager.load_meta(seed)?.turn_count;
+    let total = manager.load_meta(session_id)?.turn_count;
     let base = total.saturating_sub(turns.len());
-    timeline_snapshot_from_turns(seed, &turns, base)
+    timeline_snapshot_from_turns(session_id, &turns, base)
 }
 
 /// 把已经投影好的 `TurnData` 序列重放进 [`TimelineAppender`]，得到与原生
@@ -70,7 +70,7 @@ pub fn rebuild_timeline_snapshot(
 ///
 /// 传入的 `turn.turn_id` 因此被**忽略**：它携带的信息量为零（永远是池内下标）。
 pub fn timeline_snapshot_from_turns(
-    seed: &str,
+    session_id: &str,
     turns: &[qaqh_domain::TurnData],
     base_index: usize,
 ) -> Option<(TimelineSnapshot, Vec<qaqh_domain::TimelineEntry>)> {
@@ -82,7 +82,7 @@ pub fn timeline_snapshot_from_turns(
     for (turn_index, turn) in turns.iter().enumerate() {
         let turn_id = format!("t{}", base_index + turn_index + 1);
         if let Err(error) = appender.apply_intent(
-            seed,
+            session_id,
             TimelineIntent::TurnOpened {
                 turn_id: turn_id.clone(),
                 user_text: turn.user_text.clone(),
@@ -107,7 +107,7 @@ pub fn timeline_snapshot_from_turns(
                         stream_segment = stream_segment.saturating_add(1);
                         rebuild_text_block(
                             &mut appender,
-                            seed,
+                            session_id,
                             &turn_id,
                             round.round_num,
                             &block_id,
@@ -124,7 +124,7 @@ pub fn timeline_snapshot_from_turns(
                         stream_segment = stream_segment.saturating_add(1);
                         rebuild_text_block(
                             &mut appender,
-                            seed,
+                            session_id,
                             &turn_id,
                             round.round_num,
                             &block_id,
@@ -137,7 +137,7 @@ pub fn timeline_snapshot_from_turns(
                         let block_id = format!("tool:{}", card.id);
                         let tool = rebuild_tool(card, &round.tool_results);
                         if let Err(error) = appender.apply_intent(
-                            seed,
+                            session_id,
                             TimelineIntent::BlockOpened {
                                 turn_id: turn_id.clone(),
                                 round_num: round.round_num,
@@ -152,7 +152,7 @@ pub fn timeline_snapshot_from_turns(
                             return None;
                         }
                         if let Err(error) = appender.apply_intent(
-                            seed,
+                            session_id,
                             TimelineIntent::ToolUpdated {
                                 turn_id: turn_id.clone(),
                                 round_num: round.round_num,
@@ -166,7 +166,7 @@ pub fn timeline_snapshot_from_turns(
                             return None;
                         }
                         if let Err(error) = appender.apply_intent(
-                            seed,
+                            session_id,
                             TimelineIntent::BlockSealed {
                                 turn_id: turn_id.clone(),
                                 round_num: round.round_num,
@@ -188,7 +188,7 @@ pub fn timeline_snapshot_from_turns(
                         stream_segment = stream_segment.saturating_add(1);
                         rebuild_text_block(
                             &mut appender,
-                            seed,
+                            session_id,
                             &turn_id,
                             round.round_num,
                             &block_id,
@@ -208,7 +208,7 @@ pub fn timeline_snapshot_from_turns(
                     stream_segment = stream_segment.saturating_add(1);
                     rebuild_text_block(
                         &mut appender,
-                        seed,
+                        session_id,
                         &turn_id,
                         round.round_num,
                         &block_id,
@@ -221,7 +221,7 @@ pub fn timeline_snapshot_from_turns(
                     let block_id = format!("round-{}:text:{stream_segment}", round.round_num);
                     rebuild_text_block(
                         &mut appender,
-                        seed,
+                        session_id,
                         &turn_id,
                         round.round_num,
                         &block_id,
@@ -235,7 +235,7 @@ pub fn timeline_snapshot_from_turns(
             if round_has_blocks {
                 let is_final = round.is_final || round_index + 1 == turn.rounds.len();
                 if let Err(error) = appender.apply_intent(
-                    seed,
+                    session_id,
                     TimelineIntent::RoundSealed {
                         turn_id: turn_id.clone(),
                         round_num: round.round_num,
@@ -249,7 +249,7 @@ pub fn timeline_snapshot_from_turns(
         }
 
         if let Err(error) = appender.apply_intent(
-            seed,
+            session_id,
             TimelineIntent::TurnSealed {
                 turn_id: turn_id.clone(),
                 state: TimelineTurnState::Completed,
@@ -261,14 +261,14 @@ pub fn timeline_snapshot_from_turns(
         }
     }
 
-    let snapshot = appender.snapshot(seed)?;
-    let journal = appender.replay_since(seed, 0);
+    let snapshot = appender.snapshot(session_id)?;
+    let journal = appender.replay_since(session_id, 0);
     Some((snapshot, journal))
 }
 
 fn rebuild_text_block(
     appender: &mut crate::timeline::TimelineAppender,
-    seed: &str,
+    session_id: &str,
     turn_id: &str,
     round_num: u32,
     block_id: &str,
@@ -276,7 +276,7 @@ fn rebuild_text_block(
     text: &str,
 ) -> Option<()> {
     if let Err(error) = appender.apply_intent(
-        seed,
+        session_id,
         TimelineIntent::BlockOpened {
             turn_id: turn_id.to_string(),
             round_num,
@@ -289,7 +289,7 @@ fn rebuild_text_block(
         return None;
     }
     if let Err(error) = appender.apply_intent(
-        seed,
+        session_id,
         TimelineIntent::BlockCheckpoint {
             turn_id: turn_id.to_string(),
             round_num,
@@ -301,7 +301,7 @@ fn rebuild_text_block(
         return None;
     }
     if let Err(error) = appender.apply_intent(
-        seed,
+        session_id,
         TimelineIntent::BlockSealed {
             turn_id: turn_id.to_string(),
             round_num,

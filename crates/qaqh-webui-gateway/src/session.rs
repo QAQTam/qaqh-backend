@@ -152,7 +152,7 @@ pub struct BrowserSession {
     id: String,
     csrf_token: String,
     lease: Mutex<Lease>,
-    active_seed: Mutex<Option<String>>,
+    active_session: Mutex<Option<String>>,
     last_seen: Mutex<Instant>,
     command_events: Mutex<VecDeque<Instant>>,
     service_events: Mutex<VecDeque<Instant>>,
@@ -167,7 +167,7 @@ impl BrowserSession {
             id: random_token(),
             csrf_token: random_token(),
             lease: Mutex::new(lease),
-            active_seed: Mutex::new(None),
+            active_session: Mutex::new(None),
             last_seen: Mutex::new(Instant::now()),
             command_events: Mutex::new(VecDeque::new()),
             service_events: Mutex::new(VecDeque::new()),
@@ -211,24 +211,24 @@ impl BrowserSession {
         allow_rate(&self.service_events, MAX_SERVICE_CALLS_PER_MINUTE)
     }
 
-    pub fn active_seed(&self) -> Option<String> {
-        self.active_seed
+    pub fn active_session(&self) -> Option<String> {
+        self.active_session
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
-    pub fn set_active_seed(&self, seed: Option<String>) {
+    pub fn set_active_session(&self, session_id: Option<String>) {
         *self
-            .active_seed
+            .active_session
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = seed;
+            .unwrap_or_else(|error| error.into_inner()) = session_id;
         self.clear_approvals();
     }
 
     pub fn issue_approval(
         &self,
-        seed: &str,
+        session_id: &str,
         kind: ApprovalKind,
         source_id: String,
         details: Value,
@@ -239,7 +239,9 @@ impl BrowserSession {
             .unwrap_or_else(|error| error.into_inner());
         cleanup_approvals(&mut approvals);
         if let Some(existing) = approvals.values().find(|challenge| {
-            challenge.kind == kind && challenge.seed == seed && challenge.source_id == source_id
+            challenge.kind == kind
+                && challenge.session_id == session_id
+                && challenge.source_id == source_id
         }) {
             return Ok(existing.clone());
         }
@@ -257,7 +259,7 @@ impl BrowserSession {
             id: id.clone(),
             kind,
             source_id,
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             details,
             issued_at: Instant::now(),
         };
@@ -270,7 +272,7 @@ impl BrowserSession {
     pub fn consume_approval(
         &self,
         id: &str,
-        active_seed: &str,
+        active_session: &str,
     ) -> Result<ApprovalChallenge, &'static str> {
         let mut approvals = self
             .approvals
@@ -278,7 +280,7 @@ impl BrowserSession {
             .unwrap_or_else(|error| error.into_inner());
         cleanup_approvals(&mut approvals);
         let challenge = approvals.remove(id).ok_or("approval_not_found")?;
-        if challenge.seed != active_seed {
+        if challenge.session_id != active_session {
             return Err("approval_scope_violation");
         }
         Ok(challenge)
@@ -471,10 +473,10 @@ mod tests {
     }
 
     #[test]
-    fn session_replaces_lease_and_tracks_seed() {
+    fn session_replaces_lease_and_tracks_session() {
         let session = BrowserSession::new(lease("one"));
-        session.set_active_seed(Some("0123abcd".into()));
-        assert_eq!(session.active_seed().as_deref(), Some("0123abcd"));
+        session.set_active_session(Some("0123abcd".into()));
+        assert_eq!(session.active_session().as_deref(), Some("0123abcd"));
         session.replace_lease(lease("two"));
         assert_eq!(session.lease_snapshot().client_session_id, "session-two");
     }

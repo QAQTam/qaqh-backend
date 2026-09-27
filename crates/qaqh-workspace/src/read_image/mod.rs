@@ -60,7 +60,7 @@ struct ImageEntry {
 /// A-2 L0：字节外置磁盘（内容寻址，幂等去重），registry 只留 `{mime, sha256}`
 /// 索引；`peek_image` 时按需读盘。落盘失败则丢弃条目并告警（调用方拿到
 /// peek None，会引导用户重新附加——与"上传离开上下文"同一语义）。
-pub fn store_image(seed: &str, mime_type: &str, data: &str) {
+pub fn store_image(session_id: &str, mime_type: &str, data: &str) {
     let sha256 = match qaqh_types::image_store::store_image_b64(data, mime_type) {
         Ok(sha) => sha,
         Err(e) => {
@@ -69,21 +69,25 @@ pub fn store_image(seed: &str, mime_type: &str, data: &str) {
         }
     };
     if let Ok(mut reg) = IMAGE_REGISTRY.lock() {
-        reg.entry(seed.to_string()).or_default().push(ImageEntry {
-            mime_type: mime_type.to_string(),
-            sha256,
-        });
+        reg.entry(session_id.to_string())
+            .or_default()
+            .push(ImageEntry {
+                mime_type: mime_type.to_string(),
+                sha256,
+            });
     }
 }
 
 /// 按 ImageRef 重建 registry 条目（resume 路径专用）：磁盘文件已在场，
 /// 无需任何字节，O(1) 登记。
-pub fn register_image_ref(seed: &str, mime_type: &str, sha256: &str) {
+pub fn register_image_ref(session_id: &str, mime_type: &str, sha256: &str) {
     if let Ok(mut reg) = IMAGE_REGISTRY.lock() {
-        reg.entry(seed.to_string()).or_default().push(ImageEntry {
-            mime_type: mime_type.to_string(),
-            sha256: sha256.to_string(),
-        });
+        reg.entry(session_id.to_string())
+            .or_default()
+            .push(ImageEntry {
+                mime_type: mime_type.to_string(),
+                sha256: sha256.to_string(),
+            });
     }
 }
 
@@ -91,19 +95,19 @@ pub fn register_image_ref(seed: &str, mime_type: &str, sha256: &str) {
 ///
 /// Called before rebuilding the registry from persisted message history
 /// (session restore) so repeated restores never shift the indices.
-pub fn reset_images(seed: &str) {
+pub fn reset_images(session_id: &str) {
     if let Ok(mut reg) = IMAGE_REGISTRY.lock() {
-        reg.remove(seed);
+        reg.remove(session_id);
     }
 }
 
 /// Peek at an image by index — returns base64 text without removing.
 ///
 /// 磁盘读取在锁外执行（几 MB 文本，ms 级），不阻塞其它 seed 的 registry 操作。
-pub fn peek_image(seed: &str, index: usize) -> Option<(String, String)> {
+pub fn peek_image(session_id: &str, index: usize) -> Option<(String, String)> {
     let entry = {
         let reg = IMAGE_REGISTRY.lock().ok()?;
-        let entries = reg.get(seed)?;
+        let entries = reg.get(session_id)?;
         entries.get(index)?.clone()
     };
     let data = qaqh_types::image_store::load_image_b64(&entry.sha256, &entry.mime_type).ok()?;
@@ -221,12 +225,12 @@ impl TypedTool for ReadImageTool {
 
         let (raw_bytes, display) = if let Some(index) = args.image_index {
             let index = index as usize;
-            let seed = &ctx.session_id;
-            let (_mime, data) = peek_image(seed, index).ok_or_else(|| {
+            let session_id = &ctx.session_id;
+            let (_mime, data) = peek_image(session_id, index).ok_or_else(|| {
                 mutation_error(
                     "TOOL_ERROR",
                     format!(
-                        "read_image: image_index {index} not found in session '{seed}'. The upload may have left the context. Ask the user to re-attach it."
+                        "read_image: image_index {index} not found in session '{session_id}'. The upload may have left the context. Ask the user to re-attach it."
                     ),
                     None,
                     json!({}),
@@ -401,18 +405,18 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
-        let seed = "read_image_registry_test";
-        store_image(seed, "image/png", "Zm9v");
+        let session_id = "read_image_registry_test";
+        store_image(session_id, "image/png", "Zm9v");
         assert_eq!(
-            peek_image(seed, 0),
+            peek_image(session_id, 0),
             Some(("image/png".into(), "Zm9v".into()))
         );
         // Peek again — must still be there (no consume semantics).
         assert_eq!(
-            peek_image(seed, 0),
+            peek_image(session_id, 0),
             Some(("image/png".into(), "Zm9v".into()))
         );
-        assert_eq!(peek_image(seed, 1), None);
+        assert_eq!(peek_image(session_id, 1), None);
         assert_eq!(peek_image("other-seed", 0), None);
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
@@ -428,22 +432,22 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-reset-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
-        let seed = "read_image_reset_test";
-        store_image(seed, "image/png", "AAA");
-        store_image(seed, "image/jpeg", "BBB");
-        reset_images(seed);
-        reset_images(seed); // 幂等
-        store_image(seed, "image/png", "AAA");
-        store_image(seed, "image/jpeg", "BBB");
+        let session_id = "read_image_reset_test";
+        store_image(session_id, "image/png", "AAA");
+        store_image(session_id, "image/jpeg", "BBB");
+        reset_images(session_id);
+        reset_images(session_id); // 幂等
+        store_image(session_id, "image/png", "AAA");
+        store_image(session_id, "image/jpeg", "BBB");
         assert_eq!(
-            peek_image(seed, 0),
+            peek_image(session_id, 0),
             Some(("image/png".into(), "AAA".into()))
         );
         assert_eq!(
-            peek_image(seed, 1),
+            peek_image(session_id, 1),
             Some(("image/jpeg".into(), "BBB".into()))
         );
-        assert_eq!(peek_image(seed, 2), None);
+        assert_eq!(peek_image(session_id, 2), None);
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -461,14 +465,20 @@ mod tests {
 
         let b64 = "aW1hZ2UtcmVmLXJlYnVpbGQ=";
         let sha = qaqh_types::image_store::store_image_b64(b64, "image/jpeg").expect("store");
-        let seed = "read_image_ref_test";
-        reset_images(seed);
-        register_image_ref(seed, "image/jpeg", &sha);
-        assert_eq!(peek_image(seed, 0), Some(("image/jpeg".into(), b64.into())));
+        let session_id = "read_image_ref_test";
+        reset_images(session_id);
+        register_image_ref(session_id, "image/jpeg", &sha);
+        assert_eq!(
+            peek_image(session_id, 0),
+            Some(("image/jpeg".into(), b64.into()))
+        );
         // 重复重建幂等（reset + 重放，索引稳定）。
-        reset_images(seed);
-        register_image_ref(seed, "image/jpeg", &sha);
-        assert_eq!(peek_image(seed, 0), Some(("image/jpeg".into(), b64.into())));
+        reset_images(session_id);
+        register_image_ref(session_id, "image/jpeg", &sha);
+        assert_eq!(
+            peek_image(session_id, 0),
+            Some(("image/jpeg".into(), b64.into()))
+        );
 
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);

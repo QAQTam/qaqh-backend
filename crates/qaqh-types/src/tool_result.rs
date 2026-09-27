@@ -240,7 +240,7 @@ pub enum ToolResultDisplayBody {
     },
     Subagent {
         name: String,
-        seed: String,
+        session_id: String,
     },
     #[serde(other)]
     Unknown,

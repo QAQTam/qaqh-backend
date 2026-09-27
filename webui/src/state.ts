@@ -124,7 +124,7 @@ export async function refreshTodo(): Promise<void> {
   if (!current || todoInflight) return;
   todoInflight = true;
   try {
-    const raw = await ringing.rpc<Record<string, any> | null>("todo.status", { seed: current });
+    const raw = await ringing.rpc<Record<string, any> | null>("todo.status", { session_id: current });
     setTodo(raw ? normalizeTodo(raw) : null);
   } catch {
     // todo 是增强面板：失败静默，下次触发再试
@@ -252,7 +252,8 @@ function applyProjection(streamKey: unknown, payload: unknown): void {
 }
 
 function onTimelineEntry(payload: Record<string, any>): void {
-  if (!payload || payload.seed !== seed()) return;
+  // timeline 帧发 `session_id`（BETA-01 Phase D）；旧字段名 `seed` 已不再出现。
+  if (!payload || payload.session_id !== seed()) return;
   const entry = payload.entry;
   if (!entry || typeof entry.timeline_seq !== "number") return;
   if (entry.timeline_seq <= transcript.watermark) return;
@@ -310,7 +311,8 @@ function wireEvents(seedName: string, source: EventSource): void {
     } catch {
       return;
     }
-    if (envelope.seed && envelope.seed !== seedName) return;
+    // v2 信封发 `session_id`（BETA-01 Phase D）；旧字段名 `seed` 已不再出现。
+    if (envelope.session_id && envelope.session_id !== seedName) return;
     applyProjection(envelope.stream_key, envelope.payload);
   });
   source.addEventListener("ringing.reset_required", () => {
@@ -456,7 +458,7 @@ export async function boot(): Promise<void> {
   }, 60_000);
   const list = sessions();
   const live = list.find((s) => !s.archived && s.running) ?? list.find((s) => !s.archived) ?? list[0];
-  if (live?.seed) await attach(String(live.seed));
+  if (live?.session_id) await attach(String(live.session_id));
   else setBootError("没有可用会话：点击左上角 ＋ 新建一个。");
 }
 

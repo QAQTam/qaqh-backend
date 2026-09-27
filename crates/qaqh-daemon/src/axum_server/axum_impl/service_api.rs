@@ -14,7 +14,7 @@ pub(crate) async fn handle_service(
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let Some(session_id) = get_session_id(&headers) else {
+    let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
     // 单一规范形态 `module.method`：slash 别名已拆除，查不到即 404。
@@ -44,33 +44,33 @@ pub(crate) async fn handle_service(
             }
         }
     };
-    if info.requires_seed && params.get("seed").and_then(|v| v.as_str()).is_none() {
+    if info.requires_session && service_methods::session_param_value(&params).is_none() {
         return (
             StatusCode::BAD_REQUEST,
             [(header::CONTENT_TYPE, "application/json")],
-            br#"{"code":"invalid_envelope","message":"seed is required"}"#.to_vec(),
+            br#"{"code":"invalid_envelope","message":"session_id is required"}"#.to_vec(),
         )
             .into_response();
     }
-    // 任何带 seed 的请求：seed 必须归属本 lease。
-    if let Some(seed) = params.get("seed").and_then(|v| v.as_str()) {
+    // 任何带会话键的请求：会话必须归属本 lease（写端发 `session_id`，兼容旧 `seed`）。
+    if let Some(session_id) = service_methods::session_param_value(&params) {
         let owns = state
             .leases
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .owns_seed(&session_id, seed);
+            .owns_session(&client_session_id, session_id);
         if !owns {
             return (
                 StatusCode::UNAUTHORIZED,
                 [(header::CONTENT_TYPE, "application/json")],
-                br#"{"code":"lease_required","message":"attach the session seed before calling"}"#
+                br#"{"code":"lease_required","message":"attach the session before calling"}"#
                     .to_vec(),
             )
                 .into_response();
         }
     }
     let method = name.trim_matches('/');
-    if let Some(rejection) = service_driver_rejection(&state, &session_id, method, &params) {
+    if let Some(rejection) = service_driver_rejection(&state, &client_session_id, method, &params) {
         return rejection;
     }
     match service_methods::dispatch(&state.service, method, &params) {
@@ -89,14 +89,14 @@ pub(crate) async fn handle_service(
     }
 }
 
-/// Driver admission for seeded write RPCs.
+/// Driver admission for session-scoped write RPCs.
 ///
 /// Service methods are outside the three-channel command envelope, so the
-/// same driver rule must be enforced here: a live holder owns seeded
+/// same driver rule must be enforced here: a live holder owns session-scoped
 /// workspace/session mutations; an unclaimed seat stays permissive.
 fn service_driver_rejection(
     state: &AppState,
-    session_id: &str,
+    client_session_id: &str,
     method: &str,
     params: &serde_json::Value,
 ) -> Option<Response> {
@@ -106,10 +106,10 @@ fn service_driver_rejection(
     ) {
         return None;
     }
-    let seed = params.get("seed").and_then(serde_json::Value::as_str)?;
-    let driver = v2::canonical_driver_state(state, seed)?;
+    let session_id = service_methods::session_param_value(params)?;
+    let driver = v2::canonical_driver_state(state, session_id)?;
     let holder = driver.holder?;
-    if !v2::holder_is_live(state, &holder) || holder == session_id {
+    if !v2::holder_is_live(state, &holder) || holder == client_session_id {
         return None;
     }
     Some(

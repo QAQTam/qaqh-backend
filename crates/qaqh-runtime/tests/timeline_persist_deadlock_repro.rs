@@ -33,9 +33,9 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     root
 }
 
-fn open_turn(hub: &RingingHub, seed: &str) {
+fn open_turn(hub: &RingingHub, session_id: &str) {
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnOpened {
             turn_id: "t1".into(),
             user_text: "hello".into(),
@@ -44,9 +44,9 @@ fn open_turn(hub: &RingingHub, seed: &str) {
     .expect("turn opened");
 }
 
-fn open_large_progress_tool(hub: &RingingHub, seed: &str) {
+fn open_large_progress_tool(hub: &RingingHub, session_id: &str) {
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockOpened {
             turn_id: "t1".into(),
             round_num: 0,
@@ -72,7 +72,7 @@ fn open_large_progress_tool(hub: &RingingHub, seed: &str) {
     )
     .expect("tool block opened");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::ToolProgress {
             turn_id: "t1".into(),
             round_num: 0,
@@ -84,7 +84,7 @@ fn open_large_progress_tool(hub: &RingingHub, seed: &str) {
     )
     .expect("large progress accepted");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockSealed {
             turn_id: "t1".into(),
             round_num: 0,
@@ -93,7 +93,7 @@ fn open_large_progress_tool(hub: &RingingHub, seed: &str) {
     )
     .expect("tool block sealed");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::RoundSealed {
             turn_id: "t1".into(),
             round_num: 0,

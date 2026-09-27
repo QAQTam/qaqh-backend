@@ -800,9 +800,9 @@ mod tests {
     use crate::effect::PersistOp;
     use qaqh_types::Message;
 
-    fn append_op(seed: &str, ids: u64) -> PersistOp {
+    fn append_op(session_id: &str, ids: u64) -> PersistOp {
         PersistOp::Append {
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             messages: vec![Message {
                 msg_id: Some(ids),
                 role: "user".into(),
@@ -1102,7 +1102,7 @@ mod io_fault_tests {
     fn fixture_op(index: usize) -> PersistOp {
         let text = format!("line-{index:04}");
         PersistOp::Append {
-            seed: "s".into(),
+            session_id: "s".into(),
             messages: vec![qaqh_types::Message {
                 msg_id: Some(1),
                 role: "user".into(),

@@ -17,7 +17,7 @@ use qaqh_workspace::{
 #[test]
 fn spawned_tool_thread_sees_actor_workspace_via_scope() {
     let ws_a = tempfile::tempdir().unwrap();
-    let seed = "bug05-scope-thread";
+    let session_id = "bug05-scope-thread";
     let before = std::env::current_dir().unwrap();
 
     // 模拟 actor 线程：安装 actor context + 会话工作区
@@ -27,7 +27,7 @@ fn spawned_tool_thread_sees_actor_workspace_via_scope() {
         std::thread::Builder::new()
             .name("bug05-actor".into())
             .spawn(move || {
-                set_actor_context(&actor_ws, seed);
+                set_actor_context(&actor_ws, session_id);
                 let scope = ActorToolScope::capture();
 
                 // actor 线程派生"工具线程"，capture 后 install 跨线程搬运
