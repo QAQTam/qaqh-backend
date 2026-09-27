@@ -51,23 +51,23 @@ pub enum QueryRequest {
     /// 会话仪表盘：任务清单 + 最近改动（daemon `session.dashboard`）。
     /// 与 [`Self::TodoStatus`] 是同一数据源的两个视图。
     SessionDashboard {
-        seed: String,
+        session_id: String,
     },
     /// 会话待办状态（daemon `todo.status`）。
     TodoStatus {
-        seed: String,
+        session_id: String,
     },
     /// 单会话 meta（daemon `session.meta`）。
     SessionMeta {
-        seed: String,
+        session_id: String,
     },
     /// 读取当前会话 plan（daemon `plan.read`）。
     PlanRead {
-        seed: String,
+        session_id: String,
     },
     /// 当前会话 context 统计（daemon `plan.context_stats`）。
     PlanContextStats {
-        seed: String,
+        session_id: String,
     },
     /// 最近 token 用量（daemon `stats.token_usage`）。
     StatsTokenUsage {
@@ -75,19 +75,19 @@ pub enum QueryRequest {
     },
     /// Git working tree 状态（daemon `git.diff`）。
     GitDiff {
-        seed: String,
+        session_id: String,
     },
     /// 当前 Git 分支（daemon `git.branch`）。
     GitBranch {
-        seed: String,
+        session_id: String,
     },
     /// Git 分支列表（daemon `git.branches`）。
     GitBranches {
-        seed: String,
+        session_id: String,
     },
     /// 单文件 Git diff（daemon `git.file_diff`）。
     GitFileDiff {
-        seed: String,
+        session_id: String,
         file_path: String,
     },
 }
@@ -108,18 +108,23 @@ impl QueryRequest {
                 }
                 ("fs.read", params)
             }
-            Self::SessionDashboard { seed } => ("session.dashboard", json!({ "seed": seed })),
-            Self::TodoStatus { seed } => ("todo.status", json!({ "seed": seed })),
-            Self::SessionMeta { seed } => ("session.meta", json!({ "seed": seed })),
-            Self::PlanRead { seed } => ("plan.read", json!({ "seed": seed })),
-            Self::PlanContextStats { seed } => ("plan.context_stats", json!({ "seed": seed })),
+            // 线上参数键保持 "seed"：RPC 协议未版本化，改名只在 Rust API 层。
+            Self::SessionDashboard { session_id } => {
+                ("session.dashboard", json!({ "seed": session_id }))
+            }
+            Self::TodoStatus { session_id } => ("todo.status", json!({ "seed": session_id })),
+            Self::SessionMeta { session_id } => ("session.meta", json!({ "seed": session_id })),
+            Self::PlanRead { session_id } => ("plan.read", json!({ "seed": session_id })),
+            Self::PlanContextStats { session_id } => {
+                ("plan.context_stats", json!({ "seed": session_id }))
+            }
             Self::StatsTokenUsage { days } => ("stats.token_usage", json!({ "days": days })),
-            Self::GitDiff { seed } => ("git.diff", json!({ "seed": seed })),
-            Self::GitBranch { seed } => ("git.branch", json!({ "seed": seed })),
-            Self::GitBranches { seed } => ("git.branches", json!({ "seed": seed })),
-            Self::GitFileDiff { seed, file_path } => (
+            Self::GitDiff { session_id } => ("git.diff", json!({ "seed": session_id })),
+            Self::GitBranch { session_id } => ("git.branch", json!({ "seed": session_id })),
+            Self::GitBranches { session_id } => ("git.branches", json!({ "seed": session_id })),
+            Self::GitFileDiff { session_id, file_path } => (
                 "git.file_diff",
-                json!({ "seed": seed, "file_path": file_path }),
+                json!({ "seed": session_id, "file_path": file_path }),
             ),
         }
     }
@@ -369,12 +374,13 @@ mod tests {
     /// 此前客户端封闭枚举缺这两个变体 → TUI 只能自建 `service(method, params)`
     /// 泛型逃生口）。
     #[test]
-    fn session_scoped_queries_carry_seed() {
-        let (name, params) = QueryRequest::SessionDashboard { seed: "s1".into() }.into_parts();
+    fn session_scoped_queries_carry_session_id() {
+        let (name, params) =
+            QueryRequest::SessionDashboard { session_id: "s1".into() }.into_parts();
         assert_eq!(name, "session.dashboard");
         assert_eq!(params, json!({ "seed": "s1" }));
 
-        let (name, params) = QueryRequest::TodoStatus { seed: "s2".into() }.into_parts();
+        let (name, params) = QueryRequest::TodoStatus { session_id: "s2".into() }.into_parts();
         assert_eq!(name, "todo.status");
         assert_eq!(params, json!({ "seed": "s2" }));
     }
@@ -383,27 +389,48 @@ mod tests {
     fn tui_service_variants_use_existing_routes() {
         for (request, expected_name) in [
             (
-                QueryRequest::SessionMeta { seed: "s".into() },
+                QueryRequest::SessionMeta {
+                    session_id: "s".into(),
+                },
                 "session.meta",
             ),
-            (QueryRequest::PlanRead { seed: "s".into() }, "plan.read"),
             (
-                QueryRequest::PlanContextStats { seed: "s".into() },
+                QueryRequest::PlanRead {
+                    session_id: "s".into(),
+                },
+                "plan.read",
+            ),
+            (
+                QueryRequest::PlanContextStats {
+                    session_id: "s".into(),
+                },
                 "plan.context_stats",
             ),
             (
                 QueryRequest::StatsTokenUsage { days: 30 },
                 "stats.token_usage",
             ),
-            (QueryRequest::GitDiff { seed: "s".into() }, "git.diff"),
-            (QueryRequest::GitBranch { seed: "s".into() }, "git.branch"),
             (
-                QueryRequest::GitBranches { seed: "s".into() },
+                QueryRequest::GitDiff {
+                    session_id: "s".into(),
+                },
+                "git.diff",
+            ),
+            (
+                QueryRequest::GitBranch {
+                    session_id: "s".into(),
+                },
+                "git.branch",
+            ),
+            (
+                QueryRequest::GitBranches {
+                    session_id: "s".into(),
+                },
                 "git.branches",
             ),
             (
                 QueryRequest::GitFileDiff {
-                    seed: "s".into(),
+                    session_id: "s".into(),
                     file_path: "src/lib.rs".into(),
                 },
                 "git.file_diff",
@@ -413,7 +440,7 @@ mod tests {
         }
 
         let (name, params) = QueryRequest::GitFileDiff {
-            seed: "s".into(),
+            session_id: "s".into(),
             file_path: "src/lib.rs".into(),
         }
         .into_parts();
@@ -448,17 +475,33 @@ mod tests {
                 path: "/".into(),
                 max_bytes: None,
             },
-            QueryRequest::SessionDashboard { seed: "s".into() },
-            QueryRequest::TodoStatus { seed: "s".into() },
-            QueryRequest::SessionMeta { seed: "s".into() },
-            QueryRequest::PlanRead { seed: "s".into() },
-            QueryRequest::PlanContextStats { seed: "s".into() },
+            QueryRequest::SessionDashboard {
+                session_id: "s".into(),
+            },
+            QueryRequest::TodoStatus {
+                session_id: "s".into(),
+            },
+            QueryRequest::SessionMeta {
+                session_id: "s".into(),
+            },
+            QueryRequest::PlanRead {
+                session_id: "s".into(),
+            },
+            QueryRequest::PlanContextStats {
+                session_id: "s".into(),
+            },
             QueryRequest::StatsTokenUsage { days: 30 },
-            QueryRequest::GitDiff { seed: "s".into() },
-            QueryRequest::GitBranch { seed: "s".into() },
-            QueryRequest::GitBranches { seed: "s".into() },
+            QueryRequest::GitDiff {
+                session_id: "s".into(),
+            },
+            QueryRequest::GitBranch {
+                session_id: "s".into(),
+            },
+            QueryRequest::GitBranches {
+                session_id: "s".into(),
+            },
             QueryRequest::GitFileDiff {
-                seed: "s".into(),
+                session_id: "s".into(),
                 file_path: "src/lib.rs".into(),
             },
         ];
