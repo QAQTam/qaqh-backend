@@ -130,7 +130,7 @@ impl ToolEngine {
         let output = result.model_text();
         let status = result.status;
         let failure = status.is_failure().then(|| qaqh_domain::TimelineFailure {
-            code: "TOOL_EXECUTION_FAILED".into(),
+            code: "tool_execution_failed".into(),
             message: output.to_string(),
         });
         let mut display = serde_json::from_str::<serde_json::Value>(args)
@@ -766,7 +766,7 @@ impl ToolEngine {
             ),
             ToolRunOutcome::LedgerFailed(message) => (
                 id.to_string(),
-                qaqh_types::ToolResult::error_with("LEDGER_WRITE_FAILED", message, false, None),
+                qaqh_types::ToolResult::error_with("ledger_write_failed", message, false, None),
                 None,
                 Vec::new(),
             ),
@@ -833,7 +833,7 @@ impl ToolEngine {
         ));
         let terminal_state = qaqh_domain::TimelineToolState::from(status);
         let failure = status.is_failure().then(|| qaqh_domain::TimelineFailure {
-            code: "TOOL_EXECUTION_FAILED".into(),
+            code: "tool_execution_failed".into(),
             message: output.clone(),
         });
         ctx.emitter
@@ -873,7 +873,7 @@ impl ToolEngine {
                     qaqh_domain::TimelineTurnState::Failed
                 },
                 failure: status.is_failure().then(|| qaqh_domain::TimelineFailure {
-                    code: "TOOL_EXECUTION_FAILED".into(),
+                    code: "tool_execution_failed".into(),
                     message: output.clone(),
                 }),
             });

@@ -3126,9 +3126,17 @@ mod seed_collision_tests {
             chosen, sentinel,
             "allocator must retry a colliding candidate instead of reusing it"
         );
+        // Windows 上 cwd 经 PathBuf 规范化后是反斜杠（D:\new-project）；
+        // 语义相同即通过，分隔符差异不属于本测试的关注点。
         assert_eq!(
-            manager.load_meta(&chosen).expect("new meta").cwd.as_deref(),
-            Some("D:/new-project"),
+            manager
+                .load_meta(&chosen)
+                .expect("new meta")
+                .cwd
+                .as_deref()
+                .map(std::path::Path::new)
+                .map(|p| p == std::path::Path::new("D:/new-project")),
+            Some(true),
             "the allocated session must own its own cwd"
         );
 

@@ -151,7 +151,7 @@ impl TimelineStream {
                         }
                     }
                     self.set_status(TimelineStatus::Reconnecting {
-                        seed: self.seed.clone(),
+                        session_id: self.seed.clone(),
                         retry_ms,
                         cursor: self.cursor,
                         reason: err.reconnect_reason(),
@@ -170,7 +170,7 @@ impl TimelineStream {
             }
         }
         self.set_status(TimelineStatus::Closed {
-            seed: self.seed.clone(),
+            session_id: self.seed.clone(),
             reason: "stopped".into(),
         });
     }
@@ -182,7 +182,7 @@ impl TimelineStream {
         retry_ms: &mut u64,
     ) -> Result<()> {
         self.set_status(TimelineStatus::Connecting {
-            seed: self.seed.clone(),
+            session_id: self.seed.clone(),
         });
         let state = self
             .session
@@ -241,7 +241,7 @@ impl TimelineStream {
         // BUG-2026-09-12-10：连接成功即复位退避（与频道流同款修复）。
         *retry_ms = RETRY_BASE_MS;
         self.set_status(TimelineStatus::Open {
-            seed: self.seed.clone(),
+            session_id: self.seed.clone(),
             server_epoch: state.server_epoch.clone(),
             cursor: self.cursor,
         });
@@ -312,7 +312,7 @@ impl TimelineStream {
             .map_err(|e| ClientError::Protocol(format!("bad timeline frame: {e}")))?;
         if parsed.schema != qaqh_ringing::RINGING_SCHEMA
             || parsed.version != qaqh_ringing::RINGING_VERSION
-            || parsed.seed != self.seed
+            || parsed.session_id != self.seed
             || parsed.server_epoch != server_epoch
         {
             return Err(ClientError::Protocol(

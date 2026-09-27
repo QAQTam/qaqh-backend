@@ -58,21 +58,25 @@ pub enum ReconnectReason {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TimelineStatus {
     Connecting {
-        seed: String,
+        #[serde(rename = "seed")]
+        session_id: String,
     },
     Open {
-        seed: String,
+        #[serde(rename = "seed")]
+        session_id: String,
         server_epoch: String,
         cursor: u64,
     },
     Reconnecting {
-        seed: String,
+        #[serde(rename = "seed")]
+        session_id: String,
         retry_ms: u64,
         cursor: u64,
         reason: Option<ReconnectReason>,
     },
     Closed {
-        seed: String,
+        #[serde(rename = "seed")]
+        session_id: String,
         reason: String,
     },
 }
@@ -87,7 +91,8 @@ pub struct TimelinePage {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    pub seed: String,
+    #[serde(rename = "seed")]
+    pub session_id: String,
     pub snapshot: TimelineSnapshot,
     /// 本页之前（游标方向）**仍有可交付的回合**，即在已物化的 timeline 里还能
     /// 再往前翻一页。
@@ -116,7 +121,7 @@ impl TimelinePage {
     pub fn validate_for(&self, seed: &str) -> Result<(), String> {
         if self.schema != RINGING_SCHEMA
             || self.version != RINGING_VERSION
-            || self.seed != seed
+            || self.session_id != seed
             || self.server_epoch.is_empty()
         {
             return Err("invalid Ringing V1 timeline page".into());
@@ -131,7 +136,8 @@ pub struct TimelineSseFrame {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    pub seed: String,
+    #[serde(rename = "seed")]
+    pub session_id: String,
     pub entry: TimelineEntry,
 }
 
@@ -252,7 +258,7 @@ mod tests {
             schema: RINGING_SCHEMA.into(),
             version: RINGING_VERSION,
             server_epoch: "epoch-1".into(),
-            seed: "seed-1".into(),
+            session_id: "seed-1".into(),
             snapshot: TimelineSnapshot {
                 watermark: 0,
                 turns: vec![],
@@ -283,7 +289,7 @@ mod tests {
     #[test]
     fn reconnecting_status_keeps_none_and_structured_reasons_distinct() {
         let lagged = TimelineStatus::Reconnecting {
-            seed: "seed-1".into(),
+            session_id: "seed-1".into(),
             retry_ms: 2_000,
             cursor: 9,
             reason: Some(ReconnectReason::Lagged { skipped: 3 }),

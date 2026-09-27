@@ -42,7 +42,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
         Some(Value::Array(questions)) => questions.clone(),
         Some(_) => {
             return Err(AskUserError {
-                code: "INVALID_QUESTIONS",
+                code: "invalid_questions",
                 message: "questions must be an array".into(),
             });
         }
@@ -56,7 +56,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
 
     if raw_questions.is_empty() {
         return Err(AskUserError {
-            code: "EMPTY_QUESTIONS",
+            code: "empty_questions",
             message: "at least one question is required".into(),
         });
     }
@@ -416,7 +416,7 @@ mod tests {
         let args = serde_json::json!({ "questions": [] });
         let result = exec_ask_user(&args);
         let err = result.error.as_ref().expect("structured error");
-        assert_eq!(err.code, "EMPTY_QUESTIONS");
+        assert_eq!(err.code, "empty_questions");
     }
 
     #[test]

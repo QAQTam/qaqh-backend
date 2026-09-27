@@ -628,6 +628,9 @@ mod tests {
 
     /// 符号链接 workspace + 绝对路径：合法请求不得被拒（N-4③，评审怀疑
     /// `joined.exists()` 的 canonicalize 与原 cwd 比对会误拒）。
+    // std::os::unix::fs::symlink 只在 Unix 存在；Windows 下本测试整体跳过，
+    // 链接语义（canonicalize 解析链接、逃逸拒绝）由 CI 的 Linux leg 覆盖。
+    #[cfg(unix)]
     #[test]
     fn symlinked_workspace_accepts_absolute_paths() {
         let dir = tempdir().unwrap();

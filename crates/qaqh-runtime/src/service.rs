@@ -1087,7 +1087,13 @@ mod canonical_session_materialization_tests {
         let FactPayload::SessionCreated(created) = &facts[0].payload else {
             panic!("first fact must be SessionCreated");
         };
-        assert_eq!(created.cwd, "/tmp/workspace");
+        // Windows 会把 /tmp/workspace 规范化成 "D:/tmp/workspace"（当前盘符
+        // 前缀）；这里只断言路径尾部不被改写，盘符差异不属于本测试的关注点。
+        assert!(
+            created.cwd.ends_with("/tmp/workspace"),
+            "cwd tail must survive canonicalization: {}",
+            created.cwd
+        );
         assert_eq!(created.model, "test-model");
 
         // 幂等：重复调用不得追加第二个 SessionCreated。
