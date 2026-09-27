@@ -2,6 +2,17 @@
 
 use serde_json::{Value, json};
 
+/// 平台中立的"绝对路径"判定。
+///
+/// Windows 的 `Path::is_absolute` 对 POSIX 风格的 `/etc/hostname` 返回 false，
+/// 会导致同一请求在 Linux daemon 上走 FORBIDDEN、在 Windows daemon 上走
+/// "非绝对路径" —— 行为分叉。daemon 是跨平台的，前导 `/` 一律按绝对路径
+/// 处理，交由 allowlist 判生死（POSIX 风格路径在 Windows 的 allowed_roots
+/// 里匹配不上，自然落到 FORBIDDEN）。
+fn is_absolute_like(path: &str) -> bool {
+    path.starts_with('/') || std::path::Path::new(path).is_absolute()
+}
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -87,7 +98,7 @@ pub(crate) fn list_remote_directory(
     scope_seed: Option<&str>,
 ) -> Result<Value, String> {
     let dir = std::path::Path::new(path);
-    if !dir.is_absolute() {
+    if !is_absolute_like(path) {
         return Err("fs.list requires an absolute path".to_string());
     }
     if !path_allowed(sessions, dir, scope_seed) {
@@ -155,7 +166,7 @@ pub(crate) fn read_remote_file(
     scope_seed: Option<&str>,
 ) -> Result<Value, String> {
     let file_path = std::path::Path::new(path);
-    if !file_path.is_absolute() {
+    if !is_absolute_like(path) {
         return Err("fs.read requires an absolute path".to_string());
     }
     if !path_allowed(sessions, file_path, scope_seed) {

@@ -195,7 +195,7 @@ impl ToolRuntime {
                         ctx.agent.msg.push_tool_result_canonical(
                             &call_id,
                             &qaqh_types::ToolResult::error_with(
-                                "LEDGER_WRITE_FAILED",
+                                "ledger_write_failed",
                                 message,
                                 false,
                                 None,
@@ -269,7 +269,7 @@ impl ToolRuntime {
                         ctx.agent.msg.push_tool_result_canonical(
                             &call_id,
                             &qaqh_types::ToolResult::error_with(
-                                "LEDGER_WRITE_FAILED",
+                                "ledger_write_failed",
                                 message,
                                 false,
                                 None,
@@ -1005,7 +1005,7 @@ fn terminal_status(result: &qaqh_types::ToolResult) -> ToolTerminalStatus {
     if result
         .error
         .as_ref()
-        .is_some_and(|error| error.code == "TIMEOUT")
+        .is_some_and(|error| error.code == "timeout")
     {
         return ToolTerminalStatus::TimedOut;
     }
@@ -1275,7 +1275,7 @@ mod tests {
     #[test]
     fn timeout_error_maps_to_canonical_timed_out() {
         let result =
-            qaqh_types::ToolResult::error_with("TIMEOUT", "tool timed out".to_string(), true, None);
+            qaqh_types::ToolResult::error_with("timeout", "tool timed out".to_string(), true, None);
         assert_eq!(
             terminal_status(&result),
             ToolTerminalStatus::TimedOut,

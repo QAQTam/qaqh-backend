@@ -444,12 +444,18 @@ async fn activating_one_timeline_does_not_stop_another() {
             let statuses = statuses.clone();
             Arc::new(move |status| {
                 let (seed, kind) = match &status {
-                    qaqh_client::TimelineStatus::Connecting { seed } => (seed, "connecting"),
-                    qaqh_client::TimelineStatus::Open { seed, .. } => (seed, "open"),
-                    qaqh_client::TimelineStatus::Reconnecting { seed, .. } => {
-                        (seed, "reconnecting")
+                    qaqh_client::TimelineStatus::Connecting { session_id } => {
+                        (session_id, "connecting")
                     }
-                    qaqh_client::TimelineStatus::Closed { seed, .. } => (seed, "closed"),
+                    qaqh_client::TimelineStatus::Open { session_id, .. } => {
+                        (session_id, "open")
+                    }
+                    qaqh_client::TimelineStatus::Reconnecting { session_id, .. } => {
+                        (session_id, "reconnecting")
+                    }
+                    qaqh_client::TimelineStatus::Closed { session_id, .. } => {
+                        (session_id, "closed")
+                    }
                 };
                 statuses
                     .lock()

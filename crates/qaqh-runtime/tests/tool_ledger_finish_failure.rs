@@ -227,7 +227,7 @@ fn fenced_finish_keeps_intent_open_and_recovers_as_indeterminate() {
     assert_eq!(result.status, ToolStatus::Error);
     assert_eq!(
         result.error.as_ref().map(|error| error.code.as_str()),
-        Some("LEDGER_WRITE_FAILED")
+        Some("ledger_write_failed")
     );
 
     let facts = CommittedFactReader::open(

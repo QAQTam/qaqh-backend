@@ -411,6 +411,9 @@ fn diff_header_labels(path: &str) -> (String, String) {
 /// 展示用绝对路径判断：跨平台（Linux 绝对路径、Windows 盘符 / UNC 路径）。
 fn is_absolute_path(path: &str) -> bool {
     Path::new(path).is_absolute()
+        // POSIX 风格前导 /：daemon 可能在 Linux 侧（Windows 的 is_absolute
+        // 对它返回 false，但路径语义是绝对的）。
+        || path.starts_with('/')
         || path.starts_with('\\')
         || matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
 }
