@@ -30,9 +30,9 @@ fn with_isolated_todo<F: FnOnce(&str)>(f: F) {
     let old_home: Option<OsString> = std::env::var_os(home_var);
     // Rust 2024: set_var/remove_var are unsafe (test-only, single-threaded via TEST_RUNTIME_SERIAL).
     unsafe { std::env::set_var(home_var, dir.path()) };
-    let seed = format!("test-seed-{}", std::process::id());
-    crate::runtime::set_context(&seed, 4);
-    f(&seed);
+    let session_id = format!("test-seed-{}", std::process::id());
+    crate::runtime::set_context(&session_id, 4);
+    f(&session_id);
     unsafe {
         match old_home {
             Some(value) => std::env::set_var(home_var, value),
@@ -51,7 +51,7 @@ fn ids(store: &TodoStore) -> Vec<String> {
 
 #[test]
 fn create_group_assigns_consecutive_ids_atomically() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(&serde_json::json!({"title": "single"}), false).unwrap();
         let result = exec_todo_create(
             &serde_json::json!({
@@ -77,7 +77,7 @@ fn create_group_assigns_consecutive_ids_atomically() {
 
 #[test]
 fn create_group_is_atomic_on_validation_failure() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         let result = exec_todo_create(
             &serde_json::json!({
                 "items": [{"title": "good"}, {"title": "   "}]
@@ -91,7 +91,7 @@ fn create_group_is_atomic_on_validation_failure() {
 
 #[test]
 fn create_rejects_oversized_groups() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         // v4：空 items 对模型工具是合法的空清单（覆写语义）；旧 create 路径
         // 仅 HTTP/CLI 预留，此处只锁 >20 上限仍拒绝。
         let items: Vec<Value> = (0..21)
@@ -111,7 +111,7 @@ fn create_rejects_oversized_groups() {
 
 #[test]
 fn insert_preserves_ids_and_changes_display_order() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(
             &serde_json::json!({
                 "items": [{"title": "a"}, {"title": "b"}]
@@ -130,7 +130,7 @@ fn insert_preserves_ids_and_changes_display_order() {
 
 #[test]
 fn set_status_is_id_only_and_never_erases_metadata() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(
             &serde_json::json!({"title": "Keep me", "description": "Keep this too"}),
             false,
@@ -162,7 +162,7 @@ fn set_status_is_id_only_and_never_erases_metadata() {
 
 #[test]
 fn idle_is_public_alias_for_pending() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(&serde_json::json!({"title": "a"}), false).unwrap();
         exec_todo_set(&serde_json::json!({"id": "T1", "status": "in_progress"})).unwrap();
         exec_todo_set(&serde_json::json!({"id": "T1", "status": "idle"})).unwrap();
@@ -172,7 +172,7 @@ fn idle_is_public_alias_for_pending() {
 
 #[test]
 fn current_id_falls_back_to_another_in_progress_task() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(
             &serde_json::json!({"items": [{"title": "a"}, {"title": "b"}]}),
             false,
@@ -187,7 +187,7 @@ fn current_id_falls_back_to_another_in_progress_task() {
 
 #[test]
 fn insert_requires_exactly_one_existing_anchor() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(&serde_json::json!({"title": "parent"}), false).unwrap();
 
         let missing = exec_todo_create(&serde_json::json!({"title": "child"}), true);
@@ -220,7 +220,7 @@ fn insert_requires_exactly_one_existing_anchor() {
 
 #[test]
 fn set_batch_ids_with_range_sets_same_status() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(
             &serde_json::json!({"items": [{"title": "a"}, {"title": "b"}, {"title": "c"}]}),
             false,
@@ -264,7 +264,7 @@ fn set_batch_ids_with_range_sets_same_status() {
 
 #[test]
 fn set_updates_parallel_sets_per_item_status() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(
             &serde_json::json!({"items": [{"title": "a"}, {"title": "b"}, {"title": "c"}]}),
             false,
@@ -290,7 +290,7 @@ fn set_updates_parallel_sets_per_item_status() {
 
 #[test]
 fn set_batch_reports_not_found_without_aborting() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(&serde_json::json!({"title": "only"}), false).unwrap();
         // 部分命中：T1 更新，T2/T3 记入 not_found
         let result = exec_todo_set(&serde_json::json!({
@@ -352,18 +352,18 @@ fn v1_v2_action_vocabulary_retired() {
 }
 
 #[test]
-fn seed_parameterized_set_and_list_hit_explicit_seed() {
+fn session_parameterized_set_and_list_hit_explicit_session() {
     // HTTP service 面 / CLI 直访契约：显式 seed 读写（write_store_for /
     // read_store_for），与工具路径（runtime ctx）写同一份 todo.json。
-    with_isolated_todo(|seed| {
+    with_isolated_todo(|session_id| {
         exec_todo_create(&serde_json::json!({"title": "工具路径建项"}), false).unwrap();
         let id = ids(&load_todo().unwrap())[0].clone();
         let set = parse(&todo_set_for(
-            seed,
+            session_id,
             &serde_json::json!({"id": id, "status": "completed", "evidence": "via CLI"}),
         ));
         assert_eq!(set["item"]["status"], "completed");
-        let listed = parse(&todo_list_for(seed, &serde_json::json!({})));
+        let listed = parse(&todo_list_for(session_id, &serde_json::json!({})));
         assert_eq!(listed["items"].as_array().unwrap().len(), 1);
         assert_eq!(listed["items"][0]["status"], "completed");
     });
@@ -371,9 +371,9 @@ fn seed_parameterized_set_and_list_hit_explicit_seed() {
 
 #[test]
 fn typed_todo_list_matches_wire_and_projection() {
-    with_isolated_todo(|seed| {
+    with_isolated_todo(|session_id| {
         exec_todo_create(&serde_json::json!({"title": "typed list"}), false).unwrap();
-        let typed = super::typed::todo_list_for_typed(seed, &serde_json::json!({})).unwrap();
+        let typed = super::typed::todo_list_for_typed(session_id, &serde_json::json!({})).unwrap();
         assert_eq!(typed.items.len(), 1);
         assert_eq!(typed.counts.total, 1);
         assert_eq!(
@@ -382,8 +382,8 @@ fn typed_todo_list_matches_wire_and_projection() {
         );
 
         let value = super::typed::todo_list_value_for(
-            seed,
-            &serde_json::json!({"seed": seed, "status": "idle"}),
+            session_id,
+            &serde_json::json!({"session_id": session_id, "status": "idle"}),
         )
         .unwrap();
         assert_eq!(value["status"], "ok");
@@ -396,7 +396,7 @@ fn typed_todo_list_matches_wire_and_projection() {
 fn high_water_id_survives_item_removal() {
     // 回归：max+1 推导在"删除最大项后新建"会复用 ID，破坏 IDs stable。
     // 高水位持久化后：T1-T3 建成 → next_id=4 落盘 → 移除 T3 → 新建仍得 T4。
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(
             &serde_json::json!({"items": [{"title": "a"}, {"title": "b"}, {"title": "c"}]}),
             false,
@@ -414,7 +414,7 @@ fn high_water_id_survives_item_removal() {
 #[test]
 fn legacy_store_without_next_id_migrates() {
     // 旧格式文件（无 next_id 字段）→ 首次分配按现存最大号 +1 迁移。
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         let legacy = serde_json::json!({
             "items": [
                 {"id": "T1", "title": "a", "description": "", "status": "completed"},
@@ -438,7 +438,7 @@ fn legacy_store_without_next_id_migrates() {
 #[test]
 fn set_edits_title_description_without_status() {
     // 纯编辑：updates 项可省略 status，仅改 title/description。
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(
             &serde_json::json!({"items": [{"title": "原始", "description": "初版描述"}]}),
             false,
@@ -467,7 +467,7 @@ fn set_edits_title_description_without_status() {
 
 #[test]
 fn set_edit_rejects_oversized_title() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         exec_todo_create(&serde_json::json!({"items": [{"title": "a"}]}), false).unwrap();
         let long = "x".repeat(101);
         assert!(
@@ -542,7 +542,7 @@ fn split_handlers_reject_cross_fields() {
 
 #[test]
 fn split_roundtrip_via_handlers() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         // 首次覆写建 2 条（v4：status 必填，assigned 回填新分配的 ID）
         let first = parse_tool_result(
             handle_write(split_ctx(
@@ -578,7 +578,7 @@ fn split_roundtrip_via_handlers() {
 
 #[test]
 fn write_empty_clears_and_restarts_id_sequence() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         handle_write(split_ctx(
             "todo_write",
             serde_json::json!({"items": [{"title": "a", "status": "idle"}]}),
@@ -606,7 +606,7 @@ fn write_empty_clears_and_restarts_id_sequence() {
 
 #[test]
 fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
-    with_isolated_todo(|_seed| {
+    with_isolated_todo(|_session| {
         // 首次覆写建 2 条，T2 in_progress（写即状态）。
         let first = parse_tool_result(
             handle_write(split_ctx(

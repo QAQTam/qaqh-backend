@@ -315,7 +315,7 @@ pub fn count_message_lines(session_dir: &Path) -> Result<usize, String> {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum IndexOp {
     Upsert { meta: Box<SessionMeta> },
-    Remove { seed: String },
+    Remove { session_id: String },
 }
 
 /// 索引日志的 compact 阈值（行数）：超过后整文件重写为每 seed 一行。
@@ -340,7 +340,7 @@ fn read_merged_index(sessions_dir: &Path) -> Vec<SessionMeta> {
     let Ok(data) = fs::read_to_string(&path) else {
         return Vec::new();
     };
-    let mut by_seed: std::collections::HashMap<String, SessionMeta> =
+    let mut by_session: std::collections::HashMap<String, SessionMeta> =
         std::collections::HashMap::new();
     let mut lines = 0usize;
     for line in data.lines() {
@@ -351,19 +351,19 @@ fn read_merged_index(sessions_dir: &Path) -> Vec<SessionMeta> {
         lines += 1;
         match serde_json::from_str::<IndexOp>(trimmed) {
             Ok(IndexOp::Upsert { meta }) => {
-                by_seed.insert(meta.session_id.clone(), *meta);
+                by_session.insert(meta.session_id.clone(), *meta);
             }
-            Ok(IndexOp::Remove { seed }) => {
-                by_seed.remove(&seed);
+            Ok(IndexOp::Remove { session_id }) => {
+                by_session.remove(&session_id);
             }
             Err(_) => continue, // 损坏行跳过（日志尾部中断可容忍）
         }
     }
     // 阈值外不做写放大：compact 只在读取（列表页）路径顺带执行。
     if lines > INDEX_COMPACT_LINES {
-        compact_index(sessions_dir, by_seed.values());
+        compact_index(sessions_dir, by_session.values());
     }
-    by_seed.into_values().collect()
+    by_session.into_values().collect()
 }
 
 /// 旧 `index.json` → 新 `index.jsonl`（一次性；迁移后删除旧文件）。
@@ -438,11 +438,11 @@ pub fn upsert_index(sessions_dir: &Path, meta: &SessionMeta) {
 
 /// Remove a session from the index：追加 tombstone，读侧归并时丢弃。
 /// tombstone 随下次 compact 消失，日志不会无界增长。
-pub fn remove_from_index(sessions_dir: &Path, seed: &str) {
+pub fn remove_from_index(sessions_dir: &Path, session_id: &str) {
     append_index_op(
         sessions_dir,
         &IndexOp::Remove {
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
         },
     );
 }
@@ -465,9 +465,9 @@ mod tests {
         dir
     }
 
-    fn meta(seed: &str, updated: u64) -> SessionMeta {
+    fn meta(session_id: &str, updated: u64) -> SessionMeta {
         SessionMeta {
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             updated_at: updated,
             ..SessionMeta::default()
         }
@@ -498,7 +498,7 @@ mod tests {
         let dir = temp_sessions_dir("merge");
         upsert_index(&dir, &meta("a", 1));
         upsert_index(&dir, &meta("b", 2));
-        upsert_index(&dir, &meta("a", 3)); // 同 seed 后行胜
+        upsert_index(&dir, &meta("a", 3)); // 同 session_id 后行胜
         assert_eq!(read_index(&dir).len(), 2);
         assert_eq!(
             read_index(&dir)

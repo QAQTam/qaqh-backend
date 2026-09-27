@@ -29,7 +29,7 @@ pub enum PersistOp {
     /// Append new messages to messages.jsonl and refresh meta/index
     /// (was `SessionManager::save_append`).
     Append {
-        seed: String,
+        session_id: String,
         messages: Vec<Message>,
         model: String,
         effort: Option<String>,
@@ -44,7 +44,7 @@ pub enum PersistOp {
     },
     /// Refresh meta/index without new messages (was `update_meta`).
     UpdateMeta {
-        seed: String,
+        session_id: String,
         model: String,
         effort: Option<String>,
         compact_skip: usize,
@@ -56,7 +56,7 @@ pub enum PersistOp {
     /// view. The optional watermark below lets that rewritten view keep its
     /// compaction marker; `None` means the rewrite removed the marker.
     SaveFull {
-        seed: String,
+        session_id: String,
         messages: Vec<Message>,
         model: String,
         effort: Option<String>,

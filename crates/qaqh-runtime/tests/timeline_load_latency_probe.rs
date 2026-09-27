@@ -42,17 +42,25 @@ fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-fn snapshot_bytes(root: &std::path::Path, seed: &str) -> u64 {
-    std::fs::metadata(root.join("ringing-timeline").join(format!("{seed}.json")))
-        .map(|meta| meta.len())
-        .unwrap_or(0)
+fn snapshot_bytes(root: &std::path::Path, session_id: &str) -> u64 {
+    std::fs::metadata(
+        root.join("ringing-timeline")
+            .join(format!("{session_id}.json")),
+    )
+    .map(|meta| meta.len())
+    .unwrap_or(0)
 }
 
 /// 按生产形状灌入一个「长回合」：块文本随 checkpoint 累积增长
 /// （`BlockCheckpoint` 携带**全量块文本**，这是快照体积的真正来源）。
-fn build_long_turn(hub: &RingingHub, seed: &str, checkpoints: usize, chunk_kib: usize) -> String {
+fn build_long_turn(
+    hub: &RingingHub,
+    session_id: &str,
+    checkpoints: usize,
+    chunk_kib: usize,
+) -> String {
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnOpened {
             turn_id: "t1".into(),
             user_text: "probe".into(),
@@ -60,7 +68,7 @@ fn build_long_turn(hub: &RingingHub, seed: &str, checkpoints: usize, chunk_kib: 
     )
     .expect("turn opened");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockOpened {
             turn_id: "t1".into(),
             round_num: 0,
@@ -75,7 +83,7 @@ fn build_long_turn(hub: &RingingHub, seed: &str, checkpoints: usize, chunk_kib: 
     for _ in 0..checkpoints {
         text.push_str(&chunk);
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockCheckpoint {
                 turn_id: "t1".into(),
                 round_num: 0,
@@ -92,13 +100,13 @@ fn build_long_turn(hub: &RingingHub, seed: &str, checkpoints: usize, chunk_kib: 
 #[ignore = "measurement harness; run explicitly with --ignored --nocapture"]
 fn hot_path_latency_under_fast_streaming() {
     let root = shared_root();
-    let seed = "probe-latency";
+    let session_id = "probe-latency";
     let hub = RingingHub::with_persistence("probe-epoch-1", &root);
 
     // ── A. 每个流式 checkpoint 的发布成本（累积文本 → 线性增长） ──────────
     const CHECKPOINTS: usize = 600;
     let t0 = Instant::now();
-    let text = build_long_turn(&hub, seed, CHECKPOINTS, 4);
+    let text = build_long_turn(&hub, session_id, CHECKPOINTS, 4);
     let build_total = t0.elapsed();
     println!(
         "[A] {CHECKPOINTS} 次 BlockCheckpoint（累积文本 {:.2} MiB）合计 {:.1}ms，平均 {:.3}ms/次",
@@ -109,7 +117,7 @@ fn hot_path_latency_under_fast_streaming() {
 
     // ── B. conversation 频道 RoundDelta：Reliable → 每事件一次锁内落盘 ─────
     hub.publish(
-        seed,
+        session_id,
         DomainEvent::Conversation(ConversationEvent::TurnStarted {
             turn_id: "t1".into(),
             user_text: "probe".into(),
@@ -122,7 +130,7 @@ fn hot_path_latency_under_fast_streaming() {
     let journal_path = root
         .join("journal")
         .join("conversation")
-        .join(format!("{seed}.jsonl"));
+        .join(format!("{session_id}.jsonl"));
     let before = std::fs::metadata(&journal_path)
         .map(|m| m.len())
         .unwrap_or(0);
@@ -130,7 +138,7 @@ fn hot_path_latency_under_fast_streaming() {
     for _ in 0..DELTAS {
         let t = Instant::now();
         hub.publish(
-            seed,
+            session_id,
             DomainEvent::Conversation(ConversationEvent::RoundDelta {
                 turn_id: "t1".into(),
                 round_num: 0,
@@ -165,7 +173,7 @@ fn hot_path_latency_under_fast_streaming() {
 
     // ── C. TurnSealed：入队（issue #28 后不再同步全量落盘） ─────────────────
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::BlockSealed {
             turn_id: "t1".into(),
             round_num: 0,
@@ -174,7 +182,7 @@ fn hot_path_latency_under_fast_streaming() {
     )
     .expect("block sealed");
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::RoundSealed {
             turn_id: "t1".into(),
             round_num: 0,
@@ -184,7 +192,7 @@ fn hot_path_latency_under_fast_streaming() {
     .expect("round sealed");
     let t0 = Instant::now();
     hub.publish_timeline(
-        seed,
+        session_id,
         TimelineIntent::TurnSealed {
             turn_id: "t1".into(),
             state: TimelineTurnState::Completed,
@@ -197,7 +205,7 @@ fn hot_path_latency_under_fast_streaming() {
     let t0 = Instant::now();
     hub.flush_timeline_persistence();
     let flush_cost = t0.elapsed();
-    let size = snapshot_bytes(&root, seed);
+    let size = snapshot_bytes(&root, session_id);
     println!(
         "[C] TurnSealed 发布 {:.2}ms（入队），flush 落盘 {:.1}ms（快照 {:.2} MiB）",
         ms(seal_publish),
@@ -209,7 +217,7 @@ fn hot_path_latency_under_fast_streaming() {
     drop(hub);
     let hub2 = RingingHub::with_persistence("probe-epoch-2", &root);
     let t0 = Instant::now();
-    let snapshot = hub2.timeline_snapshot(seed);
+    let snapshot = hub2.timeline_snapshot(session_id);
     let cold_load = t0.elapsed();
     let turns = snapshot.as_ref().map(|s| s.turns.len()).unwrap_or(0);
     println!(
@@ -231,7 +239,7 @@ fn hot_path_latency_under_fast_streaming() {
 #[ignore = "measurement harness; run explicitly with --ignored --nocapture"]
 fn production_scale_snapshot_persist_and_cold_load() {
     let root = shared_root();
-    let seed = "probe-production-scale";
+    let session_id = "probe-production-scale";
     let hub = RingingHub::with_persistence("probe-epoch-3", &root);
 
     // 8 个回合，每回合块文本累积到 ~2 MiB → 快照同量级于生产 17 MiB。
@@ -241,7 +249,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
     for index in 1..=TURNS {
         let turn_id = format!("t{index}");
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::TurnOpened {
                 turn_id: turn_id.clone(),
                 user_text: format!("probe turn {index}"),
@@ -249,7 +257,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         )
         .expect("turn opened");
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockOpened {
                 turn_id: turn_id.clone(),
                 round_num: 0,
@@ -264,7 +272,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         for _ in 0..CHECKPOINTS {
             text.push_str(&chunk);
             hub.publish_timeline(
-                seed,
+                session_id,
                 TimelineIntent::BlockCheckpoint {
                     turn_id: turn_id.clone(),
                     round_num: 0,
@@ -275,7 +283,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
             .expect("checkpoint");
         }
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::BlockSealed {
                 turn_id: turn_id.clone(),
                 round_num: 0,
@@ -284,7 +292,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         )
         .expect("block sealed");
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::RoundSealed {
                 turn_id: turn_id.clone(),
                 round_num: 0,
@@ -294,7 +302,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         .expect("round sealed");
         let t0 = Instant::now();
         hub.publish_timeline(
-            seed,
+            session_id,
             TimelineIntent::TurnSealed {
                 turn_id: turn_id.clone(),
                 state: TimelineTurnState::Completed,
@@ -305,19 +313,19 @@ fn production_scale_snapshot_persist_and_cold_load() {
         last_seal = t0.elapsed();
         // 显式同步边界（= 崩溃一致性 fail-closed 点），不在发布会话线程上。
         hub.flush_timeline_persistence();
-        let after = snapshot_bytes(&root, seed);
+        let after = snapshot_bytes(&root, session_id);
         println!(
             "[E] turn {turn_id} seal：发布 {:.2}ms（快照 {:.2} MiB）",
             ms(last_seal),
             after as f64 / 1048576.0
         );
     }
-    let size = snapshot_bytes(&root, seed);
+    let size = snapshot_bytes(&root, session_id);
 
     drop(hub);
     let hub2 = RingingHub::with_persistence("probe-epoch-4", &root);
     let t0 = Instant::now();
-    let snapshot = hub2.timeline_snapshot(seed);
+    let snapshot = hub2.timeline_snapshot(session_id);
     let cold_load = t0.elapsed();
     let turns = snapshot.as_ref().map(|s| s.turns.len()).unwrap_or(0);
     println!(

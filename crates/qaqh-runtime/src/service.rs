@@ -141,73 +141,79 @@ impl QaqhService {
     /// 转发 Ringing 命令到 agent worker（wire 判别后由 worker reader 解析）。
     pub fn send_ringing_command(
         &self,
-        seed: &str,
+        session_id: &str,
         env: &qaqh_ringing::RingingWorkerCommandEnvelope,
     ) -> Result<(), String> {
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .send_ringing(seed, env)
+            .send_ringing(session_id, env)
     }
 
     pub fn subscribe_channel(
         &self,
-        seed: &str,
+        session_id: &str,
         connection_id: &ConnectionId,
         channel: RingingChannel,
     ) -> Result<bool, String> {
         self.registry()?
-            .subscribe_channel(seed, connection_id.clone(), channel)
+            .subscribe_channel(session_id, connection_id.clone(), channel)
     }
 
     pub fn unsubscribe_channel(
         &self,
-        seed: &str,
+        session_id: &str,
         connection_id: &ConnectionId,
         channel: RingingChannel,
     ) -> Result<bool, String> {
         self.registry()?
-            .unsubscribe_channel(seed, connection_id.clone(), channel)
+            .unsubscribe_channel(session_id, connection_id.clone(), channel)
     }
 
     pub fn connection_closed(
         &self,
-        seed: &str,
+        session_id: &str,
         connection_id: &ConnectionId,
     ) -> Result<usize, String> {
         self.registry()?
-            .connection_closed(seed, connection_id.clone())
+            .connection_closed(session_id, connection_id.clone())
     }
 
     /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
     /// 关闭 registry 实例并经 hub 发布 `SessionStateChanged { state: Closed }`，
     /// causation 挂命令 id。会话不存在同样返回 Ok（幂等关闭）。
-    pub fn close_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
-        self.registry()?.close(seed);
+    pub fn close_session(
+        &self,
+        session_id: &str,
+        causation_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.registry()?.close(session_id);
         // D-3：关闭即终止该会话的取消标记。worker 优雅收尾可能已把它置假
         // （actor 线程 clear_cancel），但整项移除才能让 SESSION_CANCELS 与
         // 活跃会话同阶（种子频繁进出的 daemon 长期运行不无界增长）。
-        qaqh_workspace::remove_session_cancel(seed);
+        qaqh_workspace::remove_session_cancel(session_id);
         // 临时会话（子代理）用完即走：关闭后删除会话目录，磁盘零残留。
         // 目录已不存在（重复 close / 已被清理）时静默跳过，保持幂等。
-        if self.sessions.is_ephemeral(seed) {
-            match self.sessions.delete(seed) {
-                Ok(()) => log::info!("[session] ephemeral session {seed} cleaned up (auto-unload)"),
+        if self.sessions.is_ephemeral(session_id) {
+            match self.sessions.delete(session_id) {
+                Ok(()) => {
+                    log::info!("[session] ephemeral session {session_id} cleaned up (auto-unload)")
+                }
                 Err(e) if e.contains("Session not found") => {}
-                Err(e) => log::warn!("[session] ephemeral cleanup {seed} failed: {e}"),
+                Err(e) => log::warn!("[session] ephemeral cleanup {session_id} failed: {e}"),
             }
         }
         if let Some(hub) = self.hub.get() {
             let _ = hub.publish_with_causation(
-                seed,
+                session_id,
                 qaqh_domain::DomainEvent::Control(qaqh_domain::ControlEvent::SessionStateChanged {
-                    session_id: seed.to_string(),
+                    session_id: session_id.to_string(),
                     state: qaqh_domain::SessionState::Closed,
                 }),
                 causation_id,
             );
         }
-        self.release_seed_resident_state(seed);
+        self.release_session_resident_state(session_id);
         release_freed_heap_memory();
         Ok(())
     }
@@ -219,13 +225,13 @@ impl QaqhService {
     /// 触发 lazy-load，把刚丢弃的状态原样重建回来，清理变成空操作。
     /// forget 之后该 seed 的 hub 态与 daemon 重启后的空态同构；磁盘索引
     /// 保留，下次访问走既有 lazy-load 重放路径（UI 历史不丢）。
-    fn release_seed_resident_state(&self, seed: &str) {
+    fn release_session_resident_state(&self, session_id: &str) {
         // 图片注册表按 seed 键控存 base64（read_image 的上传缓存）。resume
         // 路径（state/lifecycle.rs）会从持久化消息历史重建，关闭期清空
         // 不破坏 image_index 语义。
-        qaqh_workspace::read_image::reset_images(seed);
+        qaqh_workspace::read_image::reset_images(session_id);
         if let Some(hub) = self.hub.get() {
-            hub.forget_seed(seed);
+            hub.forget_session(session_id);
         }
     }
 
@@ -243,12 +249,12 @@ impl QaqhService {
         };
         let unloaded = registry.unload_idle_sessions(idle_secs);
         if let Some(hub) = self.hub.get() {
-            for seed in &unloaded {
+            for session_id in &unloaded {
                 let _ = hub.publish_with_causation(
-                    seed,
+                    session_id,
                     qaqh_domain::DomainEvent::Control(
                         qaqh_domain::ControlEvent::SessionStateChanged {
-                            session_id: seed.to_string(),
+                            session_id: session_id.to_string(),
                             state: qaqh_domain::SessionState::Closed,
                         },
                     ),
@@ -256,8 +262,8 @@ impl QaqhService {
                 );
             }
         }
-        for seed in &unloaded {
-            self.release_seed_resident_state(seed);
+        for session_id in &unloaded {
+            self.release_session_resident_state(session_id);
         }
         if !unloaded.is_empty() {
             release_freed_heap_memory();
@@ -268,28 +274,36 @@ impl QaqhService {
     /// 归档会话（标签 × 语义）：关闭 registry 实例 + meta `archived=true`。
     /// 磁盘与消息文件保留，左侧列表归档组可见可恢复。会话不存在同样
     /// 幂等成功（close 幂等 + set_archived 补写 meta）。
-    pub fn archive_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
-        self.close_session(seed, causation_id)?;
-        self.sessions.set_archived(seed, true);
+    pub fn archive_session(
+        &self,
+        session_id: &str,
+        causation_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.close_session(session_id, causation_id)?;
+        self.sessions.set_archived(session_id, true);
         Ok(())
     }
 
     /// 恢复归档会话：meta `archived=false` + 重新拉起实例（resume 语义，
     /// 对齐 `session.resume` 查询——get_or_spawn + active seed 更新）。
-    pub fn unarchive_session(&self, seed: &str) -> Result<(), String> {
-        self.sessions.set_archived(seed, false);
-        self.registry()?.get_or_spawn(seed)
+    pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {
+        self.sessions.set_archived(session_id, false);
+        self.registry()?.get_or_spawn(session_id)
     }
 
     /// 彻底删除会话（左侧列表 × 语义）：先关实例（若运行，幂等）再删
     /// 磁盘目录与索引。会话不存在返回 Err（由 daemon 拦截层按幂等处理）。
-    pub fn delete_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
-        let _ = self.close_session(seed, causation_id);
-        self.sessions.delete(seed)
+    pub fn delete_session(
+        &self,
+        session_id: &str,
+        causation_id: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = self.close_session(session_id, causation_id);
+        self.sessions.delete(session_id)
     }
 
     pub fn handle(&self, method: &str, params: &Value) -> Result<Value, String> {
-        let seed = || pstr(params, "seed");
+        let session_id = || session_param(params);
         match method {
             "daemon.version" => Ok(json!(env!("CARGO_PKG_VERSION"))),
             // ── UI 工作区注册表（组织语义，与运行环境 workspace 解耦）──
@@ -315,8 +329,8 @@ impl QaqhService {
             // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
             "fs.list" => {
                 let path = pstr(params, "path")?;
-                let scope_seed = params.get("scope_seed").and_then(Value::as_str);
-                list_remote_directory(&self.sessions, &path, scope_seed)
+                let scope_session = scope_session_param_value(params);
+                list_remote_directory(&self.sessions, &path, scope_session)
             }
             "fs.read" => {
                 let path = pstr(params, "path")?;
@@ -324,8 +338,8 @@ impl QaqhService {
                     .get("max_bytes")
                     .and_then(Value::as_u64)
                     .unwrap_or(512 * 1024);
-                let scope_seed = params.get("scope_seed").and_then(Value::as_str);
-                read_remote_file(&self.sessions, &path, max_bytes, scope_seed)
+                let scope_session = scope_session_param_value(params);
+                read_remote_file(&self.sessions, &path, max_bytes, scope_session)
             }
             "workspace.create" => {
                 let path = pstr(params, "path")?;
@@ -347,21 +361,21 @@ impl QaqhService {
                 Ok(Value::Null)
             }
             "workspace.move_session" => {
-                let seed = pstr(params, "seed")?;
+                let session_id = session_param(params)?;
                 let workspace_id = pstr(params, "workspace_id")?;
-                qaqh_session::WorkspaceStore::global().move_session(&seed, &workspace_id)?;
+                qaqh_session::WorkspaceStore::global().move_session(&session_id, &workspace_id)?;
                 Ok(Value::Null)
             }
             "workspace.detach" => {
-                let seed = pstr(params, "seed")?;
-                qaqh_session::WorkspaceStore::global().remove_session(&seed);
+                let session_id = session_param(params)?;
+                qaqh_session::WorkspaceStore::global().remove_session(&session_id);
                 Ok(Value::Null)
             }
             "session.list" => Ok(serde_json::to_value(self.list_sessions()).map_err(err)?),
             "session.meta" => {
-                let seed = seed()?;
+                let session_id = session_id()?;
                 let manager = &self.sessions;
-                let Some(meta) = manager.load_meta(&seed) else {
+                let Some(meta) = manager.load_meta(&session_id) else {
                     return Ok(Value::Null);
                 };
                 // 单条与 `session.list` 的条目**同一个形状**（G2）：同样的
@@ -395,13 +409,13 @@ impl QaqhService {
                     .sessions
                     .allocate_session(cwd.as_deref())
                     .map_err(|error| format!("session.new: allocate session failed: {error}"))?;
-                let seed = identity.session_id.as_str().to_string();
+                let session_id = identity.session_id.as_str().to_string();
                 self.sessions.clear_active();
                 // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
                 // 保证 minimal:dsh 的极简 system prompt 首轮就生效。
                 if let Some((tool_mode, custom_tools)) = preset {
                     self.sessions
-                        .persist_tool_mode(&seed, &tool_mode, &custom_tools)
+                        .persist_tool_mode(&session_id, &tool_mode, &custom_tools)
                         .map_err(|error| format!("persist tool_mode failed: {error}"))?;
                 }
                 // 纯 v2：session_create 即物化 canonical identity + 首个
@@ -409,7 +423,7 @@ impl QaqhService {
                 // 才可用，新建会话在第一回合前一直处于 snapshot_missing 瞬态。
                 let canonical_cwd = self
                     .sessions
-                    .workspace_cwd(&seed)
+                    .workspace_cwd(&session_id)
                     .filter(|cwd| !cwd.is_empty())
                     .or_else(|| {
                         std::env::current_dir()
@@ -420,23 +434,25 @@ impl QaqhService {
                 let model = qaqh_config::Config::load()
                     .map(|config| config.model)
                     .unwrap_or_else(|_| "unknown".to_string());
-                if let Err(error) = materialize_canonical_session(&seed, &canonical_cwd, &model) {
-                    let _ = self.sessions.delete(&seed);
+                if let Err(error) =
+                    materialize_canonical_session(&session_id, &canonical_cwd, &model)
+                {
+                    let _ = self.sessions.delete(&session_id);
                     return Err(format!(
                         "session.new: canonical materialization failed: {error}"
                     ));
                 }
-                self.registry()?.spawn_new(&seed)?;
-                Ok(json!(seed))
+                self.registry()?.spawn_new(&session_id)?;
+                Ok(json!(session_id))
             }
             "session.resume" => {
-                let seed = seed()?;
-                self.sessions.set_active_seed(&seed);
-                self.registry()?.get_or_spawn(&seed)?;
+                let session_id = session_id()?;
+                self.sessions.set_active_session(&session_id);
+                self.registry()?.get_or_spawn(&session_id)?;
                 Ok(Value::Null)
             }
             "session.set_tool_mode" => {
-                let seed = seed()?;
+                let session_id = session_id()?;
                 let tool_mode = pstr(params, "tool_mode")?;
                 validate_tool_mode(&tool_mode)?;
                 let custom_tools = pstrings(params, "custom_tools");
@@ -450,20 +466,20 @@ impl QaqhService {
                 // CK-PERSIST：持久化失败 → 400 返回前端，前端回滚乐观值；
                 // 不允许「应用成功但没落盘」的假切换（重启即丢）。
                 self.sessions
-                    .persist_tool_mode(&seed, &tool_mode, &custom_tools)
+                    .persist_tool_mode(&session_id, &tool_mode, &custom_tools)
                     .map_err(|error| format!("persist tool_mode failed: {error}"))?;
                 self.send_ringing_cmd(
-                    seed,
+                    session_id,
                     RingingCommand::Control(ControlCommand::SetToolMode {
                         tool_mode,
                         custom_tools,
                     }),
                 )
             }
-            "session.dashboard" => dashboard(&seed()?),
-            "session.get_activity" => activity(&self.sessions, &seed()?),
+            "session.dashboard" => dashboard(&session_id()?),
+            "session.get_activity" => activity(&self.sessions, &session_id()?),
             "skills.operation" => self.send_ringing_cmd(
-                seed()?,
+                session_id()?,
                 RingingCommand::Control(ControlCommand::SkillsOperation {
                     operation_id: pstr2(params, "operation_id", "operationId")?,
                     action: pstr(params, "action")?,
@@ -471,19 +487,19 @@ impl QaqhService {
                 }),
             ),
             "skills.reload" => self.send_ringing_cmd(
-                seed()?,
+                session_id()?,
                 RingingCommand::Control(ControlCommand::SkillsReload),
             ),
             "skills.activate" => self.send_ringing_cmd(
-                seed()?,
+                session_id()?,
                 RingingCommand::Control(ControlCommand::SkillsActivate {
                     name: pstr(params, "name")?,
                 }),
             ),
             "skills.list_tools" => Ok(json!(qaqh_workspace::runtime::process_all_tool_names())),
-            "workspace.get" => Ok(json!(workspace(&self.sessions, &seed()?))),
+            "workspace.get" => Ok(json!(workspace(&self.sessions, &session_id()?))),
             "workspace.set" => {
-                let seed = seed()?;
+                let session_id = session_id()?;
                 // 空 path 防护：canonical_cwd("") = "" 会把 meta.cwd 清空，
                 // 导致会话工作区/归属丢失（前端重启后回空 cwd 的 bug 通道）。
                 let path = pstr(params, "path")?.trim().to_string();
@@ -491,34 +507,34 @@ impl QaqhService {
                     return Err("workspace.set: empty path rejected".into());
                 }
                 // 统一数据源：运行环境工作目录存 meta.cwd（workspace.txt 退役）。
-                self.sessions.set_cwd(&seed, &path, true);
+                self.sessions.set_cwd(&session_id, &path, true);
                 self.send_ringing_cmd(
-                    seed,
+                    session_id,
                     RingingCommand::Control(ControlCommand::AgentReloadConfig),
                 )?;
                 Ok(Value::Null)
             }
             "git.diff" => git(
                 &self.sessions,
-                &seed()?,
+                &session_id()?,
                 qaqh_workspace::git::status_json,
                 json!([]),
             ),
             "git.branch" => git(
                 &self.sessions,
-                &seed()?,
+                &session_id()?,
                 qaqh_workspace::git::current_branch,
                 Value::Null,
             ),
             "git.branches" => git(
                 &self.sessions,
-                &seed()?,
+                &session_id()?,
                 qaqh_workspace::git::list_branches,
                 json!([]),
             ),
             "git.switch_branch" => git(
                 &self.sessions,
-                &seed()?,
+                &session_id()?,
                 |ws| {
                     qaqh_workspace::git::switch_branch(
                         ws,
@@ -530,13 +546,13 @@ impl QaqhService {
             ),
             "git.commit" => git(
                 &self.sessions,
-                &seed()?,
+                &session_id()?,
                 |ws| qaqh_workspace::git::commit_all(ws, &pstr(params, "message")?),
                 Value::Null,
             ),
             "git.file_diff" => git(
                 &self.sessions,
-                &seed()?,
+                &session_id()?,
                 |ws| qaqh_workspace::git::file_diff(ws, &pstr2(params, "file_path", "filePath")?),
                 Value::Null,
             ),
@@ -593,18 +609,20 @@ impl QaqhService {
                 })?;
                 Ok(Value::Null)
             }
-            "todo.status" => qaqh_workspace::todo::todo_status_value(&seed()?),
+            "todo.status" => qaqh_workspace::todo::todo_status_value(&session_id()?),
             "todo.cancel" => {
-                qaqh_workspace::todo::todo_cancel_value(&seed()?, &pstr(params, "id")?)
+                qaqh_workspace::todo::todo_cancel_value(&session_id()?, &pstr(params, "id")?)
             }
-            "todo.set" => qaqh_workspace::todo::todo_set_value_for(&seed()?, params),
-            "todo.list" => qaqh_workspace::todo::todo_list_value_for(&seed()?, params),
-            "plan.context_stats" => context_stats(&self.sessions, &seed()?),
+            "todo.set" => qaqh_workspace::todo::todo_set_value_for(&session_id()?, params),
+            "todo.list" => qaqh_workspace::todo::todo_list_value_for(&session_id()?, params),
+            "plan.context_stats" => context_stats(&self.sessions, &session_id()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
-            "plan.read" => serde_json::to_value(read_plan(&self.sessions, &seed()?)).map_err(err),
+            "plan.read" => {
+                serde_json::to_value(read_plan(&self.sessions, &session_id()?)).map_err(err)
+            }
             "plan.action" => serde_json::to_value(plan_action(
                 &self.sessions,
-                &seed()?,
+                &session_id()?,
                 &pstr2(params, "item_id", "itemId")?,
                 &pstr(params, "action")?,
                 value2(params, "user_comment", "userComment")
@@ -660,22 +678,22 @@ impl QaqhService {
                     .sessions
                     .allocate_agent_session(workspace.as_deref())
                     .map_err(|error| format!("subagent.spawn: allocate child session: {error}"))?;
-                let seed = identity.session_id.as_str().to_string();
+                let session_id = identity.session_id.as_str().to_string();
                 if let Some(workspace) = &workspace {
-                    log::info!("[subagent] inherited workspace for seed={seed}: {workspace}");
+                    log::info!("[subagent] inherited workspace for seed={session_id}: {workspace}");
                 }
                 self.registry()?.spawn_subagent(
-                    &seed,
+                    &session_id,
                     &tools,
                     model.as_deref(),
                     base_url.as_deref(),
                     max_tokens,
                 )?;
                 log::info!(
-                    "[subagent] spawned subagent worker seed={seed} tools={}",
+                    "[subagent] spawned subagent worker seed={session_id} tools={}",
                     tools.len()
                 );
-                Ok(json!({ "seed": seed }))
+                Ok(json!({ "session_id": session_id }))
             }
             _ => Err(format!("unknown method: {method}")),
         }
@@ -728,9 +746,13 @@ impl QaqhService {
     }
 
     /// 构造 Ringing worker 命令信封并转发给 agent（legacy Ui2Agent 帧已拆除）。
-    fn send_ringing_cmd(&self, seed: String, command: RingingCommand) -> Result<Value, String> {
-        let env = RingingWorkerCommandEnvelope::new(seed.clone(), command_id(), command);
-        self.send_ringing_command(&seed, &env)?;
+    fn send_ringing_cmd(
+        &self,
+        session_id: String,
+        command: RingingCommand,
+    ) -> Result<Value, String> {
+        let env = RingingWorkerCommandEnvelope::new(session_id.clone(), command_id(), command);
+        self.send_ringing_command(&session_id, &env)?;
         Ok(Value::Null)
     }
 
@@ -945,8 +967,8 @@ fn spawn_config_file_poller() {
 /// `CanonicalSessionIdentity::open_or_create` 只建 identity sidecar；bootstrap
 /// 还要求 `events.commit.json` 存在。这里在 worker spawn 前串行写入首个
 /// `SessionCreated`，把「identity 已建但 snapshot 缺失」的瞬态消掉。
-fn materialize_canonical_session(seed: &str, cwd: &str, model: &str) -> Result<(), String> {
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+fn materialize_canonical_session(session_id: &str, cwd: &str, model: &str) -> Result<(), String> {
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
     materialize_canonical_session_in(&session_dir, cwd, model, None)
 }
 
@@ -1045,7 +1067,8 @@ pub(crate) mod stats;
 use self::common::{command_id, err, release_freed_heap_memory};
 use self::fs_git::{git, list_remote_directory, read_remote_file, workspace};
 use self::params::{
-    optional_tool_mode, pbool, pstr, pstr2, pstrings, pu64, validate_tool_mode, value2,
+    optional_tool_mode, pbool, pstr, pstr2, pstrings, pu64, scope_session_param_value,
+    session_param, validate_tool_mode, value2,
 };
 use self::plan::{plan_action, read_plan, token_stats};
 use self::stats::{activity, context_stats, dashboard, load_config};

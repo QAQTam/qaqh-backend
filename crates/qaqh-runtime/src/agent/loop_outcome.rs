@@ -229,14 +229,14 @@ impl Loop {
             let pending_compact_id = compact_id.clone();
             let (tx, rx) = mpsc::channel();
             let event_tx = self.event_tx.clone();
-            let compact_seed = self.session.agent.session.session_id.clone();
+            let compact_session = self.session.agent.session.session_id.clone();
             let worker_causation = causation.clone();
             match std::thread::Builder::new()
                 .name("compact-worker".into())
                 .spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         super::engine_compact::run_compact_worker(
-                            compact_seed,
+                            compact_session,
                             compact_id.clone(),
                             prompt,
                             provider,

@@ -112,7 +112,7 @@ pub enum ActivityState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionActivity {
     /// Session identifier.
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     /// Current lifecycle state.
     pub state: ActivityState,
@@ -179,7 +179,7 @@ pub struct DashboardTask {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct DashboardSnapshot {
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub documents: Vec<DashboardDocument>,
     pub recent_edits: Vec<String>,
@@ -557,7 +557,7 @@ impl ToolEvent {
 pub enum ControlEvent {
     /// 会话生命周期状态变更。
     SessionStateChanged {
-        #[serde(rename = "session_id", alias = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
         state: SessionState,
     },
@@ -568,7 +568,7 @@ pub enum ControlEvent {
     ConfigChanged { rev: u64 },
     /// 会话活动状态变更（WaitingUser 汇总 interaction/permission 挂起）。
     SessionActivityChanged {
-        #[serde(rename = "session_id", alias = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
         state: ActivityState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -580,7 +580,7 @@ pub enum ControlEvent {
     },
     /// 会话元数据变更（标题生成/重命名）——前端收到后重拉 session.list。
     SessionMetaChanged {
-        #[serde(rename = "session_id", alias = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
@@ -665,7 +665,7 @@ pub enum ControlEvent {
     /// 回合状态机、不进模型上下文。`state` 为注入标签原样
     /// （COMPLETED / ERROR / TIMEOUT / CANCELLED）。
     SubagentStatus {
-        #[serde(rename = "session_id", alias = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
         name: String,
         state: String,

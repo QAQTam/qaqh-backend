@@ -173,15 +173,15 @@ impl Drop for TestDaemon {
 /// Poll until a seed-scoped timeline read succeeds (BUG-2026-09-12-10: the
 /// client must replay `attach` after every lease re-negotiation) or `within`
 /// elapses. A 401 here means the replay is broken.
-async fn assert_timeline_readable(client: &Client, seed: &str, within: Duration) {
+async fn assert_timeline_readable(client: &Client, session_id: &str, within: Duration) {
     let deadline = Instant::now() + within;
     loop {
-        match client.fetch_timeline_page(seed, None, None).await {
+        match client.fetch_timeline_page(session_id, None, None).await {
             Ok(_) => return,
             Err(err) => {
                 if Instant::now() >= deadline {
                     panic!(
-                        "timeline fetch for {seed} kept failing after lease re-negotiation \
+                        "timeline fetch for {session_id} kept failing after lease re-negotiation \
                          (attach replay broken?): {err:?}"
                     );
                 }
@@ -225,15 +225,17 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         on_v2_status: {
             let open_counts = open_counts.clone();
             let reconnect_counts = reconnect_counts.clone();
-            Arc::new(move |_seed: String, status: V2StreamStatus| match &status {
-                V2StreamStatus::Open { .. } => {
-                    open_counts.lock().unwrap()[0] += 1;
-                }
-                V2StreamStatus::Reconnecting { .. } => {
-                    reconnect_counts.lock().unwrap()[0] += 1;
-                }
-                _ => {}
-            })
+            Arc::new(
+                move |_session: String, status: V2StreamStatus| match &status {
+                    V2StreamStatus::Open { .. } => {
+                        open_counts.lock().unwrap()[0] += 1;
+                    }
+                    V2StreamStatus::Reconnecting { .. } => {
+                        reconnect_counts.lock().unwrap()[0] += 1;
+                    }
+                    _ => {}
+                },
+            )
         },
         on_timeline_entry: Arc::new(|_, _| {}),
         on_timeline_status: Arc::new(|_| {}),
@@ -271,7 +273,7 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         RingingCommandAckStatus::Accepted,
         "session_create must be accepted"
     );
-    let seed = {
+    let session_id = {
         let mut found: Option<String> = None;
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -282,21 +284,24 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
             let arr = sessions
                 .as_array()
                 .or_else(|| sessions.get("sessions").and_then(|s| s.as_array()));
-            if let Some(seed) = arr
+            if let Some(session_id) = arr
                 .and_then(|a| a.first())
-                .and_then(|s| s.get("seed"))
+                .and_then(|s| s.get("session_id"))
                 .and_then(|s| s.as_str())
             {
-                found = Some(seed.to_string());
+                found = Some(session_id.to_string());
                 break;
             }
         }
         found.expect("created session seed appears in session.list")
     };
-    client.attach(&seed).await.expect("attach created session");
+    client
+        .attach(&session_id)
+        .await
+        .expect("attach created session");
     // The canonical v2 single stream starts with `activate_timeline`.
     client
-        .activate_timeline(&seed)
+        .activate_timeline(&session_id)
         .await
         .expect("activate timeline + v2 stream");
 
@@ -340,7 +345,7 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
     // BUG-2026-09-12-10：重新协商已发生（上面断言过）——此刻读取 seed 的
     // timeline 必须成功（客户端已重放 attach）。旧行为：cs2 无归属 → 持续
     // 401，本轮询会超时失败。
-    assert_timeline_readable(&client, &seed, Duration::from_secs(20)).await;
+    assert_timeline_readable(&client, &session_id, Duration::from_secs(20)).await;
 
     // Phase 3: sanity — after another window the streams are still cycling
     // Open (self-healing continues; not permanently stuck in Reconnecting).
@@ -352,14 +357,14 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
     );
 
     // 归属重放必须持续有效（窗口内至少一次重新协商已经/正在发生）。
-    assert_timeline_readable(&client, &seed, Duration::from_secs(15)).await;
+    assert_timeline_readable(&client, &session_id, Duration::from_secs(15)).await;
 
     client.close();
     drop(daemon);
 }
 
 /// `session.list` 当前的 seed 集合。
-async fn session_seeds(client: &Client) -> Vec<String> {
+async fn session_ids(client: &Client) -> Vec<String> {
     let sessions = client
         .query(QueryRequest::SessionList)
         .await
@@ -369,7 +374,11 @@ async fn session_seeds(client: &Client) -> Vec<String> {
         .or_else(|| sessions.get("sessions").and_then(|s| s.as_array()))
         .map(|arr| {
             arr.iter()
-                .filter_map(|s| s.get("seed").and_then(|v| v.as_str()).map(str::to_string))
+                .filter_map(|s| {
+                    s.get("session_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -378,7 +387,7 @@ async fn session_seeds(client: &Client) -> Vec<String> {
 /// 创建一个会话并返回其 seed——靠「列表里新出现的那一个」识别，不能取
 /// `last()`（第二次调用时会拿到上一个会话）。
 async fn create_attached_session(client: &Client) -> String {
-    let before = session_seeds(client).await;
+    let before = session_ids(client).await;
     let ack = client
         .send_command(
             None,
@@ -396,11 +405,11 @@ async fn create_attached_session(client: &Client) -> String {
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let now = session_seeds(client).await;
-        if let Some(seed) = now.iter().find(|s| !before.contains(s)) {
-            let seed = seed.clone();
-            client.attach(&seed).await.expect("attach");
-            return seed;
+        let now = session_ids(client).await;
+        if let Some(session_id) = now.iter().find(|s| !before.contains(s)) {
+            let session_id = session_id.clone();
+            client.attach(&session_id).await.expect("attach");
+            return session_id;
         }
         assert!(
             Instant::now() < deadline,
@@ -443,13 +452,11 @@ async fn activating_one_timeline_does_not_stop_another() {
         on_timeline_status: {
             let statuses = statuses.clone();
             Arc::new(move |status| {
-                let (seed, kind) = match &status {
+                let (session_id, kind) = match &status {
                     qaqh_client::TimelineStatus::Connecting { session_id } => {
                         (session_id, "connecting")
                     }
-                    qaqh_client::TimelineStatus::Open { session_id, .. } => {
-                        (session_id, "open")
-                    }
+                    qaqh_client::TimelineStatus::Open { session_id, .. } => (session_id, "open"),
                     qaqh_client::TimelineStatus::Reconnecting { session_id, .. } => {
                         (session_id, "reconnecting")
                     }
@@ -460,7 +467,7 @@ async fn activating_one_timeline_does_not_stop_another() {
                 statuses
                     .lock()
                     .unwrap()
-                    .push((seed.clone(), kind.to_string()));
+                    .push((session_id.clone(), kind.to_string()));
             })
         },
         on_timeline_snapshot: Arc::new(|_| {}),
@@ -476,23 +483,23 @@ async fn activating_one_timeline_does_not_stop_another() {
     .await
     .expect("client connect to isolated daemon");
 
-    let seed_a = create_attached_session(&client).await;
-    let seed_b = create_attached_session(&client).await;
-    assert_ne!(seed_a, seed_b, "must have two distinct sessions");
+    let session_a = create_attached_session(&client).await;
+    let session_b = create_attached_session(&client).await;
+    assert_ne!(session_a, session_b, "must have two distinct sessions");
 
     client
-        .activate_timeline(&seed_a)
+        .activate_timeline(&session_a)
         .await
         .expect("activate timeline A");
     client
-        .activate_timeline(&seed_b)
+        .activate_timeline(&session_b)
         .await
         .expect("activate timeline B");
 
     // 两条流必须同时存在——这正是旧单槽实现失败的地方。
     let mut active = client.active_timelines().await;
     active.sort();
-    let mut expected = vec![seed_a.clone(), seed_b.clone()];
+    let mut expected = vec![session_a.clone(), session_b.clone()];
     expected.sort();
     assert_eq!(
         active, expected,
@@ -504,7 +511,7 @@ async fn activating_one_timeline_does_not_stop_another() {
         .lock()
         .unwrap()
         .iter()
-        .any(|(s, k)| s == &seed_a && k == "closed");
+        .any(|(s, k)| s == &session_a && k == "closed");
     assert!(
         !closed_a,
         "seed A's timeline was closed by activating seed B: {:?}",
@@ -512,14 +519,14 @@ async fn activating_one_timeline_does_not_stop_another() {
     );
 
     // 显式停用只影响目标 seed。
-    client.deactivate_timeline(&seed_a).await;
-    assert_eq!(client.active_timelines().await, vec![seed_b.clone()]);
+    client.deactivate_timeline(&session_a).await;
+    assert_eq!(client.active_timelines().await, vec![session_b.clone()]);
     assert!(
-        client.timeline_status_for(&seed_a).await.is_none(),
+        client.timeline_status_for(&session_a).await.is_none(),
         "deactivated seed must have no timeline handle"
     );
     assert!(
-        client.timeline_status_for(&seed_b).await.is_some(),
+        client.timeline_status_for(&session_b).await.is_some(),
         "deactivating A must leave B's timeline alone"
     );
 

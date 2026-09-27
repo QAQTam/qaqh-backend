@@ -166,12 +166,12 @@ impl SubagentHost for QaqhService {
             .sessions
             .allocate_agent_session(workspace.filter(|w| !w.is_empty() && *w != "."))
             .map_err(|error| format!("allocate child session failed: {error}"))?;
-        let seed = identity.session_id.as_str().to_string();
+        let session_id = identity.session_id.as_str().to_string();
         if let Some(workspace) = workspace.filter(|w| !w.is_empty() && *w != ".") {
-            log::info!("[SUBAGENT-HOST] inherited workspace for seed={seed}: {workspace}");
+            log::info!("[SUBAGENT-HOST] inherited workspace for seed={session_id}: {workspace}");
         }
         let spawned = self.registry()?.spawn_subagent_v2(
-            &seed,
+            &session_id,
             parent_session_id,
             requested_name,
             crate::registry::SubagentSpawnOptions {
@@ -183,12 +183,12 @@ impl SubagentHost for QaqhService {
             },
         )?;
         log::info!(
-            "[SUBAGENT-HOST] spawned subagent seed={seed} path={} tools={}",
+            "[SUBAGENT-HOST] spawned subagent seed={session_id} path={} tools={}",
             spawned.child_agent_path,
             tools.len()
         );
         Ok(SpawnedSubagent {
-            seed,
+            session_id,
             child_session_id: spawned.child_session_id.as_str().to_string(),
             parent_agent_path: spawned.parent_agent_path.as_str().to_string(),
             child_agent_path: spawned.child_agent_path.as_str().to_string(),
@@ -307,7 +307,7 @@ impl SubagentHost for QaqhService {
             if let Err(error) = qaqh_subagent::arm_subagent_collector(
                 collector_host,
                 ArmSubagentCollectorRequest {
-                    seed: target.agent_id.as_str(),
+                    session_id: target.agent_id.as_str(),
                     child_session_id: &spec.child_session_id,
                     name: &spec.name,
                     parent_session_id: &spec.parent_session_id,
@@ -477,53 +477,55 @@ impl SubagentHost for QaqhService {
         Ok(())
     }
 
-    fn rollback_subagent(&self, seed: &str, child_session_id: &str, process_id: u32) {
+    fn rollback_subagent(&self, session_id: &str, child_session_id: &str, process_id: u32) {
         qaqh_workspace::process_registry::ProcessRegistry::set_answer(
             process_id,
             "[ABORTED] canonical SubagentSpawned edge was not committed".to_string(),
         );
         qaqh_workspace::process_registry::ProcessRegistry::mark_exited(process_id, 1);
         match self.registry() {
-            Ok(mut registry) => registry.rollback_subagent(seed, child_session_id),
+            Ok(mut registry) => registry.rollback_subagent(session_id, child_session_id),
             Err(error) => {
-                log::warn!("[SUBAGENT-HOST] rollback registry unavailable for {seed}: {error}");
-                let _ = self.close(seed);
+                log::warn!(
+                    "[SUBAGENT-HOST] rollback registry unavailable for {session_id}: {error}"
+                );
+                let _ = self.close(session_id);
             }
         }
     }
 
-    fn abort_subagent(&self, seed: &str, process_id: u32) {
+    fn abort_subagent(&self, session_id: &str, process_id: u32) {
         qaqh_workspace::process_registry::ProcessRegistry::set_answer(
             process_id,
             "[ABORTED] subagent closed after canonical spawn edge".to_string(),
         );
         qaqh_workspace::process_registry::ProcessRegistry::mark_exited(process_id, 1);
-        if let Err(error) = self.close(seed) {
-            log::warn!("[SUBAGENT-HOST] abort close failed for {seed}: {error}");
+        if let Err(error) = self.close(session_id) {
+            log::warn!("[SUBAGENT-HOST] abort close failed for {session_id}: {error}");
         }
     }
 
     fn send_ringing(
         &self,
-        seed: &str,
+        session_id: &str,
         command: qaqh_ringing::RingingCommand,
     ) -> Result<(), String> {
         let id = format!("host-{:x}", nanos());
-        let env = RingingWorkerCommandEnvelope::new(seed, id, command);
-        self.registry()?.send_ringing(seed, &env)
+        let env = RingingWorkerCommandEnvelope::new(session_id, id, command);
+        self.registry()?.send_ringing(session_id, &env)
     }
 
-    fn subscribe(&self, seed: &str) -> mpsc::Receiver<EventBatch> {
+    fn subscribe(&self, session_id: &str) -> mpsc::Receiver<EventBatch> {
         let (tx, rx) = mpsc::channel::<EventBatch>();
         let hub = match self.hub.get() {
             Some(hub) => hub.clone(),
             None => {
-                log::error!("[SUBAGENT-HOST] subscribe {seed}: Ringing hub not attached");
+                log::error!("[SUBAGENT-HOST] subscribe {session_id}: Ringing hub not attached");
                 return rx;
             }
         };
         let epoch = hub.epoch().to_string();
-        let seed_own = seed.to_string();
+        let session_own = session_id.to_string();
         for channel in [
             RingingChannel::Control,
             RingingChannel::Conversation,
@@ -532,19 +534,19 @@ impl SubagentHost for QaqhService {
             // BUG-2026-09-12-12：按 (channel, seed) 分片订阅——桥接只需本
             // seed 的事件，分片订阅既省掉每事件的 seed 过滤，也不再被其它
             // 会话的风暴推向 Lagged。
-            let mut hub_rx = hub.subscribe(channel, &seed_own);
+            let mut hub_rx = hub.subscribe(channel, &session_own);
             let tx = tx.clone();
-            let seed = seed_own.clone();
+            let session_id = session_own.clone();
             let epoch = epoch.clone();
             std::thread::Builder::new()
-                .name(format!("qaqh-subagent-sub-{seed_own}"))
+                .name(format!("qaqh-subagent-sub-{session_own}"))
                 .spawn(move || {
                     // broadcast::Receiver 非 Send… 但 tokio broadcast Receiver 是 Send。
                     // 用 try_recv 轮询（无 block_on 依赖），聚合到 std mpsc。
                     loop {
                         match hub_rx.try_recv() {
                             Ok(env) => {
-                                if env.session_id != seed {
+                                if env.session_id != session_id {
                                     continue;
                                 }
                                 let batch = envelope_to_batch(channel, env, &epoch);
@@ -564,13 +566,17 @@ impl SubagentHost for QaqhService {
         rx
     }
 
-    fn download_content(&self, seed: &str, reference: &ContentRef) -> Result<Vec<u8>, String> {
+    fn download_content(
+        &self,
+        session_id: &str,
+        reference: &ContentRef,
+    ) -> Result<Vec<u8>, String> {
         let hub = self
             .hub
             .get()
             .ok_or_else(|| "Ringing hub not attached".to_string())?;
         let entry = hub
-            .get_content(seed, &reference.content_id)
+            .get_content(session_id, &reference.content_id)
             .ok_or_else(|| format!("content {} not found", reference.content_id))?;
         let digest = {
             use sha2::Digest;
@@ -586,10 +592,10 @@ impl SubagentHost for QaqhService {
         Ok(entry.bytes)
     }
 
-    fn close(&self, seed: &str) -> Result<(), String> {
+    fn close(&self, session_id: &str) -> Result<(), String> {
         // 与 daemon action `session.close`/`SessionClose` 拦截一致：关闭 registry
         // 实例并清理临时会话；结果已注入主会话 + 终态已回写注册表，残留不丢数据。
-        self.close_session(seed, None)
+        self.close_session(session_id, None)
     }
 }
 

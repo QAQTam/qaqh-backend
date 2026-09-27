@@ -420,7 +420,7 @@ fn v2_c7_snapshot_missing_is_reported() {
     CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
     let hub = V2ProjectionHub::new("epoch-c7");
     match hub.bootstrap(dir.path(), "seed") {
-        Err(V2HubError::SnapshotMissing(seed)) => assert_eq!(seed, "seed"),
+        Err(V2HubError::SnapshotMissing(session_id)) => assert_eq!(session_id, "seed"),
         other => panic!("expected snapshot_missing, got {other:?}"),
     }
 }

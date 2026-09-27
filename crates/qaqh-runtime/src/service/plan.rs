@@ -111,9 +111,9 @@ pub(crate) fn days_before_today(days: u32) -> String {
 
 pub(crate) fn read_plan(
     sessions: &qaqh_session::SessionManager,
-    seed: &str,
+    session_id: &str,
 ) -> Result<PlanListOutput, String> {
-    let content = match std::fs::read_to_string(qaqh_dir(sessions, seed).join("PLAN.md")) {
+    let content = match std::fs::read_to_string(qaqh_dir(sessions, session_id).join("PLAN.md")) {
         Ok(value) => value,
         Err(_) => return Ok(PlanListOutput(Vec::new())),
     };
@@ -122,12 +122,12 @@ pub(crate) fn read_plan(
 
 pub(crate) fn plan_action(
     sessions: &qaqh_session::SessionManager,
-    seed: &str,
+    session_id: &str,
     item_id: &str,
     action: &str,
     comment: &str,
 ) -> Result<PlanActionOutput, String> {
-    let path = qaqh_dir(sessions, seed).join("PLAN.md");
+    let path = qaqh_dir(sessions, session_id).join("PLAN.md");
     let content = std::fs::read_to_string(&path).map_err(err)?;
     let mut found = false;
     let output = content

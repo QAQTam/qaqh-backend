@@ -6,7 +6,6 @@
 mod clock;
 mod identity;
 mod log;
-mod migration;
 mod reader;
 mod recovery;
 mod recovery_executor;
@@ -26,12 +25,6 @@ pub use identity::{
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
     EVENTS_POISON_FILE, UPGRADE_FENCE_FILE, WRITER_FENCE_FILE,
-};
-pub use migration::{
-    CanonicalSeq, LEGACY_MAPPING_FILE, LegacyMapping, LegacyMappingKey, LegacyMappingTarget,
-    LegacySource, MIGRATION_STATE_FILE, MIGRATION_STATE_SCHEMA, MIGRATION_STATUS_SCHEMA,
-    MigrationController, MigrationError, MigrationStage, MigrationState, MigrationStatus,
-    ReconciliationMetrics, V1DeliveryKind, append_legacy_mapping, load_mapping_keys,
 };
 pub use reader::CommittedFactReader;
 pub use recovery::{

@@ -32,23 +32,23 @@ impl SessionEngine {
     }
 
     /// Create a new session with a pre-set seed (from CLI --seed).
-    pub fn create_with_seed(
+    pub fn create_with_session(
         &self,
         agent: &mut crate::agent::state::agent::AgentState,
         _cancel: &CancelToken,
     ) {
-        lifecycle::create_session_with_seed(agent);
+        lifecycle::create_session_with_session(agent);
     }
 
     /// Resume an existing session. Returns false if the session doesn't exist.
     pub fn resume(
         &self,
         agent: &mut crate::agent::state::agent::AgentState,
-        seed: &str,
+        session_id: &str,
         _cancel: &CancelToken,
     ) -> bool {
-        log::info!("[SESSION] resume seed={seed}");
-        if lifecycle::init_session(agent, Some(seed)) {
+        log::info!("[SESSION] resume seed={session_id}");
+        if lifecycle::init_session(agent, Some(session_id)) {
             // Restore persisted agent mode（0=Code 也重置：避免进程内已切
             // plan/code 后恢复默认会话仍停留在旧模式——前后端显示/拦截一致）。
             let saved_mode = agent.session.mode;
@@ -64,7 +64,7 @@ impl SessionEngine {
             );
             true
         } else {
-            log::info!("[SESSION] init_session returned false for {seed}");
+            log::info!("[SESSION] init_session returned false for {session_id}");
             false
         }
     }

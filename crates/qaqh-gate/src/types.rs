@@ -128,9 +128,9 @@ impl OpencodeHeaders {
     /// (@opencode-ai/schema/identifier: 48-bit time-like field + 14 random
     /// base62 chars). Deterministic derivation keeps the same conversation on
     /// the same `x-opencode-session` across process restarts.
-    pub fn derive(session_seed: &str, tag: &str) -> Self {
+    pub fn derive(session_id: &str, tag: &str) -> Self {
         Self {
-            session_id: derive_opencode_id("ses", session_seed),
+            session_id: derive_opencode_id("ses", session_id),
             request_id: derive_opencode_id("msg", tag),
         }
     }
@@ -399,9 +399,9 @@ impl ProviderConfig {
     ///
     /// `session_seed` identifies the conversation (stable across restarts),
     /// `request_tag` the logical request (turn id / "title" / "compact").
-    pub fn with_opencode_headers(mut self, session_seed: &str, request_tag: &str) -> Self {
+    pub fn with_opencode_headers(mut self, session_id: &str, request_tag: &str) -> Self {
         if self.base_url.contains("opencode.ai/zen") {
-            self.opencode_headers = Some(OpencodeHeaders::derive(session_seed, request_tag));
+            self.opencode_headers = Some(OpencodeHeaders::derive(session_id, request_tag));
         }
         self
     }

@@ -93,20 +93,20 @@ struct TrackedActivity {
 }
 
 impl SessionActivityTracker {
-    pub fn begin(&self, seed: &str) -> (u64, SessionActivity) {
+    pub fn begin(&self, session_id: &str) -> (u64, SessionActivity) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = inner.get(seed);
+        let previous = inner.get(session_id);
         let generation = previous.map_or(1, |value| value.generation.saturating_add(1));
         let seq = previous.map_or(1, |value| value.activity.seq.saturating_add(1));
         let activity = SessionActivity {
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             state: ActivityState::Starting,
             turn_id: None,
             seq,
             updated_at: now_millis(),
         };
         inner.insert(
-            seed.to_string(),
+            session_id.to_string(),
             TrackedActivity {
                 generation,
                 activity: activity.clone(),
@@ -117,12 +117,12 @@ impl SessionActivityTracker {
 
     pub fn observe(
         &self,
-        seed: &str,
+        session_id: &str,
         generation: u64,
         event: &serde_json::Value,
     ) -> Option<SessionActivity> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let tracked = inner.get_mut(seed)?;
+        let tracked = inner.get_mut(session_id)?;
         if tracked.generation != generation {
             return None;
         }
@@ -170,17 +170,17 @@ impl SessionActivityTracker {
         Some(tracked.activity.clone())
     }
 
-    pub fn get(&self, seed: &str) -> Option<SessionActivity> {
+    pub fn get(&self, session_id: &str) -> Option<SessionActivity> {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(seed)
+            .get(session_id)
             .map(|tracked| tracked.activity.clone())
     }
 
-    pub fn disconnect(&self, seed: &str, generation: u64) -> Option<SessionActivity> {
+    pub fn disconnect(&self, session_id: &str, generation: u64) -> Option<SessionActivity> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let tracked = inner.get_mut(seed)?;
+        let tracked = inner.get_mut(session_id)?;
         if tracked.generation != generation || tracked.activity.state == ActivityState::Disconnected
         {
             return None;
@@ -248,11 +248,15 @@ mod tests {
         assert_eq!(parsed.turn_id, None);
         assert_eq!(serde_json::to_string(&parsed).unwrap(), legacy);
     }
-    fn idle_tracker(seed: &str) -> (SessionActivityTracker, u64) {
+    fn idle_tracker(session_id: &str) -> (SessionActivityTracker, u64) {
         let tracker = SessionActivityTracker::default();
-        let (generation, _) = tracker.begin(seed);
+        let (generation, _) = tracker.begin(session_id);
         tracker
-            .observe(seed, generation, &serde_json::json!({ "type": "ready" }))
+            .observe(
+                session_id,
+                generation,
+                &serde_json::json!({ "type": "ready" }),
+            )
             .expect("starting to idle");
         (tracker, generation)
     }

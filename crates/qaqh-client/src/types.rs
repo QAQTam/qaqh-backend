@@ -58,30 +58,30 @@ pub enum ReconnectReason {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TimelineStatus {
     Connecting {
-        #[serde(rename = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
     },
     Open {
-        #[serde(rename = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
         server_epoch: String,
         cursor: u64,
     },
     Reconnecting {
-        #[serde(rename = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
         retry_ms: u64,
         cursor: u64,
         reason: Option<ReconnectReason>,
     },
     Closed {
-        #[serde(rename = "seed")]
+        #[serde(rename = "session_id")]
         session_id: String,
         reason: String,
     },
 }
 
-/// Versioned response from `GET /ringing/v2/sessions/{seed}/timeline`.
+/// Versioned response from `GET /ringing/v2/sessions/{session_id}/timeline`.
 ///
 /// `snapshot` is the authoritative materialized transcript. Pagination
 /// metadata remains outside it because it describes the current HTTP page,
@@ -91,7 +91,7 @@ pub struct TimelinePage {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    #[serde(rename = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub snapshot: TimelineSnapshot,
     /// 本页之前（游标方向）**仍有可交付的回合**，即在已物化的 timeline 里还能
@@ -118,10 +118,10 @@ pub struct TimelinePage {
 }
 
 impl TimelinePage {
-    pub fn validate_for(&self, seed: &str) -> Result<(), String> {
+    pub fn validate_for(&self, session_id: &str) -> Result<(), String> {
         if self.schema != RINGING_SCHEMA
             || self.version != RINGING_VERSION
-            || self.session_id != seed
+            || self.session_id != session_id
             || self.server_epoch.is_empty()
         {
             return Err("invalid Ringing V1 timeline page".into());
@@ -136,7 +136,7 @@ pub struct TimelineSseFrame {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    #[serde(rename = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub entry: TimelineEntry,
 }
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_page_validates_version_and_seed() {
+    fn timeline_page_validates_version_and_session() {
         let page = TimelinePage {
             schema: RINGING_SCHEMA.into(),
             version: RINGING_VERSION,
@@ -298,7 +298,7 @@ mod tests {
             serde_json::to_value(&lagged).expect("serialize lagged reconnect"),
             serde_json::json!({
                 "status": "reconnecting",
-                "seed": "seed-1",
+                "session_id": "seed-1",
                 "retry_ms": 2_000,
                 "cursor": 9,
                 "reason": {"kind": "lagged", "skipped": 3}

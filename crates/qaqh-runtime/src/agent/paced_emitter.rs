@@ -16,7 +16,7 @@ pub struct PacedEmitter {
     /// 当前会话 seed（Ringing 事件信封路由键）。会话切换后经
     /// `set_seed` 更新；构造时快照的旧值在 resume 模式下为空，
     /// 必须由 Loop 在 init_session 后同步。
-    seed: Arc<Mutex<String>>,
+    session_id: Arc<Mutex<String>>,
     tx: mpsc::SyncSender<WriterEvent>,
     writer_dead: Arc<AtomicBool>,
     causation: Arc<Mutex<Option<String>>>,
@@ -24,12 +24,12 @@ pub struct PacedEmitter {
 
 impl PacedEmitter {
     pub fn new(
-        seed: impl Into<String>,
+        session_id: impl Into<String>,
         tx: mpsc::SyncSender<WriterEvent>,
         writer_dead: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            seed: Arc::new(Mutex::new(seed.into())),
+            session_id: Arc::new(Mutex::new(session_id.into())),
             tx,
             writer_dead,
             causation: Arc::new(Mutex::new(None)),
@@ -53,9 +53,9 @@ impl PacedEmitter {
 
     /// 同步当前会话 seed。会话创建/恢复（含 auto-create、worker 内切换）
     /// 后调用，使 Ringing 事件信封携带正确的路由键。
-    pub fn set_seed(&self, seed: &str) {
-        let mut slot = self.seed.lock().unwrap_or_else(|e| e.into_inner());
-        *slot = seed.to_string();
+    pub fn set_session(&self, session_id: &str) {
+        let mut slot = self.session_id.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = session_id.to_string();
     }
 }
 
@@ -79,14 +79,18 @@ impl Emitter for PacedEmitter {
         }
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let seed = self.seed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let session_id = self
+            .session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let causation = self
             .causation
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let env = qaqh_ringing::RingingWorkerEventEnvelope::new(
-            seed.as_str(),
+            session_id.as_str(),
             format!("w-{seq}"),
             event.into(),
         );
@@ -103,14 +107,18 @@ impl Emitter for PacedEmitter {
         }
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let seed = self.seed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let session_id = self
+            .session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let causation = self
             .causation
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let env = qaqh_ringing::RingingTimelineIntentEnvelope::new(
-            seed.as_str(),
+            session_id.as_str(),
             format!("timeline-{seq}"),
             intent,
         );

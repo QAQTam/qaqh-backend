@@ -188,7 +188,7 @@ export class Ringing {
       command_id: commandId,
       client_instance_id: "browser",
       client_session_id: "gateway-owned",
-      seed: targetSeed,
+      session_id: targetSeed,
       command,
     };
     const response = await fetch(`/__gateway/ringing/commands/${channel}`, {

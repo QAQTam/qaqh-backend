@@ -433,20 +433,20 @@ const SessionList: Component = () => (
       <For each={sessions()}>
         {(session) => (
           <div
-            class={{ session: true, active: session.seed === seed(), archived: session.archived }}
-            onClick={() => void attach(String(session.seed))}
+            class={{ session: true, active: session.session_id === seed(), archived: session.archived }}
+            onClick={() => void attach(String(session.session_id))}
           >
             <div class="row1">
-              <span class="title">{session.title || `会话 ${String(session.seed).slice(0, 8)}`}</span>
-              <Show when={session.running && session.seed === seed() && activity() === "working"}>
+              <span class="title">{session.title || `会话 ${String(session.session_id).slice(0, 8)}`}</span>
+              <Show when={session.running && session.session_id === seed() && activity() === "working"}>
                 <span class="badge working">工作中</span>
               </Show>
-              <Show when={session.running && !(session.seed === seed() && activity() === "working")}>
+              <Show when={session.running && !(session.session_id === seed() && activity() === "working")}>
                 <span class="badge running">运行中</span>
               </Show>
             </div>
             <div class="meta">
-              <span>{String(session.seed).slice(0, 8)}</span>
+              <span>{String(session.session_id).slice(0, 8)}</span>
               <span>{session.turn_count ?? 0} 回合</span>
             </div>
           </div>

@@ -266,7 +266,10 @@ fn build_router(state: GatewayState) -> Router {
         .route("/__gateway/session", post(create_session))
         .route("/__gateway/logout", post(logout))
         .route("/__gateway/sessions", get(list_sessions))
-        .route("/__gateway/sessions/{seed}/attach", post(attach_seed))
+        .route(
+            "/__gateway/sessions/{session_id}/attach",
+            post(attach_session),
+        )
         .route("/__gateway/approvals", post(list_approvals))
         .route("/__gateway/approvals/{id}", post(respond_approval))
         .route(
@@ -279,19 +282,19 @@ fn build_router(state: GatewayState) -> Router {
         )
         .route("/__gateway/ringing/content", post(proxy_content_upload))
         .route(
-            "/__gateway/ringing/sessions/{seed}/events",
+            "/__gateway/ringing/sessions/{session_id}/events",
             get(proxy_events),
         )
         .route(
-            "/__gateway/ringing/sessions/{seed}/bootstrap",
+            "/__gateway/ringing/sessions/{session_id}/bootstrap",
             get(proxy_bootstrap),
         )
         .route(
-            "/__gateway/ringing/sessions/{seed}/timeline",
+            "/__gateway/ringing/sessions/{session_id}/timeline",
             get(proxy_timeline),
         )
         .route(
-            "/__gateway/ringing/sessions/{seed}/timeline/events",
+            "/__gateway/ringing/sessions/{session_id}/timeline/events",
             get(proxy_timeline_events),
         )
         .route("/__gateway/ringing/service/{method}", post(proxy_service))
@@ -505,7 +508,7 @@ fn sanitize_session_list(value: Value) -> Value {
         .iter()
         .map(|entry| {
             json!({
-                "seed": entry.get("seed").cloned().unwrap_or(Value::Null),
+                "session_id": entry.get("session_id").cloned().unwrap_or(Value::Null),
                 "title": entry.get("title").cloned().unwrap_or(Value::Null),
                 "created_at": entry.get("created_at").cloned().unwrap_or(Value::Null),
                 "updated_at": entry.get("updated_at").cloned().unwrap_or(Value::Null),
@@ -520,9 +523,9 @@ fn sanitize_session_list(value: Value) -> Value {
     Value::Array(sanitized)
 }
 
-async fn attach_seed(
+async fn attach_session(
     State(state): State<GatewayState>,
-    AxumPath(seed): AxumPath<String>,
+    AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
     let session = match authenticate(&state, &headers, true) {
@@ -535,8 +538,8 @@ async fn attach_seed(
     if !session.allow_command() {
         return error_response(StatusCode::TOO_MANY_REQUESTS, "command_rate_limited");
     }
-    if !valid_seed(&seed) {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_seed");
+    if !valid_session_id(&session_id) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_session_id");
     }
 
     let client_instance_id = session.lease_snapshot().client_instance_id;
@@ -545,15 +548,15 @@ async fn attach_seed(
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
     };
     session.replace_lease(lease.clone());
-    session.set_active_seed(None);
+    session.set_active_session(None);
 
     let command = RingingCommand::Control(ControlCommand::SessionAttach {
-        session_id: seed.clone(),
+        session_id: session_id.clone(),
     });
     let envelope =
         RingingV2CommandEnvelope::new(session::random_token(), client_instance_id, command)
             .with_client_session_id(lease.client_session_id.clone())
-            .with_seed(seed.clone());
+            .with_session(session_id.clone());
     let body = match serde_json::to_value(envelope) {
         Ok(body) => body,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed"),
@@ -576,7 +579,7 @@ async fn attach_seed(
     if ack.status != RingingCommandAckStatus::Accepted {
         return error_response(StatusCode::FORBIDDEN, "attach_rejected");
     }
-    session.set_active_seed(Some(seed));
+    session.set_active_session(Some(session_id));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -591,14 +594,17 @@ async fn list_approvals(State(state): State<GatewayState>, headers: HeaderMap) -
     if !session.allow_service() {
         return error_response(StatusCode::TOO_MANY_REQUESTS, "service_rate_limited");
     }
-    let Some(seed) = session.active_seed() else {
+    let Some(session_id) = session.active_session() else {
         return error_response(StatusCode::CONFLICT, "no_active_seed");
     };
     let lease = session.lease_snapshot();
     let response = match state
         .daemon
         .get(
-            &format!("/ringing/v2/sessions/{}/approvals", encode_path(&seed)),
+            &format!(
+                "/ringing/v2/sessions/{}/approvals",
+                encode_path(&session_id)
+            ),
             &lease,
         )
         .await
@@ -613,7 +619,7 @@ async fn list_approvals(State(state): State<GatewayState>, headers: HeaderMap) -
         Ok(value) => value,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"),
     };
-    match issue_approval_views(&session, &seed, &pending) {
+    match issue_approval_views(&session, &session_id, &pending) {
         Ok(views) => Json(views).into_response(),
         Err(code) => error_response(StatusCode::BAD_GATEWAY, code),
     }
@@ -621,7 +627,7 @@ async fn list_approvals(State(state): State<GatewayState>, headers: HeaderMap) -
 
 fn issue_approval_views(
     session: &BrowserSession,
-    seed: &str,
+    session_id: &str,
     pending: &Value,
 ) -> Result<Vec<Value>, &'static str> {
     let mut views = Vec::new();
@@ -647,7 +653,7 @@ fn issue_approval_views(
         });
         let challenge = session
             .issue_approval(
-                seed,
+                session_id,
                 ApprovalKind::ToolPermission,
                 source_id.to_string(),
                 details,
@@ -675,7 +681,7 @@ fn issue_approval_views(
             .cloned()
             .unwrap_or_else(|| json!({}));
         let challenge = session
-            .issue_approval(seed, kind, source_id.to_string(), details)
+            .issue_approval(session_id, kind, source_id.to_string(), details)
             .map_err(|_| "approval_limit")?;
         views.push(challenge.view());
     }
@@ -709,10 +715,10 @@ async fn respond_approval(
         Ok(request) => request,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_approval_body"),
     };
-    let Some(active_seed) = session.active_seed() else {
+    let Some(active_session) = session.active_session() else {
         return error_response(StatusCode::CONFLICT, "no_active_seed");
     };
-    let challenge = match session.consume_approval(&id, &active_seed) {
+    let challenge = match session.consume_approval(&id, &active_session) {
         Ok(challenge) => challenge,
         Err(code) => {
             let status = match code {
@@ -735,7 +741,7 @@ async fn respond_approval(
         command,
     )
     .with_client_session_id(lease.client_session_id.clone())
-    .with_seed(active_seed);
+    .with_session(active_session);
     if let Err(error) = envelope.validate() {
         return error_response(StatusCode::BAD_REQUEST, error);
     }
@@ -784,7 +790,7 @@ async fn proxy_command(
     if !session.allow_command() {
         return error_response(StatusCode::TOO_MANY_REQUESTS, "command_rate_limited");
     }
-    let Some(active_seed) = session.active_seed() else {
+    let Some(active_session) = session.active_session() else {
         return error_response(StatusCode::CONFLICT, "no_active_seed");
     };
     let mut envelope: RingingCommandEnvelope = match serde_json::from_slice(&body) {
@@ -805,7 +811,7 @@ async fn proxy_command(
         envelope.command,
     )
     .with_client_session_id(lease.client_session_id.clone())
-    .with_seed(active_seed);
+    .with_session(active_session);
     v2.expected_revision = envelope.expected_revision;
     if let Err(error) = v2.validate() {
         return error_response(StatusCode::BAD_REQUEST, error);
@@ -907,20 +913,20 @@ async fn proxy_content_upload(
 /// 换成 per-seed 单流；事件带 `stream_key`，浏览器自行 demux。
 async fn proxy_events(
     State(state): State<GatewayState>,
-    AxumPath(seed): AxumPath<String>,
+    AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
     let session = match authenticate(&state, &headers, true) {
         Ok(session) => session,
         Err(response) => return response,
     };
-    if session.active_seed().as_deref() != Some(seed.as_str()) {
+    if session.active_session().as_deref() != Some(session_id.as_str()) {
         return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
     }
     let lease = session.lease_snapshot();
     let response = match state
         .daemon
-        .get_stream(&events_proxy_path(&seed), &lease, &headers)
+        .get_stream(&events_proxy_path(&session_id), &lease, &headers)
         .await
     {
         Ok(response) => response,
@@ -931,36 +937,36 @@ async fn proxy_events(
 
 /// 事件流的 daemon 侧路径。抽成函数是为了让「必须指向 v2 单流」有回归测试兜住
 /// ——这条路径曾经在 v1 硬切后漏改，导致浏览器事件流全部 404。
-fn events_proxy_path(seed: &str) -> String {
-    format!("/ringing/v2/sessions/{}/events", encode_path(seed))
+fn events_proxy_path(session_id: &str) -> String {
+    format!("/ringing/v2/sessions/{}/events", encode_path(session_id))
 }
 
 async fn proxy_bootstrap(
     State(state): State<GatewayState>,
-    AxumPath(seed): AxumPath<String>,
+    AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    proxy_seeded_get(state, seed, headers, "bootstrap").await
+    proxy_seeded_get(state, session_id, headers, "bootstrap").await
 }
 
 async fn proxy_timeline(
     State(state): State<GatewayState>,
-    AxumPath(seed): AxumPath<String>,
+    AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    proxy_seeded_get(state, seed, headers, "timeline").await
+    proxy_seeded_get(state, session_id, headers, "timeline").await
 }
 
 async fn proxy_timeline_events(
     State(state): State<GatewayState>,
-    AxumPath(seed): AxumPath<String>,
+    AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
     let session = match authenticate(&state, &headers, true) {
         Ok(session) => session,
         Err(response) => return response,
     };
-    if session.active_seed().as_deref() != Some(seed.as_str()) {
+    if session.active_session().as_deref() != Some(session_id.as_str()) {
         return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
     }
     let lease = session.lease_snapshot();
@@ -969,7 +975,7 @@ async fn proxy_timeline_events(
         .get_stream(
             &format!(
                 "/ringing/v2/sessions/{}/timeline/events",
-                encode_path(&seed)
+                encode_path(&session_id)
             ),
             &lease,
             &headers,
@@ -984,7 +990,7 @@ async fn proxy_timeline_events(
 
 async fn proxy_seeded_get(
     state: GatewayState,
-    seed: String,
+    session_id: String,
     headers: HeaderMap,
     suffix: &str,
 ) -> Response {
@@ -992,14 +998,17 @@ async fn proxy_seeded_get(
         Ok(session) => session,
         Err(response) => return response,
     };
-    if session.active_seed().as_deref() != Some(seed.as_str()) {
+    if session.active_session().as_deref() != Some(session_id.as_str()) {
         return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
     }
     let lease = session.lease_snapshot();
     let path = if suffix == "bootstrap" {
-        format!("/ringing/v2/sessions/{}/bootstrap", encode_path(&seed))
+        format!(
+            "/ringing/v2/sessions/{}/bootstrap",
+            encode_path(&session_id)
+        )
     } else {
-        format!("/ringing/v2/sessions/{}/timeline", encode_path(&seed))
+        format!("/ringing/v2/sessions/{}/timeline", encode_path(&session_id))
     };
     let response = match state.daemon.get(&path, &lease).await {
         Ok(response) => response,
@@ -1041,17 +1050,17 @@ async fn proxy_service(
             Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_body"),
         }
     };
-    if service_requires_seed(&method) {
-        let Some(active_seed) = session.active_seed() else {
+    if service_requires_session(&method) {
+        let Some(active_session) = session.active_session() else {
             return error_response(StatusCode::CONFLICT, "no_active_seed");
         };
         if let Some(object) = params.as_object_mut() {
-            object.insert("seed".into(), Value::String(active_seed.clone()));
+            object.insert("session_id".into(), Value::String(active_session.clone()));
             if method.starts_with("fs.") {
-                object.insert("scope_seed".into(), Value::String(active_seed));
+                object.insert("scope_session_id".into(), Value::String(active_session));
             }
         } else {
-            params = json!({ "seed": active_seed });
+            params = json!({ "session_id": active_session });
         }
     }
     let lease = session.lease_snapshot();
@@ -1098,7 +1107,7 @@ fn sanitize_service_response(method: &str, value: Value) -> Value {
 
 fn sanitize_session_meta(value: &Value) -> Value {
     json!({
-        "seed": value.get("seed").cloned().unwrap_or(Value::Null),
+        "session_id": value.get("session_id").cloned().unwrap_or(Value::Null),
         "title": value.get("title").cloned().unwrap_or(Value::Null),
         "created_at": value.get("created_at").cloned().unwrap_or(Value::Null),
         "updated_at": value.get("updated_at").cloned().unwrap_or(Value::Null),
@@ -1236,7 +1245,7 @@ fn service_allowed(method: &str) -> bool {
     )
 }
 
-fn service_requires_seed(method: &str) -> bool {
+fn service_requires_session(method: &str) -> bool {
     !matches!(
         method,
         "daemon.version" | "session.list" | "session.activity" | "workspace.list"
@@ -1252,8 +1261,12 @@ fn channel_from_path(channel: &str) -> Option<RingingChannel> {
     }
 }
 
-fn valid_seed(seed: &str) -> bool {
-    seed.len() == 8 && seed.chars().all(|character| character.is_ascii_hexdigit())
+/// 会话 id 校验：canonical `SessionId` 是 UUIDv7（36 字符、含 `-`）。
+/// legacy 8 位 hex seed 在迁移窗口内仍然放行——**不得再假设固定长度**
+/// （BETA-01 Phase D：旧实现要求 `len == 8 && all hexdigit`，会让所有新会话
+/// 在 `/__gateway/sessions/{session_id}/attach` 上被判 400）。
+fn valid_session_id(value: &str) -> bool {
+    valid_opaque_id(value)
 }
 
 fn valid_opaque_id(value: &str) -> bool {
@@ -1651,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn approvals_are_opaque_seed_bound_and_single_use() {
+    fn approvals_are_opaque_session_bound_and_single_use() {
         let session = BrowserSession::new(session::Lease::new(
             "instance".into(),
             "lease".into(),
@@ -1707,7 +1720,7 @@ mod tests {
     #[test]
     fn sanitized_views_remove_paths_and_models() {
         let session = sanitize_session_meta(&json!({
-            "seed": "0123abcd",
+            "session_id": "01930000-0000-7000-8000-000000000000",
             "title": "demo",
             "cwd": "/home/secret",
             "model": "internal-model",
@@ -1716,14 +1729,48 @@ mod tests {
         assert!(session.get("cwd").is_none());
         assert!(session.get("model").is_none());
         assert!(session.get("skills").is_none());
+        // BETA-01 Phase D：会话键必须原样透传——旧实现读 legacy `seed`，
+        // 而 daemon 已发 `session_id`，导致前端拿到恒为 null。
+        assert_eq!(
+            session["session_id"], "01930000-0000-7000-8000-000000000000",
+            "sanitize 必须透传 session_id"
+        );
+        assert!(session.get("seed").is_none(), "不得再发 legacy seed 键");
 
         let workspace = sanitize_workspace(&json!({
             "id": "w1",
             "title": "demo",
             "path": "/home/secret",
-            "session_ids": ["0123abcd"]
+            "session_ids": ["01930000-0000-7000-8000-000000000000"]
         }));
         assert!(workspace.get("path").is_none());
         assert!(workspace.get("session_ids").is_none());
+    }
+
+    /// BETA-01 Phase D：`session.list` 条目的会话键必须透传。
+    #[test]
+    fn sanitized_session_list_preserves_session_id() {
+        let list = sanitize_session_list(json!([
+            {
+                "session_id": "01930000-0000-7000-8000-000000000000",
+                "title": "demo",
+                "cwd": "/home/secret"
+            }
+        ]));
+        let entry = &list[0];
+        assert_eq!(entry["session_id"], "01930000-0000-7000-8000-000000000000");
+        assert!(entry.get("seed").is_none(), "不得再发 legacy seed 键");
+        assert!(entry.get("cwd").is_none(), "路径必须被剔除");
+    }
+
+    /// BETA-01 Phase D：会话 id 不再是 8 位 hex。旧实现 `len == 8 && hexdigit`
+    /// 会让所有 UUIDv7 会话在 attach 上被判 400。
+    #[test]
+    fn session_id_validation_accepts_uuid_and_legacy_session() {
+        assert!(valid_session_id("01930000-0000-7000-8000-000000000000"));
+        assert!(valid_session_id("0123abcd"));
+        assert!(!valid_session_id(""));
+        assert!(!valid_session_id("has space"));
+        assert!(!valid_session_id("a/b"));
     }
 }

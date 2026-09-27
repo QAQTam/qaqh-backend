@@ -41,7 +41,7 @@ impl InputEngine {
             crate::agent::state::lifecycle::create_session(ctx.agent);
             // 新 seed 生成后立即同步，后续 Ringing 事件（TurnStarted 双发、
             // RoundDelta 流式等）才能携带正确路由键。
-            ctx.emitter.set_seed(&ctx.agent.session.session_id);
+            ctx.emitter.set_session(&ctx.agent.session.session_id);
         }
 
         let text = if text == "[QAQ-Harness Goal: resume]" {
@@ -264,7 +264,7 @@ impl InputEngine {
         if ctx.agent.session.session_id.is_empty() {
             log::info!("[INPUT] auto-creating session on system injection");
             crate::agent::state::lifecycle::create_session(ctx.agent);
-            ctx.emitter.set_seed(&ctx.agent.session.session_id);
+            ctx.emitter.set_session(&ctx.agent.session.session_id);
         }
 
         // 清零取消标记意味着「开新回合」——因此本函数**不得**在取消门置位

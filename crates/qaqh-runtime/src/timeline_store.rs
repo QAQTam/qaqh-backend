@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedTimeline {
-    pub seed: String,
+    pub session_id: String,
     pub snapshot: TimelineSnapshot,
     /// 活跃 turn 的重连回放尾。已 seal turn 的条目在 `snapshot` 内物化，不会出现
     /// 在此。保留该字段以兼容既有缓存文件（旧格式含尾部长度的条目）。
@@ -88,23 +88,23 @@ impl TimelineStore {
     /// offload 侧车路径：`offload/{seed}.jsonl`，append-only（每行一个
     /// 已 seal turn 的完整 TimelineTurn JSON）。append 语义 O(文本) 无放大；
     /// 同 turn 重 seal（reopen）时后行胜（读侧取该 turn_id 最后一条）。
-    fn offload_path_for(&self, seed: &str) -> PathBuf {
+    fn offload_path_for(&self, session_id: &str) -> PathBuf {
         self.root
             .parent()
             .unwrap_or(&self.root)
             .join("ringing-offload")
-            .join(format!("{}.jsonl", sanitize_seed(seed)))
+            .join(format!("{}.jsonl", sanitize_session(session_id)))
     }
 
     /// turn seal 卸载：把完整 turn 文本追加进侧车。
     pub fn append_offloaded_turn(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn: &qaqh_domain::TimelineTurn,
     ) -> std::io::Result<()> {
         let _legacy_writer = LegacyWriterFacade::lock();
-        self.ensure_offload_index(seed);
-        let path = self.offload_path_for(seed);
+        self.ensure_offload_index(session_id);
+        let path = self.offload_path_for(session_id);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -117,7 +117,7 @@ impl TimelineStore {
         writeln!(file, "{line}")?;
         file.flush()?;
         self.offload_offsets
-            .entry(seed.to_string())
+            .entry(session_id.to_string())
             .or_default()
             .insert(turn.turn_id.clone(), offset);
         Ok(())
@@ -126,12 +126,12 @@ impl TimelineStore {
     /// 读取某 turn 的最新完整文本（侧车同 turn_id 后行胜）。
     pub fn load_offloaded_turn(
         &mut self,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
     ) -> Option<qaqh_domain::TimelineTurn> {
-        self.ensure_offload_index(seed);
-        let offset = *self.offload_offsets.get(seed)?.get(turn_id)?;
-        let path = self.offload_path_for(seed);
+        self.ensure_offload_index(session_id);
+        let offset = *self.offload_offsets.get(session_id)?.get(turn_id)?;
+        let path = self.offload_path_for(session_id);
         let mut file = std::fs::File::open(path).ok()?;
         file.seek(SeekFrom::Start(offset)).ok()?;
         let mut line = String::new();
@@ -141,12 +141,12 @@ impl TimelineStore {
 
     /// 首次读取 sidecar 时建立 `turn_id → 最新行 offset` 索引。损坏行跳过；
     /// 同 turn 的后续行覆盖前值，保持后行胜语义。
-    fn ensure_offload_index(&mut self, seed: &str) {
-        if self.offload_indexed.contains(seed) {
+    fn ensure_offload_index(&mut self, session_id: &str) {
+        if self.offload_indexed.contains(session_id) {
             return;
         }
         let mut offsets = HashMap::new();
-        let path = self.offload_path_for(seed);
+        let path = self.offload_path_for(session_id);
         if let Ok(mut file) = std::fs::File::open(path) {
             let mut offset = 0u64;
             let mut reader = BufReader::new(&mut file);
@@ -169,30 +169,30 @@ impl TimelineStore {
                 }
             }
         }
-        self.offload_offsets.insert(seed.to_string(), offsets);
-        self.offload_indexed.insert(seed.to_string());
+        self.offload_offsets.insert(session_id.to_string(), offsets);
+        self.offload_indexed.insert(session_id.to_string());
     }
 
     pub fn persist(
         &mut self,
-        seed: &str,
+        session_id: &str,
         snapshot: &TimelineSnapshot,
         journal: Vec<TimelineEntry>,
     ) -> std::io::Result<()> {
         let _legacy_writer = LegacyWriterFacade::lock();
-        if let Some(&watermark) = self.persisted_watermarks.get(seed) {
+        if let Some(&watermark) = self.persisted_watermarks.get(session_id) {
             if watermark > snapshot.watermark {
                 return Ok(());
             }
-        } else if let Some(existing) = self.load_seed(seed)
+        } else if let Some(existing) = self.load_session(session_id)
             && existing.snapshot.watermark > snapshot.watermark
         {
             return Ok(());
         }
-        let path = self.path_for(seed);
+        let path = self.path_for(session_id);
         let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_vec(&PersistedTimeline {
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             snapshot: snapshot.clone(),
             journal,
         })
@@ -203,7 +203,7 @@ impl TimelineStore {
         }
         std::fs::rename(tmp, path)?;
         self.persisted_watermarks
-            .insert(seed.to_string(), snapshot.watermark);
+            .insert(session_id.to_string(), snapshot.watermark);
         Ok(())
     }
 
@@ -221,10 +221,10 @@ impl TimelineStore {
                 .and_then(|body| serde_json::from_slice::<PersistedTimeline>(&body).ok())
             {
                 Some(timeline) => {
-                    if timeline.seed.is_empty() {
+                    if timeline.session_id.is_empty() {
                         log::warn!("[timeline] skip record without seed {}", path.display());
                     } else {
-                        timelines.insert(timeline.seed.clone(), timeline);
+                        timelines.insert(timeline.session_id.clone(), timeline);
                     }
                 }
                 None => log::warn!(
@@ -237,37 +237,38 @@ impl TimelineStore {
     }
 
     /// 磁盘上的 timeline seed 清单（懒加载索引；不读取文件内容）。
-    pub fn list_seeds(&self) -> std::io::Result<Vec<String>> {
-        let mut seeds = Vec::new();
+    pub fn list_sessions(&self) -> std::io::Result<Vec<String>> {
+        let mut sessions = Vec::new();
         for entry in std::fs::read_dir(&self.root)? {
             let path = entry?.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(seed) = path.file_stem().and_then(|s| s.to_str())
-                && !seed.is_empty()
+            if let Some(session_id) = path.file_stem().and_then(|s| s.to_str())
+                && !session_id.is_empty()
             {
-                seeds.push(seed.to_string());
+                sessions.push(session_id.to_string());
             }
         }
-        Ok(seeds)
+        Ok(sessions)
     }
 
     /// 装载单个 seed 的持久化 timeline（懒加载按需恢复用）。
-    pub fn load_seed(&self, seed: &str) -> Option<PersistedTimeline> {
-        let path = self.path_for(seed);
+    pub fn load_session(&self, session_id: &str) -> Option<PersistedTimeline> {
+        let path = self.path_for(session_id);
         std::fs::read(&path)
             .ok()
             .and_then(|body| serde_json::from_slice::<PersistedTimeline>(&body).ok())
     }
 
-    fn path_for(&self, seed: &str) -> PathBuf {
-        self.root.join(format!("{}.json", sanitize_seed(seed)))
+    fn path_for(&self, session_id: &str) -> PathBuf {
+        self.root
+            .join(format!("{}.json", sanitize_session(session_id)))
     }
 
-    fn audit_path_for(&self, seed: &str) -> PathBuf {
+    fn audit_path_for(&self, session_id: &str) -> PathBuf {
         self.audit_root
-            .join(format!("{}.jsonl", sanitize_seed(seed)))
+            .join(format!("{}.jsonl", sanitize_session(session_id)))
     }
 
     /// 追加轻量审计行（`seq` + `ts` + 事件类型，**不含正文**）。
@@ -280,12 +281,12 @@ impl TimelineStore {
     ///   `journal_watermark` 同语义），避免重复行。
     /// - 超过 [`AUDIT_ROTATE_BYTES`] 时保留尾部一半后重写，使磁盘占用恒定。
     /// - 任何 I/O 失败仅记录日志，**绝不**影响事件路径（审计是旁路）。
-    pub fn append_audit(&mut self, seed: &str, entries: &[TimelineEntry]) {
+    pub fn append_audit(&mut self, session_id: &str, entries: &[TimelineEntry]) {
         let _legacy_writer = LegacyWriterFacade::lock();
         if entries.is_empty() {
             return;
         }
-        let watermark = self.audit_watermark(seed);
+        let watermark = self.audit_watermark(session_id);
         let new: Vec<&TimelineEntry> = {
             let mut fresh: Vec<&TimelineEntry> = entries
                 .iter()
@@ -297,11 +298,11 @@ impl TimelineStore {
         if new.is_empty() {
             return;
         }
-        let path = self.audit_path_for(seed);
+        let path = self.audit_path_for(session_id);
         if let Some(parent) = path.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
         {
-            log::warn!("[timeline] audit dir create failed for {seed}: {error}");
+            log::warn!("[timeline] audit dir create failed for {session_id}: {error}");
             return;
         }
         let mut file = match std::fs::OpenOptions::new()
@@ -311,7 +312,7 @@ impl TimelineStore {
         {
             Ok(file) => file,
             Err(error) => {
-                log::warn!("[timeline] audit open failed for {seed}: {error}");
+                log::warn!("[timeline] audit open failed for {session_id}: {error}");
                 return;
             }
         };
@@ -323,12 +324,12 @@ impl TimelineStore {
                 "turn": entry.turn_id,
             });
             if let Err(error) = writeln!(file, "{line}") {
-                log::warn!("[timeline] audit write failed for {seed}: {error}");
+                log::warn!("[timeline] audit write failed for {session_id}: {error}");
                 return;
             }
         }
         if let Err(error) = file.flush() {
-            log::warn!("[timeline] audit flush failed for {seed}: {error}");
+            log::warn!("[timeline] audit flush failed for {session_id}: {error}");
             return;
         }
         let max = new
@@ -336,24 +337,25 @@ impl TimelineStore {
             .map(|entry| entry.timeline_seq)
             .max()
             .unwrap_or(watermark);
-        self.audit_watermarks.insert(seed.to_string(), max);
+        self.audit_watermarks.insert(session_id.to_string(), max);
         drop(file);
-        self.rotate_audit_if_needed(seed, &path);
+        self.rotate_audit_if_needed(session_id, &path);
     }
 
     /// 该 seed 已审计到的最大 seq（无文件则为 0）。懒计算并缓存。
-    fn audit_watermark(&mut self, seed: &str) -> u64 {
-        if let Some(&watermark) = self.audit_watermarks.get(seed) {
+    fn audit_watermark(&mut self, session_id: &str) -> u64 {
+        if let Some(&watermark) = self.audit_watermarks.get(session_id) {
             return watermark;
         }
-        let watermark = self.audit_max_seq(seed);
-        self.audit_watermarks.insert(seed.to_string(), watermark);
+        let watermark = self.audit_max_seq(session_id);
+        self.audit_watermarks
+            .insert(session_id.to_string(), watermark);
         watermark
     }
 
     /// 扫描审计文件取最大 seq。只解析 `seq` 字段；损坏行跳过。
-    fn audit_max_seq(&self, seed: &str) -> u64 {
-        let path = self.audit_path_for(seed);
+    fn audit_max_seq(&self, session_id: &str) -> u64 {
+        let path = self.audit_path_for(session_id);
         let Ok(file) = std::fs::File::open(&path) else {
             return 0;
         };
@@ -371,7 +373,7 @@ impl TimelineStore {
     }
 
     /// 审计文件超过上限时保留尾部一半（原子替换），使磁盘占用恒定。
-    fn rotate_audit_if_needed(&self, seed: &str, path: &std::path::Path) {
+    fn rotate_audit_if_needed(&self, session_id: &str, path: &std::path::Path) {
         let size = match std::fs::metadata(path) {
             Ok(meta) => meta.len(),
             Err(_) => return,
@@ -395,15 +397,16 @@ impl TimelineStore {
         }
         if std::fs::rename(&tmp, path).is_ok() {
             log::info!(
-                "[timeline] audit rotated for {seed}: {size} bytes -> {} bytes",
+                "[timeline] audit rotated for {session_id}: {size} bytes -> {} bytes",
                 body.len() - keep_from
             );
         }
     }
 }
 
-fn sanitize_seed(seed: &str) -> String {
-    seed.chars()
+fn sanitize_session(session_id: &str) -> String {
+    session_id
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -491,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn load_returns_every_persisted_seed() {
+    fn load_returns_every_persisted_session() {
         let root = std::env::temp_dir().join(format!("qaqh-timeline-store-{}", std::process::id()));
         let mut store = TimelineStore::new(&root).unwrap();
         store
@@ -580,7 +583,7 @@ mod tests {
             )
             .unwrap();
 
-        let persisted = store.load_seed("s").unwrap();
+        let persisted = store.load_session("s").unwrap();
         assert_eq!(persisted.snapshot.watermark, 10);
         let progress = &persisted.snapshot.turns[0].rounds[0].blocks[0]
             .tool
@@ -600,7 +603,7 @@ mod tests {
         let legacy = root.join("timeline-v3");
         std::fs::create_dir_all(&legacy).expect("create legacy directory");
         let record = PersistedTimeline {
-            seed: "seed".into(),
+            session_id: "seed".into(),
             snapshot: TimelineSnapshot {
                 watermark: 7,
                 turns: vec![],

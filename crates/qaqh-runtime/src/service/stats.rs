@@ -6,9 +6,9 @@ use std::io::BufRead;
 
 use super::common::err;
 
-pub(crate) fn dashboard(seed: &str) -> Result<Value, String> {
-    let dir = qaqh_types::platform::sessions_dir().join(seed);
-    let tasks: Vec<Value> = qaqh_workspace::todo::todo_status_value(seed)
+pub(crate) fn dashboard(session_id: &str) -> Result<Value, String> {
+    let dir = qaqh_types::platform::sessions_dir().join(session_id);
+    let tasks: Vec<Value> = qaqh_workspace::todo::todo_status_value(session_id)
         .ok()
         .and_then(|v| {
             v.get("items")?.as_array().map(|arr| {
@@ -46,10 +46,10 @@ pub(crate) fn dashboard(seed: &str) -> Result<Value, String> {
 
 pub(crate) fn activity(
     sessions: &qaqh_session::SessionManager,
-    seed: &str,
+    session_id: &str,
 ) -> Result<Value, String> {
     let (_, messages) = sessions
-        .load(seed)
+        .load(session_id)
         .ok_or_else(|| "session not found".to_string())?;
     let mut tools = std::collections::HashMap::new();
     for message in &messages {
@@ -88,11 +88,11 @@ pub(crate) fn load_config() -> Result<Value, String> {
 }
 pub(crate) fn context_stats(
     sessions: &qaqh_session::SessionManager,
-    seed: &str,
+    session_id: &str,
 ) -> Result<Value, String> {
     // 统一数据源：meta.json 的 context_stats 字段（原独立文件退役）。
     // 旧 context_stats.json 为可再生缓存，忽略不迁移。
-    if let Some(meta) = sessions.load_meta(seed)
+    if let Some(meta) = sessions.load_meta(session_id)
         && let Some(stats) = meta.context_stats
     {
         return Ok(stats);

@@ -544,14 +544,14 @@ pub fn needs_permission(
 /// Persistent set of trusted directories for cross-workspace access.
 /// Stored as `{sessions_dir}/{seed}/trusted_folders.json`.
 pub struct TrustedFolderSet {
-    seed: String,
+    session_id: String,
     dirs: HashSet<PathBuf>,
 }
 
 impl TrustedFolderSet {
     /// Load the trusted folders file for a session, or create an empty set.
-    pub fn load(seed: &str) -> Self {
-        let path = trusted_folders_path(seed);
+    pub fn load(session_id: &str) -> Self {
+        let path = trusted_folders_path(session_id);
         let dirs = if path.exists() {
             std::fs::read_to_string(&path)
                 .ok()
@@ -562,7 +562,7 @@ impl TrustedFolderSet {
             HashSet::new()
         };
         Self {
-            seed: seed.to_string(),
+            session_id: session_id.to_string(),
             dirs,
         }
     }
@@ -584,7 +584,7 @@ impl TrustedFolderSet {
     }
 
     fn save(&self) {
-        let path = trusted_folders_path(&self.seed);
+        let path = trusted_folders_path(&self.session_id);
         // 由 qaqh_dir()/seed 拼接而来，必然带父目录；None 仅在路径为根时出现。
         let Some(dir) = path.parent() else {
             return;
@@ -599,10 +599,10 @@ impl TrustedFolderSet {
     }
 }
 
-fn trusted_folders_path(seed: &str) -> PathBuf {
+fn trusted_folders_path(session_id: &str) -> PathBuf {
     crate::workspace::qaqh_dir()
         .join("sessions")
-        .join(seed)
+        .join(session_id)
         .join("trusted_folders.json")
 }
 

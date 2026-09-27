@@ -385,7 +385,7 @@ fn build_navigation_anchors(ctx: &RingContext) -> String {
 }
 
 /// 锚点构造主体（与 `RingContext` 解耦，便于单测直接调用）。
-fn build_navigation_anchors_for(seed: &str) -> String {
+fn build_navigation_anchors_for(session_id: &str) -> String {
     let mut out = String::new();
 
     let files = qaqh_workspace::file_state::summary();
@@ -398,8 +398,8 @@ fn build_navigation_anchors_for(seed: &str) -> String {
         out.push('\n');
     }
 
-    if !seed.is_empty()
-        && let Ok(store) = qaqh_workspace::todo::load_todo_for(seed)
+    if !session_id.is_empty()
+        && let Ok(store) = qaqh_workspace::todo::load_todo_for(session_id)
         && !store.items.is_empty()
     {
         let current = store.current_id.as_deref();
@@ -476,7 +476,7 @@ pub(crate) fn compact_request_messages(prompt: &str) -> Vec<qaqh_types::Message>
 /// Returns CompactMeta via the channel.
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
 pub(crate) fn run_compact_worker(
-    seed: String,
+    session_id: String,
     compact_id: String,
     prompt: String,
     provider: qaqh_gate::ProviderConfig,
@@ -497,7 +497,7 @@ pub(crate) fn run_compact_worker(
             // Ringing 双发：CompactProgress（replaceable 流式摘要）
             progress_seq += 1;
             let env = qaqh_ringing::RingingWorkerEventEnvelope::new(
-                seed.as_str(),
+                session_id.as_str(),
                 format!("w-compact-{compact_id}-{progress_seq}"),
                 qaqh_domain::DomainEvent::Conversation(
                     qaqh_domain::ConversationEvent::CompactProgress {
