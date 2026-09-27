@@ -49,7 +49,7 @@ pub mod v2;
 
 pub(crate) use auth::{
     get_session_id, is_authorized, lease_required_json, parse_channel, publish_session_created,
-    session_close_seed, unauthorized,
+    session_close_session, unauthorized,
 };
 pub(crate) use command::{command_fingerprint, handle_command};
 pub(crate) use content::{handle_content_get, handle_content_upload};
@@ -109,13 +109,13 @@ pub struct TimelineQuery {
     pub limit: Option<usize>,
 }
 
-pub(crate) fn session_not_found_response(seed: &str) -> Response {
+pub(crate) fn session_not_found_response(session_id: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::json!({
             "code": "session_not_found",
-            "message": format!("test-injected missing session: {seed}"),
+            "message": format!("test-injected missing session: {session_id}"),
         })
         .to_string(),
     )
@@ -143,39 +143,42 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ringing/v2/clients/open", post(handle_open_v2))
         .route("/ringing/v2/leases/renew", post(handle_renew_v2))
         .route(
-            "/ringing/v2/sessions/{seed}/bootstrap",
+            "/ringing/v2/sessions/{session_id}/bootstrap",
             get(handle_bootstrap_v2),
         )
         .route(
-            "/ringing/v2/sessions/{seed}/team",
+            "/ringing/v2/sessions/{session_id}/team",
             get(handle_team_snapshot_v2),
         )
-        .route("/ringing/v2/sessions/{seed}/events", get(handle_events_v2))
+        .route(
+            "/ringing/v2/sessions/{session_id}/events",
+            get(handle_events_v2),
+        )
         .route(
             "/ringing/v2/commands/{id}",
             post(handle_command_v2).get(handle_command_status_v2),
         )
         .route(
-            "/ringing/v2/sessions/{seed}/driver/claim",
+            "/ringing/v2/sessions/{session_id}/driver/claim",
             post(handle_driver_claim_v2),
         )
         .route(
-            "/ringing/v2/sessions/{seed}/driver/release",
+            "/ringing/v2/sessions/{session_id}/driver/release",
             post(handle_driver_release_v2),
         )
         .route(
-            "/ringing/v2/sessions/{seed}/approvals",
+            "/ringing/v2/sessions/{session_id}/approvals",
             get(handle_pending_approvals_v2),
         )
         .route(
-            "/ringing/v2/sessions/{seed}/timeline",
+            "/ringing/v2/sessions/{session_id}/timeline",
             get(handle_timeline_snapshot),
         )
         .route("/ringing/v2/content/{content_id}", get(handle_content_get))
         .route("/ringing/v2/content", post(handle_content_upload))
         .route("/ringing/v2/service/{method}", post(handle_service))
         .route(
-            "/ringing/v2/sessions/{seed}/timeline/events",
+            "/ringing/v2/sessions/{session_id}/timeline/events",
             get(handle_timeline_events),
         )
         .route("/control/v1/stop", post(handle_stop))
@@ -218,17 +221,17 @@ pub(crate) mod pure_tests {
         assert_eq!(parse_timeline_cursor("epoch-1:timeline:abc", "epoch-1"), 0);
     }
     #[test]
-    fn session_close_seed_resolution_prefers_command_seed() {
+    fn session_close_session_resolution_prefers_command_session() {
         assert_eq!(
-            session_close_seed("s-command", &Some("s-envelope".into())),
+            session_close_session("s-command", &Some("s-envelope".into())),
             "s-command"
         );
-        assert_eq!(session_close_seed("s-command", &None), "s-command");
+        assert_eq!(session_close_session("s-command", &None), "s-command");
         assert_eq!(
-            session_close_seed("", &Some("s-envelope".into())),
+            session_close_session("", &Some("s-envelope".into())),
             "s-envelope"
         );
-        assert_eq!(session_close_seed("", &None), "");
+        assert_eq!(session_close_session("", &None), "");
     }
     #[test]
     fn session_create_event_carries_command_causation() {

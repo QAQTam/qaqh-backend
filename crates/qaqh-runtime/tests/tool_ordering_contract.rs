@@ -41,11 +41,11 @@ use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
 use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
 
-fn tool_scope(call_id: &str, seed: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
+fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
     qaqh_workspace::runtime::ToolExecutionScope::capture(
         qaqh_workspace::tool_api::ToolCallContext {
             call_id: call_id.to_string(),
-            session_id: seed.to_string(),
+            session_id: session_id.to_string(),
             workspace_root: std::path::PathBuf::from(qaqh_workspace::current_workspace()),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
@@ -183,8 +183,8 @@ impl Emitter for RecordingEmitter {
 }
 
 /// 模型发出 N 个 tool_use、尚无结果的 store 状态（批执行前）。
-fn store_with_tool_uses(seed: &str, calls: &[(&str, &str)]) -> MessageStore {
-    let mut store = MessageStore::new(seed);
+fn store_with_tool_uses(session_id: &str, calls: &[(&str, &str)]) -> MessageStore {
+    let mut store = MessageStore::new(session_id);
     store.push_user("run the ordering batch");
     let mut assistant = Message {
         msg_id: None,
@@ -284,7 +284,7 @@ fn run_batch<F: FnOnce(&Path)>(
     }
     CANCEL_ARMED.store(false, Ordering::SeqCst);
 
-    let seed = format!(
+    let session_id = format!(
         "tool-ordering-{label}-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -296,14 +296,14 @@ fn run_batch<F: FnOnce(&Path)>(
     qaqh_workspace::runtime::init_tools(label, &[register_probe], vec![]);
     qaqh_workspace::clear_cancel();
     let mut agent = AgentState::init("tool-ordering-test", qaqh_config::Config::default());
-    agent.session.session_id = seed.clone();
+    agent.session.session_id = session_id.clone();
     agent.ephemeral = true;
     agent.config.permission_level = 4;
     let tool_uses: Vec<(&str, &str)> = calls
         .iter()
         .map(|(call_id, tool, _args)| (*call_id, *tool))
         .collect();
-    agent.msg = store_with_tool_uses(&seed, &tool_uses);
+    agent.msg = store_with_tool_uses(&session_id, &tool_uses);
 
     let mut admitted = Vec::new();
     for (call_id, tool, args) in calls {
@@ -314,12 +314,12 @@ fn run_batch<F: FnOnce(&Path)>(
         {
             object.insert("call".to_string(), serde_json::json!(call_id));
         }
-        match qaqh_workspace::authorize_call(&seed, call_id, tool, &args, 4) {
+        match qaqh_workspace::authorize_call(&session_id, call_id, tool, &args, 4) {
             qaqh_workspace::Admission::Authorized(auth) => {
                 admitted.push(qaqh_runtime::agent::types::AdmittedTool {
                     call_id: (*call_id).to_string(),
                     auth: Box::new(auth),
-                    scope: tool_scope(call_id, &seed),
+                    scope: tool_scope(call_id, &session_id),
                 });
             }
             _ => panic!("call {call_id} ({tool}) must be authorized at level 4"),

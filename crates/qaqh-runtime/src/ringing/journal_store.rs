@@ -36,7 +36,7 @@ pub enum JournalOp {
 /// 装载结果：每 (channel, seed) 的 op 序列。
 #[derive(Debug, Default)]
 pub struct LoadedJournal {
-    pub per_seed: Vec<(RingingChannel, String, Vec<JournalOp>)>,
+    pub per_session: Vec<(RingingChannel, String, Vec<JournalOp>)>,
 }
 
 /// 持久化 journal 存储（root/journal/{channel}/{seed}.jsonl）。
@@ -76,12 +76,12 @@ impl JournalStore {
     pub fn append(
         &mut self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         envelope: &RingingEventEnvelope,
     ) -> std::io::Result<()> {
         self.write_line(
             channel,
-            seed,
+            session_id,
             &JournalOp::Append {
                 envelope: envelope.clone(),
             },
@@ -92,13 +92,13 @@ impl JournalStore {
     pub fn checkpoint(
         &mut self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         identity: &str,
         stream_seq: u64,
     ) -> std::io::Result<()> {
         self.write_line(
             channel,
-            seed,
+            session_id,
             &JournalOp::Checkpoint {
                 identity: identity.to_string(),
                 stream_seq,
@@ -110,13 +110,13 @@ impl JournalStore {
     pub fn compact(
         &mut self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         turn_id: &str,
         round_num: u32,
     ) -> std::io::Result<()> {
         self.write_line(
             channel,
-            seed,
+            session_id,
             &JournalOp::Compact {
                 turn_id: turn_id.to_string(),
                 round_num,
@@ -129,12 +129,12 @@ impl JournalStore {
     pub fn replaceable(
         &mut self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         identity: &str,
         envelope: &RingingEventEnvelope,
     ) -> std::io::Result<()> {
         let _legacy_writer = LegacyWriterFacade::lock();
-        let path = self.replaceable_path(channel, seed, identity);
+        let path = self.replaceable_path(channel, session_id, identity);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -149,11 +149,11 @@ impl JournalStore {
     pub fn remove_replaceable(
         &mut self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         identity: &str,
     ) -> std::io::Result<()> {
         let _legacy_writer = LegacyWriterFacade::lock();
-        let path = self.replaceable_path(channel, seed, identity);
+        let path = self.replaceable_path(channel, session_id, identity);
         if path.exists() {
             std::fs::remove_file(path)?;
         }
@@ -168,14 +168,15 @@ impl JournalStore {
     pub fn rewrite(
         &mut self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         envelopes: &[RingingEventEnvelope],
         checkpoints: &[(String, u64)],
     ) -> std::io::Result<()> {
         let _legacy_writer = LegacyWriterFacade::lock();
-        self.files.remove(&(channel, seed.to_string()));
-        self.pending_bytes.insert((channel, seed.to_string()), 0);
-        let path = self.path_for(channel, seed);
+        self.files.remove(&(channel, session_id.to_string()));
+        self.pending_bytes
+            .insert((channel, session_id.to_string()), 0);
+        let path = self.path_for(channel, session_id);
         let mut body = Vec::new();
         for envelope in envelopes {
             body.extend(
@@ -208,21 +209,21 @@ impl JournalStore {
     }
 
     /// 当前 jsonl 物理大小（字节）。
-    pub fn file_size(&self, channel: RingingChannel, seed: &str) -> std::io::Result<u64> {
-        Ok(std::fs::metadata(self.path_for(channel, seed))?.len())
+    pub fn file_size(&self, channel: RingingChannel, session_id: &str) -> std::io::Result<u64> {
+        Ok(std::fs::metadata(self.path_for(channel, session_id))?.len())
     }
 
     /// 自上次 rewrite 以来追加的字节数（内存计数，无 I/O）。
-    pub fn pending_bytes(&self, channel: RingingChannel, seed: &str) -> u64 {
+    pub fn pending_bytes(&self, channel: RingingChannel, session_id: &str) -> u64 {
         self.pending_bytes
-            .get(&(channel, seed.to_string()))
+            .get(&(channel, session_id.to_string()))
             .copied()
             .unwrap_or(0)
     }
 
     /// 磁盘上有历史记录的 (channel → seed) 清单（懒加载索引；不读取文件内容）。
     /// 覆盖 reliable jsonl 与 replaceable latest 槽目录。
-    pub fn list_seeds(&self) -> HashMap<RingingChannel, HashSet<String>> {
+    pub fn list_sessions(&self) -> HashMap<RingingChannel, HashSet<String>> {
         let mut out = HashMap::<RingingChannel, HashSet<String>>::new();
         for channel in [
             RingingChannel::Control,
@@ -236,10 +237,12 @@ impl JournalStore {
                     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                         continue;
                     }
-                    if let Some(seed) = path.file_stem().and_then(|s| s.to_str())
-                        && !seed.is_empty()
+                    if let Some(session_id) = path.file_stem().and_then(|s| s.to_str())
+                        && !session_id.is_empty()
                     {
-                        out.entry(channel).or_default().insert(seed.to_string());
+                        out.entry(channel)
+                            .or_default()
+                            .insert(session_id.to_string());
                     }
                 }
             }
@@ -247,9 +250,11 @@ impl JournalStore {
             if let Ok(entries) = std::fs::read_dir(&latest_dir) {
                 for entry in entries.flatten() {
                     if entry.path().is_dir()
-                        && let Some(seed) = entry.file_name().to_str()
+                        && let Some(session_id) = entry.file_name().to_str()
                     {
-                        out.entry(channel).or_default().insert(seed.to_string());
+                        out.entry(channel)
+                            .or_default()
+                            .insert(session_id.to_string());
                     }
                 }
             }
@@ -259,13 +264,13 @@ impl JournalStore {
 
     /// 装载单个 (channel, seed) 的磁盘操作序列（reliable jsonl + replaceable
     /// latest 槽，顺序与 `load()` 一致）。懒加载按需恢复用。
-    pub fn load_seed(
+    pub fn load_session(
         &self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
     ) -> std::io::Result<Vec<JournalOp>> {
         let mut ops = Vec::new();
-        let path = self.path_for(channel, seed);
+        let path = self.path_for(channel, session_id);
         if path.is_file() {
             ops = read_ops(&path);
         }
@@ -273,7 +278,7 @@ impl JournalStore {
             .root
             .join("latest")
             .join(channel.as_str())
-            .join(sanitize_seed(seed));
+            .join(sanitize_session(session_id));
         if latest_dir.is_dir() {
             for entry in std::fs::read_dir(&latest_dir)? {
                 let path = entry?.path();
@@ -314,30 +319,30 @@ impl JournalStore {
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let seed = path
+                let session_id = path
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .map(str::to_string)
                     .unwrap_or_default();
-                if seed.is_empty() {
+                if session_id.is_empty() {
                     continue;
                 }
                 let ops = read_ops(&path);
                 if !ops.is_empty() {
-                    out.per_seed.push((channel, seed, ops));
+                    out.per_session.push((channel, session_id, ops));
                 }
             }
 
             let latest_dir = root.join("latest").join(channel.as_str());
             if latest_dir.is_dir() {
-                for seed_entry in std::fs::read_dir(&latest_dir)? {
-                    let seed_entry = seed_entry?;
-                    if !seed_entry.path().is_dir() {
+                for session_entry in std::fs::read_dir(&latest_dir)? {
+                    let session_entry = session_entry?;
+                    if !session_entry.path().is_dir() {
                         continue;
                     }
-                    let seed = seed_entry.file_name().to_string_lossy().to_string();
+                    let session_id = session_entry.file_name().to_string_lossy().to_string();
                     let mut latest = Vec::new();
-                    for entry in std::fs::read_dir(seed_entry.path())? {
+                    for entry in std::fs::read_dir(session_entry.path())? {
                         let path = entry?.path();
                         if path.extension().and_then(|value| value.to_str()) != Some("json") {
                             continue;
@@ -354,15 +359,15 @@ impl JournalStore {
                     }
                     if !latest.is_empty() {
                         if let Some((_, _, ops)) =
-                            out.per_seed
+                            out.per_session
                                 .iter_mut()
-                                .find(|(saved_channel, saved_seed, _)| {
-                                    *saved_channel == channel && saved_seed == &seed
+                                .find(|(saved_channel, saved_session, _)| {
+                                    *saved_channel == channel && saved_session == &session_id
                                 })
                         {
                             ops.extend(latest);
                         } else {
-                            out.per_seed.push((channel, seed, latest));
+                            out.per_session.push((channel, session_id, latest));
                         }
                     }
                 }
@@ -374,46 +379,51 @@ impl JournalStore {
     fn write_line(
         &mut self,
         channel: RingingChannel,
-        seed: &str,
+        session_id: &str,
         op: &JournalOp,
     ) -> std::io::Result<()> {
         let _legacy_writer = LegacyWriterFacade::lock();
-        let file = self.file(channel, seed)?;
+        let file = self.file(channel, session_id)?;
         let mut line = serde_json::to_vec(op).map_err(io_error)?;
         line.push(b'\n');
         file.write_all(&line)?;
         file.flush()?;
         *self
             .pending_bytes
-            .entry((channel, seed.to_string()))
+            .entry((channel, session_id.to_string()))
             .or_default() += line.len() as u64;
         Ok(())
     }
 
-    fn file(&mut self, channel: RingingChannel, seed: &str) -> std::io::Result<&mut File> {
-        let key = (channel, seed.to_string());
+    fn file(&mut self, channel: RingingChannel, session_id: &str) -> std::io::Result<&mut File> {
+        let key = (channel, session_id.to_string());
         if !self.files.contains_key(&key) {
-            let path = self.path_for(channel, seed);
+            let path = self.path_for(channel, session_id);
             let file = OpenOptions::new().create(true).append(true).open(&path)?;
             self.files.insert(key.clone(), file);
         }
         Ok(self.files.get_mut(&key).expect("inserted above"))
     }
 
-    fn path_for(&self, channel: RingingChannel, seed: &str) -> PathBuf {
+    fn path_for(&self, channel: RingingChannel, session_id: &str) -> PathBuf {
         self.root
             .join("journal")
             .join(channel.as_str())
-            .join(format!("{}.jsonl", sanitize_seed(seed)))
+            .join(format!("{}.jsonl", sanitize_session(session_id)))
     }
 
-    fn replaceable_path(&self, channel: RingingChannel, seed: &str, identity: &str) -> PathBuf {
+    fn replaceable_path(
+        &self,
+        channel: RingingChannel,
+        session_id: &str,
+        identity: &str,
+    ) -> PathBuf {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         identity.hash(&mut hasher);
         self.root
             .join("latest")
             .join(channel.as_str())
-            .join(sanitize_seed(seed))
+            .join(sanitize_session(session_id))
             .join(format!("{:016x}.json", hasher.finish()))
     }
 }
@@ -441,8 +451,9 @@ fn read_ops(path: &Path) -> Vec<JournalOp> {
 }
 
 /// seed 是十六进制会话标识；防御性净化防止路径穿越。
-fn sanitize_seed(seed: &str) -> String {
-    seed.chars()
+fn sanitize_session(session_id: &str) -> String {
+    session_id
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -505,10 +516,10 @@ mod tests {
                 .expect("compact");
         }
         let loaded = JournalStore::load(&root).expect("load");
-        assert_eq!(loaded.per_seed.len(), 1);
-        let (channel, seed, ops) = &loaded.per_seed[0];
+        assert_eq!(loaded.per_session.len(), 1);
+        let (channel, session_id, ops) = &loaded.per_session[0];
         assert_eq!(*channel, RingingChannel::Conversation);
-        assert_eq!(seed, "s");
+        assert_eq!(session_id, "s");
         assert_eq!(ops.len(), 4);
         assert!(matches!(ops[0], JournalOp::Append { .. }));
         assert!(matches!(ops[1], JournalOp::Checkpoint { .. }));
@@ -541,9 +552,9 @@ mod tests {
                 .expect("write corrupt");
         }
         let loaded = JournalStore::load(&root).expect("load");
-        let (_, _, _ops) = &loaded.per_seed[0];
+        let (_, _, _ops) = &loaded.per_session[0];
         let loaded = JournalStore::load(&root).expect("load");
-        let (_, _, ops) = &loaded.per_seed[0];
+        let (_, _, ops) = &loaded.per_session[0];
         assert_eq!(ops.len(), 1, "corrupt line skipped");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -606,7 +617,7 @@ mod tests {
                 .expect("append after rewrite");
         }
         let loaded = JournalStore::load(&root).expect("load");
-        let (_, _, ops) = &loaded.per_seed[0];
+        let (_, _, ops) = &loaded.per_session[0];
         // delta 的 Append 已被物理移除；turn_started 与后续 e3 保留；checkpoint 保留。
         let appends: Vec<_> = ops
             .iter()

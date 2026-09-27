@@ -108,7 +108,7 @@ pub struct RingingV2EventEnvelope<P> {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub event_id: String,
     pub stream_key: RingingV2StreamKey,
@@ -231,7 +231,7 @@ pub struct RingingV2ResetRequired {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_id: Option<String>,
@@ -339,7 +339,7 @@ pub struct RingingV2Bootstrap<C, V, T> {
     pub schema: String,
     pub version: u32,
     pub server_epoch: String,
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: String,
     pub snapshot_cursor: CursorToken,
     pub control: RingingV2ChannelSnapshot<C>,
@@ -387,7 +387,7 @@ pub struct RingingV2CommandEnvelope {
     pub client_instance_id: String,
     pub client_session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "session_id", alias = "seed")]
+    #[serde(rename = "session_id")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
@@ -430,7 +430,7 @@ impl RingingV2CommandEnvelope {
     }
 
     /// Deprecated compatibility alias for pre-beta callers.
-    pub fn with_seed(self, session_id: impl Into<String>) -> Self {
+    pub fn with_session(self, session_id: impl Into<String>) -> Self {
         self.with_session_id(session_id)
     }
 
@@ -621,8 +621,8 @@ pub fn open_path() -> String {
 /// 单流订阅路径（每 seed 一条 SSE；事件带 `stream_key`）。
 ///
 /// 2026-09-24 冻结修订：per-channel 的 `events/{channel}` 已硬切删除。
-pub fn events_path(seed: &str) -> String {
-    format!("{RINGING_V2_BASE_PATH}/sessions/{seed}/events")
+pub fn events_path(session_id: &str) -> String {
+    format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/events")
 }
 
 #[cfg(test)]
@@ -879,7 +879,7 @@ mod tests {
 
     /// 单流修订（2026-09-24）：SSE 路径不再带 channel 段。
     #[test]
-    fn events_path_is_per_seed_single_stream() {
+    fn events_path_is_per_session_single_stream() {
         assert_eq!(events_path("s1"), "/ringing/v2/sessions/s1/events");
         assert!(
             !events_path("s1").contains("/events/"),

@@ -80,11 +80,14 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
             workspace: None,
         })
         .expect("host spawn_subagent must succeed");
-    let seed = spawned.seed;
+    let session_id = spawned.session_id;
     let child_session_id = spawned.child_session_id;
-    assert!(!seed.is_empty(), "host spawn must return a non-empty seed");
+    assert!(
+        !session_id.is_empty(),
+        "host spawn must return a non-empty seed"
+    );
     assert_eq!(
-        child_session_id, seed,
+        child_session_id, session_id,
         "beta identity requires seed == child_session_id == directory"
     );
     assert_eq!(spawned.parent_agent_path, "/root");
@@ -117,7 +120,7 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
 
     let parent_identity = CanonicalSessionIdentity::open(data.join("sessions").join(&parent))
         .expect("parent canonical identity");
-    let child_dir = data.join("sessions").join(&seed);
+    let child_dir = data.join("sessions").join(&session_id);
     let child_identity =
         CanonicalSessionIdentity::open_or_create(&child_dir).expect("child canonical identity");
     assert_eq!(child_identity.session_id.as_str(), child_session_id);
@@ -279,12 +282,12 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     .expect("interrupted child must remain available for messages");
 
     // 2. subscribe：从 hub 过滤该 seed 的事件批次（工具 collect 线程消费）。
-    let rx = host.subscribe(&seed);
+    let rx = host.subscribe(&session_id);
     // 发布一条属于该 seed 的合成事件（等价 actor 事件进入 hub 的路径）。
     hub.publish_with_causation(
-        &seed,
+        &session_id,
         DomainEvent::Control(ControlEvent::SessionStateChanged {
-            session_id: seed.clone(),
+            session_id: session_id.clone(),
             state: SessionState::Created,
         }),
         None,
@@ -302,23 +305,29 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
             "timed out waiting for the synthetic control batch"
         );
     };
-    assert_eq!(batch.session_id, seed, "batch must carry the sub seed");
+    assert_eq!(
+        batch.session_id, session_id,
+        "batch must carry the sub seed"
+    );
     assert!(
-        batch.envelopes.iter().any(|env| env.session_id == seed),
+        batch
+            .envelopes
+            .iter()
+            .any(|env| env.session_id == session_id),
         "batch must contain the published envelope"
     );
 
     // 3. send_ringing：命令直达 actor 队列（SessionShutdown 触发 actor 优雅退出，
     //    无模型也可安全清理；不依赖 provider）。
     host.send_ringing(
-        &seed,
+        &session_id,
         qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionShutdown),
     )
     .expect("send_ringing must address the in-process actor");
 
     // 4. close：幂等（已关闭/已退出均返回 Ok，不 panic）。
-    host.close(&seed).expect("first close");
-    let _ = host.close(&seed); // 第二次幂等
+    host.close(&session_id).expect("first close");
+    let _ = host.close(&session_id); // 第二次幂等
     host.close(&parent).expect("close parent actor");
 }
 
@@ -368,7 +377,7 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
         .expect("spawn child before unload");
     let child = spawned.child_session_id.clone();
     let child_path = spawned.child_agent_path.clone();
-    assert_eq!(child, spawned.seed);
+    assert_eq!(child, spawned.session_id);
 
     let parent_dir = sessions.session_path_dir(&parent);
     let parent_canonical = CanonicalSessionIdentity::open(&parent_dir).expect("parent identity");
@@ -513,7 +522,7 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     std::thread::sleep(Duration::from_millis(1_500));
     let unloaded = service.unload_idle_sessions(1);
     assert!(
-        unloaded.iter().any(|seed| seed == &child),
+        unloaded.iter().any(|session_id| session_id == &child),
         "idle reloaded child must be an unload candidate: {unloaded:?}"
     );
     assert_eq!(

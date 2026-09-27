@@ -57,43 +57,45 @@ pub(crate) fn page_plan(
 pub(crate) async fn handle_timeline_snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(seed): Path<String>,
+    Path(session_id): Path<String>,
     Query(q): Query<TimelineQuery>,
 ) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let Some(session_id) = get_session_id(&headers) else {
+    let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
-    if seed.is_empty() {
-        return (StatusCode::BAD_REQUEST, "missing seed").into_response();
+    if session_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing session_id").into_response();
     }
-    if state.test_hooks.session_is_404(&seed) {
-        return session_not_found_response(&seed);
+    if state.test_hooks.session_is_404(&session_id) {
+        return session_not_found_response(&session_id);
     }
     let owns = state
         .leases
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .owns_seed(&session_id, &seed);
+        .owns_session(&client_session_id, &session_id);
     if !owns {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "application/json")],
-            br#"{"code":"lease_required","message":"attach the session seed before reading timeline"}"#.to_vec(),
+            br#"{"code":"lease_required","message":"attach the session before reading timeline"}"#
+                .to_vec(),
         )
             .into_response();
     }
-    let snapshot = state
-        .hub
-        .timeline_snapshot(&seed)
-        .unwrap_or(qaqh_domain::TimelineSnapshot {
-            watermark: 0,
-            turns: vec![],
-        });
+    let snapshot =
+        state
+            .hub
+            .timeline_snapshot(&session_id)
+            .unwrap_or(qaqh_domain::TimelineSnapshot {
+                watermark: 0,
+                turns: vec![],
+            });
     let materialized = snapshot.turns.len();
-    let persisted = state.hub.persisted_turn_count(&seed);
+    let persisted = state.hub.persisted_turn_count(&session_id);
     let (total_turns, window_truncated) = window_metadata(materialized, persisted);
     let limit = q.limit.unwrap_or(TIMELINE_PAGE_LIMIT).min(200);
     // 常驻窗口覆盖的全局序号区间 = [window_base, total_turns)
@@ -103,7 +105,7 @@ pub(crate) async fn handle_timeline_snapshot(
     // 两个来源：常驻窗口（零 I/O）与归档（有界读取）。**不跨来源拼一页**——
     // 拼页会让边界回合的 id/序号来自两套算法。
     let (page, has_more, truncated_before) = if plan.from_archive {
-        match state.hub.archive_turn_page(&seed, plan.end, limit) {
+        match state.hub.archive_turn_page(&session_id, plan.end, limit) {
             Some((turns, page_start, capped)) => {
                 // 触顶 = 更旧的回合取不到 → 不能再宣称「还能翻」（否则客户端会
                 // 永远请求同一个空页，BUG-2026-09-13-18 那一族）。
@@ -135,12 +137,12 @@ pub(crate) async fn handle_timeline_snapshot(
     // Page before rehydration: the resident snapshot keeps only bounded
     // shells, while the response restores full text for this page only.
     // 归档投影出来的回合本身就是全文（`offloaded=false`），此调用对它们是空操作。
-    let page = state.hub.rehydrate_timeline_page(&seed, page);
+    let page = state.hub.rehydrate_timeline_page(&session_id, page);
     let body = serde_json::json!({
         "schema": "qaqh.Ringing",
         "version": 1,
         "server_epoch": state.hub.epoch(),
-        "seed": seed,
+        "session_id": session_id,
         "snapshot": {"watermark": snapshot.watermark, "turns": page},
         "has_more": has_more,
         "total_turns": total_turns,

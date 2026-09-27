@@ -24,7 +24,7 @@ pub const RECLAIM_RETRY_COOLDOWN_MS: u64 = 15_000;
 
 #[derive(Debug, Default)]
 pub struct RingingDriverWatch {
-    seeds: HashSet<String>,
+    sessions: HashSet<String>,
     /// In-memory only: last dispatch time per seed (epoch ms).
     dispatched_at_ms: HashMap<String, u64>,
     persistence_path: Option<PathBuf>,
@@ -54,10 +54,10 @@ impl RingingDriverWatch {
             return;
         };
         match serde_json::from_slice::<Vec<String>>(&bytes) {
-            Ok(seeds) => {
-                self.seeds = seeds
+            Ok(sessions) => {
+                self.sessions = sessions
                     .into_iter()
-                    .filter(|seed| !seed.trim().is_empty())
+                    .filter(|session_id| !session_id.trim().is_empty())
                     .collect();
             }
             Err(_) => log::warn!(
@@ -71,9 +71,9 @@ impl RingingDriverWatch {
         let Some(path) = &self.persistence_path else {
             return;
         };
-        let mut seeds: Vec<&String> = self.seeds.iter().collect();
-        seeds.sort();
-        let Ok(bytes) = serde_json::to_vec(&seeds) else {
+        let mut sessions: Vec<&String> = self.sessions.iter().collect();
+        sessions.sort();
+        let Ok(bytes) = serde_json::to_vec(&sessions) else {
             return;
         };
         if let Some(parent) = path.parent() {
@@ -86,8 +86,8 @@ impl RingingDriverWatch {
     }
 
     /// Register a seed for scanning. Returns whether the set changed.
-    pub fn insert(&mut self, seed: &str) -> bool {
-        if seed.trim().is_empty() || !self.seeds.insert(seed.to_string()) {
+    pub fn insert(&mut self, session_id: &str) -> bool {
+        if session_id.trim().is_empty() || !self.sessions.insert(session_id.to_string()) {
             return false;
         }
         self.persist();
@@ -95,9 +95,9 @@ impl RingingDriverWatch {
     }
 
     /// Drop a seed from the scan list. Returns whether the set changed.
-    pub fn remove(&mut self, seed: &str) -> bool {
-        self.dispatched_at_ms.remove(seed);
-        if !self.seeds.remove(seed) {
+    pub fn remove(&mut self, session_id: &str) -> bool {
+        self.dispatched_at_ms.remove(session_id);
+        if !self.sessions.remove(session_id) {
             return false;
         }
         self.persist();
@@ -105,34 +105,34 @@ impl RingingDriverWatch {
     }
 
     /// Whether a reclaim may be dispatched for this seed now.
-    pub fn reclaim_due(&self, seed: &str, now_ms: u64) -> bool {
+    pub fn reclaim_due(&self, session_id: &str, now_ms: u64) -> bool {
         self.dispatched_at_ms
-            .get(seed)
+            .get(session_id)
             .is_none_or(|last| now_ms.saturating_sub(*last) >= RECLAIM_RETRY_COOLDOWN_MS)
     }
 
     /// Record a reclaim dispatch attempt for this seed.
-    pub fn note_reclaim_dispatch(&mut self, seed: &str, now_ms: u64) {
-        self.dispatched_at_ms.insert(seed.to_string(), now_ms);
+    pub fn note_reclaim_dispatch(&mut self, session_id: &str, now_ms: u64) {
+        self.dispatched_at_ms.insert(session_id.to_string(), now_ms);
     }
 
-    pub fn contains(&self, seed: &str) -> bool {
-        self.seeds.contains(seed)
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.sessions.contains(session_id)
     }
 
     pub fn len(&self) -> usize {
-        self.seeds.len()
+        self.sessions.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.seeds.is_empty()
+        self.sessions.is_empty()
     }
 
     /// Snapshot of the seeds to scan (stable order).
-    pub fn seeds(&self) -> Vec<String> {
-        let mut seeds: Vec<String> = self.seeds.iter().cloned().collect();
-        seeds.sort();
-        seeds
+    pub fn sessions(&self) -> Vec<String> {
+        let mut sessions: Vec<String> = self.sessions.iter().cloned().collect();
+        sessions.sort();
+        sessions
     }
 }
 
@@ -142,14 +142,14 @@ mod tests {
 
     fn watch_at(path: &Path) -> RingingDriverWatch {
         RingingDriverWatch {
-            seeds: HashSet::new(),
+            sessions: HashSet::new(),
             dispatched_at_ms: HashMap::new(),
             persistence_path: Some(path.to_path_buf()),
         }
     }
 
     #[test]
-    fn reclaim_dispatch_is_rate_limited_per_seed() {
+    fn reclaim_dispatch_is_rate_limited_per_session() {
         let mut watch = RingingDriverWatch::new();
         assert!(watch.reclaim_due("seed-a", 1_000));
         watch.note_reclaim_dispatch("seed-a", 1_000);
@@ -173,19 +173,19 @@ mod tests {
         assert!(!watch.insert("seed-a"), "duplicate insert is a no-op");
         assert!(!watch.insert("  "), "blank seed is rejected");
         assert_eq!(
-            watch.seeds(),
+            watch.sessions(),
             vec!["seed-a".to_string(), "seed-b".to_string()]
         );
 
         let mut reloaded = watch_at(&path);
         reloaded.load(&path);
-        assert_eq!(reloaded.seeds(), watch.seeds());
+        assert_eq!(reloaded.sessions(), watch.sessions());
         assert!(reloaded.contains("seed-a"));
 
         assert!(reloaded.remove("seed-a"));
         assert!(!reloaded.remove("seed-a"), "second remove is a no-op");
         let mut again = watch_at(&path);
         again.load(&path);
-        assert_eq!(again.seeds(), vec!["seed-b".to_string()]);
+        assert_eq!(again.sessions(), vec!["seed-b".to_string()]);
     }
 }

@@ -33,8 +33,8 @@ fn fact(payload: FactPayload, event_ordinal: u64) -> SessionFact {
     fact
 }
 
-fn content_ref(seed: u8) -> ContentRef {
-    ContentRef::new(ContentHash::new(format!("sha256:{seed:064x}")))
+fn content_ref(session_id: u8) -> ContentRef {
+    ContentRef::new(ContentHash::new(format!("sha256:{session_id:064x}")))
 }
 
 fn input_fact(event_ordinal: u64) -> SessionFact {

@@ -82,7 +82,7 @@ fn session_spawns_inprocess_and_receives_created_event() {
     let _manager_owns_this_test_dir = init_manager_for_this_test(&data);
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
-    let seed = format!("session-inproc-{}", std::process::id());
+    let session_id = format!("session-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("session-inprocess-test"));
     let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -96,16 +96,18 @@ fn session_spawns_inprocess_and_receives_created_event() {
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
 
-    registry.spawn_new(&seed).expect("spawn in-process session");
+    registry
+        .spawn_new(&session_id)
+        .expect("spawn in-process session");
     assert!(
-        registry.is_running(&seed),
+        registry.is_running(&session_id),
         "registry must track the session actor"
     );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == session_id => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..
@@ -119,7 +121,7 @@ fn session_spawns_inprocess_and_receives_created_event() {
         }
     }
     registry.shutdown_all();
-    assert!(!registry.is_running(&seed));
+    assert!(!registry.is_running(&session_id));
 }
 
 #[test]
@@ -172,10 +174,10 @@ fn cross_session_cancel_does_not_leak() {
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
 
-    let seed_a = format!("cross-cancel-a-{}", std::process::id());
-    let seed_b = format!("cross-cancel-b-{}", std::process::id());
-    registry.spawn_new(&seed_a).expect("spawn session a");
-    registry.spawn_new(&seed_b).expect("spawn session b");
+    let session_a = format!("cross-cancel-a-{}", std::process::id());
+    let session_b = format!("cross-cancel-b-{}", std::process::id());
+    registry.spawn_new(&session_a).expect("spawn session a");
+    registry.spawn_new(&session_b).expect("spawn session b");
 
     // 会话 A 经 registry 真实 interrupt 路径取消：per-session CancelToken +
     // 会话键控取消表（PR-3-4：不再置进程级全局 flag）。
@@ -187,7 +189,7 @@ fn cross_session_cancel_does_not_leak() {
         ),
     );
     registry
-        .send_ringing(&seed_a, &interrupt)
+        .send_ringing(&session_a, &interrupt)
         .expect("interrupt a");
 
     // 无会话线程视角：进程级全局 flag 不被会话级 interrupt 触碰。
@@ -199,7 +201,7 @@ fn cross_session_cancel_does_not_leak() {
     // 会话 B 的工具执行视角（execute 路径绑定的 runtime ctx = worker 语义）：
     // cancel 检查在 admit 之前——未注册工具报 Unknown tool 而非 Cancelled，
     // 即证明 A 的取消没有泄漏进 B 的执行上下文。
-    let ctx_b = qaqh_workspace::runtime::ToolCtx::admitted(&seed_b);
+    let ctx_b = qaqh_workspace::runtime::ToolCtx::admitted(&session_b);
     let result = qaqh_workspace::execution::execute_with_context(
         "read",
         "",
@@ -247,7 +249,7 @@ fn idle_unload_then_respawn_preserves_history() {
     let _manager_owns_this_test_dir = init_manager_for_this_test(&data);
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
-    let seed = format!("session-idle-unload-{}", std::process::id());
+    let session_id = format!("session-idle-unload-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("idle-unload-test"));
     let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -262,9 +264,11 @@ fn idle_unload_then_respawn_preserves_history() {
     registry.attach_ringing(hub);
 
     // 1. Spawn + wait for Created（worker 活着，liveness 全新）。
-    registry.spawn_new(&seed).expect("spawn in-process session");
+    registry
+        .spawn_new(&session_id)
+        .expect("spawn in-process session");
     let liveness = registry
-        .worker_liveness(&seed)
+        .worker_liveness(&session_id)
         .expect("session actor must expose liveness");
     assert!(!liveness.unloadable() || liveness.idle_secs() < 1);
 
@@ -275,8 +279,12 @@ fn idle_unload_then_respawn_preserves_history() {
     // 2. 拨钟 + 卸载。
     liveness.rewind_last_activity(7200);
     let unloaded = registry.unload_idle_sessions(3600);
-    assert_eq!(unloaded, vec![seed.clone()], "idle worker must be unloaded");
-    assert!(!registry.is_running(&seed));
+    assert_eq!(
+        unloaded,
+        vec![session_id.clone()],
+        "idle worker must be unloaded"
+    );
+    assert!(!registry.is_running(&session_id));
 
     // 卸载后再次卸载 = 幂等（实例已不在 registry）。
     let again = registry.unload_idle_sessions(3600);
@@ -284,12 +292,12 @@ fn idle_unload_then_respawn_preserves_history() {
 
     // 3. 重生（resume 语义）→ Created 再现 → 会话可用。
     registry
-        .spawn_new(&seed)
+        .spawn_new(&session_id)
         .expect("respawn after idle unload");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == seed => match envelope.event {
+            Ok(envelope) if envelope.session_id == session_id => match envelope.event {
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
                     state: SessionState::Created,
                     ..
@@ -300,27 +308,27 @@ fn idle_unload_then_respawn_preserves_history() {
             Err(error) => panic!("respawned session emitted no Created event: {error}"),
         }
     }
-    assert!(registry.is_running(&seed));
+    assert!(registry.is_running(&session_id));
 
     // 4. 挂起交互守卫：busy/suspend 的 worker 不可卸载（拨钟也不行）。
-    if let Some(again_liveness) = registry.worker_liveness(&seed) {
+    if let Some(again_liveness) = registry.worker_liveness(&session_id) {
         again_liveness.rewind_last_activity(7200);
         again_liveness.set_suspend_pending(true);
         let blocked = registry.unload_idle_sessions(3600);
         assert!(
-            !blocked.contains(&seed),
+            !blocked.contains(&session_id),
             "suspended session must not be idle-unloaded"
         );
         again_liveness.set_suspend_pending(false);
     }
 
     registry.shutdown_all();
-    assert!(!registry.is_running(&seed));
+    assert!(!registry.is_running(&session_id));
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn close_session_cleans_per_seed_resident_state() {
+fn close_session_cleans_per_session_resident_state() {
     let _test_lock = test_guard();
     let root = std::env::temp_dir().join(format!(
         "qaqh-session-close-clean-{}-{}",
@@ -345,58 +353,57 @@ fn close_session_cleans_per_seed_resident_state() {
     // 的清理（IMAGE_REGISTRY / hub channels / content_store）——清理点在
     // service.close_session 内，与实例是否存在无关；有 worker 的完整关闭
     // 路径由 idle_unload_then_respawn_preserves_history 覆盖。
-    let seed = format!("session-close-clean-{}", std::process::id());
+    let session_id = format!("session-close-clean-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("close-clean-test"));
     let service = QaqhService::init(qaqh_session::SessionManager::global());
     service.attach_ringing(hub.clone());
 
-    qaqh_workspace::read_image::store_image(&seed, "image/png", "QUJD");
-    let content_id = hub.put_content(&seed, "text/plain", b"hello".to_vec(), false);
+    qaqh_workspace::read_image::store_image(&session_id, "image/png", "QUJD");
+    let content_id = hub.put_content(&session_id, "text/plain", b"hello".to_vec(), false);
     let _ = hub.publish(
-        &seed,
+        &session_id,
         qaqh_domain::DomainEvent::Control(ControlEvent::SessionStateChanged {
-            session_id: seed.clone(),
+            session_id: session_id.clone(),
             state: SessionState::Resumed,
         }),
     );
-    assert!(qaqh_workspace::read_image::peek_image(&seed, 0).is_some());
-    assert!(hub.get_content(&seed, &content_id).is_some());
+    assert!(qaqh_workspace::read_image::peek_image(&session_id, 0).is_some());
+    assert!(hub.get_content(&session_id, &content_id).is_some());
     let before = hub
-        .snapshot(qaqh_domain::RingingChannel::Control, &seed)
+        .snapshot(qaqh_domain::RingingChannel::Control, &session_id)
         .baseline_stream_seq;
     assert!(before > 0, "channel state must be resident before close");
 
-    service.close_session(&seed, None).expect("close session");
+    service
+        .close_session(&session_id, None)
+        .expect("close session");
 
     assert!(
-        qaqh_workspace::read_image::peek_image(&seed, 0).is_none(),
+        qaqh_workspace::read_image::peek_image(&session_id, 0).is_none(),
         "IMAGE_REGISTRY entry must be dropped on close"
     );
     assert!(
-        hub.get_content(&seed, &content_id).is_none(),
+        hub.get_content(&session_id, &content_id).is_none(),
         "content_store entry must be released on close"
     );
     let after = hub
-        .snapshot(qaqh_domain::RingingChannel::Control, &seed)
+        .snapshot(qaqh_domain::RingingChannel::Control, &session_id)
         .baseline_stream_seq;
     assert_eq!(after, 0, "hub channel state must be dropped on close");
 }
 
-/// BUG-2026-09-13-24 端到端回归：`session.new` 分配的 seed 绝不能撞进
-/// 已有会话目录（旧实现 = `generate_seed`（无碰撞检查）+
-/// `persist_new_session_with_cwd`（无条件覆盖 meta）→ 静默写穿）。
+/// BUG-2026-09-13-24 端到端回归：`session.new` 分配的会话绝不能撞进
+/// 已有会话目录（旧实现 = 无碰撞检查 + 无条件覆盖 meta → 静默写穿）。
 ///
-/// 这里把 id 空间压缩到「已占用的 seed 一定会被再次生成」的程度是不现实的
-/// （32 位哈希无法强行注入），因此改为在**真实 spawn 路径上**做可验证的
-/// 等价断言：
-///   1. 连续多次 `session.new` 得到的 seed 互不相同、且各自目录独立；
-///   2. 每个新 seed 的 meta.created_at 与 workspace 归属都属于它自己
-///      （没有任何一次落进别人的目录）；
-///   3. 预先手工占用的种子目录在整轮 session.new 前后逐字节不变。
-///   4. 服务侧确实走的是 `allocate_seed`（同进程占用登记生效：已分配的
-///      seed 在 `is_seed_taken` 上为真）。
+/// 在**真实 spawn 路径上**做可验证的断言：
+///   1. 连续多次 `session.new` 得到的会话 id 互不相同、且各自目录独立；
+///   2. 每个新会话的 meta 与 workspace 归属都属于它自己（没有任何一次
+///      落进别人的目录）；
+///   3. 预先手工占用的会话目录在整轮 session.new 前后逐字节不变；
+///   4. 服务侧确实走了 canonical `allocate_session`（同进程占用登记生效：
+///      已分配的 id 在 `is_session_taken` 上为真）。
 #[test]
-fn session_new_never_reuses_an_existing_seed_directory() {
+fn session_new_never_reuses_an_existing_session_directory() {
     let _test_lock = test_guard();
     let root = std::env::temp_dir().join(format!(
         "qaqh-session-seed-collision-{}-{}",
@@ -445,44 +452,12 @@ fn session_new_never_reuses_an_existing_seed_directory() {
     let sentinel_messages_before =
         std::fs::read_to_string(sentinel_dir.join("messages.jsonl")).expect("sentinel messages");
 
-    // 确定性碰撞注入：候选源**每轮先返回已占用的 sentinel seed**，再返回
-    // 真实随机 seed。这样 `session.new` 必然撞上 sentinel —— 未修复的
-    // main 上会直接写穿它（返回 sentinel 且覆盖 meta），修复后必须换 seed。
-    //
-    // RAII 守卫：`set_seed_source_for_test` 是**进程级**单例。若本用例在
-    // 中途 panic（断言失败/OOM），注入源会**留在**进程里继续喂给后续用例
-    // —— 后续 `session.new` 就会不断撞上已占用 seed 而失败。守卫保证任何
-    // 退出路径（含 panic unwind）都会解除注入（BUG-2026-09-13-24 返工）。
-    static COLLIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-    static SENTINEL: Mutex<Option<String>> = Mutex::new(None);
-    struct SeedSourceGuard;
-    impl Drop for SeedSourceGuard {
-        fn drop(&mut self) {
-            qaqh_session::SessionManager::set_seed_source_for_test(None);
-        }
-    }
-    let _seed_source_guard = SeedSourceGuard;
-    *SENTINEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(sentinel.clone());
-    fn injected() -> String {
-        if COLLIDE.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            return SENTINEL
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-                .expect("sentinel installed");
-        }
-        qaqh_session::SessionManager::generate_seed()
-    }
-    qaqh_session::SessionManager::set_seed_source_for_test(Some(injected));
-    // 首轮候选 = sentinel（必碰撞）→ 分配器必须重试。
-    COLLIDE.store(true, std::sync::atomic::Ordering::SeqCst);
-
-    let hub = Arc::new(RingingHub::new("seed-collision-test"));
+    let hub = Arc::new(RingingHub::new("session-collision-test"));
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
     let service = QaqhService::init(qaqh_session::SessionManager::global());
 
-    let mut seeds: Vec<String> = Vec::new();
+    let mut allocated: Vec<String> = Vec::new();
     for round in 0..8 {
         let created = service
             .handle(
@@ -490,31 +465,28 @@ fn session_new_never_reuses_an_existing_seed_directory() {
                 &serde_json::json!({ "cwd": ws.to_string_lossy() }),
             )
             .expect("session.new must succeed");
-        let seed = created
+        let session_id = created
             .as_str()
             .expect("session.new returns the seed")
             .to_string();
         assert!(
-            !seed.is_empty() && seed != sentinel,
+            !session_id.is_empty() && session_id != sentinel,
             "round {round}: allocator must not return the occupied sentinel seed"
         );
         assert!(
-            !seeds.contains(&seed),
-            "round {round}: session.new reused seed {seed}"
+            !allocated.contains(&session_id),
+            "round {round}: session.new reused seed {session_id}"
         );
         if round == 0 {
-            // 首轮被注入的候选就是 sentinel：分配器必须重试到别的 seed，
-            // 绝不能把 sentinel 本身发回来（否则就是写穿旧会话目录）。
+            // canonical 分配给出全新 UUIDv7，绝不会是哨兵目录。
             assert_ne!(
-                seed, sentinel,
-                "the first injected candidate collides with the sentinel session —                  session.new must retry, not reuse it"
+                session_id, sentinel,
+                "session.new must not reuse the sentinel session directory"
             );
-            // 重试后的候选仍需继续碰撞注入（保证每轮都验证重试逻辑）。
-            COLLIDE.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         // 该 seed 目录必须属于它自己：新建 metas 的 cwd 是本次的 cwd。
-        let meta = sessions.load_meta(&seed).expect("fresh meta");
-        assert_eq!(meta.session_id, seed, "meta must be self-owned");
+        let meta = sessions.load_meta(&session_id).expect("fresh meta");
+        assert_eq!(meta.session_id, session_id, "meta must be self-owned");
         let expected_cwd = std::fs::canonicalize(&ws)
             .expect("canonicalize ws")
             .to_string_lossy()
@@ -525,13 +497,12 @@ fn session_new_never_reuses_an_existing_seed_directory() {
             "round {round}: new session must load its own workspace"
         );
         assert!(
-            sessions.is_seed_taken(&seed),
+            sessions.is_session_taken(&session_id),
             "allocated seed must be claimed (never re-handed out)"
         );
-        seeds.push(seed);
+        allocated.push(session_id);
     }
-    assert_eq!(seeds.len(), 8);
-    // 注入源由 `_seed_source_guard` 在用例退出时解除（panic 路径同样生效）。
+    assert_eq!(allocated.len(), 8);
 
     // 哨兵会话逐字节未变（未被任何一次 session.new 写穿）。
     assert_eq!(

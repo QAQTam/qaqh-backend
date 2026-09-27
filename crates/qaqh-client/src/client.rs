@@ -144,7 +144,7 @@ pub(crate) struct ClientInner {
     /// Seeds this client has attached (BUG-2026-09-12-10): replayed after a
     /// lease re-negotiation so seed-scoped reads do not 401 with the new
     /// client_session_id.
-    attached_seeds: Mutex<HashSet<String>>,
+    attached_sessions: Mutex<HashSet<String>>,
 }
 
 /// Bookkeeping for the currently activated timeline stream.
@@ -240,7 +240,7 @@ impl Client {
                 tasks,
                 timeline: Mutex::new(HashMap::new()),
                 v2_streams: Mutex::new(HashMap::new()),
-                attached_seeds: Mutex::new(HashSet::new()),
+                attached_sessions: Mutex::new(HashSet::new()),
             }),
         };
 
@@ -270,17 +270,17 @@ impl Client {
                         }
                         _ = stop.changed() => return,
                     }
-                    let seeds: Vec<String> = {
-                        let guard = client.inner.attached_seeds.lock().await;
+                    let sessions: Vec<String> = {
+                        let guard = client.inner.attached_sessions.lock().await;
                         guard.iter().cloned().collect()
                     };
-                    for seed in seeds {
-                        match client.attach(&seed).await {
+                    for session_id in sessions {
+                        match client.attach(&session_id).await {
                             Ok(_) => log::info!(
-                                "[qaqh-client] re-attached {seed} after lease re-negotiation"
+                                "[qaqh-client] re-attached {session_id} after lease re-negotiation"
                             ),
                             Err(err) => log::warn!(
-                                "[qaqh-client] re-attach {seed} failed: {err}; will retry on next re-negotiation"
+                                "[qaqh-client] re-attach {session_id} failed: {err}; will retry on next re-negotiation"
                             ),
                         }
                     }
@@ -329,14 +329,14 @@ impl Client {
     /// duplicate the channel tag.
     pub async fn send_command(
         &self,
-        seed: Option<&str>,
+        session_id: Option<&str>,
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingCommandAck> {
         // 纯 v2：命令面只有 v2 一条路径（`send_command_v2_typed` 是带 typed
         // `existing` 的入口，这里投影回 v1 形状保持既有壳层 API）。
         Ok(self
-            .send_command_v2_typed(seed, command, options)
+            .send_command_v2_typed(session_id, command, options)
             .await?
             .into_v1())
     }
@@ -374,8 +374,8 @@ impl Client {
     /// 2026-09-24 硬切：v1 `/ringing/v1/…/bootstrap` 已删除，本方法直接走 v2
     /// 三频道 typed 快照（`control` / `conversation` / `tool`）。返回类型从
     /// v1 的 `RingingSessionBootstrap` 换成 [`crate::ClientV2Bootstrap`]。
-    pub async fn bootstrap(&self, seed: &str) -> Result<crate::ClientV2Bootstrap> {
-        self.bootstrap_v2(seed).await
+    pub async fn bootstrap(&self, session_id: &str) -> Result<crate::ClientV2Bootstrap> {
+        self.bootstrap_v2(session_id).await
     }
 
     /// Execute a closed, typed auxiliary action (Write 类服务方法)。Method
@@ -431,12 +431,12 @@ impl Client {
     /// ownership so subsequent seed-scoped commands are accepted). The seed
     /// is carried both in the envelope and in the command body (validate
     /// requires a non-empty envelope seed for every command except create).
-    pub async fn attach(&self, seed: &str) -> Result<RingingCommandAck> {
+    pub async fn attach(&self, session_id: &str) -> Result<RingingCommandAck> {
         let ack = self
             .send_command(
-                Some(seed),
+                Some(session_id),
                 RingingCommand::Control(ControlCommand::SessionResume {
-                    session_id: seed.to_string(),
+                    session_id: session_id.to_string(),
                 }),
                 CommandOptions::default(),
             )
@@ -444,10 +444,10 @@ impl Client {
         if ack.status == RingingCommandAckStatus::Accepted {
             // BUG-2026-09-12-10：记录归属，供租约重新协商后重放 attach。
             self.inner
-                .attached_seeds
+                .attached_sessions
                 .lock()
                 .await
-                .insert(seed.to_string());
+                .insert(session_id.to_string());
         }
         Ok(ack)
     }
@@ -472,21 +472,22 @@ impl Client {
     /// 又只是消息池内下标——两者都当不了稳定游标。
     pub async fn fetch_timeline_page(
         &self,
-        seed: &str,
+        session_id: &str,
         before_index: Option<u64>,
         limit: Option<u32>,
     ) -> Result<TimelinePage> {
-        self.get_timeline_page(seed, before_index, limit).await
+        self.get_timeline_page(session_id, before_index, limit)
+            .await
     }
 
     /// GET `/ringing/v2/sessions/{seed}/timeline` + typed protocol validation.
     async fn get_timeline_page(
         &self,
-        seed: &str,
+        session_id: &str,
         before_index: Option<u64>,
         limit: Option<u32>,
     ) -> Result<TimelinePage> {
-        if seed.is_empty() {
+        if session_id.is_empty() {
             return Err(ClientError::Negotiation("seed is required".into()));
         }
         let state = self
@@ -495,7 +496,7 @@ impl Client {
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let path = format!("/ringing/v2/sessions/{seed}/timeline");
+        let path = format!("/ringing/v2/sessions/{session_id}/timeline");
         let mut request = self
             .inner
             .http
@@ -516,7 +517,8 @@ impl Client {
             });
         }
         let page: TimelinePage = response.json().await?;
-        page.validate_for(seed).map_err(ClientError::Protocol)?;
+        page.validate_for(session_id)
+            .map_err(ClientError::Protocol)?;
         Ok(page)
     }
 
@@ -533,24 +535,24 @@ impl Client {
     /// concurrent timelines as they track; a shell that shows one transcript at
     /// a time simply calls this for the newly focused seed and
     /// [`Self::deactivate_timeline`] for the one it left.
-    pub async fn activate_timeline(&self, seed: &str) -> Result<TimelinePage> {
-        let page = self.get_timeline_page(seed, None, None).await?;
+    pub async fn activate_timeline(&self, session_id: &str) -> Result<TimelinePage> {
+        let page = self.get_timeline_page(session_id, None, None).await?;
         let watermark = page.snapshot.watermark;
 
         // Replace this seed's previous stream only.
         let mut guard = self.inner.timeline.lock().await;
-        if let Some(prev) = guard.remove(seed) {
+        if let Some(prev) = guard.remove(session_id) {
             let _ = prev.stop_tx.send(true);
             let _ = prev.status.send_replace(Some(TimelineStatus::Closed {
-                session_id: seed.to_string(),
+                session_id: session_id.to_string(),
                 reason: "re-activated".into(),
             }));
         }
         let (stop_tx, stop_rx) = watch::channel(false);
         let (status_tx, _status_rx) = watch::channel(None);
-        let seed_owned = seed.to_string();
+        let session_owned = session_id.to_string();
         let mut stream = TimelineStream::new(
-            seed_owned.clone(),
+            session_owned.clone(),
             self.inner.http.clone(),
             self.inner.session.clone(),
             self.inner.handlers.on_timeline_entry.clone(),
@@ -565,13 +567,13 @@ impl Client {
         let task = tokio::spawn(async move {
             stream.run(stop_rx, session_stop).await;
             let _ = task_status_tx.send_replace(Some(TimelineStatus::Closed {
-                session_id: seed_owned,
+                session_id: session_owned,
                 reason: "stream ended".into(),
             }));
         });
         self.push_task(task).await;
         guard.insert(
-            seed.to_string(),
+            session_id.to_string(),
             TimelineHandle {
                 stop_tx,
                 status: status_tx,
@@ -585,14 +587,14 @@ impl Client {
         (self.inner.handlers.on_timeline_snapshot)(page.clone());
         // 同一时刻起 canonical v2 单流：投影事件（control/conversation/meta/…）
         // 只从它来，v1 三频道流已删除。
-        self.start_v2_stream(seed).await;
+        self.start_v2_stream(session_id).await;
         Ok(page)
     }
 
     /// 启动（或替换）一条 seed 的 canonical v2 单流。`activate_timeline` 调用。
-    async fn start_v2_stream(&self, seed: &str) {
+    async fn start_v2_stream(&self, session_id: &str) {
         let mut guard = self.inner.v2_streams.lock().await;
-        if let Some(prev) = guard.remove(seed) {
+        if let Some(prev) = guard.remove(session_id) {
             let _ = prev.stop_tx.send(true);
         }
         let handlers = V2StreamHandlers {
@@ -602,35 +604,37 @@ impl Client {
             on_liveness: self.inner.handlers.on_liveness.clone(),
         };
         let (stop_tx, stop_rx) = watch::channel(false);
-        let mut stream = V2Stream::new(seed.to_string(), self.clone(), handlers);
+        let mut stream = V2Stream::new(session_id.to_string(), self.clone(), handlers);
         let session_stop = self.inner.stop_tx.subscribe();
         let task = tokio::spawn(async move {
             stream.run(stop_rx, session_stop).await;
         });
         self.push_task(task).await;
-        guard.insert(seed.to_string(), V2StreamHandle { stop_tx });
+        guard.insert(session_id.to_string(), V2StreamHandle { stop_tx });
     }
 
     /// Stop the timeline stream for one seed (no-op when not active). The other
     /// seeds' streams are untouched.
-    pub async fn deactivate_timeline(&self, seed: &str) {
-        let handle = self.inner.timeline.lock().await.remove(seed);
+    pub async fn deactivate_timeline(&self, session_id: &str) {
+        let handle = self.inner.timeline.lock().await.remove(session_id);
         if let Some(handle) = handle {
             let _ = handle.stop_tx.send(true);
             let _ = handle.status.send_replace(Some(TimelineStatus::Closed {
-                session_id: seed.to_string(),
+                session_id: session_id.to_string(),
                 reason: "deactivated".into(),
             }));
         }
-        if let Some(handle) = self.inner.v2_streams.lock().await.remove(seed) {
+        if let Some(handle) = self.inner.v2_streams.lock().await.remove(session_id) {
             let _ = handle.stop_tx.send(true);
         }
     }
 
     /// Timeline connection status for one seed (`None` when never activated).
-    pub async fn timeline_status_for(&self, seed: &str) -> Option<TimelineStatus> {
+    pub async fn timeline_status_for(&self, session_id: &str) -> Option<TimelineStatus> {
         let guard = self.inner.timeline.lock().await;
-        guard.get(seed).and_then(|h| h.status.borrow().clone())
+        guard
+            .get(session_id)
+            .and_then(|h| h.status.borrow().clone())
     }
 
     /// Seeds with an active timeline stream, in unspecified order.
@@ -701,12 +705,13 @@ impl Client {
     /// content reference.
     ///
     /// Hand-rolled multipart/form-data（daemon 受限解析只认
-    /// `seed` / `media_type` / `content` 三字段，见 `handle_content_upload`）；
+    /// `session_id` / `media_type` / `content` 三字段，见 `handle_content_upload`；
+    /// legacy `seed` 字段仍被兼容读取）；
     /// 返回的 `ContentRef` 可放入 `conversation_send_message` 的
     /// `attachments`（命令中不允许出现本地路径）。失败调用方自行记录。
     pub async fn upload_content(
         &self,
-        seed: &str,
+        session_id: &str,
         media_type: &str,
         data: Vec<u8>,
     ) -> Result<ContentRef> {
@@ -720,7 +725,7 @@ impl Client {
             body.extend_from_slice(value);
             body.extend_from_slice(b"\r\n");
         };
-        push_field("seed", seed.as_bytes());
+        push_field("session_id", session_id.as_bytes());
         push_field("media_type", media_type.as_bytes());
         push_field("content", &data);
         body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());

@@ -52,7 +52,7 @@ fn freeze(context: &[Message]) -> Vec<String> {
 /// 注意不要手动 push_system：`create_session` 已预置 backend prompt（lifecycle.rs:268），
 /// 而 resume 重放时 `from_messages` 会丢弃第一条之后的非保护 system 消息
 /// （store.rs:1155-1182 的历史 bug 防护）——多 push 的 system 会在恢复后消失。
-fn seed_turn_1(agent: &mut AgentState) {
+fn session_turn_1(agent: &mut AgentState) {
     agent.msg.push_user("hello, look up the deploy color");
     let assistant = Message {
         msg_id: None,
@@ -75,14 +75,14 @@ fn seed_turn_1(agent: &mut AgentState) {
 }
 
 /// 一个"生命周期"：等价于 daemon 重启后 resume 指定会话。
-fn resume_agent(root: &PathBuf, ws: &str, seed: &str) -> AgentState {
+fn resume_agent(root: &PathBuf, ws: &str, session_id: &str) -> AgentState {
     unsafe { std::env::set_var("QAQH_DATA_DIR", root) };
     let mut agent = AgentState::init("restart-prefix-cache-test", Config::default());
     agent.ephemeral = false; // 必须走真实磁盘持久化
     qaqh_workspace::set_workspace(ws);
     assert!(
-        init_session(&mut agent, Some(seed)),
-        "resume must succeed for seed {seed}"
+        init_session(&mut agent, Some(session_id)),
+        "resume must succeed for seed {session_id}"
     );
     agent
 }
@@ -118,8 +118,8 @@ fn prefix_cache_consistency_across_restarts() {
     // ════ 场景 A：多次重启，无追加 → 上下文逐字节复现 ════
     {
         let mut agent = create_agent(&root, &ws);
-        let seed = agent.session.session_id.clone();
-        seed_turn_1(&mut agent);
+        let session_id = agent.session.session_id.clone();
+        session_turn_1(&mut agent);
         // build_context 生成并冻结 [Environment] annotation；
         // flush_meta 把 pending_save 缓冲转为 PersistOp（真实循环中由
         // engine_turn.rs:1026 每回合调用）；drain_persist_ops 统一落盘
@@ -139,7 +139,7 @@ fn prefix_cache_consistency_across_restarts() {
 
         // ── 重启 #1 ──
         drop(agent);
-        let mut agent = resume_agent(&root, &ws, &seed);
+        let mut agent = resume_agent(&root, &ws, &session_id);
         let after1 = freeze(&agent.build_context());
         assert_eq!(
             baseline, after1,
@@ -152,19 +152,19 @@ fn prefix_cache_consistency_across_restarts() {
 
         // ── 重启 #2：确认稳定性不是巧合 ──
         drop(agent);
-        let mut agent = resume_agent(&root, &ws, &seed);
+        let mut agent = resume_agent(&root, &ws, &session_id);
         let after2 = freeze(&agent.build_context());
         assert_eq!(baseline, after2, "restart #2 must also be byte-identical");
 
         drop(agent);
-        let _ = qaqh_session::SessionManager::global().delete(&seed);
+        let _ = qaqh_session::SessionManager::global().delete(&session_id);
     }
 
     // ════ 场景 B：重启后追加新回合 → 前缀字节不变 + 仅尾部增长 ════
     {
         let mut agent = create_agent(&root, &ws);
-        let seed = agent.session.session_id.clone();
-        seed_turn_1(&mut agent);
+        let session_id = agent.session.session_id.clone();
+        session_turn_1(&mut agent);
         agent.build_context();
         agent
             .msg
@@ -175,7 +175,7 @@ fn prefix_cache_consistency_across_restarts() {
 
         // ── 重启后追加第二个回合 ──
         drop(agent);
-        let mut agent = resume_agent(&root, &ws, &seed);
+        let mut agent = resume_agent(&root, &ws, &session_id);
         let after_restart = freeze(&agent.build_context());
         assert_eq!(before, after_restart, "resume must not mutate the prefix");
 
@@ -204,7 +204,7 @@ fn prefix_cache_consistency_across_restarts() {
 
         // ── 再次重启：追加后的上下文同样逐字节复现 ──
         drop(agent);
-        let mut agent = resume_agent(&root, &ws, &seed);
+        let mut agent = resume_agent(&root, &ws, &session_id);
         let final_snapshot = freeze(&agent.build_context());
         assert_eq!(
             grown, final_snapshot,
@@ -212,13 +212,13 @@ fn prefix_cache_consistency_across_restarts() {
         );
 
         drop(agent);
-        let _ = qaqh_session::SessionManager::global().delete(&seed);
+        let _ = qaqh_session::SessionManager::global().delete(&session_id);
     }
 
     // ════ 场景 C：中断恢复（孤儿 tool_use）→ 修复一次，其后稳定 ════
     {
         let mut agent = create_agent(&root, &ws);
-        let seed = agent.session.session_id.clone();
+        let session_id = agent.session.session_id.clone();
         agent.msg.push_user("run the tool");
         let assistant = Message {
             msg_id: None,
@@ -241,7 +241,7 @@ fn prefix_cache_consistency_across_restarts() {
         let baseline = freeze(&agent.build_context());
 
         drop(agent);
-        let mut agent = resume_agent(&root, &ws, &seed);
+        let mut agent = resume_agent(&root, &ws, &session_id);
         // [RESTORE] 修复是**有意的恢复语义**：把丢失的结果物化为失败占位，
         // 因此此处不要求与崩溃前逐字节一致；要求的是：
         // 1) 修复不增删消息数量；
@@ -265,7 +265,7 @@ fn prefix_cache_consistency_across_restarts() {
         );
 
         drop(agent);
-        let mut agent = resume_agent(&root, &ws, &seed);
+        let mut agent = resume_agent(&root, &ws, &session_id);
         let after_second_restart = freeze(&agent.build_context());
         assert_eq!(
             stabilized, after_second_restart,
@@ -273,7 +273,7 @@ fn prefix_cache_consistency_across_restarts() {
         );
 
         drop(agent);
-        let _ = qaqh_session::SessionManager::global().delete(&seed);
+        let _ = qaqh_session::SessionManager::global().delete(&session_id);
     }
 
     let _ = std::fs::remove_dir_all(root);

@@ -25,7 +25,7 @@ fn permission_request_ref_matches_interaction_body_content_id() {
     }
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
 
-    let seed = "permission-body-content-id";
+    let session_id = "permission-body-content-id";
     let wire_turn = "turn-perm-body";
     let wire_call = "call-perm-body";
     let paths = vec!["/tmp/x".to_string()];
@@ -41,7 +41,7 @@ fn permission_request_ref_matches_interaction_body_content_id() {
     );
 
     let mut agent = AgentState::init("perm-body-test", qaqh_config::Config::default());
-    agent.session.session_id = seed.to_string();
+    agent.session.session_id = session_id.to_string();
     agent.ephemeral = false;
 
     let mut engine = TurnEngine::new();
@@ -55,7 +55,7 @@ fn permission_request_ref_matches_interaction_body_content_id() {
     )
     .expect("persist permission yield");
 
-    let session_dir = qaqh_types::platform::sessions_dir().join(seed);
+    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
     let identity = CanonicalSessionIdentity::open_or_create(&session_dir).expect("identity");
     let facts = CommittedFactReader::open(
         &session_dir,
@@ -92,7 +92,7 @@ fn permission_request_ref_matches_interaction_body_content_id() {
         format!("int_{}", qaqh_session::canonical::ulid_from_text(wire_call));
     let stored_id = hub
         .put_interaction_content(
-            seed,
+            session_id,
             &canonical_interaction_id,
             interaction_body::INTERACTION_BODY_MEDIA_TYPE,
             body.clone(),
@@ -102,7 +102,7 @@ fn permission_request_ref_matches_interaction_body_content_id() {
     let entry = hub
         .get_content_any(&expected_id)
         .expect("ref resolves to stored body");
-    assert_eq!(entry.owners, vec![seed.to_string()]);
+    assert_eq!(entry.owners, vec![session_id.to_string()]);
     assert_eq!(entry.bytes, body);
     assert!(
         entry.pinned,

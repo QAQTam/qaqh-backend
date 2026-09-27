@@ -314,10 +314,11 @@ impl CanonicalLog {
         })
     }
 
-    /// Rotate writer ownership during migration/cutover.
+    /// 夺取 writer 所有权：epoch 与 token 必须**双双递增**，否则拒绝。
     ///
-    /// This is the S3 CAS barrier: epoch and token must both advance, and the
-    /// previous writer's next append fails with `stale_writer`.
+    /// 用途是回收陈旧 writer——daemon 启动时若发现上一个进程留下的 fence
+    /// 已过期（见 `qaqh-daemon/src/server.rs` 的启动轮转），用本方法递增
+    /// epoch/token 接管；旧 writer 的下一次 append 会拿到 `stale_writer`。
     pub fn rotate_writer_fence(
         &mut self,
         writer_id: WriterId,

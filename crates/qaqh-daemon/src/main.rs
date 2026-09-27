@@ -269,10 +269,10 @@ fn todo_cli(args: &[String]) -> i32 {
     };
 
     // ── seed 解析：显式 --seed 优先；缺省时唯一会话自动取用 ──
-    let seed = match opt("seed") {
-        Some(seed) => seed,
-        None => match auto_discover_seed(&discovery) {
-            Ok(seed) => seed,
+    let session_id = match opt("seed") {
+        Some(session_id) => session_id,
+        None => match auto_discover_session(&discovery) {
+            Ok(session_id) => session_id,
             Err(error) => {
                 eprintln!("todo: {error}");
                 eprintln!(
@@ -285,11 +285,11 @@ fn todo_cli(args: &[String]) -> i32 {
 
     match action {
         "list" => {
-            let mut params = serde_json::json!({ "seed": seed });
+            let mut params = serde_json::json!({ "session_id": session_id });
             if let Some(status) = opt("status") {
                 params["status"] = serde_json::Value::String(status);
             }
-            run_service_call(&discovery, &seed, "todo.list", &params)
+            run_service_call(&discovery, &session_id, "todo.list", &params)
         }
         "set" => {
             let params = match opt("json") {
@@ -305,11 +305,11 @@ fn todo_cli(args: &[String]) -> i32 {
                             return 2;
                         }
                     };
-                    value["seed"] = serde_json::Value::String(seed.clone());
+                    value["session_id"] = serde_json::Value::String(session_id.clone());
                     value
                 }
                 None => {
-                    let mut params = serde_json::json!({ "seed": seed });
+                    let mut params = serde_json::json!({ "session_id": session_id });
                     if let Some(id) = opt("id") {
                         params["id"] = serde_json::Value::String(id);
                     }
@@ -341,7 +341,7 @@ fn todo_cli(args: &[String]) -> i32 {
                     params
                 }
             };
-            run_service_call(&discovery, &seed, "todo.set", &params)
+            run_service_call(&discovery, &session_id, "todo.set", &params)
         }
         other => {
             eprintln!("todo: unknown action {other}; expected list or set");
@@ -352,7 +352,7 @@ fn todo_cli(args: &[String]) -> i32 {
 
 /// 缺省 --seed 时：session.list 只返回一个会话则自动取用（多/零会话报错，
 /// 绝不静默猜测写错会话的 todo.json）。
-fn auto_discover_seed(discovery: &qaqh_types::DaemonDiscovery) -> Result<String, String> {
+fn auto_discover_session(discovery: &qaqh_types::DaemonDiscovery) -> Result<String, String> {
     // 纯 v2：先开 lease（v2 open 不再接受 attach_seed），再走 v2 service。
     let instance_id = cli_instance_id();
     let session_id = open_lease(discovery, &instance_id)?;
@@ -365,16 +365,11 @@ fn auto_discover_seed(discovery: &qaqh_types::DaemonDiscovery) -> Result<String,
     let Some(entries) = sessions.as_array() else {
         return Err("session.list returned unexpected payload".into());
     };
-    let seeds: Vec<&str> = entries
+    let sessions: Vec<&str> = entries
         .iter()
-        .filter_map(|entry| {
-            entry
-                .get("session_id")
-                .or_else(|| entry.get("seed"))
-                .and_then(|v| v.as_str())
-        })
+        .filter_map(|entry| entry.get("session_id").and_then(|v| v.as_str()))
         .collect();
-    match seeds.as_slice() {
+    match sessions.as_slice() {
         [only] => Ok((*only).to_string()),
         [] => Err("no sessions exist yet".into()),
         many => Err(format!(
@@ -422,27 +417,27 @@ fn open_lease(
 }
 
 /// v2 open 没有 attach_seed：用 control 命令建立 seed 归属。
-fn attach_seed(
+fn attach_session(
     discovery: &qaqh_types::DaemonDiscovery,
     instance_id: &str,
+    client_session_id: &str,
     session_id: &str,
-    seed: &str,
 ) -> Result<(), String> {
     let body = serde_json::json!({
         "schema": qaqh_ringing::protocol::RINGING_SCHEMA,
         "version": qaqh_ringing::RINGING_V2_VERSION,
         "channel": "control",
-        "command_id": format!("cli-attach-{}-{seed}", cli_instance_id()),
+        "command_id": format!("cli-attach-{}-{session_id}", cli_instance_id()),
         "client_instance_id": instance_id,
-        "client_session_id": session_id,
-        "seed": seed,
-        "command": {"channel": "control", "type": "session_attach", "seed": seed},
+        "client_session_id": client_session_id,
+        "session_id": session_id,
+        "command": {"channel": "control", "type": "session_attach", "session_id": session_id},
     });
     let (status, response) = http_post_json(
         discovery,
         "/ringing/v2/commands/control",
         &body,
-        Some(session_id),
+        Some(client_session_id),
     )?;
     if !(200..300).contains(&status) {
         return Err(format!(
@@ -455,25 +450,25 @@ fn attach_seed(
 /// v2 open lease → attach seed → 调 service 方法 → 打印结果。
 fn run_service_call(
     discovery: &qaqh_types::DaemonDiscovery,
-    seed: &str,
+    session_id: &str,
     method: &str,
     params: &serde_json::Value,
 ) -> i32 {
     let instance_id = cli_instance_id();
-    let session_id = match open_lease(discovery, &instance_id) {
+    let client_session_id = match open_lease(discovery, &instance_id) {
         Ok(session_id) => session_id,
         Err(error) => {
             eprintln!("todo: lease open failed: {error}");
             return 1;
         }
     };
-    if let Err(error) = attach_seed(discovery, &instance_id, &session_id, seed) {
+    if let Err(error) = attach_session(discovery, &instance_id, &client_session_id, session_id) {
         eprintln!("todo: {error}");
         return 1;
     }
 
     let path = format!("/ringing/v2/service/{method}");
-    match http_post_json(discovery, &path, params, Some(&session_id)) {
+    match http_post_json(discovery, &path, params, Some(&client_session_id)) {
         Ok((status, body)) if (200..300).contains(&status) => {
             println!(
                 "{}",

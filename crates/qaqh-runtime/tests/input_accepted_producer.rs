@@ -17,8 +17,8 @@ use qaqh_session::session_fact_v2::{
     ActorKind, FactPayload, InputKind, InputPurpose, InterAgentContent, MailboxMessageState,
 };
 
-fn send_cmd(cmd_tx: &mpsc::SyncSender<WorkerCommand>, seed: &str, command: RingingCommand) {
-    let env = RingingWorkerCommandEnvelope::new(seed, "input-accepted-test", command);
+fn send_cmd(cmd_tx: &mpsc::SyncSender<WorkerCommand>, session_id: &str, command: RingingCommand) {
+    let env = RingingWorkerCommandEnvelope::new(session_id, "input-accepted-test", command);
     cmd_tx
         .send(WorkerCommand {
             frame: env,
@@ -91,7 +91,7 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
                 custom_tools: Vec::new(),
             }),
         );
-        let seed = match expect(&event_rx, Duration::from_secs(10), |event| {
+        let session_id = match expect(&event_rx, Duration::from_secs(10), |event| {
             matches!(
                 event,
                 RingingEvent::Control(ControlEvent::SessionStateChanged {
@@ -108,7 +108,7 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
 
         send_cmd(
             &cmd_tx,
-            &seed,
+            &session_id,
             RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                 text: "canonical input".into(),
                 images: vec![],
@@ -122,7 +122,7 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
         );
         send_cmd(
             &cmd_tx,
-            &seed,
+            &session_id,
             RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                 text: oversized_inter_agent_for_thread,
                 images: vec![],
@@ -132,7 +132,7 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
                 as_system: false,
                 inter_agent: Some(InterAgentEnvelope {
                     message_id: inter_agent_message_id.into(),
-                    root_session_id: seed.clone(),
+                    root_session_id: session_id.clone(),
                     author: "/root".into(),
                     recipient: "/root/review".into(),
                     other_recipients: vec![],
@@ -147,10 +147,10 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
         );
         send_cmd(
             &cmd_tx,
-            &seed,
+            &session_id,
             RingingCommand::Control(ControlCommand::SessionShutdown),
         );
-        seed
+        session_id
     });
 
     let mut lp = Loop::from_channels(
@@ -164,10 +164,10 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
     );
     lp.run();
 
-    let seed = driver.join().expect("driver thread");
+    let session_id = driver.join().expect("driver thread");
     reader.join().expect("reader thread");
 
-    let session_dir = qaqh_types::platform::sessions_dir().join(&seed);
+    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     let identity = CanonicalSessionIdentity::open(&session_dir).expect("canonical identity");
     let facts = CommittedFactReader::open(
         &session_dir,

@@ -497,7 +497,7 @@ pub(crate) fn gate_request(
                     if !ctx.agent.ephemeral {
                         ctx.agent.enqueue_meta_op(
                             crate::agent::state::agent::MetaOp::PersistUsage {
-                                seed: ctx.agent.session.session_id.clone(),
+                                session_id: ctx.agent.session.session_id.clone(),
                                 totals: ctx.agent.session.usage_totals.clone(),
                                 last_usage: ctx.agent.session.last_usage.clone(),
                                 requests: ctx.agent.session.usage_requests,

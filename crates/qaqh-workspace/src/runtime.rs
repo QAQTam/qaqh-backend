@@ -390,12 +390,12 @@ impl Drop for ActorToolScopeGuard {
 
 /// Initialize the process-global tool manager.
 pub fn init_tools(
-    session_seed: &str,
+    session_id: &str,
     extra_registrars: &[crate::registration::ToolRegistrar],
     allowed_tools: Vec<String>,
 ) {
     let mut manager = crate::registration::build_tool_manager(extra_registrars);
-    manager.apply_init(allowed_tools, session_seed);
+    manager.apply_init(allowed_tools, session_id);
     let _ = TOOL_MANAGER.set(Mutex::new(manager));
     crate::file_cache::clear();
     crate::file_state::clear();
