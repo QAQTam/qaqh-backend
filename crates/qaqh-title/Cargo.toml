@@ -1,0 +1,15 @@
+[package]
+name = "qaqh-title"
+version.workspace = true
+edition.workspace = true
+description = "Session title generation: fallback truncation and LLM summary task"
+
+[dependencies]
+qaqh-gate = { path = "../qaqh-gate" }
+qaqh-message = { path = "../qaqh-message" }
+qaqh-session = { path = "../qaqh-session" }
+qaqh-types = { path = "../qaqh-types" }
+log = "0.4"
+
+[lints]
+workspace = true

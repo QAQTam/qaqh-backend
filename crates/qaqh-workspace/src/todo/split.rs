@@ -126,7 +126,7 @@ pub(crate) fn todo_write_schema() -> Value {
                     "properties": {
                         "id": {"type": ["string", "integer"], "description": "Existing T<n> to keep/update this task; omit to assign a new one."},
                         "title": {"type": "string", "description": "Task title (1-100 chars)."},
-                        "status": {"type": "string", "enum": ["idle", "in_progress", "completed", "cancelled"], "description": "Exactly one item should be in_progress while working."},
+                        "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Exactly one item should be in_progress while working."},
                         "description": {"type": "string", "description": "Optional context (<=200 chars)."},
                         "evidence": {"type": "string", "description": "Completion evidence (for completed items)."}
                     },
@@ -146,7 +146,7 @@ pub(crate) fn todo_update_schema() -> Value {
         "type": "object",
         "properties": {
             "id": {"type": ["string", "integer"], "description": "Target ID (e.g. T1)."},
-            "status": {"type": "string", "enum": ["idle", "in_progress", "completed", "cancelled"], "description": "Target status."},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Target status."},
             "evidence": {"type": "string", "description": "Completion summary (required when completed)."}
         },
         "required": ["id", "status"],
@@ -158,7 +158,7 @@ pub(crate) fn todo_list_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "status": {"type": "string", "enum": ["idle", "in_progress", "completed", "cancelled"], "description": "Optional filter."}
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Optional filter."}
         },
         "additionalProperties": false
     })

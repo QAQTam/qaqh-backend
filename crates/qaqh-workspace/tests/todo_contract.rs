@@ -68,7 +68,7 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
     assert_eq!(write_item["required"], json!(["title", "status"]));
     assert_eq!(
         write_item["properties"]["status"]["enum"],
-        json!(["idle", "in_progress", "completed", "cancelled"])
+        json!(["pending", "in_progress", "completed", "cancelled"])
     );
     assert!(write_item["properties"]["id"].is_object());
     assert!(write_item["properties"]["evidence"].is_object());
@@ -90,7 +90,7 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
     );
     assert_eq!(
         update.function.parameters["properties"]["status"]["enum"],
-        json!(["idle", "in_progress", "completed", "cancelled"])
+        json!(["pending", "in_progress", "completed", "cancelled"])
     );
     assert_eq!(
         update.function.parameters["additionalProperties"],
@@ -104,7 +104,7 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
     );
     assert_eq!(
         list.function.parameters["properties"]["status"]["enum"],
-        json!(["idle", "in_progress", "completed", "cancelled"])
+        json!(["pending", "in_progress", "completed", "cancelled"])
     );
 }
 
@@ -153,10 +153,10 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         "todo_write",
         "",
         &serde_json::json!({"items": [
-            {"title": "Working", "description": "item 0", "status": "idle"},
-            {"title": "Done", "description": "item 1", "status": "idle"},
-            {"title": "Cancelled", "description": "item 2", "status": "idle"},
-            {"title": "Waiting", "description": "item 3", "status": "idle"}
+            {"title": "Working", "description": "item 0", "status": "pending"},
+            {"title": "Done", "description": "item 1", "status": "pending"},
+            {"title": "Cancelled", "description": "item 2", "status": "pending"},
+            {"title": "Waiting", "description": "item 3", "status": "pending"}
         ]})
         .to_string(),
         "todo-create",
@@ -244,11 +244,11 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(list_json["counts"]["in_progress"], 1);
     assert_eq!(list_json["counts"]["completed"], 1);
     assert_eq!(list_json["counts"]["cancelled"], 1);
-    assert_eq!(list_json["counts"]["idle"], 1);
+    assert_eq!(list_json["counts"]["pending"], 1);
     assert_eq!(list_json["items"][0]["id"], "T1");
     assert_eq!(list_json["items"][1]["status"], "completed");
     assert_eq!(list_json["items"][1]["evidence"], "verified");
-    assert_eq!(list_json["items"][3]["status"], "idle");
+    assert_eq!(list_json["items"][3]["status"], "pending");
     assert_eq!(list.result.data["counts"]["total"], 4);
     assert_eq!(
         qaqh_workspace::runtime::project_tool_display_from_result(
@@ -268,7 +268,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["mode"], "manual");
     assert_eq!(status["current_id"], "T1");
     assert_eq!(status["current_title"], "Working");
-    assert_eq!(status["idle"], 1);
+    assert_eq!(status["pending"], 1);
     assert_eq!(status["pending"], 1);
     assert_eq!(status["in_progress"], 1);
     assert_eq!(status["completed"], 1);

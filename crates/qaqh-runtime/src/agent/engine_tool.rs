@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::approval_registry::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
+use qaqh_policy::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 use super::dashboard;
 use super::tool_runtime::{ToolRunOutcome, ToolRuntime};
 use crate::agent::state::agent::PendingApproval;
@@ -328,7 +328,11 @@ impl ToolEngine {
         trust_folder: bool,
     ) -> PermissionDisposition {
         // v2 投影只暴露 canonical call_id；归一回 registry 的 wire key。
-        let resolved = self.pending.resolve_key(tool_call_id);
+        let resolved = self
+            .pending
+            .resolve_key_with(tool_call_id, |stored, incoming| {
+                crate::agent::tool_runtime::permission_id_matches(stored, incoming)
+            });
         let pending = match resolved.as_deref().map(|key| self.pending.take(key)) {
             Some(ApprovalTake::Pending(pending)) => pending,
             Some(ApprovalTake::AlreadyResolved(decision)) => {

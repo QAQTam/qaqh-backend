@@ -100,7 +100,7 @@ pub enum ResetReason {
     UnknownFact,
     UpgradeRequired,
     ReplayOverflow,
-    V1EpochMismatch,
+    EpochMismatch,
     CrossSession,
     SnapshotMissing,
     SnapshotExpired,

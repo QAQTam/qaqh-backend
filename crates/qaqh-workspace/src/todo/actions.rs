@@ -71,13 +71,10 @@ pub(crate) fn exec_todo_create(args: &Value, positioned: bool) -> Result<String,
 
 pub(crate) fn parse_status(value: &str) -> Option<TodoStatus> {
     match value {
-        // V2 public vocabulary.
-        "idle" => Some(TodoStatus::Pending),
+        "pending" => Some(TodoStatus::Pending),
         "in_progress" => Some(TodoStatus::InProgress),
         "completed" | "complete" => Some(TodoStatus::Completed),
         "cancelled" | "canceled" => Some(TodoStatus::Cancelled),
-        // V1 compatibility for persisted/model calls during rollout.
-        "pending" => Some(TodoStatus::Pending),
         _ => None,
     }
 }
