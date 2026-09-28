@@ -35,7 +35,7 @@ pub struct TodoListArgs {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct TodoCounts {
-    pub idle: usize,
+    pub pending: usize,
     pub in_progress: usize,
     pub completed: usize,
     pub cancelled: usize,
@@ -262,7 +262,7 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
         crate::json_err_string(
             "INVALID_INPUT",
             format!("invalid todo_list args: {error}"),
-            "Use {\"status\": \"idle|in_progress|completed|cancelled\"} or omit it.",
+            "Use {\"status\": \"pending|in_progress|completed|cancelled\"} or omit it.",
         )
     })?;
     let store = read_store_for(session_id)?;
@@ -275,7 +275,7 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
                 crate::json_err_string(
                     "INVALID_INPUT",
                     format!("unknown status: {value}"),
-                    "Use idle, in_progress, completed, or cancelled.",
+                    "Use pending, in_progress, completed, or cancelled.",
                 )
             })
         })
@@ -287,7 +287,7 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
         .map(TodoItemView::from)
         .collect();
     let counts = TodoCounts {
-        idle: count_status(&store, TodoStatus::Pending),
+        pending: count_status(&store, TodoStatus::Pending),
         in_progress: count_status(&store, TodoStatus::InProgress),
         completed: count_status(&store, TodoStatus::Completed),
         cancelled: count_status(&store, TodoStatus::Cancelled),
@@ -423,7 +423,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
                     crate::json_err_string(
                         "INVALID_INPUT",
                         format!("unknown status: {requested}"),
-                        "Use idle, in_progress, completed, or cancelled.",
+                        "Use pending, in_progress, completed, or cancelled.",
                     )
                 })?)
             };
@@ -465,7 +465,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             crate::json_err_string(
                 "INVALID_INPUT",
                 format!("unknown status: {requested}"),
-                "Use idle, in_progress, completed, or cancelled.",
+                "Use pending, in_progress, completed, or cancelled.",
             )
         })?;
         let mut list = Vec::new();
@@ -510,7 +510,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             crate::json_err_string(
                 "INVALID_INPUT",
                 format!("unknown status: {requested}"),
-                "Use idle, in_progress, completed, or cancelled.",
+                "Use pending, in_progress, completed, or cancelled.",
             )
         })?;
         let evidence = args

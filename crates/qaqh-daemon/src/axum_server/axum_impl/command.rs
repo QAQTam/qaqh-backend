@@ -237,7 +237,7 @@ pub(crate) async fn handle_command(
                 StatusCode::BAD_REQUEST,
                 reject_ack(
                     env.command_id,
-                    "missing_seed",
+                    "missing_session_id",
                     "SessionClose requires seed".into(),
                 ),
             );
@@ -302,7 +302,7 @@ pub(crate) async fn handle_command(
                 StatusCode::BAD_REQUEST,
                 reject_ack(
                     env.command_id,
-                    "missing_seed",
+                    "missing_session_id",
                     format!("Session{op} requires seed"),
                 ),
             );
@@ -471,7 +471,7 @@ pub(crate) async fn handle_command(
                     StatusCode::BAD_REQUEST,
                     reject_ack(
                         env.command_id,
-                        "missing_seed",
+                        "missing_session_id",
                         "session.attach requires a non-empty seed".into(),
                     ),
                 );

@@ -28,8 +28,7 @@ use axum::{
 use daemon::DaemonClient;
 use qaqh_domain::{ControlCommand, ConversationCommand, RingingChannel};
 use qaqh_ringing::{
-    RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope,
-    RingingV2CommandEnvelope,
+    RingingCommand, RingingCommandAckStatus, RingingV2CommandAck, RingingV2CommandEnvelope,
 };
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 use reqwest::Response as UpstreamResponse;
@@ -556,7 +555,7 @@ async fn attach_session(
     let envelope =
         RingingV2CommandEnvelope::new(session::random_token(), client_instance_id, command)
             .with_client_session_id(lease.client_session_id.clone())
-            .with_session(session_id.clone());
+            .with_session_id(session_id.clone());
     let body = match serde_json::to_value(envelope) {
         Ok(body) => body,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed"),
@@ -572,7 +571,7 @@ async fn attach_session(
     if !response.status().is_success() {
         return forward_response(response).await;
     }
-    let ack: RingingCommandAck = match response.json().await {
+    let ack: RingingV2CommandAck = match response.json().await {
         Ok(ack) => ack,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"),
     };
@@ -741,7 +740,7 @@ async fn respond_approval(
         command,
     )
     .with_client_session_id(lease.client_session_id.clone())
-    .with_session(active_session);
+    .with_session_id(active_session);
     if let Err(error) = envelope.validate() {
         return error_response(StatusCode::BAD_REQUEST, error);
     }
@@ -764,7 +763,7 @@ async fn respond_approval(
     if !response.status().is_success() {
         return forward_response(response).await;
     }
-    let ack: RingingCommandAck = match response.json().await {
+    let ack: RingingV2CommandAck = match response.json().await {
         Ok(ack) => ack,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "invalid_daemon_response"),
     };
@@ -793,7 +792,8 @@ async fn proxy_command(
     let Some(active_session) = session.active_session() else {
         return error_response(StatusCode::CONFLICT, "no_active_seed");
     };
-    let mut envelope: RingingCommandEnvelope = match serde_json::from_slice(&body) {
+    // v2 单一信封：浏览器与 daemon 同形状，网关只覆写自己拥有的身份字段。
+    let mut envelope: RingingV2CommandEnvelope = match serde_json::from_slice(&body) {
         Ok(envelope) => envelope,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_envelope"),
     };
@@ -804,19 +804,16 @@ async fn proxy_command(
         return error_response(StatusCode::FORBIDDEN, "command_not_allowed");
     }
     let lease = session.lease_snapshot();
-    // 浏览器侧仍按 v1 形状提交（网关自有 API），转发给 daemon 时构造 v2 信封。
-    let mut v2 = RingingV2CommandEnvelope::new(
-        envelope.command_id,
-        lease.client_instance_id.clone(),
-        envelope.command,
-    )
-    .with_client_session_id(lease.client_session_id.clone())
-    .with_session(active_session);
-    v2.expected_revision = envelope.expected_revision;
-    if let Err(error) = v2.validate() {
+    // client_instance_id / client_session_id / session_id 由网关签发，
+    // 浏览器提交的值一律不采信；driver_epoch 亦由 driver 面管理。
+    envelope.client_instance_id = lease.client_instance_id.clone();
+    envelope.client_session_id = lease.client_session_id.clone();
+    envelope.session_id = Some(active_session);
+    envelope.driver_epoch = None;
+    if let Err(error) = envelope.validate() {
         return error_response(StatusCode::BAD_REQUEST, error);
     }
-    let body = match serde_json::to_value(v2) {
+    let body = match serde_json::to_value(envelope) {
         Ok(body) => body,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed"),
     };

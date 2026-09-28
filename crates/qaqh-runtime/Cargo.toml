@@ -11,9 +11,11 @@ qaqh-domain = { path = "../qaqh-domain" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-lsp = { path = "../qaqh-lsp" }
 qaqh-message = { path = "../qaqh-message" }
+qaqh-policy = { path = "../qaqh-policy" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-subagent = { path = "../qaqh-subagent" }
+qaqh-title = { path = "../qaqh-title" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-workspace = { path = "../qaqh-workspace" }
 qaqh-gate = { path = "../qaqh-gate" }

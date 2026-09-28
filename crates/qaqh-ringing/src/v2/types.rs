@@ -210,7 +210,7 @@ pub enum RingingV2ResetReason {
     UnknownFact,
     UpgradeRequired,
     ReplayOverflow,
-    V1EpochMismatch,
+    EpochMismatch,
     CrossSession,
     SnapshotMissing,
     SnapshotExpired,
@@ -429,11 +429,6 @@ impl RingingV2CommandEnvelope {
         self
     }
 
-    /// Deprecated compatibility alias for pre-beta callers.
-    pub fn with_session(self, session_id: impl Into<String>) -> Self {
-        self.with_session_id(session_id)
-    }
-
     pub fn with_driver_epoch(mut self, driver_epoch: u64) -> Self {
         self.driver_epoch = Some(driver_epoch);
         self
@@ -472,7 +467,7 @@ impl RingingV2CommandEnvelope {
                 RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate { .. })
             )
         {
-            return Err("missing_seed");
+            return Err("missing_session_id");
         }
         Ok(())
     }
@@ -480,8 +475,6 @@ impl RingingV2CommandEnvelope {
 
 /// v2 command acknowledgement.
 ///
-/// Wire-compatible superset of [`crate::RingingCommandAck`]: the four base
-/// fields keep their names and types, so a v1 ack body still deserializes.
 /// `existing` is populated only when the daemon replays a receipt that is
 /// still inside the idempotency TTL — that is, when the caller re-submitted a
 /// `command_id` it may have lost the ACK for.
@@ -498,19 +491,6 @@ pub struct RingingV2CommandAck {
     /// Already-recorded outcome this submission collided with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing: Option<RingingV2ExistingResult>,
-}
-
-impl RingingV2CommandAck {
-    /// Project the base ack fields back onto the v1 shape.
-    pub fn into_v1(self) -> crate::RingingCommandAck {
-        crate::RingingCommandAck {
-            command_id: self.command_id,
-            status: self.status,
-            code: self.code,
-            message: self.message,
-            retry_after_ms: self.retry_after_ms,
-        }
-    }
 }
 
 /// Why a v2 submission collided with an already-recorded outcome.
@@ -581,19 +561,6 @@ pub struct RingingV2CommandStatus {
     pub error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<RingingV2CommandResult>,
-}
-
-impl RingingV2CommandStatus {
-    /// Project the base status fields back onto the v1 shape.
-    pub fn into_v1(self) -> crate::RingingCommandStatus {
-        crate::RingingCommandStatus {
-            command_id: self.command_id,
-            state: self.state,
-            payload_fingerprint: self.payload_fingerprint,
-            terminal_event_id: self.terminal_event_id,
-            error_code: self.error_code,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

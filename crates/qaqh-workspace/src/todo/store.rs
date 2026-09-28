@@ -114,7 +114,6 @@ pub fn todo_status_value(session_id: &str) -> Result<serde_json::Value, String> 
         "mode": "manual",
         "current_id": current.map(|item| item.id.clone()),
         "current_title": current.map(|i| i.title.clone()),
-        "idle": pending,
         "pending": pending,
         "in_progress": in_progress,
         "completed": completed,
@@ -202,7 +201,7 @@ pub(crate) fn read_store() -> Result<TodoStore, String> {
 
 pub(crate) fn status_name(status: &TodoStatus) -> &'static str {
     match status {
-        TodoStatus::Pending => "idle",
+        TodoStatus::Pending => "pending",
         TodoStatus::InProgress => "in_progress",
         TodoStatus::Completed => "completed",
         TodoStatus::Cancelled => "cancelled",

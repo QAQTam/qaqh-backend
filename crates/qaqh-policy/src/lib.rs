@@ -8,6 +8,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub mod approval;
+pub mod input_guard;
+
+pub use approval::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
+pub use input_guard::content_guard;
+
 /// Risk profile for each tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {

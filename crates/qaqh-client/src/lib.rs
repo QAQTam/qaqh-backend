@@ -1,10 +1,8 @@
-//! QAQ-Harness Ringing V1/V2 daemon client (HTTP/SSE).
+//! QAQ-Harness Ringing v2 daemon client (HTTP/SSE).
 //!
 //! Shared transport for the TUI and desktop shells: discovery, lease
-//! negotiation/renewal, three SSE event channels and the per-session timeline
-//! stream, plus commands, queries, bootstrap and graceful stop. The additive
-//! [`v2`] surface exposes canonical cursors, typed projection events,
-//! bootstrap/reset and driver commands for the beta cutover.
+//! negotiation/renewal, the v2 single-stream event feed and the per-session
+//! timeline stream, plus commands, queries, bootstrap and graceful stop.
 //!
 //! The public API uses the canonical `qaqh-domain` and `qaqh-ringing`
 //! contracts. HTTP/SSE JSON is decoded at this boundary and never becomes a
@@ -38,25 +36,23 @@ pub use qaqh_domain::state::{
     RunningTool, ToolState,
 };
 pub use remote_path::{display_host, display_path, remote_path_from_display};
-pub use session::{RingingSession, SessionState};
+pub use session::RingingSession;
 pub use timeline::TimelineStream;
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
     CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
     ConversationEvent, ConversationInputPurpose, ConversationMode, DashboardDocument,
     DashboardTask, Delivery, DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot,
-    DomainError, DomainSessionState, ErrorScope, EventBatch, ImageBlock, MAX_SAFE_INTEGER,
-    NoticeLevel, PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState,
-    RINGING_SCHEMA, RINGING_VERSION, ReconnectReason, RingingChannelSnapshot, RingingCommand,
-    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
-    RingingEvent, RingingEventEnvelope, RoundDeltaKind, SessionActivity, SessionListEntry,
-    SessionMeta, SkillInfo, SkillRuntimeInfo, SkillsStatus, TimelineBlock, TimelineBlockKind,
-    TimelineBlockState, TimelineEntry, TimelineEvent, TimelineFailure, TimelinePage,
-    TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineStatus, TimelineTool,
-    TimelineToolBody, TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics,
-    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand,
-    ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult, ToolStatus,
-    UsageInfo, is_safe_integer,
+    DomainError, DomainSessionState, ErrorScope, ImageBlock, MAX_SAFE_INTEGER, NoticeLevel,
+    PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState, RINGING_SCHEMA,
+    ReconnectReason, RingingCommand, RingingCommandAckStatus, RingingCommandState,
+    RoundDeltaKind, SessionActivity, SessionListEntry, SessionMeta, SkillInfo, SkillRuntimeInfo,
+    SkillsStatus, TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry,
+    TimelineEvent, TimelineFailure, TimelinePage, TimelinePathOp, TimelineRound, TimelineSnapshot,
+    TimelineStatus, TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader,
+    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn,
+    TimelineTurnState, ToolCommand, ToolContinuation, ToolError, ToolEvent, ToolImage,
+    ToolModelPayload, ToolResult, ToolStatus, UsageInfo, is_safe_integer,
 };
 pub use v2::{
     CLIENT_V2_END_OF_FACT, ClientV2ActivityState, ClientV2ActorRef, ClientV2AskOutcome,
