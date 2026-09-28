@@ -20,7 +20,6 @@ pub struct RingingEventEnvelope {
     /// 可靠性等级：由领域事件定义显式声明，wire 不决定。
     pub delivery: Delivery,
     /// 会话标识。
-    #[serde(rename = "session_id")]
     pub session_id: String,
     /// 每 (server_epoch, channel) 全局递增，供单条 SSE 连接恢复。
     #[cfg_attr(feature = "ts", ts(as = "u32"))]
@@ -121,7 +120,6 @@ pub struct RingingCommandEnvelope {
     /// open 成功后由 daemon 签发的连接级身份。
     pub client_session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "session_id")]
     pub session_id: Option<String>,
     /// 乐观并发修订（可选）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,11 +153,6 @@ impl RingingCommandEnvelope {
         self
     }
 
-    /// Deprecated compatibility alias for pre-beta callers.
-    pub fn with_session(self, session_id: impl Into<String>) -> Self {
-        self.with_session_id(session_id)
-    }
-
     pub fn with_client_session_id(mut self, client_session_id: impl Into<String>) -> Self {
         self.client_session_id = client_session_id.into();
         self
@@ -187,7 +180,7 @@ impl RingingCommandEnvelope {
                 RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate { .. })
             )
         {
-            return Err("missing_seed");
+            return Err("missing_session_id");
         }
         if self.expected_revision.is_some_and(|v| !is_safe_integer(v)) {
             return Err("invalid_envelope");
@@ -253,7 +246,6 @@ pub struct RingingEventBatch {
     pub schema: String,
     pub version: u32,
     pub channel: RingingChannel,
-    #[serde(rename = "session_id")]
     pub session_id: String,
     pub server_epoch: String,
     #[cfg_attr(feature = "ts", ts(as = "u32"))]

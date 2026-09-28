@@ -55,7 +55,7 @@ const advanceReasoningTail = (delta: string): void => {
   setReasoningTail(reasoningLastLine(previous + delta) ?? "");
 };
 
-// ── todo（旧版投影；v2 契约落地后本节映射层整体删除）─────────────────────
+// ── todo ────────────────────────────────────────────────────────────────────
 export type TodoStatusName = "pending" | "in_progress" | "completed" | "cancelled";
 export type TodoItemView = {
   id: string;
@@ -73,20 +73,15 @@ export type TodoSummary = {
 };
 export const [todo, setTodo] = createSignal<TodoSummary | null>(null);
 
-/**
- * TODO(v2) 归一层：旧 wire 把 pending 投影成 "idle"（store.rs status_name），
- * 且 counts 同时带 idle/pending 两个同值键。统一状态词落地后此函数退化为直通。
- */
 function normalizeTodo(raw: Record<string, any>): TodoSummary {
-  const mapStatus = (status: string): TodoStatusName => (status === "idle" ? "pending" : (status as TodoStatusName));
   const items = (raw.items ?? []).map((item: Record<string, any>) => ({
     id: String(item.id ?? ""),
     title: String(item.title ?? ""),
     description: String(item.description ?? ""),
-    status: mapStatus(String(item.status ?? "pending")),
+    status: String(item.status ?? "pending") as TodoStatusName,
     evidence: item.evidence ?? null,
   }));
-  const pending = Number(raw.pending ?? raw.idle ?? 0);
+  const pending = Number(raw.pending ?? 0);
   return {
     mode: String(raw.mode ?? "manual"),
     currentId: raw.current_id ?? null,

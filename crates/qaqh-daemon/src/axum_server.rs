@@ -895,7 +895,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
-        .with_session("seed-1");
+        .with_session_id("seed-1");
         let fingerprint = crate::axum_server::axum_impl::command_fingerprint(
             envelope.channel,
             envelope.session_id.as_deref(),
@@ -1005,7 +1005,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
-        .with_session("seed-1");
+        .with_session_id("seed-1");
         {
             let mut pending = pending.lock().unwrap();
             assert!(
@@ -1173,7 +1173,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id(open.client_session_id.clone())
-        .with_session(session_id);
+        .with_session_id(session_id);
         let request = Request::builder()
             .method("POST")
             .uri("/ringing/v2/commands/control")
@@ -1519,7 +1519,7 @@ mod axum_tests {
                 }),
             )
             .with_client_session_id(client.client_session_id.clone())
-            .with_session(session_id);
+            .with_session_id(session_id);
             let expected = RingingV2CommandResult::PermissionResolved {
                 interaction_id: interaction_id.as_str().to_string(),
                 approved: true,
@@ -1543,7 +1543,7 @@ mod axum_tests {
                 }),
             )
             .with_client_session_id(client.client_session_id.clone())
-            .with_session(session_id);
+            .with_session_id(session_id);
             let expected = RingingV2CommandResult::PlanReviewResolved {
                 interaction_id: interaction_id.as_str().to_string(),
                 approved: false,
@@ -1592,7 +1592,7 @@ mod axum_tests {
                 }),
             )
             .with_client_session_id(client_session_id)
-            .with_session(session_id.clone())
+            .with_session_id(session_id.clone())
         };
 
         let (_, rejected) = post_v2_command(
@@ -2106,7 +2106,7 @@ mod axum_tests {
     }
 
     /// SessionAttach：仅 lease attach，不触碰 actor。attach 后 owns_seed 放行
-    /// timeline/频道读取；空 seed 被拒（missing_seed）。
+    /// timeline/频道读取；空 seed 被拒（missing_session_id）。
     #[tokio::test]
     async fn session_attach_grants_session_ownership_without_actor_side_effects() {
         let state = test_state();
@@ -2124,7 +2124,7 @@ mod axum_tests {
             }),
         )
         .with_client_session_id("cs-1")
-        .with_session("sub-seed-1");
+        .with_session_id("sub-seed-1");
         let req = Request::builder()
             .method("POST")
             .uri("/ringing/v2/commands/control")
@@ -2143,7 +2143,7 @@ mod axum_tests {
                 .owns_session("cs-1", "sub-seed-1")
         );
 
-        // 空 seed → Rejected missing_seed，且不产生任何归属。
+        // 空 seed → Rejected missing_session_id，且不产生任何归属。
         let app = build_router(state.clone());
         let env_bad = qaqh_ringing::RingingV2CommandEnvelope::new(
             "cmd-attach-2",

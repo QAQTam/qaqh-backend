@@ -13,7 +13,7 @@
 use super::dashboard;
 use crate::agent::state::agent::{AgentState, MetaOp};
 
-use super::types::Emitter;
+use crate::agent::types::Emitter;
 
 pub struct MiscEngine;
 

@@ -1,4 +1,4 @@
-//! Ringing V1 session negotiation and lease renewal.
+//! Ringing v2 session negotiation and lease renewal.
 
 use std::sync::Arc;
 
@@ -6,16 +6,6 @@ use tokio::sync::{Mutex, watch};
 
 use crate::discovery::DiscoveryExt;
 use crate::error::{ClientError, Result};
-
-/// Negotiated session state (mirrors `RingingSessionOpen` in TS).
-#[derive(Debug, Clone)]
-pub struct SessionState {
-    pub client_instance_id: String,
-    pub client_session_id: String,
-    pub server_epoch: String,
-    pub lease_ttl_ms: u64,
-    pub renew_interval_ms: u64,
-}
 
 /// 当前 daemon 端点与 Bearer token。
 ///
@@ -27,7 +17,7 @@ pub(crate) struct Credentials {
     pub token: String,
 }
 
-/// Ringing V1 session: open + background lease renewal.
+/// Ringing v2 session: open + background lease renewal.
 pub struct RingingSession {
     /// 可热更新：daemon 重启会换端口与随机 token，靠 [`Self::refresh_discovery`]
     /// 原地换值。旧的不可变实现只会拿着死端点/旧 token 永久重试，客户端再也
@@ -41,7 +31,7 @@ pub struct RingingSession {
     /// 的 `daemon.json` 悄悄改道到另一个 daemon。
     local_discovery: std::sync::atomic::AtomicBool,
     http: reqwest::Client,
-    state: Arc<Mutex<Option<SessionState>>>,
+    state: Arc<Mutex<Option<crate::v2::ClientV2SessionState>>>,
     /// Consecutive renewal failures; `>= 2` marks the lease unhealthy.
     renew_failures: Arc<Mutex<u32>>,
     /// 广播当前 `(server_epoch, client_session_id)` 给所有 SSE 流。
@@ -49,9 +39,6 @@ pub struct RingingSession {
     /// 流重连即读到新 lease——否则流永远复用已过期的 session 死循环
     /// （daemon 的 keepalive 闸门持续关闭旧 session 的流）。
     session_ctx: watch::Sender<Option<(String, String)>>,
-    /// v2 握手得到的 capability 与会话身份（纯 v2：与 `state` 同一个 lease，
-    /// 不再是「第二条 lease」）。
-    v2_state: Arc<Mutex<Option<crate::v2::ClientV2SessionState>>>,
 }
 
 const MAX_RENEW_FAILURES: u32 = 2;
@@ -81,7 +68,6 @@ impl RingingSession {
             state: Arc::new(Mutex::new(None)),
             renew_failures: Arc::new(Mutex::new(0)),
             session_ctx,
-            v2_state: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -135,9 +121,8 @@ impl RingingSession {
 
     /// `POST /ringing/v2/clients/open` — capability negotiation（纯 v2：唯一握手）。
     ///
-    /// 一次握手同时填充 `SessionState`（header 身份，SSE/命令/服务共用）与
-    /// `v2_state`（capability / v2 端点）。**不再有第二条 lease**。
-    pub async fn open(&self) -> Result<SessionState> {
+    /// 一次握手填充唯一的会话状态（header 身份 + capability，SSE/命令/服务共用）。
+    pub async fn open(&self) -> Result<crate::v2::ClientV2SessionState> {
         let client_instance_id = self.client_instance_id();
         let creds = self.credentials();
         let path = "/ringing/v2/clients/open";
@@ -179,31 +164,18 @@ impl RingingSession {
                 "open returned an incomplete session".into(),
             ));
         }
-        let state = SessionState {
-            client_instance_id: client_instance_id.clone(),
-            client_session_id: result.client_session_id.clone(),
-            server_epoch: result.server_epoch.clone(),
-            lease_ttl_ms: result.lease_ttl_ms,
-            renew_interval_ms: result.renew_interval_ms,
-        };
+        let state = crate::v2::ClientV2SessionState::from_open(client_instance_id, result)?;
         *self.state.lock().await = Some(state.clone());
         self.session_ctx.send_replace(Some((
             state.server_epoch.clone(),
             state.client_session_id.clone(),
         )));
-        let v2_state = crate::v2::ClientV2SessionState::from_open(client_instance_id, result)?;
-        *self.v2_state.lock().await = Some(v2_state);
         Ok(state)
-    }
-
-    /// 当前 v2 会话状态（capability / v2 端点身份）。
-    pub(crate) async fn v2_state(&self) -> Option<crate::v2::ClientV2SessionState> {
-        self.v2_state.lock().await.clone()
     }
 
     /// 显式 v2 握手路径（`Client::open_v2`）写入的状态。
     pub(crate) async fn adopt_v2_state(&self, state: crate::v2::ClientV2SessionState) {
-        *self.v2_state.lock().await = Some(state);
+        *self.state.lock().await = Some(state);
     }
 
     /// Subscribe to the current `(server_epoch, client_session_id)`.
@@ -220,14 +192,14 @@ impl RingingSession {
     }
 
     /// Adopt a session opened elsewhere (e.g. by a control client in the same process).
-    pub async fn adopt(&self, state: SessionState) {
+    pub async fn adopt(&self, state: crate::v2::ClientV2SessionState) {
         *self.state.lock().await = Some(state.clone());
         self.session_ctx
             .send_replace(Some((state.server_epoch, state.client_session_id)));
     }
 
     /// Current session state, if negotiated.
-    pub async fn state(&self) -> Option<SessionState> {
+    pub async fn state(&self) -> Option<crate::v2::ClientV2SessionState> {
         self.state.lock().await.clone()
     }
 
@@ -352,12 +324,21 @@ impl RingingSession {
         server_epoch: String,
         renew_interval_ms: u64,
     ) {
-        let state = SessionState {
+        let state = crate::v2::ClientV2SessionState {
             client_instance_id,
             client_session_id,
             server_epoch,
             lease_ttl_ms: 30_000,
             renew_interval_ms,
+            capabilities: qaqh_ringing::RingingV2Capabilities {
+                subscribe: true,
+                interact: true,
+                drive: true,
+                timeline: true,
+                service: true,
+                content: true,
+                single_stream: true,
+            },
         };
         self.adopt(state).await;
     }

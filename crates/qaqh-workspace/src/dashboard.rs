@@ -46,7 +46,7 @@ fn dashboard_task(item: &crate::todo::TodoItem) -> DashboardTask {
         subject: item.title.clone(),
         description: item.description.clone(),
         status: match item.status {
-            TodoStatus::Pending => "idle".into(),
+            TodoStatus::Pending => "pending".into(),
             TodoStatus::InProgress => "in_progress".into(),
             TodoStatus::Completed => "completed".into(),
             TodoStatus::Cancelled => "cancelled".into(),

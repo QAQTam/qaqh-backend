@@ -1,6 +1,6 @@
-//! Per-session Ringing V1 timeline SSE stream.
+//! Per-session Ringing v2 timeline SSE stream.
 //!
-//! Mirrors the Ringing V1 timeline semantics (the original Electron reference
+//! Mirrors the Ringing v2 timeline semantics (the original Electron reference
 //! implementation `apps/desktop/electron/timelineClient.ts` was removed): one
 //! SSE stream per session, one monotonically increasing cursor
 //! (`{epoch}:timeline:{seq}`). Streams are keyed by seed, so a shell may hold
@@ -311,12 +311,12 @@ impl TimelineStream {
         let parsed: TimelineSseFrame = serde_json::from_str(frame.data.trim())
             .map_err(|e| ClientError::Protocol(format!("bad timeline frame: {e}")))?;
         if parsed.schema != qaqh_ringing::RINGING_SCHEMA
-            || parsed.version != qaqh_ringing::RINGING_VERSION
+            || parsed.version != qaqh_ringing::RINGING_V2_VERSION
             || parsed.session_id != self.session_id
             || parsed.server_epoch != server_epoch
         {
             return Err(ClientError::Protocol(
-                "invalid Ringing V1 timeline SSE frame".into(),
+                "invalid timeline SSE frame".into(),
             ));
         }
         if parsed.entry.timeline_seq <= self.cursor {
@@ -381,7 +381,7 @@ mod tests {
     //!
     //! 与频道流同协议：daemon 的 `ringing.stream_terminated`（Lagged）在
     //! timeline 流上同样归一为结构化 `StreamTerminated`，绝不能落成
-    //! `Protocol("invalid Ringing V1 timeline SSE frame")`。
+    //! `Protocol("invalid timeline SSE frame")`。
 
     use super::*;
     use crate::types::ReconnectReason;

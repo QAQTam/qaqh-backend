@@ -24,7 +24,7 @@
 //! |-----------|-------------|-----------------------------------------|
 //! | Entry     | `spawn.rs`  | 构造唯一入口（PR-2-3）                  |
 //! | Loop      | `loop_core.rs` + `loop_*.rs` | Ringing V1 固定引擎模块显式分派（Phase 2-5 拆分：注入/三路分派/收尾） |
-//! | Engines   | `engine_*.rs`（平铺） | session/input/compact/misc/title/tool/turn |
+//! | Plugins   | `plugins/`  | 非 loop 内核：compact/misc/dashboard（待 crate 化）；title 已外移 `qaqh-title` |
 //! | State     | `state/`    | AgentState, sessions, skills            |
 //! | Services  | `dashboard.rs` | Conflict detection, dashboard        |
 //! | Utilities | `util/`     | Calendar, token logging, display fmt    |
@@ -41,19 +41,14 @@
 //! 2. 对外构造唯一入口为 `spawn_agent`（`actor.rs` / `registry.rs` 不得自行
 //!    装配 `AgentState`）。
 
-pub(crate) mod approval_registry;
 pub(crate) mod compaction_port;
 pub mod context;
-pub(crate) mod dashboard;
-pub mod engine_compact;
 pub mod engine_input;
-pub mod engine_misc;
 pub mod engine_session;
 pub mod engine_title;
 pub mod engine_tool;
 pub mod engine_turn;
 pub mod injection;
-pub mod input_guard;
 pub(crate) mod lifecycle_port;
 pub mod liveness;
 pub mod loop_core;
@@ -63,6 +58,7 @@ pub mod loop_dispatch_tool;
 pub mod loop_injection;
 pub mod loop_outcome;
 pub mod paced_emitter;
+pub mod plugins;
 pub mod prompt;
 pub(crate) mod spawn;
 pub mod state;
@@ -76,5 +72,11 @@ pub(crate) mod turn_lap;
 pub mod turn_lap_test_api;
 pub mod types;
 pub mod util;
+
+// Non-loop engines were moved to `plugins/`; these re-exports keep the
+// historical `agent::engine_compact` / `agent::engine_misc` / `agent::dashboard`
+// paths resolving without touching their call sites.
+pub use plugins::engine_compact;
+pub(crate) use plugins::{dashboard, engine_misc};
 
 pub(crate) use spawn::{ActorKind, SubagentSpawnSpec, spawn_agent};

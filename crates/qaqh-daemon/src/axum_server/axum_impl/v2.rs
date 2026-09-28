@@ -164,7 +164,7 @@ pub(crate) async fn handle_bootstrap_v2(
         return lease_required_v2();
     };
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
     }
     let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
@@ -290,7 +290,7 @@ pub(crate) async fn handle_team_snapshot_v2(
         return lease_required_v2();
     }
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
     }
     let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     let team = match state.v2_hub.bootstrap(&session_dir, &session_id) {
@@ -345,7 +345,7 @@ pub(crate) async fn handle_pending_approvals_v2(
         return lease_required_v2();
     }
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
     }
     let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
@@ -452,7 +452,7 @@ pub(crate) async fn handle_events_v2(
         return lease_required_v2();
     }
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
     }
     let cursor = query
         .since_cursor
@@ -633,7 +633,7 @@ async fn forward_driver_command(
         qaqh_ringing::RingingCommand::Control(command),
     )
     .with_client_session_id(caller)
-    .with_session(session_id);
+    .with_session_id(session_id);
     let body = match serde_json::to_vec(&envelope) {
         Ok(body) => body,
         Err(error) => {
@@ -665,7 +665,7 @@ pub(crate) async fn handle_driver_claim_v2(
         return lease_required_v2();
     };
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
     }
     watch_driver_seat(&state, &session_id);
     let current = canonical_driver_state(&state, &session_id);
@@ -740,7 +740,7 @@ pub(crate) async fn handle_driver_release_v2(
         return lease_required_v2();
     };
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_seed", "missing seed");
+        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
     }
     let current = canonical_driver_state(&state, &session_id);
     let holder = current.as_ref().and_then(|driver| driver.holder.clone());

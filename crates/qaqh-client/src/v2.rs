@@ -9,17 +9,17 @@ use std::fmt;
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_ringing::{
-    CursorToken, RingingCommandAck, RingingCommandStatus, RingingV2Bootstrap,
-    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandStatus,
-    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2EventEnvelope,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    CursorToken, RingingV2Bootstrap, RingingV2Capabilities, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandStatus, RingingV2DriverClaimResponse,
+    RingingV2DriverReleaseResponse, RingingV2EventEnvelope, RingingV2LeaseRenewResponse,
+    RingingV2OpenRequest, RingingV2OpenResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::client::{Client, ClientOptions};
+use crate::client::Client;
 use crate::error::{ClientError, Result};
 use crate::sse_decoder::SseDecoder;
-use crate::types::{CommandOptions, RingingCommand, TimelinePage};
+use crate::types::{CommandOptions, RingingCommand};
 
 pub use qaqh_ringing::{
     CanonicalCursor as ClientV2Cursor, CursorToken as ClientV2CursorToken,
@@ -260,14 +260,6 @@ impl ClientV2Subscription {
 }
 
 impl Client {
-    /// Connect through the existing discovery path and negotiate a v2 lease.
-    ///
-    /// 纯 v2 下 [`Client::connect_async`] 的 `open()` 本身就是 v2 握手，这里
-    /// 不再额外开第二条 lease。
-    pub async fn connect_v2_async(options: ClientOptions) -> Result<Client> {
-        Self::connect_async(options).await
-    }
-
     /// `POST /ringing/v2/clients/open`.
     pub async fn open_v2(&self) -> Result<RingingV2OpenResponse> {
         self.open_v2_with_instance_id(uuid::Uuid::new_v4().to_string())
@@ -299,7 +291,7 @@ impl Client {
     }
 
     pub async fn v2_session_state(&self) -> Option<ClientV2SessionState> {
-        self.inner.session.v2_state().await
+        self.inner.session.state().await
     }
 
     /// `POST /ringing/v2/leases/renew`.
@@ -375,22 +367,8 @@ impl Client {
         })
     }
 
-    /// Submit a v2 command with an explicit v2 lease identity.
-    pub async fn send_command_v2(
-        &self,
-        session_id: Option<&str>,
-        command: RingingCommand,
-        options: CommandOptions,
-    ) -> Result<RingingCommandAck> {
-        Ok(self
-            .send_command_v2_typed(session_id, command, options)
-            .await?
-            .into_v1())
-    }
-
     /// v2 command submission that keeps the typed `existing` receipt returned
-    /// for an idempotent `command_id` replay. `send_command_v2` remains as the
-    /// v1-shaped compatibility surface.
+    /// for an idempotent `command_id` replay.
     pub async fn send_command_v2_typed(
         &self,
         session_id: Option<&str>,
@@ -406,7 +384,7 @@ impl Client {
             RingingV2CommandEnvelope::new(command_id.clone(), state.client_instance_id, command)
                 .with_client_session_id(client_session_id.clone());
         if let Some(session_id) = session_id {
-            payload = payload.with_session(session_id);
+            payload = payload.with_session_id(session_id);
         }
         payload.expected_revision = options.expected_revision;
         payload.driver_epoch = options.driver_epoch;
@@ -438,11 +416,6 @@ impl Client {
             ));
         }
         Ok(ack)
-    }
-
-    /// `GET /ringing/v2/commands/{command_id}`.
-    pub async fn command_status_v2(&self, command_id: &str) -> Result<RingingCommandStatus> {
-        Ok(self.command_status_v2_typed(command_id).await?.into_v1())
     }
 
     /// v2 command status that keeps the typed terminal `result` payload.
@@ -494,37 +467,6 @@ impl Client {
             .post(format!("{}{path}", self.credentials().base_url))
             .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(api_error(response, &path).await);
-        }
-        Ok(response.json().await?)
-    }
-
-    /// `GET /ringing/v2/sessions/{seed}/timeline`.
-    pub async fn timeline_v2(
-        &self,
-        session_id: &str,
-        before_index: Option<usize>,
-        limit: Option<usize>,
-    ) -> Result<TimelinePage> {
-        let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/timeline");
-        let mut query = Vec::new();
-        if let Some(before_index) = before_index {
-            query.push(("before_index", before_index.to_string()));
-        }
-        if let Some(limit) = limit {
-            query.push(("limit", limit.to_string()));
-        }
-        let response = self
-            .inner
-            .http
-            .get(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
-            .query(&query)
             .send()
             .await?;
         if !response.status().is_success() {
@@ -610,7 +552,7 @@ impl Client {
     async fn require_v2_session(&self) -> Result<ClientV2SessionState> {
         self.inner
             .session
-            .v2_state()
+            .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("v2 session not open".into()))
     }

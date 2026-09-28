@@ -95,14 +95,14 @@ fn create_rejects_oversized_groups() {
         // v4：空 items 对模型工具是合法的空清单（覆写语义）；旧 create 路径
         // 仅 HTTP/CLI 预留，此处只锁 >20 上限仍拒绝。
         let items: Vec<Value> = (0..21)
-            .map(|index| serde_json::json!({"title": format!("t{index}"), "status": "idle"}))
+            .map(|index| serde_json::json!({"title": format!("t{index}"), "status": "pending"}))
             .collect();
         let oversized = handle_write(split_ctx("todo_write", serde_json::json!({"items": items})));
         assert!(oversized.error.is_some());
         let ok = handle_write(split_ctx(
             "todo_write",
             serde_json::json!({"items": [
-                {"title": "within", "status": "idle"}
+                {"title": "within", "status": "pending"}
             ]}),
         ));
         assert!(ok.error.is_none());
@@ -157,16 +157,6 @@ fn set_status_is_id_only_and_never_erases_metadata() {
         assert_eq!(store.items[0].evidence.as_deref(), Some("verified"));
         assert_eq!(store.items[0].status, TodoStatus::Completed);
         assert!(store.current_id.is_none());
-    });
-}
-
-#[test]
-fn idle_is_public_alias_for_pending() {
-    with_isolated_todo(|_session| {
-        exec_todo_create(&serde_json::json!({"title": "a"}), false).unwrap();
-        exec_todo_set(&serde_json::json!({"id": "T1", "status": "in_progress"})).unwrap();
-        exec_todo_set(&serde_json::json!({"id": "T1", "status": "idle"})).unwrap();
-        assert_eq!(read_store().unwrap().items[0].status, TodoStatus::Pending);
     });
 }
 
@@ -383,7 +373,7 @@ fn typed_todo_list_matches_wire_and_projection() {
 
         let value = super::typed::todo_list_value_for(
             session_id,
-            &serde_json::json!({"session_id": session_id, "status": "idle"}),
+            &serde_json::json!({"session_id": session_id, "status": "pending"}),
         )
         .unwrap();
         assert_eq!(value["status"], "ok");
@@ -520,7 +510,7 @@ fn split_handlers_reject_cross_fields() {
     assert!(
         handle_update(split_ctx(
             "todo_update",
-            serde_json::json!({"ids": ["T1"], "status": "idle"})
+            serde_json::json!({"ids": ["T1"], "status": "pending"})
         ))
         .error
         .is_some()
@@ -528,7 +518,7 @@ fn split_handlers_reject_cross_fields() {
     assert!(
         handle_update(split_ctx(
             "todo_update",
-            serde_json::json!({"updates": [{"id": "T1", "status": "idle"}]})
+            serde_json::json!({"updates": [{"id": "T1", "status": "pending"}]})
         ))
         .error
         .is_some()
@@ -548,7 +538,7 @@ fn split_roundtrip_via_handlers() {
             handle_write(split_ctx(
                 "todo_write",
                 serde_json::json!({"items": [
-                    {"title": "a", "status": "idle"},
+                    {"title": "a", "status": "pending"},
                     {"title": "b", "status": "in_progress"}
                 ]}),
             ))
@@ -564,7 +554,7 @@ fn split_roundtrip_via_handlers() {
                 serde_json::json!({"items": [
                     {"id": "T1", "title": "a", "status": "completed"},
                     {"id": "T2", "title": "b", "status": "in_progress"},
-                    {"title": "c", "status": "idle"}
+                    {"title": "c", "status": "pending"}
                 ]}),
             ))
             .model_text(),
@@ -581,7 +571,7 @@ fn write_empty_clears_and_restarts_id_sequence() {
     with_isolated_todo(|_session| {
         handle_write(split_ctx(
             "todo_write",
-            serde_json::json!({"items": [{"title": "a", "status": "idle"}]}),
+            serde_json::json!({"items": [{"title": "a", "status": "pending"}]}),
         ));
         // v4：空 items = 空清单（覆写语义的自然结果），next_id 不重置——
         // 下次写入从高水位继续分配，永不复用旧号。
@@ -596,7 +586,7 @@ fn write_empty_clears_and_restarts_id_sequence() {
         let after = parse_tool_result(
             handle_write(split_ctx(
                 "todo_write",
-                serde_json::json!({"items": [{"title": "fresh", "status": "idle"}]}),
+                serde_json::json!({"items": [{"title": "fresh", "status": "pending"}]}),
             ))
             .model_text(),
         );
@@ -612,7 +602,7 @@ fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
             handle_write(split_ctx(
                 "todo_write",
                 serde_json::json!({"items": [
-                    {"title": "a", "status": "idle"},
+                    {"title": "a", "status": "pending"},
                     {"title": "b", "status": "in_progress"}
                 ]}),
             ))
@@ -638,7 +628,7 @@ fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
         let bogus = handle_write(split_ctx(
             "todo_write",
             serde_json::json!({"items": [
-                {"id": "T9", "title": "ghost", "status": "idle"}
+                {"id": "T9", "title": "ghost", "status": "pending"}
             ]}),
         ));
         assert!(bogus.error.is_some());
@@ -652,8 +642,8 @@ fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
         let dup = handle_write(split_ctx(
             "todo_write",
             serde_json::json!({"items": [
-                {"id": "T1", "title": "a", "status": "idle"},
-                {"id": "T1", "title": "again", "status": "idle"}
+                {"id": "T1", "title": "a", "status": "pending"},
+                {"id": "T1", "title": "again", "status": "pending"}
             ]}),
         ));
         assert!(dup.error.is_some());

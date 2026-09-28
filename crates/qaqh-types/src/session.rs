@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(keys, expected, "session.list 条目的 wire 键集合变了");
 
         // 运行期字段**不落 wire**：`#[serde(skip)]` 掉了就必须一直是掉的。
-        for runtime_only in ["resume_seed", "tokens", "from_resume"] {
+        for runtime_only in ["resume_session", "tokens", "from_resume"] {
             assert!(
                 !wire.as_object().unwrap().contains_key(runtime_only),
                 "{runtime_only} 是运行期字段，不得出现在 session.list 里"

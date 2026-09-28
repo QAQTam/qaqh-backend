@@ -10,14 +10,14 @@ const MAX_RESOLVED_TOMBSTONES: usize = 1024;
 
 /// Stable decision recorded for a resolved approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ApprovalDecision {
+pub enum ApprovalDecision {
     Approved,
     Rejected,
     Expired,
 }
 
 impl ApprovalDecision {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Approved => "approved",
             Self::Rejected => "rejected",
@@ -28,14 +28,14 @@ impl ApprovalDecision {
 
 /// Result of looking up a pending approval.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ApprovalTake<T> {
+pub enum ApprovalTake<T> {
     Pending(T),
     AlreadyResolved(ApprovalDecision),
     Missing,
 }
 
 /// First-answer-wins registry for pending approvals.
-pub(crate) struct ApprovalRegistry<T> {
+pub struct ApprovalRegistry<T> {
     pending: HashMap<String, T>,
     resolved: HashMap<String, ApprovalDecision>,
     resolved_order: VecDeque<String>,
@@ -48,7 +48,7 @@ impl<T> Default for ApprovalRegistry<T> {
 }
 
 impl<T> ApprovalRegistry<T> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             pending: HashMap::new(),
             resolved: HashMap::new(),
@@ -57,7 +57,7 @@ impl<T> ApprovalRegistry<T> {
     }
 
     /// Register a new pending approval. Reusing a key starts a new interaction.
-    pub(crate) fn insert(&mut self, call_id: impl Into<String>, pending: T) -> Option<T> {
+    pub fn insert(&mut self, call_id: impl Into<String>, pending: T) -> Option<T> {
         let call_id = call_id.into();
         if self.resolved.remove(&call_id).is_some() {
             self.resolved_order.retain(|existing| existing != &call_id);
@@ -66,7 +66,7 @@ impl<T> ApprovalRegistry<T> {
     }
 
     /// Consume a pending approval or return the stable first-answer decision.
-    pub(crate) fn take(&mut self, call_id: &str) -> ApprovalTake<T> {
+    pub fn take(&mut self, call_id: &str) -> ApprovalTake<T> {
         if let Some(pending) = self.pending.remove(call_id) {
             return ApprovalTake::Pending(pending);
         }
@@ -77,25 +77,30 @@ impl<T> ApprovalRegistry<T> {
             .unwrap_or(ApprovalTake::Missing)
     }
 
-    /// 把入站 id 归一到 registry 的 key：先精确匹配；否则按 canonical 形式在
-    /// 挂起/已解决项里找。
+    /// 把入站 id 归一到 registry 的 key：先精确匹配；否则由调用方注入的
+    /// 匹配器在挂起/已解决项里找。
     ///
     /// v2 投影（`ControlDelta::InteractionRequested.call_id`）只暴露 canonical
     /// call_id，而本表按 wire id 记账——不归一的话 v2 壳层的答复会落成
-    /// `unknown permission response`。
-    pub(crate) fn resolve_key(&self, incoming: &str) -> Option<String> {
+    /// `unknown permission response`。匹配语义（如 wire id ↔ canonical id）
+    /// 由调用方注入，本 crate 保持零领域依赖。
+    pub fn resolve_key_with(
+        &self,
+        incoming: &str,
+        matches: impl Fn(&str, &str) -> bool,
+    ) -> Option<String> {
         if self.pending.contains_key(incoming) || self.resolved.contains_key(incoming) {
             return Some(incoming.to_string());
         }
         self.pending
             .keys()
             .chain(self.resolved.keys())
-            .find(|key| super::tool_runtime::permission_id_matches(key, incoming))
+            .find(|key| matches(key, incoming))
             .cloned()
     }
 
     /// Record the first answer for a consumed pending approval.
-    pub(crate) fn mark_resolved(&mut self, call_id: impl Into<String>, decision: ApprovalDecision) {
+    pub fn mark_resolved(&mut self, call_id: impl Into<String>, decision: ApprovalDecision) {
         let call_id = call_id.into();
         if self.resolved.insert(call_id.clone(), decision).is_none() {
             self.resolved_order.push_back(call_id);
@@ -108,19 +113,19 @@ impl<T> ApprovalRegistry<T> {
         }
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.pending.clear();
         self.resolved.clear();
         self.resolved_order.clear();
     }
 
     #[cfg(test)]
-    pub(crate) fn pending_len(&self) -> usize {
+    pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
 
     #[cfg(test)]
-    pub(crate) fn resolved_len(&self) -> usize {
+    pub fn resolved_len(&self) -> usize {
         self.resolved.len()
     }
 }
@@ -190,5 +195,19 @@ mod tests {
 
         assert_eq!(registry.resolved_len(), MAX_RESOLVED_TOMBSTONES);
         assert_eq!(registry.take("call-0"), ApprovalTake::Missing);
+    }
+
+    #[test]
+    fn resolve_key_uses_injected_matcher_for_canonical_ids() {
+        let mut registry = ApprovalRegistry::new();
+        registry.insert("toolu_01ABC", "pending");
+
+        let key = registry.resolve_key_with("call_01ABC", |stored, incoming| {
+            stored == incoming
+                || stored
+                    .trim_start_matches("toolu_")
+                    .eq_ignore_ascii_case(incoming.trim_start_matches("call_"))
+        });
+        assert_eq!(key.as_deref(), Some("toolu_01ABC"));
     }
 }

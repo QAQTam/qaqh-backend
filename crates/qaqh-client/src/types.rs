@@ -4,7 +4,7 @@
 //! and wire types. JSON is a serialization detail at the HTTP/SSE boundary;
 //! it is not an application-facing event model.
 
-// `RINGING_SCHEMA`/`RINGING_VERSION` 由下面的 `pub use` 一并带入本模块作用域。
+// `RINGING_SCHEMA` 由下面的 `pub use` 一并带入本模块作用域。
 use serde::{Deserialize, Serialize};
 
 // 再导出的完整性是**有意的**：壳层只认 `qaqh-client` 一个入口，不该越过它去直接
@@ -31,10 +31,8 @@ pub use qaqh_domain::{
 };
 pub use qaqh_ringing::{
     CLIENT_SESSION_HEADER, ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse,
-    MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_VERSION, RingingChannelSnapshot, RingingCommand,
-    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
-    RingingEvent, RingingEventBatch as EventBatch, RingingEventEnvelope,
-    RingingResetRequired as ResetRequired, is_safe_integer,
+    MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommand, RingingCommandAckStatus,
+    RingingCommandState, is_safe_integer,
 };
 pub use qaqh_types::{
     SessionListEntry, SessionMeta, ToolContinuation, ToolError, ToolImage, ToolModelPayload,
@@ -120,17 +118,17 @@ pub struct TimelinePage {
 impl TimelinePage {
     pub fn validate_for(&self, session_id: &str) -> Result<(), String> {
         if self.schema != RINGING_SCHEMA
-            || self.version != RINGING_VERSION
+            || self.version != RINGING_V2_VERSION
             || self.session_id != session_id
             || self.server_epoch.is_empty()
         {
-            return Err("invalid Ringing V1 timeline page".into());
+            return Err("invalid timeline page".into());
         }
         Ok(())
     }
 }
 
-/// Ringing V1 timeline SSE frame.
+/// Timeline SSE frame.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TimelineSseFrame {
     pub schema: String,
@@ -149,49 +147,6 @@ pub struct SseFrame {
     pub data: String,
 }
 
-/// Extract the stream sequence from `id: <epoch>:<channel>:<seq>`.
-pub fn cursor_from_sse_id(id: &str, channel: Channel) -> Option<u64> {
-    let mut parts = id.split(':');
-    let epoch = parts.next()?;
-    let frame_channel = parts.next()?;
-    let seq = parts.next()?;
-    if epoch.is_empty() || frame_channel != channel.as_str() || parts.next().is_some() {
-        return None;
-    }
-    seq.parse::<u64>().ok()
-}
-
-pub fn validate_envelope(envelope: &RingingEventEnvelope, channel: Channel) -> Result<(), String> {
-    envelope.validate().map_err(str::to_string)?;
-    if envelope.event.channel() != channel {
-        return Err(format!(
-            "envelope channel {:?} != connection channel {:?}",
-            envelope.event.channel(),
-            channel
-        ));
-    }
-    Ok(())
-}
-
-/// Wrap one validated SSE envelope in the canonical Ringing batch type.
-pub fn envelope_to_batch(
-    channel: Channel,
-    envelope: RingingEventEnvelope,
-    server_epoch: String,
-) -> EventBatch {
-    let seq = envelope.stream_seq;
-    EventBatch {
-        schema: RINGING_SCHEMA.to_string(),
-        version: RINGING_VERSION,
-        channel,
-        session_id: envelope.session_id.clone(),
-        server_epoch,
-        from_stream_seq: seq,
-        to_stream_seq: seq,
-        envelopes: vec![envelope],
-    }
-}
-
 /// Options for one typed command submission. The client creates an id when
 /// callers do not need to supply one for durable retry/correlation.
 #[derive(Debug, Clone, Default)]
@@ -207,56 +162,12 @@ pub struct CommandOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_domain::{ConversationEvent, Delivery};
-    use qaqh_ringing::RingingEvent;
-
-    #[test]
-    fn canonical_envelope_keeps_domain_event_typed() {
-        let envelope = RingingEventEnvelope::new(
-            "seed-1",
-            7,
-            3,
-            3,
-            "event-1",
-            RingingEvent::Conversation(ConversationEvent::TurnStarted {
-                turn_id: "t1".into(),
-                user_text: "hello".into(),
-            }),
-        );
-        assert_eq!(envelope.delivery, Delivery::Reliable);
-        validate_envelope(&envelope, Channel::Conversation).expect("valid envelope");
-        let batch = envelope_to_batch(Channel::Conversation, envelope, "epoch-1".into());
-        batch.validate().expect("canonical batch");
-    }
-
-    /// 帧 id 是游标推进的**唯一**依据（`{epoch}:{channel}:{seq}`）——解析放宽
-    /// 一个字符，客户端就会按错误的位置续传。逐条锁住形状。
-    #[test]
-    fn cursor_from_sse_id_accepts_only_the_exact_shape() {
-        let ch = Channel::Conversation;
-        assert_eq!(cursor_from_sse_id("epoch-1:conversation:7", ch), Some(7));
-        assert_eq!(cursor_from_sse_id("epoch-1:conversation:0", ch), Some(0));
-
-        // 频道不匹配：把 tool 的帧当 conversation 的续传位置，会直接跳过一段。
-        assert_eq!(cursor_from_sse_id("epoch-1:tool:7", ch), None);
-        // 段数不对（多一段 = 帧 id 形状变了，不能猜）。
-        assert_eq!(cursor_from_sse_id("epoch-1:conversation:7:9", ch), None);
-        // 少段。
-        assert_eq!(cursor_from_sse_id("epoch-1:conversation", ch), None);
-        assert_eq!(cursor_from_sse_id("epoch-1", ch), None);
-        assert_eq!(cursor_from_sse_id("", ch), None);
-        // 空 epoch：daemon 尚未协商，此时没有可续传的位置。
-        assert_eq!(cursor_from_sse_id(":conversation:7", ch), None);
-        // seq 非数字 / 空。
-        assert_eq!(cursor_from_sse_id("epoch-1:conversation:abc", ch), None);
-        assert_eq!(cursor_from_sse_id("epoch-1:conversation:", ch), None);
-    }
 
     #[test]
     fn timeline_page_validates_version_and_session() {
         let page = TimelinePage {
             schema: RINGING_SCHEMA.into(),
-            version: RINGING_VERSION,
+            version: RINGING_V2_VERSION,
             server_epoch: "epoch-1".into(),
             session_id: "seed-1".into(),
             snapshot: TimelineSnapshot {

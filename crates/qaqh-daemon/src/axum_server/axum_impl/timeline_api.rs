@@ -140,7 +140,7 @@ pub(crate) async fn handle_timeline_snapshot(
     let page = state.hub.rehydrate_timeline_page(&session_id, page);
     let body = serde_json::json!({
         "schema": "qaqh.Ringing",
-        "version": 1,
+        "version": 2,
         "server_epoch": state.hub.epoch(),
         "session_id": session_id,
         "snapshot": {"watermark": snapshot.watermark, "turns": page},

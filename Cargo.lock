@@ -2033,6 +2033,7 @@ name = "qaqh-policy"
 version = "2.0.0-alpha3"
 dependencies = [
  "serde",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -2061,11 +2062,13 @@ dependencies = [
  "qaqh-lsp",
  "qaqh-mcp",
  "qaqh-message",
+ "qaqh-policy",
  "qaqh-ringing",
  "qaqh-sandbox",
  "qaqh-session",
  "qaqh-skills",
  "qaqh-subagent",
+ "qaqh-title",
  "qaqh-types",
  "qaqh-workspace",
  "rmcp",
@@ -2134,6 +2137,17 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "qaqh-title"
+version = "2.0.0-alpha3"
+dependencies = [
+ "log",
+ "qaqh-gate",
+ "qaqh-message",
+ "qaqh-session",
+ "qaqh-types",
 ]
 
 [[package]]

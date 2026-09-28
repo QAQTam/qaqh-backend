@@ -52,7 +52,7 @@ pub(crate) async fn handle_service(
         )
             .into_response();
     }
-    // 任何带会话键的请求：会话必须归属本 lease（写端发 `session_id`，兼容旧 `seed`）。
+    // 任何带会话键的请求：会话必须归属本 lease（会话键只认 `session_id`）。
     if let Some(session_id) = service_methods::session_param_value(&params) {
         let owns = state
             .leases

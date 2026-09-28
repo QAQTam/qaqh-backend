@@ -353,7 +353,7 @@ mod tests {
             items: Vec::new(),
             current_id: None,
             counts: crate::todo::typed::TodoCounts {
-                idle: 1,
+                pending: 1,
                 in_progress: 1,
                 completed: 0,
                 cancelled: 0,
