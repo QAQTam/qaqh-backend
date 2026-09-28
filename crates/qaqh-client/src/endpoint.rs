@@ -108,8 +108,8 @@ impl QueryRequest {
                 }
                 ("fs.read", params)
             }
-            // 线上参数键统一 `session_id`（BETA-01 Phase D）。daemon 侧
-            // `session_param_value` 会回退读取 legacy `seed`，旧客户端仍可用。
+            // 线上参数键统一 `session_id`（daemon 侧 `session_param_value`
+            // 只认 `session_id`，legacy `seed` 已退场）。
             Self::SessionDashboard { session_id } => {
                 ("session.dashboard", json!({ "session_id": session_id }))
             }

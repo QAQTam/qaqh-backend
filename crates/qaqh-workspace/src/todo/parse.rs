@@ -187,7 +187,7 @@ fn parse_status_field(value: Option<&Value>, label: &str) -> Result<TodoStatus, 
     super::actions::parse_status(raw).ok_or_else(|| {
         json_err_string(
             "INVALID_INPUT",
-            format!("{label}.status must be one of idle|in_progress|completed|cancelled"),
+            format!("{label}.status must be one of pending|in_progress|completed|cancelled"),
             "Status is required on every item (full-replace semantics).",
         )
     })

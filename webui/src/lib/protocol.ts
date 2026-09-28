@@ -1,5 +1,6 @@
 export const RINGING_SCHEMA = "qaqh.Ringing";
-export const RINGING_VERSION = 1;
+/** Ringing v2 单一信封版本：历史 v1 兼容已拆除。 */
+export const RINGING_VERSION = 2;
 
 /** Streaming-markdown token ids (subset we render), re-declared for typing. */
 export const MD = {

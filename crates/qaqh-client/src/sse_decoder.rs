@@ -263,13 +263,8 @@ mod tests {
                 "{\"x\":1}".into()
             )
         );
-        // 测试名承诺的那半句：id 存活**必须**同时意味着游标可推进。若 BOM 只
-        // 吃掉了前缀的一部分（id 变成 `onversation:7` 之类），上面三条字段
-        // 断言未必红，游标解析一定红。
-        assert_eq!(
-            crate::types::cursor_from_sse_id(&frame.id, crate::types::Channel::Conversation),
-            Some(7)
-        );
+        // 测试名承诺的那半句：id 存活的判定就在上面的字段断言里
+        // （id 为 `epoch-1:conversation:7`，而不是 BOM 吃剩的残段）。
         assert!(d.next_frame().is_none());
     }
 

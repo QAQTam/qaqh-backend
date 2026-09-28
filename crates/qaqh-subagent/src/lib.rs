@@ -1,4 +1,4 @@
-//! qaqh-subagent — spawn sub-agent tool for the QAQ-Harness agent (Ringing V1).
+//! qaqh-subagent — spawn sub-agent tool for the QAQ-Harness agent.
 //!
 //! The subagent is an **isolated Ringing session**, not a raw child process:
 //!
@@ -6,8 +6,8 @@
 //!    thread. When the daemon installs an in-process [`SubagentHost`]
 //!    (Knife-1 step-2: `QaqhService` via `qaqh_subagent::install_host`), the
 //!    tool drives the actor directly through the host handle — no daemon
-//!    HTTP/SSE loopback. Without a host (tests / non-daemon embedding) it
-//!    falls back to the legacy `subagent.spawn` action over HTTP/SSE.
+//!    HTTP/SSE loopback. (The legacy HTTP/SSE fallback was removed in PR-4-2;
+//!    a host handle is required.)
 //! 2. The parent attaches (or directly addresses) the sub-seed and sends the
 //!    task via the ordinary `ConversationSendMessage` Ringing command.
 //! 3. A background collector thread watches the event stream for
@@ -909,7 +909,6 @@ fn register_subagent_process(name: &str) -> RegistryRef {
     RegistryRef::Local { id }
 }
 
-/// 子代理命令/事件传输抽象：宿主直连与 HTTP/SSE 回连共用同一套 collect 流程。
 /// 子代理命令/事件传输抽象（PR-4-2：legacy HTTP/SSE 回连已删除，仅宿主直连）。
 ///
 /// - [`HostTransport`]：进程内直连（无 lease / 无 HTTP），由 daemon 装配宿主。
@@ -919,10 +918,6 @@ trait SubagentTransport: Send {
     /// 读取外置大内容。
     fn download_content(&self, session_id: &str, reference: &ContentRef)
     -> Result<Vec<u8>, String>;
-    /// 建立 attachment / lease（HTTP 路径需要；宿主直连为 no-op）。
-    fn attach(&self, session_id: &str) -> Result<(), String>;
-    /// 关闭客户端连接（宿主直连为 no-op）。
-    fn close(&self);
     /// 该 seed 的实时事件批次流。
     fn events(&self) -> &mpsc::Receiver<EventBatch>;
 }
@@ -955,12 +950,6 @@ impl SubagentTransport for HostTransport {
     ) -> Result<Vec<u8>, String> {
         self.host.download_content(session_id, reference)
     }
-
-    fn attach(&self, _session: &str) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn close(&self) {}
 
     fn events(&self) -> &mpsc::Receiver<EventBatch> {
         &self.batch_rx
@@ -1300,11 +1289,9 @@ pub fn start_subagent_collector(
     match transport.send_command(session_id, send) {
         Ok(true) => {}
         Ok(false) => {
-            transport.close();
             return Err("daemon rejected subagent task send".to_string());
         }
         Err(error) => {
-            transport.close();
             return Err(format!("send subagent task: {error}"));
         }
     }
@@ -1613,13 +1600,6 @@ fn collect_subagent_result(
                     300 * (1 << attempt.min(3)),
                 ));
             }
-            // attach（HTTP/lease 语义；宿主直连为 no-op，覆盖 lease 过期后的恢复）。
-            if let Err(e) = transport.attach(parent_session) {
-                log::warn!(
-                    "[SUBAGENT] '{name}' attach parent {parent_session} for inject (attempt {}): {e}",
-                    attempt + 1
-                );
-            }
             match transport.send_command(parent_session, inject.clone()) {
                 Ok(true) => {
                     accepted = true;
@@ -1662,7 +1642,6 @@ fn collect_subagent_result(
         log::info!("[SUBAGENT] '{name}' sub agent {session_id} closed (auto-unload)");
     }
 
-    transport.close();
     log::info!(
         "[SUBAGENT] '{name}' collector complete (seed={session_id}), answer_len={answer_len}, exit={exit_code}, cancelled={did_cancel}, first_event={first_event_logged}"
     );
@@ -2038,12 +2017,6 @@ mod tests {
         ) -> Result<Vec<u8>, String> {
             Err("no externalized content in this test".into())
         }
-
-        fn attach(&self, _session: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn close(&self) {}
 
         fn events(&self) -> &mpsc::Receiver<EventBatch> {
             &self.batch_rx

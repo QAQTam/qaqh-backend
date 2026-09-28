@@ -6,6 +6,7 @@ description = "Pure policy decisions and sandbox specifications for QAQ-Harness"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+unicode-normalization = "0.1"
 
 [lints]
 workspace = true

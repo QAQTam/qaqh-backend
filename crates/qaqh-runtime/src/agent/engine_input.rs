@@ -90,7 +90,7 @@ impl InputEngine {
         qaqh_workspace::clear_cancel();
 
         if ctx.agent.config.compliance_enabled
-            && let Err(reason) = crate::agent::input_guard::content_guard(&text)
+            && let Err(reason) = qaqh_policy::content_guard(&text)
         {
             log::info!("[INPUT] compliance blocked: {reason}");
             // Ringing 双发：OperationFailed（Control 频道错误终态）

@@ -16,6 +16,7 @@ members = [
     "crates/qaqh-workspace",
     "crates/qaqh-session",
     "crates/qaqh-subagent",
+    "crates/qaqh-title",
     "crates/qaqh-client",
     "crates/qaqh-mcp",
     "crates/qaqh-lsp",

@@ -12,17 +12,18 @@ use serde_json::Value;
 use tokio::sync::{Mutex, watch};
 
 use qaqh_domain::ControlCommand;
-use qaqh_ringing::RingingCommandStatus;
 
 use crate::discovery::{DaemonDiscovery, DiscoveryExt, read_discovery};
 use crate::endpoint::{ActionRequest, QueryRequest};
 use crate::error::{ClientError, Result};
-use crate::session::{RingingSession, SessionState};
+use crate::session::RingingSession;
+use crate::v2::ClientV2SessionState;
 use crate::timeline::TimelineStream;
 use crate::types::{
-    CommandOptions, ContentRef, RingingCommand, RingingCommandAck, RingingCommandAckStatus,
-    TimelineEntry, TimelinePage, TimelineStatus,
+    CommandOptions, ContentRef, RingingCommand, RingingCommandAckStatus, TimelineEntry,
+    TimelinePage, TimelineStatus,
 };
+use qaqh_ringing::v2::{RingingV2CommandAck, RingingV2CommandStatus};
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
 
 /// Callbacks delivered on the client's background tasks.
@@ -60,7 +61,7 @@ pub struct ClientHandlers {
 /// 远端 daemon 的直连目标（临时跨端模式）。
 ///
 /// 与本地模式互斥：设置后跳过 `daemon.json` discovery、pid 判活和本地
-/// spawn，直接用 `base_url + token` 走 Ringing V1。
+/// spawn，直接用 `base_url + token` 走 Ringing v2。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteEndpoint {
     /// `http://<ip>:<port>` 或 `https://...`（不带尾随斜杠）。
@@ -116,7 +117,7 @@ pub enum StopStatus {
     Unsupported,
 }
 
-/// A connected Ringing V1 client. Cloneable handle; `close()` stops all tasks.
+/// A connected Ringing v2 client. Cloneable handle; `close()` stops all tasks.
 #[derive(Clone)]
 pub struct Client {
     pub(crate) inner: Arc<ClientInner>,
@@ -307,7 +308,7 @@ impl Client {
     }
 
     /// Current negotiated session state.
-    pub async fn session_state(&self) -> Option<SessionState> {
+    pub async fn session_state(&self) -> Option<ClientV2SessionState> {
         self.inner.session.state().await
     }
 
@@ -332,18 +333,15 @@ impl Client {
         session_id: Option<&str>,
         command: RingingCommand,
         options: CommandOptions,
-    ) -> Result<RingingCommandAck> {
-        // 纯 v2：命令面只有 v2 一条路径（`send_command_v2_typed` 是带 typed
-        // `existing` 的入口，这里投影回 v1 形状保持既有壳层 API）。
-        Ok(self
+    ) -> Result<RingingV2CommandAck> {
+        self
             .send_command_v2_typed(session_id, command, options)
-            .await?
-            .into_v1())
+            .await
     }
 
     /// `GET /ringing/v2/commands/{command_id}` — resolve post-acceptance uncertainty.
-    pub async fn command_status(&self, command_id: &str) -> Result<RingingCommandStatus> {
-        Ok(self.command_status_v2_typed(command_id).await?.into_v1())
+    pub async fn command_status(&self, command_id: &str) -> Result<RingingV2CommandStatus> {
+        self.command_status_v2_typed(command_id).await
     }
 
     /// `POST /ringing/v2/service/{name}` — typed read-only query.
@@ -426,12 +424,10 @@ impl Client {
         Ok(response.json().await?)
     }
 
-    /// Attach a session seed to this client session (Ringing v1 semantics:
-    /// `session_resume` on the control channel — the daemon records the seed
-    /// ownership so subsequent seed-scoped commands are accepted). The seed
-    /// is carried both in the envelope and in the command body (validate
-    /// requires a non-empty envelope seed for every command except create).
-    pub async fn attach(&self, session_id: &str) -> Result<RingingCommandAck> {
+    /// Attach a session to this client session (`session_resume` on the
+    /// control channel — the daemon records the ownership so subsequent
+    /// session-scoped commands are accepted).
+    pub async fn attach(&self, session_id: &str) -> Result<RingingV2CommandAck> {
         let ack = self
             .send_command(
                 Some(session_id),
@@ -705,8 +701,7 @@ impl Client {
     /// content reference.
     ///
     /// Hand-rolled multipart/form-data（daemon 受限解析只认
-    /// `session_id` / `media_type` / `content` 三字段，见 `handle_content_upload`；
-    /// legacy `seed` 字段仍被兼容读取）；
+    /// `session_id` / `media_type` / `content` 三字段，见 `handle_content_upload`）。
     /// 返回的 `ContentRef` 可放入 `conversation_send_message` 的
     /// `attachments`（命令中不允许出现本地路径）。失败调用方自行记录。
     pub async fn upload_content(
