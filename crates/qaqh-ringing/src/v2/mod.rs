@@ -1,7 +1,8 @@
 //! Ringing v2 wire contract.
 //!
-//! v1 remains available in the crate root for the 2.0 compatibility window.
-//! v2 is additive and uses a separate base path and version constant.
+//! v2 is additive and uses a separate base path and version constant. The
+//! crate root retains the live command/snapshot/worker envelopes; the v1
+//! event bus and its wire types were removed in hub-fact-bus stages 3.2/3d.
 
 mod cursor;
 mod types;
