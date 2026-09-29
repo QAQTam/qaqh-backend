@@ -18,10 +18,7 @@ use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use qaqh_domain::{
-    ControlEvent, ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineEntry,
-    ToolEvent,
-};
+use qaqh_domain::{ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineEntry};
 use qaqh_ringing::{
     RingingChannelSnapshot, RingingEvent, RingingEventEnvelope, RingingResetRequired,
     is_safe_integer,
@@ -877,11 +874,42 @@ impl RingingHub {
             .get_any(content_id)
     }
 
+    /// 活交互登记：当前进程发布的 InteractionRequested/PlanReviewRequested
+    /// 进入内存表，resolved 时移除。daemon 重启后表为空 → journal 重放的
+    /// 幽灵交互不在表 → bootstrap 孤儿收尾仍可收尾它们（原设计意图）；
+    /// 活交互在表 → 收尾跳过（修复「ask 发布后 1ms 被 bootstrap 秒杀」）。
+    ///
+    /// §4.0.5：副作用由事件产生侧调用（actor 桥），不再由 publish 承载。
+    pub fn register_live_interaction(&self, session_id: &str, interaction_id: &str) {
+        self.live_interactions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), interaction_id.to_string());
+    }
+
+    /// 条件解除活交互登记：仅当活表仍指向该 interaction_id 才移除
+    /// （并发发布的新 ask 可能已注册了不同 id，不能误抹）。
+    pub fn unregister_live_interaction(&self, session_id: &str, interaction_id: &str) {
+        let mut live = self
+            .live_interactions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if live
+            .get(session_id)
+            .is_some_and(|cur| cur == interaction_id)
+        {
+            live.remove(session_id);
+        }
+    }
+
     /// 解除某交互正文的 pin（交互 resolved / expired / permission tool finished）。
     ///
     /// 先走内存活表（当前进程路径），再按持久化的 pin_key 兜底——daemon 重启后
     /// 活表为空，但 metadata 里仍记录着 interaction_id，孤儿收尾时也能释放 pin。
-    fn release_interaction_content(&self, session_id: &str, interaction_id: &str) {
+    ///
+    /// §4.0.5：副作用由事件产生侧调用（actor 桥 / orphan_seal 补终态），
+    /// 不再由 publish 承载。
+    pub fn release_interaction_content(&self, session_id: &str, interaction_id: &str) {
         let content_id = {
             let mut live = self
                 .live_interaction_content
@@ -1047,56 +1075,10 @@ impl RingingHub {
                     st.replaceable_since_checkpoint.remove(&key);
                     self.persist_remove_replaceable(channel, session_id, st, &format!("{key:?}"));
                 }
-                // 活交互登记：当前进程发布的 InteractionRequested/PlanReviewRequested
-                // 进入内存表，resolved 时移除。daemon 重启后表为空 → journal 重放的
-                // 幽灵交互不在表 → bootstrap 孤儿收尾仍可收尾它们（原设计意图）；
-                // 活交互在表 → 收尾跳过（修复「ask 发布后 1ms 被 bootstrap 秒杀」）。
-                match &envelope.event {
-                    RingingEvent::Control(ControlEvent::InteractionRequested {
-                        interaction_id,
-                        ..
-                    })
-                    | RingingEvent::Control(ControlEvent::PlanReviewRequested {
-                        interaction_id,
-                        ..
-                    }) => {
-                        self.live_interactions
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(session_id.to_string(), interaction_id.clone());
-                    }
-                    RingingEvent::Control(ControlEvent::InteractionResolved {
-                        interaction_id,
-                        ..
-                    })
-                    | RingingEvent::Control(ControlEvent::PlanReviewResolved {
-                        interaction_id,
-                        ..
-                    }) => {
-                        let mut live = self
-                            .live_interactions
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        if live
-                            .get(session_id)
-                            .is_some_and(|cur| cur == interaction_id)
-                        {
-                            live.remove(session_id);
-                        }
-                        drop(live);
-                        // #345：交互终结 → 正文解除 pin，回到普通 TTL/淘汰语义。
-                        self.release_interaction_content(session_id, interaction_id);
-                    }
-                    // permission 的正文用 canonical interaction id 作为 pin_key；
-                    // 权限答复本身没有 Ringing 终态事件，工具完成/取消就是它的
-                    // 终结信号（拒绝路径同样会落到 ToolFinished(Cancelled/Denied)）。
-                    RingingEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
-                        let interaction_id =
-                            crate::agent::tool_runtime::canonical_interaction_id(tool_call_id);
-                        self.release_interaction_content(session_id, interaction_id.as_str());
-                    }
-                    _ => {}
-                }
+                // §4.0.5：publish 的隐式副作用（live_interactions 登记/解除、
+                // 交互正文 pin 释放）已迁出到事件产生侧——actor 桥
+                // （`registry::apply_interaction_side_effects`）与 orphan_seal
+                // 补终态路径。publish 只保留广播 + journal 语义。
                 // Reliable replay/backpressure belongs to the journal. Keeping a
                 // second reliable queue in the router would fill permanently
                 // because live broadcast has no dequeue/ack path.
@@ -1717,7 +1699,8 @@ fn unix_ms() -> u64 {
 mod tests {
     use super::*;
     use qaqh_domain::{
-        CompactStatus, ConversationEvent, TimelineIntent, TimelineSnapshot, ToolEvent,
+        CompactStatus, ControlEvent, ConversationEvent, TimelineIntent, TimelineSnapshot,
+        ToolEvent,
     };
 
     #[test]
@@ -1922,49 +1905,6 @@ mod tests {
             1,
             "seed b history restored on first access"
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn orphan_compact_from_persisted_journal_is_failed_before_bootstrap() {
-        let root = temp_root("orphan-compact");
-        {
-            let hub = RingingHub::with_persistence("epoch-1", &root);
-            let _ = hub.publish(
-                "s",
-                DomainEvent::Conversation(ConversationEvent::CompactStarted {
-                    compact_id: "compact-persisted".into(),
-                    turns_total: 9,
-                    turns_keeping: 3,
-                }),
-            );
-        }
-
-        let hub = RingingHub::with_persistence("epoch-2", &root);
-        assert_eq!(
-            hub.snapshot(RingingChannel::Conversation, "s").state["compact_status"],
-            "running",
-            "journal replay alone restores the interrupted operation"
-        );
-        assert!(hub.seal_orphan_channel_state("s", false));
-        // daemon bootstrap 在 SessionManager 初始化后会调用 conversation_snapshot；
-        // 此处只需验证由 journal 驱动、随后会被持久消息 overlay 保留的投影字段。
-        let bootstrap_state = hub.snapshot(RingingChannel::Conversation, "s").state;
-        assert_eq!(bootstrap_state["compact_status"], "failed");
-        assert_eq!(bootstrap_state["compact_id"], "compact-persisted");
-        assert!(!hub.seal_orphan_channel_state("s", false));
-
-        let replay = hub
-            .replay_since(RingingChannel::Conversation, "s", 0)
-            .expect("replay compact recovery");
-        assert!(replay.iter().any(|envelope| matches!(
-            &envelope.event,
-            RingingEvent::Conversation(ConversationEvent::CompactFinished {
-                compact_id,
-                status: CompactStatus::Failed,
-                ..
-            }) if compact_id == "compact-persisted"
-        )));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3378,174 +3318,6 @@ mod tests {
     }
 
     #[test]
-    fn seal_orphan_channel_state_converges_three_channels() {
-        let hub = RingingHub::new("epoch-seal");
-        // 无终态的中断现场：running turn、running compact、running tool + 挂起权限、未决 ask
-        hub.publish(
-            "s",
-            DomainEvent::Conversation(ConversationEvent::TurnStarted {
-                turn_id: "t1".into(),
-                user_text: "hi".into(),
-            }),
-        );
-        hub.publish(
-            "s",
-            DomainEvent::Conversation(ConversationEvent::CompactStarted {
-                compact_id: "compact-1".into(),
-                turns_total: 8,
-                turns_keeping: 2,
-            }),
-        );
-        hub.publish(
-            "s",
-            DomainEvent::Tool(ToolEvent::ToolStarted {
-                tool_call_id: "c1".into(),
-                turn_id: "t1".into(),
-                round_num: 0,
-                name: "exec".into(),
-            }),
-        );
-        hub.publish(
-            "s",
-            DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
-                tool_call_id: "c2".into(),
-                turn_id: "t1".into(),
-                round_num: 0,
-                tool_name: "exec".into(),
-                action_summary: Some(r#"command: "cargo test""#.into()),
-                reason: "r".into(),
-                paths: vec![],
-                category: qaqh_domain::PermissionCategory::Exec,
-                level: 3,
-                risk: qaqh_domain::PermissionRisk::High,
-                consequence: "run".into(),
-            }),
-        );
-        hub.publish(
-            "s",
-            DomainEvent::Control(ControlEvent::InteractionRequested {
-                interaction_id: "i1".into(),
-                turn_id: "t1".into(),
-                mode: qaqh_domain::AskMode::Single,
-                questions: vec![],
-            }),
-        );
-
-        // 收尾前：三个投影都携带无终态残留
-        assert_eq!(
-            hub.snapshot(RingingChannel::Conversation, "s").state["active_turn"],
-            "t1"
-        );
-        assert_eq!(
-            hub.snapshot(RingingChannel::Conversation, "s").state["compact_status"],
-            "running"
-        );
-        assert!(hub.snapshot(RingingChannel::Tool, "s").state["running"].is_array());
-        assert_eq!(
-            hub.snapshot(RingingChannel::Tool, "s").state["pending_permission"],
-            "c2"
-        );
-        assert_eq!(
-            hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"]["id"],
-            "i1"
-        );
-
-        // force=true：本测试的 InteractionRequested 由当前进程发布（活表内），
-        // 语义为「worker 死亡/重启后的强制收尾」，故 force=true。
-        assert!(hub.seal_orphan_channel_state("s", true));
-        // 幂等：再次调用无变更
-        assert!(!hub.seal_orphan_channel_state("s", true));
-
-        // 收尾后：三个投影全部收敛
-        let conversation = hub.snapshot(RingingChannel::Conversation, "s");
-        assert!(conversation.state["active_turn"].is_null());
-        assert_eq!(conversation.state["compact_status"], "failed");
-        assert_eq!(conversation.state["compact_id"], "compact-1");
-        assert!(hub.snapshot(RingingChannel::Tool, "s").state["running"].is_null());
-        assert!(hub.snapshot(RingingChannel::Tool, "s").state["pending_permission"].is_null());
-        assert!(hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"].is_null());
-
-        // journal 已包含终态事件（SSE 客户端与重启后的重放都收敛）
-        let replay = hub
-            .replay_since(RingingChannel::Conversation, "s", 0)
-            .expect("within window");
-        assert!(replay.iter().any(|env| matches!(
-            &env.event,
-            qaqh_ringing::RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
-                turn_id: Some(id)
-            }) if id == "t1"
-        )));
-        assert!(replay.iter().any(|env| matches!(
-            &env.event,
-            qaqh_ringing::RingingEvent::Conversation(ConversationEvent::CompactFinished {
-                compact_id,
-                status: CompactStatus::Failed,
-                ..
-            }) if compact_id == "compact-1"
-        )));
-        let tool_replay = hub
-            .replay_since(RingingChannel::Tool, "s", 0)
-            .expect("within window");
-        assert!(tool_replay.iter().any(|env| matches!(
-            &env.event,
-            qaqh_ringing::RingingEvent::Tool(ToolEvent::ToolFinished {
-                tool_call_id,
-                ..
-            }) if tool_call_id == "c1"
-        )));
-        assert!(tool_replay.iter().any(|env| matches!(
-            &env.event,
-            qaqh_ringing::RingingEvent::Tool(ToolEvent::ToolFinished {
-                tool_call_id,
-                ..
-            }) if tool_call_id == "c2"
-        )));
-        let control_replay = hub
-            .replay_since(RingingChannel::Control, "s", 0)
-            .expect("within window");
-        assert!(control_replay.iter().any(|env| matches!(
-            &env.event,
-            qaqh_ringing::RingingEvent::Control(ControlEvent::InteractionResolved {
-                interaction_id,
-                ..
-            }) if interaction_id == "i1"
-        )));
-    }
-
-    #[test]
-    fn seal_orphan_channel_state_preserves_live_interaction_awaiting_user() {
-        // 回归测试：修复「ask 发布 1ms 后被 bootstrap 孤儿收尾秒杀」——
-        // 当前进程发布、等待用户响应的活交互必须被 bootstrap 路径保护；
-        // worker 死亡/重启路径（force=true）仍要强制收尾。
-        let hub = RingingHub::new("epoch-live-ask");
-        hub.publish(
-            "s",
-            DomainEvent::Control(ControlEvent::InteractionRequested {
-                interaction_id: "live-1".into(),
-                turn_id: "t1".into(),
-                mode: qaqh_domain::AskMode::Single,
-                questions: vec![],
-            }),
-        );
-        assert_eq!(
-            hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"]["id"],
-            "live-1"
-        );
-        // bootstrap 路径（force=false）：活交互不被误判为孤儿，无其他孤儿 → false。
-        assert!(!hub.seal_orphan_channel_state("s", false));
-        assert_eq!(
-            hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"]["id"],
-            "live-1",
-            "live interaction must survive the bootstrap seal path"
-        );
-        // worker 死亡/重启收尾路径（force=true）：无视守卫，强制收尾。
-        assert!(hub.seal_orphan_channel_state("s", true));
-        assert!(hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"].is_null());
-        // 收尾后活表清空：后续 bootstrap 路径不再保护（幂等）。
-        assert!(!hub.seal_orphan_channel_state("s", false));
-    }
-
-    #[test]
     fn forget_session_drops_per_session_resident_state() {
         let hub = RingingHub::new("forget-seed-test");
         hub.publish("s1", round_delta(1));
@@ -3749,6 +3521,7 @@ mod lock_sharding_tests {
     //! 其他频道/会话的 publish 全部阻塞。下述测试在旧代码上红（超时失败），
     //! 在新代码上绿。
 
+    use qaqh_domain::ControlEvent;
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, mpsc};

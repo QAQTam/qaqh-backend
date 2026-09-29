@@ -4,8 +4,8 @@
 //! `open -> bootstrap -> since_cursor subscribe -> replay -> live`.
 
 use qaqh_ringing::{
-    RINGING_SCHEMA, RINGING_V2_VERSION, RINGING_VERSION, RingingCommandAckStatus,
-    RingingCommandEnvelope, RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities,
+    RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommandAckStatus,
+    RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities,
     RingingV2ChannelSnapshot, RingingV2CommandAck, RingingV2CommandEnvelope,
     RingingV2CommandResult, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,
     RingingV2DriverState, RingingV2ExistingResult, RingingV2InteractionKind,
@@ -627,30 +627,15 @@ async fn forward_driver_command(
         .unwrap_or_else(|error| error.into_inner())
         .instance_for_session(caller)
         .unwrap_or_default();
-    let envelope = RingingCommandEnvelope::new(
+    let envelope = RingingV2CommandEnvelope::new(
         qaqh_session::canonical::generate_ulid(),
         client_instance_id,
         qaqh_ringing::RingingCommand::Control(command),
     )
     .with_client_session_id(caller)
     .with_session_id(session_id);
-    let body = match serde_json::to_vec(&envelope) {
-        Ok(body) => body,
-        Err(error) => {
-            return api_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "encode_error",
-                &error.to_string(),
-            );
-        }
-    };
-    handle_command(
-        State(state.clone()),
-        headers.clone(),
-        Path("control".into()),
-        Bytes::from(body),
-    )
-    .await
+    let (status, ack) = execute_command(state, headers, envelope).await;
+    json_response(status, &ack)
 }
 
 pub(crate) async fn handle_driver_claim_v2(
@@ -997,28 +982,10 @@ pub(crate) async fn handle_command_v2(
             _ => {}
         }
     }
-    let v1 = RingingCommandEnvelope {
-        schema: RINGING_SCHEMA.into(),
-        version: RINGING_VERSION,
-        channel: envelope.channel,
-        command_id: envelope.command_id,
-        client_instance_id: envelope.client_instance_id,
-        client_session_id: envelope.client_session_id,
-        session_id: envelope.session_id,
-        expected_revision: envelope.expected_revision,
-        command: envelope.command,
-    };
-    let body = match serde_json::to_vec(&v1) {
-        Ok(body) => body,
-        Err(error) => {
-            return api_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "encode_error",
-                &error.to_string(),
-            );
-        }
-    };
-    handle_command(State(state), headers, Path(id), Bytes::from(body)).await
+    // 进程内命令入口直调（spec 阶段 1.2）：v2 信封直接进引擎，
+    // 不再序列化成 v1 信封 JSON 绕已无路由的 v1 handler。
+    let (status, ack) = execute_command(&state, &headers, envelope).await;
+    json_response(status, &ack)
 }
 
 /// Interaction addressed by an interaction-resolution command.

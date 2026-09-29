@@ -12,16 +12,16 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::RingingChannel;
-use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
+use qaqh_ringing::{RingingWorkerCommandEnvelope};
 use qaqh_session::canonical::{
     CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE, generate_ulid,
 };
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{
-    AgentPath, ContentHash, ContentRef as CanonicalContentRef, EventId, LogId, SessionId,
-    TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot, TeamBoardSubscription,
-    TeamBoardSubscriptionTarget, TeamBoardThread, TeamTaskArtifact, TeamTaskSnapshot,
+    AgentPath, AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
+    ConversationDelta, EventId, LogId, ProjectionPayload, SessionId, TeamBoardChannel,
+    TeamBoardPost, TeamBoardSnapshot, TeamBoardSubscription, TeamBoardSubscriptionTarget,
+    TeamBoardThread, TeamTaskArtifact, TeamTaskSnapshot, TurnTerminal,
 };
 use qaqh_session::team::{
     BoardFact, BoardId, BoardPayload, BoardStore, BoardSubscriptionTarget, ChannelCreated,
@@ -34,14 +34,16 @@ use qaqh_subagent::{
     ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
-    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest, ContentRef, EventBatch,
-    InterruptAgentRequest, InterruptedAgent, ListedAgent, ListedAgentResidency, ListedAgentStatus,
-    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
-    StartSubagentRequest, SubagentHost, TaskBoardArtifact, TaskBoardHost, TaskBoardTask,
-    TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
-    TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
+    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest, CollectorBatch,
+    CollectorEvent, ContentRef, InterruptAgentRequest, InterruptedAgent, ListedAgent,
+    ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage,
+    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost, TaskBoardArtifact,
+    TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest, TaskCloseAction,
+    TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction, TaskUpdateRequest,
+    WaitAgentOutcome, WaitAgentRequest,
 };
 
+use crate::ringing::V2StreamItem;
 use super::QaqhService;
 
 impl QaqhService {
@@ -515,54 +517,59 @@ impl SubagentHost for QaqhService {
         self.registry()?.send_ringing(session_id, &env)
     }
 
-    fn subscribe(&self, session_id: &str) -> mpsc::Receiver<EventBatch> {
-        let (tx, rx) = mpsc::channel::<EventBatch>();
-        let hub = match self.hub.get() {
-            Some(hub) => hub.clone(),
+    fn subscribe(&self, session_id: &str) -> mpsc::Receiver<CollectorBatch> {
+        let (tx, rx) = mpsc::channel::<CollectorBatch>();
+        let Some(v2) = self.v2_hub.get().cloned() else {
+            log::error!("[SUBAGENT-HOST] subscribe {session_id}: v2 projection hub not attached");
+            return rx;
+        };
+        let session_dir = match self
+            .sessions
+            .session_dir_for_id(session_id)
+            .ok()
+            .flatten()
+        {
+            Some(dir) => dir,
             None => {
-                log::error!("[SUBAGENT-HOST] subscribe {session_id}: Ringing hub not attached");
+                log::error!("[SUBAGENT-HOST] subscribe {session_id}: session dir not found");
                 return rx;
             }
         };
-        let epoch = hub.epoch().to_string();
-        let session_own = session_id.to_string();
-        for channel in [
-            RingingChannel::Control,
-            RingingChannel::Conversation,
-            RingingChannel::Tool,
-        ] {
-            // BUG-2026-09-12-12：按 (channel, seed) 分片订阅——桥接只需本
-            // seed 的事件，分片订阅既省掉每事件的 seed 过滤，也不再被其它
-            // 会话的风暴推向 Lagged。
-            let mut hub_rx = hub.subscribe(channel, &session_own);
-            let tx = tx.clone();
-            let session_id = session_own.clone();
-            let epoch = epoch.clone();
-            std::thread::Builder::new()
-                .name(format!("qaqh-subagent-sub-{session_own}"))
-                .spawn(move || {
-                    // broadcast::Receiver 非 Send… 但 tokio broadcast Receiver 是 Send。
-                    // 用 try_recv 轮询（无 block_on 依赖），聚合到 std mpsc。
-                    loop {
-                        match hub_rx.try_recv() {
-                            Ok(env) => {
-                                if env.session_id != session_id {
-                                    continue;
-                                }
-                                let batch = envelope_to_batch(channel, env, &epoch);
+        // since_cursor = None → 只收 live 事件，与 v1 桥接的订阅时机语义一致。
+        let mut sub = match v2.subscribe(&session_dir, session_id, None) {
+            Ok(sub) => sub,
+            Err(error) => {
+                log::error!("[SUBAGENT-HOST] subscribe {session_id}: v2 subscribe failed: {error}");
+                return rx;
+            }
+        };
+        std::thread::Builder::new()
+            .name(format!("qaqh-subagent-sub-{session_id}"))
+            .spawn(move || {
+                // hub-fact-bus spec 阶段 2.2：v2 单流桥接。广播 Receiver 是
+                // Send，用 try_recv 轮询（无 block_on 依赖），聚合到 std mpsc。
+                loop {
+                    match sub.try_next() {
+                        Some(V2StreamItem::Event(envelope)) => {
+                            if let Some(event) = collector_event_from_projection(&envelope.payload)
+                            {
+                                let batch = CollectorBatch {
+                                    session_id: envelope.session_id.clone(),
+                                    events: vec![event],
+                                };
                                 if tx.send(batch).is_err() {
                                     break;
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
-                                std::thread::sleep(Duration::from_millis(20));
-                            }
-                            Err(_) => break, // Closed / Lagged：终止桥接
                         }
+                        // Lagged/流终止：与 v1 桥接一致直接退出（收集器有
+                        // 超时与 Disconnected 兜底）。
+                        Some(V2StreamItem::Reset(_)) => break,
+                        None => std::thread::sleep(Duration::from_millis(20)),
                     }
-                })
-                .ok();
-        }
+                }
+            })
+            .ok();
         rx
     }
 
@@ -1626,22 +1633,41 @@ fn parse_task_state(state: &str) -> Result<TaskState, String> {
     }
 }
 
-/// 把单条 hub 事件信封包装为规范 EventBatch（与 client 的 `envelope_to_batch` 同构）。
-fn envelope_to_batch(
-    channel: RingingChannel,
-    env: RingingEventEnvelope,
-    server_epoch: &str,
-) -> EventBatch {
-    let seq = env.stream_seq;
-    EventBatch {
-        schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
-        version: qaqh_ringing::protocol::RINGING_VERSION,
-        channel,
-        session_id: env.session_id.clone(),
-        server_epoch: server_epoch.to_string(),
-        from_stream_seq: seq,
-        to_stream_seq: seq,
-        envelopes: vec![env],
+/// ProjectionPayload → 收集器事件（hub-fact-bus spec 阶段 2.2）。
+///
+/// 只翻译收集器关心的语义：终答正文（Answer block seal）与 turn 终态。
+/// v1 的 `Control(OperationFailed)` 仅记日志且 fact 侧无对应物，不再翻译。
+fn collector_event_from_projection(payload: &ProjectionPayload) -> Option<CollectorEvent> {
+    match payload {
+        ProjectionPayload::ConversationDelta(ConversationDelta::AssistantBlockSealed {
+            block_kind: AssistantBlockKind::Answer,
+            content,
+            ..
+        }) => Some(CollectorEvent::AnswerSealed {
+            text: match content {
+                ContentValue::Inline { text } => Some(text.clone()),
+                _ => None,
+            },
+            output_ref: match content {
+                ContentValue::Ref { content_ref } => Some(qaqh_types::ContentRef {
+                    content_id: content_ref.0.as_str().to_string(),
+                    media_type: "text/plain".to_string(),
+                    sha256: content_ref.0.as_str().to_string(),
+                    truncated: false,
+                }),
+                _ => None,
+            },
+        }),
+        ProjectionPayload::ConversationDelta(ConversationDelta::TurnFinished {
+            terminal,
+            error,
+            ..
+        }) => Some(CollectorEvent::TurnFinished {
+            failed: matches!(terminal, TurnTerminal::Failed),
+            cancelled: matches!(terminal, TurnTerminal::Cancelled),
+            error: error.as_ref().map(|e| format!("{}: {}", e.code, e.message)),
+        }),
+        _ => None,
     }
 }
 
