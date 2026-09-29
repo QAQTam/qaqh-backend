@@ -231,6 +231,41 @@ pub(crate) fn build_prompt_and_meta(
     ))
 }
 
+/// D10 fact 产生侧：把成功的压缩终态写成 canonical `CompactionApplied` fact。
+///
+/// 调用时序（两处成功路径共用）：`persist_compaction` 之后、`CompactFinished`
+/// 域事件之前——durable append 先于投影发布，是 fact bus 的不变量。
+/// `checkpoint_id` 与流式阶段的 `compact-<millis>` 关联 id 不同域：canonical
+/// 校验要求 `ckpt_` + ULID。失败只降级记录——messages.jsonl 仍是压缩真相，
+/// fact 缺失只损失 v2 投影/回执折叠，不允许拖垮本轮 turn。
+pub(crate) fn publish_compaction_fact(ctx: &mut RingContext, summary: &str) {
+    use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
+
+    let now = unix_ms();
+    let summary_ref = qaqh_session::session_fact_v2::ContentRef::new(
+        qaqh_session::canonical::sha256_content_hash(summary.as_bytes()),
+    );
+    let checkpoint_id = qaqh_session::session_fact_v2::CheckpointId::new(format!(
+        "ckpt_{}",
+        qaqh_session::canonical::generate_ulid()
+    ));
+    let context_revision = ctx.agent.msg.context_revision();
+    let Ok(Some(ledger)) = ctx.agent.tool_ledger_mut() else {
+        return;
+    };
+    if let Err(error) = ledger.ensure_lease(now, tool_ledger_lease_ms()) {
+        log::warn!("[COMPACT] compaction fact lease unavailable: {error}");
+        return;
+    }
+    let event_id =
+        qaqh_session::session_fact_v2::EventId::new(qaqh_session::canonical::generate_ulid());
+    if let Err(error) =
+        ledger.append_compaction_applied(event_id, checkpoint_id, summary_ref, context_revision, now)
+    {
+        log::warn!("[COMPACT] compaction fact append failed (degraded): {error}");
+    }
+}
+
 /// Step 2: Apply compact result on the live message store (called from main thread).
 pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
     if meta.context_revision != ctx.agent.msg.context_revision() {
@@ -311,6 +346,10 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
     ctx.agent
         .msg
         .persist_compaction(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+    if !compact_noop {
+        // D10 fact 产生侧：durable append 先于 CompactFinished 域事件发布。
+        publish_compaction_fact(ctx, &meta.summary);
+    }
 
     let (
         chat_text,
