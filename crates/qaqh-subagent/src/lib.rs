@@ -30,8 +30,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{ControlEvent, ConversationCommand, ConversationEvent};
-use qaqh_ringing::{RingingCommand, RingingEvent};
+use qaqh_domain::{ConversationCommand};
+use qaqh_ringing::{RingingCommand};
 use qaqh_workspace::tool_api::{
     OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
     ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
@@ -49,12 +49,13 @@ pub use host::{
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
     BoardSubscriptionTarget, BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
-    ContentRef, EventBatch, InterruptAgentRequest, InterruptedAgent, ListedAgent,
-    ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage,
-    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost, TaskBoardArtifact,
-    TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest, TaskCloseAction,
-    TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction, TaskUpdateRequest,
-    WaitAgentOutcome, WaitAgentRequest, board_host, host, install_board_host, install_host,
+    ContentRef, CollectorBatch, CollectorEvent, InterruptAgentRequest, InterruptedAgent,
+    ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
+    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
+    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
+    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
+    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, board_host, host, install_board_host,
+    install_host,
     install_task_host, task_host,
 };
 
@@ -919,13 +920,13 @@ trait SubagentTransport: Send {
     fn download_content(&self, session_id: &str, reference: &ContentRef)
     -> Result<Vec<u8>, String>;
     /// 该 seed 的实时事件批次流。
-    fn events(&self) -> &mpsc::Receiver<EventBatch>;
+    fn events(&self) -> &mpsc::Receiver<CollectorBatch>;
 }
 
 /// 宿主直连传输：直接调用进程内宿主（ActorRegistry + RingingHub）。
 struct HostTransport {
     host: Arc<dyn SubagentHost>,
-    batch_rx: mpsc::Receiver<EventBatch>,
+    batch_rx: mpsc::Receiver<CollectorBatch>,
 }
 
 impl SubagentTransport for HostTransport {
@@ -951,7 +952,7 @@ impl SubagentTransport for HostTransport {
         self.host.download_content(session_id, reference)
     }
 
-    fn events(&self) -> &mpsc::Receiver<EventBatch> {
+    fn events(&self) -> &mpsc::Receiver<CollectorBatch> {
         &self.batch_rx
     }
 }
@@ -1410,25 +1411,19 @@ fn collect_subagent_result(
                 if batch.session_id != session_id {
                     continue;
                 }
-                if !first_event_logged && !batch.envelopes.is_empty() {
+                if !first_event_logged && !batch.events.is_empty() {
                     first_event_logged = true;
                     log::info!(
-                        "[SUBAGENT] '{name}' first event received ({} envelopes, stream_seq {})",
-                        batch.envelopes.len(),
-                        batch.from_stream_seq
+                        "[SUBAGENT] '{name}' first event received ({} events)",
+                        batch.events.len()
                     );
                 }
-                for envelope in batch.envelopes {
-                    match envelope.event {
-                        RingingEvent::Conversation(ConversationEvent::RoundCompleted {
-                            answer,
-                            output_ref,
-                            is_final,
-                            ..
-                        }) => {
+                for event in batch.events {
+                    match event {
+                        CollectorEvent::AnswerSealed { text, output_ref } => {
                             // Prefer the authoritative full answer; fall back to
                             // externalized content when the body is large.
-                            if let Some(answer) = answer {
+                            if let Some(answer) = text {
                                 if !answer.is_empty() {
                                     final_answer = answer;
                                 }
@@ -1438,41 +1433,30 @@ fn collect_subagent_result(
                             {
                                 final_answer = String::from_utf8_lossy(&bytes).to_string();
                             }
-                            if is_final && !final_answer.is_empty() {
-                                did_finish = true;
+                        }
+                        CollectorEvent::TurnFinished {
+                            failed,
+                            cancelled,
+                            error,
+                        } => {
+                            if failed {
+                                log::warn!("[SUBAGENT] '{name}' turn failed: {error:?}");
+                                final_answer = format!(
+                                    "[SUBAGENT '{name}' ERROR] {}",
+                                    error.unwrap_or_else(|| "unknown".into())
+                                );
+                                exit_code = 1;
+                                terminal = qaqh_domain::SubagentTerminalKind::Failed;
+                            } else if cancelled {
+                                log::info!("[SUBAGENT] '{name}' conversation cancelled");
+                                final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
+                                terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
+                                did_cancel = true;
+                            } else {
+                                log::info!("[SUBAGENT] '{name}' turn completed");
                             }
-                        }
-                        RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. }) => {
-                            log::info!("[SUBAGENT] '{name}' turn completed");
                             did_finish = true;
                         }
-                        RingingEvent::Conversation(ConversationEvent::TurnFailed {
-                            error, ..
-                        }) => {
-                            log::warn!("[SUBAGENT] '{name}' turn failed: {error:?}");
-                            final_answer = format!("[SUBAGENT '{name}' ERROR] {error:?}");
-                            exit_code = 1;
-                            terminal = qaqh_domain::SubagentTerminalKind::Failed;
-                            did_finish = true;
-                        }
-                        RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
-                            ..
-                        }) => {
-                            log::info!("[SUBAGENT] '{name}' conversation cancelled");
-                            final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
-                            terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
-                            did_cancel = true;
-                        }
-                        // 控制面失败（compact 拒绝注入、lease 拒绝等）：此前被
-                        // 静默忽略导致"等到超时"。至少记入日志便于归因。
-                        RingingEvent::Control(ControlEvent::OperationFailed { error, .. }) => {
-                            log::warn!(
-                                "[SUBAGENT] '{name}' operation failed: code={:?} message={:?}",
-                                error.code,
-                                error.message
-                            );
-                        }
-                        _ => {}
                     }
                     if did_finish || did_cancel {
                         break;
@@ -1997,7 +1981,7 @@ mod tests {
     /// 记录投递命令的 mock 传输：事件流由测试预置（这里只放一条
     /// `ConversationCancelled`，让 collector 立即进取消终态）。
     struct RecordingTransport {
-        batch_rx: mpsc::Receiver<EventBatch>,
+        batch_rx: mpsc::Receiver<CollectorBatch>,
         sent: Arc<std::sync::Mutex<Vec<(String, RingingCommand)>>>,
     }
 
@@ -2018,7 +2002,7 @@ mod tests {
             Err("no externalized content in this test".into())
         }
 
-        fn events(&self) -> &mpsc::Receiver<EventBatch> {
+        fn events(&self) -> &mpsc::Receiver<CollectorBatch> {
             &self.batch_rx
         }
     }
@@ -2026,7 +2010,7 @@ mod tests {
     #[derive(Default)]
     struct CollectorTestHost {
         sent: Arc<std::sync::Mutex<Vec<(String, RingingCommand)>>>,
-        event_tx: std::sync::Mutex<Option<mpsc::Sender<EventBatch>>>,
+        event_tx: std::sync::Mutex<Option<mpsc::Sender<CollectorBatch>>>,
     }
 
     impl SubagentHost for CollectorTestHost {
@@ -2081,7 +2065,7 @@ mod tests {
             Ok(())
         }
 
-        fn subscribe(&self, _session: &str) -> mpsc::Receiver<EventBatch> {
+        fn subscribe(&self, _session: &str) -> mpsc::Receiver<CollectorBatch> {
             let (tx, rx) = mpsc::channel();
             *self
                 .event_tx
@@ -2103,49 +2087,25 @@ mod tests {
         }
     }
 
-    fn cancelled_batch(session_id: &str) -> EventBatch {
-        let envelope = qaqh_ringing::RingingEventEnvelope::new(
-            session_id,
-            1,
-            1,
-            1,
-            "ev-cancel-1",
-            RingingEvent::Conversation(ConversationEvent::ConversationCancelled { turn_id: None }),
-        );
-        EventBatch {
-            schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
-            version: qaqh_ringing::protocol::RINGING_VERSION,
-            channel: qaqh_domain::RingingChannel::Conversation,
+    fn cancelled_batch(session_id: &str) -> CollectorBatch {
+        CollectorBatch {
             session_id: session_id.to_string(),
-            server_epoch: "test-epoch".to_string(),
-            from_stream_seq: 1,
-            to_stream_seq: 1,
-            envelopes: vec![envelope],
+            events: vec![CollectorEvent::TurnFinished {
+                failed: false,
+                cancelled: true,
+                error: None,
+            }],
         }
     }
 
-    fn completed_batch(session_id: &str) -> EventBatch {
-        let envelope = qaqh_ringing::RingingEventEnvelope::new(
-            session_id,
-            1,
-            1,
-            1,
-            "ev-complete-1",
-            RingingEvent::Conversation(ConversationEvent::TurnCompleted {
-                turn_id: "t1".to_string(),
-                stop_reason: None,
-                usage: None,
-            }),
-        );
-        EventBatch {
-            schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
-            version: qaqh_ringing::protocol::RINGING_VERSION,
-            channel: qaqh_domain::RingingChannel::Conversation,
+    fn completed_batch(session_id: &str) -> CollectorBatch {
+        CollectorBatch {
             session_id: session_id.to_string(),
-            server_epoch: "test-epoch".to_string(),
-            from_stream_seq: 1,
-            to_stream_seq: 1,
-            envelopes: vec![envelope],
+            events: vec![CollectorEvent::TurnFinished {
+                failed: false,
+                cancelled: false,
+                error: None,
+            }],
         }
     }
 
@@ -2159,7 +2119,7 @@ mod tests {
 
         let child = "sub-cancel-inject-child";
         let parent = "sub-cancel-inject-parent";
-        let (tx, rx) = mpsc::channel::<EventBatch>();
+        let (tx, rx) = mpsc::channel::<CollectorBatch>();
         tx.send(cancelled_batch(child))
             .expect("test channel must not fail");
 
@@ -2229,7 +2189,7 @@ mod tests {
 
         let child = "0198f1a0-0000-7000-8000-000000000004";
         let parent = "sub-complete-parent";
-        let (tx, rx) = mpsc::channel::<EventBatch>();
+        let (tx, rx) = mpsc::channel::<CollectorBatch>();
         tx.send(completed_batch(child))
             .expect("test channel must not fail");
 

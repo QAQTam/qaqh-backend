@@ -185,7 +185,7 @@ impl QaqhService {
     pub fn close_session(
         &self,
         session_id: &str,
-        causation_id: Option<&str>,
+        _causation_id: Option<&str>,
     ) -> Result<(), String> {
         self.registry()?.close(session_id);
         // D-3：关闭即终止该会话的取消标记。worker 优雅收尾可能已把它置假
@@ -203,16 +203,7 @@ impl QaqhService {
                 Err(e) => log::warn!("[session] ephemeral cleanup {session_id} failed: {e}"),
             }
         }
-        if let Some(hub) = self.hub.get() {
-            let _ = hub.publish_with_causation(
-                session_id,
-                qaqh_domain::DomainEvent::Control(qaqh_domain::ControlEvent::SessionStateChanged {
-                    session_id: session_id.to_string(),
-                    state: qaqh_domain::SessionState::Closed,
-                }),
-                causation_id,
-            );
-        }
+        // 阶段 3b：SessionStateChanged{Closed} 的 v1 广播已删（A1：wire 零消费方）。
         self.release_session_resident_state(session_id);
         release_freed_heap_memory();
         Ok(())
@@ -248,20 +239,7 @@ impl QaqhService {
             return Vec::new();
         };
         let unloaded = registry.unload_idle_sessions(idle_secs);
-        if let Some(hub) = self.hub.get() {
-            for session_id in &unloaded {
-                let _ = hub.publish_with_causation(
-                    session_id,
-                    qaqh_domain::DomainEvent::Control(
-                        qaqh_domain::ControlEvent::SessionStateChanged {
-                            session_id: session_id.to_string(),
-                            state: qaqh_domain::SessionState::Closed,
-                        },
-                    ),
-                    None,
-                );
-            }
-        }
+        // 阶段 3b：Closed 广播已删（A1）。
         for session_id in &unloaded {
             self.release_session_resident_state(session_id);
         }
@@ -787,21 +765,8 @@ impl QaqhService {
 
     /// 配置写后广播（所有 config.* / profile.* 写路径共用）。
     fn notify_config_changed(&self) {
-        // P2-D2：除 worker 广播外，向 Control 频道发布 ConfigChanged（空 seed =
-        // 全局），前端/TUI/web 订阅后重拉 config.load——轮询降级为兜底。
-        if let Some(hub) = self.hub.get() {
-            let rev = qaqh_config::watch::latest().map_or(0, |_| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0)
-            });
-            let _ = hub.publish_with_causation(
-                "",
-                qaqh_domain::DomainEvent::Control(qaqh_domain::ControlEvent::ConfigChanged { rev }),
-                None,
-            );
-        }
+        // P2-D2 / 阶段 3b：ConfigChanged 的 v1 Control 频道广播已删（A1：wire
+        // 零消费方，前端重拉由 worker 侧 AgentReloadConfig 广播驱动）。
         let failed = match self.registry() {
             Ok(mut registry) => registry
                 .broadcast_ringing(&RingingCommand::Control(ControlCommand::AgentReloadConfig)),

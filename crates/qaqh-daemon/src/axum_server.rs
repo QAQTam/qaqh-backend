@@ -2368,3 +2368,141 @@ mod axum_tests {
         assert_eq!(page["total_turns"], serde_json::json!(3));
     }
 }
+
+#[cfg(test)]
+mod command_entry_tests {
+    //! `execute_command` 进程内命令入口的不变量测试（hub-fact-bus spec §5.2）。
+    //!
+    //! 只锁不变量：lease 归属校验在入口（不变量 4）、missing_session_id 拒绝、
+    //! 幂等回执（同 payload 重放 accepted / 异 payload 冲突，不变量 3）。
+    //! 不锁旧 HTTP 形状——这些路径曾经由 v1 handler 承载。
+
+    use super::*;
+    use crate::axum_server::axum_impl::command::execute_command;
+    use axum::http::{HeaderMap, StatusCode};
+    use qaqh_ringing::{RingingCommandAckStatus, RingingV2CommandEnvelope};
+
+    const CALLER: &str = "cs-entry";
+
+    fn entry_state() -> AppState {
+        let leases = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_runtime::ringing::RingingLeaseStore::new(),
+        ));
+        leases
+            .lock()
+            .unwrap()
+            .open(CALLER.into(), "ci-entry".into());
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        // SessionManager 是进程级单例，统一走 init_session_manager 守卫。
+        super::init_session_manager();
+        AppState {
+            hub: std::sync::Arc::new(qaqh_runtime::RingingHub::new("entry-epoch")),
+            v2_hub: std::sync::Arc::new(
+                qaqh_runtime::ringing::V2ProjectionHub::new("entry-epoch"),
+            ),
+            leases,
+            driver_watch: std::sync::Arc::new(std::sync::Mutex::new(
+                qaqh_runtime::ringing::RingingDriverWatch::new(),
+            )),
+            pending: std::sync::Arc::new(std::sync::Mutex::new(
+                qaqh_runtime::ringing::PendingCommandStore::new(),
+            )),
+            service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
+                .clone(),
+            token: String::from("entry-token"),
+            epoch: String::from("entry-epoch"),
+            shutdown,
+            test_hooks: std::sync::Arc::new(TestHooks::disabled()),
+        }
+    }
+
+    fn caller_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-qaqh-client-session-id", CALLER.parse().unwrap());
+        headers
+    }
+
+    fn attach_envelope(command_id: &str, target: &str) -> RingingV2CommandEnvelope {
+        RingingV2CommandEnvelope::new(
+            command_id,
+            "ci-entry",
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
+                session_id: target.to_string(),
+            }),
+        )
+        .with_client_session_id(CALLER)
+        .with_session_id(target)
+    }
+
+    #[tokio::test]
+    async fn missing_lease_header_is_rejected_at_the_entry() {
+        let state = entry_state();
+        let envelope = attach_envelope("cmd-no-header", "seed-target");
+        let (status, ack) = execute_command(&state, &HeaderMap::new(), envelope).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(ack.status, RingingCommandAckStatus::Rejected);
+        assert_eq!(ack.code.as_deref(), Some("lease_required"));
+    }
+
+    #[tokio::test]
+    async fn inactive_lease_is_rejected_at_the_entry() {
+        let state = entry_state();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-qaqh-client-session-id", "cs-ghost".parse().unwrap());
+        let envelope = attach_envelope("cmd-ghost", "seed-target");
+        let (status, ack) = execute_command(&state, &headers, envelope).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(ack.code.as_deref(), Some("lease_required"));
+    }
+
+    #[tokio::test]
+    async fn missing_session_id_command_is_rejected() {
+        let state = entry_state();
+        // session.attach 之外的非 SessionCreate 命令缺 session_id 必须在入口拒绝。
+        let envelope = RingingV2CommandEnvelope::new(
+            "cmd-missing-seed",
+            "ci-entry",
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionResume {
+                session_id: "seed-x".into(),
+            }),
+        )
+        .with_client_session_id(CALLER);
+        let (status, ack) = execute_command(&state, &caller_headers(), envelope).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(ack.code.as_deref(), Some("missing_session_id"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_command_id_with_same_payload_replays_accepted() {
+        let state = entry_state();
+        let envelope = attach_envelope("cmd-dup", "seed-target");
+        let (first_status, first_ack) =
+            execute_command(&state, &caller_headers(), envelope.clone()).await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first_ack.status, RingingCommandAckStatus::Accepted);
+
+        let (status, ack) = execute_command(&state, &caller_headers(), envelope).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
+        assert!(
+            ack.message
+                .as_deref()
+                .is_some_and(|m| m.contains("duplicate command_id")),
+            "replay must be answered from the receipt, not re-executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_command_id_with_other_payload_is_conflict() {
+        let state = entry_state();
+        let first = attach_envelope("cmd-clash", "seed-target");
+        let (first_status, _) = execute_command(&state, &caller_headers(), first).await;
+        assert_eq!(first_status, StatusCode::OK);
+
+        // 同 command_id、不同 payload：必须拒绝，不得重放旧回执。
+        let second = attach_envelope("cmd-clash", "seed-other");
+        let (status, ack) = execute_command(&state, &caller_headers(), second).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(ack.code.as_deref(), Some("duplicate_command_mismatch"));
+    }
+}

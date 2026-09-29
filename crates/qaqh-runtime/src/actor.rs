@@ -36,9 +36,8 @@ pub(crate) fn run_inprocess_event_reader(
             panic
         );
     }
-    if let Some(update) = activity.disconnect(&session_id, generation) {
-        crate::activity::publish_activity(hub.as_deref(), &update);
-    }
+    // tracker 断连状态更新保留（/activity 查询权威）。
+    let _ = activity.disconnect(&session_id, generation);
 }
 
 fn publish_worker_event(
@@ -62,16 +61,18 @@ fn publish_worker_event(
             // #345：交互正文（ask/plan）在发布前入 content store 并 pin——canonical
             // fact 里只有 ref，正文走展示面旁路。
             crate::registry::stash_interaction_body(hub, &env.session_id, &domain);
-            let domain = crate::registry::externalize_large_content(hub, &env.session_id, domain);
+            // §4.0.5 迁移完成：live_interactions 登记与交互 pin 释放现在随事件
+            // 产生侧执行（worker 桥），publish 只保留广播 + journal 语义——
+            // 阶段 3d 删 publish 时不再需要迁移。
+            crate::registry::apply_interaction_side_effects(hub, &env.session_id, &domain);
             let _ = hub.publish_with_causation(
                 &env.session_id,
                 domain.clone(),
                 env.causation_id.as_deref(),
             );
-            if let Some(observe) = crate::activity::domain_activity_observe(&domain)
-                && let Some(activity) = activity.observe(session_id, generation, &observe)
-            {
-                crate::activity::publish_activity(Some(hub), &activity);
+            if let Some(observe) = crate::activity::domain_activity_observe(&domain) {
+                // tracker 状态机保留（/activity 查询权威）；广播照旧随 publish。
+                let _ = activity.observe(session_id, generation, &observe);
             }
         }
     }

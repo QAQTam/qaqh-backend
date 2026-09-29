@@ -13,6 +13,29 @@ use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
+/// hub-fact-bus spec 阶段 2.3：canonical fact 投影链上的命令回执折叠 sink。
+/// 先折叠回执，再委托 `V2ProjectionHub`——durable-before-publish 语义不变，
+/// 折叠只看见已落盘事实。
+struct FoldingSink {
+    v2: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
+    pending: Arc<Mutex<qaqh_runtime::ringing::PendingCommandStore>>,
+}
+
+impl qaqh_session::projection::ProjectionSink for FoldingSink {
+    fn publish(
+        &self,
+        session_dir: &std::path::Path,
+        fact: &qaqh_session::session_fact_v2::SessionFact,
+        events: &[qaqh_session::session_fact_v2::ProjectionEvent],
+    ) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .observe_projection_events(events);
+        qaqh_session::projection::ProjectionSink::publish(&*self.v2, session_dir, fact, events);
+    }
+}
+
 fn daemon_channel() -> String {
     std::env::var("QAQH_CHANNEL").unwrap_or_else(|_| {
         if cfg!(debug_assertions) {
@@ -166,7 +189,17 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             .with_sessions(sessions.clone()),
     );
     let v2_hub = Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new(epoch.clone()));
-    if let Err(existing) = v2_hub.install() {
+    let pending_commands = Arc::new(Mutex::new(
+        qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
+    ));
+    // hub-fact-bus spec 阶段 2.3：回执折叠挂在 canonical fact 投影链上
+    // （durable-before-publish），不再订阅 v1 事件总线。
+    if let Err(existing) = qaqh_session::projection::install_projection_sink(Arc::new(
+        FoldingSink {
+            v2: v2_hub.clone(),
+            pending: pending_commands.clone(),
+        },
+    )) {
         log::warn!(
             "[ringing-v2] projection sink already installed; keeping existing sink ({existing:p})"
         );
@@ -185,39 +218,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     let driver_watch = Arc::new(Mutex::new(
         qaqh_runtime::ringing::RingingDriverWatch::new_persistent(),
     ));
-    let pending_commands = Arc::new(Mutex::new(
-        qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
-    ));
-    // Fold causally-linked business terminal events into persistent command
-    // receipts. One observer per physical channel preserves channel isolation.
-    for channel in [
-        qaqh_domain::RingingChannel::Control,
-        qaqh_domain::RingingChannel::Conversation,
-        qaqh_domain::RingingChannel::Tool,
-    ] {
-        // 命令回执折叠需要**全部** seed 的终态事件 → 频道级聚合订阅
-        // （BUG-2026-09-12-12：实时流已按 (channel, seed) 分片）。
-        let mut receiver = hub.subscribe_channel(channel);
-        let receipts = pending_commands.clone();
-        tokio::spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(envelope) => receipts
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .observe_terminal_event(&envelope),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        log::warn!(
-                            "[ringing] command receipt observer lagged on {} by {} events",
-                            channel.as_str(),
-                            skipped
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
     let (shutdown, _) = watch::channel(false);
     // L1 durability: the daemon previously had NO OS signal handling — Ctrl+C
     // or a terminal close killed the process without running the graceful

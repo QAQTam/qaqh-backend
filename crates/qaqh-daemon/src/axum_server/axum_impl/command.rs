@@ -1,31 +1,38 @@
-//! axum_impl::command — 命令面（open/renew/command/command_status + Ack builder）。
+//! axum_impl::command — 命令面（幂等指纹 + 进程内命令入口 `execute_command`）。
+//!
+//! hub-fact-bus spec 阶段 1（命令面去圈）：v2 HTTP handler 与 driver
+//! claim/release 都直调 `execute_command`，v2→v1 信封重序列化圈与 v1 HTTP
+//! handler 面已删除。命令入口只收 v2 信封、只吐 v2 ack；HTTP 状态码由调用方
+//! 从 `(StatusCode, RingingV2CommandAck)` 组装。
 
 use super::test_hooks::InteractionFault;
 use super::*;
 
-/// Rejected 命令回执构造器（22 处 `RingingCommandAck` 字面量的单一构造点）。
-pub(crate) fn reject_ack(command_id: String, code: &str, message: String) -> RingingCommandAck {
-    RingingCommandAck {
+/// Rejected 命令回执构造器（命令入口所有拒绝路径的单一构造点）。
+pub(crate) fn reject_ack(command_id: String, code: &str, message: String) -> RingingV2CommandAck {
+    RingingV2CommandAck {
         command_id,
         status: RingingCommandAckStatus::Rejected,
         code: Some(code.to_string()),
         message: Some(message),
         retry_after_ms: None,
+        existing: None,
     }
 }
 
 /// Accepted 命令回执构造器。
-pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> RingingCommandAck {
-    RingingCommandAck {
+pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> RingingV2CommandAck {
+    RingingV2CommandAck {
         command_id,
         status: RingingCommandAckStatus::Accepted,
         code: None,
         message,
         retry_after_ms: None,
+        existing: None,
     }
 }
 
-/// 命令幂等指纹。v1/v2 handler 必须共用，否则重放判定会在两个协议面漂移。
+/// 命令幂等指纹。进程内入口与 HTTP 面必须共用，否则重放判定会漂移。
 pub(crate) fn command_fingerprint(
     channel: qaqh_domain::RingingChannel,
     session_id: Option<&str>,
@@ -46,27 +53,26 @@ pub(crate) fn command_fingerprint(
     qaqh_types::sha256_hex(payload.as_bytes())
 }
 
-/// Ack JSON 信封响应（`Content-Type: application/json` 固定）。
-pub(crate) fn ack_response(status: StatusCode, ack: RingingCommandAck) -> Response {
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_vec(&ack).unwrap_or_default(),
-    )
-        .into_response()
-}
-
-pub(crate) async fn handle_command(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(channel): Path<String>,
-    body: Bytes,
-) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
-    let Some(session_id) = get_session_id(&headers) else {
-        return lease_required_json();
+/// 进程内命令入口（spec 阶段 1.1）。
+///
+/// 承接原 v1 `handle_command` 的解析后逻辑，但不做 HTTP body 组装：
+/// - 信封直接收 v2，不再有 v2→v1 JSON 重序列化圈；
+/// - 返回 `(StatusCode, RingingV2CommandAck)`，ack → Response 由调用方组装；
+/// - lease 归属校验仍发生在命令入口（不变量 4），调用方无需提前检查。
+pub(crate) async fn execute_command(
+    state: &AppState,
+    headers: &HeaderMap,
+    mut envelope: RingingV2CommandEnvelope,
+) -> (StatusCode, RingingV2CommandAck) {
+    let Some(session_id) = get_session_id(headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            reject_ack(
+                String::new(),
+                "lease_required",
+                "open a Ringing v2 client session first".into(),
+            ),
+        );
     };
     let session_active = state
         .leases
@@ -74,63 +80,40 @@ pub(crate) async fn handle_command(
         .unwrap_or_else(|e| e.into_inner())
         .is_active_session(&session_id);
     if !session_active {
-        return lease_required_json();
-    }
-    let Some(expected) = parse_channel(&channel) else {
-        return (StatusCode::NOT_FOUND, "unknown channel").into_response();
-    };
-    let mut env: RingingCommandEnvelope = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            return ack_response(
-                StatusCode::BAD_REQUEST,
-                reject_ack(String::new(), "invalid_body", e.to_string()),
-            );
-        }
-    };
-    if let Err(code) = env.validate() {
-        let status = if code == "lease_required" {
-            StatusCode::UNAUTHORIZED
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        return ack_response(
-            status,
+        return (
+            StatusCode::UNAUTHORIZED,
             reject_ack(
-                env.command_id.clone(),
-                code,
-                "invalid Ringing v1 command envelope".into(),
+                String::new(),
+                "lease_required",
+                "lease is not active".into(),
             ),
         );
     }
-    if env.channel != expected {
-        return ack_response(
+    if let Err(code) = envelope.validate() {
+        return (
             StatusCode::BAD_REQUEST,
             reject_ack(
-                env.command_id.clone(),
-                "channel_mismatch",
-                format!(
-                    "path channel {channel} != envelope channel {:?}",
-                    env.channel
-                ),
+                envelope.command_id.clone(),
+                code,
+                "invalid Ringing v2 command envelope".into(),
             ),
         );
     }
     state
         .test_hooks
-        .apply_command_ack_fault(expected, &env.command)
+        .apply_command_ack_fault(envelope.channel, &envelope.command)
         .await;
     // unsupported ConversationLoadMore
     if matches!(
-        &env.command,
+        &envelope.command,
         qaqh_ringing::RingingCommand::Conversation(
             qaqh_domain::ConversationCommand::ConversationLoadMore { .. }
         )
     ) {
-        return ack_response(
+        return (
             StatusCode::UNPROCESSABLE_ENTITY,
             reject_ack(
-                env.command_id,
+                envelope.command_id,
                 "unsupported_command",
                 "Ringing v1 bootstrap already returns the complete persisted conversation history"
                     .into(),
@@ -139,24 +122,25 @@ pub(crate) async fn handle_command(
     }
     // idempotency
     let fingerprint = command_fingerprint(
-        env.channel,
-        env.session_id.as_deref(),
-        env.expected_revision,
-        None,
-        &env.command,
+        envelope.channel,
+        envelope.session_id.as_deref(),
+        envelope.expected_revision,
+        envelope.driver_epoch,
+        &envelope.command,
     );
     let duplicate_check = {
         let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
-        match pending.record_fingerprint_for_session(&env.command_id, &fingerprint, &session_id) {
+        match pending.record_fingerprint_for_session(&envelope.command_id, &fingerprint, &session_id)
+        {
             Ok(v) => Ok(!v),
             Err(()) => Err(()),
         }
     };
     if duplicate_check.is_err() {
-        return ack_response(
+        return (
             StatusCode::CONFLICT,
             reject_ack(
-                env.command_id.clone(),
+                envelope.command_id.clone(),
                 "duplicate_command_mismatch",
                 "command_id was already used with another payload".into(),
             ),
@@ -164,15 +148,15 @@ pub(crate) async fn handle_command(
     }
     let duplicate = duplicate_check.expect("error branch already returned CONFLICT above");
     if duplicate {
-        return ack_response(
+        return (
             StatusCode::OK,
             accept_ack(
-                env.command_id.clone(),
+                envelope.command_id.clone(),
                 Some("duplicate command_id (already accepted)".into()),
             ),
         );
     }
-    if let Some(fault) = state.test_hooks.take_interaction_fault(&env.command) {
+    if let Some(fault) = state.test_hooks.take_interaction_fault(&envelope.command) {
         match fault {
             InteractionFault::PermissionDeny => {
                 if let qaqh_ringing::RingingCommand::Tool(
@@ -181,7 +165,7 @@ pub(crate) async fn handle_command(
                         trust_folder,
                         ..
                     },
-                ) = &mut env.command
+                ) = &mut envelope.command
                 {
                     *approved = false;
                     *trust_folder = false;
@@ -189,7 +173,7 @@ pub(crate) async fn handle_command(
             }
             InteractionFault::PermissionHang => {
                 if matches!(
-                    &env.command,
+                    &envelope.command,
                     qaqh_ringing::RingingCommand::Tool(
                         qaqh_domain::ToolCommand::ToolPermissionRespond { .. }
                     )
@@ -200,9 +184,9 @@ pub(crate) async fn handle_command(
             InteractionFault::AskDismiss => {
                 if let qaqh_ringing::RingingCommand::Control(
                     qaqh_domain::ControlCommand::InteractionAskRespond { interaction_id, .. },
-                ) = &env.command
+                ) = &envelope.command
                 {
-                    env.command = qaqh_ringing::RingingCommand::Control(
+                    envelope.command = qaqh_ringing::RingingCommand::Control(
                         qaqh_domain::ControlCommand::InteractionAskDismiss {
                             interaction_id: interaction_id.clone(),
                         },
@@ -211,7 +195,7 @@ pub(crate) async fn handle_command(
             }
             InteractionFault::AskHang => {
                 if matches!(
-                    &env.command,
+                    &envelope.command,
                     qaqh_ringing::RingingCommand::Control(
                         qaqh_domain::ControlCommand::InteractionAskRespond { .. }
                     )
@@ -224,19 +208,19 @@ pub(crate) async fn handle_command(
     // SessionClose
     if let qaqh_ringing::RingingCommand::Control(ControlCommand::SessionClose {
         session_id: close_session,
-    }) = &env.command
+    }) = &envelope.command
     {
-        let close_session = session_close_session(close_session, &env.session_id);
+        let close_session = session_close_session(close_session, &envelope.session_id);
         if close_session.is_empty() {
             state
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .rollback(&env.command_id);
-            return ack_response(
+                .rollback(&envelope.command_id);
+            return (
                 StatusCode::BAD_REQUEST,
                 reject_ack(
-                    env.command_id,
+                    envelope.command_id,
                     "missing_session_id",
                     "SessionClose requires seed".into(),
                 ),
@@ -248,7 +232,7 @@ pub(crate) async fn handle_command(
         let close_result = {
             let service = state.service.clone();
             let session_id = close_session.clone();
-            let command_id = env.command_id.clone();
+            let command_id = envelope.command_id.clone();
             tokio::task::spawn_blocking(move || {
                 service.close_session(&session_id, Some(&command_id))
             })
@@ -260,10 +244,10 @@ pub(crate) async fn handle_command(
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .rollback(&env.command_id);
-            return ack_response(
+                .rollback(&envelope.command_id);
+            return (
                 StatusCode::BAD_GATEWAY,
-                reject_ack(env.command_id, "dispatch_failed", error.to_string()),
+                reject_ack(envelope.command_id, "dispatch_failed", error.to_string()),
             );
         }
         state
@@ -275,15 +259,18 @@ pub(crate) async fn handle_command(
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .mark_terminal(&env.command_id, RingingCommandState::Succeeded, None, None);
-        return ack_response(StatusCode::OK, accept_ack(env.command_id, None));
+            .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
+        return (
+            StatusCode::OK,
+            accept_ack(envelope.command_id, None),
+        );
     }
     // SessionArchive / Unarchive / Delete
     if let qaqh_ringing::RingingCommand::Control(
         cmd @ (ControlCommand::SessionArchive { .. }
         | ControlCommand::SessionUnarchive { .. }
         | ControlCommand::SessionDelete { .. }),
-    ) = &env.command
+    ) = &envelope.command
     {
         let (op, target) = match cmd {
             ControlCommand::SessionArchive { session_id } => ("archive", session_id),
@@ -291,17 +278,17 @@ pub(crate) async fn handle_command(
             ControlCommand::SessionDelete { session_id } => ("delete", session_id),
             _ => unreachable!(),
         };
-        let target = session_close_session(target, &env.session_id);
+        let target = session_close_session(target, &envelope.session_id);
         if target.is_empty() {
             state
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .rollback(&env.command_id);
-            return ack_response(
+                .rollback(&envelope.command_id);
+            return (
                 StatusCode::BAD_REQUEST,
                 reject_ack(
-                    env.command_id,
+                    envelope.command_id,
                     "missing_session_id",
                     format!("Session{op} requires seed"),
                 ),
@@ -313,7 +300,7 @@ pub(crate) async fn handle_command(
         let result: Result<(), String> = {
             let service = state.service.clone();
             let target = target.clone();
-            let command_id = env.command_id.clone();
+            let command_id = envelope.command_id.clone();
             tokio::task::spawn_blocking(move || match op {
                 "archive" => service
                     .archive_session(&target, Some(&command_id))
@@ -337,10 +324,10 @@ pub(crate) async fn handle_command(
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .rollback(&env.command_id);
-            return ack_response(
+                .rollback(&envelope.command_id);
+            return (
                 StatusCode::BAD_GATEWAY,
-                reject_ack(env.command_id, "dispatch_failed", error),
+                reject_ack(envelope.command_id, "dispatch_failed", error),
             );
         }
         if op == "delete" {
@@ -354,13 +341,16 @@ pub(crate) async fn handle_command(
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .mark_terminal(&env.command_id, RingingCommandState::Succeeded, None, None);
-        return ack_response(StatusCode::OK, accept_ack(env.command_id, None));
+            .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
+        return (
+            StatusCode::OK,
+            accept_ack(envelope.command_id, None),
+        );
     }
     // session.new / session.resume
-    match &env.command {
+    match &envelope.command {
         qaqh_ringing::RingingCommand::Control(ControlCommand::SessionCreate { .. }) => {
-            let params = serde_json::to_value(&env.command).unwrap_or_default();
+            let params = serde_json::to_value(&envelope.command).unwrap_or_default();
             // service.handle expects params as Value; for session.new it expects seed? Actually SessionCreate is handled via service.handle("session.new")
             let created = match state.service.handle("session.new", &params) {
                 Ok(v) => v,
@@ -369,10 +359,10 @@ pub(crate) async fn handle_command(
                         .pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .rollback(&env.command_id);
-                    return ack_response(
+                        .rollback(&envelope.command_id);
+                    return (
                         StatusCode::BAD_GATEWAY,
-                        reject_ack(env.command_id, "dispatch_failed", e.to_string()),
+                        reject_ack(envelope.command_id, "dispatch_failed", e.to_string()),
                     );
                 }
             };
@@ -390,24 +380,27 @@ pub(crate) async fn handle_command(
                         .pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .rollback(&env.command_id);
-                    return ack_response(
+                        .rollback(&envelope.command_id);
+                    return (
                         StatusCode::UNAUTHORIZED,
                         reject_ack(
-                            env.command_id,
+                            envelope.command_id,
                             "lease_required",
                             "lease is not active".into(),
                         ),
                     );
                 }
-                publish_session_created(&state.hub, &session_id, &env.command_id);
+                // 阶段 3b：SessionCreated 的 v1 广播已删（A1）。
             }
             state
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(&env.command_id, RingingCommandState::Succeeded, None, None);
-            return ack_response(StatusCode::OK, accept_ack(env.command_id, None));
+                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
+            return (
+                StatusCode::OK,
+                accept_ack(envelope.command_id, None),
+            );
         }
         qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume {
             session_id: target_session_id,
@@ -425,11 +418,11 @@ pub(crate) async fn handle_command(
                     .pending
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .rollback(&env.command_id);
-                return ack_response(
+                    .rollback(&envelope.command_id);
+                return (
                     StatusCode::UNAUTHORIZED,
                     reject_ack(
-                        env.command_id,
+                        envelope.command_id,
                         "lease_required",
                         "lease is not active".into(),
                     ),
@@ -443,18 +436,21 @@ pub(crate) async fn handle_command(
                     .pending
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .rollback(&env.command_id);
-                return ack_response(
+                    .rollback(&envelope.command_id);
+                return (
                     StatusCode::BAD_GATEWAY,
-                    reject_ack(env.command_id, "dispatch_failed", e.to_string()),
+                    reject_ack(envelope.command_id, "dispatch_failed", e.to_string()),
                 );
             }
             state
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(&env.command_id, RingingCommandState::Succeeded, None, None);
-            return ack_response(StatusCode::OK, accept_ack(env.command_id, None));
+                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
+            return (
+                StatusCode::OK,
+                accept_ack(envelope.command_id, None),
+            );
         }
         // 仅 attach（无 actor 副作用）：供前端订阅子代理等只读观测 seed 的
         // timeline/频道流。与 SessionResume 的差异见 ControlCommand 文档。
@@ -466,11 +462,11 @@ pub(crate) async fn handle_command(
                     .pending
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .rollback(&env.command_id);
-                return ack_response(
+                    .rollback(&envelope.command_id);
+                return (
                     StatusCode::BAD_REQUEST,
                     reject_ack(
-                        env.command_id,
+                        envelope.command_id,
                         "missing_session_id",
                         "session.attach requires a non-empty seed".into(),
                     ),
@@ -486,11 +482,11 @@ pub(crate) async fn handle_command(
                     .pending
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .rollback(&env.command_id);
-                return ack_response(
+                    .rollback(&envelope.command_id);
+                return (
                     StatusCode::UNAUTHORIZED,
                     reject_ack(
-                        env.command_id,
+                        envelope.command_id,
                         "lease_required",
                         "lease is not active".into(),
                     ),
@@ -500,24 +496,27 @@ pub(crate) async fn handle_command(
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(&env.command_id, RingingCommandState::Succeeded, None, None);
-            return ack_response(StatusCode::OK, accept_ack(env.command_id, None));
+                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
+            return (
+                StatusCode::OK,
+                accept_ack(envelope.command_id, None),
+            );
         }
         _ => {}
     }
     // generic worker dispatch
-    let session_id = env.session_id.clone().unwrap_or_default();
-    let mut worker_command = env.command.clone();
+    let session_id = envelope.session_id.clone().unwrap_or_default();
+    let mut worker_command = envelope.command.clone();
     if let Err(code) = hydrate_attachment_previews(&state.hub, &session_id, &mut worker_command) {
         state
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .rollback(&env.command_id);
-        return ack_response(
+            .rollback(&envelope.command_id);
+        return (
             StatusCode::BAD_REQUEST,
             reject_ack(
-                env.command_id,
+                envelope.command_id,
                 &code.clone(),
                 "attachment is unavailable or invalid".into(),
             ),
@@ -525,27 +524,30 @@ pub(crate) async fn handle_command(
     }
     let worker_env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
         session_id.as_str(),
-        env.command_id.clone(),
+        envelope.command_id.clone(),
         worker_command,
     )
-    .with_expected_revision(env.expected_revision);
+    .with_expected_revision(envelope.expected_revision);
     if let Err(e) = state.service.send_ringing_command(&session_id, &worker_env) {
         state
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .rollback(&env.command_id);
-        return ack_response(
+            .rollback(&envelope.command_id);
+        return (
             StatusCode::BAD_GATEWAY,
-            reject_ack(env.command_id.clone(), "dispatch_failed", e.to_string()),
+            reject_ack(envelope.command_id.clone(), "dispatch_failed", e.to_string()),
         );
     }
     state
         .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .mark_running(&env.command_id);
-    ack_response(StatusCode::OK, accept_ack(env.command_id, None))
+        .mark_running(&envelope.command_id);
+    (
+        StatusCode::OK,
+        accept_ack(envelope.command_id, None),
+    )
 }
 
 #[cfg(test)]

@@ -8,8 +8,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qaqh_ringing::{
-    RingingCommandState, RingingCommandStatus, RingingEvent, RingingEventEnvelope,
-    RingingV2AskOutcome, RingingV2CommandResult, RingingV2CommandStatus, RingingV2ExistingResult,
+    RingingCommandState, RingingCommandStatus, RingingV2CommandResult, RingingV2CommandStatus,
+    RingingV2ExistingResult,
+};
+use qaqh_session::session_fact_v2::{ProjectionEvent, ProjectionPayload};
+use qaqh_session::session_fact_v2::{
+    ConversationDelta, ControlDelta, ToolTerminalStatus, TurnTerminal,
 };
 
 /// 已 accepted 命令的幂等表（有界 TTL；accepted 后断线重试不得重复执行）。
@@ -259,61 +263,61 @@ impl PendingCommandStore {
         }
     }
 
-    /// 将带 causation_id 的可靠业务终态折叠进命令 receipt。ACK 只表示
-    /// accepted；这里为断线后的 command-status 查询提供最终结果。
-    pub fn observe_terminal_event(&mut self, envelope: &RingingEventEnvelope) {
-        let Some(command_id) = envelope.causation_id.as_deref() else {
-            return;
-        };
-        let terminal = match &envelope.event {
-            RingingEvent::Control(qaqh_domain::ControlEvent::OperationFailed { error, .. }) => {
-                Some((RingingCommandState::Failed, Some(error.code.clone())))
+    /// Canonical fact 投影链上的回执折叠（hub-fact-bus spec 阶段 2.3）。
+    ///
+    /// 与 [`Self::observe_terminal_event`] 语义对齐，但消费 `ProjectionEvent`：
+    /// durable append 之后的 sink 链保证这里只看到已落盘事实。
+    /// 降级说明：v1 的 `SkillsUpdated` / `OperationCompleted` / `OperationFailed` /
+    /// `SessionStateChanged` 在 fact 侧无一比一对应物（spec §6 冻结 canonical log
+    /// 磁盘格式，暂不补 fact），相关回执靠 TTL 过期而非事件折叠。
+    pub fn observe_projection_events(&mut self, events: &[ProjectionEvent]) {
+        for event in events {
+            let Some(command_id) = event.causation_id.as_ref().map(|id| id.0.as_str()) else {
+                continue;
+            };
+            let terminal = match &event.payload {
+                ProjectionPayload::ConversationDelta(ConversationDelta::TurnFinished {
+                    terminal,
+                    error,
+                    ..
+                }) => match terminal {
+                    TurnTerminal::Failed => {
+                        Some((RingingCommandState::Failed, error_code_of(error.as_ref())))
+                    }
+                    TurnTerminal::Completed | TurnTerminal::Cancelled => {
+                        Some((RingingCommandState::Succeeded, None))
+                    }
+                },
+                ProjectionPayload::ConversationDelta(ConversationDelta::CompactionApplied {
+                    ..
+                }) => Some((RingingCommandState::Succeeded, None)),
+                ProjectionPayload::ControlDelta(ControlDelta::ToolFinished {
+                    terminal_status,
+                    error,
+                    ..
+                }) => match terminal_status {
+                    ToolTerminalStatus::Failed
+                    | ToolTerminalStatus::TimedOut
+                    | ToolTerminalStatus::Denied => {
+                        Some((RingingCommandState::Failed, error_code_of(error.as_ref())))
+                    }
+                    _ => Some((RingingCommandState::Succeeded, None)),
+                },
+                ProjectionPayload::ControlDelta(
+                    ControlDelta::InteractionResolved { .. }
+                    | ControlDelta::InteractionExpired { .. },
+                ) => Some((RingingCommandState::Succeeded, None)),
+                _ => None,
+            };
+            if let Some((state, error_code)) = terminal {
+                self.mark_terminal_with_result(
+                    command_id,
+                    state,
+                    Some(event.event_id.0.clone()),
+                    error_code,
+                    None,
+                );
             }
-            RingingEvent::Control(
-                qaqh_domain::ControlEvent::InteractionResolved { .. }
-                | qaqh_domain::ControlEvent::PlanReviewResolved { .. }
-                | qaqh_domain::ControlEvent::SkillsUpdated { .. }
-                | qaqh_domain::ControlEvent::SessionStateChanged { .. }
-                | qaqh_domain::ControlEvent::DriverChanged { .. }
-                | qaqh_domain::ControlEvent::OperationCompleted { .. },
-            ) => Some((RingingCommandState::Succeeded, None)),
-            RingingEvent::Conversation(qaqh_domain::ConversationEvent::TurnFailed {
-                error,
-                ..
-            }) => Some((RingingCommandState::Failed, Some(error.code.clone()))),
-            RingingEvent::Conversation(
-                qaqh_domain::ConversationEvent::TurnCompleted { .. }
-                | qaqh_domain::ConversationEvent::ConversationCancelled { .. },
-            ) => Some((RingingCommandState::Succeeded, None)),
-            RingingEvent::Conversation(qaqh_domain::ConversationEvent::CompactFinished {
-                status,
-                ..
-            }) => match status {
-                qaqh_domain::CompactStatus::Failed => {
-                    Some((RingingCommandState::Failed, Some("compact_failed".into())))
-                }
-                _ => Some((RingingCommandState::Succeeded, None)),
-            },
-            RingingEvent::Tool(qaqh_domain::ToolEvent::ToolFinished { result, .. }) => {
-                if result.status.is_failure() {
-                    Some((
-                        RingingCommandState::Failed,
-                        result.error.as_ref().map(|error| error.code.clone()),
-                    ))
-                } else {
-                    Some((RingingCommandState::Succeeded, None))
-                }
-            }
-            _ => None,
-        };
-        if let Some((state, error_code)) = terminal {
-            self.mark_terminal_with_result(
-                command_id,
-                state,
-                Some(envelope.event_id.clone()),
-                error_code,
-                terminal_result(&envelope.event),
-            );
         }
     }
 
@@ -458,26 +462,28 @@ impl PendingCommandStore {
 /// Derive the typed payload a client can reconcile from, when the terminal
 /// event carries one. Permission resolution is not yet a canonical fact, so it
 /// is intentionally absent until the permission registry lands.
-fn terminal_result(event: &RingingEvent) -> Option<RingingV2CommandResult> {
-    match event {
-        RingingEvent::Control(qaqh_domain::ControlEvent::InteractionResolved {
-            interaction_id,
-            resolution,
-        }) => Some(RingingV2CommandResult::AskResolved {
-            interaction_id: interaction_id.clone(),
-            outcome: match resolution {
-                qaqh_domain::AskResolution::Answered => RingingV2AskOutcome::Answered,
-                qaqh_domain::AskResolution::Dismissed => RingingV2AskOutcome::Dismissed,
-            },
-        }),
-        RingingEvent::Control(qaqh_domain::ControlEvent::PlanReviewResolved {
-            interaction_id,
-            approved,
-        }) => Some(RingingV2CommandResult::PlanReviewResolved {
-            interaction_id: interaction_id.clone(),
-            approved: *approved,
-        }),
-        _ => None,
+/// Turn/Tool 失败时的错误码提取（fact 侧折叠用）。
+fn error_code_of<E>(error: Option<&E>) -> Option<String>
+where
+    E: HasErrorCode,
+{
+    error.map(|e| e.code().to_string())
+}
+
+/// `TurnError` / `ToolError` 共有的 code 字段的最小访问接口。
+trait HasErrorCode {
+    fn code(&self) -> &str;
+}
+
+impl HasErrorCode for qaqh_session::session_fact_v2::TurnError {
+    fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+impl HasErrorCode for qaqh_session::session_fact_v2::ToolError {
+    fn code(&self) -> &str {
+        &self.code
     }
 }
 
@@ -524,126 +530,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn causally_linked_terminal_event_completes_receipt_without_running_downgrade() {
-        let mut store = PendingCommandStore::new();
-        assert!(
-            store
-                .record_fingerprint_for_session("cmd-1", "fp", "session-a")
-                .expect("accept")
-        );
-        let envelope = RingingEventEnvelope::new(
-            "seed",
-            1,
-            1,
-            1,
-            "event-1",
-            RingingEvent::Tool(ToolEvent::ToolFinished {
-                tool_call_id: "call".into(),
-                turn_id: "turn".into(),
-                round_num: 0,
-                result: ToolResult::ok("ok"),
-            }),
-        )
-        .with_causation("cmd-1");
-        store.observe_terminal_event(&envelope);
-        store.mark_running("cmd-1");
-        let status = store
-            .status_for_session("cmd-1", "session-a")
-            .expect("status");
-        assert_eq!(status.state, RingingCommandState::Succeeded);
-        assert_eq!(status.terminal_event_id.as_deref(), Some("event-1"));
-    }
-
-    #[test]
-    fn interaction_resolution_records_typed_result_for_replay() {
-        let mut store = PendingCommandStore::new();
-        assert!(
-            store
-                .record_fingerprint_for_session("cmd-ask", "fp", "session-a")
-                .expect("accept")
-        );
-        let envelope = RingingEventEnvelope::new(
-            "seed",
-            1,
-            1,
-            1,
-            "event-ask",
-            RingingEvent::Control(qaqh_domain::ControlEvent::InteractionResolved {
-                interaction_id: "ask-1".into(),
-                resolution: qaqh_domain::AskResolution::Answered,
-            }),
-        )
-        .with_causation("cmd-ask");
-        store.observe_terminal_event(&envelope);
-
-        let status = store
-            .v2_status_for_session("cmd-ask", "session-a")
-            .expect("status");
-        assert_eq!(status.state, RingingCommandState::Succeeded);
-        assert_eq!(
-            status.result,
-            Some(RingingV2CommandResult::AskResolved {
-                interaction_id: "ask-1".into(),
-                outcome: RingingV2AskOutcome::Answered,
-            })
-        );
-
-        let existing = store
-            .existing_receipt_for_session("cmd-ask", "session-a")
-            .expect("existing receipt");
-        assert_eq!(existing.payload_fingerprint, "fp");
-        assert!(matches!(
-            existing.into_existing(),
-            RingingV2ExistingResult::CommandReceipt {
-                state: RingingCommandState::Succeeded,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn plan_review_resolution_records_typed_result() {
-        let mut store = PendingCommandStore::new();
-        assert!(
-            store
-                .record_fingerprint_for_session("cmd-plan", "fp", "session-a")
-                .expect("accept")
-        );
-        let envelope = RingingEventEnvelope::new(
-            "seed",
-            1,
-            1,
-            1,
-            "event-plan",
-            RingingEvent::Control(qaqh_domain::ControlEvent::PlanReviewResolved {
-                interaction_id: "plan-1".into(),
-                approved: false,
-            }),
-        )
-        .with_causation("cmd-plan");
-        store.observe_terminal_event(&envelope);
-
-        assert_eq!(
-            store
-                .v2_status_for_session("cmd-plan", "session-a")
-                .expect("status")
-                .result,
-            Some(RingingV2CommandResult::PlanReviewResolved {
-                interaction_id: "plan-1".into(),
-                approved: false,
-            })
-        );
-    }
-}
-
-#[cfg(test)]
-mod stale_running_tests {
-    use super::*;
-
-    /// 冻结事故（2026-09-02）回归：Accepted/Running 超时无终态必须被巡检
-    /// 告警；终态折叠后不再告警；限频间隔内不重复告警。
-    #[test]
+#[test]
     fn stale_running_receipts_are_warned_and_rate_limited() {
         let mut store = PendingCommandStore::new();
         assert!(store.record("cmd-stuck"));

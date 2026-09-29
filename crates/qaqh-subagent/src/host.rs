@@ -6,7 +6,7 @@
 //! SessionManager）提供的 actor 句柄即可。
 //!
 //! 本 trait 只依赖 domain/ringing 规范 wire 类型（`RingingCommand`、
-//! `ContentRef`、`EventBatch` 等，PR-4-2 起直接取自 qaqh-domain /
+//! `ContentRef`、`CollectorBatch` 等，PR-4-2 起直接取自 qaqh-domain /
 //! qaqh-ringing），不引用 qaqh-runtime 任何类型，保证依赖方向
 //! `runtime → subagent` 不回环。
 //!
@@ -21,11 +21,36 @@ use qaqh_ringing::RingingCommand;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// 大内容引用与事件批次（宿主实现 `download_content` / 事件流需要；与 trait
-/// 签名同类型），re-export 供 qaqh-runtime 消费。
+/// 大内容引用（宿主实现 `download_content` 需要；与 trait 签名同类型），
+/// re-export 供 qaqh-runtime 消费。
 pub use qaqh_domain::ContentRef;
-// PR-4-2：`EventBatch` 即 ringing 规范类型（此前经 qaqh-client 转手）。
-pub use qaqh_ringing::RingingEventBatch as EventBatch;
+
+/// 收集器消费的精简事件（hub-fact-bus spec 阶段 2.2）。
+///
+/// 宿主桥（qaqh-runtime `host_impl`）把 V2ProjectionHub 的 `ProjectionPayload`
+/// 翻译成这几个变体；qaqh-subagent 因此保持不依赖 qaqh-session。
+#[derive(Debug, Clone)]
+pub enum CollectorEvent {
+    /// 一段已 seal 的 Answer block。`text` 为内联正文；大内容外化时为
+    /// `None`，`output_ref` 携带内容引用供 `download_content` 回拉。
+    AnswerSealed {
+        text: Option<String>,
+        output_ref: Option<ContentRef>,
+    },
+    /// turn 终态（Completed/Failed/Cancelled 三态压平成两个布尔位）。
+    TurnFinished {
+        failed: bool,
+        cancelled: bool,
+        error: Option<String>,
+    },
+}
+
+/// 单次轮询拿到的批次。保留 `session_id` 以维持收集器的会话过滤语义。
+#[derive(Debug)]
+pub struct CollectorBatch {
+    pub session_id: String,
+    pub events: Vec<CollectorEvent>,
+}
 
 /// Result of creating an in-process subagent actor.
 ///
@@ -509,8 +534,8 @@ pub trait SubagentHost: Send + Sync {
     fn send_ringing(&self, session_id: &str, command: RingingCommand) -> Result<(), String>;
 
     /// 订阅某 seed 的实时事件批次流（等价 SSE 单条连接；宿主内部按 seed
-    /// 过滤后以 `EventBatch` 聚合）。返回 std mpsc receiver，供 std 线程消费。
-    fn subscribe(&self, session_id: &str) -> std::sync::mpsc::Receiver<EventBatch>;
+    /// 过滤后以 `CollectorBatch` 聚合）。返回 std mpsc receiver，供 std 线程消费。
+    fn subscribe(&self, session_id: &str) -> std::sync::mpsc::Receiver<CollectorBatch>;
 
     /// 进程内读取外置大内容（等价 HTTP `download_content`）。
     fn download_content(&self, session_id: &str, reference: &ContentRef)

@@ -108,6 +108,8 @@ impl RingingHub {
             log::info!(
                 "[ringing] sealing orphan active turn {turn_id} for {session_id} (no terminal event)"
             );
+            // §4.0.5 迁移后 publish 不再承载副作用；补终态仍走 publish 以维持
+            // journal/投影/SSE 一致性；fact 补写仍为遗留债（§4.0.4）。
             let _ = self.publish_with_causation(
                 session_id,
                 DomainEvent::Conversation(ConversationEvent::ConversationCancelled {
@@ -188,11 +190,15 @@ impl RingingHub {
             log::info!(
                 "[ringing] sealing orphan tool {tool_call_id} for {session_id} (no ToolFinished)"
             );
+            // §4.0.5 迁移：ToolFinished 触发 permission pin 释放，现在随产生侧
+            // 显式执行（原由 publish 承载）。
+            let interaction_id =
+                crate::agent::tool_runtime::canonical_interaction_id(&tool_call_id);
             let _ = self.publish_with_causation(
                 session_id,
                 DomainEvent::Tool(ToolEvent::ToolFinished {
                     tool_call_id,
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     round_num,
                     result: ToolResult::cancelled(
                         "Agent restarted before the tool returned a result",
@@ -200,6 +206,7 @@ impl RingingHub {
                 }),
                 None,
             );
+            self.release_interaction_content(session_id, interaction_id.as_str());
             changed = true;
         }
 
@@ -246,6 +253,9 @@ impl RingingHub {
                     live.remove(session_id);
                 }
                 drop(live);
+                // §4.0.5 迁移：补终态 Dismissed 同样释放交互正文 pin
+                // （原由 publish 承载）。
+                self.release_interaction_content(session_id, id);
                 changed = true;
             }
         }
