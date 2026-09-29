@@ -108,14 +108,13 @@ impl RingingHub {
             log::info!(
                 "[ringing] sealing orphan active turn {turn_id} for {session_id} (no terminal event)"
             );
-            // §4.0.5 迁移后 publish 不再承载副作用；补终态仍走 publish 以维持
-            // journal/投影/SSE 一致性；fact 补写仍为遗留债（§4.0.4）。
-            let _ = self.publish_with_causation(
+            // 阶段 3d：v1 广播删除后补终态只做进程内投影收敛（snapshot /
+            // 幂等检测）；fact 补写仍为遗留债（§4.0.4）。
+            self.apply_seal_event(
                 session_id,
                 DomainEvent::Conversation(ConversationEvent::ConversationCancelled {
                     turn_id: Some(turn_id.to_string()),
                 }),
-                None,
             );
             changed = true;
         }
@@ -135,7 +134,7 @@ impl RingingHub {
             log::info!(
                 "[ringing] sealing orphan compact {compact_id} for {session_id} (worker operation cannot resume)"
             );
-            let _ = self.publish_with_causation(
+            self.apply_seal_event(
                 session_id,
                 DomainEvent::Conversation(ConversationEvent::CompactFinished {
                     compact_id,
@@ -144,7 +143,6 @@ impl RingingHub {
                     turns_compacted: Some(0),
                     turns_removed: Some(0),
                 }),
-                None,
             );
             changed = true;
         }
@@ -190,11 +188,11 @@ impl RingingHub {
             log::info!(
                 "[ringing] sealing orphan tool {tool_call_id} for {session_id} (no ToolFinished)"
             );
-            // §4.0.5 迁移：ToolFinished 触发 permission pin 释放，现在随产生侧
-            // 显式执行（原由 publish 承载）。
+            // 阶段 3d：补终态走 apply_seal_event（进程内投影收敛）；
+            // ToolFinished 的 permission pin 释放仍随产生侧显式执行。
             let interaction_id =
                 crate::agent::tool_runtime::canonical_interaction_id(&tool_call_id);
-            let _ = self.publish_with_causation(
+            self.apply_seal_event(
                 session_id,
                 DomainEvent::Tool(ToolEvent::ToolFinished {
                     tool_call_id,
@@ -204,7 +202,6 @@ impl RingingHub {
                         "Agent restarted before the tool returned a result",
                     ),
                 }),
-                None,
             );
             self.release_interaction_content(session_id, interaction_id.as_str());
             changed = true;
@@ -235,13 +232,12 @@ impl RingingHub {
                 log::info!(
                     "[ringing] sealing orphan interaction {id} for {session_id} (no resolution)"
                 );
-                let _ = self.publish_with_causation(
+                self.apply_seal_event(
                     session_id,
                     DomainEvent::Control(ControlEvent::InteractionResolved {
                         interaction_id: id.to_string(),
                         resolution: AskResolution::Dismissed,
                     }),
-                    None,
                 );
                 // B9/H3c：条件删除——仅当活表仍指向被收尾的 id 才清除；
                 // 并发发布的新 ask 可能已注册了不同 id，不能误抹。
