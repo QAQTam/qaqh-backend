@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::session_fact_v2::{
-    ContentRef, DriverChanged, EventId, ExecutionId, FactPayload, FactSchema, InputAccepted,
-    InputId, InterAgentCommunication, InteractionExpired, InteractionId, InteractionRequested,
-    InteractionResolved, MessageId, RecoveryRef, SessionFact, SessionId, SessionRecovered,
-    SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished, ToolIntent,
-    ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    CheckpointId, CompactionApplied, ContentRef, DriverChanged, EventId, ExecutionId, FactPayload,
+    FactSchema, InputAccepted, InputId, InterAgentCommunication, InteractionExpired,
+    InteractionId, InteractionRequested, InteractionResolved, MessageId, RecoveryRef, SessionFact,
+    SessionId, SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError,
+    ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 use super::{
@@ -735,6 +735,45 @@ impl ToolLedger {
         facts
     }
 
+    /// Append the terminal `CompactionApplied` fact after a successful compact.
+    ///
+    /// D10 产生侧：压缩成功后 durable append 先于 `CompactFinished` 域事件，
+    /// 让 v2 投影（conversation/timeline/meta）与回执折叠都能看到终态。
+    /// `replaces_through_fact_seq` 取追加前的 canonical head——压缩边界语义
+    /// 是「本 fact 之前的全部事实已被摘要替代」。空日志（head=0）会触发
+    /// `InvalidFactSeq` 校验失败并原样返回，调用方按降级处理。
+    pub fn append_compaction_applied(
+        &mut self,
+        event_id: EventId,
+        checkpoint_id: CheckpointId,
+        summary_ref: ContentRef,
+        context_revision: u64,
+        applied_at_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let replaces_through_fact_seq = self.store.last_fact_seq();
+        let fact = SessionFact {
+            schema: FactSchema::v2(),
+            session_id: self.session_id.clone(),
+            log_id: self.log_id.clone(),
+            fact_seq: 0,
+            event_id,
+            ts_ms: applied_at_ms,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::CompactionApplied(CompactionApplied {
+                checkpoint_id,
+                replaces_through_fact_seq,
+                summary_ref,
+                context_revision,
+                applied_at_ms,
+            }),
+        };
+        let outcome = self.append_and_publish(fact, applied_at_ms)?;
+        Ok(outcome.fact)
+    }
+
     /// Append the recovery batch's final `SessionRecovered` fact.
     ///
     /// Recovery execution owns the same writer lease as the tool ledger so the
@@ -745,8 +784,7 @@ impl ToolLedger {
         event_id: EventId,
         payload: SessionRecovered,
         now_ms: i64,
-    ) -> Result<SessionFact, ToolLedgerError> {
-        let fact = SessionFact {
+    ) -> Result<SessionFact, ToolLedgerError> {        let fact = SessionFact {
             schema: FactSchema::v2(),
             session_id: self.session_id.clone(),
             log_id: self.log_id.clone(),

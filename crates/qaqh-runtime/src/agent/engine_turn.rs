@@ -1240,6 +1240,8 @@ impl TurnEngine {
                         ));
                     return false;
                 }
+                // D10 fact 产生侧：durable append 先于 CompactFinished 域事件发布。
+                super::plugins::engine_compact::publish_compaction_fact(ctx, &summary);
                 // Ringing 双发：CompactFinished（成功终态）
                 ctx.emitter
                     .emit_domain(qaqh_domain::DomainEvent::Conversation(
