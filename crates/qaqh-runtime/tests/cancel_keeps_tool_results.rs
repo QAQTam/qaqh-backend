@@ -23,6 +23,18 @@ use qaqh_runtime::agent::turn_lap_test_api::execute_admitted_batch;
 use qaqh_runtime::agent::types::{Emitter, LoopPhase, PendingState, RingContext, StatsCollector};
 use qaqh_types::{ContentBlock, Message};
 
+/// `run_batch` 的工具用 `shell: "sh"`：无 Git-Bash/MSYS 的 Windows 上 spawn
+/// 直接失败，4 个工具全部零执行，"取消点在批中途"的前置断言必然失败——
+/// 这是测试基建的环境依赖，不是产品缺陷。探测失败时跳过该用例。
+fn sh_available() -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("true")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
     qaqh_workspace::runtime::ToolExecutionScope::capture(
         qaqh_workspace::tool_api::ToolCallContext {
@@ -329,6 +341,13 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
 #[test]
 fn cancel_mid_batch_keeps_executed_tool_results() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    if !sh_available() {
+        eprintln!(
+            "skip: `sh` not on PATH（无 Git-Bash/MSYS 的 Windows）；\
+             批执行前置条件无法满足，用例不适用"
+        );
+        return;
+    }
     let (report, temp) = run_batch(false, "cancel-mid-batch");
     // 批确实跑起来了：4 个工具都产生了副作用（取消点在中途，不是批前）。
     let executed_count = report.executed.iter().filter(|count| **count > 0).count();

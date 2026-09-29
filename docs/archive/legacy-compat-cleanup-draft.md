@@ -124,21 +124,23 @@ serde rename、TUI 同步（`ClientV2CommandAck`/`ClientV2CommandStatus`）。
 
 ## G. TUI 并入后端仓（独立二进制，进程分离不变）
 
+> **勘误 2026-09-29**：本节各条此前误标 [x]，仓库事实为未执行（无 crates/qaqh-tui、无 build-tui、无 ratatui patch）。全部改回 [ ]，见 docs/plan-beta-readiness.md P5。
+
 > 2026-09-27 可行性结论：**可做，低风险**。运行时已具备进程模型——TUI 有
 > `launch_daemon_if_missing: true` / `--no-spawn`（tui-app main.rs:95,139），发现 daemon
 > 不在则拉起，经 HTTP/SSE 连接。搬家不改任何运行时行为。
 
-- [x] 新建 `crates/qaqh-tui/`，`[[bin]] name = "qaqh-tui"`；对外产物名不变；workspace members 加行。
-- [x] 依赖简化：`qaqh-client`/`qaqh-config-api` 的 `../qaqh-backend/...` 相对路径依赖改为
+- [ ] 新建 `crates/qaqh-tui/`，`[[bin]] name = "qaqh-tui"`；对外产物名不变；workspace members 加行。
+- [ ] 依赖简化：`qaqh-client`/`qaqh-config-api` 的 `../qaqh-backend/...` 相对路径依赖改为
       workspace 内部依赖（离线分发问题消失）；后续按 D 轨直用 `qaqh-ringing`/`qaqh-domain`。
-- [x] **`[patch.crates-io]`（ratatui 本地工作树）必须上移到 workspace 根 Cargo.toml**
+- [ ] **`[patch.crates-io]`（ratatui 本地工作树）必须上移到 workspace 根 Cargo.toml**
       （Cargo 只认根 patch）；后端不用 ratatui，无副作用；ratatui 发版后可直接删 patch。
-- [x] workspace 继承：TUI package 的 `version`/`lints` 改 `workspace = true`；
+- [ ] workspace 继承：TUI package 的 `version`/`lints` 改 `workspace = true`；
       核对 `scripts/sync-version.ps1` 覆盖新 crate（当前两仓同为 2.0.0-alpha3）。
-- [x] 构建/CI：justfile 加 `build-tui`；TUI 仓 `.cnb.yml` 迁移或废弃；注意 syntect/pulldown
+- [ ] 构建/CI：justfile 加 `build-tui`；TUI 仓 `.cnb.yml` 迁移或废弃；注意 syntect/pulldown
       会加重 workspace 首编。
-- [x] Git：旧仓（D:\qaqh-tui-app）转只读归档，代码无历史或 subtree 并入。
-- [x] 收益：codegraph 前后端一图可见、单 CI 单版本号；清理草稿 D 轨"迁外部壳层"变成仓库内改动。
+- [ ] Git：旧仓（D:\qaqh-tui-app）转只读归档，代码无历史或 subtree 并入。
+- [ ] 收益：codegraph 前后端一图可见、单 CI 单版本号；清理草稿 D 轨"迁外部壳层"变成仓库内改动。
 
 ---
 

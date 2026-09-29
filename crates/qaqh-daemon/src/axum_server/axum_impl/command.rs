@@ -367,14 +367,18 @@ pub(crate) async fn execute_command(
                 }
             };
             let created_session = created.as_str().map(str::to_string);
-            if let Some(session_id) = created_session {
+            // BUG-2026-09-29-01：这里此前写作 `if let Some(session_id)`，把外层
+            // `session_id`（header 的 client_session_id）遮蔽成新 seed，导致
+            // `attach_session(&seed, &seed)` 恒 false——commands 通道上的
+            // SessionCreate 永远 401。attach 的宿主必须是发起命令的 lease。
+            if let Some(created) = created_session {
                 // BUG-2026-09-12-10：attach 失败（lease 已死）必须显式 401，
                 // 而不是静默 ack 200 让前端进入「无归属」状态。
                 let attached = state
                     .leases
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .attach_session(&session_id, &session_id);
+                    .attach_session(&session_id, &created);
                 if !attached {
                     state
                         .pending
