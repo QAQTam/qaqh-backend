@@ -342,6 +342,7 @@ fn v2_c4_ephemeral_is_cursorless_and_unreplayable() {
         revision: None,
         causation_id: None,
         correlation_id: None,
+        ts_ms: None,
         payload: qaqh_session::session_fact_v2::ProjectionPayload::Unknown(
             qaqh_session::session_fact_v2::UnknownProjection {
                 raw_ref: qaqh_session::session_fact_v2::ContentRef::new(
