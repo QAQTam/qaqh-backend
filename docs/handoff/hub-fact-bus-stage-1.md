@@ -39,6 +39,22 @@
 - **已知残留**：`tests/host_direct.rs` 维持存量编译失败（CollectorBatch 失配 +
   2 处 publish_with_causation，§5.4 一并处理）。
 
+## §3.2 wire 清理（2026-09-29，同日追加）
+
+- `qaqh-ringing`：删 `RingingEventEnvelope`、`RingingEventBatch`（envelope.rs）
+  与 `reset.rs`（`RingingResetRequired`）——v1 总线删除后全仓零消费方；
+  lib.rs re-export 与 crate 文档同步收缩。命令 wire 契约
+  （`RingingCommandEnvelope`/`RingingCommandAck`/`RingingCommandState|Status`）
+  保留——`qaqh-domain` 命令面仍在使用。
+- `RingingChannelSnapshot` 复核后**保留**：snapshot 是阶段 3d 保留的读入口
+  （`projection.rs` 消费），§3.3 其余项（Channel/ChannelStatus）确认无消费方。
+- 验证：`cargo check --workspace` 绿；ringing --lib 21 / runtime --lib 265 /
+  daemon --bins 65 全绿。
+- §4.0.4（orphan_seal fact 补写）评估后**维持遗留债**：canonical ledger
+  句柄在 agent/session 侧，RingingHub 不持有；且孤儿工具终态与
+  tool_ledger/tool_crash_recovery 恢复路径语义交叠，需要先做归属裁决再动，
+  不宜在本轮加速窗口内硬塞。
+
 ### 验证证据（阶段 3d）
 
 - `cargo check --workspace` → exit 0（qaqh-runtime lib/tests 零警告；存量
