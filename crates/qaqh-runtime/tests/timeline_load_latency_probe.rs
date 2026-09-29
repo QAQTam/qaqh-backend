@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{
-    ConversationEvent, DomainEvent, RoundDeltaKind, TimelineIntent, TimelineTurnState,
+    TimelineIntent, TimelineTurnState,
 };
 use qaqh_runtime::RingingHub;
 use qaqh_session::SessionManager;
@@ -115,61 +115,7 @@ fn hot_path_latency_under_fast_streaming() {
         ms(build_total) / CHECKPOINTS as f64
     );
 
-    // ── B. conversation 频道 RoundDelta：Reliable → 每事件一次锁内落盘 ─────
-    hub.publish(
-        session_id,
-        DomainEvent::Conversation(ConversationEvent::TurnStarted {
-            turn_id: "t1".into(),
-            user_text: "probe".into(),
-        }),
-    );
-    let chunk = "x".repeat(4096);
-    const DELTAS: usize = 4000;
-    let mut worst = Duration::ZERO;
-    let mut over_20ms = 0usize;
-    let journal_path = root
-        .join("journal")
-        .join("conversation")
-        .join(format!("{session_id}.jsonl"));
-    let before = std::fs::metadata(&journal_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let t0 = Instant::now();
-    for _ in 0..DELTAS {
-        let t = Instant::now();
-        hub.publish(
-            session_id,
-            DomainEvent::Conversation(ConversationEvent::RoundDelta {
-                turn_id: "t1".into(),
-                round_num: 0,
-                kind: RoundDeltaKind::Answering,
-                delta: chunk.clone(),
-            }),
-        );
-        let d = t.elapsed();
-        if d > worst {
-            worst = d;
-        }
-        if ms(d) > 20.0 {
-            over_20ms += 1;
-        }
-    }
-    let sink_total = t0.elapsed();
-    let after = std::fs::metadata(&journal_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    println!(
-        "[B] {DELTAS} 次 RoundDelta（4 KiB）合计 {:.1}ms，平均 {:.3}ms/次，\
-         最慢 {:.1}ms，>20ms 的 {over_20ms} 次",
-        ms(sink_total),
-        ms(sink_total) / DELTAS as f64,
-        ms(worst)
-    );
-    println!(
-        "[B] journal 增长 {:.2} MiB（{:.0} B/事件，含 4 MiB 全量重写）",
-        (after - before) as f64 / 1048576.0,
-        (after - before) as f64 / DELTAS as f64
-    );
+    // ── B. v1 conversation 频道 RoundDelta 探针已随 v1 总线删除（阶段 3d）。
 
     // ── C. TurnSealed：入队（issue #28 后不再同步全量落盘） ─────────────────
     hub.publish_timeline(
