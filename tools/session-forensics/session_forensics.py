@@ -9,10 +9,13 @@
         meta.json           会话元信息（模型/effort/cwd/token 统计）
         messages.jsonl      追加写的权威消息流（一行一条 Message）
         messages.wal        L2 预写日志（未 drain 的 persist op）
-        compact-context.json 当前压缩检查点（摘要 + 保留的消息）
         todo.json           任务计划
         tool_outbox.wal     工具调用回执（call_id/name/status/ts）
         code_stats.jsonl    文件改动行数统计
+
+压缩事实（v2「route 1」体系）：压缩摘要直接以 `[Compacted N turns]` 合成
+消息写入 messages.jsonl（唯一真源，route 1 不再生成第二个 compact 真源文件）；
+meta.json 的 `compact_skip` / `compact_covered_through_msg_id` 是压缩水位。
 
 本工具**只读**这些文件，输出可引用的取证结论（带 msg_id 出处），
 供模型在压缩后重建事实。不写盘、不改会话、不依赖 daemon。
@@ -142,11 +145,20 @@ class Session:
         self.seed = path.name
         self.meta = load_json(path / "meta.json", {}) or {}
         self.messages, self.torn = load_jsonl(path / "messages.jsonl")
-        self.compact = load_json(path / "compact-context.json", {}) or {}
         self.todo = load_json(path / "todo.json", {}) or {}
         self.outbox, _ = load_jsonl(path / "tool_outbox.wal")
         self.code_stats, _ = load_jsonl(path / "code_stats.jsonl")
         self.wal_ops, self.wal_header = self._load_wal(path / "messages.wal")
+
+    def compaction_summaries(self) -> list[dict]:
+        """messages.jsonl 里的 `[Compacted N turns]` 合成消息（route 1 压缩真相）。"""
+        return [
+            m for m in self.messages
+            if any(
+                b.get("type") == "text" and str(b.get("text", "")).startswith("[Compacted ")
+                for b in blocks(m)
+            )
+        ]
 
     @staticmethod
     def _load_wal(path: Path):
@@ -326,6 +338,8 @@ def cmd_sessions(args) -> int:
 def cmd_info(args) -> int:
     s = Session(pick_session(resolve_sessions_dir(args.root), args.session))
     m = s.meta
+    summaries = s.compaction_summaries()
+    latest_summary = summaries[-1] if summaries else None
     info = {
         "seed": s.seed,
         "dir": str(s.dir),
@@ -338,11 +352,11 @@ def cmd_info(args) -> int:
         "messages_on_disk": len(s.messages),
         "torn_lines": s.torn,
         "turn_count": m.get("turn_count"),
+        # route 1 压缩事实：水位在 meta.json，摘要在 messages.jsonl 里。
         "compact_skip": m.get("compact_skip"),
-        "compact_checkpoint": s.compact.get("checkpoint_id"),
-        "compact_parent": s.compact.get("parent_checkpoint_id"),
-        "compact_created_at": fmt_ts(s.compact.get("created_at")) if s.compact else None,
-        "archive_message_count": s.compact.get("archive_message_count"),
+        "compact_covered_through_msg_id": m.get("compact_covered_through_msg_id"),
+        "compaction_summaries": len(summaries),
+        "latest_summary_msg_id": latest_summary.get("msg_id") if latest_summary else None,
         "wal_header": s.wal_header,
         "wal_ops": len(s.wal_ops),
         "todo_items": len(s.todo.get("items", []) or []),
@@ -355,9 +369,9 @@ def cmd_info(args) -> int:
     print(f"session {s.seed}  ({s.dir})")
     for k in ("model", "effort", "cwd", "created_at", "updated_at",
               "message_count_meta", "messages_on_disk", "torn_lines", "turn_count",
-              "compact_skip", "compact_checkpoint", "compact_parent", "compact_created_at",
-              "archive_message_count", "wal_ops", "todo_items"):
-        print(f"  {k:<22} {info[k]}")
+              "compact_skip", "compact_covered_through_msg_id", "compaction_summaries",
+              "latest_summary_msg_id", "wal_ops", "todo_items"):
+        print(f"  {k:<30} {info[k]}")
     if info["usage_totals"]:
         u = info["usage_totals"]
         print(f"  usage_totals           total={u.get('total_tokens')} "
@@ -568,11 +582,13 @@ def cmd_evidence(args) -> int:
     print(f"created={fmt_ts(m.get('created_at'))} updated={fmt_ts(m.get('updated_at'))}")
     print(f"messages_on_disk={len(s.messages)} (meta says {m.get('message_count')}) "
           f"torn={s.torn}")
-    if s.compact:
-        print(f"compact checkpoint={s.compact.get('checkpoint_id')} "
-              f"parent={s.compact.get('parent_checkpoint_id')} "
-              f"archive_count={s.compact.get('archive_message_count')} "
-              f"at={fmt_ts(s.compact.get('created_at'))}")
+    summaries = s.compaction_summaries()
+    if summaries:
+        latest = summaries[-1]
+        covered = m.get("compact_covered_through_msg_id")
+        print(f"compaction: {len(summaries)} checkpoint message(s) in messages.jsonl; "
+              f"latest at msg {latest.get('msg_id')}; watermark "
+              f"compact_covered_through_msg_id={covered}")
     print("source of truth: messages.jsonl is append-only and NOT compacted — "
           "cite msg_ids from it.")
 
@@ -660,9 +676,11 @@ def cmd_selftest(args) -> int:
             for x in msgs:
                 fh.write(json.dumps(x, ensure_ascii=False) + "\n")
             fh.write("{torn half line\n")  # 模拟撕裂行
-        (sd / "compact-context.json").write_text(json.dumps({
-            "version": 1, "checkpoint_id": "compact-1", "parent_checkpoint_id": None,
-            "created_at": 1_700_000_100, "archive_message_count": 4, "messages": [],
+        (sd / "meta.json").write_text(json.dumps({
+            "seed": "abcd1234", "created_at": 1_700_000_000, "updated_at": 1_700_000_100,
+            "model": "test-model", "effort": "high", "message_count": 4, "turn_count": 1,
+            "cwd": "/tmp/ws", "usage_totals": {"total_tokens": 42},
+            "compact_skip": 2, "compact_covered_through_msg_id": 3,
         }), encoding="utf-8")
         (sd / "todo.json").write_text(json.dumps({"items": [
             {"id": "T1", "title": "do thing", "status": "completed", "evidence": "done"}]}),
@@ -688,6 +706,10 @@ def cmd_selftest(args) -> int:
         assert len(s.wal_ops) == 1 and s.wal_header["next_seq"] == 5
         assert pick_session(root / "sessions", None).name == "abcd1234"
         assert resolve_sessions_dir(str(root)).name == "sessions"
+        # route 1 压缩事实：无 compact-context.json，摘要按消息前缀识别。
+        assert not (sd / "compact-context.json").exists()
+        assert s.meta.get("compact_covered_through_msg_id") == 3
+        assert s.compaction_summaries() == []
 
     print("selftest: OK (parsing, blocks, tool summary, wal, session pick)")
     return 0
