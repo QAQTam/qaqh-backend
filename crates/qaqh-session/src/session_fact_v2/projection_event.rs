@@ -134,6 +134,10 @@ pub struct ProjectionEvent {
     /// Causal source copied from the canonical fact (for example a command id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub causation_id: Option<EventId>,
+    /// Wall-clock commit time of the source fact (C3). Synthetic events with
+    /// no source fact (ephemeral team overlays) carry `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_ms: Option<i64>,
     pub stream_key: StreamKey,
     pub delivery: Delivery,
     /// Reliable must be `Some` and match the delivery cursor's slot.
@@ -217,6 +221,7 @@ impl ProjectionEvent {
             source_fact_seq: source_fact.fact_seq,
             source_event_id: source_fact.event_id.clone(),
             causation_id: source_fact.causation_id.clone(),
+            ts_ms: Some(source_fact.ts_ms),
             stream_key,
             delivery: Delivery::Reliable {
                 cursor: ReliableCursor {
@@ -245,6 +250,7 @@ impl ProjectionEvent {
             source_fact_seq: source_fact.fact_seq,
             source_event_id: source_fact.event_id.clone(),
             causation_id: source_fact.causation_id.clone(),
+            ts_ms: Some(source_fact.ts_ms),
             stream_key,
             delivery: Delivery::Replaceable { revision },
             projection_slot: None,
@@ -266,6 +272,7 @@ impl ProjectionEvent {
             source_fact_seq: source_fact.fact_seq,
             source_event_id: source_fact.event_id.clone(),
             causation_id: source_fact.causation_id.clone(),
+            ts_ms: Some(source_fact.ts_ms),
             stream_key,
             delivery: Delivery::Ephemeral,
             projection_slot: None,
