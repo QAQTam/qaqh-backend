@@ -211,10 +211,15 @@ RingingHub 残余职责：命令路由/幂等回执、content store、interactio
 - [ ] **3.1** 删 `RingingHub::publish/publish_with_causation/subscribe/subscribe_channel/
       replay_since/replay_channel_since/snapshot/conversation_snapshot/live_watermark`
       及全部 broadcast 通道与 journal 事件持久化（hub.rs 约一半）。
-- [ ] **3.2** 删 `RingingEventEnvelope` 在 qaqh-ringing 的**运行时使用**（crate 内仅剩
+- [x] **3.2** 删 `RingingEventEnvelope` 在 qaqh-ringing 的**运行时使用**（crate 内仅剩
       历史命名则顺带改名/删除，wire 无消费方）。
-- [ ] **3.3** 删 v1 频道快照相关：`RingingChannelSnapshot`、`Channel`/`ChannelStatus`
+      （2026-09-29：全仓零消费方，`RingingEventEnvelope`/`RingingEventBatch`/
+      `reset::RingingResetRequired` 连同模块删除；命令 wire 契约
+      `RingingCommandEnvelope`/`RingingCommandAck` 等保留——qaqh-domain 命令面仍在用。）
+- [x] **3.3** 删 v1 频道快照相关：`RingingChannelSnapshot`、`Channel`/`ChannelStatus`
       若已无消费方（client 已确认无）。
+      （2026-09-29 复核：`RingingChannelSnapshot` 仍被 `projection.rs` 使用——
+      snapshot 是阶段 3d 明确保留的读入口（orphan_seal 检测），**保留不删**。）
 - [ ] **3.4** agent/actor 侧：所有 `hub.publish(DomainEvent)` 调用点改为
       「durable fact append → sink 自动发布」。**此处与 agent loop 插件化协同，
       见 §7。**
