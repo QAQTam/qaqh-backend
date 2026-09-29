@@ -190,12 +190,15 @@ RingingHub 残余职责：命令路由/幂等回执、content store、interactio
 - [x] c''. 退役锁 v1 广播行为的测试 ×4：hub.rs orphan/seal 三测 +
         daemon `session_create_event_carries_command_causation`
         （待 §5.4 重挂到 fact 面）。
-- [ ] d. hub.rs：删 `publish/publish_with_causation/subscribe/subscribe_channel/
+- [x] d. hub.rs：删 `publish/publish_with_causation/subscribe/subscribe_channel/
         replay_since/replay_channel_since` + DomainEvent broadcast 通道 +
         journal 事件持久化；**保留** `publish_timeline/subscribe_timeline/
         snapshot/live_watermark`（timeline SSE 与 orphan_seal 依赖）。
         现状：广播面已零生产者/零消费者（registry/service 的 subscribe_channel
         是订阅邮箱机制，非 hub 广播），删除是纯 hub.rs 内部手术。
+        （2026-09-29 完成，见 handoff §阶段 3d。偏差：orphan_seal 补终态改为
+        进程内收敛入口 `apply_seal_event`（投影 + 序号 + 水位，不广播/不落盘）；
+        fact 补写仍为 §4.0.4 遗留债。timeline/内容/lease 等模块保留。）
 - [x] e. pending_store：`observe_terminal_event`/`terminal_result`/3 个 v1 折叠测试
         已删除（零调用方）；fact 链 `observe_projection_events` 为唯一折叠入口。
         typed `existing` replay 能力随之彻底移除（降级已在 handoff 记录）。

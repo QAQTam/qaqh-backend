@@ -5,10 +5,9 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{
-    ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, DomainEvent,
-    RingingChannel, SessionState,
+    ControlCommand, ConversationCommand, ConversationEvent, DomainEvent, RingingChannel,
 };
-use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
+use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use qaqh_runtime::quota_ledger::QuotaLimits;
 use qaqh_runtime::{AgentRegistry, RingingHub};
 
@@ -67,15 +66,6 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
 
     let session_id = format!("sub-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-inprocess-test"));
-    let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok(envelope) = control_rx.blocking_recv() {
-            if event_tx.send(envelope).is_err() {
-                break;
-            }
-        }
-    });
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
 
@@ -87,22 +77,18 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
         "registry must track the actor"
     );
 
-    // The actor emits SessionStateChanged(Created) through the same hub path as
-    // a process worker's stdout reader. Its private ToolManager is visible to
-    // actor tool calls but must not replace the daemon process snapshot.
+    // 阶段 3d：v1 Control 广播已删除。「actor 已就绪」改在查询权威的
+    // activity 面等待（AgentLifecycleChanged{Ready} → activity Idle）。
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == session_id => match envelope.event {
-                RingingEvent::Control(ControlEvent::SessionStateChanged {
-                    state: SessionState::Created,
-                    ..
-                }) => break,
-                _ => continue,
-            },
-            Ok(_) => continue,
-            Err(error) => panic!("subagent actor emitted no Created event: {error}"),
+        assert!(Instant::now() < deadline, "subagent actor never reached ready/idle");
+        if registry
+            .activity(&session_id)
+            .is_some_and(|activity| activity.state == qaqh_domain::ActivityState::Idle)
+        {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
 
     // The process-level snapshot must stay stable and must NOT pick up the
@@ -137,32 +123,22 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
         "concurrent subagents must both be running"
     );
 
-    // The flush-stop race the old serialized path needed is gone: a subagent
-    // spawned while another is mid-turn must still emit its own Created event
-    // promptly. Under `ACTOR_SERIAL` this recv would time out because the
-    // second actor's thread blocked behind the first actor's loop.
+    // 阶段 3d：v1 Created 事件已随总线删除；并发性由 activity 面等第二个
+    // actor 到 ready（第一个仍在运行，第二个不得被串行化阻塞）。
     let second_deadline = Instant::now() + Duration::from_secs(10);
-    let mut saw_second_created = false;
-    while Instant::now() < second_deadline {
-        match event_rx.recv_timeout(second_deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == queued_session => match envelope.event {
-                RingingEvent::Control(ControlEvent::SessionStateChanged {
-                    state: SessionState::Created,
-                    ..
-                }) => {
-                    saw_second_created = true;
-                    break;
-                }
-                _ => continue,
-            },
-            Ok(_) => continue,
-            Err(error) => panic!("second actor emitted no Created event: {error}"),
+    loop {
+        assert!(
+            Instant::now() < second_deadline,
+            "second subagent actor never reached ready/idle"
+        );
+        if registry
+            .activity(&queued_session)
+            .is_some_and(|activity| activity.state == qaqh_domain::ActivityState::Idle)
+        {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        saw_second_created,
-        "second subagent must reach Created while the first is still running (concurrency)"
-    );
 
     registry.shutdown_all();
     assert!(!registry.is_running(&session_id));
@@ -216,7 +192,7 @@ fn spawn_subagent_registers_liveness() {
         .expect("spawn in-process subagent");
 
     // 构造可观察的「无终态 running 状态」：一个已开但未收尾的 turn。
-    hub.publish(
+    hub.apply_seal_event(
         &session_id,
         DomainEvent::Conversation(ConversationEvent::TurnStarted {
             turn_id: "t1".into(),
@@ -280,8 +256,6 @@ fn parent_cancel_propagates_to_children() {
         "spawn 时必须登记 parent -> children"
     );
 
-    let mut child_events = hub.subscribe(RingingChannel::Conversation, &child);
-
     let cancel_env = RingingWorkerCommandEnvelope::new(
         parent.clone(),
         "cancel-parent-1",
@@ -291,27 +265,21 @@ fn parent_cancel_propagates_to_children() {
         .send_ringing(&parent, &cancel_env)
         .expect("cancel must reach the parent worker");
 
+    // 阶段 3d：v1 Conversation 广播已删除；取消传播改在 supervisor 生命周期
+    // trace 上观察（child_cancel_sent 由子 seed 键控取消标记的投递记录）。
     let deadline = Instant::now() + Duration::from_secs(10);
+    let expected = format!("child_cancel_sent:{parent}:{child}");
     let mut saw_child_cancel = false;
     while Instant::now() < deadline {
-        match child_events.try_recv() {
-            Ok(envelope)
-                if envelope.session_id == child
-                    && matches!(
-                        envelope.event,
-                        RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. })
-                    ) =>
-            {
-                saw_child_cancel = true;
-                break;
-            }
-            Ok(_) => continue,
-            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        if registry.subagent_lifecycle_trace().iter().any(|e| e == &expected) {
+            saw_child_cancel = true;
+            break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
         saw_child_cancel,
-        "父取消必须传播到子 seed（子 actor 应发布 ConversationCancelled）"
+        "父取消必须传播到子 seed（lifecycle trace 应记录 child_cancel_sent）"
     );
 
     registry.shutdown_all();

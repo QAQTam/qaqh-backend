@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{ControlEvent, SessionState};
-use qaqh_ringing::RingingEvent;
 use qaqh_runtime::{AgentRegistry, QaqhService, RingingHub};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -84,15 +83,6 @@ fn session_spawns_inprocess_and_receives_created_event() {
 
     let session_id = format!("session-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("session-inprocess-test"));
-    let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok(envelope) = control_rx.blocking_recv() {
-            if event_tx.send(envelope).is_err() {
-                break;
-            }
-        }
-    });
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
 
@@ -104,21 +94,21 @@ fn session_spawns_inprocess_and_receives_created_event() {
         "registry must track the session actor"
     );
 
+    // 阶段 3d：v1 Control 广播已删除；「actor 已就绪」改在查询权威的
+    // activity 面等待（AgentLifecycleChanged{Ready} → activity Idle）。
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == session_id => match envelope.event {
-                RingingEvent::Control(ControlEvent::SessionStateChanged {
-                    state: SessionState::Created,
-                    ..
-                }) => {
-                    break;
-                }
-                _ => continue,
-            },
-            Ok(_) => continue,
-            Err(error) => panic!("session actor emitted no Created event: {error}"),
+        assert!(
+            Instant::now() < deadline,
+            "session actor never reached ready/idle on the activity surface"
+        );
+        if registry
+            .activity(&session_id)
+            .is_some_and(|activity| activity.state == qaqh_domain::ActivityState::Idle)
+        {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
     registry.shutdown_all();
     assert!(!registry.is_running(&session_id));
@@ -251,15 +241,6 @@ fn idle_unload_then_respawn_preserves_history() {
 
     let session_id = format!("session-idle-unload-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("idle-unload-test"));
-    let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok(envelope) = control_rx.blocking_recv() {
-            if event_tx.send(envelope).is_err() {
-                break;
-            }
-        }
-    });
     let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
     registry.attach_ringing(hub);
 
@@ -294,19 +275,20 @@ fn idle_unload_then_respawn_preserves_history() {
     registry
         .spawn_new(&session_id)
         .expect("respawn after idle unload");
+    // 阶段 3d：重生后同样等 activity 面（v1 Created 事件已随总线删除）。
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(envelope) if envelope.session_id == session_id => match envelope.event {
-                RingingEvent::Control(ControlEvent::SessionStateChanged {
-                    state: SessionState::Created,
-                    ..
-                }) => break,
-                _ => continue,
-            },
-            Ok(_) => continue,
-            Err(error) => panic!("respawned session emitted no Created event: {error}"),
+        assert!(
+            Instant::now() < deadline,
+            "session actor never reached ready/idle on the activity surface"
+        );
+        if registry
+            .activity(&session_id)
+            .is_some_and(|activity| activity.state == qaqh_domain::ActivityState::Idle)
+        {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(registry.is_running(&session_id));
 
@@ -360,7 +342,7 @@ fn close_session_cleans_per_session_resident_state() {
 
     qaqh_workspace::read_image::store_image(&session_id, "image/png", "QUJD");
     let content_id = hub.put_content(&session_id, "text/plain", b"hello".to_vec(), false);
-    let _ = hub.publish(
+    hub.apply_seal_event(
         &session_id,
         qaqh_domain::DomainEvent::Control(ControlEvent::SessionStateChanged {
             session_id: session_id.clone(),
