@@ -38,15 +38,18 @@ python3 tools/session-forensics/session_forensics.py timeline | tail -40
 转述、改过的文件被概括、决定的理由被抹平。但磁盘上的原始日志**从未被压缩**：
 
 ```
-{data_root}/sessions/{seed}/
+    {data_root}/sessions/{seed}/
     meta.json            会话元信息（模型/effort/cwd/token 统计）
     messages.jsonl       追加写的权威消息流（一行一条 Message）★ 唯一真源
     messages.wal         L2 预写日志（未 drain 的 persist op）
-    compact-context.json 当前压缩检查点（摘要 + 保留的消息）
     todo.json            任务计划
     tool_outbox.wal      工具调用回执（call_id/name/status/ts）
     code_stats.jsonl     文件改动行数统计
 ```
+
+压缩事实（route 1）：压缩摘要以 `[Compacted N turns]` 合成消息**写入
+messages.jsonl 本身**（不存在独立的 compact 检查点文件）；meta.json 的
+`compact_skip` / `compact_covered_through_msg_id` 是压缩水位。
 
 本工具**只读**这些文件，因此：不写盘、不改会话、不依赖 daemon 在跑。
 `messages.jsonl` 是 append-only 的，`msg_id` 单调递增且可作引用锚点——
@@ -96,7 +99,8 @@ python3 tools/session-forensics/session_forensics.py timeline | tail -40
 
 - `files` 的路径收集是**启发式**（键名含 `path`/`file`），不是 AST 级分析；
   正则写在 `collect_paths` 里，误报时改那里。
-- 压缩检查点只报告元信息（`checkpoint_id`/`parent`/`archive_message_count`），
-  不展开摘要正文——摘要本身会失真，取证应回到 `messages.jsonl`。
+- 压缩摘要正文不展开展示——摘要本身会失真，取证应回到 `messages.jsonl`
+  （摘要消息本身就是其中一条 `[Compacted N turns]` 记录，可用
+  `show <msg_id>` 定位）。
 - 若会话正在被 daemon 写入，读到的可能是瞬时状态；`wal` 有未 drain op 时以
   `messages.jsonl` 为准（它就是 append-only 真源）。
