@@ -78,7 +78,7 @@ RingingHub 残余职责：命令路由/幂等回执、content store、interactio
 
 ## 2. 阶段 1：命令面去圈 【先砍】
 
-> 状态：**已完成（见 docs/handoff/hub-fact-bus-stage-1.md）**。偏差：入口落在
+> 状态：**已完成（见 docs/handoff/beta-readiness-2026-09-29.md）**。偏差：入口落在
 > daemon `axum_impl::command::execute_command` 而非 `RingingHub`（leases/pending/
 > service 在 daemon AppState，hub 不持有）；ack 全路径统一 v2 形状。
 
@@ -99,7 +99,7 @@ RingingHub 残余职责：命令路由/幂等回执、content store、interactio
 
 ## 3. 阶段 2：事件侧消费方迁移 【先砍】
 
-> 状态：**2.2/2.3 已完成**（2026-09-28，见 docs/handoff/hub-fact-bus-stage-1.md）。
+> 状态：**2.2/2.3 已完成**（2026-09-28，见 docs/handoff/beta-readiness-2026-09-29.md）。
 > 盘点修正（§0.3 表的两处偏差）：① orphan_seal 是**发布者**不是订阅者；
 > ② 漏了 `axum_impl/sse.rs` 的 timeline SSE（`hub.subscribe_timeline`）——
 > 它消费 hub 内 timeline 专用广播，按 §6 归入"timeline 是否并入 fact 总线"
