@@ -135,6 +135,46 @@ export async function refreshTodo(): Promise<void> {
 // ── streams ─────────────────────────────────────────────────────────────────
 const sources = new Map<string, EventSource>();
 
+// B9 断线重连：指数退避 + 抖动的自管重连；cursor 记录到上次接收位置，
+// 重连 URL 带上游游标，daemon 先补发缺口再转实时（服务端已按 seq 去重，
+// 前端 timeline 侧另有 watermark 兜底）。
+const MAX_BACKOFF_MS = 30_000;
+const BACKOFF_BASE_MS = 500;
+const reconnect = new Map<string, { attempt: number; timer: ReturnType<typeof setTimeout> | null }>();
+let lastEventsCursor: string | null = null;
+let lastEventsCursorSeed = "";
+let lastTimelineEventId = "";
+let lastTimelineEventIdSeed = "";
+
+function nextBackoffMs(kind: string): number {
+  const state = reconnect.get(kind);
+  const attempt = state ? state.attempt : 0;
+  if (state) state.attempt += 1;
+  else reconnect.set(kind, { attempt: 1, timer: null });
+  // 半程随机抖动：[base*2^attempt/2, base*2^attempt)，封顶 30s。
+  const ceiling = Math.min(BACKOFF_BASE_MS * 2 ** attempt, MAX_BACKOFF_MS);
+  return ceiling / 2 + Math.random() * (ceiling / 2);
+}
+
+function scheduleReconnect(kind: string, seedName: string): void {
+  const delay = nextBackoffMs(kind);
+  setStream(kind, "connecting");
+  const state = reconnect.get(kind)!;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    // 会话已切换（seed() 不再是当时连接的 seed）则由切换逻辑负责重连。
+    if (seed() !== seedName) return;
+    if (kind === "events") connectEvents(seedName);
+    else connectTimeline(seedName);
+  }, delay);
+}
+
+function cancelReconnect(kind: string): void {
+  const state = reconnect.get(kind);
+  if (state?.timer) clearTimeout(state.timer);
+  if (state) state.timer = null;
+}
+
 function setStream(kind: string, state: string): void {
   setStreams((current) => ({ ...current, [kind]: state }));
 }
@@ -296,15 +336,16 @@ function onTimelineEntry(payload: Record<string, any>): void {
 /// 2026-09-24 硬切：daemon 的三条 per-channel `events/{channel}` 已删除，网关只暴露
 /// `/__gateway/ringing/sessions/{seed}/events`。事件带 `stream_key`，这里 demux。
 function wireEvents(seedName: string, source: EventSource): void {
-  source.onopen = () => setStream("events", "open");
-  source.onerror = () =>
-    setStream("events", source.readyState === EventSource.CLOSED ? "closed" : "connecting");
   source.addEventListener("ringing.event", (event) => {
     let envelope: Record<string, any> = {};
     try {
       envelope = JSON.parse((event as MessageEvent).data);
     } catch {
       return;
+    }
+    // B9：记录 reliable 信封的不透明 cursor，重连时作为 since_cursor 补发缺口。
+    if (typeof envelope.cursor === "string" && envelope.cursor) {
+      lastEventsCursor = envelope.cursor;
     }
     // v2 信封发 `session_id`（BETA-01 Phase D）；旧字段名 `seed` 已不再出现。
     if (envelope.session_id && envelope.session_id !== seedName) return;
@@ -323,6 +364,9 @@ function wireTimeline(source: EventSource): void {
   source.onerror = () =>
     setStream("timeline", source.readyState === EventSource.CLOSED ? "closed" : "connecting");
   source.addEventListener("timeline.entry", (event) => {
+    // B9：记录 SSE 帧 id（= timeline_seq 游标），重连时作为 last_event_id 补放。
+    const messageId = (event as MessageEvent).lastEventId;
+    if (messageId) lastTimelineEventId = messageId;
     let parsed: Record<string, any> = {};
     try {
       parsed = JSON.parse((event as MessageEvent).data);
@@ -335,23 +379,58 @@ function wireTimeline(source: EventSource): void {
 
 function connectEvents(currentSeed: string): void {
   sources.get("events")?.close();
-  const source = new EventSource(ringing.eventsUrl(currentSeed));
+  // 切换会话：旧 cursor 属于旧 log，必须丢弃（重放跨 log 会被 reset 拒绝）。
+  if (lastEventsCursorSeed !== currentSeed) {
+    lastEventsCursor = null;
+    lastEventsCursorSeed = currentSeed;
+  }
+  // 连续失败（attempt>1）后丢弃 cursor 降级为纯实时：cursor 过期时
+  // daemon 会 400 cursor_expired，重放死循环没有意义，全量刷新兜底。
+  const backoff = reconnect.get("events");
+  const cursor = backoff && backoff.attempt > 1 ? null : lastEventsCursor;
+  const source = new EventSource(ringing.eventsUrl(currentSeed, cursor));
   sources.set("events", source);
   setStream("events", "connecting");
   wireEvents(currentSeed, source);
+  source.onopen = () => {
+    const state = reconnect.get("events");
+    if (state) state.attempt = 0;
+    setStream("events", "open");
+  };
+  source.onerror = () => {
+    source.close();
+    sources.delete("events");
+    scheduleReconnect("events", currentSeed);
+  };
 }
 
 function connectTimeline(currentSeed: string): void {
   sources.get("timeline")?.close();
-  const source = new EventSource(ringing.timelineSseUrl(currentSeed));
+  if (lastTimelineEventIdSeed !== currentSeed) {
+    lastTimelineEventId = "";
+    lastTimelineEventIdSeed = currentSeed;
+  }
+  const source = new EventSource(ringing.timelineSseUrl(currentSeed, lastTimelineEventId || null));
   sources.set("timeline", source);
   setStream("timeline", "connecting");
   wireTimeline(source);
+  source.onopen = () => {
+    const state = reconnect.get("timeline");
+    if (state) state.attempt = 0;
+    setStream("timeline", "open");
+  };
+  source.onerror = () => {
+    source.close();
+    sources.delete("timeline");
+    scheduleReconnect("timeline", currentSeed);
+  };
 }
 
 function closeStreams(): void {
   for (const source of sources.values()) source.close();
   sources.clear();
+  cancelReconnect("events");
+  cancelReconnect("timeline");
   setStreams({});
 }
 

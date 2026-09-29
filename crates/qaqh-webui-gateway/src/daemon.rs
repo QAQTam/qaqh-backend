@@ -18,6 +18,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone)]
 pub struct DaemonClient {
     http: reqwest::Client,
+    /// SSE 专用：无整体超时。`REQUEST_TIMEOUT` 是 reqwest 的**全请求**超时
+    /// （含响应体流），长连接 SSE 会在 15s 整被掐断（BUG-2026-09-29-02），
+    /// 浏览器侧表现为每 15s 断流重连、B10 keep-alive 永远到不了。
+    stream_http: reqwest::Client,
     base_url: String,
     token: String,
     epoch: String,
@@ -29,8 +33,12 @@ impl DaemonClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|error| format!("build daemon http client: {error}"))?;
+        let stream_http = reqwest::Client::builder()
+            .build()
+            .map_err(|error| format!("build daemon stream http client: {error}"))?;
         Ok(Self {
             http,
+            stream_http,
             base_url: discovery.endpoint.trim_end_matches('/').to_string(),
             token: discovery.token.clone(),
             epoch: discovery.server_epoch.clone(),
@@ -119,7 +127,7 @@ impl DaemonClient {
         headers: &HeaderMap,
     ) -> Result<Response, String> {
         let mut request = self
-            .http
+            .stream_http
             .get(format!("{}{}", self.base_url, path))
             .bearer_auth(&self.token)
             .header("x-qaqh-client-session-id", &lease.client_session_id);

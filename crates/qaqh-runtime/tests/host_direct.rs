@@ -8,23 +8,25 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use qaqh_domain::{ControlEvent, DomainEvent, InterAgentDelivery, RingingChannel, SessionState};
+use qaqh_domain::InterAgentDelivery;
+use qaqh_runtime::ringing::V2ProjectionHub;
 use qaqh_runtime::{QaqhService, RingingHub};
 use qaqh_session::canonical::{
-    CanonicalLog, CanonicalSessionIdentity, CommittedFactReader, WriterId, generate_ulid,
+    CanonicalLog, CanonicalSessionIdentity, CanonicalSessionStore, CommittedFactReader, WriterId,
+    generate_ulid,
 };
-use qaqh_session::projection::{MailboxProjection, Projection};
+use qaqh_session::projection::{MailboxProjection, Projection, ProjectionSink};
 use qaqh_session::session_fact_v2::{
     AgentPath, EventId, FactPayload, FactSchema, MailboxMessageState, SessionCreated, SessionFact,
-    SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId,
+    SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId, TurnFinished, TurnId, TurnTerminal,
 };
 use qaqh_subagent::{
     BoardChannelCreateRequest, BoardHost, BoardListRequest, BoardPostRequest,
     BoardSubscriptionAction, BoardSubscriptionRequest, BoardSubscriptionTargetKind,
-    BoardThreadCreateRequest, InterruptAgentRequest, ListedAgentResidency, ListedAgentStatus,
-    SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost, TaskBoardHost, TaskClaimAction,
-    TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest,
-    TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
+    BoardThreadCreateRequest, CollectorEvent, InterruptAgentRequest, ListedAgentResidency,
+    ListedAgentStatus, SendAgentMessageRequest, SpawnSubagentRequest, SubagentHost, TaskBoardHost,
+    TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
+    TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -281,40 +283,110 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     })
     .expect("interrupted child must remain available for messages");
 
-    // 2. subscribe：从 hub 过滤该 seed 的事件批次（工具 collect 线程消费）。
-    let rx = host.subscribe(&session_id);
-    // 发布一条属于该 seed 的合成事件（等价 actor 事件进入 hub 的路径）。
-    hub.publish_with_causation(
-        &session_id,
-        DomainEvent::Control(ControlEvent::SessionStateChanged {
-            session_id: session_id.clone(),
-            state: SessionState::Created,
+    // 2. subscribe：v2 单流桥接（hub-fact-bus 阶段 2.2）。收集器只映射
+    //    ConversationDelta 投影；注入路径与 v2_acceptance_matrix fixture
+    //    一致：canonical store append + ProjectionSink::publish
+    //    （durable-before-publish；v1 hub 广播已随阶段 3d 删除）。
+    //    用独立 seed 注入，避免与已 spawn 子代理 actor 的 writer 租约竞争。
+    let sub_identity = qaqh_session::SessionManager::global()
+        .allocate_session(None)
+        .expect("allocate subscribe-only session");
+    let sub_seed = sub_identity.session_id.as_str().to_string();
+    let sub_dir = qaqh_session::SessionManager::global().session_path_dir(&sub_seed);
+    let sub_canonical = CanonicalSessionIdentity::open_or_create(&sub_dir).expect("sub identity");
+    let mut sub_store = CanonicalSessionStore::open(
+        &sub_dir,
+        sub_canonical.session_id.clone(),
+        sub_canonical.log_id.clone(),
+    )
+    .expect("sub canonical store");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let lease = sub_store
+        .acquire_writer(WriterId::new("host-direct-subscribe"), now_ms, 600_000)
+        .expect("sub writer lease");
+    // 先落 SessionCreated 建立提交基线：无 commit 文件时 v2 subscribe 返回
+    // SnapshotMissing，收集器桥会立即断开（V2-C1 契约）。
+    let created = SessionFact {
+        schema: FactSchema::v2(),
+        session_id: sub_canonical.session_id.clone(),
+        log_id: sub_canonical.log_id.clone(),
+        fact_seq: 0,
+        event_id: EventId::new(generate_ulid()),
+        ts_ms: now_ms,
+        causation_id: None,
+        turn_id: None,
+        call_id: None,
+        interaction_id: None,
+        payload: FactPayload::SessionCreated(SessionCreated {
+            created_at_ms: now_ms,
+            cwd: "/".to_string(),
+            model: "test-model".to_string(),
+            parent_session_id: None,
+            schema_caps: vec![],
         }),
-        None,
-    );
+    };
+    sub_store
+        .append(&lease, created, now_ms)
+        .expect("append session-created baseline");
+
+    let v2 = Arc::new(V2ProjectionHub::new("qaqh-host-direct-test"));
+    service.attach_v2_projection(v2.clone());
+    let rx = host.subscribe(&sub_seed);
+    let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
+    let fact = SessionFact {
+        schema: FactSchema::v2(),
+        session_id: sub_canonical.session_id.clone(),
+        log_id: sub_canonical.log_id.clone(),
+        fact_seq: 0,
+        event_id: EventId::new(generate_ulid()),
+        ts_ms: now_ms,
+        causation_id: None,
+        turn_id: Some(turn_id.clone()),
+        call_id: None,
+        interaction_id: None,
+        payload: FactPayload::TurnFinished(TurnFinished {
+            turn_id,
+            terminal: TurnTerminal::Completed,
+            usage: None,
+            error: None,
+            finished_at_ms: now_ms,
+        }),
+    };
+    let outcome = sub_store
+        .append(&lease, fact, now_ms)
+        .expect("append turn-finished fact");
+    ProjectionSink::publish(v2.as_ref(), &sub_dir, &outcome.fact, &outcome.events);
+
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let batch = loop {
         let batch = rx
             .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             .expect("subscribe must deliver the seed's event batch");
-        if batch.channel == RingingChannel::Control {
+        if batch
+            .events
+            .iter()
+            .any(|event| matches!(event, CollectorEvent::TurnFinished { .. }))
+        {
             break batch;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for the synthetic control batch"
+            "timed out waiting for the turn-finished batch"
         );
     };
     assert_eq!(
-        batch.session_id, session_id,
-        "batch must carry the sub seed"
+        batch.session_id, sub_seed,
+        "batch must carry the subscribed seed"
     );
     assert!(
         batch
-            .envelopes
+            .events
             .iter()
-            .any(|env| env.session_id == session_id),
-        "batch must contain the published envelope"
+            .any(|event| matches!(event, CollectorEvent::TurnFinished { failed: false, .. })),
+        "batch must contain the mapped turn-finished collector event"
     );
 
     // 3. send_ringing：命令直达 actor 队列（SessionShutdown 触发 actor 优雅退出，
@@ -551,17 +623,9 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     .expect("trigger delivery must reload child again through loaded parent");
 
     // The original collector ended when the child unloaded. A Trigger delivery
-    // must arm a new collector before the turn so terminal activity can route
-    // back to the parent mailbox.
-    hub.publish_with_causation(
-        &child,
-        DomainEvent::Conversation(qaqh_domain::ConversationEvent::TurnCompleted {
-            turn_id: "t1".to_string(),
-            stop_reason: None,
-            usage: None,
-        }),
-        None,
-    );
+    // re-arms a new collector inside the host bridge before the turn; the v1
+    // synthetic broadcast is gone (hub-fact-bus 阶段 3d)，terminal routing
+    // 由 canonical fact 投影链驱动，此处无需手工注入。
 
     let child_dir = sessions.session_path_dir(&child);
     let child_canonical = CanonicalSessionIdentity::open(&child_dir).expect("child identity");

@@ -238,12 +238,19 @@ export class Ringing {
   ///
   /// 2026-09-24 硬切：daemon 的三条 per-channel `events/{channel}` 已删除；单流
   /// 事件带 `stream_key`，调用方自行 demux。
-  eventsUrl(seed: string): string {
-    return `/__gateway/ringing/sessions/${encodeURIComponent(seed)}/events`;
+  ///
+  /// B9 断线重连：`sinceCursor` 传上次收到的信封 cursor，daemon 先补发缺口
+  /// 再转实时；不传则只收实时（重连窗口内的事件丢弃，靠信号刷新兜底）。
+  eventsUrl(seed: string, sinceCursor?: string | null): string {
+    const base = `/__gateway/ringing/sessions/${encodeURIComponent(seed)}/events`;
+    return sinceCursor ? `${base}?since_cursor=${encodeURIComponent(sinceCursor)}` : base;
   }
 
-  timelineSseUrl(seed: string): string {
-    return `/__gateway/ringing/sessions/${encodeURIComponent(seed)}/timeline/events`;
+  /// timeline SSE。`lastEventId` 传上次帧的 SSE id（daemon 侧
+  /// `?last_event_id=` 与原生 `Last-Event-ID` 头同语义），重连先重放缺口。
+  timelineSseUrl(seed: string, lastEventId?: string | null): string {
+    const base = `/__gateway/ringing/sessions/${encodeURIComponent(seed)}/timeline/events`;
+    return lastEventId ? `${base}?last_event_id=${encodeURIComponent(lastEventId)}` : base;
   }
 }
 
