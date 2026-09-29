@@ -501,6 +501,34 @@ impl ProjectionSink for V2ProjectionHub {
 }
 
 impl V2Subscription {
+    /// 非阻塞消费：先排空 replay，再 `try_recv` live。空 → `None`。
+    /// 供进程内桥接线程轮询（hub-fact-bus spec 阶段 2.2），语义与
+    /// [`Self::next`] 的 async 路径一致：Lagged 上报 Reset，Closed 静默终止。
+    pub fn try_next(&mut self) -> Option<V2StreamItem> {
+        if let Some(reset) = self.initial_reset.take() {
+            return Some(V2StreamItem::Reset(reset));
+        }
+        if let Some(event) = self.replay.pop_front() {
+            return Some(V2StreamItem::Event(Box::new(event)));
+        }
+        match self.live_rx.try_recv() {
+            Ok(event) => Some(V2StreamItem::Event(Box::new(event))),
+            Err(broadcast::error::TryRecvError::Empty) => None,
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                Some(V2StreamItem::Reset(RingingV2ResetRequired {
+                    schema: qaqh_ringing::RINGING_SCHEMA.into(),
+                    version: qaqh_ringing::RINGING_V2_VERSION,
+                    server_epoch: self.server_epoch.clone(),
+                    session_id: self.session_id.clone(),
+                    log_id: Some(self.log_id.as_str().to_string()),
+                    snapshot_cursor: None,
+                    reason: RingingV2ResetReason::ReplayOverflow,
+                }))
+            }
+            Err(broadcast::error::TryRecvError::Closed) => None,
+        }
+    }
+
     pub async fn next(&mut self) -> V2StreamItem {
         if let Some(reset) = self.initial_reset.take() {
             return V2StreamItem::Reset(reset);

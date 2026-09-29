@@ -39,6 +39,9 @@ pub(crate) fn get_session_id(headers: &HeaderMap) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// v1 HTTP 面的路径频道解析。v1 命令 handler 删除后仅剩单测消费；
+/// 阶段 3 清理 v1 面时一并退役。
+#[cfg(test)]
 pub(crate) fn parse_channel(s: &str) -> Option<RingingChannel> {
     match s {
         "control" => Some(RingingChannel::Control),
@@ -57,17 +60,6 @@ pub(crate) fn session_close_session(
     } else {
         envelope_session.clone().unwrap_or_default()
     }
-}
-
-pub(crate) fn publish_session_created(hub: &RingingHub, session_id: &str, command_id: &str) {
-    let _ = hub.publish_with_causation(
-        session_id,
-        qaqh_domain::DomainEvent::Control(qaqh_domain::ControlEvent::SessionStateChanged {
-            session_id: session_id.to_string(),
-            state: qaqh_domain::SessionState::Created,
-        }),
-        Some(command_id),
-    );
 }
 
 #[cfg(test)]

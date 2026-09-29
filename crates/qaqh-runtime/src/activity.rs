@@ -2,29 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use qaqh_domain::{ActivityState, ControlEvent, DomainEvent, SessionActivity};
-
-use crate::RingingHub;
-
-/// 活动发布：tracker 快照 → Ringing 会话活动变更领域事件。
-/// （原为「双发」：legacy 流 + domain 事件流；PR-3-2 起
-/// legacy 类型已删，状态单一源于 domain。）
-pub fn publish_activity(hub: Option<&RingingHub>, activity: &SessionActivity) {
-    let Some(hub) = hub else {
-        return;
-    };
-    let _ = hub.publish_with_causation(
-        &activity.session_id,
-        DomainEvent::Control(ControlEvent::SessionActivityChanged {
-            session_id: activity.session_id.clone(),
-            state: activity.state,
-            turn_id: activity.turn_id.clone(),
-            seq: activity.seq,
-            updated_at: activity.updated_at,
-        }),
-        None,
-    );
-}
+use qaqh_domain::{ActivityState, SessionActivity};
 
 /// 领域事件 → `SessionActivityTracker::observe` 的事件类型映射（生产接线）。
 ///
