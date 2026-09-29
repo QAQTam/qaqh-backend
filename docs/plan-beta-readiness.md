@@ -8,7 +8,7 @@
 
 ## 0. 文档勘误（先修，10 分钟）
 
-- [ ] `legacy-compat-cleanup-draft.md` G 节（TUI 并入后端仓）全部标 [x]，但仓库事实为未做：
+- [x] `legacy-compat-cleanup-draft.md` G 节（TUI 并入后端仓）全部标 [x]，但仓库事实为未做：
   `crates/qaqh-tui` 不存在、justfile 无 `build-tui`、根 Cargo.toml 无 ratatui patch。
   将 G 节各条改回 [ ] 或注明"计划已批准未执行"；I6 保持 [ ]。
 
@@ -33,16 +33,37 @@
 
 ## 2. Beta 窗口内可做（不阻塞上线，随 beta 补）
 
-- [ ] **W1. C3 信封加 `ts_ms`**：`RingingV2EventEnvelope` 加
-  `#[serde(default)] ts_ms: Option<u64>`，向后兼容；随首个 beta 点版本发布。
-- [ ] **W2. D4/D5 前端翻页**：消费后端已就绪的 `before_index` 游标 +
-  触顶懒加载 + 滚动锚点补偿；D8 页淘汰随同。
-- [ ] **W3. D10 压缩标记**：前端消费 `CompactFinished` 插入"此前已压缩"分隔。
-- [ ] **W4. I4 跨仓 path 依赖 → git 依赖**：若 beta 需要分发 TUI/WinUI 二进制则升级为门禁；
-  仅内测可不阻塞。
-- [ ] **W5. I1 WinUI v2 桥接**：WinUI bridge 仍停在 v1 合同（on_batch/EventBatch），
-  对 HEAD 编译不过。**仅当 WinUI 是 beta 交付面时升级为门禁**；beta 只发 webui + TUI 则不阻塞。
-- [ ] **W6. I5 session-forensics 死解析清理**（零风险随手清）。
+- [x] **W1. C3 信封加 `ts_ms`**（2026-09-29 完成）：`RingingV2EventEnvelope` 加
+  `#[serde(default, skip_serializing_if)] ts_ms: Option<u64>`；源头 = `ProjectionEvent.ts_ms`
+  （reliable/replaceable/ephemeral 构造器从源 fact 携带，合成 ephemeral 团队事件为 None），
+  信封侧 `u64::try_from` 转换。回归断言挂在 `hub_bootstraps_from_committed_canonical_facts`。
+- [x] **W2. D4/D5 前端翻页**（2026-09-29 完成）：webui 消费 `before_index` 排他游标
+  （快照回合的 `turn_index`）+ 触顶懒加载 + scrollHeight 锚点补偿；D8 页淘汰
+  （上限 400 回合，运行中回合不淘汰，尾部被淘汰后触底自动重拉最新页）随同。
+  单测 `webui/tests/transcript-pagination.test.ts`（6 条）。
+  ⚠️ 随此发现并修复后端缺口：归档深翻页此前**不回填 `turn_index`**（只有常驻
+  窗口分支回填）——跨过窗口边界翻页即断链；已在 timeline_api.rs 归档分支补齐
+  （与窗口分支同口径 0-based）。
+- [x] **W3. D10 压缩标记**（2026-09-29 完成，含 fact 产生侧补齐）：
+  - 后端（严格 v2）：**`CompactionApplied` fact 此前零产生点**（投影/回执折叠
+    全是死链）。新增 `ToolLedger::append_compaction_applied`（`replaces_through_fact_seq`
+    = 追加前 canonical head；空日志被校验拒绝）；engine_compact 手动压缩与
+    engine_turn 自动压缩两条成功路径在 `persist_compaction` 之后、
+    `CompactFinished` 域事件之前 durable append（失败降级记日志不拖垮 turn）。
+    session 侧 2 条 ledger 测试。
+  - 前端：conversation 流 `compaction_applied` → 「此前已压缩」分隔
+    （锚定事件时刻窗口最后一个回合后；锚点被淘汰则渲染在顶部；快照重载清除）。
+- [x] **W4/W5. WinUI 裁决**（2026-09-29 拍板）：WinUI **暂不包含 beta 交付面**
+  → W5 不升级门禁、W4 保持 backlog。daemon/后端继续按 v2 严格语义演进、
+  不做 v1 兼容层（本轮检查：`RingingEvent` 是 worker 事件泵活跃别名而非 v1
+  残留；`v2/mod.rs` 过期"兼容窗口"注释已修；command 信封 version=1 为活跃
+  合同，硬切属 P 阶段评估）。
+- [x] **W6. I5 session-forensics 死解析清理**（2026-09-29 完成）：删除
+  `compact-context.json` 整条解析链（docstring/`Session.compact`/info 四个死字段/
+  evidence 死分支/selftest 样例），改为 route 1 活口径——meta 的
+  `compact_covered_through_msg_id` + messages.jsonl 内 `[Compacted N turns]`
+  摘要消息识别（`compaction_summaries()`）；README 布局与局限节同步。
+  selftest 通过。`meta.compact_skip` 经核实仍是活字段（resume 路径在用），保留。
 
 ## 3. Beta 后 backlog（大重构三件套，独立排期，禁止混入 beta 窗口）
 
