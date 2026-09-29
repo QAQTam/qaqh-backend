@@ -671,8 +671,7 @@ impl RingingHub {
         for session_id in sessions {
             self.persist_timeline_sync(&session_id);
         }
-        // BUG-2026-09-12-08：journal 写队列一并排空（关闭/调试同步点共用）。
-        self.flush_journal_persistence();
+        // 阶段 3d：v1 journal 写队列已随广播面删除，只剩 timeline 持久化排空。
     }
 
     /// Ringing V1 bootstrap 的权威 transcript 快照。

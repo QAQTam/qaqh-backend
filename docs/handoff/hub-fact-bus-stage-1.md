@@ -1,9 +1,58 @@
-# Handoff — hub-fact-bus-refactor（阶段 1 + 2 完成；阶段 3 部分完成 + 扫尾）
+# Handoff — hub-fact-bus-refactor（阶段 1 + 2 完成；阶段 3 全部完成；测试重挂待做）
 
 > 任务来源：`docs/spec/hub-fact-bus-refactor.md`（领取自 `docs/legacy-compat-cleanup-draft.md` H1 条目）。
-> 状态：**阶段 1、2 完成；阶段 3：b/c'/c''/e 完成并维持，§4.0.5 副作用迁移完成（a/c 的回滚前置已解除，a/c 现可安全重做），d 待做**。
-> 全仓 `cargo check --workspace` 绿；runtime 309 / daemon 65 / subagent 15 测试全绿。
+> 状态：**阶段 1、2 完成；阶段 3：a/b/c'/c''/d/e 全部完成（2026-09-29 d 收尾）**。
+> 全仓 `cargo check --workspace` 绿；runtime 265 / daemon 65 / subagent 15 测试全绿。
 > 事实核查基线：2026-09-27 spec HEAD。
+
+## 阶段 3d：删 v1 事件总线（2026-09-29，本次完成）
+
+- **hub.rs 手术（3824 → ~1980 行）**：删 `publish`/`publish_with_causation`/
+  `subscribe`/`subscribe_channel`/`fanout`/`replay_since`/`replay_channel_since`/
+  `checkpoint`/`last_stream_seq` + `live`/`live_channels` 广播环 + **v1 事件
+  journal 全套持久化**（`JournalStore`/`JournalWriteOp`/写线程/`persist_*`/
+  `load_persisted`/`disk_sessions`/`ensure_session_loaded` 重放）。保留
+  `publish_timeline`/`subscribe_timeline`/`snapshot`/`live_watermark`/
+  timeline 持久化、content store、lease/pending store、三频道投影
+  （snapshot 读入口）。
+- **新收敛入口 `RingingHub::apply_seal_event(session_id, event)`**：orphan_seal
+  4 类补终态改走此入口——只做进程内投影收敛（槽登记 + 序号/水位推进 +
+  projection.apply），不产生信封、不广播、不落盘；重复调用幂等。
+  fact 补写仍为 §4.0.4 遗留债（v2 wire 今天同样看不到孤儿终态，无回归）。
+- **生产者清零**：actor.rs `WriterEvent::Ringing` 分支删 v1 publish
+  （stash/side-effects/activity observe 保留）；孤儿收尾路径改 apply_seal_event。
+- **删除死模块**：`ringing/{journal.rs, journal_store.rs, router.rs, outbox.rs}`
+  及 mod.rs 注册；`tests/{replay_equivalence, broadcast_fanout_bench,
+  hub_lock_contention_probe}.rs` 整文件退役。
+- **测试退役/改挂（§5.4 前的临时处置）**：hub.rs 退役 21 个锁 v1 广播/journal
+  语义的测试（`publish_*`/`replay_*`/journal 持久化/分片广播 storm 等）；
+  4 个锁分片测试（`forget_session_races_*`、`concurrent_publish_*`、
+  `per_session_channel_state_locks_*`、`other_channel_reads_*`）与
+  `forget_session_drops_per_session_resident_state` 改用 `apply_seal_event`
+  注入，断言不变；lease_store 的 ChannelReplay 过滤测试退役。
+- **集成测试观察面迁移**：session_inprocess / subagent_inprocess 的
+  「等 v1 Created 事件」改为轮询 activity 面（`registry.activity` →
+  `ActivityState::Idle`，AgentLifecycleChanged{Ready} 的查询权威对应物）；
+  子取消传播改为轮询 `subagent_lifecycle_trace()` 的
+  `child_cancel_sent:{parent}:{child}`；close_session 用例改 apply_seal_event
+  造常驻态。timeline_load_latency_probe 的 v1 journal 探针段（B 段）退役。
+- **已知残留**：`tests/host_direct.rs` 维持存量编译失败（CollectorBatch 失配 +
+  2 处 publish_with_causation，§5.4 一并处理）。
+
+### 验证证据（阶段 3d）
+
+- `cargo check --workspace` → exit 0（qaqh-runtime lib/tests 零警告；存量
+  qaqh-sandbox / qaqh-mcp 警告不变）。
+- `cargo test -p qaqh-runtime --lib` → **265 passed / 0 failed**。
+- `cargo test -p qaqh-daemon --bins` → **65 passed**；`-p qaqh-subagent --lib`
+  → **15 passed**。
+- runtime 集成抽查全绿：session_inprocess 6 / subagent_inprocess 13 /
+  ask_user_lifecycle 16 / permission_lifecycle 11 / plan_review_hook 4 /
+  interaction ×3 / tool_crash_recovery 3 / v2_acceptance_matrix 7 /
+  inprocess_loop 6 / input_accepted_producer 1 / tool_ordering_contract 6 /
+  tool_output_projection_equivalence 1 / session_lifecycle 9 /
+  timeline_load_latency_probe / timeline_checkpoint_cost / hanging_tool_use_reload。
+  `cancel_keeps_tool_results::cancel_mid_batch_*` 仍为存量环境失败（HEAD 复现）。
 
 ## 已完成（spec §2 对照）
 
@@ -123,17 +172,15 @@ publish 内隐式副作用已全部迁出到**事件产生侧**，publish 现在
 
 ## 遗留 / 下一步（按优先级）
 
-1. ~~把 publish 内隐式副作用迁出（spec §4.0.5）~~ **✅ 已完成**（见上节；
-   a/c 的回滚前置解除，可按原清单重做：actor.rs 删 `publish_with_causation`、
-   orphan_seal 补终态改 fact append）。
-2. 副作用迁出后：d（hub.rs 删 `publish/publish_with_causation/subscribe/
-   subscribe_channel/replay_*` + journal 事件持久化，**保留** timeline 族与
-   snapshot）、§5.4 把退役的 4+3 个测试重挂到 fact 面。
-3. 遗留债：orphan_seal 4 类补终态的 fact 补写（§4.0.4）；
+1. ~~把 publish 内隐式副作用迁出（spec §4.0.5）~~ **✅ 已完成**（见上节）。
+2. ~~阶段 3d：删 v1 事件总线~~ **✅ 已完成**（见「阶段 3d」节）。
+3. §5.4 把退役的测试重挂到 fact 面（hub.rs 21 个 + lease_store 1 个 +
+   host_direct.rs 修复）；§5.3 subagent 收集器 facts 订阅测试改写。
+4. 遗留债：orphan_seal 4 类补终态的 fact 补写（§4.0.4）；
    SessionActivityChanged 的 fact 产生侧（活动推送现为查询轮询）；
    typed `existing` replay 的 fact 侧重建（可选）。
-4. 手工冒烟（阶段 1/2 均未做）：webui 发命令 → ack → 事件到达。
-5. timeline 归属决策（spec §6 独立决策点）：`timeline_hub` 是否并入 fact 总线。
+5. 手工冒烟（阶段 1/2/3 均未做）：webui 发命令 → ack → 事件到达。
+6. timeline 归属决策（spec §6 独立决策点）：`timeline_hub` 是否并入 fact 总线。
 
 ## 风险
 

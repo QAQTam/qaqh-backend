@@ -499,8 +499,6 @@ fn unix_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_domain::{ToolEvent, ToolResult};
-    use qaqh_ringing::{RingingEvent, RingingEventEnvelope};
 
     #[test]
     fn pending_command_idempotency() {

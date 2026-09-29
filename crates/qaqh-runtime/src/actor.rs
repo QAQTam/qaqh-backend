@@ -65,11 +65,8 @@ fn publish_worker_event(
             // 产生侧执行（worker 桥），publish 只保留广播 + journal 语义——
             // 阶段 3d 删 publish 时不再需要迁移。
             crate::registry::apply_interaction_side_effects(hub, &env.session_id, &domain);
-            let _ = hub.publish_with_causation(
-                &env.session_id,
-                domain.clone(),
-                env.causation_id.as_deref(),
-            );
+            // 阶段 3d：v1 广播面已删除——worker 事件只保留副作用迁移后的
+            // 产生侧动作；事件本体由 canonical fact 面（timeline/journal）外化。
             if let Some(observe) = crate::activity::domain_activity_observe(&domain) {
                 // tracker 状态机保留（/activity 查询权威）；广播照旧随 publish。
                 let _ = activity.observe(session_id, generation, &observe);
