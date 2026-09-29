@@ -27,7 +27,7 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use qaqh_domain::{ControlCommand, RingingChannel};
 use qaqh_ringing::{
-    RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope, RingingCommandState,
+    RingingCommandAckStatus, RingingCommandState, RingingV2CommandAck, RingingV2CommandEnvelope,
     RingingV2ContentValue,
 };
 use qaqh_runtime::ringing::{PendingCommandStore, RingingLeaseStore, service_methods};
@@ -47,11 +47,10 @@ pub(crate) mod test_hooks;
 pub mod timeline_api;
 pub mod v2;
 
-pub(crate) use auth::{
-    get_session_id, is_authorized, lease_required_json, parse_channel, publish_session_created,
-    session_close_session, unauthorized,
-};
-pub(crate) use command::{command_fingerprint, handle_command};
+pub(crate) use auth::{get_session_id, is_authorized, lease_required_json, session_close_session, unauthorized};
+#[cfg(test)]
+pub(crate) use auth::parse_channel;
+pub(crate) use command::{command_fingerprint, execute_command};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
@@ -233,20 +232,7 @@ pub(crate) mod pure_tests {
         );
         assert_eq!(session_close_session("", &None), "");
     }
-    #[test]
-    fn session_create_event_carries_command_causation() {
-        let hub = RingingHub::new("epoch-1");
-        publish_session_created(&hub, "s-created", "cmd-create");
-        let replay = hub.replay_channel_since(RingingChannel::Control, 0, false);
-        assert_eq!(replay.events.len(), 1);
-        assert_eq!(replay.events[0].session_id, "s-created");
-        assert_eq!(replay.events[0].causation_id.as_deref(), Some("cmd-create"));
-        assert!(matches!(
-            &replay.events[0].event,
-            qaqh_ringing::RingingEvent::Control(qaqh_domain::ControlEvent::SessionStateChanged {
-                state: qaqh_domain::SessionState::Created,
-                ..
-            })
-        ));
-    }
+    // `session_create_event_carries_command_causation` 已随 v1 广播删除退役
+    // （hub-fact-bus spec 阶段 3b：A1 确认 wire 零消费方；fact 侧由
+    // ControlDelta::SessionCreated 承载）。
 }

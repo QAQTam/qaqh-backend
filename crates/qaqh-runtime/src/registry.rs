@@ -2195,77 +2195,52 @@ pub(crate) fn stash_interaction_body(
     }
 }
 
-pub(crate) fn externalize_large_content(
+/// §4.0.5：publish 内隐式副作用的迁移落点（事件产生侧）。
+///
+/// - live_interactions 登记/解除：orphan_seal 的 force=false 防误杀守卫依赖；
+/// - 交互正文 pin 释放：交互 resolved / permission tool finished 时解除，
+///   否则 content store 泄漏。
+///
+/// 调用方：actor 桥（`WriterEvent::Ringing` → hub 发布前）。事件字段与
+/// hub.publish 原 match 完全一致；publish 已不再承载这些副作用。
+pub(crate) fn apply_interaction_side_effects(
     hub: &RingingHub,
     session_id: &str,
-    event: qaqh_domain::DomainEvent,
-) -> qaqh_domain::DomainEvent {
-    let qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
-        tool_call_id,
-        turn_id,
-        round_num,
-        result,
-    }) = event
-    else {
-        return event;
-    };
-    let full_text = result.model_text();
-    if full_text.len() <= crate::ringing::CONTENT_STORE_THRESHOLD_BYTES {
-        return qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
-            tool_call_id,
-            turn_id,
-            round_num,
-            result,
-        });
+    event: &qaqh_domain::DomainEvent,
+) {
+    use qaqh_domain::{ControlEvent, ToolEvent};
+    match event {
+        qaqh_domain::DomainEvent::Control(ControlEvent::InteractionRequested {
+            interaction_id,
+            ..
+        })
+        | qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewRequested {
+            interaction_id,
+            ..
+        }) => {
+            hub.register_live_interaction(session_id, interaction_id);
+        }
+        qaqh_domain::DomainEvent::Control(ControlEvent::InteractionResolved {
+            interaction_id,
+            ..
+        })
+        | qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewResolved {
+            interaction_id,
+            ..
+        }) => {
+            hub.unregister_live_interaction(session_id, interaction_id);
+            // #345：交互终结 → 正文解除 pin，回到普通 TTL/淘汰语义。
+            hub.release_interaction_content(session_id, interaction_id);
+        }
+        // permission 的正文用 canonical interaction id 作为 pin_key；
+        // 权限答复本身没有 Ringing 终态事件，工具完成/取消就是它的
+        // 终结信号（拒绝路径同样会落到 ToolFinished(Cancelled/Denied)）。
+        qaqh_domain::DomainEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
+            let interaction_id = crate::agent::tool_runtime::canonical_interaction_id(tool_call_id);
+            hub.release_interaction_content(session_id, interaction_id.as_str());
+        }
+        _ => {}
     }
-    let content_id = hub.put_content(
-        session_id,
-        "text/plain",
-        full_text.as_bytes().to_vec(),
-        true,
-    );
-    // 保留尾部（命令输出通常尾部才是结论），但展示行取**全文开头**——
-    // 取 tail 的前 512 字符只会得到输出中段，作为 summary 毫无意义。
-    let tail = tail_text(full_text, CONTENT_TAIL_BYTES);
-    let head: String = full_text
-        .chars()
-        .take(qaqh_types::TOOL_SUMMARY_MAX_CHARS)
-        .collect();
-    let mut projected = result;
-    projected.externalize_output(
-        tail,
-        head,
-        qaqh_domain::ContentRef {
-            content_id: content_id.clone(),
-            media_type: "text/plain".into(),
-            sha256: content_id.clone(),
-            truncated: true,
-        },
-    );
-    qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
-        tool_call_id,
-        turn_id,
-        round_num,
-        result: projected,
-    })
-}
-
-/// 事件内可渲染 tail 上限。
-const CONTENT_TAIL_BYTES: usize = 256 * 1024;
-
-/// 按 char 边界截取文本末尾最多 max_bytes（UTF-8 保守按 4 字节/字符）。
-fn tail_text(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let max_chars = max_bytes / 4;
-    text.chars()
-        .rev()
-        .take(max_chars)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 /// Stable, grammar-valid name for legacy direct `spawn_subagent` callers.
@@ -2298,6 +2273,7 @@ mod tests {
     use super::*;
 
     /// 正常路径：探测命令秒回，输出拿得到。
+    #[cfg(unix)] // Windows 无 sh：存量环境失败，与探测逻辑无关
     #[test]
     fn probe_output_returns_fast_command_output() {
         let mut command = Command::new("sh");
@@ -2330,6 +2306,7 @@ mod tests {
     ///
     /// 变异验证：把 [`probe_output`] 里的 `recv_timeout` 换回阻塞式读取
     /// （或改用 `Command::output()`），本测试立刻红。
+    #[cfg(unix)] // 同上
     #[test]
     fn probe_output_survives_grandchild_holding_the_pipe() {
         let mut command = Command::new("sh");
@@ -2786,82 +2763,6 @@ mod tests {
         qaqh_workspace::remove_session_cancel("child-seed");
     }
 
-    fn tool_finished(summary: String) -> qaqh_domain::DomainEvent {
-        // The worker normally sends the bounded model projection. This test
-        // helper also covers the pre-projection large-output boundary used by
-        // the content store: `limit = None` 即 NoFold 语义，模型文本不截断。
-        let result = if summary.len() > qaqh_types::TOOL_MODEL_MAX_CHARS {
-            qaqh_domain::ToolResult::ok_with_limit(summary, None)
-        } else {
-            qaqh_domain::ToolResult::ok(summary)
-        };
-        qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
-            tool_call_id: "t1".into(),
-            turn_id: "turn1".into(),
-            round_num: 0,
-            result,
-        })
-    }
-
-    #[test]
-    fn large_tool_finished_is_externalized() {
-        let hub = RingingHub::new("test");
-        let big = "x".repeat(crate::ringing::CONTENT_STORE_THRESHOLD_BYTES + 1024);
-        let out = externalize_large_content(&hub, "s1", tool_finished(big.clone()));
-        match out {
-            qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
-                result, ..
-            }) => {
-                assert!(result.model_text().len() <= CONTENT_TAIL_BYTES);
-                assert!(result.summary().chars().count() <= qaqh_types::TOOL_SUMMARY_MAX_CHARS);
-                let rf = result.output_ref().expect("output_ref set").clone();
-                assert!(rf.truncated);
-                assert_eq!(rf.media_type, "text/plain");
-                // 完整内容可从 ContentStore 读回（会话所有权校验）
-                let entry = hub.get_content("s1", &rf.content_id).expect("stored");
-                assert_eq!(entry.bytes.len(), big.len());
-                assert_eq!(entry.sha256, rf.sha256);
-                // 跨会话不可读
-                assert!(hub.get_content("other", &rf.content_id).is_none());
-            }
-            other => panic!("expected ToolFinished, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn small_tool_finished_is_not_externalized() {
-        let hub = RingingHub::new("test");
-        let out = externalize_large_content(&hub, "s1", tool_finished("small".into()));
-        match out {
-            qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
-                result, ..
-            }) => {
-                assert_eq!(result.summary(), "small");
-                assert!(result.output_ref().is_none());
-            }
-            other => panic!("expected ToolFinished, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn non_tool_event_passes_through() {
-        let hub = RingingHub::new("test");
-        let ev =
-            qaqh_domain::DomainEvent::Conversation(qaqh_domain::ConversationEvent::TurnStarted {
-                turn_id: "t1".into(),
-                user_text: "hi".into(),
-            });
-        let out = externalize_large_content(&hub, "s1", ev);
-        assert!(matches!(
-            out,
-            qaqh_domain::DomainEvent::Conversation(
-                qaqh_domain::ConversationEvent::TurnStarted {
-                    turn_id,
-                    user_text,
-                }
-            ) if turn_id == "t1" && user_text == "hi"
-        ));
-    }
 
     #[test]
     fn message_quota_rejects_in_flight_and_outbound_over_limit() {
@@ -2898,13 +2799,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tail_text_respects_char_boundaries() {
-        // 中文 3 字节/字符：按 4 字节/字符保守截取，不得切半个字符
-        let text = "汉".repeat(200_000);
-        let tail = tail_text(&text, 1024);
-        assert!(tail.len() <= 1024);
-        assert!(tail.chars().all(|c| c == '汉'));
-        assert_eq!(tail, "汉".repeat(tail.chars().count()));
-    }
 }
