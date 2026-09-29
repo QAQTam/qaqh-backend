@@ -4,7 +4,50 @@
 > 逐条执行记录随其留档于 git 历史，本文件只保留仍然有效的事实与挂点）。
 > 任务来源：`docs/spec/hub-fact-bus-refactor.md`（领取自 `docs/archive/legacy-compat-cleanup-draft.md` H1 条目）
 > + `docs/plan-beta-readiness.md`（排期权威）。
-> 当前状态：**beta 门禁 G1-G5 全部完成**；hub-fact-bus 主体收尾完成，遗留项已挂 P4。
+> 当前状态：**beta 门禁 G1-G5 全部完成**；W1-W6 全部完成（见「二·五」节）；
+> hub-fact-bus 主体收尾完成，遗留项已挂 P4。
+
+## 二·五、第二批（2026-09-29 深夜）：W 类全清 + BUG-01 回归锁
+
+裁决：WinUI **暂不包含 beta 交付面**（W5 不升级门禁、W4 留 backlog）；
+daemon/后端一律按 v2 严格语义演进、不做 v1 兼容层。
+
+- **BUG-01 回归测试**（`crates/qaqh-daemon/src/axum_server.rs`
+  `session_create_over_commands_channel_attaches_created_seed_to_the_lease`）：
+  真实路径锁（session.new 落盘 + in-process worker spawn，同 smoke-g1 流程），
+  断言 ack accepted + `owned_sessions(lease)` 恰含新建 seed，结束 close+delete
+  清理。旧代码下该测试必红（attach 恒 false → 401）。
+- **W1（C3）**：`ProjectionEvent` 加 `ts_ms: Option<i64>`（源 fact 提交时间，
+  合成 ephemeral 为 None）→ 信封 `ts_ms: Option<u64>`（serde default，向后兼容）。
+  回归断言挂 `hub_bootstraps_from_committed_canonical_facts`。
+- **W2（D4/D5/D8）**：webui 消费 `before_index`（回合 `turn_index` 全局序号）
+  触顶懒加载 + scrollHeight 锚点补偿；页淘汰上限 400 回合（运行中回合不淘汰，
+  尾部被淘汰后触底自动重拉最新页）；单测 `webui/tests/transcript-pagination.test.ts`。
+  ⚠️ 随此发现并修复后端缺口：**归档深翻页此前不回填 `turn_index`**（只有常驻
+  窗口分支回填），跨窗口边界翻页即断链；`timeline_api.rs` 归档分支已补齐。
+- **W3（D10，严格 v2）**：调查结论——**`CompactionApplied` fact 零产生点**
+  （conversation/meta/timeline 三个投影与 pending_store 回执折叠全是死链；
+  handoff P4 的"fact 产生侧缺口"判断在压缩面同样成立）。本轮补齐：
+  - 后端：`ToolLedger::append_compaction_applied`（`replaces_through_fact_seq` =
+    追加前 canonical head，空日志校验拒绝）；engine_compact（手动）与
+    engine_turn（自动）两条成功路径在 `persist_compaction` 后、
+    `CompactFinished` 域事件前 durable append；失败降级记日志不拖垮 turn。
+    `summary_ref` = 摘要文本 sha256（与 args_ref/request_ref 同口径，正文
+    本就在 messages.jsonl）。session 侧 2 条 ledger 测试。
+  - 前端：conversation 流 `compaction_applied` → 「此前已压缩」分隔
+    （锚定事件时刻最后回合后；锚点淘汰后渲染顶部；快照重载清除）。
+- **W6**：session-forensics 删除 `compact-context.json` 死解析链
+  （`Session.compact`/info 四死字段/evidence 死分支/selftest 样例），换 route 1
+  活口径（meta `compact_covered_through_msg_id` + messages.jsonl 内
+  `[Compacted N turns]` 摘要识别）；README 同步。`meta.compact_skip` 核实为
+  活字段（resume 路径在用），保留。
+- **v1 兼容残留检查**：`RingingEvent` 为 worker 事件泵活跃别名（非残留）；
+  `v2/mod.rs` 过期"兼容窗口"注释已修；command 信封 version=1 是活跃合同，
+  硬切留 P 阶段评估。
+- **回归基线（全绿）**：runtime --lib 265 / session 全套（含新 2 条）/
+  daemon --bins 66（+1）/ gateway --lib 21 / v2 验收矩阵 9 / host_direct 6 /
+  cancel 4 / webui tsc 0 错 + bun test 11（+6）。workspace 全量与 daemon 集成
+  测试仍按磁盘预算暂缓，随 beta 前最后一次构建补跑（G5 口径不变）。
 
 ## 一、本轮（2026-09-29 晚）完成的改动
 
@@ -76,12 +119,8 @@
 
 ## 三、遗留 / 下一步（按 plan-beta-readiness 挂点）
 
-- **W1**：`RingingV2EventEnvelope` 加 `#[serde(default)] ts_ms: Option<u64>`（C3）。
-- **W2/W3**：前端消费 `before_index` 游标翻页 + 滚动锚点（D4/D5/D8）；
-  `CompactFinished` 压缩分隔标记（D10）。
-- **W4/W5/W6**：跨仓 path 依赖、WinUI v2 桥（**决策项**：beta 交付面是否含 WinUI
-  二进制——是则升级为门禁，WinUI bridge 目前停 v1 合同对 HEAD 编译不过）、
-  session-forensics 死解析清理。
+- **W1-W6：已全部完成**（第二批记录见「二·五」；plan 已勾）。W4/W5 裁决 =
+  WinUI 暂不交付，不升级门禁。
 - **P4（hub-fact-bus 遗留债，from 旧 handoff，仍然有效）**：
   - §5.4：hub.rs 21 个退役锁 v1 语义测试的重挂 + lease_store 1 个（需按 fact 面
     重新表述，不阻塞 beta）；
@@ -90,9 +129,11 @@
   - SessionActivityChanged 的 fact 产生侧（活动推送现为查询轮询）；
   - typed `existing` replay 的 fact 侧重建（可选）；
   - §6：timeline 归属决策（`timeline_hub` 是否并入 fact 总线，与 P2 协同裁决）。
-- **BUG-2026-09-29-01 回归测试**：execute_command SessionCreate 路径目前仅冒烟
-  验证，daemon --bins 缺一条不变量测试锁（open → create → accepted + lease owns
-  seed），下批补。
+  - （本轮新证据：压缩面 fact 产生侧缺口已由 W3 补齐，同类缺口的
+    TurnStarted/TurnFinished/AssistantBlock fact 产生侧仍缺——v2 events 流上
+    `turn_finished`/`assistant_block_sealed` 等 kind 目前实际不可达，与 P2/P4
+    协同裁决是否补齐。）
+- **BUG-2026-09-29-01 回归测试：已完成**（第二批，daemon --bins）。
 
 ## 四、已知存量问题（HEAD 基线，非本轮引入）
 
@@ -112,5 +153,25 @@
 - `crates/qaqh-runtime/tests/cancel_keeps_tool_results.rs` — skip 守卫
 - `scripts/smoke-g1.ps1` — 新增端到端冒烟
 - `docs/plan-beta-readiness.md` — 排期权威（G1-G5 已勾）
+
+第二批（W 类 + BUG-01 锁）新增改动：
+
+- `crates/qaqh-session/src/session_fact_v2/projection_event.rs` — ProjectionEvent.ts_ms
+- `crates/qaqh-ringing/src/v2/types.rs` — 信封 ts_ms（C3）
+- `crates/qaqh-ringing/src/v2/mod.rs` — 过期兼容窗口注释修正
+- `crates/qaqh-runtime/src/ringing/v2.rs` — 信封透传 ts_ms + 回归断言
+- `crates/qaqh-session/src/canonical/tool_ledger.rs` — append_compaction_applied
+- `crates/qaqh-runtime/src/agent/plugins/engine_compact.rs` — 压缩 fact 产生侧（共享 helper）
+- `crates/qaqh-runtime/src/agent/engine_turn.rs` — 自动压缩成功路径接线
+- `crates/qaqh-session/tests/tool_ledger.rs` — 压缩 fact 2 条测试
+- `crates/qaqh-runtime/tests/v2_acceptance_matrix.rs` — 信封字面量补 ts_ms
+- `crates/qaqh-daemon/src/axum_server.rs` — BUG-01 回归锁
+- `crates/qaqh-daemon/src/axum_server/axum_impl/timeline_api.rs` — 归档页 turn_index 补回填
+- `webui/src/lib/transcript.ts` — oldestIndex/tailTruncated/compactMarker + 前插/淘汰
+- `webui/src/state.ts` — loadOlderTurns/reloadLatestTurns + compaction_applied 分派
+- `webui/src/App.tsx` — 触顶加载 + 锚点补偿 + 压缩分隔渲染
+- `webui/src/styles.css` — .compact-divider
+- `webui/tests/transcript-pagination.test.ts` — 翻页/淘汰/分隔 6 条单测
+- `tools/session-forensics/session_forensics.py` + `README.md` — 死解析清理（W6）
 - `docs/archive/legacy-compat-cleanup-draft.md` — 已归档（G 节勘误后留档）
 - 本文件 — 取代 hub-fact-bus-stage-1.md
