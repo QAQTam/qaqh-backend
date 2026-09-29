@@ -68,10 +68,32 @@ export type TranscriptState = {
   watermark: number;
   hasMore: boolean;
   totalTurns: number;
+  /** Oldest loaded turn's global ordinal — the `before_index` cursor for D4 pagination. */
+  oldestIndex: number | null;
+  /** D8：深翻页时尾部被淘汰过 → 回到底部需要重新拉最新页。 */
+  tailTruncated: boolean;
+  /** D10：最近一次压缩的「此前已压缩」分隔（锚定在其发生时的最后一个回合后）。 */
+  compactMarker: CompactMarker | null;
+};
+
+export type CompactMarker = {
+  checkpointId: string;
+  contextRevision: number;
+  /** 分隔线渲染在该回合之后；锚点回合被淘汰/不在窗口时置 null（渲染在顶部）。 */
+  afterTurnId: string | null;
 };
 
 export function emptyTranscript(): TranscriptState {
-  return { turns: {}, order: [], watermark: 0, hasMore: false, totalTurns: 0 };
+  return {
+    turns: {},
+    order: [],
+    watermark: 0,
+    hasMore: false,
+    totalTurns: 0,
+    oldestIndex: null,
+    tailTruncated: false,
+    compactMarker: null,
+  };
 }
 
 function ensureTurn(draft: TranscriptState, turnId: string): Turn {
@@ -117,43 +139,114 @@ function reasoningTailText(value: string): string {
   return value.slice(start);
 }
 
-/** Build the tree from a fully materialized timeline page. */
-export function loadSnapshot(draft: TranscriptState, page: {
+/** Build one turn tree node from a raw timeline-snapshot record. */
+function buildTurn(raw: Record<string, unknown>): Turn {
+  const turnId = String(raw.turn_id);
+  const turn: Turn = {
+    id: turnId,
+    userText: String(raw.user_text ?? ""),
+    state: (raw.state as TurnState) ?? "completed",
+    failure: (raw.failure as Turn["failure"]) ?? null,
+    rounds: [],
+  };
+  for (const rawRound of (raw.rounds as Array<Record<string, unknown>>) ?? []) {
+    const round: Round = { num: Number(rawRound.round_num ?? 0), blocks: [] };
+    for (const rawBlock of (rawRound.blocks as Array<Record<string, unknown>>) ?? []) {
+      round.blocks.push({
+        id: String(rawBlock.block_id),
+        kind: rawBlock.kind as BlockKind,
+        state: (rawBlock.state as Block["state"]) ?? "sealed",
+        seedText: rawBlock.kind === "reasoning" ? "" : String(rawBlock.text ?? ""),
+        text: rawBlock.kind === "reasoning" ? reasoningTailText(String(rawBlock.text ?? "")) : undefined,
+        tool: rawBlock.tool ? normalizeTool(rawBlock.tool) : null,
+      });
+    }
+    turn.rounds.push(round);
+  }
+  return turn;
+}
+
+type TimelinePage = {
   snapshot?: { watermark?: number; turns?: Array<Record<string, unknown>> };
   has_more?: boolean;
   total_turns?: number;
-}): void {
+};
+
+/** Build the tree from a fully materialized timeline page. */
+export function loadSnapshot(draft: TranscriptState, page: TimelinePage): void {
   draft.turns = {};
   draft.order = [];
   for (const raw of page.snapshot?.turns ?? []) {
-    const turnId = String(raw.turn_id);
-    const turn: Turn = {
-      id: turnId,
-      userText: String(raw.user_text ?? ""),
-      state: (raw.state as TurnState) ?? "completed",
-      failure: (raw.failure as Turn["failure"]) ?? null,
-      rounds: [],
-    };
-    for (const rawRound of (raw.rounds as Array<Record<string, unknown>>) ?? []) {
-      const round: Round = { num: Number(rawRound.round_num ?? 0), blocks: [] };
-      for (const rawBlock of (rawRound.blocks as Array<Record<string, unknown>>) ?? []) {
-        round.blocks.push({
-          id: String(rawBlock.block_id),
-          kind: rawBlock.kind as BlockKind,
-          state: (rawBlock.state as Block["state"]) ?? "sealed",
-          seedText: rawBlock.kind === "reasoning" ? "" : String(rawBlock.text ?? ""),
-          text: rawBlock.kind === "reasoning" ? reasoningTailText(String(rawBlock.text ?? "")) : undefined,
-          tool: rawBlock.tool ? normalizeTool(rawBlock.tool) : null,
-        });
-      }
-      turn.rounds.push(round);
-    }
-    draft.turns[turnId] = turn;
-    draft.order.push(turnId);
+    const turn = buildTurn(raw);
+    draft.turns[turn.id] = turn;
+    draft.order.push(turn.id);
   }
   draft.watermark = page.snapshot?.watermark ?? 0;
   draft.hasMore = page.has_more === true;
   draft.totalTurns = page.total_turns ?? 0;
+  // D4：快照页每个回合带全局序号 `turn_index`，最旧一条即下一次翻页的
+  // `before_index` 游标（排他）。后端缺该字段时置 null（禁用翻页）。
+  const firstTurn = page.snapshot?.turns?.[0];
+  draft.oldestIndex = typeof firstTurn?.turn_index === "number" ? firstTurn.turn_index : null;
+  draft.tailTruncated = false;
+  draft.compactMarker = null;
+}
+
+/**
+ * D4/D8：把一页更旧的回合接到窗口顶部（`before_index` 翻页）。
+ *
+ * 页淘汰（D8）：窗口上限 `maxLoadedTurns` 由调用方传入；超出即从尾部淘汰
+ * 并置 `tailTruncated`，运行中的回合永不淘汰。淘汰后用户滚回底部需重新
+ * 拉最新页（调用方据此分支）。
+ */
+export function prependHistoryPage(
+  draft: TranscriptState,
+  page: TimelinePage,
+  maxLoadedTurns: number,
+): void {
+  const incoming = page.snapshot?.turns ?? [];
+  const newIds: string[] = [];
+  for (const raw of incoming) {
+    const turn = buildTurn(raw);
+    if (draft.turns[turn.id]) continue;
+    draft.turns[turn.id] = turn;
+    newIds.push(turn.id);
+  }
+  // 旧页本身最旧→最新排列；整体前插保持全局顺序。
+  draft.order.unshift(...newIds);
+  draft.hasMore = page.has_more === true;
+  draft.totalTurns = page.total_turns ?? draft.totalTurns;
+  const firstTurn = incoming[0];
+  if (typeof firstTurn?.turn_index === "number") {
+    draft.oldestIndex = firstTurn.turn_index;
+  } else {
+    draft.hasMore = false;
+  }
+  while (draft.order.length > maxLoadedTurns) {
+    const evicted = draft.order[draft.order.length - 1]!;
+    if (draft.turns[evicted]?.state === "running") break;
+    draft.order.pop();
+    delete draft.turns[evicted];
+    draft.tailTruncated = true;
+  }
+  // 压缩分隔锚点被淘汰 → 顶部渲染（"以上全部已压缩"仍然为真）。
+  if (
+    draft.compactMarker &&
+    draft.compactMarker.afterTurnId !== null &&
+    !draft.turns[draft.compactMarker.afterTurnId]
+  ) {
+    draft.compactMarker = { ...draft.compactMarker, afterTurnId: null };
+  }
+}
+
+/** D10：压缩成功终态（conversation 流 `compaction_applied`）→ 记录分隔锚点。 */
+export function applyCompactMarker(
+  draft: TranscriptState,
+  checkpointId: string,
+  contextRevision: number,
+): void {
+  const anchor = draft.order.length > 0 ? draft.order[draft.order.length - 1]! : null;
+  draft.compactMarker = { checkpointId, contextRevision, afterTurnId: anchor };
 }
 
 /** Apply one live timeline entry (structure only; text routing is external). */

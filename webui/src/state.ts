@@ -6,11 +6,13 @@ import { createSignal } from "solid-js";
 import { createStore } from "solid-js";
 import { ringing, type GatewaySession } from "./lib/ringing";
 import {
+  applyCompactMarker,
   applyEntry,
   emptyTranscript,
   findBlockById,
   findOpenReasoningId,
   loadSnapshot,
+  prependHistoryPage,
   setSeedText,
   type TranscriptState,
 } from "./lib/transcript";
@@ -273,6 +275,12 @@ function applyProjection(streamKey: unknown, payload: unknown): void {
         const usage = data.usage as Record<string, any> | null | undefined;
         if (usage) setContext({ used: usage.prompt_tokens ?? 0, limit: context().limit });
       }
+      if (kind === "compaction_applied") {
+        // D10：压缩成功终态 → 在当前窗口末尾插入「此前已压缩」分隔锚点。
+        setTranscript((draft) =>
+          applyCompactMarker(draft, String(data.checkpoint_id ?? ""), Number(data.context_revision ?? 0)),
+        );
+      }
       if (kind === "turn_finished" || kind === "turn_interrupted") {
         scheduleApprovalsRefresh();
       }
@@ -441,6 +449,55 @@ export async function refreshSessions(): Promise<void> {
     setSessions(Array.isArray(list) ? list : []);
   } catch (e) {
     setBootError(String(e instanceof Error ? e.message : e));
+  }
+}
+
+// ── D4/D5/D8 timeline 翻页 ──────────────────────────────────────────────────
+const PAGE_LIMIT = 50;
+/** D8 页淘汰上限：窗口超过即从尾部淘汰，滚回底部重新拉最新页。 */
+const MAX_LOADED_TURNS = 400;
+export const [historyLoading, setHistoryLoading] = createSignal(false);
+
+/**
+ * D4/D5：触顶懒加载。以窗口最旧回合的全局序号（`turn_index`）作
+ * `before_index` 排他游标向 daemon 取更旧一页；store 侧负责前插与
+ * 页淘汰（D8）。返回是否真的加载了内容（调用方据此做滚动锚点补偿）。
+ */
+export async function loadOlderTurns(): Promise<boolean> {
+  const current = seed();
+  if (!current || historyLoading()) return false;
+  if (!transcript.hasMore || transcript.oldestIndex == null) return false;
+  setHistoryLoading(true);
+  try {
+    const page = (await ringing.timelinePage(
+      current,
+      `?limit=${PAGE_LIMIT}&before_index=${transcript.oldestIndex}`,
+    )) as any;
+    // 翻页在途切了会话：旧页属于旧 log，直接丢弃。
+    if (seed() !== current) return false;
+    setTranscript((draft) => prependHistoryPage(draft, page, MAX_LOADED_TURNS));
+    return true;
+  } catch {
+    // 翻页失败静默：hasMore 仍在，下次触顶重试。
+    return false;
+  } finally {
+    setHistoryLoading(false);
+  }
+}
+
+/** D8：尾部被淘汰后滚回底部 → 重拉最新页替换整个窗口。 */
+export async function reloadLatestTurns(): Promise<void> {
+  const current = seed();
+  if (!current || historyLoading()) return;
+  setHistoryLoading(true);
+  try {
+    const page = (await ringing.timelinePage(current, `?limit=${PAGE_LIMIT}`)) as any;
+    if (seed() !== current) return;
+    setTranscript((draft) => loadSnapshot(draft, page));
+  } catch {
+    // 下次触底再试。
+  } finally {
+    setHistoryLoading(false);
   }
 }
 
