@@ -667,6 +667,7 @@ fn ephemeral_team_envelope(
         source_fact_seq: last_fact_seq.max(1),
         source_event_id: qaqh_session::session_fact_v2::EventId::new(generate_ulid()),
         causation_id: None,
+        ts_ms: None,
         stream_key: StreamKey::Channel(qaqh_domain::RingingChannel::Control),
         delivery: Delivery::Ephemeral,
         projection_slot: None,
@@ -733,6 +734,7 @@ fn event_to_envelope(
             .as_ref()
             .map(|causation| causation.as_str().to_string()),
         correlation_id: None,
+        ts_ms: event.ts_ms.and_then(|value| u64::try_from(value).ok()),
         payload: event.payload.clone(),
     })
 }
@@ -1054,6 +1056,8 @@ mod tests {
         .expect("replay");
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].fact_seq, Some(changed.fact_seq));
+        // C3：信封携带源 fact 的提交时间（epoch ms）。
+        assert_eq!(replay[0].ts_ms, Some(u64::try_from(changed.ts_ms).expect("ts_ms")));
     }
 
     #[tokio::test]

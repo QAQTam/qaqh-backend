@@ -129,6 +129,10 @@ pub struct RingingV2EventEnvelope<P> {
     pub causation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// Wall-clock commit time of the source fact, epoch milliseconds (C3).
+    /// Synthetic ephemeral events without a source fact omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_ms: Option<u64>,
     pub payload: P,
 }
 
@@ -615,6 +619,7 @@ mod tests {
             revision: Some(7),
             causation_id: Some("cmd-1".into()),
             correlation_id: None,
+            ts_ms: Some(1_789_830_000_000),
             payload: serde_json::json!({ "kind": "control_delta" }),
         }
     }
