@@ -2505,4 +2505,67 @@ mod command_entry_tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(ack.code.as_deref(), Some("duplicate_command_mismatch"));
     }
+
+    /// BUG-2026-09-29-01 回归锁（真实端到端路径：session.new 落盘 + worker
+    /// spawn，同 scripts/smoke-g1.ps1 流程）。
+    ///
+    /// 不变量：SessionCreate 经 commands 通道必须「ack accepted + 新 seed 归属
+    /// 发起命令的 lease」。回归前 `if let Some(session_id)` 遮蔽外层 lease 变量，
+    /// `attach_session(&seed, &seed)` 恒 false——命令表面 200，会话实际处于
+    /// 「无归属」孤儿态（后续所有该 seed 的命令 401）。
+    #[tokio::test]
+    async fn session_create_over_commands_channel_attaches_created_seed_to_the_lease() {
+        let state = entry_state();
+        let envelope = RingingV2CommandEnvelope::new(
+            "cmd-session-create-attach",
+            "ci-entry",
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate {
+                close_current: false,
+                cwd: None,
+                tool_mode: None,
+                custom_tools: Vec::new(),
+            }),
+        )
+        .with_client_session_id(CALLER);
+        let (status, ack) = execute_command(&state, &caller_headers(), envelope).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
+
+        // 归属不变量：本 lease 名下恰好出现（且仅出现）新建的那个 seed。
+        let owned = state
+            .leases
+            .lock()
+            .unwrap()
+            .owned_sessions(CALLER);
+        assert_eq!(
+            owned.len(),
+            1,
+            "created session must be attached to the commanding lease, owned={owned:?}"
+        );
+        let created_seed = owned.into_iter().next().expect("owned set non-empty");
+        assert!(
+            state
+                .leases
+                .lock()
+                .unwrap()
+                .owns_session(CALLER, &created_seed),
+            "lease must own the created seed after ack"
+        );
+
+        // 清理：close（join in-process worker）+ delete（删会话目录），
+        // 与 command.rs SessionDelete op 同语义。
+        let service = state.service.clone();
+        let seed = created_seed.clone();
+        let cleanup = tokio::task::spawn_blocking(move || {
+            let _ = service.close_session(&seed, None);
+            service.delete_session(&seed, None)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("cleanup join error: {e}")));
+        if let Err(error) = cleanup {
+            panic!(
+                "cleanup failed for {created_seed} (leaked session dir): {error}"
+            );
+        }
+    }
 }
