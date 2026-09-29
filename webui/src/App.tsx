@@ -11,7 +11,8 @@ import type { ToolInfo, Turn } from "./lib/transcript";
 import { createStreamingMarkdown } from "./lib/streaming-md";
 import {
   activeReasoningId, activity, attach, boot, bootError, cancelTurn, context,
-  dismissAsk, lease, model, pendingInteraction, pendingPermission, ready, reasoningTail, renderers,
+  dismissAsk, historyLoading, lease, loadOlderTurns, model, pendingInteraction,
+  pendingPermission, ready, reasoningTail, reloadLatestTurns, renderers,
   respondAsk, respondPlan, respondPermission, seed, sendMessage, sessions,
   streams, transcript,
 } from "./state";
@@ -226,6 +227,12 @@ const TurnView: Component<{ turn: Turn }> = (props) => (
   </section>
 );
 
+const CompactDivider: Component = () => (
+  <div class="compact-divider" role="separator" title="更早的上下文已压缩为摘要">
+    <span>此前已压缩</span>
+  </div>
+);
+
 const Transcript: Component = () => {
   let scroller: HTMLDivElement | undefined;
   const [pinned, setPinned] = createSignal(true);
@@ -238,10 +245,35 @@ const Transcript: Component = () => {
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
     setPinned(nearBottom);
     if (nearBottom) setUnseen(false);
+    // D8：尾部被淘汰过 → 接近底部时自动重拉最新页（落在真实窗口上）。
+    if (nearBottom && transcript.tailTruncated && !historyLoading()) {
+      void reloadLatestTurns();
+      return;
+    }
+    // D4/D5：触顶懒加载。
+    if (scroller.scrollTop < 240 && transcript.hasMore && !historyLoading()) {
+      void loadOlder(scroller);
+    }
+  };
+
+  // D5 滚动锚点补偿：前插旧页会让 scrollHeight 变大，把视口按增量下移，
+  // 用户正在看的回合保持在屏幕原位。
+  let anchorTop = 0;
+  let anchorHeight = 0;
+  const loadOlder = async (el: HTMLDivElement): Promise<void> => {
+    anchorTop = el.scrollTop;
+    anchorHeight = el.scrollHeight;
+    const loaded = await loadOlderTurns();
+    if (!loaded) return;
+    requestAnimationFrame(() => {
+      if (!scroller) return;
+      scroller.scrollTop = anchorTop + (scroller.scrollHeight - anchorHeight);
+    });
   };
 
   onSettled(() => {
     const observer = new MutationObserver(() => {
+      if (historyLoading()) return; // 前插/重拉期间不做跟随与未读标记
       if (pinned() && scroller) {
         scroller.scrollTop = scroller.scrollHeight;
       } else if (!pinned()) {
@@ -255,16 +287,35 @@ const Transcript: Component = () => {
   const jump = () => {
     setPinned(true);
     setUnseen(false);
+    if (transcript.tailTruncated) {
+      // D8：底部已被淘汰 → 重拉最新页再落底。
+      void reloadLatestTurns();
+      return;
+    }
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   };
   return (
     <>
       <div id="transcript" ref={scroller} onScroll={onScroll}>
         <Show when={transcript.order.length > 0} fallback={<div class="empty">该会话还没有回合</div>}>
+          <Show when={transcript.compactMarker && transcript.compactMarker.afterTurnId === null}>
+            <CompactDivider />
+          </Show>
           <Repeat count={transcript.order.length}>
             {(index) => {
               const turnId = transcript.order[index] ?? "";
-              return <Show when={transcript.turns[turnId]}>{(turn) => <TurnView turn={turn()} />}</Show>;
+              return (
+                <Show when={transcript.turns[turnId]}>
+                  {(turn) => (
+                    <>
+                      <TurnView turn={turn()} />
+                      <Show when={transcript.compactMarker && transcript.compactMarker.afterTurnId === turnId}>
+                        <CompactDivider />
+                      </Show>
+                    </>
+                  )}
+                </Show>
+              );
             }}
           </Repeat>
         </Show>

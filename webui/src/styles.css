@@ -149,6 +149,9 @@ pre { margin: 0; font-family: var(--font-mono); font-size: 12px; line-height: 1.
 .block.notice { color: var(--text-dim); background: var(--accent-soft); border-radius: 12px; padding: 9px 12px; }
 .turn-status { display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--text-faint); font-size: 12px; }
 .turn-status.failed, .turn-status.cancelled { color: var(--danger); }
+/* D10：压缩分隔——细线 + 居中标签，弱视觉但可辨识。 */
+.compact-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--text-faint); font-size: 12px; width: min(var(--chat-width), 100%); margin-inline: auto; }
+.compact-divider::before, .compact-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 
 /* ── markdown ──────────────────────────────────────────────────────── */
 .md-host { max-width: var(--chat-width); font-size: 14.5px; line-height: 1.68; overflow-wrap: anywhere; }
