@@ -1025,3 +1025,68 @@ fn subagent_spawn_and_finish_edges_are_idempotent_and_rebuildable() {
         2
     );
 }
+
+#[test]
+fn compaction_applied_fact_records_the_canonical_head_as_the_replace_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+
+    // 压缩只发生在有历史之后：先落一条 InputAccepted，head ≥ 1 才满足
+    // `replaces_through_fact_seq` 的非零校验（生产侧由 SessionCreated 保证）。
+    let input = ledger
+        .append_input_accepted(event_id(80), input_accepted("history"), NOW_MS + 80)
+        .expect("append input");
+
+    let applied = ledger
+        .append_compaction_applied(
+            event_id(81),
+            qaqh_session::session_fact_v2::CheckpointId::new(
+                "ckpt_01J00000000000000000000001".to_string(),
+            ),
+            content_ref(7),
+            42,
+            NOW_MS + 81,
+        )
+        .expect("append compaction fact");
+    assert_eq!(applied.fact_seq, input.fact_seq + 1);
+    match &applied.payload {
+        FactPayload::CompactionApplied(payload) => {
+            assert_eq!(payload.checkpoint_id.as_str(), "ckpt_01J00000000000000000000001");
+            assert_eq!(payload.replaces_through_fact_seq, input.fact_seq);
+            assert_eq!(payload.context_revision, 42);
+            assert_eq!(payload.summary_ref, content_ref(7));
+            assert_eq!(payload.applied_at_ms, NOW_MS + 81);
+        }
+        other => panic!("expected CompactionApplied payload, got {other:?}"),
+    }
+
+    // 落盘可读回：CommittedFactReader 能重放该 fact（durable-before-publish）。
+    let committed = CommittedFactReader::open(temp.path(), session_id(), log_id())
+        .expect("open reader")
+        .read_all()
+        .expect("read facts");
+    assert_eq!(committed.len(), 2);
+    assert!(matches!(
+        &committed[1].payload,
+        FactPayload::CompactionApplied(_)
+    ));
+}
+
+#[test]
+fn compaction_applied_on_an_empty_log_is_rejected_by_validation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+    let result = ledger.append_compaction_applied(
+        event_id(82),
+        qaqh_session::session_fact_v2::CheckpointId::new(
+            "ckpt_01J00000000000000000000002".to_string(),
+        ),
+        content_ref(8),
+        1,
+        NOW_MS + 82,
+    );
+    assert!(
+        matches!(&result, Err(ToolLedgerError::Canonical(_))),
+        "empty log has no replace boundary; validation must reject, got {result:?}"
+    );
+}
