@@ -19,7 +19,9 @@ use approval::{ApprovalKind, ApprovalRequest, command_for};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{ConnectInfo, DefaultBodyLimit, Path as AxumPath, State},
+    extract::{
+        ConnectInfo, DefaultBodyLimit, Path as AxumPath, RawQuery, State,
+    },
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -912,6 +914,7 @@ async fn proxy_events(
     State(state): State<GatewayState>,
     AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
+    RawQuery(query): RawQuery,
 ) -> Response {
     let session = match authenticate(&state, &headers, true) {
         Ok(session) => session,
@@ -921,11 +924,13 @@ async fn proxy_events(
         return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
     }
     let lease = session.lease_snapshot();
-    let response = match state
-        .daemon
-        .get_stream(&events_proxy_path(&session_id), &lease, &headers)
-        .await
-    {
+    // B9 断线重连：透传 `since_cursor`，重连方按 cursor 补发缺失事件。
+    let mut path = events_proxy_path(&session_id);
+    if let Some(query) = forward_query_param(query.as_deref(), &["since_cursor"]) {
+        path.push('?');
+        path.push_str(&query);
+    }
+    let response = match state.daemon.get_stream(&path, &lease, &headers).await {
         Ok(response) => response,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
     };
@@ -958,6 +963,7 @@ async fn proxy_timeline_events(
     State(state): State<GatewayState>,
     AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
+    RawQuery(query): RawQuery,
 ) -> Response {
     let session = match authenticate(&state, &headers, true) {
         Ok(session) => session,
@@ -967,22 +973,41 @@ async fn proxy_timeline_events(
         return error_response(StatusCode::FORBIDDEN, "seed_scope_violation");
     }
     let lease = session.lease_snapshot();
-    let response = match state
-        .daemon
-        .get_stream(
-            &format!(
-                "/ringing/v2/sessions/{}/timeline/events",
-                encode_path(&session_id)
-            ),
-            &lease,
-            &headers,
-        )
-        .await
+    // B9 断线重连：透传 `last_event_id`（= 上次 timeline_seq 游标），
+    // daemon 从该游标重放缺口后再转实时。
+    let mut path = format!(
+        "/ringing/v2/sessions/{}/timeline/events",
+        encode_path(&session_id)
+    );
+    if let Some(query) = forward_query_param(query.as_deref(), &["last_event_id", "last-event-id"])
     {
+        path.push('?');
+        path.push_str(&query);
+    }
+    let response = match state.daemon.get_stream(&path, &lease, &headers).await {
         Ok(response) => response,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
     };
     stream_response(response)
+}
+
+/// 白名单式查询透传：只放行 `allowed` 中的键（保留浏览器原始编码，不做二次
+/// 编解码），其余参数一律丢弃。返回完整的 `key=value` 查询串（不含 `?`）。
+fn forward_query_param(query: Option<&str>, allowed: &[&str]) -> Option<String> {
+    let query = query?;
+    let forwarded: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            pair.split('=').next().is_some_and(|key| {
+                allowed.iter().any(|name| name.eq_ignore_ascii_case(key))
+            })
+        })
+        .collect();
+    if forwarded.is_empty() {
+        None
+    } else {
+        Some(forwarded.join("&"))
+    }
 }
 
 async fn proxy_seeded_get(
@@ -1658,6 +1683,25 @@ mod tests {
             !events_proxy_path("seed-1").contains("/ringing/v1"),
             "v1 事件路径已删除"
         );
+    }
+
+    /// B9 断线重连：白名单查询透传——只放行声明的键，其余丢弃。
+    #[test]
+    fn forward_query_param_whitelists_reconnect_cursors() {
+        assert_eq!(
+            forward_query_param(
+                Some("since_cursor=epoch-1%3Aabc&evil=1"),
+                &["since_cursor"]
+            ),
+            Some("since_cursor=epoch-1%3Aabc".to_string())
+        );
+        assert_eq!(
+            forward_query_param(Some("last_event_id=e1%3Atimeline%3A42"), &["last_event_id"]),
+            Some("last_event_id=e1%3Atimeline%3A42".to_string())
+        );
+        assert_eq!(forward_query_param(Some("evil=1"), &["since_cursor"]), None);
+        assert_eq!(forward_query_param(None, &["since_cursor"]), None);
+        assert_eq!(forward_query_param(Some(""), &["since_cursor"]), None);
     }
 
     #[test]
