@@ -106,7 +106,14 @@ pub(crate) async fn handle_timeline_snapshot(
     // 拼页会让边界回合的 id/序号来自两套算法。
     let (page, has_more, truncated_before) = if plan.from_archive {
         match state.hub.archive_turn_page(&session_id, plan.end, limit) {
-            Some((turns, page_start, capped)) => {
+            Some((mut turns, page_start, capped)) => {
+                // 回填全局序号（与窗口分支同口径，0-based）：归档页的 turn_id
+                // 虽由全局序号派生（t{N} ↔ index N-1），但客户端的
+                // `before_index` 游标读的是 `turn_index` 字段，深翻页必须同样
+                // 带上，否则跨过窗口边界后翻页断链。
+                for (offset, turn) in turns.iter_mut().enumerate() {
+                    turn.turn_index = Some((page_start + offset) as u64);
+                }
                 // 触顶 = 更旧的回合取不到 → 不能再宣称「还能翻」（否则客户端会
                 // 永远请求同一个空页，BUG-2026-09-13-18 那一族）。
                 let more = page_start > 0 && !capped;
