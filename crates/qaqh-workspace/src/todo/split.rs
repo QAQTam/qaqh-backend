@@ -39,7 +39,7 @@ pub(crate) fn reject_fields(args: &Value, fields: &[&str], tool: &str) -> Result
         Ok(())
     } else {
         Err(crate::json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("{tool} does not accept: {}", present.join(", ")),
             "Follow the tool-specific schema.",
         ))

@@ -264,7 +264,7 @@ impl ToolProjection for TodoUpdateOutput {
 pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOutput, String> {
     let args: TodoListArgs = serde_json::from_value(args.clone()).map_err(|error| {
         crate::json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("invalid todo_list args: {error}"),
             "Use {\"status\": \"pending|in_progress|completed|cancelled\"} or omit it.",
         )
@@ -277,7 +277,7 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
         .map(|value| {
             parse_status(value).ok_or_else(|| {
                 crate::json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("unknown status: {value}"),
                     "Use pending, in_progress, completed, or cancelled.",
                 )
@@ -323,7 +323,7 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
             Some(id) => {
                 if !seen_ids.insert(id.clone()) {
                     return Err(crate::json_err_string(
-                        "INVALID_INPUT",
+                        "invalid_input",
                         format!("items[{index}] duplicates id {id}"),
                         "Each id may appear at most once per write.",
                     ));
@@ -332,7 +332,7 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
                     id
                 } else {
                     return Err(crate::json_err_string(
-                        "NOT_FOUND",
+                        "not_found",
                         format!("items[{index}] references unknown id {id}"),
                         "Omit \"id\" to assign a new one, or use todo_list to inspect existing IDs.",
                     ));
@@ -401,7 +401,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
     {
         if updates.is_empty() {
             return Err(crate::json_err_string(
-                "INVALID_INPUT",
+                "invalid_input",
                 "updates must not be empty",
                 "Provide at least one {id, status} entry.",
             ));
@@ -410,7 +410,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
         for update in updates {
             let id = parse_todo_id(update.get("id")).ok_or_else(|| {
                 crate::json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     "updates[].id missing or invalid",
                     "Provide the assigned ID, e.g. T1.",
                 )
@@ -425,7 +425,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             } else {
                 Some(parse_status(requested).ok_or_else(|| {
                     crate::json_err_string(
-                        "INVALID_INPUT",
+                        "invalid_input",
                         format!("unknown status: {requested}"),
                         "Use pending, in_progress, completed, or cancelled.",
                     )
@@ -446,7 +446,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             )?;
             if status.is_none() && title.is_none() && description.is_none() && evidence.is_none() {
                 return Err(crate::json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("updates[] entry for {id} changes nothing"),
                     "Provide status, evidence, title, or description.",
                 ));
@@ -467,7 +467,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             .unwrap_or_default();
         let status = parse_status(requested).ok_or_else(|| {
             crate::json_err_string(
-                "INVALID_INPUT",
+                "invalid_input",
                 format!("unknown status: {requested}"),
                 "Use pending, in_progress, completed, or cancelled.",
             )
@@ -475,14 +475,14 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
         let mut list = Vec::new();
         for expr in ids.as_array().ok_or_else(|| {
             crate::json_err_string(
-                "INVALID_INPUT",
+                "invalid_input",
                 "ids must be an array of strings",
                 "Use ids: [\"T1\", \"T1-T3\"]",
             )
         })? {
             let expr = expr.as_str().ok_or_else(|| {
                 crate::json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     "ids entries must be strings",
                     "Use ids: [\"T1\", \"T1-T3\"]",
                 )
@@ -501,7 +501,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
     } else {
         let id = parse_todo_id(args.get("id")).ok_or_else(|| {
             crate::json_err_string(
-                "INVALID_INPUT",
+                "invalid_input",
                 "missing or invalid id",
                 "Provide the assigned ID, e.g. T1.",
             )
@@ -512,7 +512,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             .unwrap_or_default();
         let status = parse_status(requested).ok_or_else(|| {
             crate::json_err_string(
-                "INVALID_INPUT",
+                "invalid_input",
                 format!("unknown status: {requested}"),
                 "Use pending, in_progress, completed, or cancelled.",
             )
@@ -525,7 +525,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             .map(str::to_string);
         if args.get("evidence").is_some() && evidence.is_none() {
             return Err(crate::json_err_string(
-                "INVALID_INPUT",
+                "invalid_input",
                 "evidence must be a non-empty string when provided",
                 "Omit evidence unless there is a concrete result summary.",
             ));
@@ -569,7 +569,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
 
     if updated.is_empty() {
         return Err(crate::json_err_string(
-            "NOT_FOUND",
+            "not_found",
             format!("no matching todos: {}", not_found.join(", ")),
             "Use todo(action=\"list\") to inspect IDs.",
         ));
@@ -624,7 +624,7 @@ fn legacy_error_to_tool_error(raw: String) -> ToolError {
     let code = parsed
         .get("code")
         .and_then(Value::as_str)
-        .unwrap_or("TOOL_ERROR");
+        .unwrap_or("tool_error");
     let message = parsed
         .get("message")
         .and_then(Value::as_str)
@@ -636,13 +636,13 @@ fn legacy_error_to_tool_error(raw: String) -> ToolError {
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let kind = match code {
-        "INVALID_INPUT" | "INVALID_ARGS" | "INVALID_ARGUMENTS" => ToolErrorKind::InvalidArguments,
-        "NOT_FOUND" => ToolErrorKind::NotFound,
-        "PERMISSION_DENIED" | "PERMISSION_REQUIRED" | "BLOCKED_BY_MODE" => {
+        "invalid_input" | "invalid_args" | "invalid_arguments" => ToolErrorKind::InvalidArguments,
+        "not_found" => ToolErrorKind::NotFound,
+        "permission_denied" | "permission_required" | "blocked_by_mode" => {
             ToolErrorKind::PermissionDenied
         }
-        "CANCELLED" => ToolErrorKind::Cancelled,
-        "TIMEOUT" => ToolErrorKind::Timeout,
+        "cancelled" => ToolErrorKind::Cancelled,
+        "timeout" => ToolErrorKind::Timeout,
         _ => ToolErrorKind::Execution,
     };
     let mut error = ToolError::new(kind, message);

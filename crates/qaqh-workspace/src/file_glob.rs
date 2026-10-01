@@ -21,8 +21,8 @@ use serde_json::Value;
 use crate::ToolRisk;
 use crate::tool_api::{
     OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
-    ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolError, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader, ToolName,
+    ToolProjection, ToolSource, TypedTool,
 };
 
 /// 默认返回上限：防超大仓库结果爆炸（`rg --files` 语义下的熔断）。
@@ -244,9 +244,7 @@ fn glob_display(args: &Value, output: &GlobOutput) -> ToolDisplay {
 }
 
 fn glob_error(message: impl Into<String>) -> ToolExecutionError {
-    let mut error = ToolError::new(ToolErrorKind::Execution, message);
-    error.code = ToolErrorCode::from_legacy("TOOL_ERROR");
-    ToolExecutionError::Recoverable(error)
+    ToolExecutionError::Recoverable(ToolError::new(ToolErrorKind::Execution, message))
 }
 
 fn glob_schema() -> Value {
@@ -428,12 +426,12 @@ mod tests {
             serde_json::json!({ "pattern": "src/[unclosed" }),
         )
         .expect_err("invalid glob must error");
-        assert_eq!(error_code(invalid), "TOOL_ERROR");
+        assert_eq!(error_code(invalid), "execution");
 
         let missing = GlobTool
             .run(&ctx(dir.path()), parse_args(serde_json::json!({})))
             .expect_err("missing pattern must error");
-        assert_eq!(error_code(missing), "TOOL_ERROR");
+        assert_eq!(error_code(missing), "execution");
 
         let none = run(dir.path(), serde_json::json!({ "pattern": "*.toml" }))
             .expect("empty match is success");

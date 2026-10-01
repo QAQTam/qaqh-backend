@@ -37,17 +37,17 @@ impl McpErrorKind {
     /// ToolResult JSON 中的稳定错误码字符串。
     pub fn code(self) -> &'static str {
         match self {
-            Self::Disabled => "MCP_DISABLED",
-            Self::ConnectFailed => "MCP_CONNECT_FAILED",
-            Self::ConnectTimeout => "MCP_CONNECT_TIMEOUT",
-            Self::ServerCrashed => "MCP_SERVER_CRASHED",
-            Self::Protocol => "MCP_PROTOCOL_ERROR",
-            Self::ToolError => "MCP_TOOL_ERROR",
-            Self::Timeout => "MCP_TIMEOUT",
-            Self::Cancelled => "MCP_CANCELLED",
-            Self::Busy => "MCP_BUSY",
-            Self::NotFound => "MCP_NOT_FOUND",
-            Self::Shutdown => "MCP_SHUTDOWN",
+            Self::Disabled => "mcp_disabled",
+            Self::ConnectFailed => "mcp_connect_failed",
+            Self::ConnectTimeout => "mcp_connect_timeout",
+            Self::ServerCrashed => "mcp_server_crashed",
+            Self::Protocol => "mcp_protocol_error",
+            Self::ToolError => "mcp_tool_error",
+            Self::Timeout => "mcp_timeout",
+            Self::Cancelled => "mcp_cancelled",
+            Self::Busy => "mcp_busy",
+            Self::NotFound => "mcp_not_found",
+            Self::Shutdown => "mcp_shutdown",
         }
     }
 }

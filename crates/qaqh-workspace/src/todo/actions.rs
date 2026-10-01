@@ -20,7 +20,7 @@ pub(crate) fn exec_todo_create(args: &Value, positioned: bool) -> Result<String,
     let mut store = read_store()?;
     if !positioned && (args.get("after_id").is_some() || args.get("before_id").is_some()) {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             "create does not accept before_id or after_id",
             "Use action=insert for positioned tasks.",
         ));
@@ -96,14 +96,14 @@ pub(crate) fn parse_edit_field(
             return Ok(Some(text));
         }
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("{label} must be 1-{max_chars} chars when provided"),
             "Omit the field to leave it unchanged.",
         ));
     }
     if text.chars().count() > max_chars {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("{label} max {max_chars} chars"),
             "",
         ));

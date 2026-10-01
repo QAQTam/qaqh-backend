@@ -248,9 +248,9 @@ fn exec_not_found_returns_diff_in_model_text() {
     let path = write_file(&dir, "nf.txt", "alpha\nlet x = 1;\nbeta\n");
     let result = call(&path, "let x = 2;", "let x = 3;");
     assert!(!result.is_success());
-    assert_eq!(code(&result), "NOT_FOUND");
+    assert_eq!(code(&result), "not_found");
     let text = result.model_text();
-    assert!(text.contains("NOT_FOUND"), "{text}");
+    assert!(text.contains("not_found"), "{text}");
     assert!(text.contains("diff (your old_str"), "{text}");
     assert!(text.contains("-let x = 2;"), "{text}");
     assert!(text.contains("+let x = 1;"), "{text}");
@@ -265,7 +265,7 @@ fn exec_ambiguous_lists_occurrences_and_leaves_file_untouched() {
     let path = write_file(&dir, "amb.txt", "x\nx\n");
     let result = call(&path, "x", "y");
     assert!(!result.is_success());
-    assert_eq!(code(&result), "AMBIGUOUS_MATCH");
+    assert_eq!(code(&result), "ambiguous_match");
     assert_eq!(result.data["match_count"], 2);
     let text = result.model_text();
     assert!(text.contains("matches 2 locations"), "{text}");
@@ -281,7 +281,7 @@ fn exec_read_prefix_is_not_stripped() {
     let path = write_file(&dir, "prefix.txt", "foo\n");
     let result = call(&path, "L1: foo", "bar");
     assert!(!result.is_success());
-    assert_eq!(code(&result), "NOT_FOUND");
+    assert_eq!(code(&result), "not_found");
     let text = result.model_text();
     assert!(text.contains("-L1: foo"), "{text}");
     assert!(text.contains("+foo"), "{text}");
@@ -293,7 +293,7 @@ fn exec_empty_file_is_not_found() {
     let path = write_file(&dir, "empty.txt", "");
     let result = call(&path, "x", "y");
     assert!(!result.is_success());
-    assert_eq!(code(&result), "NOT_FOUND");
+    assert_eq!(code(&result), "not_found");
     assert_eq!(read(&path), "");
 }
 
@@ -304,7 +304,7 @@ fn exec_empty_file_is_not_found() {
 #[test]
 fn exec_missing_path_is_parse_error() {
     let result = exec_edit(&json!({"old_str": "a", "new_str": "b"}));
-    assert_eq!(code(&result), "PARSE_ERROR");
+    assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("missing 'path'"));
 }
 
@@ -319,14 +319,14 @@ fn exec_missing_old_or_new_is_parse_error() {
 #[test]
 fn exec_empty_old_str_is_rejected() {
     let result = exec_edit(&json!({"path": "a.txt", "old_str": "", "new_str": "b"}));
-    assert_eq!(code(&result), "PARSE_ERROR");
+    assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("must be non-empty"));
 }
 
 #[test]
 fn exec_identical_old_and_new_is_rejected() {
     let result = exec_edit(&json!({"path": "a.txt", "old_str": "a", "new_str": "a"}));
-    assert_eq!(code(&result), "PARSE_ERROR");
+    assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("identical"));
 }
 
@@ -335,7 +335,7 @@ fn exec_missing_file_does_not_create() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ghost.txt").to_string_lossy().to_string();
     let result = call(&path, "a", "b");
-    assert_eq!(code(&result), "FILE_NOT_FOUND");
+    assert_eq!(code(&result), "file_not_found");
     assert!(!std::path::Path::new(&path).exists());
 }
 
@@ -345,7 +345,7 @@ fn exec_binary_file_is_rejected() {
     let path = dir.path().join("bin.dat");
     std::fs::write(&path, [0u8, 159, 146, 150]).unwrap();
     let result = call(&path.to_string_lossy(), "a", "b");
-    assert_eq!(code(&result), "NOT_UTF8_TEXT");
+    assert_eq!(code(&result), "not_utf8_text");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -421,7 +421,7 @@ fn exec_symlink_target_is_rejected() {
     let link = dir.path().join("link.txt");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let result = call(&link.to_string_lossy(), "hello", "HELLO");
-    assert_eq!(code(&result), "SYMLINK_TARGET");
+    assert_eq!(code(&result), "symlink_target");
     assert!(
         result.model_text().contains("symbolic link"),
         "{}",
