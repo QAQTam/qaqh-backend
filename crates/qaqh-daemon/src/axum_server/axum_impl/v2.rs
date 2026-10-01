@@ -4,13 +4,12 @@
 //! `open -> bootstrap -> since_cursor subscribe -> replay -> live`.
 
 use qaqh_ringing::{
-    RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommandAckStatus,
-    RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities,
-    RingingV2ChannelSnapshot, RingingV2CommandAck, RingingV2CommandEnvelope,
-    RingingV2CommandResult, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,
-    RingingV2DriverState, RingingV2ExistingResult, RingingV2InteractionKind,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
-    RingingV2PendingInteraction,
+    RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommandAckStatus, RingingV2AskOutcome,
+    RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2DriverClaimResponse,
+    RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2ExistingResult,
+    RingingV2InteractionKind, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
+    RingingV2OpenResponse, RingingV2PendingInteraction,
 };
 use qaqh_runtime::ringing::V2StreamItem;
 use qaqh_session::projection::{
@@ -164,7 +163,11 @@ pub(crate) async fn handle_bootstrap_v2(
         return lease_required_v2();
     };
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
+        return api_error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_session_id",
+            "missing seed",
+        );
     }
     let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
@@ -290,7 +293,11 @@ pub(crate) async fn handle_team_snapshot_v2(
         return lease_required_v2();
     }
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
+        return api_error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_session_id",
+            "missing seed",
+        );
     }
     let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     let team = match state.v2_hub.bootstrap(&session_dir, &session_id) {
@@ -345,7 +352,11 @@ pub(crate) async fn handle_pending_approvals_v2(
         return lease_required_v2();
     }
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
+        return api_error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_session_id",
+            "missing seed",
+        );
     }
     let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
     let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
@@ -452,7 +463,11 @@ pub(crate) async fn handle_events_v2(
         return lease_required_v2();
     }
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
+        return api_error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_session_id",
+            "missing seed",
+        );
     }
     let cursor = query
         .since_cursor
@@ -650,7 +665,11 @@ pub(crate) async fn handle_driver_claim_v2(
         return lease_required_v2();
     };
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
+        return api_error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_session_id",
+            "missing seed",
+        );
     }
     watch_driver_seat(&state, &session_id);
     let current = canonical_driver_state(&state, &session_id);
@@ -725,7 +744,11 @@ pub(crate) async fn handle_driver_release_v2(
         return lease_required_v2();
     };
     if session_id.trim().is_empty() {
-        return api_error_response(StatusCode::BAD_REQUEST, "missing_session_id", "missing seed");
+        return api_error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_session_id",
+            "missing seed",
+        );
     }
     let current = canonical_driver_state(&state, &session_id);
     let holder = current.as_ref().and_then(|driver| driver.holder.clone());

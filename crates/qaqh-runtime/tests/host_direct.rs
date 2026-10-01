@@ -18,7 +18,8 @@ use qaqh_session::canonical::{
 use qaqh_session::projection::{MailboxProjection, Projection, ProjectionSink};
 use qaqh_session::session_fact_v2::{
     AgentPath, EventId, FactPayload, FactSchema, MailboxMessageState, SessionCreated, SessionFact,
-    SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId, TurnFinished, TurnId, TurnTerminal,
+    SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId, TurnFinished, TurnId,
+    TurnTerminal,
 };
 use qaqh_subagent::{
     BoardChannelCreateRequest, BoardHost, BoardListRequest, BoardPostRequest,

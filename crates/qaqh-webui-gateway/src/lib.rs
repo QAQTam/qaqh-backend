@@ -19,9 +19,7 @@ use approval::{ApprovalKind, ApprovalRequest, command_for};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{
-        ConnectInfo, DefaultBodyLimit, Path as AxumPath, RawQuery, State,
-    },
+    extract::{ConnectInfo, DefaultBodyLimit, Path as AxumPath, RawQuery, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -998,9 +996,9 @@ fn forward_query_param(query: Option<&str>, allowed: &[&str]) -> Option<String> 
     let forwarded: Vec<&str> = query
         .split('&')
         .filter(|pair| {
-            pair.split('=').next().is_some_and(|key| {
-                allowed.iter().any(|name| name.eq_ignore_ascii_case(key))
-            })
+            pair.split('=')
+                .next()
+                .is_some_and(|key| allowed.iter().any(|name| name.eq_ignore_ascii_case(key)))
         })
         .collect();
     if forwarded.is_empty() {
@@ -1689,10 +1687,7 @@ mod tests {
     #[test]
     fn forward_query_param_whitelists_reconnect_cursors() {
         assert_eq!(
-            forward_query_param(
-                Some("since_cursor=epoch-1%3Aabc&evil=1"),
-                &["since_cursor"]
-            ),
+            forward_query_param(Some("since_cursor=epoch-1%3Aabc&evil=1"), &["since_cursor"]),
             Some("since_cursor=epoch-1%3Aabc".to_string())
         );
         assert_eq!(

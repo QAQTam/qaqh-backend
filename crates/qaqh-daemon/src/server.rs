@@ -213,12 +213,12 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     ));
     // hub-fact-bus spec 阶段 2.3：回执折叠挂在 canonical fact 投影链上
     // （durable-before-publish），不再订阅 v1 事件总线。
-    if let Err(existing) = qaqh_session::projection::install_projection_sink(Arc::new(
-        FoldingSink {
+    if let Err(existing) =
+        qaqh_session::projection::install_projection_sink(Arc::new(FoldingSink {
             v2: v2_hub.clone(),
             pending: pending_commands.clone(),
-        },
-    )) {
+        }))
+    {
         log::warn!(
             "[ringing-v2] projection sink already installed; keeping existing sink ({existing:p})"
         );
@@ -569,7 +569,10 @@ mod tests {
             return;
         }
         let config = ServerNetworkConfig::parse(&[]).expect("default parse");
-        assert!(config.bind_ip.is_loopback(), "default bind must be loopback");
+        assert!(
+            config.bind_ip.is_loopback(),
+            "default bind must be loopback"
+        );
         assert_eq!(config.port, 64413);
 
         let error = ServerNetworkConfig::parse(&["--bind".into(), "0.0.0.0".into()])

@@ -315,9 +315,7 @@ impl TimelineStream {
             || parsed.session_id != self.session_id
             || parsed.server_epoch != server_epoch
         {
-            return Err(ClientError::Protocol(
-                "invalid timeline SSE frame".into(),
-            ));
+            return Err(ClientError::Protocol("invalid timeline SSE frame".into()));
         }
         if parsed.entry.timeline_seq <= self.cursor {
             return Err(ClientError::Protocol(format!(

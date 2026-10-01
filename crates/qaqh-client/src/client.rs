@@ -17,14 +17,14 @@ use crate::discovery::{DaemonDiscovery, DiscoveryExt, read_discovery};
 use crate::endpoint::{ActionRequest, QueryRequest};
 use crate::error::{ClientError, Result};
 use crate::session::RingingSession;
-use crate::v2::ClientV2SessionState;
 use crate::timeline::TimelineStream;
 use crate::types::{
     CommandOptions, ContentRef, RingingCommand, RingingCommandAckStatus, TimelineEntry,
     TimelinePage, TimelineStatus,
 };
-use qaqh_ringing::v2::{RingingV2CommandAck, RingingV2CommandStatus};
+use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
+use qaqh_ringing::v2::{RingingV2CommandAck, RingingV2CommandStatus};
 
 /// Callbacks delivered on the client's background tasks.
 #[derive(Clone)]
@@ -334,8 +334,7 @@ impl Client {
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingV2CommandAck> {
-        self
-            .send_command_v2_typed(session_id, command, options)
+        self.send_command_v2_typed(session_id, command, options)
             .await
     }
 

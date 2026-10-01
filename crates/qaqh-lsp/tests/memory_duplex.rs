@@ -347,7 +347,7 @@ fn unknown_server_reports_not_found() {
         "/tmp",
     );
     assert!(
-        out.model_text().contains("LSP_NOT_FOUND"),
+        out.model_text().contains("lsp_not_found"),
         "{}",
         out.model_text()
     );
@@ -371,7 +371,7 @@ fn unknown_file_reports_protocol() {
         "/nonexistent-root-qaqh-lsp",
     );
     assert!(
-        out.model_text().contains("LSP_CONNECT_FAILED"),
+        out.model_text().contains("lsp_connect_failed"),
         "{}",
         out.model_text()
     );
@@ -393,7 +393,7 @@ fn cancel_before_request_reports_cancelled() {
         "/tmp",
     );
     assert!(
-        out.model_text().contains("LSP_CANCELLED"),
+        out.model_text().contains("lsp_cancelled"),
         "{}",
         out.model_text()
     );

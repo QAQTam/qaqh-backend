@@ -1057,7 +1057,10 @@ mod tests {
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].fact_seq, Some(changed.fact_seq));
         // C3：信封携带源 fact 的提交时间（epoch ms）。
-        assert_eq!(replay[0].ts_ms, Some(u64::try_from(changed.ts_ms).expect("ts_ms")));
+        assert_eq!(
+            replay[0].ts_ms,
+            Some(u64::try_from(changed.ts_ms).expect("ts_ms"))
+        );
     }
 
     #[tokio::test]

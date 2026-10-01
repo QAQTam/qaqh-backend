@@ -259,9 +259,13 @@ pub(crate) fn publish_compaction_fact(ctx: &mut RingContext, summary: &str) {
     }
     let event_id =
         qaqh_session::session_fact_v2::EventId::new(qaqh_session::canonical::generate_ulid());
-    if let Err(error) =
-        ledger.append_compaction_applied(event_id, checkpoint_id, summary_ref, context_revision, now)
-    {
+    if let Err(error) = ledger.append_compaction_applied(
+        event_id,
+        checkpoint_id,
+        summary_ref,
+        context_revision,
+        now,
+    ) {
         log::warn!("[COMPACT] compaction fact append failed (degraded): {error}");
     }
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use qaqh_ringing::{RingingWorkerCommandEnvelope};
+use qaqh_ringing::RingingWorkerCommandEnvelope;
 use qaqh_session::canonical::{
     CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE, generate_ulid,
 };
@@ -43,8 +43,8 @@ use qaqh_subagent::{
     WaitAgentOutcome, WaitAgentRequest,
 };
 
-use crate::ringing::V2StreamItem;
 use super::QaqhService;
+use crate::ringing::V2StreamItem;
 
 impl QaqhService {
     /// Read mailbox activity strictly after `after_fact_seq`.
@@ -523,12 +523,7 @@ impl SubagentHost for QaqhService {
             log::error!("[SUBAGENT-HOST] subscribe {session_id}: v2 projection hub not attached");
             return rx;
         };
-        let session_dir = match self
-            .sessions
-            .session_dir_for_id(session_id)
-            .ok()
-            .flatten()
-        {
+        let session_dir = match self.sessions.session_dir_for_id(session_id).ok().flatten() {
             Some(dir) => dir,
             None => {
                 log::error!("[SUBAGENT-HOST] subscribe {session_id}: session dir not found");

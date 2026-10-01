@@ -2397,9 +2397,7 @@ mod command_entry_tests {
         super::init_session_manager();
         AppState {
             hub: std::sync::Arc::new(qaqh_runtime::RingingHub::new("entry-epoch")),
-            v2_hub: std::sync::Arc::new(
-                qaqh_runtime::ringing::V2ProjectionHub::new("entry-epoch"),
-            ),
+            v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("entry-epoch")),
             leases,
             driver_watch: std::sync::Arc::new(std::sync::Mutex::new(
                 qaqh_runtime::ringing::RingingDriverWatch::new(),
@@ -2532,11 +2530,7 @@ mod command_entry_tests {
         assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
 
         // 归属不变量：本 lease 名下恰好出现（且仅出现）新建的那个 seed。
-        let owned = state
-            .leases
-            .lock()
-            .unwrap()
-            .owned_sessions(CALLER);
+        let owned = state.leases.lock().unwrap().owned_sessions(CALLER);
         assert_eq!(
             owned.len(),
             1,
@@ -2563,9 +2557,7 @@ mod command_entry_tests {
         .await
         .unwrap_or_else(|e| Err(format!("cleanup join error: {e}")));
         if let Err(error) = cleanup {
-            panic!(
-                "cleanup failed for {created_seed} (leaked session dir): {error}"
-            );
+            panic!("cleanup failed for {created_seed} (leaked session dir): {error}");
         }
     }
 }
