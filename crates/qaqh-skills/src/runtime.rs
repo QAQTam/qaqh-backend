@@ -196,13 +196,13 @@ impl SkillContextManager {
         }
         let result = if expected_revision != self.operation_revision {
             Err(format!(
-                "SKILL_OPERATION_STALE: expected {expected_revision}, current {}",
+                "skill_operation_stale: expected {expected_revision}, current {}",
                 self.operation_revision
             ))
         } else {
             match action {
                 "request" | "activate" => self.queue_request(name, "user"),
-                _ => Err(format!("SKILL_INVALID_ACTION: '{action}'")),
+                _ => Err(format!("skill_invalid_action: '{action}'")),
             }
         };
         let resolved = (result.is_ok(), self.operation_revision, result.err());
@@ -632,7 +632,7 @@ impl SkillContextManager {
             .skills
             .iter()
             .find(|skill| skill.name == name)
-            .ok_or_else(|| format!("SKILL_NOT_FOUND: '{name}'"))?;
+            .ok_or_else(|| format!("skill_not_found: '{name}'"))?;
         crate::load(metadata)
     }
 
@@ -643,7 +643,7 @@ impl SkillContextManager {
             .iter()
             .any(|skill| skill.name == name)
             .then_some(())
-            .ok_or_else(|| format!("SKILL_NOT_FOUND: '{name}'"))
+            .ok_or_else(|| format!("skill_not_found: '{name}'"))
     }
 }
 
@@ -840,7 +840,7 @@ mod tests {
             stale
                 .2
                 .as_deref()
-                .is_some_and(|error| error.contains("SKILL_OPERATION_STALE"))
+                .is_some_and(|error| error.contains("skill_operation_stale"))
         );
     }
 }

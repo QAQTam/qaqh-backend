@@ -61,7 +61,7 @@ impl ToolProjection for ConfirmApplyOutput {
     fn error(&self) -> Option<ToolError> {
         self.wire.error.as_ref().map(|wire| {
             let mut error = ToolError::new(ToolErrorKind::Execution, wire.message.clone());
-            error.code = ToolErrorCode::from_legacy(&wire.code);
+            error.code = ToolErrorCode::parse_or_builtin(&wire.code, ToolErrorKind::Execution);
             error.retryable = wire.retryable;
             error.hint = wire.hint.clone();
             error
@@ -123,13 +123,13 @@ impl TypedTool for ConfirmApplyTool {
     ) -> Result<Self::Output, ToolExecutionError> {
         if args.pending_id.trim().is_empty() {
             return Err(mutation_error(
-                "MISSING_PENDING_ID",
+                "missing_pending_id",
                 "confirm_apply requires 'pending_id' (returned by a dry_run of apply_patch / write)",
                 None,
                 json!({
                     "timeis": crate::now_utc8(),
                     "status": "error",
-                    "code": "MISSING_PENDING_ID",
+                    "code": "missing_pending_id",
                     "message": "confirm_apply requires 'pending_id' (returned by a dry_run of apply_patch / write)",
                 }),
             ));
@@ -138,13 +138,13 @@ impl TypedTool for ConfirmApplyTool {
         let action = args.action;
         let Some(pending) = crate::pending::take(&pending_id) else {
             return Err(mutation_error(
-                "PENDING_NOT_FOUND_OR_EXPIRED",
+                "pending_not_found_or_expired",
                 format!("pending {pending_id} not found or expired (30 min window; one-shot)"),
                 Some("Re-run the write tool with dry_run=true to get a fresh pending_id."),
                 json!({
                     "timeis": crate::now_utc8(),
                     "status": "error",
-                    "code": "PENDING_NOT_FOUND_OR_EXPIRED",
+                    "code": "pending_not_found_or_expired",
                     "pending_id": pending_id,
                 }),
             ));
@@ -160,7 +160,7 @@ impl TypedTool for ConfirmApplyTool {
                         )
                         .map_err(|error| {
                             mutation_error(
-                                "INVALID_PENDING_ARGS",
+                                "invalid_pending_args",
                                 format!("pending {pending_id} holds invalid write args: {error}"),
                                 None,
                                 json!({}),
@@ -177,7 +177,7 @@ impl TypedTool for ConfirmApplyTool {
                         )
                         .map_err(|error| {
                             mutation_error(
-                                "INVALID_PENDING_ARGS",
+                                "invalid_pending_args",
                                 format!(
                                     "pending {pending_id} holds invalid apply_patch args: {error}"
                                 ),
@@ -192,13 +192,13 @@ impl TypedTool for ConfirmApplyTool {
                     }
                     other => {
                         return Err(mutation_error(
-                            "UNKNOWN_PENDING_TOOL",
+                            "unknown_pending_tool",
                             format!("pending {pending_id} holds unknown tool '{other}'"),
                             None,
                             json!({
                                 "timeis": crate::now_utc8(),
                                 "status": "error",
-                                "code": "UNKNOWN_PENDING_TOOL",
+                                "code": "unknown_pending_tool",
                                 "pending_id": pending_id,
                             }),
                         ));
@@ -257,13 +257,13 @@ impl TypedTool for ConfirmApplyTool {
                 })
             }
             other => Err(mutation_error(
-                "INVALID_ACTION",
+                "invalid_action",
                 format!("invalid action {other:?} — use \"apply\" or \"discard\""),
                 None,
                 json!({
                     "timeis": crate::now_utc8(),
                     "status": "error",
-                    "code": "INVALID_ACTION",
+                    "code": "invalid_action",
                 }),
             )),
         }
@@ -433,6 +433,6 @@ mod tests {
     #[test]
     fn missing_pending_id_is_error() {
         let out = run_confirm("", "apply");
-        assert_eq!(out["code"], "MISSING_PENDING_ID");
+        assert_eq!(out["code"], "missing_pending_id");
     }
 }

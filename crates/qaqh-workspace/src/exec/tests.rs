@@ -124,7 +124,7 @@ fn invalid_configured_default_shell_fails_closed() {
         .expect_err("invalid configured shell must fail");
     match error {
         ToolExecutionError::Recoverable(error) => {
-            assert_eq!(error.code.as_str(), "UNKNOWN_SHELL")
+            assert_eq!(error.code.as_str(), "unknown_shell")
         }
         ToolExecutionError::Fatal(error) => panic!("unexpected fatal: {error:?}"),
     }
@@ -394,10 +394,8 @@ fn pwsh_regression_runner_ready() -> bool {
 /// 解析特性，exec 的 argv 构造层无法修复。探测真实往返能力：坏环境跳过
 /// （设 QAQH_REQUIRE_SHELL=1 强制失败），好环境仍走真实断言。
 fn bash_positional_quote_roundtrip_ok() -> bool {
-    let argv = Shell::Bash.derive_exec_args_with(
-        r#"printf %s "$1""#,
-        Some(&[r#"x"y"#.to_string()]),
-    );
+    let argv =
+        Shell::Bash.derive_exec_args_with(r#"printf %s "$1""#, Some(&[r#"x"y"#.to_string()]));
     let out = super::direct::direct_exec(
         &argv,
         None,
@@ -450,7 +448,7 @@ fn cmd_tool_with_args_rejected() {
     assert!(
         r.error
             .as_ref()
-            .is_some_and(|e| e.code == "ARGS_NOT_SUPPORTED"),
+            .is_some_and(|e| e.code == "args_not_supported"),
         "error code: {:?}, model text: {}",
         r.error,
         r.model_text()
@@ -1320,7 +1318,7 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
     assert_eq!(failed.status(), crate::ToolStatus::Error);
     assert_eq!(
         failed.error().as_ref().map(|error| error.code.as_str()),
-        Some("TOOL_ERROR")
+        Some("execution")
     );
 }
 
@@ -1403,7 +1401,7 @@ fn exec_rejects_removed_argv_and_requires_command() {
     assert!(
         r.error
             .as_ref()
-            .is_some_and(|e| e.code == "INVALID_ARGUMENTS"),
+            .is_some_and(|e| e.code == "invalid_arguments"),
         "error code: {:?}, model text: {}",
         r.error,
         r.model_text()
@@ -1418,7 +1416,7 @@ fn exec_rejects_removed_argv_and_requires_command() {
     assert!(
         r.error
             .as_ref()
-            .is_some_and(|e| e.code == "MISSING_COMMAND"),
+            .is_some_and(|e| e.code == "missing_command"),
         "error code: {:?}, model text: {}",
         r.error,
         r.model_text()

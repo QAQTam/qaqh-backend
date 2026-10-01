@@ -998,7 +998,7 @@ fn terminal_status(result: &qaqh_types::ToolResult) -> ToolTerminalStatus {
     if result
         .error
         .as_ref()
-        .is_some_and(|error| error.code == "AUDIT_QUARANTINED")
+        .is_some_and(|error| error.code == "audit_quarantined")
     {
         return ToolTerminalStatus::Indeterminate;
     }
@@ -1044,7 +1044,7 @@ fn blocked_tool_exec_result(
         content: message.to_string(),
         success: false,
         result: qaqh_types::ToolResult::error_with(
-            "LEDGER_BLOCKED",
+            "ledger_blocked",
             message.to_string(),
             false,
             None,
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn audit_quarantine_maps_to_canonical_indeterminate() {
         let result = qaqh_types::ToolResult::error_with(
-            "AUDIT_QUARANTINED",
+            "audit_quarantined",
             "result audit failed after side effects".to_string(),
             false,
             None,

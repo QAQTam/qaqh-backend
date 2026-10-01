@@ -123,7 +123,7 @@ impl TypedTool for EditTool {
         } = args;
         if old_arg.is_empty() {
             return Err(mutation_error(
-                "PARSE_ERROR",
+                "parse_error",
                 "edit: 'old_str' must be non-empty (use write to create a file)",
                 None,
                 json!({}),
@@ -131,7 +131,7 @@ impl TypedTool for EditTool {
         }
         if old_arg == new_arg {
             return Err(mutation_error(
-                "PARSE_ERROR",
+                "parse_error",
                 "edit: 'old_str' and 'new_str' are identical",
                 None,
                 json!({}),
@@ -154,7 +154,7 @@ impl TypedTool for EditTool {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(mutation_error(
-                    "FILE_NOT_FOUND",
+                    "file_not_found",
                     format!("edit: {raw_path}: file not found (use write to create a new file)"),
                     None,
                     json!({}),
@@ -162,7 +162,7 @@ impl TypedTool for EditTool {
             }
             Err(error) => {
                 return Err(mutation_error(
-                    "READ_FAILED",
+                    "read_failed",
                     format!("edit: cannot read {raw_path}: {error}"),
                     None,
                     json!({}),
@@ -173,7 +173,7 @@ impl TypedTool for EditTool {
             Ok(raw) => raw,
             Err(_) => {
                 return Err(mutation_error(
-                    "NOT_UTF8_TEXT",
+                    "not_utf8_text",
                     format!("edit: {raw_path} is not valid UTF-8 text (treated as binary)"),
                     None,
                     json!({}),
@@ -192,14 +192,14 @@ impl TypedTool for EditTool {
             Err(ReplaceError::NotFound { nearest }) => {
                 let text = render_not_found(&raw_path, &old, nearest.as_ref());
                 return Err(mutation_error_with_retryable(
-                    "NOT_FOUND",
+                    "not_found",
                     text,
                     Some(true),
                     Some("Re-read the file and retry with the exact text."),
                     json!({
                         "timeis": crate::now_utc8(),
                         "status": "error",
-                        "code": "NOT_FOUND",
+                        "code": "not_found",
                         "path": &raw_path,
                     }),
                 ));
@@ -207,14 +207,14 @@ impl TypedTool for EditTool {
             Err(ReplaceError::Ambiguous { total, occurrences }) => {
                 let text = render_ambiguous(&raw_path, total, &occurrences);
                 return Err(mutation_error_with_retryable(
-                    "AMBIGUOUS_MATCH",
+                    "ambiguous_match",
                     text,
                     Some(true),
                     Some("Extend 'old_str' with surrounding lines to make it unique."),
                     json!({
                         "timeis": crate::now_utc8(),
                         "status": "error",
-                        "code": "AMBIGUOUS_MATCH",
+                        "code": "ambiguous_match",
                         "path": &raw_path,
                         "match_count": total,
                     }),
@@ -225,7 +225,7 @@ impl TypedTool for EditTool {
         let write_content = splice_raw(&raw, &new, &outcome.matches, endings);
         if let Err(error) = atomic_write(&path, &write_content) {
             return Err(mutation_error(
-                "WRITE_FAILED",
+                "write_failed",
                 format!(
                     "edit: atomic write failed for {raw_path}: {error} — the file on disk was NOT modified"
                 ),
@@ -348,23 +348,23 @@ fn legacy_parse_error(args: &Value) -> Option<crate::ToolResult> {
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
     else {
-        return Some(fail("PARSE_ERROR", "edit: missing 'path'".to_string()));
+        return Some(fail("parse_error", "edit: missing 'path'".to_string()));
     };
     let Some(old_arg) = args.get("old_str").and_then(Value::as_str) else {
-        return Some(fail("PARSE_ERROR", "edit: missing 'old_str'".to_string()));
+        return Some(fail("parse_error", "edit: missing 'old_str'".to_string()));
     };
     let Some(new_arg) = args.get("new_str").and_then(Value::as_str) else {
-        return Some(fail("PARSE_ERROR", "edit: missing 'new_str'".to_string()));
+        return Some(fail("parse_error", "edit: missing 'new_str'".to_string()));
     };
     if old_arg.is_empty() {
         return Some(fail(
-            "PARSE_ERROR",
+            "parse_error",
             "edit: 'old_str' must be non-empty (use write to create a file)".to_string(),
         ));
     }
     if old_arg == new_arg {
         return Some(fail(
-            "PARSE_ERROR",
+            "parse_error",
             "edit: 'old_str' and 'new_str' are identical".to_string(),
         ));
     }

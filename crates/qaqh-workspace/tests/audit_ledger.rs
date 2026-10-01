@@ -193,19 +193,19 @@ fn audit_ledger_traces_calls_end_to_end() {
     assert_eq!(denied_record["kind"], "tool_rejected");
     assert_eq!(denied_record["actor"]["call_id"], "call-2");
     assert_eq!(denied_record["decision"]["outcome"], "challenge_required");
-    assert_eq!(denied_record["result"]["error_code"], "PERMISSION_DENIED");
+    assert_eq!(denied_record["result"]["error_code"], "permission_denied");
     assert_eq!(denied_record["tool"]["permission_level"], 1);
 
     // ③ PLAN 阻断。
     let blocked_record = &records[3];
     assert_eq!(blocked_record["kind"], "tool_rejected");
-    assert_eq!(blocked_record["result"]["error_code"], "BLOCKED_BY_MODE");
+    assert_eq!(blocked_record["result"]["error_code"], "blocked_by_mode");
 
     // ④ 失败终态：执行层错误码透传。
     let failed_record = &records[4];
     assert_eq!(failed_record["kind"], "tool_call");
     assert_eq!(failed_record["result"]["status"], "error");
-    assert_eq!(failed_record["result"]["error_code"], "NOT_FOUND");
+    assert_eq!(failed_record["result"]["error_code"], "not_found");
 
     // 时间与链：seq 连续 + prev_hash 逐条衔接（时间字段必须齐备）。
     for (index, record) in records.iter().enumerate() {

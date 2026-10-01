@@ -323,6 +323,77 @@ fn intent_and_finished_round_trip_after_reopen() {
 }
 
 #[test]
+fn failed_finished_requires_stable_snake_case_error_code() {
+    // 回归（2026-10-02）：exec/grep 失败曾带 legacy 大写码 `TOOL_ERROR`，
+    // canonical 校验拒收导致 tool_finished 永远落盘失败（tool_execution_failed:
+    // canonical fact validation failed）。锁死契约：系统实际产出的 snake_case 码
+    // 必须全部可追加；非 conforming 码必须被校验拒绝。
+    let conforming = [
+        "execution",
+        "tool_error",
+        "partial",
+        "cancelled",
+        "timeout",
+        "not_found",
+        "stale_file",
+        "audit_quarantined",
+        "mcp_tool_error",
+        "ledger_blocked",
+        "tool_denied",
+        "custom_unspecified",
+    ];
+    for code in conforming {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let call = call_id(7);
+        let execution = execution_id(7);
+        let mut ledger = open_ledger(temp.path());
+        ledger
+            .append_intent(
+                event_id(1),
+                None,
+                intent(&call, &execution, ToolReplayCapability::NoReplay),
+                NOW_MS + 1,
+            )
+            .expect("append intent");
+        let mut fact = finished(
+            &call,
+            Some(&execution),
+            ToolTerminalStatus::Failed,
+            NOW_MS + 2,
+        );
+        fact.error.as_mut().expect("error").code = code.to_owned();
+        ledger
+            .append_finished(event_id(2), None, fact, NOW_MS + 2)
+            .unwrap_or_else(|error| panic!("code {code} 必须可追加 canonical fact: {error}"));
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let call = call_id(8);
+    let execution = execution_id(8);
+    let mut ledger = open_ledger(temp.path());
+    ledger
+        .append_intent(
+            event_id(1),
+            None,
+            intent(&call, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 1,
+        )
+        .expect("append intent");
+    let mut fact = finished(
+        &call,
+        Some(&execution),
+        ToolTerminalStatus::Failed,
+        NOW_MS + 2,
+    );
+    fact.error.as_mut().expect("error").code = "TOOL_ERROR".to_owned();
+    let appended = ledger.append_finished(event_id(2), None, fact, NOW_MS + 2);
+    assert!(
+        appended.is_err(),
+        "非 conforming 大写码必须被 canonical 校验拒绝"
+    );
+}
+
+#[test]
 fn duplicate_intent_is_idempotent_and_conflict_is_rejected() {
     let temp = tempfile::tempdir().expect("tempdir");
     let call = call_id(2);
@@ -1051,7 +1122,10 @@ fn compaction_applied_fact_records_the_canonical_head_as_the_replace_boundary() 
     assert_eq!(applied.fact_seq, input.fact_seq + 1);
     match &applied.payload {
         FactPayload::CompactionApplied(payload) => {
-            assert_eq!(payload.checkpoint_id.as_str(), "ckpt_01J00000000000000000000001");
+            assert_eq!(
+                payload.checkpoint_id.as_str(),
+                "ckpt_01J00000000000000000000001"
+            );
             assert_eq!(payload.replaces_through_fact_seq, input.fact_seq);
             assert_eq!(payload.context_revision, 42);
             assert_eq!(payload.summary_ref, content_ref(7));

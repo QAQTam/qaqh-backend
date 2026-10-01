@@ -113,7 +113,7 @@ impl TypedTool for WebFetchTool {
         if !url.starts_with("http") {
             return Err(web_error(
                 ToolErrorKind::InvalidArguments,
-                "MISSING_URL",
+                "missing_url",
                 "web_fetch: 'url' (starting with http) is required; web search is handled by the model's built-in web_search tool",
                 Some("Pass a URL to fetch, or rely on the model's server-side web_search."),
             ));
@@ -145,14 +145,14 @@ fn fetch_content(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
         )
         .call()
-        .map_err(|error| web_fetch_payload_error("FETCH_ERROR", format!("{error}"), ""))?;
+        .map_err(|error| web_fetch_payload_error("fetch_error", format!("{error}"), ""))?;
     if resp
         .body()
         .content_length()
         .is_some_and(|len| len > MAX_WEB_BODY_BYTES)
     {
         return Err(web_fetch_payload_error(
-            "RESPONSE_TOO_LARGE",
+            "response_too_large",
             format!("Response exceeds the {MAX_WEB_BODY_BYTES} byte limit"),
             "Fetch a narrower URL or use a source with a paginated API.",
         ));
@@ -169,7 +169,7 @@ fn fetch_content(
         .read_to_string()
         .map_err(|_| {
             web_fetch_payload_error(
-                "READ_ERROR",
+                "read_error",
                 "Response could not be read within the body limit",
                 "Fetch a narrower URL or use a source with a paginated API.",
             )
@@ -238,7 +238,7 @@ fn web_fetch_payload_error(
         "hint": hint,
     })
     .to_string();
-    web_error(ToolErrorKind::Execution, "TOOL_ERROR", payload, None)
+    web_error(ToolErrorKind::Execution, "tool_error", payload, None)
 }
 
 fn web_error(
@@ -248,7 +248,7 @@ fn web_error(
     hint: Option<&str>,
 ) -> ToolExecutionError {
     let mut error = ToolError::new(kind, message);
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, kind);
     if let Some(hint) = hint {
         error = error.with_hint(hint);
     }
@@ -307,7 +307,7 @@ mod tests {
             .expect_err("missing url");
         match error {
             ToolExecutionError::Recoverable(error) => {
-                assert_eq!(error.code.as_str(), "MISSING_URL");
+                assert_eq!(error.code.as_str(), "missing_url");
                 assert!(error.hint.is_some());
             }
             ToolExecutionError::Fatal(error) => panic!("unexpected fatal: {}", error.code),

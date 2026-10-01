@@ -2465,7 +2465,7 @@ mod tests {
 
     #[test]
     fn edit_failure_result_passes_through_uncut() {
-        // 失败结果（NO_MATCH 候选/详情）不折叠：模型必须看到失败原因与候选才能
+        // 失败结果（no_match 候选/详情）不折叠：模型必须看到失败原因与候选才能
         // 修正重试——折叠会剪断反馈闭环（曾导致 edit 失败时模型只能盲猜
         // 重试 → TTL 过期 → 缓存失效螺旋）。
         let mut store = MessageStore::new_ephemeral("test");
@@ -2473,12 +2473,12 @@ mod tests {
         store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
         store.push_tool_result_direct(
             "edit-1",
-            "[ERROR] NO_MATCH\n  detail: old matches nothing near expected context\n  candidates: [L12, L40]",
+            "[ERROR] no_match\n  detail: old matches nothing near expected context\n  candidates: [L12, L40]",
             true,
         );
 
         let projected = context_result(&store.build_context_for_gate(&[]), "edit-1");
-        assert!(projected.contains("NO_MATCH"));
+        assert!(projected.contains("no_match"));
         assert!(
             projected.contains("candidates"),
             "failure candidates must survive: {projected}"
@@ -2494,12 +2494,12 @@ mod tests {
         store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
         store.push_tool_result_direct(
             "edit-1",
-            "[PARTIAL] 1 hunk(s) applied, 1 failed — re-send ONLY the failed hunks\n  hunk 1: NO_MATCH detail with candidates",
+            "[PARTIAL] 1 hunk(s) applied, 1 failed — re-send ONLY the failed hunks\n  hunk 1: no_match detail with candidates",
             true,
         );
 
         let projected = context_result(&store.build_context_for_gate(&[]), "edit-1");
-        assert!(projected.contains("NO_MATCH"));
+        assert!(projected.contains("no_match"));
         assert!(projected.contains("hunk 1"));
         assert!(!projected.contains("[edit diff folded"));
     }

@@ -328,7 +328,7 @@ fn intent_precedes_handler_finish_is_unique_and_terminal_blocks_replay() {
     assert_eq!(blocked.status, ToolStatus::Error);
     assert_eq!(
         blocked.error.as_ref().map(|error| error.code.as_str()),
-        Some("LEDGER_BLOCKED")
+        Some("ledger_blocked")
     );
 
     // A serial tail cancelled before spawn must be sealed as Cancelled without

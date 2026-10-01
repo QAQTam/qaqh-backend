@@ -97,7 +97,7 @@ fn ensure_shell_available(shell: super::shell::Shell) -> Result<(), ToolExecutio
         return Ok(());
     }
     Err(exec_error(
-        "SHELL_NOT_FOUND",
+        "shell_not_found",
         format!("{} not found on this machine", shell.path()),
         Some(&format!("available shells: {}", available_shells())),
     ))
@@ -114,7 +114,7 @@ fn resolve_shell(
     let resolve_named = |name: &str, source: &str| {
         Shell::from_name(name).ok_or_else(|| {
             exec_error(
-                "UNKNOWN_SHELL",
+                "unknown_shell",
                 format!("unknown shell '{name}' from {source}"),
                 Some(
                     "Use one of: pwsh, powershell, bash, bash4windows, zsh, sh, cmd. The default is auto-detected.",
@@ -149,7 +149,7 @@ fn resolve_shell(
     }
 
     Err(exec_error(
-        "SHELL_NOT_FOUND",
+        "shell_not_found",
         "no supported shell found on this machine",
         Some("Install one of: pwsh, powershell, bash, zsh, sh, cmd."),
     ))
@@ -168,14 +168,14 @@ pub(crate) fn run_exec(
     // ── Resolve shell command ──
     let Some(command) = args.command.as_deref() else {
         return Err(exec_error(
-            "MISSING_COMMAND",
+            "missing_command",
             "exec requires a command string",
             Some(r#"Example: {"command": "cargo check"}"#),
         ));
     };
     if command.trim().is_empty() {
         return Err(exec_error(
-            "EMPTY_COMMAND",
+            "empty_command",
             "command string is empty",
             Some("Provide a shell command string."),
         ));
@@ -185,7 +185,7 @@ pub(crate) fn run_exec(
     let extra_args = args.args.as_deref().filter(|args| !args.is_empty());
     if extra_args.is_some() && shell == Shell::Cmd {
         return Err(exec_error(
-            "ARGS_NOT_SUPPORTED",
+            "args_not_supported",
             "args is only supported for bash/zsh/sh ($1/$@) and pwsh -CommandWithArgs ($args)",
             Some(
                 "Use exec with shell bash/zsh/sh and args as string array (positional $1...), or shell pwsh.",
@@ -311,7 +311,7 @@ pub(crate) fn handle_run_with_shell(
         Ok(args) => args,
         Err(error) => {
             return crate::json_err(
-                "INVALID_ARGUMENTS",
+                "invalid_arguments",
                 format!("invalid arguments: {error}"),
                 "",
             );

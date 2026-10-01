@@ -178,7 +178,7 @@ impl TypedTool for SkillsTool {
             }
             "activate" | "list" | "resource" | "validate" => Err(recoverable(legacy_error(
                 ToolErrorKind::InvalidArguments,
-                "INVALID_ARGUMENTS",
+                "invalid_arguments",
                 "arguments do not match the selected skills action",
             )
             .with_hint(
@@ -186,7 +186,7 @@ impl TypedTool for SkillsTool {
             ))),
             _ => Err(recoverable(legacy_error(
                 ToolErrorKind::InvalidArguments,
-                "INVALID_ACTION",
+                "invalid_action",
                 "skills action must be activate, list, resource, or validate",
             )
             .with_hint("Choose the action matching the required skill operation."))),
@@ -197,7 +197,7 @@ impl TypedTool for SkillsTool {
 fn activate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillsOutput, ToolExecutionError> {
     let activation = qaqh_skills::load_named(&ctx.workspace_root, name).map_err(|error| {
         recoverable(
-            legacy_error(ToolErrorKind::NotFound, "SKILL_NOT_AVAILABLE", error)
+            legacy_error(ToolErrorKind::NotFound, "skill_not_available", error)
                 .with_hint("Use an exact name from the current skill catalog."),
         )
     })?;
@@ -261,7 +261,7 @@ fn read_resource(
         return Err(recoverable(
             legacy_error(
                 ToolErrorKind::InvalidArguments,
-                "MISSING_ARGUMENT",
+                "missing_argument",
                 "skill resource requires name and path",
             )
             .with_hint("Use an exact skill name and a relative path from its resource manifest."),
@@ -272,7 +272,7 @@ fn read_resource(
             recoverable(
                 legacy_error(
                     ToolErrorKind::Unavailable,
-                    "SKILL_RESOURCE_UNAVAILABLE",
+                    "skill_resource_unavailable",
                     error,
                 )
                 .with_hint("Use a relative file path listed by the activated skill."),
@@ -289,7 +289,7 @@ fn validate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillsOutput, Too
         return Err(recoverable(
             legacy_error(
                 ToolErrorKind::InvalidArguments,
-                "MISSING_NAME",
+                "missing_name",
                 "skill name is required",
             )
             .with_hint("Use an exact name from the current skill catalog."),
@@ -300,7 +300,7 @@ fn validate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillsOutput, Too
         return Err(recoverable(
             legacy_error(
                 ToolErrorKind::NotFound,
-                "SKILL_NOT_AVAILABLE",
+                "skill_not_available",
                 format!("unknown skill '{name}'"),
             )
             .with_hint("Use an exact name from the current skill catalog."),
@@ -325,7 +325,7 @@ fn recoverable(error: ToolError) -> ToolExecutionError {
 
 fn legacy_error(kind: ToolErrorKind, code: &str, detail: impl Into<String>) -> ToolError {
     let mut error = ToolError::new(kind, detail);
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, kind);
     error
 }
 

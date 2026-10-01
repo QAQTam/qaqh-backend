@@ -10,11 +10,11 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use qaqh_policy::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 use super::dashboard;
 use super::tool_runtime::{ToolRunOutcome, ToolRuntime};
 use crate::agent::state::agent::PendingApproval;
 use qaqh_domain::{AskMode, AskQuestion};
+use qaqh_policy::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 
 use super::types::*;
 
@@ -305,7 +305,7 @@ impl ToolEngine {
                         turn_id: turn_id.clone(),
                         round_num: 0,
                         result: qaqh_types::ToolResult::error_with(
-                            "TOOL_DENIED",
+                            "tool_denied",
                             reason.to_string(),
                             false,
                             None,
@@ -1001,7 +1001,7 @@ impl ToolEngine {
                 turn_id: turn_id.clone(),
                 round_num: 0,
                 result: qaqh_types::ToolResult::error_with(
-                    "TOOL_DENIED",
+                    "tool_denied",
                     reason.to_string(),
                     false,
                     None,

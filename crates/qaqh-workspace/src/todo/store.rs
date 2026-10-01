@@ -130,7 +130,7 @@ pub fn todo_status_json(session_id: &str) -> Result<String, String> {
 /// Direct cancel by session seed — no runtime context needed.
 pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value, String> {
     if session_id.is_empty() {
-        return Err(json_err_string("INVALID_INPUT", "no active session", ""));
+        return Err(json_err_string("invalid_input", "no active session", ""));
     }
     let _guard = TODO_LOCK
         .lock()
@@ -140,7 +140,7 @@ pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value
         .join("todo.json");
     if !path.exists() {
         return Err(json_err_string(
-            "NOT_FOUND",
+            "not_found",
             "no todo list for this session",
             "",
         ));
@@ -154,7 +154,7 @@ pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value
         .position(|item| item.id == id)
         .ok_or_else(|| {
             json_err_string(
-                "NOT_FOUND",
+                "not_found",
                 format!("todo {id} not found"),
                 "Use todo(action=\"list\") to see all IDs.",
             )

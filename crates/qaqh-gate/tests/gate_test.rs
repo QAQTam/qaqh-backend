@@ -1670,7 +1670,7 @@ fn responses_empty_input_sync_reports_diagnostic_error() {
 
     let err =
         qaqh_gate::chat_sync(&provider, vec![], 1024).expect_err("空输入必须报错而非发空请求");
-    assert!(err.contains("EMPTY_REQUEST"), "错误必须可诊断，got: {err}");
+    assert!(err.contains("empty_request"), "错误必须可诊断，got: {err}");
     assert_eq!(
         mock.request_count.load(Ordering::SeqCst),
         0,

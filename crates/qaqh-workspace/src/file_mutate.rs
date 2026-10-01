@@ -88,15 +88,15 @@ pub(crate) fn mutation_error_with_retryable(
     hint: Option<&str>,
     details: Value,
 ) -> ToolExecutionError {
-    let kind = if code == "STALE_FILE" {
+    let kind = if code == "stale_file" {
         ToolErrorKind::Conflict
-    } else if code == "NOT_FOUND" || code.ends_with("_NOT_FOUND") {
+    } else if code == "not_found" || code.ends_with("_not_found") {
         ToolErrorKind::NotFound
     } else {
         ToolErrorKind::Execution
     };
     let mut error = ToolError::new(kind, message);
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, kind);
     if let Some(retryable) = retryable {
         error.retryable = retryable;
     }
@@ -109,7 +109,7 @@ pub(crate) fn mutation_error_with_retryable(
 
 fn write_io_error(path: &str, error: &std::io::Error) -> ToolExecutionError {
     mutation_error(
-        "TOOL_ERROR",
+        "tool_error",
         write_error(path, error),
         None,
         json!({"path": path}),
@@ -295,7 +295,7 @@ impl TypedTool for WriteTool {
         if let Err(guard) = crate::file_shared::ensure_writable_regular_target(&path) {
             let hint = guard.hint().unwrap_or_default();
             return Err(mutation_error(
-                "TOOL_ERROR",
+                "tool_error",
                 format!(
                     "[ERROR] Cannot write {raw_path}: {} [HINT] {hint}",
                     guard.message()
@@ -323,8 +323,8 @@ impl TypedTool for WriteTool {
             let actual_hash = content_hash(&normalized_old);
             if actual_hash != expected_hash {
                 return Err(mutation_error(
-                    "STALE_FILE",
-                    "STALE_FILE: File content changed since the referenced read",
+                    "stale_file",
+                    "stale_file: File content changed since the referenced read",
                     Some("Use read to obtain current content and hash, then retry the edit."),
                     json!({
                         "path": &path,
@@ -344,8 +344,8 @@ impl TypedTool for WriteTool {
             let disk_lf_hash = content_hash(&normalized_old);
             if known != disk_lf_hash {
                 return Err(mutation_error(
-                    "STALE_FILE",
-                    "STALE_FILE: File was modified outside the tool since the last read/edit",
+                    "stale_file",
+                    "stale_file: File was modified outside the tool since the last read/edit",
                     Some("Use read to refresh the tool's view of the file, then retry the write."),
                     json!({
                         "path": &path,
@@ -672,8 +672,8 @@ impl TypedTool for DeleteTool {
         let source = Path::new(&path);
         if !source.exists() {
             return Err(mutation_error(
-                "NOT_FOUND",
-                format!("NOT_FOUND: {path} does not exist"),
+                "not_found",
+                format!("not_found: {path} does not exist"),
                 Some("Use exec command \"ls -la\" to verify."),
                 json!({"path": &path}),
             ));
@@ -688,8 +688,8 @@ impl TypedTool for DeleteTool {
                 let disk_lf_hash = content_hash(&lf);
                 if known != disk_lf_hash {
                     return Err(mutation_error(
-                        "STALE_FILE",
-                        "STALE_FILE: File was modified outside the tool since the last read/edit",
+                        "stale_file",
+                        "stale_file: File was modified outside the tool since the last read/edit",
                         Some(
                             "Use read to refresh the tool's view of the file, then retry the delete.",
                         ),
@@ -761,7 +761,7 @@ impl TypedTool for DeleteTool {
             Err(_error) => {
                 if source.is_dir() {
                     return Err(mutation_error(
-                        "CROSS_DEVICE_DIR",
+                        "cross_device_dir",
                         "Cannot trash directory across devices",
                         Some(&format!(
                             "Use exec command \"rm -rf '{}'\" for cross-device deletion.",
@@ -772,7 +772,7 @@ impl TypedTool for DeleteTool {
                 }
                 if let Err(error) = std::fs::copy(source, &trash_path) {
                     return Err(mutation_error(
-                        "COPY_FAILED",
+                        "copy_failed",
                         error.to_string(),
                         Some("Check permissions and disk space."),
                         json!({"path": &path}),
@@ -809,7 +809,7 @@ impl TypedTool for DeleteTool {
                         })
                     }
                     Err(error) => Err(mutation_error(
-                        "DELETE_FAILED",
+                        "delete_failed",
                         format!("Copied to trash but could not remove original: {error}"),
                         Some(&format!(
                             "Original still at {path}; remove it manually or retry."
@@ -1177,8 +1177,8 @@ mod tests {
         let path = dir.path().join("missing.txt");
         let result = execute_delete(dir.path(), json!({"path": path}));
         assert!(!result.is_success());
-        assert_eq!(result.error.as_ref().unwrap().code, "NOT_FOUND");
-        assert!(result.model_text().contains("NOT_FOUND"));
+        assert_eq!(result.error.as_ref().unwrap().code, "not_found");
+        assert!(result.model_text().contains("not_found"));
     }
 
     #[test]
@@ -1191,7 +1191,7 @@ mod tests {
         std::fs::write(&path, "changed outside\n").unwrap();
         let result = execute_delete(dir.path(), json!({"path": raw_path}));
         assert!(!result.is_success());
-        assert_eq!(result.error.as_ref().unwrap().code, "STALE_FILE");
+        assert_eq!(result.error.as_ref().unwrap().code, "stale_file");
         assert!(path.exists());
     }
 }

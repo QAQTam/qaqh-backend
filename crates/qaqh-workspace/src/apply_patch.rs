@@ -135,7 +135,7 @@ impl TypedTool for ApplyPatchTool {
 
         if args.patch.is_empty() {
             return Err(mutation_error(
-                "PARSE_ERROR",
+                "parse_error",
                 "apply_patch: missing 'patch'",
                 Some(
                     "Provide a Codex-format patch: '*** Begin Patch' ... '*** End Patch' (see the tool description for the format).",
@@ -299,31 +299,31 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
             )
         }
         EngineError::Parse(_) => (
-            "PARSE_ERROR",
+            "parse_error",
             "The patch does not follow the Codex apply-patch format: start with '*** Begin Patch', end with '*** End Patch'; hunk lines start with '+' (add), '-' (remove), ' ' (context); '@@' starts a chunk (optionally with a context line).".to_string(),
         ),
         EngineError::Compute(_) => (
-            "NO_MATCH",
+            "no_match",
             "The engine could not find the expected lines in the target file (4-tier matching: exact → trailing-whitespace → trimmed → Unicode-normalised). Check the 'old' lines against the file; use '@@ <context>' to anchor the chunk, or '*** End of File' for end-of-file hunks.".to_string(),
         ),
         EngineError::EmptyPatch => (
-            "EMPTY_PATCH",
+            "empty_patch",
             "The patch parsed to zero hunks; at least one '*** Add File: / *** Delete File: / *** Update File:' section is required.".to_string(),
         ),
         EngineError::Io { .. } => (
-            "IO_ERROR",
+            "io_error",
             "A filesystem operation failed (read/write/remove).".to_string(),
         ),
         EngineError::PathOutsideWorkspace { .. } => (
-            "PATH_OUTSIDE_WORKSPACE",
+            "path_outside_workspace",
             "Every patch path must resolve inside the workspace root; '..' escapes and absolute paths outside the workspace are rejected.".to_string(),
         ),
         EngineError::SymlinkTarget { .. } => (
-            "SYMLINK_TARGET",
+            "symlink_target",
             "Patch paths must not be symbolic links: resolve the link and retry with the real target path (links are never replaced or written through).".to_string(),
         ),
         EngineError::WouldOverwrite { .. } => (
-            "WOULD_OVERWRITE",
+            "would_overwrite",
             "dry-run finding: '*** Add File:' would replace an existing file wholesale. Use '*** Update File:' to edit it in place (or '*** Delete File:' first). To overwrite deliberately, re-send the same patch without dry_run — a real apply keeps the upstream overwrite semantics and records the replaced contents in the delta/journal for rollback.".to_string(),
         ),
     }
@@ -358,7 +358,7 @@ pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
             json!({
                 "timeis": crate::now_utc8(),
                 "status": "error",
-                "code": "PARSE_ERROR",
+                "code": "parse_error",
                 "message": "apply_patch: missing 'patch'",
                 "hint": "Provide a Codex-format patch: '*** Begin Patch' ... '*** End Patch' (see the tool description for the format).",
             })
@@ -502,7 +502,7 @@ mod tests {
 ";
         let out = run_in(&ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "error", "got: {out}");
-        assert_eq!(out["code"], "NO_MATCH");
+        assert_eq!(out["code"], "no_match");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "line1\nline2\n"
@@ -524,7 +524,7 @@ mod tests {
 ";
         let out = run_in(&ws, patch, serde_json::json!({ "dry_run": true }));
         assert_eq!(out["status"], "error", "got: {out}");
-        assert_eq!(out["code"], "WOULD_OVERWRITE", "got: {out}");
+        assert_eq!(out["code"], "would_overwrite", "got: {out}");
         let hint = out["hint"].as_str().unwrap_or_default();
         assert!(
             hint.contains("overwrite"),
@@ -655,7 +655,7 @@ mod tests {
         let result = exec_apply_patch(&serde_json::json!({ "patch": patch }));
         let envelope = result.render_xml_envelope();
         assert!(
-            envelope.contains("error_code=\"NO_MATCH\""),
+            envelope.contains("error_code=\"no_match\""),
             "got: {envelope}"
         );
         assert!(
@@ -790,7 +790,7 @@ mod tests {
             link.display()
         );
         let out = run_in(&ws, &patch, serde_json::json!({}));
-        assert_eq!(out["code"], "SYMLINK_TARGET", "got: {out}");
+        assert_eq!(out["code"], "symlink_target", "got: {out}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
         assert!(
             std::fs::symlink_metadata(&link)

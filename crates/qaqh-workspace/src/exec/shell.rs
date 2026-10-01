@@ -227,11 +227,13 @@ impl Shell {
                 .map(String::as_str)
                 .or(resolved)
                 .unwrap_or("pwsh"),
-            Shell::WindowsPowerShell => windows_system_shell(&SYSTEM_POWERSHELL_PATH, SYSTEM_POWERSHELL_REL)
-                .as_deref()
-                .or(registered.map(String::as_str))
-                .or(resolved)
-                .unwrap_or("powershell"),
+            Shell::WindowsPowerShell => {
+                windows_system_shell(&SYSTEM_POWERSHELL_PATH, SYSTEM_POWERSHELL_REL)
+                    .as_deref()
+                    .or(registered.map(String::as_str))
+                    .or(resolved)
+                    .unwrap_or("powershell")
+            }
             Shell::Cmd => windows_system_shell(&SYSTEM_CMD_PATH, SYSTEM_CMD_REL)
                 .as_deref()
                 .or(registered.map(String::as_str))
@@ -371,13 +373,18 @@ static SYSTEM_POWERSHELL_PATH: OnceLock<Option<String>> = OnceLock::new();
 /// Windows 系统组件壳的固定绝对路径：cmd / powershell 钉到 System32 下，
 /// PATH 形态异常时也不落回裸名搜索（裸名在 Windows 会先搜当前目录）。
 /// 非 Windows 平台恒 `None`（这两个壳本就只在 Windows 语义里出现）。
-fn windows_system_shell(cache: &'static OnceLock<Option<String>>, relative: &str) -> &'static Option<String> {
+fn windows_system_shell(
+    cache: &'static OnceLock<Option<String>>,
+    relative: &str,
+) -> &'static Option<String> {
     cache.get_or_init(|| {
         #[cfg(windows)]
         {
             let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
             let candidate = std::path::Path::new(&root).join(relative);
-            candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+            candidate
+                .is_file()
+                .then(|| candidate.to_string_lossy().into_owned())
         }
         #[cfg(not(windows))]
         {

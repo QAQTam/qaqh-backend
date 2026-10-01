@@ -812,21 +812,21 @@ impl ToolError {
     /// 审计账本，避免两处映射漂移。
     pub fn code(&self) -> &'static str {
         match self {
-            Self::ManagerUnavailable => "MANAGER_UNAVAILABLE",
-            Self::UnknownTool { .. } => "UNKNOWN_TOOL",
-            Self::SessionMismatch => "SESSION_MISMATCH",
-            Self::PermissionDenied { .. } => "PERMISSION_DENIED",
-            Self::Cancelled => "CANCELLED",
-            Self::BlockedByMode { .. } => "BLOCKED_BY_MODE",
-            Self::InvalidArgs { .. } => "INVALID_ARGUMENTS",
-            Self::Io { .. } => "IO_ERROR",
-            Self::ResourceMismatch => "RESOURCE_MISMATCH",
-            Self::RuntimeNotInitialized => "RUNTIME_NOT_INITIALIZED",
-            Self::AuditUnavailable { .. } => "AUDIT_UNAVAILABLE",
-            Self::AuditQuarantined { .. } => "AUDIT_QUARANTINED",
-            Self::ToolSpecific { .. } => "TOOL_ERROR",
-            Self::Partial { .. } => "PARTIAL",
-            Self::Internal { .. } => "INTERNAL_ERROR",
+            Self::ManagerUnavailable => "manager_unavailable",
+            Self::UnknownTool { .. } => "unknown_tool",
+            Self::SessionMismatch => "session_mismatch",
+            Self::PermissionDenied { .. } => "permission_denied",
+            Self::Cancelled => "cancelled",
+            Self::BlockedByMode { .. } => "blocked_by_mode",
+            Self::InvalidArgs { .. } => "invalid_arguments",
+            Self::Io { .. } => "io_error",
+            Self::ResourceMismatch => "resource_mismatch",
+            Self::RuntimeNotInitialized => "runtime_not_initialized",
+            Self::AuditUnavailable { .. } => "audit_unavailable",
+            Self::AuditQuarantined { .. } => "audit_quarantined",
+            Self::ToolSpecific { .. } => "tool_error",
+            Self::Partial { .. } => "partial",
+            Self::Internal { .. } => "internal_error",
         }
     }
 

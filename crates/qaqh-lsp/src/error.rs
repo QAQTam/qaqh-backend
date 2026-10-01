@@ -18,15 +18,15 @@ pub enum LspErrorKind {
 impl LspErrorKind {
     pub fn code(self) -> &'static str {
         match self {
-            LspErrorKind::Disabled => "LSP_DISABLED",
-            LspErrorKind::NotFound => "LSP_NOT_FOUND",
-            LspErrorKind::ConnectFailed => "LSP_CONNECT_FAILED",
-            LspErrorKind::ConnectTimeout => "LSP_CONNECT_TIMEOUT",
-            LspErrorKind::ServerCrashed => "LSP_SERVER_CRASHED",
-            LspErrorKind::Timeout => "LSP_TIMEOUT",
-            LspErrorKind::Protocol => "LSP_PROTOCOL_ERROR",
-            LspErrorKind::Cancelled => "LSP_CANCELLED",
-            LspErrorKind::Shutdown => "LSP_SHUTDOWN",
+            LspErrorKind::Disabled => "lsp_disabled",
+            LspErrorKind::NotFound => "lsp_not_found",
+            LspErrorKind::ConnectFailed => "lsp_connect_failed",
+            LspErrorKind::ConnectTimeout => "lsp_connect_timeout",
+            LspErrorKind::ServerCrashed => "lsp_server_crashed",
+            LspErrorKind::Timeout => "lsp_timeout",
+            LspErrorKind::Protocol => "lsp_protocol_error",
+            LspErrorKind::Cancelled => "lsp_cancelled",
+            LspErrorKind::Shutdown => "lsp_shutdown",
         }
     }
 }

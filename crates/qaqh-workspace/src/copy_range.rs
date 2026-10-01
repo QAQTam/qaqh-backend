@@ -136,16 +136,16 @@ fn run_copy_range(
 ) -> Result<RangeResult, ToolExecutionError> {
     let src_content = std::fs::read_to_string(src).map_err(|error| {
         mutation_error(
-            "SOURCE_READ_ERROR",
+            "source_read_error",
             format!(
-                "SOURCE_READ_ERROR: failed to read source {}: {error}",
+                "source_read_error: failed to read source {}: {error}",
                 src.to_string_lossy()
             ),
             None,
             json!({
                 "timeis": crate::now_utc8(),
                 "status": "error",
-                "code": "SOURCE_READ_ERROR",
+                "code": "source_read_error",
                 "path": src.to_string_lossy(),
             }),
         )
@@ -159,11 +159,11 @@ fn run_copy_range(
     // ── 源区间定位 ──────────────────────────────────────────────
     let start_hits = locate_exact(&src_lines, start_anchor);
     if start_hits.is_empty() {
-        return Err(not_found_error("SOURCE_START_NOT_FOUND", start_anchor));
+        return Err(not_found_error("source_start_not_found", start_anchor));
     }
     if start_hits.len() > 1 {
         return Err(ambiguous_error(
-            "SOURCE_START_AMBIGUOUS",
+            "source_start_ambiguous",
             start_anchor,
             &start_hits,
         ));
@@ -182,7 +182,7 @@ fn run_copy_range(
                 .collect();
             match end_hits.first() {
                 Some(&index) => index,
-                None => return Err(not_found_error("SOURCE_END_NOT_FOUND", end_anchor)),
+                None => return Err(not_found_error("source_end_not_found", end_anchor)),
             }
         }
         None => start_idx,
@@ -194,16 +194,16 @@ fn run_copy_range(
     // ── 目标读取与插入点定位 ────────────────────────────────────
     let target_before = std::fs::read_to_string(tgt).map_err(|error| {
         mutation_error(
-            "TARGET_READ_ERROR",
+            "target_read_error",
             format!(
-                "TARGET_READ_ERROR: failed to read target {}: {error}",
+                "target_read_error: failed to read target {}: {error}",
                 tgt.to_string_lossy()
             ),
             None,
             json!({
                 "timeis": crate::now_utc8(),
                 "status": "error",
-                "code": "TARGET_READ_ERROR",
+                "code": "target_read_error",
                 "path": tgt.to_string_lossy(),
             }),
         )
@@ -220,25 +220,25 @@ fn run_copy_range(
         Mode::InsertAfter | Mode::InsertBefore => {
             let anchor = target_anchor.ok_or_else(|| {
                 mutation_error(
-                    "MISSING_TARGET_ANCHOR",
+                    "missing_target_anchor",
                     format!(
-                        "MISSING_TARGET_ANCHOR: mode={:?} requires 'target_anchor'",
+                        "missing_target_anchor: mode={:?} requires 'target_anchor'",
                         mode.name()
                     ),
                     None,
                     json!({
                         "timeis": crate::now_utc8(),
                         "status": "error",
-                        "code": "MISSING_TARGET_ANCHOR",
+                        "code": "missing_target_anchor",
                     }),
                 )
             })?;
             let hits = locate_exact(&tgt_lines, anchor);
             if hits.is_empty() {
-                return Err(not_found_error("TARGET_ANCHOR_NOT_FOUND", anchor));
+                return Err(not_found_error("target_anchor_not_found", anchor));
             }
             if hits.len() > 1 {
-                return Err(ambiguous_error("TARGET_ANCHOR_AMBIGUOUS", anchor, &hits));
+                return Err(ambiguous_error("target_anchor_ambiguous", anchor, &hits));
             }
             match mode {
                 Mode::InsertAfter => hits[0] + 1,
@@ -253,9 +253,9 @@ fn run_copy_range(
         // 插入点落在 [start..=end] 区间内 → 位移后区间漂移。
         // （insert_at == end_idx + 1，即区间正后方插入，是安全的。）
         return Err(mutation_error(
-            "INSERT_INSIDE_RANGE",
+            "insert_inside_range",
             format!(
-                "INSERT_INSIDE_RANGE: source and target are the same file and the insertion point (after line {}) lies inside the copied range L{}-L{} — copy would shift the range",
+                "insert_inside_range: source and target are the same file and the insertion point (after line {}) lies inside the copied range L{}-L{} — copy would shift the range",
                 insert_at, range.0, range.1
             ),
             Some(
@@ -264,7 +264,7 @@ fn run_copy_range(
             json!({
                 "timeis": crate::now_utc8(),
                 "status": "error",
-                "code": "INSERT_INSIDE_RANGE",
+                "code": "insert_inside_range",
             }),
         ));
     }
@@ -294,16 +294,16 @@ fn run_copy_range(
     }
     std::fs::write(tgt, &target_after).map_err(|error| {
         mutation_error(
-            "TARGET_WRITE_ERROR",
+            "target_write_error",
             format!(
-                "TARGET_WRITE_ERROR: failed to write target {}: {error}",
+                "target_write_error: failed to write target {}: {error}",
                 tgt.to_string_lossy()
             ),
             None,
             json!({
                 "timeis": crate::now_utc8(),
                 "status": "error",
-                "code": "TARGET_WRITE_ERROR",
+                "code": "target_write_error",
                 "path": tgt.to_string_lossy(),
             }),
         )
@@ -436,9 +436,9 @@ impl TypedTool for CopyRangeTool {
     ) -> Result<Self::Output, ToolExecutionError> {
         let mode = Mode::parse(&args.mode).ok_or_else(|| {
             mutation_error(
-                "INVALID_MODE",
+                "invalid_mode",
                 format!(
-                    "INVALID_MODE: invalid mode — use one of: {}",
+                    "invalid_mode: invalid mode — use one of: {}",
                     MODES.join(" | ")
                 ),
                 None,
@@ -452,8 +452,8 @@ impl TypedTool for CopyRangeTool {
             crate::apply_patch_engine::resolve_workspace_path(&workspace, Path::new(&source_path))
                 .map_err(|error| {
                     mutation_error(
-                        "PATH_OUTSIDE_WORKSPACE",
-                        format!("PATH_OUTSIDE_WORKSPACE: {error}"),
+                        "path_outside_workspace",
+                        format!("path_outside_workspace: {error}"),
                         None,
                         json!({}),
                     )
@@ -462,8 +462,8 @@ impl TypedTool for CopyRangeTool {
             crate::apply_patch_engine::resolve_workspace_path(&workspace, Path::new(&target_path))
                 .map_err(|error| {
                     mutation_error(
-                        "PATH_OUTSIDE_WORKSPACE",
-                        format!("PATH_OUTSIDE_WORKSPACE: {error}"),
+                        "path_outside_workspace",
+                        format!("path_outside_workspace: {error}"),
                         None,
                         json!({}),
                     )
@@ -565,7 +565,7 @@ fn exec_copy_range(args: &Value) -> crate::ToolResult {
     if get("source_path").is_none() || get("source_start").is_none() || get("target_path").is_none()
     {
         return crate::json_err(
-            "MISSING_ARGUMENT",
+            "missing_argument",
             "copy_range requires 'source_path', 'source_start' and 'target_path'",
             "",
         );
@@ -741,7 +741,7 @@ mod tests {
     fn ambiguous_source_start_rejected_with_candidates() {
         let (_dir, ws) = setup(&[("src.rs", "dup\nx\ndup\ny\n"), ("dst.rs", "out\n")]);
         let err = run(&ws, "src.rs", "dup", None, "dst.rs", None, "append").unwrap_err();
-        assert!(err.contains("SOURCE_START_AMBIGUOUS"), "got: {err}");
+        assert!(err.contains("source_start_ambiguous"), "got: {err}");
         assert!(err.contains("L1"), "candidates expected, got: {err}");
         assert!(err.contains("L3"), "candidates expected, got: {err}");
     }
@@ -759,7 +759,7 @@ mod tests {
             "append",
         )
         .unwrap_err();
-        assert!(err.contains("SOURCE_END_NOT_FOUND"), "got: {err}");
+        assert!(err.contains("source_end_not_found"), "got: {err}");
     }
 
     #[test]
@@ -775,7 +775,7 @@ mod tests {
             "insert_after",
         )
         .unwrap_err();
-        assert!(err.contains("INSERT_INSIDE_RANGE"), "got: {err}");
+        assert!(err.contains("insert_inside_range"), "got: {err}");
     }
 
     #[test]
@@ -931,7 +931,7 @@ mod tests {
             "write with the pre-copy fingerprint must be rejected as STALE_FILE"
         );
         assert!(
-            stale.model_text().contains("STALE_FILE"),
+            stale.model_text().contains("stale_file"),
             "expected STALE_FILE, got: {}",
             stale.model_text()
         );
@@ -972,6 +972,6 @@ mod tests {
     fn missing_anchor_when_mode_requires_it() {
         let (_dir, ws) = setup(&[("src.rs", "s\n"), ("dst.rs", "t\n")]);
         let err = run(&ws, "src.rs", "s", None, "dst.rs", None, "insert_after").unwrap_err();
-        assert!(err.contains("MISSING_TARGET_ANCHOR"), "got: {err}");
+        assert!(err.contains("missing_target_anchor"), "got: {err}");
     }
 }

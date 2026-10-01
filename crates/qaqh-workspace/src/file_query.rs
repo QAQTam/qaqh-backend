@@ -137,7 +137,7 @@ impl TypedTool for ReadTool {
         });
         if requests.is_empty() || requests.len() > 8 {
             return Err(read_error(
-                "INVALID_REQUEST_COUNT",
+                "invalid_request_count",
                 "read accepts between 1 and 8 file requests",
                 Some("Split the read into multiple calls."),
                 json!({"max_requests": 8}),
@@ -152,7 +152,7 @@ impl TypedTool for ReadTool {
             total_chars += part.body.chars().count();
             if total_chars > 48_000 {
                 return Err(read_error(
-                    "RANGE_TOO_LARGE",
+                    "range_too_large",
                     "combined read result exceeds the 12k-token lap budget",
                     Some("Read fewer files or split the requests."),
                     json!({"max_tokens": 12_000}),
@@ -176,7 +176,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
     let path = resolve_read_path(ctx, &request.path);
     if path.is_empty() {
         return Err(read_error(
-            "TOOL_ERROR",
+            "tool_error",
             "read: path is required",
             None,
             json!({}),
@@ -187,7 +187,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         qaqh_skills::managed_skill_for_path(Path::new(&workspace), Path::new(&path))
     {
         return Err(read_error(
-            "USE_SKILLS_TOOL",
+            "use_skills_tool",
             format!("'{path}' is managed by skill '{skill}'"),
             Some("Use skills(action=activate|resource, name=...) instead."),
             json!({"path": path}),
@@ -195,7 +195,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
     }
     if Path::new(&path).is_dir() {
         return Err(read_error(
-            "IS_DIRECTORY",
+            "is_directory",
             format!("'{path}' is a directory"),
             Some(
                 "Use exec command \"rg --files\" (or \"ls -la\" / \"dir /b\" on cmd) to list directory contents.",
@@ -214,7 +214,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         && meta.len() > crate::file_shared::READ_MAX_BYTES
     {
         return Err(read_error(
-            "FILE_TOO_LARGE",
+            "file_too_large",
             format!(
                 "'{path}' is {} bytes (read limit {} bytes)",
                 meta.len(),
@@ -240,7 +240,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
     if let (Some(start), Some(end)) = (start, end) {
         if end < start {
             return Err(read_error(
-                "TOOL_ERROR",
+                "tool_error",
                 "end_line must be greater than or equal to start_line",
                 None,
                 json!({}),
@@ -248,7 +248,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         }
         if end - start + 1 > MAX_LINES {
             return Err(read_error(
-                "RANGE_TOO_LARGE",
+                "range_too_large",
                 format!("requested range exceeds {MAX_LINES} lines"),
                 Some("Use smaller contiguous ranges."),
                 json!({"max_lines": MAX_LINES}),
@@ -260,7 +260,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         Ok(raw) => raw,
         Err(error) if is_binary_read_error(&error.to_string()) => {
             return Err(read_error(
-                "BINARY_FILE",
+                "binary_file",
                 format!("'{path}' is binary and cannot be read as text"),
                 Some("Use exec for a binary-aware inspection."),
                 json!({"path": path}),
@@ -268,7 +268,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         }
         Err(error) => {
             return Err(read_error(
-                "NOT_FOUND",
+                "not_found",
                 format!("cannot read '{path}': {error}"),
                 Some("Verify the path, then retry read."),
                 json!({"path": path}),
@@ -319,7 +319,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
     let first = start.unwrap_or(1).saturating_sub(1);
     if first > total_lines {
         return Err(read_error(
-            "LINE_OUT_OF_RANGE",
+            "line_out_of_range",
             format!("requested lines are outside '{path}' ({total_lines} total lines)"),
             Some("Use the total_lines value and retry."),
             json!({"path": path, "total_lines": total_lines, "hash": hash}),
@@ -329,7 +329,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
     let mut end_index = requested_end;
     if explicit && end_index.saturating_sub(first) > MAX_MODEL_CHARS / 40 {
         return Err(read_error(
-            "RANGE_TOO_LARGE",
+            "range_too_large",
             "requested range exceeds the model output budget",
             Some("Split the range into smaller contiguous reads."),
             json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
@@ -363,7 +363,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         .join("\n");
     if explicit && body.chars().count() > MAX_MODEL_CHARS {
         return Err(read_error(
-            "RANGE_TOO_LARGE",
+            "range_too_large",
             "requested range exceeds the model output budget",
             Some("Split the range into smaller contiguous reads."),
             json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
@@ -482,7 +482,7 @@ fn read_error(
     details: Value,
 ) -> ToolExecutionError {
     let mut error = ToolError::new(ToolErrorKind::Execution, message);
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, ToolErrorKind::Execution);
     if let Some(hint) = hint {
         error = error.with_hint(hint);
     }
@@ -563,7 +563,7 @@ mod tests {
         }));
 
         assert!(!result.is_success());
-        assert_eq!(result.error.as_ref().unwrap().code, "IS_DIRECTORY");
+        assert_eq!(result.error.as_ref().unwrap().code, "is_directory");
     }
 
     #[test]
@@ -647,7 +647,7 @@ fn out_of_range_start_still_rejects() {
         "start_line": 10,
     }));
     assert!(!result.is_success());
-    assert_eq!(result.error.as_ref().unwrap().code, "LINE_OUT_OF_RANGE");
+    assert_eq!(result.error.as_ref().unwrap().code, "line_out_of_range");
     assert_eq!(result.data["total_lines"], 2);
     assert!(result.data["hash"].as_str().is_some());
 }

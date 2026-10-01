@@ -314,7 +314,7 @@ async fn tool_error_maps_is_error() {
     let result = dispatch_sync(&manager, "mcp__mock__fail", json!({}), &cancel, None);
     assert!(!result.is_success());
     let (code, message) = error_code_of(&result);
-    assert_eq!(code, "MCP_TOOL_ERROR");
+    assert_eq!(code, "mcp_tool_error");
     assert!(
         message.contains("boom: simulated tool failure"),
         "content 透传：{message}"
@@ -340,7 +340,7 @@ async fn cancel_hits_and_sends_notification() {
     flagger.join().unwrap();
     let elapsed = started.elapsed();
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_CANCELLED", "实际返回：{}", result.model_text());
+    assert_eq!(code, "mcp_cancelled", "实际返回：{}", result.model_text());
     assert!(
         elapsed < Duration::from_millis(1800),
         "取消应在工具完成前生效（实际 {elapsed:?}）"
@@ -367,7 +367,7 @@ async fn timeout_keeps_connection_healthy() {
     let cancel = AtomicBool::new(false);
     let result = dispatch_sync(&manager, "mcp__mock__slow", json!({}), &cancel, Some(1));
     let (code, message) = error_code_of(&result);
-    assert_eq!(code, "MCP_TIMEOUT");
+    assert_eq!(code, "mcp_timeout");
     assert!(
         message.contains("may still be executing"),
         "hint 语义：{message}"
@@ -489,7 +489,7 @@ async fn subprocess_crash_mid_call_reports_server_crashed() {
     let (code, _message) = error_code_of(&result);
     assert_eq!(
         code,
-        "MCP_SERVER_CRASHED",
+        "mcp_server_crashed",
         "进程死亡必须报 crash：{}",
         result.model_text()
     );
@@ -533,7 +533,7 @@ async fn busy_rejects_over_concurrency_cap() {
     let cancel2 = AtomicBool::new(false);
     let second = dispatch_sync(&manager, "mcp__mock__echo", json!({}), &cancel2, None);
     let (code, message) = error_code_of(&second);
-    assert_eq!(code, "MCP_BUSY", "并发上限拒绝：{message}");
+    assert_eq!(code, "mcp_busy", "并发上限拒绝：{message}");
 
     first.join().unwrap();
     // 排空后恢复可用。
@@ -557,10 +557,10 @@ async fn malformed_and_unknown_names() {
 
     let result = dispatch_sync(&manager, "echo", json!({}), &cancel, None);
     let (code, message) = error_code_of(&result);
-    assert_eq!(code, "MCP_NOT_FOUND", "缺前缀：{message}");
+    assert_eq!(code, "mcp_not_found", "缺前缀：{message}");
 
     let result = dispatch_sync(&manager, "mcp__nope__echo", json!({}), &cancel, None);
     let (code, message) = error_code_of(&result);
-    assert_eq!(code, "MCP_NOT_FOUND");
+    assert_eq!(code, "mcp_not_found");
     assert!(message.contains("mock"), "附可用名单：{message}");
 }

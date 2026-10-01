@@ -216,7 +216,7 @@ impl TypedTool for ReadImageTool {
     ) -> Result<Self::Output, ToolExecutionError> {
         if !image_model_supported() {
             return Err(mutation_error(
-                "TOOL_ERROR",
+                "tool_error",
                 "read_image: the active model does not support image input. Do NOT retry read_image. Tell the user this model cannot see images, and continue with a text-only approach (e.g. ask the user to describe the image or paste relevant text).",
                 None,
                 json!({}),
@@ -228,7 +228,7 @@ impl TypedTool for ReadImageTool {
             let session_id = &ctx.session_id;
             let (_mime, data) = peek_image(session_id, index).ok_or_else(|| {
                 mutation_error(
-                    "TOOL_ERROR",
+                    "tool_error",
                     format!(
                         "read_image: image_index {index} not found in session '{session_id}'. The upload may have left the context. Ask the user to re-attach it."
                     ),
@@ -238,7 +238,7 @@ impl TypedTool for ReadImageTool {
             })?;
             if data.len() > image_utils::MAX_BASE64_BYTES * 4 {
                 return Err(mutation_error(
-                    "TOOL_ERROR",
+                    "tool_error",
                     format!(
                         "read_image: upload #{index} is too large ({}, limit ~{} bytes)",
                         data.len(),
@@ -250,7 +250,7 @@ impl TypedTool for ReadImageTool {
             }
             let raw = image_utils::decode_base64(&data).map_err(|error| {
                 mutation_error(
-                    "TOOL_ERROR",
+                    "tool_error",
                     format!("read_image: upload #{index} has invalid base64: {error}"),
                     None,
                     json!({}),
@@ -261,7 +261,7 @@ impl TypedTool for ReadImageTool {
             read_image_file(ctx, path)?
         } else {
             return Err(mutation_error(
-                "TOOL_ERROR",
+                "tool_error",
                 "read_image: either image_index or path is required. If you see [Image #N: ...] in the conversation, use image_index=N.",
                 None,
                 json!({}),
@@ -270,7 +270,7 @@ impl TypedTool for ReadImageTool {
 
         let normalized = image_utils::normalize_image(&raw_bytes).map_err(|error| {
             mutation_error(
-                "TOOL_ERROR",
+                "tool_error",
                 format!("read_image: {display}: {error}"),
                 None,
                 json!({}),
@@ -305,7 +305,7 @@ fn read_image_file(
     let full = PathBuf::from(resolve_mutation_path(ctx, path));
     let metadata = std::fs::metadata(&full).map_err(|error| {
         mutation_error(
-            "TOOL_ERROR",
+            "tool_error",
             format!("read_image: cannot stat '{}': {error}", full.display()),
             None,
             json!({}),
@@ -313,7 +313,7 @@ fn read_image_file(
     })?;
     if !metadata.is_file() {
         return Err(mutation_error(
-            "TOOL_ERROR",
+            "tool_error",
             format!("read_image: '{}' is not a regular file", full.display()),
             None,
             json!({}),
@@ -321,7 +321,7 @@ fn read_image_file(
     }
     if metadata.len() as usize > MAX_IMAGE_BYTES {
         return Err(mutation_error(
-            "TOOL_ERROR",
+            "tool_error",
             format!(
                 "read_image: '{}' is too large ({} bytes, max ~{MAX_IMAGE_BYTES})",
                 full.display(),
@@ -333,7 +333,7 @@ fn read_image_file(
     }
     let bytes = std::fs::read(&full).map_err(|error| {
         mutation_error(
-            "TOOL_ERROR",
+            "tool_error",
             format!("read_image: cannot read '{}': {error}", full.display()),
             None,
             json!({}),

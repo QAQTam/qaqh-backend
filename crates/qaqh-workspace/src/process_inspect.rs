@@ -92,7 +92,7 @@ impl TypedTool for ProcessTool {
             "write" => handle_write(&args),
             "kill" => handle_kill(&args),
             _ => Err(process_error(
-                "INVALID_ACTION",
+                "invalid_action",
                 "process.action must be check, wait, write, or kill",
                 "Choose one of the supported process actions.",
             )),
@@ -103,7 +103,7 @@ impl TypedTool for ProcessTool {
 fn process_id(args: &ProcessArgs, operation: &str) -> Result<u32, ToolExecutionError> {
     args.id.ok_or_else(|| {
         process_error(
-            "MISSING_ID",
+            "missing_id",
             format!("{operation}: id required"),
             "Provide the process ID returned by exec.",
         )
@@ -116,7 +116,7 @@ fn handle_check(args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError>
     match ProcessRegistry::get_info(id) {
         Some(info) => Ok(process_info_output(id, info)),
         None => Err(process_error(
-            "NOT_FOUND",
+            "not_found",
             format!("process.check: process {id} not found"),
             "Process may have already exited and been cleaned up.",
         )),
@@ -131,7 +131,7 @@ fn handle_wait(
     let timeout_secs = args.timeout_secs.unwrap_or(120);
     if !(1..=3600).contains(&timeout_secs) {
         return Err(process_error(
-            "INVALID_ARGUMENTS",
+            "invalid_arguments",
             "process.wait: timeout_secs must be between 1 and 3600",
             "Use a bounded wait timeout.",
         ));
@@ -140,7 +140,7 @@ fn handle_wait(
     match ProcessRegistry::wait_for(id, timeout_secs, Some(cancel.as_ref())) {
         Some(info) => Ok(process_info_output(id, info)),
         None => Err(process_error(
-            "NOT_FOUND",
+            "not_found",
             format!("process.wait: process {id} not found"),
             "Check that the process ID is correct.",
         )),
@@ -155,7 +155,7 @@ fn handle_write(args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError>
         .filter(|text| !text.is_empty())
         .ok_or_else(|| {
             process_error(
-                "MISSING_TEXT",
+                "missing_text",
                 "process.write: text required",
                 "Provide the text to write to stdin.",
             )
@@ -165,7 +165,7 @@ fn handle_write(args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError>
             "content": format!("Wrote {bytes} bytes to process {id}.")
         }))),
         Err(error) => Err(process_error(
-            "WRITE_FAILED",
+            "write_failed",
             format!("process write: {error}"),
             "Check that the process is still running.",
         )),
@@ -185,12 +185,12 @@ fn kill_result(id: u32, outcome: KillOutcome) -> Result<ProcessOutput, ToolExecu
             serde_json::json!({"content": outcome.content(id)}),
         )),
         KillOutcome::NoOsPid => Err(process_error(
-            "NO_OS_PID",
+            "no_os_pid",
             outcome.content(id),
             "This process has no os_pid (never attached a child); there is nothing to clean up.",
         )),
         KillOutcome::NotFound => Err(process_error(
-            "NOT_FOUND",
+            "not_found",
             format!("process.kill: process {id} not found or already exited"),
             "Check the process ID.",
         )),
@@ -231,12 +231,12 @@ fn ok_output(extra: serde_json::Value) -> ProcessOutput {
 
 fn process_error(code: &str, message: impl Into<String>, hint: &str) -> ToolExecutionError {
     let kind = match code {
-        "NOT_FOUND" => ToolErrorKind::NotFound,
-        "WRITE_FAILED" => ToolErrorKind::Unavailable,
+        "not_found" => ToolErrorKind::NotFound,
+        "write_failed" => ToolErrorKind::Unavailable,
         _ => ToolErrorKind::InvalidArguments,
     };
     let mut error = ToolError::new(kind, message).with_hint(hint);
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, kind);
     ToolExecutionError::Recoverable(error)
 }
 
@@ -307,12 +307,12 @@ mod tests {
             let no_pid = error_code(
                 kill_result(id, KillOutcome::NoOsPid).expect_err("NoOsPid must be an error"),
             );
-            assert_eq!(no_pid, "NO_OS_PID");
+            assert_eq!(no_pid, "no_os_pid");
 
             let missing = error_code(
                 kill_result(id, KillOutcome::NotFound).expect_err("NotFound must be an error"),
             );
-            assert_eq!(missing, "NOT_FOUND");
+            assert_eq!(missing, "not_found");
         }
     }
 

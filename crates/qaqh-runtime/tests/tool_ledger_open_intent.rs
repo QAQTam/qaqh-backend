@@ -256,7 +256,7 @@ fn open_non_replay_intent_is_sealed_and_handler_never_runs() {
     assert_eq!(result.status, ToolStatus::Error);
     assert_eq!(
         result.error.as_ref().map(|error| error.code.as_str()),
-        Some("LEDGER_BLOCKED")
+        Some("ledger_blocked")
     );
 
     let facts = CommittedFactReader::open(

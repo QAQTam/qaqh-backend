@@ -30,8 +30,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{ConversationCommand};
-use qaqh_ringing::{RingingCommand};
+use qaqh_domain::ConversationCommand;
+use qaqh_ringing::RingingCommand;
 use qaqh_workspace::tool_api::{
     OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
     ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
@@ -49,14 +49,13 @@ pub use host::{
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
     BoardSubscriptionTarget, BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
-    ContentRef, CollectorBatch, CollectorEvent, InterruptAgentRequest, InterruptedAgent,
+    CollectorBatch, CollectorEvent, ContentRef, InterruptAgentRequest, InterruptedAgent,
     ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
     SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
     TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
     TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
     TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, board_host, host, install_board_host,
-    install_host,
-    install_task_host, task_host,
+    install_host, install_task_host, task_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -254,7 +253,7 @@ impl TypedTool for ListAgentsTool {
             .unwrap_or("/root");
         let host = host().ok_or_else(|| {
             subagent_error(
-                "HOST_UNAVAILABLE",
+                "host_unavailable",
                 "list_agents: no in-process subagent host installed",
                 "Agent discovery requires the daemon host (install_host).",
             )
@@ -263,7 +262,7 @@ impl TypedTool for ListAgentsTool {
             .list_agents(&ctx.session_id, path_prefix)
             .map_err(|error| {
                 subagent_error(
-                    "LIST_ERROR",
+                    "list_error",
                     format!("list_agents: {error}"),
                     "Check that the path prefix names a valid AgentPath in the current root tree.",
                 )
@@ -541,7 +540,7 @@ impl TypedTool for WaitAgentTool {
         let timeout_ms = args.timeout_ms.unwrap_or(WAIT_AGENT_DEFAULT_TIMEOUT_MS);
         if !(WAIT_AGENT_MIN_TIMEOUT_MS..=WAIT_AGENT_MAX_TIMEOUT_MS).contains(&timeout_ms) {
             return Err(subagent_error(
-                "INVALID_TIMEOUT",
+                "invalid_timeout",
                 format!(
                     "wait_agent timeout_ms must be between {WAIT_AGENT_MIN_TIMEOUT_MS} and \
                      {WAIT_AGENT_MAX_TIMEOUT_MS}"
@@ -551,7 +550,7 @@ impl TypedTool for WaitAgentTool {
         }
         let host = host().ok_or_else(|| {
             subagent_error(
-                "HOST_UNAVAILABLE",
+                "host_unavailable",
                 "wait_agent requires the in-process subagent host",
                 "Check that the daemon installed the subagent host.",
             )
@@ -565,7 +564,7 @@ impl TypedTool for WaitAgentTool {
             })
             .map_err(|error| {
                 subagent_error(
-                    "WAIT_REJECTED",
+                    "wait_rejected",
                     format!("wait_agent rejected: {error}"),
                     "Check that the caller has a committed canonical mailbox.",
                 )
@@ -579,7 +578,7 @@ impl TypedTool for WaitAgentTool {
                 timed_out: true,
             }),
             WaitAgentOutcome::Cancelled => Err(subagent_error(
-                "WAIT_CANCELLED",
+                "wait_cancelled",
                 "wait_agent was cancelled",
                 "The surrounding turn was cancelled.",
             )),
@@ -671,14 +670,14 @@ impl TypedTool for InterruptAgentTool {
     ) -> Result<Self::Output, ToolExecutionError> {
         if args.target.trim().is_empty() {
             return Err(subagent_error(
-                "MISSING_TARGET",
+                "missing_target",
                 "interrupt_agent target is required",
                 "Provide an AgentPath such as /root/review_code.",
             ));
         }
         let host = host().ok_or_else(|| {
             subagent_error(
-                "HOST_UNAVAILABLE",
+                "host_unavailable",
                 "interrupt_agent requires the in-process subagent host",
                 "Check that the daemon installed the subagent host.",
             )
@@ -690,7 +689,7 @@ impl TypedTool for InterruptAgentTool {
             })
             .map_err(|error| {
                 subagent_error(
-                    "INTERRUPT_REJECTED",
+                    "interrupt_rejected",
                     format!("interrupt_agent rejected: {error}"),
                     "Root and self interrupts are forbidden; check the target path.",
                 )
@@ -727,21 +726,21 @@ fn handle_agent_message(
 ) -> Result<AgentMessageOutput, ToolExecutionError> {
     if args.to.trim().is_empty() {
         return Err(subagent_error(
-            "MISSING_TARGET",
+            "missing_target",
             "agent message target is required",
             "Provide an AgentPath such as /root/review_code.",
         ));
     }
     if args.message.trim().is_empty() {
         return Err(subagent_error(
-            "MISSING_MESSAGE",
+            "missing_message",
             "agent message body is required",
             "Provide a non-empty message.",
         ));
     }
     let host = host().ok_or_else(|| {
         subagent_error(
-            "HOST_UNAVAILABLE",
+            "host_unavailable",
             "agent messaging requires the in-process subagent host",
             "Check that the daemon installed the subagent host.",
         )
@@ -755,7 +754,7 @@ fn handle_agent_message(
         })
         .map_err(|error| {
             subagent_error(
-                "SEND_REJECTED",
+                "send_rejected",
                 format!("agent message rejected: {error}"),
                 "Check the recipient path, root ownership and message size.",
             )
@@ -1091,7 +1090,7 @@ fn handle_spawn_subagent(
 
     if task.trim().is_empty() {
         return Err(subagent_error(
-            "MISSING_TASK",
+            "missing_task",
             "spawn_subagent: task_description is required",
             "Provide a task description.",
         ));
@@ -1126,7 +1125,7 @@ fn handle_spawn_subagent(
     // after the canonical `SubagentSpawned` edge is committed. ──
     let host = host().ok_or_else(|| {
         subagent_error(
-            "HOST_UNAVAILABLE",
+            "host_unavailable",
             "spawn_subagent: no in-process subagent host installed",
             "Subagent spawning requires the daemon host (install_host).",
         )
@@ -1143,14 +1142,14 @@ fn handle_spawn_subagent(
         })
         .map_err(|error| {
             subagent_error(
-                "SPAWN_ERROR",
+                "spawn_error",
                 format!("spawn_subagent: host rejected spawn: {error}"),
                 "Check that the daemon can start subagent actors.",
             )
         })?;
     if spawned.session_id.is_empty() {
         return Err(subagent_error(
-            "SPAWN_ERROR",
+            "spawn_error",
             "spawn_subagent: host returned empty seed",
             "Check host/daemon logs.",
         ));
@@ -1202,7 +1201,7 @@ fn validate_agent_name(name: &str) -> Result<(), ToolExecutionError> {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     {
         return Err(subagent_error(
-            "INVALID_AGENT_NAME",
+            "invalid_agent_name",
             format!(
                 "spawn_subagent: invalid agent_name {name:?}; use lowercase [a-z0-9_] segments"
             ),
@@ -1218,13 +1217,13 @@ fn subagent_error(
     hint: impl Into<String>,
 ) -> ToolExecutionError {
     let kind = match code {
-        "MISSING_TASK" => ToolErrorKind::InvalidArguments,
-        "HOST_UNAVAILABLE" | "SEND_ERROR" => ToolErrorKind::Unavailable,
-        "SEND_REJECTED" | "SPAWN_ERROR" => ToolErrorKind::Execution,
+        "missing_task" => ToolErrorKind::InvalidArguments,
+        "host_unavailable" | "send_error" => ToolErrorKind::Unavailable,
+        "send_rejected" | "spawn_error" => ToolErrorKind::Execution,
         _ => ToolErrorKind::Custom,
     };
     let mut error = ToolError::new(kind, message).with_hint(hint);
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, kind);
     ToolExecutionError::Recoverable(error)
 }
 
@@ -1905,7 +1904,7 @@ mod tests {
             .expect_err("empty task must fail before host lookup");
         match error {
             ToolExecutionError::Recoverable(error) => {
-                assert_eq!(error.code.as_str(), "MISSING_TASK");
+                assert_eq!(error.code.as_str(), "missing_task");
             }
             ToolExecutionError::Fatal(error) => {
                 panic!(

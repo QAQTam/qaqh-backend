@@ -293,7 +293,7 @@ mod tests {
         let error = "[ERROR] NO_MATCH\n  detail: old matches nothing\n  candidates: [L12, L40]\n"
             .repeat(200); // ~19K chars < qaqh-types 24K 硬顶
         let mut result =
-            ToolResult::error_with("NO_MATCH", error.clone(), true, Some("refine old".into()));
+            ToolResult::error_with("no_match", error.clone(), true, Some("refine old".into()));
         apply("exec", &mut result);
         assert_eq!(result.model_text(), error);
 
