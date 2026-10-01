@@ -21,8 +21,20 @@
 
 本周期从未完整跑过的回归，磁盘预算批准后执行：
 
-- [ ] `cargo test --workspace`（含 daemon 集成测试）
-- [ ] webui `bun test` + `tsc --noEmit`（已绿，复跑确认）
+- [x] `cargo test --workspace`（含 daemon 集成测试）—— **2026-10-01 补跑全绿**
+  （143 个测试目标，commit `ca2a46d`）。补跑按判定规则处置了 4 条红：
+  - **修**：exec 管道 OEM 解码分支漏 `append_registry`，非 UTF-8（CP936 等
+    码页）输出在工具结果（注册表 captured_full 权威源）中整段丢失；
+  - **修**：`TodoStatusView::Idle` 序列化为 "idle"，typed 桥往返把
+    todo_write 的 "pending" 改写后遭 parse_status 拒绝——变体改名 `Pending`
+    对齐 wire 契约；
+  - **守卫**（G4 先例）：MSYS/Cygwin bash 5.3 对原生父进程 `\"` 参数往返
+    有损（`a"b`→`a\b`），exec bash 位置参数测试加探测式 skip
+    （`QAQH_REQUIRE_SHELL=1` 可强制失败）；
+  - **偶发**：`ringing::hub::offload_page_keeps_shell…` 在全量重负载下红过
+    一次，隔离与两轮复跑绿。
+- [x] webui `bun test` + `tsc --noEmit`（已绿，复跑确认）—— 2026-10-01：
+  11/11 + tsc 干净（本机 node_modules 缺失，`bun install` 后绿）。
 
 **判定规则**：
 - 全绿 → 进 1.2；
@@ -32,7 +44,9 @@
 
 ### 1.2 端到端冒烟复跑
 
-- [ ] `scripts/smoke-g1.ps1`（真实数据根全流程，可重复执行）。
+- [x] `scripts/smoke-g1.ps1`（真实数据根全流程，可重复执行）—— **2026-10-01
+  PASS**（含 H1-H3/M1-M5 安全修复后的构建：daemon loopback、审批摘要沙箱
+  警告、exec env 白名单均在真实路径上生效验证）。
 
 理由：本周期动过 v2 信封字段（ts_ms）与 timeline 响应（归档页 turn_index），
 虽有单测与回归锁，发版前用真实 daemon+gateway+浏览器路径再踩一遍。
@@ -48,6 +62,8 @@
 
 - **已知存量问题**（handoff 第四节）：cancel 测试无 `sh` 环境跳过；
   qaqh-sandbox / qaqh-mcp unused 警告；legacy draft 已归档勘误。
+  G5 补跑新增：MSYS/Cygwin bash 5.3 机器上 exec bash 位置参数测试探测
+  跳过（`\"` 参数往返有损，应用层不可修；旧 bash 不受影响）。
 - **v2 events 流 kind 可达性说明**：`turn_finished` / `assistant_block_sealed`
   等 kind 的 fact 产生侧缺失，当前实际不可达（已挂 P4）；webui 设计上把事件当
   刷新信号、数据走 RPC/timeline 快照，功能不受影响。
