@@ -56,7 +56,7 @@ pub(crate) fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
             let start =
                 parse_todo_id(Some(&Value::String(start.trim().to_string()))).ok_or_else(|| {
                     json_err_string(
-                        "INVALID_INPUT",
+                        "invalid_input",
                         format!("invalid id range '{segment}'"),
                         "Use T<n> or a numeric range like T1-T3.",
                     )
@@ -64,7 +64,7 @@ pub(crate) fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
             let end =
                 parse_todo_id(Some(&Value::String(end.trim().to_string()))).ok_or_else(|| {
                     json_err_string(
-                        "INVALID_INPUT",
+                        "invalid_input",
                         format!("invalid id range '{segment}'"),
                         "Use T<n> or a numeric range like T1-T3.",
                     )
@@ -72,14 +72,14 @@ pub(crate) fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
             let (start_n, end_n) = (todo_id_number(&start), todo_id_number(&end));
             let (Some(start_n), Some(end_n)) = (start_n, end_n) else {
                 return Err(json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("invalid id range '{segment}'"),
                     "Range endpoints must be T<number>.",
                 ));
             };
             if start_n > end_n {
                 return Err(json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("id range '{segment}' has start > end"),
                     "Use ascending ranges like T1-T3.",
                 ));
@@ -89,7 +89,7 @@ pub(crate) fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
             const MAX_RANGE_EXPAND: u32 = 1000;
             if end_n - start_n >= MAX_RANGE_EXPAND {
                 return Err(json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("id range '{segment}' expands to more than {MAX_RANGE_EXPAND} ids"),
                     "Narrow the range, e.g. T1-T20.",
                 ));
@@ -100,7 +100,7 @@ pub(crate) fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
         } else {
             let id = parse_todo_id(Some(&Value::String(segment.to_string()))).ok_or_else(|| {
                 json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("invalid id '{segment}'"),
                     "Use T<n> or a numeric range like T1-T3.",
                 )
@@ -110,7 +110,7 @@ pub(crate) fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
     }
     if out.is_empty() {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             "no valid ids in expression",
             "Provide at least one id, e.g. T1 or T1-T3.",
         ));
@@ -143,7 +143,7 @@ pub(crate) fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, Stri
         .to_string();
     if title.is_empty() || title.chars().count() > 100 {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("{label}.title must be 1-100 chars"),
             "Use a short imperative title, e.g. 'Add login API'.",
         ));
@@ -156,7 +156,7 @@ pub(crate) fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, Stri
         .to_string();
     if description.chars().count() > 200 {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("{label}.description max 200 chars"),
             "",
         ));
@@ -186,7 +186,7 @@ fn parse_status_field(value: Option<&Value>, label: &str) -> Result<TodoStatus, 
         .unwrap_or_default();
     super::actions::parse_status(raw).ok_or_else(|| {
         json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("{label}.status must be one of pending|in_progress|completed|cancelled"),
             "Status is required on every item (full-replace semantics).",
         )
@@ -196,14 +196,14 @@ fn parse_status_field(value: Option<&Value>, label: &str) -> Result<TodoStatus, 
 pub(crate) fn parse_write_items(args: &Value) -> Result<Vec<ParsedWriteItem>, String> {
     let items = args.get("items").and_then(Value::as_array).ok_or_else(|| {
         json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             "todo_write requires items",
             "Provide the full list: [{title, status, id?, description?, evidence?}].",
         )
     })?;
     if items.len() > MAX_WRITE_ITEMS {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             format!("items max {MAX_WRITE_ITEMS} entries per call"),
             "Reduce the plan to its essential steps.",
         ));
@@ -221,7 +221,7 @@ pub(crate) fn parse_write_items(args: &Value) -> Result<Vec<ParsedWriteItem>, St
                 .to_string();
             if title.is_empty() || title.chars().count() > 100 {
                 return Err(json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("{label}.title must be 1-100 chars"),
                     "Use a short imperative title, e.g. 'Add login API'.",
                 ));
@@ -234,7 +234,7 @@ pub(crate) fn parse_write_items(args: &Value) -> Result<Vec<ParsedWriteItem>, St
                 .to_string();
             if description.chars().count() > 200 {
                 return Err(json_err_string(
-                    "INVALID_INPUT",
+                    "invalid_input",
                     format!("{label}.description max 200 chars"),
                     "",
                 ));
@@ -266,28 +266,28 @@ pub(crate) fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, 
     let after = parse_todo_id(after_raw);
     if before_raw.is_some() && before.is_none() {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             "invalid before_id",
             "Use an assigned ID such as T1.",
         ));
     }
     if after_raw.is_some() && after.is_none() {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             "invalid after_id",
             "Use an assigned ID such as T1.",
         ));
     }
     if before.is_some() && after.is_some() {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             "use only one of before_id or after_id",
             "",
         ));
     }
     if before.is_none() && after.is_none() {
         return Err(json_err_string(
-            "INVALID_INPUT",
+            "invalid_input",
             "insert requires before_id or after_id",
             "Use action=create to append tasks at the end.",
         ));
@@ -299,7 +299,7 @@ pub(crate) fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, 
             .position(|item| item.id == id)
             .ok_or_else(|| {
                 json_err_string(
-                    "NOT_FOUND",
+                    "not_found",
                     format!("todo {id} not found"),
                     "Use todo(action=\"list\") to inspect IDs.",
                 )
@@ -313,7 +313,7 @@ pub(crate) fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, 
             .map(|index| index + 1)
             .ok_or_else(|| {
                 json_err_string(
-                    "NOT_FOUND",
+                    "not_found",
                     format!("todo {id} not found"),
                     "Use todo(action=\"list\") to inspect IDs.",
                 )

@@ -23,8 +23,8 @@ use std::time::Duration;
 use crate::ToolRisk;
 use crate::tool_api::{
     OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
-    ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolError, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader, ToolName,
+    ToolProjection, ToolSource, TypedTool,
 };
 
 const DEFAULT_MAX_RESULTS: usize = 200;
@@ -396,9 +396,7 @@ impl TypedTool for GrepTool {
 }
 
 fn grep_error(message: impl Into<String>) -> ToolExecutionError {
-    let mut error = ToolError::new(ToolErrorKind::Execution, message);
-    error.code = ToolErrorCode::from_legacy("TOOL_ERROR");
-    ToolExecutionError::Recoverable(error)
+    ToolExecutionError::Recoverable(ToolError::new(ToolErrorKind::Execution, message))
 }
 
 fn grep_schema() -> Value {
@@ -648,10 +646,10 @@ mod tests {
     fn invalid_regex_preserves_legacy_error_code() {
         let (_dir, root) = setup(&[("f.txt", "abc\n")]);
         let error = run(&root, serde_json::json!({ "pattern": "(" })).expect_err("invalid regex");
-        assert_eq!(error_code(error), "TOOL_ERROR");
+        assert_eq!(error_code(error), "execution");
 
         let missing = run(&root, serde_json::json!({})).expect_err("missing pattern");
-        assert_eq!(error_code(missing), "TOOL_ERROR");
+        assert_eq!(error_code(missing), "execution");
     }
 
     #[test]
@@ -679,7 +677,7 @@ mod tests {
             serde_json::json!({ "pattern": "abc", "paths": ["../../.."] }),
         )
         .expect_err("outside path rejected");
-        assert_eq!(error_code(error), "TOOL_ERROR");
+        assert_eq!(error_code(error), "execution");
     }
 
     #[test]

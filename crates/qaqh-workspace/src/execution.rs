@@ -91,7 +91,7 @@ pub fn execute_authorized_with_context(
         audit_rejected(
             &invocation,
             "rejected",
-            "SESSION_MISMATCH",
+            "session_mismatch",
             None,
             None,
             started,
@@ -104,7 +104,7 @@ pub fn execute_authorized_with_context(
         audit_rejected(
             &invocation,
             "rejected",
-            "WORKSPACE_MISMATCH",
+            "workspace_mismatch",
             None,
             pre_bind_level,
             started,
@@ -113,7 +113,7 @@ pub fn execute_authorized_with_context(
             &invocation.tool_name,
             crate::ToolError::ToolSpecific {
                 tool: invocation.tool_name.clone(),
-                code: "WORKSPACE_MISMATCH".into(),
+                code: "workspace_mismatch".into(),
                 message: "workspace mismatch — active workspace changed after authorization".into(),
             },
         );
@@ -130,7 +130,7 @@ pub fn execute_authorized_with_context(
         audit_rejected(
             &invocation,
             "rejected",
-            "RESOURCE_MISMATCH",
+            "resource_mismatch",
             None,
             pre_bind_level,
             started,
@@ -142,7 +142,7 @@ pub fn execute_authorized_with_context(
         audit_rejected(
             &invocation,
             "rejected",
-            "CANCELLED",
+            "cancelled",
             None,
             pre_bind_level,
             started,
@@ -156,7 +156,7 @@ pub fn execute_authorized_with_context(
         audit_rejected(
             &invocation,
             "rejected",
-            "BLOCKED_BY_MODE",
+            "blocked_by_mode",
             Some("PLAN mode"),
             pre_bind_level,
             started,
@@ -209,7 +209,7 @@ pub fn execute_authorized_with_context(
             audit_rejected(
                 &audit_invocation,
                 "rejected",
-                "PREPARE_REJECTED",
+                "prepare_rejected",
                 Some(&report.content),
                 pre_bind_level,
                 started,
@@ -236,7 +236,7 @@ pub fn execute_authorized_with_context(
             audit_rejected(
                 &audit_invocation,
                 "rejected",
-                "MANAGER_UNAVAILABLE",
+                "manager_unavailable",
                 None,
                 pre_bind_level,
                 started,
@@ -343,7 +343,7 @@ pub fn execute_authorized_with_context(
                     fatal.message
                 );
                 (
-                    crate::ToolResult::error_with("TOOL_FATAL", "internal tool error", false, None),
+                    crate::ToolResult::error_with("tool_fatal", "internal tool error", false, None),
                     Vec::new(),
                 )
             }
@@ -454,7 +454,7 @@ pub fn execute_authorized_with_context(
             audit_rejected(
                 &audit_invocation,
                 "rejected",
-                "MANAGER_UNAVAILABLE",
+                "manager_unavailable",
                 None,
                 pre_bind_level,
                 started,
@@ -860,7 +860,7 @@ mod tests {
                 .error
                 .as_ref()
                 .map(|error| error.code.as_str()),
-            Some("USE_SKILLS_TOOL")
+            Some("use_skills_tool")
         );
 
         let traversal = execute_with_context(
@@ -878,7 +878,7 @@ mod tests {
                 .error
                 .as_ref()
                 .map(|error| error.code.as_str()),
-            Some("SKILL_RESOURCE_UNAVAILABLE")
+            Some("skill_resource_unavailable")
         );
 
         let list = execute_with_context(
@@ -907,7 +907,7 @@ mod tests {
                 .error
                 .as_ref()
                 .map(|error| error.code.as_str()),
-            Some("INVALID_ARGUMENTS")
+            Some("invalid_arguments")
         );
         crate::set_workspace(".");
     }
@@ -1086,7 +1086,7 @@ mod tests {
                 .error
                 .as_ref()
                 .map(|error| error.code.as_str()),
-            Some("CANCELLED")
+            Some("cancelled")
         );
         assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 0);
     }

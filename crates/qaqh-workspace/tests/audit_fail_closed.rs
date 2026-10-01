@@ -83,7 +83,7 @@ fn audit_intent_failure_blocks_write_before_side_effect() {
             .error
             .as_ref()
             .map(|error| error.code.as_str()),
-        Some("AUDIT_UNAVAILABLE")
+        Some("audit_unavailable")
     );
     assert!(
         !target.exists(),
@@ -113,7 +113,7 @@ fn audit_intent_failure_blocks_exec_before_side_effect() {
             .error
             .as_ref()
             .map(|error| error.code.as_str()),
-        Some("AUDIT_UNAVAILABLE")
+        Some("audit_unavailable")
     );
     assert!(
         !target.exists(),
@@ -142,7 +142,7 @@ fn audit_intent_failure_blocks_net_before_request() {
             .error
             .as_ref()
             .map(|error| error.code.as_str()),
-        Some("AUDIT_UNAVAILABLE")
+        Some("audit_unavailable")
     );
     let _ = env;
 }
@@ -198,7 +198,7 @@ fn audit_result_failure_quarantines_and_blocks_subsequent_high_risk_tools() {
     );
     assert_eq!(
         first.result.error.as_ref().map(|error| error.code.as_str()),
-        Some("AUDIT_QUARANTINED")
+        Some("audit_quarantined")
     );
     assert!(
         first_target.exists(),
@@ -230,7 +230,7 @@ fn audit_result_failure_quarantines_and_blocks_subsequent_high_risk_tools() {
             .error
             .as_ref()
             .map(|error| error.code.as_str()),
-        Some("AUDIT_QUARANTINED")
+        Some("audit_quarantined")
     );
     assert!(
         !second_target.exists(),
