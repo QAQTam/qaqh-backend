@@ -195,6 +195,7 @@ impl V2Stream {
                     return Err(ClientError::Transport("v2 SSE idle timeout".into()));
                 }
                 item = subscription.next() => {
+                    // 复位覆盖所有 item（含 KeepAlive）：字节到达即视为活跃。
                     idle.as_mut().reset(tokio::time::Instant::now() + SSE_IDLE_TIMEOUT);
                     match item? {
                         Some(ClientV2SubscriptionEvent::Event(event)) => {
@@ -205,6 +206,13 @@ impl V2Stream {
                                 self.cursor = Some(cursor);
                             }
                             (self.handlers.on_event)(self.session_id.clone(), *event);
+                            (self.handlers.on_liveness)();
+                        }
+                        Some(ClientV2SubscriptionEvent::KeepAlive) => {
+                            // 字节到了 = daemon 活着。keepalive 注释行/半帧不产出
+                            // 事件，但它们正是安静期里唯一的字节来源——字节层
+                            // 探活与 timeline.rs 的 BUG-2026-09-12-10 对齐，否则
+                            // 健康流每 45s 被误判 idle timeout 重连一次。
                             (self.handlers.on_liveness)();
                         }
                         Some(ClientV2SubscriptionEvent::Reset(reset)) => {
