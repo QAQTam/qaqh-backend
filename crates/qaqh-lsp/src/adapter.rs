@@ -57,7 +57,10 @@ pub(crate) fn take_spawn_pid(server: &str) -> Option<u32> {
 /// env 必须是**已解析**的值（见 [`resolve_server_secrets`]）——本函数不做
 /// 占位符处理。`cwd` 为空时继承 daemon cwd（tokio 默认行为，不显式设）。
 pub(crate) fn build_stdio_command(cfg: &LspServerConfig, root: &str) -> CommandWrap {
-    let mut command = tokio::process::Command::new(&cfg.command);
+    // 审计 M2（2026-10-01）：裸名在 Windows 的 CreateProcess 搜索序含当前
+    // 目录——先钉死绝对路径（仅 PATH 查找），解析失败保持原值由 spawn 报错。
+    let resolved = qaqh_types::platform::resolve_command_path(&cfg.command);
+    let mut command = tokio::process::Command::new(resolved);
     command.args(&cfg.args);
     command.envs(cfg.env.iter());
     command.current_dir(root);
