@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::client::Client;
 use crate::error::{ClientError, Result};
 use crate::sse_decoder::SseDecoder;
-use crate::types::{CommandOptions, RingingCommand};
+use crate::types::{CommandOptions, RingingCommand, SseFrame};
 
 pub use qaqh_ringing::{
     CanonicalCursor as ClientV2Cursor, CursorToken as ClientV2CursorToken,
@@ -215,6 +215,14 @@ impl ClientV2SessionState {
 pub enum ClientV2SubscriptionEvent {
     Event(Box<ClientV2Event>),
     Reset(ClientV2Reset),
+    /// 字节到达但凑不出完整帧（daemon 的 keepalive 注释行 / 跨 chunk 半帧）。
+    ///
+    /// 把「到达」本身呈现给调用方，v2 流的空闲计时器才能在**字节层**复位：
+    /// 会话安静期里 daemon 的 15s keepalive 是唯一字节来源，只按事件复位
+    /// 会让健康流每 45s 被误判 `v2 SSE idle timeout` 重连（真机实测 11 次，
+    /// 每次还触发 app 层全量 re-bootstrap）。对齐 timeline.rs 的
+    /// BUG-2026-09-12-10 字节层探活。
+    KeepAlive,
 }
 
 pub struct ClientV2Subscription {
@@ -234,28 +242,42 @@ impl ClientV2Subscription {
     pub async fn next(&mut self) -> Result<Option<ClientV2SubscriptionEvent>> {
         loop {
             if let Some(frame) = self.decoder.next_frame() {
-                let frame = frame
-                    .map_err(|()| ClientError::Protocol("invalid UTF-8 in v2 SSE frame".into()))?;
-                if frame.event_type == "ringing.reset_required" {
-                    let reset: ClientV2Reset = serde_json::from_str(&frame.data)?;
-                    reset.validate().map_err(|code| {
-                        ClientError::Protocol(format!("invalid v2 reset: {code}"))
-                    })?;
-                    return Ok(Some(ClientV2SubscriptionEvent::Reset(reset)));
-                }
-                let event: ClientV2Event = serde_json::from_str(&frame.data)?;
-                event
-                    .validate()
-                    .map_err(|code| ClientError::Protocol(format!("invalid v2 event: {code}")))?;
-                return Ok(Some(ClientV2SubscriptionEvent::Event(Box::new(event))));
+                return Self::decode_frame(frame).map(Some);
             }
 
             match self.stream.next().await {
-                Some(Ok(bytes)) => self.decoder.push(&bytes),
+                Some(Ok(bytes)) => {
+                    self.decoder.push(&bytes);
+                    match self.decoder.next_frame() {
+                        // 这批字节凑出了完整帧：照常解码返回。
+                        Some(frame) => return Self::decode_frame(frame).map(Some),
+                        // 字节到了但凑不出帧：以 KeepAlive 把「到达」本身报给
+                        // 调用方（见枚举上的 KeepAlive 文档）。
+                        None => return Ok(Some(ClientV2SubscriptionEvent::KeepAlive)),
+                    }
+                }
                 Some(Err(error)) => return Err(error.into()),
                 None => return Ok(None),
             }
         }
+    }
+
+    /// 一帧 SSE → 订阅事件。`Err(())` 是解码器的 UTF-8 失败标记。
+    fn decode_frame(frame: std::result::Result<SseFrame, ()>) -> Result<ClientV2SubscriptionEvent> {
+        let frame =
+            frame.map_err(|()| ClientError::Protocol("invalid UTF-8 in v2 SSE frame".into()))?;
+        if frame.event_type == "ringing.reset_required" {
+            let reset: ClientV2Reset = serde_json::from_str(&frame.data)?;
+            reset
+                .validate()
+                .map_err(|code| ClientError::Protocol(format!("invalid v2 reset: {code}")))?;
+            return Ok(ClientV2SubscriptionEvent::Reset(reset));
+        }
+        let event: ClientV2Event = serde_json::from_str(&frame.data)?;
+        event
+            .validate()
+            .map_err(|code| ClientError::Protocol(format!("invalid v2 event: {code}")))?;
+        Ok(ClientV2SubscriptionEvent::Event(Box::new(event)))
     }
 }
 
@@ -754,5 +776,89 @@ mod tests {
             serde_json::json!("plan")
         );
         assert!(driver.can_claim);
+    }
+
+    // ── 字节层探活（KeepAlive）回归 ─────────────────────────────────────
+    //
+    // 真机故障：daemon 每 15s 发 SSE 注释 keepalive，但 `next()` 只在产出
+    // 事件时返回——安静期里这些字节全部"隐身"，健康 v2 流每 45s 被误判
+    // `v2 SSE idle timeout` 重连一次（实测 11 次/20 分钟），每次还触发
+    // app 层全量 re-bootstrap。以下两条锁住字节层信号语义。
+
+    /// 从字节块序列构造订阅（不碰网络）。
+    fn subscription_with_chunks(chunks: Vec<Vec<u8>>) -> ClientV2Subscription {
+        ClientV2Subscription {
+            stream: futures_util::stream::iter(
+                chunks.into_iter().map(|chunk| Ok(Bytes::from(chunk))),
+            )
+            .boxed(),
+            decoder: SseDecoder::new(),
+        }
+    }
+
+    /// daemon keepalive 的实际形态：注释行 + 空行。
+    fn keepalive_chunk() -> Vec<u8> {
+        b": keepalive\n\n".to_vec()
+    }
+
+    /// 能通过 envelope `validate()` 的最小 ephemeral 事件帧（payload 用
+    /// `team_delta_variants_are_nameable_from_the_client_surface` 验证过的
+    /// 反序列化形状）。
+    fn event_frame_chunk() -> Vec<u8> {
+        let event = serde_json::json!({
+            "schema": qaqh_ringing::RINGING_SCHEMA,
+            "version": RINGING_V2_VERSION,
+            "server_epoch": "epoch-1",
+            "session_id": "session-1",
+            "event_id": "event-1",
+            "stream_key": {"kind": "channel", "data": "control"},
+            "delivery": "ephemeral",
+            "payload": {"kind": "team_delta", "data": {"kind": "agent_residency_changed",
+                "data": {"revision": 3,
+                         "agent_id": "0199a0f0-0000-7000-8000-000000000002",
+                         "residency": "unloaded"}}}
+        });
+        format!(
+            "event: ringing.event\ndata: {}\n\n",
+            serde_json::to_string(&event).expect("json")
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn keepalive_bytes_surface_as_keepalive_without_losing_frames() {
+        let mut sub = subscription_with_chunks(vec![keepalive_chunk(), event_frame_chunk()]);
+
+        match sub.next().await.expect("next") {
+            Some(ClientV2SubscriptionEvent::KeepAlive) => {}
+            other => panic!("keepalive 注释必须呈现为 KeepAlive，got {other:?}"),
+        }
+        match sub.next().await.expect("next") {
+            Some(ClientV2SubscriptionEvent::Event(_)) => {}
+            other => panic!("完整事件帧必须照常解码，got {other:?}"),
+        }
+        assert!(
+            sub.next().await.expect("next").is_none(),
+            "流结束必须照常报 None"
+        );
+    }
+
+    /// 跨 chunk 的半帧不得因 KeepAlive 路径丢帧：先到的半帧报 KeepAlive，
+    /// 补齐后必须照常解码出事件。
+    #[tokio::test]
+    async fn half_frame_across_chunks_yields_event_after_keepalive() {
+        let frame = event_frame_chunk();
+        let split = frame.len() / 2;
+        let mut sub =
+            subscription_with_chunks(vec![frame[..split].to_vec(), frame[split..].to_vec()]);
+
+        match sub.next().await.expect("next") {
+            Some(ClientV2SubscriptionEvent::KeepAlive) => {}
+            other => panic!("半帧应先报 KeepAlive，got {other:?}"),
+        }
+        match sub.next().await.expect("next") {
+            Some(ClientV2SubscriptionEvent::Event(_)) => {}
+            other => panic!("补齐后必须解码出事件（不得丢帧），got {other:?}"),
+        }
     }
 }
