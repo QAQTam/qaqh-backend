@@ -321,6 +321,13 @@ pub(crate) fn forward_progress(
                 #[cfg(windows)]
                 if let Some(decoded) = decode_windows_oem(pending) {
                     pending.clear();
+                    // OEM 解码块同样必须进注册表：captured_full 是工具结果的
+                    // 权威源，漏追加 = 非 UTF-8（GBK 等码页）输出整段丢失
+                    //（实测：pwsh 在 CP936 下 Write-Output 中文 → 工具结果
+                    // 只剩 "\r\n"，G5 补跑 exec 断言红即此因）。
+                    if let Some(id) = registry_id {
+                        append_registry(id, stream, &decoded);
+                    }
                     send_progress(tx, tool_call_id, stream, seq, decoded);
                     return;
                 }
