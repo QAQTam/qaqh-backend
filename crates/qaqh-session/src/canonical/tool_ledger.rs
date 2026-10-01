@@ -12,10 +12,10 @@ use thiserror::Error;
 
 use crate::session_fact_v2::{
     CheckpointId, CompactionApplied, ContentRef, DriverChanged, EventId, ExecutionId, FactPayload,
-    FactSchema, InputAccepted, InputId, InterAgentCommunication, InteractionExpired,
-    InteractionId, InteractionRequested, InteractionResolved, MessageId, RecoveryRef, SessionFact,
-    SessionId, SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError,
-    ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    FactSchema, InputAccepted, InputId, InterAgentCommunication, InteractionExpired, InteractionId,
+    InteractionRequested, InteractionResolved, MessageId, RecoveryRef, SessionFact, SessionId,
+    SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
 };
 
 use super::{
@@ -784,7 +784,8 @@ impl ToolLedger {
         event_id: EventId,
         payload: SessionRecovered,
         now_ms: i64,
-    ) -> Result<SessionFact, ToolLedgerError> {        let fact = SessionFact {
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let fact = SessionFact {
             schema: FactSchema::v2(),
             session_id: self.session_id.clone(),
             log_id: self.log_id.clone(),

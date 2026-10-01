@@ -30,11 +30,9 @@ use crate::{TimelineAppender, TimelineLiveEntry};
 /// 溢出即 `Lagged`——由 daemon SSE 侧发终止帧让客户端重连重定基。
 pub(super) const LIVE_BROADCAST_CAPACITY: usize = 1024;
 
-
 /// Non-terminal timeline changes are checkpointed at most once per interval.
 /// Live delivery is still immediate; only the full snapshot rewrite is paced.
 pub(super) const TIMELINE_PERSIST_INTERVAL: Duration = Duration::from_secs(1);
-
 
 /// Overlay persisted conversation data onto the live event projection.
 /// Metadata used by native clients belongs to the same authoritative
@@ -67,8 +65,6 @@ fn merge_persisted_conversation_state(
         None => *projected = persisted,
     }
 }
-
-
 
 #[derive(Debug)]
 pub(super) struct SessionChannelState {
@@ -123,7 +119,6 @@ pub(super) struct ChannelShards {
 }
 
 impl ChannelShards {
-
     /// 取（必要时登记）该 seed 的槽。
     ///
     /// 同 seed ⇒ 同一个 `Arc` ⇒ 同一把锁：这是「全局 (channel, seed) 互斥」
@@ -172,7 +167,6 @@ impl ChannelShards {
             .remove(session_id)
             .is_some()
     }
-
 }
 
 /// Ringing daemon 运行时聚合。
@@ -238,7 +232,6 @@ pub struct RingingHub {
     pub(super) sessions: Option<Arc<SessionManager>>,
 }
 
-
 impl RingingHub {
     pub fn new(epoch: impl Into<String>) -> Self {
         Self::with_options(epoch.into(), None)
@@ -291,9 +284,6 @@ impl RingingHub {
             sessions: None,
         }
     }
-
-
-
 
     /// 收尾三频道投影中的孤儿领域状态（Ringing 版 `seal_orphan_running_turns`）。
     ///
@@ -548,11 +538,13 @@ impl RingingHub {
         }
         st.projection.apply(channel, session_id, &event);
         st.last_stream_seq = st.last_stream_seq.max(stream_seq);
-        let mut watermark = self.live_watermark.lock().unwrap_or_else(|e| e.into_inner());
+        let mut watermark = self
+            .live_watermark
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let entry = watermark.entry(channel).or_insert(0);
         *entry = (*entry).max(stream_seq);
     }
-
 
     /// 读该频道的发布水位（见 `live_watermark` 文档）。
     pub fn live_watermark(&self, channel: RingingChannel) -> u64 {
@@ -563,7 +555,6 @@ impl RingingHub {
             .copied()
             .unwrap_or(0)
     }
-
 
     /// 读取某频道的领域快照（v1 bootstrap 路由已删除；本方法是 orphan_seal 等
     /// 内部路径与产出方往返测试的读入口）。
@@ -589,11 +580,6 @@ impl RingingHub {
         }
         snap
     }
-
-
-
-
-
 
     /// 按 block 折叠落盘副本中被后续覆盖的 BlockCheckpoint。
     ///
@@ -649,7 +635,6 @@ impl RingingHub {
     fn fold_checkpoints_for_test(entries: Vec<TimelineEntry>) -> Vec<TimelineEntry> {
         Self::prune_superseded_checkpoints(entries)
     }
-
 }
 
 impl Drop for RingingHub {
@@ -669,7 +654,6 @@ impl Drop for RingingHub {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -718,7 +702,6 @@ mod tests {
             delta: format!("chunk-{seq}"),
         })
     }
-
 
     fn publish_open_tool_turn(hub: &RingingHub, session_id: &str, turn_id: &str, progress: &str) {
         hub.publish_timeline(
@@ -824,22 +807,6 @@ mod tests {
         )
         .unwrap();
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     #[test]
     fn fold_checkpoints_keeps_only_the_newest_per_block() {
@@ -1590,8 +1557,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-
-
     #[test]
     fn forget_session_drops_per_session_resident_state() {
         let hub = RingingHub::new("forget-seed-test");
@@ -1675,7 +1640,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn per_session_lazy_loads_do_not_block_each_other() {
         // Phase 1 回归：懒加载锁必须 per-seed。持有 seed A 的锁时，seed B
@@ -1717,7 +1681,6 @@ mod tests {
             "same seed must map to the same lock instance"
         );
     }
-
 }
 
 #[cfg(test)]
@@ -1729,8 +1692,8 @@ mod lock_sharding_tests {
     //! 其他频道/会话的 publish 全部阻塞。下述测试在旧代码上红（超时失败），
     //! 在新代码上绿。
 
-    use qaqh_domain::{ConversationEvent, ControlEvent};
     use super::*;
+    use qaqh_domain::{ControlEvent, ConversationEvent};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::{Duration, Instant};
@@ -1904,7 +1867,6 @@ mod lock_sharding_tests {
         );
     }
 
-
     /// 不变量 2：`forget_seed` 与并发发布不得 panic，且遗忘后该 seed 常驻态
     /// 不再出现在任何分片。
     #[test]
@@ -1931,14 +1893,12 @@ mod lock_sharding_tests {
             join.join().expect("publisher must not panic");
         }
     }
-
 }
 
 impl RingingHub {
-
-/// timeline live 广播容量（qaqh-daemon SSE 测试装置用；与
-/// subscribe_timeline 同源。v1 三频道广播删除后不再有其他读者）。
-pub fn live_capacity(_channel: RingingChannel) -> usize {
-    LIVE_BROADCAST_CAPACITY
-}
+    /// timeline live 广播容量（qaqh-daemon SSE 测试装置用；与
+    /// subscribe_timeline 同源。v1 三频道广播删除后不再有其他读者）。
+    pub fn live_capacity(_channel: RingingChannel) -> usize {
+        LIVE_BROADCAST_CAPACITY
+    }
 }

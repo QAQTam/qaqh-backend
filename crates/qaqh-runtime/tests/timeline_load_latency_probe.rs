@@ -17,9 +17,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{
-    TimelineIntent, TimelineTurnState,
-};
+use qaqh_domain::{TimelineIntent, TimelineTurnState};
 use qaqh_runtime::RingingHub;
 use qaqh_session::SessionManager;
 

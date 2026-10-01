@@ -47,9 +47,11 @@ pub(crate) mod test_hooks;
 pub mod timeline_api;
 pub mod v2;
 
-pub(crate) use auth::{get_session_id, is_authorized, lease_required_json, session_close_session, unauthorized};
 #[cfg(test)]
 pub(crate) use auth::parse_channel;
+pub(crate) use auth::{
+    get_session_id, is_authorized, lease_required_json, session_close_session, unauthorized,
+};
 pub(crate) use command::{command_fingerprint, execute_command};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};

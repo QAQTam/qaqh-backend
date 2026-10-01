@@ -393,10 +393,11 @@ pub fn resolve_command_path(command: &str) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
-    if path.parent().is_some_and(|parent| !parent.as_os_str().is_empty()) {
-        return std::env::current_dir()
-            .unwrap_or_default()
-            .join(path);
+    if path
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+    {
+        return std::env::current_dir().unwrap_or_default().join(path);
     }
     find_on_path(command).unwrap_or_else(|| path.to_path_buf())
 }

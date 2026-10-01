@@ -130,8 +130,11 @@ pub(crate) async fn execute_command(
     );
     let duplicate_check = {
         let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
-        match pending.record_fingerprint_for_session(&envelope.command_id, &fingerprint, &session_id)
-        {
+        match pending.record_fingerprint_for_session(
+            &envelope.command_id,
+            &fingerprint,
+            &session_id,
+        ) {
             Ok(v) => Ok(!v),
             Err(()) => Err(()),
         }
@@ -259,11 +262,13 @@ pub(crate) async fn execute_command(
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
-        return (
-            StatusCode::OK,
-            accept_ack(envelope.command_id, None),
-        );
+            .mark_terminal(
+                &envelope.command_id,
+                RingingCommandState::Succeeded,
+                None,
+                None,
+            );
+        return (StatusCode::OK, accept_ack(envelope.command_id, None));
     }
     // SessionArchive / Unarchive / Delete
     if let qaqh_ringing::RingingCommand::Control(
@@ -341,11 +346,13 @@ pub(crate) async fn execute_command(
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
-        return (
-            StatusCode::OK,
-            accept_ack(envelope.command_id, None),
-        );
+            .mark_terminal(
+                &envelope.command_id,
+                RingingCommandState::Succeeded,
+                None,
+                None,
+            );
+        return (StatusCode::OK, accept_ack(envelope.command_id, None));
     }
     // session.new / session.resume
     match &envelope.command {
@@ -400,11 +407,13 @@ pub(crate) async fn execute_command(
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
-            return (
-                StatusCode::OK,
-                accept_ack(envelope.command_id, None),
-            );
+                .mark_terminal(
+                    &envelope.command_id,
+                    RingingCommandState::Succeeded,
+                    None,
+                    None,
+                );
+            return (StatusCode::OK, accept_ack(envelope.command_id, None));
         }
         qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume {
             session_id: target_session_id,
@@ -450,11 +459,13 @@ pub(crate) async fn execute_command(
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
-            return (
-                StatusCode::OK,
-                accept_ack(envelope.command_id, None),
-            );
+                .mark_terminal(
+                    &envelope.command_id,
+                    RingingCommandState::Succeeded,
+                    None,
+                    None,
+                );
+            return (StatusCode::OK, accept_ack(envelope.command_id, None));
         }
         // 仅 attach（无 actor 副作用）：供前端订阅子代理等只读观测 seed 的
         // timeline/频道流。与 SessionResume 的差异见 ControlCommand 文档。
@@ -500,11 +511,13 @@ pub(crate) async fn execute_command(
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
-            return (
-                StatusCode::OK,
-                accept_ack(envelope.command_id, None),
-            );
+                .mark_terminal(
+                    &envelope.command_id,
+                    RingingCommandState::Succeeded,
+                    None,
+                    None,
+                );
+            return (StatusCode::OK, accept_ack(envelope.command_id, None));
         }
         _ => {}
     }
@@ -540,7 +553,11 @@ pub(crate) async fn execute_command(
             .rollback(&envelope.command_id);
         return (
             StatusCode::BAD_GATEWAY,
-            reject_ack(envelope.command_id.clone(), "dispatch_failed", e.to_string()),
+            reject_ack(
+                envelope.command_id.clone(),
+                "dispatch_failed",
+                e.to_string(),
+            ),
         );
     }
     state
@@ -548,10 +565,7 @@ pub(crate) async fn execute_command(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .mark_running(&envelope.command_id);
-    (
-        StatusCode::OK,
-        accept_ack(envelope.command_id, None),
-    )
+    (StatusCode::OK, accept_ack(envelope.command_id, None))
 }
 
 #[cfg(test)]
