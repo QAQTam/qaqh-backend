@@ -71,8 +71,12 @@ fn timeline_entry_to_event(
     entry: &qaqh_domain::TimelineEntry,
 ) -> Event {
     let data = serde_json::json!({
-        "schema": "qaqh.Ringing",
-        "version": 1,
+        "schema": qaqh_ringing::RINGING_SCHEMA,
+        // 必须与客户端校验一致（qaqh-client timeline dispatch 要求
+        // `version == RINGING_V2_VERSION`）：写死 1 曾让每一帧都被判
+        // `protocol violation: invalid timeline SSE frame`，timeline 流
+        // 1s 重连死循环、transcript 永远无法渲染。
+        "version": qaqh_ringing::RINGING_V2_VERSION,
         "server_epoch": epoch,
         "session_id": session_id,
         "entry": entry,
