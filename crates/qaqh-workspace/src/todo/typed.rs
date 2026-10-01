@@ -46,8 +46,12 @@ pub struct TodoCounts {
 #[serde(rename_all = "snake_case")]
 #[schemars(rename_all = "snake_case")]
 pub enum TodoStatusView {
-    #[serde(alias = "pending")]
-    Idle,
+    // 变体名必须与 wire 契约一致（pending|in_progress|completed|cancelled）：
+    // typed 桥经 to_args_value 把 Args **再序列化**回 Value 交给解析层，
+    // 变体名若叫 Idle 会被 rename_all 写成 "idle"，parse_status 不认——
+    // 实测 todo_write "pending" 进 → "idle" 出 → INVALID_INPUT（G5 补跑
+    // todo_contract 红）。"pending" 别名只救反序列化，救不了序列化。
+    Pending,
     InProgress,
     #[serde(alias = "complete")]
     Completed,
@@ -58,7 +62,7 @@ pub enum TodoStatusView {
 impl From<&TodoStatus> for TodoStatusView {
     fn from(status: &TodoStatus) -> Self {
         match status {
-            TodoStatus::Pending => Self::Idle,
+            TodoStatus::Pending => Self::Pending,
             TodoStatus::InProgress => Self::InProgress,
             TodoStatus::Completed => Self::Completed,
             TodoStatus::Cancelled => Self::Cancelled,
