@@ -88,7 +88,10 @@ impl SkillContextManager {
 
         let mentions = crate::explicit_mentions(user_text, &self.catalog.catalog);
         for metadata in mentions {
-            let _ = self.request_now(&metadata.name, "user");
+            // 审计 H2：`$name` 只是「上下文里出现了这个记号」——网页粘贴等
+            // 注入渠道同样能产生它。来源标注不得冒充 `user`（真实用户主动
+            // 请求），否则模型会把它当成已授权信号而放松警惕。
+            let _ = self.request_now(&metadata.name, "mentioned");
         }
         let snapshot = self.build_snapshot();
         self.frozen = Some(snapshot.clone());
@@ -558,7 +561,7 @@ impl SkillContextManager {
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
         (!requested.is_empty()).then(|| format!(
-            "<requested_skills>\nUser requested: {}. Call the fixed `skills` tool with action=`activate` and the exact name.\n</requested_skills>",
+            "<requested_skills>\nRequested (not verified as user intent): {}. Call the fixed `skills` tool with action=`activate` and the exact name.\n</requested_skills>",
             requested.join(", ")
         ))
     }
@@ -665,6 +668,20 @@ mod tests {
         .unwrap();
         let manager = SkillContextManager::new(temp.path(), 100_000);
         (temp, manager)
+    }
+
+    #[test]
+    fn explicit_mentions_do_not_claim_user_source() {
+        // 审计 H2：`$name` 可被网页粘贴等注入渠道伪造，来源标注不得写成
+        // `user`（真实用户主动请求），否则模型把它当已授权信号。
+        let (_temp, mut manager) = manager();
+        let _ = manager.begin_user_turn("use $alpha");
+        let alpha = manager
+            .runtime_info()
+            .into_iter()
+            .find(|item| item.name == "alpha")
+            .expect("alpha in runtime info");
+        assert_eq!(alpha.source, "mentioned");
     }
 
     #[test]

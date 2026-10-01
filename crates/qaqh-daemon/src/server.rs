@@ -46,7 +46,12 @@ fn daemon_channel() -> String {
     })
 }
 
-/// `qaqh-daemon server` 的网络配置（临时跨端模式，不做任何安全加固）。
+/// `qaqh-daemon server` 的网络配置。
+///
+/// 审计 H3（2026-10-01）：这是**明文 HTTP + Bearer token** 的控制面，token
+/// 一旦被截获即可完全接管 agent（读任意会话、驱动工具执行、直接设 L4）。
+/// 因此：默认只绑 loopback；非 loopback 绑定必须显式给出 token——这是唯一
+/// 的「我知道我在做什么」开关，启动横幅还会再警告一次传输无加密。
 #[derive(Debug, Clone)]
 pub struct ServerNetworkConfig {
     /// 监听 IP；`0.0.0.0` = 局域网可访问。
@@ -72,7 +77,9 @@ impl ServerNetworkConfig {
     /// `QAQH_SERVER_TOKEN` 环境变量（避免出现在进程命令行里）。
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let mut config = Self {
-            bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            // 审计 H3：默认 loopback。跨端模式必须显式 `--bind`，不给 LAN
+            // 侧留下被动嗅探 Bearer token 的默认面。
+            bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 64413,
             token: std::env::var("QAQH_SERVER_TOKEN")
                 .ok()
@@ -103,6 +110,18 @@ impl ServerNetworkConfig {
                 other => return Err(format!("unknown server flag: {other}")),
             }
             index += 1;
+        }
+        // 审计 H3：非 loopback 绑定必须显式 token。没有它，随机 token 会打
+        // 到 stderr 并以明文 HTTP 暴露完整 agent 控制面——把「确认危险」的
+        // 动作交还给显式传参这一步。
+        if !config.bind_ip.is_loopback() && config.token.is_none() {
+            return Err(
+                "refusing to bind a non-loopback address without an explicit token: \
+                 pass --token <token> (or set QAQH_SERVER_TOKEN). The control plane is \
+                 plain-text HTTP; anything on the network can read the bearer token. \
+                 Bind loopback (default) if the remote peer does not truly need LAN access."
+                    .into(),
+            );
         }
         Ok(config)
     }
@@ -538,6 +557,39 @@ fn restrict_discovery_permissions(_path: &std::path::Path) -> Result<(), String>
 mod tests {
     use super::*;
     use qaqh_session::canonical::CanonicalSessionStore;
+
+    #[test]
+    fn server_parse_defaults_to_loopback_and_requires_token_for_lan() {
+        // 审计 H3：默认面必须收敛到 loopback，LAN 明文 HTTP 必须显式 --token。
+        if std::env::var("QAQH_SERVER_TOKEN")
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+        {
+            // 环境注入了 token 时，「无 token 拒绝」分支无法构造，跳过。
+            return;
+        }
+        let config = ServerNetworkConfig::parse(&[]).expect("default parse");
+        assert!(config.bind_ip.is_loopback(), "default bind must be loopback");
+        assert_eq!(config.port, 64413);
+
+        let error = ServerNetworkConfig::parse(&["--bind".into(), "0.0.0.0".into()])
+            .expect_err("non-loopback without explicit token must be refused");
+        assert!(error.contains("--token"), "error: {error}");
+
+        let config = ServerNetworkConfig::parse(&[
+            "--bind".into(),
+            "0.0.0.0".into(),
+            "--token".into(),
+            "explicit".into(),
+        ])
+        .expect("explicit token unlocks LAN bind");
+        assert!(!config.bind_ip.is_loopback());
+        assert_eq!(config.token.as_deref(), Some("explicit"));
+
+        let config =
+            ServerNetworkConfig::parse(&["--bind".into(), "127.0.0.1".into()]).expect("loopback");
+        assert!(config.bind_ip.is_loopback());
+    }
 
     #[test]
     fn startup_rotation_releases_a_crashed_writer_fence() {

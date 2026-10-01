@@ -155,34 +155,34 @@ pub(crate) fn lock_holder_alive() -> bool {
 /// Resolve the daemon executable.
 ///
 /// Candidate order (first hit wins):
-///   1. `QAQH_BACKEND_ROOT/target/debug/qaqh-daemon` — dev
-///   2. `<cwd>/target/debug/qaqh-daemon` — dev
-///   3. `<exe_dir>/resources/qaqh-daemon` — packaged layout (installer keeps
+///   1. `QAQH_BACKEND_ROOT/target/debug/qaqh-daemon` — dev layout (explicit
+///      env opt-in)
+///   2. `<exe_dir>/resources/qaqh-daemon` — packaged layout (installer keeps
 ///      the daemon inside the shell's resources dir; mirrors Electron sidecar)
-///   4. `<exe_dir>/qaqh-daemon` — side-by-side layout
-///   5. bare name (PATH lookup)
-pub fn daemon_executable() -> std::path::PathBuf {
+///   3. `<exe_dir>/qaqh-daemon` — side-by-side layout
+///   4. bare name (PATH lookup) — only with `QAQH_DAEMON_ALLOW_PATH=1`
+///
+/// 审计 M5（2026-10-01）：候选序**不含当前工作目录**——在含
+/// `target/debug/qaqh-daemon` 的目录里启动客户端（如克隆的恶意仓库）时，
+/// 旧序会拉起被投放的伪装 daemon 并交出 token。PATH 裸名兜底同理收窄为
+/// 显式 opt-in。找不到任何候选时返回错误，绝不静默退回裸名。
+pub fn daemon_executable() -> Result<std::path::PathBuf> {
     let exe = if cfg!(windows) {
         "qaqh-daemon.exe"
     } else {
         "qaqh-daemon"
     };
 
-    for base in [
-        std::env::var("QAQH_BACKEND_ROOT").ok(),
-        std::env::current_dir()
-            .ok()
-            .map(|p| p.display().to_string()),
-    ]
-    .into_iter()
-    .flatten()
+    if let Some(root) = std::env::var("QAQH_BACKEND_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
     {
-        let p = std::path::PathBuf::from(base)
+        let p = std::path::PathBuf::from(root)
             .join("target")
             .join("debug")
             .join(exe);
         if p.exists() {
-            return p;
+            return Ok(p);
         }
     }
 
@@ -193,12 +193,29 @@ pub fn daemon_executable() -> std::path::PathBuf {
         for base in [dir.join("resources"), dir.clone()] {
             let p = base.join(exe);
             if p.exists() {
-                return p;
+                return Ok(p);
             }
         }
     }
 
-    std::path::PathBuf::from(exe)
+    let path_lookup_allowed = std::env::var("QAQH_DAEMON_ALLOW_PATH")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    if path_lookup_allowed {
+        return match qaqh_types::platform::find_on_path(exe) {
+            Some(found) => Ok(found),
+            None => Err(ClientError::Discovery(format!(
+                "QAQH_DAEMON_ALLOW_PATH=1 is set but '{exe}' was not found on PATH"
+            ))),
+        };
+    }
+
+    Err(ClientError::Discovery(
+        "qaqh-daemon executable not found: install it next to the client (or in its \
+         resources/ directory), set QAQH_BACKEND_ROOT for the dev layout, or set \
+         QAQH_DAEMON_ALLOW_PATH=1 to allow a PATH lookup"
+            .to_string(),
+    ))
 }
 
 /// 以「脱离当前 shell」的方式拉起 daemon 进程。**daemon 的唯一 spawn 出口**
@@ -247,7 +264,8 @@ fn configure_detached(command: &mut std::process::Command) {
 }
 
 fn spawn_daemon_detached() -> Result<()> {
-    spawn_daemon_process(&daemon_executable())
+    let executable = daemon_executable()?;
+    spawn_daemon_process(&executable)
 }
 
 /// Process liveness probe — client-side implementation, deliberately distinct

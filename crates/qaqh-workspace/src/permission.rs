@@ -169,6 +169,15 @@ pub fn summarize_permission_action(tool_name: &str, args: &serde_json::Value) ->
     if parts.is_empty() {
         return None;
     }
+    // 审计 H1：`SandboxSpec.workspace_write` + 网络 Deny 在无强制后端的平台
+    // （Windows/macOS，以及缺 landlock/bwrap 的 Linux）纯属装饰。审批对话框
+    // 必须明说，不得让用户带着「命令在沙箱内」的错觉放行 exec。
+    if !qaqh_sandbox::filesystem_and_network_isolation_enforced() {
+        parts.push(
+            "WARNING: sandbox not enforced on this platform — the command will run with full user privileges (filesystem & network)"
+                .to_string(),
+        );
+    }
     Some(bounded_action_summary(parts.join(" · ")))
 }
 
@@ -365,6 +374,18 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
             return true;
         }
     }
+    // 审计 M4：用户目录 config.toml 也在敏感名单内。L4 下模型可经普通 write
+    // 工具重写它固化 `permission_level = 4` 或改 `base_url`（后续 LLM 请求
+    // 连同 api_key 导向攻击者端点），且 mtime 轮询热加载**免重启生效**。
+    // 配置只从平台数据根读取，按权威路径做组件级判定，不靠宽泛子串。
+    let config_file = qaqh_types::platform::config_path();
+    if config_file.is_absolute() {
+        let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
+        let config_norm = normalize_lexically(&resolve_target_path(config_file));
+        if path_within_dir(&candidate, &config_norm) {
+            return true;
+        }
+    }
     let s = path.to_string_lossy().to_ascii_lowercase();
     s.contains("messages.jsonl")
         || s.contains("meta.json")
@@ -373,6 +394,27 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
         || s.contains("/sessions/")
         || s.contains("\\sessions\\")
         || s.contains(".qaqh/sessions")
+}
+
+/// Whether `path` lies inside a skill discovery root (audit 2026-10-01 H2).
+///
+/// Files under these roots are discovered every turn and injected into model
+/// context as authoritative instructions (`skills(action=activate)`), and the
+/// files persist in the repo across sessions. A write there is an instruction
+/// injection, so it never rides the Level-3 in-workspace auto-approve.
+/// Containment is lexical (roots may not exist yet — the attack writes *new*
+/// files), resolved against the same roots [`qaqh_skills::discover`] scans.
+fn is_skill_instruction_path(path: &Path, workspace_root: &Path) -> bool {
+    let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
+    if candidate.as_os_str().is_empty() {
+        return false;
+    }
+    qaqh_skills::skill_roots(workspace_root)
+        .iter()
+        .any(|root| {
+            let root_norm = normalize_lexically(&resolve_target_path(root.clone()));
+            path_within_dir(&candidate, &root_norm)
+        })
 }
 
 /// Determine whether a tool call requires user permission.
@@ -442,6 +484,30 @@ pub fn needs_permission(
     let workspace_root = resolve_target_path(workspace_root.to_path_buf());
     let risk = classify_risk(category, &paths, &workspace_root);
     let consequence = risk.consequence().to_string();
+
+    // 审计 H2：skill 目录写入 = 权威指令注入面。默认档 L3 下工作区内写自动
+    // 放行，被注入的模型可静默把 SKILL.md 植入 `.qaqh/skills/`，下一回合被
+    // 发现目录自动收录并以系统级权威指令身份注入，且文件留在仓库跨会话
+    // 持久生效。故写工具落点在任一 skill 发现根内时无条件弹审批（含 L4——
+    // 这类文件一旦落盘，其影响远超单次命令）。
+    if category == ToolCategory::Write
+        && paths
+            .iter()
+            .any(|path| is_skill_instruction_path(path, &workspace_root))
+    {
+        return PermissionDecision::AskUser {
+            reason: format!(
+                "Writing a skill file requires confirmation: '{}'",
+                tool_name
+            ),
+            paths,
+            category,
+            risk: PermissionRisk::High,
+            consequence: "Skill files are injected into model context as authoritative \
+                          instructions and persist across sessions."
+                .to_string(),
+        };
+    }
 
     // Level 4 is the explicit bypass mode: ordinary tools auto-approve,
     // including Exec/Net. The sensitive-session-file guard above still wins.
@@ -850,6 +916,88 @@ mod tests {
     }
 
     #[test]
+    fn skill_directory_writes_require_approval_at_every_level() {
+        // 审计 H2：skill 发现根下的文件 = 权威指令注入面。默认档 L3 的工作区
+        // 内写自动放行对它们不适用，L4 也不得静默——文件落盘即跨会话持久。
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        let skill_file = ws.join(".qaqh/skills/helper/SKILL.md");
+        for level in [
+            PermissionLevel::ReadFree,
+            PermissionLevel::WorkspaceFree,
+            PermissionLevel::Unrestricted,
+        ] {
+            let decision = needs_permission(
+                level,
+                "write",
+                &serde_json::json!({ "path": skill_file.display().to_string() }),
+                &ws,
+                &HashSet::new(),
+                ToolCategory::Write,
+            );
+            assert!(
+                matches!(decision, PermissionDecision::AskUser { .. }),
+                "skill write at L{} must ask, got {decision:?}",
+                level.to_u8()
+            );
+        }
+        // 旧式 `skills/` 根与不存在的深层目录（新建文件场景）同样命中。
+        let fresh = ws.join("skills/new/helper/SKILL.md");
+        let decision = needs_permission(
+            PermissionLevel::WorkspaceFree,
+            "apply_patch",
+            &serde_json::json!({ "patch": format!("*** Add File: {}\n+hi", fresh.display()) }),
+            &ws,
+            &HashSet::new(),
+            ToolCategory::Write,
+        );
+        assert!(
+            matches!(decision, PermissionDecision::AskUser { .. }),
+            "new skill file in a not-yet-existing root must ask, got {decision:?}"
+        );
+        // 工作区普通文件不受影响（L3 仍自动放行）。
+        let normal = needs_permission(
+            PermissionLevel::WorkspaceFree,
+            "write",
+            &serde_json::json!({ "path": ws.join("src/main.rs").display().to_string() }),
+            &ws,
+            &HashSet::new(),
+            ToolCategory::Write,
+        );
+        assert!(
+            matches!(normal, PermissionDecision::AutoApprove),
+            "ordinary workspace write must stay auto-approved, got {normal:?}"
+        );
+    }
+
+    #[test]
+    fn user_config_toml_is_sensitive_but_lookalikes_are_not() {
+        // 审计 M4：平台数据根下的 config.toml 在任何档位都要弹审批
+        // （L4 下可固化提权 + 改 base_url 劫持 LLM 流量，且热加载免重启生效）。
+        let config = qaqh_types::platform::config_path();
+        if !config.is_absolute() {
+            // 测试环境重定向了数据根且非绝对路径：组件级判定无法构造，跳过。
+            return;
+        }
+        assert!(
+            is_sensitive_session_path(&config),
+            "user-dir config.toml must be sensitive"
+        );
+        // 组件级判定不外溢：别处的同名/含名文件不受牵连。
+        for path in [
+            std::path::Path::new("C:/elsewhere/config.toml"),
+            std::path::Path::new("/opt/project/myconfig.toml"),
+        ] {
+            assert!(
+                !is_sensitive_session_path(path),
+                "{path:?} must not be sensitive"
+            );
+        }
+    }
+
+    #[test]
     fn workspace_free_requires_approval_for_exec_and_network() {
         for (tool, category) in [
             ("exec", ToolCategory::Exec),
@@ -961,6 +1109,25 @@ mod w3_w7_tests {
         let patch = "*** Begin Patch\n*** Update File: a.rs\n*** Delete File: b.rs\n*** Move to: c.rs\nnot-a-header: d.rs\n*** End Patch";
         assert_eq!(patch_target_paths(patch), vec!["a.rs", "b.rs", "c.rs"]);
         assert!(patch_target_paths("no headers here").is_empty());
+    }
+
+    #[test]
+    fn exec_approval_summary_flags_unenforced_sandbox() {
+        // 审计 H1：无强制后端的平台上，审批摘要必须带「无沙箱」警告，
+        // 用户不得带着「命令在沙箱内」的错觉放行 exec。
+        let summary = summarize_permission_action(
+            "exec",
+            &serde_json::json!({ "command": "ls", "cwd": "/repo" }),
+        )
+        .expect("exec summary");
+        if qaqh_sandbox::filesystem_and_network_isolation_enforced() {
+            assert!(!summary.contains("WARNING"), "{summary}");
+        } else {
+            assert!(
+                summary.contains("sandbox not enforced"),
+                "summary must warn about unenforced sandbox: {summary}"
+            );
+        }
     }
 
     #[test]

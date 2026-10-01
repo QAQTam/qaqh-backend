@@ -121,6 +121,11 @@ fn direct_exec_inner(
     };
     let sandbox_backend = sandbox_launch.backend;
     let sandbox_request = sandbox_launch.request;
+    // 审计 M1：子进程不得整体继承 daemon 环境——一次 `Get-ChildItem Env:`
+    // 即可把进程内所有变量（含潜在 API key）回传给模型。改为 env_clear +
+    // 最小白名单，模型显式传入的 `env` 最后覆盖。
+    cmd.env_clear();
+    cmd.envs(minimal_child_env());
     if let Some(env) = env {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
@@ -405,12 +410,24 @@ fn direct_exec_inner(
     // truncated 口径（见上方 hard_trunc）：字节预算耗尽（任一流）或读线程未以
     // EOF 收尾（settle 放弃 = 孙进程可能继续产出，保守提示输出可能不完整）。
     let cleaned = strip_ansi(&combined);
+    // 审计 M1：denial 日志里的输出片段先过脱敏——模型注入的 env 值（≥8 字符，
+    // 过短值只会粉碎输出片段而无保护意义）不得原样进日志。
+    let injected_secrets: Vec<String> = env
+        .map(|pairs| {
+            pairs
+                .iter()
+                .map(|(_, value)| value.clone())
+                .filter(|value| value.chars().count() >= 8)
+                .collect()
+        })
+        .unwrap_or_default();
     qaqh_sandbox::record_denial_if_any(
         sandbox_backend,
         exit_code,
         &cleaned,
         tool_call_id,
         &display_name,
+        &injected_secrets,
     );
     let total_tokens = qaqh_types::token::count_tokens(&cleaned);
     let (output_str, truncated) = if total_tokens > max_output_tokens || hard_trunc {
@@ -435,6 +452,66 @@ fn direct_exec_inner(
         cancelled,
         process_id: Some(proc_id),
     }
+}
+
+/// 审计 M1：子进程环境最小白名单。
+///
+/// 只透传运行命令所需的系统级变量；daemon 自身的全部其他环境（包括任何以
+/// 环境变量注入的凭据）不再进入子进程。Windows 的环境名大小写不敏感，
+/// 按 ASCII 大写折叠匹配；其余平台按原样精确匹配。
+fn minimal_child_env() -> Vec<(String, String)> {
+    const PASSTHROUGH: &[&str] = &[
+        // 跨平台基础：可执行查找 / 临时目录 / locale
+        "PATH",
+        "PATHEXT",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "USER",
+        "LOGNAME",
+        // Windows 系统定位：缺 SystemRoot/ComSpec 时大量系统组件直接失败
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "COMMONPROGRAMFILES",
+        "COMMONPROGRAMFILES(X86)",
+        "USERDOMAIN",
+        "USERNAME",
+        "PROCESSOR_ARCHITECTURE",
+        "NUMBER_OF_PROCESSORS",
+        "OS",
+    ];
+    let wanted: std::collections::HashSet<String> = PASSTHROUGH
+        .iter()
+        .map(|name| (*name).to_ascii_uppercase())
+        .collect();
+    std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let matched = if cfg!(windows) {
+                wanted.contains(&key.to_ascii_uppercase())
+            } else {
+                wanted.contains(&key)
+            };
+            matched.then(|| {
+                let value = value.to_string_lossy().into_owned();
+                (key, value)
+            })
+        })
+        .collect()
 }
 
 /// Structured output from a command execution.

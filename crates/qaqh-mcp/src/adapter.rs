@@ -111,7 +111,11 @@ pub(crate) fn auto_lifecycle() -> ClientLifecycleMode {
 /// env 必须是**已解析**的值（见 [`resolve_server_secrets`]）——本函数不做
 /// 占位符处理。
 pub(crate) fn build_stdio_command(cfg: &McpServerConfig) -> CommandWrap {
-    let mut command = tokio::process::Command::new(&cfg.command);
+    // 审计 M2（2026-10-01）：裸名在 Windows 的 CreateProcess 搜索序含当前
+    // 目录，且进程 cwd 可被配置指到模型可写目录——先钉死绝对路径（仅 PATH
+    // 查找），解析失败保持原值由 spawn 报 `program not found`。
+    let resolved = qaqh_types::platform::resolve_command_path(&cfg.command);
+    let mut command = tokio::process::Command::new(resolved);
     command.args(&cfg.args);
     command.envs(cfg.env.iter());
     if !cfg.cwd.trim().is_empty() {

@@ -177,6 +177,21 @@ struct ParsedMetadata {
 /// 优先级固定为：项目 `.qaqh` > `.agents` > `skills`，随后是用户
 /// `.qaqh` > `.agents`。同名 skill 只保留优先级最高者。
 pub fn discover(workspace: &Path) -> SkillCatalog {
+    discover_roots(&discovery_roots(workspace))
+}
+
+/// All skill discovery roots for `workspace` (project roots first, then user
+/// home roots). Shared by [`discover`] and by the permission engine, which
+/// treats every path under a root as an authoritative-instruction write
+/// surface (audit 2026-10-01 H2).
+pub fn skill_roots(workspace: &Path) -> Vec<PathBuf> {
+    discovery_roots(workspace)
+        .into_iter()
+        .map(|(root, _)| root)
+        .collect()
+}
+
+fn discovery_roots(workspace: &Path) -> Vec<(PathBuf, SkillScope)> {
     let workspace = absolutize(workspace);
     let mut roots = vec![
         (workspace.join(".qaqh/skills"), SkillScope::Project),
@@ -187,7 +202,7 @@ pub fn discover(workspace: &Path) -> SkillCatalog {
         roots.push((home.join(".qaqh/skills"), SkillScope::User));
         roots.push((home.join(".agents/skills"), SkillScope::User));
     }
-    discover_roots(&roots)
+    roots
 }
 
 fn discover_roots(roots: &[(PathBuf, SkillScope)]) -> SkillCatalog {

@@ -5,11 +5,14 @@
 //! bypass; it does not make the daemon unstartable.
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use std::process::Command;
+#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 
 pub use qaqh_policy::SandboxBackend;
 
+#[cfg(target_os = "linux")]
 const USER_NAMESPACE_FAILURES: [&str; 4] = [
     "loopback: Failed RTM_NEWADDR",
     "loopback: Failed RTM_NEWLINK",
@@ -17,12 +20,14 @@ const USER_NAMESPACE_FAILURES: [&str; 4] = [
     "No permissions to create a new namespace",
 ];
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BubblewrapSupport {
     available: bool,
     detail: String,
 }
 
+#[cfg(target_os = "linux")]
 static BUBBLEWRAP_SUPPORT: OnceLock<BubblewrapSupport> = OnceLock::new();
 
 /// Operating-system family used by policy presets and diagnostics.
@@ -50,6 +55,16 @@ pub struct SandboxCapabilities {
 }
 
 impl SandboxCapabilities {
+    /// Human-readable platform name for warnings and banners.
+    pub fn platform_str(&self) -> &'static str {
+        match self.platform {
+            Platform::Linux => "linux",
+            Platform::Macos => "macOS",
+            Platform::Windows => "Windows",
+            Platform::Other => std::env::consts::OS,
+        }
+    }
+
     /// Detect the current platform without failing startup.
     pub fn detect() -> Self {
         #[cfg(target_os = "linux")]
