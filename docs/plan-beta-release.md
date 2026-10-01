@@ -11,7 +11,9 @@
 - **交付面**：daemon（Rust 二进制）+ webui（静态资源）。WinUI 不在本仓且暂不交付；
   TUI 并入未执行（`crates/qaqh-tui` 不存在）。
 - **版本号（决策项，需拍板）**：当前 `2.0.0-alpha4`。建议按 semver 预发布发
-  **`2.0.0-beta.1`**（workspace 各 Cargo.toml + webui package.json 同步 bump）。
+  **`2.0.0-beta.1`**（workspace 各 Cargo.toml 同步 bump；webui 的
+  package.json 无独立版本消费点，2026-10-01 已移除 version 字段，
+  版本随 daemon 交付面）。
   若内测口径维持 alpha 号亦可，但发版说明须注明 beta 交付。
 - **tag**：建议 `v2.0.0-beta.1`，打在版本 bump 提交上。
 

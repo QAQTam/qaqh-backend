@@ -1,7 +1,6 @@
 {
   "name": "qaqh-webui",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
   "description": "QAQ-Harness WebUI (Solid 2 + Vite 8)",
   "scripts": {
