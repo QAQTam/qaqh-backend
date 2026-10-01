@@ -57,7 +57,8 @@ fn main() {
         Some("status") => status(),
         Some("stop") => stop(),
         Some("server") => {
-            // 临时跨端模式：headless 监听局域网地址，供远端壳直连。
+            // 审计 H3：默认 loopback + 固定端口；跨端（LAN）必须显式 `--bind`
+            // 且强制显式 `--token`（明文 HTTP 上 Bearer token 可被嗅探）。
             qaqh_runtime::cache_system_path();
             qaqh_runtime::detect_os_info();
             let capabilities = qaqh_sandbox::configure_from_current_exe();

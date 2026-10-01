@@ -353,6 +353,54 @@ pub fn plans_dir() -> PathBuf {
     data_dir().join("plans")
 }
 
+/// 在 **PATH 目录**里查找可执行文件（审计 2026-10-01 M2 的共用原语）。
+///
+/// 关键约束：候选目录**只来自 `PATH` 环境变量，绝不含当前工作目录**——
+/// Windows `CreateProcess` 对裸名的搜索序包含 cwd，模型可先在工作区投放
+/// 伪装可执行文件再触发 spawn。带扩展名补全（Windows: exe/cmd/bat/com），
+/// 与 shell 探测、MCP/LSP server 启动共用同一口径。
+pub fn find_on_path(command: &str) -> Option<PathBuf> {
+    let path = Path::new(command);
+    if path.is_absolute() {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    let base = Path::new(command);
+    let candidates: Vec<PathBuf> = if cfg!(windows) && path.extension().is_none() {
+        ["exe", "cmd", "bat", "com"]
+            .into_iter()
+            .map(|extension| base.with_extension(extension))
+            .collect()
+    } else {
+        vec![base.to_path_buf()]
+    };
+    std::env::split_paths(&path_var).find_map(|dir| {
+        candidates
+            .iter()
+            .map(|candidate| dir.join(candidate))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// 把用户/配置提供的命令解析为**绝对路径**后再 spawn（审计 M2）。
+///
+/// - 绝对路径：原样返回（含不存在的情况——交给 spawn 报 ENOENT，保持错误语义）。
+/// - 带目录的相对路径：钉死到当前工作目录，避免隐式依赖进程 cwd。
+/// - 裸名：仅 PATH 查找（[`find_on_path`]）；找不到时原样返回，spawn 报
+///   `program not found`，绝不落回 cwd 搜索。
+pub fn resolve_command_path(command: &str) -> PathBuf {
+    let path = Path::new(command);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if path.parent().is_some_and(|parent| !parent.as_os_str().is_empty()) {
+        return std::env::current_dir()
+            .unwrap_or_default()
+            .join(path);
+    }
+    find_on_path(command).unwrap_or_else(|| path.to_path_buf())
+}
+
 /// Return whether a process id currently exists without mutating it.
 pub fn process_is_running(pid: u32) -> bool {
     if pid == 0 {
@@ -415,6 +463,24 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
 mod data_root_tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn find_on_path_only_searches_path_and_pins_absolute() {
+        // 审计 M2（2026-10-01）：裸名解析只查 PATH（绝不含 cwd），命中即
+        // 绝对路径；未命中/带目录相对路径原样返回，由 spawn 报 ENOENT。
+        let name = if cfg!(windows) { "cmd" } else { "sh" };
+        let found = find_on_path(name).expect("system binary must be on PATH");
+        assert!(found.is_absolute(), "found={found:?}");
+
+        assert!(resolve_command_path(name).is_absolute());
+
+        let absolute = if cfg!(windows) {
+            r"C:\definitely\missing\tool.exe"
+        } else {
+            "/definitely/missing/tool"
+        };
+        assert_eq!(resolve_command_path(absolute), PathBuf::from(absolute));
+    }
 
     #[test]
     fn ua_version_tracks_package_version() {

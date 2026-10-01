@@ -171,10 +171,16 @@ fn shell_derive_args_are_shell_specific() {
     assert_eq!(bash[2], "ls -la");
 
     let pwsh = Shell::PowerShell.derive_exec_args("Get-ChildItem");
+    // 审计 M2（2026-10-01）：argv[0] 解析为绝对路径（仅 PATH 查找，不含
+    // cwd）。壳身份按尾段断言，wrapper 参数仍逐项精确保留。
+    assert!(
+        pwsh[0].ends_with("pwsh.exe") || pwsh[0].ends_with("pwsh"),
+        "argv[0]={}",
+        pwsh[0]
+    );
     assert_eq!(
-        &pwsh[..11],
+        &pwsh[1..11],
         [
-            "pwsh",
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
@@ -203,8 +209,38 @@ fn shell_derive_args_are_shell_specific() {
     assert_eq!(decoded, "Get-ChildItem");
 
     let cmd = Shell::Cmd.derive_exec_args("dir");
-    assert_eq!(&cmd[..2], ["cmd", "/c"]);
+    // 审计 M2：argv[0] 为 System32 下的 cmd.exe 绝对路径（或 PATH 解析结果）。
+    assert!(
+        cmd[0].ends_with("cmd.exe") || cmd[0].ends_with("cmd"),
+        "argv[0]={}",
+        cmd[0]
+    );
+    assert_eq!(cmd[1], "/c");
     assert_eq!(cmd[2], "dir");
+}
+
+/// 审计 M2（2026-10-01）：可解析到的壳必须钉成**绝对路径**且只查 PATH
+/// （Windows `CreateProcess` 对裸名的搜索序含当前目录——工作区二进制投放
+/// 防御）。解析失败才允许裸名兜底（此时 `available()` 也为 false）。
+#[test]
+fn resolved_shell_paths_are_absolute_when_available() {
+    for shell in [
+        Shell::PowerShell,
+        Shell::WindowsPowerShell,
+        Shell::Cmd,
+        Shell::Bash,
+        Shell::Zsh,
+        Shell::Sh,
+    ] {
+        if !shell.available() {
+            continue;
+        }
+        let path = shell.path();
+        assert!(
+            std::path::Path::new(path).is_absolute(),
+            "{path:?} resolved for an available shell must be absolute"
+        );
+    }
 }
 
 /// `-CommandWithArgs` 的绑定契约（O-3 结论）：只填 `$args`，**不产生
@@ -233,10 +269,15 @@ fn pwsh_command_with_args_uses_command_with_args() {
     ];
     let pwsh = Shell::PowerShell
         .derive_exec_args_with("Write-Output $args[0]; Write-Output $args[1]", Some(&args));
+    // 审计 M2：argv[0] 为绝对路径，壳身份按尾段断言。
+    assert!(
+        pwsh[0].ends_with("pwsh.exe") || pwsh[0].ends_with("pwsh"),
+        "argv[0]={}",
+        pwsh[0]
+    );
     assert_eq!(
-        &pwsh[..12],
+        &pwsh[1..12],
         [
-            "pwsh",
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",

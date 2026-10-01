@@ -808,9 +808,10 @@ async fn wait_for_daemon(
     daemon_path: Option<&std::path::Path>,
     timeout: std::time::Duration,
 ) -> Result<DaemonDiscovery> {
-    let executable = daemon_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(default_daemon_path);
+    let executable = match daemon_path {
+        Some(p) => p.to_path_buf(),
+        None => default_daemon_path()?,
+    };
     // 串行化 spawn 决策（临界区只做文件检查 + spawn，很快）。
     let guard = DAEMON_SPAWN_GUARD
         .get_or_init(|| tokio::sync::Mutex::new(()))
@@ -845,13 +846,14 @@ async fn wait_for_daemon(
 }
 
 /// Resolve the daemon executable. 与 [`crate::discovery::daemon_executable`]
-/// 的候选顺序保持一致：dev 布局（`QAQH_BACKEND_ROOT`/cwd 的 `target/debug`）
-/// → exe 旁 `resources/`（安装布局）→ exe 旁 → PATH 兜底。
+/// 的候选顺序保持一致：dev 布局（`QAQH_BACKEND_ROOT` 的 `target/debug`）→
+/// exe 旁 `resources/`（安装布局）→ exe 旁 → PATH 兜底（仅
+/// `QAQH_DAEMON_ALLOW_PATH=1`）。候选全空时返回错误。
 ///
 /// 注意：此前仅支持 dev 布局，安装版在「本地映射模式下由桥首次拉起 daemon」
 /// 时（`daemon.json` 不存在 → `wait_for_daemon` → 此处）会直接命中 PATH 裸名，
 /// 报 `io error: program not found`。统一为 `daemon_executable` 后安装布局
-/// 正确命中。
-fn default_daemon_path() -> std::path::PathBuf {
+/// 正确命中。审计 M5（2026-10-01）：候选序已移除 cwd，PATH 兜底改为 opt-in。
+fn default_daemon_path() -> Result<std::path::PathBuf> {
     crate::discovery::daemon_executable()
 }

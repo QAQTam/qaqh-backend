@@ -3,7 +3,20 @@
 //! The first production backend is Linux-only: Landlock for filesystem/TCP
 //! policy and seccomp-bpf for syscall/network denial. Other platforms still
 //! start normally and report a degraded capability set; they must not turn a
-//! missing Linux primitive into a daemon-startup failure.
+//! missing Linux primitive into a daemon-startup failure. The degradation is
+//! however **loud**: [`wrap_command`] warns on every unenforced exec and
+//! [`configure_from_current_exe`] warns at startup, and approval UIs surface
+//! [`filesystem_and_network_isolation_enforced`] so a user never approves an
+//! exec believing it is sandboxed when it is not.
+//!
+//! ## What the sandbox does NOT do (audit 2026-10-01 M3)
+//!
+//! The Linux backends isolate **writes** (Landlock/bwrap writable_roots) and
+//! **direct outbound network** (seccomp/bwrap --unshare-net). They do not
+//! restrict **reads**: a sandboxed command can read the whole filesystem,
+//! including `~/.ssh` and other secrets, and hand the data back through its
+//! captured output. The sandbox is an exfiltration friction, not an
+//! exfiltration boundary — classify secrets accordingly.
 //!
 //! Enforcement happens in a short-lived helper process. The daemon never calls
 //! `restrict_self()` in-process: Landlock is irreversible and `pre_exec` in a
@@ -44,6 +57,22 @@ pub struct SandboxLaunch {
 /// never prevents daemon startup.
 pub fn configure_from_current_exe() -> SandboxCapabilities {
     let capabilities = SandboxCapabilities::detect();
+    // 审计 H1：能力降级必须让操作者看见，而不是只留在 info 日志里。
+    // 非 Linux 平台（主平台是 Windows）当前没有任何强制后端，`workspace_write`
+    // + Deny 的 spec 声明纯属装饰——启动横幅必须明说。
+    if !capabilities.filesystem_write_isolation || !capabilities.network_isolation {
+        log::warn!(
+            "sandbox: NO enforcement on this platform ({}); exec commands run with full user \
+             privileges regardless of the declared sandbox spec — {}",
+            capabilities.platform_str(),
+            capabilities.detail
+        );
+        eprintln!(
+            "[qaqh-daemon] WARNING: exec sandbox is NOT enforced on this platform ({}); \
+             approved commands run with full user privileges",
+            capabilities.platform_str()
+        );
+    }
     if capabilities.landlock && capabilities.seccomp {
         match std::env::current_exe() {
             Ok(current) => {
@@ -62,6 +91,15 @@ pub fn configure_from_current_exe() -> SandboxCapabilities {
     capabilities
 }
 
+/// Whether exec specs on this platform are actually enforced (filesystem write
+/// isolation AND network isolation). Approval surfaces must call this instead
+/// of trusting the declared `SandboxSpec`: on Windows/macOS the spec is
+/// currently decorative (audit 2026-10-01 H1).
+pub fn filesystem_and_network_isolation_enforced() -> bool {
+    let capabilities = SandboxCapabilities::detect();
+    capabilities.filesystem_write_isolation && capabilities.network_isolation
+}
+
 /// Wrap a target command with the strongest configured backend.
 ///
 /// `Auto` prefers bubblewrap, then the Landlock/seccomp helper. Explicitly
@@ -78,7 +116,10 @@ pub fn wrap_command(
             request: None,
         });
     }
+    // 审计 H1：spec 声明与平台现实分离——非 Linux 平台当前没有强制后端，
+    // 不得静默假装「沙箱内」。降级放行（fail-open），但必须留下 warn 级证据。
     if !cfg!(target_os = "linux") {
+        warn_spec_unenforced(spec);
         return Ok(SandboxLaunch {
             backend: SandboxBackend::None,
             request: None,
@@ -88,6 +129,10 @@ pub fn wrap_command(
     let capabilities = SandboxCapabilities::detect();
     let resolved_spec = canonicalize_spec(spec)?;
     let backend = resolve_backend(spec.backend, &capabilities)?;
+    // Linux 也会降级（无 landlock/bwrap → ProcessHardening）：同样不许静默。
+    if backend == SandboxBackend::ProcessHardening {
+        warn_spec_unenforced(spec);
+    }
     log::debug!(
         target: "qaqh_sandbox",
         "{}",
@@ -142,6 +187,26 @@ pub fn wrap_command(
             request: None,
         }),
         SandboxBackend::Auto => unreachable!("resolve_backend removes Auto"),
+    }
+}
+
+/// 审计 H1：无强制后端时的降级证据。进程级只告警一次，避免长会话刷屏；
+/// 每次审批面仍可通过 [`filesystem_and_network_isolation_enforced`] 实时取口径。
+fn warn_spec_unenforced(spec: &SandboxSpec) {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if WARNED.set(()).is_ok() {
+        log::warn!(
+            target: "qaqh_sandbox",
+            "{}",
+            serde_json::json!({
+                "event": "sandbox_spec_unenforced",
+                "platform": std::env::consts::OS,
+                "network": spec.network,
+                "writable_roots": spec.writable_roots,
+                "note": "declared sandbox spec cannot be enforced on this platform; \
+                         command runs with full user privileges",
+            })
+        );
     }
 }
 
@@ -294,12 +359,17 @@ pub fn classify_denial(
 
 /// Emit a structured denial event when a sandboxed command failed for a
 /// recognized policy reason.
+///
+/// `secrets` are values that must never reach the log verbatim (e.g. env
+/// values the caller injected into the child): the output snippet is passed
+/// through [`redact_text`] before logging (audit 2026-10-01 M1).
 pub fn record_denial_if_any(
     backend: SandboxBackend,
     exit_code: Option<i32>,
     output: &str,
     tool_call_id: &str,
     command: &str,
+    secrets: &[String],
 ) {
     let Some(denial) = classify_denial(backend, exit_code, output) else {
         return;
@@ -314,9 +384,29 @@ pub fn record_denial_if_any(
             "exit_code": denial.exit_code,
             "tool_call_id": tool_call_id,
             "command": command,
-            "output_snippet": denial.output_snippet,
+            "output_snippet": redact_text(&denial.output_snippet, secrets),
         })
     );
+}
+
+/// Replace every occurrence of a known secret value with `[redacted]`.
+///
+/// Substitution runs longest-first so a value that is the prefix of another
+/// cannot leave a half-redacted residue; empty values are skipped. Callers
+/// should pre-filter trivially short values (they would shred the snippet
+/// without protecting anything).
+pub fn redact_text(text: &str, secrets: &[String]) -> String {
+    let mut ordered: Vec<&str> = secrets
+        .iter()
+        .map(String::as_str)
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    ordered.sort_by_key(|secret| std::cmp::Reverse(secret.chars().count()));
+    let mut out = text.to_owned();
+    for secret in ordered {
+        out = out.replace(secret, "[redacted]");
+    }
+    out
 }
 
 /// Entry point for the hidden daemon subcommand.
@@ -413,5 +503,13 @@ mod tests {
         .expect("denial");
         assert_eq!(denial.reason, SandboxDenialReason::ReadOnlyFileSystem);
         assert_eq!(denial.backend, SandboxBackend::LinuxBubblewrap);
+    }
+
+    #[test]
+    fn redact_text_replaces_longest_first_and_skips_empty() {
+        // 审计 M1：长值是短值前缀时不得留下半截残片。
+        let secrets = vec!["abc".to_string(), "abcdef".to_string(), String::new()];
+        assert_eq!(redact_text("k=abcdef k2=abc k3=", &secrets), "k=[redacted] k2=[redacted] k3=");
+        assert_eq!(redact_text("plain", &[]), "plain");
     }
 }
