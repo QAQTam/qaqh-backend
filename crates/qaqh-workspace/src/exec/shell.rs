@@ -128,8 +128,13 @@ impl Shell {
         }
     }
 
-    /// 已解析的候选名（进程内一次性；`None` = 候选集全不可用）。
+    /// 已解析的候选可执行**绝对路径**（进程内一次性；`None` = 候选集全不可用）。
     /// 与 `available()` 共用同一份口径，保证探测与派生同源。
+    ///
+    /// 审计 M2（2026-10-01）：解析结果必须钉到绝对路径且**只查 PATH，绝不含
+    /// 当前工作目录**——Windows `CreateProcess` 对裸名的搜索序包含 cwd，模型
+    /// 可先在工作区投放改造过的 `pwsh.exe`，此后每次 exec 实际启动的都是投放
+    /// 的 shell，壳探测的全部语义（EncodedCommand 等）即被绕过。
     fn resolved_shell_name(&self) -> Option<&'static str> {
         let slot = match self {
             Shell::Bash => 0,
@@ -147,8 +152,9 @@ impl Shell {
             .executable_candidates()
             .iter()
             .copied()
-            .find(|candidate| executable_on_path(candidate));
-        let _ = cache.set(resolved.map(str::to_string));
+            .find_map(qaqh_types::platform::find_on_path)
+            .map(|path| path.to_string_lossy().into_owned());
+        let _ = cache.set(resolved);
         cache.get().and_then(Option::as_deref)
     }
 
@@ -199,8 +205,9 @@ impl Shell {
     }
 
     /// Path to the shell executable.
-    /// 优先级：显式注册（启动期探测结果）> Windows git-bash 绝对路径 >
-    /// 候选集解析出的可运行名（`resolved_shell_name`）> 名义名。
+    /// 优先级：显式注册（启动期探测结果）> Windows 系统壳固定路径（cmd/
+    /// powershell，审计 M2）> Windows git-bash 绝对路径 > 候选集解析出的
+    /// **绝对路径**（`resolved_shell_name`，仅 PATH 查找）> 名义名。
     /// 候选解析是「探测与派生同源」的关键：精简镜像只有 `sh`/`dash` 时，
     /// `Shell::Bash` 会派生 `sh` 而不是必然失败的 `bash`——于是显式
     /// `shell: "bash"` 与平台自动检测落在同一支壳上（同一 POSIX 语义），
@@ -220,11 +227,16 @@ impl Shell {
                 .map(String::as_str)
                 .or(resolved)
                 .unwrap_or("pwsh"),
-            Shell::WindowsPowerShell => registered
-                .map(String::as_str)
+            Shell::WindowsPowerShell => windows_system_shell(&SYSTEM_POWERSHELL_PATH, SYSTEM_POWERSHELL_REL)
+                .as_deref()
+                .or(registered.map(String::as_str))
                 .or(resolved)
                 .unwrap_or("powershell"),
-            Shell::Cmd => resolved.unwrap_or("cmd"),
+            Shell::Cmd => windows_system_shell(&SYSTEM_CMD_PATH, SYSTEM_CMD_REL)
+                .as_deref()
+                .or(registered.map(String::as_str))
+                .or(resolved)
+                .unwrap_or("cmd"),
         }
     }
 
@@ -345,6 +357,34 @@ impl Shell {
             }
         }
     }
+}
+
+/// Windows 系统壳相对 `SystemRoot` 的固定位置（审计 M2）。
+const SYSTEM_CMD_REL: &str = r"System32\cmd.exe";
+const SYSTEM_POWERSHELL_REL: &str = r"System32\WindowsPowerShell\v1.0\powershell.exe";
+
+/// 系统壳固定路径的进程内缓存（`None` = 该位置不存在）。缓存后 `path()`
+/// 可以安全返回 `&'static str`。
+static SYSTEM_CMD_PATH: OnceLock<Option<String>> = OnceLock::new();
+static SYSTEM_POWERSHELL_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+/// Windows 系统组件壳的固定绝对路径：cmd / powershell 钉到 System32 下，
+/// PATH 形态异常时也不落回裸名搜索（裸名在 Windows 会先搜当前目录）。
+/// 非 Windows 平台恒 `None`（这两个壳本就只在 Windows 语义里出现）。
+fn windows_system_shell(cache: &'static OnceLock<Option<String>>, relative: &str) -> &'static Option<String> {
+    cache.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            let candidate = std::path::Path::new(&root).join(relative);
+            candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = relative;
+            None
+        }
+    })
 }
 
 /// PowerShell `-EncodedCommand` 要求的编码：UTF-16LE → Base64（RFC 4648）。
