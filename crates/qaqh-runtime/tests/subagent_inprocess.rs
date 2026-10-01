@@ -81,7 +81,10 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     // activity 面等待（AgentLifecycleChanged{Ready} → activity Idle）。
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        assert!(Instant::now() < deadline, "subagent actor never reached ready/idle");
+        assert!(
+            Instant::now() < deadline,
+            "subagent actor never reached ready/idle"
+        );
         if registry
             .activity(&session_id)
             .is_some_and(|activity| activity.state == qaqh_domain::ActivityState::Idle)
@@ -271,7 +274,11 @@ fn parent_cancel_propagates_to_children() {
     let expected = format!("child_cancel_sent:{parent}:{child}");
     let mut saw_child_cancel = false;
     while Instant::now() < deadline {
-        if registry.subagent_lifecycle_trace().iter().any(|e| e == &expected) {
+        if registry
+            .subagent_lifecycle_trace()
+            .iter()
+            .any(|e| e == &expected)
+        {
             saw_child_cancel = true;
             break;
         }

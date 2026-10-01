@@ -11,10 +11,10 @@ use qaqh_ringing::{
     RingingCommandState, RingingCommandStatus, RingingV2CommandResult, RingingV2CommandStatus,
     RingingV2ExistingResult,
 };
-use qaqh_session::session_fact_v2::{ProjectionEvent, ProjectionPayload};
 use qaqh_session::session_fact_v2::{
-    ConversationDelta, ControlDelta, ToolTerminalStatus, TurnTerminal,
+    ControlDelta, ConversationDelta, ToolTerminalStatus, TurnTerminal,
 };
+use qaqh_session::session_fact_v2::{ProjectionEvent, ProjectionPayload};
 
 /// 已 accepted 命令的幂等表（有界 TTL；accepted 后断线重试不得重复执行）。
 #[derive(Debug, Default)]
@@ -528,7 +528,7 @@ mod tests {
         );
     }
 
-#[test]
+    #[test]
     fn stale_running_receipts_are_warned_and_rate_limited() {
         let mut store = PendingCommandStore::new();
         assert!(store.record("cmd-stuck"));

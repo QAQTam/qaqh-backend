@@ -626,7 +626,7 @@ mod tests {
             "/tmp",
         );
         assert!(!out.is_success());
-        assert!(out.model_text().contains("LSP_PROTOCOL_ERROR"));
+        assert!(out.model_text().contains("lsp_protocol_error"));
     }
 
     #[test]
@@ -639,7 +639,7 @@ mod tests {
             None,
             "/tmp",
         );
-        assert!(out.model_text().contains("LSP_DISABLED"));
+        assert!(out.model_text().contains("lsp_disabled"));
     }
 
     #[test]
@@ -669,7 +669,7 @@ mod tests {
             "/tmp",
         );
         assert!(
-            out.model_text().contains("LSP_NOT_FOUND"),
+            out.model_text().contains("lsp_not_found"),
             "{}",
             out.model_text()
         );

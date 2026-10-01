@@ -409,12 +409,10 @@ fn is_skill_instruction_path(path: &Path, workspace_root: &Path) -> bool {
     if candidate.as_os_str().is_empty() {
         return false;
     }
-    qaqh_skills::skill_roots(workspace_root)
-        .iter()
-        .any(|root| {
-            let root_norm = normalize_lexically(&resolve_target_path(root.clone()));
-            path_within_dir(&candidate, &root_norm)
-        })
+    qaqh_skills::skill_roots(workspace_root).iter().any(|root| {
+        let root_norm = normalize_lexically(&resolve_target_path(root.clone()));
+        path_within_dir(&candidate, &root_norm)
+    })
 }
 
 /// Determine whether a tool call requires user permission.

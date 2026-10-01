@@ -228,5 +228,4 @@ mod tests {
         );
         assert!(!store.is_active_session("cs-2"));
     }
-
 }

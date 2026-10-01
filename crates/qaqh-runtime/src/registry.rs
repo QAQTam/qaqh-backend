@@ -2763,7 +2763,6 @@ mod tests {
         qaqh_workspace::remove_session_cancel("child-seed");
     }
 
-
     #[test]
     fn message_quota_rejects_in_flight_and_outbound_over_limit() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2798,5 +2797,4 @@ mod tests {
             "each root tree has its own outbound budget"
         );
     }
-
 }

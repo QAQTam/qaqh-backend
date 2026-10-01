@@ -509,7 +509,10 @@ mod tests {
     fn redact_text_replaces_longest_first_and_skips_empty() {
         // 审计 M1：长值是短值前缀时不得留下半截残片。
         let secrets = vec!["abc".to_string(), "abcdef".to_string(), String::new()];
-        assert_eq!(redact_text("k=abcdef k2=abc k3=", &secrets), "k=[redacted] k2=[redacted] k3=");
+        assert_eq!(
+            redact_text("k=abcdef k2=abc k3=", &secrets),
+            "k=[redacted] k2=[redacted] k3="
+        );
         assert_eq!(redact_text("plain", &[]), "plain");
     }
 }
