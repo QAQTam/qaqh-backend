@@ -29,7 +29,7 @@ pub enum ToolErrorKind {
     Execution,
     /// 暂不可用（可重试）。
     Unavailable,
-    /// 工具特有错误（必须携带命名空间 code）。
+    /// 工具特有错误（code 建议带工具前缀，且不得与内置码重名）。
     Custom,
 }
 
@@ -51,6 +51,24 @@ impl ToolErrorKind {
         })
     }
 
+    /// 全部内置 code（供 `Custom` 构造查重）。
+    pub fn iter_builtin_codes() -> impl Iterator<Item = &'static str> {
+        [
+            Self::InvalidArguments,
+            Self::NotFound,
+            Self::Conflict,
+            Self::PermissionDenied,
+            Self::Unauthorized,
+            Self::Timeout,
+            Self::Cancelled,
+            Self::Network,
+            Self::Execution,
+            Self::Unavailable,
+        ]
+        .into_iter()
+        .filter_map(Self::builtin_code)
+    }
+
     /// 默认可重试性（base spec §6.4：超时/网络/暂不可用可重试）。
     pub fn default_retryable(self) -> bool {
         matches!(self, Self::Timeout | Self::Network | Self::Unavailable)
@@ -59,9 +77,8 @@ impl ToolErrorKind {
 
 /// 稳定、机器可读的错误 code。
 ///
-/// 形态：`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`。
-/// [`ToolErrorKind::Custom`] 必须至少含一个命名空间段（`.` 分隔），
-/// 例如 `mcp.rate_limited`、`edit.hash_mismatch`。
+/// 形态：`^[a-z][a-z0-9_]*$`（与 canonical fact v2 的 `error.code` 校验完全一致）。
+/// 工具命名空间用下划线前缀约定表达，例如 `mcp_rate_limited`、`edit_hash_mismatch`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ToolErrorCode(String);
 
@@ -73,34 +90,27 @@ pub struct ToolErrorCodeError {
 }
 
 impl ToolErrorCode {
-    /// 解析并校验 code。
+    /// 解析并校验 code（`^[a-z][a-z0-9_]*$`）。
     pub fn parse(raw: &str) -> Result<Self, ToolErrorCodeError> {
         if raw.is_empty() {
             return Err(ToolErrorCodeError {
                 reason: "code 不得为空",
             });
         }
-        for segment in raw.split('.') {
-            if segment.is_empty() {
+        let mut chars = raw.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_lowercase() => {}
+            _ => {
                 return Err(ToolErrorCodeError {
-                    reason: "code 不允许空段（连续/首尾点）",
+                    reason: "code 首字符必须为小写字母",
                 });
             }
-            let mut chars = segment.chars();
-            match chars.next() {
-                Some(first) if first.is_ascii_lowercase() => {}
-                _ => {
-                    return Err(ToolErrorCodeError {
-                        reason: "code 段首字符必须为小写字母",
-                    });
-                }
-            }
-            for c in chars {
-                if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-                    return Err(ToolErrorCodeError {
-                        reason: "code 段仅允许 [a-z0-9_]",
-                    });
-                }
+        }
+        for c in chars {
+            if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                return Err(ToolErrorCodeError {
+                    reason: "code 仅允许 [a-z0-9_]",
+                });
             }
         }
         Ok(Self(raw.to_owned()))
@@ -111,23 +121,20 @@ impl ToolErrorCode {
         kind.builtin_code().map(|code| Self(code.to_owned()))
     }
 
-    /// 桥接构造：legacy 错误码为 UPPER_SNAKE（如 `RESOURCE_MISMATCH`），
-    /// 不做小写/命名空间校验。
+    /// 保留具体错误码：`raw` 合法则原样采用，否则回退 kind 内置码。
     ///
-    /// **仅限 legacy 工具迁移期**使用，用于保持既有 wire error code 不变；
-    /// 全新工具必须走 [`Self::parse`] / [`Self::builtin`]。
-    pub fn from_legacy(raw: &str) -> Self {
-        Self(raw.to_owned())
+    /// 错误码的唯一规范形态就是 [`Self::parse`] 接受的 snake_case——调用方
+    /// 传入的码可能来自旧持久化数据或动态拼接，非法时不得透传（会破坏
+    /// canonical fact 追加），静默落到 kind 内置码即可。
+    pub fn parse_or_builtin(raw: &str, fallback_kind: ToolErrorKind) -> Self {
+        Self::parse(raw).unwrap_or_else(|_| {
+            Self::builtin(fallback_kind).unwrap_or_else(|| Self("tool_error".to_owned()))
+        })
     }
 
     /// 字符串视图。
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    /// 是否带命名空间（含 `.`）。
-    pub fn is_namespaced(&self) -> bool {
-        self.0.contains('.')
     }
 }
 
@@ -144,7 +151,7 @@ impl fmt::Display for ToolErrorCode {
 pub struct ToolError {
     /// 机器可读分类。
     pub kind: ToolErrorKind,
-    /// 稳定 code（内置 kind 由 kind 推导；`Custom` 必须命名空间形态）。
+    /// 稳定 code（内置 kind 由 kind 推导；`Custom` 建议带工具前缀）。
     pub code: ToolErrorCode,
     /// 模型可见、具体、可操作的说明。
     pub detail: String,
@@ -162,10 +169,10 @@ impl ToolError {
     /// 构造内置类错误（code 由 kind 推导、retryable 取 kind 默认）。
     ///
     /// `kind` 应为 [`ToolErrorKind::Custom`] 之外的分类；误传 `Custom` 时
-    /// code 回退为 `custom.unspecified`（保持"Custom 必带命名空间"不变量）。
+    /// code 回退为 `custom_unspecified`（保持"Custom 不得冒用内置码"不变量）。
     pub fn new(kind: ToolErrorKind, detail: impl Into<String>) -> Self {
         let code = ToolErrorCode::builtin(kind)
-            .unwrap_or_else(|| ToolErrorCode("custom.unspecified".to_owned()));
+            .unwrap_or_else(|| ToolErrorCode("custom_unspecified".to_owned()));
         Self {
             kind,
             code,
@@ -177,14 +184,15 @@ impl ToolError {
         }
     }
 
-    /// 构造 `Custom` 错误（code 必须为命名空间形态，否则报构造错误）。
+    /// 构造 `Custom` 错误（code 不得与内置码重名，建议带工具前缀，如
+    /// `mcp_rate_limited`）。
     pub fn custom(
         code: ToolErrorCode,
         detail: impl Into<String>,
     ) -> Result<Self, ToolErrorCodeError> {
-        if !code.is_namespaced() {
+        if ToolErrorKind::iter_builtin_codes().any(|builtin| builtin == code.0) {
             return Err(ToolErrorCodeError {
-                reason: "Custom code 必须包含命名空间（如 mcp.rate_limited）",
+                reason: "Custom code 不得与内置码重名（建议带工具前缀，如 mcp_rate_limited）",
             });
         }
         Ok(Self {
@@ -325,11 +333,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn code_parse_accepts_builtin_and_namespaced_forms() {
+    fn code_parse_accepts_snake_case() {
         for raw in [
             "invalid_arguments",
-            "mcp.rate_limited",
-            "edit.hash_mismatch",
+            "mcp_rate_limited",
+            "edit_hash_mismatch",
         ] {
             assert!(ToolErrorCode::parse(raw).is_ok(), "{raw} 应合法");
         }
@@ -337,7 +345,15 @@ mod tests {
 
     #[test]
     fn code_parse_rejects_malformed() {
-        for raw in ["", "Invalid", "_x", "a..b", ".a", "a.", "a.b-c"] {
+        for raw in [
+            "",
+            "Invalid",
+            "TOOL_ERROR",
+            "_x",
+            "mcp.rate_limited",
+            "a b",
+            "全角",
+        ] {
             assert!(ToolErrorCode::parse(raw).is_err(), "{raw} 应非法");
         }
     }
@@ -346,19 +362,32 @@ mod tests {
     fn builtin_codes_derive_from_kind() {
         let code = ToolErrorCode::builtin(ToolErrorKind::NotFound).expect("内置 code");
         assert_eq!(code.as_str(), "not_found");
-        assert!(!code.is_namespaced());
         assert_eq!(ToolErrorCode::builtin(ToolErrorKind::Custom), None);
     }
 
     #[test]
-    fn custom_requires_namespace() {
-        let ok = ToolErrorCode::parse("mcp.rate_limited").expect("valid");
+    fn custom_rejects_builtin_collision() {
+        let ok = ToolErrorCode::parse("mcp_rate_limited").expect("valid");
         assert!(ToolError::custom(ok, "限流").is_ok());
 
-        let flat = ToolErrorCode::parse("rate_limited").expect("valid");
+        let builtin = ToolErrorCode::parse("not_found").expect("valid");
         assert!(
-            ToolError::custom(flat, "限流").is_err(),
-            "无命名空间 code 不得构造 Custom"
+            ToolError::custom(builtin, "x").is_err(),
+            "Custom code 不得与内置码重名"
+        );
+    }
+
+    #[test]
+    fn parse_or_builtin_keeps_conforming_and_falls_back() {
+        let kept = ToolErrorCode::parse_or_builtin("edit_hash_mismatch", ToolErrorKind::Execution);
+        assert_eq!(kept.as_str(), "edit_hash_mismatch");
+        let legacy = ToolErrorCode::parse_or_builtin("TOOL_ERROR", ToolErrorKind::Execution);
+        assert_eq!(legacy.as_str(), "execution", "非法码回退 kind 内置码");
+        let custom_fallback = ToolErrorCode::parse_or_builtin("", ToolErrorKind::Custom);
+        assert_eq!(
+            custom_fallback.as_str(),
+            "tool_error",
+            "Custom 无内置码时兜底"
         );
     }
 
@@ -370,9 +399,13 @@ mod tests {
     }
 
     #[test]
-    fn custom_kind_via_new_keeps_namespaced_fallback_code() {
+    fn custom_kind_via_new_keeps_conforming_fallback_code() {
         let error = ToolError::new(ToolErrorKind::Custom, "x");
-        assert!(error.code.is_namespaced(), "回退 code 仍保持命名空间形态");
+        assert_eq!(
+            error.code.as_str(),
+            "custom_unspecified",
+            "回退 code 仍为合法形态"
+        );
     }
 
     #[test]

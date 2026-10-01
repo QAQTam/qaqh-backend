@@ -71,7 +71,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
             .to_string();
         if question.trim().is_empty() {
             return Err(AskUserError {
-                code: "MISSING_QUESTION",
+                code: "missing_question",
                 message: format!("questions[{index}].question is required"),
             });
         }
@@ -81,14 +81,14 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
             Some(Value::String(id)) if !id.trim().is_empty() => id.clone(),
             Some(_) => {
                 return Err(AskUserError {
-                    code: "INVALID_QUESTION_ID",
+                    code: "invalid_question_id",
                     message: format!("questions[{index}].id must be a non-empty string"),
                 });
             }
         };
         if !ids.insert(id.clone()) {
             return Err(AskUserError {
-                code: "DUPLICATE_QUESTION_ID",
+                code: "duplicate_question_id",
                 message: format!("duplicate question id: {id}"),
             });
         }
@@ -100,7 +100,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
                 for (option_index, value) in values.iter().enumerate() {
                     let Some(option) = value.as_str() else {
                         return Err(AskUserError {
-                            code: "INVALID_OPTION",
+                            code: "invalid_option",
                             message: format!(
                                 "question {id} option {option_index} must be a non-empty string"
                             ),
@@ -109,7 +109,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
                     let option = option.trim();
                     if option.is_empty() {
                         return Err(AskUserError {
-                            code: "INVALID_OPTION",
+                            code: "invalid_option",
                             message: format!(
                                 "question {id} option {option_index} must be a non-empty string"
                             ),
@@ -121,7 +121,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
             }
             Some(_) => {
                 return Err(AskUserError {
-                    code: "INVALID_OPTIONS",
+                    code: "invalid_options",
                     message: format!("question {id} options must be an array"),
                 });
             }
@@ -132,7 +132,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
             .any(|option| !unique_options.insert(option.clone()))
         {
             return Err(AskUserError {
-                code: "DUPLICATE_OPTION",
+                code: "duplicate_option",
                 message: format!("question {id} contains duplicate options"),
             });
         }
@@ -143,7 +143,7 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
             .unwrap_or(true);
         if options.is_empty() && !allow_custom {
             return Err(AskUserError {
-                code: "UNANSWERABLE_QUESTION",
+                code: "unanswerable_question",
                 message: format!("question {id} has no options and disallows custom answers"),
             });
         }
@@ -429,7 +429,7 @@ mod tests {
         });
         let result = exec_ask_user(&args);
         let err = result.error.as_ref().expect("structured error");
-        assert_eq!(err.code, "MISSING_QUESTION");
+        assert_eq!(err.code, "missing_question");
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert_eq!(error.code, "DUPLICATE_QUESTION_ID");
+        assert_eq!(error.code, "duplicate_question_id");
     }
 
     #[test]
@@ -487,7 +487,7 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert_eq!(error.code, "DUPLICATE_OPTION");
+        assert_eq!(error.code, "duplicate_option");
     }
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert_eq!(error.code, "UNANSWERABLE_QUESTION");
+        assert_eq!(error.code, "unanswerable_question");
     }
 
     #[test]
@@ -511,7 +511,7 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert_eq!(error.code, "INVALID_OPTION");
+        assert_eq!(error.code, "invalid_option");
     }
 
     #[test]
@@ -523,6 +523,6 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert_eq!(error.code, "INVALID_QUESTION_ID");
+        assert_eq!(error.code, "invalid_question_id");
     }
 }

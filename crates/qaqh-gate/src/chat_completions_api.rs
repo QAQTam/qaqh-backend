@@ -1434,7 +1434,7 @@ mod skill_envelope_tests {
             ],
         )
         .unwrap_err();
-        assert!(error.contains("SKILL_CONTEXT_SYNC_UNSUPPORTED"));
+        assert!(error.contains("skill_context_sync_unsupported"));
     }
 
     /// T-7-1 / BUG-2026-09-13-13：上游掐流时可能只送到 tool_call 的

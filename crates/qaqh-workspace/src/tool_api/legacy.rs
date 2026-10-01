@@ -324,29 +324,29 @@ pub fn map_tool_result(result: ToolResult) -> ToolOutcome {
 /// legacy 错误码 → SDK 错误分类（未识别码归 `Custom`，code 原样保留）。
 fn map_error_kind(code: &str) -> ToolErrorKind {
     match code {
-        "INVALID_ARGUMENTS" | "INVALID_ARGS" => ToolErrorKind::InvalidArguments,
-        "UNKNOWN_TOOL" | "NOT_FOUND" => ToolErrorKind::NotFound,
-        "PERMISSION_DENIED"
-        | "PERMISSION_REQUIRED"
-        | "BLOCKED_BY_MODE"
-        | "SESSION_MISMATCH"
-        | "RESOURCE_MISMATCH"
-        | "WORKSPACE_MISMATCH" => ToolErrorKind::PermissionDenied,
-        "CANCELLED" => ToolErrorKind::Cancelled,
-        "TIMEOUT" => ToolErrorKind::Timeout,
-        "MANAGER_UNAVAILABLE" | "RUNTIME_NOT_INITIALIZED" => ToolErrorKind::Unavailable,
-        "PARTIAL" | "IO_ERROR" | "INTERNAL_ERROR" | "TOOL_ERROR" | "PREPARE_REJECTED" => {
+        "invalid_arguments" | "invalid_args" => ToolErrorKind::InvalidArguments,
+        "unknown_tool" | "not_found" => ToolErrorKind::NotFound,
+        "permission_denied"
+        | "permission_required"
+        | "blocked_by_mode"
+        | "session_mismatch"
+        | "resource_mismatch"
+        | "workspace_mismatch" => ToolErrorKind::PermissionDenied,
+        "cancelled" => ToolErrorKind::Cancelled,
+        "timeout" => ToolErrorKind::Timeout,
+        "manager_unavailable" | "runtime_not_initialized" => ToolErrorKind::Unavailable,
+        "partial" | "io_error" | "internal_error" | "tool_error" | "prepare_rejected" => {
             ToolErrorKind::Execution
         }
         _ => ToolErrorKind::Custom,
     }
 }
 
-/// legacy 错误 → SDK 错误（code 原样保留，kind 由 code 推导）。
+/// legacy 错误 → SDK 错误（code 为 conforming snake_case 时保留，kind 由 code 推导）。
 fn map_error(error: &qaqh_types::ToolError) -> ToolError {
-    let mut mapped = ToolError::new(map_error_kind(&error.code), error.message.clone())
-        .with_retryable(error.retryable);
-    mapped.code = ToolErrorCode::from_legacy(&error.code);
+    let kind = map_error_kind(&error.code);
+    let mut mapped = ToolError::new(kind, error.message.clone()).with_retryable(error.retryable);
+    mapped.code = ToolErrorCode::parse_or_builtin(&error.code, kind);
     if let Some(hint) = &error.hint {
         mapped = mapped.with_hint(hint.clone());
     }
@@ -447,7 +447,7 @@ mod tests {
 
     fn error_handler(_ctx: ToolCallCtx) -> ToolResult {
         ToolResult::error_with(
-            "NOT_FOUND",
+            "not_found",
             "file missing",
             false,
             Some("check the path".to_owned()),
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(call.outcome.status, qaqh_types::ToolStatus::Partial);
         assert_eq!(call.outcome.check_invariants(), Ok(()));
         let error = call.outcome.error.expect("partial 必须带 error");
-        assert_eq!(error.code.as_str(), "PARTIAL");
+        assert_eq!(error.code.as_str(), "partial");
 
         let adapter =
             LegacyToolAdapter::new(legacy_handler("exec", backgrounded_handler)).expect("adapter");
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(call.outcome.check_invariants(), Ok(()));
         let error = call.outcome.error.expect("error 必须存在");
         assert_eq!(error.kind, ToolErrorKind::NotFound);
-        assert_eq!(error.code.as_str(), "NOT_FOUND", "legacy code 原样保留");
+        assert_eq!(error.code.as_str(), "not_found", "legacy code 原样保留");
         assert_eq!(error.detail, "file missing");
         assert_eq!(error.hint.as_deref(), Some("check the path"));
         assert!(!error.retryable);
@@ -691,7 +691,7 @@ mod tests {
         assert_eq!(call.outcome.check_invariants(), Ok(()));
         let error = call.outcome.error.expect("error 必须存在");
         assert_eq!(error.kind, ToolErrorKind::Cancelled);
-        assert_eq!(error.code.as_str(), "CANCELLED");
+        assert_eq!(error.code.as_str(), "cancelled");
     }
 
     #[test]

@@ -6,8 +6,8 @@
 use super::direct::ExecOutput;
 use crate::tool_api::display::clamp_display_body;
 use crate::tool_api::{
-    ToolBody, ToolContentBlock, ToolDisplay, ToolDisplayOutcome, ToolError, ToolErrorCode,
-    ToolErrorKind, ToolHeader, ToolProjection, ToolStatus, ToolTerminalState,
+    ToolBody, ToolContentBlock, ToolDisplay, ToolDisplayOutcome, ToolError, ToolErrorKind,
+    ToolHeader, ToolProjection, ToolStatus, ToolTerminalState,
 };
 
 #[cfg(test)]
@@ -51,9 +51,7 @@ impl ToolProjection for ExecOutput {
         if self.status() == ToolStatus::Ok {
             return None;
         }
-        let mut error = ToolError::new(ToolErrorKind::Execution, self.to_json());
-        error.code = ToolErrorCode::from_legacy("TOOL_ERROR");
-        Some(error)
+        Some(ToolError::new(ToolErrorKind::Execution, self.to_json()))
     }
 
     fn model_blocks(&self) -> Vec<ToolContentBlock> {

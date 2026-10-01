@@ -252,9 +252,9 @@ pub(crate) enum PathGuardError {
 impl PathGuardError {
     pub(crate) fn code(&self) -> &'static str {
         match self {
-            Self::DevicePath(_) => "UNSUPPORTED_PATH",
-            Self::Symlink { .. } => "SYMLINK_TARGET",
-            Self::NotRegular { .. } => "UNSUPPORTED_FILE_TYPE",
+            Self::DevicePath(_) => "unsupported_path",
+            Self::Symlink { .. } => "symlink_target",
+            Self::NotRegular { .. } => "unsupported_file_type",
         }
     }
 
@@ -615,7 +615,7 @@ mod atomic_write_tests {
         let link = dir.path().join("link.txt");
         symlink(&target, &link).unwrap();
         let err = ensure_writable_regular_target(&link.to_string_lossy()).unwrap_err();
-        assert_eq!(err.code(), "SYMLINK_TARGET");
+        assert_eq!(err.code(), "symlink_target");
         assert!(err.message().contains("target.txt"), "{}", err.message());
 
         let fifo = dir.path().join("fifo");
@@ -628,19 +628,19 @@ mod atomic_write_tests {
             ensure_writable_regular_target(&fifo.to_string_lossy())
                 .unwrap_err()
                 .code(),
-            "UNSUPPORTED_FILE_TYPE"
+            "unsupported_file_type"
         );
         assert_eq!(
             ensure_readable_regular_file(&fifo.to_string_lossy())
                 .unwrap_err()
                 .code(),
-            "UNSUPPORTED_FILE_TYPE"
+            "unsupported_file_type"
         );
         assert_eq!(
             ensure_readable_regular_file("/dev/null")
                 .unwrap_err()
                 .code(),
-            "UNSUPPORTED_FILE_TYPE"
+            "unsupported_file_type"
         );
         assert!(ensure_writable_regular_target(&target.to_string_lossy()).is_ok());
         assert!(

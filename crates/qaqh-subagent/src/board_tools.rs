@@ -229,7 +229,7 @@ impl TypedTool for BoardChannelCreateTool {
                 name: &args.name,
                 topic: args.topic.as_deref(),
             })
-            .map_err(|error| board_error("BOARD_CHANNEL_CREATE_FAILED", error))?;
+            .map_err(|error| board_error("board_channel_create_failed", error))?;
         Ok(BoardChannelOutput { channel })
     }
 }
@@ -279,7 +279,7 @@ impl TypedTool for BoardThreadCreateTool {
                 title: &args.title,
                 task_id: args.task_id.as_deref(),
             })
-            .map_err(|error| board_error("BOARD_THREAD_CREATE_FAILED", error))?;
+            .map_err(|error| board_error("board_thread_create_failed", error))?;
         Ok(BoardThreadOutput { thread })
     }
 }
@@ -331,7 +331,7 @@ impl TypedTool for BoardPostTool {
                 body: &args.body,
                 task_id: args.task_id.as_deref(),
             })
-            .map_err(|error| board_error("BOARD_POST_FAILED", error))?;
+            .map_err(|error| board_error("board_post_failed", error))?;
         let BoardPostOutcome {
             post,
             notified,
@@ -391,7 +391,7 @@ impl TypedTool for BoardSubscribeTool {
                 target_id: &args.target_id,
                 action: args.action,
             })
-            .map_err(|error| board_error("BOARD_SUBSCRIBE_FAILED", error))?;
+            .map_err(|error| board_error("board_subscribe_failed", error))?;
         Ok(BoardSubscriptionOutput { subscription })
     }
 }
@@ -443,7 +443,7 @@ impl TypedTool for BoardListTool {
                 include_posts: args.include_posts,
                 post_limit: args.post_limit,
             })
-            .map_err(|error| board_error("BOARD_LIST_FAILED", error))?;
+            .map_err(|error| board_error("board_list_failed", error))?;
         Ok(BoardListOutput { board })
     }
 }
@@ -451,7 +451,7 @@ impl TypedTool for BoardListTool {
 fn board_host_or_error(tool: &str) -> Result<std::sync::Arc<dyn BoardHost>, ToolExecutionError> {
     board_host().ok_or_else(|| {
         board_error(
-            "HOST_UNAVAILABLE",
+            "host_unavailable",
             format!("{tool} requires the in-process message board host"),
         )
     })
@@ -459,16 +459,16 @@ fn board_host_or_error(tool: &str) -> Result<std::sync::Arc<dyn BoardHost>, Tool
 
 fn board_error(code: &str, message: impl Into<String>) -> ToolExecutionError {
     let kind = match code {
-        "HOST_UNAVAILABLE" => ToolErrorKind::Unavailable,
-        "BOARD_CHANNEL_CREATE_FAILED"
-        | "BOARD_THREAD_CREATE_FAILED"
-        | "BOARD_POST_FAILED"
-        | "BOARD_SUBSCRIBE_FAILED"
-        | "BOARD_LIST_FAILED" => ToolErrorKind::Execution,
+        "host_unavailable" => ToolErrorKind::Unavailable,
+        "board_channel_create_failed"
+        | "board_thread_create_failed"
+        | "board_post_failed"
+        | "board_subscribe_failed"
+        | "board_list_failed" => ToolErrorKind::Execution,
         _ => ToolErrorKind::Custom,
     };
     let mut error = ToolError::new(kind, message)
         .with_hint("Check the message board state and retry with valid references.");
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, kind);
     ToolExecutionError::Recoverable(error)
 }

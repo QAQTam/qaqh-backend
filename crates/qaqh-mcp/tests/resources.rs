@@ -461,7 +461,7 @@ async fn list_resources_unknown_server_maps_not_found() {
         json!({ "action": "list_resources", "server": "nope" }),
     );
     let (code, message) = error_code_of(&result);
-    assert_eq!(code, "MCP_NOT_FOUND", "{message}");
+    assert_eq!(code, "mcp_not_found", "{message}");
     assert!(message.contains("configured"));
 }
 
@@ -608,7 +608,7 @@ async fn read_resource_unknown_uri_maps_tool_error() {
         }),
     );
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_TOOL_ERROR", "server 侧错误透传（设计 §7）");
+    assert_eq!(code, "mcp_tool_error", "server 侧错误透传（设计 §7）");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -623,7 +623,7 @@ async fn read_resource_unknown_server_maps_not_found() {
         }),
     );
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_NOT_FOUND");
+    assert_eq!(code, "mcp_not_found");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -631,13 +631,13 @@ async fn read_resource_missing_params_maps_protocol() {
     let manager = make_manager_named(Some("mock"));
     let result = aggregate(&manager, json!({ "action": "read_resource" }));
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_PROTOCOL_ERROR");
+    assert_eq!(code, "mcp_protocol_error");
     let result = aggregate(
         &manager,
         json!({ "action": "read_resource", "server": "mock" }),
     );
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_PROTOCOL_ERROR");
+    assert_eq!(code, "mcp_protocol_error");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -645,10 +645,10 @@ async fn invalid_action_maps_protocol() {
     let manager = make_manager_named(Some("mock"));
     let result = aggregate(&manager, json!({}));
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_PROTOCOL_ERROR", "缺 action");
+    assert_eq!(code, "mcp_protocol_error", "缺 action");
     let result = aggregate(&manager, json!({ "action": "explode" }));
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_PROTOCOL_ERROR", "未知 action");
+    assert_eq!(code, "mcp_protocol_error", "未知 action");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -656,7 +656,7 @@ async fn disabled_manager_rejects_aggregate() {
     let manager = disabled_manager();
     let result = aggregate(&manager, json!({ "action": "list_servers" }));
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_DISABLED");
+    assert_eq!(code, "mcp_disabled");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -676,7 +676,7 @@ async fn read_resource_honours_cancel() {
         &cancel,
     );
     let (code, _message) = error_code_of(&result);
-    assert_eq!(code, "MCP_CANCELLED");
+    assert_eq!(code, "mcp_cancelled");
 }
 
 // ═══════ PR-M2-2：资源清单注入块渲染（resource_env_block_with）═══════
@@ -881,7 +881,7 @@ async fn get_prompt_times_out_and_frees_the_service_lock() {
     let result = qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "hang", None, timeout);
     let elapsed = started.elapsed();
     let error = result.expect_err("hung prompt must not succeed");
-    assert_eq!(error.kind.code(), "MCP_TIMEOUT", "{error:?}");
+    assert_eq!(error.kind.code(), "mcp_timeout", "{error:?}");
     assert!(
         elapsed < Duration::from_secs(2),
         "timeout must release the call well before the server finishes: {elapsed:?}"

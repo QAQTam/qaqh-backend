@@ -178,7 +178,7 @@ impl TypedTool for TaskCreateTool {
                 title: &args.title,
                 description_ref: args.description_ref.as_deref(),
             })
-            .map_err(|error| task_error("TASK_CREATE_FAILED", error))?;
+            .map_err(|error| task_error("task_create_failed", error))?;
         Ok(TaskOutput { task })
     }
 }
@@ -228,7 +228,7 @@ impl TypedTool for TaskClaimTool {
                 action: args.action,
                 reason: args.reason.as_deref(),
             })
-            .map_err(|error| task_error("TASK_CLAIM_FAILED", error))?;
+            .map_err(|error| task_error("task_claim_failed", error))?;
         Ok(TaskOutput { task })
     }
 }
@@ -288,7 +288,7 @@ impl TypedTool for TaskUpdateTool {
                 media_type: args.media_type.as_deref(),
                 acceptance: args.acceptance.as_deref(),
             })
-            .map_err(|error| task_error("TASK_UPDATE_FAILED", error))?;
+            .map_err(|error| task_error("task_update_failed", error))?;
         Ok(TaskOutput { task })
     }
 }
@@ -340,7 +340,7 @@ impl TypedTool for TaskCloseTool {
                 result_ref: args.result_ref.as_deref(),
                 reason: args.reason.as_deref(),
             })
-            .map_err(|error| task_error("TASK_CLOSE_FAILED", error))?;
+            .map_err(|error| task_error("task_close_failed", error))?;
         Ok(TaskOutput { task })
     }
 }
@@ -388,7 +388,7 @@ impl TypedTool for TaskListTool {
                 caller_session_id: &ctx.session_id,
                 state: args.state.as_deref(),
             })
-            .map_err(|error| task_error("TASK_LIST_FAILED", error))?;
+            .map_err(|error| task_error("task_list_failed", error))?;
         Ok(TaskListOutput { tasks })
     }
 }
@@ -396,7 +396,7 @@ impl TypedTool for TaskListTool {
 fn task_host_or_error(tool: &str) -> Result<std::sync::Arc<dyn TaskBoardHost>, ToolExecutionError> {
     task_host().ok_or_else(|| {
         task_error(
-            "HOST_UNAVAILABLE",
+            "host_unavailable",
             format!("{tool} requires the in-process task board host"),
         )
     })
@@ -404,13 +404,13 @@ fn task_host_or_error(tool: &str) -> Result<std::sync::Arc<dyn TaskBoardHost>, T
 
 fn task_error(code: &str, message: impl Into<String>) -> ToolExecutionError {
     let kind = match code {
-        "HOST_UNAVAILABLE" => ToolErrorKind::Unavailable,
-        "TASK_CREATE_FAILED" | "TASK_CLAIM_FAILED" | "TASK_UPDATE_FAILED" | "TASK_CLOSE_FAILED"
-        | "TASK_LIST_FAILED" => ToolErrorKind::Execution,
+        "host_unavailable" => ToolErrorKind::Unavailable,
+        "task_create_failed" | "task_claim_failed" | "task_update_failed" | "task_close_failed"
+        | "task_list_failed" => ToolErrorKind::Execution,
         _ => ToolErrorKind::Custom,
     };
     let mut error = ToolError::new(kind, message)
         .with_hint("Check the task board state and retry with a valid transition.");
-    error.code = ToolErrorCode::from_legacy(code);
+    error.code = ToolErrorCode::parse_or_builtin(code, kind);
     ToolExecutionError::Recoverable(error)
 }

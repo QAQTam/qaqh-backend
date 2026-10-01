@@ -518,7 +518,7 @@ impl TypedTool for JournalTool {
                     .filter(|file| !file.is_empty())
                     .ok_or_else(|| {
                         mutation_error(
-                            "MISSING_FILE",
+                            "missing_file",
                             "journal replay requires 'file'",
                             None,
                             json!({}),
@@ -530,13 +530,13 @@ impl TypedTool for JournalTool {
                     .map(|out| std::path::PathBuf::from(resolve_mutation_path(ctx, out)));
                 let replayed = replay_to_path(file, args.at, out.as_deref()).map_err(|error| {
                     mutation_error(
-                        "REPLAY_FAILED",
+                        "replay_failed",
                         error,
                         None,
                         json!({
                             "timeis": crate::now_utc8(),
                             "status": "error",
-                            "code": "REPLAY_FAILED",
+                            "code": "replay_failed",
                             "file": file,
                         }),
                     )
@@ -573,13 +573,13 @@ impl TypedTool for JournalTool {
                 }
             }
             other => Err(mutation_error(
-                "INVALID_ACTION",
+                "invalid_action",
                 format!("invalid journal action {other:?} — use query, replay, or export"),
                 None,
                 json!({
                     "timeis": crate::now_utc8(),
                     "status": "error",
-                    "code": "INVALID_ACTION",
+                    "code": "invalid_action",
                 }),
             )),
         }

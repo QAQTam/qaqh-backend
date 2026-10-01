@@ -208,7 +208,7 @@ fn ratio(a: &str, b: &str) -> f32 {
 
 /// `NOT_FOUND` 的模型可见正文：错误说明 + 最近似位置 + old_str→实际内容的 unified diff。
 pub(crate) fn render_not_found(path: &str, old: &str, nearest: Option<&NearestMatch>) -> String {
-    let mut out = format!("[ERROR] edit {path}\n  NOT_FOUND: old_str was not found in the file.\n");
+    let mut out = format!("[ERROR] edit {path}\n  not_found: old_str was not found in the file.\n");
     if let Some(n) = nearest {
         out.push_str(&format!(
             "  closest match: L{}-L{} (similarity {:.2})\n",

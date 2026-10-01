@@ -317,7 +317,7 @@ impl ToolResult {
         Self::with_error(
             ToolStatus::Partial,
             text.clone(),
-            "PARTIAL",
+            "partial",
             text,
             false,
             None,
@@ -329,7 +329,7 @@ impl ToolResult {
         Self::with_error(
             ToolStatus::Cancelled,
             text.clone(),
-            "CANCELLED",
+            "cancelled",
             text,
             false,
             None,
@@ -342,7 +342,7 @@ impl ToolResult {
 
     pub fn error(message: impl Into<String>) -> Self {
         let message = message.into();
-        Self::error_with("TOOL_ERROR", message, false, None)
+        Self::error_with("tool_error", message, false, None)
     }
 
     pub fn error_with(
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn failure_status_is_the_only_failure_authority() {
         let result =
-            ToolResult::error_with("NOT_FOUND", "missing", false, Some("retry read".into()));
+            ToolResult::error_with("not_found", "missing", false, Some("retry read".into()));
         assert_eq!(result.status, ToolStatus::Error);
         assert!(result.error.is_some());
         assert!(!result.is_success());
