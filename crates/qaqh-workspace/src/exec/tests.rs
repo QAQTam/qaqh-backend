@@ -388,9 +388,44 @@ fn pwsh_regression_runner_ready() -> bool {
     shell_available(Shell::PowerShell)
 }
 
+/// G4 先例的扩展守卫（G5 补跑定性）：MSYS/Cygwin bash 5.3 运行时对**原生
+/// Windows 父进程**拼出的 `\"` 参数往返有损（实测 git-bash 5.3.15：
+/// `a"b` → `a\b`，bin/bash.exe 与 usr/bin/bash.exe 同样），属 bash 侧命令行
+/// 解析特性，exec 的 argv 构造层无法修复。探测真实往返能力：坏环境跳过
+/// （设 QAQH_REQUIRE_SHELL=1 强制失败），好环境仍走真实断言。
+fn bash_positional_quote_roundtrip_ok() -> bool {
+    let argv = Shell::Bash.derive_exec_args_with(
+        r#"printf %s "$1""#,
+        Some(&[r#"x"y"#.to_string()]),
+    );
+    let out = super::direct::direct_exec(
+        &argv,
+        None,
+        None,
+        1000,
+        15,
+        None,
+        None,
+        None,
+        "probe-quote-roundtrip",
+    );
+    out.status == "completed" && out.exit_code == Some(0) && out.output.trim() == r#"x"y"#
+}
+
 #[test]
 fn exec_with_bash_shell_and_args_executes_via_positional_params() {
     skip_without_shell!(Shell::Bash, "bash");
+    if !bash_positional_quote_roundtrip_ok() {
+        let required = std::env::var("QAQH_REQUIRE_SHELL").is_ok_and(|v| v == "1");
+        assert!(
+            !required,
+            "SKIPPED-BUT-REQUIRED: bash positional quote roundtrip is broken (MSYS bash 5.3+)，而 QAQH_REQUIRE_SHELL=1 要求真跑"
+        );
+        eprintln!(
+            "SKIPPED: bash positional quote roundtrip is broken on this bash (MSYS 5.3 `\\\"` mangling)；未执行，勿当通过"
+        );
+        return;
+    }
     let ctx = make_ctx(
         "exec",
         serde_json::json!({ "command": "echo \"$1\"; echo \"$2\"", "shell": "bash", "args": ["hello world", "a\"b"], "cwd": std::env::current_dir().unwrap() }),
