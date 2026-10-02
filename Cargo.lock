@@ -3890,6 +3890,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-spy"
+version = "2.0.0-beta.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hex",
+ "ignore",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar",
+]
+
+[[package]]
 name = "qaqh-subagent"
 version = "2.0.0-beta.1"
 dependencies = [
