@@ -30,7 +30,7 @@ read"补偿"宿主测不到改动"**——即本计划要消除的对象。
 | **PR1** | 新建 `crates/qaqh-spy`（scan/store/report/diff；去 clap CLI / watch / procmon） | **已完成**（`feat(spy)` 提交；11 单测 + 1 e2e 全绿，零新依赖） |
 | **PR2** | 批次边界扫描 + `ContextFlow` 注入（chat + responses） | **已完成**（`feat(runtime)` 提交；端到端 2 用例 + message 恢复用例全绿） |
 | **PR2b** | `message_api.rs:266` 合并规则扩展（Anthropic 载体吸收后置纯文本）+ 三协议形态测试 | 已入仓（`feat(gate)` 提交；118 全绿、fmt/clippy 干净）；**严格性未经验证 → 端点验证未完成，挂起**（§6） |
-| **PR3** | spy 反向喂 `journal::record_change` + `file_state::record_write` + 报告内联回滚命令 | 未开始（**下一项**） |
+| **PR3** | spy 反向喂 `journal::record_change` + `file_state::record_write` + 报告内联回滚命令 | **已完成**（见 §9） |
 | **PR4** | `serial_call_ids` 纳入 exec ⇒ per-exec 精细归因 | 未开始（可选） |
 
 ## 2. 三协议形态对照
@@ -167,8 +167,9 @@ Anthropic 通路今天没在用。
 3. **落盘断言已入仓**（`qaqh-runtime/tests/workspace_change_injection.rs` 断言注入
    进了 message store 且排在 tool 结果之后）。**仍缺**：下一次 provider 请求视图
    确实携带该文本块的端到端断言——目前由 gate 侧形态测试间接覆盖，未串成一条链。
-4. **PR3**：spy 喂 `journal::record_change`（`tool="exec"`）+ `file_state::record_write`
-   ⇒ 模型用已有 `journal` 工具即可找回脚本改动，且 `stale_file` 假阳性消失。
+4. ~~**PR3**~~ **已完成**，细节与偏差见 §9。
+5. **待办**：`QAQH_SPY_DISABLED` 目前是唯一开关；接入 `config.toml` 的正式配置项
+   尚未做（灰度期用 env 足够，长期应进 `profiles` 段）。
 
 ## 8. 边界备忘
 
@@ -180,3 +181,61 @@ Anthropic 通路今天没在用。
   SMJ 无全量 manifest ⇒ 给不出"时刻 T 完整状态"，也无法发现未声明的写。
 - 性能基线（spy 实测）：qaqh-backend 738 文件首扫 0.9s，稳态 66ms ⇒ 每批两次扫描
   ≈ +130ms，可接受。
+
+
+## 9. PR3 实施记录（与计划的偏差）
+
+回填发生在 `workspace_audit::backfill`，位于「批尾扫描」与「渲染报告」**之间**——
+这个顺序是被需求逼出来的：回滚命令需要 SMJ 序号，而序号只有先记 SMJ 才拿得到。
+因此 qaqh-spy 的 `report_since` 被拆成 `changes_after_tool_end` + `render_report` 两步
+（`report_since` 保留为二者的组合，既有 e2e 测试不受影响）。
+
+### 9.1 三条回填契约（均有测试）
+
+| 契约 | 实现 | 测试 |
+|---|---|---|
+| SMJ 记上，模型能用已有 `journal` 工具 query/replay | `journal::record_change`，`op` 取 `scan_added`/`scan_modified`/`scan_deleted` | `self_declared_write_is_not_double_recorded_in_smj` 反向覆盖；主用例断言 `step.op == "scan_added"` |
+| 账本指纹刷新 ⇒ `stale_file` 假阳性消失 | `file_state::record_write` / `record_delete`，路径**必须先解析成绝对路径** | 主用例断言 `file_state::last_hash(abs).is_some()` |
+| 报告带可执行回滚命令 | `journal action=replay file=<p> at=<seq-1> out=<p>` | 主用例断言含该命令，并实调 `replay_to_path` 验证文件真被还原/删除 |
+
+`at = seq - 1` 对三种变更都正确：replay 到本步之前即撤销本步——新增文件此前不存在
+⇒ `replay` 返回 None ⇒ 删除；删除文件 ⇒ 取回旧内容；修改 ⇒ 回到改前。
+
+**这条命令本身也被验证过可执行**，不是发出去就算数：测试直接调用 journal 工具背后
+的同一个函数 `replay_to_path(file, Some(seq-1), Some(path))`，断言新增文件确实被删除
+（`replay_to_path` 在内容为 None 时走 `remove_file` 分支）。此前仓里有过「README 宣称
+有回滚命令、实现里根本没有」的先例，所以凡是发给模型的命令都要有对应断言。
+
+### 9.2 去重（计划里没有，实施中必须加）
+
+`write`/`edit`/`apply_patch`/`copy_range`/`web_fetch` **自己已经调过 `record_change`**。
+spy 若不加区别地补记，`journal query` 会出现成对假记录、审计流水翻倍。因此 `begin`
+捕获本批的 `declared_writes`（取自 `conflict::file_write_paths`，按
+`file_state::ledger_key` 归一化），`backfill` 跳过落在该集合里的路径。
+
+`exec` 不在 `file_write_paths` 的名单里（它返回空集），所以脚本副作用天然落不进该
+集合——正是我们要补的那一类。这一点是去重规则能成立的关键，测试里用注册成 `file`
+工具名的自报探针把它钉住。
+
+**已知偏差**：同一批里若某路径既被工具自报、又被脚本二次改写，SMJ 只会留下工具自报
+那一条，脚本那次后续写入在 SMJ 里不可见（报告仍然会显示，因为报告来自状态扫描）。
+要彻底消除需按调用切分扫描，即 §1 里挂起的 PR4。
+
+### 9.3 二进制跳过
+
+SMJ 的 `store_blob(content: &str)` / `read_blob → read_to_string` 只存文本；喂二进制
+会在 replay 时才炸。`backfill` 因此对任一侧非 UTF-8 的变更**整体跳过**（不记 SMJ、
+不刷账本），并在报告尾部如实说明数量。快照本身仍在 spy 的 CAS 存储里，字节级可取回。
+
+### 9.4 账本刷新与 SMJ 解耦
+
+`record_change` 返回 None 表示 SMJ 写失败，但磁盘内容已经是新的——指纹**必须**跟上，
+否则 `stale_file` 假阳性照旧。所以账本刷新不受 SMJ 成败影响，只有回滚提示依赖 seq。
+
+### 9.5 验证
+
+- `cargo test -p qaqh-runtime`：全部通过，含既有 harness
+  （`tool_ordering_contract` / `tool_ledger_*` / `cancel_keeps_tool_results`）——
+  证明钩子在每次批上跑不会污染它们对消息序列的断言。
+- `qaqh-spy` 12、`qaqh-message` 65、`qaqh-gate` 118 全绿；fmt/clippy 净。
+- `workspace_change_injection` 3 用例：注入+落盘+排序、零变更不注入、自报路径不双记。
