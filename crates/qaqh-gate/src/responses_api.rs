@@ -1614,6 +1614,117 @@ mod tests {
         assert!(input[0]["arguments"].as_str().unwrap().contains("path"));
     }
 
+    /// PR2：Responses 通路把注入渲染成 function_call_output **之后**的独立
+    /// `message` item。items 按 call_id 各自寻址，无 Chat 那条"必须紧邻"约束，
+    /// 但同样不携带 `name`（来源标识只能靠文本自标签）。
+    #[test]
+    fn workspace_diff_injection_follows_function_call_outputs() {
+        let diff = "[workspace-changes scan=s0001790940017262_0003] app.py is now empty";
+        let msgs = vec![
+            Message::user("run two commands"),
+            Message {
+                msg_id: None,
+                role: "assistant".into(),
+                name: None,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "call-1".into(),
+                        name: "exec".into(),
+                        input: serde_json::json!({ "command": "x" }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call-2".into(),
+                        name: "exec".into(),
+                        input: serde_json::json!({ "command": "y" }),
+                    },
+                ],
+            },
+            Message {
+                msg_id: None,
+                role: "tool".into(),
+                name: None,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".into(),
+                    result: qaqh_types::ToolResult::ok("ran-1"),
+                }],
+            },
+            Message {
+                msg_id: None,
+                role: "tool".into(),
+                name: None,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-2".into(),
+                    result: qaqh_types::ToolResult::ok("ran-2"),
+                }],
+            },
+            Message {
+                msg_id: None,
+                role: "user".into(),
+                name: Some("workspace".into()),
+                content: vec![ContentBlock::text(diff)],
+            },
+        ];
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
+        let types: Vec<&str> = input
+            .iter()
+            .map(|i| i["type"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                "message",
+                "function_call",
+                "function_call",
+                "function_call_output",
+                "function_call_output",
+                "message",
+            ],
+            "注入 item 必须排在全部 output 之后：{input:#?}"
+        );
+        assert_eq!(input[3]["call_id"], "call-1");
+        assert_eq!(input[4]["call_id"], "call-2");
+        assert_eq!(input[5]["role"], "user", "{input:#?}");
+        let parts = input[5]["content"].as_array().expect("content array");
+        assert_eq!(parts[0]["type"], "input_text", "{input:#?}");
+        assert_eq!(parts[0]["text"].as_str().unwrap_or(""), diff, "{input:#?}");
+        assert!(input[5].get("name").is_none(), "{input:#?}");
+    }
+
+    /// 与 Chat 的不对称：Responses 允许 message item 插在 function_call_output
+    /// 之间（工具图片降级就是这么做的）。锁定该形态，以免日后误按 Chat 的
+    /// "必须紧邻"约束去"修"它。
+    #[test]
+    fn responses_allow_message_item_between_function_call_outputs() {
+        let tool_msg = |id: &str, b64: &str| Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    result: qaqh_types::ToolResult::ok("image attached"),
+                },
+                ContentBlock::image("image/png", b64),
+            ],
+        };
+        let msgs = vec![tool_msg("call-1", "Zm9v"), tool_msg("call-2", "YmFy")];
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
+        let types: Vec<&str> = input
+            .iter()
+            .map(|i| i["type"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                "function_call_output",
+                "message",
+                "function_call_output",
+                "message",
+            ],
+            "Responses 无紧邻约束：{input:#?}"
+        );
+    }
+
     #[test]
     fn tool_message_becomes_function_call_output() {
         let msgs = vec![Message {

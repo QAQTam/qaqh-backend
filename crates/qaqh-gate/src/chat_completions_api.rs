@@ -1092,6 +1092,122 @@ mod skill_envelope_tests {
     /// 之后紧跟全部对应的 tool 消息，否则 HTTP 400：
     /// "An assistant message with 'tool_calls' must be followed by tool
     /// messages responding to each tool_call_id"。
+    /// PR2：工作区变更审计注入落在**整批 tool 消息之后**的一条 `user` 消息上。
+    /// Chat Completions 路径因此天然合法：assistant(tool_calls) 之后紧跟全部 tool
+    /// 消息的硬约束未被破坏，且 `name` 会原样上 wire——来源标识不丢。
+    #[test]
+    fn workspace_diff_injection_after_tool_run_keeps_pairing_and_name() {
+        let assistant = Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "exec".into(),
+                    input: serde_json::json!({ "command": "x" }),
+                },
+                ContentBlock::ToolUse {
+                    id: "call-2".into(),
+                    name: "exec".into(),
+                    input: serde_json::json!({ "command": "y" }),
+                },
+            ],
+        };
+        let tool_msg = |id: &str| Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                result: qaqh_types::ToolResult::ok("ran"),
+            }],
+        };
+        let diff = "[workspace-changes scan=s0001790940017262_0003] app.py is now empty";
+        let msgs = vec![
+            Message::user("run two commands"),
+            assistant,
+            tool_msg("call-1"),
+            tool_msg("call-2"),
+            Message {
+                msg_id: None,
+                role: "user".into(),
+                name: Some("workspace".into()),
+                content: vec![ContentBlock::text(diff)],
+            },
+        ];
+        let out = convert_messages(&provider(), msgs, None, 0);
+        let roles: Vec<&str> = out
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "tool", "tool", "user"],
+            "注入必须排在整批 tool 消息之后：{out:#?}"
+        );
+        assert_eq!(out[2]["tool_call_id"], "call-1");
+        assert_eq!(out[3]["tool_call_id"], "call-2");
+        assert_eq!(out[4]["name"], "workspace", "{out:#?}");
+        assert_eq!(out[4]["content"].as_str().unwrap_or(""), diff, "{out:#?}");
+    }
+
+    /// 锁定约束（而非期望行为）：若注入落在两条 tool 消息**之间**，转换器
+    /// **不会**重排它——user 原样楔在中间，恰是 `convert_messages` 注释里
+    /// "must be followed by tool messages responding to each tool_call_id" 的 HTTP 400
+    /// 形态。结论：注入必须由 lap 边界（loop_outcome.rs 的 ContinueTurn 分支）
+    /// 在整批 tool 结果落盘之后统一 flush，绝不能在工具线程内即时插队。
+    #[test]
+    fn chat_does_not_reorder_a_user_message_wedged_between_tool_messages() {
+        let assistant = Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "exec".into(),
+                    input: serde_json::json!({ "command": "x" }),
+                },
+                ContentBlock::ToolUse {
+                    id: "call-2".into(),
+                    name: "exec".into(),
+                    input: serde_json::json!({ "command": "y" }),
+                },
+            ],
+        };
+        let tool_msg = |id: &str| Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                result: qaqh_types::ToolResult::ok("ran"),
+            }],
+        };
+        let msgs = vec![
+            assistant,
+            tool_msg("call-1"),
+            Message {
+                msg_id: None,
+                role: "user".into(),
+                name: Some("workspace".into()),
+                content: vec![ContentBlock::text("mid-run injection")],
+            },
+            tool_msg("call-2"),
+        ];
+        let out = convert_messages(&provider(), msgs, None, 0);
+        let roles: Vec<&str> = out
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["assistant", "tool", "user", "tool"],
+            "楔入的 user 会原样保留在 tool 消息之间（须由调用方避免）：{out:#?}"
+        );
+    }
+
     #[test]
     fn parallel_tool_result_images_do_not_split_the_tool_run() {
         let provider = provider();

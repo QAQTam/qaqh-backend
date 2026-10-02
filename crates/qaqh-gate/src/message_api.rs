@@ -266,8 +266,15 @@ fn convert_messages_to_anthropic(
                             .any(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
                     })
                     .unwrap_or(false);
-                // Merge only when kinds match (both tool or both non-tool)
-                if last_is_tool == cur_is_tool {
+                // Merge when kinds match (both tool or both non-tool), and also
+                // when a plain-text `user` directly follows a tool_result carrier:
+                // the carrier absorbs it so no Anthropic endpoint ever sees two
+                // consecutive `user` messages. The stable partition below keeps
+                // every `tool_result` ahead of the absorbed text, which is the
+                // shape strict compat layers accept (see the [tr,tr,img,img] note).
+                // The protected case is untouched: a plain `user` BEFORE
+                // tool_results still starts its own turn (last=false, cur=true).
+                if last_is_tool == cur_is_tool || (last_is_tool && !cur_is_tool) {
                     let last_content = last.get_mut("content").and_then(|v| v.as_array_mut());
                     let cur_content = msg.get("content").and_then(|v| v.as_array());
                     if let (Some(dst), Some(src)) = (last_content, cur_content) {
@@ -1333,6 +1340,143 @@ mod tests {
         // user, then merged tool results as single user with 2 blocks
         assert_eq!(api.len(), 2);
         assert_eq!(api[1]["content"].as_array().unwrap().len(), 2);
+    }
+
+    /// PR2 design: the workspace-change audit injection lands on a separate
+    /// `user` message AFTER the tool results. This pins the real Anthropic
+    /// wire shape: the merge rule coalesces same-kind messages, and a
+    /// tool_result carrier absorbs a plain-text `user` that directly follows
+    /// it, so the injection never becomes a second consecutive `user` turn.
+    /// The carve-out PR2b must NOT break: a plain `user` that precedes the
+    /// tool_result carrier stays its own turn.
+    #[test]
+    fn plain_user_before_tool_results_is_not_merged_into_the_carrier() {
+        let msgs = vec![
+            Message::user("first"),
+            Message {
+                msg_id: None,
+                role: "assistant".into(),
+                name: None,
+                content: vec![ContentBlock::ToolUse {
+                    id: "a".into(),
+                    name: "exec".into(),
+                    input: serde_json::json!({ "command": "x" }),
+                }],
+            },
+            Message::user("steered while running"),
+            Message {
+                msg_id: None,
+                role: "tool".into(),
+                name: None,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "a".into(),
+                    result: qaqh_types::ToolResult::ok("ran"),
+                }],
+            },
+        ];
+        let (_, api) = convert_messages_to_anthropic(msgs, 0);
+        let roles: Vec<&str> = api
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        let kinds: Vec<Vec<String>> = api
+            .iter()
+            .map(|m| {
+                m["content"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|b| b["type"].as_str().unwrap_or("?").to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant", "user", "user"], "{api:#?}");
+        assert_eq!(kinds[2], vec!["text"], "前置纯 user 不得被吸收：{api:#?}");
+        assert_eq!(kinds[3], vec!["tool_result"], "{api:#?}");
+    }
+
+    #[test]
+    fn workspace_diff_injection_is_absorbed_by_tool_result_carrier() {
+        let tool_msg = |id: &str| Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                result: qaqh_types::ToolResult::ok("ran"),
+            }],
+        };
+        let msgs = vec![
+            Message::user("run two commands"),
+            Message {
+                msg_id: None,
+                role: "assistant".into(),
+                name: None,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "exec".into(),
+                        input: serde_json::json!({ "command": "x" }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_2".into(),
+                        name: "exec".into(),
+                        input: serde_json::json!({ "command": "y" }),
+                    },
+                ],
+            },
+            tool_msg("toolu_1"),
+            tool_msg("toolu_2"),
+            Message {
+                msg_id: None,
+                role: "user".into(),
+                name: Some("workspace".into()),
+                content: vec![ContentBlock::text(
+                    "[workspace-changes] app.py is now empty",
+                )],
+            },
+        ];
+        let (_, api) = convert_messages_to_anthropic(msgs, 0);
+        let roles: Vec<&str> = api
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        let kinds: Vec<Vec<String>> = api
+            .iter()
+            .map(|m| {
+                m["content"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|b| b["type"].as_str().unwrap_or("?").to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        eprintln!("ROLES = {roles:?}");
+        for (i, k) in kinds.iter().enumerate() {
+            eprintln!("  [{i}] blocks = {k:?}");
+        }
+        // PR2b: the tool_result carrier absorbs the trailing injection, so the
+        // request stays strictly alternating and the diff text still arrives
+        // after every tool_result in the same turn.
+        assert_eq!(roles, vec!["user", "assistant", "user"], "{api:#?}");
+        assert_eq!(
+            kinds[2],
+            vec!["tool_result", "tool_result", "text"],
+            "tool_result 必须连续且在前，吸收的文本在后：{api:#?}"
+        );
+        // 配对关系一字未动：两个 tool_use 仍各自对应一条 tool_result。
+        let blocks = api[2]["content"].as_array().expect("content array");
+        assert_eq!(blocks[0]["tool_use_id"], "toolu_1");
+        assert_eq!(blocks[1]["tool_use_id"], "toolu_2");
+        assert_eq!(
+            blocks[2]["text"].as_str().unwrap_or(""),
+            "[workspace-changes] app.py is now empty"
+        );
     }
 
     #[test]
