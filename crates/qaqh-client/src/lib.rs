@@ -12,6 +12,7 @@ pub mod client;
 pub mod discovery;
 pub mod endpoint;
 pub mod error;
+pub mod projection;
 pub mod remote_path;
 pub mod session;
 mod sse_decoder;
@@ -26,6 +27,7 @@ pub use client::{
 pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_discovery};
 pub use endpoint::{ActionRequest, QueryRequest};
 pub use error::{ClientError, Result};
+pub use projection::sanitize_session_list;
 /// 领域状态类型（`qaqh_domain::state`）。
 ///
 /// 纯 v2 之后**不再**经 v1 bootstrap 的 `state` 访问器取用：v2 bootstrap 直接返回

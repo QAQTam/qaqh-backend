@@ -1,18 +1,18 @@
 /**
  * 一个标签页 = 一个会话的客户端状态机。
  *
- * 网关契约:所有 per-seed 面(命令/审批/RPC/timeline SSE/快照)都限定在网关的
- * **单一 active session** 上,因此只有活动标签持有连接;切标签 = attach(网关侧
- * 切 active)+ 快照重建(权威对齐)。后台标签不收流,状态由标签页轮询
- * sessions 列表(turn_count/running,后端事实)驱动状态点。
+ * 宿主契约(webui-tauri):所有 per-seed 面(命令/审批/RPC/timeline 流/快照)
+ * 经 Rust 宿主的类型化 IPC 转发,宿主维护「单一 active seed 持流」(plan D4);
+ * 切标签 = attach(宿主切 active + 重建流)+ 快照重建(权威对齐)。后台标签
+ * 不收流,状态由标签页轮询 sessions 列表(turn_count/running,后端事实)驱动
+ * 状态点。重连/退避/续传责任在宿主(qaqh-client),前端不再有 SSE 循环。
  *
- * 数据单源:transcript 结构/文本只来自 timeline(快照+SSE,`last_event_id` 续传,
- * `watermark` 去重 + 缺口触发快照);审批只来自 approvals RPC(投影事件仅当刷新
- * 信号);会话标题/运行态来自 sessions 列表。
+ * 数据单源:transcript 结构/文本只来自 timeline(宿主转发的快照+SSE 帧,
+ * `watermark` 去重 + 缺口触发快照);审批只来自 approvals RPC(投影事件仅当
+ * 刷新信号);会话标题/运行态来自 sessions 列表。
  */
 import { createSignal, createStore } from "solid-js";
-import { transport, type ApprovalView } from "../lib/transport";
-import { backoffDelayMs, exhausted } from "../lib/reconnect";
+import { transport, tauriHost, type ApprovalView, type StreamHandlers } from "../lib/transport";
 import { now } from "../lib/time";
 import { applyEntry, applySnapshot, emptySession, prependPage } from "./reducer";
 import type { SessionState, TimelineEntryWire, Wait } from "./types";
@@ -39,11 +39,8 @@ export class SessionStore {
   compactedAfter = createSignal<string | null>(null);
   loadingOlder = createSignal(false);
 
-  private sources = new Map<"timeline" | "events", EventSource>();
-  private attempts: Record<"timeline" | "events", number> = { timeline: 0, events: 0 };
-  private timers: Record<"timeline" | "events", ReturnType<typeof setTimeout> | null> = { timeline: null, events: null };
-  private lastTimelineEventId = "";
-  private lastEventsCursor: string | null = null;
+  /** 宿主事件反订阅。 */
+  private hostUnlisten: (() => void) | null = null;
   private pendingText = new Map<string, { turnId: string; blockId: string; delta: string }>();
   private rafHandle: number | null = null;
   private lastResnapshotAt = 0;
@@ -64,107 +61,98 @@ export class SessionStore {
     this.state[1](fn);
   }
 
+  private host(): NonNullable<ReturnType<typeof tauriHost>> {
+    const host = tauriHost(transport);
+    if (host == null) throw new Error("宿主传输后端不可用(应在 Tauri 壳内运行)");
+    return host;
+  }
+
   // ── 生命周期 ────────────────────────────────────────────────────────────────
 
-  /** 成为活动标签:attach(网关 active 切换)→ 快照重建 → 建流。 */
+  /** 成为活动标签:attach(宿主切 active + 重建流)→ 快照重建 → 订阅。 */
   async activate(): Promise<void> {
     if (this.disposed) return;
     this.hasNewReply[1](false);
     await transport.attach(this.seed);
     await this.resnapshot();
-    this.connectAll();
+    void this.connectHost();
     void this.refreshApprovals();
     void this.refreshActivity();
   }
 
-  /** 失去活动资格(别的标签接管):停流保状态。 */
+  /** 失去活动资格(别的标签接管):退订宿主事件保状态(流由宿主在新 attach 时停)。 */
   deactivate(): void {
-    this.closeStreams();
+    this.closeHost();
     this.setConnection("reconnecting");
   }
 
   dispose(): void {
     this.disposed = true;
-    this.closeStreams();
+    this.closeHost();
   }
 
   retry(): void {
-    this.attempts.timeline = 0;
-    this.attempts.events = 0;
-    this.connectAll();
+    // 重连/退避在宿主侧,这里只触发宿主重建流(用户点「重试」/窗口聚焦)。
+    this.setConnection("reconnecting");
+    this.host()
+      .streamsRetry(this.seed)
+      .catch(() => this.setConnection("offline"));
   }
 
   private setConnection(kind: ConnectionKind): void {
     this.connection[1](kind);
   }
 
-  private connectAll(): void {
-    this.connectTimeline();
-    this.connectEvents();
+  private closeHost(): void {
+    this.hostUnlisten?.();
+    this.hostUnlisten = null;
   }
 
-  private closeStreams(): void {
-    for (const source of this.sources.values()) source.close();
-    this.sources.clear();
-    if (this.timers.timeline) clearTimeout(this.timers.timeline);
-    if (this.timers.events) clearTimeout(this.timers.events);
-    this.timers.timeline = null;
-    this.timers.events = null;
-  }
+  // ── 宿主事件订阅(timeline://*, projection://*) ─────────────────────────────
 
-  // ── timeline SSE(结构性事实 + 文本) ────────────────────────────────────────
-
-  private connectTimeline(): void {
-    const previous = this.sources.get("timeline");
-    previous?.close();
-    const source = new EventSource(transport.timelineSseUrl(this.seed, this.lastTimelineEventId || null));
-    this.sources.set("timeline", source);
-    this.setConnection(this.attempts.timeline > 0 ? "reconnecting" : "reconnecting");
-    source.addEventListener("timeline.entry", (event) => {
-      const messageId = (event as MessageEvent).lastEventId;
-      if (messageId) this.lastTimelineEventId = messageId;
-      let parsed: TimelineEntryWire;
-      try {
-        parsed = JSON.parse((event as MessageEvent).data) as TimelineEntryWire;
-      } catch {
-        return;
-      }
-      this.onTimelineEntry(parsed);
-    });
-    source.addEventListener("ringing.stream_terminated", () => {
-      // 服务端缓冲溢出,要求客户端 re-baseline:丢弃游标,快照校正后重连。
-      this.lastTimelineEventId = "";
-      this.attempts.timeline = 0;
-      void this.resnapshot().then(() => this.connectTimeline());
-    });
-    source.onopen = () => {
-      const hadFailures = this.attempts.timeline > 0;
-      this.attempts.timeline = 0;
-      this.setConnection("connected");
-      // 重连成功后以快照为准恢复(spec §15.2):重放窗口可能不够/epoch 可能已变。
-      if (hadFailures) void this.resnapshot();
-    };
-    source.onerror = () => {
-      source.close();
-      this.sources.delete("timeline");
-      this.scheduleReconnect("timeline");
-    };
-  }
-
-  private scheduleReconnect(kind: "timeline" | "events"): void {
-    this.attempts[kind] += 1;
-    if (exhausted(this.attempts[kind])) {
-      this.setConnection("offline");
-      return;
-    }
+  private async connectHost(): Promise<void> {
+    if (this.disposed) return;
+    this.closeHost();
     this.setConnection("reconnecting");
-    const delay = backoffDelayMs(this.attempts[kind]);
-    this.timers[kind] = setTimeout(() => {
-      this.timers[kind] = null;
-      if (this.disposed) return;
-      if (kind === "timeline") this.connectTimeline();
-      else this.connectEvents();
-    }, delay);
+    const handlers: StreamHandlers = {
+      onTimelineEntry: (seed, entry) => {
+        if (seed === this.seed) this.onTimelineEntry(entry as TimelineEntryWire);
+      },
+      onTimelineStatus: (status) => {
+        if (status.session_id != null && status.session_id !== this.seed) return;
+        if (status.status === "open") {
+          this.setConnection("connected");
+        } else if (status.status === "closed") {
+          this.setConnection("offline");
+        } else {
+          this.setConnection("reconnecting");
+        }
+      },
+      onProjectionEvent: (seed, envelope) => {
+        if (seed !== this.seed) return;
+        this.applyProjection(envelope.stream_key as Record<string, any> | undefined, envelope.payload as Record<string, any> | undefined);
+      },
+      onProjectionReset: (seed) => {
+        if (seed !== this.seed) return;
+        // 宿主的 v2 流会自动以 snapshot cursor 重订阅;这里刷新派生信号即可。
+        void this.refreshApprovals();
+        void this.refreshActivity();
+      },
+      onTimelineSnapshot: (page) => {
+        // 宿主侧缺口恢复推来的权威快照(前端 watermark 去重天然兜底)。
+        if (page.session_id != null && page.session_id !== this.seed) return;
+        this.mutate((draft) => {
+          applySnapshot(draft, page);
+        });
+      },
+      onIncompatible: () => {},
+      onHostError: () => {},
+    };
+    try {
+      this.hostUnlisten = await this.host().subscribe(handlers);
+    } catch {
+      this.setConnection("offline");
+    }
   }
 
   private onTimelineEntry(entry: TimelineEntryWire): void {
@@ -220,7 +208,7 @@ export class SessionStore {
     void this.resnapshot();
   }
 
-  /** 快照重建(attach/重连/缺口/流终止后的权威对齐)。 */
+  /** 快照重建(attach/缺口校正后的权威对齐)。 */
   async resnapshot(): Promise<void> {
     try {
       const page = await transport.timelinePage(this.seed, `?limit=${SNAPSHOT_LIMIT}`);
@@ -233,40 +221,7 @@ export class SessionStore {
     }
   }
 
-  // ── 投影事件流(刷新信号) ─────────────────────────────────────────────────────
-
-  private connectEvents(): void {
-    const previous = this.sources.get("events");
-    previous?.close();
-    const source = new EventSource(transport.eventsUrl(this.seed, this.lastEventsCursor));
-    this.sources.set("events", source);
-    source.addEventListener("ringing.event", (event) => {
-      let envelope: Record<string, any>;
-      try {
-        envelope = JSON.parse((event as MessageEvent).data) as Record<string, any>;
-      } catch {
-        return;
-      }
-      if (typeof envelope.cursor === "string" && envelope.cursor) this.lastEventsCursor = envelope.cursor;
-      if (envelope.session_id && envelope.session_id !== this.seed) return;
-      this.applyProjection(envelope.stream_key as Record<string, any> | undefined, envelope.payload as Record<string, any> | undefined);
-    });
-    source.addEventListener("ringing.reset_required", () => {
-      this.lastEventsCursor = null;
-      void this.refreshApprovals();
-      void this.refreshActivity();
-    });
-    source.onopen = () => {
-      this.attempts.events = 0;
-    };
-    source.onerror = () => {
-      source.close();
-      this.sources.delete("events");
-      // cursor 过期(400 cursor_expired)时降级纯实时,全量信号兜底。
-      this.lastEventsCursor = null;
-      this.scheduleReconnect("events");
-    };
-  }
+  // ── 投影事件(刷新信号,宿主转发) ─────────────────────────────────────────────
 
   /** 前端只把投影事件当刷新信号;数据一律走 approvals RPC / sessions 列表。 */
   private applyProjection(streamKey: unknown, payload: unknown): void {
@@ -305,7 +260,7 @@ export class SessionStore {
 
   async refreshActivity(): Promise<void> {
     try {
-      const bootstrap = (await transport.call<any>(`/__gateway/ringing/sessions/${encodeURIComponent(this.seed)}/bootstrap`)) as any;
+      const bootstrap = (await this.host().sessionBootstrap(this.seed)) as any;
       const control = bootstrap?.control?.state ?? {};
       this.activity[1](normalizeActivity(control.activity));
     } catch {

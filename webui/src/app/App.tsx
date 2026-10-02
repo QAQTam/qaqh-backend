@@ -1,8 +1,19 @@
 /**
  * 应用壳:标签栏 + 会话视图 + 授权卡 + 单行思考链 + 输入区(spec §4 布局);
  * 全局快捷键(§5.3)与后台会话轮询。
+ *
+ * Tauri 桌面壳新增(spec §2.2):
+ *  - 标题栏拖拽区并入 `#top`(data-tauri-drag-region)+ 右侧窗口控制按钮,
+ *    `--titlebar-inset-right` 预留其占位;
+ *  - 外链经宿主 `open_external` 走系统浏览器(webview 内不导航外站);
+ *  - daemon 兼容性失败(D1)渲染明确文案 + 「停止旧实例并连接」动作,
+ *    不静默杀旧 daemon(可能正在跑 TUI 的 Turn)。
  */
-import { For, Match, onSettled, Show, Switch, type Component } from "solid-js";
+import { createSignal, For, Match, onCleanup, onSettled, Show, Switch, type Component } from "solid-js";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import IconMinus from "~icons/lucide/minus";
+import IconSquare from "~icons/lucide/square";
+import IconX from "~icons/lucide/x";
 import { TabBar } from "../tabs/TabBar";
 import {
   activeId,
@@ -25,7 +36,34 @@ import { ThinkingChain } from "../thinking/ThinkingChain";
 import { Composer, type SendBlockReason } from "../composer/Composer";
 import { ApprovalStack } from "../approval/ApprovalCards";
 import { STR } from "../lib/strings";
+import { isTauriRuntime, listenHostDiagnostics, openExternalUrl, transport, tauriHost } from "../lib/transport";
 import "../styles/app.css";
+
+const inTauri = isTauriRuntime();
+
+/** D1 兼容性失败详情(conn://incompatible);null = 正常。 */
+const [hostIncompatible, setHostIncompatible] = createSignal<Record<string, unknown> | null>(null);
+const [hostActionNote, setHostActionNote] = createSignal<string | null>(null);
+
+/** 一键停止旧 daemon(不静默杀:Busy 时给动作文案)→ 重启标签引导。 */
+async function stopStaleAndReconnect(): Promise<void> {
+  const host = tauriHost(transport);
+  if (host == null) return;
+  setHostActionNote(STR.incompatibleStopping);
+  try {
+    const status = await host.stopStaleDaemon();
+    if (status === "busy") {
+      setHostActionNote(STR.incompatibleBusy);
+      return;
+    }
+    setHostIncompatible(null);
+    setHostActionNote(null);
+    // 停止是异步收敛:稍候让 boot 重新走 discovery(旧记录已消失 → 拉起 sidecar)。
+    setTimeout(() => void bootTabs().catch(() => setBootError(STR.bootFailed)), 800);
+  } catch (error) {
+    setHostActionNote(`${STR.hostError}:${String(error instanceof Error ? error.message : error)}`);
+  }
+}
 
 const App: Component = () => {
   onSettled(() => {
@@ -43,6 +81,30 @@ const App: Component = () => {
       if (tab != null && tab.store.connection[0]() === "offline") tab.store.retry();
     };
     window.addEventListener("focus", onFocus);
+
+    // Tauri:外链一律走系统浏览器;宿主诊断事件(兼容性失败/宿主错误)。
+    let unlistenHost: (() => void) | null = null;
+    if (inTauri) {
+      const onClick = (event: MouseEvent): void => {
+        const target = event.target instanceof Element ? event.target : null;
+        const anchor = target?.closest("a[href]");
+        const href = anchor?.getAttribute("href") ?? "";
+        if (!/^https?:\/\//i.test(href)) return;
+        event.preventDefault();
+        void openExternalUrl(href);
+      };
+      document.addEventListener("click", onClick, true);
+      onCleanup(() => document.removeEventListener("click", onClick));
+      void listenHostDiagnostics({
+        onIncompatible: (details) => {
+          setHostActionNote(null);
+          setHostIncompatible(details);
+        },
+        onHostError: (message) => setBootError(message),
+      }).then((unlisten) => {
+        unlistenHost = unlisten;
+      });
+    }
 
     // 全局快捷键(§5.3)。
     const onKey = (event: KeyboardEvent): void => {
@@ -74,11 +136,12 @@ const App: Component = () => {
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => {
+    onCleanup(() => {
       clearInterval(poll);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("keydown", onKey);
-    };
+      unlistenHost?.();
+    });
   });
 
   const active = (): ReturnType<typeof activeTab> => activeTab();
@@ -112,7 +175,7 @@ const App: Component = () => {
 
   return (
     <div id="app">
-      <header id="top">
+      <header id="top" data-tauri-drag-region={inTauri ? true : undefined}>
         <TabBar
           tabs={tabs()}
           activeId={activeId()}
@@ -125,9 +188,31 @@ const App: Component = () => {
           onClose={(id) => void closeTab(id)}
           onCreate={() => void createSession()}
         />
+        {inTauri && <div class="top-drag" data-tauri-drag-region />}
         <ConnectionStatus />
+        {inTauri && <TitlebarControls />}
       </header>
       <main id="main">
+        <Show when={hostIncompatible() != null}>
+          <div class="host-banner" role="alert">
+            <span>
+              {STR.incompatibleDaemon(
+                typeof hostIncompatible()!.detail === "string" ? (hostIncompatible()!.detail as string) : "版本/协议不匹配",
+              )}
+            </span>
+            <Show when={hostActionNote() != null}>
+              <span class="host-banner-note">{hostActionNote()}</span>
+            </Show>
+            <span class="host-banner-actions">
+              <button type="button" class="ghost-mini" onClick={() => void stopStaleAndReconnect()}>
+                {STR.incompatibleStopAndConnect}
+              </button>
+              <button type="button" class="ghost-mini" onClick={() => void bootTabs()}>
+                {STR.retry}
+              </button>
+            </span>
+          </div>
+        </Show>
         <Show when={bootError() != null}>
           <div class="boot-error">
             <span>{bootError()}</span>
@@ -186,6 +271,24 @@ const ConnectionStatus: Component = () => {
         </Switch>
       </div>
     </Show>
+  );
+};
+
+/** Tauri 无边框窗口的窗口控制(最小化/最大化切换/关闭)。关闭 = detach(宿主退出不触 stop_daemon)。 */
+const TitlebarControls: Component = () => {
+  const win = getCurrentWindow();
+  return (
+    <div class="titlebar-controls">
+      <button type="button" aria-label="最小化" onClick={() => void win.minimize()}>
+        <IconMinus />
+      </button>
+      <button type="button" aria-label="最大化/还原" onClick={() => void win.toggleMaximize()}>
+        <IconSquare />
+      </button>
+      <button type="button" class="titlebar-close" aria-label="关闭" onClick={() => void win.close()}>
+        <IconX />
+      </button>
+    </div>
   );
 };
 

@@ -328,18 +328,21 @@ pub(crate) async fn handle_team_snapshot_v2(
     )
 }
 
-/// `GET /ringing/v2/sessions/{seed}/approvals` — 本地浏览器网关的待审批投影。
+/// `GET /ringing/v2/sessions/{seed}/approvals` — 本地壳层审批投影。
+///
+/// 消费方是桌面壳宿主（`qaqh-webui-app` 经 `qaqh-client::pending_approvals`）:
+/// 宿主把这里的 canonical id 映射为不透明 challenge 再交给渲染层（防御纵深,
+/// 见 plan-webui-tauri D3 决策）。webui 浏览器网关已随 Tauri 化移除。
 ///
 /// 纯 v2：pending 集合来自 canonical control 投影（只取未 resolved / 未 expired 的
-/// 条目），正文来自 canonical content ref（`request`）。形状与旧 v1 端点保持一致，
-/// 网关与前端无需改动：
+/// 条目），正文来自 canonical content ref（`request`）。形状保持稳定：
 ///
 /// ```json
 /// { "pending_permission": {...}|null, "pending_interaction": {...}|null }
 /// ```
 ///
 /// 返回的 id 是 **canonical** 形态（`call_<ULID>` / `int_<ULID>`）；运行时侧已接受
-/// canonical 与 wire 两种形态，故网关直接透传即可。
+/// canonical 与 wire 两种形态，故宿主直接透传即可。
 pub(crate) async fn handle_pending_approvals_v2(
     State(state): State<AppState>,
     headers: HeaderMap,

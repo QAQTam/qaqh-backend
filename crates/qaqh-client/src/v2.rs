@@ -240,25 +240,25 @@ impl fmt::Debug for ClientV2Subscription {
 
 impl ClientV2Subscription {
     pub async fn next(&mut self) -> Result<Option<ClientV2SubscriptionEvent>> {
-        loop {
-            if let Some(frame) = self.decoder.next_frame() {
-                return Self::decode_frame(frame).map(Some);
-            }
+        // 解码器中遗留的完整帧（上次 push 后未消费）直接返回。
+        // 注：所有分支必然 return,原 `loop` 被 clippy::never_loop 拒绝(1.98)。
+        if let Some(frame) = self.decoder.next_frame() {
+            return Self::decode_frame(frame).map(Some);
+        }
 
-            match self.stream.next().await {
-                Some(Ok(bytes)) => {
-                    self.decoder.push(&bytes);
-                    match self.decoder.next_frame() {
-                        // 这批字节凑出了完整帧：照常解码返回。
-                        Some(frame) => return Self::decode_frame(frame).map(Some),
-                        // 字节到了但凑不出帧：以 KeepAlive 把「到达」本身报给
-                        // 调用方（见枚举上的 KeepAlive 文档）。
-                        None => return Ok(Some(ClientV2SubscriptionEvent::KeepAlive)),
-                    }
+        match self.stream.next().await {
+            Some(Ok(bytes)) => {
+                self.decoder.push(&bytes);
+                match self.decoder.next_frame() {
+                    // 这批字节凑出了完整帧：照常解码返回。
+                    Some(frame) => Self::decode_frame(frame).map(Some),
+                    // 字节到了但凑不出帧：以 KeepAlive 把「到达」本身报给
+                    // 调用方（见枚举上的 KeepAlive 文档）。
+                    None => Ok(Some(ClientV2SubscriptionEvent::KeepAlive)),
                 }
-                Some(Err(error)) => return Err(error.into()),
-                None => return Ok(None),
             }
+            Some(Err(error)) => Err(error.into()),
+            None => Ok(None),
         }
     }
 
@@ -354,6 +354,30 @@ impl Client {
             .validate()
             .map_err(|code| ClientError::Protocol(format!("invalid v2 bootstrap: {code}")))?;
         Ok(bootstrap)
+    }
+
+    /// `GET /ringing/v2/sessions/{seed}/approvals` — 本地壳层审批投影。
+    ///
+    /// 返回 daemon 的原始 JSON(`{ "pending_permission": …|null,
+    /// "pending_interaction": …|null }`),id 为 canonical 形态(`call_<ULID>` /
+    /// `int_<ULID>`)。壳层(桌面宿主)自行做不透明 challenge 映射;返回裸
+    /// `Value` 而非 typed 结构,与 daemon 注释契约「形状与旧 v1 端点保持一致」
+    /// 解耦,避免投影字段演进被迫改 client。
+    pub async fn pending_approvals(&self, session_id: &str) -> Result<serde_json::Value> {
+        let state = self.require_v2_session().await?;
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/approvals");
+        let response = self
+            .inner
+            .http
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(api_error(response, &path).await);
+        }
+        Ok(response.json().await?)
     }
 
     /// Open the typed v2 per-seed SSE subscription.

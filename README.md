@@ -33,7 +33,16 @@ qaqh-message     MessageStore、WAL、compact archive watermark
 qaqh-gate        OpenAI Chat / Responses / Anthropic provider HTTP
 qaqh-workspace   typed tools、permission、audit、sandbox integration
 qaqh-types       shared types / storage contracts
+qaqh-client      Ringing v2 共享传输(TUI / 桌面壳)
+qaqh-webui-app   Tauri 2 桌面壳宿主(webui/src-tauri,sidecar 托管 daemon)
 ```
+
+## 桌面壳(WebUI)
+
+webui 渲染层(SolidJS)运行在 Tauri 2 桌面壳内,宿主经 `qaqh-client` 直连
+daemon并以 sidecar 分发(`just desktop-build` 产出自包含安装包)。原浏览器
+gateway(`qaqh-webui-gateway`)已移除,daemon token 不进 webview。
+详见 [`webui/README.md`](webui/README.md)。
 
 ## 当前事实源
 

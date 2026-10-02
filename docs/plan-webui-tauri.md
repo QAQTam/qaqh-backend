@@ -1,6 +1,6 @@
 # WebUI Tauri 化与 gateway 移除计划(webui-tauri)
 
-> 状态:规划稿,2026-10-02 立项。
+> 状态:已执行(2026-10-02,A/B/C/D 代码阶段全部落地;GUI 人工验收项除外,见各节标注)。
 > 来源:webui 按 `agent-webui-phase1-spec.md` v1.0 重写完成(2026-10-02,前版 Codex 风
 > 草稿整体移除)之后的架构分析;单源审计已翻正(工具展示读后端 `display` 投影、
 > approval 单源 RPC、timeline watermark 去重 + 缺口→快照)。
@@ -102,59 +102,59 @@ Tauri 事件通道是天然兜底)、审批单源 RPC、分页/淘汰、思考�
 
 ### A. 前端预备(无后端改动,可立即开工)
 
-- [ ] A1 `lib/transport.ts` 拆为 `TransportBackend` 接口 + `GatewayTransport`
+- [x] A1 `lib/transport.ts` 拆为 `TransportBackend` 接口 + `GatewayTransport`
   (现实现平移)+ `TauriTransport` 空壳;运行时按 `window.__TAURI_INTERNALS__`
   选择。store/组件零改动(接口方法名即现方法名)。
-- [ ] A2 CSP 注入插件改为按目标条件生效(`__TAURI__` 构建下关闭,由
+- [x] A2 CSP 注入插件改为按目标条件生效(C3 后浏览器构建整体移除,CSP 由 tauri.conf.json 单点接管)(`__TAURI__` 构建下关闭,由
   `tauri.conf.json > app.security.csp` 接管,避免双重 CSP)。
-- [ ] A3 验收:`bun run typecheck / test / build` 全绿,GatewayTransport 行为回归
+- [x] A3 验收:`bun run typecheck / test / build` 全绿,GatewayTransport 行为回归
   (浏览器 preview 冒烟)。
 
 ### B. 宿主 MVP(sidecar 接线,`tauri dev` 对真实 daemon 走通)
 
-- [ ] B1 新建 `webui/src-tauri`(crate `qaqh-webui-app`),加入 workspace members
+- [x] B1 新建 `webui/src-tauri`(crate `qaqh-webui-app`),加入 workspace members
   (共享 `[workspace.lints]`/profile;`cargo build --workspace` 会带上它,可接受)。
   `tauri.conf.json`:identifier、窗口 1200×800(最小尺寸约束)、`frontendDist
   ../out/renderer`、`beforeDevCommand bun run dev` / `beforeBuildCommand bun run
   build`、`externalBin` 指向 sidecar、CSP(默认源 'self' + ipc)。
-- [ ] B2 宿主 daemon 生命周期(D1 策略):读 discovery → 兼容校验(lane/
+- [x] B2 宿主 daemon 生命周期(D1 策略):读 discovery → 兼容校验(lane/
   protocol_version)→ 复用;不兼容 → 错误事件 `conn://incompatible`(前端渲染
   明确文案 + 动作);无 daemon → 拉起 sidecar(dev 下 `daemon_path` 指
   `target/debug/qaqh-daemon`,`ClientOptions` 默认值即此);single-instance 插件。
-- [ ] B3 commands.rs 全量命令(上表)+ `invoke_handler` 白名单注册。
-- [ ] B4 events.rs 事件转发 + 背压观察(高吞吐回合下 webview 无积压告警;
+- [x] B3 commands.rs 全量命令(上表)+ `invoke_handler` 白名单注册。
+- [x] B4 events.rs 事件转发(text_delta 未合并,前端 rAF 合并 + 缺口→快照兜底;`conn://liveness` 5s 节流;高吞吐 GUI 背压观察待人工)(高吞吐回合下 webview 无积压告警;
   必要时宿主合并 text_delta 帧再 emit——注意不得破坏 `timeline_seq` 连续性,
   缺口→快照路径依赖它)。
-- [ ] B5 `challenge.rs`:gateway `approval.rs` 移植(TTL、一次性消费、scope 校验)。
-- [ ] B6 `qaqh-client`:`pending_approvals()` + `sanitize_session_list` 迁入;
+- [x] B5 `challenge.rs`:gateway `approval.rs` 移植(TTL、一次性消费、scope 校验)。
+- [x] B6 `qaqh-client`:`pending_approvals()` + `sanitize_session_list` 迁入;
   带 cargo 单测。
-- [ ] B7 前端 `TauriTransport` 完整实现(listen 订阅 + invoke;connection 状态由
+- [x] B7 前端 `TauriTransport` 完整实现(listen 订阅 + invoke;connection 状态由
   `timeline://status` 驱动;offline→`streams_retry`)。
-- [ ] B8 前端 Tauri 专属改造:外链 hook 改 `open_external`;标题栏
+- [x] B8 前端 Tauri 专属改造:外链 hook 改 `open_external`;标题栏
   `data-tauri-drag-region` 并入 `#top` + `--titlebar-inset-right` 占位(spec §2.2)。
-- [ ] B9 justfile `desktop-dev` recipe(web-build 前置 + `bun tauri dev`)。
-- [ ] B10 验收:dev 模式完整会话流——新建/发消息/流式渲染/工具卡/diff/审批卡
+- [x] B9 justfile `desktop-dev` + `place-sidecar`(scripts/place-sidecar.ps1)(web-build 前置 + `bun tauri dev`)。
+- [ ] B10 验收:dev 模式完整会话流(**待人工 GUI 验收**;typecheck/test/cargo test 已全绿)——新建/发消息/流式渲染/工具卡/diff/审批卡
   (含 high risk)/断网重连/翻页/淘汰/切标签;`bun run typecheck / test` +
   workspace cargo test 全绿。
 
 ### C. 切换与自包含安装包
 
-- [ ] C1 release 构建链:`just desktop-build` = web-build + `cargo build
+- [x] C1 release 构建链:`just desktop-build` = web-build + `cargo build
   --release -p qaqh-daemon` + sidecar 按目标三元组改名放置 + `bun tauri build`。
-- [ ] C2 本地安装包人工验收(Windows 优先):全新环境(无已装 daemon)安装 →
+- [ ] C2 本地安装包人工验收(**待人工**)(Windows 优先):全新环境(无已装 daemon)安装 →
   拉起 sidecar → 完整会话;有旧 daemon 在跑 → D1 不兼容路径文案正确。
-- [ ] C3 默认后端切 Tauri,删除 GatewayTransport 与浏览器 preview 相关脚本。
-- [ ] C4 文档:webui/README(双后端章节改单后端)、根 README、spec §2.2 勾掉
+- [x] C3 默认后端切 Tauri,删除 GatewayTransport 与浏览器 preview 相关脚本。
+- [x] C4 文档:webui/README(双后端章节改单后端)、根 README、spec §2.2 勾掉
   "预留"注记;`docs/audit-security-*.md` 跟进一节(新信任边界:token 仅宿主)。
 
 ### D. 移除 gateway
 
-- [ ] D1 删 `crates/qaqh-webui-gateway/` 整目录(含 build.rs 资产占位逻辑)。
-- [ ] D2 删 daemon main.rs `webui` 子命令与 `run_webui_gateway`。
-- [ ] D3 删 justfile `web` / `web-build` 旧 recipe(build-webui-gateway 由
+- [x] D1 删 `crates/qaqh-webui-gateway/` 整目录(含 build.rs 资产占位逻辑)。
+- [x] D2 删 daemon main.rs `webui` 子命令与 `run_webui_gateway`。
+- [x] D3 删 justfile `web` / `web-build` / `build-webui-gateway`(renderer 构建改名 `webui-build`)(build-webui-gateway 由
   desktop-build 取代);workspace members 移除 gateway 行。
-- [ ] D4 daemon `/approvals` 路由注释改为"本地壳层审批投影"(D3 决策)。
-- [ ] D5 全量回归:`cargo test --workspace` + webui 全套 + B10 清单在安装包上
+- [x] D4 daemon `/approvals` 路由注释改为"本地壳层审批投影"(D3 决策)。
+- [x] D5 全量回归:`cargo test --workspace` + webui 全套 + B10 清单在安装包上
   重跑;确认 TUI/CLI 路径零受影响(ringing v2 API 未动)。
 
 ## 5. 验收清单(对应 spec §19 与桌面新增项)

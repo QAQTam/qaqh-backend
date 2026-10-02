@@ -115,3 +115,39 @@
 5. **M4**：把用户目录 `config.toml` 加入敏感路径名单（即便 L4 也强制弹窗）。
 6. **M3**：考虑 Landlock 增加读限制选项（`ReadFile`/`ReadDir` 按白名单），或至少在文档中明确「沙箱不防读」。
 7. **M5**：`daemon_executable()` 移除 cwd 候选，PATH 查找仅在显式 opt-in。
+
+## 跟进:webui Tauri 化后的信任边界变化(2026-10-02)
+
+按 `docs/plan-webui-tauri.md` 完成 A→D 阶段后,本报告与 webui 相关的结论按
+下述口径更新:
+
+**已移除的面(随 `qaqh-webui-gateway` 删除)**
+
+- gateway 的 nonce 引导 / HttpOnly 会话 / CSRF / origin 白名单 / 限流全部退役
+  ——这些机制防御的「不可信浏览器跨站与脚本面」在 Tauri 壳模型下不存在;
+- 网关命令白名单(`sanitize_command`)退役;IPC 面改为 `invoke_handler`
+  类型化注册即白名单,`service_rpc` 保留与原网关一致的 19 方法白名单,
+  写类动作(`config.save`/`workspace.*` 写法)不在其中;
+- 静态资源内嵌(`RustEmbed` + 扩展名白名单)退役,由 `frontendDist` + Tauri
+  自定义协议接管。
+
+**新信任边界**
+
+- **token 仅宿主**:daemon bearer token / lease id 只存在于 Rust 宿主进程
+  (`qaqh-webui-app` + `qaqh-client`);webview 可达面 = 类型化 IPC + 宿主转发
+  事件,均不携带凭据。报告「确认安全」中的 token 纪律条目(daemon 侧常时
+  比较、0600 discovery)不变。
+- **审批防御纵深保留并前移**:gateway `approval.rs` 移植为宿主
+  `challenge.rs`——webview 只见不透明 challenge id(64 hex,TTL 5min,
+  一次性消费 + active-seed scope 校验),canonical `call_*`/`int_*` id 不出
+  宿主;审批提交仍不受 driver 门控(daemon 侧语义不变)。
+- **CSP 单点化**:构建期不再注入 meta CSP;`tauri.conf.json >
+  app.security.csp`(`default-src 'self'` + `ipc:`)单点接管,消除双重 CSP
+  相互削弱。渲染管线约束(无 innerHTML/eval、DOMPurify、textContent 构建)
+  不变,仍由 `webui/tests/` 断言。
+- **外链收敛**:webview 不导航外站,http(s) 外链经宿主 `open_external`
+  (scheme 白名单 + 系统 opener)。
+- **新增建议**:宿主侧 `challenge.rs` 与 `commands.rs` 是新的安全敏感面,
+  后续变更需与原 gateway 同等强度审查(TTL/一次性消费/scope 语义不可放宽);
+  `conn://liveness` 节流与 `projection://event` 直发需在上线阶段做一次高
+  吞吐回合的背压观察(plan B4)。

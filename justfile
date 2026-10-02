@@ -20,31 +20,43 @@ default:
 build-daemon:
     cargo build --release -p qaqh-daemon
 
-# 编译 WebUI 网关（release；依赖 webui/out/renderer 构建产物）
-build-webui-gateway: web-build
-    cargo build --release -p qaqh-webui-gateway
-
 # ── 开发 ────────────────────────────────────────────
 
 # 启动 daemon（dev profile）
 dev:
     cargo run -p qaqh-daemon -- run
 
-# ── webUI（独立回环网关）───────────────────────────
+# ── webUI 渲染层（Tauri 桌面壳的构建产物）──────────
 
-# 构建 WebUI 并启动显式回环网关。前置：daemon 已运行（just dev）。
-web-build:
+# 构建 webui renderer:安装依赖 + 静态检查 + 单测 + vite build。
+# desktop-build 复用此 recipe;产物 out/renderer 由 tauri.conf.json 消费。
+webui-build:
     cd webui && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build
 
-[unix]
-web: web-build
-    cargo build -p qaqh-webui-gateway
-    cargo run -p qaqh-daemon -- webui
+# ── 桌面壳（Tauri,webui-tauri 计划）────────────────
 
+# 把 daemon 构建产物放置为 Tauri sidecar（目标三元组命名,带存在性断言）。
+# mode: debug | release
+[unix]
 [windows]
-web: web-build
-    cargo build -p qaqh-webui-gateway
-    cargo run -p qaqh-daemon -- webui
+place-sidecar mode="debug":
+    @pwsh -NoLogo -File scripts/place-sidecar.ps1 {{mode}}
+
+# 桌面开发:构建 daemon(debug)→ 放置 sidecar → bun tauri dev(对真实 daemon 走通)。
+[unix]
+[windows]
+desktop-dev:
+    cargo build -p qaqh-daemon
+    just place-sidecar debug
+    cd webui && bun install --frozen-lockfile && bun tauri dev
+
+# 桌面自包含安装包(C1):web 产物 + daemon release + sidecar + tauri build。
+[unix]
+[windows]
+desktop-build: webui-build
+    cargo build --release -p qaqh-daemon
+    just place-sidecar release
+    cd webui && bun tauri build
 
 # ── 检查 & 测试 ─────────────────────────────────────
 
