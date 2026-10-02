@@ -118,6 +118,13 @@ impl Session {
         self
     }
 
+    /// 覆盖扫描参数（默认 [`ScanOpts::default`]）。宿主用它收紧 `lock_wait`
+    /// 等与调用方等待预算相关的项。
+    pub fn with_opts(mut self, opts: ScanOpts) -> Self {
+        self.opts = opts;
+        self
+    }
+
     pub fn store_dir(&self) -> &std::path::Path {
         self.store.dir()
     }

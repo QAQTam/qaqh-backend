@@ -72,6 +72,7 @@ pub(crate) mod turn_lap;
 pub mod turn_lap_test_api;
 pub mod types;
 pub mod util;
+pub mod workspace_audit;
 
 // Non-loop engines were moved to `plugins/`; these re-exports keep the
 // historical `agent::engine_compact` / `agent::engine_misc` / `agent::dashboard`
