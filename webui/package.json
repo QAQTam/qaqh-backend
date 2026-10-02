@@ -2,7 +2,7 @@
   "name": "qaqh-webui",
   "private": true,
   "type": "module",
-  "description": "QAQ-Harness WebUI (Solid 2 + Vite 8)",
+  "description": "QAQ-Harness WebUI phase 1 (Solid 2 rc + Vite + TS strict)",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -12,13 +12,20 @@
   },
   "dependencies": {
     "@solidjs/web": "2.0.0-rc.9",
-    "solid-js": "2.0.0-rc.9",
-    "streaming-markdown": "0.2.15"
+    "anser": "^2.2.4",
+    "diff": "^8.0.2",
+    "dompurify": "^3.2.7",
+    "marked": "^16.4.1",
+    "shiki": "^3.15.0",
+    "solid-js": "2.0.0-rc.9"
   },
   "devDependencies": {
+    "@iconify-json/lucide": "^1.2.68",
     "@solidjs/vite-plugin": "3.0.0-next.43",
+    "@types/bun": "^1.4.2",
     "happy-dom": "^20.14.5",
     "typescript": "^7.0.2",
+    "unplugin-icons": "^22.4.2",
     "vite": "^8.3.0"
   }
 }
