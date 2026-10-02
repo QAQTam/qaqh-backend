@@ -28,9 +28,9 @@ read"补偿"宿主测不到改动"**——即本计划要消除的对象。
 | 项 | 内容 | 状态 |
 |---|---|---|
 | **PR1** | 新建 `crates/qaqh-spy`（scan/store/report/diff；去 clap CLI / watch / procmon） | **已完成**（`feat(spy)` 提交；11 单测 + 1 e2e 全绿，零新依赖） |
-| **PR2** | 批次边界扫描 + `ContextFlow` 注入（chat + responses） | **设计冻结，形态测试已入仓；接线未开始** |
+| **PR2** | 批次边界扫描 + `ContextFlow` 注入（chat + responses） | **已完成**（`feat(runtime)` 提交；端到端 2 用例 + message 恢复用例全绿） |
 | **PR2b** | `message_api.rs:266` 合并规则扩展（Anthropic 载体吸收后置纯文本）+ 三协议形态测试 | 已入仓（`feat(gate)` 提交；118 全绿、fmt/clippy 干净）；**严格性未经验证 → 端点验证未完成，挂起**（§6） |
-| **PR3** | spy 反向喂 `journal::record_change` + `file_state::record_write` | 未开始 |
+| **PR3** | spy 反向喂 `journal::record_change` + `file_state::record_write` + 报告内联回滚命令 | 未开始（**下一项**） |
 | **PR4** | `serial_call_ids` 纳入 exec ⇒ per-exec 精细归因 | 未开始（可选） |
 
 ## 2. 三协议形态对照
@@ -80,6 +80,19 @@ LLM 请求立即可见"*，随后 `drain_pending_injections(); drain_injections(
 
 **3.7 已知分叉：落盘 ≠ 传输。** `engine_turn.rs:53` 点名"trailing 注入已持久化但
 模型请求未携带"。这是 PR2 的真闸门，与协议无关。
+
+**3.8 新发现：trailing 注入判定硬编码 `"subagent"` 字面量（PR2 实施中抓出）。**
+`MessageStore` 有四处各自复制同一契约——`push_trailing_system` 的 `debug_assert`、
+`from_messages` 的 user 分支、中段 `_` 分支、以及 Environment 锚点的"第一条真实
+用户消息"判定。injection.rs 头注释宣称的"新 source 只需声明自己"在 store 层**并不
+成立**：未登记的新注入源会在崩溃恢复时被误认成真实用户输入（虚增回合数、把报告
+钉进对话史）。已收敛为 `USER_INJECTION_SOURCES` + `is_user_injection` 共享谓词，
+`workspace` 登记在册，并由 `from_messages_restores_workspace_injection_as_trailing`
+锁定。
+
+实施教训：站点 4 原本是**不限角色**的 `[SUBAGENT ` 前缀回退（`push_system_input` 造
+的是 system 角色 + 该前缀），把它收紧成 `role==user` 会静默丢弃旧档——该回归被
+`cargo test -p qaqh-message` 当场抓出。前缀回退的适用范围本身是契约的一部分。
 
 ## 4. 设计决策（冻结）
 
@@ -146,11 +159,14 @@ Anthropic 通路今天没在用。
    存储根 `QAQH_SPY_DIR` ∨ `platform::data_dir()/spy/<工作区哈希>`。
    遗留：`report.rs` 只出危险启发式、**不含可执行回滚命令**（codespy README 宣称有，
    代码里没有）→ 并入 PR3 接到 `journal replay` / 未来的 `spy undo`。
-2. **PR2 接线**：`tool_runtime.rs:114 execute_batch` 入口 `scan(ToolStart)`，整批
-   backfill 完成后 `report_since(mark, 4096)`，非空则 `flow.submit(WORKSPACE, msg,
-   Some("{turn}#{round}#spy"))`；`execution.rs` 一行不动。
-3. **端到端断言（真闸门）**：注入落 `messages.jsonl` 后，下一次 provider 请求视图
-   必须携带该文本块——针对 §3.7 的"落盘 ≠ 传输"分叉。
+2. ~~**PR2 接线**~~ **已完成**，但落点从计划的 `execute_batch` 上移到
+   `turn_lap/admit.rs::execute_admitted_batch`——`execute_batch` 内部有多个取消早退
+   分支，只有包裹层能覆盖全部退出路径。`execution.rs` 一行未动（D6 兑现）。
+   提交时立即 `drain_turn_boundary`：`Loop::drain_injections` 在总线无投递时提前
+   返回、不排空 `ContextFlow::pending`，只 submit 会让报告永不落盘（§3.7 反向形态）。
+3. **落盘断言已入仓**（`qaqh-runtime/tests/workspace_change_injection.rs` 断言注入
+   进了 message store 且排在 tool 结果之后）。**仍缺**：下一次 provider 请求视图
+   确实携带该文本块的端到端断言——目前由 gate 侧形态测试间接覆盖，未串成一条链。
 4. **PR3**：spy 喂 `journal::record_change`（`tool="exec"`）+ `file_state::record_write`
    ⇒ 模型用已有 `journal` 工具即可找回脚本改动，且 `stale_file` 假阳性消失。
 
