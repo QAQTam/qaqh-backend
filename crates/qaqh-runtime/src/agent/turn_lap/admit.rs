@@ -90,6 +90,12 @@ fn emit_active_ask(ctx: &mut RingContext, state: &TurnState) {
 // ── execute_admitted_batch ──
 
 /// Thin compatibility entry: scheduling/execution lives in [`ToolRuntime`].
+///
+/// 也是**工作区变更审计的唯一批边界钩子**（`workspace_audit`）：这里是
+/// `ToolRuntime::execute_batch` 的唯一入口（正常批与权限恢复批都走它），
+/// 而 `execute_batch` 内部有多个取消早退分支——在包裹层打点/收口才能覆盖
+/// 全部退出路径。此刻整批 tool 结果均已回填，注入天然排在结果之后
+/// （Chat Completions 的 tool 紧邻约束，见 chat_completions_api.rs）。
 #[allow(clippy::too_many_arguments)]
 pub fn execute_admitted_batch(
     ctx: &mut RingContext,
@@ -102,7 +108,8 @@ pub fn execute_admitted_batch(
     turn_id: &str,
     round_num: u32,
 ) -> bool {
-    ToolRuntime::execute_batch(
+    let audit = crate::agent::workspace_audit::begin(&admitted);
+    let completed = ToolRuntime::execute_batch(
         ctx,
         tool,
         actor,
@@ -112,7 +119,9 @@ pub fn execute_admitted_batch(
         serial_call_ids,
         turn_id,
         round_num,
-    )
+    );
+    crate::agent::workspace_audit::finish(ctx, audit, turn_id, round_num);
+    completed
 }
 
 // ── Admit/dispatch for run_lap's !turn_completed first batch ──

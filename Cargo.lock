@@ -3831,6 +3831,7 @@ dependencies = [
  "qaqh-sandbox",
  "qaqh-session",
  "qaqh-skills",
+ "qaqh-spy",
  "qaqh-subagent",
  "qaqh-title",
  "qaqh-types",

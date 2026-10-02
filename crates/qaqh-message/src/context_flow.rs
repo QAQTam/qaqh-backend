@@ -479,6 +479,7 @@ pub mod builtin {
     pub const SUBAGENT: &str = "subagent";
     pub const GOAL: &str = "goal";
     pub const MCP_RESOURCES: &str = "mcp_resources";
+    pub const WORKSPACE: &str = "workspace";
 
     fn base(
         id: &'static str,
@@ -630,6 +631,28 @@ pub mod builtin {
         )
     }
 
+    /// 工作区变更审计注入（`[workspace-changes …]`：qaqh-spy 在工具批边界
+    /// 全量扫描出的净变更报告）。与 [`subagent_source`] 同形态——`User` role +
+    /// `Trailing` sink + `TurnBoundary` timing：Chat Completions 要求
+    /// assistant(tool_calls) 之后紧跟全部 tool 消息，所以注入必须排在整批结果
+    /// 之后落盘；TurnBoundary 让它下一轮请求即可见、不打断运行中的回合。
+    ///
+    /// `Compressable`（非 `Preserved`）：diff 报告是**某一批的易过期环境状态**
+    /// 而非对话事实，下一批会重新扫描重述——与 `mcp_resources_source` 同一理由。
+    pub fn workspace_source() -> Arc<dyn ContextSource> {
+        base(
+            WORKSPACE,
+            FlowRole::User,
+            Sink::Trailing,
+            Timing::TurnBoundary,
+            Visibility { context: true },
+            LifecyclePolicy {
+                undo: UndoBehavior::Keep,
+                compact: CompactBehavior::Compressable,
+            },
+        )
+    }
+
     /// Register all built-in sources on a flow (idempotent per flow).
     pub fn register_all(flow: &mut ContextFlow) {
         flow.register(user_source());
@@ -638,6 +661,7 @@ pub mod builtin {
         flow.register(subagent_source());
         flow.register(goal_source());
         flow.register(mcp_resources_source());
+        flow.register(workspace_source());
     }
 }
 

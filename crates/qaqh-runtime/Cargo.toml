@@ -18,6 +18,7 @@ qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-title = { path = "../qaqh-title" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-workspace = { path = "../qaqh-workspace" }
+qaqh-spy = { path = "../qaqh-spy" }
 qaqh-gate = { path = "../qaqh-gate" }
 unicode-normalization = "0.1"
 qaqh-skills = { path = "../qaqh-skills" }

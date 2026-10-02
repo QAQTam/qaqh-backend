@@ -237,6 +237,26 @@ impl Clone for MessageStore {
     }
 }
 
+/// 注入型 user 消息的来源标记（`name` 字段）。
+///
+/// 这些消息 role=user 但**不是真实用户轮次**：不建回合、不触发 timeline、
+/// 不算 turn-start，崩溃/重启恢复时必须回到 trailing 而不是 push_user。
+/// 新增 ContextSource（User role + Trailing sink）时在这里登记它的 name。
+///
+/// 背景：此前四处判定各自硬编码 "subagent" 字面量，任何新注入源都会在
+/// 恢复路径被误认成真实用户输入（workspace 变更审计注入即为此而登记）。
+const USER_INJECTION_SOURCES: &[&str] = &["subagent", "workspace"];
+
+/// 判定注入型 user 消息。text 用于旧档前缀回退（早期 subagent 注入只靠
+/// [SUBAGENT 标签、没有 name 字段）。
+fn is_user_injection(msg: &Message, text: &str) -> bool {
+    msg.role == "user"
+        && (msg
+            .name
+            .as_deref()
+            .is_some_and(|name| USER_INJECTION_SOURCES.contains(&name))
+            || text.starts_with("[SUBAGENT "))
+}
 impl MessageStore {
     pub fn new(session_id: &str) -> Self {
         Self {
@@ -589,11 +609,8 @@ impl MessageStore {
             })
             .unwrap_or("");
         debug_assert!(
-            msg.role == "system"
-                || msg.role == "developer"
-                || (msg.role == "user" && msg.name.as_deref() == Some("subagent"))
-                || (msg.role == "user" && new_text.starts_with("[SUBAGENT ")),
-            "push_trailing_system requires role=system|developer|user(subagent), got role={} name={:?}",
+            msg.role == "system" || msg.role == "developer" || is_user_injection(&msg, new_text),
+            "push_trailing_system requires role=system|developer|user(已登记的注入源), got role={} name={:?}",
             msg.role,
             msg.name
         );
@@ -1011,14 +1028,17 @@ impl MessageStore {
             // made turn-1's message render differently once turn 2 arrived,
             // breaking the whole prefix cache at the first user message — cache
             // hits collapsed to the system prefix only.) In write-order
-            // serialization a trailing subagent report could theoretically
-            // precede the first user turn (injection into an auto-created
-            // session), so skip name="subagent" messages — annotations belong
+            // serialization a trailing injection could theoretically precede
+            // the first user turn (injection into an auto-created session),
+            // so skip every registered injection source — annotations belong
             // to the human user's message, not to an injected report.
-            if let Some(first_user) = full
-                .iter_mut()
-                .find(|m| m.role == "user" && m.name.as_deref() != Some("subagent"))
-            {
+            if let Some(first_user) = full.iter_mut().find(|m| {
+                m.role == "user"
+                    && !m
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| USER_INJECTION_SOURCES.contains(&name))
+            }) {
                 let existing = first_user.content.iter_mut().find_map(|b| {
                     if let qaqh_types::ContentBlock::Text { text } = b {
                         Some(text)
@@ -1315,12 +1335,10 @@ impl MessageStore {
                     // push_trailing_system 回放以分配写入顺序 msg_id（replaying
                     // 期间 save_msg 不落盘），使 to_vec/build_context 的写入顺序
                     // 合并能恢复注入的原始时间位置。
-                    // M-low④：判别优先用持久化 name 字段（写侧
-                    // handle_system_input 恒置 name="subagent"）；前缀仅作
-                    // 旧档回退——以 "[SUBAGENT " 开头的真实用户消息不再被
-                    // 误改类为注入。
-                    let is_injection = msgs[i].name.as_deref() == Some("subagent")
-                        || text.starts_with("[SUBAGENT ");
+                    // M-low④：判别优先用持久化 name 字段（写侧恒置 name），
+                    // 前缀仅作旧档回退——以 [SUBAGENT 开头的真实用户消息
+                    // 不再被误改类为注入。登记表见 USER_INJECTION_SOURCES。
+                    let is_injection = is_user_injection(&msgs[i], &text);
                     if is_injection {
                         store.push_trailing_system(msgs[i].clone());
                     } else {
@@ -1373,8 +1391,10 @@ impl MessageStore {
                         })
                         .unwrap_or("");
                     if msgs[i].role == "developer"
-                        || msgs[i].name.as_deref() == Some("subagent")
+                        || is_user_injection(&msgs[i], text)
                         || text.starts_with("<skill_context_envelope")
+                        // 旧档回退：[SUBAGENT 前缀不限角色（push_system_input 造的
+                        // 是 system 角色 + 该前缀），收紧成 role==user 会静默丢弃。
                         || text.starts_with("[SUBAGENT ")
                     {
                         // 同上：经 push_trailing_system 回放，分配写入顺序 id。
@@ -2946,6 +2966,43 @@ mod tests {
         assert_eq!(roles, vec!["system", "user", "user"]);
         let last = ctx.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("subagent"));
+    }
+
+    /// 工作区变更审计注入（PR2）：只有 name="workspace"、**没有** [SUBAGENT
+    /// 前缀——正是四处硬编码 "subagent" 时会漏判的形态。恢复必须回到
+    /// trailing，不得当成真实用户 turn（否则虚增回合数、并把报告钉进对话史）。
+    #[test]
+    fn from_messages_restores_workspace_injection_as_trailing() {
+        let mut inject = Message::user(concat!(
+            "[workspace-changes turn=t1 round=0 mark=s0001790946308788_0001 calls=call-1]\n",
+            "[workspace] 自标记以来 1 个文件变更\n",
+            "─── src/a.py (新增, - → 26B)",
+        ));
+        inject.name = Some("workspace".into());
+        let messages = vec![
+            Message::system("base instructions"),
+            Message::user("real user message"),
+            inject,
+        ];
+        let (store, _) = MessageStore::from_messages("test", &messages, 0);
+
+        assert_eq!(store.turn_count(), 1, "注入不得建回合");
+        assert_eq!(store.trailing_messages.len(), 1, "注入必须恢复为 trailing");
+        let text = store.trailing_messages[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                qaqh_types::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(text.contains("[workspace-changes"), "{text}");
+
+        // Environment 块必须钉在真实用户消息上，而不是这条注入上：
+        // 注入排在首位时会抢先成为「第一条 user」。
+        let ctx = store.build_context_for_gate(&[]);
+        let names: Vec<Option<&str>> = ctx.iter().map(|m| m.name.as_deref()).collect();
+        assert!(names.contains(&Some("workspace")), "{names:?}");
     }
 
     // ── BUG-2026-09-13-04 回归：用户图片必须随消息落盘 ──
