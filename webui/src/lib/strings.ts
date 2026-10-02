@@ -77,6 +77,11 @@ export const STR = {
   decidedDeny: "已拒绝",
   statusUnknown: "状态未知",
   binaryChanged: "二进制文件已变更",
+  incompatibleDaemon: (detail: string) => `检测到不兼容的 daemon 实例(${detail})。桌面壳需要匹配的版本。`,
+  incompatibleStopAndConnect: "停止旧实例并连接",
+  incompatibleBusy: "旧实例正在运行任务,无法自动停止。请退出正在使用的会话后重试,或手动退出旧实例。",
+  incompatibleStopping: "正在停止旧实例…",
+  hostError: "桌面壳与 daemon 通信异常",
 } as const;
 
 /** 「已工作 X 秒」的时长格式化（spec §7.3）。纯函数,可单测。 */
