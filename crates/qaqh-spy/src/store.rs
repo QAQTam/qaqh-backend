@@ -237,9 +237,16 @@ impl Store {
     // ---------- 并发 ----------
 
     /// 跨线程/跨进程的简单文件锁；崩溃残留的锁 60s 后可抢占。
+    /// 获取存储锁，最长等待 15 秒（人工 / CLI 路径的默认上界）。
     pub fn lock(&self) -> Result<StoreLock> {
+        self.lock_timeout(std::time::Duration::from_secs(15))
+    }
+
+    /// 带等待上界的加锁。库接入（每批工具边界）应传**小值**：争用时宁可跳过
+    /// 本次扫描，也不把调用方（agent 循环）阻塞到锁超时——超过 `wait` 返回 Err。
+    pub fn lock_timeout(&self, wait: std::time::Duration) -> Result<StoreLock> {
         let path = self.dir.join("lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + wait;
         loop {
             match fs::OpenOptions::new()
                 .write(true)

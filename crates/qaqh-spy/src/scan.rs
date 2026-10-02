@@ -24,6 +24,9 @@ use crate::store::{Change, ChangeStatus, FileEntry, Manifest, Store};
 pub struct ScanOpts {
     /// 单文件大小上限，超过则不纳入快照（也无法为其回滚）
     pub max_file_bytes: u64,
+    /// 存储锁最长等待。挂在工具批边界时用短值：并发会话争锁则跳过本次
+    /// 扫描（调用方退化为“本批无报告”），不阻塞 agent 循环。
+    pub lock_wait: std::time::Duration,
     /// 目录名黑名单（任何层级下同名目录整棵剪掉）
     pub exclude_dirs: Vec<String>,
 }
@@ -32,6 +35,7 @@ impl Default for ScanOpts {
     fn default() -> Self {
         ScanOpts {
             max_file_bytes: 2 * 1024 * 1024,
+            lock_wait: std::time::Duration::from_millis(1_000),
             exclude_dirs: [
                 ".git",
                 "node_modules",
@@ -68,7 +72,7 @@ pub(crate) fn run_scan(
     trigger: &str,
     opts: &ScanOpts,
 ) -> Result<ScanOutcome> {
-    let _guard = store.lock()?;
+    let _guard = store.lock_timeout(opts.lock_wait)?;
     let state = store.load_state()?;
     let prev = match &state.last_scan {
         Some(id) => Some(store.load_manifest(id)?),
