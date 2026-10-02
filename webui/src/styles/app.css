@@ -140,6 +140,30 @@
   .tab-dot.new { background: var(--accent); }
   .conn-status { flex: none; padding: 0 12px; font-size: var(--fs-xs); color: var(--muted); display: flex; align-items: center; gap: 6px; }
 
+  /* Tauri 桌面壳标题栏(spec §2.2):--titlebar-inset-right 预留窗口控制占位 */
+  html.tauri { --titlebar-inset-right: 114px; }
+  .top-drag { flex: 0 1 180px; min-width: 32px; height: 100%; }
+  .titlebar-controls {
+    flex: none; display: flex; align-items: stretch;
+    width: var(--titlebar-inset-right); height: 100%;
+  }
+  .titlebar-controls button {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); border-radius: 0;
+    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  }
+  .titlebar-controls button:hover { background: var(--surface-2); color: var(--text); }
+  .titlebar-controls button.titlebar-close:hover { background: var(--err); color: #fff; }
+  .titlebar-controls svg { width: 13px; height: 13px; }
+  .host-banner {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin: 12px 16px 0; padding: 10px 12px;
+    border: 1px solid var(--warn); border-radius: var(--r-md);
+    color: var(--text); font-size: var(--fs-sm); background: var(--surface);
+  }
+  .host-banner-note { color: var(--muted); }
+  .host-banner-actions { display: flex; gap: 6px; margin-left: auto; }
+
   /* 主区 */
   #main { min-height: 0; display: grid; }
   .session-column {

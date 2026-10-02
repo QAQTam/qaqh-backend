@@ -1,13 +1,13 @@
 /**
  * 标签页与会话路由(spec §5)。
  *
- * 一个标签 = 一个会话;关闭标签 = 解除连接,不取消运行中的 Turn、不取消
+ * 一个标签 = 一个会话;关闭标签 = 退订宿主事件,不取消运行中的 Turn、不取消
  * 待处理授权(后端常驻,D2:本阶段无法重新打开已关闭标签)。
  * 非活动标签卸载 DOM,仅保留 store 数据(§5.3)。
  *
  * 会话创建(spec §5.1「+」):经控制通道 SessionCreate,轮询 sessions 列表
- * 找出新 seed。网关要求命令必须指向 active session——零标签时无法创建,
- * 按钮禁用并说明。
+ * 找出新 seed。宿主模式下 SessionCreate 不要求 active seed,但保持与原网关
+ * 一致的入口约束(活动标签发起)。
  */
 import { createSignal } from "solid-js";
 import { transport } from "../lib/transport";
@@ -46,7 +46,7 @@ function addTab(seed: string): Tab {
   return tab;
 }
 
-/** 激活标签:网关 attach 切 active session → 该 store 建流,其余停流。 */
+/** 激活标签:宿主 attach 切 active seed + 重建流 → 该 store 订阅,其余退订。 */
 export async function activateTab(tab: Tab): Promise<void> {
   setActiveId(tab.id);
   setFocusToken(focusToken() + 1);
@@ -86,7 +86,7 @@ export async function closeTab(tabId: string): Promise<void> {
 export async function createSession(): Promise<void> {
   if (creating()) return;
   const active = activeTab();
-  if (active == null) return; // 网关要求 active session 才能发命令
+  if (active == null) return; // 保持入口约束:由活动标签发起创建
   setCreating(true);
   try {
     const before = new Set((await transport.sessions()).map((item) => String(item.session_id)));
