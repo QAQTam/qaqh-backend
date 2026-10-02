@@ -1,0 +1,24 @@
+[package]
+name = "qaqh-webui-app"
+version.workspace = true
+edition = "2024"
+description = "QAQ-Harness 桌面壳:Tauri 2 宿主,承载 webui 渲染层并以 sidecar 托管 daemon"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+log = "0.4"
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+qaqh-client = { path = "../../crates/qaqh-client" }
+qaqh-types = { path = "../../crates/qaqh-types" }
+
+[lints]
+workspace = true
