@@ -65,7 +65,11 @@ fn init_env() {
         qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
         // 注意顺序：TOOL_MANAGER 是 OnceLock，init_tools 只有第一次生效，
         // 必须先注册探针再 AgentState::init（其内部 init_tools 成为 no-op）。
-        qaqh_workspace::runtime::init_tools("workspace-spy", &[register_spy_probe], vec![]);
+        qaqh_workspace::runtime::init_tools(
+            "workspace-spy",
+            &[register_spy_probe, register_declared_probe],
+            vec![],
+        );
     });
 }
 
@@ -134,7 +138,12 @@ fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolE
     )
 }
 
-fn store_with_tool_use(session_id: &str, call_id: &str, args: serde_json::Value) -> MessageStore {
+fn store_with_tool_use(
+    session_id: &str,
+    call_id: &str,
+    tool: &str,
+    args: serde_json::Value,
+) -> MessageStore {
     let mut store = MessageStore::new(session_id);
     store.push_user("mutate the workspace");
     let assistant = Message {
@@ -143,7 +152,7 @@ fn store_with_tool_use(session_id: &str, call_id: &str, args: serde_json::Value)
         name: None,
         content: vec![ContentBlock::ToolUse {
             id: call_id.to_string(),
-            name: "spy_probe".to_string(),
+            name: tool.to_string(),
             input: args,
         }],
     };
@@ -160,6 +169,7 @@ fn store_with_tool_use(session_id: &str, call_id: &str, args: serde_json::Value)
 fn run_batch(
     workspace: &Path,
     session_id: &str,
+    tool: &str,
     call_id: &str,
     args: serde_json::Value,
     turn_id: &str,
@@ -172,15 +182,15 @@ fn run_batch(
     agent.session.session_id = session_id.to_string();
     agent.ephemeral = true;
     agent.config.permission_level = 4;
-    agent.msg = store_with_tool_use(session_id, call_id, args.clone());
+    agent.msg = store_with_tool_use(session_id, call_id, tool, args.clone());
 
-    let auth = match qaqh_workspace::authorize_call(session_id, call_id, "spy_probe", &args, 4) {
+    let auth = match qaqh_workspace::authorize_call(session_id, call_id, tool, &args, 4) {
         qaqh_workspace::Admission::Authorized(auth) => auth,
         qaqh_workspace::Admission::ApprovalRequired(_) => {
-            panic!("spy_probe must not need approval at level 4")
+            panic!("{tool} must not need approval at level 4")
         }
         qaqh_workspace::Admission::Denied(reason) => {
-            panic!("spy_probe was denied: {reason}")
+            panic!("{tool} was denied: {reason}")
         }
     };
     let admitted = vec![AdmittedTool {
@@ -189,7 +199,7 @@ fn run_batch(
         scope: tool_scope(call_id, session_id),
     }];
 
-    let emitter = NullEmitter::default();
+    let emitter = NullEmitter;
     let mut phase = LoopPhase::ToolsRunning;
     let mut pending = PendingState::default();
     let writer_dead = Arc::new(AtomicBool::new(false));
@@ -218,7 +228,7 @@ fn run_batch(
     agent.msg.to_vec()
 }
 
-#[derive(Default)]
+/// 只满足 Emitter trait，本用例不关心事件流。
 struct NullEmitter;
 
 impl Emitter for NullEmitter {
@@ -274,6 +284,7 @@ fn batch_with_file_change_injects_report_after_tool_result() {
     let messages = run_batch(
         &workspace,
         session,
+        "spy_probe",
         "call-1",
         serde_json::json!({"name": "generated.py", "content": "def f():\n    return 1\n"}),
         "turn-a",
@@ -316,6 +327,58 @@ fn batch_with_file_change_injects_report_after_tool_result() {
         body.contains("mark=s"),
         "注入头必须带扫描边界 id，供 undo/restore 定位：{body}"
     );
+
+    // ── PR3：exec 盲区必须在两条既有宿主设施里留下痕迹 ──
+    let abs = workspace.join("generated.py").to_string_lossy().to_string();
+
+    // 1) SMJ 审计链：模型能用已经存在的 journal 工具 query/replay 找回脚本改动。
+    let steps = qaqh_workspace::journal::query(None, Some("generated.py"), None);
+    assert!(
+        !steps.is_empty(),
+        "spy 发现的变更必须回填 SMJ，否则审计链仍看不见 exec 副作用"
+    );
+    let step = &steps[steps.len() - 1];
+    assert_eq!(step.tool, "spy_probe", "单调用批应归因到真实工具名");
+    assert_eq!(step.op, "scan_added", "op 必须标出这是扫描发现的变更");
+    assert_eq!(step.result, "ok");
+    assert!(step.after_sha.is_some(), "新增文件必须有 after 指纹");
+
+    // 2) file_state 账本：脚本改过的文件指纹必须刷新，否则下一次 edit/write
+    //    命中 stale_file、被迫重新 read——这正是本功能要消除的症状。
+    assert!(
+        qaqh_workspace::file_state::last_hash(&abs).is_some(),
+        "批尾必须刷新账本指纹：{abs}"
+    );
+
+    // 3) 报告必须带可执行回滚命令（codespy README 宣称有、原实现里没有）。
+    assert!(
+        body.contains("journal action=replay"),
+        "报告必须给出可直接执行的回滚命令：{body}"
+    );
+    assert!(
+        body.contains("at=0"),
+        "新增文件的回滚点应是本步之前（seq-1）：{body}"
+    );
+
+    // 4) 回滚命令必须真的能用——报告里发出的 at=seq-1 若还原不了就是空头支票。
+    //    直接走 journal 工具背后的同一个函数，验证语义与提示一致。
+
+    let restored = qaqh_workspace::journal::replay_to_path(
+        "generated.py",
+        Some(step.seq - 1),
+        Some(Path::new(&abs)),
+    )
+    .expect("replay must succeed");
+    assert_eq!(
+        restored, None,
+        "新增文件回滚到本步之前应得 None（即应删除），实得 {restored:?}"
+    );
+    // replay_to_path 在内容为 None 时会删除已存在的文件（journal.rs 的 else 分支），
+    // 所以「撤销新增」的真语义是：文件消失。
+    assert!(
+        !Path::new(&abs).exists(),
+        "回滚新增文件必须把它删掉，{abs} 仍在"
+    );
 }
 
 /// 契约 3：零变更批不注入——不占模型上下文。
@@ -330,6 +393,7 @@ fn quiet_batch_injects_nothing() {
     let messages = run_batch(
         &workspace,
         "spy-quiet",
+        "spy_probe",
         "call-q",
         serde_json::json!({"name": "__quiet__"}),
         "turn-q",
@@ -343,4 +407,88 @@ fn quiet_batch_injects_nothing() {
     );
     // 工具照常执行成功，只是没有副作用。
     tool_result_index(&messages, "call-q");
+}
+
+/// 自报写路径的探针：注册成 file 工具名，args 带 action=write + path。
+/// conflict::file_write_paths 对 tool_name==file 会取 args.action 再收集 path，
+/// 因此本调用会进入批的 declared_writes 集合。
+fn declared_write_handler(ctx: ToolCallCtx) -> ToolResult {
+    let workspace = qaqh_workspace::current_workspace();
+    let path = match ctx.args.get("path").and_then(serde_json::Value::as_str) {
+        Some(path) => path,
+        None => return ToolResult::error("declared_write: missing path"),
+    };
+    let content = ctx
+        .args
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("declared content");
+    let full = Path::new(&workspace).join(path);
+    match std::fs::write(&full, content) {
+        Ok(()) => ToolResult::ok(format!("declared wrote {path}")),
+        Err(error) => ToolResult::error(format!("declared_write failed: {error}")),
+    }
+}
+
+fn register_declared_probe(mgr: &mut ToolManager) {
+    mgr.register(ToolHandler {
+        key: "file".to_string(),
+        description: "self-declaring write probe",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string" },
+                "path": { "type": "string" },
+                "content": { "type": "string" }
+            },
+            "required": ["action", "path"]
+        }),
+        handler: declared_write_handler,
+        risk: ToolRisk::Write,
+        category: ToolCategory::Write,
+        default_timeout: Duration::from_secs(5),
+    });
+}
+
+/// 去重契约：工具**自报过**的写路径，工具自己已经记过 SMJ 也刷新过账本，
+/// spy 不得再记一条——否则 journal query 出现成对假记录、审计流水翻倍。
+/// 报告本身仍应出现（它描述的是工作区状态，与是否重复记账无关）。
+#[test]
+fn self_declared_write_is_not_double_recorded_in_smj() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_env();
+    let temp = tempfile::tempdir().expect("workspace tempdir");
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+
+    let messages = run_batch(
+        &workspace,
+        "spy-dedupe",
+        "file",
+        "call-d",
+        serde_json::json!({
+            "action": "write",
+            "path": "declared.txt",
+            "content": "self declared",
+        }),
+        "turn-d",
+        0,
+    );
+
+    // 报告里应当看到它（状态扫描确实测到了）。
+    let injections = injection_indices(&messages);
+    assert_eq!(injections.len(), 1, "仍应注入变更报告：{messages:#?}");
+    let body = text_of(&messages[injections[0]]);
+    assert!(body.contains("declared.txt"), "报告应点名该文件：{body}");
+
+    // 但 SMJ 不得由 spy 再记一遍。
+    let steps = qaqh_workspace::journal::query(None, Some("declared.txt"), None);
+    let from_scan = steps
+        .iter()
+        .filter(|step| step.op.starts_with("scan_"))
+        .count();
+    assert_eq!(
+        from_scan, 0,
+        "自报写路径不得被 spy 重复记入 SMJ：{steps:#?}"
+    );
 }
