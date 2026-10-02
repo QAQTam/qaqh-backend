@@ -31,6 +31,7 @@ read"补偿"宿主测不到改动"**——即本计划要消除的对象。
 | **PR2** | 批次边界扫描 + `ContextFlow` 注入（chat + responses） | **已完成**（`feat(runtime)` 提交；端到端 2 用例 + message 恢复用例全绿） |
 | **PR2b** | `message_api.rs:266` 合并规则扩展（Anthropic 载体吸收后置纯文本）+ 三协议形态测试 | 已入仓（`feat(gate)` 提交；118 全绿、fmt/clippy 干净）；**严格性未经验证 → 端点验证未完成，挂起**（§6） |
 | **PR3** | spy 反向喂 `journal::record_change` + `file_state::record_write` + 报告内联回滚命令 | **已完成**（见 §9） |
+| **PR2.5** | 真实模型验证注入是否被消费 | **已完成**（qwen3.8-flash，见 §10；两个 `#[ignore]` live 探针入仓） |
 | **PR4** | `serial_call_ids` 纳入 exec ⇒ per-exec 精细归因 | 未开始（可选） |
 
 ## 2. 三协议形态对照
@@ -179,8 +180,10 @@ Anthropic 通路今天没在用。
   vs spy `sha256(原始字节)`。**不得混填同一字段**（会污染 `expected_hash` 防漂移校验）。
 - 两套 CAS 第一阶段并存（`data_dir()/journal/blobs` 与 `data_dir()/spy/objects`）：
   SMJ 无全量 manifest ⇒ 给不出"时刻 T 完整状态"，也无法发现未声明的写。
-- 性能基线（spy 实测）：qaqh-backend 738 文件首扫 0.9s，稳态 66ms ⇒ 每批两次扫描
-  ≈ +130ms，可接受。
+- 性能基线（**spy 裸库实测**）：qaqh-backend 738 文件首扫 0.9s，稳态 66ms。
+  由此外推每批两次扫描 ≈ +130ms——**这是估算，不是宿主内实测**：真实链路还含
+  canonicalize + create_dir_all + SMJ 回填 + 账本刷新，且首扫会在会话第一批付掉
+  0.9s。宿主内实测仍待做（§10.4）。
 
 
 ## 9. PR3 实施记录（与计划的偏差）
@@ -238,4 +241,52 @@ SMJ 的 `store_blob(content: &str)` / `read_blob → read_to_string` 只存文�
   （`tool_ordering_contract` / `tool_ledger_*` / `cancel_keeps_tool_results`）——
   证明钩子在每次批上跑不会污染它们对消息序列的断言。
 - `qaqh-spy` 12、`qaqh-message` 65、`qaqh-gate` 118 全绿；fmt/clippy 净。
-- `workspace_change_injection` 3 用例：注入+落盘+排序、零变更不注入、自报路径不双记。
+- `workspace_change_injection` 3 用例：注入+落盘+排序、零变更不注入、自报路径不双记。## 10. 真实模型验证（2026-10-02，qwen3.8-flash @ 127.0.0.1:8317/v1）
+
+两个 `#[ignore]` live 探针落在 `qaqh-gate/src/chat_completions_api.rs`，**messages 全部
+由生产转换器 `convert_messages` 产出**，不是手搓 payload 的近似实验：
+
+```text
+QAQH_LIVE_PROBE_URL=http://127.0.0.1:8317/v1 cargo test -p qaqh-gate --lib live_probe \
+  -- --ignored --nocapture
+```
+
+### 10.1 行为差异（不禁用工具）
+
+场景固定为：exec 跑 `cleanup.py`，脚本自报 `exit 0, no output`，但它把 app.py 清空了
+——工具回执上完全看不出来，这正是 exec 盲区。
+
+| 臂 | 模型下一步 |
+|---|---|
+| 无注入 | `read(cleanup.py)` + **`exec("ls -la; git status \| head -30")`** ——靠 shell 去*发现*状态 |
+| 有注入 | `read(cleanup.py)` + `read(app.py)` ——不再猜，直接去读审计点名的文件 |
+
+wire roles 同时证实 §2 的判断：`[user, assistant, tool]` vs `[user, assistant, tool, user]`，
+注入排在 tool 消息之后，真实端点接受（200）。
+
+### 10.2 判决性差异（禁用工具，只能凭上下文回答）
+
+问：「现在 app.py 是什么状态？只根据你已经知道的信息回答，不要提出要去读文件。」
+
+- **无注入**：「我没法描述 `app.py` 现在的内容，因为我从头到尾没有读过它。」
+- **有注入**：「根据运行 `cleanup.py` 后工作区状态的变化：`app.py` 现在是**空文件（0
+  字节）**。」
+
+⇒ diff 内容确实进了模型的推理，不是只进了上下文窗口没人读。
+
+### 10.3 成本
+
+单文件报告的 `prompt_tokens` 165 → 321，即 **+156 token**。该报告约 300 字节、
+CJK 密集。按此比例，默认 4KB 预算的最坏情况约 1.5k–2k token——预算合理，
+但**多文件批次的报告应按 §4 D5 折叠**，不能让 K 个文件的全文 diff 都展开。
+
+### 10.4 验证边界（不要过度解读）
+
+本轮证明的是：**wire 形态被真实端点接受** + **注入内容被真实模型消费**。
+仍未证明：
+
+- 真实 daemon 进程内的完整链路（真实工具执行 → spy 扫描 → 注入落盘 → 下一轮请求）。
+  进程内测试已覆盖到「注入进 message store 且排在 tool 结果之后」，但没穿过 daemon。
+- 每批扫描在真实工作区上的墙钟开销（spy 裸库基线：738 文件首扫 0.9s / 稳态 66ms）。
+- Anthropic 通路（§6 仍挂起）。
+
