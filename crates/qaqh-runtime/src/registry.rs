@@ -547,7 +547,9 @@ impl AgentRegistry {
                 qaqh_domain::ActivityState::Disconnected => {
                     return Ok(ListedAgentStatus::Shutdown);
                 }
-                qaqh_domain::ActivityState::Idle => {}
+                // Failed 与 Idle 同权：回合错误不改变 agent 生命周期，
+                // listed 状态继续走下方按事实推导的路径。
+                qaqh_domain::ActivityState::Idle | qaqh_domain::ActivityState::Failed => {}
             }
         }
 
