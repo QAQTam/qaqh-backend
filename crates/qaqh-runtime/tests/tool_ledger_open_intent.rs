@@ -81,7 +81,7 @@ fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolE
             session_id: session_id.to_string(),
             workspace_root: PathBuf::from(qaqh_workspace::current_workspace()),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
-            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(PathBuf::from(
                 qaqh_workspace::current_workspace(),
@@ -97,7 +97,7 @@ fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolE
 
 fn admitted_call(session_id: &str, call_id: &str, tool_name: &str) -> AdmittedTool {
     let args = serde_json::json!({"call": call_id});
-    let auth = match qaqh_workspace::authorize_call(session_id, call_id, tool_name, &args, 4) {
+    let auth = match qaqh_workspace::authorize_call(session_id, call_id, tool_name, &args, 3) {
         qaqh_workspace::Admission::Authorized(auth) => auth,
         qaqh_workspace::Admission::ApprovalRequired(_) => {
             panic!("call {call_id} unexpectedly requires approval")
@@ -240,7 +240,7 @@ fn open_non_replay_intent_is_sealed_and_handler_never_runs() {
     let mut agent = AgentState::init("open-intent-test", qaqh_config::Config::default());
     agent.session.session_id = session_id.to_string();
     agent.ephemeral = false;
-    agent.config.permission_level = 4;
+    agent.config.permission_level = 3; // skip-permissions(三档制)
     agent.msg = store_with_tool_use(session_id, call_id, "open_intent_probe");
 
     assert!(

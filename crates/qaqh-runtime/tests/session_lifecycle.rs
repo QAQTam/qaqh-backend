@@ -407,7 +407,7 @@ fn system_injection_lands_inside_running_turn() {
     agent.config.provider_id.clear();
     agent.config.endpoint.clear();
     agent.config.compliance_enabled = false;
-    agent.config.permission_level = 4;
+    agent.config.permission_level = 3; // skip-permissions(三档制)
 
     let (ir, mut iw) = os_pipe::pipe().expect("os pipe");
     let (oread, owrite) = os_pipe::pipe().expect("os pipe");

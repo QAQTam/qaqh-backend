@@ -6,11 +6,14 @@ description = "QAQ-Harness session manager — singleton, list/load/save/active"
 
 [features]
 default = []
+# web 端 TS 类型生成（ts-rs 单一真相）：投影 delta 是前端 applyProjection 的词表
+ts = ["dep:ts-rs", "qaqh-domain/ts"]
 
 [dependencies]
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-message = { path = "../qaqh-message" }
 qaqh-types = { path = "../qaqh-types" }
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

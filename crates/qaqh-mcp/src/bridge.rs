@@ -22,7 +22,13 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use qaqh_workspace::{DynamicTool, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolResult, now_utc8};
+use qaqh_types::{
+    ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader, ToolResultDisplayOutcome,
+    ToolResultDisplayOutcomeState,
+};
+use qaqh_workspace::{
+    DynamicTool, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolResult, ToolStatus, now_utc8,
+};
 use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::McpManager;
@@ -269,12 +275,40 @@ fn send_cancelled(manager: &McpManager, server: &str, tool: &str, reason: &str) 
 fn call_result_to_tool_result(result: CallToolResult) -> ToolResult {
     let text = content_text(&result.content);
     if result.is_error.unwrap_or(false) {
-        error_result(
+        error_result_with_slot(
             McpErrorKind::ToolError,
             format!("tool reported failure:\n{text}"),
+            text,
         )
     } else {
-        ToolResult::ok(text)
+        ToolResult::ok(text.clone())
+            .with_display(mcp_display(ToolResultDisplayOutcomeState::Succeeded, text))
+    }
+}
+
+/// MCP 工具的 typed display 投影（09-18 契约补全，2026-10-03）：此前 MCP 是
+/// 唯一没有 display 的工具族，TUI 只能走 legacy 摘要/JSON 考古。
+///
+/// header 用空 label 的 `Other`——工具名（`mcp__server__tool`）已是真相字段，
+/// header 只让 TUI 抑制 legacy 摘要，不添加重复信息；正文即上游 content。
+fn mcp_display(state: ToolResultDisplayOutcomeState, text: String) -> ToolResultDisplay {
+    ToolResultDisplay {
+        summary: None,
+        diff: None,
+        header: Some(ToolResultDisplayHeader::Other {
+            label: String::new(),
+        }),
+        body: Some(ToolResultDisplayBody::Text {
+            text,
+            truncated: false,
+        }),
+        outcome: Some(ToolResultDisplayOutcome {
+            state,
+            exit_code: None,
+            duration_ms: None,
+            output_bytes: None,
+            truncated: Some(false),
+        }),
     }
 }
 
@@ -308,16 +342,46 @@ fn mcp_error_to_tool_result(error: McpError) -> ToolResult {
 }
 
 pub(crate) fn error_result(kind: McpErrorKind, message: String) -> ToolResult {
-    ToolResult::error(
+    error_result_with_slot(kind, message.clone(), message)
+}
+
+/// 模型面维持 §7 JSON 信封**逐字节不变**（改它属于契约切片，涉及模型行为）；
+/// 只把 wire 的**结构化 error 槽**从「整封信塞进 message、code 固定
+/// `tool_error`」修成真字段——账本与 timeline 失败槽读的是这里，此前它们
+/// 只能拿到一坨 JSON。
+///
+/// `slot_message` 允许与信封 message 不同：工具自报失败时信封里是
+/// `tool reported failure:\n{content}` 包装句，error 槽直接放上游 content，
+/// 让「首个非空行」投影拿到的是真实原因而不是包装句。
+fn error_result_with_slot(
+    kind: McpErrorKind,
+    envelope_message: String,
+    slot_message: String,
+) -> ToolResult {
+    let hint = hint_for(kind);
+    let mut display = mcp_display(ToolResultDisplayOutcomeState::Failed, slot_message.clone());
+    if !hint.is_empty()
+        && let Some(ToolResultDisplayBody::Text { text, .. }) = display.body.as_mut()
+    {
+        text.push_str("\nHint: ");
+        text.push_str(hint);
+    }
+    ToolResult::with_error(
+        ToolStatus::Error,
         serde_json::json!({
             "timeis": now_utc8(),
             "status": "error",
             "code": kind.code(),
-            "message": message,
-            "hint": hint_for(kind),
+            "message": envelope_message,
+            "hint": hint,
         })
         .to_string(),
+        kind.code(),
+        slot_message,
+        false,
+        Some(hint.to_string()),
     )
+    .with_display(display)
 }
 
 fn hint_for(kind: McpErrorKind) -> &'static str {
@@ -432,4 +496,48 @@ pub fn projection_batch_with(manager: &Arc<McpManager>) -> Option<Vec<(String, D
         ));
     }
     Some(batch)
+}
+
+#[cfg(test)]
+mod error_slot_tests {
+    use super::error_result_with_slot;
+    use crate::error::McpErrorKind;
+
+    /// 错误槽结构化回归锁：模型面 §7 信封逐字节不变（改它属于契约切片，
+    /// 涉及模型行为）；结构化 error 槽携带真实 code/message/hint——这是
+    /// 账本与 timeline 失败槽的单一事实源，此前只能拿到一坨 JSON。
+    #[test]
+    fn error_slot_is_structured_while_model_envelope_is_byte_identical() {
+        let result = error_result_with_slot(
+            McpErrorKind::ToolError,
+            "tool reported failure:
+boom"
+                .into(),
+            "boom".into(),
+        );
+        let envelope = result.model_text();
+        let parsed: serde_json::Value = serde_json::from_str(envelope).expect("信封是 JSON");
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["code"], "mcp_tool_error");
+        assert_eq!(
+            parsed["message"],
+            "tool reported failure:
+boom"
+        );
+        assert_eq!(
+            parsed["hint"],
+            "The tool ran but reported failure; its content is passed through above."
+        );
+        assert!(parsed.get("timeis").is_some(), "信封形状不得增删字段");
+
+        let error = result.error.as_ref().expect("结构化 error 存在");
+        assert_eq!(error.code, "mcp_tool_error");
+        assert_eq!(error.message, "boom", "槽内是真实原因，不是包装句");
+        assert!(error.hint.is_some());
+        assert!(!error.retryable);
+        assert!(
+            !error.message.trim_start().starts_with('{'),
+            "error.message 不得是 JSON 串"
+        );
+    }
 }

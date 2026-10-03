@@ -140,7 +140,7 @@ print(f"fake provider: http://127.0.0.1:{port}/v1")
 (DATA / "config.toml").write_text(
     f'''provider_id = "openai"
 active_profile = "default"
-permission_level = 3
+permission_tier = 2
 
 [profiles.default]
 model = "fake-model"

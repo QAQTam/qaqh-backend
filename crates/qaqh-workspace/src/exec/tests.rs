@@ -58,7 +58,7 @@ fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::Tool
         session_id: "exec-shell-config-seed".to_string(),
         workspace_root: workspace_root.clone(),
         mode: crate::tool_api::AgentMode::Code,
-        permission_level: crate::permission::PermissionLevel::Unrestricted,
+        permission_level: crate::permission::PermissionLevel::SkipPermissions,
         sandbox: crate::tool_api::SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
         exec_default_shell: exec_default_shell.map(str::to_string),

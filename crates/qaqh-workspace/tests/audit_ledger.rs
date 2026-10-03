@@ -78,7 +78,7 @@ fn audit_ledger_traces_calls_end_to_end() {
     );
     assert!(write.success, "write must succeed: {}", write.content);
 
-    // ② 被拒调用：Level 1（MaxLockdown）写操作需审批，本通道无审批 → 拒绝。
+    // ② 被拒调用：read-only 档写操作需审批，本通道无审批 → 拒绝。
     let locked = qaqh_workspace::runtime::ToolCtx {
         session_id: "audit-ledger".to_string(),
         permission_level: 1,
@@ -91,12 +91,12 @@ fn audit_ledger_traces_calls_end_to_end() {
         "call-2",
         &locked,
     );
-    assert!(!denied.success, "Level 1 write must require approval");
+    assert!(!denied.success, "read-only tier write must require approval");
 
     // ③ PLAN 模式前置阻断（edit 在 PLAN_BLOCKED 名单内）。
     let plan = qaqh_workspace::runtime::ToolCtx {
         session_id: "audit-ledger".to_string(),
-        permission_level: 4,
+        permission_level: 3,
         mode: 1,
         workspace_root: None,
     };
@@ -168,7 +168,7 @@ fn audit_ledger_traces_calls_end_to_end() {
     assert_eq!(first["actor"]["sandbox"], false);
     assert_eq!(first["tool"]["name"], "write");
     assert_eq!(first["tool"]["category"], "write");
-    assert_eq!(first["tool"]["permission_level"], 4);
+    assert_eq!(first["tool"]["permission_level"], 3);
     assert_eq!(first["decision"]["outcome"], "auto");
     assert_eq!(first["result"]["status"], "ok");
     assert!(

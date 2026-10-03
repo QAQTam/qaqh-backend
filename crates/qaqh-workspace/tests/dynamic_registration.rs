@@ -309,10 +309,10 @@ fn replace_dynamic_tools_clears_and_rebuilds() {
 /// 验收用例 `mcp_dynamic_tool_requires_permission`。
 ///
 /// 收紧前：`admit()` 对 `mcp__` 前缀工具走 D5 快路径，**全档位无条件
-/// Authorized**（含 Level 1/2/3），DynamicTool 权限层等于 allow-all。
-/// 收紧后：category ∈ {Exec, Net} 在 Level 1/2/3 进入审批；Level 4 是显式
-/// bypass，恢复动态工具的全放行。只读类（Read，如 `mcp` resources 聚合）
-/// 在任何档位都保留 D5 快路径，不误伤。
+/// Authorized**，DynamicTool 权限层等于 allow-all。
+/// 收紧后：category ∈ {Exec, Net} 在 read-only / workspace-write 进入审批；
+/// skip-permissions 是显式 bypass，恢复动态工具的全放行。只读类（Read，
+/// 如 `mcp` resources 聚合）在任何档位都保留 D5 快路径，不误伤。
 #[test]
 fn mcp_dynamic_tool_requires_permission() {
     let ws = std::env::temp_dir().join("qaqh-mcp-dynamic-perm");
@@ -334,24 +334,25 @@ fn mcp_dynamic_tool_requires_permission() {
         )
     };
 
-    // Exec（stdio server）与 Net（http server）：Level 1/2/3 要审批。
+    // Exec（stdio server）与 Net（http server）：read-only / workspace-write
+    // 要审批。
     for category in [ToolCategory::Exec, ToolCategory::Net] {
-        for level in [1u8, 2, 3] {
+        for level in [1u8, 2] {
             let admission = call(category, "mcp__demo__echo", level);
             assert!(
                 matches!(admission, Admission::ApprovalRequired(_)),
-                "{category:?} 动态工具在 Level {level} 必须要求审批，got non-approval"
+                "{category:?} 动态工具在档位 {level} 必须要求审批，got non-approval"
             );
         }
-        let admission = call(category, "mcp__demo__echo", 4);
+        let admission = call(category, "mcp__demo__echo", 3);
         assert!(
             matches!(admission, Admission::Authorized(_)),
-            "{category:?} 动态工具在 Level 4 应走显式 bypass，got non-authorized"
+            "{category:?} 动态工具在 skip-permissions 应走显式 bypass，got non-authorized"
         );
     }
 
     // 只读动态工具仍走 D5 快路径（收紧 Exec/Net 不得误伤只读）。
-    for level in [1u8, 2, 3, 4] {
+    for level in [1u8, 2, 3] {
         let admission = call(ToolCategory::Read, "mcp__demo__resources", level);
         assert!(
             matches!(admission, Admission::Authorized(_)),

@@ -14,6 +14,7 @@ import {
   type StreamHandlers,
   type TimelinePageResponse,
   type TimelineStatusWire,
+  type TodoItemWire,
   type TransportBackend,
   isTauriRuntime,
   tauriHost,
@@ -31,5 +32,6 @@ export type {
   StreamHandlers,
   TimelinePageResponse,
   TimelineStatusWire,
+  TodoItemWire,
   TransportBackend,
 };

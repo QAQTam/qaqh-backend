@@ -6,6 +6,8 @@
 use qaqh_domain::RingingChannel;
 use qaqh_types::UsageInfo;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
 
 use super::agent::AgentPath;
 use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex};
@@ -22,6 +24,7 @@ use super::types::{
 use super::validation::ValidationError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ReliableCursor {
     pub log_id: LogId,
     pub fact_seq: u64,
@@ -77,6 +80,11 @@ impl ReliableCursor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionDelivery")
+)]
 pub enum Delivery {
     Reliable { cursor: ReliableCursor },
     Replaceable { revision: u64 },
@@ -94,6 +102,7 @@ impl Delivery {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ResetReason {
     CursorExpired,
     LogIdMismatch,
@@ -113,6 +122,7 @@ pub enum ResetReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ResetRequired {
     pub log_id: LogId,
     pub snapshot_cursor: Option<ReliableCursor>,
@@ -121,12 +131,14 @@ pub struct ResetRequired {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum StreamKey {
     Channel(RingingChannel),
     Resource { kind: ResourceKind, id: ResourceId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ProjectionEvent {
     pub event_id: EventId,
     pub source_fact_seq: u64,
@@ -286,6 +298,7 @@ impl ProjectionEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ProjectionPayload {
     ConversationDelta(ConversationDelta),
     TimelineDelta(TimelineDelta),
@@ -328,12 +341,14 @@ impl ProjectionPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ContentValue {
     Inline { text: String },
     Ref { content_ref: ContentRef },
     Unavailable(ContentUnavailable),
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MailboxMessageState {
@@ -341,6 +356,7 @@ pub enum MailboxMessageState {
     Delivered,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailboxMessage {
     pub communication: InterAgentCommunication,
@@ -350,6 +366,7 @@ pub struct MailboxMessage {
     pub delivered_fact_seq: Option<u64>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamAgentStatus {
@@ -363,6 +380,7 @@ pub enum TeamAgentStatus {
     NotFound,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamAgentResidency {
@@ -370,6 +388,7 @@ pub enum TeamAgentResidency {
     Unloaded,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamAgentSnapshot {
     pub agent_id: SessionId,
@@ -386,6 +405,7 @@ pub struct TeamAgentSnapshot {
     pub current_task_id: Option<String>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamInboxSummary {
     pub message_id: MessageId,
@@ -397,6 +417,7 @@ pub struct TeamInboxSummary {
     pub created_at_ms: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamTaskArtifact {
     pub content_ref: ContentRef,
@@ -404,6 +425,7 @@ pub struct TeamTaskArtifact {
     pub added_at_ms: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamTaskSnapshot {
     pub task_id: String,
@@ -424,6 +446,7 @@ pub struct TeamTaskSnapshot {
     pub updated_at_ms: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamBoardChannel {
     pub channel_id: String,
@@ -434,6 +457,7 @@ pub struct TeamBoardChannel {
     pub created_at_ms: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamBoardThread {
     pub thread_id: String,
@@ -446,6 +470,7 @@ pub struct TeamBoardThread {
     pub post_count: u64,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamBoardPost {
     pub post_id: String,
@@ -459,6 +484,7 @@ pub struct TeamBoardPost {
     pub reply_to: Option<String>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TeamBoardSubscriptionTarget {
@@ -466,6 +492,7 @@ pub enum TeamBoardSubscriptionTarget {
     Thread { thread_id: String },
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamBoardSubscription {
     pub target: TeamBoardSubscriptionTarget,
@@ -474,6 +501,7 @@ pub struct TeamBoardSubscription {
     pub updated_at_ms: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamBoardSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,6 +518,7 @@ pub struct TeamBoardSnapshot {
     pub subscriptions: Vec<TeamBoardSubscription>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum TeamDelta {
@@ -534,6 +563,7 @@ pub enum TeamDelta {
     },
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum MailboxDelta {
@@ -550,6 +580,7 @@ pub enum MailboxDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ConversationDelta {
     InputAccepted {
         revision: u64,
@@ -617,6 +648,7 @@ pub enum ConversationDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum TimelineDelta {
     Input {
         revision: u64,
@@ -661,6 +693,7 @@ pub enum TimelineDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ControlDelta {
     SessionCreated {
         revision: u64,
@@ -754,6 +787,7 @@ pub enum ControlDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ResourceDelta {
     WorkspaceResourceChanged {
         revision: u64,
@@ -771,6 +805,7 @@ pub enum ResourceDelta {
     },
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum MetaDelta {
@@ -809,12 +844,14 @@ pub enum MetaDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct AuditRef {
     pub audit_seq: u64,
     pub audit_hash: ContentHash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct UnknownProjection {
     pub raw_ref: ContentRef,
 }

@@ -5,6 +5,7 @@
 export const STR = {
   newTab: "新对话",
   running: "运行中",
+  idle: "空闲",
   waitingYou: "等待你的处理",
   error: "出错",
   hasNewReply: "有新回复",
@@ -82,6 +83,25 @@ export const STR = {
   incompatibleBusy: "旧实例正在运行任务,无法自动停止。请退出正在使用的会话后重试,或手动退出旧实例。",
   incompatibleStopping: "正在停止旧实例…",
   hostError: "桌面壳与 daemon 通信异常",
+  todoTitle: "待办",
+  todoEmpty: "暂无待办",
+  todoDone: (done: number, total: number) => `${done}/${total}`,
+  settings: "设置",
+  close: "关闭",
+  settingsLoading: "读取配置中…",
+  settingsSave: "保存",
+  settingsSaving: "保存中…",
+  settingsReload: "重新读取",
+  settingsChanged: "未保存改动",
+  settingsClean: "没有改动",
+  settingsDiscardAsk: "有未保存改动:",
+  settingsDiscardYes: "放弃并关闭",
+  settingsStay: "继续编辑",
+  settingsNoDelete: "后端只回掩码,也没有删除密钥的接口:填新值即覆盖,留空保持不变。",
+  // theme 是「后端已生效、前端未接线」的档位:说清楚,免得用户以为界面会跟着变。
+  settingsThemeNote:
+    "写进 config.toml 即对 daemon 生效;webui 自身仍按系统 prefers-color-scheme 着色(DiffView.tsx:63、app.css:55),尚未接到界面配色。",
+  settingsBypassWarn: "即将降到 skip-permissions:普通工具全部自动放行。",
 } as const;
 
 /** 「已工作 X 秒」的时长格式化（spec §7.3）。纯函数,可单测。 */

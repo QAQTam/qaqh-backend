@@ -6,8 +6,13 @@ description = "配置契约层（wire DTO）：ConfigDto 读模型 / ConfigPatch
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-# ts-rs（web 端 TS 类型生成）按 PLAN §2/K1 预留 feature-gate；web 开工时再引入，
-# 避免当前引入新的构建依赖。
+# K1「只依赖 serde」靠 feature-gate 守住：`ts` 默认关，普通构建面不引入新依赖。
+# webui 设置页的读写模型走 ts-rs 单一真相（`just ts-export`），不再手抄 wire 形状。
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
+
+[features]
+# web 端 TS 类型生成（ts-rs 单一真相）
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 serde_json = "1"

@@ -6,6 +6,7 @@
  * 含义——argv 展开仅按空格连接用于单行预览,完整入参在展开态原样呈现。
  */
 import { parseJsonish } from "../session/reducer";
+import type { TimelineToolDisplay } from "../api/qaqh/TimelineToolDisplay";
 
 const LABELS: Record<string, string> = {
   exec: "执行命令",
@@ -53,14 +54,15 @@ function firstString(value: unknown, depth = 0): string | null {
 }
 
 /** 展开态「输入」段的完整主参数(等宽、自动换行、不截断)。 */
-export function primaryArgFull(argsJson: string | undefined, display: Record<string, any> | undefined): string {
+export function primaryArgFull(argsJson: string | undefined, display: TimelineToolDisplay | undefined): string {
+  // header 是后端声明的展示事实(variant 即字段真相),只在缺失/不适用时回退入参键位。
   const header = display?.header;
-  if (header?.kind === "shell" && typeof header.command === "string") return header.command;
-  if (header?.kind === "path" && typeof header.path === "string") return header.path;
-  if (header?.kind === "query" && typeof header.query === "string") {
-    return typeof header.scope === "string" && header.scope ? `${header.query}(${header.scope})` : header.query;
-  }
-  if (header?.kind === "other" && typeof header.label === "string") return header.label;
+  if (header?.kind === "shell") return header.command;
+  if (header?.kind === "path") return header.path;
+  if (header?.kind === "query") return header.scope ? `${header.query}(${header.scope})` : header.query;
+  // 空 label 必须继续往下回退到入参键位:MCP 的 display header 刻意给空
+  // label(只用来抑制 legacy 摘要,工具名本身是真相),早返回会让摘要整行空白。
+  if (header?.kind === "other" && header.label) return header.label;
   const args = parseJsonish(argsJson);
   if (args != null) {
     if (typeof args.command === "string" && args.command) return args.command;
@@ -76,7 +78,7 @@ export function primaryArgFull(argsJson: string | undefined, display: Record<str
 }
 
 /** 折叠行主参数(单行截断仅为视觉,CSS ellipsis;title 给完整值)。 */
-export function primaryArg(argsJson: string | undefined, display: Record<string, any> | undefined): string {
+export function primaryArg(argsJson: string | undefined, display: TimelineToolDisplay | undefined): string {
   const full = primaryArgFull(argsJson, display);
   return full.replace(/\s*\n\s*/g, " ").trim();
 }

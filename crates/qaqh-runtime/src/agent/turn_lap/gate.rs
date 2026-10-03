@@ -575,6 +575,8 @@ pub(crate) fn gate_request(
                             block_id: block_id.clone(),
                             kind: qaqh_domain::TimelineBlockKind::Tool,
                             tool: Some(qaqh_domain::TimelineTool {
+                                exit_code: None,
+                                completed_at_ms: None,
                                 tool_call_id: id.clone(),
                                 name: name.clone(),
                                 state: qaqh_domain::TimelineToolState::Prepared,
