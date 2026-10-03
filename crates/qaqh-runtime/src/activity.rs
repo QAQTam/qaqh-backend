@@ -26,7 +26,7 @@ pub fn domain_activity_observe(event: &qaqh_domain::DomainEvent) -> Option<serde
             Some(serde_json::json!({ "type": "turn_end" }))
         }
         DomainEvent::Conversation(ConversationEvent::TurnFailed { .. }) => {
-            Some(serde_json::json!({ "type": "cancelled" }))
+            Some(serde_json::json!({ "type": "failed" }))
         }
         DomainEvent::Conversation(ConversationEvent::ConversationCancelled { .. }) => {
             Some(serde_json::json!({ "type": "cancelled" }))
@@ -118,6 +118,7 @@ impl SessionActivityTracker {
         let current_turn = tracked.activity.turn_id.clone();
         let (state, turn_id) = match event_type {
             "ready" | "done" | "turn_end" | "cancelled" => (ActivityState::Idle, None),
+            "failed" => (ActivityState::Failed, None),
             "shutdown_ack" => (ActivityState::Disconnected, None),
             "turn_start" => (
                 ActivityState::Working,
@@ -350,6 +351,25 @@ mod tests {
         let finished = tracker.observe("seed", generation, &end).expect("turn end");
         assert_eq!(finished.state, ActivityState::Idle);
         assert_eq!(finished.turn_id, None);
+
+        // turn_failed → Failed（错误态驻留，区别于用户取消收敛 Idle）
+        let failure =
+            domain_activity_observe(&DomainEvent::Conversation(ConversationEvent::TurnFailed {
+                turn_id: "t1".into(),
+                error: qaqh_domain::DomainError {
+                    error_id: "e1".into(),
+                    code: "provider_http_500".into(),
+                    message: "boom".into(),
+                    retryable: false,
+                    dedupe_key: None,
+                },
+            }))
+            .expect("turn failed maps");
+        let failed = tracker
+            .observe("seed", generation, &failure)
+            .expect("turn failed");
+        assert_eq!(failed.state, ActivityState::Failed);
+        assert_eq!(failed.turn_id, None);
 
         // permission_request → WaitingUser
         let perm =

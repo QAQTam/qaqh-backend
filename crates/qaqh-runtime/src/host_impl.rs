@@ -420,6 +420,7 @@ impl SubagentHost for QaqhService {
                 qaqh_domain::ActivityState::Working => "working",
                 qaqh_domain::ActivityState::WaitingUser => "waiting_user",
                 qaqh_domain::ActivityState::Disconnected => "disconnected",
+                qaqh_domain::ActivityState::Failed => "failed",
             })
             .unwrap_or("running")
             .to_string();

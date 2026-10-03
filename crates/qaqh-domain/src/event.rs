@@ -103,6 +103,9 @@ pub enum ActivityState {
     Working,
     WaitingUser,
     Disconnected,
+    /// 回合失败（TurnFailed）。区别于用户取消（收敛回 Idle）：错误态需要
+    /// 在前端以告警色驻留，直到下一回合开始或新的 Ready 收敛。
+    Failed,
 }
 
 /// 会话活动快照：`session.activity` 方法与 daemon `/activity` 观测端点的
