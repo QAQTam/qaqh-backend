@@ -855,7 +855,7 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
     let bodies = run_case(
         vec![
             tool_round(&[
-                ("read-call", "read", json!({"path":"input.txt"})),
+                ("read-call", "write", json!({"path":"input.txt"})),
                 (
                     "ask-after-read",
                     "ask",
@@ -900,8 +900,8 @@ fn every_permission_resolves_before_the_queued_ask_is_presented() {
     run_case(
         vec![
             tool_round(&[
-                ("read-one", "read", json!({"path":"input.txt"})),
-                ("read-two", "read", json!({"path":"input2.txt"})),
+                ("read-one", "write", json!({"path":"input.txt"})),
+                ("read-two", "write", json!({"path":"input2.txt"})),
                 (
                     "ask-after-two-reads",
                     "ask",

@@ -60,6 +60,8 @@ pub(crate) fn parse_and_ingest(
                     block_id: format!("tool:{}", tool_call.id),
                     kind: qaqh_domain::TimelineBlockKind::Tool,
                     tool: Some(qaqh_domain::TimelineTool {
+                        exit_code: None,
+                        completed_at_ms: None,
                         tool_call_id: tool_call.id.clone(),
                         name: tool_call.function.name.clone(),
                         state: qaqh_domain::TimelineToolState::Prepared,

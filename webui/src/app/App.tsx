@@ -7,11 +7,14 @@
  *    `--titlebar-inset-right` 预留其占位;
  *  - 外链经宿主 `open_external` 走系统浏览器(webview 内不导航外站);
  *  - daemon 兼容性失败(D1)渲染明确文案 + 「停止旧实例并连接」动作,
- *    不静默杀旧 daemon(可能正在跑 TUI 的 Turn)。
+ *    不静默杀旧 daemon(可能正在跑 TUI 的 Turn);
+ *  - 设置浮层(spec 第二阶段):Ctrl+, 开关,读写 daemon 全局配置
+ *    (`config.load`/`config.save`/`profile.*` 经宿主白名单)。
  */
-import { createSignal, For, Match, onCleanup, onSettled, Show, Switch, type Component } from "solid-js";
+import { createSignal, For, Match, onSettled, Show, Switch, type Component } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import IconMinus from "~icons/lucide/minus";
+import IconSettings from "~icons/lucide/settings";
 import IconSquare from "~icons/lucide/square";
 import IconX from "~icons/lucide/x";
 import { TabBar } from "../tabs/TabBar";
@@ -35,6 +38,12 @@ import { SessionView } from "../session/SessionView";
 import { ThinkingChain } from "../thinking/ThinkingChain";
 import { Composer, type SendBlockReason } from "../composer/Composer";
 import { ApprovalStack } from "../approval/ApprovalCards";
+import { SettingsView } from "../settings/SettingsView";
+import {
+  open as settingsOpen,
+  requestClose as requestSettingsClose,
+  toggleSettings,
+} from "../settings/store";
 import { STR } from "../lib/strings";
 import { isTauriRuntime, listenHostDiagnostics, openExternalUrl, transport, tauriHost } from "../lib/transport";
 import "../styles/app.css";
@@ -78,12 +87,15 @@ const App: Component = () => {
     const onFocus = (): void => {
       void pollSessions();
       const tab = activeTab();
-      if (tab != null && tab.store.connection[0]() === "offline") tab.store.retry();
+      // reconnecting 也重试:状态可能因事件竞态/退避中卡在中间态,
+      // 聚焦触发宿主重建流(activate_timeline 会发新 open 事件自愈)。
+      if (tab != null && tab.store.connection[0]() !== "connected") tab.store.retry();
     };
     window.addEventListener("focus", onFocus);
 
     // Tauri:外链一律走系统浏览器;宿主诊断事件(兼容性失败/宿主错误)。
     let unlistenHost: (() => void) | null = null;
+    let onClickCleanup: (() => void) | null = null;
     if (inTauri) {
       const onClick = (event: MouseEvent): void => {
         const target = event.target instanceof Element ? event.target : null;
@@ -94,7 +106,7 @@ const App: Component = () => {
         void openExternalUrl(href);
       };
       document.addEventListener("click", onClick, true);
-      onCleanup(() => document.removeEventListener("click", onClick));
+      onClickCleanup = () => document.removeEventListener("click", onClick);
       void listenHostDiagnostics({
         onIncompatible: (details) => {
           setHostActionNote(null);
@@ -108,7 +120,21 @@ const App: Component = () => {
 
     // 全局快捷键(§5.3)。
     const onKey = (event: KeyboardEvent): void => {
+      // 浮层开着时快捷键归浮层:Ctrl+T/W/Tab/1-9 不该在遮罩背后建会话、切标签。
+      if (settingsOpen()) {
+        const modKey = event.ctrlKey || event.metaKey;
+        if (event.key === "Escape" || (modKey && event.key === ",")) {
+          event.preventDefault();
+          requestSettingsClose();
+        }
+        return;
+      }
       const mod = event.ctrlKey || event.metaKey;
+      if (mod && event.key === ",") {
+        event.preventDefault();
+        toggleSettings();
+        return;
+      }
       if (!mod) return;
       if (event.key === "t" || event.key === "T") {
         event.preventDefault();
@@ -136,12 +162,15 @@ const App: Component = () => {
       }
     };
     window.addEventListener("keydown", onKey);
-    onCleanup(() => {
+    // onSettled 作用域禁止 onCleanup(rc.13:CLEANUP_IN_FORBIDDEN_SCOPE)——
+    // 返回清理函数,由 owner disposal 调用。
+    return () => {
       clearInterval(poll);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("keydown", onKey);
+      onClickCleanup?.();
       unlistenHost?.();
-    });
+    };
   });
 
   const active = (): ReturnType<typeof activeTab> => activeTab();
@@ -151,15 +180,16 @@ const App: Component = () => {
     if (tab == null) return "offline";
     if (tab.store.connection[0]() !== "connected") return "offline";
     if (tab.store.pending[0]().length > 0) return "pending";
-    const runningTurn = Object.values(tab.store.state[0].turns).some((turn) => turn.status === "running");
-    if (runningTurn || tab.store.activity[0]() === "working") return "running";
+    // 运行态读 reducer 维护的计数:遍历 turns 会让输入区订阅每一个回合,
+    // 于是每帧流式写入都重算一次发送按钮(高吞吐下的卡顿放大器)。
+    if (tab.store.state[0].runningTurns > 0 || tab.store.activity[0]() === "working") return "running";
     return null;
   };
 
   const runningNow = (): boolean => {
     const tab = active();
     if (tab == null) return false;
-    return Object.values(tab.store.state[0].turns).some((turn) => turn.status === "running") || tab.store.activity[0]() === "working";
+    return tab.store.state[0].runningTurns > 0 || tab.store.activity[0]() === "working";
   };
 
   const send = async (text: string): Promise<void> => {
@@ -189,6 +219,15 @@ const App: Component = () => {
           onCreate={() => void createSession()}
         />
         {inTauri && <div class="top-drag" data-tauri-drag-region />}
+        <button
+          type="button"
+          class="ghost-mini settings-open"
+          aria-label={STR.settings}
+          title={`${STR.settings} (Ctrl+,)`}
+          onClick={toggleSettings}
+        >
+          <IconSettings />
+        </button>
         <ConnectionStatus />
         {inTauri && <TitlebarControls />}
       </header>
@@ -249,6 +288,10 @@ const App: Component = () => {
           <div class="no-tab" />
         </Show>
       </main>
+      {/* 全局配置面,与标签/会话无关:零会话、引导失败时也要能打开。 */}
+      <Show when={settingsOpen()}>
+        <SettingsView />
+      </Show>
     </div>
   );
 };

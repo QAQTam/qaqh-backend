@@ -54,6 +54,17 @@ pub(crate) fn page_plan(
 
 // ---- handlers ----
 
+/// `?limit` 的钳位口径（纯函数，契约见测试）：缺省取一页窗口大小，下限 1
+/// （`limit=0` 会造出「空页 + `has_more=true`」的死循环翻页，
+/// BUG-2026-09-13-18），上限 [`TIMELINE_PAGE_MAX`]。
+///
+/// 上限是**回合数**而不是字节：一页 200 个已 rehydrate 全文的回合仍然可能有
+/// 数 MB，响应侧目前没有字节上界。
+pub(crate) fn page_limit(raw: Option<usize>) -> usize {
+    raw.unwrap_or(TIMELINE_PAGE_LIMIT)
+        .clamp(1, TIMELINE_PAGE_MAX)
+}
+
 pub(crate) async fn handle_timeline_snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -97,7 +108,7 @@ pub(crate) async fn handle_timeline_snapshot(
     let materialized = snapshot.turns.len();
     let persisted = state.hub.persisted_turn_count(&session_id);
     let (total_turns, window_truncated) = window_metadata(materialized, persisted);
-    let limit = q.limit.unwrap_or(TIMELINE_PAGE_LIMIT).min(200);
+    let limit = page_limit(q.limit);
     // 常驻窗口覆盖的全局序号区间 = [window_base, total_turns)
     let window_base = total_turns.saturating_sub(materialized);
     let plan = page_plan(q.before_index, limit, total_turns, window_base);
@@ -205,6 +216,20 @@ mod tests {
         //（BUG-2026-09-13-18 那一族）
         let p = page_plan(None, 0, total, window_base);
         assert_eq!(p.end - p.start, 1, "limit=0 必须钳到 1");
+    }
+
+    /// `?limit` 的钳位口径：以前只有 `limit=0 → 1` 被端到端测试钉住，
+    /// 上限 200 完全无测试——它是响应侧唯一的量级上界，必须是显式契约。
+    #[test]
+    fn page_limit_clamps_both_ends() {
+        assert_eq!(page_limit(None), TIMELINE_PAGE_LIMIT, "缺省 = 一页窗口大小");
+        assert_eq!(page_limit(Some(0)), 1, "0 → 1，否则空页 + has_more 死循环");
+        assert_eq!(page_limit(Some(2)), 2, "正常值原样生效（分页真的有用）");
+        assert_eq!(
+            page_limit(Some(100_000)),
+            TIMELINE_PAGE_MAX,
+            "上限是口径而不是巧合"
+        );
     }
 
     /// 窗口覆盖全史（未重建的常见情形）→ 永远零 I/O。

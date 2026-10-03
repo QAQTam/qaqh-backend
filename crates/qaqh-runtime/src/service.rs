@@ -539,16 +539,17 @@ impl QaqhService {
                 self.save_config(params)?;
                 Ok(Value::Null)
             }
-            // 权限等级（L1-L4）：与 config.save 共用 Config::update 单写口；
+            // 权限档位（三档：read-only / workspace-write / skip-permissions）：
+            // 与 config.save 共用 Config::update 单写口；
             // 校验 → 写 config.toml → 广播 AgentReloadConfig 让所有活跃
             // worker（含子代理，子代理继承同一全局权限）重载。
             "config.set_permission_level" => {
                 let level = params
                     .get("level")
                     .and_then(Value::as_u64)
-                    .ok_or_else(|| "permission level (1-4) is required".to_string())?;
-                if !(1..=4).contains(&level) {
-                    return Err(format!("invalid permission level {level} (must be 1-4)"));
+                    .ok_or_else(|| "permission level (1-3) is required".to_string())?;
+                if !(1..=3).contains(&level) {
+                    return Err(format!("invalid permission level {level} (must be 1-3: 1=read-only, 2=workspace-write, 3=skip-permissions)"));
                 }
                 self.update_config_and_reload(|cfg| {
                     cfg.permission_level = level as u8;

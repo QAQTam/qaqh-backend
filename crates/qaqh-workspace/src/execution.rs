@@ -807,7 +807,7 @@ mod tests {
         std::fs::create_dir_all(skill_dir.join("references")).unwrap();
         std::fs::write(skill_dir.join("references/info.md"), "complete reference").unwrap();
         crate::set_workspace(&temp.path().to_string_lossy());
-        crate::runtime::set_context("test_session", 4);
+        crate::runtime::set_context("test_session", 3);
 
         let result = execute_with_context(
             "skills",
@@ -927,16 +927,16 @@ mod tests {
         }
     }
 
-    // ── Test 1: Auto-approved calls execute normally (Level 4) ──
+    // ── Test 1: Auto-approved calls execute normally (SkipPermissions) ──
 
     #[test]
     fn auto_approved_call_executes_normally() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
+        crate::runtime::set_context("test_session", 3);
         let inv = make_invocation("test_counter", "call-1");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
-        let admission = admit(inv, 4, &ws, &trusted);
+        let admission = admit(inv, 3, &ws, &trusted);
         match admission {
             Admission::Authorized(auth) => {
                 let result = execute_authorized(auth, None);
@@ -964,7 +964,7 @@ mod tests {
             session_id: "explicit-seed".to_string(),
             workspace_root: workspace.path().to_path_buf(),
             mode: crate::tool_api::AgentMode::Code,
-            permission_level: crate::permission::PermissionLevel::Unrestricted,
+            permission_level: crate::permission::PermissionLevel::SkipPermissions,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
                 workspace.path().to_path_buf(),
@@ -1016,7 +1016,7 @@ mod tests {
             session_id: "sandbox-seed".to_string(),
             workspace_root: workspace.path().to_path_buf(),
             mode: crate::tool_api::AgentMode::Code,
-            permission_level: crate::permission::PermissionLevel::MaxLockdown,
+            permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
                 workspace.path().to_path_buf(),
@@ -1059,7 +1059,7 @@ mod tests {
             session_id: "test_session".to_string(),
             workspace_root: crate::runtime::active_workspace_root(),
             mode: crate::tool_api::AgentMode::Code,
-            permission_level: crate::permission::PermissionLevel::Unrestricted,
+            permission_level: crate::permission::PermissionLevel::SkipPermissions,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
                 crate::runtime::active_workspace_root(),
@@ -1091,18 +1091,20 @@ mod tests {
         assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 0);
     }
 
-    // ── Test 2: Level 1 (MaxLockdown) requires approval ──
+    // ── Test 2: read-only 档 requires approval for change tools ──
 
     #[test]
-    fn max_lockdown_requires_approval() {
+    fn read_only_tier_requires_approval_for_write() {
         let _test_guard = setup_test_manager();
-        let inv = make_invocation("test_counter", "call-2");
+        // 守卫工具用 Write 类的 test_write:read-only 档下工作区内读已
+        // 自动放行(旧 L1 全审批语义废除),变更类才是该档的审批面。
+        let inv = make_invocation("test_write", "call-2");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
         let admission = admit(inv, 1, &ws, &trusted);
         assert!(
             matches!(admission, Admission::ApprovalRequired(_)),
-            "Level 1 should require approval for all tools"
+            "read-only tier should require approval for write tools"
         );
         assert_eq!(
             TEST_HANDLER_COUNT.load(Ordering::SeqCst),
@@ -1116,8 +1118,11 @@ mod tests {
     #[test]
     fn approved_call_executes_exactly_once() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
-        let inv = make_invocation("test_counter", "call-3-once");
+        crate::runtime::set_context("test_session", 3);
+        let mut inv = make_invocation("test_write", "call-3-once");
+        // test_write 是文件型 Destructive 工具：缺 path 会被 SafetyPolicy
+        // fail-closed 拦下；带工作区内 path 才能到达 handler。
+        inv.args = serde_json::json!({ "path": "audit-target.txt" });
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
         let admission = admit(inv, 1, &ws, &trusted);
@@ -1144,7 +1149,7 @@ mod tests {
     #[test]
     fn rejected_approval_does_not_execute() {
         let _test_guard = setup_test_manager();
-        let inv = make_invocation("test_counter", "call-4");
+        let inv = make_invocation("test_write", "call-4");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
         let admission = admit(inv, 1, &ws, &trusted);
@@ -1170,7 +1175,7 @@ mod tests {
     #[test]
     fn expired_approval_fails() {
         let _test_guard = setup_test_manager();
-        let inv = make_invocation("test_counter", "call-5-exp");
+        let inv = make_invocation("test_write", "call-5-exp");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
@@ -1190,8 +1195,10 @@ mod tests {
     #[test]
     fn challenge_cannot_be_replayed() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
-        let inv = make_invocation("test_counter", "call-6");
+        crate::runtime::set_context("test_session", 3);
+        let mut inv = make_invocation("test_write", "call-6");
+        // 同 call-3-once：Destructive 工具缺 path 被 SafetyPolicy 拦下。
+        inv.args = serde_json::json!({ "path": "audit-target.txt" });
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
         let admission = admit(inv, 1, &ws, &trusted);
@@ -1217,7 +1224,7 @@ mod tests {
     fn mismatched_call_id_detected_at_loop_level() {
         let _test_guard = setup_test_manager();
         // Create challenge for call-7a
-        let inv = make_invocation("test_counter", "call-7a");
+        let inv = make_invocation("test_write", "call-7a");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
         let admission = admit(inv, 1, &ws, &trusted);
@@ -1239,17 +1246,17 @@ mod tests {
     #[test]
     fn authorization_bound_to_call_identity() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
+        crate::runtime::set_context("test_session", 3);
         let inv1 = make_invocation("test_counter", "bound-1");
         let inv2 = make_invocation("test_counter", "bound-2");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
-        let a1 = match admit(inv1, 4, &ws, &trusted) {
+        let a1 = match admit(inv1, 3, &ws, &trusted) {
             Admission::Authorized(a) => a,
             _other => panic!("expected Authorized"),
         };
-        let a2 = match admit(inv2, 4, &ws, &trusted) {
+        let a2 = match admit(inv2, 3, &ws, &trusted) {
             Admission::Authorized(a) => a,
             _other => panic!("expected Authorized"),
         };
@@ -1264,9 +1271,9 @@ mod tests {
     #[test]
     fn compat_wrapper_delegates_to_secured_path() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
+        crate::runtime::set_context("test_session", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
-        // With Level 4 permission context, auto-approve should work
+        // With SkipPermissions context, auto-approve should work
         let result = execute_with_context(
             "test_counter",
             "",
@@ -1288,14 +1295,14 @@ mod tests {
     #[test]
     fn structured_success_propagates_correctly() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
+        crate::runtime::set_context("test_session", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
 
         // auto-approve
         let inv = make_invocation("test_counter", "struc-1");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
-        match admit(inv, 4, &ws, &trusted) {
+        match admit(inv, 3, &ws, &trusted) {
             Admission::Authorized(auth) => {
                 let result = execute_authorized(auth, None);
                 assert!(result.success, "structured success should be true");
@@ -1313,7 +1320,7 @@ mod tests {
     #[test]
     fn plan_mode_blocks_destructive_but_not_reads() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
+        crate::runtime::set_context("test_session", 3);
         let previous_mode = 0;
         crate::runtime::set_mode(1);
 
@@ -1328,7 +1335,7 @@ mod tests {
         // 本用例检验的是 PLAN 名单语义，故显式给出工区内 path 让安全闸门放行。
         let mut inv = make_invocation("test_write", "plan-write");
         inv.args = serde_json::json!({ "path": "." });
-        if let Admission::Authorized(auth) = admit(inv, 4, &ws, &trusted) {
+        if let Admission::Authorized(auth) = admit(inv, 3, &ws, &trusted) {
             let result = execute_authorized(auth, None);
             assert!(
                 result.success,
@@ -1345,30 +1352,30 @@ mod tests {
     #[test]
     fn ui_and_llm_same_permission_decision() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 2); // ReadFree: reads auto, writes need approval
+        crate::runtime::set_context("test_session", 1); // read-only: writes need approval
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
-        // Both "test_counter" and "test_write" have default ToolCategory::Write.
-        // At Level 2 (ReadFree), both require approval.
+        // Both invocations use test_write (ToolCategory::Write).
+        // At the read-only tier, writes require approval.
         for id in &["inv-a", "inv-b"] {
             let inv = make_invocation("test_write", id);
-            match admit(inv, 2, &ws, &trusted) {
-                Admission::ApprovalRequired(_) => {} // expected for Write at Level 2
+            match admit(inv, 1, &ws, &trusted) {
+                Admission::ApprovalRequired(_) => {} // expected for Write at read-only
                 other => panic!(
-                    "write tools should require approval at level 2, {:?}",
+                    "write tools should require approval at read-only tier, {:?}",
                     std::any::type_name_of_val(&other)
                 ),
             }
         }
 
-        // Same at Level 4 — explicit bypass auto-approves write tools
+        // Same at SkipPermissions — explicit bypass auto-approves write tools
         for id in &["inv-c", "inv-d"] {
             let inv = make_invocation("test_write", id);
-            match admit(inv, 4, &ws, &trusted) {
+            match admit(inv, 3, &ws, &trusted) {
                 Admission::Authorized(_) => {} // expected for bypass mode
                 other => panic!(
-                    "level 4 bypass should auto-approve write tools, {:?}",
+                    "skip-permissions bypass should auto-approve write tools, {:?}",
                     std::any::type_name_of_val(&other)
                 ),
             }
@@ -1401,7 +1408,7 @@ mod tests {
     #[test]
     fn invalid_json_does_not_execute() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test", 4);
+        crate::runtime::set_context("test", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         let result = execute_with_context(
             "test_counter",
@@ -1428,7 +1435,7 @@ mod tests {
     #[test]
     fn resources_bound_in_authorization() {
         let _test_guard = setup_test_manager();
-        let inv = make_invocation("test_counter", "res-bound-1");
+        let inv = make_invocation("test_write", "res-bound-1");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
         let admission = admit(inv, 1, &ws, &trusted);
@@ -1455,7 +1462,7 @@ mod tests {
     fn workspace_change_after_authorization_is_rejected() {
         let _test_guard = setup_test_manager();
         let _workspace_reset = WorkspaceReset;
-        crate::runtime::set_context("test_session", 4);
+        crate::runtime::set_context("test_session", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         let authorized_workspace = tempfile::tempdir().unwrap();
         let changed_workspace = tempfile::tempdir().unwrap();
@@ -1463,7 +1470,7 @@ mod tests {
 
         let authorized = match admit(
             make_invocation("test_workspace", "workspace-bound-1"),
-            4,
+            3,
             authorized_workspace.path(),
             &HashSet::new(),
         ) {
@@ -1491,7 +1498,7 @@ mod tests {
     #[test]
     fn session_mismatch_rejected() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("session-A", 4);
+        crate::runtime::set_context("session-A", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         let inv = ToolInvocation {
             session_id: "session-B".to_string(),
@@ -1528,7 +1535,7 @@ mod tests {
     #[test]
     fn resource_mismatch_rejected() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test", 4);
+        crate::runtime::set_context("test", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
 
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1543,7 +1550,7 @@ mod tests {
             args: serde_json::json!({"path": "a.txt"}),
             category: crate::permission::ToolCategory::Read,
         };
-        let admission = admit(inv1, 4, &ws, &trusted);
+        let admission = admit(inv1, 3, &ws, &trusted);
         let auth = match admission {
             Admission::Authorized(a) => a,
             other => panic!(

@@ -2,7 +2,7 @@
  * 工具调用行(spec §8):折叠行 + 展开详情,实时流与时间线共用同一组件。
  * 状态词表与图标表现按 §8.2;持续动画仅 1s 线性旋转图标。
  */
-import { createMemo, createSignal, For, Match, onCleanup, Show, Switch, type Component } from "solid-js";
+import { createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack, type Component } from "solid-js";
 import IconCheck from "~icons/lucide/check";
 import IconChevronRight from "~icons/lucide/chevron-right";
 import IconCopy from "~icons/lucide/copy";
@@ -52,12 +52,13 @@ const LiveElapsed: Component<{ startedAt: number | undefined }> = (props) => {
 const AnsiBlock: Component<{ text: string }> = (props) => (
   <Show when={hasAnsi(props.text)} fallback={<pre class="tool-text">{props.text}</pre>}>
     <pre class="tool-text">
-      <For each={parseAnsi(props.text)}>
+      {/* 解析结果是每次新建的片段数组:按位置 keying,文本变化就地更新而不是整块重挂 */}
+      <For each={parseAnsi(props.text)} keyed={false}>
         {(chunk) => (
           <span
-            style={{ color: chunk.color, background: chunk.background, "font-weight": chunk.bold ? "600" : "", "font-style": chunk.italic ? "italic" : "", "text-decoration": chunk.underline ? "underline" : "" }}
+            style={{ color: chunk().color, background: chunk().background, "font-weight": chunk().bold ? "600" : "", "font-style": chunk().italic ? "italic" : "", "text-decoration": chunk().underline ? "underline" : "" }}
           >
-            {chunk.text}
+            {chunk().text}
           </span>
         )}
       </For>
@@ -92,11 +93,11 @@ export const ToolDetail: Component<{ step: ToolStep }> = (props) => {
           when={step().name === "exec" || step().name === "bash" || step().name === "shell"}
           fallback={
             <div class="kv-table">
-              <For each={argEntries()}>
-                {([key, value]) => (
+              <For each={argEntries()} keyed={false}>
+                {(entry) => (
                   <div class="kv-row">
-                    <span class="kv-key">{key}</span>
-                    <span class="kv-value">{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</span>
+                    <span class="kv-key">{entry()[0]}</span>
+                    <span class="kv-value">{typeof entry()[1] === "string" ? entry()[1] : JSON.stringify(entry()[1], null, 2)}</span>
                   </div>
                 )}
               </For>
@@ -157,7 +158,8 @@ function isTerminal(status: ToolStep["status"]): boolean {
 
 export const StepRow: Component<{ step: ToolStep; turn: Turn; expandable?: boolean }> = (props) => {
   const step = () => props.step;
-  const [open, setOpen] = createSignal(step().status === "error"); // error 默认展开(§8.2)
+  // 初始展开态只取创建时的状态(§8.2 error 默认展开);后续由用户点击接管。
+  const [open, setOpen] = createSignal(untrack(() => step().status === "error"));
   const summary = () => primaryArg(step().argsJson, step().display);
   const stats = createMemo(() => {
     const diffText = step().output?.diffText;

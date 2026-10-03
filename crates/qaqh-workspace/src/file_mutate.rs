@@ -885,7 +885,7 @@ pub(crate) fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCall
         },
         permission_level: crate::runtime::context()
             .map(|context| crate::permission::PermissionLevel::from_u8(context.permission_level))
-            .unwrap_or(crate::permission::PermissionLevel::MaxLockdown),
+            .unwrap_or(crate::permission::PermissionLevel::ReadOnly),
         sandbox: if crate::authorization::is_subagent_sandbox() {
             SandboxMode::Subagent
         } else {
@@ -919,7 +919,7 @@ mod tests {
             session_id: "test-session".to_string(),
             workspace_root: root.to_path_buf(),
             mode: AgentMode::Code,
-            permission_level: TestPermissionLevel::ReadFree,
+            permission_level: TestPermissionLevel::ReadOnly,
             sandbox: TestSandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
             exec_default_shell: None,
