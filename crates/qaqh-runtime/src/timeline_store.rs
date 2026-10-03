@@ -439,6 +439,7 @@ fn event_kind(event: &TimelineEvent) -> &'static str {
         TimelineEvent::BlockCheckpoint { .. } => "block_checkpoint",
         TimelineEvent::ToolUpdated { .. } => "tool_updated",
         TimelineEvent::ToolProgress { .. } => "tool_progress",
+        TimelineEvent::ToolEstimated { .. } => "tool_estimated",
         TimelineEvent::RoundSealed { .. } => "round_sealed",
     }
 }

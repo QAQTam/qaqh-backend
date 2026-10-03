@@ -21,4 +21,4 @@ stream?: string | null,
 /**
  * 累计观测字节（emitted + dropped），0 = 未接线。
  */
-bytes_total?: number, } | { "type": "block_sealed", turn_id: string, round_num: number, block_id: string, } | { "type": "round_sealed", turn_id: string, round_num: number, is_final: boolean, } | { "type": "turn_sealed", turn_id: string, state: TimelineTurnState, failure?: TimelineFailure | null, };
+bytes_total?: number, } | { "type": "tool_estimated", turn_id: string, round_num: number, block_id: string, lines_added: number, lines_removed: number, } | { "type": "block_sealed", turn_id: string, round_num: number, block_id: string, } | { "type": "round_sealed", turn_id: string, round_num: number, is_final: boolean, } | { "type": "turn_sealed", turn_id: string, state: TimelineTurnState, failure?: TimelineFailure | null, };

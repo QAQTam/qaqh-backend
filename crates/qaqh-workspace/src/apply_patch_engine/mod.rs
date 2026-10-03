@@ -24,8 +24,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub use file_update::{AppliedPatch, derive_new_contents_from_chunks};
-pub use parser::{Hunk, ParseError, UpdateFileChunk, parse_patch};
-pub use streaming_parser::StreamingPatchParser;
+pub use parser::{Hunk, ParseError, UpdateFileChunk, parse_patch, patch_stats};
+pub use streaming_parser::{PatchStats, StreamingPatchParser};
 
 /// Controls how updates reconstruct the target file after matching a patch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -683,6 +683,36 @@ mod tests {
         let outcome = dry_run_patch_engine(&add_file_patch("fresh.txt"), dir.path()).unwrap();
         assert_eq!(outcome.affected.added, vec!["fresh.txt".to_string()]);
         assert!(!dir.path().join("fresh.txt").exists());
+    }
+
+    /// `patch_stats`（统计通道）与 `parse_patch`（执行通道）的接受/拒绝面必须
+    /// 完全一致：执行成功的补丁不能数不出行数，执行拒掉的补丁也不能报出数字。
+    #[test]
+    fn patch_stats_accepts_exactly_what_parse_patch_accepts() {
+        let cases = [
+            add_file_patch("a.txt"),
+            // heredoc 包裹靠 lenient 分支放行，两边都得认。
+            "<<'EOF'\n*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\nEOF\n".to_string(),
+            "*** Begin Patch\n*** Add File: a.txt\n+x\n".to_string(), // 缺 End Patch
+            "not a patch at all".to_string(),
+            String::new(),
+        ];
+        for patch in &cases {
+            assert_eq!(
+                patch_stats(patch).is_ok(),
+                parse_patch(patch).is_ok(),
+                "stats/parse disagree on: {patch:?}"
+            );
+        }
+        let stats = patch_stats(&add_file_patch("a.txt")).unwrap();
+        assert_eq!(
+            (
+                stats.lines_added,
+                stats.files_created,
+                stats.single_path.as_deref()
+            ),
+            (1, 1, Some(Path::new("a.txt")))
+        );
     }
 
     /// T-3-2：失败发生在第 2 个 hunk 时，错误必须携带「已生效 / 未生效」。

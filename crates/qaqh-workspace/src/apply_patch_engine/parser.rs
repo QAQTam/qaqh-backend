@@ -27,7 +27,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::apply_patch_engine::streaming_parser::StreamingPatchParser;
+use crate::apply_patch_engine::streaming_parser::{PatchStats, StreamingPatchParser};
 
 pub(crate) const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
 pub(crate) const END_PATCH_MARKER: &str = "*** End Patch";
@@ -131,10 +131,7 @@ pub struct ParsedPatch {
 }
 
 pub fn parse_patch(patch: &str) -> Result<ParsedPatch, ParseError> {
-    let lines: Vec<&str> = patch.trim().lines().collect();
-    let patch_lines = check_patch_boundaries_lenient(&lines)?;
-
-    let patch = patch_lines.join("\n");
+    let patch = normalized_patch_text(patch)?;
     let mut parser = StreamingPatchParser::default();
     parser.push_delta(&patch)?;
     let hunks = parser.finish()?;
@@ -144,6 +141,25 @@ pub fn parse_patch(patch: &str) -> Result<ParsedPatch, ParseError> {
         patch,
         environment_id,
     })
+}
+
+/// 只数规模、不留 hunk：同一套边界校验 + 同一个逐行状态机。
+///
+/// 与 `parse_patch` 共用 [`normalized_patch_text`] 是有意的——两者的
+/// 接受/拒绝面必须完全一致，否则「执行成功却报不出行数」会成常态。
+pub fn patch_stats(patch: &str) -> Result<PatchStats, ParseError> {
+    let patch = normalized_patch_text(patch)?;
+    let mut parser = StreamingPatchParser::default();
+    parser.push_delta(&patch)?;
+    parser.finish()?;
+    Ok(parser.stats())
+}
+
+/// 校验补丁首尾行（含 heredoc 包裹的宽松分支）并归一化成 LF 文本。
+fn normalized_patch_text(patch: &str) -> Result<String, ParseError> {
+    let lines: Vec<&str> = patch.trim().lines().collect();
+    let patch_lines = check_patch_boundaries_lenient(&lines)?;
+    Ok(patch_lines.join("\n"))
 }
 
 /// Checks the start and end lines of the patch text, returning an error if they

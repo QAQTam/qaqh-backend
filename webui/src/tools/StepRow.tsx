@@ -171,6 +171,17 @@ export const StepRow: Component<{ step: ToolStep; turn: Turn; expandable?: boole
       return null;
     }
   });
+  /**
+   * 行差数字的唯一出口:终态 diff 是权威,参数还在流式输出时退到后端旁路的
+   * 估算(虚线样式,提示"这个数还会涨")。
+   */
+  const lineStats = createMemo(() => {
+    const terminal = stats();
+    if (terminal) return { ...terminal, estimating: false };
+    const est = step().streamEstimate;
+    if (est != null && !isTerminal(step().status)) return { add: est.add, del: est.del, estimating: true };
+    return null;
+  });
   return (
     <div class={{ "step-row": true, tool: true, [`st-${step().status}`]: true }}>
       <button
@@ -198,10 +209,14 @@ export const StepRow: Component<{ step: ToolStep; turn: Turn; expandable?: boole
           <span class="tool-summary" title={summary()}>{summary()}</span>
         </Show>
         <span class="spacer" />
-        <Show when={stats() != null}>
-          <span class="tool-diffstat">
-            <b class="diff-stat-add">+{stats()!.add}</b>
-            <b class="diff-stat-del">−{stats()!.del}</b>
+        <Show when={lineStats() != null}>
+          <span class={{ "tool-diffstat": true, "is-estimate": lineStats()!.estimating }}>
+            <b class="diff-stat-add">+{lineStats()!.add}</b>
+            <b class="diff-stat-del">−{lineStats()!.del}</b>
+            <Show when={lineStats()!.estimating}>
+              {/* 估算不是结果:角标说清楚,免得被读成"已经改完了"。 */}
+              <span class="diff-stat-flag">估算</span>
+            </Show>
           </span>
         </Show>
         <Switch>

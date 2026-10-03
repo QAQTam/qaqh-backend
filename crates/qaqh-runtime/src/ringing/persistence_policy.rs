@@ -14,7 +14,7 @@
 //! | TurnSealed | ✅ timeline 快照 | 回合恢复边界；terminal 优先队列立即落盘（非发布会话线程同步） |
 //! | BlockCheckpoint | ❌ 不触发快照重写 | 增量载荷（`arg`），文本可由 `TextDelta`/块投影重建 |
 //! | ToolUpdated | ✅ timeline 快照 | 覆盖语义，物化进 turns |
-//! | TextDelta / ToolProgress | ❌ 不落盘 | 只进内存投影 + SSE 实时流 + 回放尾（有界）；崩溃后由快照 watermark 重基线 |
+//! | TextDelta / ToolProgress / ToolEstimated | ❌ 不落盘 | 只进内存投影 + SSE 实时流 + 回放尾（有界）；崩溃后由快照 watermark 重基线 |
 //! | 三频道 Reliable（TurnStarted/Finished、ToolPrepared/Finished、Interaction*） | ✅ 三频道 journal | 投影恢复权威 |
 //! | 三频道 Replaceable（RoundDelta / BlockCheckpoint / Usage / …） | ⚠️ 折叠落盘 | 同 identity 只保留最新值（64 次一 checkpoint），RoundCompleted 时整轮 compact |
 //! | 三频道 Ephemeral | ❌ 不落盘 | 纯实时 |
@@ -136,6 +136,12 @@ mod tests {
                 truncated: false,
                 stream: None,
                 bytes_total: 0,
+            },
+            // 参数行数估算：终态一到就取代，落盘只是写放大。
+            TimelineEvent::ToolEstimated {
+                block_id: "b".into(),
+                lines_added: 12,
+                lines_removed: 3,
             },
         ];
         for event in &transient {

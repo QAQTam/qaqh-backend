@@ -212,6 +212,12 @@
   .turn-steps { display: grid; gap: 6px; margin-bottom: 10px; }
   .turn-intermediate { margin: 6px 0; }
   .turn-answer { overflow-anchor: auto; }
+  /* 中断且无任何产物的回合状态行(与折叠行同一家族的弱化文本) */
+  .turn-aborted {
+    margin-top: 2px;
+    color: var(--muted); font-size: var(--fs-sm);
+    min-height: 24px; display: flex; align-items: center;
+  }
   .turn-error {
     margin-top: 10px;
     border: 1px solid var(--err);
@@ -283,6 +289,10 @@
   .tool-diffstat { display: inline-flex; gap: 5px; font-size: var(--fs-xs); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   .diff-stat-add { color: var(--ok); font-weight: 500; }
   .diff-stat-del { color: var(--err); font-weight: 500; }
+  /* 参数仍在流式输出时的行数估算：涨跌色留着（读得懂），整块压低 + 虚线下划线
+     （不当真）。终态 diff 一到 StepRow.lineStats 就换回权威值，虚线自动消失。 */
+  .tool-diffstat.is-estimate { opacity: .66; text-decoration: underline dashed 1px; text-underline-offset: 3px; }
+  .diff-stat-flag { margin-left: 3px; font-weight: 400; opacity: .75; }
 
   .tool-detail { display: grid; gap: 6px; padding: 6px 8px 10px; min-width: 0; }
   .tool-detail-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--fs-xs); }

@@ -769,6 +769,40 @@ impl TimelineAppender {
         ))
     }
 
+    /// 写工具参数的流式行数估算：**不改块状态**，只发一条瞬态条目。
+    ///
+    /// 校验存在性与"未 seal"是为了让发射方能安静地丢掉迟到的估算；数字本身
+    /// 一律由终态取代，所以它既不写 tool 字段也不进快照。
+    pub fn estimate_tool_lines(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        round_num: u32,
+        block_id: &str,
+        lines_added: u32,
+        lines_removed: u32,
+    ) -> Result<TimelineEntry, TimelineError> {
+        let timeline = self.timeline_mut(session_id)?;
+        let round = existing_round_mut(timeline, turn_id, round_num)?;
+        let block = block_mut(round, block_id)?;
+        if block.state == TimelineBlockState::Sealed {
+            return Err(TimelineError::SealedBlock(block_id.to_string()));
+        }
+        if block.tool.is_none() {
+            return Err(TimelineError::InvalidBlockKind(block_id.to_string()));
+        }
+        Ok(next_entry(
+            timeline,
+            turn_id.to_string(),
+            Some(round_num),
+            TimelineEvent::ToolEstimated {
+                block_id: block_id.to_string(),
+                lines_added,
+                lines_removed,
+            },
+        ))
+    }
+
     /// Applies one producer intent. The method is the only place that turns a
     /// producer's ordered intent into a numbered transcript record.
     pub fn apply_intent(
@@ -839,6 +873,20 @@ impl TimelineAppender {
                 chunk,
                 stream,
                 bytes_total,
+            ),
+            TimelineIntent::ToolEstimated {
+                turn_id,
+                round_num,
+                block_id,
+                lines_added,
+                lines_removed,
+            } => self.estimate_tool_lines(
+                session_id,
+                &turn_id,
+                round_num,
+                &block_id,
+                lines_added,
+                lines_removed,
             ),
             TimelineIntent::BlockSealed {
                 turn_id,
@@ -1499,6 +1547,87 @@ mod tests {
         let tool = snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
         assert_eq!(tool.progress_stream.as_deref(), Some("stdout"));
         assert_eq!(tool.progress_bytes_total, 12_600);
+    }
+
+    /// 估算条目是瞬态旁路：发得出、每条占一个 seq，但**不碰**块的任何字段；
+    /// 块 seal 之后迟到的估算安静报错，而不是把脏数字留在投影里。
+    #[test]
+    fn tool_estimated_is_transient_and_never_mutates_the_block() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        appender
+            .open_block("s", "t", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
+            .unwrap();
+        let before = appender
+            .snapshot("s")
+            .unwrap()
+            .turns[0]
+            .rounds[0]
+            .blocks[0]
+            .tool
+            .clone()
+            .unwrap();
+
+        let first = appender
+            .apply_intent(
+                "s",
+                TimelineIntent::ToolEstimated {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "tool".into(),
+                    lines_added: 12,
+                    lines_removed: 4,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                first.event,
+                TimelineEvent::ToolEstimated {
+                    lines_added: 12,
+                    lines_removed: 4,
+                    ..
+                }
+            ),
+            "got {:?}",
+            first.event
+        );
+        let second = appender
+            .apply_intent(
+                "s",
+                TimelineIntent::ToolEstimated {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "tool".into(),
+                    lines_added: 48,
+                    lines_removed: 4,
+                },
+            )
+            .unwrap();
+        // 每条估算都吃一个 timeline_seq —— 节流就是在这里省钱的。
+        assert_eq!(second.timeline_seq, first.timeline_seq + 1);
+
+        let after = appender.snapshot("s").unwrap();
+        assert_eq!(
+            after.turns[0].rounds[0].blocks[0].tool.clone().unwrap(),
+            before,
+            "估算不得改写块状态"
+        );
+
+        appender.seal_block("s", "t", 0, "tool").unwrap();
+        assert!(matches!(
+            appender.apply_intent(
+                "s",
+                TimelineIntent::ToolEstimated {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "tool".into(),
+                    lines_added: 99,
+                    lines_removed: 0,
+                },
+            ),
+            Err(TimelineError::SealedBlock(_))
+        ));
     }
 
     #[test]

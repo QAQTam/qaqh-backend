@@ -1,6 +1,7 @@
 /** 事件 reducer(spec §1.3 允许的纯逻辑单测:事件 reducer 与 seq 去重)。 */
 import { describe, expect, test } from "bun:test";
-import { applyEntry, applySnapshot, emptySession, prependPage, recomputeDerived } from "../src/session/reducer";
+import { applyEntry, applySnapshot, buildTurn, emptySession, prependPage, recomputeDerived } from "../src/session/reducer";
+import { isWorkStep } from "../src/session/types";
 import type { SessionState, TimelineEntryWire } from "../src/session/types";
 
 function entry(seq: number, turnId: string, event: Record<string, any>, round = 0): TimelineEntryWire {
@@ -375,6 +376,51 @@ describe("快照回合并(重对齐不再整表重建)", () => {
   });
 });
 
+describe("isWorkStep:作答文本块不进时间线(2026-10-03 渲染重复修复)", () => {
+  /** 真实会话形态(01a10228…):思考 + 最终作答。 */
+  const realShapeTurn = () => ({
+    turn_id: "t2", turn_index: 1, user_text: "你好", state: "completed",
+    rounds: [{ round_num: 0, blocks: [
+      { block_id: "round-0:reasoning:0", kind: "reasoning", state: "sealed", text: "Simple greeting in Chinese." },
+      { block_id: "round-0:text:1", kind: "text", state: "sealed", text: "你好！😊 很高兴见到你。\n\n有什么我可以帮你的吗？" },
+    ] }],
+  });
+
+  test("快照重建:最后文本块是作答 → 时间线只剩思考;中间叙述文本块保留", () => {
+    const turn = buildTurn({
+      ...realShapeTurn(),
+      rounds: [{ round_num: 0, blocks: [
+        { block_id: "n0", kind: "text", state: "sealed", text: "先看看" },
+        ...realShapeTurn().rounds[0]!.blocks,
+      ] }],
+    } as never, 1000);
+    const work = turn.steps.filter((step) => isWorkStep(turn, step));
+    expect(work.map((step) => step.id)).toEqual(["n0", "round-0:reasoning:0"]);
+    expect(turn.answerStepId).toBe("round-0:text:1");
+  });
+
+  test("作答降级(answerStepId=null)后文本块回到时间线", () => {
+    const state = emptySession();
+    applyEntry(state, entry(1, "t1", { type: "turn_opened", user_text: "hi" }));
+    applyEntry(state, entry(2, "t1", { type: "block_opened", block: { block_id: "b1", kind: "text" } }));
+    applyEntry(state, entry(3, "t1", { type: "text_delta", block_id: "b1", delta: "先看看" }));
+    applyEntry(state, entry(4, "t1", { type: "block_opened", block: { block_id: "b2", kind: "tool", tool: { name: "read", state: "running" } } }));
+    const turn = state.turns["t1"]!;
+    expect(turn.answerStepId).toBeNull();
+    expect(turn.steps.every((step) => isWorkStep(turn, step))).toBe(true);
+  });
+
+  test("纯作答回合(无思考/工具)没有可折叠的工作", () => {
+    const turn = buildTurn({
+      turn_id: "t3", turn_index: 2, user_text: "q", state: "completed",
+      rounds: [{ round_num: 0, blocks: [
+        { block_id: "only", kind: "text", state: "sealed", text: "直接回答" },
+      ] }],
+    } as never, 1000);
+    expect(turn.steps.some((step) => isWorkStep(turn, step))).toBe(false);
+  });
+});
+
 describe("陈旧快照页不得回滚（B）", () => {
   const pageWith = (epoch: string, watermark: number, text: string) => ({
     server_epoch: epoch,
@@ -418,5 +464,59 @@ describe("陈旧快照页不得回滚（B）", () => {
     applySnapshot(state, { server_epoch: "e1" });
     expect(state.slots).toHaveLength(1);
     expect(state.turns["#0"]!.answer?.text).toBe("内容");
+  });
+});
+
+describe("参数流式行数估算 tool_estimated", () => {
+  /** 取 t1 的第一个工具步(取不到就抛,免得断言在 undefined 上假绿)。 */
+  const firstTool = (state: SessionState) => {
+    const step = state.turns["t1"]!.steps[0]!;
+    if (step.kind !== "tool") throw new Error("expect tool step");
+    return step;
+  };
+  const opened = (): SessionState => {
+    const state = emptySession();
+    applyEntry(state, entry(1, "t1", {
+      type: "block_opened",
+      block: { block_id: "b1", kind: "tool", tool: { name: "edit", state: "prepared" } },
+    }));
+    return state;
+  };
+  const estimated = (add: number, del: number): Record<string, unknown> => ({
+    type: "tool_estimated", block_id: "b1", lines_added: add, lines_removed: del,
+  });
+
+  test("运行中的工具卡收下估算", () => {
+    const state = opened();
+    applyEntry(state, entry(2, "t1", estimated(7, 2)));
+    expect(firstTool(state).streamEstimate).toEqual({ add: 7, del: 2 });
+  });
+
+  test("数字就地更新,不新增 step", () => {
+    const state = opened();
+    applyEntry(state, entry(2, "t1", estimated(1, 0)));
+    applyEntry(state, entry(3, "t1", estimated(9, 4)));
+    expect(firstTool(state).streamEstimate).toEqual({ add: 9, del: 4 });
+    expect(state.turns["t1"]!.steps).toHaveLength(1);
+  });
+
+  test("终态一到即清空:约等于不许活在真值旁边", () => {
+    const state = opened();
+    applyEntry(state, entry(2, "t1", estimated(9, 4)));
+    applyEntry(state, entry(3, "t1", {
+      type: "tool_updated", block_id: "b1",
+      tool: { name: "edit", state: "succeeded", diff: "--- a\n+++ b\n+x\n" },
+    }));
+    expect(firstTool(state).streamEstimate).toBeNull();
+  });
+
+  test("迟到的估算不再改写终态", () => {
+    const state = opened();
+    applyEntry(state, entry(2, "t1", {
+      type: "tool_updated", block_id: "b1", tool: { name: "edit", state: "succeeded" },
+    }));
+    applyEntry(state, entry(3, "t1", estimated(9, 4)));
+    // 终态把它清成 null;迟到帧不许把它再填回一个数。
+    expect(firstTool(state).streamEstimate).toBeNull();
   });
 });

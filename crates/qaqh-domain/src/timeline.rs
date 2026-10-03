@@ -468,6 +468,16 @@ pub enum TimelineEvent {
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         bytes_total: u64,
     },
+    /// 写工具参数**还在流式输出时**的行数估算（渲染层旁路）。
+    ///
+    /// 执行仍然要等参数 JSON 完整才开始；这条只报"目前吐出来的参数里能数出
+    /// 多少行"。它不改任何块状态，也不进快照——终态的 CodeChanged / display
+    /// diff 一到就取代它，落盘只是写放大。
+    ToolEstimated {
+        block_id: String,
+        lines_added: u32,
+        lines_removed: u32,
+    },
     BlockSealed {
         block_id: String,
     },
@@ -551,6 +561,15 @@ pub enum TimelineIntent {
         /// 累计观测字节（emitted + dropped），0 = 未接线。
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         bytes_total: u64,
+    },
+    /// 见 [`TimelineEvent::ToolEstimated`]：参数还在流式输出时的行数估算。
+    /// 高频事件，发射方自带节流（行数增量 + 时间双阈值）。
+    ToolEstimated {
+        turn_id: String,
+        round_num: u32,
+        block_id: String,
+        lines_added: u32,
+        lines_removed: u32,
     },
     BlockSealed {
         turn_id: String,
