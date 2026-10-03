@@ -3,7 +3,7 @@
  * 行内容一律 textContent/文本节点(JSX 文本节点等价),不走 innerHTML;
  * shiki 异步高亮,未完成或失败回退纯文本,不得改变文本与行数。
  */
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, type Component } from "solid-js";
 import {
   findWordPairs,
   languageOf,
@@ -90,18 +90,18 @@ const LineContent: Component<{ line: ParsedLine; segments?: WordSegment[]; token
   };
   return (
     <>
-      <For each={props.segments}>
+      <For each={props.segments} keyed={false}>
         {(segment) => (
-          <Show when={segment.kind !== "same"} fallback={<>{segment.value}</>}>
-            <span class={segment.kind === "added" ? "diff-word add" : "diff-word del"}>{segment.value}</span>
+          <Show when={segment().kind !== "same"} fallback={<>{segment().value}</>}>
+            <span class={segment().kind === "added" ? "diff-word add" : "diff-word del"}>{segment().value}</span>
           </Show>
         )}
       </For>
       <Show when={props.segments == null && props.tokens != null}>
-        <For each={props.tokens}>
+        <For each={props.tokens} keyed={false}>
           {(token) => (
-            <Show when={token.color} fallback={<>{token.content}</>}>
-              <span style={{ color: token.color ?? "" }}>{token.content}</span>
+            <Show when={token().color} fallback={<>{token().content}</>}>
+              <span style={{ color: token().color ?? "" }}>{token().content}</span>
             </Show>
           )}
         </For>
@@ -130,14 +130,14 @@ const HunkRows: Component<{ file: ParsedFile; hunk: ParsedHunk; index: number; p
       <tr class="diff-hunkhead">
         <td colspan={4}>{`@@ -${props.hunk.oldStart},${props.hunk.oldLines} +${props.hunk.newStart},${props.hunk.newLines} @@`}</td>
       </tr>
-      <For each={props.hunk.lines}>
-        {(line, lineIndex) => (
-          <tr class={`diff-line ${line.t}`}>
-            <td class="diff-no">{line.oldNo ?? ""}</td>
-            <td class="diff-no">{line.newNo ?? ""}</td>
-            <td class="diff-sign">{line.t === "add" ? "+" : line.t === "del" ? "−" : " "}</td>
+      <For each={props.hunk.lines} keyed={false}>
+        {(line, index) => (
+          <tr class={`diff-line ${line().t}`}>
+            <td class="diff-no">{line().oldNo ?? ""}</td>
+            <td class="diff-no">{line().newNo ?? ""}</td>
+            <td class="diff-sign">{line().t === "add" ? "+" : line().t === "del" ? "−" : " "}</td>
             <td class="diff-content">
-              <LineContent line={line} segments={props.pairMap.get(line)} tokens={tokensFor(lineIndex())} />
+              <LineContent line={line()} segments={props.pairMap.get(line())} tokens={tokensFor(index)} />
             </td>
           </tr>
         )}
@@ -150,26 +150,35 @@ export const DiffFileView: Component<{ file: ParsedFile }> = (props) => {
   const file = () => props.file;
   const totalLines = () => file().hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
   const [expanded, setExpanded] = createSignal(totalLines() <= BIG_DIFF_LINES);
+  // 词级 diff(Myers)只在文件真正展开时算:折叠态下对白文件的代价毫无收益。
+  const EMPTY_SEGMENTS = new Map<ParsedLine, WordSegment[]>();
   const pairMap = createMemo(() => {
+    if (!expanded()) return EMPTY_SEGMENTS;
     const map = new Map<ParsedLine, WordSegment[]>();
     for (const hunk of file().hunks) {
       for (const pair of findWordPairs(hunk)) {
-        map.set(pair.del, wordSegments(pair.del.text, pair.add.text).del);
-        map.set(pair.add, wordSegments(pair.del.text, pair.add.text).add);
+        const segments = wordSegments(pair.del.text, pair.add.text);
+        map.set(pair.del, segments.del);
+        map.set(pair.add, segments.add);
       }
     }
     return map;
   });
 
   const [tokenLines, setTokenLines] = createSignal<Tokens | null>(null);
+  // 折叠时不拼整篇内容字符串、不跑 shiki:一个大文件的 token 数组是回合数据
+  // 本身的数十倍,收起的状态下常驻内存毫无意义(展开时再高亮,§9.4 允许纯文本回退)。
   createEffect(
-    () => ({ lang: languageOf(file().path), content: file().hunks.map((h) => h.lines.map((l) => l.text).join("\n")).join("\n") }),
-    ({ lang, content }) => {
-      if (lang == null || content.length > 200_000) return;
+    () => {
+      if (!expanded()) return null;
+      const content = file().hunks.map((h) => h.lines.map((l) => l.text).join("\n")).join("\n");
+      const lang = languageOf(file().path);
+      return lang == null || content.length > 200_000 ? null : { lang, content };
+    },
+    (job) => {
+      if (job == null) return;
+      const { lang, content } = job;
       let disposed = false;
-      onCleanup(() => {
-        disposed = true;
-      });
       void (async () => {
         try {
           const highlighter = await getHighlighter();
@@ -185,6 +194,12 @@ export const DiffFileView: Component<{ file: ParsedFile }> = (props) => {
           // 高亮失败回退纯文本(§9.4)。
         }
       })();
+      // apply 阶段不是反应式上下文:`onCleanup` 在这里注册等于永不执行(NO_OWNER_CLEANUP),
+      // 返回清理函数才会挂到本 effect 的下一次运行/销毁上 —— 否则收起分支后,迟到的
+      // shiki 结果仍会写进已经废弃的 signal。
+      return (): void => {
+        disposed = true;
+      };
     },
   );
 
@@ -214,9 +229,9 @@ export const DiffFileView: Component<{ file: ParsedFile }> = (props) => {
           <div class="diff-scroll">
             <table class="diff-table">
               <tbody>
-                <For each={file().hunks}>
+                <For each={file().hunks} keyed={false}>
                   {(hunk, index) => (
-                    <HunkRows file={file()} hunk={hunk} index={index()} pairMap={pairMap()} tokenLines={tokenLines} />
+                    <HunkRows file={file()} hunk={hunk()} index={index} pairMap={pairMap()} tokenLines={tokenLines} />
                   )}
                 </For>
               </tbody>

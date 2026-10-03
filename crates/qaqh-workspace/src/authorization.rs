@@ -54,7 +54,7 @@ pub struct ToolInvocation {
 /// 「自动放行还是用户批准」——决策链因此显式随凭证传递。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantKind {
-    /// 策略自动放行（含 MCP D5 快路径与 Level 4 bypass）。
+    /// 策略自动放行（含 MCP D5 快路径与 skip-permissions bypass）。
     Auto,
     /// 用户在审批通道显式批准（一次性凭证）。
     UserApproved,
@@ -348,9 +348,9 @@ pub fn admit_with_context(
     // 供审计展示。
     //
     // T-8-1（安全审查 P1-1 / O-4）收紧：**Exec/Net 类别不再无条件放行**——
-    // Level 1/2/3 落到下面的 needs_permission 决策并进入审批；Level 4 是
-    // 显式 bypass，继续走 D5 快路径。只读类（Read，如 `mcp` resources 聚合）
-    // 在任何档位都保留 D5 快路径，避免误伤。
+    // read-only / workspace-write 落到下面的 needs_permission 决策并进入审批；
+    // skip-permissions 是显式 bypass，继续走 D5 快路径。只读类（Read，如
+    // `mcp` resources 聚合）在任何档位都保留 D5 快路径，避免误伤。
     //
     // 子代理沙箱优先于 D5：S3 要求 MCP 工具在子代理上下文一律拒绝
     // （防越狱）——原“沙箱零代码”依赖 needs_permission→AskUser 路径，
@@ -371,7 +371,7 @@ pub fn admit_with_context(
         let d5_bypass = !matches!(
             invocation.category,
             crate::permission::ToolCategory::Exec | crate::permission::ToolCategory::Net
-        ) || level == crate::permission::PermissionLevel::Unrestricted;
+        ) || level == crate::permission::PermissionLevel::SkipPermissions;
         if d5_bypass {
             let mut resources =
                 crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
@@ -625,7 +625,7 @@ mod tests {
                 args,
                 category,
             },
-            1, // 即使主代理是 MaxLockdown，沙箱下 workspace 内文件操作也自动批准
+            1, // 即使主代理是 read-only 档，沙箱下 workspace 内文件操作也自动批准
             ws,
             &HashSet::new(),
         )
@@ -727,16 +727,17 @@ mod tests {
     }
 
     #[test]
-    fn mcp_exec_net_require_approval_until_unrestricted() {
+    fn mcp_exec_net_require_approval_until_skip_permissions() {
         // T-8-1（安全审查 P1-1 / O-4）：D5 不再对 Exec/Net 类别无条件放行。
-        // Level 1/2/3 必须审批；Level 4 是显式 bypass，继续走 D5 快路径。
+        // read-only / workspace-write 必须审批；skip-permissions 是显式
+        // bypass，继续走 D5 快路径。
         // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-mcp-d5");
-        for level in [1u8, 2, 3] {
+        for level in [1u8, 2] {
             let admission = admit(
                 ToolInvocation {
                     session_id: "seed-d5".into(),
@@ -764,13 +765,13 @@ mod tests {
                 args: serde_json::json!({}),
                 category: crate::permission::ToolCategory::Exec,
             },
-            4,
+            3,
             &ws,
             &HashSet::new(),
         );
         assert!(
             matches!(admission, Admission::Authorized(_)),
-            "level 4 explicit bypass must authorize MCP Exec calls"
+            "skip-permissions explicit bypass must authorize MCP Exec calls"
         );
     }
 
@@ -782,7 +783,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-mcp-d5-read");
-        for level in [1u8, 2, 3, 4] {
+        for level in [1u8, 2, 3] {
             let admission = admit(
                 ToolInvocation {
                     session_id: "seed-d5r".into(),
@@ -805,7 +806,7 @@ mod tests {
 
     #[test]
     fn non_sandbox_still_requires_approval() {
-        // 未启用沙箱：Level 1 写仍需审批（主代理行为不受影响）。
+        // 未启用沙箱：read-only 档写仍需审批（主代理行为不受影响）。
         // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()

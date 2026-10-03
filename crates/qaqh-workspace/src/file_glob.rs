@@ -305,7 +305,7 @@ mod tests {
             session_id: "glob-test-session".to_string(),
             workspace_root: root.to_path_buf(),
             mode: crate::tool_api::AgentMode::Code,
-            permission_level: crate::permission::PermissionLevel::ReadFree,
+            permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
             exec_default_shell: None,
@@ -448,7 +448,7 @@ mod tests {
         use crate::permission::{PermissionDecision, PermissionLevel, needs_permission};
         let ws = std::env::temp_dir().join("qaqh-glob-perm");
         let decision = needs_permission(
-            PermissionLevel::ReadFree,
+            PermissionLevel::ReadOnly,
             "glob",
             &serde_json::json!({ "pattern": "**/*.rs" }),
             &ws,

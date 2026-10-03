@@ -6,6 +6,8 @@
 //! ownership and prefix listing.
 
 use std::fmt;
+#[cfg(feature = "ts")]
+use ts_rs::TS;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -131,6 +133,7 @@ impl fmt::Display for AgentPathSegmentError {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 /// Absolute, canonical path of an agent.
 ///
 /// Wire representation is a string. Deserialization always revalidates the

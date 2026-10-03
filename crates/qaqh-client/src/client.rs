@@ -531,7 +531,19 @@ impl Client {
     /// a time simply calls this for the newly focused seed and
     /// [`Self::deactivate_timeline`] for the one it left.
     pub async fn activate_timeline(&self, session_id: &str) -> Result<TimelinePage> {
-        let page = self.get_timeline_page(session_id, None, None).await?;
+        self.activate_timeline_with(session_id, None).await
+    }
+
+    /// [`Self::activate_timeline`] with an explicit tail-page size. A shell that
+    /// renders one page of its own chosen size (e.g. the Tauri webui) passes it
+    /// here so the pushed snapshot already is the page it wanted, instead of
+    /// taking the default page and re-fetching a second one.
+    pub async fn activate_timeline_with(
+        &self,
+        session_id: &str,
+        limit: Option<u32>,
+    ) -> Result<TimelinePage> {
+        let page = self.get_timeline_page(session_id, None, limit).await?;
         let watermark = page.snapshot.watermark;
 
         // Replace this seed's previous stream only.

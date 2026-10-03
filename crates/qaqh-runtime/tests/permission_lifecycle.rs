@@ -447,10 +447,9 @@ fn skill_activation_reaches_followup_round_and_next_user_turn() {
         ],
         3,
         move |writer, receiver| {
+            // 三档制 read-only 档:技能激活是读类操作,自动放行(注入防护在
+            // H2:skill 目录写入仍强制审批)
             send_cmd(writer, "", cmd_user_input("use the matching skill"));
-            assert_eq!(permission_id(receiver), "activate-skill");
-            assert_no_round_completion(receiver);
-            send_cmd(writer, "", cmd_permission_respond("activate-skill", true));
             let first = collect_through_terminal(receiver);
             assert_single_completion(&first, 1);
             let result = finished_result(&first);
@@ -503,7 +502,12 @@ fn llm_approval_resumes_original_turn_once() {
         1,
         temp.path(),
         vec![
-            tool_round(&[("llm-read", "read", json!({"path": path}))]),
+            tool_round(&[(
+                "llm-read",
+                "write",
+                json!({"path": path, "content": "written
+"}),
+            )]),
             final_round("finished"),
         ],
         2,
@@ -522,7 +526,8 @@ fn llm_approval_resumes_original_turn_once() {
                     ..
                 }) => {
                     assert_eq!(tool_call_id, "llm-read");
-                    assert_eq!(risk, qaqh_domain::PermissionRisk::Low);
+                    // 三档制 read-only 档:工作区读自动放行,审批面只剩变更类 → Medium
+                    assert_eq!(risk, qaqh_domain::PermissionRisk::Medium);
                     assert!(!consequence.is_empty());
                 }
                 other => panic!("expected ToolPermissionRequested, got {other:?}"),
@@ -548,7 +553,12 @@ fn llm_duplicate_permission_response_is_stable_and_does_not_execute_twice() {
         1,
         temp.path(),
         vec![
-            tool_round(&[("llm-read-once", "read", json!({"path": path}))]),
+            tool_round(&[(
+                "llm-read-once",
+                "write",
+                json!({"path": path, "content": "once
+"}),
+            )]),
             final_round("finished once"),
         ],
         2,
@@ -612,7 +622,12 @@ fn llm_rejection_resumes_with_original_failure() {
         1,
         temp.path(),
         vec![
-            tool_round(&[("llm-denied", "read", json!({"path": path}))]),
+            tool_round(&[(
+                "llm-denied",
+                "write",
+                json!({"path": path, "content": "denied
+"}),
+            )]),
             final_round("handled denial"),
         ],
         2,
@@ -647,8 +662,18 @@ fn llm_multiple_pending_waits_for_every_response() {
         temp.path(),
         vec![
             tool_round(&[
-                ("llm-first", "read", json!({"path": first})),
-                ("llm-second", "read", json!({"path": second})),
+                (
+                    "llm-first",
+                    "write",
+                    json!({"path": first, "content": "one
+"}),
+                ),
+                (
+                    "llm-second",
+                    "write",
+                    json!({"path": second, "content": "two
+"}),
+                ),
             ]),
             final_round("both finished"),
         ],
@@ -755,8 +780,9 @@ fn llm_mixed_auto_and_pending_emits_one_unified_result() {
     let output = temp.path().join("output.txt");
     std::fs::write(&input, "hello\n").unwrap();
     let expected_output = output.clone();
+    // 三档制:read-only 档 = 工作区读自动 + 写审批,正是本用例的 auto/pending 组合
     run_case(
-        2,
+        1,
         temp.path(),
         vec![
             tool_round(&[

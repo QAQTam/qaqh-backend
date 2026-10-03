@@ -42,7 +42,7 @@ fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolE
             session_id: session_id.to_string(),
             workspace_root: std::path::PathBuf::from(qaqh_workspace::current_workspace()),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
-            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from(qaqh_workspace::current_workspace()),
@@ -220,7 +220,7 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
     );
     agent.session.session_id = session_id.clone();
     agent.ephemeral = true;
-    agent.config.permission_level = 4;
+    agent.config.permission_level = 3;
     agent.msg = store_with_pending_batch(&session_id);
 
     let mut admitted = Vec::new();
@@ -235,7 +235,7 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
             "timeout_secs": 30,
         });
         let admission =
-            qaqh_workspace::authorize_call(&agent.session.session_id, id, "exec", &args, 4);
+            qaqh_workspace::authorize_call(&agent.session.session_id, id, "exec", &args, 3);
         match admission {
             qaqh_workspace::Admission::Authorized(auth) => {
                 admitted.push(qaqh_runtime::agent::types::AdmittedTool {
