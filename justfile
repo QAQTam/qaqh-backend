@@ -33,6 +33,29 @@ dev:
 webui-build:
     cd webui && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build
 
+# ── 前端类型契约（ts-rs 单一真相）──────────────────
+#
+# webui/src/api/ 是**生成物**：crates/qaqh-{types,domain,ringing} 上 97 处
+# `derive(TS)` 集中导出到此（`export_to = "qaqh/"` 不变，靠 TS_RS_EXPORT_DIR
+# 收口，避免各 crate 散落 bindings/）。前端一律 import 这里，不再手抄 wire 形状。
+#
+# TS_RS_LARGE_INT=number 是必须的：ts-rs 默认把 u64/i64 映射成 `bigint`,
+# 而它们在 JSON 线上就是 number（生成物里那些 ts(as = "u32") 就是在绕这件事）。
+# 导出发生在 `cargo test` 的 export_bindings_* 测试里,所以只能跑测试生成。
+
+[unix]
+ts-export:
+    TS_RS_EXPORT_DIR="{{justfile_directory()}}/webui/src/api" TS_RS_LARGE_INT=number cargo test -p qaqh-types -p qaqh-domain -p qaqh-ringing --features qaqh-types/ts,qaqh-domain/ts,qaqh-ringing/ts
+
+[windows]
+ts-export:
+    $env:TS_RS_EXPORT_DIR="{{justfile_directory()}}/webui/src/api"; $env:TS_RS_LARGE_INT="number"; cargo test -p qaqh-types -p qaqh-domain -p qaqh-ringing --features qaqh-types/ts,qaqh-domain/ts,qaqh-ringing/ts
+
+# 生成物落后于 Rust 真相则失败——wire 类型改完忘了跑 ts-export 的兜底。
+# 退出码非零时看 `git diff webui/src/api` 就是漂移清单。
+ts-check: ts-export
+    git diff --exit-code webui/src/api
+
 # ── 桌面壳（Tauri,webui-tauri 计划）────────────────
 
 # 把 daemon 构建产物放置为 Tauri sidecar（目标三元组命名,带存在性断言）。
