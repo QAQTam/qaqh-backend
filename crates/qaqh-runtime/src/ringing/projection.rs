@@ -587,6 +587,7 @@ fn build_turns(
                                 file: None,
                                 metrics: result.metrics.clone(),
                                 display: result.display().cloned(),
+                                error: result.error.clone(),
                             })
                         } else {
                             None

@@ -8,7 +8,7 @@
  * (approve/reject/trust;submit/dismiss;approve/reject),此处与之对齐。
  * 后端补 choices 后按列表渲染即可。
  */
-import { createEffect, createSignal, For, Show, type Component } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, type Component } from "solid-js";
 import type { ApprovalView } from "../lib/transport";
 import { STR } from "../lib/strings";
 
@@ -60,7 +60,7 @@ export const ApprovalCard: Component<{ view: ApprovalView; busy: () => boolean; 
         </Show>
         <div class="card-line">
           <span class="card-key">{STR.riskLabel}</span>
-          {`${details().risk ?? "?"} · level ${details().level ?? "?"} · ${details().category ?? "?"}`}
+          {`${details().risk ?? "?"} · ${details().level_name || `level ${details().level ?? "?"}`} · ${details().category ?? "?"}`}
         </div>
         <Show when={details().consequence}>
           <div class="card-line"><span class="card-key">{STR.consequence}</span>{details().consequence}</div>
@@ -158,11 +158,12 @@ export const PlanCard: Component<{ view: ApprovalView; busy: () => boolean; resp
 export const ApprovalStack: Component<{ pending: ApprovalView[]; respond: (challengeId: string, decision: string, payload?: Record<string, unknown>) => Promise<void> }> = (props) => {
   const [busyId, setBusyId] = createSignal<string | null>(null);
   let root: HTMLDivElement | undefined;
+  const head = createMemo(() => props.pending[0] ?? null);
   createEffect(
     () => props.pending.length,
-    () => {
-      if (props.pending.length > 0 && document.activeElement === document.body) {
-        // 不抢输入框焦点:仅当焦点在 body 时自动聚焦卡片(§11.1)。
+    (count) => {
+      // 焦点在 body 时才自动聚焦卡片(§11.1),不抢输入框。
+      if (count > 0 && document.activeElement === document.body) {
         root?.querySelector<HTMLElement>(".approval-wrap")?.focus();
       }
     },
@@ -178,7 +179,8 @@ export const ApprovalStack: Component<{ pending: ApprovalView[]; respond: (chall
   const busy = (id: string) => busyId() === id;
   return (
     <div id="approval-slot" ref={root}>
-      <For each={props.pending.slice(0, 1)}>
+      {/* keyed:换一个 challenge 就是一张新卡(内部草稿/展开态不该串到下一个请求) */}
+      <Show when={head()} keyed>
         {(view) => (
           <div class="approval-wrap" tabindex={-1}>
             <Show when={props.pending.length > 1}>
@@ -193,7 +195,7 @@ export const ApprovalStack: Component<{ pending: ApprovalView[]; respond: (chall
             )}
           </div>
         )}
-      </For>
+      </Show>
     </div>
   );
 };

@@ -1515,6 +1515,8 @@ impl TurnEngine {
                         block_id: format!("tool:{call_id}"),
                         kind: qaqh_domain::TimelineBlockKind::Tool,
                         tool: Some(qaqh_domain::TimelineTool {
+                            exit_code: None,
+                            completed_at_ms: None,
                             tool_call_id: call_id.clone(),
                             name: tool_call.function.name.clone(),
                             state: qaqh_domain::TimelineToolState::Prepared,

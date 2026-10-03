@@ -6,6 +6,8 @@
 
 pub use qaqh_types::UsageInfo;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
 
 use super::agent::AgentPath;
 
@@ -19,6 +21,7 @@ macro_rules! string_id {
     ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
         pub struct $name(pub String);
 
         impl $name {
@@ -59,6 +62,7 @@ string_id!(CheckpointId);
 string_id!(RecoveryId);
 string_id!(ResourceId);
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContentHash(pub String);
@@ -73,6 +77,11 @@ impl ContentHash {
     }
 }
 
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionContentRef")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContentRef(pub ContentHash);
@@ -89,6 +98,7 @@ impl ContentRef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ContentUnavailableReason {
     GarbageCollected,
     Missing,
@@ -97,6 +107,7 @@ pub enum ContentUnavailableReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ContentUnavailable {
     pub content_ref: ContentRef,
     pub reason: ContentUnavailableReason,
@@ -290,6 +301,7 @@ pub struct InteractionRequested {
     pub requested_at_ms: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 /// Structured interaction verdict.
 ///
 /// `decision_ref` alone is a content hash, so a client (or a restarted daemon)
@@ -463,6 +475,11 @@ pub struct SubagentFinished {
     pub recovery_ref: Option<RecoveryRef>,
 }
 
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionInterAgentDelivery")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterAgentDelivery {
@@ -487,6 +504,7 @@ impl InterAgentDelivery {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum InterAgentContent {
@@ -494,6 +512,7 @@ pub enum InterAgentContent {
     ContentRef { content_ref: ContentRef },
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterAgentCommunication {
     pub message_id: MessageId,
@@ -519,6 +538,7 @@ impl InterAgentCommunication {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryRef {
     pub recovery_id: RecoveryId,
@@ -526,6 +546,7 @@ pub struct RecoveryRef {
     pub recovery_input_fingerprint: ContentHash,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadataPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -542,6 +563,7 @@ pub struct SessionMetadataPatch {
     pub schema_caps: Option<Vec<String>>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorRef {
     pub kind: ActorKind,
@@ -551,6 +573,7 @@ pub struct ActorRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct PolicyDecisionRef {
     pub outcome: ToolIntentPolicyOutcome,
     pub rule_id: String,
@@ -559,6 +582,7 @@ pub struct PolicyDecisionRef {
     pub reason_ref: Option<ContentRef>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolMetrics {
     pub started_at_ms: i64,
@@ -568,6 +592,11 @@ pub struct ToolMetrics {
     pub progress_bytes_total: u64,
 }
 
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionToolError")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolError {
     pub code: String,
@@ -577,6 +606,7 @@ pub struct ToolError {
     pub details_ref: Option<ContentRef>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnError {
     pub code: String,
@@ -586,6 +616,7 @@ pub struct TurnError {
     pub details_ref: Option<ContentRef>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryToolCompletion {
     pub call_id: ToolCallId,
@@ -608,6 +639,7 @@ pub struct RecoveryToolCompletion {
     pub evidence_event_id: Option<EventId>,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecoveryAction {
@@ -677,6 +709,7 @@ pub struct ListOutput<T> {
     pub truncated: bool,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorKind {
@@ -687,6 +720,7 @@ pub enum ActorKind {
     Subagent,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputKind {
@@ -697,6 +731,7 @@ pub enum InputKind {
     System,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputPurpose {
@@ -706,6 +741,7 @@ pub enum InputPurpose {
     Interject,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnMode {
@@ -714,6 +750,7 @@ pub enum TurnMode {
     Ask,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssistantBlockKind {
@@ -724,6 +761,7 @@ pub enum AssistantBlockKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ToolIntentPolicyOutcome {
     Allow,
     Ask,
@@ -732,6 +770,7 @@ pub enum ToolIntentPolicyOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum SideEffectClass {
     ReadOnly,
     WorkspaceWrite,
@@ -742,6 +781,11 @@ pub enum SideEffectClass {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionActivityState")
+)]
 pub enum ActivityState {
     #[default]
     Idle,
@@ -749,6 +793,7 @@ pub enum ActivityState {
     Interrupted,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolReplayCapability {
@@ -757,6 +802,7 @@ pub enum ToolReplayCapability {
     Reconcile { probe_ref: ContentRef },
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolTerminalStatus {
@@ -770,6 +816,11 @@ pub enum ToolTerminalStatus {
     Denied,
 }
 
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionInteractionKind")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionKind {
@@ -778,6 +829,7 @@ pub enum InteractionKind {
     Permission,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionExpiryReason {
@@ -787,6 +839,7 @@ pub enum InteractionExpiryReason {
     TurnCancelled,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnTerminal {
@@ -795,6 +848,7 @@ pub enum TurnTerminal {
     Cancelled,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterruptReason {
@@ -813,6 +867,7 @@ pub enum MetadataSource {
     Migration,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TitleSource {
@@ -821,6 +876,7 @@ pub enum TitleSource {
     Migration,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteReason {
@@ -830,6 +886,7 @@ pub enum DeleteReason {
     Rollback,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
@@ -840,6 +897,7 @@ pub enum ResourceKind {
     File,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentTerminalStatus {
@@ -849,6 +907,7 @@ pub enum SubagentTerminalStatus {
     TimedOut,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryOutcome {
@@ -858,6 +917,7 @@ pub enum RecoveryOutcome {
     Tombstone,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchVisibility {
@@ -865,6 +925,7 @@ pub enum SearchVisibility {
     Hidden,
 }
 
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

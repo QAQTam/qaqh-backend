@@ -71,6 +71,9 @@ const RENEW_INTERVAL_MS: u64 = 10_000;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 128;
 const TIMELINE_PAGE_LIMIT: usize = 30;
+/// `?limit` 的上界。响应侧只有回合数上界（`MAX_BODY_BYTES` 挂在请求侧），
+/// 没有这一条的话一个请求就能把整段转录连全文一起拉走。
+const TIMELINE_PAGE_MAX: usize = 200;
 
 fn lease_ttl_ms() -> u64 {
     std::env::var("QAQH_TEST_LEASE_TTL_MS")

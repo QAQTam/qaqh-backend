@@ -45,8 +45,9 @@ export class TauriTransport implements TransportBackend {
     return invoke<any[]>("session_list");
   }
 
-  async attach(seed: string): Promise<void> {
-    await invoke("attach", { seed });
+  async attach(seed: string, limit?: number): Promise<void> {
+    // limit:宿主按这个大小取权威首页并推给 webview;省略则后端用默认页大小。
+    await invoke("attach", { seed, limit: limit ?? null });
     this.activeSeed = seed;
   }
 
@@ -125,6 +126,10 @@ export class TauriTransport implements TransportBackend {
 
   sessionBootstrap(seed: string): Promise<unknown> {
     return invoke<unknown>("session_bootstrap", { seed });
+  }
+
+  async timelineStatus(seed: string): Promise<TimelineStatusWire | null> {
+    return invoke<TimelineStatusWire | null>("timeline_status", { seed });
   }
 
   async streamsRetry(seed?: string): Promise<void> {

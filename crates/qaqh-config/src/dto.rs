@@ -162,7 +162,7 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         cfg.compliance_enabled = v;
     }
     if let Some(v) = patch.permission_level {
-        // validate() 已保证 1..=4（BUG-2026-09-13-15）。
+        // validate() 已保证 1..=3（BUG-2026-09-13-15；三档制 2026-10-03）。
         cfg.permission_level = u8::try_from(v).unwrap_or(1);
     }
     if let Some(v) = &patch.lang {

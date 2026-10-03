@@ -9,6 +9,19 @@
  *   reasoning 块 → ThinkingStep,tool 块 → ToolStep,text 块 → 答案或(多轮回合
  *   时)中间叙述 TextStep。
  */
+import type { TimelineEntry } from "../api/qaqh/TimelineEntry";
+import type { TimelineToolDisplay } from "../api/qaqh/TimelineToolDisplay";
+import type { TimelineToolPermission } from "../api/qaqh/TimelineToolPermission";
+
+/**
+ * wire 契约的本地别名。形状由 ts-rs 从 Rust 单一真相生成(`just ts-export` →
+ * `src/api/qaqh/`),这里**不再手抄字段**——后端加槽/改语义时,漂移会变成
+ * typecheck 失败而不是静默读空。
+ */
+export type ToolDisplay = TimelineToolDisplay;
+export type ToolPermission = TimelineToolPermission;
+export type TimelineEntryWire = TimelineEntry;
+
 export type Seq = number;
 
 export type TurnStatus = "running" | "done" | "aborted" | "failed";
@@ -16,8 +29,13 @@ export type TurnStatus = "running" | "done" | "aborted" | "failed";
 export interface Turn {
   /** 后端 turn_id。注意 id 可能复用,稳定去重键见 `key`。 */
   id: string;
-  /** 稳定键:快照/翻页回合用 `#turn_index`,实时回合(无全局序号)用 id。 */
+  /**
+   * 稳定键:快照/翻页回合用 `#turn_index`,实时回合(无全局序号)用 id。
+   * 权威页一旦把序号对上这个回合,键**保持本地那个**(换键 = 换 DOM 行,
+   * 正在流式的回合会闪断并丢滚动位置),序号记到 `turnIndex` 上。
+   */
   key: string;
+  /** 会话内全局序号;实时路径开出来的回合先为 null,由权威页补记(也是翻页游标)。 */
   turnIndex: number | null;
   user: { text: string };
   /** 按 seq 升序(后端真相)。 */
@@ -87,25 +105,6 @@ export interface ToolStep {
 
 export type Step = ThinkingStep | TextStep | ToolStep;
 
-/** 后端 TimelineToolDisplay 的透明转发(类型宽松,未知变体原样保留)。 */
-export interface ToolDisplay {
-  summary?: string;
-  header?: Record<string, any>;
-  body?: Record<string, any>;
-  metrics?: Record<string, any>;
-  outcome?: any;
-  [k: string]: any;
-}
-
-export interface ToolPermission {
-  reason: string;
-  paths: string[];
-  category: string;
-  level: number;
-  risk: string;
-  consequence: string;
-}
-
 /** 用户等待区间(授权/AskUser),挂在其发生时正在运行的回合上。 */
 export interface Wait {
   turnKey: string | null;
@@ -128,12 +127,39 @@ export interface SessionState {
   totalTurns: number;
   /** 当前正在流式输出的 reasoning 块 id(单行思考链)。 */
   activeReasoningId: string | null;
+  /** 该 reasoning 块所属回合 key:思考链只读这一个回合,不遍历 turns。 */
+  activeReasoningTurnKey: string | null;
+  /** 运行中的回合数(发送/授权判定的唯一依据,避免遍历 turns)。 */
+  runningTurns: number;
+  /** 失败回合数(标签状态点用,同样避免遍历 turns)。 */
+  failedTurns: number;
+  /** 当前运行中回合的 key;无运行中回合为 null(等待区间归属判定)。 */
+  activeTurnKey: string | null;
   waits: Wait[];
 }
 
-export type Slot = { kind: "turn"; key: string } | { kind: "placeholder"; key: string; height: number };
+/**
+ * 渲染顺序槽:回合,或**一段**连续被淘汰的回合。
+ *
+ * 占位为什么是一段而不是一格:被淘汰的回合永远是相邻前缀,一格一个占位会让
+ * `slots` 随翻页无界增长(实测 201 槽里 151 是占位)——每次前插都要重写约 170 个
+ * 下标节点、`<For>` 每次重排整表、DOM 里多挂 150 个空 div。并成一段后
+ * `slots ≈ 窗口 + 1`。
+ */
+export type Slot = { kind: "turn"; key: string } | { kind: "gap"; key: string; spans: GapSpan[] };
+
+/** 段内一个被淘汰回合的等高占位高度(逐回合钳过 2 屏,合并后不再重钳)。 */
+export interface GapSpan {
+  key: string;
+  height: number;
+}
+
+export function gapHeight(spans: GapSpan[]): number {
+  return spans.reduce((sum, span) => sum + span.height, 0);
+}
 
 export function emptySession(): SessionState {
+
   return {
     turns: {},
     slots: [],
@@ -144,14 +170,10 @@ export function emptySession(): SessionState {
     oldestIndex: null,
     totalTurns: 0,
     activeReasoningId: null,
+    activeReasoningTurnKey: null,
+    runningTurns: 0,
+    failedTurns: 0,
+    activeTurnKey: null,
     waits: [],
   };
-}
-
-/** 后端 timeline 条目(线协议形状,字段宽松)。 */
-export interface TimelineEntryWire {
-  timeline_seq: number;
-  turn_id: string;
-  round_num?: number;
-  event: Record<string, any>;
 }

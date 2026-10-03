@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::dashboard;
 use super::tool_runtime::{ToolRunOutcome, ToolRuntime};
-use crate::agent::state::agent::PendingApproval;
+use crate::agent::state::agent::{PendingApproval, unix_ms};
 use qaqh_domain::{AskMode, AskQuestion};
 use qaqh_policy::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 
@@ -32,6 +32,11 @@ fn timeline_tool(
     let summary = display
         .is_none()
         .then(|| crate::timeline::project_tool_summary(name, state, None, output.as_deref()));
+    let wire_display = display.as_ref().map(crate::timeline::wire_display);
+    let exit_code = wire_display
+        .as_ref()
+        .and_then(|display| display.body.as_ref())
+        .and_then(|body| body.exit_code());
     qaqh_domain::TimelineTool {
         tool_call_id: tool_call_id.to_string(),
         name: name.to_string(),
@@ -44,9 +49,11 @@ fn timeline_tool(
         progress_truncated: false,
         progress_stream: None,
         progress_bytes_total: 0,
-        display: display.as_ref().map(crate::timeline::wire_display),
+        display: wire_display,
         failure,
         permission: None,
+        exit_code,
+        completed_at_ms: None,
     }
 }
 
@@ -129,10 +136,10 @@ impl ToolEngine {
     ) {
         let output = result.model_text();
         let status = result.status;
-        let failure = status.is_failure().then(|| qaqh_domain::TimelineFailure {
-            code: "tool_execution_failed".into(),
-            message: output.to_string(),
-        });
+        // 失败槽单一事实源（qaqh_domain::tool_failure_of）：code/message 只从
+        // result.error 取，**不抄 output**——output 是正文证据，复制进失败槽
+        // 会让 TUI 状态行与正文双重显示同一错误。
+        let failure = qaqh_domain::tool_failure_of(result);
         let mut display = serde_json::from_str::<serde_json::Value>(args)
             .ok()
             .and_then(|args| {
@@ -141,21 +148,24 @@ impl ToolEngine {
         if let Some(display) = display.as_mut() {
             crate::timeline::apply_result_metrics(display, &result.metrics);
         }
+        let mut tool = timeline_tool(
+            tool_call_id,
+            name,
+            qaqh_domain::TimelineToolState::from(status),
+            Some(args.to_string()),
+            Some(output.to_string()),
+            result.diff.clone(),
+            failure,
+            display,
+        );
+        // 终态墙钟：runtime 在发射时盖戳，不信工具自报（契约切片 2026-10-03）。
+        tool.completed_at_ms = Some(unix_ms().max(0) as u64);
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
                 turn_id: turn_id.to_string(),
                 round_num,
                 block_id: format!("tool:{tool_call_id}"),
-                tool: timeline_tool(
-                    tool_call_id,
-                    name,
-                    qaqh_domain::TimelineToolState::from(status),
-                    Some(args.to_string()),
-                    Some(output.to_string()),
-                    result.diff.clone(),
-                    failure,
-                    display,
-                ),
+                tool,
             });
     }
 
@@ -231,6 +241,11 @@ impl ToolEngine {
                         .collect(),
                     category: cat_str.clone(),
                     level: ctx.agent.config.permission_level,
+                    level_name: qaqh_workspace::PermissionLevel::from_u8(
+                        ctx.agent.config.permission_level,
+                    )
+                    .as_str()
+                    .to_string(),
                     risk: match risk_domain {
                         qaqh_domain::PermissionRisk::Low => "low",
                         qaqh_domain::PermissionRisk::Medium => "medium",
@@ -251,6 +266,8 @@ impl ToolEngine {
                         block_id: format!("tool:{}", challenge.call_id()),
                         kind: qaqh_domain::TimelineBlockKind::Tool,
                         tool: Some(qaqh_domain::TimelineTool {
+                            exit_code: None,
+                            completed_at_ms: None,
                             tool_call_id: challenge.call_id().to_string(),
                             name: challenge.tool_name().to_string(),
                             state: qaqh_domain::TimelineToolState::Prepared,
@@ -544,6 +561,8 @@ impl ToolEngine {
                             round_num,
                             block_id: format!("tool:{call_id}"),
                             tool: qaqh_domain::TimelineTool {
+                                exit_code: None,
+                                completed_at_ms: None,
                                 tool_call_id: call_id.clone(),
                                 name: challenge.tool_name().to_string(),
                                 state: qaqh_domain::TimelineToolState::Prepared,
@@ -566,6 +585,11 @@ impl ToolEngine {
                                         .collect(),
                                     category: cat_str.clone(),
                                     level: ctx.agent.config.permission_level,
+                                    level_name: qaqh_workspace::PermissionLevel::from_u8(
+                                        ctx.agent.config.permission_level,
+                                    )
+                                    .as_str()
+                                    .to_string(),
                                     risk,
                                     consequence: challenge.consequence().to_string(),
                                 }),
@@ -818,9 +842,11 @@ impl ToolEngine {
             ));
         }
 
-        // 展示平面 diff / metrics：先取出（ToolFinished 会 move 整个 result）。
+        // 展示平面 diff / metrics / 失败槽：先取出（ToolFinished 会 move 整个
+        // result）。失败槽单一事实源：只从 result.error 取，不抄 output。
         let display_diff = result.diff.clone();
         let result_metrics = result.metrics.clone();
+        let failure = qaqh_domain::tool_failure_of(&result);
         let mut display =
             qaqh_workspace::runtime::project_tool_display_from_result(name, args, &result);
         if let Some(display) = display.as_mut() {
@@ -836,25 +862,24 @@ impl ToolEngine {
             },
         ));
         let terminal_state = qaqh_domain::TimelineToolState::from(status);
-        let failure = status.is_failure().then(|| qaqh_domain::TimelineFailure {
-            code: "tool_execution_failed".into(),
-            message: output.clone(),
-        });
+        let mut tool = timeline_tool(
+            id,
+            name,
+            terminal_state,
+            Some(args.to_string()),
+            Some(output.clone()),
+            display_diff,
+            failure.clone(),
+            display,
+        );
+        // 终态墙钟：runtime 在发射时盖戳（UI 直调路径同源）。
+        tool.completed_at_ms = Some(unix_ms().max(0) as u64);
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
                 turn_id: turn_id.clone(),
                 round_num: 0,
                 block_id: format!("tool:{id}"),
-                tool: timeline_tool(
-                    id,
-                    name,
-                    terminal_state,
-                    Some(args.to_string()),
-                    Some(output.clone()),
-                    display_diff,
-                    failure,
-                    display,
-                ),
+                tool,
             });
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
@@ -876,10 +901,7 @@ impl ToolEngine {
                 } else {
                     qaqh_domain::TimelineTurnState::Failed
                 },
-                failure: status.is_failure().then(|| qaqh_domain::TimelineFailure {
-                    code: "tool_execution_failed".into(),
-                    message: output.clone(),
-                }),
+                failure: failure.clone(),
             });
     }
 

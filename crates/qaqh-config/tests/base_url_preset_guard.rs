@@ -43,7 +43,7 @@ reasoning_effort = "max"
 active_profile = "default"
 lang = "zh"
 compliance_enabled = true
-permission_level = 4
+permission_tier = 3
 auto_compact_threshold = 0.75
 
 [profiles.default]
@@ -182,7 +182,7 @@ default_tools = ["file", "exec"]
         reloaded.base_url, CUSTOM_URL,
         "unrelated fields must survive update"
     );
-    assert_eq!(reloaded.permission_level, 4);
+    assert_eq!(reloaded.permission_level, 3);
 
     // 8) update 的 mutator 返回 Err 时不得写盘（事务语义）。
     let root = setup("update-err");

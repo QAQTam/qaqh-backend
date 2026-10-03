@@ -331,12 +331,30 @@ fn rebuild_tool(
         Some(status) => status.is_failure(),
         None => !success,
     }
-    .then(|| TimelineFailure {
-        code: "tool_execution_failed".into(),
-        message: result
-            .map(|result| result.output.clone())
-            .filter(|output| !output.is_empty())
-            .unwrap_or_else(|| "tool result missing in archived messages".into()),
+    .then(|| -> TimelineFailure {
+        // 失败槽单一事实源：归档 error（与 live 发射同源投影）。旧 journal
+        // 兼容臂已删（无旧会话，2026-10-03）：failure 无 error 属契约违反，
+        // message 置空由 client 显示裸 code。
+        match result.and_then(|result| result.error.as_ref()) {
+            Some(error) => {
+                let code = if error.code.trim().is_empty() {
+                    "tool_execution_failed"
+                } else {
+                    error.code.trim()
+                };
+                TimelineFailure {
+                    code: code.to_owned(),
+                    message: qaqh_domain::timeline::one_line_bounded(
+                        &error.message,
+                        qaqh_domain::timeline::FAILURE_MESSAGE_MAX_CHARS,
+                    ),
+                }
+            }
+            None => TimelineFailure {
+                code: "tool_execution_failed".into(),
+                message: String::new(),
+            },
+        }
     });
     // 展示投影由工具作者声明；重建路径用归档 args 重新调用同一投影函数，
     // 保证 live 与 rebuild 两条路径产出同形 display（契约 §7.1）。
@@ -361,7 +379,15 @@ fn rebuild_tool(
             result.map(|result| result.output.as_str()),
         )
     });
+    // 顶层退出码与 live 发射同源：从 wire display body 提取（契约切片）。
+    let exit_code = display
+        .as_ref()
+        .map(crate::timeline::wire_display)
+        .and_then(|display| display.body)
+        .and_then(|body| body.exit_code());
     TimelineTool {
+        exit_code,
+        completed_at_ms: None,
         tool_call_id: card.id.clone(),
         name: card.name.clone(),
         state,
@@ -420,6 +446,7 @@ mod tests {
                     truncated: Some(false),
                 }),
             }),
+            error: None,
         };
 
         let tool = rebuild_tool(&card, &[result]);
@@ -475,6 +502,7 @@ mod tests {
                     file: None,
                     metrics: Default::default(),
                     display: None,
+                    error: None,
                 }],
                 blocks: vec![
                     RoundBlock::Reasoning {
@@ -555,6 +583,63 @@ mod tests {
         assert_eq!(round.blocks[2].text, "answer");
     }
 
+    /// 失败槽单一事实源（rebuild 侧）：新归档带结构化 error 时，failure 与
+    /// live 发射同源（qaqh_domain::tool_failure_of 同款投影）；旧 journal 无
+    /// error 时从 output 首行降级且**单行有界**，不再整段复制。
+    #[test]
+    fn rebuild_failure_slot_uses_archived_error_without_output_copy() {
+        let card = ToolCallDef {
+            id: "call-1".into(),
+            name: "edit".into(),
+            args_display: "edit".into(),
+            args_json: "{}".into(),
+        };
+        let with_error = ToolResultDef {
+            tool_call_id: "call-1".into(),
+            output: "stale file
+Hint: re-read"
+                .into(),
+            success: false,
+            status: Some(qaqh_types::ToolStatus::Error),
+            file: None,
+            metrics: Default::default(),
+            display: None,
+            error: Some(qaqh_types::ToolError {
+                code: "stale_file".into(),
+                message: "file changed since read
+Hint: re-read the file"
+                    .into(),
+                retryable: false,
+                hint: None,
+            }),
+        };
+        let tool = rebuild_tool(&card, &[with_error]);
+        let failure = tool.failure.as_ref().expect("failed tool carries failure");
+        assert_eq!(failure.code, "stale_file");
+        assert_eq!(failure.message, "file changed since read");
+        assert!(
+            !failure.message.contains("Hint"),
+            "单行理由，不是 output 复制"
+        );
+
+        let legacy = ToolResultDef {
+            tool_call_id: "call-1".into(),
+            output: "boom line one
+boom line two"
+                .into(),
+            success: false,
+            status: None,
+            file: None,
+            metrics: Default::default(),
+            display: None,
+            error: None,
+        };
+        let tool = rebuild_tool(&card, &[legacy]);
+        let failure = tool.failure.as_ref().expect("no-error failure still fails");
+        assert_eq!(failure.code, "tool_execution_failed");
+        assert_eq!(failure.message, "", "无 error 属契约违反，message 置空");
+    }
+
     #[test]
     fn rebuild_marks_failed_tool_as_failed() {
         let mut turn = turn_with_blocks();
@@ -580,6 +665,7 @@ mod tests {
             file: None,
             metrics: Default::default(),
             display: None,
+            error: None,
         }];
 
         let (snapshot, _) =
@@ -589,7 +675,11 @@ mod tests {
             .as_ref()
             .expect("tool block");
         assert_eq!(tool.state, qaqh_domain::TimelineToolState::Failed);
-        assert_eq!(tool.failure.as_ref().expect("failure").message, "boom");
+        assert_eq!(
+            tool.failure.as_ref().expect("failure").message,
+            "",
+            "无 error → message 空"
+        );
     }
 
     #[test]
@@ -618,6 +708,7 @@ mod tests {
             file: None,
             metrics: Default::default(),
             display: None,
+            error: None,
         }];
 
         let (snapshot, _) =
@@ -629,7 +720,8 @@ mod tests {
         assert_eq!(tool.state, qaqh_domain::TimelineToolState::Cancelled);
         assert_eq!(
             tool.failure.as_ref().expect("failure").message,
-            "cancelled by user"
+            "",
+            "无 error → message 空"
         );
     }
 

@@ -154,11 +154,11 @@ port = server.server_address[1]
 threading.Thread(target=server.serve_forever, daemon=True).start()
 print(f"fake provider: http://127.0.0.1:{port}/v1")
 
-permission_level = 2 if MODE == "permission" else 3
+permission_tier = 1 if MODE == "permission" else 2
 (DATA / "config.toml").write_text(
     f'''provider_id = "openai"
 active_profile = "default"
-permission_level = {permission_level}
+permission_tier = {permission_tier}
 
 [profiles.default]
 model = "fake-model"

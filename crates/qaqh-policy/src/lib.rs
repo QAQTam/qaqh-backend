@@ -60,71 +60,93 @@ impl PermissionRisk {
     }
 }
 
-/// Agent operating permission level (1–4). These are presets; the policy
+/// Agent operating permission tier (1–3). These are presets; the policy
 /// engine remains the source of allow/deny/ask/amend decisions.
+///
+/// 2026-10-03 起为三档制(read-only / workspace-write / skip-permissions),
+/// 取代旧 L1–L4(MaxLockdown/ReadFree/WorkspaceFree/Unrestricted)。旧配置数值
+/// 在 config load 处经 [`PermissionLevel::from_legacy_u8`] 迁移;wire 上仍是
+/// 裸 u8(1/2/3),语义单调:数值越大越放行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum PermissionLevel {
-    /// Level 1: Every tool call requires user confirmation.
-    MaxLockdown = 1,
-    /// Level 2: Workspace reads auto-approve; writes, exec, net require confirmation.
-    ReadFree = 2,
-    /// Level 3: Workspace all auto-approve; cross-workspace writes require one-time folder trust.
-    WorkspaceFree = 3,
-    /// Level 4: Dangerous bypass. Ordinary tools auto-approve; exec may
-    /// escape the workspace until the sandbox is introduced.
-    Unrestricted = 4,
+    /// Read-only: 工作区内读自动放行;一切变更(write/exec/net)逐次审批。
+    /// fail-closed 兜底档(非法配置值一律落这里)。
+    ReadOnly = 1,
+    /// Workspace-write: 工作区内读写自动放行;跨工作区写走一次性目录信任;
+    /// exec/net 仍逐次审批。
+    WorkspaceWrite = 2,
+    /// Skip permissions: 显式旁路——普通工具全部自动(含 exec/net)。
+    /// 敏感路径守卫(会话文件/平台 config/skill 根)在所有档位都强制审批。
+    SkipPermissions = 3,
 }
 
 impl PermissionLevel {
-    /// Lenient scalar parser: legal levels map to themselves; any other value
-    /// conservatively degrades to the most restrictive level.
+    /// Lenient scalar parser: legal tiers map to themselves; any other value
+    /// conservatively degrades to the most restrictive tier.
     pub fn from_u8(value: u8) -> Self {
-        Self::try_from_u8(value).unwrap_or(Self::MaxLockdown)
+        Self::try_from_u8(value).unwrap_or(Self::ReadOnly)
     }
 
-    /// Strict scalar parser: rejects anything outside `1..=4`.
+    /// Strict scalar parser: rejects anything outside `1..=3`.
     pub fn try_from_u8(value: u8) -> Result<Self, String> {
         match value {
-            1 => Ok(Self::MaxLockdown),
-            2 => Ok(Self::ReadFree),
-            3 => Ok(Self::WorkspaceFree),
-            4 => Ok(Self::Unrestricted),
+            1 => Ok(Self::ReadOnly),
+            2 => Ok(Self::WorkspaceWrite),
+            3 => Ok(Self::SkipPermissions),
             other => Err(format!(
-                "invalid permission level {other} (must be 1-4: 1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree, 4=Unrestricted)"
+                "invalid permission level {other} (must be 1-3: 1=read-only, 2=workspace-write, 3=skip-permissions)"
             )),
         }
     }
 
+    /// 旧 L1–L4 数值 → 新三档。`None` = 无法识别(调用方按非法值 fail-closed)。
+    ///
+    /// | 旧值 | 旧语义 | 新档 |
+    /// |---|---|---|
+    /// | 1 MaxLockdown | 一切审批 | ReadOnly(旧 L1 无对应档,唯一松动:工作区内读不再逐次弹) |
+    /// | 2 ReadFree | 读自动/变更审批 | ReadOnly(语义相同) |
+    /// | 3 WorkspaceFree | 工作区自由 | WorkspaceWrite(语义相同) |
+    /// | 4 Unrestricted | 危险旁路 | SkipPermissions(语义相同) |
+    pub fn from_legacy_u8(value: u8) -> Option<Self> {
+        match value {
+            1 | 2 => Some(Self::ReadOnly),
+            3 => Some(Self::WorkspaceWrite),
+            4 => Some(Self::SkipPermissions),
+            _ => None,
+        }
+    }
+
     pub fn is_valid_u8(value: u8) -> bool {
-        (1..=4).contains(&value)
+        (1..=3).contains(&value)
     }
 
     pub fn to_u8(self) -> u8 {
         self as u8
     }
 
+    /// 稳定小写标签(wire/UI 用;与档名一一对应)。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::SkipPermissions => "skip-permissions",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
-            Self::MaxLockdown => "Level 1 — Maximum Lockdown",
-            Self::ReadFree => "Level 2 — Read Free",
-            Self::WorkspaceFree => "Level 3 — Workspace Free",
-            Self::Unrestricted => "Level 4 — Unrestricted",
+            Self::ReadOnly => "Read-Only",
+            Self::WorkspaceWrite => "Workspace-Write",
+            Self::SkipPermissions => "Skip Permissions",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::MaxLockdown => "All operations require confirmation. No automatic trust.",
-            Self::ReadFree => {
-                "Reads auto-approve. Writes, execution, and network require confirmation."
-            }
-            Self::WorkspaceFree => {
-                "Auto-approve within workspace. Cross-workspace writes are trusted once per folder."
-            }
-            Self::Unrestricted => {
-                "Dangerous bypass: ordinary tools auto-approve; exec may escape the workspace until sandboxing lands."
-            }
+            Self::ReadOnly => "Workspace reads auto-approve. Every mutation (write/exec/net) requires per-call approval.",
+            Self::WorkspaceWrite => "Auto-approve within the workspace; cross-workspace writes are trusted once per folder. Exec/net require approval.",
+            Self::SkipPermissions => "Explicit bypass: ordinary tools auto-approve, including exec/net. Sensitive-path guards still ask.",
         }
     }
 }
@@ -208,9 +230,20 @@ mod tests {
 
     #[test]
     fn invalid_permission_level_fails_closed() {
-        assert_eq!(PermissionLevel::from_u8(0), PermissionLevel::MaxLockdown);
-        assert_eq!(PermissionLevel::from_u8(99), PermissionLevel::MaxLockdown);
+        assert_eq!(PermissionLevel::from_u8(0), PermissionLevel::ReadOnly);
+        assert_eq!(PermissionLevel::from_u8(99), PermissionLevel::ReadOnly);
         assert!(PermissionLevel::try_from_u8(0).is_err());
+        assert!(PermissionLevel::try_from_u8(4).is_err());
+    }
+
+    #[test]
+    fn legacy_values_migrate_to_three_tiers() {
+        assert_eq!(PermissionLevel::from_legacy_u8(1), Some(PermissionLevel::ReadOnly));
+        assert_eq!(PermissionLevel::from_legacy_u8(2), Some(PermissionLevel::ReadOnly));
+        assert_eq!(PermissionLevel::from_legacy_u8(3), Some(PermissionLevel::WorkspaceWrite));
+        assert_eq!(PermissionLevel::from_legacy_u8(4), Some(PermissionLevel::SkipPermissions));
+        assert_eq!(PermissionLevel::from_legacy_u8(0), None);
+        assert_eq!(PermissionLevel::from_legacy_u8(5), None);
     }
 
     #[test]

@@ -122,7 +122,7 @@ fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolE
             session_id: session_id.to_string(),
             workspace_root: root.clone(),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
-            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(root),
             exec_default_shell: None,
@@ -171,10 +171,10 @@ fn run_batch(
     let mut agent = AgentState::init("workspace-spy-test", qaqh_config::Config::default());
     agent.session.session_id = session_id.to_string();
     agent.ephemeral = true;
-    agent.config.permission_level = 4;
+    agent.config.permission_level = 3; // skip-permissions(三档制)
     agent.msg = store_with_tool_use(session_id, call_id, args.clone());
 
-    let auth = match qaqh_workspace::authorize_call(session_id, call_id, "spy_probe", &args, 4) {
+    let auth = match qaqh_workspace::authorize_call(session_id, call_id, "spy_probe", &args, 3) {
         qaqh_workspace::Admission::Authorized(auth) => auth,
         qaqh_workspace::Admission::ApprovalRequired(_) => {
             panic!("spy_probe must not need approval at level 4")

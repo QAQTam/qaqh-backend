@@ -251,7 +251,7 @@ mod tests {
         let cancel = CancelToken::new();
         let runtime = RuntimeContext::from_legacy_ambient(
             "seed-tool".to_string(),
-            3,
+            2, // workspace-write 档
             cancel.clone(),
             Some("zsh".to_string()),
         );
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(tool_ctx.session_id, "seed-tool");
         assert_eq!(tool_ctx.workspace_root, Path::new("/tmp/qaqh-p2-4c-b"));
         assert_eq!(tool_ctx.mode, AgentMode::Plan);
-        assert_eq!(tool_ctx.permission_level, PermissionLevel::WorkspaceFree);
+        assert_eq!(tool_ctx.permission_level, PermissionLevel::WorkspaceWrite);
         assert_eq!(tool_ctx.sandbox, SandboxMode::Subagent);
         assert_eq!(tool_ctx.exec_default_shell.as_deref(), Some("zsh"));
         assert_eq!(

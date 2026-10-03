@@ -230,15 +230,15 @@ fn web_fetch_payload_error(
     message: impl Into<String>,
     hint: &str,
 ) -> ToolExecutionError {
-    let payload = serde_json::json!({
-        "timeis": crate::now_utc8(),
-        "status": "error",
-        "code": code,
-        "message": message.into(),
-        "hint": hint,
-    })
-    .to_string();
-    web_error(ToolErrorKind::Execution, "tool_error", payload, None)
+    // detail 是人读一句话（模型面与 error 槽共用）；hint 走结构化槽。
+    // 此前把 §7 JSON 信封塞进 detail——模型与展示面拿到的都是一坨 JSON
+    // （2026-10-03 拆考古层时一并清除，无兼容包袱）。
+    web_error(
+        ToolErrorKind::Execution,
+        code,
+        message,
+        Some(hint).filter(|hint| !hint.is_empty()),
+    )
 }
 
 fn web_error(
@@ -282,7 +282,7 @@ mod tests {
             session_id: "web-fetch-test-session".to_string(),
             workspace_root: root.to_path_buf(),
             mode: crate::tool_api::AgentMode::Code,
-            permission_level: crate::permission::PermissionLevel::ReadFree,
+            permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
             exec_default_shell: None,

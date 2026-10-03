@@ -36,6 +36,7 @@ pub fn run() {
             commands::open_external,
             commands::streams_retry,
             commands::stop_stale_daemon,
+            commands::timeline_status,
         ])
         .setup(|app| {
             // 启动即校验/拉起 daemon(D1);不阻塞窗口显示,失败经事件上报。

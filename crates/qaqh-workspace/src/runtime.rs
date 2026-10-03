@@ -249,7 +249,7 @@ impl ToolCtx {
     pub fn admitted(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
-            permission_level: 4,
+            permission_level: 3,
             mode: 0,
             workspace_root: None,
         }

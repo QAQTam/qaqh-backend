@@ -1260,6 +1260,8 @@ mod tests {
 
     fn tool() -> TimelineTool {
         TimelineTool {
+            exit_code: None,
+            completed_at_ms: None,
             tool_call_id: "call-1".into(),
             name: "read".into(),
             state: TimelineToolState::Prepared,

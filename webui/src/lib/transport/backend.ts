@@ -6,18 +6,20 @@
  * store/组件只面向本接口;连接管理由宿主事件驱动(见 `StreamHandlers`)。
  */
 
+import type { RingingCommandAck } from "../../api/qaqh/RingingCommandAck";
+import type { TimelineSnapshot } from "../../api/qaqh/TimelineSnapshot";
+
 export const RINGING_SCHEMA = "qaqh.Ringing";
 /** Ringing v2 单一信封版本:历史 v1 兼容已拆除。 */
 export const RINGING_VERSION = 2;
 
 export type GatewaySession = { csrfToken: string; expiresIn: number };
 
-export type Ack = {
-  command_id: string;
-  status: "accepted" | "rejected";
-  code?: string;
-  message?: string;
-};
+/**
+ * 命令确认。形状是生成绑定(此前手写镜像漏掉了 `retry_after_ms` —— 限流/退避
+ * 提示),本地只留别名。
+ */
+export type Ack = RingingCommandAck;
 
 export type ApprovalKind = "tool_permission" | "ask" | "plan";
 
@@ -31,7 +33,8 @@ export type ApprovalView = {
 export type TimelinePageResponse = {
   server_epoch?: string;
   session_id?: string;
-  snapshot?: { watermark?: number; turns?: Array<Record<string, unknown>> };
+  /** 权威快照:形状由 ts-rs 生成(回合/轮/块整条链)。 */
+  snapshot?: TimelineSnapshot | null;
   has_more?: boolean;
   total_turns?: number;
   truncated_before?: boolean;
@@ -42,6 +45,15 @@ export type TimelineStatusWire = {
   status: "connecting" | "open" | "reconnecting" | "closed";
   session_id?: string;
   [key: string]: unknown;
+};
+
+/** todo.list 的条目线类型(daemon typed 投影;status 归一化在 UI 侧做)。 */
+export type TodoItemWire = {
+  id?: string;
+  title?: string;
+  description?: string;
+  status?: string;
+  evidence?: string;
 };
 
 /** 宿主事件的订阅面(事件 payload 与现行 SSE 帧同形)。 */
@@ -63,7 +75,7 @@ export interface TransportBackend {
   sessions(): Promise<any[]>;
 
   /** attach:宿主切 active seed + attach + 激活 timeline 流。 */
-  attach(seed: string): Promise<void>;
+  attach(seed: string, limit?: number): Promise<void>;
 
   /** 待审批(challenge 由宿主签发,canonical id 不出宿主)。 */
   approvals(): Promise<ApprovalView[]>;
@@ -82,6 +94,8 @@ export interface TransportBackend {
 export interface TauriHostSurface {
   /** 订阅宿主转发事件;返回反订阅函数。 */
   subscribe(handlers: StreamHandlers): Promise<() => void>;
+  /** 查询宿主 timeline 流当前状态(null = 从未激活;兜底订阅晚于事件的竞态)。 */
+  timelineStatus(seed: string): Promise<TimelineStatusWire | null>;
   /** per-session bootstrap RPC(刷新 activity)。 */
   sessionBootstrap(seed: string): Promise<unknown>;
   /** 宿主侧重连(用户点「重试」/窗口聚焦)。 */

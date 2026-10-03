@@ -3667,6 +3667,7 @@ version = "2.0.0-beta.1"
 dependencies = [
  "log",
  "qaqh-config-api",
+ "qaqh-policy",
  "qaqh-types",
  "qaqh-workspace",
  "serde",
@@ -3683,6 +3684,7 @@ version = "2.0.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
+ "ts-rs",
 ]
 
 [[package]]
@@ -3877,6 +3879,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
+ "ts-rs",
  "uuid",
 ]
 

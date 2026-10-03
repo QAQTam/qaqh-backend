@@ -4,4 +4,10 @@
  * Tool permission data belongs to the transcript tool block, while the
  * interaction request/response lifecycle stays on the native control plane.
  */
-export type TimelineToolPermission = { reason: string, paths: Array<string>, category: string, level: number, risk: string, consequence: string, };
+export type TimelineToolPermission = { reason: string, paths: Array<string>, category: string, level: number, 
+/**
+ * 稳定档名标签(read-only / workspace-write / skip-permissions)。
+ * 展示端用档名而非裸数字——数字语义已在三档制中整体平移,单看数字
+ * 会误导。旧记录经 serde default 反序列化为空串,展示端兜底显数字。
+ */
+level_name: string, risk: string, consequence: string, };

@@ -48,7 +48,7 @@ fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolE
             session_id: session_id.to_string(),
             workspace_root: std::path::PathBuf::from(qaqh_workspace::current_workspace()),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
-            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from(qaqh_workspace::current_workspace()),
@@ -298,7 +298,7 @@ fn run_batch<F: FnOnce(&Path)>(
     let mut agent = AgentState::init("tool-ordering-test", qaqh_config::Config::default());
     agent.session.session_id = session_id.clone();
     agent.ephemeral = true;
-    agent.config.permission_level = 4;
+    agent.config.permission_level = 3; // skip-permissions(三档制)
     let tool_uses: Vec<(&str, &str)> = calls
         .iter()
         .map(|(call_id, tool, _args)| (*call_id, *tool))
@@ -314,7 +314,7 @@ fn run_batch<F: FnOnce(&Path)>(
         {
             object.insert("call".to_string(), serde_json::json!(call_id));
         }
-        match qaqh_workspace::authorize_call(&session_id, call_id, tool, &args, 4) {
+        match qaqh_workspace::authorize_call(&session_id, call_id, tool, &args, 3) {
             qaqh_workspace::Admission::Authorized(auth) => {
                 admitted.push(qaqh_runtime::agent::types::AdmittedTool {
                     call_id: (*call_id).to_string(),

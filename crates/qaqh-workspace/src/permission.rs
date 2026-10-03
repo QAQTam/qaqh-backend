@@ -350,7 +350,7 @@ pub(crate) fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool 
 
 /// Whether `path` points at the agent's own persistent state (history /
 /// credentials under the platform data dir). Blocked from normal `read`
-/// access even at Level 4 to prevent exfiltration of prior turns.
+/// access even under SkipPermissions to prevent exfiltration of prior turns.
 ///
 /// 也是远端 `fs.read`/`fs.list` 的单一事实源（T-2-1）：白名单放行的数据根下，
 /// 这些敏感路径必须单独拦掉。
@@ -358,7 +358,7 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
     // Block the agent from reading its own persistent history / credentials.
     // These live under the platform data dir (e.g. ~/.config/qaqh/sessions/…/messages.jsonl,
     // meta.json, token_stats.jsonl, secrets.toml) and are outside any workspace.
-    // At Level 4 they'd otherwise auto-approve, allowing the model to exfiltrate
+    // Under SkipPermissions they'd otherwise auto-approve, allowing the model to exfiltrate
     // prior turns via a normal `read` tool call and then replay that content
     // into the gateway (messages.jsonl → gateway leak).
     //
@@ -374,9 +374,10 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
             return true;
         }
     }
-    // 审计 M4：用户目录 config.toml 也在敏感名单内。L4 下模型可经普通 write
-    // 工具重写它固化 `permission_level = 4` 或改 `base_url`（后续 LLM 请求
-    // 连同 api_key 导向攻击者端点），且 mtime 轮询热加载**免重启生效**。
+    // 审计 M4：用户目录 config.toml 也在敏感名单内。skip-permissions 下模型
+    // 可经普通 write 工具重写它固化 `permission_tier = 3` 或改 `base_url`
+    // （后续 LLM 请求连同 api_key 导向攻击者端点），且 mtime 轮询热加载
+    // **免重启生效**。
     // 配置只从平台数据根读取，按权威路径做组件级判定，不靠宽泛子串。
     let config_file = qaqh_types::platform::config_path();
     if config_file.is_absolute() {
@@ -447,8 +448,8 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
-    // Sensitive session files are never auto-approved, even at Level 4.
-    // The paths are outside the workspace already, but Level 4 would otherwise
+    // Sensitive session files are never auto-approved, even under SkipPermissions.
+    // The paths are outside the workspace already, but SkipPermissions would otherwise
     // bypass the outside-workspace check. Treat them as High risk and force a
     // dialog so the user sees "read messages.jsonl" before it happens.
     let paths = extract_target_paths(tool_name, args);
@@ -507,33 +508,24 @@ pub fn needs_permission(
         };
     }
 
-    // Level 4 is the explicit bypass mode: ordinary tools auto-approve,
+    // SkipPermissions is the explicit bypass mode: ordinary tools auto-approve,
     // including Exec/Net. The sensitive-session-file guard above still wins.
-    // Exec sandboxing is a separate follow-up; until then this mode can write
-    // outside the workspace.
-    if level == PermissionLevel::Unrestricted {
+    // Exec sandboxing is independent of the tier: bypassing approval does not
+    // disable the sandbox spec.
+    if level == PermissionLevel::SkipPermissions {
         return PermissionDecision::AutoApprove;
     }
 
-    // Level 1: everything requires confirmation
-    if level == PermissionLevel::MaxLockdown {
-        return PermissionDecision::AskUser {
-            reason: format!("Level 1: '{}' requires confirmation.", tool_name),
-            paths,
-            category,
-            risk,
-            consequence,
-        };
-    }
-
-    // Level 2+: 工作区内 Reads auto-approve；工作区外读进入审批
-    // （L4 已在上面显式 bypass 返回；子代理沙箱在 authorization 层另行拒绝）。
+    // Read-only tier (and the read face of WorkspaceWrite): workspace reads
+    // auto-approve; outside-workspace reads enter approval (exfiltration is
+    // friction, not a boundary — consistent with the sandbox read posture).
     if category == ToolCategory::Read && all_within_workspace(&paths, &workspace_root) {
         return PermissionDecision::AutoApprove;
     }
 
-    // Level 3: only workspace writes auto-approve. Exec and Net still require confirmation.
-    if level >= PermissionLevel::WorkspaceFree && category == ToolCategory::Write {
+    // WorkspaceWrite: workspace writes auto-approve. Exec and Net still require
+    // confirmation. Cross-workspace writes go through one-time folder trust.
+    if level >= PermissionLevel::WorkspaceWrite && category == ToolCategory::Write {
         // If no paths or all paths are within the workspace, auto-approve the write.
         if all_within_workspace(&paths, &workspace_root) {
             return PermissionDecision::AutoApprove;
@@ -571,23 +563,22 @@ pub fn needs_permission(
     // Otherwise: ask user
     let reason = if category == ToolCategory::Read {
         format!(
-            "Level {}: '{}' reads a path outside the workspace.",
-            level.to_u8(),
+            "read-only posture: '{}' reads a path outside the workspace.",
             tool_name
         )
-    } else if level == PermissionLevel::ReadFree {
+    } else if level == PermissionLevel::ReadOnly {
         format!(
-            "Level 2: '{}' (write/exec/net) requires confirmation.",
+            "read-only mode: '{}' (write/exec/net) requires confirmation.",
             tool_name
         )
     } else if matches!(category, ToolCategory::Exec | ToolCategory::Net) {
         format!(
-            "Level 3: '{}' requires execution or network confirmation.",
+            "'{}' requires execution or network confirmation.",
             tool_name
         )
     } else {
         format!(
-            "Level 3: '{}' accesses a path outside the workspace.",
+            "'{}' writes outside the workspace (one-time folder trust).",
             tool_name
         )
     };
@@ -731,20 +722,20 @@ mod tests {
     #[test]
     fn from_u8_is_exhaustively_fail_closed() {
         // BUG-2026-09-13-15：全值域逐一断言——任何非法档位都不得解析为
-        // Unrestricted（免审批），必须保守降级 MaxLockdown。
+        // skip-permissions(免审批),必须保守降级 read-only。
         for raw in 0u8..=255 {
             let level = PermissionLevel::from_u8(raw);
             match raw {
-                1..=4 => {
-                    assert_eq!(level.to_u8(), raw, "legal level {raw} must map to itself");
+                1..=3 => {
+                    assert_eq!(level.to_u8(), raw, "legal tier {raw} must map to itself");
                     assert!(PermissionLevel::is_valid_u8(raw));
                     assert_eq!(PermissionLevel::try_from_u8(raw), Ok(level));
                 }
                 invalid => {
                     assert_eq!(
                         level,
-                        PermissionLevel::MaxLockdown,
-                        "illegal level {invalid} must degrade to MaxLockdown, not fail open"
+                        PermissionLevel::ReadOnly,
+                        "illegal tier {invalid} must degrade to read-only, not fail open"
                     );
                     assert!(!PermissionLevel::is_valid_u8(invalid));
                     assert!(
@@ -759,7 +750,7 @@ mod tests {
     #[test]
     fn ask_user_does_not_open_a_second_permission_dialog() {
         let decision = needs_permission(
-            PermissionLevel::MaxLockdown,
+            PermissionLevel::ReadOnly,
             "ask",
             &serde_json::json!({"question":"Continue?"}),
             Path::new("."),
@@ -773,10 +764,9 @@ mod tests {
     #[test]
     fn session_todo_operations_never_open_permission_dialogs() {
         for level in [
-            PermissionLevel::MaxLockdown,
-            PermissionLevel::ReadFree,
-            PermissionLevel::WorkspaceFree,
-            PermissionLevel::Unrestricted,
+            PermissionLevel::ReadOnly,
+            PermissionLevel::WorkspaceWrite,
+            PermissionLevel::SkipPermissions,
         ] {
             let tool_name = "todo_write";
             {
@@ -832,7 +822,7 @@ mod tests {
         let (_temp, workspace, target) = linked_temp_tree();
 
         let decision = needs_permission(
-            PermissionLevel::WorkspaceFree,
+            PermissionLevel::WorkspaceWrite,
             "write",
             &serde_json::json!({"path": target}),
             &workspace,
@@ -857,7 +847,7 @@ mod tests {
             .join("new.txt");
 
         let decision = needs_permission(
-            PermissionLevel::WorkspaceFree,
+            PermissionLevel::WorkspaceWrite,
             "write",
             &serde_json::json!({"path": target}),
             &workspace,
@@ -872,9 +862,10 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_session_files_require_approval_even_at_unrestricted() {
-        // messages.jsonl / meta.json live outside any workspace but at Level 4
-        // they'd otherwise auto-approve. This must be forced to AskUser to avoid
+    fn sensitive_session_files_require_approval_even_at_skip_permissions() {
+        // messages.jsonl / meta.json live outside any workspace but under
+        // SkipPermissions they'd otherwise auto-approve. This must be forced to
+        // AskUser to avoid
         // the model silently reading prior turns and feeding them into the gateway.
         let ws = std::env::temp_dir().join("qaqh-ws-sensitive");
         let session_file = dirs_next();
@@ -884,7 +875,7 @@ mod tests {
             "/home/test/.config/qaqh/token_stats.jsonl",
         ] {
             let decision = needs_permission(
-                PermissionLevel::Unrestricted,
+                PermissionLevel::SkipPermissions,
                 "read",
                 &serde_json::json!({"path": path}),
                 &ws,
@@ -893,12 +884,12 @@ mod tests {
             );
             assert!(
                 matches!(decision, PermissionDecision::AskUser { .. }),
-                "sensitive path {path} must require approval even at Level 4, got {decision:?}"
+                "sensitive path {path} must require approval even under SkipPermissions, got {decision:?}"
             );
         }
-        // Normal workspace file at Level 4 still auto-approves.
+        // Normal workspace file under SkipPermissions still auto-approves.
         let normal = needs_permission(
-            PermissionLevel::Unrestricted,
+            PermissionLevel::SkipPermissions,
             "read",
             &serde_json::json!({"path": ws.join("src/main.rs")}),
             &ws,
@@ -923,9 +914,9 @@ mod tests {
         let ws = std::fs::canonicalize(&ws).unwrap();
         let skill_file = ws.join(".qaqh/skills/helper/SKILL.md");
         for level in [
-            PermissionLevel::ReadFree,
-            PermissionLevel::WorkspaceFree,
-            PermissionLevel::Unrestricted,
+            PermissionLevel::ReadOnly,
+            PermissionLevel::WorkspaceWrite,
+            PermissionLevel::SkipPermissions,
         ] {
             let decision = needs_permission(
                 level,
@@ -944,7 +935,7 @@ mod tests {
         // 旧式 `skills/` 根与不存在的深层目录（新建文件场景）同样命中。
         let fresh = ws.join("skills/new/helper/SKILL.md");
         let decision = needs_permission(
-            PermissionLevel::WorkspaceFree,
+            PermissionLevel::WorkspaceWrite,
             "apply_patch",
             &serde_json::json!({ "patch": format!("*** Add File: {}\n+hi", fresh.display()) }),
             &ws,
@@ -957,7 +948,7 @@ mod tests {
         );
         // 工作区普通文件不受影响（L3 仍自动放行）。
         let normal = needs_permission(
-            PermissionLevel::WorkspaceFree,
+            PermissionLevel::WorkspaceWrite,
             "write",
             &serde_json::json!({ "path": ws.join("src/main.rs").display().to_string() }),
             &ws,
@@ -1003,7 +994,7 @@ mod tests {
             ("web_fetch", ToolCategory::Net),
         ] {
             let decision = needs_permission(
-                PermissionLevel::WorkspaceFree,
+                PermissionLevel::WorkspaceWrite,
                 tool,
                 &serde_json::json!({}),
                 Path::new("."),
@@ -1012,20 +1003,20 @@ mod tests {
             );
             assert!(
                 matches!(decision, PermissionDecision::AskUser { .. }),
-                "Level 3 must ask before {tool}"
+                "workspace-write must ask before {tool}"
             );
         }
     }
 
     #[test]
-    fn unrestricted_auto_approves_execution_and_network() {
+    fn skip_permissions_auto_approves_execution_and_network() {
         for (tool, category) in [
             ("exec", ToolCategory::Exec),
             ("spawn_subagent", ToolCategory::Exec),
             ("web_fetch", ToolCategory::Net),
         ] {
             let decision = needs_permission(
-                PermissionLevel::Unrestricted,
+                PermissionLevel::SkipPermissions,
                 tool,
                 &serde_json::json!({}),
                 Path::new("."),
@@ -1034,20 +1025,20 @@ mod tests {
             );
             assert!(
                 matches!(decision, PermissionDecision::AutoApprove),
-                "Level 4 bypass must auto-approve {tool}"
+                "SkipPermissions bypass must auto-approve {tool}"
             );
         }
     }
 
     #[test]
-    fn unrestricted_keeps_reads_and_writes_frictionless() {
+    fn skip_permissions_keeps_reads_and_writes_frictionless() {
         for (tool, category) in [
             ("read", ToolCategory::Read),
             ("write", ToolCategory::Write),
             ("edit", ToolCategory::Write),
         ] {
             let decision = needs_permission(
-                PermissionLevel::Unrestricted,
+                PermissionLevel::SkipPermissions,
                 tool,
                 &serde_json::json!({"path": "src/lib.rs"}),
                 Path::new("."),
@@ -1056,7 +1047,7 @@ mod tests {
             );
             assert!(
                 matches!(decision, PermissionDecision::AutoApprove),
-                "Level 4 must keep {tool} auto-approved"
+                "SkipPermissions must keep {tool} auto-approved"
             );
         }
     }
@@ -1180,7 +1171,7 @@ mod w3_w7_tests {
         std::fs::write(&outside, "x").unwrap();
         let ws = std::fs::canonicalize(&ws).unwrap();
 
-        for level in [PermissionLevel::ReadFree, PermissionLevel::WorkspaceFree] {
+        for level in [PermissionLevel::ReadOnly, PermissionLevel::WorkspaceWrite] {
             let inside_decision = needs_permission(
                 level,
                 "read",
@@ -1210,7 +1201,7 @@ mod w3_w7_tests {
         }
 
         let bypass = needs_permission(
-            PermissionLevel::Unrestricted,
+            PermissionLevel::SkipPermissions,
             "read",
             &serde_json::json!({"path": outside}),
             &ws,

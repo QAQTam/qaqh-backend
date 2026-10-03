@@ -23,7 +23,7 @@ fn skills_typed_activation_carries_effect_and_same_source_output() {
     qaqh_workspace::set_workspace(&workspace.path().to_string_lossy());
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: "skills-typed".into(),
-        permission_level: 4,
+        permission_level: 3,
         mode: 0,
         workspace_root: Some(workspace.path().to_string_lossy().into_owned()),
     };

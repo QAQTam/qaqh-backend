@@ -47,7 +47,7 @@ fn decision_for(path: &Path, trusted: &[PathBuf]) -> PermissionDecision {
 fn decision_for_json_path(json_path: &str, trusted: &[PathBuf]) -> PermissionDecision {
     let workspace = std::env::temp_dir().join("qaqh-trust-subtree-workspace");
     needs_permission(
-        qaqh_workspace::PermissionLevel::WorkspaceFree,
+        qaqh_workspace::PermissionLevel::WorkspaceWrite,
         "write",
         &serde_json::json!({ "path": json_path }),
         &workspace,
@@ -325,7 +325,7 @@ fn one_untrusted_path_in_batch_blocks_auto_approval() {
     });
 
     let decision = needs_permission(
-        qaqh_workspace::PermissionLevel::WorkspaceFree,
+        qaqh_workspace::PermissionLevel::WorkspaceWrite,
         "write",
         &args,
         &workspace,

@@ -140,7 +140,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     }
     qaqh_workspace::runtime::init_tools("todo-contract", &[], vec![]);
     qaqh_workspace::runtime::set_context("todo-contract", 1);
-    // PR-3-2：显式上下文。刻意用 Level 1（MaxLockdown）：todo_* 是会话内
+    // PR-3-2：显式上下文。刻意用最严档 read-only：todo_* 是会话内
     // 状态工具，permission 层对其豁免（永不弹确认），本测试同时验证这一点。
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: "todo-contract".into(),

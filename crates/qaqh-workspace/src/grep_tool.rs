@@ -547,7 +547,7 @@ mod tests {
             session_id: "grep-test-session".to_string(),
             workspace_root: root.to_path_buf(),
             mode: crate::tool_api::AgentMode::Code,
-            permission_level: crate::permission::PermissionLevel::ReadFree,
+            permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
             exec_default_shell: None,

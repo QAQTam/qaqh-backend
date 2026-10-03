@@ -281,7 +281,7 @@ fn context_from_legacy(ctx: &ToolCallCtx) -> ToolCallContext {
         },
         permission_level: crate::runtime::context()
             .map(|context| crate::permission::PermissionLevel::from_u8(context.permission_level))
-            .unwrap_or(crate::permission::PermissionLevel::MaxLockdown),
+            .unwrap_or(crate::permission::PermissionLevel::ReadOnly),
         sandbox: if crate::authorization::is_subagent_sandbox() {
             SandboxMode::Subagent
         } else {

@@ -8,6 +8,7 @@ description = "QAQ-Harness configuration: provider registry, config load/save"
 default = []
 
 [dependencies]
+qaqh-policy = { path = "../qaqh-policy" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-config-api = { path = "../qaqh-config-api" }
 serde = { version = "1", features = ["derive"] }

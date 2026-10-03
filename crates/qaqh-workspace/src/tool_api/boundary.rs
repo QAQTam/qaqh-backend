@@ -128,7 +128,7 @@ mod tests {
             session_id: "d9a1a320".to_owned(),
             workspace_root: PathBuf::from("/tmp/ws"),
             mode: AgentMode::Plan,
-            permission_level: PermissionLevel::MaxLockdown,
+            permission_level: PermissionLevel::ReadOnly,
             cancellation: CancellationToken::new(),
         };
         assert_eq!(context.mode, AgentMode::Plan);

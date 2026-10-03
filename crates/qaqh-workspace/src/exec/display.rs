@@ -51,7 +51,24 @@ impl ToolProjection for ExecOutput {
         if self.status() == ToolStatus::Ok {
             return None;
         }
-        Some(ToolError::new(ToolErrorKind::Execution, self.to_json()))
+        // 失败槽的 detail 是给账本与 timeline 状态行的人读一句话，不是正文：
+        // stdout/stderr 证据由 display body（与模型向 JSON）承载，这里再塞
+        // `to_json()` 会让失败槽与正文逐字重复。timeout/cancelled 连退出码
+        // 都没有，kind 一并给准，code 随 kind 推导。
+        let (kind, detail) = if self.timed_out {
+            (ToolErrorKind::Timeout, "timeout".to_owned())
+        } else if self.cancelled {
+            (ToolErrorKind::Cancelled, "cancelled".to_owned())
+        } else {
+            (
+                ToolErrorKind::Execution,
+                format!(
+                    "exit {}",
+                    self.exit_code.map_or("?".into(), |code| code.to_string())
+                ),
+            )
+        };
+        Some(ToolError::new(kind, detail))
     }
 
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
@@ -349,5 +366,71 @@ mod tests {
                 command: "ls".into()
             }
         );
+    }
+
+    /// 失败槽 detail 是给人读的一句话（exit N / timeout / cancelled），不再把
+    /// 整段模型向 JSON 塞进 `error.detail`——那曾让 timeline 失败槽与正文逐字
+    /// 重复，TUI 状态行/正文双重显示。
+    #[test]
+    fn exec_error_slot_is_human_reason_not_a_json_copy() {
+        let mut view = ExecOutput {
+            status: "completed".into(),
+            command: "cargo build".into(),
+            exit_code: Some(101),
+            output: String::new(),
+            stdout: String::new(),
+            stderr: "error: could not compile".into(),
+            truncated: false,
+            timed_out: false,
+            cancelled: false,
+            process_id: None,
+        };
+        let error = view.error().expect("failed exec carries error");
+        assert_eq!(error.code.as_str(), "execution");
+        assert_eq!(error.detail, "exit 101");
+        assert!(!error.detail.contains('{'), "detail 不得是 JSON: {error:?}");
+
+        view.timed_out = true;
+        view.exit_code = None;
+        let error = view.error().expect("timeout carries error");
+        assert_eq!(error.code.as_str(), "timeout");
+        assert_eq!(error.detail, "timeout");
+
+        view.timed_out = false;
+        view.cancelled = true;
+        let error = view.error().expect("cancelled carries error");
+        assert_eq!(error.code.as_str(), "cancelled");
+        assert_eq!(error.detail, "cancelled");
+    }
+
+    /// LLM 传输面回归锁：错误槽改造不得动模型可见内容——model_blocks 仍是
+    /// canonical JSON，summary 仍是 `exit N · command`。
+    #[test]
+    fn exec_model_face_is_unchanged_by_error_slot_rework() {
+        let view = ExecOutput {
+            status: "completed".into(),
+            command: "cargo build".into(),
+            exit_code: Some(101),
+            output: "partial".into(),
+            stdout: String::new(),
+            stderr: "error: could not compile".into(),
+            truncated: false,
+            timed_out: false,
+            cancelled: false,
+            process_id: None,
+        };
+        let blocks = view.model_blocks();
+        assert_eq!(blocks.len(), 1);
+        let ToolContentBlock::Text { text } = &blocks[0] else {
+            panic!("exec model block must be text");
+        };
+        assert_eq!(text, &view.to_json(), "模型面必须仍是 canonical JSON");
+        // stdout/stderr 是 `#[serde(skip)]` 的 display-only 字段；模型 JSON 带
+        // 的是合并 `output`。锁的是形状不变：合并正文仍在模型面。
+        assert!(text.contains("partial"), "合并正文仍在模型面");
+        assert!(!text.contains("stdout"), "display-only 流字段不进模型 JSON");
+        // summary() 不带 args（命令后缀走 display(&args) 路径），此处只锁
+        // 「错误槽改造未影响 summary 投影」。
+        assert_eq!(view.summary(), Some("exit 101".to_string()));
     }
 }

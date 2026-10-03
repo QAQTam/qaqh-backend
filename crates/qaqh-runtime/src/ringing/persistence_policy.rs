@@ -179,6 +179,8 @@ mod tests {
             TimelineEvent::ToolUpdated {
                 block_id: "b".into(),
                 tool: qaqh_domain::TimelineTool {
+                    exit_code: None,
+                    completed_at_ms: None,
                     tool_call_id: "c".into(),
                     name: "exec".into(),
                     state: TimelineToolState::Running,

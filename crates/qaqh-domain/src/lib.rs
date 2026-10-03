@@ -44,5 +44,5 @@ pub use timeline::{
     TimelineEntry, TimelineEvent, TimelineFailure, TimelineIntent, TimelinePathOp, TimelineRound,
     TimelineSnapshot, TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader,
     TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn,
-    TimelineTurnState, ToolCallDef, ToolResultDef, TurnData,
+    TimelineTurnState, ToolCallDef, ToolResultDef, TurnData, tool_failure_of,
 };

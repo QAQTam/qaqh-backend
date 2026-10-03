@@ -35,13 +35,33 @@ const SERVICE_METHODS: &[&str] = &[
     "git.branch",
     "git.branches",
     "git.file_diff",
+    // 设置页读写面(qaqh-config-api 契约):全局配置 + profile 名录。
+    // 档位不单开 `config.set_permission_level`——它与 `config.save` 的
+    // permissionLevel 走同一个单写口与同一份 validate(service.rs:537-556),
+    // 双写口只会让「未保存草稿」和「已生效档位」在 UI 里对不齐。
+    "config.load",
+    "config.save",
+    "profile.apply",
+    "profile.save_current",
+    "profile.delete",
 ];
 
 /// 这些方法之外都要注入 active session_id(gateway 语义平移)。
+///
+/// config.*/profile.* 一律豁免:配置是 daemon 全局态,与活动会话无关。注入会
+/// 在无活动 seed 时(引导失败/零会话)直接报 `no_active_seed`,设置浮层就打不开了。
 fn service_requires_session(method: &str) -> bool {
     !matches!(
         method,
-        "daemon.version" | "session.list" | "session.activity" | "workspace.list"
+        "daemon.version"
+            | "session.list"
+            | "session.activity"
+            | "workspace.list"
+            | "config.load"
+            | "config.save"
+            | "profile.apply"
+            | "profile.save_current"
+            | "profile.delete"
     )
 }
 
@@ -90,6 +110,7 @@ pub async fn attach(
     app: AppHandle,
     state: State<'_, HostState>,
     seed: String,
+    limit: Option<u32>,
 ) -> Result<(), String> {
     let client = daemon::ensure_connected(&app).await?;
     let previous = {
@@ -106,7 +127,12 @@ pub async fn attach(
         client.deactivate_timeline(&previous).await;
     }
     client.attach(&seed).await.map_err(string_of)?;
-    client.activate_timeline(&seed).await.map_err(string_of)?;
+    // 首页大小由前端指定:宿主取的那一页会作为 timeline://snapshot 推给 webview,
+    // 前端因此不必再补一次 resnapshot(一次 attach 两页、整表重建两遍)。
+    client
+        .activate_timeline_with(&seed, limit)
+        .await
+        .map_err(string_of)?;
     Ok(())
 }
 
@@ -280,6 +306,19 @@ pub fn open_external(app: AppHandle, url: String) -> Result<(), String> {
         return Err("only http/https urls are allowed".into());
     }
     app.opener().open_url(url, None::<&str>).map_err(string_of)
+}
+
+/// `(seed) → TimelineStatus | null`:查询该 seed 的 timeline 流当前状态
+/// (宿主 `watch` 侧值,`None` = 从未激活)。兜底事件竞态:webview 订阅晚于
+/// `timeline://status: open` 发出时(Tauri 事件不保留给晚到订阅者),前端订阅
+/// 完成后主动查询一次对齐,避免 UI 永远停在「重连中」。
+#[tauri::command]
+pub async fn timeline_status(app: AppHandle, seed: String) -> Result<Option<Value>, String> {
+    let client = daemon::ensure_connected(&app).await?;
+    match client.timeline_status_for(&seed).await {
+        Some(status) => serde_json::to_value(&status).map(Some).map_err(string_of),
+        None => Ok(None),
+    }
 }
 
 /// `(seed?) → ()`:宿主侧重连(用户点「重试」/窗口聚焦)。同时兜底建立连接。

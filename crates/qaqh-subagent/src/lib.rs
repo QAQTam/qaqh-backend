@@ -1880,7 +1880,7 @@ mod tests {
             session_id: "parent-seed".to_string(),
             workspace_root: std::path::PathBuf::from("/tmp/workspace"),
             mode: qaqh_workspace::tool_api::AgentMode::Code,
-            permission_level: qaqh_workspace::permission::PermissionLevel::Unrestricted,
+            permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from("/tmp/workspace"),

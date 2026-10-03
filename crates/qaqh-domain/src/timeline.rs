@@ -76,6 +76,57 @@ pub struct TimelineFailure {
     pub message: String,
 }
 
+/// 失败槽 message 的单行上界：状态行/导出承载的是「为什么失败」的一句话，
+/// 不是正文证据——证据由 `output` 独自承载，两者**永不互相复制**。
+pub const FAILURE_MESSAGE_MAX_CHARS: usize = 200;
+
+/// 工具终态 → timeline 失败槽的**单一事实源**投影。
+///
+/// - `code` 取 `error.code`（机器可读的真实错误码）；无 error 时回退
+///   `tool_execution_failed`（历史字面量，旧 journal 无 error 字段）。
+/// - `message` 只从 `error.message` 取首个非空行并压平、有界——**不读
+///   `output`**。此前三处发射点都把整段模型向文本塞进 message，与 output
+///   逐字重复，TUI 状态行与正文因此双重显示同一错误。
+///
+/// 非 failure 状态返回 `None`。
+pub fn tool_failure_of(result: &qaqh_types::ToolResult) -> Option<TimelineFailure> {
+    if !result.status.is_failure() {
+        return None;
+    }
+    let error = result.error.as_ref();
+    let code = error
+        .map(|error| error.code.trim())
+        .filter(|code| !code.is_empty())
+        .unwrap_or("tool_execution_failed")
+        .to_owned();
+    let message = error
+        .map(|error| one_line_bounded(&error.message, FAILURE_MESSAGE_MAX_CHARS))
+        .unwrap_or_default();
+    Some(TimelineFailure { code, message })
+}
+
+/// 首个非空行压平为单行并按字符数有界（UTF-8 边界安全）。
+///
+/// 失败槽的唯一文本规整入口：live 发射（[`tool_failure_of`]）与 journal
+/// rebuild 共用，保证两条路径产出同形的 message。
+pub fn one_line_bounded(text: &str, max_chars: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .map(|ch| if ch == '\r' || ch == '\t' { ' ' } else { ch })
+        .collect::<String>();
+    let trimmed = line.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_owned();
+    }
+    let mut bounded: String = trimmed.chars().take(max_chars).collect();
+    bounded.push('…');
+    bounded
+}
+
 /// Tool permission data belongs to the transcript tool block, while the
 /// interaction request/response lifecycle stays on the native control plane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +136,11 @@ pub struct TimelineToolPermission {
     pub paths: Vec<String>,
     pub category: String,
     pub level: u8,
+    /// 稳定档名标签(read-only / workspace-write / skip-permissions)。
+    /// 展示端用档名而非裸数字——数字语义已在三档制中整体平移,单看数字
+    /// 会误导。旧记录经 serde default 反序列化为空串,展示端兜底显数字。
+    #[serde(default)]
+    pub level_name: String,
     pub risk: String,
     pub consequence: String,
 }
@@ -208,6 +264,17 @@ pub enum TimelineToolBody {
     Unknown,
 }
 
+impl TimelineToolBody {
+    /// body 携带的退出码（契约切片 2026-10-03：runtime 据此填充
+    /// `TimelineTool.exit_code` 顶层槽，client 无需拆 body）。
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Shell { exit_code, .. } | Self::Streams { exit_code, .. } => *exit_code,
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct TimelineToolMetrics {
@@ -269,6 +336,15 @@ pub struct TimelineTool {
     pub failure: Option<TimelineFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<TimelineToolPermission>,
+    /// 工具退出码（提升为顶层槽，契约切片 2026-10-03）。由 runtime 从
+    /// display body 提取——client 无需拆 body/legacy JSON 即可拿到；非
+    /// exec 家族恒为 `None`。归档 rebuild 从同源 display 提取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// 调用完成时间（epoch ms，runtime 在终态发射时盖戳，不信工具自报）。
+    /// 终态前 / 旧归档为 `None`——client 对缺席**不画**，不用本地时钟兜底。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
 }
 
 /// Fully materialized display block saved in timeline snapshots.
@@ -537,6 +613,10 @@ pub struct ToolResultDef {
     /// Canonical display projection carried by typed tool results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<qaqh_types::ToolResultDisplay>,
+    /// 结构化错误（rebuild 侧失败槽的单一事实源）。历史归档无此字段
+    /// （serde default 兼容）；缺失时 rebuild 只能从 output 首行降级。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<qaqh_types::ToolError>,
 }
 
 /// File metadata snapshot for rich rendering.
@@ -597,6 +677,147 @@ pub enum RoundBlock {
     /// (Responses API). Shown as a record line; the search itself ran on the
     /// provider, so there is no local tool card or result round-trip.
     WebSearch { action: String },
+}
+
+#[cfg(test)]
+mod failure_slot_tests {
+    use super::*;
+    use qaqh_types::ToolResult;
+
+    fn failed_result(error: Option<qaqh_types::ToolError>, model_text: &str) -> ToolResult {
+        let mut result = ToolResult::text(qaqh_types::ToolStatus::Error, model_text.to_owned());
+        result.error = error;
+        result
+    }
+
+    /// 失败槽单一事实源：code/message 只从 error 取，**永不抄 output**——
+    /// 此前三处发射点把整段模型向文本塞进 message，TUI 状态行与正文双重
+    /// 显示同一错误（2026-10-03 实锤）。
+    #[test]
+    fn failure_slot_takes_code_and_one_line_message_from_error_not_output() {
+        let result = failed_result(
+            Some(qaqh_types::ToolError {
+                code: "not_found".into(),
+                message: "file not found: /tmp/missing.txt".into(),
+                retryable: false,
+                hint: Some("re-read".into()),
+            }),
+            "file not found: /tmp/missing.txt
+Hint: re-read",
+        );
+        let failure = tool_failure_of(&result).expect("failure slot");
+        assert_eq!(failure.code, "not_found", "code 用真实错误码");
+        assert_eq!(failure.message, "file not found: /tmp/missing.txt");
+        assert!(
+            !failure.message.contains("Hint"),
+            "message 是单行理由，不是整段 output 的复制"
+        );
+    }
+
+    #[test]
+    fn failure_slot_flattens_to_first_nonempty_line_and_bounds() {
+        let result = failed_result(
+            Some(qaqh_types::ToolError {
+                code: "execution".into(),
+                message: "
+
+  second line is the real reason  
+more"
+                    .into(),
+                retryable: false,
+                hint: None,
+            }),
+            "whatever",
+        );
+        let failure = tool_failure_of(&result).expect("failure slot");
+        assert_eq!(failure.message, "second line is the real reason");
+
+        let long = "x".repeat(FAILURE_MESSAGE_MAX_CHARS + 50);
+        let result = failed_result(
+            Some(qaqh_types::ToolError {
+                code: "execution".into(),
+                message: long.clone(),
+                retryable: false,
+                hint: None,
+            }),
+            "whatever",
+        );
+        let failure = tool_failure_of(&result).expect("failure slot");
+        assert_eq!(
+            failure.message.chars().count(),
+            FAILURE_MESSAGE_MAX_CHARS + 1
+        );
+        assert!(failure.message.ends_with('…'));
+    }
+
+    #[test]
+    fn failure_slot_falls_back_when_error_missing_or_blank() {
+        let result = failed_result(None, "some output");
+        let failure = tool_failure_of(&result).expect("failure slot");
+        assert_eq!(failure.code, "tool_execution_failed");
+        assert_eq!(failure.message, "");
+
+        let result = failed_result(
+            Some(qaqh_types::ToolError {
+                code: "  ".into(),
+                message: "   ".into(),
+                retryable: false,
+                hint: None,
+            }),
+            "some output",
+        );
+        let failure = tool_failure_of(&result).expect("failure slot");
+        assert_eq!(failure.code, "tool_execution_failed");
+        assert_eq!(failure.message, "");
+    }
+
+    #[test]
+    fn success_and_cancelled_free_statuses_have_no_failure_slot() {
+        let mut result = ToolResult::text(qaqh_types::ToolStatus::Ok, "fine".into());
+        assert!(tool_failure_of(&result).is_none());
+        result.status = qaqh_types::ToolStatus::Backgrounded;
+        assert!(tool_failure_of(&result).is_none());
+    }
+
+    /// 契约切片（2026-10-03）：TimelineTool 顶层 exit_code/completed_at_ms
+    /// 可选，旧 wire JSON（无这两个键）可解析且为 None。
+    #[test]
+    fn timeline_tool_parses_without_terminal_slots() {
+        let raw = r#"{"tool_call_id":"c1","name":"read","state":"succeeded","progress":""}"#;
+        let tool: TimelineTool = serde_json::from_str(raw).expect("旧 wire 必须可解析");
+        assert_eq!(tool.exit_code, None);
+        assert_eq!(tool.completed_at_ms, None);
+    }
+
+    /// body.exit_code() 顶层提取：Shell/Streams 携带，其余变体 None。
+    #[test]
+    fn body_exit_code_accessor_reads_shell_and_streams() {
+        let shell = TimelineToolBody::Shell {
+            output: String::new(),
+            exit_code: Some(101),
+            truncated: false,
+        };
+        assert_eq!(shell.exit_code(), Some(101));
+        let streams = TimelineToolBody::Streams {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            truncated: false,
+            interleaved: false,
+        };
+        assert_eq!(streams.exit_code(), None);
+        assert_eq!(TimelineToolBody::None.exit_code(), None);
+        assert_eq!(TimelineToolBody::Unknown.exit_code(), None);
+    }
+
+    /// 归档 wire 兼容：ToolResultDef.error 可选，旧 journal（无该键）可解析。
+    #[test]
+    fn tool_result_def_parses_without_error_field() {
+        let raw = r#"{"tool_call_id":"c1","output":"legacy","success":false}"#;
+        let def: ToolResultDef = serde_json::from_str(raw).expect("旧 journal 必须可解析");
+        assert!(def.error.is_none());
+        assert!(def.status.is_none());
+    }
 }
 
 #[cfg(test)]

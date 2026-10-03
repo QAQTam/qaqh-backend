@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
 /// TUI/web）从这里取值；`serde(default)` 保证旧 daemon 缺字段时向前兼容。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDto {
@@ -61,6 +62,7 @@ pub struct ConfigDto {
 }
 
 /// provider 目录项（endpoint 预设树）。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDto {
@@ -69,6 +71,7 @@ pub struct ProviderDto {
     pub endpoints: Vec<EndpointDto>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointDto {
@@ -83,6 +86,7 @@ pub struct EndpointDto {
 }
 
 /// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentDto {
@@ -118,6 +122,7 @@ fn default_subagent_message_outbound() -> u64 {
 }
 
 /// MCP 客户端配置读模型（docs/current/architecture.md）。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpDto {
@@ -128,6 +133,7 @@ pub struct McpDto {
 }
 
 /// 单个 MCP server 读模型。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerDto {
@@ -150,6 +156,7 @@ pub struct McpServerDto {
 }
 
 /// LSP 客户端配置读模型（docs/current/architecture.md）。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LspDto {
@@ -160,6 +167,7 @@ pub struct LspDto {
 }
 
 /// 单个 LSP server 读模型。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LspServerDto {
@@ -178,10 +186,11 @@ pub struct LspServerDto {
 ///
 /// 刻意**不含**：providers/profiles 名录（服务端派生）、active_profile
 /// （切换走 `profile.apply`）、api_key_set（服务端派生）。
-/// `permissionLevel` 在 patch 中受 1..=4 值域校验（BUG-2026-09-13-15）。
+/// `permissionLevel` 在 patch 中受 1..=3 值域校验（BUG-2026-09-13-15；三档制 2026-10-03）。
 ///
 /// 特例语义冻结：`apiKey`/`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
 /// 保持现值（显式删除须专用接口）；其余字符串字段 Some(空串) = 显式置空。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ConfigPatch {
@@ -216,13 +225,13 @@ pub struct ConfigPatch {
     pub theme: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notifications_enabled: Option<bool>,
-    /// 权限档位（1=MaxLockdown，2=ReadFree，3=WorkspaceFree，
-    /// 4=Unrestricted：显式危险 bypass，普通工具全部自动放行）。
+    /// 权限档位（1=read-only，2=workspace-write，
+    /// 3=skip-permissions：显式危险 bypass，普通工具全部自动放行）。
     ///
     /// BUG-2026-09-13-15：历史上该字段刻意缺席写模型，只有
     /// `config.set_permission_level` 单写口；但写口校验缺失时非法档位仍能从
     /// `config.save` 的裸 `permissionLevel` 载荷漏进配置。现在并入 patch 并在
-    /// [`Self::validate`] 中做值域校验（非法即拒绝，不落成 Level 4）。
+    /// [`Self::validate`] 中做值域校验（非法即拒绝，1..=3 之外不落盘）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -232,6 +241,7 @@ pub struct ConfigPatch {
 }
 
 /// 子代理配置段（写模型），嵌套于 [`ConfigPatch::subagent`]。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SubagentPatch {
@@ -287,10 +297,10 @@ impl ConfigPatch {
             ));
         }
         if let Some(level) = self.permission_level
-            && !(1..=4).contains(&level)
+            && !(1..=3).contains(&level)
         {
             return Err(format!(
-                "permissionLevel 仅允许 1..=4（1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree, 4=Unrestricted），收到 {level}"
+                "permissionLevel 仅允许 1..=3（1=read-only, 2=workspace-write, 3=skip-permissions），收到 {level}"
             ));
         }
         if let Some(sub) = &self.subagent {
@@ -480,14 +490,19 @@ mod tests {
             ..Default::default()
         };
         assert!(disabled.validate().is_ok());
-        // permissionLevel 值域 1..=4（BUG-2026-09-13-15：非法档位曾能从
-        // config.save 的裸载荷漏进配置、落成 Level 4）。
+        // permissionLevel 值域 1..=3(BUG-2026-09-13-15:非法档位曾能从
+        // config.save 的裸载荷漏进配置;2026-10-03 三档制)。
         let bad_level = ConfigPatch {
             permission_level: Some(5),
             ..Default::default()
         };
         assert!(bad_level.validate().is_err(), "档位 5 必须被拒");
-        for level in 1..=4u64 {
+        let legacy_level = ConfigPatch {
+            permission_level: Some(4),
+            ..Default::default()
+        };
+        assert!(legacy_level.validate().is_err(), "旧四档值 4 必须被拒");
+        for level in 1..=3u64 {
             let ok_level = ConfigPatch {
                 permission_level: Some(level),
                 ..Default::default()

@@ -78,8 +78,13 @@ pub struct PersistentConfig {
     pub compliance_allowlist: Option<Vec<String>>,
 
     // ── Permission ──
-    /// Agent permission level: 1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree,
-    /// 4=Unrestricted (explicit dangerous bypass; all ordinary tools auto).
+    /// Agent permission tier(2026-10-03 三档制): 1=read-only, 2=workspace-write,
+    /// 3=skip-permissions (explicit dangerous bypass; all ordinary tools auto).
+    /// 这是唯一 save 落盘的权限键。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_tier: Option<u8>,
+    /// 旧 L1–L4 键(废弃):仅 load 时迁移(1/2→read-only, 3→workspace-write,
+    /// 4→skip-permissions),save 不再写出,避免数字 3 的新旧歧义越权。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<u8>,
 

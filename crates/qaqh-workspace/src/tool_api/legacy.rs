@@ -408,7 +408,7 @@ mod tests {
             session_id: "seed_1".to_owned(),
             workspace_root: std::path::PathBuf::from("/tmp/ws"),
             mode: AgentMode::Code,
-            permission_level: PermissionLevel::ReadFree,
+            permission_level: PermissionLevel::ReadOnly,
             sandbox: SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
                 "/tmp/ws",

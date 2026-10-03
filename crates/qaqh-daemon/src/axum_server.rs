@@ -2367,6 +2367,54 @@ mod axum_tests {
         assert_eq!(turns.len(), 1, "limit=0 must degrade to a bounded page");
         assert_eq!(page["total_turns"], serde_json::json!(3));
     }
+
+    /// `?limit=N` 端到端生效（此前只有 `limit=0` 被钉过，正常页大小无人验证）。
+    #[tokio::test]
+    async fn timeline_honors_requested_page_size() {
+        let state = test_state();
+        state
+            .leases
+            .lock()
+            .unwrap()
+            .open("cs-1".into(), "ci-1".into());
+        state
+            .leases
+            .lock()
+            .unwrap()
+            .attach_session("cs-1", "seed-1");
+        for i in 1..=3 {
+            state
+                .hub
+                .publish_timeline(
+                    "seed-1",
+                    qaqh_domain::TimelineIntent::TurnOpened {
+                        turn_id: format!("t{i}"),
+                        user_text: format!("q{i}"),
+                    },
+                )
+                .expect("seed a timeline turn");
+        }
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/ringing/v2/sessions/seed-1/timeline?limit=2")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", "cs-1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let turns = page["snapshot"]["turns"].as_array().expect("turns array");
+        // 取的是最新两页端点：t3、t2（`before_index` 缺省 = 最新一页）。
+        assert_eq!(turns.len(), 2, "limit=2 必须恰好给两条");
+        assert_eq!(page["total_turns"], serde_json::json!(3));
+        assert_eq!(turns[0]["turn_index"], serde_json::json!(1));
+        assert_eq!(turns[1]["turn_index"], serde_json::json!(2));
+        assert_eq!(page["has_more"], serde_json::json!(true), "还有 t1 可翻");
+    }
 }
 
 #[cfg(test)]

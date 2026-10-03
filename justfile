@@ -35,9 +35,13 @@ webui-build:
 
 # ── 前端类型契约（ts-rs 单一真相）──────────────────
 #
-# webui/src/api/ 是**生成物**：crates/qaqh-{types,domain,ringing} 上 97 处
-# `derive(TS)` 集中导出到此（`export_to = "qaqh/"` 不变，靠 TS_RS_EXPORT_DIR
+# webui/src/api/ 是**生成物**：crates/qaqh-{types,domain,ringing,session,config-api}
+# 上的 `derive(TS)` 集中导出到此（`export_to = "qaqh/"` 不变，靠 TS_RS_EXPORT_DIR
 # 收口，避免各 crate 散落 bindings/）。前端一律 import 这里，不再手抄 wire 形状。
+#
+# 注意跨 crate 撞名：qaqh-session 的 ActivityState/ContentRef/ToolError/
+# InteractionKind/InterAgentDelivery 与 domain/types 同名但**不同形状**，已用
+# `#[ts(rename = "Session…")]` 区分——集中目录里同名即静默覆盖。
 #
 # TS_RS_LARGE_INT=number 是必须的：ts-rs 默认把 u64/i64 映射成 `bigint`,
 # 而它们在 JSON 线上就是 number（生成物里那些 ts(as = "u32") 就是在绕这件事）。
@@ -45,11 +49,11 @@ webui-build:
 
 [unix]
 ts-export:
-    TS_RS_EXPORT_DIR="{{justfile_directory()}}/webui/src/api" TS_RS_LARGE_INT=number cargo test -p qaqh-types -p qaqh-domain -p qaqh-ringing --features qaqh-types/ts,qaqh-domain/ts,qaqh-ringing/ts
+    TS_RS_EXPORT_DIR="{{justfile_directory()}}/webui/src/api" TS_RS_LARGE_INT=number cargo test -p qaqh-types -p qaqh-domain -p qaqh-ringing -p qaqh-session -p qaqh-config-api --features qaqh-types/ts,qaqh-domain/ts,qaqh-ringing/ts,qaqh-session/ts,qaqh-config-api/ts
 
 [windows]
 ts-export:
-    $env:TS_RS_EXPORT_DIR="{{justfile_directory()}}/webui/src/api"; $env:TS_RS_LARGE_INT="number"; cargo test -p qaqh-types -p qaqh-domain -p qaqh-ringing --features qaqh-types/ts,qaqh-domain/ts,qaqh-ringing/ts
+    $env:TS_RS_EXPORT_DIR="{{justfile_directory()}}/webui/src/api"; $env:TS_RS_LARGE_INT="number"; cargo test -p qaqh-types -p qaqh-domain -p qaqh-ringing -p qaqh-session -p qaqh-config-api --features qaqh-types/ts,qaqh-domain/ts,qaqh-ringing/ts,qaqh-session/ts,qaqh-config-api/ts
 
 # 生成物落后于 Rust 真相则失败——wire 类型改完忘了跑 ts-export 的兜底。
 # 退出码非零时看 `git diff webui/src/api` 就是漂移清单。

@@ -130,9 +130,10 @@ pub struct Config {
     pub compliance_extra_keywords: Vec<String>,
     /// Whitelisted patterns exempt from content filtering.
     pub compliance_allowlist: Vec<String>,
-    /// Agent permission level:
-    /// 1 = MaxLockdown, 2 = ReadFree, 3 = WorkspaceFree,
-    /// 4 = Unrestricted (explicit dangerous bypass; all ordinary tools auto).
+    /// Agent permission tier (裸 u8,wire 兼容;2026-10-03 三档制取代 L1–L4):
+    /// 1 = read-only, 2 = workspace-write,
+    /// 3 = skip-permissions (explicit dangerous bypass; all ordinary tools auto).
+    /// 旧四档数值在 load 处经 `PermissionLevel::from_legacy_u8` 迁移。
     pub permission_level: u8,
     /// Path to a HuggingFace tokenizer.json. `None` = use heuristic fallback.
     pub tokenizer_path: Option<String>,
@@ -640,7 +641,7 @@ impl Default for Config {
             compliance_enabled: true,
             compliance_extra_keywords: Vec::new(),
             compliance_allowlist: Vec::new(),
-            permission_level: 3, // WorkspaceFree — safe autonomous default
+            permission_level: 2, // workspace-write — safe autonomous default
             tokenizer_path: None,
             auto_compact_threshold: 0.75,
             session_idle_unload_secs: 0,
@@ -906,20 +907,33 @@ impl Config {
             // serde 忽略；残留的 secrets.toml multimodal 槽位不再读取。
 
             // ── Permission ──
-            // BUG-2026-09-13-15：`permission_level` 是裸 u8，手写 config.toml
-            // 的笔误（0 / 5..=255）曾一路带进运行时并被静默当作 Level 4
-            // （Unrestricted，免审批）——越界值必须收敛到最严档（fail-closed），
-            // 绝不能反向放大权限。仅打日志，不中断启动（用户配置不应让 daemon
-            // 起不来；降级方向安全）。
-            if let Some(pl) = pc.permission_level {
-                if (1..=4).contains(&pl) {
-                    cfg.permission_level = pl;
-                } else {
-                    log::warn!(
-                        "[config] invalid permission_level {pl} in config.toml (must be 1-4); \
-falling back to 1 (MaxLockdown)"
-                    );
-                    cfg.permission_level = 1;
+            // 2026-10-03 三档制(read-only / workspace-write / skip-permissions)
+            // 取代旧 L1–L4。落盘键为 `permission_tier`(严格 1..=3);旧键
+            // `permission_level`(L1–L4)仅 load 时迁移——数字 3 的新旧语义不同
+            // (旧 WorkspaceFree ≈ 新 workspace-write),不能按数字直读,否则
+            // 旧配置升级后越权。无法识别的值 fail-closed 收敛到最严档 1
+            // (read-only),绝不反向放大权限(BUG-2026-09-13-15)。仅打日志。
+            if let Some(tier) = pc.permission_tier {
+                match qaqh_policy::PermissionLevel::try_from_u8(tier) {
+                    Ok(t) => cfg.permission_level = t.to_u8(),
+                    Err(_) => {
+                        log::warn!(
+                            "[config] invalid permission_tier {tier} in config.toml (must be 1-3); \
+falling back to 1 (read-only)"
+                        );
+                        cfg.permission_level = 1;
+                    }
+                }
+            } else if let Some(pl) = pc.permission_level {
+                match qaqh_policy::PermissionLevel::from_legacy_u8(pl) {
+                    Some(tier) => cfg.permission_level = tier.to_u8(),
+                    None => {
+                        log::warn!(
+                            "[config] invalid permission_level {pl} in config.toml; \
+falling back to 1 (read-only)"
+                        );
+                        cfg.permission_level = 1;
+                    }
                 }
             }
 
@@ -1157,7 +1171,9 @@ falling back to 1 (MaxLockdown)"
             } else {
                 Some(self.compliance_allowlist.clone())
             },
-            permission_level: Some(self.permission_level),
+            permission_tier: Some(self.permission_level),
+            // 旧键不再写出:防止数字 3 在新三档下被再次当成旧 WorkspaceFree
+            permission_level: None,
             tokenizer_path: self.tokenizer_path.clone(),
             auto_compact_threshold: Some(self.auto_compact_threshold),
             session_idle_unload_secs: (self.session_idle_unload_secs > 0)

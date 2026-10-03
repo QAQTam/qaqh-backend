@@ -473,6 +473,8 @@ mod tests {
                     state: TimelineBlockState::Sealed,
                     text: String::new(),
                     tool: Some(TimelineTool {
+                        exit_code: None,
+                        completed_at_ms: None,
                         tool_call_id: "call-1".into(),
                         name: "exec".into(),
                         state: TimelineToolState::Succeeded,

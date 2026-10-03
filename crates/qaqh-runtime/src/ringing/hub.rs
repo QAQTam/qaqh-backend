@@ -720,6 +720,8 @@ mod tests {
                 block_id: "tool".into(),
                 kind: qaqh_domain::TimelineBlockKind::Tool,
                 tool: Some(qaqh_domain::TimelineTool {
+                    exit_code: None,
+                    completed_at_ms: None,
                     tool_call_id: format!("call-{turn_id}"),
                     name: "exec".into(),
                     state: qaqh_domain::TimelineToolState::Running,
@@ -757,6 +759,8 @@ mod tests {
                 round_num: 0,
                 block_id: "tool".into(),
                 tool: qaqh_domain::TimelineTool {
+                    exit_code: None,
+                    completed_at_ms: None,
                     tool_call_id: format!("call-{turn_id}"),
                     name: "exec".into(),
                     state: qaqh_domain::TimelineToolState::Succeeded,
@@ -1057,6 +1061,8 @@ mod tests {
                 block_id: "tool".into(),
                 kind: qaqh_domain::TimelineBlockKind::Tool,
                 tool: Some(qaqh_domain::TimelineTool {
+                    exit_code: None,
+                    completed_at_ms: None,
                     tool_call_id: "call-t1".into(),
                     name: "exec".into(),
                     state: qaqh_domain::TimelineToolState::Running,
