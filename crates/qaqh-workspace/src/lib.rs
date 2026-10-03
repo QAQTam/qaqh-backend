@@ -14,6 +14,7 @@ pub mod pending;
 pub mod apply_patch;
 pub mod apply_patch_engine;
 
+pub mod arg_estimate;
 pub mod authorization;
 mod code_delta;
 pub mod edit;

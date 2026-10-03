@@ -1,6 +1,8 @@
 /**
  * Turn 渲染(spec §7):用户消息 → (step 流或「已工作」折叠行) → 最终作答;
  * 展开后的时间线(§7.3.1):条目完整、按真实时间顺序,等待区间单独列出。
+ * 「条目完整」指作答以外的工作(step 流阶段用户看到过的东西);被提升为
+ * 最终作答的文本块不进时间线——它已经在下方渲染,再列一遍就是重复。
  *
  * 列表一律按稳定 key 挂载(steps 用 block id、时间线条目用 s:/w: 前缀),
  * 且判别式读取放在 memo/JSX 里:`<For>` 回调体里的直接读取是一次性快照
@@ -15,6 +17,7 @@ import { StepRow } from "../tools/StepRow";
 import { STR, formatOffset, formatWorkDuration } from "../lib/strings";
 import { workDurationMs } from "../lib/time";
 import type { SessionStore } from "../session/store";
+import { isWorkStep } from "../session/types";
 import type { Step, ThinkingStep, Turn, Wait } from "../session/types";
 
 type TimelineItem =
@@ -144,12 +147,14 @@ const TimelineRow: Component<{ item: Accessor<TimelineItem>; turn: Turn; base: n
 
 const Timeline: Component<{ turn: Turn; waits: Wait[] }> = (props) => {
   const items = createMemo<TimelineItem[]>(() => {
-    const entries: TimelineItem[] = props.turn.steps.map((step) => ({
-      key: `s:${step.id}`,
-      at: step.startedAt ?? 0,
-      kind: "step" as const,
-      step,
-    }));
+    const entries: TimelineItem[] = props.turn.steps
+      .filter((step) => isWorkStep(props.turn, step))
+      .map((step) => ({
+        key: `s:${step.id}`,
+        at: step.startedAt ?? 0,
+        kind: "step" as const,
+        step,
+      }));
     for (let index = 0; index < props.waits.length; index += 1) {
       const wait = props.waits[index]!;
       entries.push({ key: `w:${index}`, at: wait.from, kind: "wait" as const, wait });
@@ -182,7 +187,9 @@ const Timeline: Component<{ turn: Turn; waits: Wait[] }> = (props) => {
 export const TurnView: Component<{ turn: Turn; waits: Wait[]; store: SessionStore }> = (props) => {
   const turn = () => props.turn;
   const hasSteps = () => turn().steps.length > 0;
-  const collapsedVisible = () => hasSteps() && (turn().answer != null || turn().status !== "running");
+  /** 折叠行/时间线的内容物:作答以外的 step,或等待区间(纯作答回合没有可展开的东西)。 */
+  const hasWork = () => turn().steps.some((step) => isWorkStep(turn(), step)) || props.waits.length > 0;
+  const collapsedVisible = () => hasWork() && (turn().answer != null || turn().status !== "running");
   const duration = () => {
     const end = turn().answer?.startedAt ?? (turn().status === "running" ? undefined : turnEndAt(turn()));
     return workDurationMs(turn().workStartedAt, end, props.waits);
@@ -223,6 +230,12 @@ export const TurnView: Component<{ turn: Turn; waits: Wait[]; store: SessionStor
         <Collapse open={turn().expanded}>
           <Timeline turn={turn()} waits={props.waits} />
         </Collapse>
+      </Show>
+
+      {/* 中断且没有任何可见产物(无 step、无作答)的回合:给一行状态,
+          别让用户气泡后面空无一物——那看起来像消息被吞了。 */}
+      <Show when={turn().status === "aborted" && !hasWork() && turn().answer == null}>
+        <div class="turn-aborted">{STR.interrupted}</div>
       </Show>
 
       {/* 最终作答(§7.4):无气泡,流式 Markdown */}

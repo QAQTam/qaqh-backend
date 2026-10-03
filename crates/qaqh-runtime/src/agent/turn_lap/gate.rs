@@ -3,7 +3,7 @@
 //! 从 `engine_turn.rs` 原样搬运，行为不变，仅可见性 `pub(crate)` 化以便
 //! 后续 `parse`/`admit`/`backfill` 共享 terminal helpers。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,62 @@ use crate::agent::util;
 pub(crate) const CHECKPOINT_TOKEN_INTERVAL: u32 = 64;
 pub(crate) const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const USAGE_EMIT_INTERVAL: Duration = Duration::from_secs(1);
+/// 参数行数估算的最小间隔。逐 SSE 帧发会把 timeline 的 seq 打成千位数（一次
+/// 2000 行补丁 ≈ 2700 帧），150 ms 上限约 6.7 次/秒，够渲染层跟手又不烧帧。
+pub(crate) const ESTIMATE_INTERVAL: Duration = Duration::from_millis(150);
+
+/// 一个 tool_call 的参数行数估算状态。
+///
+/// `ToolCallProgress.args_so_far` 是**累计串**，所以这里记消费量，每帧只把
+/// 新到的尾巴喂给估算器（估算器本身恒定成本，见 `ArgLineEstimator`）。
+struct ArgLineSlot {
+    /// `None` = 还没认出这是写工具：provider 可能把 name 放在后面的片段里，
+    /// 认出后从累计串第 0 字节重数，前面的内容不会漏。
+    estimator: Option<qaqh_workspace::arg_estimate::ArgLineEstimator>,
+    consumed: usize,
+    last_total: u32,
+    last_emit_at: Option<Instant>,
+}
+
+impl ArgLineSlot {
+    /// 投喂累计参数串，返回这一帧该发的估算（`None` = 不发）。
+    fn push(
+        &mut self,
+        tool_name: &str,
+        args_so_far: &str,
+    ) -> Option<qaqh_workspace::arg_estimate::ArgLineEstimate> {
+        if self.estimator.is_none() {
+            self.estimator = Some(qaqh_workspace::arg_estimate::ArgLineEstimator::for_tool(
+                tool_name,
+            )?);
+            self.consumed = 0;
+        }
+        let estimator = self.estimator.as_mut()?;
+        // `consumed` 只会是此前某个 `args_so_far.len()`，对同一条流必然是字符
+        // 边界；provider 若换了缓冲（非追加），`.get` 失败就把偏移归零重数。
+        let start = self.consumed.min(args_so_far.len());
+        let Some(fragment) = args_so_far.get(start..) else {
+            self.consumed = 0;
+            return None;
+        };
+        if fragment.is_empty() {
+            return None;
+        }
+        estimator.push_fragment(fragment);
+        self.consumed = args_so_far.len();
+        let estimate = estimator.estimate();
+        let total = estimate.lines_added.saturating_add(estimate.lines_removed);
+        let ripe = self
+            .last_emit_at
+            .is_none_or(|at| at.elapsed() >= ESTIMATE_INTERVAL);
+        if total == self.last_total || !ripe {
+            return None;
+        }
+        self.last_total = total;
+        self.last_emit_at = Some(Instant::now());
+        Some(estimate)
+    }
+}
 
 // ── Gate 请求聚合结果 ──
 
@@ -368,6 +424,8 @@ pub(crate) fn gate_request(
     let mut stream_block_text = String::new();
     let mut timeline_segment = 0u32;
     let mut timeline_tools_open = HashSet::new();
+    // A4：写工具参数的行数估算（key = tool_call_id，为空时退到 provider 帧序）。
+    let mut arg_line_slots: HashMap<String, ArgLineSlot> = HashMap::new();
     let mut had_error = false;
     // 已收到 Done（内容完整流式输出）标记：gate 尾部错误不再否定完成。
     let mut done_seen = false;
@@ -551,7 +609,7 @@ pub(crate) fn gate_request(
                 }
             }
             qaqh_gate::StreamEvent::ToolCallProgress {
-                index: _,
+                index,
                 id,
                 name,
                 args_so_far,
@@ -592,6 +650,30 @@ pub(crate) fn gate_request(
                                 failure: None,
                                 permission: None,
                             }),
+                        });
+                }
+                // A4：参数行数估算——只读旁路，执行仍是"参数完整才开始"。
+                let slot_key = if id.is_empty() {
+                    format!("idx:{index}")
+                } else {
+                    id.clone()
+                };
+                let slot = arg_line_slots
+                    .entry(slot_key)
+                    .or_insert_with(|| ArgLineSlot {
+                        estimator: None,
+                        consumed: 0,
+                        last_total: 0,
+                        last_emit_at: None,
+                    });
+                if let Some(estimate) = slot.push(&name, &args_so_far) {
+                    ctx.emitter
+                        .emit_timeline(qaqh_domain::TimelineIntent::ToolEstimated {
+                            turn_id: turn_id.to_string(),
+                            round_num,
+                            block_id: block_id.clone(),
+                            lines_added: estimate.lines_added,
+                            lines_removed: estimate.lines_removed,
                         });
                 }
                 // Ringing 双发：ToolCallPrepared（replaceable 预览，可被 ToolStarted 覆盖）
@@ -804,6 +886,105 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
         }
         p.with_opencode_headers(&ctx.agent.session.session_id, request_tag)
             .with_retry(retry.clone())
+    }
+}
+
+#[cfg(test)]
+mod arg_line_slot_tests {
+    use super::{ArgLineSlot, ESTIMATE_INTERVAL};
+    use std::time::Duration;
+
+    fn slot() -> ArgLineSlot {
+        ArgLineSlot {
+            estimator: None,
+            consumed: 0,
+            last_total: 0,
+            last_emit_at: None,
+        }
+    }
+
+    /// 累计串的每一帧必须是前一帧的扩展（provider 就是这么发的）。
+    fn write_args(lines: usize) -> String {
+        let mut out = String::from(r#"{"path":"a.txt","content":""#);
+        for i in 0..lines {
+            out.push_str(&format!("line{i}\\n"));
+        }
+        out
+    }
+
+    #[test]
+    fn first_number_goes_out_at_once_then_the_interval_gates_the_rest() {
+        let mut s = slot();
+        let first = s.push("write", &write_args(1)).expect("第一个数立刻发");
+        assert_eq!((first.lines_added, first.lines_removed), (1, 0));
+        for lines in 2..=6 {
+            assert!(
+                s.push("write", &write_args(lines)).is_none(),
+                "同一瞬间内不该再发（lines={lines}）"
+            );
+        }
+        std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
+        let later = s.push("write", &write_args(7)).expect("跨过间隔后要发");
+        assert_eq!((later.lines_added, later.lines_removed), (7, 0));
+    }
+
+    /// 数字没变就不占 timeline 的 seq。
+    #[test]
+    fn unchanged_number_is_not_re_emitted() {
+        let mut s = slot();
+        assert!(s.push("write", &write_args(2)).is_some());
+        std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
+        let args = write_args(2);
+        assert!(s.push("write", &args).is_none(), "重复帧没有新信息");
+        assert!(s.push("write", &args).is_none());
+    }
+
+    /// provider 常把 name 放在后续片段里：认出工具后要能从累计串第 0 字节重数。
+    #[test]
+    fn late_name_does_not_lose_the_lines_already_streamed() {
+        let mut s = slot();
+        for lines in 1..=3 {
+            assert!(
+                s.push("", &write_args(lines)).is_none(),
+                "空 name 阶段不发估算"
+            );
+        }
+        std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
+        let late = s
+            .push("write", &write_args(4))
+            .expect("认出 write 后立刻出数");
+        assert_eq!(
+            (late.lines_added, late.lines_removed),
+            (4, 0),
+            "前 3 行不能因为 name 晚到而漏计"
+        );
+    }
+
+    /// 只读工具永远不出估算——否则 read 也会显示"+N"。
+    #[test]
+    fn read_only_tools_never_estimate() {
+        let mut s = slot();
+        for name in ["", "read", "grep", "exec", "confirm_apply"] {
+            assert!(s.push(name, &write_args(5)).is_none(), "{name}");
+        }
+    }
+
+    /// 累计串被整体替换（不是追加）时，旧偏移可能落在多字节字符中间：
+    /// 必须安静归零重数，而不是切片 panic。
+    #[test]
+    fn non_prefixed_resync_does_not_panic() {
+        let mut s = slot();
+        // 先消费 48 字节（write_args(2) 的长度）。
+        assert!(s.push("write", &write_args(2)).is_some());
+        // 第 48 个字节落在 `汉` 的三个字节中间。
+        let replaced = format!("{}汉{}", "a".repeat(47), r#"\n"#);
+        assert!(
+            s.push("write", &replaced).is_none(),
+            "偏移越界这一帧不发估算"
+        );
+        std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
+        let after = s.push("write", &write_args(9)).expect("重同步后要继续出数");
+        assert!(after.lines_added >= 9, "got {after:?}");
     }
 }
 
