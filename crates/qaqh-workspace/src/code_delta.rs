@@ -15,8 +15,10 @@ pub(crate) fn compute(
     let file_path = args.get("path").and_then(|value| value.as_str());
 
     // Compute text-based line counts from args (cheap, no git2 pathspec bug).
+    // 档位键是 execution.rs 的 resolved tool name：`write` 不是 `file`
+    // （旧拼法 `("file", "write")` 在这里永远匹配不上，实测返回 None）。
     let mut delta = match (tool_name, action) {
-        ("file", "write") => {
+        ("write", _) => {
             let content = args
                 .get("content")
                 .and_then(|value| value.as_str())
@@ -28,6 +30,23 @@ pub(crate) fn compute(
                 files_created: 1,
                 files_deleted: 0,
                 file: file_path.map(String::from),
+            })
+        }
+        ("apply_patch", _) => {
+            // 行数从补丁文本数出来（不走 git：apply_patch 没有 `path` 参数，
+            // 下面按单路径查 HEAD 的修正对它无意义）。此前这一档落进
+            // `_ => None`，CodeChanged 与 code_stats.jsonl 对 apply_patch 整体缺席。
+            let patch = args.get("patch").and_then(|value| value.as_str())?;
+            let stats = crate::apply_patch_engine::patch_stats(patch).ok()?;
+            Some(qaqh_domain::CodeDeltaRecord {
+                timestamp: now,
+                lines_added: stats.lines_added,
+                lines_removed: stats.lines_removed,
+                files_created: stats.files_created,
+                files_deleted: stats.files_deleted,
+                file: stats
+                    .single_path
+                    .map(|path| path.to_string_lossy().into_owned()),
             })
         }
         ("delete", _) => Some(qaqh_domain::CodeDeltaRecord {
@@ -98,4 +117,72 @@ fn git_file_meta(file_path: &str) -> Option<GitFileMeta> {
         files_created: usize::from(is_new),
         files_deleted: 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute;
+    use serde_json::json;
+
+    /// apply_patch 此前落进 `_ => None`：CodeChanged 与 code_stats.jsonl 对它
+    /// 整体缺席。行数从补丁文本数，上下文行不计入。
+    #[test]
+    fn apply_patch_reports_line_counts_from_the_patch() {
+        let patch = "\
+*** Begin Patch
+*** Update File: src/a.rs
+@@
+-old one
+-old two
++new one
++new two
++new three
+ context line
+*** End Patch
+";
+        let delta = compute("apply_patch", &json!({ "patch": patch })).expect("apply_patch delta");
+        assert_eq!((delta.lines_added, delta.lines_removed), (3, 2));
+        assert_eq!((delta.files_created, delta.files_deleted), (0, 0));
+        assert_eq!(delta.file.as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn multi_file_apply_patch_delta_sums_across_files() {
+        let patch = "\
+*** Begin Patch
+*** Add File: a.txt
++one
++two
+*** Delete File: b.txt
+*** Update File: c.txt
+@@
+-x
++X
+*** End Patch
+";
+        let delta = compute("apply_patch", &json!({ "patch": patch })).expect("apply_patch delta");
+        assert_eq!((delta.lines_added, delta.lines_removed), (3, 1));
+        assert_eq!((delta.files_created, delta.files_deleted), (1, 1));
+        assert_eq!(delta.file, None, "多文件补丁不归属到单一路径");
+    }
+
+    /// 数不出来就不报数字，而不是报一个假的零。
+    #[test]
+    fn apply_patch_without_a_parseable_patch_yields_no_delta() {
+        assert!(
+            compute("apply_patch", &json!({ "patch": "*** Begin Patch\n+x\n" })).is_none(),
+            "缺 End Patch 的补丁不该出数"
+        );
+        assert!(compute("apply_patch", &json!({})).is_none());
+    }
+
+    /// 档位键必须是 resolved tool name。旧写法 `("file", "write")` 实测永远
+    /// 匹配不上（注册表里这个工具就叫 `write`），write 因此从不出 CodeChanged。
+    #[test]
+    fn write_tool_reports_content_line_count() {
+        let delta = compute("write", &json!({ "path": "a.txt", "content": "x\ny\n" }))
+            .expect("write 必须出 CodeChanged");
+        assert_eq!((delta.lines_added, delta.lines_removed), (2, 0));
+        assert_eq!(delta.file.as_deref(), Some("a.txt"));
+    }
 }
