@@ -101,6 +101,12 @@ export interface ToolStep {
   /** 后端 metrics。 */
   elapsedMs?: number;
   permission?: ToolPermission | null;
+  /**
+   * 参数还在流式输出时后端旁路透传的**行数估算**(tool_estimated)。
+   * 口径是"已吐出的参数里能数出多少行",不是实际改动行;瞬态值,
+   * 不进快照/resnapshot 会丢,终态 `tool_updated` 一到即清。
+   */
+  streamEstimate?: { add: number; del: number } | null;
 }
 
 export type Step = ThinkingStep | TextStep | ToolStep;
@@ -156,6 +162,16 @@ export interface GapSpan {
 
 export function gapHeight(spans: GapSpan[]): number {
   return spans.reduce((sum, span) => sum + span.height, 0);
+}
+
+/**
+ * 时间线/折叠行的工作步骤谓词:作答以外的全部 step。被提升为最终作答的文本块
+ * 已在作答区渲染,再进时间线就是同一段文字出现两遍(数据模型里 text 块要么是
+ * 答案、要么是中间叙述,见本文件顶部的归约注释);answerStepId 为 null(运行中
+ * 未提升/已降级)时全部文本块都按中间叙述算。
+ */
+export function isWorkStep(turn: Turn, step: Step): boolean {
+  return step.kind !== "text" || step.id !== turn.answerStepId;
 }
 
 export function emptySession(): SessionState {

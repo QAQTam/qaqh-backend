@@ -294,6 +294,8 @@ export function applyEntry(draft: SessionState, entry: TimelineEntryWire): Sessi
         step.status = nextState;
         if (nextState === "running" && step.startedAt == null) step.startedAt = ts;
         if (isTerminalToolStatus(nextState)) {
+          // 终态一到就换权威数字:估算槽清零,不留一个"约等于"在真值旁边。
+          step.streamEstimate = null;
           // 终态时刻优先用后端发射时盖的 epoch ms(Tauri 侧 daemon 与 webview 同机,
           // 比「客户端收到」准);归档 rebuild 不带该槽 → 回退本地采样。
           step.endedAt = rawTool.completed_at_ms ?? ts;
@@ -315,6 +317,13 @@ export function applyEntry(draft: SessionState, entry: TimelineEntryWire): Sessi
       const next = (step.progressTail ?? "") + chunk;
       step.progressTail = next.length > PROGRESS_WINDOW ? next.slice(-PROGRESS_WINDOW) : next;
       step.progressTruncated = step.progressTruncated || event.truncated === true;
+      break;
+    }
+    case "tool_estimated": {
+      // 参数流式行数估算：瞬态值,只挂运行中的工具卡;终态由 tool_updated 清。
+      const step = findStep(turn, event.block_id);
+      if (step?.kind !== "tool" || isTerminalToolStatus(step.status)) break;
+      step.streamEstimate = { add: event.lines_added, del: event.lines_removed };
       break;
     }
     case "block_sealed": {
