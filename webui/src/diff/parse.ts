@@ -3,9 +3,9 @@
  *
  * 单源说明:后端目前交付的是 unified diff 文本(`display.body.diff.unified`,
  * 由 Rust 侧生成,前端绝不重算 diff)。本模块只是把后端产物解析成渲染结构 +
- * 按 §9.3 规则做「等长 del/add 连续段」的词级配对;`+N −M` 统计由解析行数得出,
- * 与后端 diff 文本严格一致。[契约缺口 D-1] spec §9.1 要求后端给结构化
- * FileDiff.stats,后端补上后本模块的统计即可退役。
+ * 按 §9.3 规则做「等长 del/add 连续段」的词级配对。
+ * 聚合 `+N −M` 已改读后端权威值 `display.lines_added/lines_removed`
+ * (见 `tools/StepRow.tsx`);本模块的 `file.stats` 现仅供 diff 视图的**逐文件**计数。
  */
 import { diffWordsWithSpace } from "diff";
 
@@ -50,14 +50,50 @@ export function parseUnifiedDiff(text: string): ParsedFile[] {
     flushHunk();
     current = null;
   };
+  /** hunk 是否已按 `@@` 头声明的行数收束(没有未消费的旧/新行)。 */
+  const hunkComplete = (h: ParsedHunk | null): boolean => {
+    if (h == null) return true;
+    let old = 0;
+    let neu = 0;
+    for (const l of h.lines) {
+      if (l.t === "ctx" || l.t === "del") old += 1;
+      if (l.t === "ctx" || l.t === "add") neu += 1;
+    }
+    return old >= h.oldLines && neu >= h.newLines;
+  };
 
-  for (const raw of text.split("\n")) {
-    const line = raw.replace(/\r$/, ""); // 行尾 \r 单独标记,不入内容
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!.replace(/\r$/, ""); // 行尾 \r 单独标记,不入内容
+    // 尾随换行 split 出的空串不是 hunk 内容(unified diff 的空上下文行写作单个空格)。
+    if (line === "") continue;
     if (line.startsWith("diff --git ")) {
       flushFile();
       const paths = parseGitHeaderPaths(line);
       current = { path: paths.newPath, oldPath: paths.oldPath !== paths.newPath ? paths.oldPath : undefined, status: "modified", binary: false, stats: { add: 0, del: 0 }, hunks: [] };
       files.push(current);
+      continue;
+    }
+    // 裸 unified diff:后端 `file_shared::unified_diff`(similar)产出**不带**
+    // `diff --git` 头,只有 `--- a/x` / `+++ b/x` / `@@`。文件边界 = `--- `
+    // 后紧跟 `+++ ` **且当前 hunk 已收束**(依 `@@` 头声明的行数判定)——hunk 内
+    // 删掉一行 `-- foo` 渲染成 `--- foo`,此时 hunk 未收束,不能误判成新文件。
+    if (
+      (hunk == null || hunkComplete(hunk)) &&
+      line.startsWith("--- ") &&
+      lines[i + 1]?.replace(/\r$/, "").startsWith("+++ ")
+    ) {
+      const oldPath = stripPathPrefix(line.slice(4));
+      if (current == null || current.hunks.length > 0) {
+        // 还没有文件,或上一个文件已收束:这是新文件的起点(单文件或多文件裸 diff)。
+        flushFile();
+        current = { path: oldPath, oldPath: undefined, status: oldPath === "/dev/null" ? "added" : "modified", binary: false, stats: { add: 0, del: 0 }, hunks: [] };
+        files.push(current);
+      } else if (oldPath === "/dev/null") {
+        current.status = "added";
+      } else {
+        current.oldPath = oldPath;
+      }
       continue;
     }
     if (current == null) continue;
@@ -79,13 +115,13 @@ export function parseUnifiedDiff(text: string): ParsedFile[] {
       current.status = "deleted";
       continue;
     }
-    if (line.startsWith("--- ")) {
+    if (hunk == null && line.startsWith("--- ")) {
       const path = stripPathPrefix(line.slice(4));
       if (path === "/dev/null") current.status = "added";
       else current.oldPath = path;
       continue;
     }
-    if (line.startsWith("+++ ")) {
+    if (hunk == null && line.startsWith("+++ ")) {
       const path = stripPathPrefix(line.slice(4));
       if (path === "/dev/null") current.status = "deleted";
       else current.path = path;

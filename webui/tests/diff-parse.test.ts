@@ -57,6 +57,52 @@ describe("parseUnifiedDiff", () => {
   });
 });
 
+// 后端 `file_shared::unified_diff`(similar)产出**不带** `diff --git` 头,只有
+// `--- a/x` / `+++ b/x` / `@@` —— 曾经整段解析成 0 文件,正文渲染为空。
+describe("裸 unified diff(无 diff --git 头)", () => {
+  const BARE = `--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,2 +1,3 @@
+ keep
+-old
++new
++extra
+`;
+
+  test("无 diff --git 头也能建文件、解析 hunk、统计行差", () => {
+    const files = parseUnifiedDiff(BARE);
+    expect(files).toHaveLength(1);
+    expect(files[0]!.path).toBe("src/a.rs");
+    expect(files[0]!.stats).toEqual({ add: 2, del: 1 });
+    expect(files[0]!.hunks[0]!.lines).toHaveLength(4);
+  });
+
+  test("hunk 内以 -- / ++ 开头的内容行不被当成文件头", () => {
+    const text = `--- a/x
++++ b/x
+@@ -1,2 +1,2 @@
+--- foo
++++ bar
+`;
+    const files = parseUnifiedDiff(text);
+    expect(files).toHaveLength(1);
+    expect(files[0]!.stats).toEqual({ add: 1, del: 1 });
+  });
+
+  test("多个裸文件相邻(拼接导出)按 --- 边界切开", () => {
+    const text = `${BARE}--- b/src/b.rs
++++ b/src/b.rs
+@@ -1 +1 @@
+-x
++y
+`;
+    const files = parseUnifiedDiff(text);
+    expect(files.map((f) => f.path)).toEqual(["src/a.rs", "src/b.rs"]);
+    expect(files[0]!.stats).toEqual({ add: 2, del: 1 });
+    expect(files[1]!.stats).toEqual({ add: 1, del: 1 });
+  });
+});
+
 describe("findWordPairs / wordSegments(§9.3 宁缺毋滥)", () => {
   test("等长 del/add 连续段按下标配对;不等长不配对(§9.3)", () => {
     const text = `diff --git a/f b/f
