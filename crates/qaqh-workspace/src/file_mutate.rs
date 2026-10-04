@@ -249,6 +249,7 @@ impl ToolProjection for WriteOutput {
             &self.model_text,
             self.diff.clone(),
         )
+        .with_lines(self.lines_added, self.lines_removed)
     }
 }
 
