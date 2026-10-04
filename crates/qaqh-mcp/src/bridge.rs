@@ -295,6 +295,8 @@ fn mcp_display(state: ToolResultDisplayOutcomeState, text: String) -> ToolResult
     ToolResultDisplay {
         summary: None,
         diff: None,
+        lines_added: 0,
+        lines_removed: 0,
         header: Some(ToolResultDisplayHeader::Other {
             label: String::new(),
         }),

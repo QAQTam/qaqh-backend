@@ -428,6 +428,8 @@ mod tests {
             display: Some(qaqh_types::ToolResultDisplay {
                 summary: Some("canonical summary".into()),
                 diff: None,
+                lines_added: 0,
+                lines_removed: 0,
                 header: Some(qaqh_types::ToolResultDisplayHeader::Other {
                     label: "canonical".into(),
                 }),
