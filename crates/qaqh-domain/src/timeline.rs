@@ -156,6 +156,11 @@ pub struct TimelineToolDisplay {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// 终态行差（write/edit/apply_patch 等文件变更类工具）。0/0 = 无变更或未接线。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lines_added: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lines_removed: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<TimelineToolHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,6 +295,10 @@ pub struct TimelineToolMetrics {
 }
 
 fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 

@@ -131,6 +131,11 @@ pub struct ToolResultDisplay {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// 终态行差（文件变更类工具）。0/0 = 无变更或未接线；旧 client 忽略即可。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lines_added: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lines_removed: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<ToolResultDisplayHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -659,6 +664,8 @@ mod tests {
         let result = ToolResult::ok("typed").with_display(ToolResultDisplay {
             summary: Some("typed summary".into()),
             diff: None,
+            lines_added: 0,
+            lines_removed: 0,
             header: Some(ToolResultDisplayHeader::Other {
                 label: "typed".into(),
             }),

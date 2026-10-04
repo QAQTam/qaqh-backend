@@ -3,7 +3,11 @@ import type { ToolResultDisplayBody } from "./ToolResultDisplayBody";
 import type { ToolResultDisplayHeader } from "./ToolResultDisplayHeader";
 import type { ToolResultDisplayOutcome } from "./ToolResultDisplayOutcome";
 
-export type ToolResultDisplay = { summary?: string | null, diff?: string | null, header?: ToolResultDisplayHeader | null, body?: ToolResultDisplayBody | null, 
+export type ToolResultDisplay = { summary?: string | null, diff?: string | null, 
+/**
+ * 终态行差（文件变更类工具）。0/0 = 无变更或未接线；旧 client 忽略即可。
+ */
+lines_added?: number, lines_removed?: number, header?: ToolResultDisplayHeader | null, body?: ToolResultDisplayBody | null, 
 /**
  * 结构化终态。旧 client 忽略即可；新 client 不再从文本猜 `[OK]`。
  */

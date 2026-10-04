@@ -337,6 +337,8 @@ pub(crate) fn wire_display(display: &qaqh_workspace::tool_api::ToolDisplay) -> T
     TimelineToolDisplay {
         summary: display.summary.clone(),
         diff: display.diff.clone(),
+        lines_added: display.lines_added,
+        lines_removed: display.lines_removed,
         header,
         body,
         metrics,
@@ -2392,6 +2394,26 @@ mod display_mapping_tests {
         );
         assert_eq!(outcome.exit_code, Some(0));
         assert_eq!(outcome.duration_ms, Some(12));
+    }
+
+    #[test]
+    fn wire_display_carries_terminal_line_delta() {
+        use qaqh_workspace::tool_api as sdk;
+
+        let display = sdk::ToolDisplay::new(
+            sdk::ToolHeader::Path {
+                path: "src/a.rs".into(),
+                op: sdk::PathOp::Edit,
+            },
+            sdk::ToolBody::None,
+        )
+        .with_lines(7, 3);
+        let wire = wire_display(&display);
+        assert_eq!(
+            (wire.lines_added, wire.lines_removed),
+            (7, 3),
+            "终态行差必须随展示投影进入 timeline wire"
+        );
     }
 
     #[test]

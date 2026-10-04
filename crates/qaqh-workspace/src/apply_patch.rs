@@ -97,6 +97,7 @@ impl ToolProjection for ApplyPatchOutput {
             &self.model_text,
             None,
         )
+        .with_lines(self.insertions as u32, self.deletions as u32)
     }
 }
 
@@ -776,6 +777,11 @@ mod tests {
             other => panic!("unexpected apply_patch display body: {other:?}"),
         };
         assert_eq!(display_text, result.model_text());
+        assert_eq!(
+            (display.lines_added, display.lines_removed),
+            (1, 1),
+            "apply_patch 终态行差必须落到展示投影（无 diff 文本可解析）"
+        );
     }
 
     #[cfg(unix)]
