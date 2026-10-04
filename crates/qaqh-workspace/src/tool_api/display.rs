@@ -49,6 +49,11 @@ pub struct ToolDisplay {
     pub summary: Option<String>,
     /// 统一 diff（文件变更类工具）。
     pub diff: Option<String>,
+    /// 终态行差（文件变更类工具；与 summary 里的 `+N -M` 同源）。
+    /// 0/0 = 无变更或未接线。置于展示平面而非 `metrics`：metrics 由框架整段
+    /// 重建（H4），工具写入的取值会被冲掉。
+    pub lines_added: u32,
+    pub lines_removed: u32,
     pub header: ToolHeader,
     pub body: ToolBody,
     /// 由框架填充；工具实现不得决定取值（H4）。
@@ -73,6 +78,13 @@ impl ToolDisplay {
 
     pub fn with_diff(mut self, diff: impl Into<String>) -> Self {
         self.diff = Some(diff.into());
+        self
+    }
+
+    /// 文件变更类工具的终态行差（本工具自己算出的权威值，框架不覆写）。
+    pub fn with_lines(mut self, added: u32, removed: u32) -> Self {
+        self.lines_added = added;
+        self.lines_removed = removed;
         self
     }
 

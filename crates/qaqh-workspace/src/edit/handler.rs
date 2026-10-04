@@ -80,6 +80,7 @@ impl ToolProjection for EditOutput {
             &self.model_text,
             self.diff.clone(),
         )
+        .with_lines(self.lines_added, self.lines_removed)
     }
 }
 
