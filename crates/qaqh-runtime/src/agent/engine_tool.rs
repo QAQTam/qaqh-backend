@@ -807,7 +807,7 @@ impl ToolEngine {
         ctx.agent.apply_tool_effects(skill_effects, ctx.flow);
 
         // Instant refresh for todo tools
-        if matches!(name, "todo_write" | "todo_update" | "todo_list") {
+        if crate::agent::plugins::dashboard::is_todo_tool(name) {
             // Ringing 双发：DashboardUpdated（replaceable 覆盖）
             ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
                 qaqh_domain::ControlEvent::DashboardUpdated {

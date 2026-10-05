@@ -52,6 +52,7 @@ pub mod permission;
 pub mod audit;
 
 pub mod journal;
+pub mod spy_tool;
 // 壳探测引导：daemon 启动期调用一次（与 cache_system_path/detect_os_info 同批），
 // 把「探测到的壳」钉进进程状态，保证 exec 的可用性探测与实际派生同源。
 pub use exec::{bootstrap as bootstrap_exec_shell, register_shell as register_exec_shell};
@@ -217,8 +218,8 @@ pub use qaqh_types::{
 ///
 /// Set at the start of every interrupt (Cancel, session switch, shutdown)
 /// from the reader thread and the main loop. Checked by bridge before
-/// executing each tool. Reset at the top of [`crate::Loop::handle_user_input`]
-/// so it is per-turn, not cross-session.
+/// executing each tool. Reset via [`clear_cancel`] at the top of the runtime's
+/// `handle_user_input` so it is per-turn, not cross-session.
 pub static CANCEL: AtomicBool = AtomicBool::new(false);
 pub static CURRENT_SESSION: Mutex<Option<String>> = Mutex::new(None);
 

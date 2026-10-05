@@ -262,15 +262,13 @@ pub struct AgentInstance {
     /// The worker `TurnActor` remains authoritative for turn state until the
     /// actors are consolidated.
     subscription_actor: SessionActor,
-    /// Idle-unload liveness (shared with the Loop actor). `None` for legacy
-    /// process workers — they are not idle-unload candidates.
+    /// Idle-unload liveness (shared with the Loop actor).
     liveness: Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>>,
-    /// Event consumer thread (stdout reader for process workers, event channel
-    /// reader for in-process actors). daemon 关闭时必须 join：worker 退出 ≠
-    /// 尾部 intent（含 seal_turn）已消费——管道/通道里的最后几个事件仍由
-    /// 本线程读取并 publish（见 shutdown）。
+    /// Event consumer thread (event channel reader for the in-process actor).
+    /// daemon 关闭时必须 join：worker 退出 ≠ 尾部 intent（含 seal_turn）已消费
+    /// ——通道里的最后几个事件仍由本线程读取并 publish（见 shutdown）。
     reader: Option<std::thread::JoinHandle<()>>,
-    /// In-process loop thread. `None` for process workers.
+    /// In-process loop thread.
     thread: Option<std::thread::JoinHandle<()>>,
 }
 

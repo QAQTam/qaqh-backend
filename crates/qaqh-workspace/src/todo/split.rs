@@ -120,17 +120,17 @@ pub(crate) fn todo_write_schema() -> Value {
             "items": {
                 "type": "array",
                 "maxItems": 20,
-                "description": "The FULL task list — replaces the previous list entirely. Each item needs title + status; include every prior item you want to keep.",
+                "description": "The FULL task list — replaces the previous list entirely. Each item needs status; keep every prior item you want to keep. `title` is optional when `id` references an existing task (the previous title is kept).",
                 "items": {
                     "type": "object",
                     "properties": {
                         "id": {"type": ["string", "integer"], "description": "Existing T<n> to keep/update this task; omit to assign a new one."},
-                        "title": {"type": "string", "description": "Task title (1-100 chars)."},
+                        "title": {"type": "string", "description": "Task title (1-100 chars). Required for new items; optional when `id` references an existing task."},
                         "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Exactly one item should be in_progress while working."},
                         "description": {"type": "string", "description": "Optional context (<=200 chars)."},
                         "evidence": {"type": "string", "description": "Completion evidence (for completed items)."}
                     },
-                    "required": ["title", "status"],
+                    "required": ["status"],
                     "additionalProperties": false
                 }
             },

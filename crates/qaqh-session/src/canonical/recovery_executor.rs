@@ -9,7 +9,8 @@
 //! The plan is a snapshot, so a later crash can leave an open intent it does
 //! not cover. Such a call is sealed when it is non-replayable (there is no
 //! replay step to plan for it) and fails closed when it needs a replay or
-//! reconcile step — see `seal_unplanned_open_intents`.
+//! reconcile step — the fail-closed check is `validate_open_set`, and sealing
+//! is done by `ToolLedger::recover_open_intents`.
 
 use std::collections::HashSet;
 use std::fs;

@@ -6,6 +6,7 @@ use super::ToolManager;
 use super::exec;
 use super::journal;
 use super::read_image;
+use super::spy_tool;
 use super::web;
 
 use super::apply_patch;
@@ -47,8 +48,8 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     confirm_apply::register(&mut mgr);
 
     // ── Todo（直接、会话内状态工具）──
-    // Todo v3（owner 拍板混合制）：todo_write 追加+空清空 / todo_update
-    // 单条状态 / todo_list 只读。无 insert（回填=追加）；修改条目=cancel+重写。
+    // Todo v4（全量覆写）：todo_write（items 即完整清单，整体替换）/ todo_update
+    // 单条状态 / todo_list 只读。无 insert；增删改排序均在 todo_write 整体重写。
     todo::register(&mut mgr);
 
     // ── 交互 ──
@@ -58,6 +59,9 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     read_image::register(&mut mgr);
 
     journal::register(&mut mgr);
+
+    // ── 工作区变更审计（qaqh-spy 恢复闭环：journal/undo/restore/cat）──
+    spy_tool::register(&mut mgr);
 
     // ── 进程巡查 ──
     process_inspect::register(&mut mgr);
@@ -101,6 +105,7 @@ mod tests {
                 "read",
                 "read_image",
                 "skills",
+                "spy",
                 "todo_list",
                 "todo_update",
                 "todo_write",

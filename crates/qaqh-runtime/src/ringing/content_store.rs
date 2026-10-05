@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 
 /// 超过该阈值的内容应外置（10 MiB）。
 ///
-/// ⚠ 这是**传输保护阀**，而非常规路径。工具结果走向本 store 的唯一入口是
-/// `registry::externalize_large_content`，在标准模式下模型文本已被
+/// ⚠ 这是**传输保护阀**，而非常规路径。内容走向本 store 的唯一入口是
+/// `agent::loop_dispatch_conversation::externalize_canonical_content`（最终经
+/// `hub.put_content` 落 store），在标准模式下模型文本已被
 /// `TOOL_MODEL_MAX_CHARS`（24K 字符，上限约 96 KiB）封顶，永远够不到 10 MiB；
 /// 只有 NoFold 极限模式下的超长输出才会触发。别把它当成"大输出的分页通道"。
 ///

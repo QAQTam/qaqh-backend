@@ -10,8 +10,9 @@ use super::handler::ExecTool;
 use super::shell::Shell;
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    // 触发探测缓存（Windows git-bash / pwsh 降级链），description 不再为
-    // 特定 shell 背书——选壳是每次调用的运行时决策。
+    // 触发探测缓存（Windows git-bash / pwsh 解析链）。description 已点名默认
+    // 壳（pwsh on Windows, bash elsewhere），但选壳仍是每次调用的运行时决策，
+    // 可经 shell= 覆盖。
     let _ = Shell::detect();
     let _ = Shell::from_name("bash");
     mgr.register_typed(ExecTool);

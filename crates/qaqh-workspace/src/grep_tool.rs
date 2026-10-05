@@ -310,11 +310,9 @@ impl TypedTool for GrepTool {
                     crate::permission::normalize_lexically(&ws_path.join(path))
                 };
                 let abs = std::path::absolute(&resolved).unwrap_or(resolved);
-                if !path_within_workspace(&abs, &ws_abs) {
-                    return Err(grep_error(format!(
-                        "grep: path {raw_path:?} resolves outside the workspace — search is workspace-bounded"
-                    )));
-                }
+                // 2026-10-05 读自由规则：grep 是读取工具，路径完全不受工作区
+                // 限制（与 read/glob 同一姿态）——工作区内路径默认根语义保留，
+                // 工作区外绝对/相对路径直接搜索，不再硬拒。
                 roots.push(abs);
             }
         }
@@ -493,30 +491,6 @@ fn lexically_normalize(p: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
-/// Component-wise prefix comparison (case-insensitive on Windows), with `..`
-/// lexically resolved first — prevents `ws/../../..` from slipping past a
-/// plain `Path::starts_with` (which compares component prefixes only).
-fn path_within_workspace(abs: &std::path::Path, ws: &std::path::Path) -> bool {
-    let a_norm = lexically_normalize(abs);
-    let a: Vec<_> = a_norm.components().collect();
-    let w_norm = lexically_normalize(ws);
-    let w: Vec<_> = w_norm.components().collect();
-    if a.len() < w.len() {
-        return false;
-    }
-    a[..w.len()].iter().zip(w.iter()).all(|(x, y)| {
-        #[cfg(windows)]
-        {
-            x.as_os_str().to_string_lossy().to_lowercase()
-                == y.as_os_str().to_string_lossy().to_lowercase()
-        }
-        #[cfg(not(windows))]
-        {
-            x == y
-        }
-    })
-}
-
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_typed(GrepTool);
 }
@@ -670,14 +644,26 @@ mod tests {
     }
 
     #[test]
-    fn path_outside_workspace_rejected_with_legacy_code() {
-        let (_dir, root) = setup(&[("f.txt", "abc\n")]);
-        let error = run(
-            &root,
-            serde_json::json!({ "pattern": "abc", "paths": ["../../.."] }),
+    fn path_outside_workspace_is_searched_read_free() {
+        // 2026-10-05 读自由规则：grep 路径完全不受工作区限制——工作区外的
+        // 绝对路径照常搜索并命中（与 read/glob 同一姿态）。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path().join("ws");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("needle.txt"), "abc\n").unwrap();
+
+        let output = run(
+            &ws,
+            serde_json::json!({
+                "pattern": "abc",
+                "paths": [outside.join("needle.txt").to_string_lossy()],
+            }),
         )
-        .expect_err("outside path rejected");
-        assert_eq!(error_code(error), "execution");
+        .expect("outside-path grep must succeed (reads are workspace-free)");
+        assert_eq!(output.count, 1);
+        assert!(output.matches[0].path.contains("needle.txt"));
     }
 
     #[test]

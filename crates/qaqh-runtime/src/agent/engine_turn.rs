@@ -1144,7 +1144,7 @@ impl TurnEngine {
 
     /// Run compact inline during a gate lap boundary.
     /// Builds the prompt (engine_compact), calls LLM inline (blocking),
-    /// applies result, and streams CompactDelta events to the frontend.
+    /// applies result, and streams CompactProgress events to the frontend.
     /// After compact, the current turn continues normally.
     fn run_auto_compact(ctx: &mut RingContext) -> bool {
         let (prompt, kept, head, provider, compact_id) =

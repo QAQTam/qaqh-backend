@@ -1,14 +1,15 @@
 //! dry-run 参数暂存注册表：`confirm_apply` 的内存直提基础。
 //!
-//! 写工具（edit / apply_patch / write）以 `dry_run=true` 通过验证后，
+//! 写工具（apply_patch / write）以 `dry_run=true` 通过验证后，
 //! 把**重放用参数**（不含 dry_run）存进这里并返回 `pending_id`；模型确认后
 //! 调 `confirm_apply { pending_id }` —— 引擎从注册表取出参数重放执行路径，
 //! **模型不需要重新输出 patch / hunks / 内容**（消除二次输出）。
 //!
 //! - 一次性：`take` 即移除（apply 或 discard 都消费掉）；
 //! - TTL：过期条目视为不存在（惰性清理，无后台任务）；
-//! - 防 race：重放时各工具的 expected_hash 校验拦截 dry-run 之后发生的
-//!   文件改动（dry-run 时读到的 hash 会写入暂存参数）。
+//! - 防 race：重放时 write 的 expected_hash 校验拦截 dry-run 之后发生的
+//!   文件改动（dry-run 时读到的 hash 会写入暂存参数）；apply_patch 靠补丁
+//!   上下文匹配天然防漂移。
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -20,7 +21,7 @@ const TTL: Duration = Duration::from_secs(30 * 60);
 
 pub struct PendingApply {
     pub tool_name: String,
-    /// 重放用参数（dry_run 已剥离；expected_hash 已注入 dry-run 时读到的值）。
+    /// 重放用参数（dry_run 已剥离；write 在 dry-run 时读到的 expected_hash 已注入）。
     pub args: serde_json::Value,
     pub created_at: Instant,
 }

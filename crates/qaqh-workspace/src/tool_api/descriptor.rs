@@ -190,7 +190,7 @@ impl ToolDescriptor {
     /// 注册前校验（P1-②）：
     /// - 描述非空；
     /// - input/output schema 为 object；
-    /// - 默认超时非零。
+    /// - 非交互工具默认超时非零（交互工具允许 `default_timeout = 0`）。
     ///
     /// 名称合法性在 [`ToolName`] 构造期已保证，无需重复校验。
     pub fn validate(&self) -> Result<(), DescriptorError> {

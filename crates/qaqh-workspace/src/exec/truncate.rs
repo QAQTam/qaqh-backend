@@ -1,7 +1,8 @@
 //! exec::truncate — token 截断（CJK 估计 + token_truncate/find_token_boundary）。
 
 /// CJK character ranges used for token-count estimation.
-/// CJK characters consume ~1.67 tokens each, vs ~3.3 for ASCII.
+/// Token estimate: ~1 token per 3.3 ASCII characters or per 1.67 CJK characters
+/// (CJK is denser, so each character costs more tokens than an ASCII one).
 pub(crate) const fn is_cjk(c: char) -> bool {
     matches!(c,
         '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}'

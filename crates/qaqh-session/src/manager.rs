@@ -6,7 +6,8 @@
 //!     messages.jsonl  — one JSON line per Message (append-only)
 //!     messages.wal    — L2 write-ahead log of un-drained persist ops
 //!
-//! A central `index.json` enables fast listing.
+//! A central `index.jsonl` enables fast listing (legacy `index.json` is
+//! migrated to it on first read, then removed).
 
 use qaqh_types::{Message, SessionMeta};
 use std::collections::HashMap;
@@ -247,7 +248,7 @@ impl SessionManager {
         crate::grouping::WorkspaceStore::global().remove_session(session_id);
         // D-4：释放 per-seed 锁槽位与占用登记。两者都以 seed 为键、只在
         // 创建/首次取锁时插入，删除路径若不回收，长驻 daemon 每删一个会话就
-        // 永久多留一条（无界增长；`release_seed_claim` 清的是另一个 map）。
+        // 永久多留一条（无界增长；`release_session_claim` 清的是另一个 map）。
         // 此处已释放全部其它锁，再取 `session_locks` 不引入反向获取顺序。
         self.session_locks
             .lock()
@@ -760,8 +761,8 @@ impl SessionManager {
     /// agent writes it asynchronously during boot.
     ///
     /// ⚠ BUG-2026-09-13-24：本方法**无条件覆盖**既有 meta（created_at/cwd
-    /// 等）。调用方必须先确认 seed 未被占用（[`Self::is_seed_taken`]/
-    /// [`Self::allocate_seed`]），否则会把新会话写进旧会话目录。
+    /// 等）。调用方必须先确认 seed 未被占用（[`Self::is_session_taken`]/
+    /// [`Self::allocate_session`]），否则会把新会话写进旧会话目录。
     pub fn persist_new_session(&self, session_id: &str) {
         self.persist_new_session_with_cwd(session_id, None);
     }
@@ -1277,9 +1278,10 @@ impl SessionManager {
 
     // ── Helpers ──
 
-    /// Maximum seed-allocation attempts before the counter fallback kicks in.
-    /// 2^32 的 id 空间下连续 64 次随机命中同一批既有 seed 是病态事件，但
-    /// 一旦发生必须收敛而不是无限重试。
+    /// Maximum canonical-identity (UUIDv7) allocation attempts; exhaustion is a
+    /// hard error with no counter fallback.
+    /// 128-bit 的 UUIDv7 空间下连续 64 次命中既有会话是病态事件，但一旦
+    /// 发生必须收敛而不是无限重试。
     const SESSION_ALLOCATION_ATTEMPTS: usize = 64;
 
     /// 尝试把 `seed` 登记为本进程占用。返回 `false` 表示已被本进程占用。
@@ -1385,11 +1387,12 @@ impl SessionManager {
             .unwrap_or(self.sessions_dir.as_path())
     }
 
-    /// Resolve a canonical `SessionId` to its seed-keyed session directory.
+    /// Resolve a canonical `SessionId` to its session directory.
     ///
-    /// BETA-01 will eventually make the directory name equal the canonical id.
-    /// Until then, the identity sidecar is the only durable mapping and this
-    /// resolver scans for it without creating missing identities.
+    /// The directory name equals the canonical id, so this returns
+    /// `sessions/{session_id}` directly once its identity sidecar confirms the
+    /// match. Legacy seed-keyed directories predating that invariant are found
+    /// by scanning for the sidecar; missing identities are never created.
     pub fn session_dir_for_id(&self, session_id: &str) -> Result<Option<PathBuf>, String> {
         let direct = self.session_path_dir(session_id);
         if direct.is_dir()

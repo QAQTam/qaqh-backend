@@ -1231,7 +1231,11 @@ fn backfill_executed_result(
         ));
     }
     // Instant refresh for todo tools
-    if matches!(tool_name, "todo") {
+    // 注意：legacy 名 "todo" 已退役（todo_contract 锁定）——此处曾匹配 "todo"，
+    // 本回填路径的即时刷新从未命中（engine_tool.rs 同款分支与
+    // turn_lap/backfill.rs 的逐 round 刷新一直在工作，故用户可见影响有限）。
+    // 2026-10-05 注释审计 §3.4 修正；判定收敛到 dashboard::is_todo_tool。
+    if crate::agent::plugins::dashboard::is_todo_tool(tool_name) {
         // Ringing 双发：DashboardUpdated（replaceable 覆盖）
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardUpdated {

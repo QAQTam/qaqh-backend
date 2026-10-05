@@ -825,8 +825,9 @@ mod tests {
             .next()
             .expect("typed activation")
         {
-            // ToolEffect / SkillEffect 目前均为单变体 enum，此臂已穷尽；
-            // 若未来新增变体，单臂 match 编译失败即强制此处显式处理。
+            // ToolEffect 现有 Skill/SubagentSpawned 两个变体（SkillEffect 仅
+            // Activate），此臂只覆盖 Skill；其余变体由下方 `other` 兜底 panic，
+            // 故新增变体不会编译失败，而是走到该 panic。
             crate::ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(activation)) => activation,
             other => panic!("unexpected typed skill effect: {other:?}"),
         };
@@ -1327,8 +1328,8 @@ mod tests {
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
-        // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec", "process", "todo"]`，
-        // 见 `crate::PLAN_BLOCKED`）中：PLAN 模式下仍放行，阻断只发生在名单内工具。
+        // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec", "process", "todo_update",
+        // "todo_write"]`，见 `crate::PLAN_BLOCKED`）中：PLAN 模式下仍放行，阻断只发生在名单内工具。
         //
         // 注意：`test_write` 是 Destructive + Write 的文件型工具，P0-2 之后
         // 「缺 path」会被 `SafetyPolicy` fail-closed 拦下（与 PLAN 模式无关）。

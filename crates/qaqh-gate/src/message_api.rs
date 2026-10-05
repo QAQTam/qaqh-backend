@@ -168,7 +168,8 @@ fn convert_messages_to_anthropic(
                 // Each harness `tool` message → Anthropic `user` with `tool_result` block(s).
                 //
                 // 去重：工具图（read_image）在存储层是「内联 result.images + 兄弟
-                // ImageRef」双份——qaqh-message/src/store.rs:874 外置落盘后没有剥离
+                // ImageRef」双份——qaqh-message/src/store.rs:893 push_tool_canonical_inner
+                // 外置落盘后没有剥离
                 // 原字节。二者是同一份字节，投影时必须只发一份，否则同一张图在请求
                 // 里出现两次（线上实测：16 张工具图 → 32 个 image 块）。
                 let ref_count = msg
@@ -1151,7 +1152,8 @@ mod tests {
     }
 
     /// 回归 BUG-2026-09-16-03：工具图（read_image）在存储层是「内联 `result.images`
-    /// 字节 + 兄弟 `ImageRef`」双份（`qaqh-message/src/store.rs:874` 外置落盘后未剥离
+    /// 字节 + 兄弟 `ImageRef`」双份（`qaqh-message/src/store.rs:893`
+    /// push_tool_canonical_inner 外置落盘后未剥离
     /// 原字节）。投影时必须只发一份——线上实测曾把 16 张工具图发成 32 个 image 块。
     #[test]
     fn tool_image_inline_and_ref_are_projected_once() {

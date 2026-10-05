@@ -6,7 +6,7 @@
 //!
 //! 选型：`tokio::sync::watch`（工作区标准）；载荷 `Arc<Config>` 克隆廉价、
 //! 消费者拿到后零成本共享。当前消费方：
-//! - `reload_config` 的 `latest()` 快速路径（免磁盘重读）；
+//! - `reload_config` 经 `authoritative()` 读配置（磁盘优先，`latest()` 仅读盘失败时兜底）；
 //! - T18 ringing `config_changed` 推送事件；
 //! - T20 axum `GET /api/config/events`(SSE)。
 
@@ -44,7 +44,8 @@ pub fn latest() -> Option<Arc<Config>> {
         .clone()
 }
 
-/// 单写口内部：发布新快照。仅 `Config::update` 成功路径调用，
+/// 单写口内部：发布新快照。由 `Config::update` 成功路径与
+/// `reload_from_disk`（文件 watcher 轮询路径）两条路径调用，
 /// 保证「磁盘已落盘 → 内存广播」顺序（消费者永远读到已持久化状态）。
 pub(crate) fn publish(cfg: Arc<Config>) {
     *latest_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg.clone());

@@ -2,7 +2,8 @@
 //!
 //! 设计要点：
 //! - **单一聚合工具**（D6：不新增 per-server 工具，防模型面膨胀）——`action`
-//!   参数分发 `list_servers` / `list_resources` / `read_resource`；
+//!   参数分发 `list_servers` / `list_resources` / `read_resource` /
+//!   `list_prompts` / `read_prompt`；
 //! - **无前缀名** `mcp`：不经 `mcp__` D5 快路径（它是 QAQH 内置只读工具而非
 //!   server 声明，D4"声明即信任"不适用），category=`Read` 走常规审批
 //!   （level≥2 自动放行，level 1 弹确认）；

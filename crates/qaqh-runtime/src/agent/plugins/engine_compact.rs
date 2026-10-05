@@ -1,10 +1,11 @@
 //! CompactEngine: context compaction — token-split → prompt → LLM → apply.
 //!
-//! Two-step flow:
+//! Two-step flow (a background thread runs the LLM call between the two steps):
 //! 1. `build_prompt_and_meta()` — synchronous, fast (token split + prompt build)
-//! 2. Background: `chat_stream()` call in a thread (non-blocking, streaming
-//!    tokens to frontend via CompactDelta events)
-//! 3. `apply_result()` — synchronous, fast (apply on main thread)
+//! 2. `apply_result()` — synchronous, fast (apply on main thread)
+//!
+//! Between them, a background `chat_stream()` call runs in a thread (non-blocking,
+//! streaming tokens to frontend via CompactProgress events).
 
 use crate::agent::types::*;
 use crate::agent::util;
@@ -515,7 +516,7 @@ pub(crate) fn compact_request_messages(prompt: &str) -> Vec<qaqh_types::Message>
 
 /// Run the LLM compaction call in a background thread.
 /// Uses streaming so the user can see the model output in real-time
-/// via `CompactDelta` events pushed through `event_tx`.
+/// via `CompactProgress` events pushed through `event_tx`.
 /// Returns CompactMeta via the channel.
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
 pub(crate) fn run_compact_worker(

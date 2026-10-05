@@ -129,8 +129,8 @@ enum ScenarioSource {
     FixedWithHeaders(Vec<SseChunk>, ScenarioHeaders),
 }
 
-/// A tiny HTTP server that responds to POST `/chat/completions` with
-/// predefined SSE scenarios.
+/// A tiny HTTP server that responds to any request (path and method are
+/// ignored) with predefined SSE scenarios.
 pub struct MockServer {
     pub port: u16,
     handle: Option<thread::JoinHandle<()>>,

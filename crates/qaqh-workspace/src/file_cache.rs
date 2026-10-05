@@ -5,7 +5,7 @@
 //! 2. Consecutive reads (same file in adjacent turns): always return full content (model needs re-examination)
 //! 3. On file_write/edit/delete: invalidate affected path
 //!
-//! Cache size capped at 64 entries, LRU eviction via Vec.
+//! Cache size capped at 64 entries, FIFO eviction via Vec (insertion order; hits are not re-promoted).
 
 use std::sync::Mutex;
 use std::sync::OnceLock;

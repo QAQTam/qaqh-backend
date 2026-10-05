@@ -125,20 +125,9 @@ pub fn chat_stream_openai(
             serde_json::json!({"include_usage": true}),
         );
     }
-    if provider.supports_thinking {
-        match provider.thinking_mode {
-            ThinkingParamMode::OpenAi => {
-                body_map.insert("thinking".into(), serde_json::json!({"type": "enabled"}));
-            }
-            ThinkingParamMode::QwenEnableThinking => {
-                body_map.insert("enable_thinking".into(), serde_json::json!(true));
-            }
-            ThinkingParamMode::MiniMaxAdaptive => {
-                body_map.insert("thinking".into(), serde_json::json!({"type": "adaptive"}));
-                body_map.insert("reasoning_split".into(), serde_json::json!(true));
-            }
-        }
-    }
+    // thinking 参数契约（provider.rs `ThinkingParamMode`）由流式与 sync 共用，
+    // 见 `apply_thinking_params`——两路径曾各自手写并漂移（sync 曾发错键名），已收敛到单一实现。
+    apply_thinking_params(&mut body_map, provider);
     body_map.insert("max_tokens".into(), serde_json::json!(max_tokens));
 
     if provider.supports_reasoning_effort
@@ -684,26 +673,10 @@ fn assemble_streamed_message(
         });
     }
 
-    // ── DSML integration: extract tool calls from text content ──
-    if crate::tool_parser::has_dsml(&text_buf) {
-        let (cleaned, dsml_tcs) = crate::tool_parser::parse_dsml_tool_calls(&text_buf, &[]);
-        // Merge DSML tool calls into tool_acc (with unique ids to avoid collision)
-        let base_idx = tool_acc.len();
-        for (i, tc) in dsml_tcs.iter().enumerate() {
-            let idx = base_idx + i;
-            tool_acc.insert(
-                idx,
-                (
-                    tc.id.clone(),
-                    tc.function.name.clone(),
-                    tc.function.arguments.to_string(),
-                ),
-            );
-        }
-        if !cleaned.is_empty() {
-            blocks.push(ContentBlock::text(&cleaned));
-        }
-    } else if !text_buf.is_empty() {
+    // 2026-10-05：DSML/XML 文本态工具调用解析已整体移除（DeepSeek v4.1 起
+    // 原生输出结构化 tool_calls，不再吐脏字符）。正文就是正文，工具调用只
+    // 认上游的结构化 tool_acc。
+    if !text_buf.is_empty() {
         blocks.push(ContentBlock::text(&text_buf));
     }
 
@@ -735,14 +708,14 @@ fn assemble_streamed_message(
 
 // ── Message conversion ──
 
-/// Stateful 模式：只保留增量消息。
-/// Web 代理端已记住完整上下文。
-/// 规则：
-///   - 首次请求（无 assistant 历史）：发 system + 所有消息
-///   - 后续请求：只发最后一条 assistant 之后的消息
+/// 把内部 `Message` 列表转换为 Chat Completions 协议的 `messages` JSON 数组。
 ///
-/// 同时返回被丢弃前缀中的图片块数量——`read_image` 的 [Image #N] 编号是
-/// 会话级累加的（与 registry 索引一致），过滤后转换时需要以此为基准续编。
+/// 本函数只做纯转换，不做 stateful 增量过滤——过滤（首次请求发全部，后续只发
+/// 最后一条 assistant 之后的消息）由调用方先用 `transport::filter_stateful_messages`
+/// 完成后传入。
+///
+/// 入参 `image_index_base` 是被过滤前缀中的图片块数量——`read_image` 的
+/// [Image #N] 编号是会话级累加的（与 registry 索引一致），过滤后转换时需要以此为基准续编。
 fn convert_messages(
     provider: &ProviderConfig,
     messages: Vec<Message>,
@@ -922,6 +895,35 @@ fn convert_messages(
     out
 }
 
+// ── thinking 参数契约（流式 / sync 共用）──
+
+/// 按 provider 的 thinking 参数契约写入请求体顶层键。
+///
+/// 契约见 `qaqh-types/src/provider.rs` 的 `ThinkingParamMode`：Qwen 用顶层
+/// `enable_thinking: true`（而非 `thinking`），MiniMax 还需附带 `reasoning_split`。
+/// 流式与 sync（compact/title）路径必须经由本函数写入——两者曾各自手写并漂移
+/// （sync 曾把 Qwen 的键发成 `thinking` 且漏发 `reasoning_split`），已收敛到单一实现。
+pub(crate) fn apply_thinking_params(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    provider: &ProviderConfig,
+) {
+    if !provider.supports_thinking {
+        return;
+    }
+    match provider.thinking_mode {
+        ThinkingParamMode::OpenAi => {
+            body.insert("thinking".into(), serde_json::json!({"type": "enabled"}));
+        }
+        ThinkingParamMode::QwenEnableThinking => {
+            body.insert("enable_thinking".into(), serde_json::json!(true));
+        }
+        ThinkingParamMode::MiniMaxAdaptive => {
+            body.insert("thinking".into(), serde_json::json!({"type": "adaptive"}));
+            body.insert("reasoning_split".into(), serde_json::json!(true));
+        }
+    }
+}
+
 // ── Synchronous (non-streaming) chat ──
 
 pub fn chat_sync_openai(
@@ -956,13 +958,11 @@ pub fn chat_sync_openai(
         "max_tokens": max_tokens,
         "stream": false,
     });
-    if provider.supports_thinking {
-        let thinking = match provider.thinking_mode {
-            ThinkingParamMode::OpenAi => serde_json::json!({"type": "enabled"}),
-            ThinkingParamMode::QwenEnableThinking => serde_json::json!(true),
-            ThinkingParamMode::MiniMaxAdaptive => serde_json::json!({"type": "adaptive"}),
-        };
-        body["thinking"] = thinking;
+    // thinking 参数契约与流式路径共用（见 `apply_thinking_params`）——
+    // 此处曾手写并漂移：Qwen 键名发错（`thinking` 而非 `enable_thinking`）、
+    // MiniMax 漏发 `reasoning_split`。
+    if let Some(obj) = body.as_object_mut() {
+        apply_thinking_params(obj, provider);
     }
 
     // T8: sync 路径（compact/title）补轻量重试——原来零重试，上游瞬时
@@ -1062,7 +1062,7 @@ fn build_chat_url(base_url: &str, chat_path: Option<&str>) -> String {
     }
 }
 
-// ── Error descriptions ──
+// ── Tests ──
 
 #[cfg(test)]
 mod skill_envelope_tests {
@@ -1435,6 +1435,45 @@ mod skill_envelope_tests {
             false,
             None,
         )
+    }
+
+    /// BUG（2026-10-05 注释审计 §3.2）：sync（compact/title）路径曾手写 thinking
+    /// 参数——Qwen 键名发成 `thinking`（契约要求顶层 `enable_thinking`）、MiniMax
+    /// 漏发 `reasoning_split`。契约现收敛到 `apply_thinking_params` 单一实现，
+    /// 本测试锁定三种模式的键位，防止流式 / sync 路径再次漂移。
+    #[test]
+    fn apply_thinking_params_matches_provider_contract() {
+        let mut p = provider();
+        p.supports_thinking = true;
+
+        p.thinking_mode = ThinkingParamMode::QwenEnableThinking;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert_eq!(body.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert!(body.get("thinking").is_none(), "Qwen 不得发 `thinking` 键");
+
+        p.thinking_mode = ThinkingParamMode::MiniMaxAdaptive;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert_eq!(
+            body.get("thinking"),
+            Some(&serde_json::json!({"type": "adaptive"}))
+        );
+        assert_eq!(body.get("reasoning_split"), Some(&serde_json::json!(true)));
+
+        p.thinking_mode = ThinkingParamMode::OpenAi;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert_eq!(
+            body.get("thinking"),
+            Some(&serde_json::json!({"type": "enabled"}))
+        );
+        assert!(body.get("enable_thinking").is_none());
+
+        p.supports_thinking = false;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert!(body.is_empty(), "不支持 thinking 的 provider 不得写入任何键");
     }
 
     #[test]

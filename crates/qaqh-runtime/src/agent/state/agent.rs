@@ -159,7 +159,6 @@ pub struct AgentState {
     pub config: qaqh_config::Config,
     pub session: SessionMeta,
     pub tool_defs: Vec<qaqh_types::ToolDef>,
-    pub dsml_compat_count: u32,
     pub turn_count: u32,
     /// If true, skip all disk persistence (subagent disposable mode).
     pub ephemeral: bool,
@@ -243,7 +242,6 @@ impl AgentState {
             config,
             session: SessionMeta::default(),
             tool_defs: Vec::new(),
-            dsml_compat_count: 0,
             turn_count: 0,
             ephemeral: false,
             timeline_turn_count: 0,
@@ -667,7 +665,7 @@ impl AgentState {
         context
     }
 
-    /// Refresh the transient catalog slot without writing it to history.
+    /// Refresh the in-memory skill catalog without writing it to history.
     pub fn inject_catalog(&mut self, workspace: &str) {
         self.skills.set_workspace(Path::new(workspace));
         self.skills.refresh();
@@ -1328,7 +1326,7 @@ mod tests {
         qaqh_workspace::runtime::init_tools("tool-mode-test", &agent_tool_registrars(), vec![]);
         let mut agent = AgentState::new(qaqh_config::Config::default());
 
-        // minimal → 固定档位（MINIMAL_TOOLS 8 个）
+        // minimal → 固定档位（MINIMAL_TOOLS 7 个）
         agent.apply_tool_mode("minimal", &[]);
         assert_eq!(agent.session.tool_mode, "minimal");
         assert!(agent.session.custom_tools.is_empty());
@@ -1437,7 +1435,7 @@ mod tests {
         );
     }
 
-    /// 验证回传给模型的工具 schema（`agent.tool_defs`，engine_turn.rs L1285
+    /// 验证回传给模型的工具 schema（`agent.tool_defs`，engine_turn.rs L1622
     /// `tools = Some(ctx.agent.tool_defs.clone())`）在极限档位下是**精确等于**
     /// 档位集合——不是「全量放送 + 执行层黑名单」。档位外的任何工具绝不能
     /// 出现在回传 schema 里。附带打印每个档位实际发出的 tool 名便于观测。

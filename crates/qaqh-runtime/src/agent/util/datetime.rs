@@ -1,5 +1,6 @@
 //! Date/time helpers (split from the former util monolith; behavior preserved,
-//! including the historical UTC+8 bias — to be revisited with tests).
+//! including the historical UTC+8 bias in the `chrono_local_*` helpers, while
+//! `epoch_to_date` stays pure UTC — to be revisited with tests).
 
 /// Convert epoch seconds to human-readable UTC date.
 pub(crate) fn epoch_to_date(epoch_secs: u64) -> String {

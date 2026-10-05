@@ -159,7 +159,7 @@ pub enum ControlCommand {
     },
 }
 
-/// Conversation 频道命令。
+/// Conversation 消息的输入用途。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -175,7 +175,7 @@ pub enum ConversationInputPurpose {
     Interject,
 }
 
-/// Conversation 频道命令。
+/// 子代理终态种类（`SubagentTerminalNotification.terminal`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -249,7 +249,8 @@ pub enum ConversationCommand {
         /// and fall back to the command id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
-        /// Whether this message must trigger a turn or is queue-only.
+        /// How the child applies this message: trigger a turn, queue it only, or
+        /// merge it into a running turn at its next safe point (Steer/Interject).
         #[serde(default)]
         input_purpose: ConversationInputPurpose,
         /// 系统级注入（如子代理结果回传）：以 system 角色进入 transcript 并

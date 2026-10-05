@@ -443,7 +443,15 @@ pub(crate) async fn execute_command(
             }
             if let Err(e) = state.service.handle(
                 "session.resume",
-                &serde_json::json!({"session_id": session_id}),
+                // BUG-2026-10-05-01：这里此前传的是 header 的 `session_id`
+                //（= client_session_id 租约标识），不是命令里的目标会话。后果：
+                // daemon 把租约 id 当会话恢复——`.active_session` 被写成租约 id、
+                // `register_root_agent` 对租约 id 物化出孤儿 identity 目录
+                // （`sessions/{cs}/canonical-identity.json`）、actor resume 加载
+                // 失败后 lifecycle 兜底又静默分配一个幽灵会话目录（worker 只写
+                // 一条 system prompt 后永久闲置）。TUI 每次重启换 client_session_id
+                // 就再产生一对。必须恢复**命令声明的目标会话**。
+                &serde_json::json!({"session_id": target_session_id}),
             ) {
                 state
                     .pending

@@ -7,12 +7,12 @@
 //! 布局：
 //! - `objects/xx/yyyy...`   内容寻址 blob（SHA-256），未变内容零重复；temp+rename 原子落盘
 //! - `journal.jsonl`        append-only 变更流水，每行一个 change
-//! - `manifests/<scan>.json 每次扫描的 path→sha 全量清单——"回到时刻 T"不需要重放日志
+//! - `manifests/<scan>.json 一次扫描的清单：锚点存全量 path→sha，增量相对 base 只存变化条目 + tombstones——"回到时刻 T"不需要重放日志
 //! - `state.json`           last_scan / last_report / seq
 //!
 //! 崩溃安全：先写 blob，后 append journal，再写 manifest/state；恢复前校验 sha。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,13 @@ pub struct State {
     pub seq: u64,
 }
 
+/// 一次 GC 的回收统计。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcOutcome {
+    pub dropped_manifests: usize,
+    pub dropped_blobs: usize,
+}
+
 /// manifest 的单文件条目：内容 sha + 用于跳过重读的 stat 缓存。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -73,15 +80,28 @@ pub struct FileEntry {
     pub size: u64,
 }
 
-/// 一次扫描的全量清单。
+/// 一次扫描的清单。锚点（`anchor = true`）存全量；增量（`anchor = false`）
+/// 相对 `base` 只存变化条目，删除以 `tombstones` 墓碑表达。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub id: String,
     pub ts: String,
     pub trigger: String,
-    #[allow(dead_code)]
     pub base: Option<String>,
+    /// 兼容存量数据：字段缺失（旧 manifest）视为全量锚点
+    #[serde(default = "default_true")]
+    pub anchor: bool,
+    /// 锚点链深：anchor = 0，delta = base.depth + 1
+    #[serde(default)]
+    pub depth: u32,
     pub files: BTreeMap<String, FileEntry>,
+    /// delta 专用：相对 base 被删除的路径
+    #[serde(default)]
+    pub tombstones: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -196,6 +216,32 @@ impl Store {
         )
     }
 
+    /// 物化任意 manifest 为全量清单：沿 base 链上溯到最近锚点，
+    /// 自锚点向下逐层应用增量条目与删除墓碑。链深有界（锚点间隔）。
+    pub fn materialize_manifest(&self, id: &str) -> Result<BTreeMap<String, FileEntry>> {
+        let mut chain = Vec::new();
+        let mut cur = id.to_string();
+        loop {
+            let m = self.load_manifest(&cur)?;
+            let (is_anchor, next) = (m.anchor, m.base.clone());
+            chain.push(m);
+            if is_anchor {
+                break;
+            }
+            cur = next.context("增量 manifest 缺少 base 指针，链无法物化")?;
+        }
+        let mut files = chain.last().context("manifest 链不应为空")?.files.clone();
+        for m in chain.iter().rev().skip(1) {
+            for (k, v) in &m.files {
+                files.insert(k.clone(), v.clone());
+            }
+            for t in &m.tombstones {
+                files.remove(t);
+            }
+        }
+        Ok(files)
+    }
+
     pub fn load_manifest(&self, id: &str) -> Result<Manifest> {
         // id 只允许安全字符，防路径注入
         if !id
@@ -220,6 +266,106 @@ impl Store {
         }
         ids.sort();
         Ok(ids)
+    }
+
+    /// 保留窗口 GC：回收窗口外的 manifest、journal 条目与孤儿 blob。
+    ///
+    /// 保留最近 `keep` 份 manifest 为窗口；journal 压缩到
+    /// `scan >= 最老保留 manifest id`（id 字典序即时间序）；blob 只保留被
+    /// 保留 manifest 与窗口内 journal 条目（before/after）引用的内容。
+    /// 代价：undo/restore 只保证窗口内可回溯，窗口外的历史变更不可恢复。
+    ///
+    /// `lock_wait` 为存储锁等待上界；争锁超时返回 Err——调用方在高频路径
+    /// （工具批边界 / `Session::open`）上应传小值并容忍本次跳过。
+    pub fn gc(&self, keep: usize, lock_wait: std::time::Duration) -> Result<GcOutcome> {
+        let _guard = self.lock_timeout(lock_wait)?;
+        let ids = self.all_manifest_ids()?;
+        if ids.len() <= keep {
+            return Ok(GcOutcome {
+                dropped_manifests: 0,
+                dropped_blobs: 0,
+            });
+        }
+        let cut = ids.len() - keep;
+        let oldest_kept = ids[cut].clone();
+
+        // 0) 链感知：窗口最老一份若是增量，其 base 链上溯到锚点途经的
+        //    manifest 虽在窗口外也必须保留，否则链断、物化失败。
+        let mut chain_keep: HashSet<String> = HashSet::new();
+        let mut cur = oldest_kept.clone();
+        loop {
+            let m = self.load_manifest(&cur)?;
+            let (is_anchor, next) = (m.anchor, m.base.clone());
+            chain_keep.insert(cur);
+            if is_anchor {
+                break;
+            }
+            cur = next.context("增量 manifest 缺少 base 指针，GC 无法定位锚点")?;
+        }
+
+        // 1) 引用集：保留 manifest 物化为全量后的条目 + 窗口内 journal 的
+        //    before/after（不能用 delta 的稀疏条目，否则会误删活跃 blob）
+        let mut referenced: HashSet<String> = HashSet::new();
+        for id in &ids[cut..] {
+            for e in self.materialize_manifest(id)?.values() {
+                referenced.insert(e.sha.clone());
+            }
+        }
+        let retained: Vec<Change> = self
+            .read_journal()?
+            .into_iter()
+            .filter(|c| c.scan >= oldest_kept)
+            .collect();
+        for c in &retained {
+            if let Some(b) = &c.before {
+                referenced.insert(b.clone());
+            }
+            if let Some(a) = &c.after {
+                referenced.insert(a.clone());
+            }
+        }
+
+        // 2) journal 压缩（原子重写；崩溃后最坏残留 = 未删的旧 manifest，
+        //    下次 GC 再收）
+        let mut buf = String::new();
+        for c in &retained {
+            buf.push_str(&serde_json::to_string(c)?);
+            buf.push('\n');
+        }
+        atomic_write_bytes(&self.dir.join("journal.jsonl"), buf.as_bytes())?;
+
+        // 3) 删窗口外 manifest（链感知：锚点链途经的保留）
+        let mut dropped_manifests = 0usize;
+        for id in &ids[..cut] {
+            if chain_keep.contains(id) {
+                continue;
+            }
+            fs::remove_file(self.dir.join("manifests").join(format!("{id}.json")))?;
+            dropped_manifests += 1;
+        }
+
+        // 4) 孤儿 blob 回收（内容寻址：不在引用集即不可达）
+        let mut dropped_blobs = 0usize;
+        for shard in fs::read_dir(self.dir.join("objects"))? {
+            let shard = shard?.path();
+            if !shard.is_dir() {
+                continue;
+            }
+            for f in fs::read_dir(&shard)? {
+                let p = f?.path();
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !referenced.contains(name) {
+                    fs::remove_file(&p)?;
+                    dropped_blobs += 1;
+                }
+            }
+        }
+        Ok(GcOutcome {
+            dropped_manifests,
+            dropped_blobs,
+        })
     }
 
     pub fn load_state(&self) -> Result<State> {
@@ -302,7 +448,7 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
+    fs::write(&tmp, serde_json::to_string(value)?)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -379,6 +525,9 @@ mod tests {
             ts: "t".into(),
             trigger: "manual".into(),
             base: None,
+            anchor: true,
+            depth: 0,
+            tombstones: Vec::new(),
             files: BTreeMap::from([(
                 "a.txt".into(),
                 FileEntry {
@@ -392,5 +541,177 @@ mod tests {
         assert_eq!(store.load_manifest("s1").unwrap().files.len(), 1);
         assert_eq!(store.all_manifest_ids().unwrap(), vec!["s1".to_string()]);
         assert!(store.load_manifest("missing").is_err());
+    }
+
+    #[test]
+    fn gc_prunes_manifests_journal_and_orphan_blobs() {
+        let dir = tmp_dir("gc");
+        let store = Store::open(&dir, Some(&dir)).unwrap();
+        let v1 = store.write_blob(b"v1").unwrap();
+        let v2 = store.write_blob(b"v2").unwrap();
+        let v3 = store.write_blob(b"v3").unwrap();
+        let orphan = store.write_blob(b"orphan").unwrap();
+
+        // 三份 manifest（a.txt: v1→v2→v3）+ 两条 journal 条目
+        let mk = |seq: u64, sha: &str| Manifest {
+            id: format!("s{seq:016}_0001"),
+            ts: "t".into(),
+            trigger: "manual".into(),
+            base: None,
+            anchor: true,
+            depth: 0,
+            tombstones: Vec::new(),
+            files: BTreeMap::from([(
+                "a.txt".into(),
+                FileEntry {
+                    sha: sha.into(),
+                    mtime: 1,
+                    size: 2,
+                },
+            )]),
+        };
+        store.save_manifest(&mk(1, &v1)).unwrap();
+        store.save_manifest(&mk(2, &v2)).unwrap();
+        store.save_manifest(&mk(3, &v3)).unwrap();
+        let ch = |seq: u64, before: &str, after: &str| Change {
+            id: format!("s{seq:016}_0001#0"),
+            scan: format!("s{seq:016}_0001"),
+            ts: "t".into(),
+            path: "a.txt".into(),
+            status: ChangeStatus::Modified,
+            before: Some(before.into()),
+            after: Some(after.into()),
+            size_before: Some(2),
+            size_after: Some(2),
+            trigger: "manual".into(),
+        };
+        store
+            .append_journal(&[ch(2, &v1, &v2), ch(3, &v2, &v3)])
+            .unwrap();
+
+        // 保留最近 2 份：m1 丢弃；journal 全在窗口内 → v1 经 before 引用保留；
+        // 唯一孤儿是手动写入的 orphan blob
+        let out = store.gc(2, std::time::Duration::from_millis(100)).unwrap();
+        assert_eq!(out.dropped_manifests, 1);
+        assert_eq!(out.dropped_blobs, 1);
+        assert_eq!(
+            store.all_manifest_ids().unwrap(),
+            vec![format!("s{:016}_0001", 2), format!("s{:016}_0001", 3)]
+        );
+        assert_eq!(store.read_journal().unwrap().len(), 2);
+        for sha in [&v1, &v2, &v3] {
+            assert!(store.read_blob(sha).is_ok());
+        }
+        assert!(store.read_blob(&orphan).is_err());
+
+        // 未超窗口：空操作
+        let again = store.gc(2, std::time::Duration::from_millis(100)).unwrap();
+        assert_eq!(again.dropped_manifests + again.dropped_blobs, 0);
+    }
+
+    #[test]
+    fn manifest_chain_materialize() {
+        let dir = tmp_dir("chain");
+        let store = Store::open(&dir, Some(&dir)).unwrap();
+        let s1 = store.write_blob(b"one").unwrap();
+        let s2 = store.write_blob(b"two").unwrap();
+        let s3 = store.write_blob(b"three").unwrap();
+        let fe = |sha: &str| FileEntry {
+            sha: sha.into(),
+            mtime: 1,
+            size: 3,
+        };
+
+        // anchor(m1)：a=one, b=two
+        store
+            .save_manifest(&Manifest {
+                id: format!("s{:016}_0001", 1),
+                ts: "t".into(),
+                trigger: "manual".into(),
+                base: None,
+                anchor: true,
+                depth: 0,
+                files: BTreeMap::from([("a.txt".into(), fe(&s1)), ("b.txt".into(), fe(&s2))]),
+                tombstones: Vec::new(),
+            })
+            .unwrap();
+        // delta(m2)：a→three（改），b 删除（墓碑），c 新增 one
+        store
+            .save_manifest(&Manifest {
+                id: format!("s{:016}_0001", 2),
+                ts: "t".into(),
+                trigger: "tool_end".into(),
+                base: Some(format!("s{:016}_0001", 1)),
+                anchor: false,
+                depth: 1,
+                files: BTreeMap::from([("a.txt".into(), fe(&s3)), ("c.txt".into(), fe(&s1))]),
+                tombstones: vec!["b.txt".into()],
+            })
+            .unwrap();
+
+        // 物化 delta：改/增/删三项语义全部生效
+        let full = store
+            .materialize_manifest(&format!("s{:016}_0001", 2))
+            .unwrap();
+        assert_eq!(full.get("a.txt").unwrap().sha, s3);
+        assert_eq!(full.get("c.txt").unwrap().sha, s1);
+        assert!(!full.contains_key("b.txt"));
+        assert_eq!(full.len(), 2);
+
+        // 锚点物化 = 原样
+        let base = store
+            .materialize_manifest(&format!("s{:016}_0001", 1))
+            .unwrap();
+        assert_eq!(base.len(), 2);
+    }
+
+    #[test]
+    fn gc_keeps_anchor_chain_outside_window() {
+        let dir = tmp_dir("gc-chain");
+        let store = Store::open(&dir, Some(&dir)).unwrap();
+        let s1 = store.write_blob(b"one").unwrap();
+        let fe = |sha: &str| FileEntry {
+            sha: sha.into(),
+            mtime: 1,
+            size: 3,
+        };
+        // anchor(m1) → delta(m2) → delta(m3)
+        store
+            .save_manifest(&Manifest {
+                id: format!("s{:016}_0001", 1),
+                ts: "t".into(),
+                trigger: "manual".into(),
+                base: None,
+                anchor: true,
+                depth: 0,
+                files: BTreeMap::from([("a.txt".into(), fe(&s1))]),
+                tombstones: Vec::new(),
+            })
+            .unwrap();
+        for seq in [2u64, 3] {
+            store
+                .save_manifest(&Manifest {
+                    id: format!("s{:016}_0001", seq),
+                    ts: "t".into(),
+                    trigger: "tool_end".into(),
+                    base: Some(format!("s{:016}_0001", seq - 1)),
+                    anchor: false,
+                    depth: (seq - 1) as u32,
+                    files: BTreeMap::new(),
+                    tombstones: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        // keep=1：窗口只有 m3，但 m1/m2 是 m3 的 base 链，必须保留
+        let out = store.gc(1, std::time::Duration::from_millis(100)).unwrap();
+        assert_eq!(out.dropped_manifests, 0);
+        assert_eq!(store.all_manifest_ids().unwrap().len(), 3);
+        // 物化仍成功 = 链未断
+        assert!(
+            store
+                .materialize_manifest(&format!("s{:016}_0001", 3))
+                .is_ok()
+        );
     }
 }

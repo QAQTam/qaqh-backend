@@ -1,6 +1,7 @@
 //! Tool SDK v1 — 工具契约核心类型（base spec §5-§9；09-19 补充稿 §2-§5）。
 //!
-//! 本模块是 Tool SDK v1 的落点（09-15 plan P1）：**类型先行、不接生产工具**；
+//! 本模块是 Tool SDK v1 的落点（09-15 plan P1）：类型先行，typed 工具其后经
+//! `register_typed` 接入生产注册表；
 //! 迁移期 legacy `ToolHandler` 经 `LegacyToolAdapter` 接入（plan P2），
 //! 新工具只能实现 [`TypedTool`]。
 //!

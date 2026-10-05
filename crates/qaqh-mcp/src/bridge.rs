@@ -9,7 +9,7 @@
 //!   禁触碰全局 `qaqh_workspace::CANCEL`，禁以任何字面形式复位取消旗标——
 //!   契约红线1），
 //!   命中即 best-effort 发送 `notifications/cancelled`、丢弃结果、返回
-//!   `MCP_CANCELLED`；超时链 = `ctx.timeout_secs`（来自 server 配置的
+//!   `mcp_cancelled`；超时链 = `ctx.timeout_secs`（来自 server 配置的
 //!   `default_timeout_secs`）→ 缺省 60s → 封顶 3600s；
 //! - 错误码映射：`McpError`/`CallToolResult::is_error` → 设计 §7 的
 //!   ToolResult JSON（timeis/status/code/message/hint）；
@@ -147,7 +147,7 @@ pub fn dispatch_with(
 ///
 /// server 名含 `_` 时存在前缀歧义（`mcp__a__b__t`），按**最长 server 前缀**
 /// 消解；注册侧碰撞拒绝保证同一完整名至多注册一次，因此最长前缀即注册时
-/// 的真实 (server, tool) 对。未匹配任何已配置 server → `MCP_NOT_FOUND`
+/// 的真实 (server, tool) 对。未匹配任何已配置 server → `mcp_not_found`
 /// （报错附可用名单，设计 §7）。
 fn resolve_call(manager: &McpManager, name: &str) -> Result<(String, String), McpError> {
     let rest = name.strip_prefix(MCP_DYNAMIC_PREFIX).ok_or_else(|| {
@@ -269,7 +269,7 @@ fn send_cancelled(manager: &McpManager, server: &str, tool: &str, reason: &str) 
     }
 }
 
-/// `CallToolResult` → ToolResult（§7：`isError=true` → `MCP_TOOL_ERROR` 且
+/// `CallToolResult` → ToolResult（§7：`isError=true` → `mcp_tool_error` 且
 /// 透传 content；成功 → 文本拼接直通，输出上限由 [`ToolResult::ok`] 既有
 /// 截断承担）。
 fn call_result_to_tool_result(result: CallToolResult) -> ToolResult {

@@ -431,7 +431,7 @@ async fn idle_reclaim_fires_then_reconnects() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_gate_rejects_further_work() {
-    // Disabled：未启用配置 → MCP_DISABLED（零网络操作）。
+    // Disabled：未启用配置 → mcp_disabled（零网络操作）。
     let disabled = McpManager::new(McpConfig::default());
     let err = connect_err(disabled.get_or_connect("anything").await);
     assert_eq!(err.kind, McpErrorKind::Disabled);
@@ -494,7 +494,7 @@ async fn subprocess_connect_and_shutdown_reaps_child() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manager_slot_defaults_to_disabled_and_swaps() {
-    // 默认占位 manager：全部拒绝（MCP_DISABLED），无网络操作。
+    // 默认占位 manager：全部拒绝（mcp_disabled），无网络操作。
     let err = connect_err(manager_slot().get_or_connect("anything").await);
     assert_eq!(err.kind, McpErrorKind::Disabled);
 

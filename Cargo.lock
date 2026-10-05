@@ -3982,6 +3982,7 @@ dependencies = [
  "qaqh-policy",
  "qaqh-sandbox",
  "qaqh-skills",
+ "qaqh-spy",
  "qaqh-types",
  "regex",
  "ropey",

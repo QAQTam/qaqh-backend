@@ -26,7 +26,6 @@
 //! | Loop      | `loop_core.rs` + `loop_*.rs` | Ringing V1 固定引擎模块显式分派（Phase 2-5 拆分：注入/三路分派/收尾） |
 //! | Plugins   | `plugins/`  | 非 loop 内核：compact/misc/dashboard（待 crate 化）；title 已外移 `qaqh-title` |
 //! | State     | `state/`    | AgentState, sessions, skills            |
-//! | Services  | `dashboard.rs` | Conflict detection, dashboard        |
 //! | Utilities | `util/`     | Calendar, token logging, display fmt    |
 //!
 //! 引擎模块为固定集合，无独立 `Engine` trait；命令经 `dispatch_ringing_one`

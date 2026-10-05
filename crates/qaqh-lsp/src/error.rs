@@ -1,5 +1,5 @@
 //! LSP 错误模型（mcp error.rs 同款风格：timeis/status/code/message/hint 的
-//! `ToolResult::error` JSON 由 bridge 统一渲染；本模块只定 kind + 构造）。
+//! `ToolResult::error` JSON 由 tool.rs 统一渲染；本模块只定 kind + 构造）。
 
 /// LSP 错误码（ToolResult JSON 的 `code` 字段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

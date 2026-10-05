@@ -152,7 +152,7 @@ pub struct Message {
 }
 
 impl Message {
-    /// Role constants — the four open roles of the context flow.
+    /// Role constants — the open roles of the context flow.
     pub const ROLE_SYSTEM: &'static str = "system";
     pub const ROLE_USER: &'static str = "user";
     pub const ROLE_ASSISTANT: &'static str = "assistant";

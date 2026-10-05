@@ -206,8 +206,9 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                 // the active view, so the next id must be greater than both.
                 //
                 // The daemon additionally injects the timeline's recorded turn
-                // count (QAQH_TIMELINE_TURN_COUNT) when spawning a resume
-                // worker: meta.turn_count only persists on completion, so after
+                // count per-agent (AgentState.timeline_turn_count) when spawning
+                // a resume worker: meta.turn_count only persists on completion,
+                // so after
                 // a restart it can lag the timeline's sealed turns by more than
                 // one (compaction shrinks the message view too). Without this
                 // floor the allocator reuses an id the timeline already sealed
@@ -452,8 +453,9 @@ pub fn create_session_with_session(agent: &mut AgentState) {
     );
     // 应用持久化的工具模式（PLAN-TOOL-MODES.md 4.3/4.4）：preset-seed 新建路径
     // 此前不读 meta.json，导致会话级 tool_mode 丢失、工具回退全量。
-    // 这里与 resume 路径（init_session L120-134）对齐，从 meta 恢复并 apply。
-    // 提前到 push_system 之前，让系统提示能读到 tool_mode（minimal:dsh → 极简 prompt）。
+    // 这里与 resume 路径（init_session L307-313）对齐，从 meta 恢复并 apply。
+    // 提前到 push_system 之前，与 resume 路径的 apply 顺序一致（注意：
+    // system_prompt_for_mode 目前忽略 tool_mode，minimal:dsh 已下线、恒返回完整 prompt）。
     if let Some(meta) = agent
         .session_manager
         .as_ref()

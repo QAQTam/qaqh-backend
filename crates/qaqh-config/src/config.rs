@@ -9,8 +9,9 @@ use std::sync::{Mutex, OnceLock};
 
 /// Subagent default configuration.
 ///
-/// These are defaults applied when spawning sub-agents. Individual
-/// `spawn_subagent` tool calls can override these on a per-instance basis.
+/// These are defaults applied when spawning sub-agents. The `spawn_subagent`
+/// tool schema only exposes `task_description` / `agent_name` / `context` /
+/// `timeout_secs`; the remaining fields are set through settings, not per-call.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubagentConfig {
     /// Override model. Empty = inherit from parent agent config.
@@ -181,7 +182,7 @@ pub struct McpServerConfig {
     pub resources_enabled: bool,
     /// 单次工具调用默认超时（秒）；1..=3600。
     pub default_timeout_secs: u64,
-    /// per-server 并发上限；1..=64。
+    /// per-server 并发上限；1..=16。
     pub max_concurrent_calls: u32,
     /// stdio 子进程工作目录；空 = 继承 daemon 进程 cwd（path-sensitive
     /// server，如按 cwd 推导 root 的索引服务，用此字段钉住工作区）。
@@ -978,8 +979,8 @@ falling back to 1 (read-only)"
                 {
                     s.api_key = Some(CONFIG_MARKER.to_owned());
                 }
-                // C3 迁移：扁平值先固化进 active/default profile（已有条目
-                // 不覆盖——profile 为权威），再剥离顶层键。fresh 无 profiles
+                // C3 迁移：扁平值先固化进 active/default profile（**无条件覆盖**
+                // 同名条目——扁平值为最新意图），再剥离顶层键。fresh 无 profiles
                 // 时就地建表；缺失的分量用合并结果 cfg 兜底，确保零丢失。
                 if legacy_flat_fields {
                     let active = fresh

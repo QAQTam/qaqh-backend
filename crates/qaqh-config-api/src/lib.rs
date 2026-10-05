@@ -25,7 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
-/// TUI/web）从这里取值；`serde(default)` 保证旧 daemon 缺字段时向前兼容。
+/// TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见 crate 级兼容策略）。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -361,8 +361,9 @@ mod tests {
         assert!(err.to_string().contains("missing field"), "{err}");
     }
 
-    /// 完整读模型 fixture：**当前** wire 形状（K2 camelCase）必须无损解析进
-    /// `ConfigDto`。
+    /// 完整读模型 fixture：字段形状为**当前** wire 形状（K2 camelCase），必须无损
+    /// 解析进 `ConfigDto`。注意 `permissionLevel: 4` 是旧四档值——读模型不做值域
+    /// 校验故照单解析，仅写路径 `ConfigPatch::validate` 拒 `4`（值域 1..=3）。
     ///
     /// 历史：本 fixture 原为 2026-08-25 对运行中 daemon 的实拍（snake_case），
     /// 靠 `alias` 与 struct 级 `#[serde(default)]` 才解析得动。按兼容政策

@@ -40,8 +40,9 @@ pub enum ToolCallSource {
 
 /// 代理运行模式（v1 本地镜像）。
 ///
-/// domain 的 `ConversationMode` 因 R-4 约束（workspace → domain 仅限
-/// Dashboard* 类型）不可引入；映射由 runtime 适配层负责。
+/// domain 的 `ConversationMode` 因 R-4 约束（workspace → domain 仅限被动投影
+/// 记录：`Dashboard*` 与 `CodeDeltaRecord`，禁止事件/行为类型；口径见
+/// `dashboard.rs:7`）不可引入；映射由 runtime 适配层负责。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentMode {
     /// 编码模式（默认）。

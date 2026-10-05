@@ -44,7 +44,10 @@ fn invalid_levels_never_resolve_to_skip_permissions() {
 fn valid_levels_keep_their_meaning() {
     assert_eq!(PermissionLevel::from_u8(1), PermissionLevel::ReadOnly);
     assert_eq!(PermissionLevel::from_u8(2), PermissionLevel::WorkspaceWrite);
-    assert_eq!(PermissionLevel::from_u8(3), PermissionLevel::SkipPermissions);
+    assert_eq!(
+        PermissionLevel::from_u8(3),
+        PermissionLevel::SkipPermissions
+    );
     for raw in 1..=3u8 {
         assert_eq!(PermissionLevel::try_from_u8(raw).unwrap().to_u8(), raw);
     }

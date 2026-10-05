@@ -533,7 +533,7 @@ impl ToolEvent {
         }
     }
 
-    /// 该事件关联的 tool_call_id（ToolCallPrepared/Started/Progress 恒有）。
+    /// 该事件关联的 tool_call_id（ToolCallPrepared/Started/Finished/PermissionRequested 恒有）。
     pub fn tool_call_id(&self) -> Option<&str> {
         match self {
             ToolEvent::ToolCallPrepared { tool_call_id, .. }
@@ -614,7 +614,7 @@ pub enum ControlEvent {
         interaction_id: String,
         resolution: AskResolution,
     },
-    /// plan review 请求（plan_submit 或 todo_activation）。
+    /// plan review 请求（plan 或 todo_activation）。
     PlanReviewRequested {
         interaction_id: String,
         turn_id: String,

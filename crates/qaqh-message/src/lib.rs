@@ -1,7 +1,11 @@
 //! qaqh-message: structured conversation state with state-machine lifecycle.
 //!
 //! `MessageStore` is the single source of truth for messages.
-//! Every `push_*` returns `bool` — `true` when the push completed the current turn (last step all tools satisfied, none pending).
+//! `push_*` return types vary by method: `push_assistant` returns whether the
+//! step completed the current turn (last step all tools satisfied, none
+//! pending), `push_trailing_system` returns whether the injection was accepted,
+//! `push_user` / `push_system` / `push_system_input` always return `false`, and
+//! the `push_tool_result_direct*` variants return `()`.
 
 pub mod context_flow;
 pub mod effect;

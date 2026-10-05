@@ -1,8 +1,8 @@
 //! Ringing 服务面方法表（`POST /ringing/v2/service/{method}` 的单一权威清单）。
 //!
 //! 旧 `/queries/{name}`（闭表白名单）与 `/actions/{name}`（前缀 allowlist）
-//! 双端点及其 slash/dot 双别名容忍已合并于此：一个方法一个条目，
-//! `Read` = 无副作用查询，`Write` = 变更操作。
+//! 双端点已合并于此，其 slash/dot 双别名容忍一并拆除：单一规范形态
+//! `module.method`，一个方法一个条目，`Read` = 无副作用查询，`Write` = 变更操作。
 //!
 //! 会话生命周期（`session.new`/`session.resume`/`skills.activate`/`todo.cancel`/
 //! `plan.action` 等命令语义方法）刻意不在表中——会话命令只走三频道
