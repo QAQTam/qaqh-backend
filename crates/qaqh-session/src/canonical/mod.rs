@@ -20,7 +20,8 @@ pub use clock::{
 };
 pub use identity::{
     CANONICAL_IDENTITY_FILE, CANONICAL_IDENTITY_SCHEMA, CanonicalIdentityError,
-    CanonicalSessionIdentity, generate_session_id, generate_ulid, ulid_from_text,
+    CanonicalSessionIdentity, causation_for_command, generate_session_id, generate_ulid,
+    ulid_from_text,
 };
 pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
@@ -48,8 +49,8 @@ pub use replay_window::{
 };
 pub use store::{AppendOutcome, CanonicalSessionStore};
 pub use tool_ledger::{
-    DriverClaimOutcome, DriverReleaseOutcome, ToolLedger, ToolLedgerEntry, ToolLedgerError,
-    ToolReconciliationEvidence, ToolRecoveryDisposition,
+    DriverClaimOutcome, DriverReleaseOutcome, FactCausation, ToolLedger, ToolLedgerEntry,
+    ToolLedgerError, ToolReconciliationEvidence, ToolRecoveryDisposition,
 };
 pub use types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,

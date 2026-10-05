@@ -946,8 +946,9 @@ fn validate_uuid_v7(field: &'static str, value: &str) -> Result<(), ValidationEr
     Ok(())
 }
 
-fn validate_ulid(field: &'static str, value: &str) -> Result<(), ValidationError> {
-    let valid = value.len() == 26
+/// Whether `value` is a canonical ULID (26 chars, Crockford base32).
+pub fn is_ulid_text(value: &str) -> bool {
+    value.len() == 26
         && value.bytes().all(|byte| {
             matches!(
                 byte,
@@ -960,8 +961,11 @@ fn validate_ulid(field: &'static str, value: &str) -> Result<(), ValidationError
                     | b'P'..=b'T'
                     | b'V'..=b'Z'
             )
-        });
-    if !valid {
+        })
+}
+
+fn validate_ulid(field: &'static str, value: &str) -> Result<(), ValidationError> {
+    if !is_ulid_text(value) {
         return Err(ValidationError::InvalidId {
             field,
             value: value.to_owned(),

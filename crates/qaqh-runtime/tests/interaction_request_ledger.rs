@@ -75,9 +75,13 @@ fn yield_persists_canonical_interaction_request() {
     let command_id = qaqh_session::canonical::generate_ulid();
     record_interaction_resolution_for_test(&mut agent, wire_call, "approved", Some(&command_id))
         .expect("persist resolution");
-    let facts = CommittedFactReader::open(&session_dir, identity.session_id, identity.log_id)
-        .and_then(|reader| reader.read_all())
-        .expect("read canonical facts after resolution");
+    let facts = CommittedFactReader::open(
+        &session_dir,
+        identity.session_id.clone(),
+        identity.log_id.clone(),
+    )
+    .and_then(|reader| reader.read_all())
+    .expect("read canonical facts after resolution");
     let resolutions = facts
         .iter()
         .filter_map(|fact| match &fact.payload {
@@ -98,4 +102,52 @@ fn yield_persists_canonical_interaction_request() {
         resolution_fact.causation_id.as_ref().map(|id| id.as_str()),
         Some(command_id.as_str())
     );
+
+    // 2026-10-05 回归（`docs/bug-ringing-v2-commands-stuck-in-running.md`）：
+    // 移动端提交的 command_id 是 UUID。writer 侧曾按 `is_ulid` 过滤，把它直接
+    // 丢成 `None`，于是这条远程审批的 canonical 终态永远找不回它的回执，
+    // 客户端看到的就是"审批永远停在 Running"。UUID 必须经 `ulid_from_text`
+    // 归一后照样落进因果通道（磁盘契约保持 ULID）。
+    let uuid_command = "92455601-b53a-4f25-8df5-94124676055b".to_string();
+    let uuid_wire_call = "call-uuid-command";
+    observe_yield_for_test(
+        &mut engine,
+        &mut agent,
+        wire_turn,
+        "input-uuid-command",
+        uuid_wire_call,
+    )
+    .expect("persist uuid yield");
+    record_interaction_resolution_for_test(
+        &mut agent,
+        uuid_wire_call,
+        "approved",
+        Some(&uuid_command),
+    )
+    .expect("persist uuid resolution");
+
+    let facts = CommittedFactReader::open(
+        &session_dir,
+        identity.session_id.clone(),
+        identity.log_id.clone(),
+    )
+    .and_then(|reader| reader.read_all())
+    .expect("read canonical facts after uuid resolution");
+    let uuid_resolutions: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            matches!(fact.payload, FactPayload::InteractionResolved(_))
+                && fact.causation_id.as_ref().map(|id| id.as_str())
+                    == Some(ulid_from_text(&uuid_command).as_str())
+        })
+        .collect();
+    assert_eq!(
+        uuid_resolutions.len(),
+        1,
+        "the UUID command id must reach the canonical causation lane"
+    );
+    for fact in &facts {
+        fact.validate()
+            .unwrap_or_else(|error| panic!("canonical fact {} must validate: {error}", fact.fact_seq));
+    }
 }

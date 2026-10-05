@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use qaqh_domain::AskAnswer;
-use qaqh_session::canonical::{generate_ulid, sha256_content_hash};
+use qaqh_session::canonical::{causation_for_command, generate_ulid, sha256_content_hash};
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, ContentHash, ContentRef, EventId, InteractionDecision, InteractionKind,
     InteractionRequested, InteractionResolved,
@@ -419,9 +419,7 @@ impl TurnEngine {
             resolution_seq: 1,
             resolved_at_ms: now,
         };
-        let causation_id = causation_id
-            .filter(|value| is_ulid(value))
-            .map(EventId::new);
+        let causation_id = causation_id.and_then(causation_for_command);
         ledger
             .append_interaction_resolved_with_causation(
                 EventId::new(generate_ulid()),
@@ -1889,23 +1887,6 @@ impl TurnEngine {
             (state.turn_id, state.usage)
         })
     }
-}
-
-pub(crate) fn is_ulid(value: &str) -> bool {
-    value.len() == 26
-        && value.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'0'..=b'9'
-                    | b'A'..=b'H'
-                    | b'J'
-                    | b'K'
-                    | b'M'
-                    | b'N'
-                    | b'P'..=b'T'
-                    | b'V'..=b'Z'
-            )
-        })
 }
 
 #[cfg(test)]
