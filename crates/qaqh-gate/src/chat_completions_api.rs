@@ -293,7 +293,7 @@ fn emit_delta_fields(
                                 index: idx,
                                 id: format!("dsml_tc_{}", idx),
                                 name,
-                                args_so_far: String::new(),
+                                args_chunk: String::new(),
                             });
                         }
                         search_from = after_tag + quote_end + 1;
@@ -333,7 +333,7 @@ fn emit_delta_fields(
                     index: idx,
                     id: entry.0.clone(),
                     name: entry.1.clone(),
-                    args_so_far: entry.2.clone(),
+                    args_chunk: args.to_string(),
                 });
             }
         }
