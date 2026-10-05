@@ -6,7 +6,7 @@ import type { SubagentDto } from "./SubagentDto";
 
 /**
  * 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
- * TUI/web）从这里取值；`serde(default)` 保证旧 daemon 缺字段时向前兼容。
+ * TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见 crate 级兼容策略）。
  */
 export type ConfigDto = { model: string, baseUrl: string, providerId: string, endpoint: string, maxTokens: number, contextLimit: number, reasoningEffort: string, autoCompactThreshold: number, permissionLevel: number, 
 /**

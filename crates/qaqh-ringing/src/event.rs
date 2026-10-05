@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use qaqh_domain::{Delivery, RingingChannel};
+use qaqh_domain::RingingChannel;
 
 /// Control 频道事件（wire 名，域类型为 `qaqh_domain::ControlEvent`）。
 pub type RingingControlEvent = ControlEvent;
@@ -34,15 +34,6 @@ impl RingingEvent {
             RingingEvent::Control(_) => RingingChannel::Control,
             RingingEvent::Conversation(_) => RingingChannel::Conversation,
             RingingEvent::Tool(_) => RingingChannel::Tool,
-        }
-    }
-
-    /// 可靠性由领域事件定义显式声明（Wire 不决定可靠性）。
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            RingingEvent::Control(e) => e.delivery(),
-            RingingEvent::Conversation(e) => e.delivery(),
-            RingingEvent::Tool(e) => e.delivery(),
         }
     }
 }
