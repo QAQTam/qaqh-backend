@@ -1,11 +1,11 @@
-# Handoff — P0 尾巴 ④（ts-rs 白名单）+ P1.3（参数增量）（2026-10-05）
+# Handoff — P0 尾巴 ④（ts-rs 白名单）+ P1.3（参数增量）+ P1.2 第一批（2026-10-05）
 
 > 任务来源：`docs/audit-legacy-protocol-2026-10-04.md` §7 移除顺序（**权威**），
 > 台账在 `docs/plan-legacy-protocol-cleanup.md` §3（两行已勾）。
 > 上一棒的交接是 `docs/handoff/legacy-protocol-p1-2026-10-05.md`（P0 死面 + P1.1）；
 > ④ 的收尾记录也写在那份文件里，本文件是 **④ + P1.3 这一棒** 的完整交代，
 > 与在途的其它改动（M0 设备鉴权 `m0-daemon-authz`、OHOS 交叉编译、canonical turn facts）分开。
-> 当前状态：**④ 与 P1.3 已落地 main**，P1.2、P2、P3 未做。
+> 当前状态：**④、P1.3、P1.2 第一批（10 变体 + 3 访问器）已落地 main**；P1.2 剩余项、P2、P3 未做。
 > 本文只给接手的人：已落地什么、验证到什么程度、哪些结论不必重查、剩下挂点在哪。
 
 ## 一、已落地（commit 链）
@@ -16,7 +16,14 @@
 | `6d1c129` | `docs(protocol)`：④ 收尾（写进上一棒那份 handoff + 计划 §3 勾选） |
 | `2366a47` | **P1.3**：`StreamEvent::ToolCallProgress` 由累计串 `args_so_far` 改为增量 `args_chunk`（三适配器全部改），`ArgLineSlot` 去掉字节偏移重算与 resync 兜底、name 晚到改用 16 KiB 暂存；顺带删除 `ToolEvent::ToolCallPrepared`（P1.2 第一条，它是唯一需要累计串的消费者）。7 文件、+67/−97 |
 
-## 二、已确证的事实（**别重复调查**）
+| `065f35a` | **P1.2 第一批**：删 10 个无人消费的 v1 领域事件变体 + 3 个死访问器（9 文件、+19/−304）；并**推翻审计的两处判定**（`RoundDelta`/`RoundCompleted` 其实被端到端测试观察） |
+
+## 一·补、P1.2 第一批删了什么
+
+`ToolEvent::{CodeChanged, ToolNotice, AuditRecorded}`、
+`ConversationEvent::{UsageUpdated, ProviderToolStatus, ProviderRetrying}`、
+`ControlEvent::{ConfigChanged, SessionActivityChanged, SystemNotice}`（后三个全仓零生产者）、
+死访问器 `DomainEvent::channel()` / `RingingEvent::channel()` / `ToolEvent::tool_call_id()`。
 
 ### ④ ts-rs 白名单
 
@@ -80,15 +87,64 @@
     真正出网的是 `TimelineTool.args_json` 与 `TimelineIntent::ToolEstimated`，两者语义未变
     （首帧 `args_json` 的值与改前逐字节相同：首帧累计串 == 首帧增量）。
 
+### P1.2 领域事件普查（本棒最重要，**审计的两处判定被推翻**）
+
+14. **桥只有一个生产实现、三件副作用、然后丢弃**：`emit_domain` 生产侧唯一实现是
+    `PacedEmitter`（`agent/paced_emitter.rs:80-102`，`agent/types.rs:419` 是 trait 默认体，
+    其余 impl 全在 `#[cfg(test)]`）；两处绕过 trait 直发同一 envelope
+    （`agent/engine_title.rs:66-75`、`agent/plugins/engine_compact.rs:543-558`）。
+    汇点 `mpsc::SyncSender<WriterEvent>`（`types.rs:439-441`）只被
+    `run_inprocess_event_reader`/`publish_worker_event`（`actor.rs:20-76`）消费，做三件事：
+    `registry::stash_interaction_body`（只认 `InteractionRequested`/`PlanReviewRequested`/
+    `ToolPermissionRequested`，其余 `_ => return`）、`apply_interaction_side_effects`
+    （只认两种 Resolved + `ToolFinished`）、`domain_activity_observe`（`activity.rs:59 _ => None`）。
+    判据原文在 `actor.rs:68-69`：「阶段 3d：v1 广播面已删除……事件本体由 canonical fact 面外化」。
+15. **没有任何出站通道携带 `DomainEvent`**：daemon 路由是 `/ringing/v2/*` 与 timeline SSE，
+    前者序列化 `ProjectionEvent`（来自 canonical facts 重放
+    `qaqh-session/src/projection/replay.rs:59`），后者是 `qaqh_domain::TimelineEntry`；
+    `events.jsonl` 存的是 `FactPayload`（`session_fact_v2/types.rs:163-186`），压根不含
+    `DomainEvent`；`qaqh-session` 整箱不认识这些枚举。
+16. **`RoundDelta` / `RoundCompleted` 不是 fire-into-void，别删**：
+    `qaqh-runtime/tests/session_lifecycle.rs:345-358` 在工作线程通道上断言
+    `TurnStarted → RoundDelta{Answering} → RoundCompleted → TurnCompleted` 这条端到端序列，
+    `ask_user_lifecycle.rs:843` 还从 `RoundCompleted.answer` 取回合正文做断言。
+    审计 §4.1「整张枚举 fire-into-void」在这两个变体上不成立。
+17. **`Dashboard*` / `SubagentStatus` / `SessionMetaChanged` 属"要动在途文件或要重构 helper"，
+    本棒没碰**：dashboard 推送调用点在 `loop_core.rs`（3 处）与 `loop_dispatch_control.rs`（1 处）；
+    子代理标签解析器 `parse_subagent_status_tag` 住在 `loop_core.rs:84`（还有自己的测试模块）；
+    `SessionMetaChanged` 走 `engine_title.rs` 的直发 channel helper（不是 `emit_domain`），
+    删它要连 helper 与调用者一起改签名。这两个文件当前有未提交改动。
+18. **删除不会连坐孤儿类型**：`NoticeLevel`、`ProviderToolState`、`DashboardSnapshot/Document/Task`、
+    `RoundDeltaKind` 逐个查过外部引用（3~15 处不等），删完事件它们仍有人用，故保留。
+19. **机械删除的真实尾巴**（下次同类改动照单检查）：删掉双发后会留下
+    「算完就丢的臂」（本棒 `WebSearchStatus` 的 `provider_state`）、空臂带未用绑定
+    （`Retrying{attempt,…}`）、只为已删事件服务的函数参数（`backfill_executed_result` 的
+    `turn_id`/`round_num`）与局部量+import（`backfill.rs` 的 `ts`/`content`/`util`），
+    以及**描述已删事件的注释**（`cancel_keeps_tool_results.rs` 两处）。
+    注意 `UsageUpdate` 臂的节流块**不是**死代码——`last_emitted_usage_total` 仍被
+    Done 分支读（判断终值要不要补发），别顺手删掉。
+
 ## 三、剩余挂点
 
-**P1.2 — 还剩 `ToolEvent::CodeChanged` + 整张 `DomainEvent` 枚举的桥上匹配普查**。
-`CodeChanged` 仍在两处产出（`agent/engine_tool.rs:831`、`agent/tool_runtime.rs:1221`），
-且 `event.rs::code_changed_accepts_legacy_shape_and_targets_new_events` 钉着
-**无 `tool_call_id` 的 legacy JSON 形状**——删它要先决定历史形状谁来读。
-审计原话是 fire-into-void 是**整张** `DomainEvent`，不只两个变体，所以先做匹配点普查
-（`emit_domain` 的 sink：`qaqh-runtime/src/actor.rs` 的副作用判定 + `registry.rs` 匹配臂）。
-`RingingEvent` 的 writer 载体换 timeline intent 后才能删（注意 `TimelineIntent` 的 `.ts`
+**P1.2 剩余 — 三件"要先动 helper / 在途文件"的 + 五件要人表态的**（普查已完成，结论见 §二 14-19）。
+
+要动结构才能删：`DashboardUpdated`/`DashboardSnapshot`（先决定 `emit_dashboard` 的 `emitter`
+参数与 `plugins::dashboard::build_snapshot` 的去留——后者已无调用者，但它产的
+`DashboardSnapshot` 结构仍被读取路径引用）、`SubagentStatus`（连带 `loop_core.rs:84` 的
+`parse_subagent_status_tag` 只剩测试在用）、`SessionMetaChanged`（`engine_title.rs:66-75`
+的直发 channel helper 是它专属，删它要连 helper 与调用者一起改）。
+前两者的调用点 `loop_core.rs`/`loop_dispatch_control.rs` 当前有未提交改动。
+
+要人表态（本棒一律没碰）：`SessionStateChanged`（6 个集成测试靠它拿权威 seed：
+`inprocess_loop.rs:89`、`session_lifecycle.rs:270`、`permission_lifecycle.rs:395`、
+`plan_review_hook.rs:191`、`input_accepted_producer.rs:97`、`concurrent_read_stress.rs:90`）、
+`OperationCompleted`/`OperationFailed`（今天无人匹配，但 `pending_store.rs:310-314` 写明它们是
+undo/设置模式/重载回执的**意图终态**，删了只剩 TTL 过期）、`SkillsUpdated`（无 canonical fact、
+无服务推送等价物）、`ToolStarted`（`activity.rs:133-142` 今天 no-op 只因 `TurnStarted` 先置
+Working；host-direct / 子代理这类非回合路径要先确认）、`AgentLifecycleChanged` 的
+`Booting/Stopping/Stopped`（从不产出，只有 `Ready` 在用）。
+
+`RingingEvent` 本体的 writer 载体换成 timeline intent 之后才能删（`TimelineIntent` 的 `.ts`
 镜像已在 ④ 砍掉，接回来时补一行 `derive` 即可）。
 
 **P2 — migrate-on-read 各项**（`compact_skip` / `index.json` / `workspace.txt` /
@@ -145,17 +201,30 @@ cd webui && npx tsc --noEmit                 # 生成物图是否闭合的最终
   这次删它的变体自然不惊动生成物。
   拷贝量口径（**按 audit 数字算出来的，不是实测**）：58 KB 参数 / 约 2493 帧，
   改前每帧复制一次累计串 ≈ 2493 × 平均 29 KB ≈ **72 MB**；改后每个字节只复制一次 ≈ **58 KB**。
-- **共享工作区纪律**：④ 在隔离 worktree `E:/qaqh-backend-p04`（分支
-  `refactor/ts-whitelist-p04`）完成，合入前核对与在途脏文件**零文件重叠**，`git merge --ff-only`
-  进 `main`，在途改动保持同一 diffstat；worktree 与分支已删。
-  P1.3 改在 main 原地做（改动面小、复用热 target），提交只 stage 明确路径。
+- **P1.2 第一批**：`cargo check -p qaqh-domain -p qaqh-ringing -p qaqh-runtime -p qaqh-gate
+  --all-targets` 0 err、**0 新告警**（唯一残留 `chat_completions_api.rs:666` 的
+  `mut tool_acc` 是既有的）；`cargo test --workspace --no-fail-fast` 在 worktree 里
+  **147 个 target / 1836 passed / 仅 `prompt_and_tool_defs_char_budget` 失败**——
+  这一轮不用 `--exclude`，因为 worktree 有自己的 `target/` 与 sidecar 副本，
+  不被在线的 `qaqh-daemon.exe` 锁住（顺带把 `qaqh-daemon`+`qaqh-webui-app` 那 13 个
+  test fn 也跑了）。`session_lifecycle` / `ask_user_lifecycle` 全绿，
+  即保留 `RoundDelta`/`RoundCompleted` 的决定被端到端测试反证为必要。
+  生成物一根手指都没动：131+1 个 `.ts`，计数不变（被删类型在 ④ 就已离开导出面）。
+- **本棒的作业形态**：`E:/qaqh-backend-p12`（分支 `refactor/p12-domain-event-census`），
+  从 `main@7f449b8` 切出，播种了三样东西（少一样就卡住）：Tauri sidecar exe、
+  `webui/node_modules` 的 junction、未跟踪的 `docs/audit-legacy-protocol-2026-10-04.md`。
+  合回用 `git merge --ff-only`，前提是核对与在途脏文件零重叠。
 - **未 push**：`main` 领先 `origin/main`（④ 后为 15）。推送是人工决定，别顺手做。
 
 ## 六、接手建议顺序
 
-① P1.2（`CodeChanged` + 整张 `DomainEvent` 匹配点普查——先普查再删，审计明说不止两个变体）
+① P1.2 第二批：先要人表态的五项 + 要动 helper 的三项（清单见 §三；**别照审计原话删
+`RoundDelta`/`RoundCompleted`**，端到端测试在观察它们）
 → ② P2（每项先写审计查询确认零命中）
 → ③ P3（转正前端 typed 消费，才能把导出面从 132 收到 34）。
+
+> 已完成并退场：④ ts-rs 白名单（`afa390b`/`6d1c129`）、P1.3 参数增量（`2366a47`）、
+> P1.2 第一批 10 变体 + 3 访问器（`065f35a`）。
 
 > 已完成并退场：④ ts-rs 白名单（`afa390b`/`6d1c129`）、P1.3 参数增量 +
 > `ToolCallPrepared` 删除。
