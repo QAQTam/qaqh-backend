@@ -392,6 +392,7 @@ impl TurnEngine {
         interaction_id: &str,
         decision: &str,
         causation_id: Option<&str>,
+        actor: Option<ActorRef>,
     ) -> Result<(), TurnActorError> {
         // See `structured_interaction_decision`: the wire decision strings map
         // onto the canonical enum so replays can return a typed verdict.
@@ -411,11 +412,12 @@ impl TurnEngine {
             interaction_id: canonical_interaction_id(interaction_id),
             decision_ref: ContentRef::new(sha256_content_hash(&decision_bytes)),
             decision: structured_interaction_decision(decision),
-            resolved_by: ActorRef {
+            // 归因（S6）：daemon 依鉴权身份填 actor；缺省回退本地 user（现状语义）。
+            resolved_by: actor.unwrap_or(ActorRef {
                 kind: ActorKind::User,
                 id: "user".into(),
                 display_name: None,
-            },
+            }),
             resolution_seq: 1,
             resolved_at_ms: now,
         };
@@ -653,6 +655,7 @@ impl TurnEngine {
         call_id: &str,
         command_id: &str,
         admitted: Option<AdmittedTool>,
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -677,7 +680,7 @@ impl TurnEngine {
             "rejected"
         };
         if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, call_id, decision, Some(command_id))
+            Self::record_interaction_resolution(ctx.agent, call_id, decision, Some(command_id), actor)
         {
             log::error!("[TURN] failed to persist permission resolution {call_id}: {error}");
         }
@@ -767,6 +770,7 @@ impl TurnEngine {
         ask_id: &str,
         command_id: &str,
         answers: &[AskAnswer],
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -800,7 +804,7 @@ impl TurnEngine {
             }
         };
         if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, ask_id, "answered", Some(command_id))
+            Self::record_interaction_resolution(ctx.agent, ask_id, "answered", Some(command_id), actor)
         {
             log::error!("[TURN] failed to persist ask resolution {ask_id}: {error}");
         }
@@ -853,6 +857,7 @@ impl TurnEngine {
         approved: bool,
         message: &str,
         autonomous: bool,
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -885,6 +890,7 @@ impl TurnEngine {
             call_id,
             if approved { "approved" } else { "rejected" },
             Some(command_id),
+            actor,
         ) {
             log::error!("[TURN] failed to persist plan resolution {call_id}: {error}");
         }
@@ -984,6 +990,7 @@ impl TurnEngine {
         tool: &mut ToolEngine,
         ask_id: &str,
         command_id: &str,
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -1002,7 +1009,7 @@ impl TurnEngine {
             return Outcome::Handled;
         }
         if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed", Some(command_id))
+            Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed", Some(command_id), actor)
         {
             log::error!("[TURN] failed to persist ask dismissal {ask_id}: {error}");
         }
