@@ -1,7 +1,11 @@
-//! LegacyToolAdapter：把 v1 `ToolHandler` 包成 [`ErasedTool`]（plan P2）。
+//! LegacyToolAdapter：把 v1 `ToolHandler` 包成 [`ErasedTool`]。
 //!
-//! 本模块同时是 **`ToolResult` → [`ToolOutcome`] 映射的唯一权威**：迁移期
-//! 存量工具经此适配器被新执行入口调用；映射语义在此集中定义并测试。
+//! 本模块同时是 **`ToolResult` → [`ToolOutcome`] 映射的唯一权威**
+//! （[`map_tool_result`]）：v1 工具与 MCP/LSP 的 v1 内部管线都经此映射收口
+//! 到 typed 结果面。
+//!
+//! 使用面：仅 `ToolManager::register`（test-harness 门控）。生产内置工具走
+//! `register_typed`，动态工具走 [`super::dynamic::DynamicToolAdapter`]。
 //!
 //! ## 映射语义（P2 决议）
 //!
@@ -41,24 +45,17 @@ use super::progress::{ProgressSink, ProgressStream, ToolProgress};
 use crate::{ExecProgressSender, ToolCallCtx, ToolEffect, ToolHandler, ToolResult};
 
 /// legacy 工具包装器（实现 [`ErasedTool`]）。
+///
+/// 仅服务 `ToolManager::register`（test-harness 门控）：动态工具（MCP/LSP）
+/// 走 [`super::dynamic::DynamicToolAdapter`]，不再经本适配器。
 pub struct LegacyToolAdapter {
-    inner: LegacyToolAdapterInner,
+    handler: ToolHandler,
     name: ToolName,
     source: ToolSource,
     exposure: ToolExposure,
     capabilities: ToolCapabilities,
     output_budget: OutputBudget,
     output_schema: serde_json::Value,
-}
-
-enum LegacyToolAdapterInner {
-    /// 内置静态描述（`ToolHandler` 的 `&'static str` 描述）。
-    Handler(ToolHandler),
-    /// 动态工具的 owned descriptor（MCP/LSP 运行期描述与 schema）。
-    Owned {
-        descriptor: ToolDescriptor,
-        handler: fn(ToolCallCtx) -> ToolResult,
-    },
 }
 
 /// 一次 legacy 调用的完整结果。
@@ -99,7 +96,7 @@ impl LegacyToolAdapter {
     ) -> Result<Self, DescriptorError> {
         let name = ToolName::new(&handler.key)?;
         let adapter = Self {
-            inner: LegacyToolAdapterInner::Handler(handler),
+            handler,
             name,
             source: ToolSource::Builtin,
             exposure: ToolExposure::Direct,
@@ -109,27 +106,6 @@ impl LegacyToolAdapter {
         };
         adapter.descriptor().validate()?;
         Ok(adapter)
-    }
-
-    /// 用 owned descriptor 包装动态工具（MCP/LSP）。
-    pub(crate) fn from_owned(
-        descriptor: ToolDescriptor,
-        handler: fn(ToolCallCtx) -> ToolResult,
-    ) -> Result<Self, DescriptorError> {
-        descriptor.validate()?;
-        let name = descriptor.name.clone();
-        Ok(Self {
-            inner: LegacyToolAdapterInner::Owned {
-                descriptor: descriptor.clone(),
-                handler,
-            },
-            name,
-            source: descriptor.source,
-            exposure: descriptor.exposure,
-            capabilities: descriptor.capabilities.clone(),
-            output_budget: descriptor.output_budget.clone(),
-            output_schema: descriptor.output_schema.clone(),
-        })
     }
 
     /// 覆盖来源（默认 [`ToolSource::Builtin`]）。
@@ -162,24 +138,21 @@ impl LegacyToolAdapter {
         self
     }
 
-    /// 工具描述符（由 legacy 字段或 owned descriptor 构造）。
+    /// 工具描述符（由 legacy 字段构造）。
     pub fn descriptor(&self) -> ToolDescriptor {
-        match &self.inner {
-            LegacyToolAdapterInner::Handler(handler) => ToolDescriptor {
-                name: self.name.clone(),
-                display_name: None,
-                description: handler.description.to_owned(),
-                input_schema: handler.input_schema.clone(),
-                output_schema: self.output_schema.clone(),
-                category: handler.category,
-                risk: handler.risk.clone(),
-                default_timeout: handler.default_timeout,
-                exposure: self.exposure,
-                source: self.source,
-                output_budget: self.output_budget.clone(),
-                capabilities: self.capabilities.clone(),
-            },
-            LegacyToolAdapterInner::Owned { descriptor, .. } => descriptor.clone(),
+        ToolDescriptor {
+            name: self.name.clone(),
+            display_name: None,
+            description: self.handler.description.to_owned(),
+            input_schema: self.handler.input_schema.clone(),
+            output_schema: self.output_schema.clone(),
+            category: self.handler.category,
+            risk: self.handler.risk.clone(),
+            default_timeout: self.handler.default_timeout,
+            exposure: self.exposure,
+            source: self.source,
+            output_budget: self.output_budget.clone(),
+            capabilities: self.capabilities.clone(),
         }
     }
 
@@ -200,19 +173,12 @@ impl LegacyToolAdapter {
         let _scope = crate::runtime::install_tool_call_context(ctx);
         // ToolCallCtx 克隆共享 skill_effects 单元；handler 消费一个克隆，
         // 本函数从原值取回副作用。
-        let result = (self.handler_fn())(legacy_ctx.clone());
+        let result = (self.handler.handler)(legacy_ctx.clone());
         let effects = legacy_ctx.take_skill_effects();
         Ok(LegacyCallOutcome {
             outcome: map_tool_result(result),
             effects,
         })
-    }
-
-    fn handler_fn(&self) -> fn(ToolCallCtx) -> ToolResult {
-        match &self.inner {
-            LegacyToolAdapterInner::Handler(handler) => handler.handler,
-            LegacyToolAdapterInner::Owned { handler, .. } => *handler,
-        }
     }
 }
 
