@@ -26,7 +26,7 @@ use super::sequencer::Sequencer;
 use crate::timeline_store::TimelineStore;
 use crate::{TimelineAppender, TimelineLiveEntry};
 
-/// 三频道 live broadcast 与 timeline live broadcast 的环形缓冲容量。
+/// timeline live broadcast 的环形缓冲容量。
 /// 溢出即 `Lagged`——由 daemon SSE 侧发终止帧让客户端重连重定基。
 pub(super) const LIVE_BROADCAST_CAPACITY: usize = 1024;
 
@@ -179,8 +179,7 @@ pub struct RingingHub {
     pub(super) lazy_loads: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 大内容外置存储（会话所有权 + TTL）。
     pub(super) content_store: Mutex<ContentStore>,
-    /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
-    /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
+    /// channel → (seed → state)。projection per (seed, channel)。
     ///
     /// BUG-2026-09-13-33（BUG-08 收尾）：全局单锁 → 两级分片锁表。
     /// 顶层锁只保护「频道登记 / 频道枚举」，临界区是 map 操作，**绝不含 I/O、
@@ -285,21 +284,11 @@ impl RingingHub {
         }
     }
 
-    /// 收尾三频道投影中的孤儿领域状态（Ringing 版 `seal_orphan_running_turns`）。
+    /// 登记 worker 存活（B9/H3）：registry 在 spawn 成功时调用，worker 关闭时
+    /// 由 [`RingingHub::mark_worker_dead`] 摘除。
     ///
-    /// worker 的挂起/运行状态在内存中，daemon 重启或 worker 被重新拉起后，
-    /// journal 重放会恢复 `TurnStarted`/`ToolStarted`/`InteractionRequested` 等
-    /// reliable 事件，但它们**永远不会有终态**——bootstrap 快照因此携带陈旧
-    /// 的 `active_turn`/`running`/`pending_permission`/`pending_interaction`：
-    /// 前端把中断的 turn 投影为 running、弹出无法批准的幽灵 ask/授权面板。
-    ///
-    /// 与 timeline seal 语义一致：通过正常 publish 路径发出终态事件
-    /// （`ConversationCancelled` / `ToolFinished(Cancelled)` / `InteractionResolved`），
-    /// 使 journal、投影与 SSE 客户端全部收敛。幂等：无孤儿时返回 false。
-    ///
-    /// 调用方必须在 `ensure_seed_loaded` 完成之后调用（本函数内部 publish 会
-    /// 再次调用 `ensure_seed_loaded`，重入同 seed 的 lazy_load 锁会死锁）。
-    /// B9/H3：registry 在 spawn 成功/worker 关闭时维护活表。
+    /// 该存活表供 force=false 的 bootstrap 孤儿收尾整体跳过活 worker，防止误杀
+    /// 活 turn（liveness gate 见 `orphan_seal::seal_orphan_channel_state`）。
     pub fn mark_worker_live(&self, session_id: &str) {
         self.live_workers
             .lock()

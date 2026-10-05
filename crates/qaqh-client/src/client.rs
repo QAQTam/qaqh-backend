@@ -75,7 +75,8 @@ pub struct ClientOptions {
     /// Spawn `qaqh-daemon run` when no discovery file exists yet.
     pub launch_daemon_if_missing: bool,
     /// Path to the daemon executable (default: `target/debug/qaqh-daemon(.exe)`
-    /// relative to `QAQH_BACKEND_ROOT` or the workspace root).
+    /// under `QAQH_BACKEND_ROOT`, else next to the client executable in
+    /// `resources/` or its own directory).
     pub daemon_path: Option<std::path::PathBuf>,
     /// Maximum time to wait for the daemon to publish discovery.
     pub start_timeout: std::time::Duration,
@@ -447,19 +448,12 @@ impl Client {
         Ok(ack)
     }
 
-    /// Activate the native timeline for one session (mirrors Electron
-    /// `ringingManager.activateTimeline`): fetch the authoritative snapshot,
-    /// replace any previous timeline stream with a new one seeded at the
-    /// snapshot watermark, and return the snapshot. The seed must have been
-    /// attached first (`backend.attach` / `session_resume`), otherwise the
-    /// daemon rejects the request with 401.
     /// 拉取 timeline 快照页（服务端默认尾部窗口，见 daemon
-    /// `TIMELINE_PAGE_LIMIT`）。`before_turn` = 返回该 turn **之前**（更早）
-    /// 的页（上滚翻页）；`limit` 覆盖默认页大小。响应含分页元数据
-    /// `has_more` / `total_turns`。与 [`Self::activate_timeline`] 不同：
-    /// 纯读，**不重建** timeline SSE 流。
+    /// `TIMELINE_PAGE_LIMIT`）。`before_index` = **排他**游标（返回全局序号小于
+    /// 它的那一页，即该 index **之前**（更早）的页），`None` = 最新一页；
+    /// `limit` 覆盖默认页大小。响应含分页元数据 `has_more` / `total_turns`。
+    /// 与 [`Self::activate_timeline`] 不同：纯读，**不重建** timeline SSE 流。
     ///
-    /// `before_index` = **排他**游标（返回全局序号小于它的那一页），`None` = 最新一页。
     /// 取下一页的游标是**本页最旧那个回合**的 `TimelineTurn::turn_index`。
     ///
     /// 原先是 `before_turn`（turn_id）作游标，已按 spec §0b 的兼容政策**替换**

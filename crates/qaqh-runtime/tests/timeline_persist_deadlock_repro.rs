@@ -6,7 +6,8 @@
 //! reentrant, so both write paths parked forever while holding the lock:
 //!
 //! - `timeline_hub.rs::persist_timeline_sync` (sync path, reached by
-//!   `publish_timeline(TurnSealed)` and `flush_timeline_persistence`);
+//!   `flush_timeline_persistence`; at bug time also by `publish_timeline(TurnSealed)`,
+//!   which since issue #28 only enqueues terminal persistence);
 //! - the `qaqh-timeline-persist` worker thread (coalesced checkpoints).
 //!
 //! Symptom was a frozen session (the writer thread never published the sealed
@@ -105,8 +106,9 @@ fn open_large_progress_tool(hub: &RingingHub, session_id: &str) {
     .expect("round sealed");
 }
 
-/// Sync path: `TurnSealed` persists synchronously on the caller thread.
-/// The call must return; with the bug the caller thread deadlocks.
+/// Publish path: since issue #28 `TurnSealed` no longer persists synchronously
+/// on the caller thread — it enqueues terminal persistence — but the publish
+/// call must still return; with the bug the caller thread deadlocked.
 #[test]
 fn turn_sealed_sync_persist_returns() {
     let root = temp_root("sync");

@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 /// 会话键提取统一走服务面契约模块，避免 daemon 与 runtime 各自实现回退。
-/// 写端发 `session_id`，读端回退 legacy `seed`（BETA-01 Phase D）。
+/// 写端发 `session_id`，读端只认 `session_id`（legacy `seed` 已随 Phase E 退场）。
 pub(crate) use crate::ringing::service_methods::{scope_session_param_value, session_param};
 
 pub(crate) fn value2<'a>(params: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
@@ -39,7 +39,8 @@ pub(crate) fn pstrings(params: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-/// 可选工具模式预置：缺省 = None（保持旧行为）；显式空串 = standard 零迁移。
+/// 可选工具模式预置：缺省 = None（保持旧行为）；显式空串 = None（未指定，
+/// 交由 SessionMeta.tool_mode 默认 standard 完成零迁移）。
 /// 供 create 路径（session.new）在 spawn 前落盘使用。
 pub(crate) fn optional_tool_mode(params: &Value) -> Result<Option<(String, Vec<String>)>, String> {
     let Some(tool_mode) = params.get("tool_mode").and_then(Value::as_str) else {

@@ -15,16 +15,9 @@ impl Loop {
     // Interrupt polling (called by engines during long ops)
     // ═══════════════════════════════════════════════════
 
-    /// 见缝插针注入消费者（回合 lap 边界调用）：从 cmd_rx 吸收排队的
-    /// `as_system` 注入（子代理报告等）到 InjectionBus，由调用方随后在
-    /// lap 边界交给 ContextFlow 落盘 trailing。
-    ///
-    /// 时机保证（PLAN-FIX-INJECTION-CACHE ②）：只在工具回合完成后的
-    /// lap 边界被调用——此时本轮 tool_call 与其 tool_result 均已提交
-    /// （工具执行是同步阻塞的），注入取号必然排在本轮全部结果之后，绝不
-    /// 夹在 assistant(toolcall) 与其 tool_result 之间。注入以 user +
-    /// name=subagent 角色落盘（chat/responses 两协议的对话流主体，可见性
-    /// 保证）。
+    /// 命令形态判定：`as_system` 注入（子代理报告等）即
+    /// `ConversationSendMessage { as_system: true }`，仅返回 bool，不消费、
+    /// 不入总线（吸收与入总线见 `drain_pending_injections`）。
     pub(super) fn is_injection_command(cmd: &super::types::WorkerCommand) -> bool {
         matches!(
             &cmd.frame,
@@ -302,6 +295,16 @@ impl Loop {
         }
     }
 
+    /// 见缝插针注入消费者（回合 lap 边界调用）：从 cmd_rx 吸收排队的
+    /// `as_system` 注入（子代理报告等）到 InjectionBus，由调用方随后在
+    /// lap 边界交给 ContextFlow 落盘 trailing。
+    ///
+    /// 时机保证（PLAN-FIX-INJECTION-CACHE ②）：只在工具回合完成后的
+    /// lap 边界被调用——此时本轮 tool_call 与其 tool_result 均已提交
+    /// （工具执行是同步阻塞的），注入取号必然排在本轮全部结果之后，绝不
+    /// 夹在 assistant(toolcall) 与其 tool_result 之间。注入以 user +
+    /// name=subagent 角色落盘（chat/responses 两协议的对话流主体，可见性
+    /// 保证）。
     pub fn drain_pending_injections(&mut self) {
         use qaqh_domain::ConversationCommand;
         use qaqh_ringing::RingingCommand;
@@ -535,8 +538,8 @@ mod tests {
         qaqh_workspace::runtime::clear_context();
     }
 
-    /// 会话切换同样复位取消原因位：新会话/恢复的会话不是「用户取消」的
-    /// 会话，否则一次取消会永久压制后续子代理结果注入。
+    /// 结构化终态通知（`subagent_terminal`）也是注入命令：`as_system=true` 的
+    /// `ConversationSendMessage` 由 `is_injection_command` 判定为注入，须在 lap 边界被吸收。
     #[test]
     fn structured_terminal_is_an_injection_command() {
         let command = crate::agent::types::WorkerCommand {
@@ -568,6 +571,8 @@ mod tests {
         );
     }
 
+    /// 会话切换同样复位取消原因位：新会话/恢复的会话不是「用户取消」的
+    /// 会话，否则一次取消会永久压制后续子代理结果注入。
     #[test]
     fn session_switch_clears_cancellation_gate() {
         qaqh_workspace::runtime::set_context(SESSION, 4);

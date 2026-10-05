@@ -2,7 +2,7 @@
 //!
 //! ## Architecture
 //! - `ToolCategory` classifies every tool by risk profile (Read/Write/Exec/Net).
-//! - `PermissionLevel` defines the default policy (1–4).
+//! - `PermissionLevel` defines the default policy (1–3).
 //! - `needs_permission()` evaluates whether a tool call requires user confirmation.
 //! - `TrustedFolderSet` persists cross-workspace folder trust decisions.
 
@@ -516,10 +516,12 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
-    // Read-only tier (and the read face of WorkspaceWrite): workspace reads
-    // auto-approve; outside-workspace reads enter approval (exfiltration is
-    // friction, not a boundary — consistent with the sandbox read posture).
-    if category == ToolCategory::Read && all_within_workspace(&paths, &workspace_root) {
+    // 2026-10-05 读自由规则：Read 类**无条件放行**——读取完全不受工作区限制
+    // （read/grep/glob/read_image 等在任意档位、任意路径下都不弹审批）。
+    // 两道既有守卫不受影响：敏感路径守卫（会话历史/凭据外泄）已在上方先行
+    // 拦截；子代理沙箱的「跨 workspace 一律拒」在 admit 层兜底（S3 防越狱），
+    // 不依赖本函数的边界判定。
+    if category == ToolCategory::Read {
         return PermissionDecision::AutoApprove;
     }
 
@@ -561,12 +563,9 @@ pub fn needs_permission(
     }
 
     // Otherwise: ask user
-    let reason = if category == ToolCategory::Read {
-        format!(
-            "read-only posture: '{}' reads a path outside the workspace.",
-            tool_name
-        )
-    } else if level == PermissionLevel::ReadOnly {
+    // （Read 类已在上文无条件放行，不会再落到这里；此处的 Read 判定仅剩
+    //   死防御。）
+    let reason = if level == PermissionLevel::ReadOnly {
         format!(
             "read-only mode: '{}' (write/exec/net) requires confirmation.",
             tool_name
@@ -597,7 +596,7 @@ pub fn needs_permission(
 // ──────────────────────────────────────
 
 /// Persistent set of trusted directories for cross-workspace access.
-/// Stored as `{sessions_dir}/{seed}/trusted_folders.json`.
+/// Stored as `{qaqh_dir}/sessions/{session_id}/trusted_folders.json`.
 pub struct TrustedFolderSet {
     session_id: String,
     dirs: HashSet<PathBuf>,
@@ -1161,7 +1160,12 @@ mod w3_w7_tests {
     }
 
     #[test]
-    fn read_outside_workspace_requires_approval_at_levels_2_and_3() {
+    fn read_outside_workspace_auto_approves_at_every_tier() {
+        // 2026-10-05 读自由规则（取代旧 W3/W7「工作区外读弹审批」契约）：
+        // 读取完全不受工作区限制——read/grep/glob 等在任意档位、任意路径下
+        // 都自动放行；敏感路径守卫（会话文件/凭据）在 needs_permission 前段
+        // 独立拦截，不受本规则影响。子代理沙箱的跨 workspace 拒读在 admit
+        // 层兜底（见 authorization.rs 测试）。
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -1171,7 +1175,11 @@ mod w3_w7_tests {
         std::fs::write(&outside, "x").unwrap();
         let ws = std::fs::canonicalize(&ws).unwrap();
 
-        for level in [PermissionLevel::ReadOnly, PermissionLevel::WorkspaceWrite] {
+        for level in [
+            PermissionLevel::ReadOnly,
+            PermissionLevel::WorkspaceWrite,
+            PermissionLevel::SkipPermissions,
+        ] {
             let inside_decision = needs_permission(
                 level,
                 "read",
@@ -1194,20 +1202,10 @@ mod w3_w7_tests {
                 ToolCategory::Read,
             );
             assert!(
-                matches!(outside_decision, PermissionDecision::AskUser { .. }),
-                "outside read must ask at L{}",
+                matches!(outside_decision, PermissionDecision::AutoApprove),
+                "outside read must auto-approve at L{} (reads are workspace-free)",
                 level.to_u8()
             );
         }
-
-        let bypass = needs_permission(
-            PermissionLevel::SkipPermissions,
-            "read",
-            &serde_json::json!({"path": outside}),
-            &ws,
-            &HashSet::new(),
-            ToolCategory::Read,
-        );
-        assert!(matches!(bypass, PermissionDecision::AutoApprove));
     }
 }

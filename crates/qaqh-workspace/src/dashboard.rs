@@ -4,9 +4,15 @@
 //! state (files read/written, todos) directly into `qaqh-domain` records
 //! (PR-3-3 单源化：proto 侧同名投影层随之删除）。
 //!
-//! R-4 约束：本 crate 对 `qaqh_domain` 的使用仅限 Dashboard* 类型，
-//! 且禁止 import domain 事件类型（评审 grep：`rg -n "qaqh_domain"
-//! crates/qaqh-workspace/src | rg -v dashboard` → 0）。
+//! R-4 约束（2026-10-05 修订口径）：本 crate 对 `qaqh_domain` 的使用仅限
+//! **被动投影记录**——`Dashboard*` 类型，以及 `code_delta.rs` / `execution.rs`
+//! 中的 `CodeDeltaRecord`（编辑效果的纯数据记录，显式豁免）；**禁止** import
+//! domain 事件/行为类型（如 `ConversationMode`——`tool_api/context.rs:43` 即依
+//! 此约束以本地 `AgentMode` 镜像替代）。早期版本写作「仅限 Dashboard* 类型」，
+//! 未记录 CodeDeltaRecord 例外，与代码不符（2026-10-05 注释审计 §3.3 修订）。
+//! 验证（与工具无关的口径）：`qaqh_domain` 在本 crate `src/` 下的引用应**仅**
+//! 出现在 dashboard.rs、code_delta.rs、execution.rs 三个文件；新增命中即违反
+//! R-4，需先修订口径（并在此处登记）再引入。
 
 use qaqh_domain::{DashboardDocument, DashboardTask};
 

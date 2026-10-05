@@ -6,7 +6,8 @@
 //! [`crate::timeline::TimelineStream`] 与 [`crate::v2::ClientV2Subscription`]。
 //!
 //! 与 v1 通道流的差异：
-//! - **按 seed 起流**（attach 时启动、detach 时停止），不再是三条全局流；
+//! - **按 seed 起流**（`activate_timeline` 时启动、`deactivate_timeline` 时停止），
+//!   不再是三条全局流；
 //! - cursor 是 canonical `CursorToken`（`since_cursor` 查询参数），不是
 //!   `Last-Event-ID`；只有 reliable 事件推进 cursor；
 //! - `ResetRequired` 是一条独立帧，送达后服务端主动断流，客户端重连前由上层

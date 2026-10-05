@@ -1079,7 +1079,7 @@ impl TimelineAppender {
     pub fn snapshot(&self, session_id: &str) -> Option<TimelineSnapshot> {
         self.sessions.get(session_id).map(|timeline| {
             let mut turns: Vec<TimelineTurn> = timeline.turns.values().cloned().collect();
-            // turns 存于 HashMap（无序）——按 created_seq 排序（TurnOpened
+            // turns 存于 BTreeMap（按 turn_id 字典序，非时间序）——按 created_seq 排序（TurnOpened
             // entry 的 seq，权威时间序）；旧磁盘数据 created_seq=0 时退化为
             // turn_id 数值序（t1..tN 递增）。两者混合时旧 turn 在前、新 turn
             // 在后，时间序依然正确。快照数组序必须=时间序：前端恢复按"尾部
@@ -1460,8 +1460,8 @@ mod tests {
             .unwrap();
         appender.seal_block("s", "t", 0, "answer").unwrap();
         appender.seal_round("s", "t", 0, true).unwrap();
-        // seal 裁剪语义：TurnSealed 会清空该 turn 的回放尾，seq 连续性
-        // 必须在 seal 前断言；watermark 含 TurnSealed 占用的下一序号。
+        // seal 会追加一条 TurnSealed 并占据下一序号（#314 后不再裁剪回放尾）：
+        // 故在 seal 前采样该 turn 回放尾的最后一个 seq，watermark 应为其 +1。
         let last_seq_before_seal = appender
             .replay_since("s", 0)
             .last()

@@ -6,12 +6,12 @@
 //! | 用例 | 覆盖 |
 //! |---|---|
 //! | `echo_round_trip` | connect→tools/list 缓存→投影批次→注册→调用成功 |
-//! | `tool_error_maps_is_error` | `isError=true` → `MCP_TOOL_ERROR` + content 透传 |
-//! | `cancel_hits_and_sends_notification` | 250ms 轮询命中 cancel → `MCP_CANCELLED` + 通知送达 mock |
-//! | `timeout_keeps_connection_healthy` | 超时 → `MCP_TIMEOUT`；连接不 crash，后续调用正常 |
-//! | `crash_during_call_then_reconnect` | 在飞断连 → `MCP_SERVER_CRASHED`；下次调用单次重启 |
-//! | `busy_rejects_over_concurrency_cap` | `max_concurrent_calls=1` → 第二路 `MCP_BUSY`，排空后恢复 |
-//! | `malformed_and_unknown_names` | 前缀/未知 server → `MCP_NOT_FOUND`（附名单） |
+//! | `tool_error_maps_is_error` | `isError=true` → `mcp_tool_error` + content 透传 |
+//! | `cancel_hits_and_sends_notification` | 250ms 轮询命中 cancel → `mcp_cancelled` + 通知送达 mock |
+//! | `timeout_keeps_connection_healthy` | 超时 → `mcp_timeout`；连接不 crash，后续调用正常 |
+//! | `subprocess_crash_mid_call_reports_server_crashed` | 在飞断连（子进程 SIGKILL）→ `mcp_server_crashed`；下次调用单次重启 |
+//! | `busy_rejects_over_concurrency_cap` | `max_concurrent_calls=1` → 第二路 `mcp_busy`，排空后恢复 |
+//! | `malformed_and_unknown_names` | 前缀/未知 server → `mcp_not_found`（附名单） |
 //!
 //! 红线呼应：本文件不含 `set_cancel(false)`；取消只读注入的 `AtomicBool`。
 
@@ -516,7 +516,7 @@ async fn subprocess_crash_mid_call_reports_server_crashed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_rejects_over_concurrency_cap() {
-    // max_concurrent_calls=1：第一路慢调用在飞，第二路必须 MCP_BUSY。
+    // max_concurrent_calls=1：第一路慢调用在飞，第二路必须 mcp_busy。
     let (manager, calls) = make_manager(1, 0);
     manager.get_or_connect("mock").await.unwrap();
     wait_cached_tools(&manager, "mock");

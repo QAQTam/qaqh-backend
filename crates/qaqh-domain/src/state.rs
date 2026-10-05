@@ -9,7 +9,7 @@
 //! # 字段来源（**产出方全量审计**，2026-09-15）
 //!
 //! 三段 `state` 只有三处写入方，逐字段对应如下（`grep -rnE 'state\["[a-z_]+"\]\s*=[^=]'
-//! crates/qaqh-runtime/src/ringing/` 实测：30 处写入**全部**在 `projection.rs`）：
+//! crates/qaqh-runtime/src/ringing/` 实测：36 处写入**全部**在 `projection.rs`）：
 //!
 //! 1. `projection.rs::SnapshotProjector::snapshot_for` 的初值 —— 仅 `session_id` / `channel` / `revision`
 //!    （三者均由快照信封承载，故**不在**本模块的类型里重复）；
@@ -80,7 +80,7 @@ pub struct LastRound {
     pub is_final: bool,
 }
 
-/// control 频道 `state`（同样不派生 `PartialEq`，理由见 [`ConversationState`]）。
+/// control 频道 `state`（不派生 `PartialEq`：DTO 消费侧不需要相等比较）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]

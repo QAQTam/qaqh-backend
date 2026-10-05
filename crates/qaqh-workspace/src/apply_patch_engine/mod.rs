@@ -10,9 +10,9 @@
 //! - `text_file.rs`        — line-ending-preserving source file abstraction
 //!
 //! Update semantics: all hunks located on the CURRENT file state, applied in
-//! order; any failure rejects the whole patch (all-or-nothing by construction —
-//! replacements are computed before any write). Paths resolve relative to the
-//! caller-supplied cwd.
+//! order; hunks are applied one at a time, so any failure leaves the already
+//! written files in place (non-atomic — see [`EngineError::Partial`]). Paths
+//! resolve relative to the caller-supplied cwd.
 
 mod file_update;
 mod parser;
@@ -47,7 +47,10 @@ pub enum EngineError {
     },
     Compute(String),
     EmptyPatch,
-    /// A patch path resolved outside the workspace root (or failed to resolve).
+    /// 词法上在工作区内、canonicalize 后逃逸出边界的 patch 路径（workspace 内
+    /// 符号链接指向外部）。这类路径 admit 层看到的是工作区内路径、不会提权，
+    /// 属不可审批的隐蔽逃逸，引擎保持硬拒。词法上就在工作区外的路径（绝对
+    /// 路径 / `..` 逃逸）走 admit 层提权后照常落盘，不产生此错误。
     PathOutsideWorkspace {
         path: String,
     },
@@ -228,7 +231,15 @@ pub(crate) fn resolve_workspace_path(cwd: &Path, path: &Path) -> Result<PathBuf,
         let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
         PathBuf::from(s)
     };
-    if !strip_verbatim(&abs).starts_with(strip_verbatim(&cwd_abs)) {
+    // 2026-10-05 权限规则：跨工作区写由 admit 层提权（patch 头路径已全部提取进
+    // 授权资源），引擎不再按 workspace 边界硬拒——词法上就在工作区外的路径
+    // （绝对路径 / `..` 逃逸，`joined` 已词法归一）在审批后照常落盘。
+    //
+    // 唯一保留的拒绝：**词法在工作区内、canonicalize 后逃逸**的路径（workspace
+    // 内符号链接指向外部）。这类路径 admit 看到的是工作区内路径、不会触发提权，
+    // 引擎若放行即 fail-open 写穿边界——与 symlink 最终组件拒绝同族，保持硬拒。
+    let lexically_inside = strip_verbatim(&joined).starts_with(strip_verbatim(&cwd_abs));
+    if lexically_inside && !strip_verbatim(&abs).starts_with(strip_verbatim(&cwd_abs)) {
         return Err(EngineError::PathOutsideWorkspace {
             path: joined.to_string_lossy().to_string(),
         });
@@ -381,7 +392,9 @@ fn apply_hunk(
 }
 
 /// Dry-run: parse and fully compute every hunk against the current file state,
-/// but write nothing. Every failure that a real apply would hit surfaces here.
+/// but write nothing. It surfaces the failures of a read-only pre-check, but
+/// cannot foresee failures that depend on earlier hunks having been written
+/// (e.g. delete then update the same file), so a real apply may still differ.
 pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, EngineError> {
     let hunks = parse_patch(patch)?.hunks;
     if hunks.is_empty() {
@@ -683,6 +696,38 @@ mod tests {
         let outcome = dry_run_patch_engine(&add_file_patch("fresh.txt"), dir.path()).unwrap();
         assert_eq!(outcome.affected.added, vec!["fresh.txt".to_string()]);
         assert!(!dir.path().join("fresh.txt").exists());
+    }
+
+    /// 2026-10-05 权限规则：词法上就在工作区外的路径（绝对路径 / `..` 逃逸）
+    /// 由 admit 层提权后照常落盘——引擎不再按 workspace 边界硬拒。
+    #[test]
+    fn cross_workspace_target_applies_after_admission_approval() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // 绝对路径：admit 从 patch 头提取到外部路径 → 提权 → 引擎放行。
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: {}\n+cross\n*** End Patch\n",
+            outside.join("new.txt").display()
+        );
+        apply_patch_engine(&patch, &ws, UpdateMode::default())
+            .expect("lexically-outside absolute path must apply (admission owns the boundary)");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("new.txt")).unwrap(),
+            "cross\n"
+        );
+
+        // `..` 逃逸：词法归一后落在工作区外 → 同样放行。
+        let escape = "*** Begin Patch\n*** Update File: ../outside/new.txt\n@@\n-cross\n+cross2\n*** End Patch\n";
+        apply_patch_engine(escape, &ws, UpdateMode::default())
+            .expect("'..' escape is lexically outside → admission-approved write applies");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("new.txt")).unwrap(),
+            "cross2\n"
+        );
     }
 
     /// `patch_stats`（统计通道）与 `parse_patch`（执行通道）的接受/拒绝面必须

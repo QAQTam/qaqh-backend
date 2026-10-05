@@ -1,8 +1,8 @@
 //! Daemon control and small read-only status endpoints.
 //!
 //! Browser WebUI hosting is intentionally absent from this module. The
-//! browser-facing gateway is a separate process exposed only by
-//! `qaqh-daemon webui`.
+//! browser-facing gateway was removed with the Tauri migration; there is no
+//! `qaqh-daemon webui` subcommand.
 
 use super::*;
 
@@ -13,8 +13,8 @@ pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// 只读活动快照（冻结事故 P0 观测项）：暴露 has_active_work 与逐会话
-/// 活动状态，冻结会话可直接从外部探测。与 /health 同级免鉴权，仅含
-/// seed/state/turn_id/seq/updated_at，无用户内容。
+/// 活动状态，供冻结排查使用。**需 Bearer 鉴权**（不同于免鉴权的
+/// `/health`），仅含 seed/state/turn_id/seq/updated_at，无用户内容。
 pub(crate) async fn activity(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();

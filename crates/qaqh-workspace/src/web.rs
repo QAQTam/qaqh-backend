@@ -2,7 +2,7 @@
 //!
 //! Web *search* is no longer a local tool: DeepSeek / OpenAI Responses APIs
 //! ship a built-in `web_search` tool executed server-side (see
-//! `qaqh-gate/src/responses.rs`). The model triggers it on its own, so the
+//! `qaqh-gate/src/responses_api.rs`). The model triggers it on its own, so the
 //! local Bing-RSS parser was removed — this tool only fetches URLs the model
 //! (or user) explicitly wants to read.
 

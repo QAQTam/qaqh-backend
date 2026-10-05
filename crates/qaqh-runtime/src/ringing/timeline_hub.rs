@@ -319,13 +319,11 @@ impl RingingHub {
                 //
                 // #42：新会话首个回合开始时，`messages.jsonl` 里已经有**正在进行
                 // 的**首条用户消息，而 timeline 文件还没落盘 → 这里会重建出一个
-                // 「只有用户文本、没有任何 block」的空回合。该回合随即被 seal，
-                // 而 `seal_turn_with_state` 的**即时裁剪**会把它的 journal 条目
-                // 全部删掉（设计如此：sealed 内容已在快照里物化）。结果是
-                // `restore(watermark=2, journal=[])`：**seq 1、2 被吃掉，却既没
-                // live 投递、也不在 journal 里**，随后真正的 live 回合只能从
-                // seq 3 起 —— 客户端 cursor=0 按 `cursor + 1` 判 gap，进入
-                // gap→快照恢复循环，transcript 永不渲染。
+                // 「只有用户文本、没有任何 block」的空回合。该回合随即被 seal。
+                // （历史成因：#42 当时 `seal_turn_with_state` 会**即时裁剪** journal
+                // 条目，导致 `restore(watermark=2, journal=[])` 吃掉 seq 1、2，客户端
+                // cursor+1 判 gap 而陷入恢复循环。该即时裁剪已在 #314（2026-09-23）
+                // 移除，故此因果链仅作历史背景。）
                 //
                 // `meta.turn_count` 是**已完成**回合数的权威值：为 0 说明这个
                 // seed 没有任何可恢复的历史，交给 live 路径物化即可，绝不能
@@ -407,7 +405,8 @@ impl RingingHub {
     /// BUG-006：timeline 目录缺失/记录损坏/记录落后时，它必须能从
     /// `messages.jsonl` 归档重建，否则 timeline 就不是"可重建投影"，而会变成
     /// 第二份事实源。重建只跳过合成摘要，保留真实人类回合，并同步写回
-    /// timeline 缓存 + timeline journal（保证下次也 journal 权威）。
+    /// timeline 缓存 + 记录内重连回放尾（`PersistedTimeline::journal`；权威产物
+    /// 是快照，已退役的 append-only 权威日志不再参与）。
     ///
     /// 返回 `true` = 已用重建结果接管该 seed 的 timeline（调用方无需再装载旧快照）。
     pub(super) fn rebuild_timeline_from_messages(&self, session_id: &str) -> bool {
@@ -639,7 +638,7 @@ fn rehydrate_offloaded_turns(
 }
 
 impl RingingHub {
-    /// 同步落盘所有待写 seed + 排空 journal 写队列（daemon 优雅关闭收尾；
+    /// 同步落盘所有待写 seed（排空 timeline 持久化队列；daemon 优雅关闭收尾；
     /// Drop 只 join 异步线程，而 Arc 引用可能仍在 tokio task 中存活，必须
     /// 显式 flush）。
     pub fn flush_timeline_persistence(&self) {

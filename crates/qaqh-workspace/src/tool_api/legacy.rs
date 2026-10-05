@@ -9,17 +9,18 @@
 //! |---|---|
 //! | `status`（五态） | `status`（同一词汇） |
 //! | `output_ref` / `data` | `output`：`ContentRef` 优先，否则 `Json(data)` |
-//! | `error{code,message,retryable,hint}` | `error`（legacy code **原样保留**；kind 由 code 推导） |
+//! | `error{code,message,retryable,hint}` | `error`（legacy code 为合法 snake_case 时**原样保留**，否则回退 kind 内置码；kind 由 code 推导） |
 //! | `model.text/truncated` | `model` |
 //! | `summary` / `diff` | `display.summary` / `display.diff`（header/body 由展示投影器填充） |
 //! | `images` | `images`（09-19 P2 补充字段；wire 适配器据此重建图片附件） |
 //! | `metrics` | `metrics`（`elapsed_ms → Duration`） |
 //!
-//! ## 已知边界（P2 不做）
+//! ## 已知边界
 //!
-//! - **workspace 注入**：legacy handler 读线程局部 workspace（`set_actor_context`），
-//!   适配器不写线程局部（那是沙箱化 P3+ 的工作）；`ToolCallContext.workspace_root`
-//!   暂不被 legacy 工具消费。
+//! - **workspace 注入**：legacy handler 经线程局部读 workspace；适配器在
+//!   `execute_legacy` 里把显式 [`ToolCallContext`] 装成该兼容视图
+//!   （`install_tool_call_context`），因此 `workspace_root` 会被 legacy 工具
+//!   消费，显式上下文始终是唯一事实源。
 //! - **action 后缀**：新契约无 `action`（legacy 的 `{name}_{action}` 解析属于
 //!   admit 侧），适配器填 `""`。
 //! - **宿主副作用**：skill effects 经 [`LegacyCallOutcome::effects`] 显式返回；
@@ -321,7 +322,7 @@ pub fn map_tool_result(result: ToolResult) -> ToolOutcome {
     }
 }
 
-/// legacy 错误码 → SDK 错误分类（未识别码归 `Custom`，code 原样保留）。
+/// legacy 错误码 → SDK 错误分类（未识别码归 `Custom`；code 为合法 snake_case 时原样保留，否则回退 kind 内置码）。
 fn map_error_kind(code: &str) -> ToolErrorKind {
     match code {
         "invalid_arguments" | "invalid_args" => ToolErrorKind::InvalidArguments,

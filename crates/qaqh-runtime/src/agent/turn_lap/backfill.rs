@@ -9,7 +9,7 @@ use crate::agent::engine_tool::ToolEngine;
 use crate::agent::types::{Outcome, RingContext};
 use crate::agent::util;
 
-// ── helpers (from engine_turn.rs, duplicated for phase decoupling) ──
+// ── helpers (from engine_turn.rs, moved for phase decoupling) ──
 
 fn domain_failure(
     code: &str,
@@ -43,7 +43,8 @@ fn occurrence_id() -> String {
 
 /// Emit timeline + domain events for one completed tool round.
 ///
-/// Verbatim from `TurnEngine::emit_completed_tool_round`. Shared by
+/// Moved here verbatim from `TurnEngine::emit_completed_tool_round`, which now
+/// delegates back to this implementation. Shared by
 /// `handle_tools_done` (run_lap fast path) and by the suspend/resume
 /// handlers that remain in `engine_turn.rs` (`handle_*`).
 pub(crate) fn emit_completed_tool_round(
