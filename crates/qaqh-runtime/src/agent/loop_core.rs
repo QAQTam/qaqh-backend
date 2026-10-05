@@ -231,6 +231,11 @@ impl Loop {
             agent.session.resume_session.clone().unwrap_or_default()
         };
         let paced_emitter = PacedEmitter::new(session_id, event_tx.clone(), writer_dead.clone());
+        // One command scope, both lanes: the actor's canonical ledger reads the
+        // emitter's causation cell, so a fact appended while a command is being
+        // dispatched names that command (which is what folds its receipt).
+        let mut agent = agent;
+        agent.bind_fact_causation(paced_emitter.causation_handle());
 
         let mut flow = qaqh_message::ContextFlow::new();
         qaqh_message::builtin::register_all(&mut flow);

@@ -11,6 +11,7 @@ use qaqh_ringing::{
     RingingCommandState, RingingCommandStatus, RingingV2CommandResult, RingingV2CommandStatus,
     RingingV2ExistingResult,
 };
+use qaqh_session::canonical::causation_for_command;
 use qaqh_session::session_fact_v2::{
     ControlDelta, ConversationDelta, ToolTerminalStatus, TurnTerminal,
 };
@@ -20,6 +21,10 @@ use qaqh_session::session_fact_v2::{ProjectionEvent, ProjectionPayload};
 #[derive(Debug, Default)]
 pub struct PendingCommandStore {
     accepted: HashMap<String, CommandReceipt>,
+    /// Canonical causation id → the client's `command_id`, for the ids that
+    /// `causation_for_command` has to encode (mobile clients submit UUIDs).
+    /// Facts carry the encoded form, so folding needs this way back.
+    by_causation: HashMap<String, String>,
     max_entries: usize,
     persistence_path: Option<PathBuf>,
 }
@@ -89,6 +94,7 @@ impl PendingCommandStore {
     pub fn new() -> Self {
         Self {
             accepted: HashMap::new(),
+            by_causation: HashMap::new(),
             max_entries: 4096,
             persistence_path: None,
         }
@@ -137,6 +143,10 @@ impl PendingCommandStore {
                     last_stale_warn_ms: None,
                 },
             );
+        }
+        let ids: Vec<String> = self.accepted.keys().cloned().collect();
+        for command_id in ids {
+            self.index_causation(&command_id);
         }
     }
 
@@ -229,6 +239,7 @@ impl PendingCommandStore {
                 last_stale_warn_ms: None,
             },
         );
+        self.index_causation(command_id);
         while self.accepted.len() > self.max_entries {
             let victim = self
                 .accepted
@@ -236,10 +247,36 @@ impl PendingCommandStore {
                 .min_by_key(|(_, receipt)| receipt.accepted_at)
                 .map(|(id, _)| id.clone())
                 .expect("non-empty");
+            self.unindex_causation(&victim);
             self.accepted.remove(&victim);
         }
         self.persist();
         Ok(true)
+    }
+
+    /// Index one receipt under the causation id its facts will carry, when that
+    /// differs from the client's raw `command_id`.
+    fn index_causation(&mut self, command_id: &str) {
+        if let Some(causation) = causation_for_command(command_id)
+            && causation.as_str() != command_id
+        {
+            self.by_causation
+                .insert(causation.as_str().to_string(), command_id.to_string());
+        }
+    }
+
+    fn unindex_causation(&mut self, command_id: &str) {
+        if let Some(causation) = causation_for_command(command_id) {
+            self.by_causation.remove(causation.as_str());
+        }
+    }
+
+    /// The `command_id` a fact's `causation_id` belongs to.
+    fn command_for_causation(&self, causation: &str) -> Option<String> {
+        if self.accepted.contains_key(causation) {
+            return Some(causation.to_string());
+        }
+        self.by_causation.get(causation).cloned()
     }
 
     pub fn is_known(&self, command_id: &str) -> bool {
@@ -250,6 +287,7 @@ impl PendingCommandStore {
 
     /// 转发失败回滚预留。
     pub fn rollback(&mut self, command_id: &str) {
+        self.unindex_causation(command_id);
         self.accepted.remove(command_id);
         self.persist();
     }
@@ -265,14 +303,18 @@ impl PendingCommandStore {
 
     /// Canonical fact 投影链上的回执折叠（hub-fact-bus spec 阶段 2.3）。
     ///
-    /// 与 [`Self::observe_terminal_event`] 语义对齐，但消费 `ProjectionEvent`：
-    /// durable append 之后的 sink 链保证这里只看到已落盘事实。
+    /// ACK 只代表命令进入了 worker；业务终态由这条折叠链负责。事件侧的
+    /// `causation_id` 是 worker 在本次 dispatch 内写下的（`FactCausation`），
+    /// 可能已被 [`causation_for_command`] 编码过，故先还原成 client 的
+    /// `command_id` 再落终态。
     /// 降级说明：v1 的 `SkillsUpdated` / `OperationCompleted` / `OperationFailed` /
     /// `SessionStateChanged` 在 fact 侧无一比一对应物（spec §6 冻结 canonical log
-    /// 磁盘格式，暂不补 fact），相关回执靠 TTL 过期而非事件折叠。
+    /// 磁盘格式，暂不补 fact），相关回执靠 TTL 过期而非事件折叠。纯对话回合的
+    /// `TurnFinished` 同理——生产侧尚未写 turn fact，只有回合内的
+    /// tool/interaction 终态能折叠到回执。
     pub fn observe_projection_events(&mut self, events: &[ProjectionEvent]) {
         for event in events {
-            let Some(command_id) = event.causation_id.as_ref().map(|id| id.0.as_str()) else {
+            let Some(causation) = event.causation_id.as_ref() else {
                 continue;
             };
             let terminal = match &event.payload {
@@ -307,11 +349,17 @@ impl PendingCommandStore {
                     ControlDelta::InteractionResolved { .. }
                     | ControlDelta::InteractionExpired { .. },
                 ) => Some((RingingCommandState::Succeeded, None)),
+                ProjectionPayload::ControlDelta(ControlDelta::DriverChanged { .. }) => {
+                    Some((RingingCommandState::Succeeded, None))
+                }
                 _ => None,
             };
             if let Some((state, error_code)) = terminal {
+                let Some(command_id) = self.command_for_causation(causation.as_str()) else {
+                    continue;
+                };
                 self.mark_terminal_with_result(
-                    command_id,
+                    &command_id,
                     state,
                     Some(event.event_id.0.clone()),
                     error_code,
@@ -355,6 +403,10 @@ impl PendingCommandStore {
     /// 但永无终态"的僵尸只能靠人肉轮询发现。此方法由 daemon 周期任务调用：
     /// 超过 `warn_after` 未达终态即 WARN，同一 receipt 按 `repeat_interval`
     /// 限频重复告警，直至终态折叠。纯内存限频状态，不触发 persist。
+    ///
+    /// 折叠窗口只有 `RECEIPT_TTL`：过了 TTL 的条目幂等表已不再认它，继续告警
+    /// 只会把日志刷满（2026-10-05 实测 2487 条同源告警）。这里直接把过期条目
+    /// 摘掉，告警只覆盖 `warn_after..TTL` 这段真正还有救的窗口。
     pub fn warn_stale_running(
         &mut self,
         warn_after: Duration,
@@ -363,6 +415,16 @@ impl PendingCommandStore {
         let now = Instant::now();
         let now_ms = unix_millis();
         let repeat_ms = repeat_interval.as_millis() as u64;
+        let expired: Vec<String> = self
+            .accepted
+            .iter()
+            .filter(|(_, receipt)| receipt.accepted_at + RECEIPT_TTL <= now)
+            .map(|(command_id, _)| command_id.clone())
+            .collect();
+        for command_id in expired {
+            self.unindex_causation(&command_id);
+            self.accepted.remove(&command_id);
+        }
         let mut stale = Vec::new();
         for (command_id, receipt) in self.accepted.iter_mut() {
             if !matches!(
@@ -498,7 +560,104 @@ fn unix_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use qaqh_session::canonical::{generate_ulid, ulid_from_text};
+    use qaqh_session::session_fact_v2::{ActorKind, ActorRef, Delivery, EventId, InteractionId};
+
     use super::*;
+
+    fn control_event(causation: Option<EventId>) -> ProjectionEvent {
+        ProjectionEvent {
+            event_id: EventId::new(generate_ulid()),
+            source_fact_seq: 1,
+            source_event_id: EventId::new(generate_ulid()),
+            causation_id: causation,
+            ts_ms: Some(1_789_830_000_000),
+            stream_key: qaqh_session::session_fact_v2::StreamKey::Channel(
+                qaqh_domain::RingingChannel::Control,
+            ),
+            delivery: Delivery::Ephemeral,
+            projection_slot: None,
+            projection_index: None,
+            payload: ProjectionPayload::ControlDelta(ControlDelta::InteractionResolved {
+                revision: 1,
+                interaction_id: InteractionId::new("int_test"),
+                decision: qaqh_session::session_fact_v2::ContentValue::Inline {
+                    text: "{\"decision\":\"approved\"}".into(),
+                },
+                verdict: None,
+                resolved_by: ActorRef {
+                    kind: ActorKind::User,
+                    id: "user".into(),
+                    display_name: None,
+                },
+                resolution_seq: 1,
+            }),
+        }
+    }
+
+    /// 2026-10-05 回归（`docs/bug-ringing-v2-commands-stuck-in-running.md`）：
+    /// fact 链折叠是 v2 命令唯一可达的终态来源，而 fact 上的 `causation_id` 是
+    /// 客户端命令 id 的 canonical 派生（移动端提交 UUID，落盘为 `ulid_from_text`
+    /// 编码）。折叠必须按同一映射找回命令 id，否则回执永远停在 Running。
+    #[test]
+    fn receipts_fold_through_the_canonical_causation_lane() {
+        let mut store = PendingCommandStore::new();
+        let uuid_command = "92455601-b53a-4f25-8df5-94124676055b".to_string();
+        let ulid_command = generate_ulid();
+        for command_id in [&uuid_command, &ulid_command] {
+            assert!(
+                store
+                    .record_fingerprint_for_session(command_id, "fp", "session-a")
+                    .expect("first accept")
+            );
+            store.mark_running(command_id);
+        }
+
+        store.observe_projection_events(&[
+            control_event(Some(EventId::new(ulid_from_text(&uuid_command)))),
+            control_event(Some(EventId::new(ulid_command.as_str()))),
+        ]);
+
+        for command_id in [&uuid_command, &ulid_command] {
+            assert_eq!(
+                store
+                    .v2_status_for_session(command_id, "session-a")
+                    .expect("receipt")
+                    .state,
+                RingingCommandState::Succeeded,
+                "{command_id} must fold from its canonical causation"
+            );
+        }
+    }
+
+    /// 过 TTL 的条目不再参与幂等，也不该继续占着日志（2026-10-05 实测 2487 条
+    /// 同源 `stuck in Running` 告警全部来自早已过期的僵尸条目）。
+    #[test]
+    fn expired_receipts_are_pruned_instead_of_warning_forever() {
+        let mut store = PendingCommandStore::new();
+        let uuid_command = "92455601-b53a-4f25-8df5-94124676055b";
+        assert!(
+            store
+                .record_fingerprint_for_session(uuid_command, "fp", "session-a")
+                .expect("first accept")
+        );
+        store
+            .accepted
+            .get_mut(uuid_command)
+            .expect("receipt")
+            .accepted_at = Instant::now() - RECEIPT_TTL - Duration::from_secs(1);
+
+        assert!(
+            store
+                .warn_stale_running(Duration::ZERO, Duration::ZERO)
+                .is_empty(),
+            "an expired receipt must not keep emitting warnings"
+        );
+        assert!(
+            !store.accepted.contains_key(uuid_command) && store.by_causation.is_empty(),
+            "expired receipts are dropped from both indexes"
+        );
+    }
 
     #[test]
     fn pending_command_idempotency() {

@@ -18,4 +18,4 @@ pub use projection::{
 };
 pub use projection_event::*;
 pub use types::*;
-pub use validation::ValidationError;
+pub use validation::{ValidationError, is_ulid_text};

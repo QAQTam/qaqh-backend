@@ -2,13 +2,12 @@
 //!
 //! 由 `loop_core.rs` 拆分（Phase 2-5）：`impl Loop` 跨文件块，对外 API 不变。
 
-use super::engine_turn::is_ulid;
 use super::loop_core::Loop;
 use super::turn_actor::{InteractionAdmission, InteractionState};
 use super::types::*;
 
 use qaqh_domain::{ControlCommand, DomainEvent};
-use qaqh_session::canonical::generate_ulid;
+use qaqh_session::canonical::{causation_for_command, generate_ulid};
 use qaqh_session::session_fact_v2::EventId;
 
 use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
@@ -425,5 +424,5 @@ impl Loop {
 }
 
 fn driver_causation_id(command_id: &str) -> Option<EventId> {
-    is_ulid(command_id).then(|| EventId::new(command_id))
+    causation_for_command(command_id)
 }
