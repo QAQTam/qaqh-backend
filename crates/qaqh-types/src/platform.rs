@@ -80,8 +80,8 @@ pub fn data_dir() -> PathBuf {
 /// user's canonical home. Destructive maintenance must call `verify_data_root`
 /// and must never infer ownership from the directory name alone.
 ///
-/// Legacy `DeepX` markers are migrated in place only when every identity field
-/// matches the current user/path; anything else fails closed.
+/// Marker product must be `QAQ-Harness` at `format_version` 1; anything else
+/// (including pre-rename identities) fails closed rather than rewriting in place.
 pub fn ensure_data_root() -> io::Result<PathBuf> {
     let root = data_dir();
     if root.as_os_str().is_empty() {
@@ -97,55 +97,11 @@ pub fn ensure_data_root() -> io::Result<PathBuf> {
     let canonical_root = fs::canonicalize(&root)?;
     let marker_path = canonical_root.join(DATA_ROOT_MARKER);
     if marker_path.exists() {
-        // Safe legacy migration happens before the strict QAQ-Harness check.
-        let _ = migrate_legacy_data_root_marker_at(&canonical_root, &owner_home)?;
         return verify_data_root(&canonical_root);
     }
 
     write_data_root_marker(&canonical_root, &owner_home)?;
     verify_data_root_paths(&canonical_root, &canonical_root, &owner_home)
-}
-
-/// Lower-level migration helper for callers that already have canonical paths.
-///
-/// Only rewrites a legacy `DeepX` marker when `canonical_root`, `owner_home`, and
-/// the marker's `root_id` all match. Unknown products or mismatched identities
-/// are rejected without modifying the marker file.
-pub fn migrate_legacy_data_root_marker_at(
-    canonical_root: &Path,
-    owner_home: &Path,
-) -> io::Result<Option<PathBuf>> {
-    reject_link(canonical_root)?;
-    let marker_path = canonical_root.join(DATA_ROOT_MARKER);
-    if !marker_path.exists() {
-        return Ok(None);
-    }
-    reject_link(&marker_path)?;
-    let mut marker: DataRootMarker =
-        serde_json::from_slice(&fs::read(&marker_path)?).map_err(invalid_data)?;
-    let canonical_root_text = normalized_path_text(canonical_root);
-    let owner_home_text = normalized_path_text(owner_home);
-    if marker.canonical_root != canonical_root_text
-        || marker.owner_home != owner_home_text
-        || marker.root_id != data_root_id(&canonical_root_text, &owner_home_text)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "data root marker does not match the current user and path",
-        ));
-    }
-    if marker.product == "QAQ-Harness" && marker.format_version == 1 {
-        return Ok(None);
-    }
-    if marker.product == "DeepX" && marker.format_version == 1 {
-        marker.product = "QAQ-Harness".to_string();
-        write_data_root_marker_at(canonical_root, &marker)?;
-        return Ok(Some(canonical_root.to_path_buf()));
-    }
-    Err(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        format!("unsupported data root marker product '{}'", marker.product),
-    ))
 }
 
 fn write_data_root_marker(canonical_root: &Path, owner_home: &Path) -> io::Result<()> {
@@ -527,128 +483,6 @@ mod data_root_tests {
 
         write_data_root_marker(&data, &first_home).expect("write data marker");
         assert!(verify_data_root_paths(&data, &data, &second_home).is_err());
-        fs::remove_dir_all(root).expect("remove test root");
-    }
-
-    #[test]
-    fn legacy_qaqh_marker_is_migrated_when_safe() {
-        let root = test_root();
-        let home = root.join("home");
-        let data = home.join(".qaqh");
-        fs::create_dir_all(&data).expect("create data root");
-        let home = fs::canonicalize(&home).expect("canonical home");
-        let data = fs::canonicalize(&data).expect("canonical data");
-
-        let canonical_root_text = normalized_path_text(&data);
-        let owner_home_text = normalized_path_text(&home);
-        let legacy = DataRootMarker {
-            format_version: 1,
-            product: "DeepX".into(),
-            canonical_root: canonical_root_text.clone(),
-            owner_home: owner_home_text.clone(),
-            root_id: data_root_id(&canonical_root_text, &owner_home_text),
-        };
-        fs::write(
-            data.join(DATA_ROOT_MARKER),
-            serde_json::to_vec_pretty(&legacy).expect("serialize legacy"),
-        )
-        .expect("write legacy marker");
-
-        let migrated = migrate_legacy_data_root_marker_at(&data, &home).expect("migrate ok");
-        assert_eq!(migrated, Some(data.clone()));
-        let marker: DataRootMarker = serde_json::from_slice(
-            &fs::read(data.join(DATA_ROOT_MARKER)).expect("read migrated marker"),
-        )
-        .expect("parse migrated marker");
-        assert_eq!(marker.product, "QAQ-Harness");
-        assert!(verify_data_root_paths(&data, &data, &home).is_ok());
-        fs::remove_dir_all(root).expect("remove test root");
-    }
-
-    #[test]
-    fn legacy_qaqh_marker_is_rejected_on_identity_mismatch() {
-        let root = test_root();
-        let home = root.join("home");
-        let data = home.join(".qaqh");
-        let other_home = root.join("other-home");
-        fs::create_dir_all(&data).expect("create data root");
-        fs::create_dir_all(&other_home).expect("create other home");
-        let home = fs::canonicalize(&home).expect("canonical home");
-        let other_home = fs::canonicalize(&other_home).expect("canonical other home");
-        let data = fs::canonicalize(&data).expect("canonical data");
-
-        let canonical_root_text = normalized_path_text(&data);
-        let owner_home_text = normalized_path_text(&home);
-        let legacy = DataRootMarker {
-            format_version: 1,
-            product: "DeepX".into(),
-            canonical_root: canonical_root_text,
-            owner_home: owner_home_text,
-            root_id: data_root_id(&normalized_path_text(&data), &normalized_path_text(&home)),
-        };
-        fs::write(
-            data.join(DATA_ROOT_MARKER),
-            serde_json::to_vec_pretty(&legacy).expect("serialize legacy"),
-        )
-        .expect("write legacy marker");
-        let before = fs::read(data.join(DATA_ROOT_MARKER)).expect("read before");
-
-        let err = migrate_legacy_data_root_marker_at(&data, &other_home)
-            .expect_err("mismatched owner must fail");
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        let after = fs::read(data.join(DATA_ROOT_MARKER)).expect("read after");
-        assert_eq!(before, after, "failed migration must not modify the marker");
-        fs::remove_dir_all(root).expect("remove test root");
-    }
-
-    #[test]
-    fn current_qaqh_marker_is_idempotent() {
-        let root = test_root();
-        let home = root.join("home");
-        let data = home.join(".qaqh");
-        fs::create_dir_all(&data).expect("create data root");
-        let home = fs::canonicalize(&home).expect("canonical home");
-        let data = fs::canonicalize(&data).expect("canonical data");
-        write_data_root_marker(&data, &home).expect("write qaqh marker");
-
-        let before = fs::read(data.join(DATA_ROOT_MARKER)).expect("read before");
-        let migrated = migrate_legacy_data_root_marker_at(&data, &home).expect("migrate ok");
-        assert_eq!(migrated, None);
-        let after = fs::read(data.join(DATA_ROOT_MARKER)).expect("read after");
-        assert_eq!(before, after, "current marker must remain byte-identical");
-        fs::remove_dir_all(root).expect("remove test root");
-    }
-
-    #[test]
-    fn unknown_product_marker_is_rejected_without_write() {
-        let root = test_root();
-        let home = root.join("home");
-        let data = home.join(".qaqh");
-        fs::create_dir_all(&data).expect("create data root");
-        let home = fs::canonicalize(&home).expect("canonical home");
-        let data = fs::canonicalize(&data).expect("canonical data");
-
-        let canonical_root_text = normalized_path_text(&data);
-        let owner_home_text = normalized_path_text(&home);
-        let marker = DataRootMarker {
-            format_version: 1,
-            product: "OtherProduct".into(),
-            canonical_root: canonical_root_text,
-            owner_home: owner_home_text,
-            root_id: data_root_id(&normalized_path_text(&data), &normalized_path_text(&home)),
-        };
-        fs::write(
-            data.join(DATA_ROOT_MARKER),
-            serde_json::to_vec_pretty(&marker).expect("serialize marker"),
-        )
-        .expect("write marker");
-        let before = fs::read(data.join(DATA_ROOT_MARKER)).expect("read before");
-
-        let err = migrate_legacy_data_root_marker_at(&data, &home)
-            .expect_err("unknown product must fail closed");
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        let after = fs::read(data.join(DATA_ROOT_MARKER)).expect("read after");
-        assert_eq!(before, after, "unknown product must not rewrite marker");
         fs::remove_dir_all(root).expect("remove test root");
     }
 
