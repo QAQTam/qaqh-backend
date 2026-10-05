@@ -174,7 +174,6 @@ pub fn execute_authorized_with_context(
         session_id,
         call_id,
         tool_name: name,
-        action,
         args,
         category,
     } = invocation;
@@ -186,7 +185,6 @@ pub fn execute_authorized_with_context(
         manager.prepare_req_with_cancel(
             call_id.clone(),
             &name,
-            &action,
             args.clone(),
             timeout_secs,
             progress_tx,
@@ -202,7 +200,6 @@ pub fn execute_authorized_with_context(
                 session_id: session_id.clone(),
                 call_id: call_id.clone(),
                 tool_name: name.clone(),
-                action: action.clone(),
                 args: args.clone(),
                 category,
             };
@@ -229,7 +226,6 @@ pub fn execute_authorized_with_context(
                 session_id: session_id.clone(),
                 call_id: call_id.clone(),
                 tool_name: name.clone(),
-                action: action.clone(),
                 args: args.clone(),
                 category,
             };
@@ -295,7 +291,7 @@ pub fn execute_authorized_with_context(
             ts: chrono::Utc::now().to_rfc3339(),
             user: "agent".into(),
             tool: name.clone(),
-            action: action.clone(),
+            action: String::new(),
             args_hash: crate::audit::hash_args(&args),
             args_bytes: crate::audit::args_size(&args),
             status: "pending".to_string(),
@@ -392,7 +388,7 @@ pub fn execute_authorized_with_context(
                 ts: chrono::Utc::now().to_rfc3339(),
                 user: "agent".into(),
                 tool: name.clone(),
-                action: action.clone(),
+                action: String::new(),
                 args_hash: crate::audit::hash_args(&args),
                 args_bytes: crate::audit::args_size(&args),
                 status: crate::audit::status_str(canonical.status).to_string(),
@@ -441,7 +437,6 @@ pub fn execute_authorized_with_context(
                 session_id,
                 call_id,
                 tool_name: name.clone(),
-                action: action.clone(),
                 args: args.clone(),
                 category,
             };
@@ -463,7 +458,6 @@ pub fn execute_authorized_with_context(
 /// pre-mutating ambient state.
 pub fn execute_with_context(
     name: &str,
-    action: &str,
     args: &str,
     tool_call_id: &str,
     progress_tx: Option<crate::ExecProgressSender>,
@@ -473,10 +467,7 @@ pub fn execute_with_context(
     // Fail closed：显式上下文缺会话等价于旧“runtime 未初始化”。
     // （无会话 = 无主体身份，拒绝事件无从归属，不落审计。）
     if ctx.session_id.is_empty() {
-        return failure(
-            &resolve_name(name, action),
-            crate::ToolError::RuntimeNotInitialized,
-        );
+        return failure(name, crate::ToolError::RuntimeNotInitialized);
     }
     let call_id = if tool_call_id.is_empty() {
         format!(
@@ -489,7 +480,7 @@ pub fn execute_with_context(
     } else {
         tool_call_id.to_string()
     };
-    let resolved_name = resolve_name(name, action);
+    let resolved_name = name.to_owned();
     let args: serde_json::Value = match serde_json::from_str(args) {
         Ok(args) => args,
         Err(error) => {
@@ -500,7 +491,6 @@ pub fn execute_with_context(
                 session_id: ctx.session_id.clone(),
                 call_id,
                 tool_name: resolved_name.clone(),
-                action: action.to_string(),
                 args: serde_json::Value::Null,
                 category: crate::runtime::lookup_category(&resolved_name)
                     .unwrap_or(crate::permission::ToolCategory::Write),
@@ -518,14 +508,6 @@ pub fn execute_with_context(
     };
     let _ctx_guard = crate::runtime::install_tool_ctx(ctx);
 
-    let resolved_action = if action.is_empty() {
-        args.get("action")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(name)
-            .to_string()
-    } else {
-        action.to_string()
-    };
     let workspace_root = crate::runtime::active_workspace_root();
     // 能力类别来自 handler 声明（单一事实源）；查不到时保守回退 Write。
     let category = crate::runtime::lookup_category(&resolved_name)
@@ -534,7 +516,6 @@ pub fn execute_with_context(
         session_id: ctx.session_id.clone(),
         call_id,
         tool_name: resolved_name.clone(),
-        action: resolved_action,
         args,
         category,
     };
@@ -596,7 +577,7 @@ fn audit_rejected(
         ts: chrono::Utc::now().to_rfc3339(),
         user: "agent".into(),
         tool: invocation.tool_name.clone(),
-        action: invocation.action.clone(),
+        action: String::new(),
         args_hash: crate::audit::hash_args(&invocation.args),
         args_bytes: crate::audit::args_size(&invocation.args),
         status: "error".to_string(),
@@ -621,14 +602,6 @@ fn audit_rejected(
             "audit: append rejected event for {} failed: {e}",
             invocation.tool_name
         );
-    }
-}
-
-fn resolve_name(name: &str, action: &str) -> String {
-    if action.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name}_{action}")
     }
 }
 
@@ -769,7 +742,6 @@ mod tests {
 
         let result = execute_with_context(
             &full_name,
-            "",
             r#"{}"#,
             "mcp-metrics-call",
             None,
@@ -817,7 +789,6 @@ mod tests {
 
         let result = execute_with_context(
             "skills",
-            "",
             r#"{"action":"activate","name":"typed-skill"}"#,
             "skill-call-1",
             None,
@@ -842,7 +813,6 @@ mod tests {
 
         let resource = execute_with_context(
             "skills",
-            "",
             r#"{"action":"resource","name":"typed-skill","path":"references/info.md"}"#,
             "resource-call-1",
             None,
@@ -854,7 +824,6 @@ mod tests {
 
         let generic_read = execute_with_context(
             "read",
-            "",
             &serde_json::json!({"path": skill_dir.join("SKILL.md")}).to_string(),
             "generic-skill-read",
             None,
@@ -872,7 +841,6 @@ mod tests {
 
         let traversal = execute_with_context(
             "skills",
-            "",
             r#"{"action":"resource","name":"typed-skill","path":"../outside.md"}"#,
             "resource-call-2",
             None,
@@ -890,7 +858,6 @@ mod tests {
 
         let list = execute_with_context(
             "skills",
-            "",
             r#"{"action":"list"}"#,
             "skills-list-1",
             None,
@@ -901,7 +868,6 @@ mod tests {
 
         let invalid = execute_with_context(
             "skills",
-            "",
             r#"{"action":"list","name":"typed-skill"}"#,
             "skills-invalid-1",
             None,
@@ -928,7 +894,6 @@ mod tests {
             session_id: "test_session".to_string(),
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
-            action: String::new(),
             args: serde_json::json!({}),
             category,
         }
@@ -1283,7 +1248,6 @@ mod tests {
         // With SkipPermissions context, auto-approve should work
         let result = execute_with_context(
             "test_counter",
-            "",
             "{}",
             "compat-2",
             None,
@@ -1398,7 +1362,7 @@ mod tests {
         // PR-3-2：fail-closed 契约迁移到显式 ToolCtx——空 session_id 等价于
         // 旧“runtime context 未初始化”。
         let ctx = crate::runtime::ToolCtx::admitted("");
-        let result = execute_with_context("test_counter", "", "{}", "miss-ctx-1", None, &ctx);
+        let result = execute_with_context("test_counter", "{}", "miss-ctx-1", None, &ctx);
         assert!(
             !result.success,
             "should fail closed without runtime context"
@@ -1419,7 +1383,6 @@ mod tests {
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         let result = execute_with_context(
             "test_counter",
-            "",
             "not-json{{{",
             "inv-json-1",
             None,
@@ -1511,7 +1474,6 @@ mod tests {
             session_id: "session-B".to_string(),
             call_id: "sess-mis-1".to_string(),
             tool_name: "test_counter".to_string(),
-            action: String::new(),
             args: serde_json::json!({}),
             category: crate::permission::ToolCategory::Read,
         };
@@ -1553,7 +1515,6 @@ mod tests {
             session_id: "test".to_string(),
             call_id: "res-mis-1".to_string(),
             tool_name: "test_counter".to_string(),
-            action: String::new(),
             args: serde_json::json!({"path": "a.txt"}),
             category: crate::permission::ToolCategory::Read,
         };
@@ -1571,7 +1532,6 @@ mod tests {
             session_id: "test".to_string(),
             call_id: "res-mis-1".to_string(),
             tool_name: "test_counter".to_string(),
-            action: String::new(),
             args: serde_json::json!({"path": "b.txt"}),
             category: crate::permission::ToolCategory::Read,
         };

@@ -525,7 +525,6 @@ mod tests {
         let ctx = crate::ToolCallCtx {
             id: "read-image-test".into(),
             name: "read_image".into(),
-            action: String::new(),
             args: serde_json::json!({}),
             tx_progress: None,
             timeout_secs: Some(30),
