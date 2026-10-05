@@ -19,13 +19,13 @@ pub mod store;
 
 pub use diff::asymmetric_unified_diff;
 pub use scan::{ScanOpts, ScanOutcome};
-pub use store::{Change, GcOutcome};
+pub use store::{Change, ChangeStatus, GcOutcome};
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-use crate::store::{ChangeStatus, Store, atomic_write_bytes};
+use crate::store::{Store, atomic_write_bytes};
 
 /// 启动 GC 的保留窗口（manifest 份数）。`QAQH_SPY_KEEP_MANIFESTS` 可覆盖，
 /// 合法区间 [16, 100_000]，默认 256（≈128 个有变更的工具批）。
@@ -167,11 +167,24 @@ impl Session {
     /// 工具边界报告：先补一次扫描（确保边界之后的改动全部入账），
     /// 再对 mark 之后的净变更渲染限额报告。返回纯文本，如何注入由调用方决定。
     pub fn report_since(&self, from: &ScanId, max_bytes: usize) -> Result<String> {
+        let changes = self.changes_after_tool_end(from)?;
+        self.render_report(&changes, max_bytes)
+    }
+
+    /// 补一次 ToolEnd 扫描（确保边界之后的改动全部入账）并返回 mark 之后的全部
+    /// 变更，**但不渲染**。宿主可在两步之间做自己的回填——例如把变更喂进宿主
+    /// 审计链换取回滚定位符，再把定位符写进报告。
+    pub fn changes_after_tool_end(&self, from: &ScanId) -> Result<Vec<Change>> {
         self.scan(Trigger::ToolEnd)?;
-        let changes = self.changes_since(from)?;
+        self.changes_since(from)
+    }
+
+    /// 渲染限额报告（不扫描、不推进指针）。与 [`Session::changes_after_tool_end`]
+    /// 拆分的目的见该方法说明。
+    pub fn render_report(&self, changes: &[Change], max_bytes: usize) -> Result<String> {
         report::build_report(
             &self.store,
-            &changes,
+            changes,
             max_bytes,
             self.ctx_before,
             self.ctx_after,
