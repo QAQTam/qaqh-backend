@@ -433,7 +433,6 @@ impl ToolManager {
         &mut self,
         id: String,
         name: &str,
-        action: &str,
         args: serde_json::Value,
         timeout_secs: Option<u64>,
         progress_tx: Option<crate::ExecProgressSender>,
@@ -441,7 +440,6 @@ impl ToolManager {
         self.prepare_req_with_cancel(
             id,
             name,
-            action,
             args,
             timeout_secs,
             progress_tx,
@@ -456,7 +454,6 @@ impl ToolManager {
         &mut self,
         id: String,
         name: &str,
-        action: &str,
         args: serde_json::Value,
         timeout_secs: Option<u64>,
         progress_tx: Option<crate::ExecProgressSender>,
@@ -510,7 +507,6 @@ impl ToolManager {
         let ctx = crate::ToolCallCtx {
             id: id.clone(),
             name: name.to_string(),
-            action: action.to_string(),
             args: args.clone(),
             tx_progress: progress_tx,
             timeout_secs: Some(timeout_secs),
@@ -854,7 +850,6 @@ mod tests {
         let err = mgr.prepare_req(
             "c1".to_string(),
             "exec",
-            "exec",
             serde_json::json!({"command": "echo hi"}),
             None,
             None,
@@ -862,7 +857,6 @@ mod tests {
         assert!(err.is_err());
         let ok = mgr.prepare_req(
             "c2".to_string(),
-            "read",
             "read",
             serde_json::json!({"path": "x"}),
             None,
@@ -898,14 +892,7 @@ mod tests {
             .expect("register dynamic");
 
         let prepared = mgr
-            .prepare_req(
-                "id-1".to_owned(),
-                &name,
-                "",
-                serde_json::json!({}),
-                None,
-                None,
-            )
+            .prepare_req("id-1".to_owned(), &name, serde_json::json!({}), None, None)
             .map_err(|report| report.content)
             .expect("dynamic tool prepare should succeed");
         assert_eq!(prepared.effective_tool_name.as_deref(), Some("echo"));
@@ -941,7 +928,6 @@ mod tests {
         let report = match mgr.prepare_req(
             "id-2".to_owned(),
             "mcp__demo__nope",
-            "",
             serde_json::json!({}),
             None,
             None,
@@ -970,7 +956,6 @@ mod m13_tests {
         crate::ToolCallCtx {
             id: "t".to_string(),
             name: "write_file".to_string(),
-            action: String::new(),
             args,
             tx_progress: None,
             timeout_secs: None,
@@ -1128,7 +1113,6 @@ mod safety_e2e_tests {
             .prepare_req(
                 "c1".to_string(),
                 "delete",
-                "",
                 serde_json::json!({}),
                 None,
                 None,
@@ -1146,7 +1130,6 @@ mod safety_e2e_tests {
             mgr.prepare_req(
                 "c2".to_string(),
                 "delete",
-                "",
                 serde_json::json!({ "path": ws.join("trash-me.txt").to_str().unwrap() }),
                 None,
                 None,
@@ -1160,7 +1143,6 @@ mod safety_e2e_tests {
             .prepare_req(
                 "c3".to_string(),
                 "delete",
-                "",
                 serde_json::json!({ "path": tmp.path().join("outside.txt").to_str().unwrap() }),
                 None,
                 None,

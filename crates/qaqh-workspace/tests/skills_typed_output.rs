@@ -31,7 +31,6 @@ fn skills_typed_activation_carries_effect_and_same_source_output() {
     let args = json!({"action": "activate", "name": "typed-skill"});
     let executed = qaqh_workspace::execution::execute_with_context(
         "skills",
-        "",
         &args.to_string(),
         "skills-typed-call",
         None,

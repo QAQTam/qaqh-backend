@@ -12,6 +12,5 @@ mod telemetry;
 pub(crate) use datetime::{chrono_local_date, chrono_local_datetime, epoch_to_date};
 pub(crate) use format::{
     build_assistant_message, emit_round_complete_via_emitter, parse_tool_calls_from_response,
-    resolve_effective_name,
 };
 pub(crate) use telemetry::record_token_usage;

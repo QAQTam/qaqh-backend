@@ -480,7 +480,6 @@ fn split_ctx(name: &str, args: Value) -> crate::ToolCallCtx {
     crate::ToolCallCtx {
         id: format!("test-{name}"),
         name: name.into(),
-        action: name.into(),
         args,
         tx_progress: None,
         timeout_secs: None,

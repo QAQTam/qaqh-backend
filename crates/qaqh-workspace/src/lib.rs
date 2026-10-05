@@ -621,7 +621,6 @@ pub fn bounded_exec_progress_channel() -> (
 pub struct ToolCallCtx {
     pub id: String,
     pub name: String,
-    pub action: String,
     pub args: serde_json::Value,
     pub tx_progress: Option<ExecProgressSender>,
     pub timeout_secs: Option<u64>,

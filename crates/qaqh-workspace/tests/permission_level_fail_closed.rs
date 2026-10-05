@@ -110,7 +110,6 @@ fn invalid_level_admits_write_as_approval_required_not_authorized() {
             session_id: "fail-closed".into(),
             call_id: format!("call-{raw}"),
             tool_name: "write".into(),
-            action: String::new(),
             args: serde_json::json!({ "path": workspace.join("inside.txt") }),
             category: ToolCategory::Write,
         };

@@ -112,7 +112,6 @@ mod tests {
         let cmd = RingingCommand::Tool(ToolCommand::ToolInvoke {
             tool_call_id: "c".into(),
             name: "exec".into(),
-            action: "run".into(),
             args: serde_json::json!({ "cmd": "echo hi" }),
         });
         let frame = RingingWorkerCommandEnvelope::new("s1", "cmd-1", cmd);

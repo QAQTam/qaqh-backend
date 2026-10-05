@@ -178,10 +178,9 @@ impl ToolEngine {
         ctx: &mut RingContext,
         id: &str,
         name: &str,
-        action: &str,
         args: &serde_json::Value,
     ) {
-        let effective_name = crate::agent::util::resolve_effective_name(name, action, args);
+        let effective_name = name.to_owned();
 
         // P2-2（观察项④修复）：UI 直调不经回合边界（投影 apply 在 run_lap）
         // —— mcp 前缀工具在投影未入册的会话里先同步 apply 一次（幂等：

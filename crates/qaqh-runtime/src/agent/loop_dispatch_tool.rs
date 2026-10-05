@@ -15,7 +15,6 @@ impl Loop {
             ToolCommand::ToolInvoke {
                 tool_call_id,
                 name,
-                action,
                 args,
             } => {
                 // C2：UI 快捷工具调用前清两处取消 token——Stop 之后
@@ -32,13 +31,9 @@ impl Loop {
                     stats: &mut self.session.stats,
                     flow: &mut self.flow,
                 };
-                self.session.tool.handle_ui_tool_call(
-                    &mut ctx,
-                    &tool_call_id,
-                    &name,
-                    &action,
-                    &args,
-                );
+                self.session
+                    .tool
+                    .handle_ui_tool_call(&mut ctx, &tool_call_id, &name, &args);
             }
             ToolCommand::ToolPermissionRespond {
                 tool_call_id,

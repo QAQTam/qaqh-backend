@@ -317,7 +317,6 @@ fn mcp_dynamic_tool_requires_permission() {
                 session_id: "seed-t8".into(),
                 call_id: format!("call-{tool}-{level}"),
                 tool_name: tool.into(),
-                action: String::new(),
                 args: serde_json::json!({}),
                 category,
             },

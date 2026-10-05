@@ -42,7 +42,6 @@ pub struct ToolInvocation {
     pub session_id: String,
     pub call_id: String,
     pub tool_name: String,
-    pub action: String,
     pub args: serde_json::Value,
     /// 能力类别（handler 声明）：权限决策的单一事实源，取代名字表。
     pub category: crate::permission::ToolCategory,
@@ -118,10 +117,6 @@ impl AuthorizedToolCall {
         &self.invocation.tool_name
     }
 
-    pub fn action(&self) -> &str {
-        &self.invocation.action
-    }
-
     pub fn args(&self) -> &serde_json::Value {
         &self.invocation.args
     }
@@ -157,7 +152,6 @@ pub enum Admission {
 pub struct PermissionChallenge {
     context: Box<ToolCallContext>,
     tool_name: String,
-    action: String,
     normalized_args: serde_json::Value,
     resources: Vec<PathBuf>,
     reason: String,
@@ -181,7 +175,6 @@ impl PermissionChallenge {
         Self {
             context: Box::new(context),
             tool_name: invocation.tool_name,
-            action: invocation.action,
             normalized_args: invocation.args,
             resources,
             reason,
@@ -203,10 +196,6 @@ impl PermissionChallenge {
 
     pub fn tool_name(&self) -> &str {
         &self.tool_name
-    }
-
-    pub fn action(&self) -> &str {
-        &self.action
     }
 
     pub fn normalized_args(&self) -> &serde_json::Value {
@@ -272,7 +261,6 @@ impl PermissionChallenge {
             session_id: context.session_id.clone(),
             call_id: context.call_id.clone(),
             tool_name: self.tool_name,
-            action: self.action,
             args: self.normalized_args,
             category: self.category,
         };
@@ -534,7 +522,6 @@ pub fn authorize_call(
         session_id: session_id.to_string(),
         call_id: call_id.to_string(),
         tool_name: tool_name.to_string(),
-        action: String::new(),
         args: args.clone(),
         category: crate::runtime::lookup_category(tool_name)
             .unwrap_or(crate::permission::ToolCategory::Write),
@@ -559,7 +546,6 @@ pub fn authorize_call_with_context(
         session_id: context.session_id.clone(),
         call_id: context.call_id.clone(),
         tool_name: tool_name.to_string(),
-        action: String::new(),
         args: args.clone(),
         category: crate::runtime::lookup_category(tool_name)
             .unwrap_or(crate::permission::ToolCategory::Write),
@@ -585,7 +571,6 @@ mod tests {
             session_id: "seed-a".into(),
             call_id: "call-a".into(),
             tool_name: "write".into(),
-            action: String::new(),
             args: serde_json::json!({ "path": workspace.join("src/lib.rs") }),
             category: crate::permission::ToolCategory::Write,
         };
@@ -635,7 +620,6 @@ mod tests {
                 session_id: "sub-a".into(),
                 call_id: "call-s".into(),
                 tool_name: tool.into(),
-                action: String::new(),
                 args,
                 category,
             },
@@ -722,7 +706,6 @@ mod tests {
                     session_id: "seed-readfree".into(),
                     call_id: format!("call-readfree-{level}"),
                     tool_name: "read".into(),
-                    action: String::new(),
                     args: serde_json::json!({ "path": outside.join("notes.txt") }),
                     category: crate::permission::ToolCategory::Read,
                 },
@@ -802,7 +785,6 @@ mod tests {
                     session_id: "seed-d5".into(),
                     call_id: format!("call-d5-{level}"),
                     tool_name: "mcp__demo__echo".into(),
-                    action: String::new(),
                     args: serde_json::json!({}),
                     category: crate::permission::ToolCategory::Exec,
                 },
@@ -820,7 +802,6 @@ mod tests {
                 session_id: "seed-d5".into(),
                 call_id: "call-d5-4".into(),
                 tool_name: "mcp__demo__echo".into(),
-                action: String::new(),
                 args: serde_json::json!({}),
                 category: crate::permission::ToolCategory::Exec,
             },
@@ -848,7 +829,6 @@ mod tests {
                     session_id: "seed-d5r".into(),
                     call_id: "call-d5r".into(),
                     tool_name: "mcp__demo__resources".into(),
-                    action: String::new(),
                     args: serde_json::json!({}),
                     category: crate::permission::ToolCategory::Read,
                 },

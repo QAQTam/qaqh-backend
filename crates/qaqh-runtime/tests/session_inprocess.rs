@@ -193,7 +193,6 @@ fn cross_session_cancel_does_not_leak() {
     let ctx_b = qaqh_workspace::runtime::ToolCtx::admitted(&session_b);
     let result = qaqh_workspace::execution::execute_with_context(
         "read",
-        "",
         "{}",
         "cross-cancel-b-tool",
         None,

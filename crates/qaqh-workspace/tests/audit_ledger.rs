@@ -58,7 +58,7 @@ fn call(
     call_id: &str,
     ctx: &qaqh_workspace::runtime::ToolCtx,
 ) -> qaqh_workspace::execution::ToolExecResult {
-    qaqh_workspace::execution::execute_with_context(name, "", &args.to_string(), call_id, None, ctx)
+    qaqh_workspace::execution::execute_with_context(name, &args.to_string(), call_id, None, ctx)
 }
 
 #[test]

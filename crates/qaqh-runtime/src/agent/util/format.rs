@@ -1,19 +1,6 @@
 //! Display formatting and tool-call parsing helpers (split from the former
 //! util monolith).
 
-/// Resolve a legacy `name`/`action` pair before policy evaluation.
-pub(crate) fn resolve_effective_name(
-    name: &str,
-    action: &str,
-    _args: &serde_json::Value,
-) -> String {
-    if action.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name}_{action}")
-    }
-}
-
 /// Extract a short human-readable display string from a tool call's arguments.
 pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) -> String {
     let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
