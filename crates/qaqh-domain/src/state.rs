@@ -15,16 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActivityState, AgentLifecycleState, DashboardSnapshot, SessionState, TurnData};
 
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 /// conversation 频道 `state`。
 ///
 /// 不派生 `PartialEq`：含 `TurnData` / `UsageInfo`，二者未派生该 trait；本类型是
 /// DTO，消费侧不需要相等比较，故不为它去改动共享类型。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ConversationState {
     // ── 持久化投影字段（bootstrap 快照的 turns/usage 等）──────────────────
     /// 完整对话回合投影（与 `RoundData` 逐字段同构）。
@@ -57,7 +53,6 @@ pub struct ConversationState {
 
 /// conversation 频道 `last_round` 的载荷（`RoundCompleted` 写入）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct LastRound {
     pub turn_id: String,
     pub round_num: u32,
@@ -69,7 +64,6 @@ pub struct LastRound {
 /// control 频道 `state`（不派生 `PartialEq`：DTO 消费侧不需要相等比较）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ControlState {
     pub session_state: Option<SessionState>,
     pub activity: Option<ActivityState>,
@@ -87,7 +81,6 @@ pub struct ControlState {
 
 /// 挂起交互（`InteractionRequested` / `PlanReviewRequested` 写入）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct PendingInteraction {
     pub id: String,
     pub kind: InteractionKind,
@@ -101,7 +94,6 @@ pub struct PendingInteraction {
 /// 让 UI 显示一个**错的**状态，而失败至少是响亮的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum InteractionKind {
     Ask,
     Plan,
@@ -110,7 +102,6 @@ pub enum InteractionKind {
 /// 最近一次操作失败标记（`OperationFailed` 置位，`OperationCompleted` 清空）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct LastFailure {
     pub occurred: bool,
 }
@@ -118,7 +109,6 @@ pub struct LastFailure {
 /// tool 频道 `state`。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolState {
     /// 等待用户授权的 tool_call_id；`None` = 无挂起授权。
     pub pending_permission: Option<String>,
@@ -129,7 +119,6 @@ pub struct ToolState {
 
 /// 进行中的工具（`ToolStarted` 写入，`ToolFinished` 清空）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RunningTool {
     pub tool_call_id: String,
     pub turn_id: String,

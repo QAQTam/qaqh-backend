@@ -322,7 +322,6 @@ pub enum ToolCommand {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum DomainCommand {
     Control(ControlCommand),
     Conversation(ConversationCommand),

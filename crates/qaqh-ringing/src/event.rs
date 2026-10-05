@@ -5,8 +5,6 @@
 
 use qaqh_domain::{ControlEvent, ConversationEvent, ToolEvent};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
 
 use qaqh_domain::RingingChannel;
 
@@ -20,7 +18,6 @@ pub type RingingToolEvent = ToolEvent;
 /// 统一 Ringing 事件（envelope `event` 字段）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[allow(clippy::large_enum_variant)] // 装箱改造属结构塑形，另立项
 pub enum RingingEvent {
     Control(RingingControlEvent),
