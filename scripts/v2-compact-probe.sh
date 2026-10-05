@@ -163,6 +163,7 @@ def start_daemon():
         pass
     env = os.environ.copy()
     env["QAQH_DATA_DIR"] = str(DATA)
+    env["QAQH_ALLOW_TEST_DATA_ROOT"] = "1"
     daemon = subprocess.Popen(
         [str(DAEMON), "run"],
         stdin=subprocess.DEVNULL,
