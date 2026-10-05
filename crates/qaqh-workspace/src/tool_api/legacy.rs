@@ -191,8 +191,6 @@ fn build_legacy_ctx(
     ToolCallCtx {
         id: ctx.call_id.clone(),
         name: name.as_str().to_owned(),
-        // 新契约无 action：legacy 的 `{name}_{action}` 解析属 admit 侧。
-        action: String::new(),
         args,
         tx_progress: progress,
         timeout_secs: Some(ctx.timeout.as_secs()),

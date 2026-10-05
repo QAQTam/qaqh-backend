@@ -300,10 +300,12 @@ fn default_load_count() -> u32 {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ToolCommand {
     /// 前端主动触发工具执行（UI 按钮/内联操作）。
+    ///
+    /// 无 `action` 字段：v1 的 `{name}_{action}` 复合名解析已退役——工具身份
+    /// 就是 `name`（v2 词汇表里 `todo_write` 等是独立工具名，不是 name+action）。
     ToolInvoke {
         tool_call_id: String,
         name: String,
-        action: String,
         args: serde_json::Value,
     },
     /// 权限请求响应。必须携带对应 interaction/tool_call 的 id；

@@ -1270,7 +1270,6 @@ fn make_ctx(name: &str, args: serde_json::Value) -> crate::ToolCallCtx {
     crate::ToolCallCtx {
         id: "exec-test".into(),
         name: name.into(),
-        action: String::new(),
         args,
         tx_progress: None,
         timeout_secs: Some(30),

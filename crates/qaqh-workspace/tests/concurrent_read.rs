@@ -30,7 +30,6 @@ fn ten_parallel_reads() {
             let ctx = qaqh_workspace::runtime::ToolCtx::admitted("test");
             let result = qaqh_workspace::execution::execute_with_context(
                 "read",
-                "",
                 &args,
                 &format!("tc_{}", i),
                 None,
