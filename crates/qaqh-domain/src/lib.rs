@@ -13,12 +13,10 @@
 //!
 //! - 本 crate **不得**依赖 wire 层（`qaqh-ringing`）或任何 legacy 投影 crate（已于 PR-3-5 删除）。
 //!   依赖方向固定为：`domain ← wire ← transport`。
-//! - 领域事件自行声明可靠性等级（`Delivery`），wire 层不得重新解释。
 //! - 领域类型不携带任何传输语义（无 SSE/WebSocket/HTTP/pipe 概念）。
 
 pub mod channel;
 pub mod command;
-pub mod delivery;
 pub mod event;
 pub mod interaction_body;
 pub mod state;
@@ -30,7 +28,6 @@ pub use command::{
     DomainCommand, ImageBlock, InterAgentDelivery, InterAgentEnvelope, SubagentTerminalKind,
     SubagentTerminalNotification, ToolCommand,
 };
-pub use delivery::Delivery;
 pub use event::{
     ActivityState, AgentLifecycleState, AskMode, AskQuestion, AskResolution, CodeDeltaRecord,
     CompactStatus, ContentRef, ControlEvent, ConversationEvent, DashboardDocument,

@@ -4,7 +4,8 @@
  * An image attachment carried by a tool result.
  *
  * Stored alongside [`ToolResult`] so the message layer can append
- * `ContentBlock::Image` blocks to the resulting tool message. Never
+ * `ContentBlock::ImageRef` blocks (falling back to inline `ContentBlock::Image`
+ * only when disk externalization fails) to the resulting tool message. Never
  * serialized into the model text projection — the gate lowers images
  * to provider-native media parts at request-build time.
  */

@@ -24,6 +24,7 @@ metrics?: ToolResultMetrics,
 display?: ToolResultDisplay | null, 
 /**
  * 结构化错误（rebuild 侧失败槽的单一事实源）。历史归档无此字段
- * （serde default 兼容）；缺失时 rebuild 只能从 output 首行降级。
+ * （serde default 兼容）；缺失时 rebuild 把 message 置空（不读 output），
+ * 由 client 显示裸 code。
  */
 error?: ToolError | null, };

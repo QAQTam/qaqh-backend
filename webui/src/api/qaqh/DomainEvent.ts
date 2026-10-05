@@ -4,7 +4,6 @@ import type { ConversationEvent } from "./ConversationEvent";
 import type { ToolEvent } from "./ToolEvent";
 
 /**
- * 统一领域事件。`channel()` 决定进入哪个频道 router；
- * `delivery()` 声明可靠性等级，供 wire envelope 与 daemon 队列使用。
+ * 统一领域事件。`channel()` 决定进入哪个频道 router。
  */
 export type DomainEvent = { "channel": "control" } & ControlEvent | { "channel": "conversation" } & ConversationEvent | { "channel": "tool" } & ToolEvent;

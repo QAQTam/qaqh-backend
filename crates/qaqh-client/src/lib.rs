@@ -44,7 +44,7 @@ pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
     CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
     ConversationEvent, ConversationInputPurpose, ConversationMode, DashboardDocument,
-    DashboardTask, Delivery, DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot,
+    DashboardTask, DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot,
     DomainError, DomainSessionState, ErrorScope, ImageBlock, MAX_SAFE_INTEGER, NoticeLevel,
     PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState, RINGING_SCHEMA,
     ReconnectReason, RingingCommand, RingingCommandAckStatus, RingingCommandState, RoundDeltaKind,

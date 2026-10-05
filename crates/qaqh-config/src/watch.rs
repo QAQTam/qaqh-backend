@@ -7,8 +7,7 @@
 //! 选型：`tokio::sync::watch`（工作区标准）；载荷 `Arc<Config>` 克隆廉价、
 //! 消费者拿到后零成本共享。当前消费方：
 //! - `reload_config` 经 `authoritative()` 读配置（磁盘优先，`latest()` 仅读盘失败时兜底）；
-//! - T18 ringing `config_changed` 推送事件；
-//! - T20 axum `GET /api/config/events`(SSE)。
+//! - T18 ringing `config_changed` 推送事件。
 
 use std::sync::{Arc, OnceLock};
 

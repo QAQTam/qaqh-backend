@@ -15,7 +15,7 @@ import type { TimelineTurnState } from "./TimelineTurnState";
  */
 export type TimelineIntent = { "type": "turn_opened", turn_id: string, user_text: string, } | { "type": "block_opened", turn_id: string, round_num: number, block_id: string, kind: TimelineBlockKind, tool?: TimelineTool | null, } | { "type": "text_delta", turn_id: string, round_num: number, block_id: string, delta: string, } | { "type": "block_checkpoint", turn_id: string, round_num: number, block_id: string, text: string, } | { "type": "tool_updated", turn_id: string, round_num: number, block_id: string, tool: TimelineTool, } | { "type": "tool_progress", turn_id: string, round_num: number, block_id: string, chunk: string, 
 /**
- * 进度流标识（"stdout" | "stderr" | "mixed"）；None = 未知。
+ * 进度流标识（"stdout" | "stderr"）；None = 未知。
  */
 stream?: string | null, 
 /**

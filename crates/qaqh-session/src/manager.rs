@@ -136,7 +136,6 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// Initialize the global singleton. Must be called once at startup.
-    /// Also triggers automatic migration from legacy TOML format if needed.
     pub fn init(data_dir: PathBuf) {
         let sessions_dir = data_dir.join("sessions");
         let _ = std::fs::create_dir_all(&sessions_dir);
@@ -1255,25 +1254,6 @@ impl SessionManager {
     /// Clear the active session marker.
     pub fn clear_active(&self) {
         let _ = std::fs::remove_file(&self.active_path);
-    }
-
-    // ── Session identity migration ──
-
-    /// Resolve a legacy directory seed to its canonical identity.
-    ///
-    /// This is the read-only compatibility boundary: it never creates an
-    /// identity and never enters new canonical facts.
-    pub fn canonical_identity_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<CanonicalSessionIdentity>, String> {
-        let dir = self.session_path_dir(session_id);
-        if dir.is_dir() && dir.join(CANONICAL_IDENTITY_FILE).exists() {
-            return CanonicalSessionIdentity::open(&dir)
-                .map(Some)
-                .map_err(|error| format!("read canonical identity at {}: {error}", dir.display()));
-        }
-        Ok(None)
     }
 
     // ── Helpers ──
