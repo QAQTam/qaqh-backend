@@ -54,9 +54,18 @@ report 03 "sessions/index.json 存在" "$n" "迁移后应已自删；存在=尚�
 n=$(find "$ROOT"/sessions -maxdepth 2 -name 'workspace.txt' 2>/dev/null | wc -l | tr -d ' ')
 report 04 "会话目录留 workspace.txt" "$n" "惰性迁移读侧；无此文件即可摘"
 
-# 5) 旧反斜杠 cwd 修复
-n=$(grep -rlE '"cwd"[[:space:]]*:[[:space:]]*"[^"]*\\\\\\\\' "$ROOT"/sessions/*/meta.json 2>/dev/null | wc -l | tr -d ' ')
-report 05 "meta.cwd 含反斜杠未修复" "$n" "grouping.rs 的旧路径修复"
+# 5) 旧反斜杠 cwd 修复（repair_legacy_backslash_cwd 只在非 Windows 生效，
+#    所以这项的命中与否要按 JSON **解码后**的值判断，不能按文件里的转义形态 grep）
+n=0
+for f in "$ROOT"/sessions/*/meta.json; do
+  [ -f "$f" ] || continue
+  if node -e '
+    const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    if(typeof o.cwd==="string" && o.cwd.includes("\\")) process.exit(0);
+    process.exit(1);
+  ' "$f" 2>/dev/null; then n=$((n + 1)); fi
+done
+report 05 "meta.cwd 含反斜杠未修复" "$n" "grouping.rs 的旧路径修复；注意它是跨平台存量修复，本机零命中≠别人机器零命中"
 
 # 6) timeline-v3 目录改名
 n=$(find "$ROOT" -maxdepth 3 -type d -name 'timeline-v3' 2>/dev/null | wc -l | tr -d ' ')
