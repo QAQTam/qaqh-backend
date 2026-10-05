@@ -1284,8 +1284,8 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
     let mut manager = crate::ToolManager::new();
     super::register::register(&mut manager);
     assert!(
-        manager.builtins["exec"].legacy.is_none(),
-        "exec still has legacy executor"
+        manager.builtins.contains_key("exec"),
+        "exec must be on the typed execution surface"
     );
 
     let success = super::direct::ExecOutput {

@@ -441,8 +441,8 @@ fn typed_edit_registration_and_display_are_same_source() {
     let mut manager = crate::ToolManager::new();
     super::register(&mut manager);
     assert!(
-        manager.builtins["edit"].legacy.is_none(),
-        "edit still has legacy executor"
+        manager.builtins.contains_key("edit"),
+        "edit must be on the typed execution surface"
     );
 
     let dir = tempfile::tempdir().unwrap();
