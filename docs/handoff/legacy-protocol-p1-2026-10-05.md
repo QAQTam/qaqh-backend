@@ -2,8 +2,8 @@
 
 > 任务来源：`docs/audit-legacy-protocol-2026-10-04.md`（§7 移除顺序，**权威**）
 > + `docs/plan-legacy-protocol-cleanup.md`（互补计划；audit §6 列了它已失效的条目）。
-> 当前状态：**P0 死面 + P1.1（MCP/LSP typed 化 + v1 注册面 + per-call TLS 视图）全部完成，
-> 已 fast-forward 进 `main`**。`main@5b1b7fa`。P0 尾巴（④ ts-rs 白名单）、P1.2、P1.3、P2、P3 未做。
+> 当前状态：**P0 死面 + P1.1（MCP/LSP typed 化 + v1 注册面 + per-call TLS 视图）+ P0 尾巴 ④
+> （ts-rs 导出面白名单化）全部完成**。P1.2、P1.3、P2、P3 未做。
 > 本文件只给接手的人：**已落地什么、已验证到什么程度、哪些结论不必重查、剩下的挂点在哪**。
 
 ## 一、已落地（commit 链，均为 main 上真实提交）
@@ -18,6 +18,7 @@
 | `ee26518` | **P1.1b**：`DynamicTool.handler_fn`（v1 `fn(ToolCallCtx)->ToolResult`）→ `DynamicDispatch`（`fn(&str,&ToolCallContext,Value)->Result<ToolOutcome,FatalToolError>`）+ 新增 `tool_api/dynamic.rs`；MCP/LSP dispatcher 换契约，LSP root 改读 `ctx.workspace_root` |
 | `d08db70` | **P1.1-②**：退役 `{name}_{action}` 复合名（删 runtime `resolve_effective_name`、workspace `resolve_name`、`ToolInvocation.action`、`AuthorizedToolCall::action()`、`PermissionChallenge.action`、wire `ToolCommand::ToolInvoke.action`） |
 | `5b1b7fa` | **P1.1-①**：删 `ToolHandler`/`LegacyToolAdapter`/`ToolCallCtx`/`install_tool_call_context`/`ToolCallContextGuard`/`TOOL_CALL_CANCEL`；`tool_api/legacy.rs`(799 行) → `tool_api/result.rs`(311 行)；新增 `probe.rs`（test-harness 的 typed 探针） |
+| `afa390b` | **P0 尾巴 ④**：ts-rs 导出面白名单化，生成物 186→132（删 54 个 fire-into-void 类型的 `cfg_attr` + 9 处字段级 `ts(as=)` + 2 处空 TS 面文件的 `use ts_rs::TS`） |
 
 > 另有 `1d6d662`（157 文件注释审计合并提交）与同事的 `ef796f7`（daemon 设备鉴权 spec），
 > 非本清理线。
@@ -53,10 +54,24 @@
 
 ## 三、剩余挂点
 
-**P0 尾巴 ④ — ts-rs 白名单化**（audit 估 156/190 死类型；`Projection*` 需先转正再定）
-- 生成物在 `webui/src/api/qaqh/`（当前 185 个 `.ts`）。
-- 口径：`just ts-export`（`cargo test` 跑 `export_bindings_*`，`TS_RS_EXPORT_DIR` + `TS_RS_LARGE_INT=number`）；
-  `just ts-check`（`git diff --exit-code webui/src/api` 兜漂移）。**纯生成物边界，零运行时风险**，建议先接。
+**P0 尾巴 ④ — ts-rs 白名单化：已完成（`afa390b`，2026-10-05）**
+- 生成物 `webui/src/api/qaqh/` + `serde_json/`：186 → **132**。
+- 口径（实测，非 audit 估算）：前端**直接 import 15 个**，沿生成物内部 import 图取闭包 = 34；
+  再并入**仍在序列化上线但前端按 untyped envelope 消费**的契约根
+  （`ProjectionEvent`/`ProjectionPayload`/`UnknownProjection` 与入站
+  `RingingCommand`/`ControlCommand`/`ConversationCommand`/`ToolCommand`/`*State`/`*Status`）
+  → 白名单 132，砍 54。`Projection*` 那一步代价最大：它单独就把 keep 从 34 抬到 116。
+- 砍掉的 54 = v1 域事件族 + v1 频道 state + v1 `ToolResult` 信封族 + `Dashboard*`/`Skill*`/
+  `PlanReviewItem`/`RunningTool`/`PendingInteraction` 等（逐条证据见 audit §4.1/§4.4 与
+  `qaqh-runtime/src/actor.rs:68`「v1 广播面已删除」）。
+- **三条不必重查的机械事实**：① ts-rs **不会**自动导出「被引用但没 `export`」的类型，
+  所以砍完不会复活、也不会留悬挂 import（重跑 export 后 132 个文件逐字节不变）；
+  ② 字段级 `#[cfg_attr(feature = "ts", ts(as = "u32"))]` 会随宿主 derive 一起失去意义，
+  **必须同步删**（本次 9 处），否则 `cargo test --features ts` 直接编译失败；
+  ③ TS 面清空的文件要连 `#[cfg(feature = "ts")] use ts_rs::TS;` 一起删（`qaqh-domain/state.rs`、
+  `qaqh-ringing/event.rs`）。
+- 新 worktree 里 `webui/src/api` 会因 checkout 的 CRLF 转换**假装全量漂移**：
+  判定用 `git diff --ignore-cr-at-eol` 或按内容比对，别信 `sha1sum`。
 
 **P1.2 — 删 `ToolEvent::ToolCallPrepared` / `CodeChanged`**（连带重审整张 `DomainEvent` 枚举谁还在桥上被匹配）
 + `RingingEvent` writer 载体换 timeline intent 后删除。audit 注明 fire-into-void 是**整张** `DomainEvent` 枚举，不只两个变体。
@@ -75,8 +90,11 @@ timeline 旧 JSON 槽位；discovery pre-0.9 兼容；`/control/v1/*` 改名）�
 
 ```bash
 cargo check --workspace --all-targets        # 期望 0 err
-cargo test  --workspace                      # 期望仅 prompt_and_tool_defs_char_budget 一个失败
+cargo test  --workspace --no-fail-fast       # 147 个 target；期望仅 2 个失败：
+                                             #   prompt_and_tool_defs_char_budget（既有，见 §二.7）
+                                             #   qaqh-mcp/tests/lifecycle.rs 崩溃重连（时序抖动，单跑即绿）
 just ts-export && git diff --stat webui/src/api   # 触及 wire 类型时必须跑；期望无 diff
+(cd webui && npx tsc --noEmit)               # 动 `derive(TS)` 面时跑；生成物图是否闭合看它
 # 取消语义回归（动 cancel/TLS 时必跑）
 cargo test -p qaqh-runtime --test cancel_keeps_tool_results --test concurrent_read_stress --test tool_ordering_contract
 ```
@@ -95,7 +113,9 @@ cargo test -p qaqh-runtime --test cancel_keeps_tool_results --test concurrent_re
 
 ## 六、接手建议顺序
 
-① ④ ts-rs 白名单（零运行时风险，先清生成物边界）
-→ ② P1.3 `ToolCallProgress`（小、独立）
-→ ③ P1.2 `DomainEvent` 桥上枚举重审（**先做匹配点普查再删**，audit 明说不止两个变体）
-→ ④ P2（每项先审计查询）。
+① P1.3 `ToolCallProgress`（小、独立）
+→ ② P1.2 `DomainEvent` 桥上枚举重审（**先做匹配点普查再删**，audit 明说不止两个变体；
+注意 ④ 之后这些类型的 `.ts` 镜像已不在导出面上，删 Rust 变体时不必再动 `webui/src/api`）
+→ ③ P2（每项先审计查询）。
+
+> 已完成并退场：④ ts-rs 白名单（`afa390b`）。
