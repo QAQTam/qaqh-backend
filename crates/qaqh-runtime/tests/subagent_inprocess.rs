@@ -4,9 +4,7 @@
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{
-    ControlCommand, ConversationCommand, ConversationEvent, DomainEvent, RingingChannel,
-};
+use qaqh_domain::{ControlCommand, ConversationCommand};
 use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use qaqh_runtime::quota_ledger::QuotaLimits;
 use qaqh_runtime::{AgentRegistry, RingingHub};
@@ -175,55 +173,6 @@ fn spawn_subagent_does_not_go_through_process_spawn() {
     );
 }
 
-/// T-1-1 回归：`spawn_subagent_inprocess` 必须把子 seed 登记进 hub 的活表。
-///
-/// 未修复时本测试红：子 seed 不在 `live_workers`，bootstrap 路径
-/// （`seal_orphan_channel_state(seed, force=false)`）会把它判为孤儿，封禁其
-/// 正在进行的 turn（前端据此显示 cancelled），而子 actor 仍在运行并继续
-/// 发布事件——即「已判定 cancel 的子代理复活」。
-#[test]
-fn spawn_subagent_registers_liveness() {
-    let _test_lock = test_guard();
-    let _root = init_env("subagent-liveness-test");
-    let session_id = format!("sub-live-{}", std::process::id());
-    let hub = Arc::new(RingingHub::new("subagent-liveness-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
-    registry.attach_ringing(Arc::clone(&hub));
-
-    registry
-        .spawn_subagent(&session_id, &[], None, None, None)
-        .expect("spawn in-process subagent");
-
-    // 构造可观察的「无终态 running 状态」：一个已开但未收尾的 turn。
-    hub.apply_seal_event(
-        &session_id,
-        DomainEvent::Conversation(ConversationEvent::TurnStarted {
-            turn_id: "t1".into(),
-            user_text: "hello".into(),
-        }),
-    );
-    let before = hub.snapshot(RingingChannel::Conversation, &session_id);
-    assert_eq!(
-        before.state.get("active_turn").and_then(|v| v.as_str()),
-        Some("t1"),
-        "前置条件：存在未收尾的 running turn"
-    );
-
-    // 活 worker 在册 → bootstrap 收尾（force=false）必须整体跳过。
-    assert!(
-        !hub.seal_orphan_channel_state(&session_id, false),
-        "活 worker 的 seed 不得被 bootstrap 收尾（本 seed 必须已在 live_workers）"
-    );
-
-    let after = hub.snapshot(RingingChannel::Conversation, &session_id);
-    assert_eq!(
-        after.state.get("active_turn").and_then(|v| v.as_str()),
-        Some("t1"),
-        "活 worker 的 running turn 不得被 seal——否则前端显示 cancelled 而 actor 仍在跑"
-    );
-
-    registry.shutdown_all();
-}
 
 /// T-1-4 回归：父会话收到 `ConversationCancel` 时，取消必须传播到它派生的
 /// 子 seed（子 actor 收到 `ConversationCancel` 并发布 `ConversationCancelled`）。

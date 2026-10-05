@@ -748,7 +748,6 @@ impl AgentRegistry {
         // 新 ask/TurnOpened，force 收尾若晚于 spawn 会误杀活交互。
         if let Some(hub) = self.hub.as_ref() {
             hub.seal_orphan_running_turns(session_id);
-            hub.seal_orphan_channel_state(session_id, true);
             hub.mark_worker_live(session_id);
         }
         self.spawn(session_id, None)?;
@@ -1104,10 +1103,7 @@ impl AgentRegistry {
             },
         );
         self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
-        // T-1-1：子 seed 必须进活表。否则 bootstrap 的
-        // `seal_orphan_channel_state(seed, force=false)` 会把它判为孤儿并封禁
-        // 其正在进行的 turn（前端据此显示 cancelled），而子 actor 仍在运行并
-        // 继续发布事件——即「已判定 cancel 的子代理复活」。
+        // T-1-1：子 seed 登记进 hub 活表（liveness 账本）。
         if let Some(hub) = self.hub.as_ref() {
             hub.mark_worker_live(session_id);
         }
@@ -1946,8 +1942,6 @@ impl AgentRegistry {
             // 新 ask/TurnOpened，晚于 spawn 的 force 收尾会误杀活交互。
             if let Some(hub) = self.hub.as_ref() {
                 hub.seal_orphan_running_turns(&session_id);
-                // force=true：旧 worker 已死亡，挂起交互必为孤儿。
-                hub.seal_orphan_channel_state(&session_id, true);
                 hub.mark_worker_live(&session_id);
             }
             let spawned = match kind {
@@ -2197,12 +2191,10 @@ pub(crate) fn stash_interaction_body(
 
 /// §4.0.5：publish 内隐式副作用的迁移落点（事件产生侧）。
 ///
-/// - live_interactions 登记/解除：orphan_seal 的 force=false 防误杀守卫依赖；
-/// - 交互正文 pin 释放：交互 resolved / permission tool finished 时解除，
-///   否则 content store 泄漏。
+/// 交互正文 pin 释放：交互 resolved / permission tool finished 时解除，
+/// 否则 content store 泄漏。
 ///
-/// 调用方：actor 桥（`WriterEvent::Ringing` → hub 发布前）。事件字段与
-/// hub.publish 原 match 完全一致；publish 已不再承载这些副作用。
+/// 调用方：actor 桥（`WriterEvent::Ringing` → hub 发布前）。
 pub(crate) fn apply_interaction_side_effects(
     hub: &RingingHub,
     session_id: &str,
@@ -2210,16 +2202,6 @@ pub(crate) fn apply_interaction_side_effects(
 ) {
     use qaqh_domain::{ControlEvent, ToolEvent};
     match event {
-        qaqh_domain::DomainEvent::Control(ControlEvent::InteractionRequested {
-            interaction_id,
-            ..
-        })
-        | qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewRequested {
-            interaction_id,
-            ..
-        }) => {
-            hub.register_live_interaction(session_id, interaction_id);
-        }
         qaqh_domain::DomainEvent::Control(ControlEvent::InteractionResolved {
             interaction_id,
             ..
@@ -2228,7 +2210,6 @@ pub(crate) fn apply_interaction_side_effects(
             interaction_id,
             ..
         }) => {
-            hub.unregister_live_interaction(session_id, interaction_id);
             // #345：交互终结 → 正文解除 pin，回到普通 TTL/淘汰语义。
             hub.release_interaction_content(session_id, interaction_id);
         }

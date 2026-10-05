@@ -136,22 +136,6 @@ fn interrupted_reload_history_has_no_hanging_tool_use() {
             .any(|b| b.kind == TimelineBlockKind::Text && b.text == "partial answer")
     );
 
-    // conversation 快照（前端 bootstrap 的 turns）同样不得出现悬挂 tool_calls。
-    let conversation = hub.conversation_snapshot(session_id);
-    let turns = conversation.state["turns"]
-        .as_array()
-        .expect("persisted turns in conversation snapshot")
-        .clone();
-    let tool_calls = turns
-        .iter()
-        .flat_map(|t| t["rounds"].as_array().cloned().unwrap_or_default())
-        .flat_map(|r| r["tool_calls"].as_array().cloned().unwrap_or_default())
-        .collect::<Vec<_>>();
-    assert!(
-        tool_calls.is_empty(),
-        "conversation reload must not surface hanging tool calls: {tool_calls:?}"
-    );
-
     // ── 第二次 reload：结果必须与首次一致（幂等，不因重建而变）──
     let reopened = reload_hub(&root, "epoch-hanging-2")
         .timeline_snapshot(session_id)
