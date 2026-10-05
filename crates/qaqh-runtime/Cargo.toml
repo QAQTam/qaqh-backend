@@ -46,6 +46,8 @@ workspace = true
 tempfile = "3"
 os_pipe = "1"
 tiny_http = "0.12"
+# 集成测试用 v1 ToolManager::register 注册探针工具（test-harness 只在测试构建启用）。
+qaqh-workspace = { path = "../qaqh-workspace", features = ["test-harness"] }
 # PR-M2-2 mcp_env_block：mock server 需 ServerHandler/service 形状。
 rmcp = { workspace = true, features = ["transport-io", "server"] }
 

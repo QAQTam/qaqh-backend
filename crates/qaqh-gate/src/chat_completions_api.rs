@@ -125,20 +125,9 @@ pub fn chat_stream_openai(
             serde_json::json!({"include_usage": true}),
         );
     }
-    if provider.supports_thinking {
-        match provider.thinking_mode {
-            ThinkingParamMode::OpenAi => {
-                body_map.insert("thinking".into(), serde_json::json!({"type": "enabled"}));
-            }
-            ThinkingParamMode::QwenEnableThinking => {
-                body_map.insert("enable_thinking".into(), serde_json::json!(true));
-            }
-            ThinkingParamMode::MiniMaxAdaptive => {
-                body_map.insert("thinking".into(), serde_json::json!({"type": "adaptive"}));
-                body_map.insert("reasoning_split".into(), serde_json::json!(true));
-            }
-        }
-    }
+    // thinking 参数契约（provider.rs `ThinkingParamMode`）由流式与 sync 共用，
+    // 见 `apply_thinking_params`——两路径曾各自手写并漂移（sync 曾发错键名），已收敛到单一实现。
+    apply_thinking_params(&mut body_map, provider);
     body_map.insert("max_tokens".into(), serde_json::json!(max_tokens));
 
     if provider.supports_reasoning_effort
@@ -304,7 +293,7 @@ fn emit_delta_fields(
                                 index: idx,
                                 id: format!("dsml_tc_{}", idx),
                                 name,
-                                args_so_far: String::new(),
+                                args_chunk: String::new(),
                             });
                         }
                         search_from = after_tag + quote_end + 1;
@@ -344,7 +333,7 @@ fn emit_delta_fields(
                     index: idx,
                     id: entry.0.clone(),
                     name: entry.1.clone(),
-                    args_so_far: entry.2.clone(),
+                    args_chunk: args.to_string(),
                 });
             }
         }
@@ -684,26 +673,10 @@ fn assemble_streamed_message(
         });
     }
 
-    // ── DSML integration: extract tool calls from text content ──
-    if crate::tool_parser::has_dsml(&text_buf) {
-        let (cleaned, dsml_tcs) = crate::tool_parser::parse_dsml_tool_calls(&text_buf, &[]);
-        // Merge DSML tool calls into tool_acc (with unique ids to avoid collision)
-        let base_idx = tool_acc.len();
-        for (i, tc) in dsml_tcs.iter().enumerate() {
-            let idx = base_idx + i;
-            tool_acc.insert(
-                idx,
-                (
-                    tc.id.clone(),
-                    tc.function.name.clone(),
-                    tc.function.arguments.to_string(),
-                ),
-            );
-        }
-        if !cleaned.is_empty() {
-            blocks.push(ContentBlock::text(&cleaned));
-        }
-    } else if !text_buf.is_empty() {
+    // 2026-10-05：DSML/XML 文本态工具调用解析已整体移除（DeepSeek v4.1 起
+    // 原生输出结构化 tool_calls，不再吐脏字符）。正文就是正文，工具调用只
+    // 认上游的结构化 tool_acc。
+    if !text_buf.is_empty() {
         blocks.push(ContentBlock::text(&text_buf));
     }
 
@@ -735,14 +708,14 @@ fn assemble_streamed_message(
 
 // ── Message conversion ──
 
-/// Stateful 模式：只保留增量消息。
-/// Web 代理端已记住完整上下文。
-/// 规则：
-///   - 首次请求（无 assistant 历史）：发 system + 所有消息
-///   - 后续请求：只发最后一条 assistant 之后的消息
+/// 把内部 `Message` 列表转换为 Chat Completions 协议的 `messages` JSON 数组。
 ///
-/// 同时返回被丢弃前缀中的图片块数量——`read_image` 的 [Image #N] 编号是
-/// 会话级累加的（与 registry 索引一致），过滤后转换时需要以此为基准续编。
+/// 本函数只做纯转换，不做 stateful 增量过滤——过滤（首次请求发全部，后续只发
+/// 最后一条 assistant 之后的消息）由调用方先用 `transport::filter_stateful_messages`
+/// 完成后传入。
+///
+/// 入参 `image_index_base` 是被过滤前缀中的图片块数量——`read_image` 的
+/// [Image #N] 编号是会话级累加的（与 registry 索引一致），过滤后转换时需要以此为基准续编。
 fn convert_messages(
     provider: &ProviderConfig,
     messages: Vec<Message>,
@@ -922,6 +895,35 @@ fn convert_messages(
     out
 }
 
+// ── thinking 参数契约（流式 / sync 共用）──
+
+/// 按 provider 的 thinking 参数契约写入请求体顶层键。
+///
+/// 契约见 `qaqh-types/src/provider.rs` 的 `ThinkingParamMode`：Qwen 用顶层
+/// `enable_thinking: true`（而非 `thinking`），MiniMax 还需附带 `reasoning_split`。
+/// 流式与 sync（compact/title）路径必须经由本函数写入——两者曾各自手写并漂移
+/// （sync 曾把 Qwen 的键发成 `thinking` 且漏发 `reasoning_split`），已收敛到单一实现。
+pub(crate) fn apply_thinking_params(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    provider: &ProviderConfig,
+) {
+    if !provider.supports_thinking {
+        return;
+    }
+    match provider.thinking_mode {
+        ThinkingParamMode::OpenAi => {
+            body.insert("thinking".into(), serde_json::json!({"type": "enabled"}));
+        }
+        ThinkingParamMode::QwenEnableThinking => {
+            body.insert("enable_thinking".into(), serde_json::json!(true));
+        }
+        ThinkingParamMode::MiniMaxAdaptive => {
+            body.insert("thinking".into(), serde_json::json!({"type": "adaptive"}));
+            body.insert("reasoning_split".into(), serde_json::json!(true));
+        }
+    }
+}
+
 // ── Synchronous (non-streaming) chat ──
 
 pub fn chat_sync_openai(
@@ -956,13 +958,11 @@ pub fn chat_sync_openai(
         "max_tokens": max_tokens,
         "stream": false,
     });
-    if provider.supports_thinking {
-        let thinking = match provider.thinking_mode {
-            ThinkingParamMode::OpenAi => serde_json::json!({"type": "enabled"}),
-            ThinkingParamMode::QwenEnableThinking => serde_json::json!(true),
-            ThinkingParamMode::MiniMaxAdaptive => serde_json::json!({"type": "adaptive"}),
-        };
-        body["thinking"] = thinking;
+    // thinking 参数契约与流式路径共用（见 `apply_thinking_params`）——
+    // 此处曾手写并漂移：Qwen 键名发错（`thinking` 而非 `enable_thinking`）、
+    // MiniMax 漏发 `reasoning_split`。
+    if let Some(obj) = body.as_object_mut() {
+        apply_thinking_params(obj, provider);
     }
 
     // T8: sync 路径（compact/title）补轻量重试——原来零重试，上游瞬时
@@ -1062,7 +1062,7 @@ fn build_chat_url(base_url: &str, chat_path: Option<&str>) -> String {
     }
 }
 
-// ── Error descriptions ──
+// ── Tests ──
 
 #[cfg(test)]
 mod skill_envelope_tests {
@@ -1095,6 +1095,235 @@ mod skill_envelope_tests {
     /// PR2：工作区变更审计注入落在**整批 tool 消息之后**的一条 `user` 消息上。
     /// Chat Completions 路径因此天然合法：assistant(tool_calls) 之后紧跟全部 tool
     /// 消息的硬约束未被破坏，且 `name` 会原样上 wire——来源标识不丢。
+    /// 判决性探针：**不给任何工具**，逼模型只凭上下文回答 app.py 的状态。
+    ///
+    /// 若注入里的 diff 真的进了模型的推理，WITH 臂应能说出「空文件 / 原 111B /
+    /// def main() 被删」这类只有报告里才有的细节；WITHOUT 臂只能承认不知道。
+    /// 同时打印 usage，量化一条报告的 token 成本。
+    #[test]
+    #[ignore = "需要真实 provider 端点"]
+    fn live_probe_injection_content_reaches_model_reasoning() {
+        let Some(base) = std::env::var("QAQH_LIVE_PROBE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())
+        else {
+            eprintln!("SKIP: 未设置 QAQH_LIVE_PROBE_URL");
+            return;
+        };
+        let model =
+            std::env::var("QAQH_LIVE_PROBE_MODEL").unwrap_or_else(|_| "qwen3.8-flash".into());
+        let key = std::env::var("QAQH_LIVE_PROBE_KEY").unwrap_or_else(|_| "probe".into());
+        let url = base.trim_end_matches('/').to_string() + "/chat/completions";
+
+        let history = || {
+            vec![
+                Message::user("跑一下 cleanup.py 清理 app.py。"),
+                Message {
+                    msg_id: None,
+                    role: Message::ROLE_ASSISTANT.into(),
+                    name: None,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call_1".into(),
+                        name: "exec".into(),
+                        input: serde_json::json!({ "command": "python cleanup.py" }),
+                    }],
+                },
+                Message {
+                    msg_id: None,
+                    role: "tool".into(),
+                    name: None,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        result: qaqh_types::ToolResult::ok("cleanup.py exit 0, no output"),
+                    }],
+                },
+            ]
+        };
+        let question = "现在 app.py 是什么状态？只根据你已经知道的信息回答，不要提出要去读文件。";
+        let report = concat!(
+            "[workspace-changes turn=t1 round=0 mark=s0001790946308788_0001 calls=call_1]\n",
+            "（按工作区状态扫描测得，覆盖本批全部工具的净效果）\n",
+            "[workspace] 自标记以来 1 个文件变更\n",
+            "[workspace] ⚠ 危险信号：1 个文件可疑，脚本可能没按预期工作\n",
+            "  ⚠ app.py: 已变为空文件（原 111B）\n",
+            "--- app.py (修改, 111B -> 0B)\n",
+            "@@ -1,11 +0,0 @@\n-def main():\n-    conf = load()\n",
+        );
+
+        let mut baseline = history();
+        baseline.push(Message::user(question));
+        let mut injected = history();
+        injected.push(Message {
+            msg_id: None,
+            role: Message::ROLE_USER.into(),
+            name: Some("workspace".into()),
+            content: vec![ContentBlock::text(report)],
+        });
+        injected.push(Message::user(question));
+
+        let provider = provider();
+        let mut input_without = 0u64;
+        let mut input_with = 0u64;
+        for (label, msgs, sink) in [
+            ("WITHOUT-injection", baseline.clone(), &mut input_without),
+            ("WITH-injection", injected.clone(), &mut input_with),
+        ] {
+            let api_messages = convert_messages(&provider, msgs, None, 0);
+            // 故意不带 tools 字段：模型无法靠调工具逃避回答。
+            let body = serde_json::json!({
+                "model": model,
+                "messages": api_messages,
+                "max_tokens": 200,
+                "stream": false,
+            });
+            let text = match block_on(async {
+                crate::shared_http_client()
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+            }) {
+                Ok(resp) => block_on(resp.text()).unwrap_or_default(),
+                Err(error) => format!("transport_error: {error}"),
+            };
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            let content = parsed["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("(none)")
+                .to_string();
+            *sink = parsed["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+            println!("### {label}  (prompt_tokens={sink})");
+            println!("{content}");
+            println!();
+            assert!(!content.is_empty(), "{label}: 空响应 {text}");
+        }
+        println!("注入的额外 prompt token ≈ {}", input_with - input_without);
+    }
+
+    /// Live 探针：把「注入前 / 注入后」两份请求打给真实端点，对比模型行为。
+    ///
+    /// messages 全部由生产转换器 convert_messages 产出，所以 wire 形态与真实
+    /// daemon 一致，不是手搓 payload 的近似实验。
+    ///
+    /// 默认 ignore；显式给端点才跑：
+    /// QAQH_LIVE_PROBE_URL=http://127.0.0.1:8317/v1 cargo test -p qaqh-gate --lib live_probe -- --ignored --nocapture
+    #[test]
+    #[ignore = "需要真实 provider 端点"]
+    fn live_probe_workspace_injection_changes_model_behaviour() {
+        let Some(base) = std::env::var("QAQH_LIVE_PROBE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())
+        else {
+            eprintln!("SKIP: 未设置 QAQH_LIVE_PROBE_URL");
+            return;
+        };
+        let model =
+            std::env::var("QAQH_LIVE_PROBE_MODEL").unwrap_or_else(|_| "qwen3.8-flash".into());
+        let key = std::env::var("QAQH_LIVE_PROBE_KEY").unwrap_or_else(|_| "probe".into());
+        let url = base.trim_end_matches('/').to_string() + "/chat/completions";
+
+        // 场景：exec 跑脚本，脚本自报成功，但它把 app.py 清空了——工具回执上
+        // 完全看不出来，这正是 exec 盲区。
+        let exec_call = ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "exec".into(),
+            input: serde_json::json!({ "command": "python cleanup.py" }),
+        };
+        let base_messages = vec![
+            Message::user("跑一下 cleanup.py 清理 app.py，然后告诉我结果。"),
+            Message {
+                msg_id: None,
+                role: Message::ROLE_ASSISTANT.into(),
+                name: None,
+                content: vec![exec_call],
+            },
+            Message {
+                msg_id: None,
+                role: "tool".into(),
+                name: None,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    result: qaqh_types::ToolResult::ok("cleanup.py exit 0, no output"),
+                }],
+            },
+        ];
+        let report = concat!(
+            "[workspace-changes turn=t1 round=0 mark=s0001790946308788_0001 calls=call_1]\n",
+            "（按工作区状态扫描测得，覆盖本批全部工具的净效果）\n",
+            "[workspace] 自标记以来 1 个文件变更\n",
+            "[workspace] ⚠ 危险信号：1 个文件可疑，脚本可能没按预期工作\n",
+            "  ⚠ app.py: 已变为空文件（原 111B）\n",
+            "--- app.py (修改, 111B -> 0B)\n",
+            "@@ -1,11 +0,0 @@\n-def main():\n-    conf = load()\n",
+            "\n可执行回滚（journal 工具）:\n",
+            "  撤销 app.py: journal action=replay file=app.py at=41 out=app.py\n",
+        );
+        let mut with_injection = base_messages.clone();
+        with_injection.push(Message {
+            msg_id: None,
+            role: Message::ROLE_USER.into(),
+            name: Some("workspace".into()),
+            content: vec![ContentBlock::text(report)],
+        });
+
+        let tools = serde_json::json!([
+            { "type": "function", "function": { "name": "exec", "description": "Run a shell command",
+              "parameters": { "type": "object", "properties": { "command": { "type": "string" } },
+              "required": ["command"] } } },
+            { "type": "function", "function": { "name": "read", "description": "Read a file from the workspace",
+              "parameters": { "type": "object", "properties": { "path": { "type": "string" } },
+              "required": ["path"] } } }
+        ]);
+
+        let provider = provider();
+        for (label, msgs) in [
+            ("WITHOUT-injection", base_messages),
+            ("WITH-injection", with_injection),
+        ] {
+            let api_messages = convert_messages(&provider, msgs, None, 0);
+            let roles: Vec<&str> = api_messages
+                .iter()
+                .map(|m| m["role"].as_str().unwrap_or(""))
+                .collect();
+            let body = serde_json::json!({
+                "model": model,
+                "messages": api_messages,
+                "tools": tools,
+                "max_tokens": 256,
+                "stream": false,
+            });
+            let send = block_on(async {
+                crate::shared_http_client()
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+            });
+            let text = match send {
+                Ok(resp) => block_on(resp.text()).unwrap_or_default(),
+                Err(error) => format!("transport_error: {error}"),
+            };
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            let msg = &parsed["choices"][0]["message"];
+            println!("### {label}");
+            println!("  wire roles = {roles:?}");
+            println!(
+                "  content    = {}",
+                msg["content"].as_str().unwrap_or("(none)")
+            );
+            println!("  tool_calls = {}", msg["tool_calls"]);
+            println!();
+            assert!(
+                parsed["choices"].is_array(),
+                "{label}: 端点未返回 choices: {text}"
+            );
+        }
+    }
+
     #[test]
     fn workspace_diff_injection_after_tool_run_keeps_pairing_and_name() {
         let assistant = Message {
@@ -1435,6 +1664,45 @@ mod skill_envelope_tests {
             false,
             None,
         )
+    }
+
+    /// BUG（2026-10-05 注释审计 §3.2）：sync（compact/title）路径曾手写 thinking
+    /// 参数——Qwen 键名发成 `thinking`（契约要求顶层 `enable_thinking`）、MiniMax
+    /// 漏发 `reasoning_split`。契约现收敛到 `apply_thinking_params` 单一实现，
+    /// 本测试锁定三种模式的键位，防止流式 / sync 路径再次漂移。
+    #[test]
+    fn apply_thinking_params_matches_provider_contract() {
+        let mut p = provider();
+        p.supports_thinking = true;
+
+        p.thinking_mode = ThinkingParamMode::QwenEnableThinking;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert_eq!(body.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert!(body.get("thinking").is_none(), "Qwen 不得发 `thinking` 键");
+
+        p.thinking_mode = ThinkingParamMode::MiniMaxAdaptive;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert_eq!(
+            body.get("thinking"),
+            Some(&serde_json::json!({"type": "adaptive"}))
+        );
+        assert_eq!(body.get("reasoning_split"), Some(&serde_json::json!(true)));
+
+        p.thinking_mode = ThinkingParamMode::OpenAi;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert_eq!(
+            body.get("thinking"),
+            Some(&serde_json::json!({"type": "enabled"}))
+        );
+        assert!(body.get("enable_thinking").is_none());
+
+        p.supports_thinking = false;
+        let mut body = serde_json::Map::new();
+        apply_thinking_params(&mut body, &p);
+        assert!(body.is_empty(), "不支持 thinking 的 provider 不得写入任何键");
     }
 
     #[test]

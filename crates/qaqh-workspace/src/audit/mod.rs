@@ -66,6 +66,9 @@ pub struct AuditEntry {
     pub ts: String,
     pub user: String,
     pub tool: String,
+    /// v1 历史列：`{name}_{action}` 子动作。v1 复合名机制退役后恒为空——
+    /// 字段保留是因为 `v2::ToolInfo.action` 参与链哈希
+    /// （`record_hash` 重序列化整条记录），删除会让既有账本校验失败。
     pub action: String,
     /// SHA-256 十六进制参数指纹。
     pub args_hash: String,

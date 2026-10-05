@@ -443,7 +443,7 @@ fn cmd_tool_with_args_rejected() {
         "exec",
         serde_json::json!({ "command": "dir", "shell": "cmd", "args": ["x"], "cwd": std::env::current_dir().unwrap() }),
     );
-    let r = super::handler::handle_run_with_shell(ctx, None);
+    let r = crate::exec::run_exec_for_test(&ctx.ctx, ctx.args, None);
     assert!(!r.is_success(), "cmd + args must fail");
     assert!(
         r.error
@@ -1266,17 +1266,40 @@ fn backgrounded_status_refreshes_when_child_exits_while_grandchild_holds_pipe() 
 
 // ── exec 通用入口（方案 A 独占：shell 参数选壳）──
 
-fn make_ctx(name: &str, args: serde_json::Value) -> crate::ToolCallCtx {
-    crate::ToolCallCtx {
-        id: "exec-test".into(),
-        name: name.into(),
-        action: String::new(),
+fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
+    TestCall {
+        ctx: crate::tool_api::ToolCallContext {
+            call_id: "exec-test".into(),
+            session_id: crate::current_session().unwrap_or_default(),
+            workspace_root: crate::permission::resolve_target_path(std::path::PathBuf::from(
+                crate::current_workspace(),
+            )),
+            mode: crate::tool_api::AgentMode::Code,
+            permission_level: crate::permission::PermissionLevel::ReadOnly,
+            sandbox: crate::tool_api::SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
+                crate::current_workspace(),
+            )),
+            exec_default_shell: None,
+            timeout: std::time::Duration::from_secs(30),
+            cancellation: crate::tool_api::CancellationToken::new(),
+            progress: None,
+            source: crate::tool_api::ToolCallSource::Model,
+        },
         args,
-        tx_progress: None,
-        timeout_secs: Some(30),
-        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        _name: name.into(),
     }
+}
+
+/// 测试调用载体：显式上下文 + args（v1 `ToolCallCtx` 退役后的形态）。
+struct TestCall {
+    ctx: crate::tool_api::ToolCallContext,
+    args: serde_json::Value,
+    _name: String,
+}
+
+fn handle_run_exec(call: TestCall) -> crate::ToolResult {
+    crate::exec::run_exec_for_test(&call.ctx, call.args, None)
 }
 
 #[test]
@@ -1284,8 +1307,8 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
     let mut manager = crate::ToolManager::new();
     super::register::register(&mut manager);
     assert!(
-        manager.builtins["exec"].legacy.is_none(),
-        "exec still has legacy executor"
+        manager.builtins.contains_key("exec"),
+        "exec must be on the typed execution surface"
     );
 
     let success = super::direct::ExecOutput {
@@ -1421,4 +1444,79 @@ fn exec_rejects_removed_argv_and_requires_command() {
         r.error,
         r.model_text()
     );
+}
+
+// ── Windows sbx 旁路(dark-launch 冒烟;需非提权环境,与 sbx-win 测试同要求)──
+
+#[cfg(windows)]
+#[test]
+fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
+    use crate::exec::direct::direct_exec_sandboxed;
+    use qaqh_policy::{NetworkPolicy, SandboxBackend, SandboxSpec};
+
+    // 提权环境下受限令牌语义不成立(sbx README 测试要求),跳过。
+    if is_elevated() {
+        eprintln!("skipped: elevated process");
+        return;
+    }
+
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_root = ws.path().to_path_buf();
+    let ws_str = ws_root.to_string_lossy().into_owned();
+
+    let mut spec = SandboxSpec::workspace_write(ws_root.clone());
+    spec.backend = SandboxBackend::WindowsToken;
+    spec.network = NetworkPolicy::Deny;
+
+    // ① 授权读/执行 + stdout 透传(无重定向,echo 直接写 stdout)。
+    let argv = vec!["cmd".to_string(), "/c".to_string(), "echo sbx-ok".to_string()];
+    let out = direct_exec_sandboxed(
+        &argv, None, Some(&ws_str), 10000, 60, None, None, None, "sbx-smoke-echo", &spec,
+    );
+    assert_eq!(out.exit_code, Some(0), "output: {}", out.output);
+    assert!(out.output.contains("sbx-ok"), "echo output missing: {}", out.output);
+
+    // ② 授权写:工作区内落盘(cwd = 工作区根)。
+    let argv = vec![
+        "cmd".to_string(),
+        "/c".to_string(),
+        "echo sbx-data > sbx_smoke.txt".to_string(),
+    ];
+    let out = direct_exec_sandboxed(
+        &argv, None, Some(&ws_str), 10000, 60, None, None, None, "sbx-smoke-allow", &spec,
+    );
+    assert_eq!(out.exit_code, Some(0), "output: {}", out.output);
+    assert!(
+        ws_root.join("sbx_smoke.txt").is_file(),
+        "authorized write did not land in workspace"
+    );
+
+    // ③ 未授权写:工作区外(真实临时目录的另一处)发生时刻被内核拒绝。
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let target = outside.path().join("sbx_escape_probe.txt");
+    let argv = vec![
+        "cmd".to_string(),
+        "/c".to_string(),
+        format!("echo escape > {}", target.display()),
+    ];
+    let out = direct_exec_sandboxed(
+        &argv, None, None, 10000, 60, None, None, None, "sbx-smoke-deny", &spec,
+    );
+    assert!(
+        !target.exists(),
+        "unauthorized write ESCAPED the token plane: {}",
+        target.display()
+    );
+    let _ = out;
+}
+
+/// 提权探测(零依赖):在系统保护位置试建临时文件,写得进去 = 提权进程。
+#[cfg(windows)]
+fn is_elevated() -> bool {
+    let probe = std::path::PathBuf::from("C:/Program Files/qaqh-sbx-elevation-probe.tmp");
+    let Ok(_) = std::fs::write(&probe, b"probe") else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&probe);
+    true
 }

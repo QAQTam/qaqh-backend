@@ -17,7 +17,24 @@ pub struct RingingWorkerCommandEnvelope {
     pub command_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
+    /// 发起该命令的主体（daemon 依鉴权身份填写，供 canonical 归因穿线）。
+    /// `None` = 未知（回退现状：记为本地 user）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<WorkerActor>,
     pub command: RingingCommand,
+}
+
+/// 命令发起主体的轻量载体。
+///
+/// 不引 `qaqh-session::ActorRef`（ringing 是独立 wire 层，不依赖 session）；由
+/// runtime 侧映射为 canonical `ActorRef`。`kind` 取 `"user" | "api" | "system" |
+/// "agent" | "subagent"`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerActor {
+    pub kind: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 impl RingingWorkerCommandEnvelope {
@@ -30,8 +47,14 @@ impl RingingWorkerCommandEnvelope {
             session_id: session_id.into(),
             command_id: command_id.into(),
             expected_revision: None,
+            actor: None,
             command,
         }
+    }
+
+    pub fn with_actor(mut self, actor: Option<WorkerActor>) -> Self {
+        self.actor = actor;
+        self
     }
 
     pub fn with_expected_revision(mut self, revision: Option<u64>) -> Self {
@@ -112,7 +135,6 @@ mod tests {
         let cmd = RingingCommand::Tool(ToolCommand::ToolInvoke {
             tool_call_id: "c".into(),
             name: "exec".into(),
-            action: "run".into(),
             args: serde_json::json!({ "cmd": "echo hi" }),
         });
         let frame = RingingWorkerCommandEnvelope::new("s1", "cmd-1", cmd);

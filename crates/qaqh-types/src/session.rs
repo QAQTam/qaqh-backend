@@ -220,7 +220,7 @@ impl SessionMeta {
     }
 
     /// 会话列表/tab 的**展示标题**（前端契约 **G2** 定死的口径）：
-    /// `title` → `cwd` 尾段 → `seed`。
+    /// `title` → `cwd` 尾段 → `session_id`。
     ///
     /// **`last_summary` 不参与**：它是「最后一条 assistant 回复首行」的预览
     /// （每轮 `save_append` 覆盖一次），拿它当标题会让列表标题随对话漂移成
@@ -438,7 +438,7 @@ mod tests {
         meta.cwd = Some("qaqh".into());
         assert_eq!(meta.display_title(), "qaqh");
 
-        // 都没有 → seed。**last_summary 全程不参与**。
+        // 都没有 → session_id。**last_summary 全程不参与**。
         meta.cwd = None;
         assert_eq!(meta.display_title(), "0123abcd");
     }

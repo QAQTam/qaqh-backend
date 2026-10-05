@@ -111,8 +111,9 @@ fn checkpoint_delivers_only_the_text_added_since_the_last_emit() {
     let mut consumer = TranscriptConsumer::new();
     let mut rx = hub.subscribe_timeline();
 
-    // 第 1 次（客户端从未见过该块）：必须全量覆盖，否则丢过 delta 的客户端
-    // 无法补齐。此后每次只发增量。
+    // 第 1 次（客户端从未见过该块）：必须携带全文，否则丢过 delta 的客户端
+    // 无法补齐（首帧仍以增量 `arg` 承载全文，而非 `{text}` 全量覆盖）。
+    // 此后每次只发余量。
     for index in 0..8 {
         published.push_str(&chunk);
         hub.publish_timeline(

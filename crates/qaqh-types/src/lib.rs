@@ -18,7 +18,7 @@ pub mod tool_def;
 pub mod tool_mode;
 pub mod tool_result;
 
-// Unified arg parsing (shared across dsx-agent, dsx-tools)
+// Unified arg parsing (shared across qaqh crates)
 pub mod arg;
 
 // Platform-specific utilities

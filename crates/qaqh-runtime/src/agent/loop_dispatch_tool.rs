@@ -8,14 +8,19 @@ use super::types::*;
 use super::engine_tool::PermissionDisposition;
 use super::turn_actor::InteractionAdmission;
 use qaqh_domain::ToolCommand;
+use qaqh_session::session_fact_v2::ActorRef;
 
 impl Loop {
-    pub(super) fn on_tool(&mut self, command: ToolCommand, command_id: &str) {
+    pub(super) fn on_tool(
+        &mut self,
+        command: ToolCommand,
+        command_id: &str,
+        actor: Option<ActorRef>,
+    ) {
         match command {
             ToolCommand::ToolInvoke {
                 tool_call_id,
                 name,
-                action,
                 args,
             } => {
                 // C2：UI 快捷工具调用前清两处取消 token——Stop 之后
@@ -32,13 +37,9 @@ impl Loop {
                     stats: &mut self.session.stats,
                     flow: &mut self.flow,
                 };
-                self.session.tool.handle_ui_tool_call(
-                    &mut ctx,
-                    &tool_call_id,
-                    &name,
-                    &action,
-                    &args,
-                );
+                self.session
+                    .tool
+                    .handle_ui_tool_call(&mut ctx, &tool_call_id, &name, &args);
             }
             ToolCommand::ToolPermissionRespond {
                 tool_call_id,
@@ -111,6 +112,7 @@ impl Loop {
                             &call_id,
                             command_id,
                             admitted.map(|admitted| *admitted),
+                            actor,
                         );
                         let _ = ctx;
                         self.apply_outcome(outcome);

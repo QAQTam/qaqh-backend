@@ -13,8 +13,6 @@ export const RINGING_SCHEMA = "qaqh.Ringing";
 /** Ringing v2 单一信封版本:历史 v1 兼容已拆除。 */
 export const RINGING_VERSION = 2;
 
-export type GatewaySession = { csrfToken: string; expiresIn: number };
-
 /**
  * 命令确认。形状是生成绑定(此前手写镜像漏掉了 `retry_after_ms` —— 限流/退避
  * 提示),本地只留别名。
@@ -68,9 +66,6 @@ export interface StreamHandlers {
 }
 
 export interface TransportBackend {
-  /** 浏览器模式遗留形态占位:Tauri 下立即返回占位值(无会话概念)。 */
-  bootstrap(): Promise<GatewaySession>;
-
   /** 会话列表(宿主侧已 sanitize 的投影字段)。 */
   sessions(): Promise<any[]>;
 

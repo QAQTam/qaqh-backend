@@ -1,15 +1,11 @@
 //! Ringing daemon 运行时（Projection/队列 层）。
 //!
-//! - `sequencer`：stream_seq / channel_seq / session_seq / state_revision 生成
-//! - `router`：每频道 ChannelRouter（reliable 队列 + replaceable slots + 回放）
-//! - `outbox`：每频道分级发送队列（背压语义）
-//! - `journal`：有界可靠 journal + replaceable checkpoint
-//! - `projection`：领域 snapshot projection（禁止事件数组模拟状态）
-//! - `hub`：三频道聚合入口 `RingingHub`
+//! - `projection`：持久化消息 → UI turn 投影
+//! - `hub`：daemon 侧 Ringing 运行时聚合入口 `RingingHub`
 
 pub mod attachment;
 pub mod content_store;
-pub mod conversation_snapshot;
+pub mod device_registry;
 pub mod driver_watch;
 pub mod hub;
 pub mod lease_store;
@@ -17,7 +13,6 @@ pub mod orphan_seal;
 pub mod pending_store;
 pub mod persistence_policy;
 pub mod projection;
-pub mod sequencer;
 pub mod service_methods;
 pub mod timeline_hub;
 pub(crate) mod timeline_rebuild;
@@ -25,6 +20,7 @@ pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;
 pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
+pub use device_registry::{DeviceRecord, DeviceRegistry, Scope};
 pub use driver_watch::RingingDriverWatch;
 pub use lease_store::RingingLeaseStore;
 pub use pending_store::{ExistingCommandReceipt, PendingCommandStore};

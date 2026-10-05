@@ -178,10 +178,9 @@ impl ToolEngine {
         ctx: &mut RingContext,
         id: &str,
         name: &str,
-        action: &str,
         args: &serde_json::Value,
     ) {
-        let effective_name = crate::agent::util::resolve_effective_name(name, action, args);
+        let effective_name = name.to_owned();
 
         // P2-2（观察项④修复）：UI 直调不经回合边界（投影 apply 在 run_lap）
         // —— mcp 前缀工具在投影未入册的会话里先同步 apply 一次（幂等：
@@ -807,7 +806,7 @@ impl ToolEngine {
         ctx.agent.apply_tool_effects(skill_effects, ctx.flow);
 
         // Instant refresh for todo tools
-        if matches!(name, "todo_write" | "todo_update" | "todo_list") {
+        if crate::agent::plugins::dashboard::is_todo_tool(name) {
             // Ringing 双发：DashboardUpdated（replaceable 覆盖）
             ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
                 qaqh_domain::ControlEvent::DashboardUpdated {
@@ -828,18 +827,6 @@ impl ToolEngine {
 
         if let Some(ref delta) = code_delta {
             ctx.stats.push_delta(delta.clone());
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                qaqh_domain::ToolEvent::CodeChanged {
-                    tool_call_id: tid.clone(),
-                    turn_id: turn_id.clone(),
-                    round_num: 0,
-                    lines_added: delta.lines_added,
-                    lines_removed: delta.lines_removed,
-                    files_created: delta.files_created,
-                    files_deleted: delta.files_deleted,
-                    file: delta.file.clone(),
-                },
-            ));
         }
 
         // 展示平面 diff / metrics / 失败槽：先取出（ToolFinished 会 move 整个

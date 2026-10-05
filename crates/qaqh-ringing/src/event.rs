@@ -5,10 +5,7 @@
 
 use qaqh_domain::{ControlEvent, ConversationEvent, ToolEvent};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
 
-use qaqh_domain::{Delivery, RingingChannel};
 
 /// Control 频道事件（wire 名，域类型为 `qaqh_domain::ControlEvent`）。
 pub type RingingControlEvent = ControlEvent;
@@ -20,31 +17,11 @@ pub type RingingToolEvent = ToolEvent;
 /// 统一 Ringing 事件（envelope `event` 字段）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[allow(clippy::large_enum_variant)] // 装箱改造属结构塑形，另立项
 pub enum RingingEvent {
     Control(RingingControlEvent),
     Conversation(RingingConversationEvent),
     Tool(RingingToolEvent),
-}
-
-impl RingingEvent {
-    pub fn channel(&self) -> RingingChannel {
-        match self {
-            RingingEvent::Control(_) => RingingChannel::Control,
-            RingingEvent::Conversation(_) => RingingChannel::Conversation,
-            RingingEvent::Tool(_) => RingingChannel::Tool,
-        }
-    }
-
-    /// 可靠性由领域事件定义显式声明（Wire 不决定可靠性）。
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            RingingEvent::Control(e) => e.delivery(),
-            RingingEvent::Conversation(e) => e.delivery(),
-            RingingEvent::Tool(e) => e.delivery(),
-        }
-    }
 }
 
 impl From<qaqh_domain::DomainEvent> for RingingEvent {

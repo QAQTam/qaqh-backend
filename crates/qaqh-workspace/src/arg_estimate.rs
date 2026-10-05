@@ -401,7 +401,8 @@ mod tests {
             ("apply_patch", PATCH_ARGS),
         ] {
             let args: serde_json::Value = serde_json::from_str(args_json).unwrap();
-            let terminal = compute(tool, &args).unwrap_or_else(|| panic!("{tool} 终态没出数"));
+            let terminal = compute(tool, &args, std::path::Path::new("."), "test")
+                .unwrap_or_else(|| panic!("{tool} 终态没出数"));
             assert_eq!(
                 estimate(tool, args_json),
                 ArgLineEstimate {

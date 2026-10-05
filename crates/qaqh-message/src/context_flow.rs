@@ -23,9 +23,10 @@
 //! # Lifecycle
 //!
 //! [`LifecyclePolicy`] makes undo/compact behavior a property of the source
-//! instead of hard-coded branch logic: trailing injections are `Preserved`
-//! under compaction, turn messages are `Compressable`, and undo removes the
-//! last turn only for sources that declare `RemoveLast`.
+//! instead of hard-coded branch logic: each source declares its own policy —
+//! dialog-fact injections are `Preserved`, turn messages and re-materialized
+//! snapshots (MCP resource lists, workspace-change reports) are `Compressable`
+//! — and undo removes the last turn only for sources that declare `RemoveLast`.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -598,7 +599,6 @@ pub mod builtin {
         )
     }
 
-    /// Goal-mode auto-advance prompt (user surrogate turn).
     /// MCP 资源清单注入块（PR-M2-2，设计 §5.4.2）：封顶清单作为 trailing
     /// developer 消息在回合边界物化（epoch 门控，内容不变不注入——prefix
     /// cache 稳定）。Compressable：清单是易过期环境信息而非对话事实，
@@ -617,6 +617,9 @@ pub mod builtin {
             },
         )
     }
+    /// Goal-mode auto-advance prompt (user surrogate turn). `Sink::Turn` +
+    /// `User`：作为完整 user 回合走 [`MessageStore::push_user`]（`RemoveLast`
+    /// undo），不同于 skills/subagent/MCP/workspace 的 trailing 注入。
     pub fn goal_source() -> Arc<dyn ContextSource> {
         base(
             GOAL,

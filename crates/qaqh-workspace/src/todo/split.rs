@@ -12,7 +12,7 @@
 
 use serde_json::Value;
 
-use crate::{ToolCallCtx, ToolResult};
+use crate::ToolResult;
 
 use super::actions::{exec_todo_set, exec_todo_write};
 
@@ -46,11 +46,11 @@ pub(crate) fn reject_fields(args: &Value, fields: &[&str], tool: &str) -> Result
     }
 }
 
-pub fn handle_write(ctx: ToolCallCtx) -> ToolResult {
+pub fn handle_write(args: &Value) -> ToolResult {
     // items-only：顶层便利字段（单条形态）与定位插入残留一律拒绝。
     // 条目内的 id/status/evidence/description 是 v4 全量覆写的合法字段。
     let result = reject_fields(
-        &ctx.args,
+        args,
         &[
             "id",
             "status",
@@ -64,16 +64,16 @@ pub fn handle_write(ctx: ToolCallCtx) -> ToolResult {
         ],
         "todo_write",
     )
-    .and_then(|_| exec_todo_write(&ctx.args));
+    .and_then(|_| exec_todo_write(args));
     tool_result(result)
 }
 
-pub fn handle_update(ctx: ToolCallCtx) -> ToolResult {
+pub fn handle_update(args: &Value) -> ToolResult {
     // 单一形态：{id, status, evidence?} 一次一条；批量/updates 已移除——
     // 多任务循环调用。底层 exec_todo_set 的 ids/updates 分支保留
     // （HTTP service 面 / CLI 直访不受工具形态约束）。
     let result = reject_fields(
-        &ctx.args,
+        args,
         &[
             "ids",
             "updates",
@@ -85,13 +85,13 @@ pub fn handle_update(ctx: ToolCallCtx) -> ToolResult {
         ],
         "todo_update",
     )
-    .and_then(|_| exec_todo_set(&ctx.args));
+    .and_then(|_| exec_todo_set(args));
     tool_result(result)
 }
 
-pub fn handle_list(ctx: ToolCallCtx) -> ToolResult {
+pub fn handle_list(args: &Value) -> ToolResult {
     let result = reject_fields(
-        &ctx.args,
+        args,
         &[
             "title",
             "description",
@@ -105,7 +105,7 @@ pub fn handle_list(ctx: ToolCallCtx) -> ToolResult {
         ],
         "todo_list",
     )
-    .and_then(|_| super::actions::exec_todo_list(&ctx.args));
+    .and_then(|_| super::actions::exec_todo_list(args));
     tool_result(result)
 }
 
@@ -120,17 +120,17 @@ pub(crate) fn todo_write_schema() -> Value {
             "items": {
                 "type": "array",
                 "maxItems": 20,
-                "description": "The FULL task list — replaces the previous list entirely. Each item needs title + status; include every prior item you want to keep.",
+                "description": "The FULL task list — replaces the previous list entirely. Each item needs status; keep every prior item you want to keep. `title` is optional when `id` references an existing task (the previous title is kept).",
                 "items": {
                     "type": "object",
                     "properties": {
                         "id": {"type": ["string", "integer"], "description": "Existing T<n> to keep/update this task; omit to assign a new one."},
-                        "title": {"type": "string", "description": "Task title (1-100 chars)."},
+                        "title": {"type": "string", "description": "Task title (1-100 chars). Required for new items; optional when `id` references an existing task."},
                         "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Exactly one item should be in_progress while working."},
                         "description": {"type": "string", "description": "Optional context (<=200 chars)."},
                         "evidence": {"type": "string", "description": "Completion evidence (for completed items)."}
                     },
-                    "required": ["title", "status"],
+                    "required": ["status"],
                     "additionalProperties": false
                 }
             },

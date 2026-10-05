@@ -53,8 +53,8 @@ pub(crate) enum InteractionFault {
 pub(crate) struct TestHooks {
     sse_terminate: Option<SseTerminate>,
     sse_terminate_scope: SseTerminateScope,
-    /// Shared by channel and timeline streams: `Scope::Any` matches both, so the
-    /// one-shot token must not be consumable once per stream kind.
+    /// Timeline-stream one-shot token: `Scope::Any` also matches the timeline
+    /// stream, so the token must be consumable at most once.
     sse_terminate_used: AtomicBool,
     timeline_gap: bool,
     timeline_gap_used: AtomicBool,
@@ -144,7 +144,7 @@ impl TestHooks {
         }
     }
 
-    /// Shared one-shot consumer for channel and timeline streams.
+    /// One-shot consumer for the timeline stream.
     fn take_sse_terminate_once(&self) -> Option<SseTerminate> {
         let terminate = self.sse_terminate.clone()?;
         if self.sse_terminate_used.swap(true, Ordering::AcqRel) {

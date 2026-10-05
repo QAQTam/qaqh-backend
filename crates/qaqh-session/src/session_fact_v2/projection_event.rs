@@ -102,7 +102,6 @@ impl Delivery {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ResetReason {
     CursorExpired,
     LogIdMismatch,
@@ -122,7 +121,6 @@ pub enum ResetReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ResetRequired {
     pub log_id: LogId,
     pub snapshot_cursor: Option<ReliableCursor>,

@@ -58,7 +58,7 @@ fn call(
     call_id: &str,
     ctx: &qaqh_workspace::runtime::ToolCtx,
 ) -> qaqh_workspace::execution::ToolExecResult {
-    qaqh_workspace::execution::execute_with_context(name, "", &args.to_string(), call_id, None, ctx)
+    qaqh_workspace::execution::execute_with_context(name, &args.to_string(), call_id, None, ctx)
 }
 
 #[test]
@@ -91,7 +91,10 @@ fn audit_ledger_traces_calls_end_to_end() {
         "call-2",
         &locked,
     );
-    assert!(!denied.success, "read-only tier write must require approval");
+    assert!(
+        !denied.success,
+        "read-only tier write must require approval"
+    );
 
     // ③ PLAN 模式前置阻断（edit 在 PLAN_BLOCKED 名单内）。
     let plan = qaqh_workspace::runtime::ToolCtx {

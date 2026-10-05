@@ -15,7 +15,7 @@
 //!
 //! 本实现按 `\n` 定位行（O(n) 总体、无搬移），在字节层面切分、整行严格
 //! UTF-8 解码（非法行跳过，绝不 lossy），空行定界事件帧。与 daemon 发送端
-//! `sse_frame()`/`timeline_sse_frame()`（`id:`/`event:`/`data:` + 空行）
+//! （`axum_impl/sse.rs` 的 `Event`，`id:`/`event:`/`data:` + 空行）
 //! 完全对齐。
 //!
 //! 行为与旧实现保持等价：
@@ -36,7 +36,7 @@ const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 #[derive(Debug, Default)]
 pub(crate) struct SseDecoder {
     buf: Vec<u8>,
-    /// 已消费前缀长度（未压缩，超过阈值时统一搬移一次摊销 O(n)）。
+    /// 已消费前缀长度（未压缩；`push` 追加前统一压缩一次，摊销 O(n)）。
     consumed: usize,
     /// 当前累积的帧（id/event/data 字段）。
     pending: Option<SseFrame>,

@@ -1,10 +1,11 @@
 //! CompactEngine: context compaction — token-split → prompt → LLM → apply.
 //!
-//! Two-step flow:
+//! Two-step flow (a background thread runs the LLM call between the two steps):
 //! 1. `build_prompt_and_meta()` — synchronous, fast (token split + prompt build)
-//! 2. Background: `chat_stream()` call in a thread (non-blocking, streaming
-//!    tokens to frontend via CompactDelta events)
-//! 3. `apply_result()` — synchronous, fast (apply on main thread)
+//! 2. `apply_result()` — synchronous, fast (apply on main thread)
+//!
+//! Between them, a background `chat_stream()` call runs in a thread (non-blocking,
+//! streaming tokens to frontend via CompactProgress events).
 
 use crate::agent::types::*;
 use crate::agent::util;
@@ -123,14 +124,6 @@ pub(crate) fn build_prompt_and_meta(
 
     let head_msgs = &msgs[..kept_idx];
     if head_msgs.is_empty() {
-        // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-            qaqh_domain::ToolEvent::ToolNotice {
-                tool_call_id: None,
-                level: qaqh_domain::NoticeLevel::Info,
-                message: "Compact skipped: all within token budget".into(),
-            },
-        ));
         return None;
     }
 
@@ -400,17 +393,6 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
                 turns_removed: Some(turns_removed as u32),
             },
         ));
-    // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
-    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-        qaqh_domain::ToolEvent::ToolNotice {
-            tool_call_id: None,
-            level: qaqh_domain::NoticeLevel::Info,
-            message: format!(
-                "Compacted {} turns -> {chars} chars, keeping {} turns",
-                meta.head_user_count, meta.kept_user_count,
-            ),
-        },
-    ));
 }
 
 /// 长程导航锚点：把压缩后**会丢失**的会话级事实补回摘要输入。
@@ -515,7 +497,7 @@ pub(crate) fn compact_request_messages(prompt: &str) -> Vec<qaqh_types::Message>
 
 /// Run the LLM compaction call in a background thread.
 /// Uses streaming so the user can see the model output in real-time
-/// via `CompactDelta` events pushed through `event_tx`.
+/// via `CompactProgress` events pushed through `event_tx`.
 /// Returns CompactMeta via the channel.
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
 pub(crate) fn run_compact_worker(

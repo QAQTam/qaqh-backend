@@ -11,7 +11,9 @@ pub fn bootstrap() -> String {
 }
 
 /// 显式钉住壳路径（embedder/测试用；`bootstrap()` 之外的第二入口）。
-/// 传空串 = no-op。钉住的路径在 `Shell::path()` 中优先级最高。
+/// 传空串 = no-op。钉住的路径在 `Shell::path()` 中优先于 git-bash 路径、
+/// 候选解析与名义名，但并非处处最高：`cmd`/`WindowsPowerShell` 仍先取
+/// System32 系统壳固定路径（审计 M2），`Zsh`/`Sh` 则完全不使用该值。
 pub fn register_shell(path: &str) {
     Shell::register_shell(path);
 }
@@ -38,9 +40,8 @@ pub(crate) static DETECTED_BASH_PATH: OnceLock<String> = OnceLock::new();
 /// 启动期显式注册的壳路径（`Shell::register_shell`）。
 pub(crate) static REGISTERED_SHELL_PATH: OnceLock<String> = OnceLock::new();
 /// 各壳解析出的可运行候选名缓存（`Some(None)` = 候选集全不可用）。
-/// 必须按壳分槽：Bash/Zsh/Sh 共用同一候选集，但「谁命中了」对每个壳
-/// 是独立事实（容器里只有 `sh` 时，Bash/Zsh 都该落到 `sh`，而不是让
-/// 先探测的一方污染另一方）。
+/// 必须按壳分槽：候选集按壳各自持有（见 `executable_candidates`），
+/// 「谁命中/是否可用」对每个壳是独立事实，避免先探测的一方污染另一方。
 static RESOLVED_SHELL_NAME: [OnceLock<Option<String>>; 6] = [
     OnceLock::new(),
     OnceLock::new(),
@@ -205,13 +206,14 @@ impl Shell {
     }
 
     /// Path to the shell executable.
-    /// 优先级：显式注册（启动期探测结果）> Windows 系统壳固定路径（cmd/
-    /// powershell，审计 M2）> Windows git-bash 绝对路径 > 候选集解析出的
-    /// **绝对路径**（`resolved_shell_name`，仅 PATH 查找）> 名义名。
-    /// 候选解析是「探测与派生同源」的关键：精简镜像只有 `sh`/`dash` 时，
-    /// `Shell::Bash` 会派生 `sh` 而不是必然失败的 `bash`——于是显式
-    /// `shell: "bash"` 与平台自动检测落在同一支壳上（同一 POSIX 语义），
-    /// 探测口径与实际 argv 不再漂移。
+    /// 各壳的优先级并不统一：`Bash` 为 显式注册 > Windows git-bash 绝对路径
+    /// > 候选集解析出的**绝对路径**（`resolved_shell_name`，仅 PATH 查找）>
+    /// 名义名 `bash`；`PowerShell` 为 显式注册 > 候选解析 > `pwsh`；
+    /// `cmd`/`WindowsPowerShell` 先取 Windows 系统壳固定路径（审计 M2），
+    /// 再到显式注册 > 候选解析 > 名义名；`Zsh`/`Sh` 只用候选解析，回落到
+    /// 名义名 `zsh`/`sh`（不使用显式注册）。
+    /// 候选解析是「探测与派生同源」的关键：探测口径与实际 argv 都经
+    /// `resolved_shell_name` 落到同一绝对路径，二者不再漂移。
     pub(crate) fn path(&self) -> &str {
         let registered = REGISTERED_SHELL_PATH.get();
         let resolved = self.resolved_shell_name();
@@ -242,11 +244,10 @@ impl Shell {
         }
     }
 
-    /// 候选可执行名集（探测与实际派生必须同源）。
-    /// `path()` 非绝对路径时只是「初始候选」，真实可用性可能落在同族别名上：
-    /// 精简镜像只有 `sh`/`dash`、Windows 侧 git-bash 尚未解析、pwsh 7 缺失时
-    /// 落 `powershell.exe`。探测只认 `path()` 一个名字会误报 SHELL_NOT_FOUND，
-    /// 而派生实际上能跑起来（O-3 的「探测 ≠ 派生」缺口）。
+    /// 候选可执行名集（探测与实际派生必须同源）。当前每个壳只列其自身
+    /// 名义名（`bash`/`zsh`/`sh`/`pwsh`/`powershell`/`cmd`），不存在同族
+    /// 别名降级；探测与派生都经此集合解析出**绝对路径**，故两者口径一致
+    /// （O-3「探测 ≠ 派生」缺口由此闭合）。
     pub(crate) fn executable_candidates(&self) -> &'static [&'static str] {
         match self {
             Shell::Bash => &["bash"],

@@ -21,6 +21,9 @@ members = [
     "crates/qaqh-client",
     "crates/qaqh-mcp",
     "crates/qaqh-lsp",
+    "crates/sbx-nt",
+    "crates/sbx-win",
+    "crates/sbx-cli",
     "webui/src-tauri",
 ]
 

@@ -1112,7 +1112,8 @@ fn preserve_completed_output_item(
             index: state.tool_index,
             id: call_id.to_string(),
             name: name.clone(),
-            args_so_far: args.to_string(),
+            // 本适配器不预览增量：整段参数在这一帧一次给出。
+            args_chunk: args.to_string(),
         });
         // Preserve the completed call so `emit_done` can attach
         // ToolUse blocks — the agent loop executes tools from
@@ -1429,7 +1430,7 @@ mod tests {
         assert_eq!(progress, SseProgress::Continue);
         assert!(matches!(
             events.as_slice(),
-            [StreamEvent::ToolCallProgress { args_so_far, .. }] if args_so_far == "{\"path\":\"课题\"}"
+            [StreamEvent::ToolCallProgress { args_chunk, .. }] if args_chunk == "{\"path\":\"课题\"}"
         ));
     }
 

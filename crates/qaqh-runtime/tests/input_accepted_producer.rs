@@ -193,6 +193,23 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
         .collect();
 
     assert_eq!(accepted.len(), 2, "both inputs must be accepted once");
+    // 2026-10-05 回归（`docs/bug-ringing-v2-commands-stuck-in-running.md`）：worker
+    // 在一次命令 dispatch 内写出的 fact 必须点名那条命令——`causation_id` 是 daemon
+    // 侧命令回执唯一可达的终态来源。这里的 command_id 故意不是 ULID（客户端自由值，
+    // 移动端就是 UUID），canonical 侧必须把它归一进 ULID 因果通道。
+    let expected_causation = qaqh_session::canonical::causation_for_command("input-accepted-test")
+        .expect("a non-ULID command id maps onto the canonical causation lane");
+    for fact in facts
+        .iter()
+        .filter(|fact| matches!(fact.payload, FactPayload::InputAccepted(_)))
+    {
+        assert_eq!(
+            fact.causation_id.as_ref().map(|id| id.as_str()),
+            Some(expected_causation.as_str()),
+            "fact #{} must name the command whose dispatch wrote it",
+            fact.fact_seq
+        );
+    }
     let normal = accepted
         .iter()
         .find(|payload| payload.client_request_id.as_deref() == Some(message_id))

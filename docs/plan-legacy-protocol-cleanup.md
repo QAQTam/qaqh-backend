@@ -63,10 +63,10 @@
 
 | 通道 | 现状（证据） | 决策 |
 |---|---|---|
-| `ToolEvent::ToolCallPrepared { args_so_far }`（`qaqh-domain/src/event.rs:457-463`，分类 `:531` Replaceable） | 每个 SSE 帧发一条**整段** args；`qaqh-runtime/src/ringing/projection.rs` 里没有它的分支 → 到不了 UI | [ ] 删事件，或接进投影（估算通道已另立，见第 5 节） |
-| `ToolEvent::CodeChanged`（`event.rs:519-520`） | 生产侧已完整（本次补齐 `write`/`apply_patch` 口径），但投影丢弃，只落 `code_stats.jsonl`（`agent/types.rs:518-542`） | [ ] 决定 UI 要不要权威行数；要则补 projection 分支，不要则从导出面摘掉 |
-| `webui/src/api/qaqh/ToolEvent.ts` 一类零消费者生成物 | ts-rs 全量导出，前端实际只用 timeline 一条通道 | [ ] 收窄导出面（白名单），别让"看起来存在"的协议误导后来人 |
-| `qaqh_gate::StreamEvent::ToolCallProgress { args_so_far }`（`qaqh-gate/src/message_api.rs:511`、`chat_completions_api.rs:347`） | 每帧 `.clone()` 整段累计串 = O(n²) 基座。58 KB 参数约 2493 帧；估算器已按字节偏移绕开它，但基座没修 | [ ] 改成携带片段 + 累计长度 |
+| `ToolEvent::ToolCallPrepared { args_so_far }`（`qaqh-domain/src/event.rs:457-463`，分类 `:531` Replaceable） | 每个 SSE 帧发一条**整段** args；`qaqh-runtime/src/ringing/projection.rs` 里没有它的分支 → 到不了 UI | [x] **已删（2026-10-05，随 P1.3）**：发射点 `turn_lap/gate.rs:679-688` 与变体一起摘掉。删前普查：生产侧无人匹配 `ToolCallPrepared`（桥只匹配 `ToolPermissionRequested`/`Started`/`Finished`/`Notice`），`tool_call_prepared` 字面量在 crates/webui/scripts/docs/数据目录 0 命中，`DomainEvent`/`ToolEvent` 无生产反序列化点 → 不影响历史账本重放。「接进投影」这条选项已随 v1 快照投影退场而不成立。 |
+| `ToolEvent::CodeChanged`（`event.rs:519-520`） | 生产侧已完整（本次补齐 `write`/`apply_patch` 口径），但投影丢弃，只落 `code_stats.jsonl`（`agent/types.rs:518-542`） | [x] **已删（2026-10-05，随 P1.2 第一批 `065f35a`）**：UI 的权威行数另有两条来源且都已接线（流式 `TimelineIntent::ToolEstimated` → `reducer.ts:326`；终态 `display.lines_added/removed` → `StepRow.tsx:75,163`，`diff/parse.ts:7` 早已停止前端自算），本事件无人匹配、webui 0 引用；`code_stats.jsonl` 是 `ctx.stats.push_delta` 的**独立路径**（`service/stats.rs` 只读它的 `file` 字段），删事件不删统计。钉 legacy 形状的测试随宿主一起删——生产无 `ToolEvent` 反序列化点，能喂那个形状的只有测试自己。 |
+| `webui/src/api/qaqh/*.ts` 零消费者生成物 | ts-rs 全量导出，前端实际只用 timeline 一条通道 | [x] **已收窄（2026-10-05）**：导出面按「前端 import 闭包 ∪ 仍在序列化上线的契约」白名单化，生成物 186→132，砍掉 54 个 fire-into-void 类型（`DomainEvent`/`ToolEvent`/`ControlEvent`/`ConversationEvent`/`RingingEvent`/`ControlState`/`ConversationState`/`ToolState`/`DomainCommand`、v1 `ToolResult` 信封族、`Dashboard*`/`Skill*`/`PlanReviewItem`…）。`Projection*` 与入站 `*Command` **保留**——SSE v2 与 bootstrap 仍在序列化它们，只是前端按 untyped envelope 消费（转正前先别删）。 |
+| `qaqh_gate::StreamEvent::ToolCallProgress { args_so_far }`（`qaqh-gate/src/message_api.rs:511`、`chat_completions_api.rs:347`） | 每帧 `.clone()` 整段累计串 = O(n²) 基座。58 KB 参数约 2493 帧；估算器已按字节偏移绕开它，但基座没修 | [x] **已改成携带片段（2026-10-05）**：三适配器全部改发 `args_chunk`（Chat Completions / Messages 发 provider 的增量，Responses 一帧给完整参数即整段）。**没有**同时携带累计长度——普查后消费面只有 `ArgLineSlot`（running counter，自己就能数）与首帧 `args_json`，加 `usize` 就是没人读的字段。`ArgLineSlot` 的字节偏移重算与 resync 兜底随之删除，换成「认出写工具前暂存片段（上限 16 KiB）」，`late_name` 语义不变。 |
 
 ## 4. 待办 C：口径与命名撞车
 
@@ -96,6 +96,9 @@
 - [ ] 第 2 节选定路线并完成改名，`cargo test --workspace` 绿
 - [ ] `just ts-export` + `just ts-check` 无漂移
 - [ ] 第 3 节四条通道逐条表态（删 / 接），代码里没有"发了但没人收"的事件
+      （P1.2 第一批已删 10 变体 + 3 访问器 `065f35a`；剩余见交接文档 §三）
+- [ ] P2 各项动刀前先跑 `scripts/v2-legacy-compat-probe.sh`（探针已建 `aabfccd`，
+      本机 13/13 零命中；beta 用户存量要另跑或按版本跨度确认）
 - [ ] 第 4 节三口径至少在文档与注释里说清权威是谁
 - [ ] 第 5 节四条发布事实更正
 - [ ] `feat/workspace-audit-pr3` worktree rebase 到新 main

@@ -129,7 +129,7 @@ impl QaqhService {
     }
 
     /// Attach the canonical V2 projection hub used for runtime residency
-    /// overlays.
+    /// overlays and ephemeral `TeamDelta` publication.
     pub fn attach_v2_projection(&self, hub: Arc<V2ProjectionHub>) {
         let _ = self.v2_hub.set(hub.clone());
         self.registry
@@ -180,8 +180,8 @@ impl QaqhService {
     }
 
     /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
-    /// 关闭 registry 实例并经 hub 发布 `SessionStateChanged { state: Closed }`，
-    /// causation 挂命令 id。会话不存在同样返回 Ok（幂等关闭）。
+    /// 关闭 registry 实例并清理常驻状态（Closed 广播已删，A1：wire 零消费方），
+    /// causation 参数不再使用。会话不存在同样返回 Ok（幂等关闭）。
     pub fn close_session(
         &self,
         session_id: &str,
@@ -227,8 +227,8 @@ impl QaqhService {
     }
 
     /// E: idle 卸载空闲会话 worker（docs/current/architecture.md）。
-    /// `idle_secs` <= 0 时为 no-op（配置禁用）。对每个被卸载的 seed 发布
-    /// `SessionStateChanged::Closed`（与手动 close_session 一致，UI 可感知）。
+    /// `idle_secs` <= 0 时为 no-op（配置禁用）。对每个被卸载的 seed 做常驻
+    /// 状态清理（Closed 广播已删，A1：wire 零消费方）。
     /// 返回被卸载的 seed 列表。registry.close 是阻塞 join——调用方
     /// （daemon 周期任务）必须置于 spawn_blocking。
     pub fn unload_idle_sessions(&self, idle_secs: u64) -> Vec<String> {
@@ -390,7 +390,7 @@ impl QaqhService {
                 let session_id = identity.session_id.as_str().to_string();
                 self.sessions.clear_active();
                 // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
-                // 保证 minimal:dsh 的极简 system prompt 首轮就生效。
+                // 保证 `minimal` 等预置工具模式首轮就生效。
                 if let Some((tool_mode, custom_tools)) = preset {
                     self.sessions
                         .persist_tool_mode(&session_id, &tool_mode, &custom_tools)
@@ -639,11 +639,12 @@ impl QaqhService {
                     .get("max_tokens")
                     .and_then(Value::as_u64)
                     .map(|v| v as u32);
-                // 子代理继承主代理的 workspace：spawn 前写入
-                // `sessions/{sub_seed}/workspace.txt`，子 worker 启动时
-                // `load_session_workspace` 读到，从而正确解析相对路径并
+                // 子代理继承主代理的 workspace：spawn 前把 workspace 作为 cwd
+                // 落进子会话 meta（`allocate_agent_session(workspace)` →
+                // `create_new_session(..., cwd, ...)`），子 worker 启动时经
+                // `load_session_workspace` 读 meta.cwd，从而正确解析相对路径并
                 // 以主代理工作区为权限边界（修复子代理"不知道工作区、
-                // 相对路径落到 daemon cwd"的问题）。
+                // 相对路径落到 daemon cwd"的问题）。workspace.txt 已退役。
                 let workspace = params
                     .get("workspace")
                     .and_then(Value::as_str)

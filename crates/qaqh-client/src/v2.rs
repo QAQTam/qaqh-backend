@@ -110,7 +110,7 @@ pub use qaqh_session::session_fact_v2::InterAgentDelivery as ClientV2TeamDeliver
 pub use qaqh_session::session_fact_v2::TeamAgentResidency as ClientV2TeamAgentResidency;
 /// roster 里一个 agent 的快照：`agent_path` 为主键，`nickname` 只是显示辅助。
 pub use qaqh_session::session_fact_v2::TeamAgentSnapshot as ClientV2TeamAgentSnapshot;
-/// agent 生命周期状态（idle / running / interrupted / completed）。
+/// agent 生命周期状态（pending_init / running / waiting_user / interrupted / completed / errored / shutdown / not_found）。
 pub use qaqh_session::session_fact_v2::TeamAgentStatus as ClientV2TeamAgentStatus;
 /// message board 快照（`/team` 的 `board` 字段）。
 pub use qaqh_session::session_fact_v2::TeamBoardSnapshot as ClientV2TeamBoardSnapshot;

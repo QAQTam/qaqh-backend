@@ -72,12 +72,9 @@ pub struct V2EventsQuery {
 
 pub(crate) async fn handle_open_v2(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let request: RingingV2OpenRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(error) => {
@@ -96,11 +93,17 @@ pub(crate) async fn handle_open_v2(
         );
     }
     let client_session_id = random_hex();
+    // 身份由 token 反推：device 的 lease 以 `device_id` 派生身份登记，客户端自报的
+    // `client_instance_id` 降级为纯诊断（不参与任何信任判定）。admin 维持旧行为。
+    let instance_key = match &identity {
+        Identity::Device { device_id, .. } => device_id.clone(),
+        Identity::Admin => request.client_instance_id,
+    };
     state
         .leases
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .open(client_session_id.clone(), request.client_instance_id);
+        .open(client_session_id.clone(), instance_key);
     let response = RingingV2OpenResponse {
         schema: RINGING_SCHEMA.into(),
         version: RINGING_V2_VERSION,
@@ -117,15 +120,13 @@ pub(crate) async fn handle_open_v2(
             service: true,
             content: true,
             single_stream: true,
+            pairing: true,
         },
     };
     json_response(StatusCode::OK, &response)
 }
 
 pub(crate) async fn handle_renew_v2(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(session_id) = get_session_id(&headers) else {
         return lease_required_v2();
     };
@@ -153,14 +154,13 @@ pub(crate) async fn handle_renew_v2(State(state): State<AppState>, headers: Head
 
 pub(crate) async fn handle_bootstrap_v2(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
-    let Some(caller) = require_v2_lease(&state, &headers) else {
-        return lease_required_v2();
+    let caller = match require_lease_on_session(&state, &headers, &identity, &session_id) {
+        Ok(caller) => caller,
+        Err(response) => return response,
     };
     if session_id.trim().is_empty() {
         return api_error_response(
@@ -283,14 +283,12 @@ pub(crate) async fn handle_bootstrap_v2(
 /// delivered on the per-seed single stream as `ProjectionPayload::TeamDelta`.
 pub(crate) async fn handle_team_snapshot_v2(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
-    if require_v2_lease(&state, &headers).is_none() {
-        return lease_required_v2();
+    if let Err(response) = require_lease_on_session(&state, &headers, &identity, &session_id) {
+        return response;
     }
     if session_id.trim().is_empty() {
         return api_error_response(
@@ -345,14 +343,12 @@ pub(crate) async fn handle_team_snapshot_v2(
 /// canonical 与 wire 两种形态，故宿主直接透传即可。
 pub(crate) async fn handle_pending_approvals_v2(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
-    if require_v2_lease(&state, &headers).is_none() {
-        return lease_required_v2();
+    if let Err(response) = require_lease_on_session(&state, &headers, &identity, &session_id) {
+        return response;
     }
     if session_id.trim().is_empty() {
         return api_error_response(
@@ -400,13 +396,108 @@ pub(crate) async fn handle_pending_approvals_v2(
             })
         });
 
-    json_response(
-        StatusCode::OK,
-        &serde_json::json!({
-            "pending_permission": pending_permission.unwrap_or(serde_json::Value::Null),
-            "pending_interaction": pending_interaction.unwrap_or(serde_json::Value::Null),
-        }),
+    let pending_json = serde_json::json!({
+        "pending_permission": pending_permission.unwrap_or(serde_json::Value::Null),
+        "pending_interaction": pending_interaction.unwrap_or(serde_json::Value::Null),
+    });
+    // admin（桌面宿主）：维持现状透传 canonical id（宿主已在壳侧做映射）。
+    if identity.is_admin() {
+        return json_response(StatusCode::OK, &pending_json);
+    }
+    // device（原生 app，半可信）：canonical id 不出 daemon，改发不透明 challenge。
+    match state.challenges.issue_views(&session_id, &pending_json) {
+        Ok(views) => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "challenges": views }),
+        ),
+        Err(code) => api_error_response(
+            StatusCode::BAD_GATEWAY,
+            code,
+            "approval projection failed",
+        ),
+    }
+}
+
+/// `POST /ringing/v2/sessions/{seed}/approvals/respond`（S5）— device 侧审批应答。
+///
+/// body：`{ "challenge_id": str, "decision": str, "payload": {...} }`。
+/// device 身份：一次性消费 challenge（scope = 本会话）→ `command_for` 映射回 canonical
+/// 命令 → 进 `execute_command`（保留「审批应答不受 driver 门控」语义）。
+/// **admin 不使用本端点**——桌面宿主维持 canonical 透传命令通道。
+///
+/// spec §9 描述了本流程但未定 wire 端点，此为本 spec 的补充设计。
+#[derive(Deserialize)]
+pub(crate) struct ApprovalRespondRequest {
+    challenge_id: String,
+    decision: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+pub(crate) async fn handle_approval_respond_v2(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = require_scope(&identity, Scope::Interact) {
+        return response;
+    }
+    let caller = match require_lease_on_session(&state, &headers, &identity, &session_id) {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    let request: ApprovalRespondRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return api_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                &format!("invalid approval respond request: {error}"),
+            );
+        }
+    };
+    let challenge = match state.challenges.consume(&request.challenge_id, &session_id) {
+        Ok(challenge) => challenge,
+        Err(code) => {
+            return api_error_response(StatusCode::FORBIDDEN, code, "challenge rejected");
+        }
+    };
+    let mut command = match challenge::command_for(&challenge, &request.decision, &request.payload)
+    {
+        Ok(command) => command,
+        Err(code) => {
+            return api_error_response(
+                StatusCode::BAD_REQUEST,
+                code,
+                "invalid approval decision",
+            );
+        }
+    };
+    // §9.5 远程 `trust_folder` 默认拒：非 admin 提交的永久扩界降级为单次放行。
+    if !identity.is_admin()
+        && let qaqh_ringing::RingingCommand::Tool(
+            qaqh_domain::ToolCommand::ToolPermissionRespond { trust_folder, .. },
+        ) = &mut command
+    {
+        *trust_folder = false;
+    }
+    let instance_key = state
+        .leases
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .instance_for_session(&caller)
+        .unwrap_or_default();
+    let envelope = RingingV2CommandEnvelope::new(
+        qaqh_session::canonical::generate_ulid(),
+        instance_key,
+        command,
     )
+    .with_client_session_id(caller)
+    .with_session_id(&session_id);
+    let (status, ack) = execute_command(&state, &headers, &identity, envelope).await;
+    json_response(status, &ack)
 }
 
 /// 从 canonical interaction 的 `request` 取回 permission 详情正文，映射回旧 v1
@@ -455,16 +546,15 @@ fn interaction_body_value(state: &AppState, request: &ContentValue) -> Option<se
 /// 已硬切删除。reset 在单流上只发一次。
 pub(crate) async fn handle_events_v2(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Query(query): Query<V2EventsQuery>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
-    if require_v2_lease(&state, &headers).is_none() {
-        return lease_required_v2();
-    }
+    let caller = match require_lease_on_session(&state, &headers, &identity, &session_id) {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
     if session_id.trim().is_empty() {
         return api_error_response(
             StatusCode::BAD_REQUEST,
@@ -486,10 +576,34 @@ pub(crate) async fn handle_events_v2(
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+    // 设备吊销（`revoke_device` 摘 lease）必须**杀掉在途 SSE**（spec §6）：订阅本身
+    // 与 lease 生命周期无关，故循环内每个事件前复查租约存活；失效即下发终止帧并
+    // 断流。与 `sse.rs::handle_timeline_events` 的逐事件存活检查同款。
+    let leases = state.leases.clone();
+    let stream_session = session_id.clone();
     tokio::spawn(async move {
         loop {
             match subscription.next().await {
                 V2StreamItem::Event(event) => {
+                    if !leases
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .is_active_session(&caller)
+                    {
+                        log::info!(
+                            "[ringing-v2] lease {caller} revoked; terminating in-flight SSE for {stream_session}"
+                        );
+                        let frame = Event::default().event("ringing.stream_terminated").data(
+                            serde_json::json!({
+                                "code": "revoked",
+                                "session_id": stream_session.as_str(),
+                                "message": "client lease revoked or expired; reconnect after re-auth",
+                            })
+                            .to_string(),
+                        );
+                        let _ = tx.send(Ok(frame)).await;
+                        break;
+                    }
                     let data =
                         serde_json::to_string(event.as_ref()).unwrap_or_else(|_| "{}".into());
                     let frame = Event::default()
@@ -635,6 +749,7 @@ pub(crate) fn reclaim_dead_driver_seats(state: &AppState) {
 async fn forward_driver_command(
     state: &AppState,
     headers: &HeaderMap,
+    identity: &Identity,
     session_id: &str,
     caller: &str,
     command: qaqh_domain::ControlCommand,
@@ -652,18 +767,16 @@ async fn forward_driver_command(
     )
     .with_client_session_id(caller)
     .with_session_id(session_id);
-    let (status, ack) = execute_command(state, headers, envelope).await;
+    let (status, ack) = execute_command(state, headers, identity, envelope).await;
     json_response(status, &ack)
 }
 
 pub(crate) async fn handle_driver_claim_v2(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
     };
@@ -712,6 +825,7 @@ pub(crate) async fn handle_driver_claim_v2(
     let dispatch = forward_driver_command(
         &state,
         &headers,
+        &identity,
         &session_id,
         &caller,
         qaqh_domain::ControlCommand::DriverClaim {
@@ -737,12 +851,10 @@ pub(crate) async fn handle_driver_claim_v2(
 
 pub(crate) async fn handle_driver_release_v2(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(caller) = require_v2_lease(&state, &headers) else {
         return lease_required_v2();
     };
@@ -773,6 +885,7 @@ pub(crate) async fn handle_driver_release_v2(
     let dispatch = forward_driver_command(
         &state,
         &headers,
+        &identity,
         &session_id,
         &caller,
         qaqh_domain::ControlCommand::DriverRelease {
@@ -871,13 +984,13 @@ fn driver_admission(
 
 pub(crate) async fn handle_command_v2(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
+    // scope 按命令分级，在 `execute_command` 内裁决（`SessionAttach` 仅需 view），
+    // 故此处不设路由级 scope 门。
     let mut envelope: RingingV2CommandEnvelope = match serde_json::from_slice(&body) {
         Ok(envelope) => envelope,
         Err(error) => {
@@ -1010,7 +1123,7 @@ pub(crate) async fn handle_command_v2(
     }
     // 进程内命令入口直调（spec 阶段 1.2）：v2 信封直接进引擎，
     // 不再序列化成 v1 信封 JSON 绕已无路由的 v1 handler。
-    let (status, ack) = execute_command(&state, &headers, envelope).await;
+    let (status, ack) = execute_command(&state, &headers, &identity, envelope).await;
     json_response(status, &ack)
 }
 
@@ -1149,9 +1262,6 @@ pub(crate) async fn handle_command_status_v2(
     headers: HeaderMap,
     Path(command_id): Path<String>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(session_id) = get_session_id(&headers) else {
         return api_error_response(
             StatusCode::UNAUTHORIZED,
@@ -1191,6 +1301,66 @@ fn lease_required_v2() -> Response {
     )
 }
 
+fn forbidden_not_owner(session_id: &str) -> Response {
+    api_error_response(
+        StatusCode::FORBIDDEN,
+        "forbidden_not_owner",
+        &format!("lease does not own session {session_id}"),
+    )
+}
+
+/// 解析调用方 lease，并**绑定到身份**：device 身份的 lease 必须由本设备建立
+/// （lease 的 `client_instance_id` == 本 token 反推的 `device_id`）——否则即便
+/// 提供了他人的有效 `client_session_id` 也视为无 lease。堵住「拿到别人的 cs 即
+/// 可冒充其 lease」（A3：身份由 token 反推）。admin 维持旧行为（自报 instance）。
+pub(crate) fn caller_lease_bound_to_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    identity: &Identity,
+) -> Option<String> {
+    let caller = require_v2_lease(state, headers)?;
+    match identity {
+        Identity::Admin => Some(caller),
+        Identity::Device { device_id, .. } => {
+            let bound = state
+                .leases
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .instance_for_session(&caller)
+                .as_deref()
+                == Some(device_id.as_str());
+            bound.then_some(caller)
+        }
+    }
+}
+
+/// 会话归属校验（S1）：无 lease → 401 `lease_required`；有 lease 但非归属 →
+/// 403 `forbidden_not_owner`。admin 豁免（桌面壳 / CLI / TUI / 探针行为不变）。
+///
+/// 归属只由 `SessionAttach` 建立；移动端读某 seed 前须先 attach。
+fn require_lease_on_session(
+    state: &AppState,
+    headers: &HeaderMap,
+    identity: &Identity,
+    session_id: &str,
+) -> Result<String, Response> {
+    let Some(caller) = caller_lease_bound_to_identity(state, headers, identity) else {
+        return Err(lease_required_v2());
+    };
+    if identity.is_admin() {
+        return Ok(caller);
+    }
+    let owns = state
+        .leases
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .owns_session(&caller, session_id);
+    if !owns {
+        return Err(forbidden_not_owner(session_id));
+    }
+    Ok(caller)
+}
+
 fn v2_hub_error_response(error: qaqh_runtime::ringing::V2HubError) -> Response {
     match error {
         qaqh_runtime::ringing::V2HubError::SessionMissing(_) => api_error_response(
@@ -1219,7 +1389,7 @@ fn v2_hub_error_response(error: qaqh_runtime::ringing::V2HubError) -> Response {
     }
 }
 
-fn api_error_response(status: StatusCode, code: &str, message: &str) -> Response {
+pub(crate) fn api_error_response(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],
@@ -1232,7 +1402,7 @@ fn api_error_response(status: StatusCode, code: &str, message: &str) -> Response
         .into_response()
 }
 
-fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
+pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],

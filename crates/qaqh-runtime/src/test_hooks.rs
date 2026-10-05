@@ -3,8 +3,8 @@
 //! These switches are intentionally environment based: the daemon is launched
 //! as a child process by PTY harnesses, so env is the only configuration
 //! channel that reaches the real worker without adding test fields to the wire
-//! protocol. The registry is documented in
-//! `docs/current/architecture.md`.
+//! protocol. The daemon-side registry lives in
+//! `crates/qaqh-daemon/src/axum_server/axum_impl/test_hooks.rs`.
 
 /// Whether the deterministic plan-review trigger is enabled.
 ///

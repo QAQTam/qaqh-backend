@@ -49,9 +49,9 @@ fn freeze(context: &[Message]) -> Vec<String> {
 }
 
 /// 带真实工具环的首轮对话：user → assistant(tool_use) → tool result。
-/// 注意不要手动 push_system：`create_session` 已预置 backend prompt（lifecycle.rs:268），
+/// 注意不要手动 push_system：`create_session` 已预置 backend prompt（lifecycle.rs:426），
 /// 而 resume 重放时 `from_messages` 会丢弃第一条之后的非保护 system 消息
-/// （store.rs:1155-1182 的历史 bug 防护）——多 push 的 system 会在恢复后消失。
+/// （store.rs:1293-1313 的历史 bug 防护）——多 push 的 system 会在恢复后消失。
 fn session_turn_1(agent: &mut AgentState) {
     agent.msg.push_user("hello, look up the deploy color");
     let assistant = Message {
@@ -244,7 +244,7 @@ fn prefix_cache_consistency_across_restarts() {
         let mut agent = resume_agent(&root, &ws, &session_id);
         // [RESTORE] 修复是**有意的恢复语义**：把丢失的结果物化为失败占位，
         // 因此此处不要求与崩溃前逐字节一致；要求的是：
-        // 1) 修复不增删消息数量；
+        // 1) 修复为孤儿 tool_use 补一条合成失败结果（消息数比崩溃前多一条）；
         // 2) 修复后（第二次 build_context 起）上下文逐字节稳定；
         // 3) 修复已持久化——再重启不再二次改写。
         let after_resume = freeze(&agent.build_context());

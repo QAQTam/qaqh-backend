@@ -63,6 +63,7 @@ use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::RingingHub;
 use crate::agent::state::agent::AgentState;
+use qaqh_session::session_fact_v2::{ActorKind, ActorRef};
 
 pub fn ringing_command_is_interrupt(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> bool {
     matches!(
@@ -231,6 +232,11 @@ impl Loop {
             agent.session.resume_session.clone().unwrap_or_default()
         };
         let paced_emitter = PacedEmitter::new(session_id, event_tx.clone(), writer_dead.clone());
+        // One command scope, both lanes: the actor's canonical ledger reads the
+        // emitter's causation cell, so a fact appended while a command is being
+        // dispatched names that command (which is what folds its receipt).
+        let mut agent = agent;
+        agent.bind_fact_causation(paced_emitter.causation_handle());
 
         let mut flow = qaqh_message::ContextFlow::new();
         qaqh_message::builtin::register_all(&mut flow);
@@ -582,12 +588,13 @@ impl Loop {
     // Pending queue drain
     // ═══════════════════════════════════════════════════
 
-    /// Process all queued commands from the channel.
+    /// Process all queued commands: first any commands left in
+    /// `deferred_ringing`, then everything currently in the channel.
     ///
-    /// Interrupt-type commands (Cancel, ResumeSession, NewSession, Shutdown)
-    /// set the cancel token and queue a pending action. Ringing commands have
-    /// already been acknowledged by the daemon, so commands received during a
-    /// session switch are retained and dispatched once the switch completes.
+    /// While the `pending` shutdown flag is set, incoming Ringing commands are
+    /// pushed onto `deferred_ringing` instead of dispatched inline. Ringing
+    /// commands have already been acknowledged by the daemon, so they are
+    /// retained rather than silently discarded.
     fn drain_pending(&mut self) {
         self.dispatch_deferred_ringing();
         while let Ok(cmd) = self.cmd_rx.try_recv() {
@@ -631,19 +638,35 @@ impl Loop {
         }
 
         let command_session_id = env.session_id.clone();
+        let actor = actor_ref_from_env(&env);
 
         match env.command {
             RingingCommand::Control(command) => {
-                self.on_control(command, &command_id, expected_revision);
+                self.on_control(command, &command_id, expected_revision, actor.clone());
             }
             RingingCommand::Conversation(command) => {
                 self.on_conversation(command, &command_id, &command_session_id);
             }
             RingingCommand::Tool(command) => {
-                self.on_tool(command, &command_id);
+                self.on_tool(command, &command_id, actor);
             }
         }
     }
+}
+
+/// 内部信封 `WorkerActor` → canonical `ActorRef`（S6 归因）。`None` 回退现状。
+fn actor_ref_from_env(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> Option<ActorRef> {
+    env.actor.as_ref().map(|actor| ActorRef {
+        kind: match actor.kind.as_str() {
+            "api" => ActorKind::Api,
+            "system" => ActorKind::System,
+            "agent" => ActorKind::Agent,
+            "subagent" => ActorKind::Subagent,
+            _ => ActorKind::User,
+        },
+        id: actor.id.clone(),
+        display_name: actor.display_name.clone(),
+    })
 }
 
 #[cfg(test)]

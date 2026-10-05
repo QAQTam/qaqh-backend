@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use qaqh_config::Config;
 use qaqh_session::SessionManager;
-use qaqh_session::canonical::{CanonicalSessionIdentity, ToolLedger, ToolLedgerError, WriterId};
+use qaqh_session::canonical::{
+    CanonicalSessionIdentity, FactCausation, ToolLedger, ToolLedgerError, WriterId,
+};
 use qaqh_types::SessionMeta;
 
 use super::token_calibration::{
@@ -159,7 +161,6 @@ pub struct AgentState {
     pub config: qaqh_config::Config,
     pub session: SessionMeta,
     pub tool_defs: Vec<qaqh_types::ToolDef>,
-    pub dsml_compat_count: u32,
     pub turn_count: u32,
     /// If true, skip all disk persistence (subagent disposable mode).
     pub ephemeral: bool,
@@ -216,6 +217,9 @@ pub struct AgentState {
     /// Seed that owns `tool_ledger`; guards against stale reuse when the
     /// same `AgentState` is rebound to another session.
     tool_ledger_session: Option<String>,
+    /// In-flight command scope, shared with the owning Loop's emitter
+    /// (`Loop::from_channels` binds it) and read by every fact append.
+    fact_causation: FactCausation,
     /// Loop bookkeeping queue (PR-1-5 / B6): title / context-stats / mode /
     /// usage / skills writes, drained by [`Self::drain_persist_ops`].
     pub pending_meta_ops: Vec<MetaOp>,
@@ -243,7 +247,6 @@ impl AgentState {
             config,
             session: SessionMeta::default(),
             tool_defs: Vec::new(),
-            dsml_compat_count: 0,
             turn_count: 0,
             ephemeral: false,
             timeline_turn_count: 0,
@@ -260,6 +263,7 @@ impl AgentState {
             session_manager: SessionManager::try_global(),
             tool_ledger: None,
             tool_ledger_session: None,
+            fact_causation: FactCausation::new(),
             pending_meta_ops: Vec::new(),
             endpoint_spec: None,
         };
@@ -297,7 +301,7 @@ impl AgentState {
                 std::process::id(),
                 self.session.session_id
             ));
-            let ledger = ToolLedger::open(
+            let mut ledger = ToolLedger::open(
                 &session_dir,
                 identity.session_id,
                 identity.log_id,
@@ -305,11 +309,18 @@ impl AgentState {
                 now_ms,
                 tool_ledger_lease_ms(),
             )?;
+            ledger.bind_causation(self.fact_causation.clone());
             self.tool_ledger = Some(ledger);
             self.tool_ledger_session = Some(self.session.session_id.clone());
         }
 
         Ok(self.tool_ledger.as_mut())
+    }
+
+    /// Share the owning Loop's in-flight command scope with this actor, so the
+    /// facts it appends carry the same causation as its Ringing events.
+    pub(crate) fn bind_fact_causation(&mut self, causation: FactCausation) {
+        self.fact_causation = causation;
     }
 
     /// Push the image capability snapshot for the current config into the
@@ -667,7 +678,7 @@ impl AgentState {
         context
     }
 
-    /// Refresh the transient catalog slot without writing it to history.
+    /// Refresh the in-memory skill catalog without writing it to history.
     pub fn inject_catalog(&mut self, workspace: &str) {
         self.skills.set_workspace(Path::new(workspace));
         self.skills.refresh();
@@ -1328,7 +1339,7 @@ mod tests {
         qaqh_workspace::runtime::init_tools("tool-mode-test", &agent_tool_registrars(), vec![]);
         let mut agent = AgentState::new(qaqh_config::Config::default());
 
-        // minimal → 固定档位（MINIMAL_TOOLS 8 个）
+        // minimal → 固定档位（MINIMAL_TOOLS 7 个）
         agent.apply_tool_mode("minimal", &[]);
         assert_eq!(agent.session.tool_mode, "minimal");
         assert!(agent.session.custom_tools.is_empty());
@@ -1437,7 +1448,7 @@ mod tests {
         );
     }
 
-    /// 验证回传给模型的工具 schema（`agent.tool_defs`，engine_turn.rs L1285
+    /// 验证回传给模型的工具 schema（`agent.tool_defs`，engine_turn.rs L1622
     /// `tools = Some(ctx.agent.tool_defs.clone())`）在极限档位下是**精确等于**
     /// 档位集合——不是「全量放送 + 执行层黑名单」。档位外的任何工具绝不能
     /// 出现在回传 schema 里。附带打印每个档位实际发出的 tool 名便于观测。

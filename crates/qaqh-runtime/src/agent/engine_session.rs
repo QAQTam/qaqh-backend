@@ -54,8 +54,8 @@ impl SessionEngine {
             let saved_mode = agent.session.mode;
             qaqh_workspace::runtime::set_mode(saved_mode);
 
-            // SessionRestored is emitted by the caller (Loop::dispatch)
-            // since it needs access to the emitter.
+            // legacy SessionRestored has been retired; Ringing restore is
+            // handled by the daemon bootstrap snapshot, not emitted here.
             let loaded = INITIAL_LOAD_COUNT.min(agent.msg.turn_count());
             log::info!(
                 "[SESSION] restored, {} turns (has_more={})",
@@ -87,12 +87,12 @@ impl SessionEngine {
     /// 唯一实现，取所有权避免逐字段 clone）。
     ///
     /// 2026-08-25 复盘（docs/current/architecture.md）：此前手工逐字段
-    /// 拷贝漏掉 `auto_compact_threshold`，压缩 gate（engine_turn.rs:910）读的
+    /// 拷贝漏掉 `auto_compact_threshold`，压缩 gate（engine_turn.rs:1326）读的
     /// 又是 `agent.config.auto_compact_threshold` → 活会话永远按旧阈值提前
     /// 压缩，而 UI/磁盘均已是新值（三方不一致，极难排查）。
     /// 单测 `applies_all_hot_fields` 锁定字段清单：**新增热同步字段时必须
     /// 同步补本测试断言**，否则该字段在运行中会话上静默不生效。
-    /// （P2-D1 落地 watch + `From<&Config>` 后本函数将被整体快照赋值取代。）
+    /// （P2-D1 已落地 watch；待 `From<&Config>` 整体快照赋值落地后本函数将被取代。）
     pub(crate) fn apply_config(
         cfg: qaqh_config::Config,
         agent: &mut crate::agent::state::agent::AgentState,

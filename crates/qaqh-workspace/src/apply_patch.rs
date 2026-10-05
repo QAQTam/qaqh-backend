@@ -97,6 +97,7 @@ impl ToolProjection for ApplyPatchOutput {
             &self.model_text,
             None,
         )
+        .with_lines(self.insertions as u32, self.deletions as u32)
     }
 }
 
@@ -316,7 +317,7 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
         ),
         EngineError::PathOutsideWorkspace { .. } => (
             "path_outside_workspace",
-            "Every patch path must resolve inside the workspace root; '..' escapes and absolute paths outside the workspace are rejected.".to_string(),
+            "The patch path lexically resolved inside the workspace but escapes it via a symbolic link; such hidden escapes are rejected. Genuinely cross-workspace targets (absolute paths / '..' escapes) are allowed after permission approval at admission.".to_string(),
         ),
         EngineError::SymlinkTarget { .. } => (
             "symlink_target",
@@ -339,10 +340,10 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_typed(ApplyPatchTool);
 }
 
-/// Compatibility entry retained until `confirm_apply` is typed (Wave 6).
+/// Compatibility entry retained for existing in-process tests.
 ///
 /// Production registration uses [`ApplyPatchTool`] directly; this bridge keeps
-/// the existing in-process call shape for confirm-apply and older tests.
+/// the existing in-process call shape for older tests.
 #[cfg(test)]
 pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
     use crate::file_mutate::ambient_tool_context;
@@ -757,8 +758,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["apply_patch"].legacy.is_none(),
-            "apply_patch still has legacy executor"
+            manager.builtins.contains_key("apply_patch"),
+            "apply_patch must be on the typed execution surface"
         );
 
         let (_dir, workspace) = repo_with_commit(&[("a.txt", "old\n")]);
@@ -776,6 +777,11 @@ mod tests {
             other => panic!("unexpected apply_patch display body: {other:?}"),
         };
         assert_eq!(display_text, result.model_text());
+        assert_eq!(
+            (display.lines_added, display.lines_removed),
+            (1, 1),
+            "apply_patch 终态行差必须落到展示投影（无 diff 文本可解析）"
+        );
     }
 
     #[cfg(unix)]

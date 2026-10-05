@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use qaqh_domain::AskAnswer;
-use qaqh_session::canonical::{generate_ulid, sha256_content_hash};
+use qaqh_session::canonical::{causation_for_command, generate_ulid, sha256_content_hash};
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, ContentHash, ContentRef, EventId, InteractionDecision, InteractionKind,
     InteractionRequested, InteractionResolved,
@@ -392,6 +392,7 @@ impl TurnEngine {
         interaction_id: &str,
         decision: &str,
         causation_id: Option<&str>,
+        actor: Option<ActorRef>,
     ) -> Result<(), TurnActorError> {
         // See `structured_interaction_decision`: the wire decision strings map
         // onto the canonical enum so replays can return a typed verdict.
@@ -411,17 +412,16 @@ impl TurnEngine {
             interaction_id: canonical_interaction_id(interaction_id),
             decision_ref: ContentRef::new(sha256_content_hash(&decision_bytes)),
             decision: structured_interaction_decision(decision),
-            resolved_by: ActorRef {
+            // 归因（S6）：daemon 依鉴权身份填 actor；缺省回退本地 user（现状语义）。
+            resolved_by: actor.unwrap_or(ActorRef {
                 kind: ActorKind::User,
                 id: "user".into(),
                 display_name: None,
-            },
+            }),
             resolution_seq: 1,
             resolved_at_ms: now,
         };
-        let causation_id = causation_id
-            .filter(|value| is_ulid(value))
-            .map(EventId::new);
+        let causation_id = causation_id.and_then(causation_for_command);
         ledger
             .append_interaction_resolved_with_causation(
                 EventId::new(generate_ulid()),
@@ -653,6 +653,7 @@ impl TurnEngine {
         call_id: &str,
         command_id: &str,
         admitted: Option<AdmittedTool>,
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -677,7 +678,7 @@ impl TurnEngine {
             "rejected"
         };
         if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, call_id, decision, Some(command_id))
+            Self::record_interaction_resolution(ctx.agent, call_id, decision, Some(command_id), actor)
         {
             log::error!("[TURN] failed to persist permission resolution {call_id}: {error}");
         }
@@ -767,6 +768,7 @@ impl TurnEngine {
         ask_id: &str,
         command_id: &str,
         answers: &[AskAnswer],
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -800,7 +802,7 @@ impl TurnEngine {
             }
         };
         if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, ask_id, "answered", Some(command_id))
+            Self::record_interaction_resolution(ctx.agent, ask_id, "answered", Some(command_id), actor)
         {
             log::error!("[TURN] failed to persist ask resolution {ask_id}: {error}");
         }
@@ -853,6 +855,7 @@ impl TurnEngine {
         approved: bool,
         message: &str,
         autonomous: bool,
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -885,6 +888,7 @@ impl TurnEngine {
             call_id,
             if approved { "approved" } else { "rejected" },
             Some(command_id),
+            actor,
         ) {
             log::error!("[TURN] failed to persist plan resolution {call_id}: {error}");
         }
@@ -984,6 +988,7 @@ impl TurnEngine {
         tool: &mut ToolEngine,
         ask_id: &str,
         command_id: &str,
+        actor: Option<ActorRef>,
     ) -> Outcome {
         // H1/H2：悬空状态属于其它会话时直接丢弃。
         if self.drop_stale_suspension(ctx) {
@@ -1002,7 +1007,7 @@ impl TurnEngine {
             return Outcome::Handled;
         }
         if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed", Some(command_id))
+            Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed", Some(command_id), actor)
         {
             log::error!("[TURN] failed to persist ask dismissal {ask_id}: {error}");
         }
@@ -1144,7 +1149,7 @@ impl TurnEngine {
 
     /// Run compact inline during a gate lap boundary.
     /// Builds the prompt (engine_compact), calls LLM inline (blocking),
-    /// applies result, and streams CompactDelta events to the frontend.
+    /// applies result, and streams CompactProgress events to the frontend.
     /// After compact, the current turn continues normally.
     fn run_auto_compact(ctx: &mut RingContext) -> bool {
         let (prompt, kept, head, provider, compact_id) =
@@ -1889,23 +1894,6 @@ impl TurnEngine {
             (state.turn_id, state.usage)
         })
     }
-}
-
-pub(crate) fn is_ulid(value: &str) -> bool {
-    value.len() == 26
-        && value.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'0'..=b'9'
-                    | b'A'..=b'H'
-                    | b'J'
-                    | b'K'
-                    | b'M'
-                    | b'N'
-                    | b'P'..=b'T'
-                    | b'V'..=b'Z'
-            )
-        })
 }
 
 #[cfg(test)]

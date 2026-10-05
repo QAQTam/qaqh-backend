@@ -95,7 +95,9 @@ impl From<&TodoItem> for TodoItemView {
 pub struct TodoWriteItemArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
-    pub title: String,
+    /// 省略 = 沿用同 `id` 既有条目的标题（仅既有 id 成立；新条目必填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub status: TodoStatusView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -312,13 +314,23 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
     let mut store = read_store_for(session_id)?;
     let incoming = parse_write_items(args)?;
 
-    // ID 解析三态：显式引用（必须已存在）→ 原样保留；缺省 → next_id 高水位
-    // 新分配。显式引用未知 ID 是硬错误（覆写语义下引用不存在的 ID 只能是
-    // 模型幻觉，放行会静默产生永久孤儿号）；同一次覆写内重复引用也拒绝。
+    // ID 解析三态：显式引用**已存在**的 id → 原样保留；缺省 → next_id 高水位
+    // 新分配；显式引用**未知** id → 按新建处理（分配新号）并把 remap 写进回执。
+    //
+    // 未知 id 早先是硬错误（"防模型幻觉产生孤儿号"），但实测这是最高频的失败：
+    // 模型把「想新建」写成「引用一个不存在的号」，整次覆写被拒、计划原地踏步。
+    // 现在降级为可恢复的 remap——孤儿号的风险由「一律新分配」消掉，模型从回执
+    // 的 assigned 列表（及 message 里列出的 remap 记录）就能拿到真实 ID。同一次覆写内重复引用仍然拒绝
+    // （那是模型自己前后矛盾，静默去重只会掩盖问题）。
     let mut next_items: Vec<TodoItem> = Vec::with_capacity(incoming.len());
     let mut assigned: Vec<String> = Vec::new();
+    let mut remapped: Vec<String> = Vec::new();
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (index, parsed) in incoming.into_iter().enumerate() {
+        let known = parsed
+            .id
+            .as_ref()
+            .is_some_and(|id| store.items.iter().any(|item| item.id == *id));
         let id = match parsed.id {
             Some(id) => {
                 if !seen_ids.insert(id.clone()) {
@@ -328,14 +340,13 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
                         "Each id may appear at most once per write.",
                     ));
                 }
-                if store.items.iter().any(|item| item.id == id) {
+                if known {
                     id
                 } else {
-                    return Err(crate::json_err_string(
-                        "not_found",
-                        format!("items[{index}] references unknown id {id}"),
-                        "Omit \"id\" to assign a new one, or use todo_list to inspect existing IDs.",
-                    ));
+                    let fresh = alloc_id(&mut store);
+                    remapped.push(format!("{id}->{fresh}"));
+                    assigned.push(fresh.clone());
+                    fresh
                 }
             }
             None => {
@@ -344,9 +355,25 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
                 id
             }
         };
+        // 标题继承只对**既有**条目成立：新条目没标题就是没标题，不能凭空捏造。
+        let title = match parsed.title {
+            Some(title) => title,
+            None => store
+                .items
+                .iter()
+                .find(|item| item.id == id)
+                .map(|item| item.title.clone())
+                .ok_or_else(|| {
+                    crate::json_err_string(
+                        "invalid_input",
+                        format!("items[{index}].title is required for new items"),
+                        "Send a title for new tasks; omit it only when re-referencing an existing id.",
+                    )
+                })?,
+        };
         next_items.push(TodoItem {
             id,
-            title: parsed.title,
+            title,
             description: parsed.description,
             status: parsed.status,
             evidence: parsed.evidence,
@@ -363,13 +390,18 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
         .iter()
         .find(|item| item.status == TodoStatus::InProgress)
         .map(|item| item.id.clone());
+    let remap_note = if remapped.is_empty() {
+        String::new()
+    } else {
+        format!(" Unknown ids reassigned: {}.", remapped.join(", "))
+    };
     Ok(TodoWriteOutput {
         replaced,
         total: store.items.len(),
         assigned: assigned.clone(),
         current_id,
         message: format!(
-            "Plan updated: {} item(s) ({} new).",
+            "Plan updated: {} item(s) ({} new).{remap_note}",
             store.items.len(),
             assigned.len()
         ),
@@ -694,7 +726,7 @@ impl TypedTool for TodoWriteTool {
     fn descriptor(&self) -> ToolDescriptor {
         descriptor(
             "todo_write",
-            "Replace the whole task list (full-replace). Each item needs title+status; keep ids to preserve items; exactly one in_progress.",
+            "Replace the whole task list (full-replace). Each item needs status; keep ids to preserve items; exactly one in_progress. `title` may be omitted when `id` references an existing task.",
             super::split::todo_write_schema(),
             serde_json::to_value(schemars::schema_for!(TodoWriteOutput))
                 .expect("todo_write output schema"),

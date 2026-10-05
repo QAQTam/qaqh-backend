@@ -20,7 +20,7 @@ pub use qaqh_domain::{
     AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef, ControlCommand,
     ControlEvent, ConversationCommand, ConversationEvent, ConversationInputPurpose,
     ConversationMode, DashboardDocument, DashboardSnapshot as DomainDashboardSnapshot,
-    DashboardTask, Delivery, DomainError, ErrorScope, ImageBlock, NoticeLevel, PermissionCategory,
+    DashboardTask, DomainError, ErrorScope, ImageBlock, NoticeLevel, PermissionCategory,
     PermissionRisk, PlanReviewItem, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
     SessionActivity, SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus,
     TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
@@ -30,9 +30,8 @@ pub use qaqh_domain::{
     ToolEvent,
 };
 pub use qaqh_ringing::{
-    CLIENT_SESSION_HEADER, ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse,
-    MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommand, RingingCommandAckStatus,
-    RingingCommandState, is_safe_integer,
+    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommand,
+    RingingCommandAckStatus, RingingCommandState, is_safe_integer,
 };
 pub use qaqh_types::{
     SessionListEntry, SessionMeta, ToolContinuation, ToolError, ToolImage, ToolModelPayload,

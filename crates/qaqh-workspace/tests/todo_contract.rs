@@ -64,8 +64,11 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
     );
     // v4：条目内 status 必填（写即状态——in_progress 显式告知载体）；
     // id/evidence/description 可选（QAQ 增强字段保留）。
+    // title 自 2026-10-04 起也降为可选：带既有 id 时省略 = 沿用原标题，
+    // 压掉实测最高频的「只想翻状态却漏抄标题」整次失败。
     let write_item = &write.function.parameters["properties"]["items"]["items"];
-    assert_eq!(write_item["required"], json!(["title", "status"]));
+    assert_eq!(write_item["required"], json!(["status"]));
+    assert!(write_item["properties"]["title"].is_object());
     assert_eq!(
         write_item["properties"]["status"]["enum"],
         json!(["pending", "in_progress", "completed", "cancelled"])
@@ -151,7 +154,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let create = qaqh_workspace::execution::execute_with_context(
         "todo_write",
-        "",
         &serde_json::json!({"items": [
             {"title": "Working", "description": "item 0", "status": "pending"},
             {"title": "Done", "description": "item 1", "status": "pending"},
@@ -179,7 +181,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let working = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        "",
         r#"{"id":"T1","status":"in_progress"}"#,
         "todo-working",
         None,
@@ -204,7 +205,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let completed = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        "",
         r#"{"id":"T2","status":"completed","evidence":"verified"}"#,
         "todo-completed",
         None,
@@ -218,7 +218,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let cancelled = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        "",
         r#"{"id":"T3","status":"cancelled"}"#,
         "todo-cancelled",
         None,
@@ -232,7 +231,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let list = qaqh_workspace::execution::execute_with_context(
         "todo_list",
-        "",
         r#"{}"#,
         "todo-list",
         None,

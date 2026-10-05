@@ -9,6 +9,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
+use qaqh_session::canonical::FactCausation;
+
 use super::types::Emitter;
 use super::types::WriterEvent;
 
@@ -19,7 +21,7 @@ pub struct PacedEmitter {
     session_id: Arc<Mutex<String>>,
     tx: mpsc::SyncSender<WriterEvent>,
     writer_dead: Arc<AtomicBool>,
-    causation: Arc<Mutex<Option<String>>>,
+    causation: FactCausation,
 }
 
 impl PacedEmitter {
@@ -32,23 +34,26 @@ impl PacedEmitter {
             session_id: Arc::new(Mutex::new(session_id.into())),
             tx,
             writer_dead,
-            causation: Arc::new(Mutex::new(None)),
+            causation: FactCausation::new(),
         }
     }
 
     /// 进入一个命令执行的作用域：期间 `emit_domain` 产出的事件携带
     /// `causation_id`。返回的 guard 在 Drop 时恢复上一个作用域（支持嵌套）。
     pub fn enter_causation(&self, causation: Option<&str>) -> CausationGuard {
-        let previous = {
-            let mut slot = self.causation.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = slot.clone();
-            *slot = causation.map(str::to_string);
-            previous
-        };
+        let previous = self.causation.current();
+        self.causation.set(causation.map(str::to_string));
         CausationGuard {
             slot: self.causation.clone(),
             previous,
         }
+    }
+
+    /// The scope cell itself. The session actor's canonical ledger is bound to
+    /// this same cell so the facts a dispatch appends carry the command id its
+    /// events already carry — one scope, both lanes.
+    pub fn causation_handle(&self) -> FactCausation {
+        self.causation.clone()
     }
 
     /// 同步当前会话 seed。会话创建/恢复（含 auto-create、worker 内切换）
@@ -61,14 +66,13 @@ impl PacedEmitter {
 
 /// 命令作用域 guard：Drop 时恢复进入前的 causation。
 pub struct CausationGuard {
-    slot: Arc<Mutex<Option<String>>>,
+    slot: FactCausation,
     previous: Option<String>,
 }
 
 impl Drop for CausationGuard {
     fn drop(&mut self) {
-        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
-        *slot = self.previous.take();
+        self.slot.set(self.previous.take());
     }
 }
 
@@ -84,11 +88,7 @@ impl Emitter for PacedEmitter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let causation = self
-            .causation
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let causation = self.causation.current();
         let env = qaqh_ringing::RingingWorkerEventEnvelope::new(
             session_id.as_str(),
             format!("w-{seq}"),
@@ -112,11 +112,7 @@ impl Emitter for PacedEmitter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let causation = self
-            .causation
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let causation = self.causation.current();
         let env = qaqh_ringing::RingingTimelineIntentEnvelope::new(
             session_id.as_str(),
             format!("timeline-{seq}"),
@@ -131,5 +127,39 @@ impl Emitter for PacedEmitter {
 
     fn event_tx(&self) -> Option<std::sync::mpsc::SyncSender<WriterEvent>> {
         Some(self.tx.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The canonical fact writer is bound to this exact scope cell
+    //! (`Loop::from_channels` → `AgentState::bind_fact_causation` →
+    //! `ToolLedger::bind_causation`), which is what lets a command's facts fold
+    //! its own receipt. If the scope ever diverges from the cell, receipts stop
+    //! reaching a terminal state (2026-10-05 incident).
+
+    use super::*;
+
+    #[test]
+    fn causation_handle_sees_every_scope_entry_and_restore() {
+        let (tx, _rx) = mpsc::sync_channel::<WriterEvent>(4);
+        let emitter = PacedEmitter::new("seed", tx, Arc::new(AtomicBool::new(false)));
+        let cell = emitter.causation_handle();
+        assert_eq!(cell.current(), None, "a fresh actor dispatches uncaused");
+
+        let outer = emitter.enter_causation(Some("cmd-outer"));
+        assert_eq!(cell.current().as_deref(), Some("cmd-outer"));
+        {
+            let inner = emitter.enter_causation(Some("cmd-inner"));
+            assert_eq!(cell.current().as_deref(), Some("cmd-inner"));
+            drop(inner);
+        }
+        assert_eq!(
+            cell.current().as_deref(),
+            Some("cmd-outer"),
+            "a nested scope restores its predecessor"
+        );
+        drop(outer);
+        assert_eq!(cell.current(), None, "the outermost scope clears");
     }
 }

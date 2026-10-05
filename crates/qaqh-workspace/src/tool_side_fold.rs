@@ -68,16 +68,14 @@ pub struct StandardPolicy;
 impl ToolResultFoldPolicy for StandardPolicy {
     fn limit_for(&self, tool_name: &str) -> Option<usize> {
         match tool_name {
-            // 透传白名单：清单 / 收据 / 激活说明——模型必须看到全文
-            // （read/edit 更名后再随工具优化，此处同样透传）
-            "apply_patch" | "ask" | "confirm_apply" | "copy_range" | "delete" | "edit" | "glob"
-            | "grep" | "read" | "skills" | "todo" | "todo_create" | "todo_insert" | "todo_list"
-            | "todo_set" | "write" => None,
             // 命令输出
             "exec" => Some(EXEC_CHAR_LIMIT),
             // 大内容
             "read_image" | "web_fetch" | "process" => Some(CONTENT_BEARING_CHAR_LIMIT),
-            // 未知工具：透传（ToolResult 构造时默认 24K 硬顶兜底）
+            // 其余工具（含 todo_write/todo_update/todo_list 等清单/收据/激活说明类）
+            // 一律透传——与默认分支同义。曾经在此手列白名单，但名单与兜底 `None`
+            // 行为完全相同，且一度混入已退役的 todo legacy 名、漏列现役名
+            // （2026-10-05 注释审计 §3.5），已删除；工具名的事实源在 registration.rs。
             _ => None,
         }
     }

@@ -5,17 +5,17 @@
 //! thread and tool execution is synchronous on that actor thread, so
 //! [`RUNTIME_CTX`], [`ACTOR_TOOL_MANAGER`], [`AGENT_MODE`], the sandbox flag and
 //! the tool-result fold policy live per-thread and give concurrent actors real
-//! isolation without `ACTOR_SERIAL`. The process-level [`TOOL_MANAGER`] stays as
+//! isolation without `ACTOR_SERIAL`. 工具运行的显式上下文经 `ToolCallContext`
+//! 显式传递，不再落成线程局部视图。 The process-level [`TOOL_MANAGER`] stays as
 //! the stable fallback for non-actor threads (daemon `skills.list_tools`,
 //! CLI).
 
 use qaqh_types::ToolDef;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::tool_api::context::{SandboxMode, ToolCallContext};
+use crate::tool_api::context::ToolCallContext;
 
 /// Unified runtime security context used for session binding and admission.
 #[derive(Clone)]
@@ -46,14 +46,6 @@ thread_local! {
     static AGENT_MODE: Cell<u8> = const { Cell::new(0) };
 }
 
-// Explicit per-call cancellation override. This is installed only while a
-// `ToolCallContext` is executing and is checked before the legacy actor/global
-// flags, so handlers that still call `is_cancel()` observe the same token as
-// the runtime-owned cancellation tree.
-thread_local! {
-    static TOOL_CALL_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
-}
-
 pub fn set_context(session: &str, permission_level: u8) {
     RUNTIME_CTX.with(|ctx| {
         *ctx.borrow_mut() = Some(RuntimeContext {
@@ -78,90 +70,6 @@ pub fn set_mode(mode: u8) {
 /// Snapshot the current agent mode for an explicit runtime context.
 pub fn current_mode() -> u8 {
     AGENT_MODE.with(|slot| slot.get())
-}
-
-pub(crate) fn explicit_cancel_flag() -> Option<Arc<AtomicBool>> {
-    TOOL_CALL_CANCEL.with(|slot| slot.borrow().clone())
-}
-
-pub(crate) fn explicit_cancel_is_set() -> Option<bool> {
-    explicit_cancel_flag().map(|flag| flag.load(Ordering::SeqCst))
-}
-
-/// Install one explicit [`ToolCallContext`] as the ambient compatibility view
-/// for the current tool worker.
-///
-/// The explicit context is the source of truth. The thread-local slots are
-/// populated only because legacy handlers still read them; the guard restores
-/// every previous value on drop.
-pub fn install_tool_call_context(ctx: &ToolCallContext) -> ToolCallContextGuard {
-    let previous_runtime = RUNTIME_CTX.with(|slot| {
-        let previous = slot.borrow().clone();
-        *slot.borrow_mut() = Some(RuntimeContext {
-            active_session: ctx.session_id.clone(),
-            permission_level: ctx.permission_level as u8,
-        });
-        previous
-    });
-    let previous_workspace = crate::ACTOR_WORKSPACE.with(|slot| {
-        slot.borrow_mut()
-            .replace(ctx.workspace_root.to_string_lossy().to_string())
-    });
-    let previous_session =
-        crate::ACTOR_SESSION.with(|slot| slot.borrow_mut().replace(ctx.session_id.clone()));
-    let previous_actor_cancel = crate::ACTOR_CANCEL.with(|slot| slot.replace(false));
-    let previous_mode = AGENT_MODE.with(|slot| {
-        let previous = slot.get();
-        slot.set(match ctx.mode {
-            crate::tool_api::AgentMode::Code => 0,
-            crate::tool_api::AgentMode::Plan => 1,
-        });
-        previous
-    });
-    let previous_sandbox = crate::authorization::is_subagent_sandbox();
-    crate::authorization::set_subagent_sandbox(matches!(ctx.sandbox, SandboxMode::Subagent));
-    let previous_cancel =
-        TOOL_CALL_CANCEL.with(|slot| slot.borrow_mut().replace(ctx.cancellation.shared_flag()));
-
-    ToolCallContextGuard {
-        previous_runtime,
-        previous_workspace,
-        previous_session,
-        previous_actor_cancel,
-        previous_mode,
-        previous_sandbox,
-        previous_cancel,
-    }
-}
-
-/// Restores the thread-local compatibility view captured by
-/// [`install_tool_call_context`].
-pub struct ToolCallContextGuard {
-    previous_runtime: Option<RuntimeContext>,
-    previous_workspace: Option<String>,
-    previous_session: Option<String>,
-    previous_actor_cancel: bool,
-    previous_mode: u8,
-    previous_sandbox: bool,
-    previous_cancel: Option<Arc<AtomicBool>>,
-}
-
-impl Drop for ToolCallContextGuard {
-    fn drop(&mut self) {
-        RUNTIME_CTX.with(|slot| *slot.borrow_mut() = self.previous_runtime.take());
-        crate::ACTOR_WORKSPACE.with(|slot| {
-            *slot.borrow_mut() = self.previous_workspace.take();
-        });
-        crate::ACTOR_SESSION.with(|slot| {
-            *slot.borrow_mut() = self.previous_session.take();
-        });
-        crate::ACTOR_CANCEL.with(|slot| slot.set(self.previous_actor_cancel));
-        AGENT_MODE.with(|slot| slot.set(self.previous_mode));
-        crate::authorization::set_subagent_sandbox(self.previous_sandbox);
-        TOOL_CALL_CANCEL.with(|slot| {
-            *slot.borrow_mut() = self.previous_cancel.take();
-        });
-    }
 }
 
 /// Worker scope carrying one explicit tool context plus the non-SDK runtime
@@ -194,16 +102,16 @@ impl ToolExecutionScope {
         &self.context
     }
 
-    /// Install the manager/policy compatibility view and the explicit tool
-    /// context on the current thread.
+    /// Install the manager/policy compatibility view on the current thread.
+    ///
+    /// 显式上下文**不再**装成线程局部视图：handler 一律从 `&ToolCallContext`
+    /// 取工作区/会话/模式/取消（per-call TLS 视图已退场）。
     pub fn install(&self) -> ToolExecutionScopeGuard {
         let previous_manager = ACTOR_TOOL_MANAGER
             .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.manager.clone()));
         let previous_policy = crate::tool_side_fold::policy();
         crate::tool_side_fold::set_thread_policy(self.policy.clone());
-        let context_guard = install_tool_call_context(&self.context);
         ToolExecutionScopeGuard {
-            _context_guard: context_guard,
             previous_manager,
             previous_policy,
         }
@@ -213,7 +121,6 @@ impl ToolExecutionScope {
 /// Restores manager/policy/context state captured by
 /// [`ToolExecutionScope::install`].
 pub struct ToolExecutionScopeGuard {
-    _context_guard: ToolCallContextGuard,
     previous_manager: Option<Arc<Mutex<crate::ToolManager>>>,
     previous_policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
 }
@@ -236,7 +143,7 @@ impl Drop for ToolExecutionScopeGuard {
 pub struct ToolCtx {
     pub session_id: String,
     pub permission_level: u8,
-    /// Agent operating mode (0=Code, 1=Plan) recorded at dispatch time.
+    /// Agent operating mode (0=Code, 1=Plan, 2=Code legacy alias) recorded at dispatch time.
     pub mode: u8,
     /// Workspace root for this execution. `None` = keep the current process
     /// workspace (the in-process agent path).
@@ -455,8 +362,8 @@ fn lock_manager(
 }
 
 #[cfg(test)]
-pub(crate) fn register_test_handler(handler: crate::ToolHandler) {
-    with_manager(|manager| manager.register(handler));
+pub(crate) fn register_test_probe(probe: crate::probe::ProbeTool) {
+    with_manager(|manager| manager.register_probe(probe));
 }
 
 /// Return the canonical workspace root used for authorization and execution.
@@ -483,7 +390,6 @@ pub fn all_tools() -> Vec<ToolDef> {
     }
 }
 
-/// 当前配置的 provider endpoint 是否接受图片输入（read_image 工具开关）。
 /// 回合边界 MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义）。
 ///
 /// 调用方：qaqh-runtime 在 run_lap 开头拿到 qaqh-mcp 投影批次后调用——
@@ -573,8 +479,6 @@ fn image_caps() -> Option<ImageCaps> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 查询 handler 声明的能力类别（权限决策单一事实源）。
-/// 未注册/未初始化返回 None——调用方回退保守默认（Write）。
 /// 按工具名调用作者声明的展示投影（09-18 展示契约 §3.4）。
 ///
 /// 未注册投影、或当前线程没有可用 manager 时返回 `None`；调用方必须完整
@@ -607,6 +511,8 @@ pub fn project_tool_display_from_wire(
     crate::tool_api::output::from_wire_display(display)
 }
 
+/// 查询 handler 声明的能力类别（权限决策单一事实源）。
+/// 未注册/未初始化返回 None——调用方回退保守默认（Write）。
 pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
     // 内置 + 动态（MCP）两层：S3 沙箱按 category 拒绝必须覆盖 MCP 工具。
     with_manager(|manager| manager.category_of(name)).flatten()

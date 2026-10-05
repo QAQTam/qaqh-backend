@@ -1,7 +1,7 @@
 //! TypedTool：新工具优先实现的 typed 接口（base spec §6.1）。
 //!
 //! schema 由类型生成（schemars 派生）——参数/输出与 schema 单一事实源；
-//! 迁移期 legacy `ToolHandler` 经 `LegacyToolAdapter` 接入（plan P2），
+//! 生产工具一律经 `register_typed` 接入；本模块是 typed 契约的落点。
 //! 新工具只能实现本 trait。
 
 use std::time::{Duration, Instant};

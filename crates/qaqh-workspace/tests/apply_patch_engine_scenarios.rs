@@ -152,22 +152,42 @@ mod escape_probes {
         let _ = std::fs::remove_file(&outside);
     }
 
-    /// 形态 B：`..` 深度超过路径深度——必须 Err（PathOutsideWorkspace），
-    /// 无论目标外部文件是否已存在，且外部不得产生文件。
+    /// 形态 B（2026-10-05 按新契约反转，原为 `dotdot_beyond_depth_rejected`）：
+    /// `..` 深度超过路径深度 → 词法消解落在 workspace 外 → 引擎放行
+    /// （admission owns the boundary；直接调引擎即等同"已审批"），落盘在
+    /// 消解后的外部路径。落点用测试自控的 tempdir 内目录取证，不污染真实盘符。
+    ///
+    /// ⚠ 语义备忘：`normalize_lexically` 对越深 `..` 的 clamp 锚点是**文件系统
+    /// 根**（盘根）而非 workspace 根——例如 `a/../../../../evil.txt` 从深层的
+    /// tempdir 出发可能消解到 `AppData\evil.txt` 这类真实位置。这正说明边界
+    /// 必须（也只能）由 admission 层在落盘前拦截，引擎直调（如本测试）就是在
+    /// 无守门状态下落盘。
     #[test]
-    fn dotdot_beyond_depth_rejected() {
+    fn dotdot_beyond_depth_applies_outside_after_approval() {
         let tmp = tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-        for rel in [
-            "a/../../../../evil.txt",
-            "a/../../../../../../../../qaqh-escape-probe-b2.txt",
-        ] {
-            let result =
-                apply_patch_engine(&patch_add(rel), &root, UpdateMode::PreserveLineEndings);
-            assert!(result.is_err(), "`{rel}` must be rejected, got {result:?}");
-        }
-        // 外部落点取证：tempdir 兄弟目录不应出现 evil.txt
-        let sibling = root.parent().unwrap().join("evil.txt");
-        assert!(!sibling.exists());
+        let ws = tmp.path().join("ws");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // ws/a/../../outside/evil.txt → 词法消解为 tmp/outside/evil.txt（受控目录）。
+        let result = apply_patch_engine(
+            &patch_add("a/../../outside/evil.txt"),
+            &ws,
+            UpdateMode::PreserveLineEndings,
+        );
+        assert!(
+            result.is_ok(),
+            "lexical `..` escape applies after admission, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("evil.txt")).unwrap(),
+            "evil\n",
+            "file must land at the lexically resolved outside path"
+        );
+        assert!(
+            !ws.join("outside").exists(),
+            "must not create the target inside the workspace"
+        );
     }
 }

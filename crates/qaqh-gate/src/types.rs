@@ -466,7 +466,11 @@ pub enum StreamEvent {
         index: usize,
         id: String,
         name: String,
-        args_so_far: String,
+        /// 本帧**新增**的参数片段（delta）。逐帧携带累计串会让每帧都
+        /// `.clone()` 一次缓冲，代价 O(n²)（58 KB 参数约 2493 帧）。
+        /// 三适配器里只有 Responses 不是增量——它在 `output_item.done` 一帧给完整参数，
+        /// 于是它的「片段」就是整段。
+        args_chunk: String,
     },
     /// Server-side web search progress (Responses API built-in tool).
     /// Payload is one of "in_progress" | "searching" | "completed".

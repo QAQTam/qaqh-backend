@@ -9,7 +9,8 @@ use anyhow::Result;
 use crate::diff::asymmetric_unified_diff;
 use crate::store::{Change, ChangeStatus, Store};
 
-/// 最多展开 diff 全文的文件数（其余折叠成一行 stat）
+/// 普通文件展开 diff 全文的数量上限（带危险信号的文件不受此限；
+/// 其余折叠为一条计数提示，不逐文件输出 stat）
 const MAX_FULL_DIFFS: usize = 3;
 
 /// 为折叠/截断提示预留的字节数，保证提示总能出现在报告里
@@ -67,16 +68,22 @@ pub(crate) fn build_report(
         let mut warnings: Vec<String> = Vec::new();
         if let Some(after) = &n.after {
             let a = store.read_blob(after)?;
-            let original = n
-                .before_size
-                .map(fmt_size)
-                .unwrap_or_else(|| "空".to_string());
-            if a.is_empty() {
-                warnings.push(format!("已变为空文件（原 {original}）"));
-                score = 100;
-            } else if a.iter().all(|b| b.is_ascii_whitespace()) {
-                warnings.push(format!("已变为纯空白文件（原 {original}）"));
-                score = 100;
+            // "被清空"的语义要求存在前像：新建的空/纯空白文件（.gitkeep、
+            // __init__.py、占位符）是正常产物而非危险信号——没有 before 就没有
+            // "变为"，对 Added 触发只会制造误报（用户在批窗口内建文件同理）。
+            if n.before.is_some() {
+                let original = match (n.before_size, &n.before) {
+                    (Some(bs), _) => fmt_size(bs),
+                    (None, Some(sha)) => fmt_size(store.read_blob(sha)?.len() as u64),
+                    (None, None) => "空".to_string(),
+                };
+                if a.is_empty() {
+                    warnings.push(format!("已变为空文件（原 {original}）"));
+                    score = 100;
+                } else if a.iter().all(|b| b.is_ascii_whitespace()) {
+                    warnings.push(format!("已变为纯空白文件（原 {original}）"));
+                    score = 100;
+                }
             }
             if let (Some(bs), Some(asz)) = (n.before_size, n.after_size)
                 && bs >= 1024
@@ -135,7 +142,7 @@ pub(crate) fn build_report(
     let warned: Vec<&Item> = items.iter().filter(|i| !i.warnings.is_empty()).collect();
     if !warned.is_empty() {
         out.push_str(&format!(
-            "[workspace] ⚠ 危险信号：{} 个文件可疑，脚本可能没按预期工作\n",
+            "[workspace] ⚠ 危险信号：{} 个文件可疑，脚本可能没按预期工作（可 spy action=journal 查流水，用 spy action=undo 回滚）\n",
             warned.len()
         ));
         for i in &warned {
@@ -196,7 +203,7 @@ pub(crate) fn build_report(
     }
     if collapsed > 0 {
         out.push_str(&format!(
-            "…另有 {collapsed} 个文件未展开（journal query 查看完整流水）\n"
+            "…另有 {collapsed} 个文件未展开（spy action=journal 查看完整流水）\n"
         ));
     }
     if out.len() > max_bytes {
@@ -266,6 +273,39 @@ mod tests {
         assert!(r.contains("app.py"));
         assert!(r.contains("@@"));
         assert!(r.contains("-line1"));
+    }
+
+    #[test]
+    fn added_blank_files_are_not_flagged() {
+        let dir = tmp_dir("report-added-blank");
+        let store = Store::open(&dir, None).unwrap();
+        let b_empty = store.write_blob(b"").unwrap();
+        let b_ws = store.write_blob(b"  \n\t\n").unwrap();
+
+        // 没有 before 就没有"变为"：新建空/空白文件（.gitkeep、占位符）是正常产物。
+        let changes = vec![
+            change(".gitkeep", None, Some(b_empty)),
+            change("placeholder.md", None, Some(b_ws)),
+        ];
+        let r = build_report(&store, &changes, 4096, 5, 3).unwrap();
+        assert!(!r.contains("⚠"), "新建空/空白文件不是危险信号:\n{r}");
+        assert!(r.contains(".gitkeep"), "新增文件仍应列出:\n{r}");
+        assert!(r.contains("placeholder.md"));
+        assert!(r.contains("新增"));
+    }
+
+    #[test]
+    fn modified_to_whitespace_still_flags() {
+        let dir = tmp_dir("report-ws");
+        let store = Store::open(&dir, None).unwrap();
+        let old = (1..=12).map(|i| format!("line{i}\n")).collect::<String>();
+        let b_old = store.write_blob(old.as_bytes()).unwrap();
+        let b_ws = store.write_blob(b"  \n\t\n").unwrap();
+
+        let changes = vec![change("app.py", Some(b_old), Some(b_ws))];
+        let r = build_report(&store, &changes, 4096, 5, 3).unwrap();
+        assert!(r.contains("⚠"), "既有文件被改成纯空白应命中启发式:\n{r}");
+        assert!(r.contains("纯空白"));
     }
 
     #[test]

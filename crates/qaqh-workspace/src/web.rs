@@ -2,7 +2,7 @@
 //!
 //! Web *search* is no longer a local tool: DeepSeek / OpenAI Responses APIs
 //! ship a built-in `web_search` tool executed server-side (see
-//! `qaqh-gate/src/responses.rs`). The model triggers it on its own, so the
+//! `qaqh-gate/src/responses_api.rs`). The model triggers it on its own, so the
 //! local Bing-RSS parser was removed — this tool only fetches URLs the model
 //! (or user) explicitly wants to read.
 
@@ -347,7 +347,7 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         let registered = manager.builtins.get("web_fetch").expect("registered");
-        assert!(registered.legacy.is_none());
+        assert_eq!(registered.descriptor.name.as_str(), "web_fetch");
         assert_eq!(
             registered.descriptor.input_schema["required"],
             serde_json::json!(["url"])

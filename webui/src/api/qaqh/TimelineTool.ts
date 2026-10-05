@@ -32,7 +32,7 @@ diff?: string | null, progress?: string,
  */
 progress_truncated?: boolean, 
 /**
- * 进度流标识（09-18 契约 §5.1）："stdout" | "stderr" | "mixed"。
+ * 进度流标识（09-18 契约 §5.1）："stdout" | "stderr"。
  */
 progress_stream?: string | null, 
 /**

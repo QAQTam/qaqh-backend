@@ -1,27 +1,6 @@
 //! Display formatting and tool-call parsing helpers (split from the former
 //! util monolith).
 
-use crate::agent::state::agent::AgentState;
-
-/// Resolve a legacy `name`/`action` pair before policy evaluation.
-pub(crate) fn resolve_effective_name(
-    name: &str,
-    action: &str,
-    _args: &serde_json::Value,
-) -> String {
-    if action.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name}_{action}")
-    }
-}
-
-pub(crate) fn has_xml(s: &str) -> bool {
-    // Require <tool_calls> wrapper to avoid false positives from
-    // examples, explanations, or markdown containing bare <invoke> tags.
-    s.contains("<tool_calls>")
-}
-
 /// Extract a short human-readable display string from a tool call's arguments.
 pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) -> String {
     let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -47,12 +26,9 @@ pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) ->
             path.map(|p| p.chars().take(60).collect::<String>())
                 .unwrap_or(display_name)
         }
-        "todo" => input
-            .get("title")
-            .or_else(|| input.get("subject"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.chars().take(60).collect::<String>())
-            .unwrap_or(display_name),
+        // legacy 名 "todo" 的显示分支已随 todo 工具拆分（todo_write/todo_update/
+        // todo_list）退役删除——原分支读 title/subject 字段，与现役入参结构
+        // （items/ids）对不上，从未命中；现役三名走兜底 display_name 即可。
         "web_fetch" => input
             .get("url")
             .or_else(|| input.get("query"))
@@ -76,36 +52,15 @@ pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) ->
 
 // (projection family moved to qaqh-runtime::ringing::projection — PR-1-4)
 
+/// 归一上游 tool_calls JSON(flat/nested)为 ToolCall 列表。
+///
+/// 2026-10-05：DSML/XML 文本态 fallback 已随非标准 toolcall 支持一起移除
+/// （DeepSeek v4.1 起原生输出结构化 tool_calls）——只认标准形态，畸形条目
+/// 由 `parse_tool_calls` 整条跳过。
 pub(crate) fn parse_tool_calls_from_response(
-    content: &str,
-    _reasoning: &str,
     tool_calls_raw: &serde_json::Value,
-    agent: &AgentState,
 ) -> Vec<qaqh_types::ToolCall> {
-    let mut parsed = qaqh_gate::tool_parser::parse_tool_calls(tool_calls_raw);
-    if parsed.is_empty() {
-        let stripped = qaqh_gate::tool_parser::strip_fenced_code(content);
-        if qaqh_gate::tool_parser::has_dsml(&stripped) {
-            let (_, dsml) =
-                qaqh_gate::tool_parser::parse_dsml_tool_calls(&stripped, &agent.tool_defs);
-            if !dsml.is_empty() {
-                parsed = dsml;
-            }
-        }
-        if parsed.is_empty() && has_xml(content) {
-            let names: Vec<String> = agent
-                .tool_defs
-                .iter()
-                .map(|t| t.function.name.clone())
-                .collect();
-            let stripped2 = qaqh_gate::tool_parser::strip_fenced_code(content);
-            let (_, xml) = qaqh_gate::tool_parser::parse_xml_tool_calls(&stripped2, &names);
-            if !xml.is_empty() {
-                parsed = xml;
-            }
-        }
-    }
-    parsed
+    qaqh_gate::tool_parser::parse_tool_calls(tool_calls_raw)
 }
 
 pub(crate) fn build_assistant_message(

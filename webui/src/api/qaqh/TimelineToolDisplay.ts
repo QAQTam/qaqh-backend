@@ -10,7 +10,11 @@ import type { ToolResultDisplayOutcome } from "./ToolResultDisplayOutcome";
  * 全部字段可选、可忽略；未知 header/body 变体解析为 `Unknown`，
  * 旧 client 不会因为新变体丢整块。
  */
-export type TimelineToolDisplay = { summary?: string | null, diff?: string | null, header?: TimelineToolHeader | null, body?: TimelineToolBody | null, metrics?: TimelineToolMetrics | null, 
+export type TimelineToolDisplay = { summary?: string | null, diff?: string | null, 
+/**
+ * 终态行差（write/edit/apply_patch 等文件变更类工具）。0/0 = 无变更或未接线。
+ */
+lines_added?: number, lines_removed?: number, header?: TimelineToolHeader | null, body?: TimelineToolBody | null, metrics?: TimelineToolMetrics | null, 
 /**
  * 结构化终态（#336 P2）；旧 client 忽略后仍可读 summary/body。
  */

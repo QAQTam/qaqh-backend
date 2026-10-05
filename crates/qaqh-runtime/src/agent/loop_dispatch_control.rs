@@ -2,14 +2,14 @@
 //!
 //! 由 `loop_core.rs` 拆分（Phase 2-5）：`impl Loop` 跨文件块，对外 API 不变。
 
-use super::engine_turn::is_ulid;
 use super::loop_core::Loop;
 use super::turn_actor::{InteractionAdmission, InteractionState};
 use super::types::*;
 
 use qaqh_domain::{ControlCommand, DomainEvent};
-use qaqh_session::canonical::generate_ulid;
+use qaqh_session::canonical::{causation_for_command, generate_ulid};
 use qaqh_session::session_fact_v2::EventId;
+use qaqh_session::session_fact_v2::ActorRef;
 
 use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
 
@@ -77,6 +77,7 @@ impl Loop {
         command: ControlCommand,
         command_id: &str,
         expected_revision: u64,
+        actor: Option<ActorRef>,
     ) {
         match command {
             ControlCommand::SessionCreate {
@@ -226,6 +227,7 @@ impl Loop {
                     &interaction_id,
                     command_id,
                     &answers,
+                    actor.clone(),
                 );
                 let _ = ctx;
                 if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
@@ -253,6 +255,7 @@ impl Loop {
                     &mut self.session.tool,
                     &interaction_id,
                     command_id,
+                    actor.clone(),
                 );
                 let _ = ctx;
                 if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
@@ -300,6 +303,7 @@ impl Loop {
                     approved,
                     &message.unwrap_or_default(),
                     autonomous,
+                    actor,
                 );
                 let _ = ctx;
                 if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
@@ -425,5 +429,5 @@ impl Loop {
 }
 
 fn driver_causation_id(command_id: &str) -> Option<EventId> {
-    is_ulid(command_id).then(|| EventId::new(command_id))
+    causation_for_command(command_id)
 }

@@ -43,8 +43,9 @@ pub(crate) enum Readiness {
 /// - 读错误（`WouldBlock`/`Interrupted` 除外）；
 /// - **settle 到期（兜底，非主出口）**：只在"放弃了"的两种形态生效——
 ///   ① `Empty`（探测无数据）且子进程终态、`READER_SETTLE_BUDGET` 已过；
-///   ② `Closed`（写端全关）且子进程**仍存活**、`READER_SETTLE_BUDGET`
-///   已过。读到任何数据都不会打断排空（快路径 `continue`，不睡轮询周期），
+///   ② `Closed`（写端全关）且子进程**已终态**、`READER_SETTLE_BUDGET`
+///   已过（子进程存活期只轮询、不 settle）。读到任何数据都不会打断排空
+///   （快路径 `continue`，不睡轮询周期），
 ///   所以**只要子进程退出后管道仍有数据、且读得动，就一定能读到 `Ok(0)`**。
 ///   兜底的意义是：孙进程持有写端时读线程必须确定性退出并释放 progress
 ///   sender（阶段 1 的 1.3 遗留驻留治愈），"静默丢"降级为"有界丢"。

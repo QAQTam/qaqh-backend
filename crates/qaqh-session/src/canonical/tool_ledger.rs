@@ -2,11 +2,13 @@
 //!
 //! This is the P3-5 core only: it enforces one `ToolIntent` and one
 //! `ToolFinished` per `call_id`, rebuilds its index from committed facts, and
-//! classifies open intents for recovery. SessionActor/ToolRuntime wiring and
-//! cancel/resume CAS remain a later slice.
+//! classifies open intents for recovery. `SessionActor` now drives it: the
+//! resume CAS lives in `SessionActor::admit_tool_intent` and the cancel CAS in
+//! `SessionActor::cancel_tool_batch`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
@@ -20,7 +22,7 @@ use crate::session_fact_v2::{
 
 use super::{
     AppendOutcome, CanonicalError, CanonicalIdentityError, CanonicalSessionStore,
-    CommittedFactReader, WriterId, WriterLease, generate_ulid,
+    CommittedFactReader, WriterId, WriterLease, causation_for_command, generate_ulid,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -216,6 +218,29 @@ impl Drop for ToolLedger {
     }
 }
 
+/// The command currently being dispatched by a session actor.
+///
+/// The actor's write scope and its Ringing event scope are the *same* cell, so
+/// a fact and the v1 events of one dispatch can never disagree about what
+/// caused them. Appends that pass an explicit causation win over this scope.
+#[derive(Debug, Clone, Default)]
+pub struct FactCausation(Arc<Mutex<Option<String>>>);
+
+impl FactCausation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, command_id: Option<String>) {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = command_id;
+    }
+
+    pub fn current(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 #[derive(Debug)]
 pub struct ToolLedger {
     store: CanonicalSessionStore,
@@ -223,6 +248,7 @@ pub struct ToolLedger {
     session_dir: PathBuf,
     session_id: SessionId,
     log_id: crate::session_fact_v2::LogId,
+    causation: FactCausation,
     entries: HashMap<ToolCallId, ToolLedgerEntry>,
     interaction_requests: HashMap<InteractionId, SessionFact>,
     interaction_terminals: HashMap<InteractionId, SessionFact>,
@@ -292,6 +318,7 @@ impl ToolLedger {
             session_dir,
             session_id,
             log_id,
+            causation: FactCausation::default(),
             entries,
             interaction_requests,
             interaction_terminals,
@@ -302,6 +329,11 @@ impl ToolLedger {
             driver_holder,
             driver_epoch,
         })
+    }
+
+    /// Share the actor's in-flight command scope with this ledger.
+    pub fn bind_causation(&mut self, causation: FactCausation) {
+        self.causation = causation;
     }
 
     /// Current canonical driver seat (`holder`, `driver_epoch`).
@@ -378,23 +410,18 @@ impl ToolLedger {
         causation_id: Option<EventId>,
         now_ms: i64,
     ) -> Result<SessionFact, ToolLedgerError> {
-        let fact = SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.session_id.clone(),
-            log_id: self.log_id.clone(),
-            fact_seq: 0,
+        let mut fact = self.envelope(
             event_id,
-            ts_ms: now_ms,
-            causation_id,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::DriverChanged(DriverChanged {
+            now_ms,
+            FactPayload::DriverChanged(DriverChanged {
                 holder: holder.clone(),
                 driver_epoch,
                 changed_at_ms: now_ms,
             }),
-        };
+        );
+        if let Some(causation_id) = causation_id {
+            fact.causation_id = Some(causation_id);
+        }
         let outcome = self.append_and_publish(fact, now_ms)?;
         self.driver_holder = holder;
         self.driver_epoch = driver_epoch;
@@ -751,25 +778,17 @@ impl ToolLedger {
         applied_at_ms: i64,
     ) -> Result<SessionFact, ToolLedgerError> {
         let replaces_through_fact_seq = self.store.last_fact_seq();
-        let fact = SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.session_id.clone(),
-            log_id: self.log_id.clone(),
-            fact_seq: 0,
+        let fact = self.envelope(
             event_id,
-            ts_ms: applied_at_ms,
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::CompactionApplied(CompactionApplied {
+            applied_at_ms,
+            FactPayload::CompactionApplied(CompactionApplied {
                 checkpoint_id,
                 replaces_through_fact_seq,
                 summary_ref,
                 context_revision,
                 applied_at_ms,
             }),
-        };
+        );
         let outcome = self.append_and_publish(fact, applied_at_ms)?;
         Ok(outcome.fact)
     }
@@ -785,19 +804,7 @@ impl ToolLedger {
         payload: SessionRecovered,
         now_ms: i64,
     ) -> Result<SessionFact, ToolLedgerError> {
-        let fact = SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.session_id.clone(),
-            log_id: self.log_id.clone(),
-            fact_seq: 0,
-            event_id,
-            ts_ms: now_ms,
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::SessionRecovered(payload),
-        };
+        let fact = self.envelope(event_id, now_ms, FactPayload::SessionRecovered(payload));
         let outcome = self.append_and_publish(fact, now_ms)?;
         Ok(outcome.fact)
     }
@@ -1129,19 +1136,7 @@ impl ToolLedger {
         payload: FactPayload,
         now_ms: i64,
     ) -> SessionFact {
-        SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.session_id.clone(),
-            log_id: self.log_id.clone(),
-            fact_seq: 0,
-            event_id,
-            ts_ms: now_ms,
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload,
-        }
+        self.envelope(event_id, now_ms, payload)
     }
 
     fn interaction_envelope_context(
@@ -1159,6 +1154,40 @@ impl ToolLedger {
         )
     }
 
+    /// The command whose dispatch is producing this fact, if any, mapped onto
+    /// the canonical causation lane ([`causation_for_command`]).
+    fn ambient_causation(&self) -> Option<EventId> {
+        self.causation
+            .current()
+            .and_then(|command_id| causation_for_command(&command_id))
+    }
+
+    /// One fact envelope, built the same way for every payload this ledger can
+    /// append. Keeping the single construction point is what stops a new append
+    /// site from silently shipping without causation (2026-10-05: three of the
+    /// five builders hardcoded `causation_id: None`, so their command receipts
+    /// never reached a terminal state).
+    fn envelope(
+        &self,
+        event_id: EventId,
+        ts_ms: i64,
+        payload: FactPayload,
+    ) -> SessionFact {
+        SessionFact {
+            schema: FactSchema::v2(),
+            session_id: self.session_id.clone(),
+            log_id: self.log_id.clone(),
+            fact_seq: 0,
+            event_id,
+            ts_ms,
+            causation_id: self.ambient_causation(),
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload,
+        }
+    }
+
     fn build_fact(
         &self,
         event_id: EventId,
@@ -1167,19 +1196,10 @@ impl ToolLedger {
         payload: FactPayload,
         now_ms: i64,
     ) -> SessionFact {
-        SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.session_id.clone(),
-            log_id: self.log_id.clone(),
-            fact_seq: 0,
-            event_id,
-            ts_ms: now_ms,
-            causation_id: None,
-            turn_id,
-            call_id: Some(call_id),
-            interaction_id: None,
-            payload,
-        }
+        let mut fact = self.envelope(event_id, now_ms, payload);
+        fact.turn_id = turn_id;
+        fact.call_id = Some(call_id);
+        fact
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1193,19 +1213,14 @@ impl ToolLedger {
         payload: FactPayload,
         now_ms: i64,
     ) -> SessionFact {
-        SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.session_id.clone(),
-            log_id: self.log_id.clone(),
-            fact_seq: 0,
-            event_id,
-            ts_ms: now_ms,
-            causation_id,
-            turn_id,
-            call_id,
-            interaction_id: Some(interaction_id),
-            payload,
+        let mut fact = self.envelope(event_id, now_ms, payload);
+        if let Some(causation_id) = causation_id {
+            fact.causation_id = Some(causation_id);
         }
+        fact.turn_id = turn_id;
+        fact.call_id = call_id;
+        fact.interaction_id = Some(interaction_id);
+        fact
     }
 }
 

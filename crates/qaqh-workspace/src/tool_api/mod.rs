@@ -1,8 +1,7 @@
 //! Tool SDK v1 — 工具契约核心类型（base spec §5-§9；09-19 补充稿 §2-§5）。
 //!
-//! 本模块是 Tool SDK v1 的落点（09-15 plan P1）：**类型先行、不接生产工具**；
-//! 迁移期 legacy `ToolHandler` 经 `LegacyToolAdapter` 接入（plan P2），
-//! 新工具只能实现 [`TypedTool`]。
+//! 本模块是 Tool SDK v1 的落点（09-15 plan P1）：类型先行，typed 工具经
+//! `register_typed` 接入生产注册表；新工具只能实现 [`TypedTool`]。
 //!
 //! ## 子模块
 //!
@@ -16,7 +15,8 @@
 //! | [`output`] | [`ToolProjection`] / [`ToolOutcome`] / 投影与指标 |
 //! | [`progress`] | [`ToolProgress`] / [`ProgressSink`] |
 //! | [`typed`] / [`erased`] | [`TypedTool`] / [`ErasedTool`] |
-//! | [`legacy`] | [`LegacyToolAdapter`]（v1 `ToolHandler` 桥接 + `ToolResult`→[`ToolOutcome`] 映射） |
+//! | [`dynamic`] | [`DynamicToolAdapter`]（MCP/LSP 动态工具 typed 适配器） |
+//! | [`result`] | [`map_tool_result`]（v1 `ToolResult` → [`ToolOutcome`] 映射 + 进度桥） |
 //! | [`boundary`] | 工具 ↔ loop 执行边界（[`ExecuteBatch`] / [`BatchOutcome`]） |
 //! | [`args`] | canonical 字段名 + 共享参数类型 |
 //!
@@ -33,11 +33,12 @@ pub mod capabilities;
 pub mod context;
 pub mod descriptor;
 pub mod display;
+pub mod dynamic;
 pub mod erased;
 pub mod error;
-pub mod legacy;
 pub mod output;
 pub mod progress;
+pub mod result;
 pub mod typed;
 
 pub use args::{CommandArgs, OffsetLimit, PathArg, PatternArg};
@@ -56,14 +57,15 @@ pub use display::{
     PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolHeader, ToolMetrics,
     ToolTerminalState,
 };
+pub use dynamic::{DynamicDispatch, DynamicToolAdapter};
 pub use erased::ErasedTool;
 pub use error::{
     FatalToolError, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError,
 };
-pub use legacy::{LegacyCallOutcome, LegacyToolAdapter, map_tool_result};
 pub use output::{
     ToolContentBlock, ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue,
     ToolProjection, ToolStatus,
 };
 pub use progress::{ProgressSink, ProgressStream, ToolProgress};
+pub use result::map_tool_result;
 pub use typed::{TypedTool, TypedToolAdapter};

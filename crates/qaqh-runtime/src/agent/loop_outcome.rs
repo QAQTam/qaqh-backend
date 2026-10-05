@@ -326,9 +326,9 @@ impl Loop {
         Outcome::Handled
     }
 
-    /// Dispatch an already typed Ringing command without constructing a
-    /// `Ui2Agent` frame. Legacy and Ringing ingress therefore remain separate
-    /// at the worker boundary; both may share the domain engines underneath.
+    /// Emit `ControlEvent::OperationCompleted` for `command_id` under the given
+    /// error `scope` (`occurrence_id`/`operation_id` both carry the command id).
+    /// Pure observation — no command is dispatched here.
     pub(super) fn emit_operation_completed(
         &self,
         command_id: &str,
@@ -571,10 +571,12 @@ impl Loop {
                 );
                 let _ = ctx;
 
-                // Poll compact result after each turn lap — the background
-                // compact thread may have completed while we were blocked
-                // on SSE streaming. Without this, CompactEnd is delayed
-                // until the entire turn finishes.
+                // Poll compact result after each turn lap. NOTE: during a lap
+                // `phase` is GateRunning/ToolsRunning, so `check_pending_compact`
+                // returns early (G4: results are consumed only at a safe point —
+                // Idle and not suspended). This call is therefore a safety net,
+                // not an early application: the result still lands on an Idle
+                // boundary, it is not applied mid-turn.
                 self.check_pending_compact();
 
                 self.apply_outcome(next_outcome);

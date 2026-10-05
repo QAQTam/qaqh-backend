@@ -2,9 +2,10 @@
 //!
 //! Each session directory contains:
 //!   meta.json      — session metadata (small, atomic replace-write)
-//!   messages.jsonl — one JSON line per Message, append-only
+//!   messages.jsonl — one JSON line per Message; normal writes append, but
+//!                    undo/compact rewrite the whole file (see `rewrite_messages`)
 //!
-//! A central `index.json` in the sessions root enables fast listing
+//! A central `index.jsonl` in the sessions root enables fast listing
 //! without scanning every session directory.
 
 use std::fs;
@@ -306,9 +307,6 @@ pub fn count_message_lines(session_dir: &Path) -> Result<usize, String> {
 /// - 读取时一次性重放（内存 map 归并）；
 /// - 行数超过 archive 阈值时启动/定期 compact 成紧凑全量（保留每个
 ///   seed 的最新 upsert，丢弃 tombstone）。
-///
-/// 兼容：首次读取若无 `index.jsonl` 但有旧 `index.json`，一次性迁移
-/// （生成 jsonl 后删除旧文件，格式破坏性变更已获 owner 批准）。
 //
 /// 单行操作（wire: 每行一个 JSON 对象）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -325,18 +323,9 @@ fn index_log_path(sessions_dir: &Path) -> std::path::PathBuf {
     sessions_dir.join("index.jsonl")
 }
 
-fn legacy_index_path(sessions_dir: &Path) -> std::path::PathBuf {
-    sessions_dir.join("index.json")
-}
-
-/// 读取并归并索引（含旧格式一次性迁移）。
+/// 读取并归并索引。
 fn read_merged_index(sessions_dir: &Path) -> Vec<SessionMeta> {
     let path = index_log_path(sessions_dir);
-    if !path.exists()
-        && let Some(migrated) = migrate_legacy_index_if_present(sessions_dir)
-    {
-        return migrated;
-    }
     let Ok(data) = fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -364,20 +353,6 @@ fn read_merged_index(sessions_dir: &Path) -> Vec<SessionMeta> {
         compact_index(sessions_dir, by_session.values());
     }
     by_session.into_values().collect()
-}
-
-/// 旧 `index.json` → 新 `index.jsonl`（一次性；迁移后删除旧文件）。
-fn migrate_legacy_index_if_present(sessions_dir: &Path) -> Option<Vec<SessionMeta>> {
-    let legacy = legacy_index_path(sessions_dir);
-    let data = fs::read_to_string(&legacy).ok()?;
-    let metas: Vec<SessionMeta> = serde_json::from_str(&data).unwrap_or_default();
-    rewrite_index_log(sessions_dir, metas.iter());
-    let _ = fs::remove_file(&legacy);
-    log::info!(
-        "[index] migrated legacy index.json ({} sessions) to index.jsonl",
-        metas.len()
-    );
-    Some(metas)
 }
 
 /// 整文件重写为紧凑全量（每个 seed 最新一行，无 tombstone）。
@@ -471,26 +446,6 @@ mod tests {
             updated_at: updated,
             ..SessionMeta::default()
         }
-    }
-
-    #[test]
-    fn legacy_index_json_migrates_to_jsonl_once() {
-        let dir = temp_sessions_dir("migrate");
-        let legacy = vec![meta("a", 1), meta("b", 2)];
-        fs::write(
-            legacy_index_path(&dir),
-            serde_json::to_string_pretty(&legacy).unwrap(),
-        )
-        .unwrap();
-
-        let read = read_index(&dir);
-        assert_eq!(read.len(), 2, "legacy entries must survive migration");
-        assert!(index_log_path(&dir).is_file(), "jsonl created");
-        assert!(!legacy_index_path(&dir).exists(), "legacy file removed");
-
-        // 二次读取稳定（迁移不重复执行）。
-        assert_eq!(read_index(&dir).len(), 2);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

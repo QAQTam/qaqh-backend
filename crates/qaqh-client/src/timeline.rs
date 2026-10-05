@@ -386,6 +386,7 @@ mod tests {
     use std::sync::Arc;
 
     fn stream() -> TimelineStream {
+        crate::client::ensure_crypto_provider();
         TimelineStream::new(
             "seed-1".into(),
             reqwest::Client::new(),

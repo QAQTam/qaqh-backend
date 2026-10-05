@@ -26,8 +26,10 @@ pub enum KillOutcome {
     Killed,
     /// 条目已驱逐，命中墓碑且按其 os_pid 执行了清理。
     TombstoneCleaned,
-    /// 条目/墓碑存在，但从未持有 os_pid（如 subagent 登记路径）——
+    /// 墓碑存在，但从未持有 os_pid（如 subagent 登记路径）——
     /// 没有可清理的残留孤儿，调用方须如实告知而不是报「已杀」。
+    /// 注意：条目仍在册时 [`ProcessRegistry::kill`] 一律返回
+    /// [`KillOutcome::Killed`]；本变体只可能来自墓碑路径。
     NoOsPid,
     /// id 从未登记过，或其墓碑已被容量淘汰。
     NotFound,

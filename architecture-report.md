@@ -625,7 +625,7 @@ pub enum ProviderKind { OpenAi, Responses, Anthropic }
 pub enum StreamEvent {
     ContentDelta(String),
     ReasoningDelta(String),
-    ToolCallProgress { index: usize, id: String, name: String, args_so_far: String },
+    ToolCallProgress { index: usize, id: String, name: String, args_chunk: String },
     WebSearchStatus(String),                    // "in_progress" | "searching" | "completed"
     Done { raw_message: Message, usage: Option<UsageInfo>, stop_reason: Option<String> },
     UsageUpdate(UsageInfo),

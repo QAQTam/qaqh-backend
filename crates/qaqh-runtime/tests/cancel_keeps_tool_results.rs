@@ -185,7 +185,7 @@ struct BatchReport {
     /// 每个 call_id 的副作用发生次数。
     executed: Vec<usize>,
     /// ToolFinished 领域事件数。**本函数内恒为 0**：批执行只落 store（外加
-    /// CodeChanged/DashboardUpdated），ringing 终态由批后的
+    /// DashboardUpdated），ringing 终态由批后的
     /// `turn_lap::backfill::emit_completed_tool_round` 逐项发。
     tool_finished: usize,
 }
@@ -360,7 +360,7 @@ fn cancel_mid_batch_keeps_executed_tool_results() {
         "已执行工具被重复执行：{:?}",
         report.executed
     );
-    // 分工锁定：`execute_admitted_batch` 只落 store + CodeChanged/DashboardUpdated，
+    // 分工锁定：`execute_admitted_batch` 只落 store + DashboardUpdated，
     // ringing 终态（ToolFinished）由批后的 `turn_lap::backfill::emit_completed_tool_round`
     // 逐项发。即使这里 4 个工具都真的执行了，本函数内也不得出现终态事件——
     // 否则就会与 backfill 双发、顺序错乱。

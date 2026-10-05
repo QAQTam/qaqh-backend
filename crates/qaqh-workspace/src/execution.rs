@@ -83,7 +83,6 @@ pub fn execute_authorized_with_context(
     let started = Instant::now();
     let (invocation, authorized_resources, authorized_workspace, grant) = call.into_parts();
     let pre_bind_level = Some(context.permission_level as u8).filter(|level| *level > 0);
-    let _scope = crate::runtime::install_tool_call_context(&context);
 
     // 拒绝路径同样落审计（kind=tool_rejected）：商业审计要求"未执行的
     // 调用"也可追溯，不能只在成功路径记账。
@@ -174,7 +173,6 @@ pub fn execute_authorized_with_context(
         session_id,
         call_id,
         tool_name: name,
-        action,
         args,
         category,
     } = invocation;
@@ -186,8 +184,8 @@ pub fn execute_authorized_with_context(
         manager.prepare_req_with_cancel(
             call_id.clone(),
             &name,
-            &action,
             args.clone(),
+            &context.workspace_root,
             timeout_secs,
             progress_tx,
             cancel_flag,
@@ -202,7 +200,6 @@ pub fn execute_authorized_with_context(
                 session_id: session_id.clone(),
                 call_id: call_id.clone(),
                 tool_name: name.clone(),
-                action: action.clone(),
                 args: args.clone(),
                 category,
             };
@@ -229,7 +226,6 @@ pub fn execute_authorized_with_context(
                 session_id: session_id.clone(),
                 call_id: call_id.clone(),
                 tool_name: name.clone(),
-                action: action.clone(),
                 args: args.clone(),
                 category,
             };
@@ -245,9 +241,15 @@ pub fn execute_authorized_with_context(
         }
     };
 
-    // Phase 2: execute without holding the manager lock. All tools now run in
+    // Phase 2: execute without holding the manager lock. All tools run in
     // the daemon actor process; WSL deployment moves the whole daemon instead
     // of routing individual tool calls across an environment boundary.
+    //
+    // 执行面统一为 `ErasedTool`（typed 工具 / MCP-LSP 动态适配器）。
+    // 生效超时在 prepare 阶段定稿（调用方显式值 / descriptor 默认值），此处
+    // 补进显式上下文——准入侧构造的上下文超时为零值。
+    let mut exec_ctx = context.clone();
+    exec_ctx.timeout = prepared.effective_timeout;
     let _ = (authorized_workspace, authorized_resources);
     // 审计对象 before 指纹：派发前按与 finalize 同源的 args 口径快照
     // file_state 账本（键一致，命中即 before，未命中为 None）。
@@ -289,7 +291,7 @@ pub fn execute_authorized_with_context(
             ts: chrono::Utc::now().to_rfc3339(),
             user: "agent".into(),
             tool: name.clone(),
-            action: action.clone(),
+            action: String::new(),
             args_hash: crate::audit::hash_args(&args),
             args_bytes: crate::audit::args_size(&args),
             status: "pending".to_string(),
@@ -318,19 +320,8 @@ pub fn execute_authorized_with_context(
         }
     }
 
-    let (mut tool_result, skill_effects) = match prepared.executor.clone() {
-        crate::manager::PreparedExecutor::Legacy(legacy) => {
-            let result = legacy(prepared.ctx.clone());
-            let skill_effects = if name == "skills" && result.is_success() {
-                prepared.ctx.take_skill_effects()
-            } else {
-                Vec::new()
-            };
-            (result, skill_effects)
-        }
-        crate::manager::PreparedExecutor::Typed(erased) => match erased
-            .execute(context.clone(), args.clone())
-        {
+    let (mut tool_result, skill_effects) =
+        match prepared.executor.clone().execute(exec_ctx, args.clone()) {
             Ok(outcome) => {
                 let effects = outcome.effects.clone();
                 (outcome.to_tool_result(), effects)
@@ -347,8 +338,7 @@ pub fn execute_authorized_with_context(
                     Vec::new(),
                 )
             }
-        },
-    };
+        };
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
     crate::tool_side_fold::apply(&name, &mut tool_result);
@@ -364,7 +354,9 @@ pub fn execute_authorized_with_context(
         manager.finalize_req(prepared, tool_result, elapsed_ms)
     });
     let code_delta = success
-        .then(|| crate::code_delta::compute(&name, &args))
+        .then(|| {
+            crate::code_delta::compute(&name, &args, &context.workspace_root, &context.session_id)
+        })
         .flatten();
 
     match report {
@@ -398,7 +390,7 @@ pub fn execute_authorized_with_context(
                 ts: chrono::Utc::now().to_rfc3339(),
                 user: "agent".into(),
                 tool: name.clone(),
-                action: action.clone(),
+                action: String::new(),
                 args_hash: crate::audit::hash_args(&args),
                 args_bytes: crate::audit::args_size(&args),
                 status: crate::audit::status_str(canonical.status).to_string(),
@@ -447,7 +439,6 @@ pub fn execute_authorized_with_context(
                 session_id,
                 call_id,
                 tool_name: name.clone(),
-                action: action.clone(),
                 args: args.clone(),
                 category,
             };
@@ -469,7 +460,6 @@ pub fn execute_authorized_with_context(
 /// pre-mutating ambient state.
 pub fn execute_with_context(
     name: &str,
-    action: &str,
     args: &str,
     tool_call_id: &str,
     progress_tx: Option<crate::ExecProgressSender>,
@@ -479,10 +469,7 @@ pub fn execute_with_context(
     // Fail closed：显式上下文缺会话等价于旧“runtime 未初始化”。
     // （无会话 = 无主体身份，拒绝事件无从归属，不落审计。）
     if ctx.session_id.is_empty() {
-        return failure(
-            &resolve_name(name, action),
-            crate::ToolError::RuntimeNotInitialized,
-        );
+        return failure(name, crate::ToolError::RuntimeNotInitialized);
     }
     let call_id = if tool_call_id.is_empty() {
         format!(
@@ -495,7 +482,7 @@ pub fn execute_with_context(
     } else {
         tool_call_id.to_string()
     };
-    let resolved_name = resolve_name(name, action);
+    let resolved_name = name.to_owned();
     let args: serde_json::Value = match serde_json::from_str(args) {
         Ok(args) => args,
         Err(error) => {
@@ -506,7 +493,6 @@ pub fn execute_with_context(
                 session_id: ctx.session_id.clone(),
                 call_id,
                 tool_name: resolved_name.clone(),
-                action: action.to_string(),
                 args: serde_json::Value::Null,
                 category: crate::runtime::lookup_category(&resolved_name)
                     .unwrap_or(crate::permission::ToolCategory::Write),
@@ -524,14 +510,6 @@ pub fn execute_with_context(
     };
     let _ctx_guard = crate::runtime::install_tool_ctx(ctx);
 
-    let resolved_action = if action.is_empty() {
-        args.get("action")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(name)
-            .to_string()
-    } else {
-        action.to_string()
-    };
     let workspace_root = crate::runtime::active_workspace_root();
     // 能力类别来自 handler 声明（单一事实源）；查不到时保守回退 Write。
     let category = crate::runtime::lookup_category(&resolved_name)
@@ -540,7 +518,6 @@ pub fn execute_with_context(
         session_id: ctx.session_id.clone(),
         call_id,
         tool_name: resolved_name.clone(),
-        action: resolved_action,
         args,
         category,
     };
@@ -602,7 +579,7 @@ fn audit_rejected(
         ts: chrono::Utc::now().to_rfc3339(),
         user: "agent".into(),
         tool: invocation.tool_name.clone(),
-        action: invocation.action.clone(),
+        action: String::new(),
         args_hash: crate::audit::hash_args(&invocation.args),
         args_bytes: crate::audit::args_size(&invocation.args),
         status: "error".to_string(),
@@ -627,14 +604,6 @@ fn audit_rejected(
             "audit: append rejected event for {} failed: {e}",
             invocation.tool_name
         );
-    }
-}
-
-fn resolve_name(name: &str, action: &str) -> String {
-    if action.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name}_{action}")
     }
 }
 
@@ -671,9 +640,24 @@ mod tests {
     use std::time::Duration;
 
     static TEST_HANDLER_COUNT: AtomicU32 = AtomicU32::new(0);
-    fn test_counter_handler(_ctx: crate::ToolCallCtx) -> crate::ToolResult {
+    fn test_counter_handler(
+        _ctx: &crate::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> crate::ToolResult {
         TEST_HANDLER_COUNT.fetch_add(1, Ordering::SeqCst);
         crate::ToolResult::ok("counter incremented")
+    }
+
+    /// 动态工具 dispatcher（typed 契约；同 `test_counter_handler` 的计数体）。
+    fn test_counter_dispatch(
+        _name: &str,
+        _ctx: &crate::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> Result<crate::tool_api::ToolOutcome, crate::tool_api::FatalToolError> {
+        TEST_HANDLER_COUNT.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::tool_api::map_tool_result(crate::ToolResult::ok(
+            "counter incremented",
+        )))
     }
 
     struct WorkspaceReset;
@@ -695,13 +679,21 @@ mod tests {
         }
     }
 
-    fn context_probe_handler(_ctx: crate::ToolCallCtx) -> crate::ToolResult {
+    /// 探针改为直接读显式上下文——TLS 兼容视图退场后，handler 唯一的事实源
+    /// 就是 `&ToolCallContext`。
+    fn context_probe_handler(
+        ctx: &crate::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> crate::ToolResult {
         crate::ToolResult::ok(
             serde_json::json!({
-                "session": crate::current_session(),
-                "workspace": crate::current_workspace(),
-                "mode": crate::runtime::current_mode(),
-                "cancelled": crate::is_cancel(),
+                "session": ctx.session_id,
+                "workspace": ctx.workspace_root.to_string_lossy(),
+                "mode": match ctx.mode {
+                    crate::tool_api::AgentMode::Plan => 1,
+                    crate::tool_api::AgentMode::Code => 0,
+                },
+                "cancelled": ctx.cancellation.is_cancelled(),
             })
             .to_string(),
         )
@@ -714,7 +706,7 @@ mod tests {
         crate::set_workspace(".");
         let allowed: Vec<String> = vec![];
         crate::runtime::init_tools("test", &[], allowed);
-        crate::runtime::register_test_handler(crate::ToolHandler {
+        crate::runtime::register_test_probe(crate::probe::ProbeTool {
             key: "test_counter".to_string(),
             description: "test handler",
             input_schema: serde_json::json!({}),
@@ -723,7 +715,7 @@ mod tests {
             category: crate::permission::ToolCategory::Read,
             default_timeout: std::time::Duration::from_secs(5),
         });
-        crate::runtime::register_test_handler(crate::ToolHandler {
+        crate::runtime::register_test_probe(crate::probe::ProbeTool {
             key: "test_write".to_string(),
             description: "test write handler",
             input_schema: serde_json::json!({}),
@@ -732,7 +724,7 @@ mod tests {
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(5),
         });
-        crate::runtime::register_test_handler(crate::ToolHandler {
+        crate::runtime::register_test_probe(crate::probe::ProbeTool {
             key: "context_probe".to_string(),
             description: "explicit context probe",
             input_schema: serde_json::json!({}),
@@ -753,7 +745,7 @@ mod tests {
             "echo",
             "test dynamic tool",
             serde_json::json!({"type":"object"}),
-            test_counter_handler,
+            test_counter_dispatch,
             crate::permission::ToolCategory::Exec,
             Duration::from_secs(30),
         );
@@ -763,7 +755,6 @@ mod tests {
 
         let result = execute_with_context(
             &full_name,
-            "",
             r#"{}"#,
             "mcp-metrics-call",
             None,
@@ -811,7 +802,6 @@ mod tests {
 
         let result = execute_with_context(
             "skills",
-            "",
             r#"{"action":"activate","name":"typed-skill"}"#,
             "skill-call-1",
             None,
@@ -825,8 +815,9 @@ mod tests {
             .next()
             .expect("typed activation")
         {
-            // ToolEffect / SkillEffect 目前均为单变体 enum，此臂已穷尽；
-            // 若未来新增变体，单臂 match 编译失败即强制此处显式处理。
+            // ToolEffect 现有 Skill/SubagentSpawned 两个变体（SkillEffect 仅
+            // Activate），此臂只覆盖 Skill；其余变体由下方 `other` 兜底 panic，
+            // 故新增变体不会编译失败，而是走到该 panic。
             crate::ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(activation)) => activation,
             other => panic!("unexpected typed skill effect: {other:?}"),
         };
@@ -835,7 +826,6 @@ mod tests {
 
         let resource = execute_with_context(
             "skills",
-            "",
             r#"{"action":"resource","name":"typed-skill","path":"references/info.md"}"#,
             "resource-call-1",
             None,
@@ -847,7 +837,6 @@ mod tests {
 
         let generic_read = execute_with_context(
             "read",
-            "",
             &serde_json::json!({"path": skill_dir.join("SKILL.md")}).to_string(),
             "generic-skill-read",
             None,
@@ -865,7 +854,6 @@ mod tests {
 
         let traversal = execute_with_context(
             "skills",
-            "",
             r#"{"action":"resource","name":"typed-skill","path":"../outside.md"}"#,
             "resource-call-2",
             None,
@@ -883,7 +871,6 @@ mod tests {
 
         let list = execute_with_context(
             "skills",
-            "",
             r#"{"action":"list"}"#,
             "skills-list-1",
             None,
@@ -894,7 +881,6 @@ mod tests {
 
         let invalid = execute_with_context(
             "skills",
-            "",
             r#"{"action":"list","name":"typed-skill"}"#,
             "skills-invalid-1",
             None,
@@ -921,7 +907,6 @@ mod tests {
             session_id: "test_session".to_string(),
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
-            action: String::new(),
             args: serde_json::json!({}),
             category,
         }
@@ -951,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_context_drives_admission_execution_and_restores_ambient() {
+    fn explicit_context_drives_admission_and_execution() {
         let _test_guard = setup_test_manager();
         let _actor_reset = ActorContextReset;
         crate::set_actor_context("/tmp/qaqh-legacy-ambient", "legacy-seed");
@@ -997,7 +982,7 @@ mod tests {
         assert_eq!(
             crate::current_session().as_deref(),
             Some("legacy-seed"),
-            "execution must restore the previous ambient context"
+            "执行不得改动 ambient 会话状态（无 per-call TLS 视图可装可还）"
         );
     }
 
@@ -1276,7 +1261,6 @@ mod tests {
         // With SkipPermissions context, auto-approve should work
         let result = execute_with_context(
             "test_counter",
-            "",
             "{}",
             "compat-2",
             None,
@@ -1327,8 +1311,8 @@ mod tests {
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
-        // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec", "process", "todo"]`，
-        // 见 `crate::PLAN_BLOCKED`）中：PLAN 模式下仍放行，阻断只发生在名单内工具。
+        // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec", "process", "todo_update",
+        // "todo_write"]`，见 `crate::PLAN_BLOCKED`）中：PLAN 模式下仍放行，阻断只发生在名单内工具。
         //
         // 注意：`test_write` 是 Destructive + Write 的文件型工具，P0-2 之后
         // 「缺 path」会被 `SafetyPolicy` fail-closed 拦下（与 PLAN 模式无关）。
@@ -1391,7 +1375,7 @@ mod tests {
         // PR-3-2：fail-closed 契约迁移到显式 ToolCtx——空 session_id 等价于
         // 旧“runtime context 未初始化”。
         let ctx = crate::runtime::ToolCtx::admitted("");
-        let result = execute_with_context("test_counter", "", "{}", "miss-ctx-1", None, &ctx);
+        let result = execute_with_context("test_counter", "{}", "miss-ctx-1", None, &ctx);
         assert!(
             !result.success,
             "should fail closed without runtime context"
@@ -1412,7 +1396,6 @@ mod tests {
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         let result = execute_with_context(
             "test_counter",
-            "",
             "not-json{{{",
             "inv-json-1",
             None,
@@ -1504,7 +1487,6 @@ mod tests {
             session_id: "session-B".to_string(),
             call_id: "sess-mis-1".to_string(),
             tool_name: "test_counter".to_string(),
-            action: String::new(),
             args: serde_json::json!({}),
             category: crate::permission::ToolCategory::Read,
         };
@@ -1546,7 +1528,6 @@ mod tests {
             session_id: "test".to_string(),
             call_id: "res-mis-1".to_string(),
             tool_name: "test_counter".to_string(),
-            action: String::new(),
             args: serde_json::json!({"path": "a.txt"}),
             category: crate::permission::ToolCategory::Read,
         };
@@ -1564,7 +1545,6 @@ mod tests {
             session_id: "test".to_string(),
             call_id: "res-mis-1".to_string(),
             tool_name: "test_counter".to_string(),
-            action: String::new(),
             args: serde_json::json!({"path": "b.txt"}),
             category: crate::permission::ToolCategory::Read,
         };

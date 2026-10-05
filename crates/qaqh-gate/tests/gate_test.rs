@@ -841,12 +841,12 @@ fn system_message_between_tool_and_assistant_model_acknowledges() {
     );
 }
 
-// ── DSML integration (via tool_parser as used by gate) ──
+// ── 非标准 toolcall 移除回归锁（2026-10-05）──
 
 #[test]
-fn dsml_tool_call_in_content() {
-    // Gate's stream_sse detects DSML in content and emits ToolCallProgress events.
-    // The content contains DSML invoke tags.
+fn dsml_looking_content_stays_plain_text() {
+    // DeepSeek v4.1 起原生输出结构化 tool_calls；文本态 DSML 解析已移除。
+    // 正文里即使出现 DSML 标记，也必须原样保留为文本，不得被抽成 ToolUse。
     let text = r#"Let me read that file.
 
 <|DSML|tool_calls>
@@ -883,14 +883,22 @@ fn dsml_tool_call_in_content() {
         .iter()
         .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
         .collect();
-    assert!(!tool_blocks.is_empty(), "should have ToolUse from DSML");
-    assert_eq!(
-        tool_blocks[0],
-        &ContentBlock::ToolUse {
-            id: "dsml_tc_0".into(),
-            name: "read".into(),
-            input: json!({"path": "/tmp/test.txt"}),
-        }
+    assert!(
+        tool_blocks.is_empty(),
+        "DSML-looking text must NOT be extracted into ToolUse"
+    );
+    let text_blocks: Vec<&ContentBlock> = msg
+        .content
+        .iter()
+        .filter(|b| matches!(b, ContentBlock::Text { .. }))
+        .collect();
+    assert!(
+        !text_blocks.is_empty()
+            && text_blocks.iter().any(|b| match b {
+                ContentBlock::Text { text } => text.contains("DSML|invoke"),
+                _ => false,
+            }),
+        "DSML text must survive verbatim in the content"
     );
 }
 
@@ -1225,10 +1233,10 @@ fn responses_chat_stream_with_tool_calls() {
         .iter()
         .filter_map(|ev| {
             if let StreamEvent::ToolCallProgress {
-                name, args_so_far, ..
+                name, args_chunk, ..
             } = ev
             {
-                Some((name.clone(), args_so_far.clone()))
+                Some((name.clone(), args_chunk.clone()))
             } else {
                 None
             }

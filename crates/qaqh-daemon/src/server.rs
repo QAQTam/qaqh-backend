@@ -111,15 +111,16 @@ impl ServerNetworkConfig {
             }
             index += 1;
         }
-        // 审计 H3：非 loopback 绑定必须显式 token。没有它，随机 token 会打
-        // 到 stderr 并以明文 HTTP 暴露完整 agent 控制面——把「确认危险」的
-        // 动作交还给显式传参这一步。
+        // 非 loopback 绑定仍需显式 admin token：随机 token 会打到 stderr，虽现已
+        // 由 TLS 保护传输，但显式传参把「确认暴露」这一步交还给人。TLS 由
+        // `run_with` 在非回环 bind 时自动启用（自签证书持久化于数据目录）。
         if !config.bind_ip.is_loopback() && config.token.is_none() {
             return Err(
                 "refusing to bind a non-loopback address without an explicit token: \
-                 pass --token <token> (or set QAQH_SERVER_TOKEN). The control plane is \
-                 plain-text HTTP; anything on the network can read the bearer token. \
-                 Bind loopback (default) if the remote peer does not truly need LAN access."
+                 pass --token <token> (or set QAQH_SERVER_TOKEN). LAN mode enables TLS \
+                 with a persisted self-signed certificate; mobile devices must pair \
+                 (QR) and pin that certificate. Bind loopback (default) if the remote \
+                 peer does not truly need LAN access."
                     .into(),
             );
         }
@@ -157,6 +158,13 @@ fn resolve_run_port(configured: u16) -> u16 {
 
 pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     let data_root = qaqh_types::platform::ensure_data_root().map_err(stringify)?;
+    // 传输安全（移动端 M0）：非回环 bind 启用 TLS，自签证书持久化于数据目录。
+    // 回环保持明文 HTTP——桌面壳 / CLI / TUI / 探针连接行为零变化。
+    let tls = if config.bind_ip.is_loopback() {
+        None
+    } else {
+        Some(crate::tls::load_or_generate(&data_root).map_err(stringify)?)
+    };
     // PR-3-1：SessionManager::init 收敛到 daemon main 装配点，全进程经注入
     // 句柄访问会话存储（hub / service / registry 均在此注入）。
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
@@ -183,7 +191,11 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         config.bind_ip
     };
     let discovery = DaemonDiscovery {
-        endpoint: format!("http://{advertise_ip}:{}", address.port()),
+        endpoint: format!(
+            "{}://{advertise_ip}:{}",
+            if tls.is_some() { "https" } else { "http" },
+            address.port()
+        ),
         token: token.clone(),
         pid: std::process::id(),
         server_epoch: epoch.clone(),
@@ -198,8 +210,12 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             .unwrap_or_default(),
     };
     if !config.bind_ip.is_loopback() {
+        let fingerprint = tls
+            .as_ref()
+            .map(|material| material.fingerprint.as_str())
+            .unwrap_or("n/a");
         log::warn!(
-            "[qaqh-daemon] lan server mode on {advertise_ip}:{} — temporary build, no transport security",
+            "[qaqh-daemon] lan server mode on {advertise_ip}:{} — TLS enabled, cert fp {fingerprint} (rotate = re-pair all devices)",
             address.port()
         );
     }
@@ -254,7 +270,15 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         driver_watch: driver_watch.clone(),
         pending: pending_commands.clone(),
         service: service.clone(),
-        token: token.clone(),
+        admin_token: token.clone(),
+        devices: Arc::new(Mutex::new(
+            qaqh_runtime::ringing::DeviceRegistry::new_persistent(),
+        )),
+        pairings: Arc::new(Mutex::new(crate::axum_server::PairingTable::new())),
+        tls_fingerprint: tls
+            .as_ref()
+            .map(|material| material.fingerprint.clone()),
+        challenges: Arc::new(crate::axum_server::ChallengeStore::default()),
         epoch: epoch.clone(),
         shutdown: shutdown.clone(),
         test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),
@@ -342,15 +366,28 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     write_discovery(&discovery)?;
     let app = crate::axum_server::build_router(app_state);
     let mut shutdown_rx = shutdown.subscribe();
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
+    let graceful = async move {
         let _ = shutdown_rx.changed().await;
-    })
-    .await
-    .map_err(stringify)?;
+    };
+    match tls {
+        Some(material) => {
+            let listener = crate::tls::TlsListener::new(listener, material.acceptor);
+            // 无 ConnectInfo handler：TLS 路径用不带 connect-info 的 make service。
+            axum::serve(listener, app.into_make_service())
+                .with_graceful_shutdown(graceful)
+                .await
+                .map_err(stringify)?;
+        }
+        None => {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(graceful)
+            .await
+            .map_err(stringify)?;
+        }
+    }
     service.shutdown();
     // 退出前主动收尾孤儿（stop 协议已在 handler 做过；此处兜底其他退出
     // 路径，如生命周期接管/信号退出。幂等：已 seal 的 turn 跳过）。

@@ -585,7 +585,7 @@ mod tests {
         assert_eq!(result.model_text(), "L2: two\nL3: three");
         assert_eq!(result.data["files"][0]["start_line"], 2);
         assert_eq!(result.data["files"][0]["end_line"], 3);
-        // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 edit 的 expected_hash 校验
+        // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 write 的 expected_hash 与账本自动防漂移校验
         let hash = result.data["files"][0]["hash"]
             .as_str()
             .expect("read must return hash");
@@ -657,9 +657,10 @@ fn read_registration_is_typed_and_descriptor_keeps_legacy_schema() {
     let mut manager = crate::ToolManager::new();
     register(&mut manager);
     let registered = manager.builtins.get("read").expect("read registered");
-    assert!(
-        registered.legacy.is_none(),
-        "read must not use legacy executor"
+    assert_eq!(
+        registered.descriptor.name.as_str(),
+        "read",
+        "read must be on the typed execution surface"
     );
     assert_eq!(
         registered.descriptor.input_schema["additionalProperties"],
