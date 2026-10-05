@@ -65,13 +65,6 @@ impl TimelineStore {
     pub fn new(root: impl Into<PathBuf>) -> std::io::Result<Self> {
         let parent = root.into();
         let root = parent.join("ringing-timeline");
-        // Preserve replay recovery across the one-time pre-V1 → Ringing V1 rename.
-        // The legacy name is migration-only; all new reads and writes use the
-        // versionless Ringing timeline directory.
-        let legacy = parent.join("timeline-v3");
-        if !root.exists() && legacy.is_dir() {
-            std::fs::rename(&legacy, &root)?;
-        }
         std::fs::create_dir_all(&root)?;
         let audit_root = parent.join("timeline-audit");
         std::fs::create_dir_all(&audit_root)?;
@@ -594,36 +587,6 @@ mod tests {
             .unwrap()
             .progress;
         assert_eq!(progress, "new");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migrates_legacy_timeline_storage_into_the_ringing_v1_root() {
-        let root = std::env::temp_dir().join(format!(
-            "qaqh-timeline-store-migration-{}",
-            std::process::id()
-        ));
-        let legacy = root.join("timeline-v3");
-        std::fs::create_dir_all(&legacy).expect("create legacy directory");
-        let record = PersistedTimeline {
-            session_id: "seed".into(),
-            snapshot: TimelineSnapshot {
-                watermark: 7,
-                turns: vec![],
-            },
-            journal: vec![],
-        };
-        std::fs::write(
-            legacy.join("seed.json"),
-            serde_json::to_vec(&record).expect("serialize legacy record"),
-        )
-        .expect("write legacy record");
-
-        let store = TimelineStore::new(&root).expect("migrate legacy directory");
-        let loaded = store.load().expect("load migrated record");
-        assert_eq!(loaded["seed"].snapshot.watermark, 7);
-        assert!(root.join("ringing-timeline").is_dir());
-        assert!(!legacy.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
