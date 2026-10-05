@@ -6,8 +6,7 @@
 //!     messages.jsonl  — one JSON line per Message (append-only)
 //!     messages.wal    — L2 write-ahead log of un-drained persist ops
 //!
-//! A central `index.jsonl` enables fast listing (legacy `index.json` is
-//! migrated to it on first read, then removed).
+//! A central `index.jsonl` enables fast listing.
 
 use qaqh_types::{Message, SessionMeta};
 use std::collections::HashMap;
