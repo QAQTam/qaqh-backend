@@ -5,9 +5,8 @@
 //! （E-5 单一 dispatcher），注册全名由适配器注入——`ToolCallContext` 的
 //! 新契约不含工具名（调用身份是 `call_id`）。
 //!
-//! 与 [`super::legacy::LegacyToolAdapter`] 的差异：本适配器**不经过** v1
-//! `ToolCallCtx`/线程局部兼容视图，dispatcher 拿到的是显式 [`ToolCallContext`]
-//! ——工作区、取消、超时全部显式传递。
+//! 显式 [`ToolCallContext`]——工作区、取消、超时全部显式传递（不经 v1
+//! `ToolCallCtx` 或线程局部兼容视图）。
 
 use super::context::ToolCallContext;
 use super::descriptor::ToolDescriptor;
@@ -72,7 +71,7 @@ mod tests {
         ctx: &ToolCallContext,
         args: serde_json::Value,
     ) -> Result<ToolOutcome, FatalToolError> {
-        Ok(super::super::legacy::map_tool_result(
+        Ok(super::super::result::map_tool_result(
             crate::ToolResult::ok_data(
                 serde_json::json!({
                     "name_is_full": true,
