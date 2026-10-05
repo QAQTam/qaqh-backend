@@ -3,9 +3,6 @@
 /// 线协议 schema 标识。
 pub const RINGING_SCHEMA: &str = "qaqh.Ringing";
 
-/// 线协议版本。
-pub const RINGING_VERSION: u32 = 1;
-
 /// open 成功后所有请求使用的连接级身份 header。
 pub const CLIENT_SESSION_HEADER: &str = "X-QAQH-Client-Session-Id";
 
