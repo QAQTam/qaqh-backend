@@ -1981,7 +1981,11 @@ mod wal_recovery_tests {
         // duplicate, and the log file is back to a bare header.
         let (_, again, _) = manager.load_for_resume(session_id).expect("resume again");
         assert_eq!(again.len(), 3);
-        assert!(qaqh_message::wal::read_ops(&dir).is_empty());
+        let ops = qaqh_message::wal::open_reader(&dir)
+            .expect("open wal")
+            .map(|mut reader| reader.finish().expect("read wal"))
+            .unwrap_or_default();
+        assert!(ops.is_empty());
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
