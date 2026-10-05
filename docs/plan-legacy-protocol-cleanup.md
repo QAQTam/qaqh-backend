@@ -63,10 +63,10 @@
 
 | 通道 | 现状（证据） | 决策 |
 |---|---|---|
-| `ToolEvent::ToolCallPrepared { args_so_far }`（`qaqh-domain/src/event.rs:457-463`，分类 `:531` Replaceable） | 每个 SSE 帧发一条**整段** args；`qaqh-runtime/src/ringing/projection.rs` 里没有它的分支 → 到不了 UI | [ ] 删事件，或接进投影（估算通道已另立，见第 5 节） |
+| `ToolEvent::ToolCallPrepared { args_so_far }`（`qaqh-domain/src/event.rs:457-463`，分类 `:531` Replaceable） | 每个 SSE 帧发一条**整段** args；`qaqh-runtime/src/ringing/projection.rs` 里没有它的分支 → 到不了 UI | [x] **已删（2026-10-05，随 P1.3）**：发射点 `turn_lap/gate.rs:679-688` 与变体一起摘掉。删前普查：生产侧无人匹配 `ToolCallPrepared`（桥只匹配 `ToolPermissionRequested`/`Started`/`Finished`/`Notice`），`tool_call_prepared` 字面量在 crates/webui/scripts/docs/数据目录 0 命中，`DomainEvent`/`ToolEvent` 无生产反序列化点 → 不影响历史账本重放。「接进投影」这条选项已随 v1 快照投影退场而不成立。 |
 | `ToolEvent::CodeChanged`（`event.rs:519-520`） | 生产侧已完整（本次补齐 `write`/`apply_patch` 口径），但投影丢弃，只落 `code_stats.jsonl`（`agent/types.rs:518-542`） | [ ] 决定 UI 要不要权威行数；要则补 projection 分支，不要则从导出面摘掉 |
 | `webui/src/api/qaqh/*.ts` 零消费者生成物 | ts-rs 全量导出，前端实际只用 timeline 一条通道 | [x] **已收窄（2026-10-05）**：导出面按「前端 import 闭包 ∪ 仍在序列化上线的契约」白名单化，生成物 186→132，砍掉 54 个 fire-into-void 类型（`DomainEvent`/`ToolEvent`/`ControlEvent`/`ConversationEvent`/`RingingEvent`/`ControlState`/`ConversationState`/`ToolState`/`DomainCommand`、v1 `ToolResult` 信封族、`Dashboard*`/`Skill*`/`PlanReviewItem`…）。`Projection*` 与入站 `*Command` **保留**——SSE v2 与 bootstrap 仍在序列化它们，只是前端按 untyped envelope 消费（转正前先别删）。 |
-| `qaqh_gate::StreamEvent::ToolCallProgress { args_so_far }`（`qaqh-gate/src/message_api.rs:511`、`chat_completions_api.rs:347`） | 每帧 `.clone()` 整段累计串 = O(n²) 基座。58 KB 参数约 2493 帧；估算器已按字节偏移绕开它，但基座没修 | [ ] 改成携带片段 + 累计长度 |
+| `qaqh_gate::StreamEvent::ToolCallProgress { args_so_far }`（`qaqh-gate/src/message_api.rs:511`、`chat_completions_api.rs:347`） | 每帧 `.clone()` 整段累计串 = O(n²) 基座。58 KB 参数约 2493 帧；估算器已按字节偏移绕开它，但基座没修 | [x] **已改成携带片段（2026-10-05）**：三适配器全部改发 `args_chunk`（Chat Completions / Messages 发 provider 的增量，Responses 一帧给完整参数即整段）。**没有**同时携带累计长度——普查后消费面只有 `ArgLineSlot`（running counter，自己就能数）与首帧 `args_json`，加 `usize` 就是没人读的字段。`ArgLineSlot` 的字节偏移重算与 resync 兜底随之删除，换成「认出写工具前暂存片段（上限 16 KiB）」，`late_name` 语义不变。 |
 
 ## 4. 待办 C：口径与命名撞车
 
