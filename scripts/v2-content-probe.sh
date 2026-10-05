@@ -172,6 +172,7 @@ endpoint = "openai"
 
 daemon_env = os.environ.copy()
 daemon_env["QAQH_DATA_DIR"] = str(DATA)
+daemon_env["QAQH_ALLOW_TEST_DATA_ROOT"] = "1"
 daemon = subprocess.Popen(
     [str(DAEMON), "run"],
     stdin=subprocess.DEVNULL,

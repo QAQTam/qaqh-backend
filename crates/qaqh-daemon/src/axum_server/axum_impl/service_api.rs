@@ -11,9 +11,6 @@ pub(crate) async fn handle_service(
     Path(name): Path<String>,
     body: Bytes,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
