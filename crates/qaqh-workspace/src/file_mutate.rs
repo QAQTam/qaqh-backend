@@ -954,7 +954,11 @@ mod tests {
                 .builtins
                 .get(name)
                 .unwrap_or_else(|| panic!("{name} must be registered"));
-            assert!(tool.legacy.is_none(), "{name} still has legacy executor");
+            assert_eq!(
+                tool.descriptor.name.as_str(),
+                name,
+                "{name} descriptor name"
+            );
         }
         assert_eq!(
             manager.builtins["write"].descriptor.input_schema,

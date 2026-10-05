@@ -342,8 +342,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["confirm_apply"].legacy.is_none(),
-            "confirm_apply still has legacy executor"
+            manager.builtins.contains_key("confirm_apply"),
+            "confirm_apply must be on the typed execution surface"
         );
         let id = crate::pending::store("write", &serde_json::json!({}));
         let result = exec_confirm_apply(&serde_json::json!({

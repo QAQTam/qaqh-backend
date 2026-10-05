@@ -683,9 +683,10 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         let registered = manager.builtins.get("grep").expect("grep registered");
-        assert!(
-            registered.legacy.is_none(),
-            "grep must not use legacy executor"
+        assert_eq!(
+            registered.descriptor.name.as_str(),
+            "grep",
+            "grep must be on the typed execution surface"
         );
         assert_eq!(
             registered.descriptor.input_schema["required"],

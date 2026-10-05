@@ -245,9 +245,15 @@ pub fn execute_authorized_with_context(
         }
     };
 
-    // Phase 2: execute without holding the manager lock. All tools now run in
+    // Phase 2: execute without holding the manager lock. All tools run in
     // the daemon actor process; WSL deployment moves the whole daemon instead
     // of routing individual tool calls across an environment boundary.
+    //
+    // 执行面统一为 `ErasedTool`：v1 `ToolHandler` 在注册时已包成适配器。
+    // 生效超时在 prepare 阶段定稿（调用方显式值 / descriptor 默认值），此处
+    // 补进显式上下文——准入侧构造的上下文超时为零值。
+    let mut exec_ctx = context.clone();
+    exec_ctx.timeout = prepared.effective_timeout;
     let _ = (authorized_workspace, authorized_resources);
     // 审计对象 before 指纹：派发前按与 finalize 同源的 args 口径快照
     // file_state 账本（键一致，命中即 before，未命中为 None）。
@@ -318,19 +324,8 @@ pub fn execute_authorized_with_context(
         }
     }
 
-    let (mut tool_result, skill_effects) = match prepared.executor.clone() {
-        crate::manager::PreparedExecutor::Legacy(legacy) => {
-            let result = legacy(prepared.ctx.clone());
-            let skill_effects = if name == "skills" && result.is_success() {
-                prepared.ctx.take_skill_effects()
-            } else {
-                Vec::new()
-            };
-            (result, skill_effects)
-        }
-        crate::manager::PreparedExecutor::Typed(erased) => match erased
-            .execute(context.clone(), args.clone())
-        {
+    let (mut tool_result, skill_effects) =
+        match prepared.executor.clone().execute(exec_ctx, args.clone()) {
             Ok(outcome) => {
                 let effects = outcome.effects.clone();
                 (outcome.to_tool_result(), effects)
@@ -347,8 +342,7 @@ pub fn execute_authorized_with_context(
                     Vec::new(),
                 )
             }
-        },
-    };
+        };
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
     crate::tool_side_fold::apply(&name, &mut tool_result);

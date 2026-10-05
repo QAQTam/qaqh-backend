@@ -337,8 +337,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["ask"].legacy.is_none(),
-            "ask still has legacy executor"
+            manager.builtins.contains_key("ask"),
+            "ask must be on the typed execution surface"
         );
         let result = exec_ask_user(&serde_json::json!({
             "question": "Choose?",

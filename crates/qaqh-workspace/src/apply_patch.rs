@@ -758,8 +758,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["apply_patch"].legacy.is_none(),
-            "apply_patch still has legacy executor"
+            manager.builtins.contains_key("apply_patch"),
+            "apply_patch must be on the typed execution surface"
         );
 
         let (_dir, workspace) = repo_with_commit(&[("a.txt", "old\n")]);
