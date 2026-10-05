@@ -16,7 +16,6 @@ pub const TOOL_MODEL_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ToolStatus {
     Ok,
     Error,
@@ -45,25 +44,21 @@ pub struct ContentRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolContinuation {
     pub tool: String,
     pub args: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolModelPayload {
     pub text: String,
     pub truncated: bool,
-    #[cfg_attr(feature = "ts", ts(as = "u32"))]
     pub total_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ToolContinuation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolError {
     pub code: String,
     pub message: String,
@@ -80,7 +75,6 @@ pub struct ToolError {
 /// serialized into the model text projection — the gate lowers images
 /// to provider-native media parts at request-build time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolImage {
     pub mime_type: String,
     /// Raw base64 payload (no `data:` prefix).
@@ -92,7 +86,6 @@ pub struct ToolImage {
 /// `elapsed_ms = None` 表示本次结果未接线 metrics（授权拒绝、历史归档等）；
 /// 全空对象不序列化，旧 wire 保持不变。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolResultMetrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
@@ -126,7 +119,6 @@ fn is_zero_u32(value: &u32) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolResultDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -179,7 +171,6 @@ pub enum ToolResultDisplayOutcomeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolResultDisplayHeader {
     Path {
@@ -200,7 +191,6 @@ pub enum ToolResultDisplayHeader {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultDisplayPathOp {
     Read,
@@ -212,7 +202,6 @@ pub enum ToolResultDisplayPathOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolResultDisplayBody {
     None,
@@ -253,7 +242,6 @@ pub enum ToolResultDisplayBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolResult {
     pub status: ToolStatus,
     pub data: serde_json::Value,
