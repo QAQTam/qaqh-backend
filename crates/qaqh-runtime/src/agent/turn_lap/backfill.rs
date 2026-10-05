@@ -7,8 +7,6 @@ use qaqh_types::UsageInfo;
 use crate::agent::dashboard;
 use crate::agent::engine_tool::ToolEngine;
 use crate::agent::types::{Outcome, RingContext};
-use crate::agent::util;
-
 // ── helpers (from engine_turn.rs, moved for phase decoupling) ──
 
 fn domain_failure(
@@ -53,7 +51,6 @@ pub(crate) fn emit_completed_tool_round(
     round_num: u32,
 ) -> Vec<qaqh_message::StepToolResult> {
     let results = ctx.agent.msg.last_step_tool_results();
-    let ts = util::chrono_local_datetime();
     for step_result in &results {
         let qaqh_message::StepToolResult {
             tool_call_id: tc_id,
@@ -66,24 +63,7 @@ pub(crate) fn emit_completed_tool_round(
             .tool_call_args(tc_id)
             .map(|a| a.to_string())
             .unwrap_or_default();
-        let content = result.model_text();
         ToolEngine::emit_timeline_tool_result(ctx, turn_id, round_num, tc_id, name, &args, result);
-        // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-            qaqh_domain::ToolEvent::AuditRecorded {
-                tool_name: name.clone(),
-                result_summary: content
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(120)
-                    .collect(),
-                success: result.is_success(),
-                time: ts.clone(),
-                args_ref: None,
-            },
-        ));
         // Ringing 终态：ToolFinished（legacy 汇总 ToolResults 退役后的替代——
         // 批量执行路径每个工具单独发终态，与 UI 主动调用路径一致）。载荷即
         // 归档的 canonical ToolResult（含五态 status），不再按 success 布尔
