@@ -1,23 +1,9 @@
 //! 三频道快照 `state` 的**类型化视图**（前端契约 G1）。
 //!
-//! `RingingChannelSnapshot.state` 是 `serde_json::Value`——中立 JSON，形状此前**没有
-//! 任何 Rust 类型承载**。每个前端都得手解，且必然各解各的：TUI 的手解至今漏了
-//! `active_turn` / `last_round` / `compact_status` / `compact_id` / `cancelled` /
-//! `last_finished` 六个字段而无人察觉。本模块把形状固定下来，三端（winui / web /
-//! TUI）共用，web 端可经 `ts` feature 直接生成 TS 类型。
-//!
-//! # 字段来源（**产出方全量审计**，2026-09-15）
-//!
-//! 三段 `state` 只有三处写入方，逐字段对应如下（`grep -rnE 'state\["[a-z_]+"\]\s*=[^=]'
-//! crates/qaqh-runtime/src/ringing/` 实测：36 处写入**全部**在 `projection.rs`）：
-//!
-//! 1. `projection.rs::SnapshotProjector::snapshot_for` 的初值 —— 仅 `session_id` / `channel` / `revision`
-//!    （三者均由快照信封承载，故**不在**本模块的类型里重复）；
-//! 2. `projection.rs::fold` —— 事件折叠，下面每个字段的文档注明了它属于哪个频道的
-//!    哪个事件分支；
-//! 3. `hub.rs::merge_persisted_conversation_state` —— 把持久化投影
-//!    （`conversation_snapshot.rs::persisted_conversation_state`）的 9 个键合入
-//!    conversation 频道，即本模块 `ConversationState` 的前 9 个字段。
+//! `state` 是中立 `serde_json::Value`，其形状由本模块的 Rust 类型固定，三端
+//! （winui / web / TUI）共用，web 端可经 `ts` feature 直接生成 TS 类型。v2
+//! bootstrap 快照的 `base` 字段直接复用这些类型（见 `qaqh-ringing::v2` 的
+//! `RingingV2Bootstrap`）。
 //!
 //! # 兼容策略
 //!
@@ -40,7 +26,7 @@ use ts_rs::TS;
 #[serde(default)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ConversationState {
-    // ── 持久化投影（`merge_persisted_conversation_state` 写入）────────────
+    // ── 持久化投影字段（bootstrap 快照的 turns/usage 等）──────────────────
     /// 完整对话回合投影（与 `RoundData` 逐字段同构）。
     pub turns: Vec<TurnData>,
     /// 会话**持久化的真实回合数**（与 `turns.len()` 未必相等：快照窗口可能被裁剪）。

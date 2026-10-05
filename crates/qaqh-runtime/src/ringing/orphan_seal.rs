@@ -1,13 +1,9 @@
-//! ringing::orphan_seal — 孤儿收尾（running turn seal + channel state seal + 全量 seal）。
+//! ringing::orphan_seal — 孤儿收尾（running turn seal + 全量 seal）。
 //!
 //! 由 `hub.rs` 拆分（Phase 2-6）：`impl RingingHub` 跨文件块，对外 API 不变。
 
 use super::hub::RingingHub;
-use qaqh_domain::{
-    AskResolution, CompactStatus, ControlEvent, ConversationEvent, DomainEvent, RingingChannel,
-    TimelineBlockState, TimelineFailure, TimelineTurnState, ToolEvent,
-};
-use qaqh_types::tool_result::ToolResult;
+use qaqh_domain::{TimelineBlockState, TimelineFailure, TimelineTurnState};
 
 impl RingingHub {
     /// 收尾孤儿 running turn。daemon 重启或 worker 重新 spawn 后，timeline 中
@@ -81,188 +77,11 @@ impl RingingHub {
         changed
     }
 
-    pub fn seal_orphan_channel_state(&self, session_id: &str, force: bool) -> bool {
-        // B9/H3 liveness gate：force=false 的 bootstrap 路径在 worker 仍
-        // 存活时整体跳过——活 worker 的 running/pending 状态不是孤儿。
-        if !force
-            && self
-                .live_workers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(session_id)
-        {
-            log::info!("[ringing] worker alive for {session_id}; skipping bootstrap orphan seal");
-            return false;
-        }
 
-        let mut changed = false;
-
-        // 1) conversation：active_turn 无终态（journal 重放后仍有值）→ 取消。
-        let conv = self.snapshot(RingingChannel::Conversation, session_id);
-        if let Some(turn_id) = conv
-            .state
-            .get("active_turn")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            log::info!(
-                "[ringing] sealing orphan active turn {turn_id} for {session_id} (no terminal event)"
-            );
-            // 阶段 3d：v1 广播删除后补终态只做进程内投影收敛（snapshot /
-            // 幂等检测）；fact 补写仍为遗留债（§4.0.4）。
-            self.apply_seal_event(
-                session_id,
-                DomainEvent::Conversation(ConversationEvent::ConversationCancelled {
-                    turn_id: Some(turn_id.to_string()),
-                }),
-            );
-            changed = true;
-        }
-
-        // 2) conversation compact：CompactStarted 无 CompactFinished → 失败。
-        //    压缩 worker 的网络请求与结果仅存于旧进程内存，daemon/worker
-        //    恢复后不可能继续；必须经正常终态事件收敛 journal、snapshot 和 SSE。
-        let conv = self.snapshot(RingingChannel::Conversation, session_id);
-        if conv.state.get("compact_status").and_then(|v| v.as_str()) == Some("running") {
-            let compact_id = conv
-                .state
-                .get("compact_id")
-                .and_then(|v| v.as_str())
-                .filter(|value| !value.is_empty())
-                .unwrap_or("orphan-compact")
-                .to_string();
-            log::info!(
-                "[ringing] sealing orphan compact {compact_id} for {session_id} (worker operation cannot resume)"
-            );
-            self.apply_seal_event(
-                session_id,
-                DomainEvent::Conversation(ConversationEvent::CompactFinished {
-                    compact_id,
-                    status: CompactStatus::Failed,
-                    summary_chars: Some(0),
-                    turns_compacted: Some(0),
-                    turns_removed: Some(0),
-                }),
-            );
-            changed = true;
-        }
-
-        // 3) tool：running 列表 + pending_permission 无 ToolFinished 终态 → 取消。
-        //    兼容旧投影的字符串数组与当前的对象数组两种格式。
-        let tool = self.snapshot(RingingChannel::Tool, session_id);
-        let mut orphans: Vec<(String, String, u32)> = Vec::new();
-        if let Some(running) = tool.state.get("running").and_then(|v| v.as_array()) {
-            for entry in running {
-                match entry {
-                    serde_json::Value::String(id) => {
-                        orphans.push((id.clone(), String::new(), 0));
-                    }
-                    serde_json::Value::Object(obj) => {
-                        if let Some(id) = obj.get("tool_call_id").and_then(|v| v.as_str()) {
-                            orphans.push((
-                                id.to_string(),
-                                obj.get("turn_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                obj.get("round_num").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some(id) = tool
-            .state
-            .get("pending_permission")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            && !orphans
-                .iter()
-                .any(|(tool_call_id, _, _)| tool_call_id == id)
-        {
-            orphans.push((id.to_string(), String::new(), 0));
-        }
-        for (tool_call_id, turn_id, round_num) in orphans {
-            log::info!(
-                "[ringing] sealing orphan tool {tool_call_id} for {session_id} (no ToolFinished)"
-            );
-            // 阶段 3d：补终态走 apply_seal_event（进程内投影收敛）；
-            // ToolFinished 的 permission pin 释放仍随产生侧显式执行。
-            let interaction_id =
-                crate::agent::tool_runtime::canonical_interaction_id(&tool_call_id);
-            self.apply_seal_event(
-                session_id,
-                DomainEvent::Tool(ToolEvent::ToolFinished {
-                    tool_call_id,
-                    turn_id: turn_id.clone(),
-                    round_num,
-                    result: ToolResult::cancelled(
-                        "Agent restarted before the tool returned a result",
-                    ),
-                }),
-            );
-            self.release_interaction_content(session_id, interaction_id.as_str());
-            changed = true;
-        }
-
-        // 4) control：pending_interaction 无 InteractionResolved → 关闭（Dismissed）。
-        //    守卫：当前进程发布、仍在等待用户响应的活交互不 seal——bootstrap
-        //    路径（force=false）会误杀 1ms 前刚发布的 ask（「ask 弹不出」根因）；
-        //    force=true（worker 死亡/重启的 registry 收尾路径）无视守卫强制收尾。
-        let control = self.snapshot(RingingChannel::Control, session_id);
-        if let Some(id) = control
-            .state
-            .get("pending_interaction")
-            .and_then(|v| v.get("id"))
-            .and_then(|v| v.as_str())
-        {
-            let is_live = self
-                .live_interactions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(session_id)
-                .is_some_and(|cur| cur == id);
-            if is_live && !force {
-                log::info!(
-                    "[ringing] keeping live interaction {id} for {session_id} (awaiting user response)"
-                );
-            } else {
-                log::info!(
-                    "[ringing] sealing orphan interaction {id} for {session_id} (no resolution)"
-                );
-                self.apply_seal_event(
-                    session_id,
-                    DomainEvent::Control(ControlEvent::InteractionResolved {
-                        interaction_id: id.to_string(),
-                        resolution: AskResolution::Dismissed,
-                    }),
-                );
-                // B9/H3c：条件删除——仅当活表仍指向被收尾的 id 才清除；
-                // 并发发布的新 ask 可能已注册了不同 id，不能误抹。
-                let mut live = self
-                    .live_interactions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if live.get(session_id).is_some_and(|cur| cur == id) {
-                    live.remove(session_id);
-                }
-                drop(live);
-                // §4.0.5 迁移：补终态 Dismissed 同样释放交互正文 pin
-                // （原由 publish 承载）。
-                self.release_interaction_content(session_id, id);
-                changed = true;
-            }
-        }
-
-        changed
-    }
-
-    /// 优雅关闭收尾：对所有已知 timeline seed 执行孤儿收尾（timeline +
-    /// 三频道投影）。正常路径下 worker 已优雅退出并自行 seal（terminal
-    /// intent 同步落盘），此处兜底 worker 超时被杀 / 未收尾的场景——
-    /// 退出时不留孤儿，安装器更新后重启不再出现 daemon_restart_interrupted。
+    /// 优雅关闭收尾：对所有已知 timeline seed 执行孤儿收尾（timeline）。
+    /// 正常路径下 worker 已优雅退出并自行 seal（terminal intent 同步落盘），
+    /// 此处兜底 worker 超时被杀 / 未收尾的场景——退出时不留孤儿，安装器
+    /// 更新后重启不再出现 daemon_restart_interrupted。
     ///
     /// 只覆盖已加载 seed 的当前状态：磁盘上未加载的 seed 由下次
     /// `ensure_timeline_loaded` 启动时收尾（懒加载路径自带孤儿 seal）。
@@ -277,9 +96,6 @@ impl RingingHub {
         for session_id in &sessions {
             if self.seal_orphan_running_turns(session_id) {
                 log::info!("[timeline] sealed orphan turn(s) for {session_id} at shutdown");
-            }
-            if self.seal_orphan_channel_state(session_id, true) {
-                log::info!("[ringing] sealed orphan channel state for {session_id} at shutdown");
             }
         }
     }

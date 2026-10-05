@@ -4,7 +4,6 @@
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{ControlEvent, SessionState};
 use qaqh_runtime::{AgentRegistry, QaqhService, RingingHub};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -332,9 +331,9 @@ fn close_session_cleans_per_session_resident_state() {
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
     // 不实际 spawn worker：本用例验证 close_session 对 per-seed 全局常驻态
-    // 的清理（IMAGE_REGISTRY / hub channels / content_store）——清理点在
-    // service.close_session 内，与实例是否存在无关；有 worker 的完整关闭
-    // 路径由 idle_unload_then_respawn_preserves_history 覆盖。
+    // 的清理（IMAGE_REGISTRY / content_store）——清理点在 service.close_session
+    // 内，与实例是否存在无关；有 worker 的完整关闭路径由
+    // idle_unload_then_respawn_preserves_history 覆盖。
     let session_id = format!("session-close-clean-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("close-clean-test"));
     let service = QaqhService::init(qaqh_session::SessionManager::global());
@@ -342,19 +341,8 @@ fn close_session_cleans_per_session_resident_state() {
 
     qaqh_workspace::read_image::store_image(&session_id, "image/png", "QUJD");
     let content_id = hub.put_content(&session_id, "text/plain", b"hello".to_vec(), false);
-    hub.apply_seal_event(
-        &session_id,
-        qaqh_domain::DomainEvent::Control(ControlEvent::SessionStateChanged {
-            session_id: session_id.clone(),
-            state: SessionState::Resumed,
-        }),
-    );
     assert!(qaqh_workspace::read_image::peek_image(&session_id, 0).is_some());
     assert!(hub.get_content(&session_id, &content_id).is_some());
-    let before = hub
-        .snapshot(qaqh_domain::RingingChannel::Control, &session_id)
-        .baseline_stream_seq;
-    assert!(before > 0, "channel state must be resident before close");
 
     service
         .close_session(&session_id, None)
@@ -368,10 +356,6 @@ fn close_session_cleans_per_session_resident_state() {
         hub.get_content(&session_id, &content_id).is_none(),
         "content_store entry must be released on close"
     );
-    let after = hub
-        .snapshot(qaqh_domain::RingingChannel::Control, &session_id)
-        .baseline_stream_seq;
-    assert_eq!(after, 0, "hub channel state must be dropped on close");
 }
 
 /// BUG-2026-09-13-24 端到端回归：`session.new` 分配的会话绝不能撞进
