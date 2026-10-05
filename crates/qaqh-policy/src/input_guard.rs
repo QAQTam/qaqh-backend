@@ -6,7 +6,7 @@
 
 use unicode_normalization::UnicodeNormalization;
 
-/// NFKC-normalized blocked keyword patterns (10 pairs).
+/// NFKC-normalized blocked keyword patterns (10 patterns).
 const BLOCKED_PATTERNS: &[&str] = &[
     "心理咨询",
     "情感陪伴",

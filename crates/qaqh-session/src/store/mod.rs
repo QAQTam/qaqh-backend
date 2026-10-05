@@ -2,10 +2,12 @@
 //!
 //! Each session directory contains:
 //!   meta.json      — session metadata (small, atomic replace-write)
-//!   messages.jsonl — one JSON line per Message, append-only
+//!   messages.jsonl — one JSON line per Message; normal writes append, but
+//!                    undo/compact rewrite the whole file (see `rewrite_messages`)
 //!
-//! A central `index.json` in the sessions root enables fast listing
-//! without scanning every session directory.
+//! A central `index.jsonl` in the sessions root enables fast listing
+//! without scanning every session directory. (Legacy `index.json` is
+//! migrated to `index.jsonl` on first read, then removed.)
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

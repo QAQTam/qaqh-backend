@@ -393,7 +393,7 @@ impl ServerConnection {
         socket.notify::<lsp_types::notification::Initialized>(InitializedParams {})?;
 
         // 索引门：等 RA 系 End token；超时放行（非 RA server 无此 token）。
-        // 等待上限取 startup 超时的剩余量，最多 60s——initialize 已耗一部分。
+        // 等待上限取 min(60s, startup_timeout_secs)，与 initialize 已耗时间无关。
         let gate_wait =
             Duration::from_secs(60.min(self.server_cfg.startup_timeout_secs.clamp(1, 600)));
         match tokio::time::timeout(gate_wait, indexed_rx).await {

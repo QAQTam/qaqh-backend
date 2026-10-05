@@ -414,7 +414,7 @@ mod tests {
     }
 
     /// **Phase D 写端契约**：所有会话域 RPC 只发 `session_id`，不得再发 legacy
-    /// `seed`（读端回退由 daemon 侧 `session_param_value` 承担）。
+    /// `seed`（daemon 侧 `session_param_value` 只认 `session_id`，legacy `seed` 已退场）。
     #[test]
     fn session_scoped_requests_never_emit_legacy_session_key() {
         let requests = [

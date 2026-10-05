@@ -3,8 +3,8 @@
 //! - [`build_stdio_command`]：stdio server → 进程组隔离的 `CommandWrap`
 //!   （Unix `ProcessGroup::leader()` / Windows `JobObject`；env 注入 +
 //!   `cwd` 透传——path-sensitive server 用 cwd 钉住工作区）；
-//! - [`spawn_pipes`]：spawn 后拆出 stdin/stdout（stderr 默认 null，mcp §5.5
-//!   同款）+ 登记 pgid（组杀兜底）；
+//! - [`spawn_server`]：spawn 后拆出 stdin/stdout（stderr 默认 null，mcp §5.5
+//!   同款）+ 返回 [`SpawnedPipes`]（pid 由连接层登记 pgid，组杀兜底）；
 //! - [`resolve_server_secrets`]：`${secret:name}` 连接时解析（mcp M1-3 同款，
 //!   secret 段复用 `[secrets.mcp]`，结果只进本次子进程 env，不回存）。
 //!

@@ -582,12 +582,13 @@ impl Loop {
     // Pending queue drain
     // ═══════════════════════════════════════════════════
 
-    /// Process all queued commands from the channel.
+    /// Process all queued commands: first any commands left in
+    /// `deferred_ringing`, then everything currently in the channel.
     ///
-    /// Interrupt-type commands (Cancel, ResumeSession, NewSession, Shutdown)
-    /// set the cancel token and queue a pending action. Ringing commands have
-    /// already been acknowledged by the daemon, so commands received during a
-    /// session switch are retained and dispatched once the switch completes.
+    /// While the `pending` shutdown flag is set, incoming Ringing commands are
+    /// pushed onto `deferred_ringing` instead of dispatched inline. Ringing
+    /// commands have already been acknowledged by the daemon, so they are
+    /// retained rather than silently discarded.
     fn drain_pending(&mut self) {
         self.dispatch_deferred_ringing();
         while let Ok(cmd) = self.cmd_rx.try_recv() {

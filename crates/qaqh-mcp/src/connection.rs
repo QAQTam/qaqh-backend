@@ -144,7 +144,7 @@ struct ConnState {
     /// 最近一次 inflight 归零的时刻；None = 有调用在飞（E-2 语义）。
     idle_since: Option<Instant>,
     /// 连接成功后自动拉取的 `tools/list` 快照（投影/模型面重建的唯一来源）。
-    /// crash/关闭即清空（模型面与连接状态一致）。
+    /// crash 即清空（模型面与连接状态一致）；idle 回收/关闭不清——重连时刷新。
     tools: Option<Arc<Vec<rmcp::model::Tool>>>,
     /// 连接成功后自动拉取的 `resources/list` 快照（PR-M2-1 聚合工具
     /// `list_resources` 的数据源；idle 回收不清——重连时刷新，与 tools 同款）。
@@ -278,7 +278,7 @@ impl ServerConnection {
 
     /// lazy connect（幂等；已连接直接返回）。
     ///
-    /// 超时 → `MCP_CONNECT_TIMEOUT`；失败 → `MCP_CONNECT_FAILED`；两者都进入
+    /// 超时 → `mcp_connect_timeout`；失败 → `mcp_connect_failed`；两者都进入
     /// 重连冷却（设计 §5.1）。冷却期内调用直接报错不重启。并发调用串行化，
     /// 后到者看到已连接结果即返回。
     pub async fn ensure_connected(self: &Arc<Self>) -> Result<(), McpError> {
@@ -516,7 +516,7 @@ impl ServerConnection {
     /// 与 [`Self::call_tool`] / [`Self::read_resource`] 同款保障（#39 盲区
     /// 复扫对齐）：`begin_call` 占 inflight（防 idle 回收竞态）、`timeout`
     /// 硬顶释放 service 锁、断连 → [`Self::handle_crash`] +
-    /// `MCP_SERVER_CRASHED`（status 不再停在 Connected）。
+    /// `mcp_server_crashed`（status 不再停在 Connected）。
     pub async fn get_prompt(
         self: &Arc<Self>,
         name: &str,
@@ -722,7 +722,7 @@ impl ServerConnection {
 
     /// 开启一次调用：占用 inflight（防 idle 回收），返回 RAII 守卫。
     ///
-    /// 未连接时返回 `MCP_CONNECT_FAILED`——调用方应先走
+    /// 未连接时返回 `mcp_connect_failed`——调用方应先走
     /// [`Self::ensure_connected`]（M1-5 桥接的固定次序）。
     pub fn begin_call(self: &Arc<Self>) -> Result<CallGuard, McpError> {
         if self.gate.load(Ordering::Relaxed) {
@@ -766,7 +766,7 @@ impl ServerConnection {
     /// 连通性探针：`tools/list` 自动翻页取全部工具名。
     ///
     /// 设计 §5.1 的 connect 验收动作；M1-4 在此基础上加缓存与白名单过滤。
-    /// transport 断连 → 标记崩溃并返回 `MCP_SERVER_CRASHED`（当前调用不重试）。
+    /// transport 断连 → 标记崩溃并返回 `mcp_server_crashed`（当前调用不重试）。
     pub async fn probe_tools(self: &Arc<Self>) -> Result<Vec<String>, McpError> {
         let _guard = self.begin_call()?;
         let service = {
@@ -815,14 +815,13 @@ impl ServerConnection {
         });
     }
 
-    /// 崩溃处置（设计 §5.1「执行中失败」）：标记断连并立即丢弃 service
     /// 工具调用 RPC（`tools/call` 透传；超时/错误码映射在桥接层完成）。
     ///
     /// - `timeout` 由桥接层按 ctx 超时链传入；此处 `tokio::time::timeout`
     ///   硬顶释放 service 锁——超时后连接保持健康（TransportClosed 才算
     ///   crash），server 侧可能仍在执行（§7 hint）。
     /// - 断连（子进程退出/半端关闭）→ [`Self::handle_crash`] 并返回
-    ///   `MCP_SERVER_CRASHED`（当前调用不重试，下次调用单次重启）。
+    ///   `mcp_server_crashed`（当前调用不重试，下次调用单次重启）。
     pub async fn call_tool(
         self: &Arc<Self>,
         tool: &str,
@@ -877,8 +876,8 @@ impl ServerConnection {
     ///
     /// 与 [`Self::call_tool`] 同款保障：`begin_call` 占 inflight（防 idle
     /// 回收竞态）、超时硬顶释放 service 锁、断连 → crash 标记 +
-    /// `MCP_SERVER_CRASHED`。读取失败（server 报错，如 uri 不存在）→
-    /// `MCP_TOOL_ERROR`（server 侧错误透传，设计 §7）。
+    /// `mcp_server_crashed`。读取失败（server 报错，如 uri 不存在）→
+    /// `mcp_tool_error`（server 侧错误透传，设计 §7）。
     pub async fn read_resource(
         self: &Arc<Self>,
         uri: &str,
@@ -954,7 +953,8 @@ impl ServerConnection {
         });
     }
 
-    /// 崩溃处置（设计 §5.1「执行中失败」）：标记断连并立即丢弃 service    /// （drop 链 → transport drop → 子进程组 kill，见 adapter.rs 文档）。
+    /// 崩溃处置（设计 §5.1「执行中失败」）：标记断连并立即丢弃 service
+    /// （drop 链 → transport drop → 子进程组 kill，见 adapter.rs 文档）。
     /// 本函数**不**设冷却——下一次调用触发单次重启，重启失败才进冷却。
     /// 工具缓存同步清空并置脏：模型面重建（投影批次）与连接状态保持一致。
     pub fn handle_crash(&self, detail: &str) {

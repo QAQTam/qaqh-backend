@@ -24,8 +24,8 @@ use super::types::{ProviderConfig, StreamEvent};
 /// SSE 轮询间隔：无数据到达时以外层 Tokio timeout 检查 cancel 标志。
 pub(crate) const SSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-// 与官方客户端会话重试策略对齐（opencode session/retry.ts：5 次重试、
-// 2s 初始、翻倍），吸收网关瞬时 5xx  burst。
+// 与官方客户端会话重试策略对齐（opencode session/retry.ts：2s 初始、翻倍；
+// 本常量 5 = 1 次原始请求 + 4 次重试），吸收网关瞬时 5xx  burst。
 pub(crate) const MAX_RETRIES: u32 = 5;
 // 对齐 codex（200ms）与 opencode（2s）的折中：整请求重发的协议适配层成本下取 1s。
 pub(crate) const BASE_DELAY_SECS: u64 = 1;

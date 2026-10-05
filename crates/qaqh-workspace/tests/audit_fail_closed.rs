@@ -2,7 +2,7 @@
 //!
 //! `write` / `exec` / `net` must durably record a v2 `tool_intent` before the
 //! handler is dispatched. If that intent write fails, the handler must not run
-//! and the call must fail with `AUDIT_UNAVAILABLE`.
+//! and the call must fail with `audit_unavailable`.
 
 use std::path::PathBuf;
 use std::sync::Mutex;

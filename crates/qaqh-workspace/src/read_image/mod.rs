@@ -116,7 +116,7 @@ pub fn peek_image(session_id: &str, index: usize) -> Option<(String, String)> {
 
 // ── Capability gate ───────────────────────────────────────────────────
 
-/// Whether the currently configured provider endpoint accepts image input.
+/// Whether the currently configured (provider, endpoint, model) accepts image input.
 use crate::runtime::image_model_supported;
 
 // ── Typed output / handler ────────────────────────────────────────────

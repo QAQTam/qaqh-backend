@@ -236,7 +236,7 @@ impl Drop for ToolExecutionScopeGuard {
 pub struct ToolCtx {
     pub session_id: String,
     pub permission_level: u8,
-    /// Agent operating mode (0=Code, 1=Plan) recorded at dispatch time.
+    /// Agent operating mode (0=Code, 1=Plan, 2=Code legacy alias) recorded at dispatch time.
     pub mode: u8,
     /// Workspace root for this execution. `None` = keep the current process
     /// workspace (the in-process agent path).
@@ -483,7 +483,6 @@ pub fn all_tools() -> Vec<ToolDef> {
     }
 }
 
-/// 当前配置的 provider endpoint 是否接受图片输入（read_image 工具开关）。
 /// 回合边界 MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义）。
 ///
 /// 调用方：qaqh-runtime 在 run_lap 开头拿到 qaqh-mcp 投影批次后调用——
@@ -573,8 +572,6 @@ fn image_caps() -> Option<ImageCaps> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 查询 handler 声明的能力类别（权限决策单一事实源）。
-/// 未注册/未初始化返回 None——调用方回退保守默认（Write）。
 /// 按工具名调用作者声明的展示投影（09-18 展示契约 §3.4）。
 ///
 /// 未注册投影、或当前线程没有可用 manager 时返回 `None`；调用方必须完整
@@ -607,6 +604,8 @@ pub fn project_tool_display_from_wire(
     crate::tool_api::output::from_wire_display(display)
 }
 
+/// 查询 handler 声明的能力类别（权限决策单一事实源）。
+/// 未注册/未初始化返回 None——调用方回退保守默认（Write）。
 pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
     // 内置 + 动态（MCP）两层：S3 沙箱按 category 拒绝必须覆盖 MCP 工具。
     with_manager(|manager| manager.category_of(name)).flatten()

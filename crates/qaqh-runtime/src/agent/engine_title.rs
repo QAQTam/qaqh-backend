@@ -6,7 +6,7 @@
 
 use super::types::{RingContext, WriterEvent};
 
-/// 首 turn 完成挂点（engine `seal_timeline_terminal_round` 的 Completed 分支调用）。
+/// 首 turn 完成挂点（engine `turn_completed` 于 `Outcome::TurnComplete` 分支调用）。
 ///
 /// 幂等：title 已存在（冻结）或 ephemeral 或无可总结的用户消息时零副作用。
 pub fn maybe_generate_title(ctx: &mut RingContext) {

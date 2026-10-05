@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 const RENEW_INTERVAL_MS: u64 = 10_000;
 /// 测试驱动的短续期间隔（远小于租约 TTL，保证租约未过期）。
 const TEST_TICK: Duration = Duration::from_millis(200);
-/// 客户端请求级超时（qaqh-client `OPEN_TIMEOUT_SECS`）。
+/// 客户端请求级超时（qaqh-client `RENEW_TIMEOUT_SECS`）。
 const CLIENT_TIMEOUT_SECS: u64 = 10;
 
 struct HangingDaemon {
@@ -122,7 +122,7 @@ async fn adopt_session(session: &RingingSession) {
 /// [红→绿] 挂起的 renew 必须在请求超时内让出，且失败被计数。
 ///
 /// 修复前：`renew_once` 无 `.timeout(..)`，`send()` 永久挂起（本测试超时失败）。
-/// 修复后：~`OPEN_TIMEOUT_SECS`（10s）后返回 transport 错误 → failures 从 0 变 1。
+/// 修复后：~`RENEW_TIMEOUT_SECS`（10s）后返回 transport 错误 → failures 从 0 变 1。
 #[tokio::test]
 async fn renew_returns_within_client_timeout_when_daemon_hangs() {
     let mut daemon = spawn_hanging_daemon().await;
@@ -192,7 +192,7 @@ async fn renewal_loop_self_heals_after_renew_timeout() {
         "first renewal was never issued"
     );
 
-    // 时间预算：renew 的超时由客户端计时（OPEN_TIMEOUT_SECS=10s）；
+    // 时间预算：renew 的超时由客户端计时（RENEW_TIMEOUT_SECS=10s）；
     // 修复前挂起的 renew 会被重新 open 的流量掩盖，故先断言失败计数增长
     // （renew 必须真的超时让路），再看自愈是否推进。
     let failures = tokio::time::timeout(Duration::from_secs(CLIENT_TIMEOUT_SECS + 5), async {

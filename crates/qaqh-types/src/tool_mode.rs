@@ -27,8 +27,9 @@ pub const CUSTOM: &str = "custom";
 /// Every mode accepted by `session.new` and `session.set_tool_mode`.
 pub const KNOWN_MODES: &[&str] = &[STANDARD, MINIMAL, MINIMAL_B, MINIMAL_C, CUSTOM];
 
-/// Minimal-family modes share no-fold policy and the minimal system prompt
-/// treatment is reserved for the dsh preset.
+/// Minimal-family modes share no-fold policy; the former minimal system prompt
+/// special-case (once reserved for the retired `minimal:dsh` preset) has been
+/// removed, so every mode now uses the full prompt.
 pub const MINIMAL_PREFIX: &str = "minimal";
 
 /// Minimal tier A (internal registration keys).

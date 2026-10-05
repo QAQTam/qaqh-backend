@@ -538,8 +538,8 @@ fn open_file_for_read(path: &Path) -> io::Result<WalSource> {
 /// a device that fails after N bytes.
 trait ByteSource: Send {
     /// Read up to `limit` bytes; `Ok(Vec::new())` is a clean EOF. `limit` bounds
-    /// the *pass* (production: 64 KiB) and doubles as the interleaving point
-    /// where a fault may surface — checks belong to the source, not the reader.
+    /// the *pass* (production: `LINE_CHUNK`, 512 B) and doubles as the interleaving
+    /// point where a fault may surface — checks belong to the source, not the reader.
     fn read_chunk(&mut self, limit: usize) -> io::Result<Vec<u8>>;
 
     /// Reposition the source. The reader only ever seeks forward (probe →
@@ -552,7 +552,7 @@ trait ByteSource: Send {
 }
 
 /// Production read source: the file itself, plus an optional fault plan that
-/// test builds arm from the process-global slot.
+/// test builds arm from the thread-local slot.
 ///
 /// The plan is a **byte budget for the current pass** rather than an absolute
 /// read count, because the reader seeks: the open-time probe walks the file,
@@ -872,11 +872,11 @@ mod tests {
 /// must not be reported as "empty log", and a checkpoint must never truncate a
 /// log whose ops were not fully read.
 ///
-/// The fault is injected at the `File` syscall boundary (a `File` handle is a
-/// real fd, so no wrapper reader can be substituted): `open_file_for_read`
-/// returns a file already rewound and pre-seeked past the injected bytes of
-/// sequential `read` calls, so a mid-stream EIO becomes deterministic without
-/// touching the fd itself.
+/// The fault is injected inside the `WalSource` read wrapper: `read_chunk`/`charge`
+/// charge a byte budget for the current pass, so a mid-stream EIO becomes
+/// deterministic without touching the real fd. In test builds `open_file_for_read`
+/// routes through `io_fault_tests::open_with_fault`, which copies the armed plan
+/// into the freshly opened source (no pre-seek/rewind of injected bytes).
 #[cfg(any(test, feature = "test-harness"))]
 mod io_fault_tests {
     use super::*;

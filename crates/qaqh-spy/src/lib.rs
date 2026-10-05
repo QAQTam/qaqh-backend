@@ -1,12 +1,13 @@
 //! qaqh-spy：工作区文件变动审计与紧急备份。
 //!
-//! 用法：**进程内库**。qaqh 的全部工具执行走唯一漏斗
-//! `qaqh-workspace/src/execution.rs::execute_authorized_with_context`，在工具批边界
-//! 各调一次 `Session::scan` / `Session::report_since`，把限额报告作为注入消息下发给
+//! 用法：**进程内库**。qaqh 在工具批边界做一次全量扫描——调用点位于
+//! `qaqh-runtime/src/agent/workspace_audit.rs`（`begin` 调 `Session::scan`、
+//! `finish` 调 `Session::report_since`），把限额报告作为注入消息下发给
 //! 模型（设计见 `docs/plan-workspace-diff-injection.md`）。
 //!
 //! 核心原则（源自 codespy DESIGN.md，已随本仓调整）：全量状态扫描是事实来源；
 //! 存储在工作区外（CAS blob + journal + manifests）；报告限额 + 危险启发式。
+//! 保留窗口 GC 随会话打开自动触发（`QAQH_SPY_KEEP_MANIFESTS` 可调）。
 //!
 //! 未从 codespy 迁入的部分：独立 CLI（clap）、`watch` 常驻兜底、`procmon` 命令归因
 //! ——前两者属 M2+ 路线图，后者 M3 搁置；`qaqh-workspace` 只需库 API。
@@ -18,13 +19,23 @@ pub mod store;
 
 pub use diff::asymmetric_unified_diff;
 pub use scan::{ScanOpts, ScanOutcome};
-pub use store::Change;
+pub use store::{Change, GcOutcome};
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
 use crate::store::{ChangeStatus, Store, atomic_write_bytes};
+
+/// 启动 GC 的保留窗口（manifest 份数）。`QAQH_SPY_KEEP_MANIFESTS` 可覆盖，
+/// 合法区间 [16, 100_000]，默认 256（≈128 个有变更的工具批）。
+fn gc_keep() -> usize {
+    std::env::var("QAQH_SPY_KEEP_MANIFESTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| (16..=100_000).contains(n))
+        .unwrap_or(256)
+}
 
 /// 一次扫描的唯一标识（manifest id）。库调用方用它划定工具调用的边界：
 /// 执行前 `scan(ToolStart)`，执行后 `report_since(&mark, budget)`。
@@ -93,7 +104,7 @@ pub struct Session {
 
 impl Session {
     /// 打开会话。`store_dir` 传 None 时用默认存储根（`QAQH_SPY_DIR` 或
-    /// `platform::data_dir()/spy/<工作区哈希>`），始终位于工作区之外。
+    /// `platform::data_dir()`，其下仍有 `spy/<工作区哈希>` 子目录），始终位于工作区之外。
     pub fn open(workspace: impl Into<PathBuf>, store_dir: Option<PathBuf>) -> Result<Self> {
         let ws = workspace.into();
         let root = std::fs::canonicalize(&ws)
@@ -102,6 +113,15 @@ impl Session {
             bail!("工作区不是目录: {}", root.display());
         }
         let store = Store::open(&root, store_dir.as_deref())?;
+        // 启动 GC（热补丁）：manifest 超出保留窗口时回收旧 manifest / journal
+        // 条目 / 孤儿 blob。先做廉价检查（manifest 计数），未超限零成本——
+        // 本构造函数在工具批边界被高频调用（runtime 每批 begin() 一次）。
+        // GC 失败静默跳过（本 crate 不依赖 log），下次 open 仍超限时重试。
+        let keep = gc_keep();
+        let over_window = store.all_manifest_ids().is_ok_and(|ids| ids.len() > keep);
+        if over_window {
+            let _ = store.gc(keep, std::time::Duration::from_millis(100));
+        }
         Ok(Session {
             root,
             store,
@@ -253,10 +273,10 @@ impl Session {
     /// 整库回到某扫描点：重建缺失/变更文件；多余文件默认只列出，prune 才删。
     pub fn restore(&self, scan: &ScanId, prune: bool) -> Result<RestoreOutcome> {
         let _guard = self.store.lock()?;
-        let manifest = self.store.load_manifest(&scan.0)?;
+        let files = self.store.materialize_manifest(&scan.0)?;
         let mut written = 0usize;
         let mut skipped = 0usize;
-        for (rel, entry) in &manifest.files {
+        for (rel, entry) in &files {
             let target = self.root.join(rel);
             let same = std::fs::read(&target)
                 .map(|b| store::sha256_hex(&b) == entry.sha)
@@ -277,7 +297,7 @@ impl Session {
         };
         let mut extras: Vec<String> = scan::collect_current(&cx)?
             .into_keys()
-            .filter(|rel| !manifest.files.contains_key(rel))
+            .filter(|rel| !files.contains_key(rel))
             .collect();
         let mut pruned = 0usize;
         if prune {
@@ -311,5 +331,12 @@ impl Session {
     /// 最近一次扫描 id。
     pub fn latest_scan(&self) -> Result<Option<ScanId>> {
         Ok(self.store.load_state()?.last_scan.map(ScanId))
+    }
+
+    /// 手动触发存储 GC（保留最近 `keep` 份 manifest，见 [`Store::gc`]）。
+    /// 启动路径的自动 GC 在 [`Session::open`]；本方法留给外部 hook / 人工
+    /// 审计，锁等待沿用 opts 的值。
+    pub fn gc(&self, keep: usize) -> Result<GcOutcome> {
+        self.store.gc(keep, self.opts.lock_wait)
     }
 }

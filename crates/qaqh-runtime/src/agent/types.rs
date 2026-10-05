@@ -50,7 +50,7 @@ pub struct CancelToken {
     node: Arc<CancelNode>,
     /// 可选的取消判定钩子（测试用）：置位后 `is_set()` 完全由钩子裁决。
     ///
-    /// 生产路径恒为 `None`，`is_set()` 退化为读 `inner`——零行为变化。
+    /// 生产路径恒为 `None`，`is_set()` 退化为读 `self.node.effective`——零行为变化。
     /// 测试用它把取消点钉在**批执行中途**（先生成批、后在收割窗口置位）。
     #[allow(clippy::type_complexity)]
     query: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -235,14 +235,15 @@ pub enum LoopPhase {
 }
 
 // ═══════════════════════════════════════════════════════
-// PendingState — interrupt queue
+// PendingState — deferred shutdown flag
 // ═══════════════════════════════════════════════════════
 
-/// Queue of deferred commands that arrived while the Loop was busy.
+/// Deferred-shutdown flag raised while the Loop was busy.
 ///
-/// Interrupt-type commands (Cancel, ResumeSession, NewSession, Shutdown)
-/// are stored here when they arrive mid-turn. They are processed once
-/// the current operation yields (TurnComplete / YieldToUser / Error).
+/// A `SessionShutdown` command (or a terminal `Shutdown` outcome) received
+/// mid-turn sets `shutdown`; the main loop checks it on the next iteration
+/// and exits. Deferred Ringing commands are held separately in the Loop's
+/// `deferred_ringing` queue, not here.
 #[derive(Debug, Default)]
 pub struct PendingState {
     /// Exit the main loop.
@@ -361,9 +362,8 @@ pub struct PendingTodoActivation {
     pub items: Vec<qaqh_domain::PlanReviewItem>,
 }
 
-/// Serialized snapshot of a turn mid-execution.
-/// Stored in `TurnEngine.suspended` when a turn is paused for permissions
-/// or awaiting user input. Restored via `TurnEngine.resume()`.
+/// One authorized tool call held during suspension until every permission
+/// decision is recorded (`TurnState.deferred_authorized`).
 pub struct AdmittedTool {
     pub call_id: String,
     pub auth: Box<qaqh_workspace::AuthorizedToolCall>,
@@ -372,6 +372,9 @@ pub struct AdmittedTool {
     pub scope: qaqh_workspace::runtime::ToolExecutionScope,
 }
 
+/// Serialized snapshot of a turn mid-execution.
+/// Stored in `TurnEngine.suspended` when a turn is paused for permissions
+/// or awaiting user input. Restored via `TurnEngine.resume()`.
 pub struct TurnState {
     pub turn_id: String,
     pub round_num: u32,
@@ -440,10 +443,9 @@ pub enum WriterEvent {
     Timeline(qaqh_ringing::RingingTimelineIntentEnvelope),
 }
 
-/// 命令通道载荷：legacy 帧或原生 Ringing DomainCommand。
+/// 命令通道载荷：原生 Ringing 命令信封（legacy Ui2Agent 帧已拆除）。
 ///
-/// 两种协议在 worker 边界保持可判别且互不转换；Ringing command_id 作为
-/// causation 进入原生领域执行路径。
+/// Ringing command_id 作为 causation 进入原生领域执行路径。
 #[derive(Debug, Clone)]
 pub struct WorkerCommand {
     pub frame: qaqh_ringing::worker::RingingWorkerCommandEnvelope,

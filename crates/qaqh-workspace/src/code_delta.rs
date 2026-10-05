@@ -1,4 +1,8 @@
 //! Code-delta calculation for successful file mutations.
+//!
+//! R-4 豁免点：本文件与 `execution.rs` 使用的 `qaqh_domain::CodeDeltaRecord`
+//! 是编辑效果的被动纯数据记录，属 R-4 允许的「被动投影记录」（口径与完整例外
+//! 清单见 `dashboard.rs:7`）——除此以外禁止引入 domain 事件/行为类型。
 
 pub(crate) fn compute(
     tool_name: &str,
@@ -81,9 +85,11 @@ pub(crate) fn compute(
         _ => None,
     };
 
-    // Override files_created / files_deleted from git when available
-    // (git2::Repository::open is a cheap metadata op — no diff, no
-    // pathspec bug since we only check HEAD tree existence).
+    // Override files_created from git when available (files_deleted is always
+    // reset to 0 here — git_file_meta only checks HEAD tree existence, so it
+    // never reports deletions and even clobbers the delete tool's files_deleted=1).
+    // git2::Repository::open is a cheap metadata op — no diff, no
+    // pathspec bug since we only check HEAD tree existence.
     if let (Some(path), Some(d)) = (file_path, &mut delta)
         && let Some(git) = git_file_meta(path)
     {

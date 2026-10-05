@@ -6,7 +6,7 @@
 //! timeline-journal 829 MB 事故的根因之一）。这里显式冻结分类，配回归
 //! 测试锁定。
 //!
-//! # 分类（QAQH Ringing V1 现状）
+//! # 分类（timeline 事件）
 //!
 //! | 事件 | 持久层 | 说明 |
 //! |---|---|---|
@@ -15,9 +15,7 @@
 //! | BlockCheckpoint | ❌ 不触发快照重写 | 增量载荷（`arg`），文本可由 `TextDelta`/块投影重建 |
 //! | ToolUpdated | ✅ timeline 快照 | 覆盖语义，物化进 turns |
 //! | TextDelta / ToolProgress / ToolEstimated | ❌ 不落盘 | 只进内存投影 + SSE 实时流 + 回放尾（有界）；崩溃后由快照 watermark 重基线 |
-//! | 三频道 Reliable（TurnStarted/Finished、ToolPrepared/Finished、Interaction*） | ✅ 三频道 journal | 投影恢复权威 |
-//! | 三频道 Replaceable（RoundDelta / BlockCheckpoint / Usage / …） | ⚠️ 折叠落盘 | 同 identity 只保留最新值（64 次一 checkpoint），RoundCompleted 时整轮 compact |
-//! | 三频道 Ephemeral | ❌ 不落盘 | 纯实时 |
+//! | 三频道（Ringing v1）Reliable / Replaceable / Ephemeral | ❌ 不再落盘 | v1 广播与事件 journal 持久化已随广播面删除（见 `hub.rs`）；本分类现只覆盖 timeline 事件 |
 //!
 //! # 内存回放尾预算
 //!
@@ -40,8 +38,7 @@
 
 /// timeline 内存回放尾的硬上限（条目数）。
 ///
-/// 与三频道 journal 的内存窗口（8192）对齐。按实测信封 ~200 B 计，
-/// 8192 条 ≈ 1.6 MB/seed，120 个活跃 seed 也在 200 MB 内。
+/// 按实测信封 ~200 B 计，8192 条 ≈ 1.6 MB/seed，120 个活跃 seed 也在 200 MB 内。
 pub const MAX_TIMELINE_JOURNAL_ENTRIES: usize = 8192;
 
 /// timeline 内存回放尾的字节硬上限（payload 估算）。

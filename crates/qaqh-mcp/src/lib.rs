@@ -95,7 +95,7 @@ fn manager_slot_raw() -> &'static RwLock<Arc<McpManager>> {
     MANAGER_SLOT.get_or_init(|| RwLock::new(McpManager::disabled()))
 }
 
-/// 当前全局 [`McpManager`]（未装配时为 disabled 占位：所有调用报 `MCP_DISABLED`）。
+/// 当前全局 [`McpManager`]（未装配时为 disabled 占位：所有调用报 `mcp_disabled`）。
 pub fn manager_slot() -> Arc<McpManager> {
     manager_slot_raw()
         .read()

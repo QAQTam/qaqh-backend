@@ -1,4 +1,4 @@
-//! 游标式 SSE 帧解码器（共享于 chat 与 responses 两条流式路径）。
+//! 游标式 SSE 帧解码器（共享于 chat / message / responses 三条流式路径）。
 //!
 //! 与 `qaqh-client/src/sse_decoder.rs` 的同名解码器**刻意不合一**（D3 决策，
 //! 暂缓）：两者行切分骨架相似，但帧语义不同——本实现产出聚合 `data: String`
@@ -63,7 +63,7 @@ impl SseDecoder {
     /// 取下一完整帧（聚合的 data payload）。`None` = 暂无完整帧，需等更多数据。
     pub(crate) fn next_frame(&mut self) -> Option<Result<String, ()>> {
         // 流首 BOM 剥离：BOM 三字节可能跨 chunk 到达，未到齐时原样保留等下一块
-        // （此时缓冲必为空，不会破坏正常行切分）。
+        // （此时缓冲持有已到的 1–2 个 BOM 字节，直接返回、不切分正常行）。
         if !self.bom_checked {
             let avail = &self.buf[self.consumed..];
             let n = BOM.iter().zip(avail).take_while(|(b, a)| b == a).count();
