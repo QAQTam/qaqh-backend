@@ -147,10 +147,20 @@ Working；host-direct / 子代理这类非回合路径要先确认）、`AgentLi
 `RingingEvent` 本体的 writer 载体换成 timeline intent 之后才能删（`TimelineIntent` 的 `.ts`
 镜像已在 ④ 砍掉，接回来时补一行 `derive` 即可）。
 
-**P2 — migrate-on-read 各项**（`compact_skip` / `index.json` / `workspace.txt` /
-`timeline-v3` / journal 字段 / `tool_outbox.wal` / DeepX marker / `provider_id` /
-明文 key / 扁平 model / 权限 u8 / `normal` alias / timeline 旧 JSON 槽位；discovery
-pre-0.9 兼容；`/control/v1/*` 改名）——**每项先写审计查询确认零命中再删**。
+**P2 — 审计探针已就位（`aabfccd`：`scripts/v2-legacy-compat-probe.sh`），删除仍缺"跨机器存量"证据。**
+只读探针覆盖审计 §3.2 的 13 个本机可判定项（compact_skip / `[COMPACT` 标记 / index.json /
+workspace.txt / 反斜杠 cwd / timeline-v3 / timeline 缓存 journal / tool_outbox.wal /
+DeepX marker / profile 缺 endpoint / 明文 api_key / 顶层扁平 model / 旧键 permission_level），
+退出码 0/1/2 可直接当闸门。**本机 `~/.qaqh`（31 个会话）实测 13 项全零命中**；
+植入旧形态的正证也过了（9 项植入、8 项检出，第 9 项是我没造那个形状）。
+
+四条**不能靠扫盘判定**的，别拿本机零命中当删除依据：CommandBody 的 `"normal"` alias
+（`qaqh-domain/src/command.rs:39`）、wire 上仍是裸 u8 的权限（`qaqh-policy/src/lib.rs:68` 注释）、
+discovery 的 pre-0.9 兼容、`/control/v1/*` 改名。这三类要看客户端/对端版本证据。
+
+删除动作本身仍要拍一下：beta 用户的存量在各自机器上，开发机零命中≠全量零命中。
+稳妥做法是把探针发给存量用户（或按发布策略确认版本跨度）再动刀；
+每一项删的时候注意 §二.19 那五类"机械删除尾巴"。
 
 **P3 — 独立工程**：canonical 接管 message/journal 写 → 收敛 `LegacyWriterFacade` 双栅栏为
 单一 `events.lock`；BETA-01 目录名 = canonical id（启用 `rename_session`，退役 seed 目录解析

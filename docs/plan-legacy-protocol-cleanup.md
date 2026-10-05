@@ -96,6 +96,9 @@
 - [ ] 第 2 节选定路线并完成改名，`cargo test --workspace` 绿
 - [ ] `just ts-export` + `just ts-check` 无漂移
 - [ ] 第 3 节四条通道逐条表态（删 / 接），代码里没有"发了但没人收"的事件
+      （P1.2 第一批已删 10 变体 + 3 访问器 `065f35a`；剩余见交接文档 §三）
+- [ ] P2 各项动刀前先跑 `scripts/v2-legacy-compat-probe.sh`（探针已建 `aabfccd`，
+      本机 13/13 零命中；beta 用户存量要另跑或按版本跨度确认）
 - [ ] 第 4 节三口径至少在文档与注释里说清权威是谁
 - [ ] 第 5 节四条发布事实更正
 - [ ] `feat/workspace-audit-pr3` worktree rebase 到新 main
