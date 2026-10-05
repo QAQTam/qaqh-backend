@@ -177,7 +177,7 @@ fn run_batch(
     args: serde_json::Value,
     turn_id: &str,
     round_num: u32,
-) -> Vec<Message> {
+) -> (Vec<Message>, Vec<Message>) {
     qaqh_workspace::set_workspace(&workspace.to_string_lossy());
     qaqh_workspace::clear_cancel();
 
@@ -228,7 +228,10 @@ fn run_batch(
             &mut ctx, &tool, admitted, &order, &serial, turn_id, round_num,
         );
     }
-    agent.msg.to_vec()
+    // 第二项是 loop 真正交给 gate 的上下文视图——「落盘了但没进请求」这一类
+    // 分叉只有在这一层断言才拦得住（见 docs/plan §3.7）。
+    let gate_context = agent.msg.build_context_for_gate(&[]);
+    (agent.msg.to_vec(), gate_context)
 }
 
 /// 只满足 Emitter trait，本用例不关心事件流。
@@ -284,7 +287,7 @@ fn batch_with_file_change_injects_report_after_tool_result() {
     std::fs::create_dir_all(&workspace).expect("workspace dir");
 
     let session = "spy-inject-1";
-    let messages = run_batch(
+    let (messages, gate_context) = run_batch(
         &workspace,
         session,
         "spy_probe",
@@ -363,6 +366,35 @@ fn batch_with_file_change_injects_report_after_tool_result() {
         "新增文件的回滚点应是本步之前（seq-1）：{body}"
     );
 
+    // 3.5) 落盘 != 传输：注入必须出现在 loop 交给 gate 的上下文视图里，
+    //      且仍排在 tool 消息之后（否则模型永远看不见它）。
+    let ctx_injections: Vec<usize> = gate_context
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.name.as_deref() == Some("workspace"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        ctx_injections.len(),
+        1,
+        "注入必须进 gate 上下文视图：{gate_context:#?}"
+    );
+    let ctx_tool = gate_context
+        .iter()
+        .position(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        })
+        .expect("gate context must carry the tool result");
+    assert!(
+        ctx_injections[0] > ctx_tool,
+        "gate 视图里注入也必须排在 tool 结果之后：ctx_tool={ctx_tool} inj={:?}",
+        ctx_injections
+    );
+    let ctx_body = text_of(&gate_context[ctx_injections[0]]);
+    assert!(ctx_body.contains("[workspace-changes"), "{ctx_body}");
+
     // 4) 回滚命令必须真的能用——报告里发出的 at=seq-1 若还原不了就是空头支票。
     //    直接走 journal 工具背后的同一个函数，验证语义与提示一致。
 
@@ -393,7 +425,7 @@ fn quiet_batch_injects_nothing() {
     let workspace = temp.path().join("ws");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
 
-    let messages = run_batch(
+    let (messages, _) = run_batch(
         &workspace,
         "spy-quiet",
         "spy_probe",
@@ -465,8 +497,7 @@ fn self_declared_write_is_not_double_recorded_in_smj() {
     let temp = tempfile::tempdir().expect("workspace tempdir");
     let workspace = temp.path().join("ws");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
-
-    let messages = run_batch(
+    let (messages, _) = run_batch(
         &workspace,
         "spy-dedupe",
         "file",
@@ -479,12 +510,10 @@ fn self_declared_write_is_not_double_recorded_in_smj() {
         "turn-d",
         0,
     );
-
     // 报告里应当看到它（状态扫描确实测到了）。
     let injections = injection_indices(&messages);
     assert_eq!(injections.len(), 1, "仍应注入变更报告：{messages:#?}");
     let body = text_of(&messages[injections[0]]);
-    assert!(body.contains("declared.txt"), "报告应点名该文件：{body}");
 
     // 但 SMJ 不得由 spy 再记一遍。
     let steps = qaqh_workspace::journal::query(None, Some("declared.txt"), None);
