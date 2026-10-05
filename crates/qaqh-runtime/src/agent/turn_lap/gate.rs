@@ -576,16 +576,6 @@ pub(crate) fn gate_request(
                     && final_usage.total_tokens != last_emitted_usage_total
                 {
                     last_emitted_usage_total = final_usage.total_tokens;
-                    ctx.emitter
-                        .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                            qaqh_domain::ConversationEvent::UsageUpdated {
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                usage: final_usage.clone(),
-                                context_limit: ctx.agent.config.context_limit,
-                                model: ctx.agent.config.model.clone(),
-                            },
-                        ));
                 }
                 content.clear();
                 reasoning.clear();
@@ -680,65 +670,24 @@ pub(crate) fn gate_request(
                         });
                 }
             }
-            qaqh_gate::StreamEvent::WebSearchStatus(status) => {
-                // Ringing 双发：ProviderToolStatus（replaceable，按 call_id 合并）
-                let provider_state = match status.as_str() {
-                    "completed" | "done" => qaqh_domain::ProviderToolState::Completed,
-                    "searching" | "running" | "in_progress" => {
-                        qaqh_domain::ProviderToolState::Searching
-                    }
-                    _ => qaqh_domain::ProviderToolState::InProgress,
-                };
-                ctx.emitter
-                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                        qaqh_domain::ConversationEvent::ProviderToolStatus {
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            call_id: format!("ws-{turn_id}-{round_num}"),
-                            tool_kind: "web_search".into(),
-                            state: provider_state,
-                        },
-                    ));
+            qaqh_gate::StreamEvent::WebSearchStatus(_) => {
+                // provider 侧搜索状态只服务已退役的 v1 双发；UI 的搜索进度走 timeline 与
+                // canonical fact 面，这里不再另发一条领域事件。
             }
             qaqh_gate::StreamEvent::UsageUpdate(u) => {
                 last_usage = Some(u.clone());
                 current_request_usage = Some(u.clone());
                 ctx.agent.session.tokens = ctx.agent.session.tokens.max(u.total_tokens as u64);
-                // A3：节流 ~1s（replaceable 覆盖显示）；终值由 Done 分支补发。
+                // A3：记住"已播报过"的用量水位（~1s 节流），Done 分支据此判断终值要不要补发。
                 let due = last_usage_emit_at.is_none_or(|at| at.elapsed() >= USAGE_EMIT_INTERVAL);
                 if due {
                     last_usage_emit_at = Some(Instant::now());
                     last_emitted_usage_total = u.total_tokens;
-                    ctx.emitter
-                        .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                            qaqh_domain::ConversationEvent::UsageUpdated {
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                usage: u.clone(),
-                                context_limit: ctx.agent.config.context_limit,
-                                model: ctx.agent.config.model.clone(),
-                            },
-                        ));
                 }
             }
-            qaqh_gate::StreamEvent::Retrying {
-                attempt,
-                max_retries,
-                delay_secs,
-                error,
-            } => {
-                // Ringing 双发：ProviderRetrying（重试可见性）
-                ctx.emitter
-                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                        qaqh_domain::ConversationEvent::ProviderRetrying {
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            attempt,
-                            max_retries,
-                            delay_secs,
-                            error_message: error,
-                        },
-                    ));
+            qaqh_gate::StreamEvent::Retrying { .. } => {
+                // 重试提示曾按 v1 ProviderRetrying 双发；重试可见性走日志与 timeline，
+                // 不再另发领域事件。
             }
             qaqh_gate::StreamEvent::Error(msg) => {
                 log::error!("[TURN] gate error turn_id={turn_id} round_num={round_num}: {msg}");

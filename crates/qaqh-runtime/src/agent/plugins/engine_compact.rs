@@ -124,14 +124,6 @@ pub(crate) fn build_prompt_and_meta(
 
     let head_msgs = &msgs[..kept_idx];
     if head_msgs.is_empty() {
-        // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-            qaqh_domain::ToolEvent::ToolNotice {
-                tool_call_id: None,
-                level: qaqh_domain::NoticeLevel::Info,
-                message: "Compact skipped: all within token budget".into(),
-            },
-        ));
         return None;
     }
 
@@ -401,17 +393,6 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
                 turns_removed: Some(turns_removed as u32),
             },
         ));
-    // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
-    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-        qaqh_domain::ToolEvent::ToolNotice {
-            tool_call_id: None,
-            level: qaqh_domain::NoticeLevel::Info,
-            message: format!(
-                "Compacted {} turns -> {chars} chars, keeping {} turns",
-                meta.head_user_count, meta.kept_user_count,
-            ),
-        },
-    ));
 }
 
 /// 长程导航锚点：把压缩后**会丢失**的会话级事实补回摘要输入。
