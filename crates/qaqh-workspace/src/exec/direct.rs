@@ -92,6 +92,33 @@ fn direct_exec_inner(
     } else {
         argv[0].clone()
     };
+    // Windows sbx 后端旁路:显式 WindowsToken/WindowsRedirect 请求不进
+    // std Command 路径(受限令牌必须经 CreateProcessAsUserW);其余 spec
+    // (含 Auto/None)行为不变(dark-launch,调研报告 §7)。
+    #[cfg(windows)]
+    if let Some(spec) = sandbox {
+        if spec.enabled
+            && matches!(
+                spec.backend,
+                qaqh_sandbox::SandboxBackend::WindowsToken
+                    | qaqh_sandbox::SandboxBackend::WindowsRedirect
+            )
+        {
+            return super::sbx_bypass::sbx_exec(
+                argv,
+                env,
+                cwd,
+                max_output_tokens,
+                timeout_secs,
+                background_after_secs,
+                cancel,
+                progress_tx,
+                tool_call_id,
+                &display_name,
+                spec,
+            );
+        }
+    }
     let mut cmd = std::process::Command::new(&argv[0]);
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
@@ -117,6 +144,7 @@ fn direct_exec_inner(
         None => qaqh_sandbox::SandboxLaunch {
             backend: qaqh_sandbox::SandboxBackend::None,
             request: None,
+            sbx_policy_json: None,
         },
     };
     let sandbox_backend = sandbox_launch.backend;
@@ -459,7 +487,7 @@ fn direct_exec_inner(
 /// 只透传运行命令所需的系统级变量；daemon 自身的全部其他环境（包括任何以
 /// 环境变量注入的凭据）不再进入子进程。Windows 的环境名大小写不敏感，
 /// 按 ASCII 大写折叠匹配；其余平台按原样精确匹配。
-fn minimal_child_env() -> Vec<(String, String)> {
+pub(crate) fn minimal_child_env() -> Vec<(String, String)> {
     const PASSTHROUGH: &[&str] = &[
         // 跨平台基础：可执行查找 / 临时目录 / locale
         "PATH",

@@ -15,6 +15,10 @@ pub mod register;
 pub mod shell;
 pub mod truncate;
 
+/// Windows sbx 旁路(TokenPlane/RedirectPlane;仅显式 Windows 后端走此路径)。
+#[cfg(windows)]
+pub(crate) mod sbx_bypass;
+
 pub use register::register;
 pub use shell::{bootstrap, register_shell};
 

@@ -87,16 +87,25 @@ impl SandboxCapabilities {
         }
         #[cfg(target_os = "windows")]
         {
+            // sbx TokenPlane(WRITE_RESTRICTED 受限令牌 + cap-SID DACL)已接
+            // 线:文件写由内核强制(授权写经 ACE 放行,其余写在发生时刻被拒)。
+            // 网络仍是零强制(token 后端透传;强制断网走实验档 AppContainer
+            // 后端,未接生产)。审批面按分项消费:写已隔离、网络未隔离。
+            let projfs = sbx_win::projfs::available();
             return Self {
                 platform: Platform::Windows,
-                backend: SandboxBackend::None,
+                backend: SandboxBackend::WindowsToken,
                 landlock: false,
                 seccomp: false,
                 bubblewrap: false,
-                filesystem_write_isolation: false,
+                filesystem_write_isolation: true,
                 network_isolation: false,
                 process_hardening: true,
-                detail: "Windows AppContainer/restricted-token backend is not wired yet".into(),
+                detail: format!(
+                    "sbx TokenPlane (restricted token + cap-SID DACL) enforces filesystem \
+                     writes; network NOT enforced on token plane; ProjFS redirect \
+                     available={projfs}"
+                ),
             };
         }
         #[allow(unreachable_code)]

@@ -15,6 +15,9 @@ landlock = "0.4.7"
 libc = "0.2"
 seccompiler = "0.5.0"
 
+[target.'cfg(windows)'.dependencies]
+sbx-win = { path = "../sbx-win" }
+
 [dev-dependencies]
 tempfile = "3"
 
