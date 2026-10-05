@@ -113,9 +113,12 @@ cargo test -p qaqh-runtime --test cancel_keeps_tool_results --test concurrent_re
 
 ## 六、接手建议顺序
 
-① P1.3 `ToolCallProgress`（小、独立）
-→ ② P1.2 `DomainEvent` 桥上枚举重审（**先做匹配点普查再删**，audit 明说不止两个变体；
-注意 ④ 之后这些类型的 `.ts` 镜像已不在导出面上，删 Rust 变体时不必再动 `webui/src/api`）
+① ~~P1.3 `ToolCallProgress`~~ **已完成**（`2366a47`，见下一棒那份
+`legacy-protocol-p04-p13-2026-10-05.md`；顺带把 P1.2 的 `ToolCallPrepared` 一起做掉了）
+→ ② P1.2 剩余项：`CodeChanged` + 整张 `DomainEvent` 桥上枚举重审（**先做匹配点普查再删**，
+audit 明说不止两个变体；注意 ④ 之后这些类型的 `.ts` 镜像已不在导出面上，
+删 Rust 变体时不必再动 `webui/src/api`）
 → ③ P2（每项先审计查询）。
 
-> 已完成并退场：④ ts-rs 白名单（`afa390b`）。
+> 本文件到此为止是 **P0 死面 + P1.1 + ④** 那一棒的记录；④ 与 P1.3 的完整交代、
+> 以及"别重查"的机械坑清单，在 `docs/handoff/legacy-protocol-p04-p13-2026-10-05.md`。
