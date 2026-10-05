@@ -180,6 +180,19 @@ impl RingingLeaseStore {
             entry.expiry = expiry;
         }
     }
+
+    /// 吊销设备：摘除其名下 lease（device 的 `client_instance_id` == `device_id`）。
+    ///
+    /// 显式切断该设备在途 SSE 与后续请求，**不**依赖短 TTL 自愈留窗口。返回是否
+    /// 确有 lease 被摘除。
+    pub fn revoke_device(&mut self, device_id: &str) -> bool {
+        let Some(entry) = self.leases.remove(device_id) else {
+            return false;
+        };
+        self.by_session.remove(&entry.client_session_id);
+        self.session_leases.remove(&entry.client_session_id);
+        true
+    }
 }
 
 #[cfg(test)]

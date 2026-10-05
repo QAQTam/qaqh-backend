@@ -63,6 +63,7 @@ use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::RingingHub;
 use crate::agent::state::agent::AgentState;
+use qaqh_session::session_fact_v2::{ActorKind, ActorRef};
 
 pub fn ringing_command_is_interrupt(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> bool {
     matches!(
@@ -632,19 +633,35 @@ impl Loop {
         }
 
         let command_session_id = env.session_id.clone();
+        let actor = actor_ref_from_env(&env);
 
         match env.command {
             RingingCommand::Control(command) => {
-                self.on_control(command, &command_id, expected_revision);
+                self.on_control(command, &command_id, expected_revision, actor.clone());
             }
             RingingCommand::Conversation(command) => {
                 self.on_conversation(command, &command_id, &command_session_id);
             }
             RingingCommand::Tool(command) => {
-                self.on_tool(command, &command_id);
+                self.on_tool(command, &command_id, actor);
             }
         }
     }
+}
+
+/// 内部信封 `WorkerActor` → canonical `ActorRef`（S6 归因）。`None` 回退现状。
+fn actor_ref_from_env(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> Option<ActorRef> {
+    env.actor.as_ref().map(|actor| ActorRef {
+        kind: match actor.kind.as_str() {
+            "api" => ActorKind::Api,
+            "system" => ActorKind::System,
+            "agent" => ActorKind::Agent,
+            "subagent" => ActorKind::Subagent,
+            _ => ActorKind::User,
+        },
+        id: actor.id.clone(),
+        display_name: actor.display_name.clone(),
+    })
 }
 
 #[cfg(test)]
