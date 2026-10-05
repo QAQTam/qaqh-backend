@@ -234,6 +234,9 @@ impl ToolManager {
         }
     }
 
+    /// v1 工具注册（legacy `ToolHandler`）。**仅测试/测试装置可用**：生产工具一律
+    /// 走 [`Self::register_typed`]，本方法不出现在生产构建里。
+    #[cfg(any(test, feature = "test-harness"))]
     pub fn register(&mut self, handler: ToolHandler) {
         let key = handler.key.clone();
         let capabilities = crate::tool_capabilities::builtin_capabilities(&key).unwrap_or_default();
