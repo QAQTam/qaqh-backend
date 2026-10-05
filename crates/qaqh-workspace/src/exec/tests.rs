@@ -443,7 +443,7 @@ fn cmd_tool_with_args_rejected() {
         "exec",
         serde_json::json!({ "command": "dir", "shell": "cmd", "args": ["x"], "cwd": std::env::current_dir().unwrap() }),
     );
-    let r = super::handler::handle_run_with_shell(ctx, None);
+    let r = crate::exec::run_exec_for_test(&ctx.ctx, ctx.args, None);
     assert!(!r.is_success(), "cmd + args must fail");
     assert!(
         r.error
@@ -1266,16 +1266,40 @@ fn backgrounded_status_refreshes_when_child_exits_while_grandchild_holds_pipe() 
 
 // ── exec 通用入口（方案 A 独占：shell 参数选壳）──
 
-fn make_ctx(name: &str, args: serde_json::Value) -> crate::ToolCallCtx {
-    crate::ToolCallCtx {
-        id: "exec-test".into(),
-        name: name.into(),
+fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
+    TestCall {
+        ctx: crate::tool_api::ToolCallContext {
+            call_id: "exec-test".into(),
+            session_id: crate::current_session().unwrap_or_default(),
+            workspace_root: crate::permission::resolve_target_path(std::path::PathBuf::from(
+                crate::current_workspace(),
+            )),
+            mode: crate::tool_api::AgentMode::Code,
+            permission_level: crate::permission::PermissionLevel::ReadOnly,
+            sandbox: crate::tool_api::SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
+                crate::current_workspace(),
+            )),
+            exec_default_shell: None,
+            timeout: std::time::Duration::from_secs(30),
+            cancellation: crate::tool_api::CancellationToken::new(),
+            progress: None,
+            source: crate::tool_api::ToolCallSource::Model,
+        },
         args,
-        tx_progress: None,
-        timeout_secs: Some(30),
-        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        _name: name.into(),
     }
+}
+
+/// 测试调用载体：显式上下文 + args（v1 `ToolCallCtx` 退役后的形态）。
+struct TestCall {
+    ctx: crate::tool_api::ToolCallContext,
+    args: serde_json::Value,
+    _name: String,
+}
+
+fn handle_run_exec(call: TestCall) -> crate::ToolResult {
+    crate::exec::run_exec_for_test(&call.ctx, call.args, None)
 }
 
 #[test]
