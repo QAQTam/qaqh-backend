@@ -414,14 +414,6 @@ pub enum ConversationEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // 装箱改造属结构塑形，另立项
 pub enum ToolEvent {
-    /// 流式响应中检测到工具调用（决策记录 Q1：replaceable 预览，可被 ToolStarted 覆盖）。
-    ToolCallPrepared {
-        tool_call_id: String,
-        turn_id: String,
-        round_num: u32,
-        name: String,
-        args_so_far: String,
-    },
     /// 工具真正开始执行（决策记录 Q1：permission 通过后，reliable）。
     ToolStarted {
         tool_call_id: String,
@@ -487,11 +479,10 @@ pub enum ToolEvent {
 }
 
 impl ToolEvent {
-    /// 该事件关联的 tool_call_id（ToolCallPrepared/Started/Finished/PermissionRequested 恒有）。
+    /// 该事件关联的 tool_call_id（Started/Finished/PermissionRequested 恒有）。
     pub fn tool_call_id(&self) -> Option<&str> {
         match self {
-            ToolEvent::ToolCallPrepared { tool_call_id, .. }
-            | ToolEvent::ToolStarted { tool_call_id, .. }
+            ToolEvent::ToolStarted { tool_call_id, .. }
             | ToolEvent::ToolFinished { tool_call_id, .. }
             | ToolEvent::ToolPermissionRequested { tool_call_id, .. } => Some(tool_call_id),
             ToolEvent::ToolNotice { tool_call_id, .. } => tool_call_id.as_deref(),
@@ -781,12 +772,11 @@ mod tests {
 
     #[test]
     fn domain_event_channel_delegation() {
-        let ev = DomainEvent::Tool(ToolEvent::ToolCallPrepared {
+        let ev = DomainEvent::Tool(ToolEvent::ToolStarted {
             tool_call_id: "c".into(),
             turn_id: "t".into(),
             round_num: 0,
             name: "exec".into(),
-            args_so_far: "{}".into(),
         });
         assert_eq!(ev.channel(), RingingChannel::Tool);
     }
