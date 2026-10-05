@@ -1,9 +1,9 @@
 # G1 beta smoke (docs/plan-beta-readiness.md): daemon -> gateway -> browser flow.
 # Covers: bootstrap nonce -> gateway session (cookie+CSRF) -> sessions ->
 # SessionCreate command -> ack -> SSE event frames -> approvals query.
-# Simulates the browser at HTTP level. NOTE: Windows daemon enforces the real
-# user data root (~/.qaqh), so this smoke runs against it and DELETES the
-# session it creates. Requires no live daemon (no ~/.qaqh/daemon.json).
+# Simulates the browser at HTTP level. Runs against an ISOLATED data root under
+# $env:TEMP (via QAQH_ALLOW_TEST_DATA_ROOT=1) so it never pollutes the real
+# ~/.qaqh. Requires no live daemon.
 param(
     [int]$DaemonPort = 64499,
     [int]$GatewayPort = 18499
@@ -23,30 +23,18 @@ $logErr = Join-Path $data "daemon.err.log"
 $glog = Join-Path $data "gateway.log"
 $glogErr = Join-Path $data "gateway.err.log"
 
-# daemon enforces the real user data root on Windows; do NOT override QAQH_DATA_DIR.
-Remove-Item Env:QAQH_DATA_DIR -ErrorAction SilentlyContinue
+# 隔离数据根（避免污染真实 ~/.qaqh，泄漏的会话会进入 session.list 干扰前端）。
+# `QAQH_ALLOW_TEST_DATA_ROOT=1` 放行非 `<USERPROFILE>\.qaqh` 的数据根（仅测试用）。
+$env:QAQH_DATA_DIR = Join-Path $data "qaqh"
+$env:QAQH_ALLOW_TEST_DATA_ROOT = "1"
 $env:QAQH_SERVER_TOKEN = "smoke-token-" + [guid]::NewGuid().ToString("N").Substring(0, 8)
-
-$realDiscovery = Join-Path $env:USERPROFILE ".qaqh\daemon.json"
-if (Test-Path $realDiscovery) {
-    # stale discovery from a killed daemon is normal; only abort if the endpoint is ALIVE
-    $prev = Get-Content $realDiscovery -Raw | ConvertFrom-Json
-    $prevAlive = $false
-    try {
-        $probe = & curl.exe -s -o NUL -w "%{http_code}" --max-time 2 "$($prev.endpoint)/health" -H "Authorization: Bearer $($prev.token)" 2>$null
-        $prevAlive = ($probe -eq "200")
-    } catch {}
-    if ($prevAlive) { throw "a live daemon already exists at $($prev.endpoint) - aborting" }
-    Write-Host "[..] stale discovery (endpoint $($prev.endpoint) dead) - removing"
-    Remove-Item $realDiscovery -Force
-}
+$discovery = Join-Path $env:QAQH_DATA_DIR "daemon.json"
 
 $daemonProc = Start-Process -FilePath $daemon -ArgumentList @("server", "--bind", "127.0.0.1", "--port", "$DaemonPort", "--token", "$env:QAQH_SERVER_TOKEN") -RedirectStandardOutput $log -RedirectStandardError $logErr -PassThru -WindowStyle Hidden
 $base = "http://127.0.0.1:$GatewayPort"
 
 try {
-    # 1) wait for discovery file (daemon ready signal) at the REAL data root
-    $discovery = $realDiscovery
+    # 1) wait for discovery file (daemon ready signal) at the ISOLATED data root
     $deadline = (Get-Date).AddSeconds(20)
     while (-not (Test-Path $discovery)) {
         if ($daemonProc.HasExited) { throw "daemon exited early: $(Get-Content $logErr -Raw)" }

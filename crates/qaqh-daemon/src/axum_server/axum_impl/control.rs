@@ -15,10 +15,7 @@ pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
 /// 只读活动快照（冻结事故 P0 观测项）：暴露 has_active_work 与逐会话
 /// 活动状态，供冻结排查使用。**需 Bearer 鉴权**（不同于免鉴权的
 /// `/health`），仅含 seed/state/turn_id/seq/updated_at，无用户内容。
-pub(crate) async fn activity(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
+pub(crate) async fn activity(State(state): State<AppState>) -> Response {
     let (has_active_work, activities) = state.service.activity_snapshot();
     let body = serde_json::json!({
         "has_active_work": has_active_work,
@@ -36,9 +33,12 @@ pub(crate) async fn not_found() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "not found")
 }
 
-pub(crate) async fn handle_stop(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
+pub(crate) async fn handle_stop(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Response {
+    if let Err(response) = require_scope(&identity, Scope::Admin) {
+        return response;
     }
     // Windows 95 semantics: seal before 200.
     // D-4：shutdown_all 对每个 worker 阻塞 join，放 spawn_blocking。
@@ -52,10 +52,10 @@ pub(crate) async fn handle_stop(State(state): State<AppState>, headers: HeaderMa
 
 pub(crate) async fn handle_stop_if_idle(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
+    if let Err(response) = require_scope(&identity, Scope::Admin) {
+        return response;
     }
     if state.service.has_active_work() {
         return (StatusCode::CONFLICT, "").into_response();
