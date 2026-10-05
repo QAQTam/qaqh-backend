@@ -83,7 +83,6 @@ pub fn execute_authorized_with_context(
     let started = Instant::now();
     let (invocation, authorized_resources, authorized_workspace, grant) = call.into_parts();
     let pre_bind_level = Some(context.permission_level as u8).filter(|level| *level > 0);
-    let _scope = crate::runtime::install_tool_call_context(&context);
 
     // 拒绝路径同样落审计（kind=tool_rejected）：商业审计要求"未执行的
     // 调用"也可追溯，不能只在成功路径记账。
@@ -186,6 +185,7 @@ pub fn execute_authorized_with_context(
             call_id.clone(),
             &name,
             args.clone(),
+            &context.workspace_root,
             timeout_secs,
             progress_tx,
             cancel_flag,
@@ -245,7 +245,7 @@ pub fn execute_authorized_with_context(
     // the daemon actor process; WSL deployment moves the whole daemon instead
     // of routing individual tool calls across an environment boundary.
     //
-    // 执行面统一为 `ErasedTool`：v1 `ToolHandler` 在注册时已包成适配器。
+    // 执行面统一为 `ErasedTool`（typed 工具 / MCP-LSP 动态适配器）。
     // 生效超时在 prepare 阶段定稿（调用方显式值 / descriptor 默认值），此处
     // 补进显式上下文——准入侧构造的上下文超时为零值。
     let mut exec_ctx = context.clone();
@@ -354,7 +354,9 @@ pub fn execute_authorized_with_context(
         manager.finalize_req(prepared, tool_result, elapsed_ms)
     });
     let code_delta = success
-        .then(|| crate::code_delta::compute(&name, &args))
+        .then(|| {
+            crate::code_delta::compute(&name, &args, &context.workspace_root, &context.session_id)
+        })
         .flatten();
 
     match report {
@@ -638,7 +640,10 @@ mod tests {
     use std::time::Duration;
 
     static TEST_HANDLER_COUNT: AtomicU32 = AtomicU32::new(0);
-    fn test_counter_handler(_ctx: crate::ToolCallCtx) -> crate::ToolResult {
+    fn test_counter_handler(
+        _ctx: &crate::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> crate::ToolResult {
         TEST_HANDLER_COUNT.fetch_add(1, Ordering::SeqCst);
         crate::ToolResult::ok("counter incremented")
     }
@@ -674,13 +679,21 @@ mod tests {
         }
     }
 
-    fn context_probe_handler(_ctx: crate::ToolCallCtx) -> crate::ToolResult {
+    /// 探针改为直接读显式上下文——TLS 兼容视图退场后，handler 唯一的事实源
+    /// 就是 `&ToolCallContext`。
+    fn context_probe_handler(
+        ctx: &crate::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> crate::ToolResult {
         crate::ToolResult::ok(
             serde_json::json!({
-                "session": crate::current_session(),
-                "workspace": crate::current_workspace(),
-                "mode": crate::runtime::current_mode(),
-                "cancelled": crate::is_cancel(),
+                "session": ctx.session_id,
+                "workspace": ctx.workspace_root.to_string_lossy(),
+                "mode": match ctx.mode {
+                    crate::tool_api::AgentMode::Plan => 1,
+                    crate::tool_api::AgentMode::Code => 0,
+                },
+                "cancelled": ctx.cancellation.is_cancelled(),
             })
             .to_string(),
         )
@@ -693,7 +706,7 @@ mod tests {
         crate::set_workspace(".");
         let allowed: Vec<String> = vec![];
         crate::runtime::init_tools("test", &[], allowed);
-        crate::runtime::register_test_handler(crate::ToolHandler {
+        crate::runtime::register_test_probe(crate::probe::ProbeTool {
             key: "test_counter".to_string(),
             description: "test handler",
             input_schema: serde_json::json!({}),
@@ -702,7 +715,7 @@ mod tests {
             category: crate::permission::ToolCategory::Read,
             default_timeout: std::time::Duration::from_secs(5),
         });
-        crate::runtime::register_test_handler(crate::ToolHandler {
+        crate::runtime::register_test_probe(crate::probe::ProbeTool {
             key: "test_write".to_string(),
             description: "test write handler",
             input_schema: serde_json::json!({}),
@@ -711,7 +724,7 @@ mod tests {
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(5),
         });
-        crate::runtime::register_test_handler(crate::ToolHandler {
+        crate::runtime::register_test_probe(crate::probe::ProbeTool {
             key: "context_probe".to_string(),
             description: "explicit context probe",
             input_schema: serde_json::json!({}),
@@ -923,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_context_drives_admission_execution_and_restores_ambient() {
+    fn explicit_context_drives_admission_and_execution() {
         let _test_guard = setup_test_manager();
         let _actor_reset = ActorContextReset;
         crate::set_actor_context("/tmp/qaqh-legacy-ambient", "legacy-seed");
@@ -969,7 +982,7 @@ mod tests {
         assert_eq!(
             crate::current_session().as_deref(),
             Some("legacy-seed"),
-            "execution must restore the previous ambient context"
+            "执行不得改动 ambient 会话状态（无 per-call TLS 视图可装可还）"
         );
     }
 

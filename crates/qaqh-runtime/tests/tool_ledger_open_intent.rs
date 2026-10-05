@@ -24,12 +24,13 @@ use qaqh_session::session_fact_v2::{
 };
 use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
+use qaqh_workspace::probe::ProbeTool;
+use qaqh_workspace::{ToolManager, ToolResult, ToolRisk};
 
 static EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
 
 fn register_probe(mgr: &mut ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_probe(ProbeTool {
         key: "open_intent_probe".to_string(),
         description: "P3-7 open intent recovery probe",
         input_schema: serde_json::json!({
@@ -44,7 +45,7 @@ fn register_probe(mgr: &mut ToolManager) {
     });
 }
 
-fn probe(_ctx: ToolCallCtx) -> ToolResult {
+fn probe(_ctx: &qaqh_workspace::tool_api::ToolCallContext, _args: serde_json::Value) -> ToolResult {
     EXECUTIONS.fetch_add(1, Ordering::SeqCst);
     ToolResult::ok("must not execute")
 }

@@ -1,4 +1,4 @@
-//! exec::handler — typed exec 工具、参数归一化与 legacy 兼容入口。
+//! exec::handler — typed exec 工具与参数归一化。
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -8,23 +8,21 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::ExecProgressSender;
+#[cfg(test)]
+use crate::ToolResult;
 use crate::ToolRisk;
 use crate::file_mutate::{mutation_error, resolve_mutation_path};
-#[cfg(test)]
-use crate::tool_api::{
-    AgentMode, CancellationToken, SandboxMode, ToolCallSource, ToolError, ToolExecutionMetrics,
-    ToolModelProjection, ToolOutcome, ToolOutputValue, ToolProjection,
-};
 use crate::tool_api::{
     OutputBudget, ToolCallContext, ToolDescriptor, ToolExecutionError, ToolExposure, ToolName,
     ToolSource, TypedTool,
 };
 #[cfg(test)]
-use crate::{ToolCallCtx, ToolResult};
+use crate::tool_api::{
+    ToolError, ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue,
+    ToolProjection,
+};
 #[cfg(test)]
 use serde_json::Value;
-#[cfg(test)]
-use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -82,7 +80,7 @@ impl TypedTool for ExecTool {
         let progress = ctx
             .progress
             .as_ref()
-            .map(crate::tool_api::legacy::bridge_progress);
+            .map(crate::tool_api::result::bridge_progress);
         run_exec(ctx, args, None, progress)
     }
 }
@@ -255,60 +253,15 @@ pub(crate) fn run_exec(
     Ok(result)
 }
 
+/// exec 单测入口：显式上下文 + args → v1 `ToolResult` 信封。
 #[cfg(test)]
-fn context_from_legacy(ctx: &ToolCallCtx) -> ToolCallContext {
-    let workspace = crate::current_workspace();
-    let workspace_root = if workspace.is_empty() {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(workspace)
-    };
-    // Legacy unit tests share process-global workspace state; a prior tempdir
-    // may already be gone. Keep the test adapter executable by falling back to
-    // the repository cwd instead of handing a stale root to the sandbox.
-    let workspace_root = if workspace_root.exists() {
-        workspace_root
-    } else {
-        std::env::current_dir().unwrap_or(workspace_root)
-    };
-    ToolCallContext {
-        call_id: ctx.id.clone(),
-        session_id: crate::current_session().unwrap_or_default(),
-        workspace_root: workspace_root.clone(),
-        mode: match crate::runtime::current_mode() {
-            1 => AgentMode::Plan,
-            _ => AgentMode::Code,
-        },
-        permission_level: crate::runtime::context()
-            .map(|context| crate::permission::PermissionLevel::from_u8(context.permission_level))
-            .unwrap_or(crate::permission::PermissionLevel::ReadOnly),
-        sandbox: if crate::authorization::is_subagent_sandbox() {
-            SandboxMode::Subagent
-        } else {
-            SandboxMode::Main
-        },
-        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
-        exec_default_shell: None,
-        timeout: Duration::from_secs(ctx.timeout_secs.unwrap_or(30)),
-        cancellation: CancellationToken::from_shared_flag(ctx.cancel.clone()),
-        progress: None,
-        source: ToolCallSource::Model,
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn handle_run_exec(ctx: ToolCallCtx) -> ToolResult {
-    handle_run_with_shell(ctx, None)
-}
-
-/// Compatibility entry retained for existing in-process callers/tests.
-#[cfg(test)]
-pub(crate) fn handle_run_with_shell(
-    ctx: ToolCallCtx,
+pub(crate) fn run_exec_for_test(
+    ctx: &ToolCallContext,
+    args: Value,
     fixed: Option<super::shell::Shell>,
 ) -> ToolResult {
-    let args: ExecArgs = match serde_json::from_value(ctx.args.clone()) {
-        Ok(args) => args,
+    let parsed: ExecArgs = match serde_json::from_value(args.clone()) {
+        Ok(parsed) => parsed,
         Err(error) => {
             return crate::json_err(
                 "invalid_arguments",
@@ -317,9 +270,12 @@ pub(crate) fn handle_run_with_shell(
             );
         }
     };
-    let call_ctx = context_from_legacy(&ctx);
-    match run_exec(&call_ctx, args, fixed, ctx.tx_progress.clone()) {
-        Ok(output) => exec_output_to_tool_result(&output, &ctx.args),
+    let progress = ctx
+        .progress
+        .as_ref()
+        .map(crate::tool_api::result::bridge_progress);
+    match run_exec(ctx, parsed, fixed, progress) {
+        Ok(output) => exec_output_to_tool_result(&output, &args),
         Err(ToolExecutionError::Recoverable(error)) => tool_result_from_error(error),
         Err(ToolExecutionError::Fatal(fatal)) => {
             panic!("exec tool fatal: {}", fatal.message)

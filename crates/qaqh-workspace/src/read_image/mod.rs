@@ -369,13 +369,13 @@ pub fn register(mgr: &mut crate::ToolManager) {
 
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
-pub(super) fn handle_read_image(ctx: crate::ToolCallCtx) -> crate::ToolResult {
+pub(super) fn handle_read_image(args: serde_json::Value) -> crate::ToolResult {
     use crate::file_mutate::ambient_tool_context;
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
     let call_ctx = ambient_tool_context("read-image-compat", Duration::from_secs(30));
     TypedToolAdapter::new(ReadImageTool)
-        .execute(call_ctx, ctx.args)
+        .execute(call_ctx, args)
         .unwrap_or_else(|fatal| panic!("read_image tool fatal: {}", fatal.message))
         .to_tool_result()
 }
@@ -522,16 +522,7 @@ mod tests {
     fn missing_args_fail_without_session() {
         // No args at all → argument error (before any capability check side
         // effects beyond the enabled probe).
-        let ctx = crate::ToolCallCtx {
-            id: "read-image-test".into(),
-            name: "read_image".into(),
-            args: serde_json::json!({}),
-            tx_progress: None,
-            timeout_secs: Some(30),
-            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        };
-        let result = handle_read_image(ctx);
+        let result = handle_read_image(serde_json::json!({}));
         assert!(!result.is_success());
     }
 

@@ -7,14 +7,12 @@
 //! that pushes these into UI events.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(any(test, feature = "test-harness"))]
-use crate::ToolHandler;
-#[cfg(any(test, feature = "test-harness"))]
-use crate::tool_api::LegacyToolAdapter;
+use crate::probe::ProbeTool;
 use crate::tool_api::{
     DynamicDispatch, DynamicToolAdapter, ErasedTool, OutputBudget, ToolCapabilities,
     ToolDescriptor, ToolExposure, ToolName, ToolSource, TypedTool, TypedToolAdapter,
@@ -48,9 +46,7 @@ pub struct ToolStats {
     pub files_written: Vec<String>,
 }
 
-/// 统一注册项：`ErasedTool` 是描述与执行面的唯一载体。v1 `ToolHandler`
-/// 由 [`LegacyToolAdapter`] 在注册时即刻包成 `ErasedTool`，执行面不再有
-/// legacy 旁路。
+/// 统一注册项：`ErasedTool` 是描述与执行面的唯一载体。
 pub(crate) struct RegisteredTool {
     pub(crate) descriptor: ToolDescriptor,
     pub(crate) erased: Arc<dyn ErasedTool>,
@@ -77,8 +73,8 @@ pub struct ToolManager {
     /// 重应用用（观察项 ①：MCP refresh 换名后 custom 名单仍生效）。
     allowed_raw: Option<Vec<String>>,
     /// 动态工具（MCP；设计 §5.3）：完整前缀名 → 统一 ErasedTool 注册项。
-    /// 动态描述/schema 是运行期 String，由 owned descriptor 承载，避免
-    /// `ToolHandler.description: &'static str` 的 `Box::leak` hack。
+    /// 动态描述/schema 是运行期 String，由 owned descriptor 承载（描述来自
+    /// MCP server 运行期，非 `&'static str`）。
     dynamic: BTreeMap<String, RegisteredTool>,
     inflight_tasks: BTreeMap<String, Arc<AtomicBool>>,
     stats_total: u32,
@@ -171,8 +167,8 @@ fn dynamic_source(name: &str) -> ToolSource {
 
 /// 动态工具注册条目（设计 §5.3/E-5；PR-M1-4）。
 ///
-/// 与 [`ToolHandler`] 的差异：模型面（[`qaqh_types::ToolDef`]）与路由元数据
-/// 合一，description 为自有 String（server 侧动态文本，经 2KB 截断）。
+/// 与 typed 工具的差异：模型面（[`qaqh_types::ToolDef`]）与路由元数据合一，
+/// description 为自有 String（server 侧动态文本，经 2KB 截断）。
 /// `dispatch` 只作为注册输入；注册后包装为 [`DynamicToolAdapter`]，refresh
 /// 换 def 不影响在飞调用。
 #[derive(Clone)]
@@ -231,26 +227,25 @@ impl ToolManager {
         }
     }
 
-    /// v1 工具注册（legacy `ToolHandler`）。**仅测试/测试装置可用**：生产工具一律
+    /// 注册测试探针（`test-harness` 门控；见 [`crate::probe`]）。生产工具一律
     /// 走 [`Self::register_typed`]，本方法不出现在生产构建里。
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn register(&mut self, handler: ToolHandler) {
-        let key = handler.key.clone();
-        let capabilities = crate::tool_capabilities::builtin_capabilities(&key).unwrap_or_default();
-        let adapter = LegacyToolAdapter::new_with_capabilities(handler, capabilities)
-            .unwrap_or_else(|error| panic!("invalid builtin tool descriptor for {key}: {error}"));
-        let descriptor = adapter.descriptor();
+    pub fn register_probe(&mut self, probe: ProbeTool) {
+        let key = probe.key.clone();
+        let descriptor = ErasedTool::descriptor(&probe);
+        descriptor
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid probe descriptor for {key}: {error}"));
         self.builtins.insert(
             key,
             RegisteredTool {
                 descriptor,
-                erased: Arc::new(adapter),
+                erased: Arc::new(probe),
             },
         );
     }
 
-    /// 注册新 typed 工具。描述符由工具实现提供，执行统一走 [`ErasedTool`]；
-    /// 迁移期不存在 legacy executor，因此不会经过 `ToolCallCtx` 兼容面。
+    /// 注册新 typed 工具。描述符由工具实现提供，执行统一走 [`ErasedTool`]。
     pub fn register_typed<T>(&mut self, tool: T)
     where
         T: TypedTool + 'static,
@@ -434,6 +429,7 @@ impl ToolManager {
         id: String,
         name: &str,
         args: serde_json::Value,
+        workspace_root: &std::path::Path,
         timeout_secs: Option<u64>,
         progress_tx: Option<crate::ExecProgressSender>,
     ) -> Result<PreparedCall, ToolExecReport> {
@@ -441,6 +437,7 @@ impl ToolManager {
             id,
             name,
             args,
+            workspace_root,
             timeout_secs,
             progress_tx,
             Arc::new(AtomicBool::new(false)),
@@ -448,6 +445,9 @@ impl ToolManager {
     }
 
     /// Phase 1 variant for a runtime-owned cancellation token.
+    ///
+    /// `progress_tx` 目前在 typed 执行面无消费方（streaming 能力字段无生产
+    /// 读取点，见审计 §6）；保留入参以免调用侧（runtime 进度通道）连带改动。
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项
     pub(crate) fn prepare_req_with_cancel(
@@ -455,8 +455,9 @@ impl ToolManager {
         id: String,
         name: &str,
         args: serde_json::Value,
+        workspace_root: &std::path::Path,
         timeout_secs: Option<u64>,
-        progress_tx: Option<crate::ExecProgressSender>,
+        _progress_tx: Option<crate::ExecProgressSender>,
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<PreparedCall, ToolExecReport> {
         if let Some(ref allowed) = self.allowed
@@ -504,16 +505,10 @@ impl ToolManager {
         let descriptor = &tool.descriptor;
 
         let timeout_secs = timeout_secs.unwrap_or(descriptor.default_timeout.as_secs());
-        let ctx = crate::ToolCallCtx {
-            id: id.clone(),
-            name: name.to_string(),
-            args: args.clone(),
-            tx_progress: progress_tx,
-            timeout_secs: Some(timeout_secs),
-            cancel: cancel_flag.clone(),
-            skill_effects: Arc::new(Mutex::new(Vec::new())),
-        };
-        let in_workspace = is_path_in_workspace(&ctx, &descriptor.risk, descriptor.category);
+        // 工区判定用显式 workspace（调用方上下文），不再读线程局部——prepare
+        // 在工具 worker 线程上跑，per-call 视图退场后那里的 TLS 不再是调用上下文。
+        let in_workspace =
+            is_path_in_workspace(&args, workspace_root, &descriptor.risk, descriptor.category);
         match crate::safety::SafetyPolicy::evaluate(descriptor.risk.clone(), in_workspace) {
             SafetyVerdict::Block(reason) => {
                 let msg = format!("[ERROR] {}", reason);
@@ -670,27 +665,28 @@ pub(crate) fn extract_files_affected(_tool_name: &str, args: &serde_json::Value)
 /// system (`ask`, `skills`, …) are `ReadOnly`/`Write`/`Administrative`
 /// and keep the permissive default.
 fn is_path_in_workspace(
-    ctx: &crate::ToolCallCtx,
+    args: &serde_json::Value,
+    workspace_root: &std::path::Path,
     risk: &ToolRisk,
     category: crate::permission::ToolCategory,
 ) -> bool {
-    if let Some(path) = ctx.args.get("path").and_then(|v| v.as_str()) {
+    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         if path.is_empty() || path == "." {
             return true;
         }
-        let ws = crate::current_workspace();
-        if ws.is_empty() || ws == "." {
+        let ws = workspace_root;
+        if ws.as_os_str().is_empty() || ws == std::path::Path::new(".") {
             return true;
         }
         let abs_path = if std::path::Path::new(path).is_absolute() {
             std::path::PathBuf::from(path)
         } else {
-            std::path::Path::new(&ws).join(path)
+            ws.join(path)
         };
         // M13：组件级比较 + `..` 词法归一化。原先对字符串做 starts_with，
         // sibling 目录（`proj` vs `proj-backup`）与未解析的 `..` 逃逸都会
         // 被误判为在工内，导致 Destructive 出工区阻断被绕过。
-        let ws_norm = crate::permission::normalize_lexically(std::path::Path::new(&ws));
+        let ws_norm = crate::permission::normalize_lexically(ws);
         let path_norm = crate::permission::normalize_lexically(&abs_path);
         path_norm.starts_with(&ws_norm)
     } else {
@@ -736,18 +732,19 @@ fn audit_args_summary(_tool: &str, args: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ToolCallCtx, ToolResult, ToolRisk};
+    use crate::probe::{ProbeBody, ProbeTool};
+    use crate::{ToolResult, ToolRisk};
 
-    fn noop(_ctx: ToolCallCtx) -> ToolResult {
+    fn noop(_ctx: &crate::tool_api::ToolCallContext, _args: serde_json::Value) -> ToolResult {
         ToolResult::ok("noop")
     }
 
-    fn handler(key: &str) -> ToolHandler {
-        ToolHandler {
+    fn probe(key: &str) -> ProbeTool {
+        ProbeTool {
             key: key.to_string(),
             description: "test handler",
             input_schema: serde_json::json!({ "type": "object" }),
-            handler: noop,
+            handler: noop as ProbeBody,
             risk: ToolRisk::ReadOnly,
             category: crate::permission::ToolCategory::Read,
             default_timeout: std::time::Duration::from_secs(10),
@@ -767,8 +764,8 @@ mod tests {
     #[test]
     fn apply_init_filters_unknown_renamed_tool_names() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("read"));
-        mgr.register(handler("exec"));
+        mgr.register_probe(probe("read"));
+        mgr.register_probe(probe("exec"));
         // 冻结期间改名/删除的旧名（read/edit/web/search）必须被剔除。
         mgr.apply_init(
             vec![
@@ -785,7 +782,7 @@ mod tests {
     #[test]
     fn apply_init_all_unknown_falls_back_to_all_tools() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("exec"));
+        mgr.register_probe(probe("exec"));
         // 旧配置全是已移除的工具名：回退到"全部工具"（空 allowlist 语义），
         // 而不是把子代理锁死成零工具。
         mgr.apply_init(vec!["read".to_string(), "edit".to_string()], "s1");
@@ -795,7 +792,7 @@ mod tests {
     #[test]
     fn apply_init_empty_stays_all_tools() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("exec"));
+        mgr.register_probe(probe("exec"));
         mgr.apply_init(vec![], "s1");
         assert_eq!(names(&mgr), vec!["exec"]);
     }
@@ -805,9 +802,9 @@ mod tests {
     #[test]
     fn set_allowed_restricts_and_restores() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("exec"));
-        mgr.register(handler("read"));
-        mgr.register(handler("write"));
+        mgr.register_probe(probe("exec"));
+        mgr.register_probe(probe("read"));
+        mgr.register_probe(probe("write"));
         // 切到极限白名单
         mgr.set_allowed(vec!["exec".to_string(), "read".to_string()]);
         assert_eq!(names(&mgr), vec!["exec", "read"]);
@@ -819,7 +816,7 @@ mod tests {
     #[test]
     fn set_allowed_filters_unknown_names() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("exec"));
+        mgr.register_probe(probe("exec"));
         // 未知名剔除（不静默吞掉，log warn）；全无效 → 全量
         mgr.set_allowed(vec!["exec".to_string(), "ghost".to_string()]);
         assert_eq!(names(&mgr), vec!["exec"]);
@@ -830,7 +827,7 @@ mod tests {
     #[test]
     fn set_allowed_does_not_touch_session() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("exec"));
+        mgr.register_probe(probe("exec"));
         mgr.apply_init(vec![], "seed-A");
         // set_allowed 只改工具集，不动 session（区别于 apply_init）
         mgr.set_allowed(vec!["exec".to_string()]);
@@ -843,14 +840,15 @@ mod tests {
     #[test]
     fn set_allowed_gates_prepare_req() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("exec"));
-        mgr.register(handler("read"));
+        mgr.register_probe(probe("exec"));
+        mgr.register_probe(probe("read"));
         mgr.set_allowed(vec!["read".to_string()]);
         // 白名单外工具在执行层被拦截（纵深防御）
         let err = mgr.prepare_req(
             "c1".to_string(),
             "exec",
             serde_json::json!({"command": "echo hi"}),
+            std::path::Path::new("."),
             None,
             None,
         );
@@ -859,6 +857,7 @@ mod tests {
             "c2".to_string(),
             "read",
             serde_json::json!({"path": "x"}),
+            std::path::Path::new("."),
             None,
             None,
         );
@@ -892,7 +891,14 @@ mod tests {
             .expect("register dynamic");
 
         let prepared = mgr
-            .prepare_req("id-1".to_owned(), &name, serde_json::json!({}), None, None)
+            .prepare_req(
+                "id-1".to_owned(),
+                &name,
+                serde_json::json!({}),
+                std::path::Path::new("."),
+                None,
+                None,
+            )
             .map_err(|report| report.content)
             .expect("dynamic tool prepare should succeed");
         assert_eq!(prepared.effective_tool_name.as_deref(), Some("echo"));
@@ -929,6 +935,7 @@ mod tests {
             "id-2".to_owned(),
             "mcp__demo__nope",
             serde_json::json!({}),
+            std::path::Path::new("."),
             None,
             None,
         ) {
@@ -948,24 +955,27 @@ mod m13_tests {
     use super::*;
     use crate::ToolRisk;
 
-    fn ctx_with_path(path: &str) -> crate::ToolCallCtx {
+    fn ctx_with_path(path: &str) -> serde_json::Value {
         ctx_with_args(serde_json::json!({ "path": path }))
     }
 
-    fn ctx_with_args(args: serde_json::Value) -> crate::ToolCallCtx {
-        crate::ToolCallCtx {
-            id: "t".to_string(),
-            name: "write_file".to_string(),
-            args,
-            tx_progress: None,
-            timeout_secs: None,
-            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        }
+    fn ctx_with_args(args: serde_json::Value) -> serde_json::Value {
+        args
     }
 
-    fn in_ws(ctx: &crate::ToolCallCtx, risk: ToolRisk) -> bool {
-        is_path_in_workspace(ctx, &risk, crate::permission::ToolCategory::Write)
+    /// 测试桥：`is_path_in_workspace` 现在吃显式 workspace，本测试沿用
+    /// `set_workspace` 装好的全局工区。
+    fn in_ws(args: &serde_json::Value, risk: ToolRisk) -> bool {
+        in_ws_cat(args, &risk, crate::permission::ToolCategory::Write)
+    }
+
+    fn in_ws_cat(
+        args: &serde_json::Value,
+        risk: &ToolRisk,
+        category: crate::permission::ToolCategory,
+    ) -> bool {
+        let ws = std::path::PathBuf::from(crate::current_workspace());
+        is_path_in_workspace(args, ws.as_path(), risk, category)
     }
 
     #[test]
@@ -997,12 +1007,8 @@ mod m13_tests {
             ToolRisk::Write
         ));
         // 无 path 参数：非 Destructive 工具默认放行（ask/skills 不碰文件系统）。
-        assert!(is_path_in_workspace(
-            &crate::ToolCallCtx {
-                id: "t".to_string(),
-                name: "ask".to_string(),
-                ..ctx_with_args(serde_json::json!({}))
-            },
+        assert!(in_ws_cat(
+            &ctx_with_args(serde_json::json!({})),
             &ToolRisk::ReadOnly,
             crate::permission::ToolCategory::Read,
         ));
@@ -1027,17 +1033,17 @@ mod m13_tests {
         // `delete` 形态：Destructive + Write，却没有 path。
         let no_path = ctx_with_args(serde_json::json!({}));
         assert!(
-            !is_path_in_workspace(&no_path, &ToolRisk::Destructive, write_cat),
+            !in_ws_cat(&no_path, &ToolRisk::Destructive, write_cat),
             "文件型 Destructive 工具缺 path 必须判为工区外（fail-closed）"
         );
         // 同样的参数形状下，非 Destructive 工具不受影响（不误伤 ask/task/skills）。
-        assert!(is_path_in_workspace(&no_path, &ToolRisk::Write, write_cat));
-        assert!(is_path_in_workspace(
+        assert!(in_ws_cat(&no_path, &ToolRisk::Write, write_cat));
+        assert!(in_ws_cat(
             &no_path,
             &ToolRisk::ReadOnly,
             crate::permission::ToolCategory::Read
         ));
-        assert!(is_path_in_workspace(
+        assert!(in_ws_cat(
             &no_path,
             &ToolRisk::Administrative,
             crate::permission::ToolCategory::Read
@@ -1046,25 +1052,25 @@ mod m13_tests {
         assert!(matches!(
             crate::safety::SafetyPolicy::evaluate(
                 ToolRisk::Destructive,
-                is_path_in_workspace(&no_path, &ToolRisk::Destructive, write_cat)
+                in_ws_cat(&no_path, &ToolRisk::Destructive, write_cat)
             ),
             SafetyVerdict::Block(_)
         ));
         // Destructive 工具带工区内 path 时仍放行（`delete` 的正常形态）。
-        assert!(is_path_in_workspace(
+        assert!(in_ws_cat(
             &ctx_with_path(ws.join("trash-me.txt").to_str().unwrap()),
             &ToolRisk::Destructive,
             write_cat
         ));
         // Destructive 工具带工区外 path 时阻断。
-        assert!(!is_path_in_workspace(
+        assert!(!in_ws_cat(
             &ctx_with_path(tmp.path().join("outside.txt").to_str().unwrap()),
             &ToolRisk::Destructive,
             write_cat
         ));
         // Exec/Net 型 Destructive 工具（`exec`：无 path 参数是设计使然，workdir
         // 缺省 = 工区根）保持放行——它们的围栏在权限层（classify_risk 已报 High）。
-        assert!(is_path_in_workspace(
+        assert!(in_ws_cat(
             &ctx_with_args(serde_json::json!({ "command": "rm -rf /tmp/x" })),
             &ToolRisk::Destructive,
             crate::permission::ToolCategory::Exec
@@ -1080,13 +1086,14 @@ mod m13_tests {
 #[cfg(test)]
 mod safety_e2e_tests {
     use super::*;
+    use crate::probe::ProbeTool;
 
-    fn destructive_handler(key: &str) -> ToolHandler {
-        ToolHandler {
+    fn destructive_probe(key: &str) -> ProbeTool {
+        ProbeTool {
             key: key.to_string(),
             description: "test destructive handler",
             input_schema: serde_json::json!({ "type": "object" }),
-            handler: |_ctx| crate::ToolResult::ok("ran"),
+            handler: |_ctx, _args| crate::ToolResult::ok("ran"),
             risk: ToolRisk::Destructive,
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(5),
@@ -1105,7 +1112,7 @@ mod safety_e2e_tests {
         crate::set_workspace(ws.to_str().unwrap());
 
         let mut mgr = ToolManager::new();
-        mgr.register(destructive_handler("delete"));
+        mgr.register_probe(destructive_probe("delete"));
 
         // skip-permissions bypass；本测试直接调用 `prepare_req`，
         // `SafetyPolicy` 是文件型 Destructive 工具进入 handler 前的最后闸门。
@@ -1114,6 +1121,7 @@ mod safety_e2e_tests {
                 "c1".to_string(),
                 "delete",
                 serde_json::json!({}),
+                ws.as_path(),
                 None,
                 None,
             )
@@ -1131,6 +1139,7 @@ mod safety_e2e_tests {
                 "c2".to_string(),
                 "delete",
                 serde_json::json!({ "path": ws.join("trash-me.txt").to_str().unwrap() }),
+                ws.as_path(),
                 None,
                 None,
             )
@@ -1144,6 +1153,7 @@ mod safety_e2e_tests {
                 "c3".to_string(),
                 "delete",
                 serde_json::json!({ "path": tmp.path().join("outside.txt").to_str().unwrap() }),
+                ws.as_path(),
                 None,
                 None,
             )

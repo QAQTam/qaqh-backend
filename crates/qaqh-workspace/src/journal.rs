@@ -120,11 +120,6 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Current active session seed, if any.
-pub fn active_session() -> String {
-    crate::current_session().unwrap_or_default()
-}
-
 /// Read all steps from disk. Corrupt/partial trailing lines are skipped.
 pub fn load_steps() -> Vec<Step> {
     let path = steps_path();

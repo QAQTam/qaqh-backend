@@ -22,7 +22,8 @@ pub use shell::{bootstrap, register_shell};
 pub(crate) use direct::{direct_exec, reader_eof_warning};
 #[cfg(test)]
 pub(crate) use handler::{
-    detect_background_derivation, handle_run_exec, normalize_command_rg, run_exec, shell_available,
+    detect_background_derivation, normalize_command_rg, run_exec, run_exec_for_test,
+    shell_available,
 };
 #[cfg(test)]
 pub(crate) use pipe::{PipePumpCtx, Readiness, drain_pipe_to_registry};

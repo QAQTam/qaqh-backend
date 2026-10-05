@@ -118,10 +118,10 @@ impl TypedTool for SpyTool {
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
     fn run(
         &self,
-        _ctx: &ToolCallContext,
+        ctx: &ToolCallContext,
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let root = crate::current_workspace();
+        let root = ctx.workspace_root.to_string_lossy().to_string();
         if root.is_empty() || root == "." {
             return Err(spy_error(
                 "no_workspace",
