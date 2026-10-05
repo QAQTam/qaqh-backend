@@ -1233,10 +1233,10 @@ fn responses_chat_stream_with_tool_calls() {
         .iter()
         .filter_map(|ev| {
             if let StreamEvent::ToolCallProgress {
-                name, args_so_far, ..
+                name, args_chunk, ..
             } = ev
             {
-                Some((name.clone(), args_so_far.clone()))
+                Some((name.clone(), args_chunk.clone()))
             } else {
                 None
             }

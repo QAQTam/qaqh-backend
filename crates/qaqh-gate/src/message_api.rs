@@ -461,7 +461,7 @@ fn handle_anthropic_frame(
                         index: idx,
                         id,
                         name,
-                        args_so_far: String::new(),
+                        args_chunk: String::new(),
                     });
                 }
             }
@@ -509,7 +509,7 @@ fn handle_anthropic_frame(
                                 index: idx,
                                 id: entry.id.clone(),
                                 name: entry.name.clone(),
-                                args_so_far: entry.buffer.clone(),
+                                args_chunk: pj.to_string(),
                             });
                         }
                     }
