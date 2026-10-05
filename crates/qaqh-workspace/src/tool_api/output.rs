@@ -307,6 +307,8 @@ fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
     ToolResultDisplay {
         summary: display.summary.clone(),
         diff: display.diff.clone(),
+        lines_added: display.lines_added,
+        lines_removed: display.lines_removed,
         header: match &display.header {
             ToolHeader::None => None,
             ToolHeader::Path { path, op } => Some(ToolResultDisplayHeader::Path {
@@ -393,6 +395,8 @@ pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
     ToolDisplay {
         summary: display.summary.clone(),
         diff: display.diff.clone(),
+        lines_added: display.lines_added,
+        lines_removed: display.lines_removed,
         header: match &display.header {
             None => ToolHeader::None,
             Some(ToolResultDisplayHeader::Path { path, op }) => ToolHeader::Path {
@@ -566,10 +570,27 @@ mod tests {
     }
 
     #[test]
+    fn wire_display_roundtrips_terminal_line_delta() {
+        let display = ToolDisplay {
+            lines_added: 4,
+            lines_removed: 2,
+            ..Default::default()
+        };
+
+        let wire = to_wire_display(&display);
+        assert_eq!((wire.lines_added, wire.lines_removed), (4, 2));
+
+        let back = from_wire_display(&wire);
+        assert_eq!((back.lines_added, back.lines_removed), (4, 2));
+    }
+
+    #[test]
     fn wire_display_outcome_roundtrips_through_internal_projection() {
         let wire = ToolResultDisplay {
             summary: Some("exit 0".into()),
             diff: None,
+            lines_added: 0,
+            lines_removed: 0,
             header: None,
             body: None,
             outcome: Some(ToolResultDisplayOutcome {
@@ -594,6 +615,8 @@ mod tests {
         let result = qaqh_types::ToolResult::ok("ok").with_display(ToolResultDisplay {
             summary: Some("exit 0".into()),
             diff: None,
+            lines_added: 0,
+            lines_removed: 0,
             header: None,
             body: Some(ToolResultDisplayBody::Shell {
                 output: "ok".into(),

@@ -8,7 +8,8 @@
 #   open -> bootstrap -> driver claim/busy -> not_driver gate
 #        -> first-answer-wins typed verdict (ask/permission/plan)
 #        -> reliable reconnect (driver_changed replay)
-#        -> command replay -> command status -> single-stream SSE subscribe
+#        -> command replay -> command status -> receipt fold to terminal
+#        -> single-stream SSE subscribe
 #        -> per-channel endpoint hard-cut (404)
 #        -> driver release / lease reclaim / restart reclaim
 #        -> snapshot_missing
@@ -47,7 +48,7 @@ start_daemon() {
     # `QAQH_SMOKE_LEASE_TTL_MS` can raise it when the host is under heavy load:
     # the phases between two lease renewals otherwise outlive a 6s TTL and the
     # explicit-release probe fails with `lease_required` (not a product bug).
-    QAQH_DATA_DIR="$DATA" QAQH_TEST_LEASE_TTL_MS="${QAQH_SMOKE_LEASE_TTL_MS:-6000}" \
+    QAQH_DATA_DIR="$DATA" QAQH_ALLOW_TEST_DATA_ROOT=1 QAQH_TEST_LEASE_TTL_MS="${QAQH_SMOKE_LEASE_TTL_MS:-6000}" \
         "$ROOT/target/debug/qaqh-daemon" run > "$DATA/../daemon.out" 2>&1 &
     DAEMON_PID=$!
     for _ in $(seq 1 80); do
@@ -269,6 +270,33 @@ REPLAY="$(command "$A" control "$ATTACH")"
 STATUS="$(curl -sS "$ENDPOINT/ringing/v2/commands/$REPLAY_ID" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A")"
 [ "$(printf '%s' "$STATUS" | json_get "['state']")" = "succeeded" ] || fail "command status"
+
+say "== 命令回执折叠到终态（fact 因果链）=="
+# `driver claim` / `driver release` 经通用命令入口进入 worker：ACK 只代表命令到达
+# actor，终态只能由这次 dispatch 写出的 canonical fact（`driver_changed`，
+# `causation_id` = 该命令）折叠回来。这条链在 hub-fact-bus 阶段 2.3 之后被截断过
+# （docs/bug-ringing-v2-commands-stuck-in-running.md：回执永停 Running，daemon
+# 每 10s 刷一条 `stuck in Running` 告警），所以这里直接验 daemon 的回执账本。
+# 客户端命令 id 的 UUID 形态（移动端）不在此覆盖：脚本里没有免模型即可挂起的
+# 审批路径，那条 lane 由 Rust 侧测试锁住
+# （qaqh-runtime/tests/interaction_request_ledger.rs + pending_store 折叠测试）。
+STUCK=""
+for _ in $(seq 1 40); do
+    renew "$A"
+    STUCK="$(python3 -c "
+import json
+receipts = json.load(open('$DATA/ringing-command-receipts.json'))
+print(' '.join(sorted(
+    r['state'] for r in receipts.values()
+    if r['state'] in ('accepted', 'running'))))
+" 2>/dev/null || echo unreadable)"
+    [ -z "$STUCK" ] && break
+    sleep 0.5
+done
+[ -z "$STUCK" ] || fail "command receipts never folded to a terminal state: $STUCK"
+# 账本非空才算通过：空账本意味着上面的检查根本没观测到命令。
+[ "$(python3 -c "import json;print(len(json.load(open('$DATA/ringing-command-receipts.json'))))")" != "0" ] \
+    || fail "command receipt ledger is empty; the fold check observed nothing"
 
 say "== SSE subscribe (single stream) =="
 renew "$A"

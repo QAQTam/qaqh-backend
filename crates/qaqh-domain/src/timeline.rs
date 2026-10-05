@@ -156,6 +156,11 @@ pub struct TimelineToolDisplay {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// 终态行差（write/edit/apply_patch 等文件变更类工具）。0/0 = 无变更或未接线。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lines_added: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lines_removed: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<TimelineToolHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,6 +298,10 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Immutable identity and mutable presentation state for one tool block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -323,7 +332,7 @@ pub struct TimelineTool {
     /// True once the writer discarded an older prefix of `progress`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub progress_truncated: bool,
-    /// 进度流标识（09-18 契约 §5.1）："stdout" | "stderr" | "mixed"。
+    /// 进度流标识（09-18 契约 §5.1）："stdout" | "stderr"。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_stream: Option<String>,
     /// 本次调用累计观测字节（emitted + dropped，含被尾部裁剪的部分）。
@@ -513,7 +522,6 @@ pub struct TimelineEntry {
 /// channel, delivery, SSE, or legacy message fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum TimelineIntent {
     TurnOpened {
         turn_id: String,
@@ -555,7 +563,7 @@ pub enum TimelineIntent {
         round_num: u32,
         block_id: String,
         chunk: String,
-        /// 进度流标识（"stdout" | "stderr" | "mixed"）；None = 未知。
+        /// 进度流标识（"stdout" | "stderr"）；None = 未知。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream: Option<String>,
         /// 累计观测字节（emitted + dropped），0 = 未接线。
@@ -595,12 +603,12 @@ pub enum TimelineIntent {
 //
 // TurnData/RoundData/RoundBlock/ToolCallDef/ToolResultDef 是 resume /
 // 归档推导活跃视图使用的**聚合投影**（回合聚合树 ≠ domain 事件流）。
-// 原 proto 同名类型原样迁入；刻意不加 ts-rs 导出（维持零前端曝光现状）。
+// 原 proto 同名类型原样迁入；随 feature="ts" 一同导出前端 TS 类型
+// （export_to = "qaqh/"），前端据此重建回合聚合树。
 // JSON/磁盘形状（含字段顺序与 skip_serializing_if）保持逐字节不变。
 
 /// Tool call definition used in turn projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolCallDef {
     pub id: String,
     pub name: String,
@@ -612,7 +620,6 @@ pub struct ToolCallDef {
 
 /// Tool execution result used in turn projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolResultDef {
     pub tool_call_id: String,
     pub output: String,
@@ -633,14 +640,14 @@ pub struct ToolResultDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<qaqh_types::ToolResultDisplay>,
     /// 结构化错误（rebuild 侧失败槽的单一事实源）。历史归档无此字段
-    /// （serde default 兼容）；缺失时 rebuild 只能从 output 首行降级。
+    /// （serde default 兼容）；缺失时 rebuild 把 message 置空（不读 output），
+    /// 由 client 显示裸 code。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<qaqh_types::ToolError>,
 }
 
 /// File metadata snapshot for rich rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct FileSnapshotInfo {
     pub path: String,
     pub lines: u32,
@@ -655,7 +662,6 @@ pub struct FileSnapshotInfo {
 
 /// One round of a turn (one API call).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RoundData {
     pub round_num: u32,
     #[serde(default)]
@@ -671,7 +677,6 @@ pub struct RoundData {
 
 /// One full turn (user message + all rounds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct TurnData {
     pub turn_id: String,
     pub user_text: String,
@@ -683,7 +688,6 @@ pub struct TurnData {
 /// Blocks are streamed to the frontend in order so it can reconstruct
 /// the exact sequence of reasoning → text → tool calls from the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoundBlock {
     /// Model reasoning/thinking block (collapsible in UI).

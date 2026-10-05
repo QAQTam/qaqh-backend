@@ -166,10 +166,14 @@ pub(crate) fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, Stri
 
 /// One fully-specified item of a full-replace `todo_write` call (v4).
 /// `id: None` = assign a fresh `T<n>`; `Some(id)` = re-reference an existing ID.
+///
+/// `title: None` = 沿用同 `id` 既有条目的标题（仅对**已存在**的 id 成立；
+/// 新建条目必须给标题，否则报错）。这是为了压掉实测里最高频的一类失败：
+/// 模型只想翻转状态却漏写标题，整次覆写被拒。
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedWriteItem {
     pub(crate) id: Option<String>,
-    pub(crate) title: String,
+    pub(crate) title: Option<String>,
     pub(crate) description: String,
     pub(crate) status: TodoStatus,
     pub(crate) evidence: Option<String>,
@@ -213,13 +217,18 @@ pub(crate) fn parse_write_items(args: &Value) -> Result<Vec<ParsedWriteItem>, St
         .enumerate()
         .map(|(index, item)| {
             let label = format!("items[{index}]");
+            // title 可选：给了就必须是 1-100 字符；省略/空白留给执行层去
+            // 既有条目里继承（见 `todo_write_for_typed`）。
             let title = item
                 .get("title")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if title.is_empty() || title.chars().count() > 100 {
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_string);
+            if title
+                .as_deref()
+                .is_some_and(|title| title.chars().count() > 100)
+            {
                 return Err(json_err_string(
                     "invalid_input",
                     format!("{label}.title must be 1-100 chars"),

@@ -79,7 +79,7 @@ impl McpError {
         }
     }
 
-    /// 稳定错误码（如 `MCP_CONNECT_TIMEOUT`）。
+    /// 稳定错误码（如 `mcp_connect_timeout`）。
     pub fn code(&self) -> &'static str {
         self.kind.code()
     }

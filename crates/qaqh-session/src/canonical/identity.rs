@@ -205,6 +205,29 @@ pub fn ulid_from_text(value: &str) -> String {
     encode_ulid_bytes(bytes)
 }
 
+/// Map a client-submitted Ringing v2 `command_id` onto the canonical
+/// causation lane.
+///
+/// Wire command ids are opaque: the envelope only requires a non-empty string,
+/// desktop clients submit ULIDs while mobile clients submit UUIDs. A canonical
+/// `causation_id` must stay a ULID (frozen on-disk contract), so a foreign
+/// shaped id takes the same deterministic `ulid_from_text` derivation the
+/// `turn_*` / `call_*` / `int_*` ids already use, and a client-chosen id never
+/// reaches the log verbatim. The daemon's command receipt fold applies this
+/// same function, which is what keeps a `causation_id` resolvable to the
+/// receipt it belongs to.
+pub fn causation_for_command(command_id: &str) -> Option<crate::session_fact_v2::EventId> {
+    if command_id.is_empty() {
+        return None;
+    }
+    if crate::session_fact_v2::is_ulid_text(command_id) {
+        return Some(crate::session_fact_v2::EventId::new(command_id));
+    }
+    Some(crate::session_fact_v2::EventId::new(ulid_from_text(
+        command_id,
+    )))
+}
+
 fn encode_ulid_bytes(bytes: [u8; 16]) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let value = u128::from_be_bytes(bytes);

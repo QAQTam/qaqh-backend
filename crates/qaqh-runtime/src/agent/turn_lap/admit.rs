@@ -12,7 +12,7 @@ use crate::agent::turn_actor::TurnActor;
 use crate::agent::turn_lap::gate::{abort_running_turn, seal_timeline_terminal_round};
 use crate::agent::types::*;
 
-// ── helpers (from engine_turn.rs, duplicated for phase decoupling) ──
+// ── helpers (from engine_turn.rs, moved for phase decoupling) ──
 
 fn domain_failure(
     code: &str,

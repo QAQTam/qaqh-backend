@@ -12,13 +12,14 @@ use std::time::Duration;
 
 use qaqh_config::config::{McpServerConfig, McpTransportKind};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolResult, build_dynamic_tool};
+use qaqh_workspace::tool_api::DynamicDispatch;
+use qaqh_workspace::{DynamicTool, build_dynamic_tool};
 
 /// server 的 `tools/list` 结果 → 可注册的动态工具批次。
 ///
 /// - **白名单**（设计 §5.3 模型面体积治理）：`server_cfg.tools = Some([...])`
 ///   时只投影名单内工具（不配 = 全暴露）；名单中 server 实际未暴露的名字
-///   → 日志 warn（连接后校验；调用时报 `MCP_NOT_FOUND` 归 M1-5）；
+///   → 日志 warn（连接后校验；调用时报 `mcp_not_found` 归 M1-5）；
 /// - **category**（S3）：stdio → `Exec`；http → `Net`——子代理沙箱按
 ///   category 自动拒绝（actor.rs 旗标路径，零特判）；
 /// - **timeout**：`server_cfg.default_timeout_secs` 透传（配置层已校验
@@ -28,7 +29,7 @@ pub fn project_tools(
     server: &str,
     server_cfg: &McpServerConfig,
     tools: &[rmcp::model::Tool],
-    dispatcher: fn(ToolCallCtx) -> ToolResult,
+    dispatcher: DynamicDispatch,
 ) -> Vec<(String, DynamicTool)> {
     let category = match server_cfg.transport {
         McpTransportKind::Stdio => ToolCategory::Exec,
@@ -79,8 +80,15 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    fn noop(_ctx: ToolCallCtx) -> ToolResult {
-        ToolResult::ok("noop")
+    use qaqh_workspace::ToolResult;
+    use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+
+    fn noop(
+        _name: &str,
+        _ctx: &ToolCallContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutcome, FatalToolError> {
+        Ok(map_tool_result(ToolResult::ok("noop")))
     }
 
     fn server_cfg(

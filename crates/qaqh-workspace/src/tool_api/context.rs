@@ -1,7 +1,7 @@
 //! 显式执行上下文（base spec §6.3 + 09-19 补充稿 §4.5）。
 //!
 //! 目标：调用身份 / 工作区 / 取消 / 进度全部**显式传递**，禁止线程局部
-//! 隐式状态（迁移期 legacy `ToolCallCtx` 兼容字段保留，新 API 不得依赖）。
+//! 隐式状态。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,8 +40,9 @@ pub enum ToolCallSource {
 
 /// 代理运行模式（v1 本地镜像）。
 ///
-/// domain 的 `ConversationMode` 因 R-4 约束（workspace → domain 仅限
-/// Dashboard* 类型）不可引入；映射由 runtime 适配层负责。
+/// domain 的 `ConversationMode` 因 R-4 约束（workspace → domain 仅限被动投影
+/// 记录：`Dashboard*` 与 `CodeDeltaRecord`，禁止事件/行为类型；口径见
+/// `dashboard.rs:7`）不可引入；映射由 runtime 适配层负责。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentMode {
     /// 编码模式（默认）。
@@ -84,8 +85,11 @@ impl CancellationToken {
         self.inner.load(Ordering::SeqCst)
     }
 
-    /// 与 legacy `ToolCallCtx.cancel` 共享同一信号的句柄（桥接专用，不对外）。
-    pub(crate) fn shared_flag(&self) -> Arc<AtomicBool> {
+    /// 共享取消标志的 `Arc<AtomicBool>` 句柄。
+    ///
+    /// 桥接专用：需要 `&AtomicBool` 轮询取消的执行面（MCP/LSP 的 250ms 轮询
+    /// 桥、exec 子进程轮询）用它；与 [`Self::from_shared_flag`] 互为反向映射。
+    pub fn shared_flag(&self) -> Arc<AtomicBool> {
         self.inner.clone()
     }
 }

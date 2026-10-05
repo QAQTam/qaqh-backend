@@ -58,7 +58,7 @@ pub fn remote_path_from_display(input: &str) -> Option<String> {
     if trimmed.starts_with('/') {
         return Some(trimmed.to_string());
     }
-    // Windows 盘符（`C:\`、`C:/`）或 UNC 输入直接透传。
+    // Windows 盘符（`C:\`、`C:/`）直接透传。
     let bytes = trimmed.as_bytes();
     if bytes.len() >= 2 && bytes[1] == b':' && (bytes[0].is_ascii_alphabetic()) {
         return Some(trimmed.replace('\\', "/"));

@@ -10,7 +10,8 @@
 //! - 目标插入：`insert_after`/`insert_before`（锚行）/ `append`（文件尾）/
 //!   `prepend`（文件头）。
 //! - LF 规范视图匹配（与 read 一致）；插入行使用目标文件的行尾风格
-//!   （CRLF 文件插入 CRLF），未改动行保持原字节。
+//!   （CRLF 文件插入 CRLF）；写回是整段 join，未改动行也随之按
+//!   `endings.preferred` 统一行尾（混合行尾文件会被归一）。
 //! - 同文件拷贝：插入点落在被拷贝区间内 → 拒绝（区间随插入位移会乱）。
 
 use std::path::Path;
@@ -942,8 +943,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["copy_range"].legacy.is_none(),
-            "copy_range still has legacy executor"
+            manager.builtins.contains_key("copy_range"),
+            "copy_range must be on the typed execution surface"
         );
 
         let (_dir, workspace) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);

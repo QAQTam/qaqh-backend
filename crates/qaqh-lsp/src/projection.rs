@@ -1,12 +1,12 @@
 //! LSP → 模型面投影（mcp projection.rs 同款职责：纯函数翻译 + 结果渲染）。
 //!
-//! - [`render_locations`]：`Location[]/LocationLink[]` → `path:line:col` 行式
+//! - [`render_goto_result`]：`Location[]/LocationLink[]` → `path:line:col` 行式
 //!   文本（1-based 回显，M1 决策 L2）；超长截断 2KB + 标记（mcp 同款）；头部
 //!   `resultCount/fileCount` 计数行（Claude schema 同款）；
 //! - [`render_hover`]：`Hover` → markdown/plain 文本直通；
-//! - [`render_symbols`]：`DocumentSymbol[]/SymbolInformation[]` → 缩进树行式。
+//! - [`render_document_symbols`]：`DocumentSymbol[]/SymbolInformation[]` → 缩进树行式。
 
-/// 描述截断上限（mcp `DYNAMIC_DESCRIPTION_LIMIT` 同款：防上下文膨胀）。
+/// 结果文本截断上限（mcp `DYNAMIC_DESCRIPTION_LIMIT` 同款：防上下文膨胀）。
 pub const RESULT_TRUNCATION_LIMIT: usize = 2048;
 
 /// 描述截断标记（追加在被截断文本尾部；mcp 同款）。

@@ -42,7 +42,6 @@ pub struct ToolInvocation {
     pub session_id: String,
     pub call_id: String,
     pub tool_name: String,
-    pub action: String,
     pub args: serde_json::Value,
     /// 能力类别（handler 声明）：权限决策的单一事实源，取代名字表。
     pub category: crate::permission::ToolCategory,
@@ -118,10 +117,6 @@ impl AuthorizedToolCall {
         &self.invocation.tool_name
     }
 
-    pub fn action(&self) -> &str {
-        &self.invocation.action
-    }
-
     pub fn args(&self) -> &serde_json::Value {
         &self.invocation.args
     }
@@ -157,7 +152,6 @@ pub enum Admission {
 pub struct PermissionChallenge {
     context: Box<ToolCallContext>,
     tool_name: String,
-    action: String,
     normalized_args: serde_json::Value,
     resources: Vec<PathBuf>,
     reason: String,
@@ -181,7 +175,6 @@ impl PermissionChallenge {
         Self {
             context: Box::new(context),
             tool_name: invocation.tool_name,
-            action: invocation.action,
             normalized_args: invocation.args,
             resources,
             reason,
@@ -203,10 +196,6 @@ impl PermissionChallenge {
 
     pub fn tool_name(&self) -> &str {
         &self.tool_name
-    }
-
-    pub fn action(&self) -> &str {
-        &self.action
     }
 
     pub fn normalized_args(&self) -> &serde_json::Value {
@@ -272,7 +261,6 @@ impl PermissionChallenge {
             session_id: context.session_id.clone(),
             call_id: context.call_id.clone(),
             tool_name: self.tool_name,
-            action: self.action,
             args: self.normalized_args,
             category: self.category,
         };
@@ -400,6 +388,18 @@ pub fn admit_with_context(
                 crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
             resources.sort();
             resources.dedup();
+            // S3 兜底（2026-10-05 读自由规则后必读）：needs_permission 对 Read
+            // 已无条件放行，子代理沙箱的「跨 workspace 拒读」姿态改在此兑现——
+            // 沙箱上下文没有审批通道，跨 workspace 读必须保持自动拒绝（防越狱）。
+            if sandboxed
+                && invocation.category == crate::permission::ToolCategory::Read
+                && !crate::permission::all_within_workspace(&resources, &workspace_root)
+            {
+                return Admission::Denied(format!(
+                    "subagent sandbox denied '{}': reads outside the workspace are host-only",
+                    invocation.tool_name
+                ));
+            }
             Admission::Authorized(AuthorizedToolCall::new(
                 invocation,
                 resources,
@@ -522,7 +522,6 @@ pub fn authorize_call(
         session_id: session_id.to_string(),
         call_id: call_id.to_string(),
         tool_name: tool_name.to_string(),
-        action: String::new(),
         args: args.clone(),
         category: crate::runtime::lookup_category(tool_name)
             .unwrap_or(crate::permission::ToolCategory::Write),
@@ -547,7 +546,6 @@ pub fn authorize_call_with_context(
         session_id: context.session_id.clone(),
         call_id: context.call_id.clone(),
         tool_name: tool_name.to_string(),
-        action: String::new(),
         args: args.clone(),
         category: crate::runtime::lookup_category(tool_name)
             .unwrap_or(crate::permission::ToolCategory::Write),
@@ -562,8 +560,9 @@ mod tests {
 
     #[test]
     fn approval_challenge_preserves_backend_risk_and_consequence() {
-        // 与 sandbox 测试共享全局 SUBAGENT_SANDBOX：并行时沙箱置位会使本测试的
-        // "level 1 write 必须要求审批"断言失败（沙箱下写自动批准）——串行化。
+        // 沙箱标志是 thread-local（`SUBAGENT_SANDBOX`），默认关闭，故本测试可
+        // 断言 "level 1 write 必须要求审批"（沙箱下写自动批准）；串行化与其他
+        // 运行时状态测试共用 `TEST_RUNTIME_SERIAL`。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -572,7 +571,6 @@ mod tests {
             session_id: "seed-a".into(),
             call_id: "call-a".into(),
             tool_name: "write".into(),
-            action: String::new(),
             args: serde_json::json!({ "path": workspace.join("src/lib.rs") }),
             category: crate::permission::ToolCategory::Write,
         };
@@ -592,8 +590,9 @@ mod tests {
 
     // ── 子代理沙箱（方案 B）──
 
-    /// 持锁 + 置位沙箱；Drop 时复位。全局 AtomicBool 会被并行测试干扰，
-    /// 必须经 `TEST_RUNTIME_SERIAL` 串行化（同 crate 其他全局状态测试）。
+    /// 持锁 + 置位沙箱；Drop 时复位。沙箱标志是 thread-local（`SUBAGENT_SANDBOX`
+    /// 为 `Cell<bool>`，只作用于本测试线程），串行化与其他运行时状态测试共用
+    /// `TEST_RUNTIME_SERIAL`。
     fn sandbox_guard() -> impl Drop {
         struct Guard {
             _serial: std::sync::MutexGuard<'static, ()>,
@@ -621,7 +620,6 @@ mod tests {
                 session_id: "sub-a".into(),
                 call_id: "call-s".into(),
                 tool_name: tool.into(),
-                action: String::new(),
                 args,
                 category,
             },
@@ -675,6 +673,50 @@ mod tests {
                 assert!(reason.contains("sandbox"), "{reason}");
             }
             _other => panic!("cross-workspace write must be denied, got non-denied"),
+        }
+        // 2026-10-05 读自由规则后沙箱兜底：needs_permission 对 Read 无条件
+        // 放行，沙箱的「跨 workspace 拒读」改在 admit 的 AutoApprove 分支兑现。
+        let admission = invoke(
+            "read",
+            serde_json::json!({ "path": outside.join("secret.txt") }),
+            &ws,
+            crate::permission::ToolCategory::Read,
+        );
+        match admission {
+            Admission::Denied(reason) => {
+                assert!(reason.contains("sandbox"), "{reason}");
+            }
+            _other => panic!("cross-workspace read must be denied in sandbox, got non-denied"),
+        }
+    }
+
+    #[test]
+    fn main_agent_reads_outside_workspace_auto_approve_at_every_tier() {
+        // 2026-10-05 读自由规则：读取完全不受工作区限制——主代理在 read-only /
+        // workspace-write 档下读工作区外路径不再弹审批（敏感路径守卫仍在前）。
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set_subagent_sandbox(false);
+        let ws = std::env::temp_dir().join("qaqh-read-free-ws");
+        let outside = std::env::temp_dir().join("qaqh-read-free-outside");
+        for level in [1u8, 2, 3] {
+            let admission = admit(
+                ToolInvocation {
+                    session_id: "seed-readfree".into(),
+                    call_id: format!("call-readfree-{level}"),
+                    tool_name: "read".into(),
+                    args: serde_json::json!({ "path": outside.join("notes.txt") }),
+                    category: crate::permission::ToolCategory::Read,
+                },
+                level,
+                &ws,
+                &HashSet::new(),
+            );
+            assert!(
+                matches!(admission, Admission::Authorized(_)),
+                "level {level} read outside workspace must auto-approve, got non-authorized"
+            );
         }
     }
 
@@ -731,7 +773,7 @@ mod tests {
         // T-8-1（安全审查 P1-1 / O-4）：D5 不再对 Exec/Net 类别无条件放行。
         // read-only / workspace-write 必须审批；skip-permissions 是显式
         // bypass，继续走 D5 快路径。
-        // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
+        // 与 sandbox_guard 共用 `TEST_RUNTIME_SERIAL` 串行化。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -743,7 +785,6 @@ mod tests {
                     session_id: "seed-d5".into(),
                     call_id: format!("call-d5-{level}"),
                     tool_name: "mcp__demo__echo".into(),
-                    action: String::new(),
                     args: serde_json::json!({}),
                     category: crate::permission::ToolCategory::Exec,
                 },
@@ -761,7 +802,6 @@ mod tests {
                 session_id: "seed-d5".into(),
                 call_id: "call-d5-4".into(),
                 tool_name: "mcp__demo__echo".into(),
-                action: String::new(),
                 args: serde_json::json!({}),
                 category: crate::permission::ToolCategory::Exec,
             },
@@ -789,7 +829,6 @@ mod tests {
                     session_id: "seed-d5r".into(),
                     call_id: "call-d5r".into(),
                     tool_name: "mcp__demo__resources".into(),
-                    action: String::new(),
                     args: serde_json::json!({}),
                     category: crate::permission::ToolCategory::Read,
                 },
@@ -807,7 +846,7 @@ mod tests {
     #[test]
     fn non_sandbox_still_requires_approval() {
         // 未启用沙箱：read-only 档写仍需审批（主代理行为不受影响）。
-        // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
+        // 与 sandbox_guard 共用 `TEST_RUNTIME_SERIAL` 串行化。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
