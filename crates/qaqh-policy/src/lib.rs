@@ -178,6 +178,10 @@ pub enum SandboxBackend {
     LinuxLandlockSeccomp,
     /// Process-tree/resource hardening only; no filesystem/network sandbox.
     ProcessHardening,
+    /// Windows restricted-token sandbox (sbx TokenPlane; kernel-enforced DACL).
+    WindowsToken,
+    /// Windows TokenPlane + ProjFS pending-overlay redirect (turn-scoped writes).
+    WindowsRedirect,
     /// No enforcing backend is currently wired.
     None,
 }
@@ -196,8 +200,22 @@ pub struct SandboxSpec {
     pub enabled: bool,
     pub backend: SandboxBackend,
     pub writable_roots: Vec<PathBuf>,
+    /// Per-file write grants (created if missing); Windows sbx 后端消费,
+    /// Linux 后端忽略。serde default 向后兼容。
+    #[serde(default)]
+    pub writable_files: Vec<PathBuf>,
+    /// Write-denied carveouts (deny 恒优先,如保护 .git);Windows sbx 后端消费。
+    #[serde(default)]
+    pub deny_write_paths: Vec<PathBuf>,
     pub network: NetworkPolicy,
     pub max_open_files: Option<u64>,
+    /// Turn-scoped pending-overlay redirect(Windows sbx 后端;缺省 false)。
+    #[serde(default)]
+    pub redirect: bool,
+    /// 工作区根(sbx 后端消费:SID 身份持久化、重定向 store 基底;
+    /// `workspace_write` 构造器自动填充,其余路径缺省 None)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<PathBuf>,
 }
 
 impl SandboxSpec {
@@ -206,9 +224,13 @@ impl SandboxSpec {
         Self {
             enabled: true,
             backend: SandboxBackend::Auto,
-            writable_roots: vec![workspace_root],
+            writable_roots: vec![workspace_root.clone()],
+            writable_files: Vec::new(),
+            deny_write_paths: Vec::new(),
             network: NetworkPolicy::Deny,
             max_open_files: Some(1024),
+            redirect: false,
+            workspace_root: Some(workspace_root.clone()),
         }
     }
 
@@ -218,8 +240,12 @@ impl SandboxSpec {
             enabled: false,
             backend: SandboxBackend::None,
             writable_roots: Vec::new(),
+            writable_files: Vec::new(),
+            deny_write_paths: Vec::new(),
             network: NetworkPolicy::Allow,
             max_open_files: None,
+            redirect: false,
+            workspace_root: None,
         }
     }
 }

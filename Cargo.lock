@@ -3858,6 +3858,7 @@ dependencies = [
  "libc",
  "log",
  "qaqh-policy",
+ "sbx-win",
  "seccompiler",
  "serde",
  "serde_json",
@@ -3986,6 +3987,7 @@ dependencies = [
  "qaqh-types",
  "regex",
  "ropey",
+ "sbx-win",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -4476,6 +4478,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sbx-cli"
+version = "0.1.0"
+dependencies = [
+ "sbx-nt",
+ "sbx-win",
+ "serde_json",
+ "windows 0.58.0",
+]
+
+[[package]]
+name = "sbx-nt"
+version = "0.1.0"
+
+[[package]]
+name = "sbx-win"
+version = "0.1.0"
+dependencies = [
+ "sbx-nt",
+ "serde",
+ "serde_json",
+ "windows 0.58.0",
 ]
 
 [[package]]
