@@ -85,8 +85,11 @@ impl CancellationToken {
         self.inner.load(Ordering::SeqCst)
     }
 
-    /// 与 legacy `ToolCallCtx.cancel` 共享同一信号的句柄（桥接专用，不对外）。
-    pub(crate) fn shared_flag(&self) -> Arc<AtomicBool> {
+    /// 与 legacy `ToolCallCtx.cancel` 共享同一信号的句柄。
+    ///
+    /// 桥接专用：v1 执行器（MCP/LSP 的 250ms 轮询桥）以 `&AtomicBool` 轮询
+    /// 取消，与 [`Self::from_shared_flag`] 互为反向映射。
+    pub fn shared_flag(&self) -> Arc<AtomicBool> {
         self.inner.clone()
     }
 }

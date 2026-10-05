@@ -19,7 +19,8 @@ use lsp_types::{
 };
 
 use qaqh_types::{ToolDef, ToolFunction, ToolResult};
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolRisk};
+use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_workspace::{DynamicTool, ToolRisk};
 
 use crate::bridge::DEFAULT_TIMEOUT_SECS;
 use crate::connection::ServerConnection;
@@ -85,7 +86,7 @@ pub fn aggregate_entry(timeout: std::time::Duration) -> (String, DynamicTool) {
     let entry = DynamicTool {
         def,
         effective_name: None,
-        handler_fn: aggregate_dispatch,
+        dispatch: aggregate_dispatch,
         category: qaqh_workspace::ToolCategory::Read,
         // mcp `mcp` 同款：risk 恒 Administrative，真实风险由 category 裁决。
         risk: ToolRisk::Administrative,
@@ -95,25 +96,35 @@ pub fn aggregate_entry(timeout: std::time::Duration) -> (String, DynamicTool) {
 }
 
 /// 生产 dispatcher（经全局槽位；E-5 单一 fn 指针）。
-pub fn aggregate_dispatch(ctx: ToolCallCtx) -> ToolResult {
-    aggregate_dispatch_with(
+///
+/// typed 外壳：root 取自显式 [`ToolCallContext::workspace_root`]，不再读
+/// 线程局部工作区。`name` 对聚合工具无意义（唯一工具名固定），忽略。
+pub fn aggregate_dispatch(
+    _name: &str,
+    ctx: &ToolCallContext,
+    args: serde_json::Value,
+) -> Result<ToolOutcome, FatalToolError> {
+    let cancel = ctx.cancellation.shared_flag();
+    let timeout_hint = (!ctx.timeout.is_zero()).then(|| ctx.timeout.as_secs());
+    let root = context_root(ctx);
+    Ok(map_tool_result(aggregate_dispatch_with(
         &manager_slot(),
-        &ctx.args,
-        ctx.cancel.as_ref(),
-        ctx.timeout_secs,
-        &current_root(),
-    )
+        &args,
+        &cancel,
+        timeout_hint,
+        &root,
+    )))
 }
 
-/// 当前工作区 root（会话 cwd；mcp 无此概念——LSP 连接键必需）。
-fn current_root() -> String {
-    let ws = qaqh_workspace::current_workspace();
+/// 显式上下文里的工作区 root（LSP 连接键必需）；空/`.` 回退进程 cwd。
+fn context_root(ctx: &ToolCallContext) -> String {
+    let ws = ctx.workspace_root.to_string_lossy();
     if ws.is_empty() || ws == "." {
         std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_owned())
     } else {
-        ws
+        ws.into_owned()
     }
 }
 

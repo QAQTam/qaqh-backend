@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use qaqh_config::config::{McpServerConfig, McpTransportKind};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolResult, build_dynamic_tool};
+use qaqh_workspace::tool_api::DynamicDispatch;
+use qaqh_workspace::{DynamicTool, build_dynamic_tool};
 
 /// server 的 `tools/list` 结果 → 可注册的动态工具批次。
 ///
@@ -28,7 +29,7 @@ pub fn project_tools(
     server: &str,
     server_cfg: &McpServerConfig,
     tools: &[rmcp::model::Tool],
-    dispatcher: fn(ToolCallCtx) -> ToolResult,
+    dispatcher: DynamicDispatch,
 ) -> Vec<(String, DynamicTool)> {
     let category = match server_cfg.transport {
         McpTransportKind::Stdio => ToolCategory::Exec,
@@ -79,8 +80,15 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    fn noop(_ctx: ToolCallCtx) -> ToolResult {
-        ToolResult::ok("noop")
+    use qaqh_workspace::ToolResult;
+    use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+
+    fn noop(
+        _name: &str,
+        _ctx: &ToolCallContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutcome, FatalToolError> {
+        Ok(map_tool_result(ToolResult::ok("noop")))
     }
 
     fn server_cfg(

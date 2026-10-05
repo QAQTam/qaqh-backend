@@ -19,13 +19,18 @@
 use std::time::Duration;
 
 use qaqh_workspace::permission::ToolCategory;
+use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
 use qaqh_workspace::{
-    Admission, DYNAMIC_DESCRIPTION_LIMIT, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolInvocation,
-    ToolManager, ToolResult, admit, build_dynamic_tool,
+    Admission, DYNAMIC_DESCRIPTION_LIMIT, MCP_DYNAMIC_PREFIX, ToolInvocation, ToolManager,
+    ToolResult, admit, build_dynamic_tool,
 };
 
-fn noop(_ctx: ToolCallCtx) -> ToolResult {
-    ToolResult::ok("noop")
+fn noop(
+    _name: &str,
+    _ctx: &ToolCallContext,
+    _args: serde_json::Value,
+) -> Result<ToolOutcome, FatalToolError> {
+    Ok(map_tool_result(ToolResult::ok("noop")))
 }
 
 fn echo_entry(
