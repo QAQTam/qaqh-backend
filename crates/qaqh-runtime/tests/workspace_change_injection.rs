@@ -514,6 +514,7 @@ fn self_declared_write_is_not_double_recorded_in_smj() {
     let injections = injection_indices(&messages);
     assert_eq!(injections.len(), 1, "仍应注入变更报告：{messages:#?}");
     let body = text_of(&messages[injections[0]]);
+    assert!(body.contains("declared.txt"), "报告应点名该文件：{body}");
 
     // 但 SMJ 不得由 spy 再记一遍。
     let steps = qaqh_workspace::journal::query(None, Some("declared.txt"), None);
