@@ -50,7 +50,7 @@ fn snapshot_bytes(root: &std::path::Path, session_id: &str) -> u64 {
 }
 
 /// 按生产形状灌入一个「长回合」：块文本随 checkpoint 累积增长
-/// （`BlockCheckpoint` 携带**全量块文本**，这是快照体积的真正来源）。
+/// （checkpoint 载荷为增量 `arg`；块全文物化进快照，这才是快照体积的真正来源）。
 fn build_long_turn(
     hub: &RingingHub,
     session_id: &str,
@@ -177,7 +177,7 @@ fn hot_path_latency_under_fast_streaming() {
 ///
 /// 生产证据：`%USERPROFILE%\.qaqh\ringing\ringing-timeline\a6227e42.json` = 17.07 MiB。
 /// 本用例按同量级构造，测量「切换 session」真正要付的两笔账：
-/// ① 上一个回合 seal 时的同步全量重写（发生在发布会话线程上）；
+/// ① 上一个回合 seal 的发布成本（issue #28 后仅入队；全量重写只在显式 flush 边界发生）；
 /// ② 新会话/重连首次访问该 seed 时的冷装载。
 #[test]
 #[ignore = "measurement harness; run explicitly with --ignored --nocapture"]

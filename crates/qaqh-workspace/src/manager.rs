@@ -2,7 +2,8 @@
 //!
 //! Since v5: per-call execution metadata (ToolExecMeta) and cumulative
 //! stats (ToolStats) are returned to the caller instead of being lost
-//! to stderr. The caller (agent tools.rs) acts as a forwarding layer
+//! to stderr. The caller (the runtime agent tool boundary, e.g.
+//! `crates/qaqh-runtime/src/agent/tool_runtime.rs`) acts as a forwarding layer
 //! that pushes these into UI events.
 
 use std::collections::BTreeMap;
@@ -88,7 +89,7 @@ pub struct ToolManager {
     display_projectors: BTreeMap<String, crate::tool_api::ToolDisplayFn>,
 }
 
-/// 动态工具名前缀（S2：`mcp__{server}__{tool}`；与内置 19 工具零碰撞）。
+/// 动态工具名前缀（S2：`mcp__{server}__{tool}`；与内置 20 工具零碰撞）。
 pub const MCP_DYNAMIC_PREFIX: &str = "mcp__";
 
 /// 动态工具描述截断上限（设计 §5.3：防上下文膨胀）。
@@ -696,7 +697,7 @@ pub(crate) fn extract_files_affected(_tool_name: &str, args: &serde_json::Value)
 /// closed here would block the tool at every permission level, so their
 /// containment stays with the permission layer (`classify_risk` already reports
 /// Exec/Net as [`crate::PermissionRisk::High`]). Tools that never touch the file
-/// system (`ask`, `task`, `skills`, …) are `ReadOnly`/`Write`/`Administrative`
+/// system (`ask`, `skills`, …) are `ReadOnly`/`Write`/`Administrative`
 /// and keep the permissive default.
 fn is_path_in_workspace(
     ctx: &crate::ToolCallCtx,
@@ -724,7 +725,7 @@ fn is_path_in_workspace(
         path_norm.starts_with(&ws_norm)
     } else {
         // No `path` arg — assume workspace operation for non-destructive tools
-        // (e.g. task, skills, ask). A **file-scoped** Destructive tool without a
+        // (e.g. skills, ask). A **file-scoped** Destructive tool without a
         // `path` fails closed (see doc comment above).
         !(matches!(risk, ToolRisk::Destructive)
             && matches!(category, crate::permission::ToolCategory::Write))
@@ -1007,7 +1008,7 @@ mod m13_tests {
             &ctx_with_path("a/../../outside.txt"),
             ToolRisk::Write
         ));
-        // 无 path 参数：非 Destructive 工具默认放行（ask/task/skills 不碰文件系统）。
+        // 无 path 参数：非 Destructive 工具默认放行（ask/skills 不碰文件系统）。
         assert!(is_path_in_workspace(
             &crate::ToolCallCtx {
                 id: "t".to_string(),

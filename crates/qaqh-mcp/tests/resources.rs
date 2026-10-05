@@ -8,18 +8,18 @@
 //! | `aggregate_tool_pinned_in_batch_head` | 批次[0]=`mcp`（enabled 即在场）；零 server 配置也含聚合工具 |
 //! | `list_servers_empty_config` | 零配置 → 提示语 |
 //! | `list_servers_shows_connection_state` | 未连接 disconnected → 连接后 connected + 计数 |
-//! | `list_resources_unknown_server_maps_not_found` | `MCP_NOT_FOUND`（附名单） |
+//! | `list_resources_unknown_server_maps_not_found` | `mcp_not_found`（附名单） |
 //! | `list_resources_before_connect_shows_placeholder` | 未连接 → 占位行（指引 lazy connect） |
 //! | `list_resources_connected_but_empty_is_not_reported_as_unconnected` | 已连接但清单为空 ≠ 未连接（T-6-2） |
 //! | `list_resources_fetch_failure_is_not_reported_as_unconnected` | 已连接但 `resources/list` 拉取失败 ≠ 未连接（N-3，第三种文案） |
 //! | `list_resources_after_connect_lists_cache_and_templates` | 缓存清单 + URI 模板段 |
 //! | `read_resource_text_passthrough` | 文本直通（mime 头） |
 //! | `read_resource_blob_placeholder` | `[blob mime=... size=3 uri=...]` |
-//! | `read_resource_unknown_uri_maps_tool_error` | server 侧报错 → `MCP_TOOL_ERROR` |
-//! | `read_resource_unknown_server_maps_not_found` | `MCP_NOT_FOUND` |
-//! | `read_resource_missing_params_maps_protocol` | 缺 uri → `MCP_PROTOCOL` |
-//! | `invalid_action_maps_protocol` | 非法/缺 action → `MCP_PROTOCOL` |
-//! | `disabled_manager_rejects_aggregate` | enabled=false → `MCP_DISABLED` |
+//! | `read_resource_unknown_uri_maps_tool_error` | server 侧报错 → `mcp_tool_error` |
+//! | `read_resource_unknown_server_maps_not_found` | `mcp_not_found` |
+//! | `read_resource_missing_params_maps_protocol` | 缺 uri → `mcp_protocol_error` |
+//! | `invalid_action_maps_protocol` | 非法/缺 action → `mcp_protocol_error` |
+//! | `disabled_manager_rejects_aggregate` | enabled=false → `mcp_disabled` |
 //!
 //! 红线呼应：本文件不含 `set_cancel(false)`。
 
@@ -661,7 +661,7 @@ async fn disabled_manager_rejects_aggregate() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_resource_honours_cancel() {
-    // 慢读（3s）：cancel 在结果到达前命中 → MCP_CANCELLED（结果丢弃，不发
+    // 慢读（3s）：cancel 在结果到达前命中 → mcp_cancelled（结果丢弃，不发
     // 通知——read 非 tools/call，无 request id 可取消，语义 §5.4/§7）。
     let manager = make_manager_named(Some("mock"));
     connect_and_wait(&manager, "mock").await;
@@ -870,7 +870,7 @@ async fn get_prompt_holds_the_inflight_guard() {
 }
 
 /// 挂死 server 的 `prompts/get` 必须被超时硬顶并释放 service 锁
-/// （对齐 `call_tool` / `read_resource`：`MCP_TIMEOUT`，非永久挂起）。
+/// （对齐 `call_tool` / `read_resource`：`mcp_timeout`，非永久挂起）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_prompt_times_out_and_frees_the_service_lock() {
     let manager = make_manager_named(Some("alpha"));

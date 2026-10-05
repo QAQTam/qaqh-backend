@@ -19,6 +19,9 @@ use ignore::WalkBuilder;
 
 use crate::store::{Change, ChangeStatus, FileEntry, Manifest, Store};
 
+/// 增量链最大深度：每 N 份 manifest 强制拍一份全量锚点。
+const ANCHOR_EVERY: u32 = 16;
+
 /// 扫描参数。
 #[derive(Debug, Clone)]
 pub struct ScanOpts {
@@ -57,6 +60,8 @@ impl Default for ScanOpts {
 
 #[derive(Debug, Clone)]
 pub struct ScanOutcome {
+    /// 本扫描的 manifest id。空扫描（无变更）复用上一份 manifest id，
+    /// 不落新文件——manifest 是全量文件清单，是存储增长的主项。
     pub id: String,
     pub files: usize,
     /// 首次扫描（只有 manifest，不刷 journal）
@@ -74,12 +79,16 @@ pub(crate) fn run_scan(
 ) -> Result<ScanOutcome> {
     let _guard = store.lock_timeout(opts.lock_wait)?;
     let state = store.load_state()?;
-    let prev = match &state.last_scan {
-        Some(id) => Some(store.load_manifest(id)?),
-        None => None,
+    let is_baseline = state.last_scan.is_none();
+    // 增量链：prev 的链深用于锚点判定；文件集必须物化为全量（prev 可能是 delta）
+    let prev_depth = match &state.last_scan {
+        Some(id) => store.load_manifest(id)?.depth,
+        None => 0,
     };
-    let is_baseline = prev.is_none();
-    let prev_files = prev.as_ref().map(|m| m.files.clone()).unwrap_or_default();
+    let prev_files = match &state.last_scan {
+        Some(id) => store.materialize_manifest(id)?,
+        None => BTreeMap::new(),
+    };
 
     // 走库 + 哈希（mtime/size 命中缓存则不重读）
     let extra = [store.dir().to_path_buf()];
@@ -180,6 +189,26 @@ pub(crate) fn run_scan(
         }
     }
 
+    // 空扫描热补丁：无变更时不落新 manifest、不动 state。工具批边界每批
+    // 固定两次扫描，稳态下绝大多数是空扫描，此前每次都全量落一份 manifest
+    // （数百 KB/份），是存储 O(批次数 × 文件数) 增长的主因。复用上一份
+    // manifest id 后 id 仍单调递增（有变更的扫描才会生成新 id），
+    // `changes_since` 的 `c.scan > mark` 过滤与 restore 的按 id 定位均不受影响。
+    if changes.is_empty() && !is_baseline {
+        let prev_id = state
+            .last_scan
+            .clone()
+            .context("非基线扫描但 state.last_scan 缺失")?;
+        return Ok(ScanOutcome {
+            id: prev_id,
+            files: n_files,
+            baseline: false,
+            added: 0,
+            modified: 0,
+            deleted: 0,
+        });
+    }
+
     let seq = state.seq + 1;
     let id = format!("s{:016}_{:04}", millis_now(), seq);
     for (i, c) in changes.iter_mut().enumerate() {
@@ -188,12 +217,42 @@ pub(crate) fn run_scan(
     }
     store.append_journal(&changes)?;
 
-    let manifest = Manifest {
-        id: id.clone(),
-        ts: now,
-        trigger: trigger.to_string(),
-        base: state.last_scan.clone(),
-        files,
+    // 锚点判定（补丁 B）：基线 / 链深到顶 / 大变更（>25% 条目变化）直接拍
+    // 全量锚点，其余落增量——相对 base 仅变化条目，删除以墓碑表达。
+    let changed = changes.len();
+    let anchor = is_baseline || prev_depth + 1 >= ANCHOR_EVERY || changed * 4 > n_files;
+    let manifest = if anchor {
+        Manifest {
+            id: id.clone(),
+            ts: now,
+            trigger: trigger.to_string(),
+            base: None,
+            anchor: true,
+            depth: 0,
+            files,
+            tombstones: Vec::new(),
+        }
+    } else {
+        let mut delta_files = BTreeMap::new();
+        let mut tombstones = Vec::new();
+        for c in &changes {
+            if c.status == ChangeStatus::Deleted {
+                tombstones.push(c.path.clone());
+                continue;
+            }
+            let e = files.get(&c.path).context("变更条目缺失于本次扫描结果")?;
+            delta_files.insert(c.path.clone(), e.clone());
+        }
+        Manifest {
+            id: id.clone(),
+            ts: now,
+            trigger: trigger.to_string(),
+            base: state.last_scan.clone(),
+            anchor: false,
+            depth: prev_depth + 1,
+            files: delta_files,
+            tombstones,
+        }
     };
     store.save_manifest(&manifest)?;
     store.save_state(&crate::store::State {
@@ -348,5 +407,42 @@ mod tests {
         fs::write(ws.join("node_modules/x/junk.js"), "junk\n").unwrap();
         let o4 = run_scan(&ws, &store, "manual", &opts).unwrap();
         assert_eq!(o4.added, 0);
+    }
+
+    #[test]
+    fn empty_scan_reuses_previous_manifest() {
+        let base = tmp_dir("scan-reuse");
+        let ws = base.join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("a.txt"), "aaa\n").unwrap();
+        let store_dir = base.join("store");
+        let store = Store::open(&ws, Some(&store_dir)).unwrap();
+        let opts = ScanOpts::default();
+
+        // 基线：1 份 manifest
+        let o1 = run_scan(&ws, &store, "manual", &opts).unwrap();
+        assert_eq!(store.all_manifest_ids().unwrap().len(), 1);
+
+        // 空扫描：复用 manifest id，不新增文件
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let o2 = run_scan(&ws, &store, "manual", &opts).unwrap();
+        assert_eq!(o2.id, o1.id);
+        assert_eq!(store.all_manifest_ids().unwrap().len(), 1);
+
+        // 有变更的扫描：拿新 id、落新 manifest，journal 照常记账
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(ws.join("a.txt"), "bbb\n").unwrap();
+        let o3 = run_scan(&ws, &store, "tool_end", &opts).unwrap();
+        assert_ne!(o3.id, o2.id);
+        assert_eq!(store.all_manifest_ids().unwrap().len(), 2);
+        assert!(
+            store
+                .read_journal()
+                .unwrap()
+                .iter()
+                .any(|c| c.path == "a.txt" && c.status == ChangeStatus::Modified)
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

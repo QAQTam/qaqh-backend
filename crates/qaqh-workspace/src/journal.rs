@@ -3,10 +3,10 @@
 //! Append-only event log for workspace file mutations. The journal lives in
 //! the user data directory (not inside a repository), so it can survive a
 //! deleted working tree. It records every successful `write`, `edit`,
-//! `apply_patch`, and `delete` operation with enough content-addressed data to
-//! replay a file back to a requested sequence point.
+//! `apply_patch`, `delete`, `copy_range`, and `web_fetch` operation with enough
+//! content-addressed data to replay a file back to a requested sequence point.
 //!
-//! Design: `docs/current/architecture.md`
+//! Design: `docs/spec-file-mutation-delta-v2.md`
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -40,7 +40,7 @@ pub struct Step {
     pub tool_use_id: String,
     /// Epoch seconds.
     pub ts: u64,
-    /// Workspace tool name: write | edit | apply_patch | delete.
+    /// Workspace tool name: write | edit | apply_patch | delete | copy_range | web_fetch.
     pub tool: String,
     /// Path as seen by the tool (workspace-relative or absolute).
     pub file: String,

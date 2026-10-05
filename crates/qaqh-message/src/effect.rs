@@ -3,9 +3,9 @@ use qaqh_types::Message;
 /// A tool invocation extracted from the assistant message.
 ///
 /// Note: the former `Effect { None, TurnComplete, CallGate }` enum was
-/// dissolved (PR structure-simplification Phase 1): `push_*` methods now
-/// return `bool` (`true` = turn completed) and `CallGate` was dead since
-/// introduction (zero constructors, zero consumers).
+/// dissolved (PR structure-simplification Phase 1): the assistant push
+/// (`push_assistant`) now returns `bool` (`true` = turn completed) and
+/// `CallGate` was dead since introduction (zero constructors, zero consumers).
 #[derive(Debug, Clone)]
 pub struct PendingTool {
     pub id: String,

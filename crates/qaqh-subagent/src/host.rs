@@ -498,7 +498,8 @@ pub trait SubagentHost: Send + Sync {
     ) -> Result<Vec<ListedAgent>, String>;
 
     /// Deliver the initial task after the caller durably recorded the spawn
-    /// edge. Implementations own process registration and result collection.
+    /// edge. The tool handler registers the process beforehand; implementations
+    /// own result collection.
     fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String>;
 
     /// Deliver a canonical inter-agent message to a loaded target agent.
@@ -558,7 +559,7 @@ pub fn install_host(host: Arc<dyn SubagentHost>) {
     }
 }
 
-/// 读取已安装的宿主；未安装返回 `None`（调用方回退 HTTP/SSE 路径）。
+/// 读取已安装的宿主；未安装返回 `None`（调用方即报错——legacy HTTP/SSE 降级已随 PR-4-2 删除）。
 pub fn host() -> Option<Arc<dyn SubagentHost>> {
     let slot = HOST.get()?;
     let guard = slot.lock().ok()?;

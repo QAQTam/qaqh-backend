@@ -2280,7 +2280,7 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// 普通 daemon Router 不挂载浏览器控制面；WebUI 只能走独立 `webui` 网关。
+    /// 普通 daemon Router 不挂载浏览器控制面（浏览器网关已随 Tauri 化移除）。
     #[tokio::test]
     async fn webui_routes_are_not_mounted() {
         let app = build_router(test_state());
@@ -2596,6 +2596,90 @@ mod command_entry_tests {
 
         // 清理：close（join in-process worker）+ delete（删会话目录），
         // 与 command.rs SessionDelete op 同语义。
+        let service = state.service.clone();
+        let seed = created_seed.clone();
+        let cleanup = tokio::task::spawn_blocking(move || {
+            let _ = service.close_session(&seed, None);
+            service.delete_session(&seed, None)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("cleanup join error: {e}")));
+        if let Err(error) = cleanup {
+            panic!("cleanup failed for {created_seed} (leaked session dir): {error}");
+        }
+    }
+
+    /// BUG-2026-10-05-01 回归锁：SessionResume 必须恢复**命令声明的目标会话**，
+    /// 而不是 header 的 client_session_id（租约标识）。
+    ///
+    /// 回归前的症状链：`session.resume` 收到租约 id → `.active_session` 被写成
+    /// 租约 id → `register_root_agent` 对 `sessions/{cs}/` 物化孤儿 identity
+    /// 目录 → actor resume 加载失败 → lifecycle 兜底静默再分配一个幽灵会话
+    /// 目录。TUI 每次打开 tab（SessionCreate → SessionResume 序列）就多出
+    /// 两个目录。不变量：resume 之后，磁盘上**不得**出现以租约 id 命名的会话
+    /// 目录，`.active_session` 也不得指向租约 id。
+    #[tokio::test]
+    async fn session_resume_over_commands_channel_resumes_the_target_not_the_lease() {
+        let state = entry_state();
+
+        // 1. 先经 commands 通道真实建会话（同上方 create 回归锁的端到端路径）。
+        let create = RingingV2CommandEnvelope::new(
+            "cmd-resume-regression-create",
+            "ci-entry",
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate {
+                close_current: false,
+                cwd: None,
+                tool_mode: None,
+                custom_tools: Vec::new(),
+            }),
+        )
+        .with_client_session_id(CALLER);
+        let (create_status, create_ack) =
+            execute_command(&state, &caller_headers(), create).await;
+        assert_eq!(create_status, StatusCode::OK);
+        assert_eq!(create_ack.status, RingingCommandAckStatus::Accepted);
+        let created_seed = state
+            .leases
+            .lock()
+            .unwrap()
+            .owned_sessions(CALLER)
+            .into_iter()
+            .next()
+            .expect("created session attached to lease");
+
+        // 2. SessionResume：envelope session_id = 目标会话，header 仍是租约 id。
+        let resume = RingingV2CommandEnvelope::new(
+            "cmd-resume-regression",
+            "ci-entry",
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionResume {
+                session_id: created_seed.clone(),
+            }),
+        )
+        .with_client_session_id(CALLER)
+        .with_session_id(&created_seed);
+        let (status, ack) = execute_command(&state, &caller_headers(), resume).await;
+        assert_eq!(status, StatusCode::OK, "resume ack: {:?}", ack.message);
+        assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
+
+        // 3. 不变量：租约 id 不得被当成会话物化/激活。
+        let caller_dir = qaqh_types::platform::sessions_dir().join(CALLER);
+        assert!(
+            !caller_dir.exists(),
+            "租约 id 被当成会话 id 物化了目录：{}",
+            caller_dir.display()
+        );
+        assert!(
+            qaqh_session::SessionManager::global().load_meta(CALLER).is_none(),
+            "租约 id 不得解析出会话 meta"
+        );
+        let active = qaqh_session::SessionManager::global().active_session();
+        assert_ne!(
+            active.as_deref(),
+            Some(CALLER),
+            ".active_session 被写成租约 id（resume 传参错位）"
+        );
+
+        // 4. 清理：close（join in-process worker）+ delete（删会话目录）。
         let service = state.service.clone();
         let seed = created_seed.clone();
         let cleanup = tokio::task::spawn_blocking(move || {

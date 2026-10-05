@@ -2,8 +2,9 @@
 //!
 //! This is the P3-5 core only: it enforces one `ToolIntent` and one
 //! `ToolFinished` per `call_id`, rebuilds its index from committed facts, and
-//! classifies open intents for recovery. SessionActor/ToolRuntime wiring and
-//! cancel/resume CAS remain a later slice.
+//! classifies open intents for recovery. `SessionActor` now drives it: the
+//! resume CAS lives in `SessionActor::admit_tool_intent` and the cancel CAS in
+//! `SessionActor::cancel_tool_batch`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

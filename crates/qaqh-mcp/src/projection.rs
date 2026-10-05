@@ -18,7 +18,7 @@ use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolResult, build_dynamic_tool};
 ///
 /// - **白名单**（设计 §5.3 模型面体积治理）：`server_cfg.tools = Some([...])`
 ///   时只投影名单内工具（不配 = 全暴露）；名单中 server 实际未暴露的名字
-///   → 日志 warn（连接后校验；调用时报 `MCP_NOT_FOUND` 归 M1-5）；
+///   → 日志 warn（连接后校验；调用时报 `mcp_not_found` 归 M1-5）；
 /// - **category**（S3）：stdio → `Exec`；http → `Net`——子代理沙箱按
 ///   category 自动拒绝（actor.rs 旗标路径，零特判）；
 /// - **timeout**：`server_cfg.default_timeout_secs` 透传（配置层已校验

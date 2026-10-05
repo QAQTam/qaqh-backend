@@ -1,4 +1,5 @@
-//! 客户端 open 握手（`POST /ringing/v2/clients/open` 的 payload 类型（v1 已硬切））。
+//! 客户端 open 握手类型（`ClientOpenRequest`/`ClientOpenResponse`；v1 端点已硬切，v2 握手口的
+//! payload 是 `v2::RingingV2OpenRequest`/`RingingV2OpenResponse`，本模块类型不再是该路径的 wire 类型）。
 //!
 //! 版本协商由 `schema`/`version` 字段承担；不再有独立的能力矩阵——
 //! 同仓库发布的客户端与 daemon 版本由打包链路保证，协议演进走

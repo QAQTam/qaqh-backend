@@ -7,7 +7,7 @@
 //! - `snapshot`：`RingingChannelSnapshot`
 //! - `content`：`RingingContentRef`（大内容外置引用）
 //! - `worker`：daemon ↔ agent worker 边界的 framed envelope
-//! - `capability`：客户端 open/能力协商（`Ringing_v1` 等）
+//! - `capability`：客户端 open 握手（`ClientOpenRequest`/`ClientOpenResponse`；已无独立能力矩阵）
 //! - `protocol`：v1 线协议标识（`schema: "qaqh.Ringing"`, `version: 1`）
 //! - `v2`：并存的 Ringing v2 wire 契约（`/ringing/v2`、canonical cursor、
 //!   typed projection envelope、bootstrap/reset/driver/interaction）

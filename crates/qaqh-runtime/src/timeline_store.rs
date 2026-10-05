@@ -85,7 +85,7 @@ impl TimelineStore {
         })
     }
 
-    /// offload 侧车路径：`offload/{seed}.jsonl`，append-only（每行一个
+    /// offload 侧车路径：`ringing-offload/{seed}.jsonl`，append-only（每行一个
     /// 已 seal turn 的完整 TimelineTurn JSON）。append 语义 O(文本) 无放大；
     /// 同 turn 重 seal（reopen）时后行胜（读侧取该 turn_id 最后一条）。
     fn offload_path_for(&self, session_id: &str) -> PathBuf {
@@ -207,7 +207,7 @@ impl TimelineStore {
         Ok(())
     }
 
-    /// 全量装载（仅测试用；生产走 `list_seeds` + `load_seed` 懒加载）。
+    /// 全量装载（仅测试用；生产走 `list_sessions` + `load_session` 懒加载）。
     #[cfg(test)]
     pub fn load(&self) -> std::io::Result<std::collections::HashMap<String, PersistedTimeline>> {
         let mut timelines = std::collections::HashMap::new();

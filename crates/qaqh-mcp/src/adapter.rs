@@ -3,12 +3,12 @@
 //! M1-2 职责（handover §五草图）：
 //! - [`build_stdio_command`]：stdio server → 进程组隔离的 `CommandWrap`
 //!   （Unix `ProcessGroup::leader()` / Windows `JobObject`；env 注入）；
-//! - [`connect`]：生产用 connect 工厂（stdio spawn + Auto 握手；http → M3 占位错误）。
+//! - [`connect`]：生产用 connect 工厂（stdio spawn + Auto 握手；http → streamable HTTP）。
 //!
 //! M1-3 追加：`${secret:name}` 连接时解析（设计 §6/E-4）——
 //! [`resolve_server_secrets`] 在 spawn 前把 env/args/headers 里的占位符换成
 //! `secrets.toml` 真值；结果只进本次子进程 env，**不回存**（`Config.mcp` 与
-//! DTO/save 永远只见占位符）。失败 → `MCP_CONNECT_FAILED`，消息含字段与
+//! DTO/save 永远只见占位符）。失败 → `mcp_connect_failed`，消息含字段与
 //! secret 名、绝不含值（E-6 红线）。
 //!
 //! ## RAII 链（rmcp 3.2.0 源码实测，PLAN §7）
@@ -134,7 +134,7 @@ pub(crate) fn build_stdio_command(cfg: &McpServerConfig) -> CommandWrap {
 ///
 /// 解析结果仅用于本次 spawn，不回存任何运行时结构（`Config.mcp` 保持占位符
 /// ——DTO/save 永不见明文）。每次连接重新读取：对密钥轮换友好（改
-/// secrets.toml → 下次重连生效）。失败 → `MCP_CONNECT_FAILED`，消息含字段
+/// secrets.toml → 下次重连生效）。失败 → `mcp_connect_failed`，消息含字段
 /// 与 secret 名、绝不含值（E-6）。
 pub(crate) fn resolve_server_secrets(
     cfg: &McpServerConfig,
@@ -179,11 +179,11 @@ fn interpolate(value: &str, secrets: &SecretStore) -> Result<String, String> {
 }
 
 /// 生产 connect 工厂（`McpManager` 默认装配；store 由 manager 注入）：
-/// stdio → 解析占位符 + spawn + Auto 握手。
+/// stdio → 解析占位符 + spawn + Auto 握手；http → streamable HTTP 传输
+/// （PR-M3-1，设计 §6 `[mcp.servers.*].url`，含 `unix://` 分发）。
 ///
-/// streamable HTTP（设计 §6 `[mcp.servers.*].url`）归 M3——在 connect 时报
-/// `ConnectFailed` 而非启动期拒绝，保持"配置仅静态校验"的边界（M1-1 已校验
-/// url 形态；此处是运行期能力边界）。
+/// http 的 url 形态在 M1-1 静态校验；此处只做运行期边界检查——空 url 报
+/// `ConnectFailed`。
 pub(crate) fn connect(name: &str, cfg: &McpServerConfig, secrets: &SecretStore) -> ConnectFuture {
     let resolved = match resolve_server_secrets(cfg, secrets) {
         Ok(resolved) => resolved,

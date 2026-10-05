@@ -571,9 +571,11 @@ mod tests {
 
     #[test]
     fn wire_display_roundtrips_terminal_line_delta() {
-        let mut display = ToolDisplay::default();
-        display.lines_added = 4;
-        display.lines_removed = 2;
+        let display = ToolDisplay {
+            lines_added: 4,
+            lines_removed: 2,
+            ..Default::default()
+        };
 
         let wire = to_wire_display(&display);
         assert_eq!((wire.lines_added, wire.lines_removed), (4, 2));

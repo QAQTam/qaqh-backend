@@ -1,4 +1,4 @@
-//! axum_impl — daemon HTTP 层（Ringing V1 + 服务面 + 控制）。
+//! axum_impl — daemon HTTP 层（Ringing V2 + 服务面 + 控制）。
 //!
 //! 由单文件 `axum_server.rs` 拆分（Phase 2-4）：`mod axum_impl` 内联模块解体为
 //! 目录模块，对外 API 不变（`AppState` + `build_router`）。

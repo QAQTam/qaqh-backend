@@ -25,12 +25,12 @@ pub fn is_compaction_summary(message: &Message) -> bool {
         })
 }
 
-/// Tool results are finalized exactly once, at storage time — but the shaping
-/// itself (truncation / folding) now happens at the TOOL side
-/// (`qaqh-workspace::tool_side_fold`) before results reach this store. The
-/// stored message therefore IS the final form: the same bytes are rendered on
-/// every subsequent request, keeping KV-cache prefixes stable across rounds
-/// and turns.
+// Tool results are finalized exactly once, at storage time — but the shaping
+// itself (truncation / folding) now happens at the TOOL side
+// (`qaqh-workspace::tool_side_fold`) before results reach this store. The
+// stored message therefore IS the final form: the same bytes are rendered on
+// every subsequent request, keeping KV-cache prefixes stable across rounds
+// and turns.
 
 #[derive(Debug, Clone)]
 pub struct Step {
@@ -525,9 +525,10 @@ impl MessageStore {
     ///
     /// 生产路径只有会话建立的三个入口（`create_session` /
     /// `create_session_with_preset_seed` / resume 建立）会调用本方法，且此时
-    /// `turns` 与 `trailing_messages` 均为空。运行期注入（skills envelope、
-    /// subagent 报告、goal、MCP 清单）一律走
-    /// [`Self::push_trailing_system`]，按写入序追加在尾部——那是缓存友好的位置。
+    /// `turns` 与 `trailing_messages` 均为空。运行期系统注入（skills envelope、
+    /// subagent 报告、MCP 清单）一律走
+    /// [`Self::push_trailing_system`]，按写入序追加在尾部——那是缓存友好的位置
+    /// （goal-mode 提示词不属此类：它是 user 代打回合，走 [`Self::push_user`]）。
     ///
     /// 需要新增「运行期系统消息」时，请用 trailing 路径，不要放宽这里的断言。
     pub fn push_system(&mut self, msg: Message) -> bool {
@@ -693,11 +694,13 @@ impl MessageStore {
         false
     }
 
-    /// Push a system-role message as a standalone turn (e.g. sub-agent result
-    /// injection). Persisted like a user turn (`save_msg`), so `to_vec()`
-    /// emits a mid-stream `system` message that OpenAI/Responses both accept.
-    /// Callers must keep the `[SUBAGENT ...]` tag in `text` so the model can
-    /// distinguish injected data from system instructions.
+    /// Push a system-role message as a standalone turn. Persisted like a user
+    /// turn (`save_msg`), so `to_vec()` emits a mid-stream `system` message
+    /// that OpenAI/Responses both accept.
+    ///
+    /// Reached via the flow for `Sink::Turn` + System/Developer sources;
+    /// subagent reports no longer use this path — they are user-role trailing
+    /// injections (see [`Self::push_trailing_system`]).
     pub fn push_system_input(&mut self, text: &str) -> bool {
         if !self.replaying
             && let Some(turn) = self.turns.last_mut()
