@@ -65,7 +65,7 @@
 |---|---|---|
 | `ToolEvent::ToolCallPrepared { args_so_far }`（`qaqh-domain/src/event.rs:457-463`，分类 `:531` Replaceable） | 每个 SSE 帧发一条**整段** args；`qaqh-runtime/src/ringing/projection.rs` 里没有它的分支 → 到不了 UI | [ ] 删事件，或接进投影（估算通道已另立，见第 5 节） |
 | `ToolEvent::CodeChanged`（`event.rs:519-520`） | 生产侧已完整（本次补齐 `write`/`apply_patch` 口径），但投影丢弃，只落 `code_stats.jsonl`（`agent/types.rs:518-542`） | [ ] 决定 UI 要不要权威行数；要则补 projection 分支，不要则从导出面摘掉 |
-| `webui/src/api/qaqh/ToolEvent.ts` 一类零消费者生成物 | ts-rs 全量导出，前端实际只用 timeline 一条通道 | [ ] 收窄导出面（白名单），别让"看起来存在"的协议误导后来人 |
+| `webui/src/api/qaqh/*.ts` 零消费者生成物 | ts-rs 全量导出，前端实际只用 timeline 一条通道 | [x] **已收窄（2026-10-05）**：导出面按「前端 import 闭包 ∪ 仍在序列化上线的契约」白名单化，生成物 186→132，砍掉 54 个 fire-into-void 类型（`DomainEvent`/`ToolEvent`/`ControlEvent`/`ConversationEvent`/`RingingEvent`/`ControlState`/`ConversationState`/`ToolState`/`DomainCommand`、v1 `ToolResult` 信封族、`Dashboard*`/`Skill*`/`PlanReviewItem`…）。`Projection*` 与入站 `*Command` **保留**——SSE v2 与 bootstrap 仍在序列化它们，只是前端按 untyped envelope 消费（转正前先别删）。 |
 | `qaqh_gate::StreamEvent::ToolCallProgress { args_so_far }`（`qaqh-gate/src/message_api.rs:511`、`chat_completions_api.rs:347`） | 每帧 `.clone()` 整段累计串 = O(n²) 基座。58 KB 参数约 2493 帧；估算器已按字节偏移绕开它，但基座没修 | [ ] 改成携带片段 + 累计长度 |
 
 ## 4. 待办 C：口径与命名撞车
