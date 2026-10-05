@@ -115,6 +115,15 @@ fn strip_verbatim(path: &std::path::Path) -> String {
 /// 都已先经 `resolve_workspace_path` 产出绝对路径；账本层再解析会把无锚点的
 /// 相对键悄悄改成 workspace/cwd 绝对键，破坏既有相对键契约（且与并行测试的
 /// 全局 `CURRENT_WORKSPACE` 互相干扰）。
+/// 账本键的公开口径：把任意写法的路径归一化成账本内部键。
+///
+/// 宿主在工具之外回填账本时（批边界扫描发现脚本改的文件）必须走同一口径，
+/// 否则与 record_read / record_write 的键错开——注意 state_key 对**相对路径不做
+/// canonicalize**，因此调用方应先把路径解析成绝对路径再传入。
+pub fn ledger_key(raw: &str) -> String {
+    state_key(raw)
+}
+
 fn state_key(raw: &str) -> String {
     let raw_path = std::path::Path::new(raw);
     if !raw_path.is_absolute() {
