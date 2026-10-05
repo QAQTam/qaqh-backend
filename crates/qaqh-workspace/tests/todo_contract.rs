@@ -154,7 +154,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let create = qaqh_workspace::execution::execute_with_context(
         "todo_write",
-        "",
         &serde_json::json!({"items": [
             {"title": "Working", "description": "item 0", "status": "pending"},
             {"title": "Done", "description": "item 1", "status": "pending"},
@@ -182,7 +181,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let working = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        "",
         r#"{"id":"T1","status":"in_progress"}"#,
         "todo-working",
         None,
@@ -207,7 +205,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let completed = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        "",
         r#"{"id":"T2","status":"completed","evidence":"verified"}"#,
         "todo-completed",
         None,
@@ -221,7 +218,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let cancelled = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        "",
         r#"{"id":"T3","status":"cancelled"}"#,
         "todo-cancelled",
         None,
@@ -235,7 +231,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let list = qaqh_workspace::execution::execute_with_context(
         "todo_list",
-        "",
         r#"{}"#,
         "todo-list",
         None,

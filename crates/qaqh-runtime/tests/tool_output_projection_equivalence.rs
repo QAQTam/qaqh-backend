@@ -36,7 +36,6 @@ fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
     };
     let executed = qaqh_workspace::execution::execute_with_context(
         "todo_write",
-        "",
         &args.to_string(),
         "typed-output-call",
         None,
