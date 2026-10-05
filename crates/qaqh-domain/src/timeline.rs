@@ -522,7 +522,6 @@ pub struct TimelineEntry {
 /// channel, delivery, SSE, or legacy message fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum TimelineIntent {
     TurnOpened {
         turn_id: String,
@@ -610,7 +609,6 @@ pub enum TimelineIntent {
 
 /// Tool call definition used in turn projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolCallDef {
     pub id: String,
     pub name: String,
@@ -622,7 +620,6 @@ pub struct ToolCallDef {
 
 /// Tool execution result used in turn projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolResultDef {
     pub tool_call_id: String,
     pub output: String,
@@ -651,7 +648,6 @@ pub struct ToolResultDef {
 
 /// File metadata snapshot for rich rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct FileSnapshotInfo {
     pub path: String,
     pub lines: u32,
@@ -666,7 +662,6 @@ pub struct FileSnapshotInfo {
 
 /// One round of a turn (one API call).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RoundData {
     pub round_num: u32,
     #[serde(default)]
@@ -682,7 +677,6 @@ pub struct RoundData {
 
 /// One full turn (user message + all rounds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct TurnData {
     pub turn_id: String,
     pub user_text: String,
@@ -694,7 +688,6 @@ pub struct TurnData {
 /// Blocks are streamed to the frontend in order so it can reconstruct
 /// the exact sequence of reasoning → text → tool calls from the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoundBlock {
     /// Model reasoning/thinking block (collapsible in UI).
