@@ -8,9 +8,15 @@ use super::types::*;
 use super::engine_tool::PermissionDisposition;
 use super::turn_actor::InteractionAdmission;
 use qaqh_domain::ToolCommand;
+use qaqh_session::session_fact_v2::ActorRef;
 
 impl Loop {
-    pub(super) fn on_tool(&mut self, command: ToolCommand, command_id: &str) {
+    pub(super) fn on_tool(
+        &mut self,
+        command: ToolCommand,
+        command_id: &str,
+        actor: Option<ActorRef>,
+    ) {
         match command {
             ToolCommand::ToolInvoke {
                 tool_call_id,
@@ -106,6 +112,7 @@ impl Loop {
                             &call_id,
                             command_id,
                             admitted.map(|admitted| *admitted),
+                            actor,
                         );
                         let _ = ctx;
                         self.apply_outcome(outcome);

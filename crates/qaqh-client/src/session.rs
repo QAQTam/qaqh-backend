@@ -338,6 +338,7 @@ impl RingingSession {
                 service: true,
                 content: true,
                 single_stream: true,
+                pairing: false,
             },
         };
         self.adopt(state).await;
