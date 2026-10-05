@@ -20,7 +20,8 @@ attachments?: Array<ContentRef> | null,
  */
 message_id?: string | null, 
 /**
- * Whether this message must trigger a turn or is queue-only.
+ * How the child applies this message: trigger a turn, queue it only, or
+ * merge it into a running turn at its next safe point (Steer/Interject).
  */
 input_purpose: ConversationInputPurpose, 
 /**
