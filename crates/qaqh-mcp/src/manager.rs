@@ -29,7 +29,7 @@ pub struct ApplyReport {
 
 /// daemon 级单例：配置快照 + 连接表 + 关闭闸。
 ///
-/// 配置热重载归 Phase 2（设计 §6）——M1-2 以构建时快照为准。
+/// 配置热重载已落地（P2-1，设计 §6）——[`McpManager::apply_config`] 换入新 `[mcp]` 快照。
 pub struct McpManager {
     /// 配置面（P2-1 热重载可换；读点短临界区 clone）。
     cfg: StdMutex<McpConfig>,
@@ -90,7 +90,7 @@ impl McpManager {
         })
     }
 
-    /// 禁用配置的空 manager（全局槽位默认值；所有调用报 `MCP_DISABLED`）。
+    /// 禁用配置的空 manager（全局槽位默认值；所有调用报 `mcp_disabled`）。
     pub fn disabled() -> Arc<Self> {
         Self::new(McpConfig::default())
     }
@@ -202,8 +202,8 @@ impl McpManager {
 
     /// 取连接并确保已连接（lazy connect 入口；幂等）。
     ///
-    /// 拒绝路径（设计 §5.1）：`enabled=false` → `MCP_DISABLED`；闸已落下 →
-    /// `MCP_SHUTDOWN`；未知 server → `MCP_NOT_FOUND`（附可用名单）；连接
+    /// 拒绝路径（设计 §5.1）：`enabled=false` → `mcp_disabled`；闸已落下 →
+    /// `mcp_shutdown`；未知 server → `mcp_not_found`（附可用名单）；连接
     /// 失败/超时/冷却 → 对应错误码。
     pub async fn get_or_connect(&self, server: &str) -> Result<Arc<ServerConnection>, McpError> {
         let cfg_snapshot = self.snapshot_cfg();
@@ -270,8 +270,8 @@ impl McpManager {
     /// 全部已声明 server 的状态行（PR-M2-1 聚合工具 `list_servers` 数据源；
     /// 不触发连接——未连接的 server 显示 disconnected）。
     ///
-    /// 状态映射 [`ConnStatus`]：Connected 显示在飞数；Cooling 显示剩余冷却
-    /// 秒数；未纳管（从未连接过）的 server 也列出（disconnected，0 工具）。
+    /// 状态映射 [`ConnStatus`]：Connected 显示 `connected`；Cooling 显示剩余
+    /// 冷却秒数；未纳管（从未连接过）的 server 也列出（disconnected，0 工具）。
     /// 闸已落下 → 每行标注 shutting_down。
     pub fn server_status_lines(&self) -> Vec<String> {
         let shutting = self.gate.load(Ordering::Relaxed);

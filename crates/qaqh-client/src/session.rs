@@ -338,6 +338,7 @@ impl RingingSession {
                 service: true,
                 content: true,
                 single_stream: true,
+                pairing: false,
             },
         };
         self.adopt(state).await;
@@ -368,6 +369,7 @@ mod tests {
     use super::*;
 
     fn session(base_url: &str, token: &str) -> RingingSession {
+        crate::client::ensure_crypto_provider();
         RingingSession::new(base_url.into(), token.into(), reqwest::Client::new())
     }
 

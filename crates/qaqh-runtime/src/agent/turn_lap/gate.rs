@@ -23,45 +23,48 @@ pub(crate) const USAGE_EMIT_INTERVAL: Duration = Duration::from_secs(1);
 /// 2000 行补丁 ≈ 2700 帧），150 ms 上限约 6.7 次/秒，够渲染层跟手又不烧帧。
 pub(crate) const ESTIMATE_INTERVAL: Duration = Duration::from_millis(150);
 
+/// 参数行数估算在认出写工具之前最多暂存多少字节的片段。provider 一般把 name
+/// 放在首帧，这里只是兜底；加上限是因为非写工具永远认不出来，不能逐帧攒完整参数。
+pub(crate) const ARG_PENDING_CAP: usize = 16 * 1024;
+
 /// 一个 tool_call 的参数行数估算状态。
 ///
-/// `ToolCallProgress.args_so_far` 是**累计串**，所以这里记消费量，每帧只把
-/// 新到的尾巴喂给估算器（估算器本身恒定成本，见 `ArgLineEstimator`）。
+/// `ToolCallProgress.args_chunk` 是**本帧新增的片段**，所以直接投喂估算器即可
+/// （估算器本身恒定成本，见 `ArgLineEstimator`）。
 struct ArgLineSlot {
     /// `None` = 还没认出这是写工具：provider 可能把 name 放在后面的片段里，
-    /// 认出后从累计串第 0 字节重数，前面的内容不会漏。
+    /// 认出后要把此前暂存在 `pending` 的片段补在前面，内容才不会漏。
     estimator: Option<qaqh_workspace::arg_estimate::ArgLineEstimator>,
-    consumed: usize,
+    pending: String,
     last_total: u32,
     last_emit_at: Option<Instant>,
 }
 
 impl ArgLineSlot {
-    /// 投喂累计参数串，返回这一帧该发的估算（`None` = 不发）。
+    /// 投喂本帧的参数片段，返回这一帧该发的估算（`None` = 不发）。
     fn push(
         &mut self,
         tool_name: &str,
-        args_so_far: &str,
+        args_chunk: &str,
     ) -> Option<qaqh_workspace::arg_estimate::ArgLineEstimate> {
         if self.estimator.is_none() {
-            self.estimator = Some(qaqh_workspace::arg_estimate::ArgLineEstimator::for_tool(
-                tool_name,
-            )?);
-            self.consumed = 0;
+            if self.pending.len() < ARG_PENDING_CAP {
+                self.pending.push_str(args_chunk);
+            }
+            self.estimator =
+                Some(qaqh_workspace::arg_estimate::ArgLineEstimator::for_tool(tool_name)?);
         }
         let estimator = self.estimator.as_mut()?;
-        // `consumed` 只会是此前某个 `args_so_far.len()`，对同一条流必然是字符
-        // 边界；provider 若换了缓冲（非追加），`.get` 失败就把偏移归零重数。
-        let start = self.consumed.min(args_so_far.len());
-        let Some(fragment) = args_so_far.get(start..) else {
-            self.consumed = 0;
-            return None;
-        };
-        if fragment.is_empty() {
-            return None;
+        if self.pending.is_empty() {
+            if args_chunk.is_empty() {
+                return None;
+            }
+            estimator.push_fragment(args_chunk);
+        } else {
+            // 认出工具的这一帧补喂暂存片段——本帧内容已经并进去了，不能再加一遍。
+            estimator.push_fragment(&self.pending);
+            self.pending.clear();
         }
-        estimator.push_fragment(fragment);
-        self.consumed = args_so_far.len();
         let estimate = estimator.estimate();
         let total = estimate.lines_added.saturating_add(estimate.lines_removed);
         let ripe = self
@@ -573,16 +576,6 @@ pub(crate) fn gate_request(
                     && final_usage.total_tokens != last_emitted_usage_total
                 {
                     last_emitted_usage_total = final_usage.total_tokens;
-                    ctx.emitter
-                        .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                            qaqh_domain::ConversationEvent::UsageUpdated {
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                usage: final_usage.clone(),
-                                context_limit: ctx.agent.config.context_limit,
-                                model: ctx.agent.config.model.clone(),
-                            },
-                        ));
                 }
                 content.clear();
                 reasoning.clear();
@@ -612,7 +605,7 @@ pub(crate) fn gate_request(
                 index,
                 id,
                 name,
-                args_so_far,
+                args_chunk,
             } => {
                 let block_id = format!("tool:{id}");
                 emit_final_block_checkpoint(
@@ -639,7 +632,7 @@ pub(crate) fn gate_request(
                                 name: name.clone(),
                                 state: qaqh_domain::TimelineToolState::Prepared,
                                 summary: None,
-                                args_json: Some(args_so_far.clone()),
+                                args_json: Some(args_chunk.clone()),
                                 output: None,
                                 diff: None,
                                 progress: String::new(),
@@ -662,11 +655,11 @@ pub(crate) fn gate_request(
                     .entry(slot_key)
                     .or_insert_with(|| ArgLineSlot {
                         estimator: None,
-                        consumed: 0,
+                        pending: String::new(),
                         last_total: 0,
                         last_emit_at: None,
                     });
-                if let Some(estimate) = slot.push(&name, &args_so_far) {
+                if let Some(estimate) = slot.push(&name, &args_chunk) {
                     ctx.emitter
                         .emit_timeline(qaqh_domain::TimelineIntent::ToolEstimated {
                             turn_id: turn_id.to_string(),
@@ -676,76 +669,25 @@ pub(crate) fn gate_request(
                             lines_removed: estimate.lines_removed,
                         });
                 }
-                // Ringing 双发：ToolCallPrepared（replaceable 预览，可被 ToolStarted 覆盖）
-                ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                    qaqh_domain::ToolEvent::ToolCallPrepared {
-                        tool_call_id: id.clone(),
-                        turn_id: turn_id.to_string(),
-                        round_num,
-                        name: name.clone(),
-                        args_so_far: args_so_far.clone(),
-                    },
-                ));
             }
-            qaqh_gate::StreamEvent::WebSearchStatus(status) => {
-                // Ringing 双发：ProviderToolStatus（replaceable，按 call_id 合并）
-                let provider_state = match status.as_str() {
-                    "completed" | "done" => qaqh_domain::ProviderToolState::Completed,
-                    "searching" | "running" | "in_progress" => {
-                        qaqh_domain::ProviderToolState::Searching
-                    }
-                    _ => qaqh_domain::ProviderToolState::InProgress,
-                };
-                ctx.emitter
-                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                        qaqh_domain::ConversationEvent::ProviderToolStatus {
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            call_id: format!("ws-{turn_id}-{round_num}"),
-                            tool_kind: "web_search".into(),
-                            state: provider_state,
-                        },
-                    ));
+            qaqh_gate::StreamEvent::WebSearchStatus(_) => {
+                // provider 侧搜索状态只服务已退役的 v1 双发；UI 的搜索进度走 timeline 与
+                // canonical fact 面，这里不再另发一条领域事件。
             }
             qaqh_gate::StreamEvent::UsageUpdate(u) => {
                 last_usage = Some(u.clone());
                 current_request_usage = Some(u.clone());
                 ctx.agent.session.tokens = ctx.agent.session.tokens.max(u.total_tokens as u64);
-                // A3：节流 ~1s（replaceable 覆盖显示）；终值由 Done 分支补发。
+                // A3：记住"已播报过"的用量水位（~1s 节流），Done 分支据此判断终值要不要补发。
                 let due = last_usage_emit_at.is_none_or(|at| at.elapsed() >= USAGE_EMIT_INTERVAL);
                 if due {
                     last_usage_emit_at = Some(Instant::now());
                     last_emitted_usage_total = u.total_tokens;
-                    ctx.emitter
-                        .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                            qaqh_domain::ConversationEvent::UsageUpdated {
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                usage: u.clone(),
-                                context_limit: ctx.agent.config.context_limit,
-                                model: ctx.agent.config.model.clone(),
-                            },
-                        ));
                 }
             }
-            qaqh_gate::StreamEvent::Retrying {
-                attempt,
-                max_retries,
-                delay_secs,
-                error,
-            } => {
-                // Ringing 双发：ProviderRetrying（重试可见性）
-                ctx.emitter
-                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                        qaqh_domain::ConversationEvent::ProviderRetrying {
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            attempt,
-                            max_retries,
-                            delay_secs,
-                            error_message: error,
-                        },
-                    ));
+            qaqh_gate::StreamEvent::Retrying { .. } => {
+                // 重试提示曾按 v1 ProviderRetrying 双发；重试可见性走日志与 timeline，
+                // 不再另发领域事件。
             }
             qaqh_gate::StreamEvent::Error(msg) => {
                 log::error!("[TURN] gate error turn_id={turn_id} round_num={round_num}: {msg}");
@@ -897,34 +839,33 @@ mod arg_line_slot_tests {
     fn slot() -> ArgLineSlot {
         ArgLineSlot {
             estimator: None,
-            consumed: 0,
+            pending: String::new(),
             last_total: 0,
             last_emit_at: None,
         }
     }
 
-    /// 累计串的每一帧必须是前一帧的扩展（provider 就是这么发的）。
-    fn write_args(lines: usize) -> String {
-        let mut out = String::from(r#"{"path":"a.txt","content":""#);
-        for i in 0..lines {
-            out.push_str(&format!("line{i}\\n"));
-        }
-        out
+    /// 估算器按 JSON 键计数，所以首帧要带参数前缀，之后每帧只到新增的那一行
+    /// （`ToolCallProgress.args_chunk` 就是这种增量）。
+    const ARGS_HEAD: &str = r#"{"path":"a.txt","content":""#;
+    fn args_line(line: usize) -> String {
+        format!("line{line}\\n")
     }
 
     #[test]
     fn first_number_goes_out_at_once_then_the_interval_gates_the_rest() {
         let mut s = slot();
-        let first = s.push("write", &write_args(1)).expect("第一个数立刻发");
+        assert!(s.push("write", ARGS_HEAD).is_none(), "前缀里还没有行");
+        let first = s.push("write", &args_line(0)).expect("第一个数立刻发");
         assert_eq!((first.lines_added, first.lines_removed), (1, 0));
-        for lines in 2..=6 {
+        for line in 1..=5 {
             assert!(
-                s.push("write", &write_args(lines)).is_none(),
-                "同一瞬间内不该再发（lines={lines}）"
+                s.push("write", &args_line(line)).is_none(),
+                "同一瞬间内不该再发（line={line}）"
             );
         }
         std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
-        let later = s.push("write", &write_args(7)).expect("跨过间隔后要发");
+        let later = s.push("write", &args_line(6)).expect("跨过间隔后要发");
         assert_eq!((later.lines_added, later.lines_removed), (7, 0));
     }
 
@@ -932,26 +873,27 @@ mod arg_line_slot_tests {
     #[test]
     fn unchanged_number_is_not_re_emitted() {
         let mut s = slot();
-        assert!(s.push("write", &write_args(2)).is_some());
+        assert!(s.push("write", ARGS_HEAD).is_none(), "前缀没有行");
+        assert!(s.push("write", &args_line(0)).is_some());
         std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
-        let args = write_args(2);
-        assert!(s.push("write", &args).is_none(), "重复帧没有新信息");
-        assert!(s.push("write", &args).is_none());
+        assert!(s.push("write", "").is_none(), "空片段没有新信息");
+        assert!(s.push("write", "").is_none());
     }
 
-    /// provider 常把 name 放在后续片段里：认出工具后要能从累计串第 0 字节重数。
+    /// provider 常把 name 放在后续片段里：认出工具后要把此前攒下的片段补在前面。
     #[test]
     fn late_name_does_not_lose_the_lines_already_streamed() {
         let mut s = slot();
-        for lines in 1..=3 {
+        assert!(s.push("", ARGS_HEAD).is_none(), "空 name 阶段不发估算");
+        for line in 0..3 {
             assert!(
-                s.push("", &write_args(lines)).is_none(),
+                s.push("", &args_line(line)).is_none(),
                 "空 name 阶段不发估算"
             );
         }
         std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
         let late = s
-            .push("write", &write_args(4))
+            .push("write", &args_line(3))
             .expect("认出 write 后立刻出数");
         assert_eq!(
             (late.lines_added, late.lines_removed),
@@ -965,26 +907,8 @@ mod arg_line_slot_tests {
     fn read_only_tools_never_estimate() {
         let mut s = slot();
         for name in ["", "read", "grep", "exec", "confirm_apply"] {
-            assert!(s.push(name, &write_args(5)).is_none(), "{name}");
+            assert!(s.push(name, &args_line(5)).is_none(), "{name}");
         }
-    }
-
-    /// 累计串被整体替换（不是追加）时，旧偏移可能落在多字节字符中间：
-    /// 必须安静归零重数，而不是切片 panic。
-    #[test]
-    fn non_prefixed_resync_does_not_panic() {
-        let mut s = slot();
-        // 先消费 48 字节（write_args(2) 的长度）。
-        assert!(s.push("write", &write_args(2)).is_some());
-        // 第 48 个字节落在 `汉` 的三个字节中间。
-        let replaced = format!("{}汉{}", "a".repeat(47), r#"\n"#);
-        assert!(
-            s.push("write", &replaced).is_none(),
-            "偏移越界这一帧不发估算"
-        );
-        std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
-        let after = s.push("write", &write_args(9)).expect("重同步后要继续出数");
-        assert!(after.lines_added >= 9, "got {after:?}");
     }
 }
 

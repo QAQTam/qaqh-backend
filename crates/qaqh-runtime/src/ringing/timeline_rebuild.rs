@@ -428,6 +428,8 @@ mod tests {
             display: Some(qaqh_types::ToolResultDisplay {
                 summary: Some("canonical summary".into()),
                 diff: None,
+                lines_added: 0,
+                lines_removed: 0,
                 header: Some(qaqh_types::ToolResultDisplayHeader::Other {
                     label: "canonical".into(),
                 }),
@@ -584,8 +586,8 @@ mod tests {
     }
 
     /// 失败槽单一事实源（rebuild 侧）：新归档带结构化 error 时，failure 与
-    /// live 发射同源（qaqh_domain::tool_failure_of 同款投影）；旧 journal 无
-    /// error 时从 output 首行降级且**单行有界**，不再整段复制。
+    /// live 发射同源（qaqh_domain::tool_failure_of 同款投影）；无 error 属
+    /// 契约违反，message 置空（client 显示裸 code），不再整段复制 output。
     #[test]
     fn rebuild_failure_slot_uses_archived_error_without_output_copy() {
         let card = ToolCallDef {

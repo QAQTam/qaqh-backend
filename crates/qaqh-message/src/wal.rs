@@ -237,44 +237,6 @@ pub fn open_reader(session_dir: &Path) -> io::Result<Option<WalReader>> {
     Ok(OpenFile::at(&path)?.map(|open| WalReader::new(path, open)))
 }
 
-/// Read all logged ops for recovery.
-///
-/// Fail-closed contract:
-/// - a torn/corrupt line (recoverable prefix followed by garbage — the normal
-///   crash-mid-write shape) stops the scan and the file is quarantined to
-///   `messages.wal.corrupt-<ts>`; ops before the bad line are returned;
-/// - a mid-file IO error is *not* a torn tail: it is logged, the whole file is
-///   quarantined to `messages.wal.unreadable-<ts>`, and the ops read before it
-///   are returned (the log itself is kept, never truncated).
-///
-/// This infallible signature exists for callers that have no durability
-/// decision to make. A caller that can checkpoint (replay + truncate) MUST use
-/// [`open_reader`] and honour [`WalReader::has_failed`], or it will destroy the
-/// ops the fault hid.
-pub fn read_ops(session_dir: &Path) -> Vec<PersistOp> {
-    let mut reader = match open_reader(session_dir) {
-        Ok(Some(reader)) => reader,
-        Ok(None) => return Vec::new(),
-        Err(error) => {
-            let path = session_dir.join(WAL_FILE_NAME);
-            log::error!(
-                "WAL: cannot read {} ({error}) — keeping the file as evidence",
-                path.display()
-            );
-            return Vec::new();
-        }
-    };
-    match reader.finish() {
-        Ok(ops) => ops,
-        Err(error) => {
-            // `finish` logs the fault and quarantines; this arm exists so the
-            // return type stays infallible, mirroring the legacy signature.
-            log::error!("WAL: {}", error);
-            reader.prefix_ops()
-        }
-    }
-}
-
 /// Streaming WAL reader used by recovery (`SessionManager::replay_message_wal`).
 ///
 /// `next_op` reports an IO fault as `Err` instead of silently mapping it to
@@ -314,12 +276,6 @@ impl WalReader {
     /// Number of ops parsed so far (the valid prefix). Used for logging.
     pub fn prefix_len(&self) -> usize {
         self.prefix.len()
-    }
-
-    /// The ops parsed so far. Only needed by the infallible [`read_ops`]
-    /// wrapper; callers with a durability decision stream via [`Self::next_op`].
-    fn prefix_ops(&mut self) -> Vec<PersistOp> {
-        std::mem::take(&mut self.prefix)
     }
 
     /// Next op, or `Ok(None)` at a clean end of log (including a torn tail,
@@ -538,8 +494,8 @@ fn open_file_for_read(path: &Path) -> io::Result<WalSource> {
 /// a device that fails after N bytes.
 trait ByteSource: Send {
     /// Read up to `limit` bytes; `Ok(Vec::new())` is a clean EOF. `limit` bounds
-    /// the *pass* (production: 64 KiB) and doubles as the interleaving point
-    /// where a fault may surface — checks belong to the source, not the reader.
+    /// the *pass* (production: `LINE_CHUNK`, 512 B) and doubles as the interleaving
+    /// point where a fault may surface — checks belong to the source, not the reader.
     fn read_chunk(&mut self, limit: usize) -> io::Result<Vec<u8>>;
 
     /// Reposition the source. The reader only ever seeks forward (probe →
@@ -552,7 +508,7 @@ trait ByteSource: Send {
 }
 
 /// Production read source: the file itself, plus an optional fault plan that
-/// test builds arm from the process-global slot.
+/// test builds arm from the thread-local slot.
 ///
 /// The plan is a **byte budget for the current pass** rather than an absolute
 /// read count, because the reader seeks: the open-time probe walks the file,
@@ -798,6 +754,21 @@ pub fn checkpoint_file(session_dir: &Path) -> io::Result<bool> {
 mod tests {
     use super::*;
     use crate::effect::PersistOp;
+
+    /// Test helper: the streaming equivalent of the removed infallible
+    /// `read_ops` — collect ops via the public API, keeping the readable
+    /// prefix on an IO fault.
+    fn read_ops(session_dir: &std::path::Path) -> Vec<PersistOp> {
+        let mut reader = match open_reader(session_dir) {
+            Ok(Some(reader)) => reader,
+            _ => return Vec::new(),
+        };
+        let mut ops = Vec::new();
+        while let Ok(Some(op)) = reader.next_op() {
+            ops.push(op);
+        }
+        ops
+    }
     use qaqh_types::Message;
 
     fn append_op(session_id: &str, ids: u64) -> PersistOp {
@@ -872,16 +843,31 @@ mod tests {
 /// must not be reported as "empty log", and a checkpoint must never truncate a
 /// log whose ops were not fully read.
 ///
-/// The fault is injected at the `File` syscall boundary (a `File` handle is a
-/// real fd, so no wrapper reader can be substituted): `open_file_for_read`
-/// returns a file already rewound and pre-seeked past the injected bytes of
-/// sequential `read` calls, so a mid-stream EIO becomes deterministic without
-/// touching the fd itself.
+/// The fault is injected inside the `WalSource` read wrapper: `read_chunk`/`charge`
+/// charge a byte budget for the current pass, so a mid-stream EIO becomes
+/// deterministic without touching the real fd. In test builds `open_file_for_read`
+/// routes through `io_fault_tests::open_with_fault`, which copies the armed plan
+/// into the freshly opened source (no pre-seek/rewind of injected bytes).
 #[cfg(any(test, feature = "test-harness"))]
 mod io_fault_tests {
     use super::*;
     use crate::effect::PersistOp;
     use std::cell::RefCell;
+
+    /// Test helper: the streaming equivalent of the removed infallible
+    /// `read_ops` — collect ops via the public API, keeping the readable
+    /// prefix on an IO fault.
+    fn read_ops(session_dir: &std::path::Path) -> Vec<PersistOp> {
+        let mut reader = match open_reader(session_dir) {
+            Ok(Some(reader)) => reader,
+            _ => return Vec::new(),
+        };
+        let mut ops = Vec::new();
+        while let Ok(Some(op)) = reader.next_op() {
+            ops.push(op);
+        }
+        ops
+    }
 
     // Fault plan for the *current thread*.
     //

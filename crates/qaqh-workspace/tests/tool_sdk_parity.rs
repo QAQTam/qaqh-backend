@@ -19,7 +19,10 @@ fn builtin_sdk_parity_matches_registry_capabilities_and_dynamic_fallback() {
         registry, capabilities,
         "builtin registry order and capability table must match exactly"
     );
-    assert_eq!(registry.len(), 19, "P3 freezes the 19 builtin tools");
+    // 冻结数 19 → 20：`journal`（会话审计查询）加入内置注册表后未同步此断言
+    // （2026-10-05 注释审计 unit-16 的「19→20」漂移在测试侧的残留；当时只修了注释）。
+    // 注册表与能力表的一致性由上方断言保证，此处数字仅防无意增删。
+    assert_eq!(registry.len(), 20, "P3 freezes the 20 builtin tools");
     for definition in &defs {
         assert!(
             !definition.function.description.trim().is_empty(),

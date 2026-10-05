@@ -11,6 +11,8 @@ qaqh-sandbox = { path = "../qaqh-sandbox" }
 # PR-3-3 新增依赖边：workspace → qaqh_domain（R-4：仅限 Dashboard* 三类型，禁止事件类型）
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-types = { path = "../qaqh-types" }
+# spy 工具：工作区变更审计的模型面入口（journal/undo/restore/cat）。
+qaqh-spy = { path = "../qaqh-spy" }
 similar = { version = "3.1", features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,12 +40,18 @@ grep-searcher = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Storage_FileSystem"] }
+sbx-win = { path = "../sbx-win" }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
 [lints]
 workspace = true
+
+[features]
+# 测试装置：暴露 v1 `ToolManager::register`（legacy ToolHandler）供跨 crate 测试使用；
+# 生产构建不启用。
+test-harness = []
 
 [dev-dependencies]
 tempfile = "3"

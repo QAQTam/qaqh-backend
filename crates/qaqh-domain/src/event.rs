@@ -1,7 +1,6 @@
 //! 中立领域事件（DomainEvent）。
 //!
 //! - 事件按频道拆分（Control / Conversation / Tool），由统一枚举 `DomainEvent` 聚合。
-//! - 每个事件类型通过 `delivery()` 显式声明可靠性等级（PLAN 硬规则）。
 //! - 本模块不得引用 legacy 类型（`Agent2Ui`）或 wire 类型（`Ringing*Envelope`）。
 
 use serde::{Deserialize, Serialize};
@@ -11,8 +10,6 @@ use ts_rs::TS;
 use qaqh_types::UsageInfo;
 pub use qaqh_types::{ContentRef, ToolResult};
 
-use crate::channel::RingingChannel;
-use crate::delivery::Delivery;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 共享支持类型
@@ -21,7 +18,6 @@ use crate::delivery::Delivery;
 /// RoundDelta 的流式块种类（决策记录 Q2：保留 kind 作 replaceable 合并键）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RoundDeltaKind {
     Thinking,
     ToolCalling,
@@ -31,7 +27,6 @@ pub enum RoundDeltaKind {
 /// provider 内建/服务端工具状态（决策记录 Q3 定稿：封闭枚举，禁止自由字符串）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ProviderToolState {
     InProgress,
     Searching,
@@ -41,7 +36,6 @@ pub enum ProviderToolState {
 /// compact 终态（PLAN：completed/skipped/failed/cancelled 明确状态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum CompactStatus {
     Completed,
     Skipped,
@@ -52,7 +46,6 @@ pub enum CompactStatus {
 /// 通知级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum NoticeLevel {
     Info,
     Warn,
@@ -62,7 +55,6 @@ pub enum NoticeLevel {
 /// 工具权限分类（legacy `category: "read"|"write"|"exec"|"net"`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum PermissionCategory {
     Read,
     Write,
@@ -73,7 +65,6 @@ pub enum PermissionCategory {
 /// 工具动作内在影响等级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum PermissionRisk {
     Low,
     Medium,
@@ -83,7 +74,6 @@ pub enum PermissionRisk {
 /// 会话生命周期状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum SessionState {
     Created,
     Resumed,
@@ -145,7 +135,6 @@ pub struct CodeDeltaRecord {
 /// 会话活动变更事件（Idle），transport 状态另由客户端健康判定）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum AgentLifecycleState {
     Booting,
     Ready,
@@ -156,7 +145,6 @@ pub enum AgentLifecycleState {
 /// A document visible in the dashboard. This intentionally mirrors only the
 /// renderer-facing tracking state, not the legacy protocol type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct DashboardDocument {
     pub tag: String,
     pub path: String,
@@ -166,7 +154,6 @@ pub struct DashboardDocument {
 
 /// One persisted task row for the native dashboard activity snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct DashboardTask {
     pub id: String,
     pub subject: String,
@@ -180,7 +167,6 @@ pub struct DashboardTask {
 /// the transcript and is sufficient for the Electron dashboard without an
 /// `Agent2Ui::Dashboard` projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct DashboardSnapshot {
     #[serde(rename = "session_id")]
     pub session_id: String,
@@ -193,7 +179,6 @@ pub struct DashboardSnapshot {
 
 /// 失败终态的错误域（PLAN：错误带 scope、code、retryable、dedupe_key）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct DomainError {
     /// 唯一错误实例 id，用于 toast 去重与日志关联。
     pub error_id: String,
@@ -211,7 +196,6 @@ pub struct DomainError {
 /// 错误归属域（用于 OperationFailed 的 scope 字段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ErrorScope {
     Control,
     Conversation,
@@ -222,7 +206,6 @@ pub enum ErrorScope {
 /// ask_user 的提问模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum AskMode {
     Single,
     Batch,
@@ -231,7 +214,6 @@ pub enum AskMode {
 /// ask_user 交互如何离队。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum AskResolution {
     Answered,
     Dismissed,
@@ -239,7 +221,6 @@ pub enum AskResolution {
 
 /// ask_user 中的单个问题。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct AskQuestion {
     /// 本 ask 内唯一（如 "q1"）。
     pub id: String,
@@ -259,7 +240,6 @@ fn default_true() -> bool {
 
 /// plan review 评审项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct PlanReviewItem {
     pub id: String,
     pub title: String,
@@ -270,7 +250,6 @@ pub struct PlanReviewItem {
 
 /// skill 目录条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -282,7 +261,6 @@ pub struct SkillInfo {
 
 /// skill 运行时条目（catalog/requested/active/unavailable 生命周期状态）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SkillRuntimeInfo {
     pub name: String,
     pub description: String,
@@ -299,7 +277,6 @@ pub struct SkillRuntimeInfo {
 
 /// 技能面板全量状态（frontend skills panel 展示）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SkillsStatus {
     /// 全部可发现技能。
     pub available: Vec<SkillInfo>,
@@ -308,10 +285,8 @@ pub struct SkillsStatus {
     #[serde(default)]
     pub catalog_revision: String,
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(as = "u32"))]
     pub context_epoch: u64,
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(as = "u32"))]
     pub operation_revision: u64,
     #[serde(default)]
     pub token_budget: usize,
@@ -330,7 +305,6 @@ pub struct SkillsStatus {
 /// Conversation 频道领域事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ConversationEvent {
     /// 新回合开始（`ConversationSendMessage` accepted 后的权威开始事件）。
     TurnStarted { turn_id: String, user_text: String },
@@ -377,34 +351,6 @@ pub enum ConversationEvent {
         /// true = 本回合最后一个 round。
         is_final: bool,
     },
-    /// provider 请求瞬时失败将重试（非终态；retry 与最终失败不得共用 event_id）。
-    ProviderRetrying {
-        turn_id: String,
-        round_num: u32,
-        attempt: u32,
-        max_retries: u32,
-        #[cfg_attr(feature = "ts", ts(as = "u32"))]
-        delay_secs: u64,
-        error_message: String,
-    },
-    /// provider 内建/服务端工具状态（决策记录 Q3：replaceable，合并键 = call_id）。
-    ProviderToolStatus {
-        turn_id: String,
-        round_num: u32,
-        /// provider 侧 call id（如 web_search_call id），**不是** QAQ-Harness tool_call_id。
-        call_id: String,
-        /// 目前固定 "web_search"，为未来 provider 内建工具预留。
-        tool_kind: String,
-        state: ProviderToolState,
-    },
-    /// provider 确认的用量（可多次发出；消费者按 turn/round 覆盖）。
-    UsageUpdated {
-        turn_id: String,
-        round_num: u32,
-        usage: UsageInfo,
-        context_limit: u32,
-        model: String,
-    },
     /// compact 开始（携带 compact_id）。
     CompactStarted {
         compact_id: String,
@@ -431,18 +377,6 @@ pub enum ConversationEvent {
     },
 }
 
-impl ConversationEvent {
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            ConversationEvent::ProviderToolStatus { .. }
-            | ConversationEvent::UsageUpdated { .. }
-            | ConversationEvent::CompactProgress { .. }
-            | ConversationEvent::BlockCheckpoint { .. } => Delivery::Replaceable,
-            _ => Delivery::Reliable,
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool 频道
 // ─────────────────────────────────────────────────────────────────────────────
@@ -450,17 +384,8 @@ impl ConversationEvent {
 /// Tool 频道领域事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[allow(clippy::large_enum_variant)] // 装箱改造属结构塑形，另立项
 pub enum ToolEvent {
-    /// 流式响应中检测到工具调用（决策记录 Q1：replaceable 预览，可被 ToolStarted 覆盖）。
-    ToolCallPrepared {
-        tool_call_id: String,
-        turn_id: String,
-        round_num: u32,
-        name: String,
-        args_so_far: String,
-    },
     /// 工具真正开始执行（决策记录 Q1：permission 通过后，reliable）。
     ToolStarted {
         tool_call_id: String,
@@ -492,61 +417,6 @@ pub enum ToolEvent {
         risk: PermissionRisk,
         consequence: String,
     },
-    /// 工具域通知（决策记录 Q6：留在 Tool 频道，不并入 SystemNotice）。
-    ToolNotice {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_call_id: Option<String>,
-        level: NoticeLevel,
-        message: String,
-    },
-    /// 审计记录（脱敏：args 只进 content store，事件仅携带引用）。
-    AuditRecorded {
-        tool_name: String,
-        result_summary: String,
-        success: bool,
-        time: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args_ref: Option<ContentRef>,
-    },
-    /// 文件操作后的实时代码统计增量。
-    CodeChanged {
-        #[serde(default)]
-        tool_call_id: String,
-        #[serde(default)]
-        turn_id: String,
-        #[serde(default)]
-        round_num: u32,
-        lines_added: usize,
-        lines_removed: usize,
-        files_created: usize,
-        files_deleted: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        file: Option<String>,
-    },
-}
-
-impl ToolEvent {
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            ToolEvent::ToolCallPrepared { .. } => Delivery::Replaceable,
-            _ => Delivery::Reliable,
-        }
-    }
-
-    /// 该事件关联的 tool_call_id（ToolCallPrepared/Started/Progress 恒有）。
-    pub fn tool_call_id(&self) -> Option<&str> {
-        match self {
-            ToolEvent::ToolCallPrepared { tool_call_id, .. }
-            | ToolEvent::ToolStarted { tool_call_id, .. }
-            | ToolEvent::ToolFinished { tool_call_id, .. }
-            | ToolEvent::ToolPermissionRequested { tool_call_id, .. } => Some(tool_call_id),
-            ToolEvent::ToolNotice { tool_call_id, .. } => tool_call_id.as_deref(),
-            ToolEvent::CodeChanged { tool_call_id, .. } if !tool_call_id.is_empty() => {
-                Some(tool_call_id)
-            }
-            ToolEvent::AuditRecorded { .. } | ToolEvent::CodeChanged { .. } => None,
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -556,30 +426,12 @@ impl ToolEvent {
 /// Control 频道领域事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ControlEvent {
     /// 会话生命周期状态变更。
     SessionStateChanged {
         #[serde(rename = "session_id")]
         session_id: String,
         state: SessionState,
-    },
-    /// 全局配置已变更（P2-D2）：`rev` = daemon 侧配置版本（每次 config.save
-    /// 自增）。消费者收到后重拉 `config.load`；seed 惯例为空串（全局广播，
-    /// 与 SessionStateChanged 的 per-seed 区分）。T20 axum SSE 同源复用。
-    #[cfg_attr(feature = "ts", ts(as = "u32"))]
-    ConfigChanged { rev: u64 },
-    /// 会话活动状态变更（WaitingUser 汇总 interaction/permission 挂起）。
-    SessionActivityChanged {
-        #[serde(rename = "session_id")]
-        session_id: String,
-        state: ActivityState,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        #[cfg_attr(feature = "ts", ts(as = "u32"))]
-        seq: u64,
-        #[cfg_attr(feature = "ts", ts(as = "u32"))]
-        updated_at: u64,
     },
     /// 会话元数据变更（标题生成/重命名）——前端收到后重拉 session.list。
     SessionMetaChanged {
@@ -614,7 +466,7 @@ pub enum ControlEvent {
         interaction_id: String,
         resolution: AskResolution,
     },
-    /// plan review 请求（plan_submit 或 todo_activation）。
+    /// plan review 请求（plan 或 todo_activation）。
     PlanReviewRequested {
         interaction_id: String,
         turn_id: String,
@@ -634,7 +486,6 @@ pub enum ControlEvent {
         /// `None` = 席位已释放。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<String>,
-        #[cfg_attr(feature = "ts", ts(as = "u32"))]
         driver_epoch: u64,
     },
     /// skill 目录/激活状态变更。
@@ -644,7 +495,6 @@ pub enum ControlEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         catalog_revision: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "ts", ts(as = "u32"))]
         operation_revision: Option<u64>,
         #[serde(default)]
         context_epoch: usize,
@@ -656,12 +506,6 @@ pub enum ControlEvent {
         runtime: Vec<SkillRuntimeInfo>,
         #[serde(default)]
         diagnostics: Vec<String>,
-    },
-    /// 系统级通知（决策记录 Q6：最小集——升级、维护、daemon 重启等）。
-    SystemNotice {
-        notice_id: String,
-        level: NoticeLevel,
-        message: String,
     },
     /// 子代理终态推送：注入被回合 lap 边界吸收（无独立注入回合）时，
     /// 前端 tracker 的唯一收敛信号仍缺失——本事件补发轻量终态，不进入
@@ -691,49 +535,18 @@ pub enum ControlEvent {
     },
 }
 
-impl ControlEvent {
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            ControlEvent::DashboardUpdated { .. } | ControlEvent::DashboardSnapshot { .. } => {
-                Delivery::Replaceable
-            }
-            _ => Delivery::Reliable,
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 统一领域事件入口
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 统一领域事件。`channel()` 决定进入哪个频道 router；
-/// `delivery()` 声明可靠性等级，供 wire envelope 与 daemon 队列使用。
+/// 统一领域事件。`channel()` 决定进入哪个频道 router。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[allow(clippy::large_enum_variant)] // 装箱改造属结构塑形，另立项
 pub enum DomainEvent {
     Control(ControlEvent),
     Conversation(ConversationEvent),
     Tool(ToolEvent),
-}
-
-impl DomainEvent {
-    pub fn channel(&self) -> RingingChannel {
-        match self {
-            DomainEvent::Control(_) => RingingChannel::Control,
-            DomainEvent::Conversation(_) => RingingChannel::Conversation,
-            DomainEvent::Tool(_) => RingingChannel::Tool,
-        }
-    }
-
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            DomainEvent::Control(e) => e.delivery(),
-            DomainEvent::Conversation(e) => e.delivery(),
-            DomainEvent::Tool(e) => e.delivery(),
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -762,34 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn code_changed_accepts_legacy_shape_and_targets_new_events() {
-        let legacy: ToolEvent = serde_json::from_value(serde_json::json!({
-            "type": "code_changed",
-            "lines_added": 2,
-            "lines_removed": 1,
-            "files_created": 0,
-            "files_deleted": 0,
-            "file": "src/lib.rs"
-        }))
-        .expect("legacy event remains readable");
-        assert_eq!(legacy.tool_call_id(), None);
-
-        let current = ToolEvent::CodeChanged {
-            tool_call_id: "edit-1".into(),
-            turn_id: "t1".into(),
-            round_num: 0,
-            lines_added: 2,
-            lines_removed: 1,
-            files_created: 0,
-            files_deleted: 0,
-            file: Some("src/lib.rs".into()),
-        };
-        assert_eq!(current.tool_call_id(), Some("edit-1"));
-        let json = serde_json::to_string(&current).expect("serialize");
-        assert!(json.contains("\"turn_id\":\"t1\""));
-    }
-
-    #[test]
     fn dashboard_task_round_trip_keeps_evidence_and_accepts_legacy_rows() {
         let current = DashboardTask {
             id: "T1".into(),
@@ -811,58 +596,6 @@ mod tests {
         }))
         .expect("legacy dashboard row without evidence remains readable");
         assert!(legacy.evidence.is_none());
-    }
-
-    #[test]
-    fn delivery_classification_matches_plan() {
-        assert_eq!(
-            ConversationEvent::RoundDelta {
-                turn_id: "t".into(),
-                round_num: 0,
-                kind: RoundDeltaKind::Answering,
-                delta: "x".into(),
-            }
-            .delivery(),
-            // 增量文本必须可靠投递；覆盖/合并会在断线重连时吞字。
-            Delivery::Reliable
-        );
-        assert_eq!(
-            ToolEvent::ToolStarted {
-                tool_call_id: "c".into(),
-                turn_id: "t".into(),
-                round_num: 0,
-                name: "exec".into(),
-            }
-            .delivery(),
-            Delivery::Reliable
-        );
-        assert_eq!(
-            ControlEvent::DashboardUpdated {
-                hp_connected: true,
-                session_id: "s".into(),
-                tool_calls_total: 0,
-                tool_failures: 0,
-                current_phase: "idle".into(),
-                streaming: false,
-            }
-            .delivery(),
-            Delivery::Replaceable
-        );
-    }
-
-    #[test]
-    fn provider_tool_status_is_replaceable() {
-        let event = ConversationEvent::ProviderToolStatus {
-            turn_id: "t".into(),
-            round_num: 0,
-            call_id: "ws-1".into(),
-            tool_kind: "web_search".into(),
-            state: ProviderToolState::Completed,
-        };
-        assert_eq!(event.delivery(), Delivery::Replaceable);
-        let json = serde_json::to_string(&event).expect("serialize");
-        assert!(json.contains("\"state\":\"completed\""));
-        assert!(json.contains("\"call_id\":\"ws-1\""));
     }
 
     #[test]
@@ -890,16 +623,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn domain_event_channel_and_delivery_delegation() {
-        let ev = DomainEvent::Tool(ToolEvent::ToolCallPrepared {
-            tool_call_id: "c".into(),
-            turn_id: "t".into(),
-            round_num: 0,
-            name: "exec".into(),
-            args_so_far: "{}".into(),
-        });
-        assert_eq!(ev.channel(), RingingChannel::Tool);
-        assert_eq!(ev.delivery(), Delivery::Replaceable);
-    }
 }

@@ -128,7 +128,6 @@ export async function pollSessions(): Promise<void> {
 
 /** 启动:选一个非归档会话(优先运行中)作为第一个标签。 */
 export async function boot(): Promise<void> {
-  await transport.bootstrap();
   const list = await transport.sessions();
   const live = list.find((item) => !item.archived && item.running) ?? list.find((item) => !item.archived) ?? list[0];
   if (live?.session_id == null) {

@@ -1,6 +1,6 @@
 //! Audit v2 —— 结构化、链式、可验证的工具审计账本。
 //!
-//! 设计文档：`docs/current/architecture.md`。与 v1 CSV
+//! 与 v1 CSV
 //! （`audit.csv`）**双写**：CSV 保持既有列语义（仅尾部追加新列），v2 是
 //! 主账本——每条事件一行 JSONL，字段自描述、哈希链可验证：
 //!
@@ -427,7 +427,7 @@ fn recover_state(root: &Path, active: &Path) -> ChainState {
 /// 读单个文件恢复 (seq, hash)。返回 None = 文件不存在/为空/无一条可解析。
 ///
 /// 崩溃撕裂的尾行（无 `\n` 结尾）先移入 `<file>.torn` 侧车保留证据，再把
-/// 活动文件截断到最后一个完整行——不静默丢弃任何字节。
+/// 该文件截断到最后一个完整行——不静默丢弃任何字节。
 fn recover_from_file(path: &Path) -> Option<ChainState> {
     let mut bytes = std::fs::read(path).ok()?;
     if bytes.is_empty() {

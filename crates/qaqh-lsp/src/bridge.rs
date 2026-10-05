@@ -9,7 +9,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolResult};
+use qaqh_workspace::DynamicTool;
+use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome};
 
 use crate::manager::LspManager;
 use crate::manager_slot;
@@ -53,8 +54,12 @@ pub fn prime_all_async(root: String) {
 }
 
 /// E-5 单一 dispatcher：`lsp` 聚合工具的 fn 指针。
-pub fn dispatch(ctx: ToolCallCtx) -> ToolResult {
-    crate::tool::aggregate_dispatch(ctx)
+pub fn dispatch(
+    name: &str,
+    ctx: &ToolCallContext,
+    args: serde_json::Value,
+) -> Result<ToolOutcome, FatalToolError> {
+    crate::tool::aggregate_dispatch(name, ctx, args)
 }
 
 /// 投影批次：enabled 即 Some（含聚合工具钉底），disabled 即 None。

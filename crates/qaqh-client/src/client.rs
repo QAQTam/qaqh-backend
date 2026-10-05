@@ -26,6 +26,21 @@ use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
 use qaqh_ringing::v2::{RingingV2CommandAck, RingingV2CommandStatus};
 
+/// `reqwest` 以 `rustls-no-provider` 特征编译（换掉 `rustls` 是为绕开 OHOS 上
+/// 构建不了的 aws-lc-rs，见 `qaqh-client/Cargo.toml`），该特征的硬契约是：建
+/// Client **之前**必须装好一个 rustls crypto provider，否则 `build()` 直接 panic
+/// ——明文 `http://` 也一样炸，因为 TLS 配置是无条件构造的。
+///
+/// 装 provider 是进程级全局动作，故用 `Once`。`let _ =` 而非 `unwrap`：后端
+/// workspace 里 `qaqh-gate` 仍用 reqwest 的 `rustls` 特征，特征统一时上游可能
+/// 已经装过，重复安装只返回 Err，不是故障。
+pub(crate) fn ensure_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Callbacks delivered on the client's background tasks.
 #[derive(Clone)]
 pub struct ClientHandlers {
@@ -75,7 +90,8 @@ pub struct ClientOptions {
     /// Spawn `qaqh-daemon run` when no discovery file exists yet.
     pub launch_daemon_if_missing: bool,
     /// Path to the daemon executable (default: `target/debug/qaqh-daemon(.exe)`
-    /// relative to `QAQH_BACKEND_ROOT` or the workspace root).
+    /// under `QAQH_BACKEND_ROOT`, else next to the client executable in
+    /// `resources/` or its own directory).
     pub daemon_path: Option<std::path::PathBuf>,
     /// Maximum time to wait for the daemon to publish discovery.
     pub start_timeout: std::time::Duration,
@@ -209,6 +225,7 @@ impl Client {
             }
         };
 
+        ensure_crypto_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()?;
@@ -447,19 +464,12 @@ impl Client {
         Ok(ack)
     }
 
-    /// Activate the native timeline for one session (mirrors Electron
-    /// `ringingManager.activateTimeline`): fetch the authoritative snapshot,
-    /// replace any previous timeline stream with a new one seeded at the
-    /// snapshot watermark, and return the snapshot. The seed must have been
-    /// attached first (`backend.attach` / `session_resume`), otherwise the
-    /// daemon rejects the request with 401.
     /// 拉取 timeline 快照页（服务端默认尾部窗口，见 daemon
-    /// `TIMELINE_PAGE_LIMIT`）。`before_turn` = 返回该 turn **之前**（更早）
-    /// 的页（上滚翻页）；`limit` 覆盖默认页大小。响应含分页元数据
-    /// `has_more` / `total_turns`。与 [`Self::activate_timeline`] 不同：
-    /// 纯读，**不重建** timeline SSE 流。
+    /// `TIMELINE_PAGE_LIMIT`）。`before_index` = **排他**游标（返回全局序号小于
+    /// 它的那一页，即该 index **之前**（更早）的页），`None` = 最新一页；
+    /// `limit` 覆盖默认页大小。响应含分页元数据 `has_more` / `total_turns`。
+    /// 与 [`Self::activate_timeline`] 不同：纯读，**不重建** timeline SSE 流。
     ///
-    /// `before_index` = **排他**游标（返回全局序号小于它的那一页），`None` = 最新一页。
     /// 取下一页的游标是**本页最旧那个回合**的 `TimelineTurn::turn_index`。
     ///
     /// 原先是 `before_turn`（turn_id）作游标，已按 spec §0b 的兼容政策**替换**

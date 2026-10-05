@@ -16,7 +16,6 @@ import { listen, type Event, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   type Ack,
   type ApprovalView,
-  type GatewaySession,
   isTauriRuntime,
   type StreamHandlers,
   type TimelinePageResponse,
@@ -36,10 +35,6 @@ function rejectAck(ack: Ack): Error {
 export class TauriTransport implements TransportBackend {
   /** 宿主的单一 active seed(attach 时登记;命令按它定界,与宿主语义一致)。 */
   private activeSeed: string | null = null;
-
-  async bootstrap(): Promise<GatewaySession> {
-    return { csrfToken: "tauri-host", expiresIn: 0 };
-  }
 
   sessions(): Promise<any[]> {
     return invoke<any[]>("session_list");

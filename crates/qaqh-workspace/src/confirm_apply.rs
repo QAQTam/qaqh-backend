@@ -5,8 +5,8 @@
 //! 本工具：**从注册表取出参数重放执行路径**——模型不需要重新输出 patch /
 //! content（消除二次输出）。
 //!
-//! - `action=apply`：重放 → 落盘（各工具的 expected_hash 校验拦截 dry-run
-//!   之后发生的外部改动；内容匹配工具天然防漂移）。
+//! - `action=apply`：重放 → 落盘（write 的 expected_hash 校验拦截 dry-run
+//!   之后发生的外部改动；apply_patch 等内容匹配工具天然防漂移）。
 //! - `action=discard`：丢弃 pending，不落盘。
 //! - pending 一次性（apply 或 discard 都消费）；过期（30 分钟）或不存在 →
 //!   `PENDING_NOT_FOUND_OR_EXPIRED`。
@@ -342,8 +342,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["confirm_apply"].legacy.is_none(),
-            "confirm_apply still has legacy executor"
+            manager.builtins.contains_key("confirm_apply"),
+            "confirm_apply must be on the typed execution surface"
         );
         let id = crate::pending::store("write", &serde_json::json!({}));
         let result = exec_confirm_apply(&serde_json::json!({

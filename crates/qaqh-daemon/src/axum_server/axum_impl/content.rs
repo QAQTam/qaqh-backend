@@ -14,9 +14,6 @@ pub(crate) async fn handle_content_get(
     headers: HeaderMap,
     Path(content_id): Path<String>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
@@ -142,11 +139,12 @@ pub(crate) fn is_valid_media_type(value: &str) -> bool {
 
 pub(crate) async fn handle_content_upload(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
+    if let Err(response) = require_scope(&identity, Scope::Interact) {
+        return response;
     }
     let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
