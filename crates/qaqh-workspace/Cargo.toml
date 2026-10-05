@@ -47,6 +47,11 @@ winresource = "0.1"
 [lints]
 workspace = true
 
+[features]
+# 测试装置：暴露 v1 `ToolManager::register`（legacy ToolHandler）供跨 crate 测试使用；
+# 生产构建不启用。
+test-harness = []
+
 [dev-dependencies]
 tempfile = "3"
 [target.'cfg(unix)'.dependencies]

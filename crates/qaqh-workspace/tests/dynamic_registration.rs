@@ -20,24 +20,12 @@ use std::time::Duration;
 
 use qaqh_workspace::permission::ToolCategory;
 use qaqh_workspace::{
-    Admission, DYNAMIC_DESCRIPTION_LIMIT, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolHandler,
-    ToolInvocation, ToolManager, ToolResult, ToolRisk, admit, build_dynamic_tool,
+    Admission, DYNAMIC_DESCRIPTION_LIMIT, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolInvocation,
+    ToolManager, ToolResult, admit, build_dynamic_tool,
 };
 
 fn noop(_ctx: ToolCallCtx) -> ToolResult {
     ToolResult::ok("noop")
-}
-
-fn builtin(key: &str) -> ToolHandler {
-    ToolHandler {
-        key: key.to_owned(),
-        description: "builtin",
-        input_schema: serde_json::json!({ "type": "object" }),
-        handler: noop,
-        risk: ToolRisk::ReadOnly,
-        category: ToolCategory::Read,
-        default_timeout: Duration::from_secs(5),
-    }
 }
 
 fn echo_entry(
@@ -109,7 +97,7 @@ fn mcp_prefix_and_model_face_merge() {
 #[test]
 fn collision_rejected_against_dynamic_and_builtin() {
     let mut mgr = ToolManager::new();
-    mgr.register(builtin("read"));
+    qaqh_workspace::file_query::register(&mut mgr);
 
     // 动态↔内置：与真实注册的内置名撞 → Err。
     let (_, clashing) = echo_entry("read", "x", "");
@@ -256,7 +244,7 @@ fn description_truncates_at_char_boundary_with_marker() {
 #[test]
 fn category_of_covers_builtin_and_dynamic() {
     let mut mgr = ToolManager::new();
-    mgr.register(builtin("read"));
+    qaqh_workspace::file_query::register(&mut mgr);
     let (name, tool) = echo_entry("demo", "echo", "d");
     mgr.register_dynamic(name, tool).expect("register");
 
