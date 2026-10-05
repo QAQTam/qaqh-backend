@@ -45,6 +45,9 @@ pub mod workspace;
 
 pub mod registration;
 
+#[cfg(any(test, feature = "test-harness"))]
+pub mod probe;
+
 pub mod manager;
 /// Permission engine: tool categories, levels, trusted folders.
 pub mod permission;
@@ -144,34 +147,6 @@ pub enum ToolRisk {
     Administrative,
 }
 
-// ── Macro: handler ──
-///
-/// The inner `$exec` function returns the canonical structured result directly.
-#[macro_export]
-macro_rules! handler {
-    ($name:ident, $exec:ident) => {
-        fn $name(ctx: ToolCallCtx) -> ToolResult {
-            $exec(&ctx.args)
-        }
-    };
-}
-
-/// String 结果兼容宏：旧式 exec 返回 `String`（[ERROR]/[PARTIAL] 前缀视为失败），
-/// 包装为结构化 `ToolResult`。file_mutate 系列工具使用（write/edit/edit_block/delete）。
-#[macro_export]
-macro_rules! handler_from_string {
-    ($name:ident, $exec:ident) => {
-        fn $name(ctx: ToolCallCtx) -> ToolResult {
-            let s: String = $exec(&ctx.args);
-            if s.trim_start().starts_with("[ERROR") || s.trim_start().starts_with("[PARTIAL") {
-                ToolResult::error(s)
-            } else {
-                ToolResult::ok(s)
-            }
-        }
-    };
-}
-
 // ── JsonArgs trait: typed access to tool arguments ──
 
 pub trait JsonArgs {
@@ -204,9 +179,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{LazyLock, Mutex, RwLock};
-use std::time::Duration;
 
-use qaqh_types::ToolDef;
 pub use qaqh_types::{
     ContentRef, ToolContinuation, ToolError as CanonicalToolError, ToolModelPayload, ToolResult,
     ToolStatus,
@@ -319,14 +292,11 @@ pub fn current_workspace() -> String {
 
 /// Set the actor-local or process-wide cancel flag.
 ///
-/// PR-3-4 解析顺序：actor 线程（有 actor session）写本地 Cell；工具线程
-/// （execute 路径已绑定 runtime ctx 会话）写会话键控表；两者皆无（进程级
-/// 路径，如 daemon shutdown）写全局 flag。
+/// PR-3-4 解析顺序：actor 线程（有 actor session）写本地 Cell；否则按会话
+/// 键控表；两者皆无（进程级路径，如 daemon shutdown）写全局 flag。per-call
+/// 取消经 `ToolCallContext.cancellation` 的共享 Arc 传递（见 ToolManager
+/// inflight 表），不再走线程局部。
 pub fn set_cancel(value: bool) {
-    if let Some(flag) = crate::runtime::explicit_cancel_flag() {
-        flag.store(value, std::sync::atomic::Ordering::SeqCst);
-        return;
-    }
     if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
         ACTOR_CANCEL.with(|slot| slot.set(value));
     } else if let Some(session) = bound_cancel_session() {
@@ -377,9 +347,6 @@ fn bound_cancel_session() -> Option<String> {
 
 /// Read the effective cancel flag: actor-local → session-keyed → process-wide.
 pub fn is_cancel() -> bool {
-    if let Some(cancelled) = crate::runtime::explicit_cancel_is_set() {
-        return cancelled;
-    }
     if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
         return ACTOR_CANCEL.with(|slot| slot.get());
     }
@@ -396,9 +363,6 @@ pub fn is_cancel() -> bool {
 /// 所有清零路径必须走这里，保证各层同步归零；会话表项只清本线程所属
 /// 会话，其它会话的取消状态不受影响（PR-3-4 隔离语义）。
 pub fn clear_cancel() {
-    if let Some(flag) = crate::runtime::explicit_cancel_flag() {
-        flag.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
     ACTOR_CANCEL.with(|slot| slot.set(false));
     CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
     if let Some(session) = bound_cancel_session() {
@@ -503,8 +467,6 @@ pub fn display_path(abs_path: &str) -> String {
     // Not under workspace — return normalised path with forward slashes
     norm_str.replace('\\', "/")
 }
-
-// ── ToolCallCtx ──
 
 /// A single non-blocking execution-output update for the frontend.
 ///
@@ -617,20 +579,6 @@ pub fn bounded_exec_progress_channel() -> (
     )
 }
 
-#[derive(Clone)]
-pub struct ToolCallCtx {
-    pub id: String,
-    pub name: String,
-    pub args: serde_json::Value,
-    pub tx_progress: Option<ExecProgressSender>,
-    pub timeout_secs: Option<u64>,
-    /// Per-invocation cancellation signal owned by ToolManager.
-    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Private, typed effects returned to the host runtime. Sharing this cell
-    /// across context clones avoids parsing trusted effects from tool text.
-    pub(crate) skill_effects: std::sync::Arc<std::sync::Mutex<Vec<ToolEffect>>>,
-}
-
 /// Trusted, typed state transitions emitted by tool handlers.
 ///
 /// Keeping this wrapper generic lets the runtime add other effect families
@@ -657,33 +605,6 @@ pub enum ToolEffect {
         spawn_ephemeral: bool,
         spawn_timeout_secs: u64,
     },
-}
-
-impl ToolCallCtx {
-    pub fn get_str(&self, key: &str) -> Option<&str> {
-        self.args.get(key).and_then(|v| v.as_str())
-    }
-    pub fn get_u64(&self, key: &str) -> Option<u64> {
-        self.args.get(key).and_then(|v| v.as_u64())
-    }
-    pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.args.get(key).and_then(|v| v.as_bool())
-    }
-    #[allow(dead_code)] // legacy adapters/tests still use this bridge
-    pub(crate) fn push_skill_effect(&self, effect: qaqh_skills::SkillEffect) {
-        self.skill_effects
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(ToolEffect::Skill(effect));
-    }
-    pub(crate) fn take_skill_effects(&self) -> Vec<ToolEffect> {
-        std::mem::take(
-            &mut *self
-                .skill_effects
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        )
-    }
 }
 
 /// Structured error type for tool operations.
@@ -867,35 +788,6 @@ pub fn parse_arg_or(args: &str, key: &str, default: &str) -> String {
 
 pub fn parse_opt(args: &str, key: &str) -> Option<String> {
     qaqh_types::arg::parse_arg(args, key)
-}
-
-// ── ToolHandler ──
-
-#[derive(Clone)]
-pub struct ToolHandler {
-    pub key: String,
-    pub description: &'static str,
-    pub input_schema: serde_json::Value,
-    pub handler: fn(ToolCallCtx) -> ToolResult,
-    pub risk: ToolRisk,
-    /// 能力类别（权限决策单一事实源）：Read/Write/Exec/Net。
-    /// 取代按工具名字表分类（categorize_tool 已删除）——加新工具必须
-    /// 显式声明，MCP 等动态工具未来包装为 Capability 时复用同字段。
-    pub category: crate::permission::ToolCategory,
-    pub default_timeout: Duration,
-}
-
-impl ToolHandler {
-    pub fn to_tool_def(&self) -> ToolDef {
-        ToolDef {
-            call_type: "function".into(),
-            function: qaqh_types::ToolFunction {
-                name: self.key.clone(),
-                description: self.description.to_string(),
-                parameters: self.input_schema.clone(),
-            },
-        }
-    }
 }
 
 #[cfg(test)]

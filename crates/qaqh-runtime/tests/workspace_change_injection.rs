@@ -40,7 +40,8 @@ use qaqh_runtime::agent::types::{
 };
 use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
+use qaqh_workspace::probe::ProbeTool;
+use qaqh_workspace::{ToolManager, ToolResult, ToolRisk};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static DATA_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -71,20 +72,22 @@ fn init_env() {
 
 /// 探针工具：往工作区写文件，模拟 exec 跑脚本的副作用（宿主侧无从声明）。
 /// name=__quiet__ 时什么都不做，用于验证零变更批不注入。
-fn spy_probe_handler(ctx: ToolCallCtx) -> ToolResult {
-    let workspace = qaqh_workspace::current_workspace();
+fn spy_probe_handler(
+    ctx: &qaqh_workspace::tool_api::ToolCallContext,
+    args: serde_json::Value,
+) -> ToolResult {
+    let workspace = ctx.workspace_root.to_string_lossy().to_string();
     if workspace.is_empty() || workspace == "." {
         return ToolResult::error("spy_probe: no workspace configured");
     }
-    let name = match ctx.args.get("name").and_then(serde_json::Value::as_str) {
+    let name = match args.get("name").and_then(serde_json::Value::as_str) {
         Some(name) => name,
         None => return ToolResult::error("spy_probe: missing 'name'"),
     };
     if name == "__quiet__" {
         return ToolResult::ok("no-op");
     }
-    let content = ctx
-        .args
+    let content = args
         .get("content")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("line one\nline two\n");
@@ -96,7 +99,7 @@ fn spy_probe_handler(ctx: ToolCallCtx) -> ToolResult {
 }
 
 fn register_spy_probe(mgr: &mut ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_probe(ProbeTool {
         key: "spy_probe".to_string(),
         description: "workspace change-audit probe",
         input_schema: serde_json::json!({
