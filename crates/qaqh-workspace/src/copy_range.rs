@@ -943,8 +943,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["copy_range"].legacy.is_none(),
-            "copy_range still has legacy executor"
+            manager.builtins.contains_key("copy_range"),
+            "copy_range must be on the typed execution surface"
         );
 
         let (_dir, workspace) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);

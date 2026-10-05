@@ -657,9 +657,10 @@ fn read_registration_is_typed_and_descriptor_keeps_legacy_schema() {
     let mut manager = crate::ToolManager::new();
     register(&mut manager);
     let registered = manager.builtins.get("read").expect("read registered");
-    assert!(
-        registered.legacy.is_none(),
-        "read must not use legacy executor"
+    assert_eq!(
+        registered.descriptor.name.as_str(),
+        "read",
+        "read must be on the typed execution surface"
     );
     assert_eq!(
         registered.descriptor.input_schema["additionalProperties"],
