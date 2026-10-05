@@ -10,7 +10,6 @@ use ts_rs::TS;
 use qaqh_types::UsageInfo;
 pub use qaqh_types::{ContentRef, ToolResult};
 
-use crate::channel::RingingChannel;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 共享支持类型
@@ -352,33 +351,6 @@ pub enum ConversationEvent {
         /// true = 本回合最后一个 round。
         is_final: bool,
     },
-    /// provider 请求瞬时失败将重试（非终态；retry 与最终失败不得共用 event_id）。
-    ProviderRetrying {
-        turn_id: String,
-        round_num: u32,
-        attempt: u32,
-        max_retries: u32,
-        delay_secs: u64,
-        error_message: String,
-    },
-    /// provider 内建/服务端工具状态（决策记录 Q3：replaceable，合并键 = call_id）。
-    ProviderToolStatus {
-        turn_id: String,
-        round_num: u32,
-        /// provider 侧 call id（如 web_search_call id），**不是** QAQ-Harness tool_call_id。
-        call_id: String,
-        /// 目前固定 "web_search"，为未来 provider 内建工具预留。
-        tool_kind: String,
-        state: ProviderToolState,
-    },
-    /// provider 确认的用量（可多次发出；消费者按 turn/round 覆盖）。
-    UsageUpdated {
-        turn_id: String,
-        round_num: u32,
-        usage: UsageInfo,
-        context_limit: u32,
-        model: String,
-    },
     /// compact 开始（携带 compact_id）。
     CompactStarted {
         compact_id: String,
@@ -445,53 +417,6 @@ pub enum ToolEvent {
         risk: PermissionRisk,
         consequence: String,
     },
-    /// 工具域通知（决策记录 Q6：留在 Tool 频道，不并入 SystemNotice）。
-    ToolNotice {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_call_id: Option<String>,
-        level: NoticeLevel,
-        message: String,
-    },
-    /// 审计记录（脱敏：args 只进 content store，事件仅携带引用）。
-    AuditRecorded {
-        tool_name: String,
-        result_summary: String,
-        success: bool,
-        time: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args_ref: Option<ContentRef>,
-    },
-    /// 文件操作后的实时代码统计增量。
-    CodeChanged {
-        #[serde(default)]
-        tool_call_id: String,
-        #[serde(default)]
-        turn_id: String,
-        #[serde(default)]
-        round_num: u32,
-        lines_added: usize,
-        lines_removed: usize,
-        files_created: usize,
-        files_deleted: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        file: Option<String>,
-    },
-}
-
-impl ToolEvent {
-    /// 该事件关联的 tool_call_id（Started/Finished/PermissionRequested 恒有）。
-    pub fn tool_call_id(&self) -> Option<&str> {
-        match self {
-            ToolEvent::ToolStarted { tool_call_id, .. }
-            | ToolEvent::ToolFinished { tool_call_id, .. }
-            | ToolEvent::ToolPermissionRequested { tool_call_id, .. } => Some(tool_call_id),
-            ToolEvent::ToolNotice { tool_call_id, .. } => tool_call_id.as_deref(),
-            ToolEvent::CodeChanged { tool_call_id, .. } if !tool_call_id.is_empty() => {
-                Some(tool_call_id)
-            }
-            ToolEvent::AuditRecorded { .. } | ToolEvent::CodeChanged { .. } => None,
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,20 +432,6 @@ pub enum ControlEvent {
         #[serde(rename = "session_id")]
         session_id: String,
         state: SessionState,
-    },
-    /// 全局配置已变更（P2-D2）：`rev` = daemon 侧配置版本（每次 config.save
-    /// 自增）。消费者收到后重拉 `config.load`；seed 惯例为空串（全局广播，
-    /// 与 SessionStateChanged 的 per-seed 区分）。T20 axum SSE 同源复用。
-    ConfigChanged { rev: u64 },
-    /// 会话活动状态变更（WaitingUser 汇总 interaction/permission 挂起）。
-    SessionActivityChanged {
-        #[serde(rename = "session_id")]
-        session_id: String,
-        state: ActivityState,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        seq: u64,
-        updated_at: u64,
     },
     /// 会话元数据变更（标题生成/重命名）——前端收到后重拉 session.list。
     SessionMetaChanged {
@@ -596,12 +507,6 @@ pub enum ControlEvent {
         #[serde(default)]
         diagnostics: Vec<String>,
     },
-    /// 系统级通知（决策记录 Q6：最小集——升级、维护、daemon 重启等）。
-    SystemNotice {
-        notice_id: String,
-        level: NoticeLevel,
-        message: String,
-    },
     /// 子代理终态推送：注入被回合 lap 边界吸收（无独立注入回合）时，
     /// 前端 tracker 的唯一收敛信号仍缺失——本事件补发轻量终态，不进入
     /// 回合状态机、不进模型上下文。`state` 为注入标签原样
@@ -644,16 +549,6 @@ pub enum DomainEvent {
     Tool(ToolEvent),
 }
 
-impl DomainEvent {
-    pub fn channel(&self) -> RingingChannel {
-        match self {
-            DomainEvent::Control(_) => RingingChannel::Control,
-            DomainEvent::Conversation(_) => RingingChannel::Conversation,
-            DomainEvent::Tool(_) => RingingChannel::Tool,
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
 // ─────────────────────────────────────────────────────────────────────────────
@@ -677,34 +572,6 @@ mod tests {
             DomainEvent::Conversation(ConversationEvent::TurnStarted { ref user_text, .. })
                 if user_text == "hello"
         ));
-    }
-
-    #[test]
-    fn code_changed_accepts_legacy_shape_and_targets_new_events() {
-        let legacy: ToolEvent = serde_json::from_value(serde_json::json!({
-            "type": "code_changed",
-            "lines_added": 2,
-            "lines_removed": 1,
-            "files_created": 0,
-            "files_deleted": 0,
-            "file": "src/lib.rs"
-        }))
-        .expect("legacy event remains readable");
-        assert_eq!(legacy.tool_call_id(), None);
-
-        let current = ToolEvent::CodeChanged {
-            tool_call_id: "edit-1".into(),
-            turn_id: "t1".into(),
-            round_num: 0,
-            lines_added: 2,
-            lines_removed: 1,
-            files_created: 0,
-            files_deleted: 0,
-            file: Some("src/lib.rs".into()),
-        };
-        assert_eq!(current.tool_call_id(), Some("edit-1"));
-        let json = serde_json::to_string(&current).expect("serialize");
-        assert!(json.contains("\"turn_id\":\"t1\""));
     }
 
     #[test]
@@ -732,20 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_status_round_trip() {
-        let event = ConversationEvent::ProviderToolStatus {
-            turn_id: "t".into(),
-            round_num: 0,
-            call_id: "ws-1".into(),
-            tool_kind: "web_search".into(),
-            state: ProviderToolState::Completed,
-        };
-        let json = serde_json::to_string(&event).expect("serialize");
-        assert!(json.contains("\"state\":\"completed\""));
-        assert!(json.contains("\"call_id\":\"ws-1\""));
-    }
-
-    #[test]
     fn operation_failed_error_round_trip() {
         let event = ControlEvent::OperationFailed {
             occurrence_id: "occ-1".into(),
@@ -770,14 +623,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn domain_event_channel_delegation() {
-        let ev = DomainEvent::Tool(ToolEvent::ToolStarted {
-            tool_call_id: "c".into(),
-            turn_id: "t".into(),
-            round_num: 0,
-            name: "exec".into(),
-        });
-        assert_eq!(ev.channel(), RingingChannel::Tool);
-    }
 }
