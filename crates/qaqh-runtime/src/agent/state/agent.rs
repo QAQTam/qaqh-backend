@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use qaqh_config::Config;
 use qaqh_session::SessionManager;
-use qaqh_session::canonical::{CanonicalSessionIdentity, ToolLedger, ToolLedgerError, WriterId};
+use qaqh_session::canonical::{
+    CanonicalSessionIdentity, FactCausation, ToolLedger, ToolLedgerError, WriterId,
+};
 use qaqh_types::SessionMeta;
 
 use super::token_calibration::{
@@ -215,6 +217,9 @@ pub struct AgentState {
     /// Seed that owns `tool_ledger`; guards against stale reuse when the
     /// same `AgentState` is rebound to another session.
     tool_ledger_session: Option<String>,
+    /// In-flight command scope, shared with the owning Loop's emitter
+    /// (`Loop::from_channels` binds it) and read by every fact append.
+    fact_causation: FactCausation,
     /// Loop bookkeeping queue (PR-1-5 / B6): title / context-stats / mode /
     /// usage / skills writes, drained by [`Self::drain_persist_ops`].
     pub pending_meta_ops: Vec<MetaOp>,
@@ -258,6 +263,7 @@ impl AgentState {
             session_manager: SessionManager::try_global(),
             tool_ledger: None,
             tool_ledger_session: None,
+            fact_causation: FactCausation::new(),
             pending_meta_ops: Vec::new(),
             endpoint_spec: None,
         };
@@ -295,7 +301,7 @@ impl AgentState {
                 std::process::id(),
                 self.session.session_id
             ));
-            let ledger = ToolLedger::open(
+            let mut ledger = ToolLedger::open(
                 &session_dir,
                 identity.session_id,
                 identity.log_id,
@@ -303,11 +309,18 @@ impl AgentState {
                 now_ms,
                 tool_ledger_lease_ms(),
             )?;
+            ledger.bind_causation(self.fact_causation.clone());
             self.tool_ledger = Some(ledger);
             self.tool_ledger_session = Some(self.session.session_id.clone());
         }
 
         Ok(self.tool_ledger.as_mut())
+    }
+
+    /// Share the owning Loop's in-flight command scope with this actor, so the
+    /// facts it appends carry the same causation as its Ringing events.
+    pub(crate) fn bind_fact_causation(&mut self, causation: FactCausation) {
+        self.fact_causation = causation;
     }
 
     /// Push the image capability snapshot for the current config into the
