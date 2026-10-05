@@ -24,8 +24,14 @@ PR #10 = `MERGED`（2026-10-05T17:29Z）。注意它 base 上原本还裹着别�
 
 ## 二、合并说明里那条回归声称：**已判定不成立，别再查**
 
-合并说明 `82b3755` 写「P1.3 参数增量因果链断裂（`gate.rs:571-601`，回归测试
+合并说明 `82b3755` 写「P1.3 参数增量因果链断裂（它引 `gate.rs:571-601`，回归测试
 `args_increment_is_cumulative` 红）」。三条证据都不支持它：
+
+> 行号提示：合并后 `StreamEvent::ToolCallProgress` 臂现在在
+> `turn_lap/gate.rs:604`（我上一棒文档里写的 611 也已漂移）。
+> 这一轮核过的当前锚点：`timeline_hub.rs:310`、`hub.rs:605`、`activity.rs:59`、
+> `session_lifecycle.rs:345`、`ask_user_lifecycle.rs:843`、`loop_core.rs:85`、
+> `pending_store.rs:310-314`。旧文档里的行号一律以本文件为准。
 
 1. 该测试在 main 上**不存在**：`grep -rn "args_increment_is_cumulative" crates/` → 0 命中。
 2. P1.3 改动面完好：`qaqh-gate/src/types.rs:465-473` 仍是 `args_chunk`，
@@ -71,17 +77,28 @@ PR #10 = `MERGED`（2026-10-05T17:29Z）。注意它 base 上原本还裹着别�
 **证据边界照旧**：零命中只证明这台机器；beta 用户存量在各自机器上，
 删之前把 `scripts/v2-legacy-compat-probe.sh` 发给存量用户跑（只读，0/1/2 当闸门）。
 
-**P1.2 第二批——三项要动 helper 或在途热点**：`DashboardUpdated`/`DashboardSnapshot`
+**P1.2 第二批——三项要动 helper**：`DashboardUpdated`/`DashboardSnapshot`
 （`emit_dashboard` 的 `emitter` 参数与 `plugins::dashboard::build_snapshot` 已无调用者）、
-`SubagentStatus`（连带 `loop_core.rs::parse_subagent_status_tag` 只剩测试在用）、
+`SubagentStatus`（连带 `loop_core.rs:85::parse_subagent_status_tag` 只剩测试在用）、
 `SessionMetaChanged`（`engine_title.rs` 的直发 channel helper 是它专属）。
-调用点在 `loop_core.rs` / `loop_dispatch_control.rs`——这次合并之后它们是新的冲突高发面。
+调用点集中在 `loop_core.rs` / `loop_dispatch_control.rs`。**这两文件当前已无未提交改动**
+（`main@82b3755` 起工作区干净、只有我一个会话在动），所以不再是阻塞项——
+但改函数签名要同时动 `loop_core.rs` 的 3 处 `emit_dashboard` 调用，属于会冲突的面，
+建议单独一次提交并跑 `qaqh-runtime` 全量。
 
 **5 项要人表态**（本线一律没碰）：`SessionStateChanged`（6 个集成测试靠它拿权威 seed）、
-`OperationCompleted`/`OperationFailed`（`pending_store.rs` 曾写明是 undo/设置/重载回执的
-意图终态——**注意 `b44f84a` 刚把 v2 命令回执接回 canonical fact 因果链并摘了 TTL 路径，
-这一项的前提已经变了，要重查**）、`SkillsUpdated`、`ToolStarted`、
+`OperationCompleted`/`OperationFailed`、`SkillsUpdated`、`ToolStarted`、
 `AgentLifecycleChanged` 的 `Booting/Stopping/Stopped`。
+
+其中 `Operation*` / `SkillsUpdated` / `SessionStateChanged` 三项，**代码里已经把理由写明**：
+`pending_store.rs:310-314` —— v1 的 `SkillsUpdated`/`OperationCompleted`/`OperationFailed`/
+`SessionStateChanged` 在 canonical fact 侧**无一比一对应物**（spec §6 冻结了 canonical log
+磁盘格式，暂不补 fact），所以这些命令的回执**靠 `RECEIPT_TTL` 过期而非事件折叠**收口
+（`RECEIPT_TTL` 仍在 `pending_store.rs:130,162,220,227,285,418-424` 活跃使用；
+`b44f84a` 接的是 `causation_for_command`（`qaqh-session/src/canonical/identity.rs:219`）
+把 UUID 客户端 id 归一到 ULID 车道，**没有**摘除 TTL——我上一版文档写"前提已变、TTL 已摘"
+是错的，已更正）。也就是说：删这三个事件不是"删个死枚举"，而是**在 fact 侧还没有对应物时
+把仅剩的 TTL 兜底也拿走**。要删必须先补 fact（属 P3/spec §6），否则就是行为回退。
 
 **P3 独立工程**：`LegacyWriterFacade` 双栅栏收敛为单一 `events.lock`；BETA-01 目录名 =
 canonical id（启用 `rename_session`、退役 seed 目录解析）；`to_tool_result()` 下游改吃
@@ -111,12 +128,13 @@ bash scripts/v2-legacy-compat-probe.sh                    # 删 P2 兼容项前�
 
 ① P2 剩余 8 项（01/02/04 一批、08 单独一次、10/11/12/13 config 一批），每项先跑探针再砍，
 每批跑"该箱编译 + 该箱测试"
-→ ② P1.2 第二批（要动 helper，且 `loop_core.rs` 面刚被并行合并大改，等它冷却）
-→ ③ `Operation*` 前提已被 `b44f84a`（回执接回 canonical fact 因果链 + 摘 TTL）改掉，
-重查后再让 owner 表态
+→ ② P1.2 第二批三项（要动 helper 与 `loop_core.rs` 的 3 处调用签名；工作区已干净，可以直接做）
+→ ③ 把 `Operation*`/`SkillsUpdated`/`SessionStateChanged` 的 fact 对应物补上（spec §6），
+**有 fact 之后才能谈删这三个事件**，否则是行为回退（见 §四）
 → ④ P3 独立工程。
 
-（原先排在前面的"结掉 §二 那条回归声称"已在本轮实测结论中结掉，不再占用顺序。）
+（原先排在前面的"结掉 §二 那条回归声称"已在本轮实测结论中结掉，不再占用顺序。
+§四 里 owner 待表态的五项，本会话结束时仍未表态。）
 
 > 本线在 main 上完成，不再另开 worktree；worktree `E:/qaqh-backend-p2` 已随 PR 合并退场。
 
