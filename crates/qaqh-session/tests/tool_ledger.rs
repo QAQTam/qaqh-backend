@@ -1,7 +1,8 @@
 //! Durable ToolLedger core contract.
 
 use qaqh_session::canonical::{
-    CommittedFactReader, ToolLedger, ToolLedgerError, ToolRecoveryDisposition, WriterId,
+    CommittedFactReader, FactCausation, ToolLedger, ToolLedgerError, ToolRecoveryDisposition,
+    WriterId, causation_for_command, generate_ulid, ulid_from_text,
 };
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
@@ -1163,4 +1164,107 @@ fn compaction_applied_on_an_empty_log_is_rejected_by_validation() {
         matches!(&result, Err(ToolLedgerError::Canonical(_))),
         "empty log has no replace boundary; validation must reject, got {result:?}"
     );
+}
+
+/// 2026-10-05 回归（`docs/bug-ringing-v2-commands-stuck-in-running.md`）：命令回执
+/// 的终态折叠只认 canonical fact 上的 `causation_id`，而 writer 侧曾把它硬编码成
+/// `None`——v1 事件链退役后，除交互应答外没有任何命令还能落到终态。
+/// in-flight 命令 id 必须落到该次 dispatch 写出的每条 fact 上，出作用域后不再归因。
+#[test]
+fn in_flight_command_causation_lands_on_appended_facts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let uuid_command = "92455601-b53a-4f25-8df5-94124676055b";
+    let scope = FactCausation::new();
+    scope.set(Some(uuid_command.to_string()));
+    let mut ledger = open_ledger(temp.path());
+    ledger.bind_causation(scope.clone());
+
+    let call = call_id(40);
+    let execution = execution_id(40);
+    let intent_fact = ledger
+        .append_intent(
+            event_id(40),
+            None,
+            intent(&call, &execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 1,
+        )
+        .expect("append intent");
+    let finished_fact = ledger
+        .append_finished(
+            event_id(41),
+            None,
+            finished(
+                &call,
+                Some(&execution),
+                ToolTerminalStatus::Succeeded,
+                NOW_MS + 2,
+            ),
+            NOW_MS + 2,
+        )
+        .expect("append finished");
+
+    let encoded = ulid_from_text(uuid_command);
+    for fact in [&intent_fact, &finished_fact] {
+        assert_eq!(
+            fact.causation_id.as_ref().map(|id| id.as_str()),
+            Some(encoded.as_str()),
+            "facts written while a command is in flight must name it"
+        );
+        fact.validate()
+            .expect("a client UUID command id must land on the ULID causation lane");
+    }
+
+    scope.set(None);
+    let idle_call = call_id(41);
+    let idle_execution = execution_id(41);
+    ledger
+        .append_intent(
+            event_id(42),
+            None,
+            intent(&idle_call, &idle_execution, ToolReplayCapability::NoReplay),
+            NOW_MS + 3,
+        )
+        .expect("append idle intent");
+    let idle_fact = ledger
+        .append_finished(
+            event_id(43),
+            None,
+            finished(
+                &idle_call,
+                Some(&idle_execution),
+                ToolTerminalStatus::Succeeded,
+                NOW_MS + 4,
+            ),
+            NOW_MS + 4,
+        )
+        .expect("append idle finished");
+    assert_eq!(
+        idle_fact.causation_id, None,
+        "no command is in flight outside the dispatch scope"
+    );
+}
+
+/// 命令 id 是客户端自由值（桌面提交 ULID、移动端提交 UUID），canonical 侧只有
+/// 一条 ULID 因果通道：原生 ULID 原样透传，其余一律 `ulid_from_text` 派生，
+/// 客户端选择的字符串永不原样落盘。
+#[test]
+fn causation_for_command_normalises_client_ids_onto_the_ulid_lane() {
+    let native = generate_ulid();
+    assert_eq!(
+        causation_for_command(&native).map(|id| id.0),
+        Some(native.clone()),
+        "a ULID command id keeps its own form (matches the driver_changed facts already on disk)"
+    );
+    let uuid = "92455601-b53a-4f25-8df5-94124676055b";
+    assert_eq!(
+        causation_for_command(uuid).map(|id| id.0),
+        Some(ulid_from_text(uuid)),
+        "a UUID command id derives deterministically"
+    );
+    assert_eq!(
+        causation_for_command(&"x".repeat(4096)).map(|id| id.0),
+        Some(ulid_from_text(&"x".repeat(4096))),
+        "an oversized client id still fits the 26-char lane"
+    );
+    assert_eq!(causation_for_command(""), None);
 }
