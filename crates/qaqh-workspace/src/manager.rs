@@ -13,9 +13,11 @@ use std::time::Duration;
 
 #[cfg(any(test, feature = "test-harness"))]
 use crate::ToolHandler;
+#[cfg(any(test, feature = "test-harness"))]
+use crate::tool_api::LegacyToolAdapter;
 use crate::tool_api::{
-    ErasedTool, LegacyToolAdapter, OutputBudget, ToolCapabilities, ToolDescriptor, ToolExposure,
-    ToolName, ToolSource, TypedTool, TypedToolAdapter,
+    DynamicDispatch, DynamicToolAdapter, ErasedTool, OutputBudget, ToolCapabilities,
+    ToolDescriptor, ToolExposure, ToolName, ToolSource, TypedTool, TypedToolAdapter,
 };
 use crate::{SafetyVerdict, ToolRisk};
 
@@ -130,7 +132,7 @@ pub fn build_dynamic_tool(
     tool_name: &str,
     description: &str,
     schema: serde_json::Value,
-    handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
+    dispatch: DynamicDispatch,
     category: crate::permission::ToolCategory,
     default_timeout: Duration,
 ) -> (String, DynamicTool) {
@@ -148,7 +150,7 @@ pub fn build_dynamic_tool(
         DynamicTool {
             def,
             effective_name: Some(tool_name.to_owned()),
-            handler_fn,
+            dispatch,
             category,
             risk: ToolRisk::Administrative,
             default_timeout,
@@ -171,16 +173,17 @@ fn dynamic_source(name: &str) -> ToolSource {
 ///
 /// 与 [`ToolHandler`] 的差异：模型面（[`qaqh_types::ToolDef`]）与路由元数据
 /// 合一，description 为自有 String（server 侧动态文本，经 2KB 截断）。
-/// `handler_fn` 只作为注册输入；注册后统一包装为 [`ErasedTool`] 与
-/// `LegacyExecutor`，refresh 换 def 不影响在飞调用。
+/// `dispatch` 只作为注册输入；注册后包装为 [`DynamicToolAdapter`]，refresh
+/// 换 def 不影响在飞调用。
 #[derive(Clone)]
 pub struct DynamicTool {
     /// 模型面（`mcp__{server}__{tool}` 命名 + schema 直通 + 截断后描述）。
     pub def: qaqh_types::ToolDef,
     /// 上游工具原名；动态注册条目由此写入，静态工具保持 None。
     pub effective_name: Option<String>,
-    /// 路由 fn（MCP 全体工具指向同一个 dispatcher，E-5）。
-    pub handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
+    /// 路由 dispatcher（MCP 全体工具指向同一个 fn 指针，E-5）；typed 契约
+    /// 见 [`DynamicDispatch`]。
+    pub dispatch: DynamicDispatch,
     /// 能力类别（S3：stdio=Exec / http=Net）——权限决策单一事实源。
     pub category: crate::permission::ToolCategory,
     /// 安全档位：MCP 调用不属本地安全模型（副作用在 server 进程内），
@@ -317,8 +320,7 @@ impl ToolManager {
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
         };
-        let adapter = LegacyToolAdapter::from_owned(descriptor.clone(), tool.handler_fn)
-            .map_err(|error| error.to_string())?;
+        let adapter = DynamicToolAdapter::new(descriptor.clone(), tool.dispatch);
         self.dynamic.insert(
             name,
             RegisteredTool {
@@ -870,8 +872,14 @@ mod tests {
     }
     // ── 动态层路由（PR-M1-4）：prepare 走注入的 dispatcher fn ──
 
-    fn marker_fn(_ctx: ToolCallCtx) -> ToolResult {
-        ToolResult::ok("mcp-dispatched")
+    fn marker_fn(
+        _name: &str,
+        _ctx: &crate::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> Result<crate::tool_api::ToolOutcome, crate::tool_api::FatalToolError> {
+        Ok(crate::tool_api::map_tool_result(ToolResult::ok(
+            "mcp-dispatched",
+        )))
     }
 
     #[test]

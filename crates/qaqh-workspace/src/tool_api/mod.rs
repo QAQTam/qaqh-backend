@@ -34,6 +34,7 @@ pub mod capabilities;
 pub mod context;
 pub mod descriptor;
 pub mod display;
+pub mod dynamic;
 pub mod erased;
 pub mod error;
 pub mod legacy;
@@ -57,6 +58,7 @@ pub use display::{
     PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolHeader, ToolMetrics,
     ToolTerminalState,
 };
+pub use dynamic::{DynamicDispatch, DynamicToolAdapter};
 pub use erased::ErasedTool;
 pub use error::{
     FatalToolError, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError,

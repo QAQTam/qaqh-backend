@@ -670,6 +670,18 @@ mod tests {
         crate::ToolResult::ok("counter incremented")
     }
 
+    /// 动态工具 dispatcher（typed 契约；同 `test_counter_handler` 的计数体）。
+    fn test_counter_dispatch(
+        _name: &str,
+        _ctx: &crate::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> Result<crate::tool_api::ToolOutcome, crate::tool_api::FatalToolError> {
+        TEST_HANDLER_COUNT.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::tool_api::map_tool_result(crate::ToolResult::ok(
+            "counter incremented",
+        )))
+    }
+
     struct WorkspaceReset;
 
     impl Drop for WorkspaceReset {
@@ -747,7 +759,7 @@ mod tests {
             "echo",
             "test dynamic tool",
             serde_json::json!({"type":"object"}),
-            test_counter_handler,
+            test_counter_dispatch,
             crate::permission::ToolCategory::Exec,
             Duration::from_secs(30),
         );

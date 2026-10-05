@@ -26,9 +26,8 @@ use qaqh_types::{
     ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader, ToolResultDisplayOutcome,
     ToolResultDisplayOutcomeState,
 };
-use qaqh_workspace::{
-    DynamicTool, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolResult, ToolStatus, now_utc8,
-};
+use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_workspace::{DynamicTool, MCP_DYNAMIC_PREFIX, ToolResult, ToolStatus, now_utc8};
 use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::McpManager;
@@ -100,14 +99,25 @@ pub fn prime_all_async() {
 }
 
 /// E-5 单一 dispatcher：全体 MCP 工具共用的 fn 指针（注册进 `DynamicTool`）。
-pub fn dispatch(ctx: ToolCallCtx) -> ToolResult {
-    dispatch_with(
+///
+/// typed 外壳：拿显式 [`ToolCallContext`]（工作区/取消/超时都显式），注册全名
+/// 由 [`qaqh_workspace::DynamicToolAdapter`] 注入。内部仍是 v1 管线的
+/// `ToolResult` 信封（模型面 §7 逐字节契约），经 [`map_tool_result`] 收口到
+/// typed 结果面。
+pub fn dispatch(
+    name: &str,
+    ctx: &ToolCallContext,
+    args: serde_json::Value,
+) -> Result<ToolOutcome, FatalToolError> {
+    let cancel = ctx.cancellation.shared_flag();
+    let timeout_hint = (!ctx.timeout.is_zero()).then(|| ctx.timeout.as_secs());
+    Ok(map_tool_result(dispatch_with(
         &manager_slot(),
-        &ctx.name,
-        &ctx.args,
-        &ctx.cancel,
-        ctx.timeout_secs,
-    )
+        name,
+        &args,
+        &cancel,
+        timeout_hint,
+    )))
 }
 
 /// [`dispatch`] 的可测形态：manager 显式注入（集成测试不经全局槽位，可并行）。
