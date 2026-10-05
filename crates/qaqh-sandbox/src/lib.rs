@@ -28,6 +28,9 @@ use std::process::Command;
 #[cfg(target_os = "linux")]
 mod linux;
 
+#[cfg(windows)]
+pub mod sbx_map;
+
 pub mod capability;
 pub mod protocol;
 
@@ -50,6 +53,9 @@ pub struct SandboxLaunch {
     /// Helper request to write to child stdin; `None` for direct launchers
     /// such as bubblewrap.
     pub request: Option<Vec<u8>>,
+    /// Windows sbx 后端:已映射的 SbxPolicy JSON(冻结契约形态),
+    /// 由 exec 旁路消费;其余后端恒 `None`。
+    pub sbx_policy_json: Option<String>,
 }
 
 /// Configure the current daemon binary as the Linux helper when the kernel
@@ -114,6 +120,38 @@ pub fn wrap_command(
         return Ok(SandboxLaunch {
             backend: SandboxBackend::None,
             request: None,
+            sbx_policy_json: None,
+        });
+    }
+    // Windows sbx 后端:显式请求 + 可行性校验 fail closed;映射出的
+    // SbxPolicy JSON 随 launch 交给 exec 旁路(direct.rs cfg(windows) 分支)。
+    #[cfg(windows)]
+    if matches!(
+        spec.backend,
+        SandboxBackend::WindowsToken | SandboxBackend::WindowsRedirect
+    ) {
+        let backend = sbx_map::resolve_windows_backend(spec)?;
+        let backend = backend.unwrap_or(SandboxBackend::WindowsToken);
+        let policy = sbx_map::map_policy(spec);
+        log::info!(
+            target: "qaqh_sandbox",
+            "{}",
+            serde_json::json!({
+                "event": "sandbox_backend_selected",
+                "requested": spec.backend,
+                "resolved": backend,
+                "network": spec.network,
+                "writable_roots": spec.writable_roots,
+                "note": "token plane enforces writes only; network policy is NOT enforced",
+            })
+        );
+        return Ok(SandboxLaunch {
+            backend,
+            request: None,
+            sbx_policy_json: Some(
+                serde_json::to_string(&policy)
+                    .map_err(|error| format!("serialize sbx policy: {error}"))?,
+            ),
         });
     }
     // 审计 H1：spec 声明与平台现实分离——非 Linux 平台当前没有强制后端，
@@ -123,6 +161,7 @@ pub fn wrap_command(
         return Ok(SandboxLaunch {
             backend: SandboxBackend::None,
             request: None,
+            sbx_policy_json: None,
         });
     }
 
@@ -154,6 +193,7 @@ pub fn wrap_command(
             Ok(SandboxLaunch {
                 backend,
                 request: None,
+                sbx_policy_json: None,
             })
         }
         SandboxBackend::LinuxLandlockSeccomp => {
@@ -162,6 +202,7 @@ pub fn wrap_command(
                     return Ok(SandboxLaunch {
                         backend: SandboxBackend::None,
                         request: None,
+                        sbx_policy_json: None,
                     });
                 }
                 return Err("Landlock/seccomp helper is not configured".into());
@@ -180,12 +221,24 @@ pub fn wrap_command(
             Ok(SandboxLaunch {
                 backend,
                 request: Some(payload),
+                sbx_policy_json: None,
             })
         }
         SandboxBackend::ProcessHardening | SandboxBackend::None => Ok(SandboxLaunch {
             backend,
             request: None,
+            sbx_policy_json: None,
         }),
+        SandboxBackend::WindowsToken | SandboxBackend::WindowsRedirect => {
+            // 非 Windows 编译不可达(spec.backend 已在此平台经上面的分支处理);
+            // Windows 上 resolve 失败时应在此之前报错,这里保底按未强制降级。
+            warn_spec_unenforced(spec);
+            Ok(SandboxLaunch {
+                backend: SandboxBackend::None,
+                request: None,
+                sbx_policy_json: None,
+            })
+        }
         SandboxBackend::Auto => unreachable!("resolve_backend removes Auto"),
     }
 }
