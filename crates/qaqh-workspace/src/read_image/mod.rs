@@ -489,8 +489,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["read_image"].legacy.is_none(),
-            "read_image still has legacy executor"
+            manager.builtins.contains_key("read_image"),
+            "read_image must be on the typed execution surface"
         );
 
         let output = ReadImageOutput {

@@ -11,11 +11,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(any(test, feature = "test-harness"))]
+use crate::ToolHandler;
 use crate::tool_api::{
     ErasedTool, LegacyToolAdapter, OutputBudget, ToolCapabilities, ToolDescriptor, ToolExposure,
     ToolName, ToolSource, TypedTool, TypedToolAdapter,
 };
-use crate::{SafetyVerdict, ToolHandler, ToolRisk};
+use crate::{SafetyVerdict, ToolRisk};
 
 // ── Execution metadata ──
 
@@ -44,15 +46,12 @@ pub struct ToolStats {
     pub files_written: Vec<String>,
 }
 
-/// 迁移期 legacy 执行面：保留 `ToolResult` 语义，避免 registry 迁移改变 wire/审计行为。
-pub(crate) type LegacyExecutor = Arc<dyn Fn(crate::ToolCallCtx) -> crate::ToolResult + Send + Sync>;
-
-/// 统一注册项：`ErasedTool` 是描述与 typed 执行面；legacy 仅保留给
-/// 尚未迁移的 v1 handler。typed 注册项的 `legacy` 为 `None`。
+/// 统一注册项：`ErasedTool` 是描述与执行面的唯一载体。v1 `ToolHandler`
+/// 由 [`LegacyToolAdapter`] 在注册时即刻包成 `ErasedTool`，执行面不再有
+/// legacy 旁路。
 pub(crate) struct RegisteredTool {
     pub(crate) descriptor: ToolDescriptor,
     pub(crate) erased: Arc<dyn ErasedTool>,
-    pub(crate) legacy: Option<LegacyExecutor>,
 }
 
 impl RegisteredTool {
@@ -194,21 +193,16 @@ pub struct DynamicTool {
 
 // ── Three-phase execution for parallel tool support ──
 
-/// 已准备调用的执行面。legacy 保留 `ToolCallCtx`/宿主 effects 语义；
-/// typed 直接进入 `ErasedTool`，由适配器负责投影。
-#[derive(Clone)]
-pub(crate) enum PreparedExecutor {
-    Legacy(LegacyExecutor),
-    Typed(Arc<dyn ErasedTool>),
-}
-
 /// Prepared tool call, ready for execution without holding the manager lock.
 pub(crate) struct PreparedCall {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) effective_tool_name: Option<String>,
-    pub(crate) executor: PreparedExecutor,
-    pub(crate) ctx: crate::ToolCallCtx,
+    pub(crate) executor: Arc<dyn ErasedTool>,
+    /// 生效超时：调用方显式值覆盖 descriptor 默认值。typed 执行面据此定稿
+    /// [`crate::tool_api::ToolCallContext::timeout`]（显式上下文在准入侧构造，
+    /// 超时未注入时为零值，此处补默认档）。
+    pub(crate) effective_timeout: Duration,
     pub(crate) audit_args: serde_json::Value,
 }
 
@@ -240,17 +234,14 @@ impl ToolManager {
     pub fn register(&mut self, handler: ToolHandler) {
         let key = handler.key.clone();
         let capabilities = crate::tool_capabilities::builtin_capabilities(&key).unwrap_or_default();
-        let adapter = LegacyToolAdapter::new_with_capabilities(handler.clone(), capabilities)
+        let adapter = LegacyToolAdapter::new_with_capabilities(handler, capabilities)
             .unwrap_or_else(|error| panic!("invalid builtin tool descriptor for {key}: {error}"));
         let descriptor = adapter.descriptor();
-        let handler_fn = handler.handler;
-        let legacy: LegacyExecutor = Arc::new(handler_fn);
         self.builtins.insert(
             key,
             RegisteredTool {
                 descriptor,
                 erased: Arc::new(adapter),
-                legacy: Some(legacy),
             },
         );
     }
@@ -272,7 +263,6 @@ impl ToolManager {
             RegisteredTool {
                 descriptor,
                 erased: Arc::new(adapter),
-                legacy: None,
             },
         );
     }
@@ -329,14 +319,11 @@ impl ToolManager {
         };
         let adapter = LegacyToolAdapter::from_owned(descriptor.clone(), tool.handler_fn)
             .map_err(|error| error.to_string())?;
-        let handler_fn = tool.handler_fn;
-        let legacy: LegacyExecutor = Arc::new(handler_fn);
         self.dynamic.insert(
             name,
             RegisteredTool {
                 descriptor,
                 erased: Arc::new(adapter),
-                legacy: Some(legacy),
             },
         );
         Ok(())
@@ -495,8 +482,8 @@ impl ToolManager {
             });
         }
 
-        // 内置/动态统一路由视图：执行元数据只从 descriptor 读取，legacy
-        // executor 是迁移期桥，typed executor 后续接同一 RegisteredTool。
+        // 内置/动态统一路由视图：执行元数据只从 descriptor 读取；执行统一走
+        // `ErasedTool`（v1 handler 已在注册时经适配器包装）。
         let tool = match self.builtins.get(name).or_else(|| self.dynamic.get(name)) {
             Some(tool) => tool,
             None => {
@@ -518,16 +505,15 @@ impl ToolManager {
         let descriptor = &tool.descriptor;
 
         let timeout_secs = timeout_secs.unwrap_or(descriptor.default_timeout.as_secs());
-        let skill_effects = Arc::new(Mutex::new(Vec::new()));
         let ctx = crate::ToolCallCtx {
             id: id.clone(),
             name: name.to_string(),
             action: action.to_string(),
             args: args.clone(),
-            tx_progress: progress_tx.clone(),
+            tx_progress: progress_tx,
             timeout_secs: Some(timeout_secs),
             cancel: cancel_flag.clone(),
-            skill_effects: skill_effects.clone(),
+            skill_effects: Arc::new(Mutex::new(Vec::new())),
         };
         let in_workspace = is_path_in_workspace(&ctx, &descriptor.risk, descriptor.category);
         match crate::safety::SafetyPolicy::evaluate(descriptor.risk.clone(), in_workspace) {
@@ -549,32 +535,15 @@ impl ToolManager {
             SafetyVerdict::Allow => {}
         }
 
-        self.inflight_tasks.insert(id.clone(), cancel_flag.clone());
-
-        let audit_args = args.clone();
-        let ctx = crate::ToolCallCtx {
-            id: id.clone(),
-            name: name.to_string(),
-            action: action.to_string(),
-            args,
-            tx_progress: progress_tx,
-            timeout_secs: Some(timeout_secs),
-            cancel: cancel_flag,
-            skill_effects,
-        };
-
-        let executor = match tool.legacy.as_ref() {
-            Some(legacy) => PreparedExecutor::Legacy(legacy.clone()),
-            None => PreparedExecutor::Typed(tool.erased.clone()),
-        };
+        self.inflight_tasks.insert(id.clone(), cancel_flag);
 
         Ok(PreparedCall {
             id,
             name: name.to_string(),
             effective_tool_name: descriptor.display_name.clone(),
-            executor,
-            ctx,
-            audit_args,
+            executor: tool.erased.clone(),
+            effective_timeout: Duration::from_secs(timeout_secs),
+            audit_args: args,
         })
     }
 
@@ -932,11 +901,34 @@ mod tests {
             .map_err(|report| report.content)
             .expect("dynamic tool prepare should succeed");
         assert_eq!(prepared.effective_tool_name.as_deref(), Some("echo"));
-        let result = match prepared.executor {
-            PreparedExecutor::Legacy(legacy) => legacy(prepared.ctx.clone()),
-            PreparedExecutor::Typed(_) => panic!("dynamic tool must stay on legacy bridge"),
-        };
-        assert_eq!(result.model_text(), "mcp-dispatched");
+        assert_eq!(
+            prepared.effective_timeout,
+            std::time::Duration::from_secs(30),
+            "生效超时 = descriptor 默认（调用方未显式给定）"
+        );
+        let outcome = prepared
+            .executor
+            .execute(
+                crate::tool_api::ToolCallContext {
+                    call_id: "id-1".to_owned(),
+                    session_id: "s1".to_owned(),
+                    workspace_root: std::path::PathBuf::from("/tmp/ws"),
+                    mode: crate::tool_api::AgentMode::Code,
+                    permission_level: crate::permission::PermissionLevel::ReadOnly,
+                    sandbox: crate::tool_api::SandboxMode::Main,
+                    sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
+                        std::path::PathBuf::from("/tmp/ws"),
+                    ),
+                    exec_default_shell: None,
+                    timeout: prepared.effective_timeout,
+                    cancellation: crate::tool_api::CancellationToken::new(),
+                    progress: None,
+                    source: crate::tool_api::ToolCallSource::Model,
+                },
+                serde_json::json!({}),
+            )
+            .expect("dynamic tool executes through ErasedTool");
+        assert_eq!(outcome.model.text, "mcp-dispatched");
 
         let report = match mgr.prepare_req(
             "id-2".to_owned(),

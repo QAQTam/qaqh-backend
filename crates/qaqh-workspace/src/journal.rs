@@ -929,8 +929,8 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins["journal"].legacy.is_none(),
-            "journal still has legacy executor"
+            manager.builtins.contains_key("journal"),
+            "journal must be on the typed execution surface"
         );
 
         with_temp_journal(|| {

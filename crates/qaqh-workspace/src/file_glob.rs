@@ -479,9 +479,10 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         let registered = manager.builtins.get("glob").expect("glob registered");
-        assert!(
-            registered.legacy.is_none(),
-            "glob must not use legacy executor"
+        assert_eq!(
+            registered.descriptor.name.as_str(),
+            "glob",
+            "glob must be on the typed execution surface"
         );
         assert_eq!(
             registered.descriptor.input_schema["required"],

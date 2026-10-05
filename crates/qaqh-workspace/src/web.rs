@@ -347,7 +347,7 @@ mod tests {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         let registered = manager.builtins.get("web_fetch").expect("registered");
-        assert!(registered.legacy.is_none());
+        assert_eq!(registered.descriptor.name.as_str(), "web_fetch");
         assert_eq!(
             registered.descriptor.input_schema["required"],
             serde_json::json!(["url"])
