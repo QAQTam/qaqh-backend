@@ -7,7 +7,7 @@ import type { PendingInteraction } from "./PendingInteraction";
 import type { SessionState } from "./SessionState";
 
 /**
- * control 频道 `state`（同样不派生 `PartialEq`，理由见 [`ConversationState`]）。
+ * control 频道 `state`（不派生 `PartialEq`：DTO 消费侧不需要相等比较）。
  */
 export type ControlState = { session_state: SessionState | null, activity: ActivityState | null, agent_lifecycle: AgentLifecycleState | null, 
 /**

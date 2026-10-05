@@ -1,7 +1,6 @@
 //! 中立领域事件（DomainEvent）。
 //!
 //! - 事件按频道拆分（Control / Conversation / Tool），由统一枚举 `DomainEvent` 聚合。
-//! - 每个事件类型通过 `delivery()` 显式声明可靠性等级（PLAN 硬规则）。
 //! - 本模块不得引用 legacy 类型（`Agent2Ui`）或 wire 类型（`Ringing*Envelope`）。
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +11,6 @@ use qaqh_types::UsageInfo;
 pub use qaqh_types::{ContentRef, ToolResult};
 
 use crate::channel::RingingChannel;
-use crate::delivery::Delivery;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 共享支持类型
@@ -431,18 +429,6 @@ pub enum ConversationEvent {
     },
 }
 
-impl ConversationEvent {
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            ConversationEvent::ProviderToolStatus { .. }
-            | ConversationEvent::UsageUpdated { .. }
-            | ConversationEvent::CompactProgress { .. }
-            | ConversationEvent::BlockCheckpoint { .. } => Delivery::Replaceable,
-            _ => Delivery::Reliable,
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool 频道
 // ─────────────────────────────────────────────────────────────────────────────
@@ -526,13 +512,6 @@ pub enum ToolEvent {
 }
 
 impl ToolEvent {
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            ToolEvent::ToolCallPrepared { .. } => Delivery::Replaceable,
-            _ => Delivery::Reliable,
-        }
-    }
-
     /// 该事件关联的 tool_call_id（ToolCallPrepared/Started/Finished/PermissionRequested 恒有）。
     pub fn tool_call_id(&self) -> Option<&str> {
         match self {
@@ -691,23 +670,11 @@ pub enum ControlEvent {
     },
 }
 
-impl ControlEvent {
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            ControlEvent::DashboardUpdated { .. } | ControlEvent::DashboardSnapshot { .. } => {
-                Delivery::Replaceable
-            }
-            _ => Delivery::Reliable,
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 统一领域事件入口
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 统一领域事件。`channel()` 决定进入哪个频道 router；
-/// `delivery()` 声明可靠性等级，供 wire envelope 与 daemon 队列使用。
+/// 统一领域事件。`channel()` 决定进入哪个频道 router。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -724,14 +691,6 @@ impl DomainEvent {
             DomainEvent::Control(_) => RingingChannel::Control,
             DomainEvent::Conversation(_) => RingingChannel::Conversation,
             DomainEvent::Tool(_) => RingingChannel::Tool,
-        }
-    }
-
-    pub fn delivery(&self) -> Delivery {
-        match self {
-            DomainEvent::Control(e) => e.delivery(),
-            DomainEvent::Conversation(e) => e.delivery(),
-            DomainEvent::Tool(e) => e.delivery(),
         }
     }
 }
@@ -814,44 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_classification_matches_plan() {
-        assert_eq!(
-            ConversationEvent::RoundDelta {
-                turn_id: "t".into(),
-                round_num: 0,
-                kind: RoundDeltaKind::Answering,
-                delta: "x".into(),
-            }
-            .delivery(),
-            // 增量文本必须可靠投递；覆盖/合并会在断线重连时吞字。
-            Delivery::Reliable
-        );
-        assert_eq!(
-            ToolEvent::ToolStarted {
-                tool_call_id: "c".into(),
-                turn_id: "t".into(),
-                round_num: 0,
-                name: "exec".into(),
-            }
-            .delivery(),
-            Delivery::Reliable
-        );
-        assert_eq!(
-            ControlEvent::DashboardUpdated {
-                hp_connected: true,
-                session_id: "s".into(),
-                tool_calls_total: 0,
-                tool_failures: 0,
-                current_phase: "idle".into(),
-                streaming: false,
-            }
-            .delivery(),
-            Delivery::Replaceable
-        );
-    }
-
-    #[test]
-    fn provider_tool_status_is_replaceable() {
+    fn provider_tool_status_round_trip() {
         let event = ConversationEvent::ProviderToolStatus {
             turn_id: "t".into(),
             round_num: 0,
@@ -859,7 +781,6 @@ mod tests {
             tool_kind: "web_search".into(),
             state: ProviderToolState::Completed,
         };
-        assert_eq!(event.delivery(), Delivery::Replaceable);
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"state\":\"completed\""));
         assert!(json.contains("\"call_id\":\"ws-1\""));
@@ -891,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_event_channel_and_delivery_delegation() {
+    fn domain_event_channel_delegation() {
         let ev = DomainEvent::Tool(ToolEvent::ToolCallPrepared {
             tool_call_id: "c".into(),
             turn_id: "t".into(),
@@ -900,6 +821,5 @@ mod tests {
             args_so_far: "{}".into(),
         });
         assert_eq!(ev.channel(), RingingChannel::Tool);
-        assert_eq!(ev.delivery(), Delivery::Replaceable);
     }
 }
