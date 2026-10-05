@@ -53,6 +53,73 @@ pub(crate) fn command_fingerprint(
     qaqh_types::sha256_hex(payload.as_bytes())
 }
 
+/// 命令所需的最低 scope。`SessionAttach` 只建立归属（不触碰会话 actor）→ `View`；
+/// 其余一律 `Interact`。admin 由 `Identity::scope()` 返回 `Admin` 恒通过。
+fn required_scope_for_command(envelope: &RingingV2CommandEnvelope) -> Scope {
+    match &envelope.command {
+        qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach { .. }) => {
+            Scope::View
+        }
+        _ => Scope::Interact,
+    }
+}
+
+/// 命令的归属目标会话。
+///
+/// 优先取显式 `envelope.session_id`；会话生命周期命令的目标在其自身字段里。
+/// 建立归属的命令（`SessionCreate`/`SessionResume`/`SessionAttach`）返回 `None`
+/// ——它们是「先 attach 再操作」的入口，必须豁免 owns 检查，否则移动端永远
+/// 无法取得任何会话的归属。
+fn command_ownership_target(envelope: &RingingV2CommandEnvelope) -> Option<&str> {
+    use qaqh_domain::ControlCommand as C;
+    use qaqh_ringing::RingingCommand as R;
+    match &envelope.command {
+        R::Control(C::SessionCreate { .. })
+        | R::Control(C::SessionResume { .. })
+        | R::Control(C::SessionAttach { .. }) => return None,
+        R::Control(C::SessionClose { session_id })
+        | R::Control(C::SessionArchive { session_id })
+        | R::Control(C::SessionUnarchive { session_id })
+        | R::Control(C::SessionDelete { session_id }) => {
+            if !session_id.is_empty() {
+                return Some(session_id.as_str());
+            }
+        }
+        _ => {}
+    }
+    envelope.session_id.as_deref().filter(|s| !s.is_empty())
+}
+
+/// daemon 鉴权身份 → 内部信封 actor（S6 归因）。
+///
+/// admin → `user`/`"user"`（保持改造前语义）；device → `api`/`device_id`
+/// （`display_name` 取注册表名，供账本可读）。`id` 由 token 反推，不采信客户端自报。
+fn identity_worker_actor(
+    state: &AppState,
+    identity: &Identity,
+) -> Option<qaqh_ringing::WorkerActor> {
+    match identity {
+        Identity::Admin => Some(qaqh_ringing::WorkerActor {
+            kind: "user".into(),
+            id: "user".into(),
+            display_name: None,
+        }),
+        Identity::Device { device_id, .. } => {
+            let display_name = state
+                .devices
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(device_id)
+                .map(|record| record.name.clone());
+            Some(qaqh_ringing::WorkerActor {
+                kind: "api".into(),
+                id: device_id.clone(),
+                display_name,
+            })
+        }
+    }
+}
+
 /// 进程内命令入口（spec 阶段 1.1）。
 ///
 /// 承接原 v1 `handle_command` 的解析后逻辑，但不做 HTTP body 组装：
@@ -62,9 +129,28 @@ pub(crate) fn command_fingerprint(
 pub(crate) async fn execute_command(
     state: &AppState,
     headers: &HeaderMap,
+    identity: &Identity,
     mut envelope: RingingV2CommandEnvelope,
 ) -> (StatusCode, RingingV2CommandAck) {
-    let Some(session_id) = get_session_id(headers) else {
+    // scope：按命令分级。`SessionAttach` 仅建立会话归属、不触碰 actor（见
+    // `ControlCommand::SessionAttach` 文档），view 档即可——否则 view 档设备永远
+    // 无法 attach，视察型 app（spec §7）作废。其余命令（消息/审批应答/driver
+    // claim/release/close/...）需 interact。admin 全权。
+    let required = required_scope_for_command(&envelope);
+    if !identity.scope().at_least(required) {
+        return (
+            StatusCode::FORBIDDEN,
+            reject_ack(
+                envelope.command_id.clone(),
+                "insufficient_scope",
+                format!("command requires {required:?} scope"),
+            ),
+        );
+    }
+    // 解析调用方 lease 并绑定身份：device 的 lease 必须由本设备建立（防拿他人 cs
+    // 冒充其 lease）。无 lease / 未绑定 / 已过期 → 401。
+    let Some(session_id) = super::v2::caller_lease_bound_to_identity(state, headers, identity)
+    else {
         return (
             StatusCode::UNAUTHORIZED,
             reject_ack(
@@ -74,21 +160,6 @@ pub(crate) async fn execute_command(
             ),
         );
     };
-    let session_active = state
-        .leases
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_active_session(&session_id);
-    if !session_active {
-        return (
-            StatusCode::UNAUTHORIZED,
-            reject_ack(
-                String::new(),
-                "lease_required",
-                "lease is not active".into(),
-            ),
-        );
-    }
     if let Err(code) = envelope.validate() {
         return (
             StatusCode::BAD_REQUEST,
@@ -98,6 +169,28 @@ pub(crate) async fn execute_command(
                 "invalid Ringing v2 command envelope".into(),
             ),
         );
+    }
+    // 非 admin：命令只能作用于本 lease 拥有的会话。建立归属的生命周期命令
+    // （create/resume/attach）豁免——移动端照常先 attach 再操作。admin（桌面壳 /
+    // CLI / TUI / 探针）全程豁免，行为不变。
+    if !identity.is_admin()
+        && let Some(target) = command_ownership_target(&envelope)
+    {
+        let owns = state
+            .leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .owns_session(&session_id, target);
+        if !owns {
+            return (
+                StatusCode::FORBIDDEN,
+                reject_ack(
+                    envelope.command_id.clone(),
+                    "forbidden_not_owner",
+                    "lease does not own the target session".into(),
+                ),
+            );
+        }
     }
     state
         .test_hooks
@@ -552,7 +645,8 @@ pub(crate) async fn execute_command(
         envelope.command_id.clone(),
         worker_command,
     )
-    .with_expected_revision(envelope.expected_revision);
+    .with_expected_revision(envelope.expected_revision)
+    .with_actor(identity_worker_actor(state, identity));
     if let Err(e) = state.service.send_ringing_command(&session_id, &worker_env) {
         state
             .pending

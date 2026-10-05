@@ -9,6 +9,7 @@ use super::types::*;
 use qaqh_domain::{ControlCommand, DomainEvent};
 use qaqh_session::canonical::{causation_for_command, generate_ulid};
 use qaqh_session::session_fact_v2::EventId;
+use qaqh_session::session_fact_v2::ActorRef;
 
 use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
 
@@ -76,6 +77,7 @@ impl Loop {
         command: ControlCommand,
         command_id: &str,
         expected_revision: u64,
+        actor: Option<ActorRef>,
     ) {
         match command {
             ControlCommand::SessionCreate {
@@ -225,6 +227,7 @@ impl Loop {
                     &interaction_id,
                     command_id,
                     &answers,
+                    actor.clone(),
                 );
                 let _ = ctx;
                 if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
@@ -252,6 +255,7 @@ impl Loop {
                     &mut self.session.tool,
                     &interaction_id,
                     command_id,
+                    actor.clone(),
                 );
                 let _ = ctx;
                 if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
@@ -299,6 +303,7 @@ impl Loop {
                     approved,
                     &message.unwrap_or_default(),
                     autonomous,
+                    actor,
                 );
                 let _ = ctx;
                 if !self.admit_legacy_interaction_resolution(command_id, &interaction_id, &outcome)
