@@ -189,6 +189,13 @@ pub fn verify_data_root(root: &Path) -> io::Result<PathBuf> {
 }
 
 fn validate_data_root_location(root: &Path, owner_home: &Path) -> io::Result<()> {
+    // 测试/烟测逃生口：显式 `QAQH_ALLOW_TEST_DATA_ROOT=1` 时放行任意数据根，让
+    // smoke / 集成测试用**隔离目录**，不再被迫污染真实 `<USERPROFILE>\.qaqh`
+    // （无此口子时，Windows 守卫会把测试/烟测全赶到真实根，泄漏的会话会进入
+    // `session.list`，干扰前端）。生产路径不设该变量，守卫语义不变。
+    if test_data_root_allowed() {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
         let expected = owner_home.join(".qaqh");
@@ -265,6 +272,13 @@ fn verify_data_root_paths(
         ));
     }
     Ok(canonical.to_path_buf())
+}
+
+/// 是否放行任意数据根（测试/烟测逃生口）。显式设为非空且非 `0` 时生效。
+fn test_data_root_allowed() -> bool {
+    std::env::var("QAQH_ALLOW_TEST_DATA_ROOT")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false)
 }
 
 fn canonical_home() -> io::Result<PathBuf> {

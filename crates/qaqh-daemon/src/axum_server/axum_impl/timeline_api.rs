@@ -73,9 +73,6 @@ pub(crate) async fn handle_timeline_snapshot(
     Path(session_id): Path<String>,
     Query(q): Query<TimelineQuery>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };

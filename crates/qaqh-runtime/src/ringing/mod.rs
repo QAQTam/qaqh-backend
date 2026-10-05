@@ -5,6 +5,7 @@
 
 pub mod attachment;
 pub mod content_store;
+pub mod device_registry;
 pub mod driver_watch;
 pub mod hub;
 pub mod lease_store;
@@ -19,6 +20,7 @@ pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;
 pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
+pub use device_registry::{DeviceRecord, DeviceRegistry, Scope};
 pub use driver_watch::RingingDriverWatch;
 pub use lease_store::RingingLeaseStore;
 pub use pending_store::{ExistingCommandReceipt, PendingCommandStore};

@@ -38,4 +38,5 @@ pub use protocol::{
 pub use v2::*;
 pub use worker::{
     RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
+    WorkerActor,
 };

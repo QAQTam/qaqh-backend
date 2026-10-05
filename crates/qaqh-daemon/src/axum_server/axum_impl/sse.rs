@@ -130,9 +130,6 @@ pub(crate) async fn handle_timeline_events(
     Path(session_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };
