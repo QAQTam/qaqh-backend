@@ -11,66 +11,25 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use qaqh_domain::{DomainEvent, RingingChannel, TimelineEntry};
-use qaqh_ringing::{RingingChannelSnapshot, is_safe_integer};
+use qaqh_domain::{RingingChannel, TimelineEntry};
 use qaqh_session::SessionManager;
 use tokio::sync::broadcast;
 
 use super::content_store::{ContentEntry, ContentQuotaExceeded, ContentStore};
-use super::projection::SnapshotProjector;
-use super::sequencer::Sequencer;
 use crate::timeline_store::TimelineStore;
 use crate::{TimelineAppender, TimelineLiveEntry};
 
-/// 三频道 live broadcast 与 timeline live broadcast 的环形缓冲容量。
+/// timeline live broadcast 的环形缓冲容量。
 /// 溢出即 `Lagged`——由 daemon SSE 侧发终止帧让客户端重连重定基。
 pub(super) const LIVE_BROADCAST_CAPACITY: usize = 1024;
 
 /// Non-terminal timeline changes are checkpointed at most once per interval.
 /// Live delivery is still immediate; only the full snapshot rewrite is paced.
 pub(super) const TIMELINE_PERSIST_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Overlay persisted conversation data onto the live event projection.
-/// Metadata used by native clients belongs to the same authoritative
-/// bootstrap state as turns and usage; keeping this list centralized prevents
-/// a newly added field from silently disappearing when the projection already
-/// contains its structural `{seed, channel, revision}` object.
-fn merge_persisted_conversation_state(
-    projected: &mut serde_json::Value,
-    persisted: serde_json::Value,
-) {
-    const PERSISTED_KEYS: &[&str] = &[
-        "turns",
-        "total_turns",
-        "has_more",
-        "usage",
-        "usage_totals",
-        "usage_requests",
-        "cache_reported_requests",
-        "model",
-        "context_limit",
-    ];
-    match projected.as_object_mut() {
-        Some(obj) => {
-            for key in PERSISTED_KEYS {
-                if let Some(value) = persisted.get(*key) {
-                    obj.insert((*key).to_string(), value.clone());
-                }
-            }
-        }
-        None => *projected = persisted,
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct SessionChannelState {
-    projection: SnapshotProjector,
-    last_stream_seq: u64,
-}
 
 #[derive(Debug)]
 pub(super) struct TimelinePersistence {
@@ -87,130 +46,15 @@ pub(super) struct TimelinePersistence {
     pub(super) terminal_sessions: Arc<Mutex<HashSet<String>>>,
     pub(super) join: Option<JoinHandle<()>>,
 }
-
-impl SessionChannelState {
-    fn new(channel: RingingChannel) -> Self {
-        let _ = channel; // 分片键沿用 (channel, seed)；state 本身已无 channel 负载
-        Self {
-            projection: SnapshotProjector::new(),
-            last_stream_seq: 0,
-        }
-    }
-}
-
-/// `(channel, seed)` → `SeedChannelState` 的分片槽。
-///
-/// 用 `Arc<Mutex<_>>` 而非直接 `Mutex<_>` 的原因：`forget_seed` 需要在**不持
-/// 分片表锁**的前提下把某个 seed 的槽从表里摘掉（否则摘除期间其他 seed 的
-/// publish 会被串行化），同时保证「摘除瞬间已在途的持槽者」继续操作同一实例；
-/// 摘除后槽由在途者自然释放，期间的并发 publish 会在表里重新 insert 一个
-/// 新槽（与 `forget_seed` 的既有竞态语义一致：调用方保证已 join worker）。
-type SessionChannelSlot = Arc<Mutex<SessionChannelState>>;
-
-/// 一个频道的全部 seed 分片（BUG-2026-09-13-33）。
-///
-/// `seeds` 的 `RwLock` 只在**登记/摘除分片槽**时短暂写入，读路径（publish /
-/// replay / snapshot）取读锁拿到 `Arc<SeedChannelSlot>` 后立刻释放，真正的
-/// 事件提交与投影只在 per-(channel, seed) 槽锁内进行——这正是 BUG-08 收尾
-/// 要消除的「跨会话内存态共享单锁」。
-#[derive(Debug, Default)]
-pub(super) struct ChannelShards {
-    sessions: RwLock<HashMap<String, SessionChannelSlot>>,
-}
-
-impl ChannelShards {
-    /// 取（必要时登记）该 seed 的槽。
-    ///
-    /// 同 seed ⇒ 同一个 `Arc` ⇒ 同一把锁：这是「全局 (channel, seed) 互斥」
-    /// 的保证点。登记是一次短写锁 + 一次 `SeedChannelState::new`，不含任何
-    /// I/O；并发首访同一 seed 时可能重复构造 state，最终只保留一个（未被保留
-    /// 的那个在 `insert` 后即被丢弃，不会有第二个线程继续写它）。
-    #[cfg(test)]
-    fn contains(&self, session_id: &str) -> bool {
-        self.sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(session_id)
-    }
-
-    fn slot(&self, channel: RingingChannel, session_id: &str) -> SessionChannelSlot {
-        if let Some(slot) = self
-            .sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(session_id)
-        {
-            return Arc::clone(slot);
-        }
-        let mut seeded = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-        Arc::clone(
-            seeded
-                .entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(SessionChannelState::new(channel)))),
-        )
-    }
-
-    /// 只读查找：不登记（回放/快照等只读路径不得因查询而建条目）。
-    fn slot_if_present(&self, session_id: &str) -> Option<SessionChannelSlot> {
-        self.sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(session_id)
-            .map(Arc::clone)
-    }
-
-    /// 摘除某 seed 的槽（`forget_seed` 用）；返回是否摘除成功。
-    fn remove(&self, session_id: &str) -> bool {
-        self.sessions
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(session_id)
-            .is_some()
-    }
-}
-
 /// Ringing daemon 运行时聚合。
 pub struct RingingHub {
     pub(super) epoch: String,
-    pub(super) sequencer: Sequencer,
     /// 磁盘 timeline seed 清单（懒加载索引；`ensure_timeline_loaded` 按需恢复）。
     pub(super) disk_timeline_sessions: Mutex<HashSet<String>>,
     /// 懒加载串行化（per-seed）：timeline 恢复与 seal 提交的首访互斥点。
     pub(super) lazy_loads: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 大内容外置存储（会话所有权 + TTL）。
     pub(super) content_store: Mutex<ContentStore>,
-    /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
-    /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
-    ///
-    /// BUG-2026-09-13-33（BUG-08 收尾）：全局单锁 → 两级分片锁表。
-    /// 顶层锁只保护「频道登记 / 频道枚举」，临界区是 map 操作，**绝不含 I/O、
-    /// 投影或事件提交**；热路径取到 `Arc<SeedChannelSlot>` 后立即释放顶层锁，
-    /// 只在 per-(channel, seed) 槽锁内提交。跨会话不再互相串行。
-    ///
-    /// # 锁序（禁止成环）
-    ///
-    /// `channels`(顶层) → `ChannelShards.seeds`(读写锁) → 槽锁(per-(channel,seed))
-    /// → 叶子锁(`live` / `live_interactions` / `content_store`)。
-    ///
-    /// 1. 顶层锁**从不**在持有其他 hub 锁时获取（`channel_shards` 先取顶层、
-    ///    后取 `seeds`，且中途不回调其他锁）；取到分片后即释放顶层锁。
-    /// 2. `seeds` 读/写锁的临界区只做 map 操作，绝不持锁进入槽锁或叶子锁。
-    /// 3. 多把槽锁**从不**同时持有：`forget_seed` 逐 seed 取放，单个 seed
-    ///    处理完立即 drop 槽锁。
-    /// 5. 与既有 per-seed 装载锁 `lazy_loads` 并存为**单向序**：
-    ///    `lazy_loads`(per-seed) → `channels`/`seeds`/槽锁（先装载、后提交）。
-    ///    反向无路径（槽锁内不做任何 `lazy_load_lock`），故无环；
-    ///    且 `lazy_loads` 与槽锁槽表无嵌套（`Drop` 先摘槽表快照，再逐个取
-    ///    槽锁，两者从不重叠持有）。
-    pub(super) channels: Mutex<HashMap<RingingChannel, Arc<ChannelShards>>>,
-    /// 每频道的**发布水位**：已提交的最大 `stream_seq`（由 `apply_seal_event`
-    /// 推进；v1 广播删除后无合并消费者，保留字段对齐 spec 阶段 3d 清单）。
-    pub(super) live_watermark: Mutex<HashMap<RingingChannel, u64>>,
-    /// 当前进程生命周期内发布且未 resolved 的活交互（seed → interaction_id）。
-    /// journal 重放的幽灵交互不在此表：daemon 重启后表为空，bootstrap 孤儿
-    /// 收尾据此区分「等待用户响应的活交互」（保护，不 seal）与「daemon 重启
-    /// 遗留的幽灵交互」（seal）。worker 死亡/重启路径用 force 无视该守卫。
-    pub(super) live_interactions: Mutex<HashMap<String, String>>,
     /// #345：活交互正文在 content store 里的归属（seed → (interaction_id, content_id)）。
     ///
     /// 交互正文是**展示面旁路**（canonical fact 只存 ref）：正文在
@@ -268,13 +112,9 @@ impl RingingHub {
         let (timeline_live, _) = broadcast::channel(LIVE_BROADCAST_CAPACITY);
         Self {
             epoch,
-            sequencer: Sequencer::new(),
             disk_timeline_sessions: Mutex::new(HashSet::new()),
             lazy_loads: Mutex::new(HashMap::new()),
             content_store: Mutex::new(content_store),
-            channels: Mutex::new(HashMap::new()),
-            live_watermark: Mutex::new(HashMap::new()),
-            live_interactions: Mutex::new(HashMap::new()),
             live_interaction_content: Mutex::new(HashMap::new()),
             live_workers: Mutex::new(std::collections::HashSet::new()),
             timeline: Arc::new(Mutex::new(TimelineAppender::new())),
@@ -285,21 +125,8 @@ impl RingingHub {
         }
     }
 
-    /// 收尾三频道投影中的孤儿领域状态（Ringing 版 `seal_orphan_running_turns`）。
-    ///
-    /// worker 的挂起/运行状态在内存中，daemon 重启或 worker 被重新拉起后，
-    /// journal 重放会恢复 `TurnStarted`/`ToolStarted`/`InteractionRequested` 等
-    /// reliable 事件，但它们**永远不会有终态**——bootstrap 快照因此携带陈旧
-    /// 的 `active_turn`/`running`/`pending_permission`/`pending_interaction`：
-    /// 前端把中断的 turn 投影为 running、弹出无法批准的幽灵 ask/授权面板。
-    ///
-    /// 与 timeline seal 语义一致：通过正常 publish 路径发出终态事件
-    /// （`ConversationCancelled` / `ToolFinished(Cancelled)` / `InteractionResolved`），
-    /// 使 journal、投影与 SSE 客户端全部收敛。幂等：无孤儿时返回 false。
-    ///
-    /// 调用方必须在 `ensure_seed_loaded` 完成之后调用（本函数内部 publish 会
-    /// 再次调用 `ensure_seed_loaded`，重入同 seed 的 lazy_load 锁会死锁）。
-    /// B9/H3：registry 在 spawn 成功/worker 关闭时维护活表。
+    /// 登记 worker 存活（B9/H3）：registry 在 spawn 成功时调用，worker 关闭时
+    /// 由 [`RingingHub::mark_worker_dead`] 摘除。
     pub fn mark_worker_live(&self, session_id: &str) {
         self.live_workers
             .lock()
@@ -314,28 +141,11 @@ impl RingingHub {
             .remove(session_id);
     }
 
-    /// D-1：会话关闭后丢弃该 seed 的全部常驻内存态（channel×seed 的投影、
-    /// 活交互表、live_workers、大内容条目）。
+    /// D-1：会话关闭后丢弃该 seed 的全部常驻内存态（活交互正文表、
+    /// live_workers、大内容条目）。
     ///
     /// 调用约束：调用方必须已 join worker，避免存活 worker 继续写回脏状态。
     pub fn forget_session(&self, session_id: &str) {
-        // 锁序：先取 `channels` 顶层锁取出分片快照，**释放后再**逐个摘除
-        // 槽表条目——顶层锁与槽表锁永不重叠持有（见 `channels` 字段锁序注释）。
-        // 摘除不在槽锁内进行：已在途的持槽者继续操作同一实例，摘除后由它自然
-        // 释放；这保持既有语义（调用方保证已 join worker，无新发布者）。
-        let shards: Vec<Arc<ChannelShards>> = self
-            .channels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .collect();
-        for shard in shards {
-            shard.remove(session_id);
-        }
-        if let Ok(mut live) = self.live_interactions.lock() {
-            live.remove(session_id);
-        }
         if let Ok(mut live) = self.live_interaction_content.lock() {
             live.remove(session_id);
         }
@@ -408,34 +218,6 @@ impl RingingHub {
             .get_any(content_id)
     }
 
-    /// 活交互登记：当前进程发布的 InteractionRequested/PlanReviewRequested
-    /// 进入内存表，resolved 时移除。daemon 重启后表为空 → journal 重放的
-    /// 幽灵交互不在表 → bootstrap 孤儿收尾仍可收尾它们（原设计意图）；
-    /// 活交互在表 → 收尾跳过（修复「ask 发布后 1ms 被 bootstrap 秒杀」）。
-    ///
-    /// §4.0.5：副作用由事件产生侧调用（actor 桥），不再由 publish 承载。
-    pub fn register_live_interaction(&self, session_id: &str, interaction_id: &str) {
-        self.live_interactions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(session_id.to_string(), interaction_id.to_string());
-    }
-
-    /// 条件解除活交互登记：仅当活表仍指向该 interaction_id 才移除
-    /// （并发发布的新 ask 可能已注册了不同 id，不能误抹）。
-    pub fn unregister_live_interaction(&self, session_id: &str, interaction_id: &str) {
-        let mut live = self
-            .live_interactions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if live
-            .get(session_id)
-            .is_some_and(|cur| cur == interaction_id)
-        {
-            live.remove(session_id);
-        }
-    }
-
     /// 解除某交互正文的 pin（交互 resolved / expired / permission tool finished）。
     ///
     /// 先走内存活表（当前进程路径），再按持久化的 pin_key 兜底——daemon 重启后
@@ -468,47 +250,6 @@ impl RingingHub {
             .unwrap_or_else(|e| e.into_inner())
             .unpin_key(session_id, interaction_id);
     }
-
-    /// 顶层锁的 `MutexGuard`（只在测试断言里用；生产路径一律走
-    /// `channel_shards` / `shards_for`，取到 `Arc` 后立刻释放顶层锁）。
-    ///
-    /// 锁序：`channels`(顶层) → `ChannelShards.seeds`(读写锁) → 槽锁 → 叶子锁，
-    /// 详见 `channels` 字段文档。本函数返回的 guard **不得**跨越槽锁获取。
-    #[cfg(test)]
-    fn channel_state(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<RingingChannel, Arc<ChannelShards>>> {
-        self.channels.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// 已登记频道的分片集（None = 该频道尚无任何 seed）。
-    pub(super) fn channel_shards(&self, channel: RingingChannel) -> Option<Arc<ChannelShards>> {
-        self.channels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&channel)
-            .cloned()
-    }
-
-    /// 取（必要时登记）频道分片集。登记只做一次 map insert。
-    fn shards_for(&self, channel: RingingChannel) -> Arc<ChannelShards> {
-        let mut guard = self.channels.lock().unwrap_or_else(|e| e.into_inner());
-        Arc::clone(
-            guard
-                .entry(channel)
-                .or_insert_with(|| Arc::new(ChannelShards::default())),
-        )
-    }
-
-    /// 该 (channel, seed) 的分片槽（不存在则登记空 state）。
-    fn session_slot(
-        &self,
-        channel: RingingChannel,
-        session_id: &str,
-    ) -> Arc<Mutex<SessionChannelState>> {
-        self.shards_for(channel).slot(channel, session_id)
-    }
-
     /// 懒加载串行化锁（per-seed）：同一 seed 的首访互斥，不同 seed 并行。
     pub(super) fn lazy_load_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
         self.lazy_loads
@@ -518,69 +259,6 @@ impl RingingHub {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
-
-    /// orphan_seal 补终态的收敛入口（阶段 3d）。
-    ///
-    /// v1 广播（publish/subscribe/fanout）与事件 journal 持久化已删除；本方法
-    /// 只做进程内收敛：登记槽、推进序号与水位、把终态事件应用到领域投影——
-    /// 保证 `snapshot()` 反映孤儿收尾结果，重复调用幂等（无孤儿状态时为
-    /// no-op）。不产生信封、不广播、不落盘（canonical fact 由 timeline/fact
-    /// 面承担；fact 侧补写见 spec §4.0.4 遗留债）。
-    pub fn apply_seal_event(&self, session_id: &str, event: DomainEvent) {
-        let channel = event.channel();
-        let slot = self.session_slot(channel, session_id);
-        let mut st = slot.lock().unwrap_or_else(|e| e.into_inner());
-        let st = &mut *st;
-        let (stream_seq, _channel_seq, _session_seq) = self.sequencer.next(channel, session_id);
-        if !is_safe_integer(stream_seq) {
-            log::error!("[ringing] sequence exceeded JSON safe integer range");
-            return;
-        }
-        st.projection.apply(channel, session_id, &event);
-        st.last_stream_seq = st.last_stream_seq.max(stream_seq);
-        let mut watermark = self
-            .live_watermark
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let entry = watermark.entry(channel).or_insert(0);
-        *entry = (*entry).max(stream_seq);
-    }
-
-    /// 读该频道的发布水位（见 `live_watermark` 文档）。
-    pub fn live_watermark(&self, channel: RingingChannel) -> u64 {
-        self.live_watermark
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&channel)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// 读取某频道的领域快照（v1 bootstrap 路由已删除；本方法是 orphan_seal 等
-    /// 内部路径与产出方往返测试的读入口）。
-    pub fn snapshot(&self, channel: RingingChannel, session_id: &str) -> RingingChannelSnapshot {
-        self.channel_shards(channel)
-            .and_then(|shards| shards.slot_if_present(session_id))
-            .map(|slot| {
-                let st = slot.lock().unwrap_or_else(|e| e.into_inner());
-                st.projection
-                    .snapshot_for(channel, session_id, st.last_stream_seq)
-            })
-            .unwrap_or_else(|| SnapshotProjector::new().snapshot_for(channel, session_id, 0))
-    }
-
-    /// Conversation 频道完整快照：领域投影摘要 + 持久化消息构建的 turns。
-    pub fn conversation_snapshot(&self, session_id: &str) -> RingingChannelSnapshot {
-        let mut snap = self.snapshot(RingingChannel::Conversation, session_id);
-        if let Some(state) = super::conversation_snapshot::persisted_conversation_state(
-            self.sessions.as_deref(),
-            session_id,
-        ) {
-            merge_persisted_conversation_state(&mut snap.state, state);
-        }
-        snap
-    }
-
     /// 按 block 折叠落盘副本中被后续覆盖的 BlockCheckpoint。
     ///
     /// checkpoint 的物化语义是整块覆盖：快照恢复时每 block 只有最新一条生效。
@@ -658,30 +336,7 @@ impl Drop for RingingHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_domain::{ConversationEvent, TimelineIntent, TimelineSnapshot};
-
-    #[test]
-    fn persisted_conversation_metadata_survives_projection_overlay() {
-        let mut projected = serde_json::json!({
-            "session_id": "s",
-            "channel": "conversation",
-            "revision": 7,
-            "compact_status": "running"
-        });
-        merge_persisted_conversation_state(
-            &mut projected,
-            serde_json::json!({
-                "turns": [],
-                "usage": { "prompt_tokens": 42 },
-                "model": "qaqh-test",
-                "context_limit": 200000
-            }),
-        );
-        assert_eq!(projected["model"], "qaqh-test");
-        assert_eq!(projected["context_limit"], 200000);
-        assert_eq!(projected["usage"]["prompt_tokens"], 42);
-        assert_eq!(projected["compact_status"], "running");
-    }
+    use qaqh_domain::{TimelineIntent, TimelineSnapshot};
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -692,15 +347,6 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
-    }
-
-    fn round_delta(seq: u64) -> DomainEvent {
-        DomainEvent::Conversation(ConversationEvent::RoundDelta {
-            turn_id: "t1".into(),
-            round_num: 0,
-            kind: qaqh_domain::RoundDeltaKind::Thinking,
-            delta: format!("chunk-{seq}"),
-        })
     }
 
     fn publish_open_tool_turn(hub: &RingingHub, session_id: &str, turn_id: &str, progress: &str) {
@@ -871,7 +517,6 @@ mod tests {
             )
             .expect("timeline intent accepted");
         assert_eq!(opened.timeline_seq, 1);
-        assert_eq!(hub.live_watermark(RingingChannel::Conversation), 0);
         let snapshot = hub.timeline_snapshot("s").expect("timeline snapshot");
         assert_eq!(snapshot.watermark, 1);
         assert_eq!(snapshot.turns[0].user_text, "question");
@@ -1566,24 +1211,12 @@ mod tests {
     #[test]
     fn forget_session_drops_per_session_resident_state() {
         let hub = RingingHub::new("forget-seed-test");
-        hub.apply_seal_event("s1", round_delta(1));
         hub.mark_worker_live("s1");
-        hub.live_interactions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert("s1".to_string(), "interaction-1".to_string());
         let content_id = hub.put_content("s1", "text/plain", b"hello".to_vec(), false);
         assert!(hub.get_content("s1", &content_id).is_some());
-        let holds_session = |hub: &RingingHub, session_id: &str| {
-            hub.channel_state()
-                .values()
-                .any(|shards| shards.contains(session_id))
-        };
-        assert!(holds_session(&hub, "s1"));
 
         hub.forget_session("s1");
 
-        assert!(!holds_session(&hub, "s1"), "channels state must be dropped");
         assert!(
             !hub.live_workers
                 .lock()
@@ -1592,20 +1225,9 @@ mod tests {
             "live_workers entry must be dropped"
         );
         assert!(
-            !hub.live_interactions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key("s1"),
-            "live_interactions entry must be dropped"
-        );
-        assert!(
             hub.get_content("s1", &content_id).is_none(),
             "content_store entry must be released"
         );
-
-        // 其他 seed 的常驻状态不受影响。
-        hub.apply_seal_event("s2", round_delta(2));
-        assert!(holds_session(&hub, "s2"));
     }
 
     #[test]
@@ -1686,218 +1308,6 @@ mod tests {
             Arc::ptr_eq(&lock_a, &lock_a3),
             "same seed must map to the same lock instance"
         );
-    }
-}
-
-#[cfg(test)]
-mod lock_sharding_tests {
-    //! BUG-08 收尾（issue #33）回归：跨 (channel, seed) 的内存态必须互不串行。
-    //!
-    //! 未修复时 `channels: Mutex<HashMap<Channel, HashMap<Seed, State>>>` 是
-    //! **单一全局锁**——任一 (channel, seed) 的 publish/checkpoint 持锁期间，
-    //! 其他频道/会话的 publish 全部阻塞。下述测试在旧代码上红（超时失败），
-    //! 在新代码上绿。
-
-    use super::*;
-    use qaqh_domain::{ControlEvent, ConversationEvent};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier, mpsc};
-    use std::time::{Duration, Instant};
-
-    fn round_delta(seq: u64) -> DomainEvent {
-        DomainEvent::Conversation(ConversationEvent::RoundDelta {
-            turn_id: "t1".into(),
-            round_num: 1,
-            kind: qaqh_domain::RoundDeltaKind::Answering,
-            delta: format!("delta-{seq}"),
-        })
-    }
-
-    /// 取某 (channel, seed) 的分片槽（测试断言用；生产路径不暴露）。
-    fn slot(
-        hub: &RingingHub,
-        channel: RingingChannel,
-        session_id: &str,
-    ) -> Arc<Mutex<SessionChannelState>> {
-        hub.session_slot(channel, session_id)
-    }
-
-    /// 红→绿 1：持有 (Conversation, seed-a) 的分片锁时，其他 (channel, seed)
-    /// 的写入必须立即可完成。
-    ///
-    /// 写法：后台线程写「新的 seed-b」——未修复时它必须先取**全局 channels
-    /// 锁**才能登记/取号/提交，而该锁正被主线程持有，于是阻塞到超时；分片后
-    /// seed-b 走另一个槽，完全不受影响。
-    #[test]
-    fn per_session_channel_state_locks_do_not_block_each_other() {
-        let hub = Arc::new(RingingHub::new("epoch-shard"));
-        hub.apply_seal_event("seed-a", round_delta(1));
-
-        let held = slot(&hub, RingingChannel::Conversation, "seed-a");
-        let guard = held.lock().unwrap_or_else(|e| e.into_inner());
-
-        let (tx, rx) = mpsc::channel();
-        let hub_b = Arc::clone(&hub);
-        std::thread::spawn(move || {
-            // 另一个 seed、另一个频道：写「新 seed」会走登记路径，未修复时
-            // 必然要取全局锁 → 阻塞。
-            hub_b.apply_seal_event("seed-b", round_delta(2));
-            hub_b.apply_seal_event(
-                "seed-b",
-                DomainEvent::Control(ControlEvent::InteractionRequested {
-                    interaction_id: "i-b".into(),
-                    turn_id: "t1".into(),
-                    mode: qaqh_domain::AskMode::Single,
-                    questions: vec![],
-                }),
-            );
-            let _ = tx.send(());
-        });
-        assert!(
-            rx.recv_timeout(Duration::from_millis(500)).is_ok(),
-            "other (channel, seed) writes must not be serialized by seed-a's shard lock"
-        );
-        drop(guard);
-    }
-
-    /// 红→绿 1b：持有 (Conversation, seed-a) 的槽锁时，**其他频道**的读
-    /// （`last_stream_seq`）必须立即可完成。未修复时读也要取全局锁 → 阻塞。
-    #[test]
-    fn other_channel_reads_are_not_blocked_by_a_held_session_shard() {
-        let hub = Arc::new(RingingHub::new("epoch-shard-read"));
-        hub.apply_seal_event("seed-a", round_delta(1));
-        hub.apply_seal_event(
-            "seed-a",
-            DomainEvent::Control(ControlEvent::InteractionRequested {
-                interaction_id: "i-a".into(),
-                turn_id: "t1".into(),
-                mode: qaqh_domain::AskMode::Single,
-                questions: vec![],
-            }),
-        );
-        let held = slot(&hub, RingingChannel::Conversation, "seed-a");
-        let guard = held.lock().unwrap_or_else(|e| e.into_inner());
-
-        let (tx, rx) = mpsc::channel();
-        let hub_b = Arc::clone(&hub);
-        std::thread::spawn(move || {
-            let seq = hub_b.live_watermark(RingingChannel::Control);
-            let _ = tx.send(seq);
-        });
-        assert_eq!(
-            rx.recv_timeout(Duration::from_millis(500)),
-            Ok(1),
-            "Control-channel read must not be serialized behind the Conversation shard lock"
-        );
-        drop(guard);
-    }
-
-    /// 红→绿 2：8 个不同 seed 并发发布必须**不退化**（旧全局锁下 8 会话吞吐
-    /// 被压成 ~0.4x——issue 记录的 448k→276k / 0.49x 就是这一现象）。
-    ///
-    /// 采用「吞吐比值」判据而非结构断言：分片是性能属性，结构断言（比较
-    /// `Arc` 指针）无法区分「锁表存在」与「锁真的不共享」。为避免 CI 抖动
-    /// 造成假红，取各侧 min-of-3 与 0.9x 余量。
-    #[test]
-    fn concurrent_publish_across_sessions_does_not_degrade() {
-        const THREADS: usize = 8;
-        const PER_THREAD: usize = 400;
-
-        let concurrent_ops = |_attempt: usize| {
-            let hub = Arc::new(RingingHub::new("epoch-scale"));
-            let barrier = Arc::new(Barrier::new(THREADS));
-            let mut joins = Vec::new();
-            for index in 0..THREADS {
-                let hub = Arc::clone(&hub);
-                let barrier = Arc::clone(&barrier);
-                joins.push(std::thread::spawn(move || {
-                    let session_id = format!("scale-{index}");
-                    barrier.wait();
-                    for i in 0..PER_THREAD {
-                        hub.apply_seal_event(&session_id, round_delta(i as u64));
-                    }
-                }));
-            }
-            let start = Instant::now();
-            for join in joins {
-                join.join().expect("publish thread must not panic");
-            }
-            (THREADS * PER_THREAD) as f64 / start.elapsed().as_secs_f64()
-        };
-        let serial_ops = || {
-            let hub = RingingHub::new("epoch-serial");
-            let start = Instant::now();
-            for index in 0..THREADS {
-                let session_id = format!("scale-{index}");
-                for i in 0..PER_THREAD {
-                    hub.apply_seal_event(&session_id, round_delta(i as u64));
-                }
-            }
-            (THREADS * PER_THREAD) as f64 / start.elapsed().as_secs_f64()
-        };
-
-        // min-of-3：取各侧最好成绩，避开其他测试的瞬时干扰。
-        let mut concurrent = f64::MIN;
-        for attempt in 0..3 {
-            concurrent = concurrent.max(concurrent_ops(attempt));
-        }
-        let mut serial = f64::MIN;
-        for _ in 0..3 {
-            serial = serial.max(serial_ops());
-        }
-        eprintln!(
-            "[lockbench] 1 thread: {serial:.0} ev/s | {THREADS} threads: {concurrent:.0} ev/s | scaling {:.2}x",
-            concurrent / serial.max(1e-9)
-        );
-        // 旧全局锁实测 0.41~0.49x；分片后 2.4x+。0.9x 留足机器抖动余量，
-        // 仍能显著区分「锁共享」与「锁分片」。
-        assert!(
-            concurrent > serial * 0.9,
-            "8-thread publish must not degrade vs 1-thread baseline \
-             (concurrent={concurrent:.0}/s serial={serial:.0}/s); \
-             a regression here means the shared channels lock is back"
-        );
-    }
-
-    /// Sequencer 的 per-seed 序号表必须分片，且**实例私有**：
-    /// 两个 `Sequencer` 的序号空间互不影响（不能是进程级 static 表）。
-    #[test]
-    fn sequencer_shards_are_per_instance() {
-        let a = Sequencer::new();
-        let b = Sequencer::new();
-        assert_eq!(a.next(RingingChannel::Conversation, "s"), (1, 1, 1));
-        assert_eq!(
-            b.next(RingingChannel::Conversation, "s"),
-            (1, 1, 1),
-            "a fresh Sequencer must start its own sequence space"
-        );
-    }
-
-    /// 不变量 2：`forget_seed` 与并发发布不得 panic，且遗忘后该 seed 常驻态
-    /// 不再出现在任何分片。
-    #[test]
-    fn forget_session_races_with_publishers_without_panic() {
-        let hub = Arc::new(RingingHub::new("epoch-forget-race"));
-        let stop = Arc::new(AtomicUsize::new(0));
-        let mut joins = Vec::new();
-        for index in 0..4 {
-            let hub = Arc::clone(&hub);
-            let stop = Arc::clone(&stop);
-            joins.push(std::thread::spawn(move || {
-                let session_id = format!("race-{index}");
-                while stop.load(Ordering::Relaxed) == 0 {
-                    hub.apply_seal_event(&session_id, round_delta(1));
-                }
-            }));
-        }
-        for _ in 0..20 {
-            hub.forget_session("race-0");
-            std::thread::yield_now();
-        }
-        stop.store(1, Ordering::Relaxed);
-        for join in joins {
-            join.join().expect("publisher must not panic");
-        }
     }
 }
 

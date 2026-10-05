@@ -2,7 +2,8 @@
 //!
 //! 设计要点：
 //! - **单一聚合工具**（D6：不新增 per-server 工具，防模型面膨胀）——`action`
-//!   参数分发 `list_servers` / `list_resources` / `read_resource`；
+//!   参数分发 `list_servers` / `list_resources` / `read_resource` /
+//!   `list_prompts` / `read_prompt`；
 //! - **无前缀名** `mcp`：不经 `mcp__` D5 快路径（它是 QAQH 内置只读工具而非
 //!   server 声明，D4"声明即信任"不适用），category=`Read` 走常规审批
 //!   （level≥2 自动放行，level 1 弹确认）；
@@ -23,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use qaqh_config::config::McpServerConfig;
 use qaqh_types::{ToolDef, ToolFunction, ToolResult};
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolRisk};
+use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_workspace::{DynamicTool, ToolRisk};
 
 use crate::bridge::{DEFAULT_TIMEOUT_SECS, error_result};
 use crate::connection::ConnStatus;
@@ -114,7 +116,7 @@ pub fn aggregate_entry(
     let entry = DynamicTool {
         def,
         effective_name: None,
-        handler_fn: aggregate_dispatch,
+        dispatch: aggregate_dispatch,
         category: qaqh_workspace::ToolCategory::Read,
         // 与 per-server 工具同构（§5.5）：risk 恒 Administrative（无条件
         // Allow 的档位字段），真实风险由 category=Read 驱动的权限层裁决。
@@ -125,13 +127,21 @@ pub fn aggregate_entry(
 }
 
 /// E-5 第二根 dispatcher 指针：`mcp` 聚合工具（生产入口，经全局槽位）。
-pub fn aggregate_dispatch(ctx: ToolCallCtx) -> ToolResult {
-    aggregate_dispatch_with(
+///
+/// typed 外壳；`name` 对聚合工具无意义（唯一工具名固定），忽略。
+pub fn aggregate_dispatch(
+    _name: &str,
+    ctx: &ToolCallContext,
+    args: serde_json::Value,
+) -> Result<ToolOutcome, FatalToolError> {
+    let cancel = ctx.cancellation.shared_flag();
+    let timeout_hint = (!ctx.timeout.is_zero()).then(|| ctx.timeout.as_secs());
+    Ok(map_tool_result(aggregate_dispatch_with(
         &crate::manager_slot(),
-        &ctx.args,
-        ctx.cancel.as_ref(),
-        ctx.timeout_secs,
-    )
+        &args,
+        &cancel,
+        timeout_hint,
+    )))
 }
 
 /// [`aggregate_dispatch`] 的可测形态（manager/args/cancel 显式注入，测试

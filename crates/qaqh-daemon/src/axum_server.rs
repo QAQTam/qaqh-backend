@@ -2,8 +2,12 @@
 //! P0 已完成 health；P1 补齐无状态 REST + 中间件/限流骨架；P1.5 起为默认 HTTP 栈。
 
 mod axum_impl;
+#[cfg(test)]
+mod authz_matrix_tests;
 
 pub(crate) use axum_impl::reclaim_dead_driver_seats;
+pub(crate) use axum_impl::challenge::ChallengeStore;
+pub(crate) use axum_impl::pairing::PairingTable;
 pub(crate) use axum_impl::test_hooks::TestHooks;
 pub use axum_impl::{AppState, build_router};
 
@@ -13,10 +17,29 @@ pub use axum_impl::{AppState, build_router};
 /// `SessionManager::init` 内部是 `OnceLock::set().expect(...)`——同一测试
 /// 二进制的多个用例共享进程，谁先谁后不确定，裸调 `init` 必然 `already
 /// initialized` panic。所有测试模块统一走这里，只初始化一次。
+///
+/// 同时做**测试数据根隔离**：默认指向进程唯一的临时目录，避免测试在真实
+/// `<USERPROFILE>\.qaqh` 里建会话（泄漏的会话会进 `session.list` 干扰前端）。
+/// 调用方显式设了 `QAQH_DATA_DIR` 时不覆盖。
 #[cfg(test)]
 fn init_session_manager() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    INIT.get_or_init(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    INIT.get_or_init(|| {
+        // SAFETY: 处于 `OnceLock` 初始化窗口，此后不再修改进程环境。
+        unsafe {
+            if std::env::var("QAQH_DATA_DIR")
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+            {
+                let root = std::env::temp_dir()
+                    .join(format!("qaqh-daemon-test-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&root);
+                std::env::set_var("QAQH_DATA_DIR", &root);
+            }
+            std::env::set_var("QAQH_ALLOW_TEST_DATA_ROOT", "1");
+        }
+        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir())
+    });
 }
 
 #[cfg(test)]
@@ -86,7 +109,13 @@ mod sse_tests {
             pending,
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
                 .clone(),
-            token: TOKEN.into(),
+            admin_token: TOKEN.into(),
+            devices: std::sync::Arc::new(std::sync::Mutex::new(
+                qaqh_runtime::ringing::DeviceRegistry::new(),
+            )),
+            pairings: std::sync::Arc::new(std::sync::Mutex::new(PairingTable::new())),
+            tls_fingerprint: None,
+            challenges: std::sync::Arc::new(ChallengeStore::default()),
             epoch: "lag-epoch".into(),
             shutdown,
             test_hooks: std::sync::Arc::new(TestHooks::disabled()),
@@ -380,7 +409,7 @@ mod axum_tests {
 
     static TEST_SERVICE: std::sync::OnceLock<qaqh_runtime::QaqhService> =
         std::sync::OnceLock::new();
-    fn test_state() -> AppState {
+    pub(super) fn test_state() -> AppState {
         let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::with_persistence(
             String::from("test-epoch"),
             std::env::temp_dir().join("qaqh-axum-test"),
@@ -413,7 +442,13 @@ mod axum_tests {
             driver_watch,
             pending,
             service,
-            token: String::from("test-token"),
+            admin_token: String::from("test-token"),
+            devices: std::sync::Arc::new(std::sync::Mutex::new(
+                qaqh_runtime::ringing::DeviceRegistry::new(),
+            )),
+            pairings: std::sync::Arc::new(std::sync::Mutex::new(PairingTable::new())),
+            tls_fingerprint: None,
+            challenges: std::sync::Arc::new(ChallengeStore::default()),
             epoch: String::from("test-epoch"),
             shutdown,
             test_hooks: std::sync::Arc::new(TestHooks::disabled()),
@@ -2280,7 +2315,7 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// 普通 daemon Router 不挂载浏览器控制面；WebUI 只能走独立 `webui` 网关。
+    /// 普通 daemon Router 不挂载浏览器控制面（浏览器网关已随 Tauri 化移除）。
     #[tokio::test]
     async fn webui_routes_are_not_mounted() {
         let app = build_router(test_state());
@@ -2293,10 +2328,13 @@ mod axum_tests {
         ] {
             let req = Request::builder().uri(path).body(Body::empty()).unwrap();
             let resp = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::NOT_FOUND,
-                "{path} must not be mounted on the daemon"
+            // S0 起鉴权中间件对所有非公开路径统一收口：未携带 Bearer 的请求在
+            // 到达 fallback 前即 401，因此这里只断言「未被挂载」——绝不可能是
+            // 200/2xx（有内容服务），且只可能是 401（未鉴权收口）或 404（fallback）。
+            let status = resp.status();
+            assert!(
+                matches!(status, StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND),
+                "{path} must not be mounted on the daemon (got {status})"
             );
         }
     }
@@ -2455,7 +2493,13 @@ mod command_entry_tests {
             )),
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
                 .clone(),
-            token: String::from("entry-token"),
+            admin_token: String::from("entry-token"),
+            devices: std::sync::Arc::new(std::sync::Mutex::new(
+                qaqh_runtime::ringing::DeviceRegistry::new(),
+            )),
+            pairings: std::sync::Arc::new(std::sync::Mutex::new(PairingTable::new())),
+            tls_fingerprint: None,
+            challenges: std::sync::Arc::new(ChallengeStore::default()),
             epoch: String::from("entry-epoch"),
             shutdown,
             test_hooks: std::sync::Arc::new(TestHooks::disabled()),
@@ -2484,7 +2528,8 @@ mod command_entry_tests {
     async fn missing_lease_header_is_rejected_at_the_entry() {
         let state = entry_state();
         let envelope = attach_envelope("cmd-no-header", "seed-target");
-        let (status, ack) = execute_command(&state, &HeaderMap::new(), envelope).await;
+        let (status, ack) =
+            execute_command(&state, &HeaderMap::new(), &axum_impl::Identity::Admin, envelope).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(ack.status, RingingCommandAckStatus::Rejected);
         assert_eq!(ack.code.as_deref(), Some("lease_required"));
@@ -2496,7 +2541,8 @@ mod command_entry_tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-qaqh-client-session-id", "cs-ghost".parse().unwrap());
         let envelope = attach_envelope("cmd-ghost", "seed-target");
-        let (status, ack) = execute_command(&state, &headers, envelope).await;
+        let (status, ack) =
+            execute_command(&state, &headers, &axum_impl::Identity::Admin, envelope).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(ack.code.as_deref(), Some("lease_required"));
     }
@@ -2513,7 +2559,7 @@ mod command_entry_tests {
             }),
         )
         .with_client_session_id(CALLER);
-        let (status, ack) = execute_command(&state, &caller_headers(), envelope).await;
+        let (status, ack) = execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, envelope).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(ack.code.as_deref(), Some("missing_session_id"));
     }
@@ -2523,11 +2569,11 @@ mod command_entry_tests {
         let state = entry_state();
         let envelope = attach_envelope("cmd-dup", "seed-target");
         let (first_status, first_ack) =
-            execute_command(&state, &caller_headers(), envelope.clone()).await;
+            execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, envelope.clone()).await;
         assert_eq!(first_status, StatusCode::OK);
         assert_eq!(first_ack.status, RingingCommandAckStatus::Accepted);
 
-        let (status, ack) = execute_command(&state, &caller_headers(), envelope).await;
+        let (status, ack) = execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, envelope).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
         assert!(
@@ -2542,12 +2588,12 @@ mod command_entry_tests {
     async fn duplicate_command_id_with_other_payload_is_conflict() {
         let state = entry_state();
         let first = attach_envelope("cmd-clash", "seed-target");
-        let (first_status, _) = execute_command(&state, &caller_headers(), first).await;
+        let (first_status, _) = execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, first).await;
         assert_eq!(first_status, StatusCode::OK);
 
         // 同 command_id、不同 payload：必须拒绝，不得重放旧回执。
         let second = attach_envelope("cmd-clash", "seed-other");
-        let (status, ack) = execute_command(&state, &caller_headers(), second).await;
+        let (status, ack) = execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, second).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(ack.code.as_deref(), Some("duplicate_command_mismatch"));
     }
@@ -2573,7 +2619,7 @@ mod command_entry_tests {
             }),
         )
         .with_client_session_id(CALLER);
-        let (status, ack) = execute_command(&state, &caller_headers(), envelope).await;
+        let (status, ack) = execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, envelope).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
 
@@ -2596,6 +2642,90 @@ mod command_entry_tests {
 
         // 清理：close（join in-process worker）+ delete（删会话目录），
         // 与 command.rs SessionDelete op 同语义。
+        let service = state.service.clone();
+        let seed = created_seed.clone();
+        let cleanup = tokio::task::spawn_blocking(move || {
+            let _ = service.close_session(&seed, None);
+            service.delete_session(&seed, None)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("cleanup join error: {e}")));
+        if let Err(error) = cleanup {
+            panic!("cleanup failed for {created_seed} (leaked session dir): {error}");
+        }
+    }
+
+    /// BUG-2026-10-05-01 回归锁：SessionResume 必须恢复**命令声明的目标会话**，
+    /// 而不是 header 的 client_session_id（租约标识）。
+    ///
+    /// 回归前的症状链：`session.resume` 收到租约 id → `.active_session` 被写成
+    /// 租约 id → `register_root_agent` 对 `sessions/{cs}/` 物化孤儿 identity
+    /// 目录 → actor resume 加载失败 → lifecycle 兜底静默再分配一个幽灵会话
+    /// 目录。TUI 每次打开 tab（SessionCreate → SessionResume 序列）就多出
+    /// 两个目录。不变量：resume 之后，磁盘上**不得**出现以租约 id 命名的会话
+    /// 目录，`.active_session` 也不得指向租约 id。
+    #[tokio::test]
+    async fn session_resume_over_commands_channel_resumes_the_target_not_the_lease() {
+        let state = entry_state();
+
+        // 1. 先经 commands 通道真实建会话（同上方 create 回归锁的端到端路径）。
+        let create = RingingV2CommandEnvelope::new(
+            "cmd-resume-regression-create",
+            "ci-entry",
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate {
+                close_current: false,
+                cwd: None,
+                tool_mode: None,
+                custom_tools: Vec::new(),
+            }),
+        )
+        .with_client_session_id(CALLER);
+        let (create_status, create_ack) =
+            execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, create).await;
+        assert_eq!(create_status, StatusCode::OK);
+        assert_eq!(create_ack.status, RingingCommandAckStatus::Accepted);
+        let created_seed = state
+            .leases
+            .lock()
+            .unwrap()
+            .owned_sessions(CALLER)
+            .into_iter()
+            .next()
+            .expect("created session attached to lease");
+
+        // 2. SessionResume：envelope session_id = 目标会话，header 仍是租约 id。
+        let resume = RingingV2CommandEnvelope::new(
+            "cmd-resume-regression",
+            "ci-entry",
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionResume {
+                session_id: created_seed.clone(),
+            }),
+        )
+        .with_client_session_id(CALLER)
+        .with_session_id(&created_seed);
+        let (status, ack) = execute_command(&state, &caller_headers(), &axum_impl::Identity::Admin, resume).await;
+        assert_eq!(status, StatusCode::OK, "resume ack: {:?}", ack.message);
+        assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
+
+        // 3. 不变量：租约 id 不得被当成会话物化/激活。
+        let caller_dir = qaqh_types::platform::sessions_dir().join(CALLER);
+        assert!(
+            !caller_dir.exists(),
+            "租约 id 被当成会话 id 物化了目录：{}",
+            caller_dir.display()
+        );
+        assert!(
+            qaqh_session::SessionManager::global().load_meta(CALLER).is_none(),
+            "租约 id 不得解析出会话 meta"
+        );
+        let active = qaqh_session::SessionManager::global().active_session();
+        assert_ne!(
+            active.as_deref(),
+            Some(CALLER),
+            ".active_session 被写成租约 id（resume 传参错位）"
+        );
+
+        // 4. 清理：close（join in-process worker）+ delete（删会话目录）。
         let service = state.service.clone();
         let seed = created_seed.clone();
         let cleanup = tokio::task::spawn_blocking(move || {

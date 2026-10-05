@@ -1,8 +1,14 @@
 //! Code-delta calculation for successful file mutations.
+//!
+//! R-4 豁免点：本文件与 `execution.rs` 使用的 `qaqh_domain::CodeDeltaRecord`
+//! 是编辑效果的被动纯数据记录，属 R-4 允许的「被动投影记录」（口径与完整例外
+//! 清单见 `dashboard.rs:7`）——除此以外禁止引入 domain 事件/行为类型。
 
 pub(crate) fn compute(
     tool_name: &str,
     args: &serde_json::Value,
+    workspace_root: &std::path::Path,
+    session_id: &str,
 ) -> Option<qaqh_domain::CodeDeltaRecord> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -81,11 +87,13 @@ pub(crate) fn compute(
         _ => None,
     };
 
-    // Override files_created / files_deleted from git when available
-    // (git2::Repository::open is a cheap metadata op — no diff, no
-    // pathspec bug since we only check HEAD tree existence).
+    // Override files_created from git when available (files_deleted is always
+    // reset to 0 here — git_file_meta only checks HEAD tree existence, so it
+    // never reports deletions and even clobbers the delete tool's files_deleted=1).
+    // git2::Repository::open is a cheap metadata op — no diff, no
+    // pathspec bug since we only check HEAD tree existence.
     if let (Some(path), Some(d)) = (file_path, &mut delta)
-        && let Some(git) = git_file_meta(path)
+        && let Some(git) = git_file_meta(path, workspace_root, session_id)
     {
         d.files_created = git.files_created;
         d.files_deleted = git.files_deleted;
@@ -101,16 +109,22 @@ struct GitFileMeta {
     files_deleted: usize,
 }
 
-fn git_file_meta(file_path: &str) -> Option<GitFileMeta> {
-    crate::current_session()?;
+fn git_file_meta(
+    file_path: &str,
+    workspace_root: &std::path::Path,
+    session_id: &str,
+) -> Option<GitFileMeta> {
+    if session_id.is_empty() {
+        return None;
+    }
     // PR-3-3：cwd 由宿主注入（daemon 会话初始化 / serve 请求体均已 set）。
     // 读注入值本身：空 / "." 视为无有效工作区（与旧只读磁盘解析的
     // “无 cwd → 无 git meta”语义对齐）。
-    let workspace = crate::current_workspace();
+    let workspace = workspace_root.to_string_lossy();
     if workspace.is_empty() || workspace == "." {
         return None;
     }
-    let repo = git2::Repository::open(workspace).ok()?;
+    let repo = git2::Repository::open(workspace.as_ref()).ok()?;
     let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
     let is_new = head_tree.get_path(std::path::Path::new(file_path)).is_err();
     Some(GitFileMeta {
@@ -140,7 +154,13 @@ mod tests {
  context line
 *** End Patch
 ";
-        let delta = compute("apply_patch", &json!({ "patch": patch })).expect("apply_patch delta");
+        let delta = compute(
+            "apply_patch",
+            &json!({ "patch": patch }),
+            std::path::Path::new("."),
+            "s",
+        )
+        .expect("apply_patch delta");
         assert_eq!((delta.lines_added, delta.lines_removed), (3, 2));
         assert_eq!((delta.files_created, delta.files_deleted), (0, 0));
         assert_eq!(delta.file.as_deref(), Some("src/a.rs"));
@@ -160,7 +180,13 @@ mod tests {
 +X
 *** End Patch
 ";
-        let delta = compute("apply_patch", &json!({ "patch": patch })).expect("apply_patch delta");
+        let delta = compute(
+            "apply_patch",
+            &json!({ "patch": patch }),
+            std::path::Path::new("."),
+            "s",
+        )
+        .expect("apply_patch delta");
         assert_eq!((delta.lines_added, delta.lines_removed), (3, 1));
         assert_eq!((delta.files_created, delta.files_deleted), (1, 1));
         assert_eq!(delta.file, None, "多文件补丁不归属到单一路径");
@@ -170,18 +196,29 @@ mod tests {
     #[test]
     fn apply_patch_without_a_parseable_patch_yields_no_delta() {
         assert!(
-            compute("apply_patch", &json!({ "patch": "*** Begin Patch\n+x\n" })).is_none(),
+            compute(
+                "apply_patch",
+                &json!({ "patch": "*** Begin Patch\n+x\n" }),
+                std::path::Path::new("."),
+                "s",
+            )
+            .is_none(),
             "缺 End Patch 的补丁不该出数"
         );
-        assert!(compute("apply_patch", &json!({})).is_none());
+        assert!(compute("apply_patch", &json!({}), std::path::Path::new("."), "s").is_none());
     }
 
     /// 档位键必须是 resolved tool name。旧写法 `("file", "write")` 实测永远
     /// 匹配不上（注册表里这个工具就叫 `write`），write 因此从不出 CodeChanged。
     #[test]
     fn write_tool_reports_content_line_count() {
-        let delta = compute("write", &json!({ "path": "a.txt", "content": "x\ny\n" }))
-            .expect("write 必须出 CodeChanged");
+        let delta = compute(
+            "write",
+            &json!({ "path": "a.txt", "content": "x\ny\n" }),
+            std::path::Path::new("."),
+            "s",
+        )
+        .expect("write 必须出 CodeChanged");
         assert_eq!((delta.lines_added, delta.lines_removed), (2, 0));
         assert_eq!(delta.file.as_deref(), Some("a.txt"));
     }

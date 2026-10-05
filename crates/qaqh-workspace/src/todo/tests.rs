@@ -97,9 +97,12 @@ fn create_rejects_oversized_groups() {
         let items: Vec<Value> = (0..21)
             .map(|index| serde_json::json!({"title": format!("t{index}"), "status": "pending"}))
             .collect();
-        let oversized = handle_write(split_ctx("todo_write", serde_json::json!({"items": items})));
+        let oversized = handle_write(&split_ctx(
+            "todo_write",
+            serde_json::json!({"items": items}),
+        ));
         assert!(oversized.error.is_some());
-        let ok = handle_write(split_ctx(
+        let ok = handle_write(&split_ctx(
             "todo_write",
             serde_json::json!({"items": [
                 {"title": "within", "status": "pending"}
@@ -333,7 +336,7 @@ fn v1_v2_action_vocabulary_retired() {
         "update",
         "cancel",
     ] {
-        let out = handle_write(split_ctx(
+        let out = handle_write(&split_ctx(
             "todo_write",
             serde_json::json!({ "action": verb, "items": [] }),
         ));
@@ -467,7 +470,7 @@ fn set_edit_rejects_oversized_title() {
 }
 
 // ═══════════════════════════════════════════════════════
-// W1 拆分（PR-DT-1）：todo_create / todo_insert / todo_set / todo_list
+// W1 拆分（PR-DT-1）：todo_write / todo_update / todo_list
 // ═══════════════════════════════════════════════════════
 
 use super::split::{handle_list, handle_update, handle_write};
@@ -476,24 +479,15 @@ fn parse_tool_result(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap()
 }
 
-fn split_ctx(name: &str, args: Value) -> crate::ToolCallCtx {
-    crate::ToolCallCtx {
-        id: format!("test-{name}"),
-        name: name.into(),
-        action: name.into(),
-        args,
-        tx_progress: None,
-        timeout_secs: None,
-        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-    }
+fn split_ctx(_name: &str, args: Value) -> Value {
+    args
 }
 
 #[test]
 fn split_handlers_reject_cross_fields() {
     // 三件套各自白名单之外的字段一律 INVALID_INPUT（形态守卫）。
     assert!(
-        handle_write(split_ctx(
+        handle_write(&split_ctx(
             "todo_write",
             serde_json::json!({"items": [{"title": "t"}], "id": "T1"})
         ))
@@ -502,13 +496,13 @@ fn split_handlers_reject_cross_fields() {
     );
     // 单条 title 便利形态已随聚合退役——write 只认 items。
     assert!(
-        handle_write(split_ctx("todo_write", serde_json::json!({"title": "t"})))
+        handle_write(&split_ctx("todo_write", serde_json::json!({"title": "t"})))
             .error
             .is_some()
     );
     // 单一形态：ids/updates 一律拒绝——一次一条。
     assert!(
-        handle_update(split_ctx(
+        handle_update(&split_ctx(
             "todo_update",
             serde_json::json!({"ids": ["T1"], "status": "pending"})
         ))
@@ -516,7 +510,7 @@ fn split_handlers_reject_cross_fields() {
         .is_some()
     );
     assert!(
-        handle_update(split_ctx(
+        handle_update(&split_ctx(
             "todo_update",
             serde_json::json!({"updates": [{"id": "T1", "status": "pending"}]})
         ))
@@ -524,7 +518,7 @@ fn split_handlers_reject_cross_fields() {
         .is_some()
     );
     assert!(
-        handle_list(split_ctx("todo_list", serde_json::json!({"ids": ["T1"]})))
+        handle_list(&split_ctx("todo_list", serde_json::json!({"ids": ["T1"]})))
             .error
             .is_some()
     );
@@ -535,7 +529,7 @@ fn split_roundtrip_via_handlers() {
     with_isolated_todo(|_session| {
         // 首次覆写建 2 条（v4：status 必填，assigned 回填新分配的 ID）
         let first = parse_tool_result(
-            handle_write(split_ctx(
+            handle_write(&split_ctx(
                 "todo_write",
                 serde_json::json!({"items": [
                     {"title": "a", "status": "pending"},
@@ -549,7 +543,7 @@ fn split_roundtrip_via_handlers() {
         // write 第二轮：全量覆写——替换而非追加；保留项带 id 引用，
         // 新项缺省 id 分配下一号（T3）。
         let second = parse_tool_result(
-            handle_write(split_ctx(
+            handle_write(&split_ctx(
                 "todo_write",
                 serde_json::json!({"items": [
                     {"id": "T1", "title": "a", "status": "completed"},
@@ -569,14 +563,14 @@ fn split_roundtrip_via_handlers() {
 #[test]
 fn write_empty_clears_and_restarts_id_sequence() {
     with_isolated_todo(|_session| {
-        handle_write(split_ctx(
+        handle_write(&split_ctx(
             "todo_write",
             serde_json::json!({"items": [{"title": "a", "status": "pending"}]}),
         ));
         // v4：空 items = 空清单（覆写语义的自然结果），next_id 不重置——
         // 下次写入从高水位继续分配，永不复用旧号。
         let cleared = parse_tool_result(
-            handle_write(split_ctx("todo_write", serde_json::json!({"items": []}))).model_text(),
+            handle_write(&split_ctx("todo_write", serde_json::json!({"items": []}))).model_text(),
         );
         assert_eq!(cleared["replaced"], 1);
         assert_eq!(cleared["total"], 0);
@@ -584,7 +578,7 @@ fn write_empty_clears_and_restarts_id_sequence() {
         assert_eq!(read_store().unwrap().next_id, 2);
         // 清空后的新写入不复用 T1：ID 唯一性跨覆写永续。
         let after = parse_tool_result(
-            handle_write(split_ctx(
+            handle_write(&split_ctx(
                 "todo_write",
                 serde_json::json!({"items": [{"title": "fresh", "status": "pending"}]}),
             ))
@@ -595,11 +589,11 @@ fn write_empty_clears_and_restarts_id_sequence() {
 }
 
 #[test]
-fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
+fn write_full_replace_updates_status_inline_and_reassigns_unknown_id() {
     with_isolated_todo(|_session| {
         // 首次覆写建 2 条，T2 in_progress（写即状态）。
         let first = parse_tool_result(
-            handle_write(split_ctx(
+            handle_write(&split_ctx(
                 "todo_write",
                 serde_json::json!({"items": [
                     {"title": "a", "status": "pending"},
@@ -611,7 +605,7 @@ fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
         assert_eq!(first["current_id"], "T2");
         // 覆写翻转状态：T1 in_progress、T2 completed，不需要 update 往返。
         let flipped = parse_tool_result(
-            handle_write(split_ctx(
+            handle_write(&split_ctx(
                 "todo_write",
                 serde_json::json!({"items": [
                     {"id": "T1", "title": "a", "status": "in_progress"},
@@ -624,22 +618,31 @@ fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
         let store = read_store().unwrap();
         assert_eq!(store.items[1].status, TodoStatus::Completed);
         assert_eq!(store.items[1].evidence.as_deref(), Some("done"));
-        // 引用未知 ID 拒绝（防模型幻觉产生孤儿号）。
-        let bogus = handle_write(split_ctx(
-            "todo_write",
-            serde_json::json!({"items": [
-                {"id": "T9", "title": "ghost", "status": "pending"}
-            ]}),
-        ));
-        assert!(bogus.error.is_some());
+        // 引用未知 ID 不再整次失败：降级为「按新建处理 + 回执 remap」。
+        let bogus = parse_tool_result(
+            handle_write(&split_ctx(
+                "todo_write",
+                serde_json::json!({"items": [
+                    {"id": "T9", "title": "ghost", "status": "pending"}
+                ]}),
+            ))
+            .model_text(),
+        );
+        assert_eq!(bogus["total"], 1);
+        assert_eq!(bogus["assigned"], serde_json::json!(["T3"]));
+        assert!(
+            bogus["message"].as_str().unwrap().contains("T9->T3"),
+            "{bogus}"
+        );
+        assert_eq!(read_store().unwrap().items[0].id, "T3");
         // 缺 status 拒绝（覆写语义下状态必填）。
-        let no_status = handle_write(split_ctx(
+        let no_status = handle_write(&split_ctx(
             "todo_write",
             serde_json::json!({"items": [{"title": "x"}]}),
         ));
         assert!(no_status.error.is_some());
         // id 重复引用拒绝。
-        let dup = handle_write(split_ctx(
+        let dup = handle_write(&split_ctx(
             "todo_write",
             serde_json::json!({"items": [
                 {"id": "T1", "title": "a", "status": "pending"},
@@ -647,6 +650,118 @@ fn write_full_replace_updates_status_inline_and_rejects_unknown_id() {
             ]}),
         ));
         assert!(dup.error.is_some());
+    });
+}
+
+/// 只翻转状态、不重抄标题：`title` 省略时沿用同 id 既有条目的标题。
+///
+/// 实测里「漏写 title」是最高频的失败（整次覆写被拒，计划原地踏步），
+/// 而模型的本意通常就是「T2 做完了」——既有条目里就有标题，没必要重抄。
+#[test]
+fn write_inherits_title_when_referencing_existing_id() {
+    with_isolated_todo(|_session| {
+        let seeded = handle_write(&split_ctx(
+            "todo_write",
+            serde_json::json!({"items": [
+                {"title": "跑通后端契约", "status": "in_progress"},
+                {"title": "补前端面板", "status": "pending"}
+            ]}),
+        ));
+        assert!(seeded.error.is_none(), "{:?}", seeded.error);
+
+        let flipped = parse_tool_result(
+            handle_write(&split_ctx(
+                "todo_write",
+                serde_json::json!({"items": [
+                    {"id": "T1", "status": "completed", "evidence": "done"},
+                    {"id": "T2", "status": "in_progress"}
+                ]}),
+            ))
+            .model_text(),
+        );
+        assert_eq!(flipped["current_id"], "T2");
+        assert_eq!(flipped["assigned"], serde_json::json!([]));
+        let store = read_store().unwrap();
+        assert_eq!(store.items[0].title, "跑通后端契约");
+        assert_eq!(store.items[1].title, "补前端面板");
+        assert_eq!(store.items[0].status, TodoStatus::Completed);
+
+        // 新条目没标题仍然拒绝：继承只对既有 id 成立，凭空建无标题条目没意义。
+        let anonymous = handle_write(&split_ctx(
+            "todo_write",
+            serde_json::json!({"items": [{"status": "pending"}]}),
+        ));
+        assert!(anonymous.error.is_some());
+        // 显式空标题视同省略——同样是「沿用既有」，不是「清空标题」。
+        let blank = parse_tool_result(
+            handle_write(&split_ctx(
+                "todo_write",
+                serde_json::json!({"items": [{"id": "T2", "title": "   ", "status": "in_progress"}]}),
+            ))
+            .model_text(),
+        );
+        assert_eq!(blank["total"], 1);
+        assert_eq!(read_store().unwrap().items[0].title, "补前端面板");
+    });
+}
+
+/// typed 桥的入参闸门：`title` 可选必须体现在 `TodoWriteArgs` 上。
+///
+/// 实测那次失败正是 `serde_json::from_value::<TodoWriteArgs>` 抛
+/// `missing field 'title'` → 回执 `invalid arguments: ...`，压根走不到执行层。
+/// 这条路径**不做 JSON schema 校验**，所以只改 schema 是修不掉的。
+#[test]
+fn typed_write_args_accept_missing_title() {
+    let args: super::typed::TodoWriteArgs = serde_json::from_value(serde_json::json!({
+        "items": [{"id": "T1", "status": "in_progress"}]
+    }))
+    .expect("title-less item must deserialize");
+    assert!(args.items[0].title.is_none());
+    assert!(args.items[0].description.is_none());
+}
+
+/// 端到端回归：`title` 缺失必须能穿过 typed 桥走到执行层。
+///
+/// 实测那次失败就是 `TypedToolAdapter` 里
+/// `serde_json::from_value::<TodoWriteArgs>` 抛 `missing field 'title'` →
+/// 回执 `invalid arguments: ...`，**压根没执行**。这条路径不做 JSON schema
+/// 校验，所以只改 schema 是修不掉的——必须让 typed args 自己也收得下。
+#[test]
+fn typed_write_accepts_title_less_items_end_to_end() {
+    use crate::tool_api::ErasedTool;
+
+    with_isolated_todo(|session_id| {
+        let run = |args: Value| {
+            let mut ctx = crate::file_mutate::ambient_tool_context(
+                "todo-typed",
+                std::time::Duration::from_secs(15),
+            );
+            // `ambient_tool_context` 读的是另一套线程局部；这里显式钉住隔离会话。
+            ctx.session_id = session_id.to_string();
+            crate::tool_api::TypedToolAdapter::new(super::typed::TodoWriteTool)
+                .execute(ctx, args)
+                .unwrap_or_else(|fatal| panic!("todo_write fatal: {}", fatal.message))
+        };
+
+        let seeded = run(serde_json::json!({"items": [
+            {"title": "跑通后端契约", "status": "in_progress"}
+        ]}));
+        assert_eq!(
+            seeded.status,
+            qaqh_types::ToolStatus::Ok,
+            "seed failed: {:?}",
+            seeded.error
+        );
+
+        // 只带 id + status：旧实现在这里就返回 invalid arguments。
+        let flipped = run(serde_json::json!({"items": [
+            {"id": "T1", "status": "completed"}
+        ]}));
+        assert_eq!(flipped.status, qaqh_types::ToolStatus::Ok);
+        assert!(flipped.error.is_none(), "{:?}", flipped.error);
+        let store = read_store().unwrap();
+        assert_eq!(store.items[0].title, "跑通后端契约");
+        assert_eq!(store.items[0].status, TodoStatus::Completed);
     });
 }
 

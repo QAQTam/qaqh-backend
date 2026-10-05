@@ -99,9 +99,9 @@ const EXEC: ToolCapabilities = ToolCapabilities {
     interactive: false,
 };
 
-/// 迁移表：19 项，顺序与注册表词表一致（`registration.rs` 的
+/// 迁移表：20 项，顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 19] = [
+const TABLE: [(&str, ToolCapabilities); 20] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
@@ -116,6 +116,9 @@ const TABLE: [(&str, ToolCapabilities); 19] = [
     ("read", READ_ONLY),
     ("read_image", READ_ONLY),
     ("skills", MUTATING),
+    // spy：journal/cat 只读，undo/restore 改写工作区。串行已足够（单次
+    // undo/restore 都是短操作，不进 EXCLUSIVE 的 process/rewrite 封闭集）。
+    ("spy", MUTATING),
     ("todo_list", READ_ONLY_UNBOUND),
     ("todo_update", SESSION_MUTATING),
     ("todo_write", SESSION_MUTATING),

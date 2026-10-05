@@ -22,7 +22,8 @@ use qaqh_session::canonical::{
 use qaqh_session::session_fact_v2::FactPayload;
 use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
+use qaqh_workspace::probe::ProbeTool;
+use qaqh_workspace::{ToolManager, ToolResult, ToolRisk};
 
 static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -34,7 +35,7 @@ fn unix_ms() -> i64 {
 }
 
 fn register_probe(mgr: &mut ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_probe(ProbeTool {
         key: "fenced_finish_probe".to_string(),
         description: "P3-7 terminal write failure probe",
         input_schema: serde_json::json!({
@@ -49,7 +50,7 @@ fn register_probe(mgr: &mut ToolManager) {
     });
 }
 
-fn probe(_ctx: ToolCallCtx) -> ToolResult {
+fn probe(_ctx: &qaqh_workspace::tool_api::ToolCallContext, _args: serde_json::Value) -> ToolResult {
     let Some(session_dir) = SESSION_DIR.get() else {
         return ToolResult::error("fenced finish probe: session dir not configured");
     };

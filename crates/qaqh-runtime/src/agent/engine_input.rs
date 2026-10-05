@@ -245,9 +245,9 @@ impl InputEngine {
     /// data. Callers must keep the `[SUBAGENT ...]` tag in `text` so the model
     /// can distinguish injected content from system instructions.
     ///
-    /// `command_id` is the durable injection-journal key: once the message is
-    /// committed to the store (drain below), the journal entry is marked
-    /// committed so a crash/replay cannot re-inject it.
+    /// `command_id` 透传给 `ContextFlow::submit` 作为命令标识；注入落盘到
+    /// messages.jsonl 即成 history。注入日志（injections.jsonl）已退役
+    /// （PLAN B1），不存在"标记 committed 以防崩溃重放"这一机制。
     pub fn handle_system_input(
         &self,
         ctx: &mut RingContext,
@@ -315,7 +315,7 @@ impl InputEngine {
 
         log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
         // 注入回合的用户可见文本**只保留 [SUBAGENT ...] 标签行**：
-        // 正文仅进模型消息流（push_system_input 已全文落盘，build_context
+        // 正文仅进模型消息流（push_trailing_system 已全文落盘，build_context
         // 从消息流取），不再进入前端 timeline/事件——否则注入正文会以
         // user 身份泄露到前端聊天流（前端把 TurnOpened.user_text 渲染为
         // 用户气泡）。前端 parse_subagent_injection 只需标签行即可收敛

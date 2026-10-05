@@ -159,7 +159,7 @@ pub enum ControlCommand {
     },
 }
 
-/// Conversation 频道命令。
+/// Conversation 消息的输入用途。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -175,7 +175,7 @@ pub enum ConversationInputPurpose {
     Interject,
 }
 
-/// Conversation 频道命令。
+/// 子代理终态种类（`SubagentTerminalNotification.terminal`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -249,7 +249,8 @@ pub enum ConversationCommand {
         /// and fall back to the command id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
-        /// Whether this message must trigger a turn or is queue-only.
+        /// How the child applies this message: trigger a turn, queue it only, or
+        /// merge it into a running turn at its next safe point (Steer/Interject).
         #[serde(default)]
         input_purpose: ConversationInputPurpose,
         /// 系统级注入（如子代理结果回传）：以 system 角色进入 transcript 并
@@ -299,10 +300,12 @@ fn default_load_count() -> u32 {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ToolCommand {
     /// 前端主动触发工具执行（UI 按钮/内联操作）。
+    ///
+    /// 无 `action` 字段：v1 的 `{name}_{action}` 复合名解析已退役——工具身份
+    /// 就是 `name`（v2 词汇表里 `todo_write` 等是独立工具名，不是 name+action）。
     ToolInvoke {
         tool_call_id: String,
         name: String,
-        action: String,
         args: serde_json::Value,
     },
     /// 权限请求响应。必须携带对应 interaction/tool_call 的 id；
@@ -319,7 +322,6 @@ pub enum ToolCommand {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum DomainCommand {
     Control(ControlCommand),
     Conversation(ConversationCommand),

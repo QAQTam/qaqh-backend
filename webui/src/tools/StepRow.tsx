@@ -13,7 +13,6 @@ import { hasAnsi, parseAnsi } from "../lib/ansi";
 import { STR, formatWorkDuration } from "../lib/strings";
 import { now } from "../lib/time";
 import { DiffList } from "../diff/DiffView";
-import { parseUnifiedDiff } from "../diff/parse";
 import { parseJsonish } from "../session/reducer";
 import type { ToolStep, Turn } from "../session/types";
 import { primaryArg, primaryArgFull, toolLabel } from "./registry";
@@ -70,15 +69,12 @@ const AnsiBlock: Component<{ text: string }> = (props) => (
 export const ToolDetail: Component<{ step: ToolStep }> = (props) => {
   const step = () => props.step;
   const output = () => step().output;
+  /** 展开详情头部的行差:与折叠行同源,取后端权威值。 */
   const diffStats = createMemo(() => {
-    const diffText = output()?.diffText;
-    if (!diffText) return null;
-    try {
-      const files = parseUnifiedDiff(diffText);
-      return files.reduce((acc, file) => ({ add: acc.add + file.stats.add, del: acc.del + file.stats.del }), { add: 0, del: 0 });
-    } catch {
-      return null;
-    }
+    const display = step().display;
+    const add = display?.lines_added ?? 0;
+    const del = display?.lines_removed ?? 0;
+    return add > 0 || del > 0 ? { add, del } : null;
   });
   const args = () => parseJsonish(step().argsJson);
   const argEntries = () => {
@@ -161,18 +157,15 @@ export const StepRow: Component<{ step: ToolStep; turn: Turn; expandable?: boole
   // 初始展开态只取创建时的状态(§8.2 error 默认展开);后续由用户点击接管。
   const [open, setOpen] = createSignal(untrack(() => step().status === "error"));
   const summary = () => primaryArg(step().argsJson, step().display);
+  /** 终态行差:后端权威值(`display.lines_*`)已随 timeline 透传,不再从 diff 文本统计。 */
   const stats = createMemo(() => {
-    const diffText = step().output?.diffText;
-    if (!diffText) return null;
-    try {
-      const files = parseUnifiedDiff(diffText);
-      return files.reduce((acc, file) => ({ add: acc.add + file.stats.add, del: acc.del + file.stats.del }), { add: 0, del: 0 });
-    } catch {
-      return null;
-    }
+    const display = step().display;
+    const add = display?.lines_added ?? 0;
+    const del = display?.lines_removed ?? 0;
+    return add > 0 || del > 0 ? { add, del } : null;
   });
   /**
-   * 行差数字的唯一出口:终态 diff 是权威,参数还在流式输出时退到后端旁路的
+   * 行差数字的唯一出口:终态权威值是权威,参数还在流式输出时退到后端旁路的
    * 估算(虚线样式,提示"这个数还会涨")。
    */
   const lineStats = createMemo(() => {

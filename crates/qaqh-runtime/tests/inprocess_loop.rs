@@ -1,6 +1,6 @@
 //! In-process Ringing V1 loop transport test (knife 1 step 1).
 //!
-//! `Loop::new_ipc` is the OS-pipe boundary. This test drives the exact same
+//! `Loop::new_ipc` was the OS-pipe boundary (now retired). This test drives the exact same
 //! loop through `LoopChannels` / `Loop::from_channels`, proving the loop is
 //! transport-agnostic before daemon-side subagent actors use the channel form.
 

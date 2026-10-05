@@ -26,8 +26,8 @@ pub struct RingingLeaseStore {
     leases: HashMap<String, LeaseEntry>,
     session_leases: HashMap<String, HashSet<String>>,
     /// `client_session_id` → `client_instance_id` 索引（BUG-2026-09-12-10）：
-    /// 让 `is_active_session` / `owns_seed` 等热路径查询保持 O(1)，
-    /// 避免每次调用做全表扫描（SSE 每事件都会经过 `owns_seed`）。
+    /// 让 `is_active_session` / `owns_session` 等热路径查询保持 O(1)，
+    /// 避免每次调用做全表扫描（SSE 每事件都会经过 `owns_session`）。
     by_session: HashMap<String, String>,
 }
 
@@ -46,7 +46,7 @@ impl RingingLeaseStore {
         // 顺带做一次过期 GC（open 是低频协商路径，适合承担清理）。
         self.expire();
         // 重新协商（同 instance 换新 cs）：旧 cs 的归属与索引必须清掉——
-        // 否则旧 cs 会成为「僵尸身份」（owns_seed 仍 true 但 lease 已死），
+        // 否则旧 cs 会成为「僵尸身份」（owns_session 仍 true 但 lease 已死），
         // 而新 cs 的归属由客户端重放 attach 补上（BUG-2026-09-12-10）。
         if let Some(old) = self.leases.get(&client_instance_id)
             && old.client_session_id != client_session_id
@@ -87,7 +87,7 @@ impl RingingLeaseStore {
 
     /// 该会话当前已 attach 的 seed 归属快照（BUG-2026-09-12-12 / issue #31）。
     ///
-    /// 用途：SSE 回放过滤原先在一次全局租约锁内逐事件调 `owns_seed`，
+    /// 用途：SSE 回放过滤原先在一次全局租约锁内逐事件调 `owns_session`，
     /// 持锁时间随回放事件数线性增长（实测 62–247 ms）。调用方改为在**一次**
     /// 短临界区内取本快照，之后锁外过滤，与事件数解耦。
     ///
@@ -179,6 +179,19 @@ impl RingingLeaseStore {
         if let Some(entry) = self.leases.get_mut(client_instance_id) {
             entry.expiry = expiry;
         }
+    }
+
+    /// 吊销设备：摘除其名下 lease（device 的 `client_instance_id` == `device_id`）。
+    ///
+    /// 显式切断该设备在途 SSE 与后续请求，**不**依赖短 TTL 自愈留窗口。返回是否
+    /// 确有 lease 被摘除。
+    pub fn revoke_device(&mut self, device_id: &str) -> bool {
+        let Some(entry) = self.leases.remove(device_id) else {
+            return false;
+        };
+        self.by_session.remove(&entry.client_session_id);
+        self.session_leases.remove(&entry.client_session_id);
+        true
     }
 }
 

@@ -39,7 +39,8 @@ use qaqh_runtime::agent::types::{
 };
 use qaqh_types::{ContentBlock, Message, ToolStatus};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
+use qaqh_workspace::probe::ProbeTool;
+use qaqh_workspace::{ToolManager, ToolResult, ToolRisk};
 
 fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolExecutionScope {
     qaqh_workspace::runtime::ToolExecutionScope::capture(
@@ -104,10 +105,23 @@ fn lock_probe() -> std::sync::MutexGuard<'static, ProbeState> {
 /// `rendezvous > 1` 时等待同批项到齐（或 3s 超时）——让"并发上限"断言
 /// 不依赖调度时序：若实现串行执行，等待超时后 `max_active` 会停在 1，
 /// 断言给出明确失败而不是偶发假红。
-fn probe_handler(ctx: ToolCallCtx) -> ToolResult {
-    let call = ctx.get_str("call").unwrap_or_default().to_string();
-    let sleep_ms = ctx.get_u64("sleep_ms").unwrap_or(0);
-    let rendezvous = ctx.get_u64("rendezvous").unwrap_or(0) as usize;
+fn probe_handler(
+    _ctx: &qaqh_workspace::tool_api::ToolCallContext,
+    args: serde_json::Value,
+) -> ToolResult {
+    let call = args
+        .get("call")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let sleep_ms = args
+        .get("sleep_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let rendezvous = args
+        .get("rendezvous")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
     {
         let mut state = lock_probe();
         state.active += 1;
@@ -146,7 +160,7 @@ fn probe_handler(ctx: ToolCallCtx) -> ToolResult {
 }
 
 fn register_probe(mgr: &mut ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_probe(ProbeTool {
         key: "test_probe".to_string(),
         description: "编排契约探针（测试专用）",
         input_schema: serde_json::json!({

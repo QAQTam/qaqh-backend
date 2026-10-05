@@ -62,13 +62,13 @@ fn publish_worker_event(
             // fact 里只有 ref，正文走展示面旁路。
             crate::registry::stash_interaction_body(hub, &env.session_id, &domain);
             // §4.0.5 迁移完成：live_interactions 登记与交互 pin 释放现在随事件
-            // 产生侧执行（worker 桥），publish 只保留广播 + journal 语义——
-            // 阶段 3d 删 publish 时不再需要迁移。
+            // 产生侧执行（worker 桥）——迁移在阶段 3d 删 publish 前即已完成，
+            // 故删除广播面未再需要迁移。
             crate::registry::apply_interaction_side_effects(hub, &env.session_id, &domain);
             // 阶段 3d：v1 广播面已删除——worker 事件只保留副作用迁移后的
             // 产生侧动作；事件本体由 canonical fact 面（timeline/journal）外化。
             if let Some(observe) = crate::activity::domain_activity_observe(&domain) {
-                // tracker 状态机保留（/activity 查询权威）；广播照旧随 publish。
+                // tracker 状态机保留（/activity 查询权威）；v1 广播面已删除，观察只驱动状态机。
                 let _ = activity.observe(session_id, generation, &observe);
             }
         }

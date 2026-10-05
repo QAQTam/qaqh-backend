@@ -7,11 +7,13 @@ use super::*;
 /// - `total_turns` = 会话**持久化的真实回合数**；取不到 meta 时回退到物化窗口
 ///   大小（不可判定 → 只报已知的，不放大）；
 /// - `truncated_before` = 物化窗口**未覆盖到历史开头**——更早的回合存在（在归档
-///   里），但本次交付不到，且当前没有深翻页接口能取到它们。
+///   里），本次交付不到（可由归档深翻页接口 `RingingHub::archive_turn_page` 继续
+///   向前翻取，读取有界）。
 ///
 /// 注意 `truncated_before` **不能**用 `has_more` 表达：`has_more` 的契约是
-/// 「还能再翻一页且本页非空」（BUG-2026-09-13-18），而这里的更早回合拿不到，
-/// 谎报只会让客户端反复请求一个永远为空的页。
+/// 「还能再翻一页且本页非空」（BUG-2026-09-13-18），而 truncated_before 是
+/// 「窗口之外还有历史」这一事实（其可达性由深翻页是否触顶另行决定），谎报只会
+/// 让客户端反复请求一个永远为空的页。
 pub(crate) fn window_metadata(materialized: usize, persisted: Option<usize>) -> (usize, bool) {
     let total_turns = persisted.unwrap_or(materialized).max(materialized);
     let truncated_before = persisted.is_some_and(|total| total > materialized);
@@ -71,9 +73,6 @@ pub(crate) async fn handle_timeline_snapshot(
     Path(session_id): Path<String>,
     Query(q): Query<TimelineQuery>,
 ) -> Response {
-    if !is_authorized(&headers, &state.token) {
-        return unauthorized();
-    }
     let Some(client_session_id) = get_session_id(&headers) else {
         return lease_required_json();
     };

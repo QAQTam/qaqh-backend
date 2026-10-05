@@ -1364,10 +1364,10 @@ pub fn arm_subagent_collector(
     Ok(())
 }
 
-/// Background collector: watches the sub-seed's event stream (process-local or
-/// HTTP/SSE, depending on the transport) until a terminal event, a kill
-/// request, or the timeout — mirroring the old stdout-frame collector, but over
-/// the Ringing event plane.
+/// Background collector: watches the sub-seed's event stream (process-local,
+/// direct host connection) until a terminal event, a kill request, or the
+/// timeout — mirroring the old stdout-frame collector, but over the Ringing
+/// event plane.
 #[allow(clippy::too_many_arguments)]
 fn collect_subagent_result(
     transport: Box<dyn SubagentTransport>,
@@ -1611,8 +1611,7 @@ fn collect_subagent_result(
     registry_ref.finish(&final_answer, exit_code);
 
     // ── 自动卸载：终态后关闭子 agent（actor / worker 进程），释放后台资源。──
-    // SessionClose 语义由宿主执行（进程内 registry.close；HTTP 路径由 daemon
-    // 拦截：registry.close → SessionShutdown 帧 → worker 优雅退出）。
+    // SessionClose 语义由进程内宿主直接执行（registry.close + 临时会话清理）。
     // 失败仅告警：结果已注入主会话 + 终态已回写注册表，残留不丢数据。
     if let Err(e) = transport.send_command(
         session_id,

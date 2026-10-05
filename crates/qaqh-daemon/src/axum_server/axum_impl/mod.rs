@@ -1,4 +1,4 @@
-//! axum_impl — daemon HTTP 层（Ringing V1 + 服务面 + 控制）。
+//! axum_impl — daemon HTTP 层（Ringing V2 + 服务面 + 控制）。
 //!
 //! 由单文件 `axum_server.rs` 拆分（Phase 2-4）：`mod axum_impl` 内联模块解体为
 //! 目录模块，对外 API 不变（`AppState` + `build_router`）。
@@ -10,7 +10,7 @@ use std::time::Duration;
 use axum::{
     Router,
     body::Bytes,
-    extract::{Path, Query, Request, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{
@@ -30,7 +30,9 @@ use qaqh_ringing::{
     RingingCommandAckStatus, RingingCommandState, RingingV2CommandAck, RingingV2CommandEnvelope,
     RingingV2ContentValue,
 };
-use qaqh_runtime::ringing::{PendingCommandStore, RingingLeaseStore, service_methods};
+use qaqh_runtime::ringing::{
+    DeviceRegistry, PendingCommandStore, RingingLeaseStore, Scope, service_methods,
+};
 use qaqh_runtime::{QaqhService, RingingHub};
 
 use crate::server::random_hex;
@@ -38,9 +40,12 @@ use crate::server::random_hex;
 use qaqh_runtime::ringing::hydrate_attachment_previews;
 
 pub mod auth;
+pub mod authz;
+pub mod challenge;
 pub mod command;
 pub mod content;
 pub mod control;
+pub mod pairing;
 pub mod service_api;
 pub mod sse;
 pub(crate) mod test_hooks;
@@ -52,6 +57,7 @@ pub(crate) use auth::parse_channel;
 pub(crate) use auth::{
     get_session_id, is_authorized, lease_required_json, session_close_session, unauthorized,
 };
+pub(crate) use authz::{Identity, require_scope};
 pub(crate) use command::{command_fingerprint, execute_command};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
@@ -61,9 +67,10 @@ pub(crate) use sse::handle_timeline_events;
 pub(crate) use sse::parse_timeline_cursor;
 pub(crate) use timeline_api::handle_timeline_snapshot;
 pub(crate) use v2::{
-    handle_bootstrap_v2, handle_command_status_v2, handle_command_v2, handle_driver_claim_v2,
-    handle_driver_release_v2, handle_events_v2, handle_open_v2, handle_pending_approvals_v2,
-    handle_renew_v2, handle_team_snapshot_v2, reclaim_dead_driver_seats,
+    handle_approval_respond_v2, handle_bootstrap_v2, handle_command_status_v2, handle_command_v2,
+    handle_driver_claim_v2, handle_driver_release_v2, handle_events_v2, handle_open_v2,
+    handle_pending_approvals_v2, handle_renew_v2, handle_team_snapshot_v2,
+    reclaim_dead_driver_seats,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -95,7 +102,18 @@ pub struct AppState {
     pub driver_watch: Arc<Mutex<qaqh_runtime::ringing::RingingDriverWatch>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
-    pub token: String,
+    /// 本地 admin 凭证：桌面壳 / daemon-CLI / TUI / 探针专用，全权。
+    /// 设备凭证走 `DeviceRegistry`（S2），移动端永不接触本 token。
+    pub admin_token: String,
+    /// 已配对设备注册表（持久化，跨重启存活，可吊销）。
+    pub devices: Arc<Mutex<DeviceRegistry>>,
+    /// 短寿一次性配对令牌表（仅内存，TTL 120s）。
+    pub pairings: Arc<Mutex<pairing::PairingTable>>,
+    /// 服务端自签证书指纹（`sha256:<hex>`）；仅非回环 bind 启用 TLS 时非空，
+    /// 经 `/pairing/tokens` 进二维码供原生端 pinning。
+    pub tls_fingerprint: Option<String>,
+    /// 服务端一次性审批 challenge（device 身份走不透明 id，canonical id 不出 daemon）。
+    pub challenges: Arc<challenge::ChallengeStore>,
     pub epoch: String,
     pub shutdown: tokio::sync::watch::Sender<bool>,
     pub(crate) test_hooks: Arc<test_hooks::TestHooks>,
@@ -175,6 +193,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handle_pending_approvals_v2),
         )
         .route(
+            "/ringing/v2/sessions/{session_id}/approvals/respond",
+            post(handle_approval_respond_v2),
+        )
+        .route(
             "/ringing/v2/sessions/{session_id}/timeline",
             get(handle_timeline_snapshot),
         )
@@ -185,9 +207,24 @@ pub fn build_router(state: AppState) -> Router {
             "/ringing/v2/sessions/{session_id}/timeline/events",
             get(handle_timeline_events),
         )
+        .route(
+            "/ringing/v2/pairing/tokens",
+            post(pairing::handle_pairing_tokens),
+        )
+        .route("/ringing/v2/pair", post(pairing::handle_pair))
+        .route("/ringing/v2/devices", get(pairing::handle_devices))
+        .route(
+            "/ringing/v2/devices/{device_id}/revoke",
+            post(pairing::handle_device_revoke),
+        )
         .route("/control/v1/stop", post(handle_stop))
         .route("/control/v1/stop-if-idle", post(handle_stop_if_idle))
         .fallback(not_found)
+        // 内层：单次 Bearer 解析（S0 收口，取代逐 handler 手检）。
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            authz::authenticate,
+        ))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(MAX_CONNECTIONS))
         .layer(TraceLayer::new_for_http())

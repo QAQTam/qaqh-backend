@@ -173,6 +173,6 @@ pub fn record_interaction_resolution_for_test(
     decision: &str,
     command_id: Option<&str>,
 ) -> Result<(), String> {
-    TurnEngine::record_interaction_resolution(agent, interaction_id, decision, command_id)
+    TurnEngine::record_interaction_resolution(agent, interaction_id, decision, command_id, None)
         .map_err(|error| error.to_string())
 }

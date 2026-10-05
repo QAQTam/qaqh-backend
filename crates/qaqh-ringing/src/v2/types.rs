@@ -50,6 +50,10 @@ pub struct RingingV2Capabilities {
     /// 新 client 必须显式断言 `true` 才能假定单流语义。
     #[serde(default)]
     pub single_stream: bool,
+    /// 扫码配对能力（移动端 M0）。`#[serde(default)]`：旧 client 反序列化新响应
+    /// 该字段为 `false`，据此判定 daemon 是否支持 `/pairing/tokens` + `/pair`。
+    #[serde(default)]
+    pub pairing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +81,66 @@ impl RingingV2OpenResponse {
         }
         Ok(())
     }
+}
+
+// ── 扫码配对（移动端 M0，spec-daemon-auth-devices §11）────────────────────────
+//
+// v2 冻结线**外追加**，不改既有帧格式。配对是唯一依赖桌面端在线的时刻。
+
+/// `POST /ringing/v2/pairing/tokens` 请求（Admin）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2PairTokenRequest {
+    /// 桌面端决定的授予档位：`"view"` | `"interact"`。
+    pub scope_grant: String,
+    #[serde(default)]
+    pub device_name: String,
+    #[serde(default)]
+    pub platform: String,
+}
+
+/// 配对令牌响应。`tls_fp` 为自签证书 SPKI 的 `sha256:<hex>`，供原生端 pinning。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2PairTokenResponse {
+    pub pairing_token: String,
+    pub expires_in_ms: u64,
+    #[serde(default)]
+    pub tls_fp: String,
+}
+
+/// `POST /ringing/v2/pair` 请求（无 Bearer，消费一次性 `pairing_token`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2PairRequest {
+    pub pairing_token: String,
+    #[serde(default)]
+    pub device_name: String,
+    #[serde(default)]
+    pub platform: String,
+}
+
+/// 配对成功响应。`device_token` 明文**仅此一次**出现，注册表只存摘要。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2PairResponse {
+    pub device_id: String,
+    pub device_token: String,
+    pub scope: String,
+    pub daemon_version: String,
+    pub protocol_version: u32,
+}
+
+/// 设备管理视图（**不含任何 token 材料**）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2DeviceWire {
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub scope: String,
+    pub created_at_ms: u64,
+    pub last_seen_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingingV2DevicesResponse {
+    pub devices: Vec<RingingV2DeviceWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -842,8 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_constants_remain_unchanged() {
-        assert_eq!(crate::RINGING_VERSION, 1);
+    fn v2_constants_remain_unchanged() {
         assert_eq!(RINGING_V2_VERSION, 2);
         assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
         assert_eq!(open_path(), "/ringing/v2/clients/open");

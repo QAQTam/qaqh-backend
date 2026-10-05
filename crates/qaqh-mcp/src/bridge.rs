@@ -9,7 +9,7 @@
 //!   禁触碰全局 `qaqh_workspace::CANCEL`，禁以任何字面形式复位取消旗标——
 //!   契约红线1），
 //!   命中即 best-effort 发送 `notifications/cancelled`、丢弃结果、返回
-//!   `MCP_CANCELLED`；超时链 = `ctx.timeout_secs`（来自 server 配置的
+//!   `mcp_cancelled`；超时链 = `ctx.timeout_secs`（来自 server 配置的
 //!   `default_timeout_secs`）→ 缺省 60s → 封顶 3600s；
 //! - 错误码映射：`McpError`/`CallToolResult::is_error` → 设计 §7 的
 //!   ToolResult JSON（timeis/status/code/message/hint）；
@@ -26,9 +26,8 @@ use qaqh_types::{
     ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader, ToolResultDisplayOutcome,
     ToolResultDisplayOutcomeState,
 };
-use qaqh_workspace::{
-    DynamicTool, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolResult, ToolStatus, now_utc8,
-};
+use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_workspace::{DynamicTool, MCP_DYNAMIC_PREFIX, ToolResult, ToolStatus, now_utc8};
 use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::McpManager;
@@ -100,14 +99,25 @@ pub fn prime_all_async() {
 }
 
 /// E-5 单一 dispatcher：全体 MCP 工具共用的 fn 指针（注册进 `DynamicTool`）。
-pub fn dispatch(ctx: ToolCallCtx) -> ToolResult {
-    dispatch_with(
+///
+/// typed 外壳：拿显式 [`ToolCallContext`]（工作区/取消/超时都显式），注册全名
+/// 由 [`qaqh_workspace::DynamicToolAdapter`] 注入。内部仍是 v1 管线的
+/// `ToolResult` 信封（模型面 §7 逐字节契约），经 [`map_tool_result`] 收口到
+/// typed 结果面。
+pub fn dispatch(
+    name: &str,
+    ctx: &ToolCallContext,
+    args: serde_json::Value,
+) -> Result<ToolOutcome, FatalToolError> {
+    let cancel = ctx.cancellation.shared_flag();
+    let timeout_hint = (!ctx.timeout.is_zero()).then(|| ctx.timeout.as_secs());
+    Ok(map_tool_result(dispatch_with(
         &manager_slot(),
-        &ctx.name,
-        &ctx.args,
-        &ctx.cancel,
-        ctx.timeout_secs,
-    )
+        name,
+        &args,
+        &cancel,
+        timeout_hint,
+    )))
 }
 
 /// [`dispatch`] 的可测形态：manager 显式注入（集成测试不经全局槽位，可并行）。
@@ -147,7 +157,7 @@ pub fn dispatch_with(
 ///
 /// server 名含 `_` 时存在前缀歧义（`mcp__a__b__t`），按**最长 server 前缀**
 /// 消解；注册侧碰撞拒绝保证同一完整名至多注册一次，因此最长前缀即注册时
-/// 的真实 (server, tool) 对。未匹配任何已配置 server → `MCP_NOT_FOUND`
+/// 的真实 (server, tool) 对。未匹配任何已配置 server → `mcp_not_found`
 /// （报错附可用名单，设计 §7）。
 fn resolve_call(manager: &McpManager, name: &str) -> Result<(String, String), McpError> {
     let rest = name.strip_prefix(MCP_DYNAMIC_PREFIX).ok_or_else(|| {
@@ -269,7 +279,7 @@ fn send_cancelled(manager: &McpManager, server: &str, tool: &str, reason: &str) 
     }
 }
 
-/// `CallToolResult` → ToolResult（§7：`isError=true` → `MCP_TOOL_ERROR` 且
+/// `CallToolResult` → ToolResult（§7：`isError=true` → `mcp_tool_error` 且
 /// 透传 content；成功 → 文本拼接直通，输出上限由 [`ToolResult::ok`] 既有
 /// 截断承担）。
 fn call_result_to_tool_result(result: CallToolResult) -> ToolResult {
@@ -295,6 +305,8 @@ fn mcp_display(state: ToolResultDisplayOutcomeState, text: String) -> ToolResult
     ToolResultDisplay {
         summary: None,
         diff: None,
+        lines_added: 0,
+        lines_removed: 0,
         header: Some(ToolResultDisplayHeader::Other {
             label: String::new(),
         }),
