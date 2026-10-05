@@ -179,8 +179,6 @@ impl ToolRuntime {
                             ctx,
                             &call_id,
                             &tool_name,
-                            turn_id,
-                            round_num,
                             result.result,
                             result.code_delta,
                         );
@@ -253,8 +251,6 @@ impl ToolRuntime {
                             ctx,
                             &call_id,
                             &tool_name,
-                            turn_id,
-                            round_num,
                             result.result,
                             result.code_delta,
                         );
@@ -1206,8 +1202,6 @@ fn backfill_executed_result(
     ctx: &mut RingContext,
     call_id: &str,
     tool_name: &str,
-    turn_id: &str,
-    round_num: u32,
     canonical_result: qaqh_types::ToolResult,
     code_delta: Option<qaqh_domain::CodeDeltaRecord>,
 ) {
@@ -1216,19 +1210,6 @@ fn backfill_executed_result(
         .push_tool_result_canonical(call_id, &canonical_result, &canonical_result.images);
     if let Some(ref delta) = code_delta {
         ctx.stats.push_delta(delta.clone());
-        // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-            qaqh_domain::ToolEvent::CodeChanged {
-                tool_call_id: call_id.to_string(),
-                turn_id: turn_id.to_string(),
-                round_num,
-                lines_added: delta.lines_added,
-                lines_removed: delta.lines_removed,
-                files_created: delta.files_created,
-                files_deleted: delta.files_deleted,
-                file: delta.file.clone(),
-            },
-        ));
     }
     // Instant refresh for todo tools
     // 注意：legacy 名 "todo" 已退役（todo_contract 锁定）——此处曾匹配 "todo"，

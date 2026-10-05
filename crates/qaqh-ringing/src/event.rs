@@ -6,7 +6,6 @@
 use qaqh_domain::{ControlEvent, ConversationEvent, ToolEvent};
 use serde::{Deserialize, Serialize};
 
-use qaqh_domain::RingingChannel;
 
 /// Control 频道事件（wire 名，域类型为 `qaqh_domain::ControlEvent`）。
 pub type RingingControlEvent = ControlEvent;
@@ -23,16 +22,6 @@ pub enum RingingEvent {
     Control(RingingControlEvent),
     Conversation(RingingConversationEvent),
     Tool(RingingToolEvent),
-}
-
-impl RingingEvent {
-    pub fn channel(&self) -> RingingChannel {
-        match self {
-            RingingEvent::Control(_) => RingingChannel::Control,
-            RingingEvent::Conversation(_) => RingingChannel::Conversation,
-            RingingEvent::Tool(_) => RingingChannel::Tool,
-        }
-    }
 }
 
 impl From<qaqh_domain::DomainEvent> for RingingEvent {

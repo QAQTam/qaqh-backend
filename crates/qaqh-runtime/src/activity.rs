@@ -395,12 +395,16 @@ mod tests {
             ActivityState::WaitingUser
         );
 
-        // 无关事件不产生观察事件
-        let none = domain_activity_observe(&DomainEvent::Tool(ToolEvent::ToolNotice {
-            tool_call_id: None,
-            level: qaqh_domain::NoticeLevel::Info,
-            message: "m".into(),
-        }));
+        // 无关事件不产生观察事件（BlockCheckpoint 只走 timeline 通道，tracker 不认）
+        let none = domain_activity_observe(&DomainEvent::Conversation(
+            qaqh_domain::ConversationEvent::BlockCheckpoint {
+                turn_id: "t".into(),
+                round_num: 0,
+                kind: qaqh_domain::RoundDeltaKind::Answering,
+                text: "x".into(),
+                char_count: 1,
+            },
+        ));
         assert!(none.is_none());
     }
 }

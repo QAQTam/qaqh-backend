@@ -827,18 +827,6 @@ impl ToolEngine {
 
         if let Some(ref delta) = code_delta {
             ctx.stats.push_delta(delta.clone());
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                qaqh_domain::ToolEvent::CodeChanged {
-                    tool_call_id: tid.clone(),
-                    turn_id: turn_id.clone(),
-                    round_num: 0,
-                    lines_added: delta.lines_added,
-                    lines_removed: delta.lines_removed,
-                    files_created: delta.files_created,
-                    files_deleted: delta.files_deleted,
-                    file: delta.file.clone(),
-                },
-            ));
         }
 
         // 展示平面 diff / metrics / 失败槽：先取出（ToolFinished 会 move 整个
