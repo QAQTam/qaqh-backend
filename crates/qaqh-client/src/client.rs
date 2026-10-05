@@ -26,6 +26,21 @@ use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
 use qaqh_ringing::v2::{RingingV2CommandAck, RingingV2CommandStatus};
 
+/// `reqwest` 以 `rustls-no-provider` 特征编译（换掉 `rustls` 是为绕开 OHOS 上
+/// 构建不了的 aws-lc-rs，见 `qaqh-client/Cargo.toml`），该特征的硬契约是：建
+/// Client **之前**必须装好一个 rustls crypto provider，否则 `build()` 直接 panic
+/// ——明文 `http://` 也一样炸，因为 TLS 配置是无条件构造的。
+///
+/// 装 provider 是进程级全局动作，故用 `Once`。`let _ =` 而非 `unwrap`：后端
+/// workspace 里 `qaqh-gate` 仍用 reqwest 的 `rustls` 特征，特征统一时上游可能
+/// 已经装过，重复安装只返回 Err，不是故障。
+pub(crate) fn ensure_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Callbacks delivered on the client's background tasks.
 #[derive(Clone)]
 pub struct ClientHandlers {
@@ -210,6 +225,7 @@ impl Client {
             }
         };
 
+        ensure_crypto_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()?;
