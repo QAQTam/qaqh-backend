@@ -7,6 +7,8 @@ description = "QAQ-Harness in-process tool execution library"
 [dependencies]
 # Tool SDK 核心（P2 拆分）：typed 契约/描述符/投影/schema 的单一事实源。
 qaqh-tool-core = { path = "../qaqh-tool-core" }
+# 权限引擎 + 全局状态（P2 拆分）：单一事实源在 qaqh-permission。
+qaqh-permission = { path = "../qaqh-permission" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }

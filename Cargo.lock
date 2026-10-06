@@ -3914,6 +3914,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-permission"
+version = "2.0.0-beta.2"
+dependencies = [
+ "log",
+ "qaqh-policy",
+ "qaqh-sandbox",
+ "qaqh-skills",
+ "qaqh-types",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "qaqh-policy"
 version = "2.0.0-beta.2"
 dependencies = [
@@ -4114,6 +4127,7 @@ dependencies = [
  "libc",
  "log",
  "qaqh-domain",
+ "qaqh-permission",
  "qaqh-policy",
  "qaqh-sandbox",
  "qaqh-skills",
