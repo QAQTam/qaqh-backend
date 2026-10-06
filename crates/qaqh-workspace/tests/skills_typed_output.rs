@@ -1,4 +1,4 @@
-//! P3 typed-output contract for the `skills` tool.
+//! P3 typed-output contract for `skill_activate` (v2 skills 三件套之一)。
 
 #![allow(clippy::unwrap_used)] // integration test fixture
 
@@ -17,7 +17,7 @@ fn isolate_workspace() -> tempfile::TempDir {
 }
 
 #[test]
-fn skills_typed_activation_carries_effect_and_same_source_output() {
+fn skill_activate_typed_activation_carries_effect_and_same_source_output() {
     let workspace = isolate_workspace();
     qaqh_workspace::runtime::init_tools("skills-typed", &[], vec![]);
     qaqh_workspace::set_workspace(&workspace.path().to_string_lossy());
@@ -28,9 +28,9 @@ fn skills_typed_activation_carries_effect_and_same_source_output() {
         workspace_root: Some(workspace.path().to_string_lossy().into_owned()),
     };
 
-    let args = json!({"action": "activate", "name": "typed-skill"});
+    let args = json!({"name": "typed-skill"});
     let executed = qaqh_workspace::execution::execute_with_context(
-        "skills",
+        "skill_activate",
         &args.to_string(),
         "skills-typed-call",
         None,
@@ -38,13 +38,13 @@ fn skills_typed_activation_carries_effect_and_same_source_output() {
     );
     assert!(
         executed.success,
-        "typed skills activation failed: {}",
+        "typed skill activation failed: {}",
         executed.content
     );
     assert_eq!(executed.result.data["skill"], "typed-skill");
     assert!(
         executed.result.display().is_some(),
-        "typed skills output must carry canonical display"
+        "typed activation output must carry canonical display"
     );
     assert_eq!(executed.skill_effects.len(), 1);
     assert!(
@@ -55,13 +55,13 @@ fn skills_typed_activation_carries_effect_and_same_source_output() {
     );
 
     let display = qaqh_workspace::runtime::project_tool_display_from_result(
-        "skills",
+        "skill_activate",
         &args,
         &executed.result,
     )
-    .expect("skills display projection");
+    .expect("skill_activate display projection");
     assert!(
         display.summary.is_some(),
-        "skills display must carry a human summary"
+        "activation display must carry a human summary"
     );
 }
