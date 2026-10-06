@@ -246,7 +246,14 @@ mod tests {
             .collect();
         assert_eq!(
             unbound,
-            vec!["ask", "todo_list", "todo_update", "todo_write", "web_fetch"],
+            vec![
+                "ask",
+                "skill_activate",
+                "todo_list",
+                "todo_update",
+                "todo_write",
+                "web_fetch"
+            ],
             "非 workspace 绑定工具必须显式审查（执行器不注入 workspace_root）"
         );
     }
