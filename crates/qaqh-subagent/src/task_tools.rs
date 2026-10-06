@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use qaqh_workspace::ToolRisk;
 use qaqh_workspace::tool_api::{
-    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
-    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
-    ToolSource, TypedTool,
+    ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
+    ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -20,7 +19,9 @@ use crate::host::{
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskCreateArgs {
+    /// Short task title.
     title: String,
+    /// Optional sha256 content id for the full description.
     #[serde(default)]
     description_ref: Option<String>,
 }
@@ -30,6 +31,7 @@ pub struct TaskCreateArgs {
 pub struct TaskClaimArgs {
     task_id: String,
     action: TaskClaimAction,
+    /// Required for release.
     #[serde(default)]
     reason: Option<String>,
 }
@@ -39,12 +41,16 @@ pub struct TaskClaimArgs {
 pub struct TaskUpdateArgs {
     task_id: String,
     action: TaskUpdateAction,
+    /// Task id this task depends on (action=add_dependency).
     #[serde(default)]
     depends_on: Option<String>,
+    /// Content id of the artifact to attach (action=attach_artifact).
     #[serde(default)]
     artifact_ref: Option<String>,
+    /// Media type of the attached artifact.
     #[serde(default)]
     media_type: Option<String>,
+    /// Replacement acceptance criteria (action=set_acceptance).
     #[serde(default)]
     acceptance: Option<Vec<String>>,
 }
@@ -54,8 +60,10 @@ pub struct TaskUpdateArgs {
 pub struct TaskCloseArgs {
     task_id: String,
     action: TaskCloseAction,
+    /// Content id of the completion result.
     #[serde(default)]
     result_ref: Option<String>,
+    /// Close/cancel reason.
     #[serde(default)]
     reason: Option<String>,
 }
@@ -63,6 +71,7 @@ pub struct TaskCloseArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskListArgs {
+    /// Filter by state: open | claimed | completed | closed | cancelled.
     #[serde(default)]
     state: Option<String>,
 }
@@ -72,6 +81,15 @@ pub struct TaskOutput {
     task: TaskBoardTask,
 }
 
+impl TaskOutput {
+    fn summary_text(&self) -> String {
+        format!(
+            "{} [{}] epoch={}",
+            self.task.task_id, self.task.state, self.task.claim_epoch
+        )
+    }
+}
+
 impl ToolProjection for TaskOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
@@ -79,15 +97,8 @@ impl ToolProjection for TaskOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(format!(
-            "{} [{}] epoch={}",
-            self.task.task_id, self.task.state, self.task.claim_epoch
-        ))
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        let summary = self.summary().unwrap_or_default();
+        let summary = self.summary_text();
         ToolDisplay::new(
             qaqh_workspace::tool_api::ToolHeader::Other {
                 label: "tasks".to_string(),
@@ -106,6 +117,12 @@ pub struct TaskListOutput {
     tasks: Vec<TaskBoardTask>,
 }
 
+impl TaskListOutput {
+    fn summary_text(&self) -> String {
+        format!("{} task(s)", self.tasks.len())
+    }
+}
+
 impl ToolProjection for TaskListOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
@@ -113,12 +130,8 @@ impl ToolProjection for TaskListOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(format!("{} task(s)", self.tasks.len()))
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        let summary = self.summary().unwrap_or_default();
+        let summary = self.summary_text();
         ToolDisplay::new(
             qaqh_workspace::tool_api::ToolHeader::Other {
                 label: "tasks".to_string(),
@@ -138,33 +151,14 @@ impl TypedTool for TaskCreateTool {
     type Args = TaskCreateArgs;
     type Output = TaskOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("task_create").expect("valid task_create tool name"),
-            display_name: None,
-            description: "Create a task in the current root tree's shared task board.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string", "description": "Short task title." },
-                    "description_ref": {
-                        "type": "string",
-                        "description": "Optional sha256 content id for the full description."
-                    }
-                },
-                "required": ["title"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(TaskOutput))
-                .expect("task_create output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "task_create",
+            "Create a task in the current root tree's shared task board.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -189,31 +183,14 @@ impl TypedTool for TaskClaimTool {
     type Args = TaskClaimArgs;
     type Output = TaskOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("task_claim").expect("valid task_claim tool name"),
-            display_name: None,
-            description: "Claim or release a task with compare-and-set claim epochs.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string" },
-                    "action": { "type": "string", "enum": ["claim", "release"] },
-                    "reason": { "type": "string", "description": "Required for release." }
-                },
-                "required": ["task_id", "action"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(TaskOutput))
-                .expect("task_claim output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "task_claim",
+            "Claim or release a task with compare-and-set claim epochs.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -239,38 +216,14 @@ impl TypedTool for TaskUpdateTool {
     type Args = TaskUpdateArgs;
     type Output = TaskOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("task_update").expect("valid task_update tool name"),
-            display_name: None,
-            description: "Add a dependency, attach an artifact, or replace acceptance criteria."
-                .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string" },
-                    "action": {
-                        "type": "string",
-                        "enum": ["add_dependency", "attach_artifact", "set_acceptance"]
-                    },
-                    "depends_on": { "type": "string" },
-                    "artifact_ref": { "type": "string" },
-                    "media_type": { "type": "string" },
-                    "acceptance": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["task_id", "action"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(TaskOutput))
-                .expect("task_update output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "task_update",
+            "Add a dependency, attach an artifact, or replace acceptance criteria.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -299,32 +252,14 @@ impl TypedTool for TaskCloseTool {
     type Args = TaskCloseArgs;
     type Output = TaskOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("task_close").expect("valid task_close tool name"),
-            display_name: None,
-            description: "Complete, close, or cancel a task.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string" },
-                    "action": { "type": "string", "enum": ["complete", "close", "cancel"] },
-                    "result_ref": { "type": "string" },
-                    "reason": { "type": "string" }
-                },
-                "required": ["task_id", "action"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(TaskOutput))
-                .expect("task_close output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "task_close",
+            "Complete, close, or cancel a task.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -351,31 +286,14 @@ impl TypedTool for TaskListTool {
     type Args = TaskListArgs;
     type Output = TaskListOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("task_list").expect("valid task_list tool name"),
-            display_name: None,
-            description: "List tasks in the current root tree's shared task board.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "state": {
-                        "type": "string",
-                        "enum": ["open", "claimed", "completed", "closed", "cancelled"]
-                    }
-                },
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(TaskListOutput))
-                .expect("task_list output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "task_list",
+            "List tasks in the current root tree's shared task board.",
+            qaqh_workspace::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
