@@ -603,6 +603,62 @@ fn validate_server_name(name: &str) -> Result<(), String> {
 /// BYOK 未声明上下文窗口时的保守分母：宁可早压缩，也不把超限推给上游换 400。
 pub const DEFAULT_CONTEXT_LENGTH: u32 = 128_000;
 
+/// 首次启动落盘的预设配置（带注释，可直接编辑）。
+///
+/// 存在的前提是"配置文件不在"（`load` 只在 `!store.exists()` 时写），因此损坏的
+/// 用户文件绝不会被它覆盖。示例端点用的是 DeepSeek 的 OpenAI 兼容端点——换成自己的
+/// 服务商只改 `base_url` / `wire` / `model` / `context_length` 四项；这里**不含任何
+/// 密钥**（api key 走设置页 → `secrets.toml`，本文件只留 `api_key = "set"` 标记）。
+const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生成，改这份即可）。
+#
+# BYOK：一个端点只需要六个字段——
+#   1. endpoint        → base_url       （scheme + host + 可选前缀，不含协议自身路径）
+#   2. wire            → 协议            （openai | responses | anthropic）
+#   3. apikey          → 设置页填一次，密文进同目录 secrets.toml（这里只留 api_key = "set"）
+#   4. model           → model
+#   5. max_token       → max_tokens     （单次回复上限）
+#   6. context_length  → 端点声明的上下文窗口，也是本地压缩的唯一分母
+#
+# 下面是一份可直接改写的起点（DeepSeek 的 OpenAI 兼容端点）。换服务商时改
+# base_url / wire / model / context_length 四项即可；要多几个端点就整段复制
+# [profiles.<名字>]，切换走设置页的 profile。
+
+active_profile = "default"
+
+[profiles.default]
+model = "deepseek-chat"
+max_tokens = 16384
+effort = "high"
+context_length = 128000
+base_url = "https://api.deepseek.com"
+wire = "openai"
+
+# 可选：只有该端点与 wire 缺省语义不一致时才需要写；整段删掉即全用缺省。
+# 这些字段描述的是"这一个端点的请求形状"，gate 照原样转发，不做厂商名判断。
+# [profiles.default.compat]
+# path = "/v1/chat/completions"           # 覆写 wire 的规范路径
+# thinking_mode = "OpenAi"                # OpenAi | QwenEnableThinking | MiniMaxAdaptive
+# cache_field = "PromptCacheHitTokens"    # PromptCacheHitTokens | PromptDetailsCached | UsageCachedTokens | None
+# include_stream_usage = true             # 请求末帧 usage（部分兼容端点不接受）
+# supports_thinking = false
+# thinking_budget_large = true            # Anthropic 大上下文 thinking 预算档（16k-96k）
+# supports_reasoning_effort = false
+# effort_allowlist = ["high", "max"]      # 稀疏档位白名单（路由器常见）
+# tool_call_content_null = true
+# supports_reasoning_content = false
+# require_provider_parameters = true
+# do_sample = false
+# user_id_mode = "Body"
+# responses_web_search = false
+# responses_effort_max = "xhigh"          # reasoning.effort 上限（超出即钳制）
+# responses_search_function_alias = "web_search"
+# supports_image_tool = true              # 打开后模型才会看到 read_image 工具
+# image_models = ["vision-*"]             # 逐模型视觉白名单（`*` 后缀 = 前缀匹配）
+# [profiles.default.compat.retry]         # 不写 = 统一传输层缺省（5 次 / 1s / 30s / 空闲 300s）
+# max_retries = 8
+# idle_timeout_secs = 600
+"#;
+
 /// 旧形状 profile → BYOK 记录。
 ///
 /// 判据是 `endpoint` 键（预设内的 endpoint id）——BYOK 记录不会写出这个键，
@@ -756,7 +812,19 @@ impl Config {
     pub fn load_from_paths_with(store: ConfigStore, secrets: SecretStore) -> Result<Self, String> {
         let mut cfg = Self::default();
 
-        let pc = store.load();
+        let mut pc = store.load();
+        // 首次启动（文件不存在，而非解析失败）：落一份带注释的 BYOK 预设，
+        // 让"配置在哪、要填哪六项"在磁盘上自解释，而不是静默跑在内存缺省值上。
+        // 按 `exists()` 二次判定：损坏的用户文件走不到这里，绝不被模板覆盖。
+        if pc.is_none() && !store.exists() {
+            if store.write_content(FIRST_RUN_CONFIG) {
+                log::info!(
+                    "[config] 首次运行：已写入预设配置 {}",
+                    store.path().display()
+                );
+                pc = store.load();
+            }
+        }
 
         let mut needs_rewrite = false;
         // 审计 P0-1：API key 不落 config.toml 明文。
@@ -792,7 +860,8 @@ impl Config {
             if let Some(ref preset) = legacy {
                 cfg.wire = preset.wire;
                 cfg.compat = preset.compat.clone();
-                if pc.base_url.as_deref().is_none_or(|u| u.is_empty()) && !preset.base_url.is_empty()
+                if pc.base_url.as_deref().is_none_or(|u| u.is_empty())
+                    && !preset.base_url.is_empty()
                 {
                     cfg.base_url = preset.base_url.clone();
                 }
@@ -1655,7 +1724,10 @@ supports_image_tool = true
         let doc: toml::Value = toml::from_str(&text).expect("toml");
         let profile = &doc["profiles"]["default"];
         assert_eq!(profile["wire"].as_str(), Some("responses"));
-        assert_eq!(profile["compat"]["responses_effort_max"].as_str(), Some("max"));
+        assert_eq!(
+            profile["compat"]["responses_effort_max"].as_str(),
+            Some("max")
+        );
         assert!(
             profile.get("endpoint").is_none() && profile.get("context_limit").is_none(),
             "BYOK 记录不得被写回预设坐标: {text}"
@@ -1665,6 +1737,59 @@ supports_image_tool = true
         assert_eq!(cfg2.wire, qaqh_types::Wire::Responses);
         assert_eq!(cfg2.compat.responses_effort_max, "max");
         assert_eq!(cfg2.reasoning_effort, "max");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 首次启动（无配置文件）：落一份带注释的 BYOK 预设，且必须能原样解析回
+    /// 六字段形状——模板与 serde 结构一旦漂移，这条就红。
+    #[test]
+    fn first_run_writes_a_parsable_preset_once() {
+        let dir = temp_dir("first-run");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = ConfigStore::new(dir.join("config.toml"));
+        let secrets = SecretStore::new(dir.join("secrets.toml"));
+        assert!(!store.exists(), "前置条件：还没有配置文件");
+
+        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        assert_eq!(cfg.model, "deepseek-chat");
+        assert_eq!(cfg.base_url, "https://api.deepseek.com");
+        assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
+        assert_eq!(cfg.max_tokens, 16_384);
+        assert_eq!(cfg.context_length, 128_000);
+        assert_eq!(cfg.reasoning_effort, "high");
+        assert!(cfg.api_key.is_empty(), "预设不得带密钥");
+        assert_eq!(
+            cfg.compat,
+            qaqh_types::EndpointCompat::default(),
+            "compat 示例只存在于注释里，解析结果必须是 wire 缺省"
+        );
+
+        let text = std::fs::read_to_string(dir.join("config.toml")).expect("read preset");
+        assert!(text.starts_with("# QAQ-Harness 配置"), "首启文件要自解释");
+        assert!(
+            text.contains("[profiles.default.compat]"),
+            "compat 例子要在（注释里）"
+        );
+        assert!(!text.contains("\napi_key"), "写出的文件里不得有 api_key");
+
+        // 幂等：再 load 不得改写（用户可能正在编辑它）。
+        Config::load_from_paths_with(store.clone(), secrets.clone()).expect("reload");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).expect("read again"),
+            text,
+            "预设只写一次"
+        );
+
+        // 损坏的用户文件绝不被模板覆盖（exists 判定与解析失败分开）。
+        std::fs::write(dir.join("config.toml"), "this is not = valid toml").expect("write junk");
+        let broken = Config::load_from_paths_with(store, secrets).expect("load survives junk");
+        assert!(broken.model.is_empty(), "解析失败时按缺省跑");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).expect("read junk"),
+            "this is not = valid toml",
+            "损坏文件必须原样留在盘上等人修"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1816,8 +1941,15 @@ wire = \"responses\"
         assert_eq!(cfg.wire, qaqh_types::Wire::Anthropic);
         assert!(cfg.compat.thinking_budget_large);
         cfg.apply_profile("b");
-        assert_eq!(cfg.wire, qaqh_types::Wire::Responses, "wire 必须跟着 profile 换");
-        assert!(!cfg.compat.thinking_budget_large, "上一个端点的 compat 不得残留");
+        assert_eq!(
+            cfg.wire,
+            qaqh_types::Wire::Responses,
+            "wire 必须跟着 profile 换"
+        );
+        assert!(
+            !cfg.compat.thinking_budget_large,
+            "上一个端点的 compat 不得残留"
+        );
         assert_eq!(cfg.context_length, 32_000);
         assert_eq!(cfg.base_url, "https://b/v1");
         cfg.apply_profile("a");
