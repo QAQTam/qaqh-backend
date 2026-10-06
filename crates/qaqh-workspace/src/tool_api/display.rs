@@ -27,6 +27,35 @@ pub(crate) fn clamp_display_body(text: &str) -> (String, bool) {
     (text.chars().take(limit).collect(), true)
 }
 
+/// 默认展示 header：从 args 的 canonical 字段提取真相字段（H13 的派生侧）。
+///
+/// 提取顺序 command → pattern/query → path；都不在场返回 [`ToolHeader::None`]。
+/// 有精确 op 语义（write/edit/delete）的工具应覆写 `ToolProjection::display`。
+pub(crate) fn derive_default_header(args: &serde_json::Value) -> ToolHeader {
+    use super::args::field;
+    if let Some(command) = args.get(field::COMMAND).and_then(serde_json::Value::as_str) {
+        return ToolHeader::Shell {
+            command: command.to_owned(),
+        };
+    }
+    if let Some(query) = args.get(field::PATTERN).and_then(serde_json::Value::as_str) {
+        return ToolHeader::Query {
+            query: query.to_owned(),
+            scope: args
+                .get(field::PATH)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        };
+    }
+    if let Some(path) = args.get(field::PATH).and_then(serde_json::Value::as_str) {
+        return ToolHeader::Path {
+            path: path.to_owned(),
+            op: PathOp::Read,
+        };
+    }
+    ToolHeader::None
+}
+
 #[cfg(test)]
 mod tests {
     use super::clamp_display_body;
