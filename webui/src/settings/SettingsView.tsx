@@ -5,7 +5,7 @@
  * 三条来自后端的硬约束在 UI 上有直接体现:
  *  - 密钥读回来永远是 `"****"`(掩码,qaqh-config/src/dto.rs:22),所以密钥框是
  *    「留空 = 不改」的新增值输入,不做双向绑定;后端没有删除密钥的接口,UI 也不假装能删。
- *  - `"" = 保持现值` 的字符串(model/baseUrl/providerId/endpoint/reasoningEffort)
+ *  - `"" = 保持现值` 的字符串(model/baseUrl/reasoningEffort)
  *    清空不会生效(dto.rs:10-11),所以这些框清空即视作未改动。
  *  - MCP/LSP 只有读模型(ConfigDto:56-59 注明写模型另立),这里只读展示。
  */
@@ -25,6 +25,7 @@ import {
   MASK,
   PERMISSION_TIERS,
   REASONING_EFFORTS,
+  WIRE_PROTOCOLS,
   THEME_OPTIONS,
   formatToolList,
   needsBypassConfirm,
@@ -122,13 +123,6 @@ export const SettingsView: Component = () => {
   const secretPlaceholder = (masked: string): string =>
     masked === MASK ? "已配置（留空保持不变）" : "未配置";
 
-  const endpointModels = createMemo(() => {
-    const current = draft();
-    if (current == null) return [];
-    const provider = current.providers.find((item) => item.id === current.providerId);
-    const endpoint = provider?.endpoints.find((item) => item.id === current.endpoint);
-    return endpoint?.models ?? [];
-  });
   /** 当前值可能不在后端允许词表里(旧配置留下的),补进选项免得下拉替用户改了值。 */
   const effortOptions = createMemo(() => {
     const current = draft()?.reasoningEffort ?? "";
@@ -136,30 +130,8 @@ export const SettingsView: Component = () => {
     if (current !== "" && !list.includes(current)) list.unshift(current);
     return list;
   });
-  const endpointOptions = createMemo(() => {
-    const current = draft();
-    if (current == null) return [];
-    return current.providers.find((item) => item.id === current.providerId)?.endpoints ?? [];
-  });
 
   const bypassPending = createMemo(() => requireBypass() && needsBypassConfirm(patch()));
-
-  /** 目录里的 baseUrl 随 provider/endpoint 一起换:留着上一个服务商的 baseUrl,
-   *  会把「provider 已改、endpoint 还是旧的」这份不自洽配置落到盘上。 */
-  function applyEndpoint(providerId: string, endpointId?: string): void {
-    const current = draft();
-    if (current == null) return;
-    const provider = current.providers.find((item) => item.id === providerId);
-    if (provider == null) return;
-    setField("providerId", providerId);
-    const endpoint =
-      endpointId == null
-        ? provider.endpoints[0]
-        : provider.endpoints.find((item) => item.id === endpointId);
-    if (endpoint == null) return;
-    setField("endpoint", endpoint.id);
-    setField("baseUrl", endpoint.baseUrl);
-  }
 
   return (
     <div
@@ -195,39 +167,24 @@ export const SettingsView: Component = () => {
           {(config) => (
             <>
               <div class="settings-body">
-                <Section title="服务与模型" desc="model/baseUrl 清空不生效（后端语义：空串 = 保持现值）。">
-                  <Field label="provider">
-                    <select
-                      class="field-input"
-                      value={config().providerId}
-                      onChange={(event) => applyEndpoint(event.currentTarget.value)}
-                    >
-                      <For each={config().providers}>
-                        {(provider) => <option value={provider.id}>{provider.display}</option>}
-                      </For>
-                    </select>
-                  </Field>
-                  <Field label="endpoint">
-                    <select
-                      class="field-input"
-                      value={config().endpoint}
-                      onChange={(event) => applyEndpoint(config().providerId, event.currentTarget.value)}
-                    >
-                      <For each={endpointOptions()}>
-                        {(endpoint) => (
-                          <option value={endpoint.id}>
-                            {endpoint.display} · {endpoint.protocol}
-                            {endpoint.beta ? " · beta" : ""}
-                          </option>
-                        )}
-                      </For>
-                    </select>
-                  </Field>
-                  <Field label="model" hint={`该 endpoint 目录:${endpointModels().join(", ") || "未列模型"}`}>
-                    <TextInput value={config().model} onInput={(value) => setField("model", value)} placeholder="模型 id" />
-                  </Field>
-                  <Field label="baseUrl" wide>
+                <Section
+                  title="端点与模型"
+                  desc="BYOK 六个字段:endpoint / wire / apikey / model / maxTokens / contextLength。端点与模型清空不生效（后端语义：空串 = 保持现值）。"
+                >
+                  <Field label="endpoint" wide hint="scheme + host + 可选前缀;wire 的规范路径自动补">
                     <TextInput value={config().baseUrl} onInput={(value) => setField("baseUrl", value)} placeholder="https://…/v1" />
+                  </Field>
+                  <Field label="wire">
+                    <select
+                      class="field-input"
+                      value={config().wire}
+                      onChange={(event) => setField("wire", event.currentTarget.value)}
+                    >
+                      <For each={WIRE_PROTOCOLS}>{(wire) => <option value={wire}>{wire}</option>}</For>
+                    </select>
+                  </Field>
+                  <Field label="model">
+                    <TextInput value={config().model} onInput={(value) => setField("model", value)} placeholder="模型 id" />
                   </Field>
                   <Field label="API key" hint={STR.settingsNoDelete} wide>
                     <TextInput
@@ -259,12 +216,12 @@ export const SettingsView: Component = () => {
                       }}
                     />
                   </Field>
-                  <Field label="contextLimit">
+                  <Field label="contextLength" hint="端点声明的窗口 = 本地压缩分母">
                     <TextInput
-                      value={String(config().contextLimit)}
+                      value={String(config().contextLength)}
                       onInput={(value) => {
                         const parsed = toInt(value);
-                        if (parsed != null) setField("contextLimit", parsed);
+                        if (parsed != null) setField("contextLength", parsed);
                       }}
                     />
                   </Field>
