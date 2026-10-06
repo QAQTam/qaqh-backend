@@ -129,7 +129,7 @@ fn state_key(raw: &str) -> String {
     if !raw_path.is_absolute() {
         return raw.to_string();
     }
-    let resolved = crate::resolve_workspace_path(raw);
+    let resolved = qaqh_permission::resolve_workspace_path(raw);
     let path = std::path::Path::new(&resolved);
     if let Ok(canon) = std::fs::canonicalize(path) {
         return strip_verbatim(&canon);
@@ -414,7 +414,7 @@ mod tests {
         let dotted = format!("{}/./sub/../ledger.txt", dir.path().display());
         record_read(&dotted, "hello\n", 1);
 
-        let resolved = crate::resolve_workspace_path(&file.to_string_lossy());
+        let resolved = qaqh_permission::resolve_workspace_path(&file.to_string_lossy());
         assert!(
             std::path::Path::new(&resolved).is_absolute(),
             "fixture must resolve to an absolute key, got {resolved}"
