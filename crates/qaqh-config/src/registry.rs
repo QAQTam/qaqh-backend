@@ -1,65 +1,62 @@
-//! Provider registry — known providers and their endpoints.
+//! BYOK 迁移层：把旧配置里的 `(provider_id, endpoint)` 坐标解析成一条具体端点记录。
 //!
-//! Architecture:
-//!   Provider (e.g. DeepSeek) has 1..N Endpoints (all OpenAI-compatible for now).
-//!   User selects (provider_id, endpoint_id) → protocol + base_url auto-fill.
-//!   Model list is fetched from endpoint's /models URL at runtime.
-//!
-//! T9 TOML 优先：内置能力基线来自 `assets/providers.toml`（include_str! 版本化，
-//! 由 example `export_providers` 生成），用户覆盖按优先级合并：
-//!   override 文件（`providers.override.toml`）> config.toml `[providers]` 段
-//!   （兼容旧路径）> assets baseline。
-//! 覆盖面是稀疏 patch（全 Option），只改声明了的字段；`remove` 可隐藏端点。
-//! 对外查找 API（find_provider/find_endpoint/image_tool_enabled…）不变。
-//!
-//! Backward compat: old provider_id "deepseek-openai"/"deepseek-anthropic" are
-//! auto-migrated to provider_id="deepseek" + endpoint="openai".
+//! 内置 provider 目录已退役——设置面只有六个字段（endpoint / wire / apikey /
+//! model / max_token / context_length）。本模块只读 `assets/legacy-providers.toml`
+//! （一次性迁移数据，不再是可选项），把老配置指向的预设翻译成
+//! `base_url + wire + compat`，使升级不改变任何在途端点的请求形状。
+//! 迁移落盘后（下个大版本）连同本模块一起删除。
 
-use qaqh_types::{
-    EndpointPatch, EndpointPatchRef, EndpointSpec, ProviderPatch, ProviderSpec, ProvidersFile,
-    ProvidersOverrideFile,
-};
+use serde::Deserialize;
 
-/// assets/providers.toml 的字节快照（编译期嵌入）。
-const BASELINE_TOML: &str = include_str!("../../../assets/providers.toml");
+use qaqh_types::{CacheTokenField, EndpointCompat, ThinkingParamMode, UserSendMode, Wire};
 
-fn builtin_providers() -> Vec<ProviderSpec> {
-    // T9: 内置基线已迁至 assets/providers.toml（include_str! 随 crate 版本化，
-    // 由 example `export_providers` 生成）；原 13 个手工构造函数删除，避免双源漂移。
-    parse_providers_toml(BASELINE_TOML).unwrap_or_else(|e| {
-        // 编译期由 tests::baseline_toml_roundtrip 保证；运行期解析失败只能是
-        // 构建产物损坏，panic 是合理处置（配置源不可信）。
-        panic!("assets/providers.toml baseline parse failed: {e}")
-    })
+/// `assets/legacy-providers.toml` 的编译期快照。
+const LEGACY_TOML: &str = include_str!("../../../assets/legacy-providers.toml");
+
+/// One migrated preset coordinate, expressed the way BYOK config states it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyPreset {
+    pub wire: Wire,
+    pub base_url: String,
+    /// 预设的兜底模型：仅在用户配置里还没有模型时使用，绝不覆盖用户选定的模型。
+    pub model: String,
+    pub compat: EndpointCompat,
 }
 
-fn parse_providers_toml(raw: &str) -> Result<Vec<ProviderSpec>, String> {
-    let file: ProvidersFile = toml::from_str(raw).map_err(|e| format!("TOML parse: {e}"))?;
-    Ok(file.providers)
+/// 查一条旧预设。`endpoint_id` 缺失或对不上时取该 provider 的第一条。
+pub fn legacy_preset(provider_id: &str, endpoint_id: &str) -> Option<LegacyPreset> {
+    let provider = legacy_rows().iter().find(|p| p.id == provider_id)?;
+    let endpoint = provider
+        .endpoints
+        .iter()
+        .find(|e| e.id == endpoint_id)
+        .or_else(|| provider.endpoints.first())?;
+    Some(endpoint.to_preset())
 }
 
-// ── 用户覆盖合并（T9） ──
-
-/// 全局合并结果缓存：进程内只读盘一次（override + config.toml 段），
-/// 后续查找全部走内存表。`invalidate_merged()` 失效后下次查找重建
-/// （config 单写口提交/文件热重载时触发）。
-static MERGED: std::sync::RwLock<Option<std::sync::Arc<Vec<ProviderSpec>>>> =
-    std::sync::RwLock::new(None);
-
-/// 失效合并缓存（T9 热重载挂钩）。
-pub fn invalidate_merged() {
-    *MERGED.write().unwrap_or_else(|e| e.into_inner()) = None;
+/// 旧 provider id 是否还在迁移表里。
+pub fn legacy_provider_exists(provider_id: &str) -> bool {
+    legacy_rows().iter().any(|p| p.id == provider_id)
 }
 
-/// 校验覆盖面声明的 base_url：必须可解析且 scheme ∈ {https,http}；
-/// `http` 仅允许 localhost/127.0.0.1（设计文档 §7 风险项）。
-fn validate_override_base_url(url: &str) -> Result<(), String> {
+/// 旧 provider 的第一条 endpoint id（配置里没写 endpoint 时的缺省）。
+pub fn legacy_first_endpoint(provider_id: &str) -> Option<String> {
+    legacy_rows()
+        .iter()
+        .find(|p| p.id == provider_id)
+        .and_then(|p| p.endpoints.first())
+        .map(|e| e.id.clone())
+}
+
+/// 校验 BYOK 的 endpoint URL：`https`，或仅限 loopback 的 `http`
+/// （设计文档 §7 风险项）。空串由调用方按"未配置"处理，不在此报错。
+pub fn validate_endpoint_url(url: &str) -> Result<(), String> {
     if url.is_empty() {
         return Ok(());
     }
     // 轻量校验，不引入 url crate：按 `scheme://rest` 切分。
     let Some((scheme, rest)) = url.split_once("://") else {
-        return Err(format!("base_url 缺少 scheme: {url}"));
+        return Err(format!("endpoint 缺少 scheme: {url}"));
     };
     match scheme {
         "https" => {}
@@ -67,785 +64,309 @@ fn validate_override_base_url(url: &str) -> Result<(), String> {
             let host = rest.split(['/', ':']).next().unwrap_or("");
             if host != "localhost" && host != "127.0.0.1" {
                 return Err(format!(
-                    "base_url http 仅允许 localhost/127.0.0.1（生产端点必须 https）: {url}"
+                    "endpoint 的 http 仅允许 localhost/127.0.0.1（生产端点必须 https）: {url}"
                 ));
             }
         }
-        _ => return Err(format!("base_url scheme 必须是 https/http: {url}")),
+        _ => return Err(format!("endpoint scheme 必须是 https/http: {url}")),
     }
     Ok(())
 }
 
-/// 把一个 ProviderPatch 合入基线表：按 id 定位，缺失时在尾部新建 provider。
-fn apply_provider_patch(baseline: &mut Vec<ProviderSpec>, patch: &ProviderPatch) {
-    let Some(patch_id) = patch.id.clone().filter(|s| !s.is_empty()) else {
-        log::warn!("[registry] override provider 缺少 id，忽略");
-        return;
-    };
-    let entry = match baseline.iter_mut().find(|p| p.id == patch_id) {
-        Some(p) => p,
-        None => {
-            baseline.push(ProviderSpec {
-                id: patch_id,
-                display: patch.display.clone().unwrap_or_default(),
-                endpoints: Vec::new(),
-            });
-            baseline.last_mut().expect("just pushed")
+// ── 迁移数据形态 ──
+
+#[derive(Debug, Deserialize)]
+struct LegacyFile {
+    #[serde(default)]
+    providers: Vec<LegacyProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyProvider {
+    id: String,
+    #[serde(default)]
+    endpoints: Vec<LegacyEndpoint>,
+}
+
+/// 旧预设端点的键集：只取迁移用得上的字段。其余（`display` / `models` /
+/// `models_url` / `beta` / `has_balance` / `balance_path` / `stateful`）随预设
+/// 一起退役，解析时忽略。
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyEndpoint {
+    id: String,
+    #[serde(default)]
+    protocol: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    default_model: String,
+    #[serde(default)]
+    user_id_mode: Option<UserSendMode>,
+    #[serde(default)]
+    chat_path: Option<String>,
+    #[serde(default)]
+    responses_path: Option<String>,
+    #[serde(default)]
+    anthropic_path: Option<String>,
+    #[serde(default)]
+    thinking_mode: Option<ThinkingParamMode>,
+    #[serde(default)]
+    cache_field: Option<CacheTokenField>,
+    #[serde(default)]
+    include_stream_usage: Option<bool>,
+    #[serde(default)]
+    supports_thinking: Option<bool>,
+    #[serde(default)]
+    thinking_budget_large: Option<bool>,
+    #[serde(default)]
+    supports_reasoning_effort: Option<bool>,
+    #[serde(default)]
+    effort_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    tool_call_content_null: Option<bool>,
+    #[serde(default)]
+    supports_reasoning_content: Option<bool>,
+    #[serde(default)]
+    require_provider_parameters: Option<bool>,
+    #[serde(default)]
+    do_sample: Option<bool>,
+    #[serde(default)]
+    responses_web_search: Option<bool>,
+    #[serde(default)]
+    responses_echo_web_search_call: Option<bool>,
+    #[serde(default)]
+    responses_send_include: Option<bool>,
+    #[serde(default)]
+    responses_effort_max: Option<String>,
+    #[serde(default)]
+    responses_supports_user: Option<bool>,
+    #[serde(default)]
+    responses_search_function_alias: Option<String>,
+    #[serde(default)]
+    responses_echo_reasoning_content: Option<bool>,
+    #[serde(default)]
+    supports_image_tool: Option<bool>,
+    #[serde(default)]
+    image_models: Option<Vec<String>>,
+    #[serde(default)]
+    retry: Option<qaqh_types::RetrySpec>,
+}
+
+impl LegacyEndpoint {
+    fn wire(&self) -> Wire {
+        Wire::parse(&self.protocol).unwrap_or_default()
+    }
+
+    /// 旧平铺字段 → compat：只保留"与该 wire 缺省不同"的表达，重复缺省的值归一掉，
+    /// 免得迁移后的配置里塞满无意义声明。
+    fn compat(&self) -> EndpointCompat {
+        let defaults = EndpointCompat::default();
+        let wire = self.wire();
+        let path = match wire {
+            Wire::OpenAi => self.chat_path.clone(),
+            Wire::Responses => self.responses_path.clone(),
+            Wire::Anthropic => self.anthropic_path.clone(),
         }
-    };
-    if let Some(d) = &patch.display {
-        entry.display = d.clone();
-    }
-    for ep_ref in &patch.endpoints {
-        apply_endpoint_patch(entry, ep_ref);
-    }
-    for remove_id in &patch.remove {
-        entry.endpoints.retain(|e| &e.id != remove_id);
-    }
-}
-
-fn apply_endpoint_patch(provider: &mut ProviderSpec, ep_ref: &EndpointPatchRef) {
-    let patch: &EndpointPatch = &ep_ref.patch;
-    // 先校验 base_url（若有声明）。
-    if let Some(url) = &patch.base_url
-        && let Err(e) = validate_override_base_url(url)
-    {
-        log::warn!(
-            "[registry] override {}/{} base_url 被拒绝: {e}",
-            provider.id,
-            ep_ref.id
-        );
-        return;
-    }
-    match provider.endpoints.iter_mut().find(|e| e.id == ep_ref.id) {
-        Some(ep) => patch.apply_to(ep),
-        None => {
-            // 新增端点：从 Default 出发，仅叠加声明字段（id/protocol/base_url
-            // 是新增端点的最小必需集，缺 protocol 默认 openai）。
-            let mut ep = EndpointSpec {
-                id: ep_ref.id.clone(),
-                ..Default::default()
-            };
-            patch.apply_to(&mut ep);
-            if ep.base_url.is_empty() {
-                log::warn!(
-                    "[registry] override 新增端点 {}/{} 缺少 base_url，忽略",
-                    provider.id,
-                    ep_ref.id
-                );
-                return;
-            }
-            provider.endpoints.push(ep);
+        .filter(|p| *p != defaults.path_for(wire));
+        let flag = |given: Option<bool>, fallback: bool| given.unwrap_or(fallback);
+        EndpointCompat {
+            path,
+            thinking_mode: self.thinking_mode.clone().unwrap_or(defaults.thinking_mode),
+            cache_field: self.cache_field.clone().unwrap_or(defaults.cache_field),
+            include_stream_usage: flag(self.include_stream_usage, defaults.include_stream_usage),
+            supports_thinking: flag(self.supports_thinking, defaults.supports_thinking),
+            thinking_budget_large: flag(
+                self.thinking_budget_large,
+                defaults.thinking_budget_large,
+            ),
+            supports_reasoning_effort: flag(
+                self.supports_reasoning_effort,
+                defaults.supports_reasoning_effort,
+            ),
+            effort_allowlist: self.effort_allowlist.clone(),
+            tool_call_content_null: flag(
+                self.tool_call_content_null,
+                defaults.tool_call_content_null,
+            ),
+            supports_reasoning_content: flag(
+                self.supports_reasoning_content,
+                defaults.supports_reasoning_content,
+            ),
+            require_provider_parameters: flag(
+                self.require_provider_parameters,
+                defaults.require_provider_parameters,
+            ),
+            do_sample: self.do_sample,
+            user_id_mode: self.user_id_mode.clone(),
+            responses_web_search: flag(self.responses_web_search, defaults.responses_web_search),
+            responses_echo_web_search_call: flag(
+                self.responses_echo_web_search_call,
+                defaults.responses_echo_web_search_call,
+            ),
+            responses_send_include: flag(
+                self.responses_send_include,
+                defaults.responses_send_include,
+            ),
+            responses_effort_max: self
+                .responses_effort_max
+                .clone()
+                .unwrap_or(defaults.responses_effort_max),
+            responses_supports_user: flag(
+                self.responses_supports_user,
+                defaults.responses_supports_user,
+            ),
+            responses_search_function_alias: self.responses_search_function_alias.clone(),
+            responses_echo_reasoning_content: flag(
+                self.responses_echo_reasoning_content,
+                defaults.responses_echo_reasoning_content,
+            ),
+            supports_image_tool: flag(self.supports_image_tool, defaults.supports_image_tool),
+            image_models: self.image_models.clone(),
+            retry: self.retry.clone(),
         }
     }
-}
 
-/// 执行一次完整合并：baseline + 逐 patch（按声明顺序叠加）。
-fn merged_providers() -> std::sync::Arc<Vec<ProviderSpec>> {
-    // 快路径：读锁命中缓存。
-    if let Some(hit) = MERGED
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .cloned()
-    {
-        return hit;
-    }
-    // 慢路径：重建 + 写回（并发下重复重建无害，最终一致）。
-    let mut baseline = builtin_providers();
-    for raw in user_override_tomls() {
-        match parse_override_toml(&raw) {
-            Ok(patches) => {
-                for patch in &patches {
-                    apply_provider_patch(&mut baseline, patch);
-                }
-            }
-            Err(e) => {
-                // 用户覆盖面解析失败只降级告警，不 panic（baseline 仍可用）。
-                log::warn!("[registry] 用户 provider 覆盖解析失败（已忽略该文件）: {e}");
-            }
-        }
-    }
-    let arc = std::sync::Arc::new(baseline);
-    *MERGED.write().unwrap_or_else(|e| e.into_inner()) = Some(arc.clone());
-    arc
-}
-
-/// 用户覆盖 TOML 原文列表，按优先级从低到高：config.toml `[providers]` 段、
-/// override 文件。均可能不存在（返回空）。
-fn user_override_tomls() -> Vec<String> {
-    let mut out = Vec::new();
-    // ① config.toml 的 [providers] / [[providers]] 段（兼容旧路径）。
-    let config_path = qaqh_types::platform::config_path();
-    if let Ok(text) = std::fs::read_to_string(&config_path)
-        && let Some(seg) = extract_providers_section(&text)
-    {
-        out.push(seg);
-    }
-    // ② override 文件（同目录 providers.override.toml）。
-    let override_path = config_path.with_file_name("providers.override.toml");
-    if let Ok(text) = std::fs::read_to_string(&override_path) {
-        out.push(text);
-    }
-    out
-}
-
-/// 从 config.toml 原文中提取 `[providers]`（含其子表）段落原文。
-/// 没有该段则返回 None。段落以行首 `[providers` 开始，下一个非子表的
-/// 顶级表头结束。文本级近似：段落内字符串值含换行/顶级表头形态的极端
-/// 输入不被支持（provider 配置段不含此类值，可接受）。
-fn extract_providers_section(text: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut inside = false;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("[providers]") || trimmed.starts_with("[[providers]]") {
-            inside = true;
-        } else if inside
-            && trimmed.starts_with('[')
-            && !trimmed.starts_with("[providers.")
-            && !trimmed.starts_with("[[providers.")
-        {
-            inside = false;
-        }
-        if inside {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-/// 解析用户覆盖面：`[[providers]]` 平铺数组形态（patch 内带 id）。
-fn parse_override_toml(raw: &str) -> Result<Vec<ProviderPatch>, String> {
-    let file: ProvidersOverrideFile =
-        toml::from_str(raw).map_err(|e| format!("TOML parse: {e}"))?;
-    let mut patches = Vec::new();
-    for p in file.providers {
-        if p.id.as_deref().unwrap_or("").is_empty() {
-            log::warn!("[registry] override [[providers]] 缺少 id，忽略该条");
-            continue;
-        }
-        patches.push(p);
-    }
-    Ok(patches)
-}
-
-fn providers() -> Vec<ProviderSpec> {
-    (*merged_providers()).clone()
-}
-
-// ── Lookup ──
-
-pub fn all_providers() -> Vec<ProviderSpec> {
-    providers()
-}
-
-pub fn find_provider(id: &str) -> Option<ProviderSpec> {
-    providers().into_iter().find(|p| p.id == id)
-}
-
-pub fn find_endpoint(provider_id: &str, endpoint_id: &str) -> Option<EndpointSpec> {
-    find_provider(provider_id).and_then(|p| p.endpoints.into_iter().find(|e| e.id == endpoint_id))
-}
-
-pub fn first_endpoint_for(provider_id: &str) -> Option<EndpointSpec> {
-    find_provider(provider_id).and_then(|p| p.endpoints.into_iter().next())
-}
-
-/// Whether the endpoint accepts image input (gates the `read_image` tool).
-pub fn image_tool_enabled(provider_id: &str, endpoint_id: &str) -> bool {
-    find_endpoint(provider_id, endpoint_id).is_some_and(|e| e.supports_image_tool)
-}
-
-/// Whether a specific model accepts image input on this endpoint.
-///
-/// Layers [`image_tool_enabled`] with the optional per-model allowlist
-/// (`EndpointSpec::image_models`): routers serve heterogeneous models, so the
-/// endpoint flag alone would let `read_image` attach pixels to text-only
-/// models and fail upstream with an opaque 400.
-pub fn image_model_supported(provider_id: &str, endpoint_id: &str, model: &str) -> bool {
-    let Some(ep) = find_endpoint(provider_id, endpoint_id) else {
-        return false;
-    };
-    if !ep.supports_image_tool {
-        return false;
-    }
-    match &ep.image_models {
-        None => true,
-        Some(list) => {
-            let model = model.to_lowercase();
-            list.iter().any(|pattern| match pattern.strip_suffix('*') {
-                Some(prefix) => model.starts_with(&prefix.to_lowercase()),
-                None => model == pattern.to_lowercase(),
-            })
+    fn to_preset(&self) -> LegacyPreset {
+        LegacyPreset {
+            wire: self.wire(),
+            base_url: self.base_url.clone(),
+            model: self.default_model.clone(),
+            compat: self.compat(),
         }
     }
 }
 
-pub fn first_provider_endpoint() -> (String, String) {
-    let providers = all_providers();
-    let p = providers.first();
-    let pid = p.map(|p| p.id.clone()).unwrap_or_else(|| "deepseek".into());
-    let ep = first_endpoint_for(&pid)
-        .map(|e| e.id.clone())
-        .unwrap_or_else(|| "openai".into());
-    (pid, ep)
-}
-
-// ── Model discovery ──
-
-pub fn models_url_for(provider_id: &str, endpoint_id: &str) -> Option<String> {
-    let ep = find_endpoint(provider_id, endpoint_id)?;
-    let base = ep.models_url.as_deref().unwrap_or(&ep.base_url);
-    // Most presets store a base URL, but OpenRouter's model discovery needs
-    // documented query filters. Treat an explicit /models URL as complete.
-    if base.contains("/models") {
-        return Some(base.to_string());
-    }
-    let stripped = base.trim_end_matches('/');
-    Some(format!("{}/models", stripped))
-}
-
-pub fn default_model_for(provider_id: &str, endpoint_id: &str) -> String {
-    find_endpoint(provider_id, endpoint_id)
-        .map(|e| e.default_model.clone())
-        .unwrap_or_default()
-}
-
-pub fn protocol_for(provider_id: &str, endpoint_id: &str) -> String {
-    find_endpoint(provider_id, endpoint_id)
-        .map(|e| e.protocol.clone())
-        .unwrap_or_else(|| "openai".into())
-}
-
-pub fn base_url_for(provider_id: &str, endpoint_id: &str) -> String {
-    find_endpoint(provider_id, endpoint_id)
-        .map(|e| e.base_url.clone())
-        .unwrap_or_default()
-}
-
-// ── Backward compatibility ──
-
-pub fn migrate_provider_id(old_pid: &str) -> (String, String) {
-    if find_provider(old_pid).is_some() {
-        let ep = first_endpoint_for(old_pid)
-            .map(|e| e.id.clone())
-            .unwrap_or_else(|| "openai".into());
-        (old_pid.to_string(), ep)
-    } else {
-        ("deepseek".into(), "openai".into())
-    }
-}
-
-/// Resolve the endpoint spec for an already-loaded [`crate::Config`]
-/// (PR-1-9 / B7): the loop resolves once at config-assembly/reload time and
-/// engines read the stored field instead of walking the registry per call.
-pub fn resolve_for_config(cfg: &crate::Config) -> Option<EndpointSpec> {
-    find_endpoint(&cfg.provider_id, &cfg.endpoint)
+/// 迁移表：进程内解析一次并缓存（纯只读数据，无需失效）。
+fn legacy_rows() -> &'static [LegacyProvider] {
+    static TABLE: std::sync::OnceLock<Vec<LegacyProvider>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            toml::from_str::<LegacyFile>(LEGACY_TOML)
+                .unwrap_or_else(|e| {
+                    // 构建期由 tests::legacy_table_parses_and_covers_every_coordinate
+                    // 兜底；运行期解析失败只能是构建产物损坏。
+                    panic!("assets/legacy-providers.toml parse failed: {e}")
+                })
+                .providers
+        })
+        .as_slice()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_types::CacheTokenField;
-
-    // ── T9: baseline round-trip / merge / override ──
 
     #[test]
-    fn baseline_toml_roundtrip() {
-        let baseline = builtin_providers();
-        assert_eq!(baseline.len(), 13, "baseline 应有 13 个 provider");
-        // 再序列化回 TOML 再解析，确认无信息丢失。
-        let doc = ProvidersFile {
-            providers: baseline.clone(),
-        };
-        let text = toml::to_string_pretty(&doc).expect("serialize");
-        let reparsed = parse_providers_toml(&text).expect("reparse");
-        assert_eq!(reparsed.len(), baseline.len());
-        for (a, b) in baseline.iter().zip(reparsed.iter()) {
-            assert_eq!(a.id, b.id);
-            assert_eq!(a.endpoints.len(), b.endpoints.len(), "provider {}", a.id);
-            for (ea, eb) in a.endpoints.iter().zip(b.endpoints.iter()) {
-                assert_eq!(ea.id, eb.id);
-                assert_eq!(ea.base_url, eb.base_url);
-                assert_eq!(ea.supports_thinking, eb.supports_thinking);
-                assert_eq!(ea.retry, eb.retry);
+    fn legacy_table_parses_and_covers_every_coordinate() {
+        let rows = legacy_rows();
+        assert_eq!(rows.len(), 13, "迁移表应有 13 个旧 provider");
+        let endpoints: usize = rows.iter().map(|p| p.endpoints.len()).sum();
+        assert_eq!(endpoints, 19, "迁移表应有 19 条旧端点");
+        for provider in rows {
+            for endpoint in &provider.endpoints {
+                assert!(
+                    !endpoint.base_url.is_empty(),
+                    "{}/{} 缺 base_url",
+                    provider.id,
+                    endpoint.id
+                );
+                // 旧 protocol 字面量必须都能落到三条 wire 之一。
+                assert!(
+                    Wire::parse(&endpoint.protocol).is_some(),
+                    "{}/{} 的 protocol 无法识别: {}",
+                    provider.id,
+                    endpoint.id,
+                    endpoint.protocol
+                );
             }
         }
     }
 
     #[test]
-    fn override_patch_updates_existing_endpoint() {
-        let mut baseline = builtin_providers();
-        let patch: ProviderPatch = toml::from_str(
-            r#"
-            id = "deepseek"
-            [[endpoints]]
-            id = "openai"
-            supports_thinking = false
-            stateful = true
-            retry = { max_retries = 8, base_delay_secs = 2, max_delay_secs = 60, idle_timeout_secs = 600 }
-            "#,
-        )
-        .expect("parse patch");
-        apply_provider_patch(&mut baseline, &patch);
-        let ep = baseline
-            .iter()
-            .find(|p| p.id == "deepseek")
-            .and_then(|p| p.endpoints.iter().find(|e| e.id == "openai"))
-            .expect("endpoint");
-        assert!(!ep.supports_thinking);
-        assert!(ep.stateful);
-        let retry = ep.retry.as_ref().expect("retry spec");
-        assert_eq!(retry.max_retries, 8);
-        assert_eq!(retry.base_delay_secs, 2);
-        // 未声明字段保持 baseline 值。
-        assert!(ep.include_stream_usage, "未声明字段不应被覆盖");
-    }
-
-    #[test]
-    fn override_new_provider_and_endpoint() {
-        let mut baseline = builtin_providers();
-        let patch: ProviderPatch = toml::from_str(
-            r#"
-            id = "my-proxy"
-            display = "本地代理"
-            [[endpoints]]
-            id = "openai"
-            protocol = "openai"
-            base_url = "http://127.0.0.1:8787/v1"
-            "#,
-        )
-        .expect("parse patch");
-        apply_provider_patch(&mut baseline, &patch);
-        let p = baseline
-            .iter()
-            .find(|p| p.id == "my-proxy")
-            .expect("new provider");
-        assert_eq!(p.endpoints.len(), 1);
-        assert_eq!(p.endpoints[0].base_url, "http://127.0.0.1:8787/v1");
-        assert_eq!(p.endpoints[0].protocol, "openai");
-    }
-
-    #[test]
-    fn override_rejects_non_local_http_base_url() {
-        let mut baseline = builtin_providers();
-        let before = baseline
-            .iter()
-            .find(|p| p.id == "deepseek")
-            .and_then(|p| p.endpoints.iter().find(|e| e.id == "openai"))
-            .map(|e| e.base_url.clone())
-            .expect("endpoint");
-        let patch: ProviderPatch = toml::from_str(
-            r#"
-            id = "deepseek"
-            [[endpoints]]
-            id = "openai"
-            base_url = "http://evil.example.com"
-            "#,
-        )
-        .expect("parse patch");
-        apply_provider_patch(&mut baseline, &patch);
-        let after = baseline
-            .iter()
-            .find(|p| p.id == "deepseek")
-            .and_then(|p| p.endpoints.iter().find(|e| e.id == "openai"))
-            .map(|e| e.base_url.clone())
-            .expect("endpoint");
-        assert_eq!(before, after, "不安全 http 覆盖应被拒绝");
-    }
-
-    #[test]
-    fn override_remove_endpoint() {
-        let mut baseline = builtin_providers();
-        let patch: ProviderPatch = toml::from_str(
-            r#"
-            id = "deepseek"
-            remove = ["responses"]
-            "#,
-        )
-        .expect("parse patch");
-        apply_provider_patch(&mut baseline, &patch);
-        let p = baseline
-            .iter()
-            .find(|p| p.id == "deepseek")
-            .expect("provider");
-        assert!(!p.endpoints.iter().any(|e| e.id == "responses"));
-        assert!(p.endpoints.iter().any(|e| e.id == "openai"));
-    }
-
-    #[test]
-    fn extract_providers_section_finds_segment() {
-        let text = r#"
-[profile.default]
-model = "x"
-
-[[providers]]
-id = "deepseek"
-[[providers.endpoints]]
-id = "openai"
-base_url = "https://api.deepseek.com"
-
-[mcp]
-foo = 1
-"#;
-        let seg = extract_providers_section(text).expect("segment");
-        assert!(seg.contains("[[providers]]"));
-        assert!(seg.contains("base_url"));
-        assert!(!seg.contains("[mcp]"));
-        assert!(!seg.contains("[profile"));
-    }
-
-    #[test]
-    fn parse_override_rejects_missing_id() {
-        let raw = r#"
-[[providers]]
-display = "no id"
-"#;
-        let patches = parse_override_toml(raw).expect("parse ok");
-        assert!(patches.is_empty(), "缺 id 的 patch 应被过滤");
-    }
-
-    #[test]
-    fn openrouter_text_endpoint_has_router_safe_capabilities() {
-        let endpoint = find_endpoint("openrouter", "openai").expect("OpenRouter endpoint");
-        assert_eq!(endpoint.base_url, "https://openrouter.ai/api/v1");
+    fn legacy_preset_maps_wire_url_and_image_capability() {
+        let preset = legacy_preset("deepseek", "openai").expect("deepseek/openai");
+        assert_eq!(preset.wire, Wire::OpenAi);
+        assert_eq!(preset.base_url, "https://api.deepseek.com");
+        assert!(preset.compat.include_stream_usage);
+        assert!(preset.compat.supports_image_tool);
         assert_eq!(
-            models_url_for("openrouter", "openai").as_deref(),
-            Some(
-                "https://openrouter.ai/api/v1/models?output_modalities=text&supported_parameters=tools&sort=pricing-low-to-high"
-            )
-        );
-        assert!(!endpoint.has_balance);
-        assert!(!endpoint.supports_thinking);
-        // reasoning_effort 简写 + 稀疏档位钳制(ox-alpha: max/high/low)。
-        assert!(endpoint.supports_reasoning_effort);
-        assert_eq!(
-            endpoint.effort_allowlist.as_deref(),
-            Some(&["max".to_string(), "high".to_string(), "low".to_string()][..])
-        );
-        assert!(endpoint.tool_call_content_null);
-        assert!(!endpoint.supports_reasoning_content);
-        assert!(endpoint.require_provider_parameters);
-    }
-
-    #[test]
-    fn existing_openai_preset_keeps_legacy_capabilities() {
-        let endpoint = find_endpoint("openai", "openai").expect("OpenAI endpoint");
-        assert!(endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert!(!endpoint.tool_call_content_null);
-        assert!(endpoint.supports_reasoning_content);
-        assert!(!endpoint.require_provider_parameters);
-    }
-
-    #[test]
-    fn openai_responses_endpoint_exists() {
-        let endpoint = find_endpoint("openai", "responses").expect("OpenAI Responses endpoint");
-        assert_eq!(endpoint.protocol, "responses");
-        assert_eq!(endpoint.base_url, "https://api.openai.com/v1");
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert!(!endpoint.supports_reasoning_content);
-        assert!(endpoint.responses_search_function_alias.is_none());
-    }
-
-    #[test]
-    fn protocol_for_responses_endpoint() {
-        let proto = protocol_for("openai", "responses");
-        assert_eq!(proto, "responses");
-    }
-
-    #[test]
-    fn image_model_support_layers_endpoint_flag_and_allowlist() {
-        // deepseek 已开图但限 vision 模型：非 vision 仍 false
-        assert!(!image_model_supported(
-            "deepseek",
-            "openai",
-            "google/gemini-2.0"
-        ));
-        assert!(!image_model_supported(
-            "deepseek",
-            "openai",
-            "deepseek-v4-flash"
-        ));
-        assert!(image_model_supported(
-            "deepseek",
-            "openai",
-            "deepseek-v4-flash-vision-exp"
-        ));
-        assert!(image_model_supported(
-            "deepseek",
-            "responses",
-            "deepseek-v4-flash-vision-exp"
-        ));
-        assert!(!image_model_supported(
-            "deepseek",
-            "responses",
-            "deepseek-v4-flash"
-        ));
-        // opencode-go:端点开图且无 allowlist → 所有模型放行。
-        assert!(image_model_supported("opencode-go", "openai", "任意-模型"));
-        // openrouter:allowlist 生效 —— 大小写不敏感、精确与前缀通配。
-        assert!(image_model_supported(
-            "openrouter",
-            "openai",
-            "stealth/ox-alpha"
-        ));
-        assert!(image_model_supported(
-            "openrouter",
-            "openai",
-            "Stealth/OX-ALPHA"
-        ));
-        assert!(image_model_supported(
-            "openrouter",
-            "openai",
-            "google/gemini-3-pro"
-        ));
-        assert!(!image_model_supported(
-            "openrouter",
-            "openai",
-            "deepseek/deepseek-v4-pro"
-        ));
-        assert!(!image_model_supported(
-            "openrouter",
-            "openai",
-            "meta-llama/llama-3.3-70b"
-        ));
-    }
-
-    #[test]
-    fn glm_vision_allowlist_matches_bigmodel_support_matrix() {
-        // glm-5.3-flash 是 VLM → 放行（大小写不敏感）。
-        assert!(image_model_supported("glm", "openai", "glm-5.3-flash"));
-        assert!(image_model_supported("glm", "openai", "GLM-5.3-Flash"));
-        // 5V / 4.5V / 4.6V / 4V-Plus 系列前缀放行。
-        assert!(image_model_supported("glm", "openai", "glm-5v-turbo"));
-        assert!(image_model_supported("glm", "openai", "glm-4.6v"));
-        assert!(image_model_supported("glm", "openai", "glm-4v-plus-0111"));
-        // 文本模型必须拒绝：glm-5.3 官方仅支持文本模态。
-        assert!(!image_model_supported("glm", "openai", "glm-5.3"));
-        assert!(!image_model_supported("glm", "openai", "glm-5.2"));
-        assert!(!image_model_supported("glm", "openai", "glm-4.7"));
-        // glm-4v-flash 官方不支持 Base64 编码（harness 只发 base64）→ 拒绝。
-        assert!(!image_model_supported("glm", "openai", "glm-4v-flash"));
-    }
-
-    #[test]
-    fn chat_endpoint_still_works() {
-        let proto = protocol_for("openai", "openai");
-        assert_eq!(proto, "openai");
-        let url = base_url_for("openai", "openai");
-        assert_eq!(url, "https://api.openai.com/v1");
-    }
-
-    #[test]
-    fn deepseek_responses_endpoint_exists() {
-        let endpoint = find_endpoint("deepseek", "responses").expect("DeepSeek Responses endpoint");
-        assert_eq!(endpoint.protocol, "responses");
-        assert_eq!(endpoint.base_url, "https://api.deepseek.com");
-        assert_eq!(endpoint.responses_path.as_deref(), Some("/responses"));
-        assert_eq!(endpoint.default_model, "deepseek-v4-flash");
-        assert_eq!(
-            endpoint.models,
-            vec![
-                "deepseek-v4-flash".to_string(),
-                "deepseek-v4-flash-vision-exp".to_string()
-            ]
-        );
-        assert!(endpoint.beta);
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert!(!endpoint.supports_reasoning_content);
-        assert!(endpoint.supports_image_tool);
-        assert_eq!(
-            endpoint.image_models.as_deref(),
-            Some(&["deepseek-v4-flash-vision-exp".to_string()][..])
-        );
-        assert_eq!(
-            endpoint.responses_search_function_alias.as_deref(),
-            Some("qaqh_search")
-        );
-    }
-
-    #[test]
-    fn deepseek_responses_protocol_flows_through() {
-        assert_eq!(protocol_for("deepseek", "responses"), "responses");
-        assert_eq!(protocol_for("deepseek", "openai"), "openai");
-        // Unknown endpoint falls back to the openai protocol (backward compat).
-        assert_eq!(protocol_for("deepseek", "unknown"), "openai");
-    }
-
-    #[test]
-    fn deepseek_openai_supports_vision_only_for_vision_model() {
-        let endpoint = find_endpoint("deepseek", "openai").expect("DeepSeek openai endpoint");
-        assert!(endpoint.supports_image_tool);
-        assert_eq!(
-            endpoint.image_models.as_deref(),
-            Some(&["deepseek-v4-flash-vision-exp".to_string()][..])
-        );
-        // 非 vision 模型被拒绝，vision 模型放行（大小写不敏感）
-        assert!(image_tool_enabled("deepseek", "openai"));
-        assert!(image_tool_enabled("deepseek", "responses"));
-        assert!(image_model_supported(
-            "deepseek",
-            "openai",
-            "deepseek-v4-flash-vision-exp"
-        ));
-        assert!(image_model_supported(
-            "deepseek",
-            "openai",
-            "DEEPSEEK-V4-FLASH-VISION-EXP"
-        ));
-        assert!(!image_model_supported(
-            "deepseek",
-            "openai",
-            "deepseek-v4-flash"
-        ));
-        assert!(!image_model_supported(
-            "deepseek",
-            "openai",
-            "deepseek-v4-pro"
-        ));
-    }
-
-    #[test]
-    fn qwen_responses_endpoint_exists() {
-        let endpoint = find_endpoint("qwen", "responses").expect("Qwen Responses endpoint");
-        assert_eq!(endpoint.protocol, "responses");
-        assert_eq!(endpoint.base_url, "https://dashscope.aliyuncs.com");
-        assert_eq!(
-            endpoint.responses_path.as_deref(),
-            Some("/compatible-mode/v1/responses")
-        );
-        assert_eq!(
-            models_url_for("qwen", "responses").as_deref(),
-            Some("https://dashscope.aliyuncs.com/compatible-mode/v1/models")
-        );
-        assert!(endpoint.beta);
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert!(!endpoint.supports_reasoning_content);
-        // Bridge must not disturb the default chat endpoint.
-        assert_eq!(protocol_for("qwen", "openai"), "openai");
-    }
-
-    #[test]
-    fn doubao_responses_endpoint_exists() {
-        let endpoint = find_endpoint("doubao", "responses").expect("Doubao Responses endpoint");
-        assert_eq!(endpoint.protocol, "responses");
-        assert_eq!(endpoint.base_url, "https://ark.cn-beijing.volces.com");
-        assert_eq!(
-            endpoint.responses_path.as_deref(),
-            Some("/api/v3/responses")
-        );
-        assert_eq!(
-            models_url_for("doubao", "responses").as_deref(),
-            Some("https://ark.cn-beijing.volces.com/api/v3/models")
-        );
-        assert!(endpoint.beta);
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert!(!endpoint.supports_reasoning_content);
-        assert_eq!(protocol_for("doubao", "openai"), "openai");
-    }
-
-    #[test]
-    fn mimo_responses_endpoint_exists() {
-        let endpoint = find_endpoint("mimo", "responses").expect("MiMo Responses endpoint");
-        assert_eq!(endpoint.protocol, "responses");
-        assert_eq!(endpoint.base_url, "https://api.xiaomimimo.com/v1");
-        assert_eq!(endpoint.responses_path.as_deref(), Some("/responses"));
-        assert_eq!(
-            models_url_for("mimo", "responses").as_deref(),
-            Some("https://api.xiaomimimo.com/v1/models")
-        );
-        assert!(endpoint.beta);
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert_eq!(endpoint.responses_effort_max, "high");
-        assert!(!endpoint.supports_reasoning_content);
-        assert_eq!(protocol_for("mimo", "openai"), "openai");
-    }
-
-    #[test]
-    fn opencode_go_chat_endpoint_exists() {
-        let endpoint = find_endpoint("opencode-go", "openai").expect("opencode-go endpoint");
-        assert_eq!(endpoint.protocol, "openai");
-        assert_eq!(endpoint.base_url, "https://opencode.ai/zen/go/v1");
-        assert_eq!(endpoint.default_model, "deepseek-v4-flash");
-        assert_eq!(
-            endpoint.models.len(),
-            15,
-            "official Go model list (chat channel)"
-        );
-        assert!(endpoint.models.contains(&"deepseek-v4-flash".to_string()));
-        assert!(endpoint.models.contains(&"kimi-k3".to_string()));
-        assert!(!endpoint.models.contains(&"grok-4.5".to_string()));
-        assert!(!endpoint.models.contains(&"minimax-m3".to_string()));
-        // 本家不发 thinking 参数（推理默认开），只发 reasoning_effort。
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert!(matches!(endpoint.cache_field, CacheTokenField::None));
-        assert!(!endpoint.has_balance);
-        assert_eq!(
-            models_url_for("opencode-go", "openai").as_deref(),
-            Some("https://opencode.ai/zen/go/v1/models")
-        );
-    }
-
-    #[test]
-    fn opencode_go_responses_endpoint_exists() {
-        let endpoint = find_endpoint("opencode-go", "responses").expect("opencode-go Responses");
-        assert_eq!(endpoint.protocol, "responses");
-        assert_eq!(endpoint.base_url, "https://opencode.ai/zen/go/v1");
-        assert_eq!(endpoint.responses_path.as_deref(), Some("/responses"));
-        assert_eq!(
-            endpoint.models,
-            vec!["grok-4.5".to_string(), "gpt-5.6-luna".to_string()]
-        );
-        assert_eq!(endpoint.default_model, "grok-4.5");
-        assert!(endpoint.beta);
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        // grok-4.5 最高档 high（超档 400）；luna 的 xhigh/max 待验证后放开。
-        assert_eq!(endpoint.responses_effort_max, "high");
-        assert!(!endpoint.supports_reasoning_content);
-        // minimax 走 anthropic messages 协议（未实现）→ 不进任何端点。
-        assert!(!endpoint.models.contains(&"minimax-m3".to_string()));
-    }
-
-    #[test]
-    fn workbuddy_proxy_endpoint_exists() {
-        let endpoint = find_endpoint("workbuddy", "openai").expect("workbuddy endpoint");
-        assert_eq!(endpoint.protocol, "openai");
-        assert_eq!(endpoint.base_url, "http://127.0.0.1:8787/v1");
-        assert_eq!(endpoint.default_model, "glm-5.2");
-        // 静态表与反代 /v1/models 动态表（及 staticModels() 兑底）对齐。
-        assert_eq!(endpoint.models.len(), 15);
-        assert!(endpoint.models.contains(&"glm-5.2".to_string()));
-        assert!(endpoint.models.contains(&"hy3".to_string()));
-        assert!(endpoint.models.contains(&"kimi-k3-1".to_string()));
-        // 上游不收 thinking/enable_thinking；只透传 reasoning_effort，
-        // 降级交给反代（按模型 supportedEfforts 转译）→ 端点无白名单。
-        assert!(!endpoint.supports_thinking);
-        assert!(endpoint.supports_reasoning_effort);
-        assert!(endpoint.effort_allowlist.is_none());
-        // 思考内容：流式 delta.reasoning_content（反代 keep_reasoning 默认开）。
-        assert!(endpoint.supports_reasoning_content);
-        // 上游在 finish 帧总带 usage，不发 stream_options.include_usage。
-        assert!(!endpoint.include_stream_usage);
-        // usage 顶层 prompt_cache_hit_tokens/miss 与 DeepSeek 同形。
-        assert!(matches!(
-            endpoint.cache_field,
+            preset.compat.cache_field,
             CacheTokenField::PromptCacheHitTokens
-        ));
-        assert!(!endpoint.has_balance);
-        // models_url 显式含 /models 路径时直接返回，不重复追加。
+        );
+
+        // responses 端点预设里的路径就是该 wire 的缺省路径 → 归一为不声明。
+        let responses = legacy_preset("deepseek", "responses").expect("deepseek/responses");
+        assert_eq!(responses.wire, Wire::Responses);
+        assert_eq!(responses.compat.path, None);
+        assert_eq!(responses.compat.responses_effort_max, "max");
+    }
+
+    #[test]
+    fn legacy_preset_keeps_request_shape_deviations() {
+        // 每一项都是"该 wire 之外的差异"，迁移后必须由 compat 原样表达。
+        let qwen = legacy_preset("qwen", "openai").expect("qwen/openai");
+        assert_eq!(qwen.compat.thinking_mode, ThinkingParamMode::QwenEnableThinking);
+        assert_eq!(qwen.compat.cache_field, CacheTokenField::PromptDetailsCached);
         assert_eq!(
-            models_url_for("workbuddy", "openai").as_deref(),
-            Some("http://127.0.0.1:8787/v1/models")
+            qwen.compat.path.as_deref(),
+            Some("/compatible-mode/v1/chat/completions")
+        );
+
+        let kimi = legacy_preset("kimi", "openai").expect("kimi/openai");
+        assert_eq!(kimi.compat.cache_field, CacheTokenField::UsageCachedTokens);
+
+        let mimo = legacy_preset("mimo", "openai").expect("mimo/openai");
+        assert_eq!(mimo.compat.cache_field, CacheTokenField::None);
+
+        let glm = legacy_preset("glm", "openai").expect("glm/openai");
+        assert_eq!(glm.compat.do_sample, Some(false));
+
+        let minimax = legacy_preset("minimax", "openai").expect("minimax/openai");
+        assert_eq!(
+            minimax.compat.thinking_mode,
+            ThinkingParamMode::MiniMaxAdaptive
+        );
+
+        let openrouter = legacy_preset("openrouter", "openai").expect("openrouter/openai");
+        assert_eq!(
+            openrouter.compat.effort_allowlist,
+            Some(vec!["max".to_string(), "high".to_string(), "low".to_string()])
+        );
+
+        let zcode = legacy_preset("zcode", "anthropic").expect("zcode/anthropic");
+        assert_eq!(zcode.wire, Wire::Anthropic);
+        assert_eq!(zcode.compat.path.as_deref(), Some("/api/anthropic/v1/messages"));
+        assert!(zcode.compat.thinking_budget_large);
+    }
+
+    #[test]
+    fn unknown_coordinates_have_no_preset() {
+        assert!(legacy_preset("nope", "openai").is_none());
+        assert!(legacy_first_endpoint("nope").is_none());
+        assert!(!legacy_provider_exists("nope"));
+        assert!(legacy_provider_exists("deepseek"));
+        // endpoint id 缺失时对不上号 → 取该 provider 的第一条。
+        assert_eq!(legacy_preset("deepseek", ""), legacy_preset("deepseek", "openai"));
+    }
+
+    #[test]
+    fn endpoint_url_validation_accepts_https_and_loopback_http() {
+        assert!(validate_endpoint_url("https://api.example.com/v1").is_ok());
+        assert!(validate_endpoint_url("http://localhost:8317/v1").is_ok());
+        assert!(validate_endpoint_url("http://127.0.0.1:11434").is_ok());
+        assert!(validate_endpoint_url("").is_ok(), "空值由调用方按未配置处理");
+
+        let remote_http = validate_endpoint_url("http://api.example.com").unwrap_err();
+        assert!(remote_http.contains("localhost"), "{remote_http}");
+        assert!(
+            validate_endpoint_url("api.example.com")
+                .unwrap_err()
+                .contains("scheme")
+        );
+        assert!(
+            validate_endpoint_url("ftp://api.example.com")
+                .unwrap_err()
+                .contains("https")
         );
     }
 }

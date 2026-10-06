@@ -1,5 +1,13 @@
 //! Shared gate types — provider config and unified stream events.
 
+/// Provider-error taxonomy carried by [`StreamEvent::Error`].
+///
+/// Re-exported from the transport SDK rather than mirrored as a gate-local
+/// enum: the SDK classifies status codes, provider error tokens, and provider
+/// message text into one stable set, and a second table here would only drift.
+/// Consumers branch on this instead of matching error strings.
+pub use mutil_ai::ErrorKind;
+
 use qaqh_types::Message;
 use qaqh_types::{CacheTokenField, ThinkingParamMode};
 
@@ -28,7 +36,7 @@ pub fn normalize_reasoning_effort(effort: Option<&str>) -> Option<String> {
 }
 
 /// Clamp a requested effort to an endpoint's sparse allowlist
-/// (`EndpointSpec::effort_allowlist`, mirrored onto `ProviderConfig`).
+/// (`EndpointCompat::effort_allowlist`, mirrored onto `ProviderConfig`).
 ///
 /// Router models often accept a non-contiguous subset of the ladder (ox-alpha:
 /// max/high/low). Sending an off-domain value is either silently ignored or
@@ -91,22 +99,6 @@ impl ProviderKind {
 pub const OPENCODE_CLIENT_ID: &str = "cli";
 /// Official client version these headers were mirrored against.
 pub const OPENCODE_CLIENT_VERSION: &str = "1.18.22";
-
-/// Upstream closed the stream (clean TCP EOF) before producing any content
-/// and without a protocol terminal marker (`[DONE]` / `response.completed`).
-/// Busy-shedding endpoints do this instead of returning an error code.
-/// Retryable: nothing was streamed to the caller yet, so a whole request
-/// retry loses nothing.
-#[derive(Debug)]
-pub(crate) struct EmptyStreamEof;
-
-impl std::fmt::Display for EmptyStreamEof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "upstream closed stream before any content")
-    }
-}
-
-impl std::error::Error for EmptyStreamEof {}
 
 /// OpenCode gateway management headers, mirroring the official client
 /// (opencode session/llm/request.ts). The gateway records them for per-session
@@ -180,12 +172,12 @@ pub struct ProviderConfig {
     pub include_stream_usage: bool,
     pub supports_thinking: bool,
     /// 大上下文模型（如 zcode GLM-5.3）的 thinking 预算档位，镜像自
-    /// `EndpointSpec::thinking_budget_large`；默认档 1k-16k，开启后
+    /// `EndpointCompat::thinking_budget_large`；默认档 1k-16k，开启后
     /// 16k-96k。仅 Anthropic thinking 分支消费。
     pub thinking_budget_large: bool,
     pub supports_reasoning_effort: bool,
     /// Sparse allowlist of accepted `reasoning_effort` values (mirrored from
-    /// `EndpointSpec::effort_allowlist`). When set, the requested effort is
+    /// `EndpointCompat::effort_allowlist`). When set, the requested effort is
     /// snapped to the nearest allowed ladder level before sending. See
     /// [`clamp_effort_to_allowlist`].
     pub effort_allowlist: Option<Vec<String>>,
@@ -196,14 +188,10 @@ pub struct ProviderConfig {
     /// deterministic codegen (do_sample=false). None means don't send the field.
     pub do_sample: Option<bool>,
 
-    // ── Stateful proxy mode (e.g. DeepSeek Web CDP proxy) ──
-    /// When true, only send incremental messages (not full history).
-    /// The proxy remembers conversation context.
-    pub stateful: bool,
     /// Whether the endpoint accepts a system message after history/tools.
     pub supports_tail_system: bool,
     /// Responses API capability differences from the OpenAI reference semantics.
-    /// Configured from `EndpointSpec` (registry) so new providers only need a
+    /// Configured from the endpoint's `EndpointCompat` so new endpoints need a
     /// config change, never gate code.
     pub responses_compat: ResponsesCompat,
     /// Prompt cache key for prefix KV reuse (opencode `promptCacheKey`).
@@ -212,7 +200,7 @@ pub struct ProviderConfig {
     /// OpenCode gateway management headers (`x-opencode-*` + UA override).
     /// `None` = send nothing (all non-opencode providers).
     pub opencode_headers: Option<OpencodeHeaders>,
-    /// Per-endpoint retry policy override (T9/T10, from `EndpointSpec.retry`).
+    /// Per-endpoint retry policy override (from `EndpointCompat.retry`).
     /// `None` = gate built-in defaults (5 / 1s / 30s / 300s).
     pub retry: Option<qaqh_types::RetrySpec>,
 }
@@ -308,7 +296,6 @@ impl ProviderConfig {
             supports_reasoning_content: true,
             require_provider_parameters: false,
             do_sample,
-            stateful: false,
             supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
@@ -344,7 +331,6 @@ impl ProviderConfig {
             supports_reasoning_content: false,
             require_provider_parameters: false,
             do_sample: None,
-            stateful: false,
             supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
@@ -385,7 +371,6 @@ impl ProviderConfig {
             supports_reasoning_content: true,
             require_provider_parameters: false,
             do_sample: None,
-            stateful: false,
             supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
@@ -406,32 +391,9 @@ impl ProviderConfig {
         self
     }
 
-    /// T10: 附加端点级重试策略（来自 `EndpointSpec.retry`）。
+    /// 附加端点级重试策略（来自 `EndpointCompat.retry`）。
     pub fn with_retry(mut self, retry: Option<qaqh_types::RetrySpec>) -> Self {
         self.retry = retry;
-        self
-    }
-
-    /// Apply the management headers onto an HTTP request builder, mirroring
-    /// the official client's LLM request headers. The per-request User-Agent
-    /// overrides the client-level default set by `crate::shared_http_client`.
-    pub(crate) fn apply_opencode_headers(
-        &self,
-        req: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder {
-        match &self.opencode_headers {
-            None => req,
-            Some(h) => req
-                .header("x-opencode-session", &h.session_id)
-                .header("x-opencode-request", &h.request_id)
-                .header("x-opencode-client", OPENCODE_CLIENT_ID)
-                .header("User-Agent", format!("opencode/{OPENCODE_CLIENT_VERSION}")),
-        }
-    }
-
-    /// Configure this provider for stateful mode (web proxy).
-    pub fn with_stateful(mut self, stateful: bool) -> Self {
-        self.stateful = stateful;
         self
     }
 
@@ -482,7 +444,15 @@ pub enum StreamEvent {
     },
     /// Emitted whenever the API reports updated usage mid-stream (cache hits may appear in any chunk).
     UsageUpdate(qaqh_types::UsageInfo),
-    Error(String),
+    /// Terminal failure for this request.
+    ///
+    /// `kind` is the unified SDK classification — consumers branch on it
+    /// instead of matching the provider's error text. `message` is the
+    /// bounded, credential-redacted description shown to the user.
+    Error {
+        kind: ErrorKind,
+        message: String,
+    },
     /// Emitted when the gate is retrying after a retryable error.
     Retrying {
         attempt: u32,

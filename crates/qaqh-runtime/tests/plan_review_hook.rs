@@ -348,8 +348,6 @@ fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
     agent.config.base_url = mock.base_url.clone();
     agent.config.api_key = "sk-test".into();
     agent.config.model = "test-model".into();
-    agent.config.provider_id.clear();
-    agent.config.endpoint.clear();
     agent.config.compliance_enabled = false;
 
     let (input_reader, mut input_writer) = os_pipe::pipe().expect("os pipe");

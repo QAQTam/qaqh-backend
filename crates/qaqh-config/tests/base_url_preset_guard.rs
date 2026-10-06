@@ -3,8 +3,10 @@
 //! 背景（Bug#1）：前端修改 max_tokens 保存后，provider 端点被强制改回 registry
 //! 预设。根因是后端 `Config::load()` / `apply_profile()` 在"已保存值 ≠ endpoint
 //! 预设"时无条件把 base_url 覆盖为预设（apply_profile 还会落盘，造成数据丢失）。
-//! 修复原则：预设仅作空值兜底——配置文件为空（base_url 缺失）时才预设，
-//! 用户已保存的值（含自定义 URL）绝不覆盖。
+//! 修复原则在 BYOK 下依然成立且更强：**预设不再参与运行期**——`assets/legacy-providers.toml`
+//! 只在 load 时把老配置的 (provider_id, endpoint) 坐标解析成一条自述的端点记录，
+//! 用户已保存的值（含自定义 URL）绝不覆盖，空值才兜底；迁移结果落盘一次后，
+//! 配置里不再有预设坐标。
 //!
 //! 注意：QAQH_DATA_DIR 是进程级环境变量，多个 #[test] 并行会互相污染，
 //! 因此所有场景在单个测试函数内串行执行。
@@ -112,11 +114,22 @@ max_tokens = 16384
         "空配置（无 base_url）应回退到 endpoint 预设"
     );
 
-    // 4) 完全没有配置文件 → Config::default()（first provider 预设）
+    // 4) 完全没有配置文件 → Config::default()：BYOK 不预置任何服务商。
+    //    端点为空 = 未配置（设置面填），分母用内置保守值，不带厂商窗口。
     let root = setup("missing");
     let _ = root; // 不写文件
     let cfg = qaqh_config::Config::load().expect("load ok");
-    assert!(!cfg.base_url.is_empty(), "无配置文件时应带预设 base_url");
+    assert!(
+        cfg.base_url.is_empty(),
+        "BYOK 不得凭空预置服务商端点: {}",
+        cfg.base_url
+    );
+    assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
+    assert_eq!(
+        cfg.context_length,
+        qaqh_config::DEFAULT_CONTEXT_LENGTH,
+        "未配置时也得有一个保守的压缩分母"
+    );
 
     // 5) 用户显式保存的 base_url 恰为预设值 → load 后保持一致（无漂移）
     let root = setup("preset");

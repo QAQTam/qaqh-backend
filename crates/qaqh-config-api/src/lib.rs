@@ -31,11 +31,13 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDto {
     pub model: String,
+    /// BYOK 的 endpoint：scheme + host + 可选前缀（不含 wire 自身路径）。
     pub base_url: String,
-    pub provider_id: String,
-    pub endpoint: String,
+    /// 该 endpoint 说的 wire：`openai` | `responses` | `anthropic`。
+    pub wire: String,
     pub max_tokens: u64,
-    pub context_limit: u64,
+    /// 端点声明的上下文窗口——本地压缩的唯一分母（软阈值与硬 pre-flight 同源）。
+    pub context_length: u64,
     pub reasoning_effort: String,
     pub auto_compact_threshold: f64,
     pub permission_level: u8,
@@ -52,37 +54,12 @@ pub struct ConfigDto {
     /// profile 名列表（管理 UI 用；不含敏感字段）。
     pub profiles: Vec<String>,
     pub compliance_enabled: bool,
-    pub providers: Vec<ProviderDto>,
     pub subagent: SubagentDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
     pub mcp: McpDto,
     /// LSP 客户端配置（M1 只读；写模型另立）。
     pub lsp: LspDto,
     pub tokenizer_path: Option<String>,
-}
-
-/// provider 目录项（endpoint 预设树）。
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderDto {
-    pub id: String,
-    pub display: String,
-    pub endpoints: Vec<EndpointDto>,
-}
-
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EndpointDto {
-    pub id: String,
-    pub display: String,
-    pub protocol: String,
-    pub base_url: String,
-    pub default_model: String,
-    pub models: Vec<String>,
-    pub stateful: bool,
-    pub beta: bool,
 }
 
 /// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。
@@ -184,8 +161,8 @@ pub struct LspServerDto {
 /// 写模型：JSON Merge Patch（K3）。反序列化时缺失即 None = 不动；
 /// 序列化时跳过 None，保证 wire 上永不出现 `"field": null`。
 ///
-/// 刻意**不含**：providers/profiles 名录（服务端派生）、active_profile
-/// （切换走 `profile.apply`）、api_key_set（服务端派生）。
+/// 刻意**不含**：profiles 名录（服务端派生）、active_profile（切换走
+/// `profile.apply`）、api_key_set（服务端派生）。BYOK 后没有 provider 目录可下发。
 /// `permissionLevel` 在 patch 中受 1..=3 值域校验（BUG-2026-09-13-15；三档制 2026-10-03）。
 ///
 /// 特例语义冻结：`apiKey`/`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
@@ -202,13 +179,11 @@ pub struct ConfigPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
+    pub wire: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_limit: Option<u64>,
+    pub context_length: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -284,10 +259,17 @@ impl ConfigPatch {
         {
             return Err("maxTokens 必须大于 0".to_string());
         }
-        if let Some(v) = self.context_limit
+        if let Some(v) = self.context_length
             && v == 0
         {
-            return Err("contextLimit 必须大于 0".to_string());
+            return Err("contextLength 必须大于 0".to_string());
+        }
+        if let Some(w) = &self.wire
+            && !matches!(w.as_str(), "openai" | "responses" | "anthropic")
+        {
+            return Err(format!(
+                "wire 仅允许 openai|responses|anthropic，收到 {w}"
+            ));
         }
         if let Some(e) = &self.reasoning_effort
             && !matches!(e.as_str(), "low" | "medium" | "high" | "xhigh" | "max")
@@ -377,10 +359,9 @@ mod tests {
         let payload = json!({
             "model": "ox-alpha-free",
             "baseUrl": "https://opencode.ai/zen/go/v1",
-            "providerId": "opencode-go",
-            "endpoint": "openai",
+            "wire": "openai",
             "maxTokens": 96000,
-            "contextLimit": 1000000,
+            "contextLength": 1000000,
             "reasoningEffort": "max",
             "autoCompactThreshold": 0.95,
             "permissionLevel": 4,
@@ -392,20 +373,6 @@ mod tests {
             "activeProfile": "default",
             "profiles": ["default"],
             "complianceEnabled": false,
-            "providers": [{
-                "id": "opencode-go",
-                "display": "OpenCode",
-                "endpoints": [{
-                    "id": "openai",
-                    "display": "OpenAI",
-                    "protocol": "openai",
-                    "baseUrl": "https://opencode.ai/zen/go/v1",
-                    "defaultModel": "",
-                    "models": ["ox-alpha-free"],
-                    "stateful": false,
-                    "beta": false
-                }]
-            }],
             "subagent": {
                 "model": "",
                 "baseUrl": "",
@@ -420,7 +387,8 @@ mod tests {
             "tokenizerPath": null
         });
         let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
-        assert_eq!(dto.context_limit, 1_000_000);
+        assert_eq!(dto.context_length, 1_000_000);
+        assert_eq!(dto.wire, "openai");
         assert_eq!(dto.reasoning_effort, "max");
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(dto.api_key, "****");
@@ -440,7 +408,7 @@ mod tests {
     fn patch_roundtrip_with_nested_subagent() {
         let patch = ConfigPatch {
             model: Some("m".into()),
-            context_limit: Some(1_000_000),
+            context_length: Some(1_000_000),
             auto_compact_threshold: Some(0.95),
             subagent: Some(SubagentPatch {
                 timeout_secs: Some(240),
@@ -451,7 +419,7 @@ mod tests {
         };
         let v = serde_json::to_value(&patch).expect("serialize");
         assert_eq!(v["model"], json!("m"));
-        assert_eq!(v["contextLimit"], json!(1_000_000));
+        assert_eq!(v["contextLength"], json!(1_000_000));
         assert_eq!(v["autoCompactThreshold"], json!(0.95));
         assert_eq!(v["subagent"]["timeoutSecs"], json!(240));
         assert_eq!(v["subagent"]["defaultTools"], json!([]));
@@ -469,7 +437,7 @@ mod tests {
             "subagent": { "timeout_secs": 60 }
         }))
         .expect("未知键不报错");
-        assert_eq!(legacy.context_limit, None, "snake_case 键已不再生效");
+        assert_eq!(legacy.context_length, None, "snake_case 键已不再生效");
         assert_eq!(legacy.subagent.expect("subagent").timeout_secs, None);
     }
 

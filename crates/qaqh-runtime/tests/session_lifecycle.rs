@@ -302,8 +302,6 @@ fn send_message_triggers_turn_lifecycle() {
     agent.config.base_url = mock.base_url.clone();
     agent.config.api_key = "sk-test".into();
     agent.config.model = "test-model".into();
-    agent.config.provider_id.clear();
-    agent.config.endpoint.clear();
     agent.config.compliance_enabled = false;
 
     let (ir, mut iw) = os_pipe::pipe().expect("os pipe");
@@ -404,8 +402,6 @@ fn system_injection_lands_inside_running_turn() {
     agent.config.base_url = mock.base_url.clone();
     agent.config.api_key = "sk-test".into();
     agent.config.model = "test-model".into();
-    agent.config.provider_id.clear();
-    agent.config.endpoint.clear();
     agent.config.compliance_enabled = false;
     agent.config.permission_level = 3; // skip-permissions(三档制)
 
@@ -524,8 +520,6 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
     agent.config.base_url = mock.base_url.clone();
     agent.config.api_key = "sk-test".into();
     agent.config.model = "test-model".into();
-    agent.config.provider_id.clear();
-    agent.config.endpoint.clear();
     agent.config.compliance_enabled = false;
 
     let (ir, mut iw) = os_pipe::pipe().expect("os pipe");
