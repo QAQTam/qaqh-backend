@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use qaqh_domain::ConversationCommand;
 use qaqh_ringing::RingingCommand;
-use qaqh_workspace::tool_api::{
+use qaqh_tool_core::tool_api::{
     ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
     ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
 };
@@ -135,10 +135,10 @@ impl ToolProjection for SpawnSubagentOutput {
 
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "subagent".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Subagent {
+            qaqh_tool_core::tool_api::ToolBody::Subagent {
                 name: self.name.clone(),
                 session_id: self.session_id.clone(),
             },
@@ -146,8 +146,8 @@ impl ToolProjection for SpawnSubagentOutput {
         .with_summary(self.content.clone())
     }
 
-    fn effects(&self) -> Vec<qaqh_workspace::ToolEffect> {
-        vec![qaqh_workspace::ToolEffect::SubagentSpawned {
+    fn effects(&self) -> Vec<qaqh_tool_core::ToolEffect> {
+        vec![qaqh_tool_core::ToolEffect::SubagentSpawned {
             session_id: self.session_id.clone(),
             child_session_id: self.child_session_id.clone(),
             name: self.name.clone(),
@@ -196,10 +196,10 @@ impl ToolProjection for ListAgentsOutput {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agents".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -292,10 +292,10 @@ impl ToolProjection for AgentMessageOutput {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agent-message".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -434,10 +434,10 @@ impl ToolProjection for WaitAgentOutput {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agents".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -550,10 +550,10 @@ impl ToolProjection for InterruptAgentOutput {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agents".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -845,7 +845,7 @@ impl SubagentTransport for HostTransport {
 fn project_subagent_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<SpawnSubagentOutput>(output) {
         return output.display(args);
     }
@@ -855,11 +855,11 @@ fn project_subagent_display(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("sub");
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "subagent".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Subagent {
+        qaqh_tool_core::tool_api::ToolBody::Subagent {
             name: name.to_string(),
             session_id: String::new(),
         },
@@ -869,15 +869,15 @@ fn project_subagent_display(
 fn project_list_agents_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<ListAgentsOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agents".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "0 agent(s)".to_string(),
             truncated: false,
         },
@@ -887,15 +887,15 @@ fn project_list_agents_display(
 fn project_agent_message_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<AgentMessageOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agent-message".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "agent message rejected".to_string(),
             truncated: false,
         },
@@ -905,15 +905,15 @@ fn project_agent_message_display(
 fn project_wait_agent_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<WaitAgentOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agents".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "wait failed".to_string(),
             truncated: false,
         },
@@ -923,15 +923,15 @@ fn project_wait_agent_display(
 fn project_interrupt_agent_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<InterruptAgentOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agents".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "interrupt rejected".to_string(),
             truncated: false,
         },
@@ -1736,7 +1736,7 @@ mod tests {
             Some("Subagent 'review_code' spawned (process 7)")
         );
         match display.body {
-            qaqh_workspace::tool_api::ToolBody::Subagent { name, session_id } => {
+            qaqh_tool_core::tool_api::ToolBody::Subagent { name, session_id } => {
                 assert_eq!(name, "review_code");
                 assert_eq!(session_id, "sub-seed");
             }
@@ -1750,17 +1750,17 @@ mod tests {
             call_id: "call-subagent".to_string(),
             session_id: "parent-seed".to_string(),
             workspace_root: std::path::PathBuf::from("/tmp/workspace"),
-            mode: qaqh_workspace::tool_api::AgentMode::Code,
+            mode: qaqh_tool_core::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
-            sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
-            sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
+            sandbox: qaqh_tool_core::tool_api::SandboxMode::Main,
+            sandbox_spec: qaqh_tool_core::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from("/tmp/workspace"),
             ),
             exec_default_shell: None,
             timeout: Duration::from_secs(180),
-            cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
+            cancellation: qaqh_tool_core::tool_api::CancellationToken::new(),
             progress: None,
-            source: qaqh_workspace::tool_api::ToolCallSource::Model,
+            source: qaqh_tool_core::tool_api::ToolCallSource::Model,
         };
         let error = SpawnSubagentTool
             .run(

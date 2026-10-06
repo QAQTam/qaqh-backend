@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use qaqh_workspace::ToolRisk;
-use qaqh_workspace::tool_api::{
+use qaqh_tool_core::ToolRisk;
+use qaqh_tool_core::tool_api::{
     ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
     ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
 };
@@ -110,10 +110,10 @@ macro_rules! simple_projection {
 
             fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
                 ToolDisplay::new(
-                    qaqh_workspace::tool_api::ToolHeader::Other {
+                    qaqh_tool_core::tool_api::ToolHeader::Other {
                         label: "board".to_string(),
                     },
-                    qaqh_workspace::tool_api::ToolBody::Text {
+                    qaqh_tool_core::tool_api::ToolBody::Text {
                         text: $label.to_string(),
                         truncated: false,
                     },
@@ -138,10 +138,10 @@ impl ToolProjection for BoardPostOutput {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         let summary = format!("posted {}", self.post.post_id);
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "board".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -165,10 +165,10 @@ impl ToolProjection for BoardListOutput {
             self.board.posts.len()
         );
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "board".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
