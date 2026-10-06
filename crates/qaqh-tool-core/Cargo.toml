@@ -1,0 +1,22 @@
+[package]
+name = "qaqh-tool-core"
+version.workspace = true
+edition.workspace = true
+description = "QAQ-Harness Tool SDK core: typed tool contract, descriptor, projection, schema (P2 crate split from qaqh-workspace)"
+
+[dependencies]
+qaqh-types = { path = "../qaqh-types" }
+# ToolCategory/PermissionLevel/PermissionDecision 的单一事实源（workspace 经
+# pub use 同源引用）。
+qaqh-policy = { path = "../qaqh-policy" }
+# ToolEffect::Skill(SkillEffect)：技能激活的宿主侧可信状态迁移类型。
+qaqh-skills = { path = "../qaqh-skills" }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ToolError 的诊断 source（base spec §7.1/§7.2，不序列化）。
+anyhow = "1"
+log = "0.4"
+
+[lints]
+workspace = true
