@@ -570,8 +570,8 @@ impl TypedTool for JournalTool {
 }
 
 /// Register the `journal` workspace tool.
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(JournalTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(JournalTool);
 }
 
 /// Compatibility entry retained for existing in-process tests.
@@ -822,7 +822,7 @@ mod tests {
     /// Serializes on TEST_RUNTIME_SERIAL (writes global CURRENT_WORKSPACE).
     #[test]
     fn journal_replay_out_resolves_against_workspace() {
-        let _guard = crate::TEST_RUNTIME_SERIAL
+        let _guard = qaqh_workspace::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         with_temp_journal(|| {
@@ -893,10 +893,10 @@ mod tests {
 
     #[test]
     fn typed_journal_registration_and_display_are_same_source() {
-        let mut manager = crate::ToolManager::new();
+        let mut manager = qaqh_workspace::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins.contains_key("journal"),
+            manager.builtin("journal").is_some(),
             "journal must be on the typed execution surface"
         );
 

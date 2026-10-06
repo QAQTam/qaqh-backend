@@ -292,8 +292,8 @@ fn splice_raw(raw: &str, new_lf: &str, matches: &[(usize, usize)], endings: Line
     out
 }
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(EditTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(EditTool);
 }
 
 /// Compatibility entry retained for existing in-process callers/tests.

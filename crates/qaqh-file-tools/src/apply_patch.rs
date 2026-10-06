@@ -309,8 +309,8 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
 pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch (*** Begin Patch). Matching takes the FIRST hit; \
      disambiguate repeated context with extra lines or '@@ <context line>'. dry_run previews.";
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(ApplyPatchTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(ApplyPatchTool);
 }
 
 /// Compatibility entry retained for existing in-process tests.
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn tool_description_warns_about_ambiguous_context() {
-        let mut mgr = crate::ToolManager::new();
+        let mut mgr = qaqh_workspace::ToolManager::new();
         register(&mut mgr);
         let desc = mgr
             .lookup("apply_patch")
@@ -728,10 +728,10 @@ mod tests {
 
     #[test]
     fn typed_apply_patch_registration_and_display_are_same_source() {
-        let mut manager = crate::ToolManager::new();
+        let mut manager = qaqh_workspace::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins.contains_key("apply_patch"),
+            manager.builtin("apply_patch").is_some(),
             "apply_patch must be on the typed execution surface"
         );
 

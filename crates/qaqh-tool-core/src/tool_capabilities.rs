@@ -101,7 +101,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
 
 /// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 22] = [
+const TABLE: [(&str, ToolCapabilities); 23] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
@@ -125,6 +125,7 @@ const TABLE: [(&str, ToolCapabilities); 22] = [
     ("todo_list", READ_ONLY_UNBOUND),
     ("todo_update", SESSION_MUTATING),
     ("todo_write", SESSION_MUTATING),
+    ("tool_search", READ_ONLY),
     ("web_fetch", READ_ONLY_UNBOUND),
     ("write", MUTATING),
 ];
@@ -148,7 +149,6 @@ pub fn table_tool_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn workspace_unbound_tools_are_pinned() {

@@ -117,7 +117,7 @@ pub fn peek_image(session_id: &str, index: usize) -> Option<(String, String)> {
 // ── Capability gate ───────────────────────────────────────────────────
 
 /// Whether the currently configured (provider, endpoint, model) accepts image input.
-use crate::runtime::image_model_supported;
+use crate::hooks::image_model_supported;
 
 // ── Typed output / handler ────────────────────────────────────────────
 
@@ -151,10 +151,7 @@ pub struct ReadImageOutput {
 
 impl ReadImageOutput {
     fn summary_text(&self) -> String {
-        format!(
-            "{}x{} · {}",
-            self.width, self.height, self.mime_type
-        )
+        format!("{}x{} · {}", self.width, self.height, self.mime_type)
     }
 }
 
@@ -337,8 +334,8 @@ fn read_image_file(
     Ok((bytes, full.display().to_string()))
 }
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(ReadImageTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(ReadImageTool);
 }
 
 /// Compatibility entry retained for existing in-process tests.
@@ -373,7 +370,7 @@ mod tests {
 
     #[test]
     fn registry_peek_is_non_destructive() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
+        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-{}", std::process::id()));
@@ -400,7 +397,7 @@ mod tests {
     fn reset_then_replay_keeps_indices_stable() {
         // 模拟 session restore：先 reset 再按历史顺序重放注册，
         // 重复 restore 不产生重复条目、不移动索引。
-        let _serial = crate::TEST_RUNTIME_SERIAL
+        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-reset-{}", std::process::id()));
@@ -430,7 +427,7 @@ mod tests {
     fn register_image_ref_rebuilds_peek_without_bytes() {
         // A-2 L0 resume 重建路径：ImageRef 已在场（磁盘有文件），
         // register_image_ref 零字节登记，peek 读盘还原。
-        let _serial = crate::TEST_RUNTIME_SERIAL
+        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-ref-{}", std::process::id()));
@@ -460,10 +457,10 @@ mod tests {
 
     #[test]
     fn typed_read_image_projects_attachment_without_base64_in_model_text() {
-        let mut manager = crate::ToolManager::new();
+        let mut manager = qaqh_workspace::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins.contains_key("read_image"),
+            manager.builtin("read_image").is_some(),
             "read_image must be on the typed execution surface"
         );
 

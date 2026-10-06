@@ -8,7 +8,7 @@ pub use qaqh_tool_core::tool_api::*;
 
 mod boundary;
 pub use boundary::{
-    BatchContext, BatchOutcome, CallOutcome, ExecuteBatch, InteractionDecision,
-    PendingInteraction, PendingKind, ResumeInteraction,
+    BatchContext, BatchOutcome, CallOutcome, ExecuteBatch, InteractionDecision, PendingInteraction,
+    PendingKind, ResumeInteraction,
 };
 pub(crate) use qaqh_tool_core::tool_api::display::clamp_display_body;
