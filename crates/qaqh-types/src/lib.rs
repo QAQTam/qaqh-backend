@@ -38,8 +38,7 @@ pub use discovery::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 pub use image_store::sha256_hex;
 pub use message::{ContentBlock, FunctionCall, Message, ToolCall};
 pub use provider::{
-    CacheTokenField, EndpointPatch, EndpointPatchRef, EndpointSpec, ProviderPatch, ProviderSpec,
-    ProvidersFile, ProvidersOverrideFile, RetrySpec, ThinkingParamMode, UserSendMode,
+    CacheTokenField, EndpointCompat, RetrySpec, ThinkingParamMode, UserSendMode, Wire,
 };
 pub use session::{
     SessionListEntry, SessionMeta, SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2,

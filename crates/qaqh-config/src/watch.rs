@@ -48,9 +48,6 @@ pub fn latest() -> Option<Arc<Config>> {
 /// 保证「磁盘已落盘 → 内存广播」顺序（消费者永远读到已持久化状态）。
 pub(crate) fn publish(cfg: Arc<Config>) {
     *latest_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg.clone());
-    // T9: config.toml 可能携带 [providers] 覆盖段——单写口提交后失效
-    // registry 合并缓存，下次查找重建（override > config.toml > assets）。
-    crate::registry::invalidate_merged();
     // 零接收者时 send 失败无妨：latest() 镜像已兜底。
     let _ = channel().send(Some(cfg));
 }
@@ -92,11 +89,11 @@ mod tests {
     fn push_path_receiver_sees_update() {
         let rx = subscribe();
         publish(Arc::new(Config {
-            context_limit: 123_456,
+            context_length: 123_456,
             ..Default::default()
         }));
         assert_eq!(
-            rx.borrow().clone().expect("pushed snapshot").context_limit,
+            rx.borrow().clone().expect("pushed snapshot").context_length,
             123_456
         );
     }
@@ -107,10 +104,10 @@ mod tests {
     fn mirror_survives_zero_receiver_publish() {
         // 不持有任何 receiver，直接发布。
         publish(Arc::new(Config {
-            context_limit: 654_321,
+            context_length: 654_321,
             ..Default::default()
         }));
-        assert_eq!(latest().expect("mirror snapshot").context_limit, 654_321);
+        assert_eq!(latest().expect("mirror snapshot").context_length, 654_321);
     }
 
     /// P2-1：文件轮询路径——磁盘合法配置经 reload_from_disk 发布到单写口；

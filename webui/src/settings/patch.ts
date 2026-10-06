@@ -34,6 +34,8 @@ export type ConfigPatchWire = Optionalize<Omit<ConfigPatch, "subagent">> & {
 
 /** 允许值来自 ConfigPatch::validate()(lib.rs:283-288);空串不在其中——别发。 */
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+/** BYOK 的三条 wire——没有 provider 目录可查,协议由用户直接声明。 */
+export const WIRE_PROTOCOLS = ["openai", "responses", "anthropic"] as const;
 
 /** "" = 跟随系统(apply_patch:lang/theme/tokenizerPath 空串 = 清除)。 */
 export const THEME_OPTIONS = [
@@ -118,8 +120,8 @@ export function buildPatch(baseline: ConfigDto, draft: ConfigDto): ConfigPatchWi
   keepIfBlank(raw, "apiKey", baseline.apiKey, draft.apiKey);
   keepIfBlank(raw, "model", baseline.model, draft.model);
   keepIfBlank(raw, "baseUrl", baseline.baseUrl, draft.baseUrl);
-  keepIfBlank(raw, "providerId", baseline.providerId, draft.providerId);
-  keepIfBlank(raw, "endpoint", baseline.endpoint, draft.endpoint);
+  // wire 恒为非空枚举值(空即非法),按差异发送而非按空串保持。
+  changed(raw, "wire", baseline.wire, draft.wire);
   keepIfBlank(raw, "reasoningEffort", baseline.reasoningEffort, draft.reasoningEffort);
   // 空串 = 清除
   clearable(raw, "lang", baseline.lang, draft.lang);
@@ -129,7 +131,7 @@ export function buildPatch(baseline: ConfigDto, draft: ConfigDto): ConfigPatchWi
   const font = norm(draft.fontFamily);
   if (font !== norm(baseline.fontFamily) && font !== MASK) raw["fontFamily"] = font;
   changed(raw, "maxTokens", baseline.maxTokens, draft.maxTokens);
-  changed(raw, "contextLimit", baseline.contextLimit, draft.contextLimit);
+  changed(raw, "contextLength", baseline.contextLength, draft.contextLength);
   changed(raw, "autoCompactThreshold", baseline.autoCompactThreshold, draft.autoCompactThreshold);
   changed(raw, "complianceEnabled", baseline.complianceEnabled, draft.complianceEnabled);
   changed(raw, "notificationsEnabled", baseline.notificationsEnabled, draft.notificationsEnabled);
@@ -155,8 +157,12 @@ export function validatePatch(patch: ConfigPatchWire): string | null {
   if (patch.maxTokens != null && (patch.maxTokens <= 0 || !Number.isInteger(patch.maxTokens))) {
     return "maxTokens 必须是大于 0 的整数";
   }
-  if (patch.contextLimit != null && (patch.contextLimit <= 0 || !Number.isInteger(patch.contextLimit))) {
-    return "contextLimit 必须是大于 0 的整数";
+  if (patch.contextLength != null && (patch.contextLength <= 0 || !Number.isInteger(patch.contextLength))) {
+    return "contextLength 必须是大于 0 的整数";
+  }
+  const wire = patch.wire;
+  if (wire != null && !(WIRE_PROTOCOLS as readonly string[]).includes(wire)) {
+    return `wire 仅允许 ${WIRE_PROTOCOLS.join("|")}，收到 ${wire}`;
   }
   const effort = patch.reasoningEffort;
   if (effort != null && !(REASONING_EFFORTS as readonly string[]).includes(effort)) {

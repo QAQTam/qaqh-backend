@@ -179,19 +179,21 @@ const steps = [
     `,
   },
   {
-    name: "provider 切换同步目录里的 endpoint+baseUrl(三项)",
+    name: "BYOK 端点改动:endpoint + wire 各发一项",
     code: `
-      __t.pick("provider", "other-vendor");
+      __t.pick("wire", "anthropic");
+      await __t.wait(250);
+      __t.type("endpoint", "https://other.example/v1");
       await __t.wait(250);
       const foot = __t.foot();
+      const wire = __t.value("wire");
       const endpoint = __t.value("endpoint");
-      const baseUrl = __t.value("baseUrl");
       __t.click(".primary-mini");
       await __t.wait(600);
       const patch = __t.lastSave() ?? {};
-      return { ok: foot.includes("3 项") && endpoint === "anthropic" && baseUrl === "https://other.example/v1"
-                 && patch.providerId === "other-vendor" && patch.endpoint === "anthropic",
-               detail: { foot, endpoint, baseUrl, patchKeys: Object.keys(patch) } };
+      return { ok: foot.includes("2 项") && wire === "anthropic" && endpoint === "https://other.example/v1"
+                 && patch.wire === "anthropic" && patch.baseUrl === "https://other.example/v1",
+               detail: { foot, wire, endpoint, patchKeys: Object.keys(patch) } };
     `,
   },
   {

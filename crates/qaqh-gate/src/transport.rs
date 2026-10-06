@@ -1,17 +1,10 @@
-//! gate::transport — 三协议共享的传输零件（Phase 3-1 收敛）。
+//! gate::transport — SDK 桥接层共享的传输零件。
 //!
-//! `chat_completions_api` / `message_api` / `responses_api` 曾各持一份字节级
-//! 相同的实现：3 个独立 current-thread tokio runtime、cancel 轮询、重试退避、
-//! 错误描述、skill envelope 归一、stateful 过滤、`SseTrace` 诊断。本模块是其
-//! 单一来源；协议本质差异（convert_messages ×3、帧处理 ×3、convert_tools ×3）
-//! 保留在各协议文件。
-//!
-//! 收敛时消除的行为漂移：
-//! - 3 个独立 runtime → 1 个共享 runtime（此前三协议各建各的 current-thread RT）；
-//! - `responses_api` 的内联 `2u64.pow(attempt)` 无 30s 上限 → 统一走
-//!   `backoff_delay`（`BASE_DELAY_SECS * 2^(attempt-1)`，上限 30s）；
-//! - `chat_completions_api::filter_stateful_messages` 在 release 也打
-//!   `eprintln!("[filter] 输出…")` → 随统一删除（stderr 污染缺陷，见 Phase 4）。
+//! HTTP/SSE/重试已整体移交 mutil-ai（`anthropic_sdk` / `openai_sdk` /
+//! `responses_sdk` + `sdk_common`）；本模块只保留仍被复用的同步门面
+//! （crate 级 current-thread runtime 的 `block_on`）、可取消睡眠、
+//! `RetryPolicy`（gate 侧旋钮，编译成 SDK 策略）、错误描述表、
+//! skill envelope 归一与 `SseTrace` 诊断。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,9 +13,6 @@ use std::time::Duration;
 use qaqh_types::{ContentBlock, Message};
 
 use super::types::{ProviderConfig, StreamEvent};
-
-/// SSE 轮询间隔：无数据到达时以外层 Tokio timeout 检查 cancel 标志。
-pub(crate) const SSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 // 与官方客户端会话重试策略对齐（opencode session/retry.ts：2s 初始、翻倍；
 // 本常量 5 = 1 次原始请求 + 4 次重试），吸收网关瞬时 5xx  burst。
@@ -67,13 +57,9 @@ pub(crate) fn sleep_with_cancel(delay: Duration, cancel: Option<&Arc<AtomicBool>
     false
 }
 
-pub(crate) fn is_retryable(status: u16) -> bool {
-    matches!(status, 429 | 500 | 503)
-}
-
 /// 每端点重试策略（对齐 codex `ModelProviderInfo` 的 request_max_retries /
-/// stream_idle_timeout 三元组）。T9 起由 `EndpointSpec` 的 `RetrySpec`（TOML）
-/// 编译而来；缺省值即现行全局常量，行为零变化。
+/// stream_idle_timeout 三元组）。由端点的 `EndpointCompat.retry`（TOML）编译
+/// 而来；缺省值即现行全局常量，行为零变化。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// 最大尝试次数（含首次；`5` = 1 次原始请求 + 4 次重试，与既有
@@ -137,68 +123,6 @@ impl RetryPolicy {
     }
 }
 
-/// 一次尝试的分类结果（[`run_with_retry`] 闭包的返回值）。
-pub(crate) enum Attempt<T> {
-    /// 成功，终止重试并返回。
-    Ok(T),
-    /// 可重试失败。`retry_after`（服务端 retry-after 头）优先于本地退避；
-    /// `reason` 进入 Retrying 事件；`final_error` 在重试额度耗尽时由执行器
-    /// 发出 Error 事件并作为终态错误返回。
-    Retry {
-        retry_after: Option<Duration>,
-        reason: String,
-        final_error: String,
-    },
-    /// 不可重试——立即传播。闭包自行负责（按既有路径）Error 事件发射。
-    Fatal(anyhow::Error),
-}
-
-/// 统一重试执行器（对齐 codex 的重试循环形态）：闭包只做"一次尝试"并分类
-/// 结果；计数、取消检查、退避计算（retry-after 优先）、Retrying 事件与可
-/// 取消睡眠全部集中在此。三协议流式循环与 `chat_sync_*` 共用，T9 起策略
-/// 可按端点从 TOML 注入。
-pub(crate) fn run_with_retry<T, F>(
-    policy: &RetryPolicy,
-    cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
-    mut attempt_fn: F,
-) -> anyhow::Result<T>
-where
-    F: FnMut(u32, &mut dyn FnMut(StreamEvent)) -> Attempt<T>,
-{
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        if is_cancelled(cancel) {
-            return Err(anyhow::anyhow!("cancelled by user"));
-        }
-        match attempt_fn(attempt, &mut *on_event) {
-            Attempt::Ok(value) => return Ok(value),
-            Attempt::Fatal(e) => return Err(e),
-            Attempt::Retry {
-                retry_after,
-                reason,
-                final_error,
-            } => {
-                if attempt >= policy.max_retries {
-                    on_event(StreamEvent::Error(final_error.clone()));
-                    return Err(anyhow::anyhow!("{}", final_error));
-                }
-                let delay = retry_after.unwrap_or_else(|| policy.delay_for(attempt));
-                on_event(StreamEvent::Retrying {
-                    attempt,
-                    max_retries: policy.max_retries,
-                    delay_secs: delay.as_secs(),
-                    error: reason,
-                });
-                if sleep_with_cancel(delay, cancel) {
-                    return Err(anyhow::anyhow!("cancelled by user"));
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 fn backoff_delay(attempt: u32) -> Duration {
     RetryPolicy::default().delay_for(attempt)
@@ -215,59 +139,6 @@ fn jitter_ms(base_ms: u64) -> u64 {
     ((base_ms as f64) * factor) as u64
 }
 
-/// retry-after 头的信任上限：`max_delay`（默认 30s）的 5 倍。
-///
-/// BUG-2026-09-13-22：该头此前被无上限信任，`retry-after: 999999` 会让回合
-/// 挂起数小时（本地退避有 `max_delay` 封顶，服务端头路径没有）。封顶取
-/// 5×`max_delay` 而非直接取 `max_delay`：既尊重服务端比本地退避更长的窗口，
-/// 又保证回合不会被无限挂起（上游 codex 同样未封顶，挂 TODO(anp)）。
-pub(crate) fn retry_after_cap(policy: &RetryPolicy) -> Duration {
-    policy.max_delay.saturating_mul(5)
-}
-
-/// 解析上游限流头（opencode retry.ts 同款）：`retry-after-ms`（毫秒）优先，
-/// 其次 `retry-after`（秒或 HTTP-date）。`None` = 无可用头，退回指数退避。
-///
-/// 已封顶（BUG-2026-09-13-22）：解析结果超过 [`retry_after_cap`] 时按上限
-/// 处理并落 `warn` 日志，回合不再被无限挂起。
-pub(crate) fn parse_retry_after(
-    headers: &reqwest::header::HeaderMap,
-    policy: &RetryPolicy,
-) -> Option<Duration> {
-    let parsed = parse_retry_after_raw(headers)?;
-    let cap = retry_after_cap(policy);
-    if parsed > cap {
-        log::warn!(
-            "retry-after 头 {}s 超过信任上限 {}s，按上限钳制（回合不再被无限挂起）",
-            parsed.as_secs(),
-            cap.as_secs()
-        );
-        return Some(cap);
-    }
-    Some(parsed)
-}
-
-/// 未封顶的原始解析（仅由 [`parse_retry_after`] 调用，保留头值的完整语义）。
-fn parse_retry_after_raw(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    if let Some(v) = headers.get("retry-after-ms")
-        && let Ok(s) = v.to_str()
-        && let Ok(ms) = s.trim().parse::<u64>()
-    {
-        return Some(Duration::from_millis(ms));
-    }
-    let v = headers.get("retry-after")?.to_str().ok()?;
-    let s = v.trim();
-    if let Ok(secs) = s.parse::<u64>() {
-        return Some(Duration::from_secs(secs));
-    }
-    // HTTP-date 形式：取与当前时间的正差，已过期/时钟回拨则为 0（立即重试）。
-    let target = httpdate::parse_http_date(s).ok()?;
-    let delta = target
-        .duration_since(std::time::SystemTime::now())
-        .unwrap_or(Duration::ZERO);
-    Some(delta)
-}
-
 pub(crate) fn http_error_description(status: u16) -> &'static str {
     match status {
         400 => "Bad Request — 格式错误",
@@ -281,63 +152,10 @@ pub(crate) fn http_error_description(status: u16) -> &'static str {
     }
 }
 
-/// stateful 增量过滤结果。
-///
-/// BUG-2026-09-13-12：尾消息就是 assistant 时增量切片必为空（`start == len`），
-/// 旧实现唯一的兜底守卫 `last.role != "assistant"` 因此恒假（死分支），
-/// 三协议会构造出 `"messages": []` 发给上游 → 400 不可重试 → 回合 Fatal。
-/// 语义上，远端会话已持有那条 assistant 响应，增量里没有任何新内容可发，
-/// 本次调用就是 no-op——必须显式建模，而不是发空数组。
-#[derive(Debug, Clone)]
-pub(crate) enum StatefulFilter {
-    /// 有增量可发（含「无 assistant 尾 → 全量首请求」）。`dropped_images`
-    /// 是被丢弃前缀中的图片数，作为会话级图片编号基准。
-    Incremental {
-        messages: Vec<Message>,
-        dropped_images: usize,
-    },
-    /// 增量全灭：远端已持有全部上下文，本次调用应为 no-op。
-    Empty,
-}
-
-/// 过滤 stateful 请求的增量消息，并在增量为空时显式返回 [`StatefulFilter::Empty`]。
-pub(crate) fn filter_stateful_messages(messages: Vec<Message>) -> StatefulFilter {
-    if messages.is_empty() {
-        // 历史为空：没有可发内容，同样按 no-op 处理（而非发空数组）。
-        return StatefulFilter::Empty;
-    }
-    let last_asst_idx = messages.iter().rposition(|m| m.role == "assistant");
-    let start = last_asst_idx.map(|i| i + 1).unwrap_or(0);
-    let is_first = start == 0;
-    if is_first {
-        return StatefulFilter::Incremental {
-            messages,
-            dropped_images: 0,
-        };
-    }
-    let dropped_images = messages[..start]
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter(|b| {
-            matches!(
-                b,
-                ContentBlock::Image { .. } | ContentBlock::ImageRef { .. }
-            )
-        })
-        .count();
-    if start == messages.len() {
-        // 尾消息即 assistant：增量全灭（旧死分支所在）。
-        return StatefulFilter::Empty;
-    }
-    StatefulFilter::Incremental {
-        messages: messages[start..].to_vec(),
-        dropped_images,
-    }
-}
-
-/// 增量全灭时流式路径的 no-op 收口：发一个空 assistant 的 Done，
-/// 让 runtime 正常完成本回合（而不是把 400 当 Fatal）。零 HTTP 请求。
-pub(crate) fn stateful_noop_done_event() -> StreamEvent {
+/// 空请求保护（流式收口）：投影后无任何可发送内容（如 responses 的 `input: []`）时
+/// 发一个空 assistant 的 Done，让 runtime 正常完成本回合（而不是把 400 当 Fatal）。
+/// 与 [`empty_request_sync_error`] 同族语义——本地短路，**零 HTTP 请求**。
+pub(crate) fn empty_request_noop_done_event() -> StreamEvent {
     StreamEvent::Done {
         raw_message: Message {
             msg_id: None,
@@ -351,15 +169,8 @@ pub(crate) fn stateful_noop_done_event() -> StreamEvent {
     }
 }
 
-/// 增量全灭时 sync 路径（compact/title）的错误文本：带稳定诊断码
-/// `STATEFUL_INCREMENT_EMPTY`，调用方（compact）据此按既有 `retryable: true`
-/// 上报 OperationFailed——而不是把上游的空数组 400 当不可重试 Fatal。
-pub(crate) fn stateful_noop_sync_error() -> String {
-    "STATEFUL_INCREMENT_EMPTY: stateful provider 增量无新消息（远端已持有该 assistant），本次调用跳过；请重建会话或改用非 stateful 端点".to_string()
-}
-
-/// 空请求保护（非 stateful 路径）：投影后无任何可发送内容（如 responses 的
-/// `input: []`）。同一族语义——本地短路，**零 HTTP 请求**，不拿空数组换上游 400。
+/// 空请求保护（sync 路径）：sync 没有流式收口可用，返回可诊断错误而不是
+/// 拿空数组去换上游 400。
 pub(crate) fn empty_request_sync_error() -> String {
     "empty_request: 本次请求无任何可投影内容（input 为空），已本地短路；未向上游发送空请求"
         .to_string()
@@ -376,9 +187,6 @@ pub(crate) fn normalize_skill_envelope(
     });
     if !is_envelope || provider.supports_tail_system {
         return Ok(messages);
-    }
-    if provider.stateful {
-        return Err("skill_context_sync_unsupported: stateful provider cannot accept the authoritative tail system envelope; rebuild the remote session with a compatible provider".into());
     }
     let envelope = messages.pop().expect("checked last message");
     let dynamic_slot = messages
@@ -457,193 +265,6 @@ mod tests {
         // 高次 attempt 封顶 30s
         let dmax = backoff_delay(20);
         assert!(dmax <= Duration::from_secs(30));
-    }
-
-    #[test]
-    fn parse_retry_after_prefers_ms_header() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert("retry-after-ms", "250".parse().unwrap());
-        h.insert("retry-after", "999".parse().unwrap());
-        assert_eq!(parse_retry_after_raw(&h), Some(Duration::from_millis(250)));
-    }
-
-    #[test]
-    fn parse_retry_after_seconds_header() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert("retry-after", "7".parse().unwrap());
-        assert_eq!(parse_retry_after_raw(&h), Some(Duration::from_secs(7)));
-    }
-
-    #[test]
-    fn parse_retry_after_http_date_future_and_past() {
-        // 未来 1 小时：应得到正的、不超过 1 小时的时长
-        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
-        let future_http = httpdate::fmt_http_date(future);
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert("retry-after", future_http.parse().unwrap());
-        let d = parse_retry_after_raw(&h).expect("future date should parse");
-        assert!(d > Duration::from_secs(3500) && d <= Duration::from_secs(3600));
-
-        // 过去时间：立即重试（0）
-        let past = std::time::SystemTime::now() - Duration::from_secs(3600);
-        let mut h2 = reqwest::header::HeaderMap::new();
-        h2.insert(
-            "retry-after",
-            httpdate::fmt_http_date(past).parse().unwrap(),
-        );
-        assert_eq!(parse_retry_after_raw(&h2), Some(Duration::ZERO));
-    }
-
-    // ── BUG-2026-09-13-22：retry-after 头封顶回归 ──
-
-    #[test]
-    fn parse_retry_after_caps_huge_seconds() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert("retry-after", "999999".parse().unwrap());
-        // 缺省策略：上限 = 5 × max_delay(30s) = 150s，绝不透传 999999s。
-        assert_eq!(
-            parse_retry_after(&h, &RetryPolicy::default()),
-            Some(Duration::from_secs(150))
-        );
-    }
-
-    #[test]
-    fn parse_retry_after_caps_huge_ms_header_under_policy() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert("retry-after-ms", "999999000".parse().unwrap());
-        let policy = RetryPolicy {
-            max_delay: Duration::from_secs(10),
-            ..Default::default()
-        };
-        assert_eq!(
-            parse_retry_after(&h, &policy),
-            Some(Duration::from_secs(50)),
-            "上限应随 max_delay 缩放（5×）"
-        );
-    }
-
-    #[test]
-    fn parse_retry_after_caps_huge_http_date() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert(
-            "retry-after",
-            httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(86_400))
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(
-            parse_retry_after(&h, &RetryPolicy::default()),
-            Some(Duration::from_secs(150))
-        );
-    }
-
-    #[test]
-    fn parse_retry_after_below_cap_is_untouched() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert("retry-after", "7".parse().unwrap());
-        assert_eq!(
-            parse_retry_after(&h, &RetryPolicy::default()),
-            Some(Duration::from_secs(7))
-        );
-    }
-
-    #[test]
-    fn parse_retry_after_missing_header_returns_none() {
-        let h = reqwest::header::HeaderMap::new();
-        assert_eq!(parse_retry_after_raw(&h), None);
-        assert_eq!(parse_retry_after(&h, &RetryPolicy::default()), None);
-    }
-
-    // ── run_with_retry ──
-
-    /// 静默事件收集器（sync 测试共用）。
-    fn silent_events() -> impl FnMut(StreamEvent) {
-        |_e: StreamEvent| {}
-    }
-
-    #[test]
-    fn run_with_retry_succeeds_after_transient_failures() {
-        let policy = RetryPolicy {
-            base_delay: Duration::ZERO,
-            ..Default::default()
-        };
-        let mut on_event = silent_events();
-        let mut calls = 0u32;
-        let result = run_with_retry(&policy, None, &mut on_event, |_attempt, _ev| {
-            calls += 1;
-            if calls < 3 {
-                Attempt::Retry {
-                    retry_after: Some(Duration::ZERO),
-                    reason: "transient".into(),
-                    final_error: "gave up".into(),
-                }
-            } else {
-                Attempt::Ok(calls)
-            }
-        });
-        assert_eq!(result.unwrap(), 3);
-        assert_eq!(calls, 3);
-    }
-
-    #[test]
-    fn run_with_retry_exhausts_budget_and_returns_final_error() {
-        let policy = RetryPolicy {
-            max_retries: 2,
-            base_delay: Duration::ZERO,
-            ..Default::default()
-        };
-        let mut events: Vec<StreamEvent> = Vec::new();
-        let mut collect = |e: StreamEvent| events.push(e);
-        let result: anyhow::Result<()> =
-            run_with_retry(&policy, None, &mut collect, |attempt, _ev| {
-                let _ = attempt;
-                Attempt::Retry {
-                    retry_after: None,
-                    reason: "boom".into(),
-                    final_error: "final failure".into(),
-                }
-            });
-        assert!(result.is_err());
-        // attempt=1 重试 + attempt=2 重试额度耗尽 → Error 事件两支各一（耗尽支）。
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::Error(m) if m.contains("final failure")))
-        );
-    }
-
-    #[test]
-    fn run_with_retry_fatal_propagates_immediately() {
-        let policy = RetryPolicy::default();
-        let mut on_event = silent_events();
-        let mut calls = 0u32;
-        let result: anyhow::Result<u32> =
-            run_with_retry(&policy, None, &mut on_event, |_attempt, _ev| {
-                calls += 1;
-                Attempt::<u32>::Fatal(anyhow::anyhow!("hard stop"))
-            });
-        assert_eq!(calls, 1, "Fatal must not consume another attempt");
-        assert!(result.unwrap_err().to_string().contains("hard stop"));
-    }
-
-    #[test]
-    fn run_with_retry_respects_cancellation() {
-        let policy = RetryPolicy {
-            base_delay: Duration::ZERO,
-            ..Default::default()
-        };
-        let cancel = Arc::new(AtomicBool::new(true));
-        let mut on_event = silent_events();
-        let result: anyhow::Result<()> =
-            run_with_retry(&policy, Some(&cancel), &mut on_event, |_, _| {
-                Attempt::Retry {
-                    retry_after: None,
-                    reason: "x".into(),
-                    final_error: "x".into(),
-                }
-            });
-        // 已取消状态下首次进入循环即退出。
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
     }
 
     #[test]

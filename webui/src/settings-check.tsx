@@ -19,10 +19,9 @@ type RpcCall = { method: string; params: Record<string, unknown> };
 const baseConfig = (): ConfigDto => ({
   model: "ox-alpha-free",
   baseUrl: "https://opencode.ai/zen/go/v1",
-  providerId: "opencode-go",
-  endpoint: "openai",
+  wire: "openai",
   maxTokens: 96000,
-  contextLimit: 1000000,
+  contextLength: 1000000,
   reasoningEffort: "max",
   autoCompactThreshold: 0.95,
   permissionLevel: 2,
@@ -34,50 +33,6 @@ const baseConfig = (): ConfigDto => ({
   activeProfile: "default",
   profiles: ["default", "fast"],
   complianceEnabled: false,
-  providers: [
-    {
-      id: "opencode-go",
-      display: "OpenCode",
-      endpoints: [
-        {
-          id: "openai",
-          display: "OpenAI",
-          protocol: "openai",
-          baseUrl: "https://opencode.ai/zen/go/v1",
-          defaultModel: "",
-          models: ["ox-alpha-free", "ox-beta"],
-          stateful: false,
-          beta: false,
-        },
-      ],
-    },
-    {
-      id: "other-vendor",
-      display: "Other",
-      endpoints: [
-        {
-          id: "anthropic",
-          display: "Anthropic",
-          protocol: "anthropic",
-          baseUrl: "https://other.example/v1",
-          defaultModel: "",
-          models: ["om-one"],
-          stateful: true,
-          beta: true,
-        },
-        {
-          id: "openai-compat",
-          display: "OpenAI 兼容",
-          protocol: "openai",
-          baseUrl: "https://other.example/compat/v1",
-          defaultModel: "",
-          models: ["om-one", "om-two"],
-          stateful: false,
-          beta: false,
-        },
-      ],
-    },
-  ],
   subagent: {
     model: "om-two",
     baseUrl: "https://other.example/compat/v1",
