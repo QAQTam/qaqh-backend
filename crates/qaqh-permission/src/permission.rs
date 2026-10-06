@@ -335,7 +335,7 @@ pub fn path_within_dir(path: &Path, dir: &Path) -> bool {
 }
 
 /// Check if ALL target paths are inside the workspace root.
-pub(crate) fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
+pub fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
     if paths.is_empty() {
         return true;
     } // tools without paths (e.g. ask) are considered safe
