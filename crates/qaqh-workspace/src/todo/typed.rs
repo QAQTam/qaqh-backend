@@ -31,7 +31,7 @@ use super::store::{
 pub struct TodoListArgs {
     /// Optional status filter (pending | in_progress | completed | cancelled).
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<TodoStatusView>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -43,7 +43,7 @@ pub struct TodoCounts {
     pub total: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(rename_all = "snake_case")]
 pub enum TodoStatusView {
@@ -119,6 +119,7 @@ pub struct TodoWriteItemArgs {
 /// prior item you want to keep; exactly one in_progress.
 pub struct TodoWriteArgs {
     /// The FULL task list — replaces the previous list entirely (max 20 items).
+    #[schemars(length(max = 20))]
     pub items: Vec<TodoWriteItemArgs>,
     /// Optional one-liner on why the plan changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,24 +277,15 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
         )
     })?;
     let store = read_store_for(session_id)?;
-    let filter = args
-        .status
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            parse_status(value).ok_or_else(|| {
-                crate::json_err_string(
-                    "invalid_input",
-                    format!("unknown status: {value}"),
-                    "Use pending, in_progress, completed, or cancelled.",
-                )
-            })
-        })
-        .transpose()?;
+    // v2 类型生成后 filter 已是 typed enum（schema enum 由类型给出），
+    // 不再走字符串 parse_status。
+    let filter = args.status;
     let items: Vec<TodoItemView> = store
         .items
         .iter()
-        .filter(|item| filter.as_ref().is_none_or(|status| item.status == *status))
+        .filter(|item| {
+            filter.as_ref().is_none_or(|status| TodoStatusView::from(&item.status) == *status)
+        })
         .map(TodoItemView::from)
         .collect();
     let counts = TodoCounts {

@@ -25,7 +25,9 @@ pub mod file_mutate;
 pub mod file_query;
 pub use qaqh_fs_core::file_shared;
 pub use qaqh_fs_core::file_state;
-pub mod git;
+// Git 面板 API 已拆至 qaqh-git（P2 拆分）；以 crate 别名 re-export，
+// `qaqh_workspace::git::*` 路径不变。
+pub use qaqh_git as git;
 pub mod read_image;
 pub mod runtime;
 mod safety;

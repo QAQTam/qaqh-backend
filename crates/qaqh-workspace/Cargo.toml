@@ -11,6 +11,8 @@ qaqh-tool-core = { path = "../qaqh-tool-core" }
 qaqh-permission = { path = "../qaqh-permission" }
 # FS 核心层（P2 拆分）：file_shared/cache/state 单一事实源。
 qaqh-fs-core = { path = "../qaqh-fs-core" }
+# Git 面板 API（P2 拆分）：daemon 控制面 git 服务的单一事实源。
+qaqh-git = { path = "../qaqh-git" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }

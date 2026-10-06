@@ -12,6 +12,7 @@ members = [
     "crates/qaqh-ringing",
     "crates/qaqh-daemon",
     "crates/qaqh-fs-core",
+    "crates/qaqh-git",
     "crates/qaqh-permission",
     "crates/qaqh-policy",
     "crates/qaqh-sandbox",
