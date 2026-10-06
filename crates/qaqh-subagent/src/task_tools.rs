@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use qaqh_workspace::ToolRisk;
-use qaqh_workspace::tool_api::{
+use qaqh_tool_core::ToolRisk;
+use qaqh_tool_core::tool_api::{
     ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
     ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
 };
@@ -100,10 +100,10 @@ impl ToolProjection for TaskOutput {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "tasks".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -133,10 +133,10 @@ impl ToolProjection for TaskListOutput {
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "tasks".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },

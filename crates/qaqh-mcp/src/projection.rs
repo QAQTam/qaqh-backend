@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use qaqh_config::config::{McpServerConfig, McpTransportKind};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::tool_api::DynamicDispatch;
+use qaqh_tool_core::tool_api::DynamicDispatch;
 use qaqh_workspace::{DynamicTool, build_dynamic_tool};
 
 /// server 的 `tools/list` 结果 → 可注册的动态工具批次。
@@ -81,7 +81,7 @@ mod tests {
     use std::sync::Arc;
 
     use qaqh_workspace::ToolResult;
-    use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+    use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
 
     fn noop(
         _name: &str,

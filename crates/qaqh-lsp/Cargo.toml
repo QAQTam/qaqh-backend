@@ -10,6 +10,7 @@ qaqh-config = { path = "../qaqh-config" }
 qaqh-types = { path = "../qaqh-types" }
 # 工具投影：DynamicTool/register_dynamic/build_dynamic_tool（mcp 同款）。
 qaqh-workspace = { path = "../qaqh-workspace" }
+qaqh-tool-core = { path = "../qaqh-tool-core" }
 # LSP client（M1 决策 L-选型）：oxalica/async-lsp 0.2 + lsp-types 0.95
 # （async-lsp 0.2.4 钉住 lsp-types 0.95.0，不追 0.97——feature
 # unification 会炸类型，升级只动 workspace 一行）。
