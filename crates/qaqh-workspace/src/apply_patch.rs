@@ -23,14 +23,16 @@ use crate::ToolRisk;
 use crate::apply_patch_engine::EngineError;
 use crate::file_mutate::{mutation_display, mutation_error};
 use crate::tool_api::{
-    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolExecutionError, ToolExposure, ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError, ToolMeta, ToolProjection,
+    TypedTool,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyPatchArgs {
+    /// Codex patch text. If a hunk's context is not unique in the file, extend it with surrounding lines or anchor the chunk with '@@ <context line>'; the engine edits the FIRST match.
     pub patch: String,
+    /// Preview only (also reports WOULD_OVERWRITE when '*** Add File:' targets an existing path)
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -68,14 +70,6 @@ impl ToolProjection for ApplyPatchOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        self.model_text
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(160).collect())
-    }
-
     fn display(&self, _args: &Value) -> ToolDisplay {
         let summary = match self.first_path.as_deref() {
             Some(path) if !path.is_empty() => crate::file_mutate::mutation_change_summary(
@@ -107,23 +101,14 @@ impl TypedTool for ApplyPatchTool {
     type Args = ApplyPatchArgs;
     type Output = ApplyPatchOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("apply_patch").expect("valid apply_patch tool name"),
-            display_name: None,
-            description: DESCRIPTION.to_string(),
-            input_schema: apply_patch_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(ApplyPatchOutput))
-                .expect("apply_patch output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: ToolRisk::Write,
-            default_timeout: Duration::from_secs(60),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("apply_patch")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "apply_patch",
+            DESCRIPTION,
+            crate::permission::ToolCategory::Write,
+            ToolRisk::Write,
+            Duration::from_secs(60),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -273,18 +258,6 @@ impl TypedTool for ApplyPatchTool {
             first_path,
         })
     }
-}
-
-fn apply_patch_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "patch": {"type": "string", "description": "Codex patch text. If a hunk's context is not unique in the file, extend it with surrounding lines or anchor the chunk with '@@ <context line>'; the engine edits the FIRST match."},
-            "dry_run": {"type": "boolean", "description": "Preview only (also reports WOULD_OVERWRITE when '*** Add File:' targets an existing path)", "default": false}
-        },
-        "required": ["patch"],
-        "additionalProperties": false
-    })
 }
 
 /// Map an engine error to its `(code, hint)` pair for the display plane.

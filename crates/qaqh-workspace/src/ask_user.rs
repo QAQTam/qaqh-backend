@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use crate::ToolRisk;
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError, ToolHeader,
+    ToolMeta, ToolProjection, TypedTool,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -164,14 +164,20 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
     Ok(NormalizedAsk { mode, questions })
 }
 
+/// Ask user questions (Ringing interaction).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AskArgs {
+    /// Questions
     #[serde(default)]
     pub questions: Option<Value>,
+    /// Single question (deprecated, use questions)
     #[serde(default)]
     pub question: Option<Value>,
+    /// Choices (deprecated)
     #[serde(default)]
     pub options: Option<Value>,
+    /// Allow custom (deprecated)
     #[serde(default)]
     pub allow_custom: Option<Value>,
 }
@@ -184,19 +190,21 @@ pub struct AskOutput {
     pub questions: Vec<NormalizedAskQuestion>,
 }
 
+impl AskOutput {
+    fn summary_text(&self) -> String {
+        let count = self.questions.len();
+        format!(
+            "asked {count} question{}",
+            if count == 1 { "" } else { "s" }
+        )
+    }
+}
+
 impl ToolProjection for AskOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
             text: serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string()),
         }]
-    }
-
-    fn summary(&self) -> Option<String> {
-        let count = self.questions.len();
-        Some(format!(
-            "asked {count} question{}",
-            if count == 1 { "" } else { "s" }
-        ))
     }
 
     fn display(&self, _args: &Value) -> ToolDisplay {
@@ -206,7 +214,7 @@ impl ToolProjection for AskOutput {
             },
             ToolBody::None,
         )
-        .with_summary(self.summary().unwrap_or_else(|| "ask".to_string()))
+        .with_summary(self.summary_text())
     }
 }
 
@@ -216,22 +224,14 @@ impl TypedTool for AskTool {
     type Args = AskArgs;
     type Output = AskOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("ask").expect("valid ask tool name"),
-            display_name: None,
-            description: "Ask user questions (Ringing interaction).".to_string(),
-            input_schema: ask_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(AskOutput))
-                .expect("ask output schema"),
-            category: crate::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: std::time::Duration::ZERO,
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("ask").unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "ask",
+            "Ask user questions (Ringing interaction).",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            std::time::Duration::ZERO,
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -268,47 +268,6 @@ impl TypedTool for AskTool {
             questions: ask.questions,
         })
     }
-}
-
-fn ask_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "questions": {
-                "type": "array",
-                "description": "Questions",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string", "description": "ID (auto if omitted)" },
-                        "question": { "type": "string", "description": "Question text" },
-                        "options": { "type": "array", "items": { "type": "string" }, "description": "Choices" },
-                        "allow_custom": { "type": "boolean", "description": "Allow custom", "default": true }
-                    },
-                    "required": ["question"]
-                }
-            },
-            "question": {
-                "type": "string",
-                "description": "Single question (deprecated, use questions)"
-            },
-            "options": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Choices (deprecated)"
-            },
-            "allow_custom": {
-                "type": "boolean",
-                "description": "Allow custom (deprecated)",
-                "default": true
-            }
-        },
-        "anyOf": [
-            { "required": ["questions"] },
-            { "required": ["question"] }
-        ],
-        "additionalProperties": false
-    })
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
@@ -399,8 +358,7 @@ mod tests {
                 { "question": "Q1?" },
                 { "question": "Q2?" },
                 { "question": "Q3?" }
-            ],
-            "mode": "batch"
+            ]
         });
         let result = exec_ask_user(&args);
         let value: serde_json::Value =

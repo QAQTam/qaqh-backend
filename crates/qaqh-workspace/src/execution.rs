@@ -774,19 +774,25 @@ mod tests {
     fn skill_execution_returns_typed_activation() {
         let _test_guard = setup_test_manager();
         let definitions = crate::runtime::all_tools();
-        let skill_definitions = definitions
-            .iter()
-            .filter(|definition| definition.function.name == "skills")
-            .collect::<Vec<_>>();
-        assert_eq!(skill_definitions.len(), 1);
-        assert!(
-            skill_definitions[0].function.parameters["oneOf"]
-                .as_array()
-                .is_some_and(|variants| variants.len() == 4)
-        );
+        // v2：skills 聚合工具拆为三件套；聚合名与 validate 不在模型面。
+        let skill_names = [
+            "skill_activate",
+            "skill_list",
+            "skill_resource",
+        ];
+        for name in skill_names {
+            assert_eq!(
+                definitions
+                    .iter()
+                    .filter(|definition| definition.function.name == name)
+                    .count(),
+                1,
+                "{name} 必须恰好注册一次"
+            );
+        }
         assert!(!definitions.iter().any(|definition| matches!(
             definition.function.name.as_str(),
-            "skill" | "skill_resource" | "skills_list" | "skill_validate"
+            "skills" | "skill" | "skills_list" | "skill_validate"
         )));
         let temp = tempfile::tempdir().unwrap();
         let skill_dir = temp.path().join(".agents/skills/typed-skill");
@@ -801,8 +807,8 @@ mod tests {
         crate::runtime::set_context("test_session", 3);
 
         let result = execute_with_context(
-            "skills",
-            r#"{"action":"activate","name":"typed-skill"}"#,
+            "skill_activate",
+            r#"{"name":"typed-skill"}"#,
             "skill-call-1",
             None,
             &crate::runtime::ToolCtx::admitted("test_session"),
@@ -825,8 +831,8 @@ mod tests {
         assert!(activation.body.contains("Typed instructions"));
 
         let resource = execute_with_context(
-            "skills",
-            r#"{"action":"resource","name":"typed-skill","path":"references/info.md"}"#,
+            "skill_resource",
+            r#"{"name":"typed-skill","path":"references/info.md"}"#,
             "resource-call-1",
             None,
             &crate::runtime::ToolCtx::admitted("test_session"),
@@ -853,8 +859,8 @@ mod tests {
         );
 
         let traversal = execute_with_context(
-            "skills",
-            r#"{"action":"resource","name":"typed-skill","path":"../outside.md"}"#,
+            "skill_resource",
+            r#"{"name":"typed-skill","path":"../outside.md"}"#,
             "resource-call-2",
             None,
             &crate::runtime::ToolCtx::admitted("test_session"),
@@ -870,8 +876,8 @@ mod tests {
         );
 
         let list = execute_with_context(
-            "skills",
-            r#"{"action":"list"}"#,
+            "skill_list",
+            r#"{}"#,
             "skills-list-1",
             None,
             &crate::runtime::ToolCtx::admitted("test_session"),
@@ -879,9 +885,11 @@ mod tests {
         assert!(list.success);
         assert!(list.content.contains("typed-skill"));
 
+        // v2：字段校验由 typed Args（deny_unknown_fields + 必填）承担，
+        // 缺 name 在反序列化层映射为 invalid_arguments。
         let invalid = execute_with_context(
-            "skills",
-            r#"{"action":"list","name":"typed-skill"}"#,
+            "skill_activate",
+            r#"{}"#,
             "skills-invalid-1",
             None,
             &crate::runtime::ToolCtx::admitted("test_session"),
