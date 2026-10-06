@@ -13,6 +13,7 @@ members = [
     "crates/qaqh-daemon",
     "crates/qaqh-policy",
     "crates/qaqh-sandbox",
+    "crates/qaqh-tool-core",
     "crates/qaqh-workspace",
     "crates/qaqh-spy",
     "crates/qaqh-session",

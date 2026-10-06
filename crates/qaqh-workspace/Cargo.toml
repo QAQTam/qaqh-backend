@@ -5,6 +5,8 @@ edition.workspace = true
 description = "QAQ-Harness in-process tool execution library"
 
 [dependencies]
+# Tool SDK 核心（P2 拆分）：typed 契约/描述符/投影/schema 的单一事实源。
+qaqh-tool-core = { path = "../qaqh-tool-core" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
