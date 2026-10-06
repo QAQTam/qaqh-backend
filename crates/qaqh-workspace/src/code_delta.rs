@@ -124,12 +124,42 @@ fn git_file_meta(
     if workspace.is_empty() || workspace == "." {
         return None;
     }
-    let repo = git2::Repository::open(workspace.as_ref()).ok()?;
-    let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
-    let is_new = head_tree.get_path(std::path::Path::new(file_path)).is_err();
-    Some(GitFileMeta {
-        files_created: usize::from(is_new),
-        files_deleted: 0,
+    // P2 去 git2：改用 git CLI 两步探测，语义与旧 libgit2 路径逐臂对齐——
+    // ① `rev-parse --verify -q HEAD`：无仓库/无 HEAD → None（保留调用方
+    //    档位算出的 files_created，与旧 Repository::open 失败回退一致）；
+    // ② `cat-file -e HEAD:<path>`：exit 0 = 已在 HEAD（编辑既有文件 →
+    //    files_created 归 0）；非 0 = HEAD 中不存在（新建 → files_created=1，
+    //    与旧 head_tree.get_path 失败臂一致，含 delete 工具 files_deleted
+    //    被覆写为 0 的既有口径）。
+    // git 不可用（spawn 失败）→ None，行为同旧 open 失败。
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(workspace.as_ref())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    if !head.success() {
+        return None;
+    }
+    let in_head = std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("HEAD:{file_path}")])
+        .current_dir(workspace.as_ref())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    Some(match in_head.code() {
+        Some(0) => GitFileMeta {
+            files_created: 0,
+            files_deleted: 0,
+        },
+        _ => GitFileMeta {
+            files_created: 1,
+            files_deleted: 0,
+        },
     })
 }
 

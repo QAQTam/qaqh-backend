@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use crate::file_mutate::{mutation_error, resolve_mutation_path};
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError, ToolHeader,
+    ToolMeta, ToolProjection, TypedTool,
 };
 
 /// Full-file snapshots are stored as content-addressed blobs up to this size.
@@ -343,21 +343,28 @@ fn export_patches(steps: &[Step]) -> String {
     out
 }
 
+/// Query/replay session journal (SMJ): query list, export dump, replay restore.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JournalArgs {
+    /// Action
     #[serde(default = "default_journal_action")]
     pub action: String,
+    /// Session seed
     #[serde(default)]
     pub session: Option<String>,
+    /// File filter / replay target
     #[serde(default)]
     pub file: Option<String>,
+    /// Since epoch seconds
     #[serde(default)]
     pub since: Option<u64>,
     #[serde(default)]
     pub format: Option<String>,
+    /// Replay up to seq
     #[serde(default)]
     pub at: Option<u64>,
+    /// Output path for replay
     #[serde(default)]
     pub out: Option<String>,
 }
@@ -397,14 +404,6 @@ impl ToolProjection for JournalOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        self.model_text
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(160).collect())
-    }
-
     fn display(&self, args: &Value) -> ToolDisplay {
         let action = args
             .get("action")
@@ -430,25 +429,14 @@ impl TypedTool for JournalTool {
     type Args = JournalArgs;
     type Output = JournalOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("journal").expect("valid journal tool name"),
-            display_name: None,
-            description:
-                "Query/replay session journal (SMJ): query list, export dump, replay restore."
-                    .to_string(),
-            input_schema: journal_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(JournalOutput))
-                .expect("journal output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: crate::ToolRisk::Write,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("journal")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "journal",
+            "Query/replay session journal (SMJ): query list, export dump, replay restore.",
+            crate::permission::ToolCategory::Write,
+            crate::ToolRisk::Write,
+            Duration::from_secs(30),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -579,22 +567,6 @@ impl TypedTool for JournalTool {
             )),
         }
     }
-}
-
-fn journal_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": ["query", "export", "replay"], "default": "query", "description": "Action"},
-            "session": {"type": "string", "description": "Session seed"},
-            "file": {"type": "string", "description": "File filter / replay target"},
-            "since": {"type": "integer", "description": "Since epoch seconds"},
-            "at": {"type": "integer", "description": "Replay up to seq"},
-            "out": {"type": "string", "description": "Output path for replay"}
-        },
-        "required": ["action"],
-        "additionalProperties": false
-    })
 }
 
 /// Register the `journal` workspace tool.

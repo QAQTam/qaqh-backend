@@ -10,36 +10,46 @@ use serde_json::{Value, json};
 use super::file_shared::{LineIndex, content_hash, is_binary_read_error, normalize_newlines};
 use crate::ToolRisk;
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
-    ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode,
+    ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadRequest {
+    /// File path (workspace-relative or absolute).
     #[serde(default)]
     pub path: String,
+    /// Start line (1-based).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_line: Option<u64>,
+    /// End line inclusive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u64>,
+    /// Hash from prior read; NOT_MODIFIED if unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Read files (L-prefixed lines, hash+line_count). Batch via `requests` (up to 8);
+/// single-file fields are sugar for one request. Dirs -> IS_DIRECTORY.
 pub struct ReadArgs {
-    #[serde(default)]
+    /// Batch of up to 8 file requests (mirrors single-file fields).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests: Option<Vec<ReadRequest>>,
-    #[serde(default)]
+    /// File path (single-request sugar).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default)]
+    /// Start line (1-based).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_line: Option<u64>,
-    #[serde(default)]
+    /// End line inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u64>,
-    #[serde(default)]
+    /// Hash from prior read; NOT_MODIFIED if unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_hash: Option<String>,
 }
 
@@ -82,10 +92,6 @@ impl ToolProjection for ReadOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        self.body.lines().next().map(str::to_string)
-    }
-
     fn display(&self, args: &Value) -> ToolDisplay {
         read_display(args, &self.body)
     }
@@ -102,24 +108,14 @@ impl TypedTool for ReadTool {
     type Args = ReadArgs;
     type Output = ReadOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("read").expect("valid read tool name"),
-            display_name: None,
-            description: "Read files (L-prefixed lines, hash+line_count). Up to 8 files; dirs -> IS_DIRECTORY."
-                .to_string(),
-            input_schema: read_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(ReadOutput))
-                .expect("read output schema"),
-            category: crate::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(15),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("read")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "read",
+            "Read files (L-prefixed lines, hash+line_count). Batch via `requests` (up to 8); single-file fields are sugar for one request. Dirs -> IS_DIRECTORY.",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(15),
+        )
     }
 
     fn run(
@@ -490,30 +486,6 @@ fn read_error(
     ToolExecutionError::Recoverable(error)
 }
 
-fn read_schema() -> Value {
-    json!({
-        "type":"object",
-        "properties": {
-            "requests": {
-                "type":"array", "maxItems":8,
-                "description":"Batch (mirrors single-file fields)",
-                "items": {"type":"object", "properties": {
-                    "path":{"type":"string","description":"File"},
-                    "start_line":{"type":"integer","minimum":1,"description":"Start line (1-based)"},
-                    "end_line":{"type":"integer","minimum":1,"description":"End line inclusive"},
-                    "if_hash":{"type":"string","description":"Hash from prior read; NOT_MODIFIED if unchanged"}
-                }, "required":["path"], "additionalProperties":false}
-            },
-            "path":{"type":"string","description":"File"},
-            "start_line":{"type":"integer","minimum":1,"description":"Start line (1-based)"},
-            "end_line":{"type":"integer","minimum":1,"description":"End line inclusive"},
-            "if_hash":{"type":"string","description":"Hash from prior read; NOT_MODIFIED if unchanged"}
-        },
-        "oneOf":[{"required":["requests"]},{"required":["path"]}],
-        "additionalProperties":false
-    })
-}
-
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_typed(ReadTool);
 }
@@ -653,7 +625,7 @@ fn out_of_range_start_still_rejects() {
 }
 
 #[test]
-fn read_registration_is_typed_and_descriptor_keeps_legacy_schema() {
+fn read_registration_is_typed_and_schema_is_type_generated() {
     let mut manager = crate::ToolManager::new();
     register(&mut manager);
     let registered = manager.builtins.get("read").expect("read registered");
@@ -666,10 +638,13 @@ fn read_registration_is_typed_and_descriptor_keeps_legacy_schema() {
         registered.descriptor.input_schema["additionalProperties"],
         serde_json::json!(false)
     );
-    assert_eq!(
-        registered.descriptor.input_schema["oneOf"],
-        serde_json::json!([{"required": ["requests"]}, {"required": ["path"]}])
+    // v2：schema 由 ReadArgs 类型生成——聚合形态不再手写 oneOf 判别。
+    assert!(
+        registered.descriptor.input_schema.get("oneOf").is_none(),
+        "generated schema must not carry oneOf"
     );
+    assert!(registered.descriptor.input_schema["properties"]["requests"].is_object());
+    assert!(registered.descriptor.input_schema["properties"]["path"].is_object());
     assert_eq!(registered.descriptor.output_schema["type"], "object");
 }
 

@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 use crate::file_mutate::mutation_error;
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError, ToolHeader,
+    ToolMeta, ToolProjection, TypedTool,
 };
 
 /// cat 文本回显的字节上限（blob 本身可能远大于此）。
@@ -28,20 +28,21 @@ pub struct SpyTool;
 
 /// `spy` 工具参数。所有可选字段按 action 取用，无关字段忽略。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpyArgs {
-    /// undo | restore | journal | cat
+    /// undo=single-change rollback; restore=workspace back to scan point; journal=change flow; cat=historical blob
     pub action: String,
-    /// undo：变更 id（journal 输出里的 `id`，形如 `s…_0007#0`）
+    /// Change id for undo
     pub change_id: Option<String>,
-    /// restore：扫描点 id（注入消息头部的 mark）
+    /// Scan id / mark for restore
     pub scan_id: Option<String>,
-    /// undo：越过 after-sha 校验强制回滚（默认 false；目标在变更后又被动过时才需要）
+    /// undo: skip after-sha guard (default false)
     pub force: Option<bool>,
-    /// restore：删除扫描点之后新增的多余文件（默认 false；删除性操作）
+    /// restore: delete extra files newer than the scan point (default false)
     pub prune: Option<bool>,
-    /// journal：最多返回的变更条数（默认 50，取最新的）
+    /// journal: max entries (default 50)
     pub limit: Option<usize>,
-    /// cat：历史 blob 的 sha
+    /// blob sha for cat
     pub sha: Option<String>,
 }
 
@@ -61,14 +62,6 @@ impl ToolProjection for SpyOutput {
         vec![ToolContentBlock::Text {
             text: self.model_text.clone(),
         }]
-    }
-
-    fn summary(&self) -> Option<String> {
-        self.model_text
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(160).collect())
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
@@ -94,25 +87,16 @@ impl TypedTool for SpyTool {
     type Args = SpyArgs;
     type Output = SpyOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("spy").expect("valid spy tool name"),
-            display_name: None,
-            description: "Workspace change audit (qaqh-spy): undo a single change, \
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "spy",
+            "Workspace change audit (qaqh-spy): undo a single change, \
                 restore the whole workspace to a scan point, journal the change flow, \
-                cat a historical blob."
-                .to_string(),
-            input_schema: spy_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(SpyOutput))
-                .expect("spy output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: crate::ToolRisk::Write,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("spy").unwrap_or_default(),
-        }
+                cat a historical blob.",
+            crate::permission::ToolCategory::Write,
+            crate::ToolRisk::Write,
+            Duration::from_secs(30),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -274,23 +258,6 @@ fn fmt_size(n: u64) -> String {
     } else {
         format!("{:.1}KB", n as f64 / 1024.0)
     }
-}
-
-fn spy_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": ["undo", "restore", "journal", "cat"], "description": "undo=single-change rollback; restore=workspace back to scan point; journal=change flow; cat=historical blob"},
-            "change_id": {"type": "string", "description": "Change id for undo"},
-            "scan_id": {"type": "string", "description": "Scan id / mark for restore"},
-            "force": {"type": "boolean", "description": "undo: skip after-sha guard (default false)"},
-            "prune": {"type": "boolean", "description": "restore: delete extra files newer than the scan point (default false)"},
-            "limit": {"type": "integer", "description": "journal: max entries (default 50)"},
-            "sha": {"type": "string", "description": "blob sha for cat"}
-        },
-        "required": ["action"],
-        "additionalProperties": false
-    })
 }
 
 /// Register the `spy` workspace tool.

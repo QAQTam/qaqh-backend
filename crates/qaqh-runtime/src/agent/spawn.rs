@@ -93,8 +93,11 @@ pub(crate) fn spawn_agent(
     let allowed_tools: Vec<String> = match &kind {
         ActorKind::Subagent(spec) => {
             let mut tools = spec.tools.clone();
-            if !tools.iter().any(|tool| tool == "skills") {
-                tools.push("skills".to_string());
+            // Skill 三件套默认可见（激活/列表/资源读取）。
+            for tool in ["skill_activate", "skill_list", "skill_resource"] {
+                if !tools.iter().any(|existing| existing == tool) {
+                    tools.push(tool.to_string());
+                }
             }
             tools
         }

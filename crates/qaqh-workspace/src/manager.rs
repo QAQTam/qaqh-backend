@@ -245,17 +245,23 @@ impl ToolManager {
         );
     }
 
-    /// 注册新 typed 工具。描述符由工具实现提供，执行统一走 [`ErasedTool`]。
+    /// 注册新 typed 工具。描述符由 meta + 类型生成 schema 组装，执行统一走 [`ErasedTool`]；
+    /// capabilities 由内置迁移表（[`crate::tool_capabilities`]）按名集中注入。
     pub fn register_typed<T>(&mut self, tool: T)
     where
         T: TypedTool + 'static,
     {
-        let descriptor = tool.descriptor();
+        let adapter = TypedToolAdapter::new(tool);
+        let mut descriptor = adapter.descriptor();
+        if let Some(capabilities) =
+            crate::tool_capabilities::builtin_capabilities(descriptor.name.as_str())
+        {
+            descriptor.capabilities = capabilities;
+        }
         descriptor
             .validate()
             .unwrap_or_else(|error| panic!("invalid typed tool descriptor: {error}"));
         let key = descriptor.name.as_str().to_owned();
-        let adapter = TypedToolAdapter::new(tool);
         self.builtins.insert(
             key,
             RegisteredTool {
@@ -560,7 +566,7 @@ impl ToolManager {
         let files_affected = extract_files_affected(&prepared.name, &prepared.audit_args);
         if success {
             match prepared.name.as_str() {
-                "read" | "skills" => {
+                "read" => {
                     for f in &files_affected {
                         if !self.files_read.contains(f) {
                             self.files_read.push(f.clone());

@@ -439,8 +439,8 @@ fn skill_activation_reaches_followup_round_and_next_user_turn() {
         vec![
             tool_round(&[(
                 "activate-skill",
-                "skills",
-                json!({"action": "activate", "name": "sticky-skill"}),
+                "skill_activate",
+                json!({"name": "sticky-skill"}),
             )]),
             final_round("first turn finished"),
             final_round("second turn finished"),

@@ -10,23 +10,27 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use super::context::{ToolCallContext, ToolCallSource};
-use super::descriptor::ToolDescriptor;
+use super::descriptor::{ToolDescriptor, ToolMeta};
 use super::erased::ErasedTool;
 use super::error::{FatalToolError, ToolError, ToolExecutionError};
 use super::output::{
-    ToolContentBlock, ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue,
-    ToolProjection,
+    ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue, ToolProjection,
 };
+use super::schema::schema_of;
 
-/// 类型化工具（v1 同步；async 变体见 base spec §6.1 备注，v1 不引入）。
+/// 类型化工具（SDK v2；async 变体见 base spec §6.1 备注，v1 不引入）。
+///
+/// v2 契约：工具作者只声明 [`ToolMeta`]（名称/描述/权限/档位/超时），schema
+/// 由 `Args`/`Output` 类型经 [`schema_of`] 生成——手写 JSON schema 从机制上
+/// 不可能，参数/输出与 wire 描述保持单一事实源。
 pub trait TypedTool: Send + Sync {
     /// 参数类型（派生 `JsonSchema`；反序列化失败映射为 `InvalidArguments`）。
     type Args: DeserializeOwned + JsonSchema + Send + 'static;
     /// 输出类型（实现 [`ToolProjection`] 提供模型/展示投影）。
     type Output: ToolProjection + JsonSchema + 'static;
 
-    /// 工具描述符（唯一描述源）。
-    fn descriptor(&self) -> ToolDescriptor;
+    /// 工具元数据（schema 之外的描述符字段）。
+    fn meta(&self) -> ToolMeta;
 
     /// 执行一次调用。
     ///
@@ -44,7 +48,7 @@ pub trait TypedTool: Send + Sync {
 ///
 /// 负责把 JSON 参数反序列化为 typed args、把可恢复错误映射为
 /// [`ToolOutcome`]、把 fatal 原样上抛，并把 typed output 投影为
-/// model/display/canonical 三面。
+/// model/display/canonical 三面；描述符由 meta + 类型生成 schema 组装。
 pub struct TypedToolAdapter<T> {
     tool: T,
 }
@@ -60,7 +64,10 @@ where
     T: TypedTool + 'static,
 {
     fn descriptor(&self) -> ToolDescriptor {
-        self.tool.descriptor()
+        let mut descriptor = ToolDescriptor::from(self.tool.meta());
+        descriptor.input_schema = schema_of::<T::Args>();
+        descriptor.output_schema = schema_of::<T::Output>();
+        descriptor
     }
 
     fn execute(
@@ -102,7 +109,11 @@ fn project_output<O: ToolProjection>(
     elapsed: Duration,
 ) -> ToolOutcome {
     let blocks = output.model_blocks();
-    let model_text = model_text_for(output, &blocks);
+    let model_text = if blocks.is_empty() {
+        serde_json::to_string(output).unwrap_or_default()
+    } else {
+        super::output::joined_model_text(&blocks)
+    };
     let output_value = serde_json::to_value(output).unwrap_or(serde_json::Value::Null);
     let display = output.display(args);
     let output_bytes = model_text.len() as u64;
@@ -160,25 +171,6 @@ fn recoverable_outcome(error: ToolError, elapsed: Duration) -> ToolOutcome {
     }
 }
 
-fn model_text_for<O: ToolProjection>(output: &O, blocks: &[ToolContentBlock]) -> String {
-    if blocks.is_empty() {
-        return serde_json::to_string(output).unwrap_or_default();
-    }
-    blocks
-        .iter()
-        .map(|block| match block {
-            ToolContentBlock::Text { text } => text.clone(),
-            ToolContentBlock::Json { value } => {
-                serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
-            }
-            ToolContentBlock::Image(image) => {
-                serde_json::to_string(image).unwrap_or_else(|_| "[image]".to_string())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -189,18 +181,19 @@ mod tests {
     use super::*;
     use crate::ToolRisk;
     use crate::permission::ToolCategory;
-    use crate::tool_api::{
-        AgentMode, CancellationToken, OutputBudget, SandboxMode, ToolCapabilities, ToolExposure,
-        ToolName, ToolSource,
-    };
+    use crate::tool_api::{AgentMode, CancellationToken, SandboxMode, ToolContentBlock};
 
     #[derive(Debug, Deserialize, JsonSchema)]
+    /// 回显参数。
     struct EchoArgs {
+        /// 待回显文本。
         text: String,
     }
 
     #[derive(Debug, Serialize, JsonSchema)]
+    /// 回显输出。
     struct EchoOutput {
+        /// 回显文本。
         text: String,
     }
 
@@ -209,10 +202,6 @@ mod tests {
             vec![ToolContentBlock::Text {
                 text: self.text.clone(),
             }]
-        }
-
-        fn summary(&self) -> Option<String> {
-            Some(self.text.clone())
         }
     }
 
@@ -223,23 +212,14 @@ mod tests {
         type Args = EchoArgs;
         type Output = EchoOutput;
 
-        fn descriptor(&self) -> ToolDescriptor {
-            ToolDescriptor {
-                name: ToolName::new("echo").expect("valid"),
-                display_name: None,
-                description: "回显输入".to_owned(),
-                input_schema: serde_json::to_value(schemars::schema_for!(EchoArgs))
-                    .expect("schema 可序列化"),
-                output_schema: serde_json::to_value(schemars::schema_for!(EchoOutput))
-                    .expect("schema 可序列化"),
-                category: ToolCategory::Read,
-                risk: ToolRisk::ReadOnly,
-                default_timeout: Duration::from_secs(10),
-                exposure: ToolExposure::Direct,
-                source: ToolSource::Builtin,
-                output_budget: OutputBudget::default(),
-                capabilities: ToolCapabilities::default(),
-            }
+        fn meta(&self) -> ToolMeta {
+            ToolMeta::new(
+                "echo",
+                "回显输入",
+                ToolCategory::Read,
+                ToolRisk::ReadOnly,
+                Duration::from_secs(10),
+            )
         }
 
         fn run(
@@ -272,14 +252,15 @@ mod tests {
 
     #[test]
     fn typed_tool_descriptor_is_generated_from_types_and_valid() {
-        let tool = EchoTool;
-        let descriptor = tool.descriptor();
+        let adapter = TypedToolAdapter::new(EchoTool);
+        let descriptor = adapter.descriptor();
         assert_eq!(descriptor.validate(), Ok(()));
         assert_eq!(descriptor.input_schema["type"], "object");
         assert!(
             descriptor.input_schema["properties"]["text"].is_object(),
             "schema 由 Args 类型生成"
         );
+        assert_eq!(descriptor.description, "回显输入");
     }
 
     #[test]
@@ -288,7 +269,17 @@ mod tests {
         let output = tool
             .run(&ctx(), EchoArgs { text: "hi".into() })
             .expect("run ok");
-        assert_eq!(output.summary().as_deref(), Some("hi"));
+        assert_eq!(output.text, "hi");
+        // summary 由模型面首行派生（v2）。
+        let outcome = project_output(
+            &output,
+            &serde_json::json!({}),
+            crate::tool_api::ToolCallSource::Model,
+            Duration::ZERO,
+        );
+        assert_eq!(outcome.model.text, "hi");
+        let wire = outcome.to_tool_result();
+        assert_eq!(wire.summary(), "hi");
     }
 
     #[test]
