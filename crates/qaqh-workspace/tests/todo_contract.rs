@@ -320,4 +320,3 @@ fn web_fetch_output_enters_authorization_resources() {
         "web_fetch output missing from authorization resources: {paths:?}"
     );
 }
-

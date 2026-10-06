@@ -4,7 +4,7 @@
 //! 是编辑效果的被动纯数据记录，属 R-4 允许的「被动投影记录」（口径与完整例外
 //! 清单见 `dashboard.rs:7`）——除此以外禁止引入 domain 事件/行为类型。
 
-pub(crate) fn compute(
+pub fn compute(
     tool_name: &str,
     args: &serde_json::Value,
     workspace_root: &std::path::Path,
@@ -104,12 +104,12 @@ pub(crate) fn compute(
 
 /// Lightweight git file metadata — only checks HEAD tree existence, no diff.
 /// Avoids the git2 pathspec bug that inflated lines_added / lines_removed.
-struct GitFileMeta {
+pub(crate) struct GitFileMeta {
     files_created: usize,
     files_deleted: usize,
 }
 
-fn git_file_meta(
+pub(crate) fn git_file_meta(
     file_path: &str,
     workspace_root: &std::path::Path,
     session_id: &str,

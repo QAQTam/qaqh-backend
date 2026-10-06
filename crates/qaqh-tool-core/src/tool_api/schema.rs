@@ -10,8 +10,8 @@
 //! - 字段描述来自 doc comment（schemars derive 约定），`#[schemars(description)]`
 //!   可显式覆盖；`#[serde(deny_unknown_fields)]` 生成 `additionalProperties: false`。
 
-use schemars::generate::{SchemaGenerator, SchemaSettings};
 use schemars::JsonSchema;
+use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde_json::Value;
 
 fn generator() -> SchemaGenerator {

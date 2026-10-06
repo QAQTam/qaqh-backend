@@ -2,33 +2,38 @@
 //!
 //! Submodules register handlers via `pub fn register(mgr: &mut ToolManager)`.
 
-pub mod confirm_apply;
+pub use qaqh_file_tools::confirm_apply;
+pub use qaqh_file_tools::copy_range;
 pub use qaqh_permission::conflict;
-pub mod copy_range;
 pub mod dashboard;
 pub mod display;
-pub mod exec;
-pub mod grep_tool;
-pub mod pending;
+pub use qaqh_file_tools::grep_tool;
+pub use qaqh_file_tools::pending;
+pub use qaqh_process_tools::exec;
 
-pub mod apply_patch;
-pub mod apply_patch_engine;
+pub use qaqh_file_tools::apply_patch;
+pub use qaqh_file_tools::apply_patch_engine;
 
-pub mod arg_estimate;
+pub use qaqh_file_tools::arg_estimate;
 pub mod authorization;
-mod code_delta;
-pub mod edit;
+pub use qaqh_file_tools::code_delta;
+pub use qaqh_file_tools::edit;
 pub mod execution;
+pub use qaqh_file_tools::file_glob;
+pub use qaqh_file_tools::file_mutate;
+pub use qaqh_file_tools::file_query;
 pub use qaqh_fs_core::file_cache;
-pub mod file_glob;
-pub mod file_mutate;
-pub mod file_query;
 pub use qaqh_fs_core::file_shared;
 pub use qaqh_fs_core::file_state;
 // Git 面板 API 已拆至 qaqh-git（P2 拆分）；以 crate 别名 re-export，
 // `qaqh_workspace::git::*` 路径不变。
 pub use qaqh_git as git;
-pub mod read_image;
+// P2(d) 拆分：文件/进程工具组 crate。`qaqh_workspace::X` 旧路径全部经
+// re-export 保持不变；门面留守 manager/runtime/registration/execution/
+// authorization/audit/tool_side_fold/display/probe + todo/ask_user/skill/
+// spy_tool/web/dashboard。
+pub use qaqh_file_tools::read_image;
+pub use qaqh_file_tools::support::{json_err, json_err_string, json_ok};
 pub mod runtime;
 mod safety;
 pub mod skill;
@@ -43,9 +48,9 @@ pub mod ask_user;
 
 pub mod todo;
 
-pub mod process_inspect;
-pub mod process_registry;
 pub use qaqh_permission::workspace;
+pub use qaqh_process_tools::process_inspect;
+pub use qaqh_process_tools::process_registry;
 
 pub mod registration;
 
@@ -58,7 +63,7 @@ pub use qaqh_permission::permission;
 
 pub mod audit;
 
-pub mod journal;
+pub use qaqh_file_tools::journal;
 pub mod spy_tool;
 // 壳探测引导：daemon 启动期调用一次（与 cache_system_path/detect_os_info 同批），
 // 把「探测到的壳」钉进进程状态，保证 exec 的可用性探测与实际派生同源。
@@ -94,58 +99,9 @@ pub fn now_utc8() -> String {
     format!("UTC+8 {y:04}-{m:02}-{d:02} {hours:02}:{minutes:02}")
 }
 
-/// Build a JSON success response for tools that only need a status message.
-/// Extra fields can be added via `extra`.
-pub fn json_ok(extra: serde_json::Value) -> String {
-    let mut v = serde_json::json!({"timeis": now_utc8(), "status": "ok"});
-    if let Some(obj) = v.as_object_mut() {
-        if let Some(ext) = extra.as_object() {
-            for (k, val) in ext {
-                obj.insert(k.clone(), val.clone());
-            }
-        } else if !extra.is_null() {
-            obj.insert("content".to_string(), extra);
-        }
-    }
-    v.to_string()
-}
-
-/// Build a structured error [`ToolResult`] (canonical `ToolError` fields:
-/// code / message / retryable / hint). Historic name retained; the legacy
-/// JSON-envelope string form only survives in `todo.rs` (its `Err(String)`
-/// channel crosses into `qaqh-runtime::service` — see `todo_err` there).
-pub fn json_err(
-    code: impl Into<String>,
-    message: impl Into<String>,
-    hint: impl Into<String>,
-) -> ToolResult {
-    let hint = hint.into();
-    ToolResult::error_with(code, message, false, Some(hint).filter(|h| !h.is_empty()))
-}
-
-/// Legacy string-JSON error envelope — ONLY for functions whose error channel
-/// is `String` (todo.rs `Err(String)` crosses into `qaqh-runtime::service`;
-/// web.rs `web_fetch` returns `String`). Do not use in new code: prefer
-/// [`json_err`] which returns a structured [`ToolResult`].
-pub fn json_err_string(
-    code: impl Into<String>,
-    message: impl Into<String>,
-    hint: impl Into<String>,
-) -> String {
-    serde_json::json!({
-        "timeis": now_utc8(),
-        "status": "error",
-        "code": code.into(),
-        "message": message.into(),
-        "hint": hint.into(),
-    })
-    .to_string()
-}
-
 pub use qaqh_tool_core::ToolRisk;
 
 pub use qaqh_tool_core::JsonArgs;
-
 
 pub use qaqh_types::{
     ContentRef, ToolContinuation, ToolError as CanonicalToolError, ToolModelPayload, ToolResult,
@@ -161,8 +117,7 @@ pub use qaqh_types::{
 
 /// Unit tests mutate process-wide runtime state. Keep those mutations
 /// deterministic even when the Rust test harness runs modules in parallel.
-#[cfg(test)]
-pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
+pub static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 pub use qaqh_permission::{
@@ -173,8 +128,8 @@ pub use qaqh_permission::{
 };
 
 pub use qaqh_tool_core::{
-    bounded_exec_progress_channel, ExecOutputStream, ExecProgressEvent, ExecProgressSender,
-    ExecProgressTotals, EXEC_PROGRESS_CHANNEL_CAPACITY,
+    EXEC_PROGRESS_CHANNEL_CAPACITY, ExecOutputStream, ExecProgressEvent, ExecProgressSender,
+    ExecProgressTotals, bounded_exec_progress_channel,
 };
 
 pub use qaqh_tool_core::ToolEffect;

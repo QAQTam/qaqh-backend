@@ -1304,10 +1304,10 @@ fn handle_run_exec(call: TestCall) -> crate::ToolResult {
 
 #[test]
 fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
-    let mut manager = crate::ToolManager::new();
+    let mut manager = qaqh_workspace::ToolManager::new();
     super::register::register(&mut manager);
     assert!(
-        manager.builtins.contains_key("exec"),
+        manager.builtin("exec").is_some(),
         "exec must be on the typed execution surface"
     );
 
@@ -1348,7 +1348,7 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
 #[test]
 fn exec_registered_alone_with_shell_param() {
     // 方案 A 独占：生产注册仅 exec（旧 register_shell_tool 退为单测载体）。
-    let mut mgr = crate::ToolManager::new();
+    let mut mgr = qaqh_workspace::ToolManager::new();
     super::register::register(&mut mgr);
     let defs = mgr.all_defs();
     assert_eq!(
@@ -1478,12 +1478,29 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
     spec.network = NetworkPolicy::Deny;
 
     // ① 授权读/执行 + stdout 透传(无重定向,echo 直接写 stdout)。
-    let argv = vec!["cmd".to_string(), "/c".to_string(), "echo sbx-ok".to_string()];
+    let argv = vec![
+        "cmd".to_string(),
+        "/c".to_string(),
+        "echo sbx-ok".to_string(),
+    ];
     let out = direct_exec_sandboxed(
-        &argv, None, Some(&ws_str), 10000, 60, None, None, None, "sbx-smoke-echo", &spec,
+        &argv,
+        None,
+        Some(&ws_str),
+        10000,
+        60,
+        None,
+        None,
+        None,
+        "sbx-smoke-echo",
+        &spec,
     );
     assert_eq!(out.exit_code, Some(0), "output: {}", out.output);
-    assert!(out.output.contains("sbx-ok"), "echo output missing: {}", out.output);
+    assert!(
+        out.output.contains("sbx-ok"),
+        "echo output missing: {}",
+        out.output
+    );
 
     // ② 授权写:工作区内落盘(cwd = 工作区根)。
     let argv = vec![
@@ -1492,7 +1509,16 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
         "echo sbx-data > sbx_smoke.txt".to_string(),
     ];
     let out = direct_exec_sandboxed(
-        &argv, None, Some(&ws_str), 10000, 60, None, None, None, "sbx-smoke-allow", &spec,
+        &argv,
+        None,
+        Some(&ws_str),
+        10000,
+        60,
+        None,
+        None,
+        None,
+        "sbx-smoke-allow",
+        &spec,
     );
     assert_eq!(out.exit_code, Some(0), "output: {}", out.output);
     assert!(
@@ -1509,7 +1535,16 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
         format!("echo escape > {}", target.display()),
     ];
     let out = direct_exec_sandboxed(
-        &argv, None, None, 10000, 60, None, None, None, "sbx-smoke-deny", &spec,
+        &argv,
+        None,
+        None,
+        10000,
+        60,
+        None,
+        None,
+        None,
+        "sbx-smoke-deny",
+        &spec,
     );
     assert!(
         !target.exists(),
@@ -1532,7 +1567,7 @@ fn is_elevated() -> bool {
 
 #[test]
 fn probe_exec_schema_shell_only_for_diagnosis() {
-    let mut mgr = crate::ToolManager::new();
+    let mut mgr = qaqh_workspace::ToolManager::new();
     super::register::register(&mut mgr);
     let defs = mgr.all_defs();
     let exec = &defs[0];

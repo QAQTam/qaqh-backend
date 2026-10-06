@@ -47,8 +47,9 @@ pub struct ToolStats {
 }
 
 /// 统一注册项：`ErasedTool` 是描述与执行面的唯一载体。
-pub(crate) struct RegisteredTool {
-    pub(crate) descriptor: ToolDescriptor,
+pub struct RegisteredTool {
+    /// P2(d)：工具组 crate 测试经 `ToolManager::builtin` 读取描述符。
+    pub descriptor: ToolDescriptor,
     pub(crate) erased: Arc<dyn ErasedTool>,
 }
 
@@ -68,6 +69,7 @@ impl RegisteredTool {
 
 pub struct ToolManager {
     pub(crate) builtins: BTreeMap<String, RegisteredTool>,
+
     allowed: Option<Vec<String>>,
     /// PR-M2-2：set_allowed 的原始输入（未过 known 过滤）——动态层重建后
     /// 重应用用（观察项 ①：MCP refresh 换名后 custom 名单仍生效）。
@@ -84,6 +86,8 @@ pub struct ToolManager {
     /// 工具作者声明的展示投影（09-18 展示契约 §3.4）。未注册 = 保持 None，
     /// client 完整回退旧字段（H16）。
     display_projectors: BTreeMap<String, crate::tool_api::ToolDisplayFn>,
+    /// P3-2：动态注册名 → dispatcher fn 指针（聚合入口复用 E-5 单一 dispatcher）。
+    dynamic_dispatches: BTreeMap<String, DynamicDispatch>,
 }
 
 /// 动态工具名前缀（S2：`mcp__{server}__{tool}`；与内置 20 工具零碰撞）。
@@ -212,6 +216,28 @@ impl Default for ToolManager {
 }
 
 impl ToolManager {
+    /// P2(d)：工具组 crate 的测试读取注册项的受限访问器
+    /// （`builtins` 本体保持 pub(crate)，注册/注销路径不经此处）。
+    pub fn builtin(&self, name: &str) -> Option<&RegisteredTool> {
+        self.builtins.get(name)
+    }
+}
+
+impl qaqh_tool_core::tool_api::RegistersTyped for ToolManager {
+    fn register_typed_tool<T: qaqh_tool_core::tool_api::TypedTool + 'static>(&mut self, tool: T) {
+        self.register_typed(tool)
+    }
+
+    fn register_display_fn(
+        &mut self,
+        name: &str,
+        projector: qaqh_tool_core::tool_api::ToolDisplayFn,
+    ) {
+        self.register_display(name, projector)
+    }
+}
+
+impl ToolManager {
     pub fn new() -> Self {
         Self {
             builtins: BTreeMap::new(),
@@ -224,6 +250,7 @@ impl ToolManager {
             files_read: Vec::new(),
             files_written: Vec::new(),
             display_projectors: BTreeMap::new(),
+            dynamic_dispatches: BTreeMap::new(),
         }
     }
 
@@ -321,6 +348,7 @@ impl ToolManager {
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
         };
+        self.dynamic_dispatches.insert(name.clone(), tool.dispatch);
         let adapter = DynamicToolAdapter::new(descriptor.clone(), tool.dispatch);
         self.dynamic.insert(
             name,
@@ -335,6 +363,7 @@ impl ToolManager {
     /// 清空动态层（tools/list_changed 或重连后的全量重建，M2 起使用）。
     pub fn clear_dynamic(&mut self) {
         self.dynamic.clear();
+        self.dynamic_dispatches.clear();
     }
 
     /// 动态层重建后重应用 allowlist（PR-M2-2 观察项 ①）。
@@ -403,9 +432,12 @@ impl ToolManager {
     }
 
     pub fn all_defs(&self) -> Vec<qaqh_types::ToolDef> {
+        // P3-3：exposure 策略化——只有 Direct（或被 tool_search 提升回的
+        // Deferred）进入模型面；Hidden/Internal 永不出现。
         let mut defs: Vec<qaqh_types::ToolDef> = self
             .builtins
             .values()
+            .filter(|tool| tool.descriptor.exposure == ToolExposure::Direct)
             .map(RegisteredTool::tool_def)
             .collect();
         // 动态层（MCP）合并在后：模型面 = 内置词汇表 + 动态投影。
@@ -485,6 +517,61 @@ impl ToolManager {
                     success: false,
                     args_summary: String::new(),
                 },
+            });
+        }
+
+        // P3-1：`tool_search` 元工具 prepare 期拦截——检索 + 提升都在锁内
+        // 完成，执行体只回放快照结果。
+        if name == TOOL_SEARCH_NAME {
+            let query = args
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let max_results = args
+                .get("max_results")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(8) as usize;
+            let hits = self.search_tools(query, max_results);
+            // 命中的 Deferred 工具升回 Direct：下一轮 defs 注入。
+            let deferred_hits: Vec<&String> = hits
+                .iter()
+                .filter(|hit| hit.exposure == "deferred")
+                .map(|hit| &hit.name)
+                .collect();
+            self.promote_tools(deferred_hits.iter().copied());
+            let promoted: Vec<String> = deferred_hits.iter().map(|name| (*name).clone()).collect();
+            let response = serde_json::json!({
+                "timeis": qaqh_types::platform::now_utc8(),
+                "status": "ok",
+                "query": query,
+                "hits": hits,
+                "promoted_next_round": promoted,
+            });
+            let descriptor = ToolDescriptor {
+                name: ToolName::new(TOOL_SEARCH_NAME).expect("tool_search is a valid name"),
+                display_name: None,
+                description: "tool registry search".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: serde_json::json!({"type": "object"}),
+                category: crate::permission::ToolCategory::Read,
+                risk: ToolRisk::ReadOnly,
+                default_timeout: std::time::Duration::from_secs(15),
+                exposure: ToolExposure::Direct,
+                source: ToolSource::Builtin,
+                output_budget: OutputBudget::default(),
+                capabilities: ToolCapabilities::default(),
+            };
+            self.inflight_tasks.insert(id.clone(), cancel_flag);
+            return Ok(PreparedCall {
+                id,
+                name: TOOL_SEARCH_NAME.to_owned(),
+                effective_tool_name: None,
+                executor: Arc::new(ToolSearchExecutor {
+                    descriptor,
+                    response,
+                }),
+                effective_timeout: std::time::Duration::from_secs(15),
+                audit_args: args,
             });
         }
 
@@ -1172,5 +1259,468 @@ mod safety_e2e_tests {
         );
 
         crate::set_workspace(&old_ws);
+    }
+}
+
+// ── P3：Deferred + tool_search（研究文档 §5.1）/ MCP 命名空间聚合（§5.2）──
+
+/// `tool_search` 元工具名：模型首轮即见，按需检索其余 Deferred 工具。
+pub const TOOL_SEARCH_NAME: &str = "tool_search";
+
+/// 一条工具检索命中。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchHit {
+    pub name: String,
+    pub description: String,
+    /// 命中时的暴露面（direct = 本轮已注入 defs；deferred = 提升后下轮注入）。
+    pub exposure: &'static str,
+}
+
+/// P3-1：`tool_search` 的执行体（prepare 期对命中做一次快照 + 提升）。
+struct ToolSearchExecutor {
+    descriptor: ToolDescriptor,
+    response: serde_json::Value,
+}
+
+impl ErasedTool for ToolSearchExecutor {
+    fn descriptor(&self) -> ToolDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn execute(
+        &self,
+        _ctx: qaqh_tool_core::tool_api::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> Result<qaqh_tool_core::tool_api::ToolOutcome, qaqh_tool_core::tool_api::FatalToolError>
+    {
+        Ok(qaqh_tool_core::tool_api::result::map_tool_result(
+            qaqh_types::ToolResult::ok_data(self.response.clone(), "tool_search"),
+        ))
+    }
+}
+
+/// P3-2：`mcp__{server}` 聚合入口的执行体。
+///
+/// 模型面只有一个入口（`name` + `args` 两参），执行面按 `name` 还原
+/// `mcp__{server}__{tool}` 全名，复用 E-5 单一 dispatcher 路由——上游
+/// MCP dispatcher 只认全名，聚合对它是透明的。
+struct NamespaceAggregatedAdapter {
+    server: String,
+    dispatch: DynamicDispatch,
+    descriptor: ToolDescriptor,
+}
+
+impl ErasedTool for NamespaceAggregatedAdapter {
+    fn descriptor(&self) -> ToolDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn execute(
+        &self,
+        ctx: qaqh_tool_core::tool_api::ToolCallContext,
+        args: serde_json::Value,
+    ) -> Result<qaqh_tool_core::tool_api::ToolOutcome, qaqh_tool_core::tool_api::FatalToolError>
+    {
+        let tool = args
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if tool.is_empty() {
+            return Ok(qaqh_tool_core::tool_api::result::map_tool_result(
+                qaqh_types::ToolResult::error_with(
+                    "missing_tool_name",
+                    format!(
+                        "aggregate tool 'mcp__{}' requires {{\"name\": <tool>}}; see description for the tool list",
+                        self.server
+                    ),
+                    false,
+                    Some(
+                        "pass the upstream tool name in `name` and its arguments in `args`"
+                            .to_string(),
+                    ),
+                ),
+            ));
+        }
+        let inner = if args.get("args").is_some_and(serde_json::Value::is_object) {
+            args["args"].clone()
+        } else {
+            args.clone()
+        };
+        (self.dispatch)(&format!("mcp__{}__{}", self.server, tool), &ctx, inner)
+    }
+}
+
+impl ToolManager {
+    /// P3-1：把已注册的内置工具降为 Deferred（注册仍在、首轮 defs 不再携带，
+    /// 仅可被 `tool_search` 检索）。返回实际降级的数量。
+    pub fn defer_tools<I, S>(&mut self, names: I) -> usize
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut deferred = 0;
+        for name in names {
+            if let Some(tool) = self.builtins.get_mut(name.as_ref())
+                && tool.descriptor.exposure == ToolExposure::Direct
+            {
+                tool.descriptor.exposure = ToolExposure::Deferred;
+                deferred += 1;
+            }
+        }
+        deferred
+    }
+
+    /// P3-1：把检索命中的 Deferred 工具升回 Direct（下一轮 defs 注入）。
+    /// 返回实际提升的数量。
+    pub fn promote_tools<I, S>(&mut self, names: I) -> usize
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut promoted = 0;
+        for name in names {
+            if let Some(tool) = self.builtins.get_mut(name.as_ref())
+                && tool.descriptor.exposure == ToolExposure::Deferred
+            {
+                tool.descriptor.exposure = ToolExposure::Direct;
+                promoted += 1;
+            }
+        }
+        promoted
+    }
+
+    /// P3-1：注册表检索（内置 + 动态，跳过 Hidden/Internal 与元工具自身）。
+    ///
+    /// 打分：名字精确/前缀/子串 > 名词分词命中 > 描述子串。大小写不敏感。
+    pub fn search_tools(&self, query: &str, max_results: usize) -> Vec<SearchHit> {
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let max_results = max_results.max(1);
+        let mut scored: Vec<(i64, SearchHit)> = Vec::new();
+        let mut push = |scored: &mut Vec<(i64, SearchHit)>,
+                        name: &str,
+                        description: &str,
+                        exposure: ToolExposure| {
+            if matches!(exposure, ToolExposure::Hidden | ToolExposure::Internal)
+                || name == TOOL_SEARCH_NAME
+            {
+                return;
+            }
+            let lower_name = name.to_ascii_lowercase();
+            let lower_desc = description.to_ascii_lowercase();
+            let mut score = 0;
+            if lower_name == query {
+                score += 100;
+            } else if lower_name.starts_with(&query) {
+                score += 60;
+            } else if lower_name.contains(&query) {
+                score += 40;
+            } else if query
+                .split(['-', '_', ' ', '.'])
+                .filter(|token| !token.is_empty())
+                .any(|token| lower_name.contains(token))
+            {
+                score += 20;
+            }
+            if lower_desc.contains(&query) {
+                score += 10;
+            }
+            if score > 0 {
+                scored.push((
+                    score,
+                    SearchHit {
+                        name: name.to_owned(),
+                        description: description.to_owned(),
+                        exposure: match exposure {
+                            ToolExposure::Direct => "direct",
+                            _ => "deferred",
+                        },
+                    },
+                ));
+            }
+        };
+        for (name, tool) in &self.builtins {
+            let exposure = tool.descriptor.exposure;
+            push(&mut scored, name, &tool.descriptor.description, exposure);
+        }
+        for (name, tool) in &self.dynamic {
+            push(
+                &mut scored,
+                name,
+                &tool.descriptor.description,
+                tool.descriptor.exposure,
+            );
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        scored.truncate(max_results);
+        scored.into_iter().map(|(_, hit)| hit).collect()
+    }
+
+    /// P3-1：`tool_search` 元工具注册（描述面 Direct；真实执行被 prepare
+    /// 拦截，注册的 execute 仅兜底不可达路径）。
+    pub fn register_tool_search(&mut self) {
+        let descriptor = ToolDescriptor {
+            name: ToolName::new(TOOL_SEARCH_NAME).expect("tool_search is a valid name"),
+            display_name: None,
+            description: "Search the tool registry by keyword when you need a capability not in \
+                          your current tool list. Returns matching tool names and descriptions; \
+                          matching deferred tools become available in the next turn."
+                .to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "keyword(s) for the capability you need"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "maximum hits to return (default 8)"
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            category: crate::permission::ToolCategory::Read,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: std::time::Duration::from_secs(15),
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: ToolCapabilities::default(),
+        };
+        self.builtins.insert(
+            TOOL_SEARCH_NAME.to_owned(),
+            RegisteredTool {
+                descriptor: descriptor.clone(),
+                erased: Arc::new(ToolSearchExecutor {
+                    descriptor,
+                    response: serde_json::json!({"status": "unreachable"}),
+                }),
+            },
+        );
+    }
+
+    /// P3-2：MCP 命名空间聚合——同一 server 的 `mcp__{server}__{tool}` 全部
+    /// 合成一个入口 `mcp__{server}`（args: {name, args}）。N 个 defs 缩成 1 个。
+    /// 返回聚合出的入口名列表（单工具 server 不聚合，保留直连语义）。
+    pub fn aggregate_mcp_namespaces(&mut self) -> Vec<String> {
+        let mut by_server: std::collections::BTreeMap<String, Vec<(String, RegisteredTool)>> =
+            std::collections::BTreeMap::new();
+        let keys: Vec<String> = self
+            .dynamic
+            .keys()
+            .filter(|name| {
+                name.strip_prefix(MCP_DYNAMIC_PREFIX)
+                    .is_some_and(|rest| rest.contains("__"))
+            })
+            .cloned()
+            .collect();
+        for key in keys {
+            let Some(rest) = key.strip_prefix(MCP_DYNAMIC_PREFIX) else {
+                continue;
+            };
+            let Some((server, tool)) = rest.split_once("__") else {
+                continue;
+            };
+            let server = server.to_owned();
+            if tool.is_empty() || server.is_empty() || tool.contains("__") {
+                continue;
+            }
+            if let Some(tool_entry) = self.dynamic.remove(&key) {
+                by_server.entry(server).or_default().push((key, tool_entry));
+            }
+        }
+        let mut aggregated = Vec::new();
+        for (server, mut entries) in by_server {
+            if entries.len() < 2 {
+                // 单工具 server：恢复原样（聚合无收益，反而破坏直连语义）。
+                for (key, entry) in entries {
+                    self.dynamic.insert(key, entry);
+                }
+                continue;
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut tool_names: Vec<String> = entries
+                .iter()
+                .map(|(key, _)| {
+                    key.strip_prefix(MCP_DYNAMIC_PREFIX)
+                        .and_then(|rest| rest.strip_prefix(&format!("{server}__")))
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect();
+            tool_names.sort();
+            // 聚合入口取组内最宽的 capability 类别，保证不放宽、只收紧。
+            let category = entries
+                .iter()
+                .map(|(_, entry)| entry.descriptor.category)
+                .max_by_key(|category| match category {
+                    crate::permission::ToolCategory::Read => 0,
+                    crate::permission::ToolCategory::Write => 1,
+                    crate::permission::ToolCategory::Net => 2,
+                    crate::permission::ToolCategory::Exec => 3,
+                })
+                .unwrap_or(crate::permission::ToolCategory::Exec);
+            let default_timeout = entries
+                .iter()
+                .map(|(_, entry)| entry.descriptor.default_timeout)
+                .max()
+                .unwrap_or(std::time::Duration::from_secs(30));
+            // dispatcher 全体 MCP 工具共享（E-5 单一 fn 指针）。
+            let Some(dispatch) = self.dynamic_dispatch_of(&entries[0].0) else {
+                for (key, entry) in entries {
+                    self.dynamic.insert(key, entry);
+                }
+                continue;
+            };
+            let description = format!(
+                "Aggregate entry for MCP server '{server}'. Pass {{\"name\": <tool>, \"args\": \
+                 {{...}}}}. Available tools: {}",
+                tool_names.join(", ")
+            );
+            let descriptor = ToolDescriptor {
+                name: ToolName::new(&format!("{MCP_DYNAMIC_PREFIX}{server}"))
+                    .expect("aggregate name is valid"),
+                display_name: None,
+                description: truncate_description(&description),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "enum": tool_names,
+                            "description": "upstream tool name"
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": "arguments forwarded to the upstream tool"
+                        }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+                output_schema: serde_json::json!({"type": "object"}),
+                category,
+                risk: ToolRisk::Administrative,
+                default_timeout,
+                exposure: ToolExposure::Direct,
+                source: ToolSource::Mcp,
+                output_budget: OutputBudget::default(),
+                capabilities: ToolCapabilities::default(),
+            };
+            let name = descriptor.name.as_str().to_owned();
+            self.dynamic.insert(
+                name.clone(),
+                RegisteredTool {
+                    descriptor: descriptor.clone(),
+                    erased: Arc::new(NamespaceAggregatedAdapter {
+                        server: server.clone(),
+                        dispatch,
+                        descriptor,
+                    }),
+                },
+            );
+            aggregated.push(name);
+        }
+        aggregated
+    }
+
+    /// 取动态注册项的 dispatcher fn 指针（register_dynamic 时随 entry 存入
+    /// [`Self::dynamic_dispatches`]）。
+    fn dynamic_dispatch_of(&self, name: &str) -> Option<DynamicDispatch> {
+        self.dynamic_dispatches.get(name).copied()
+    }
+}
+
+#[cfg(test)]
+mod p3_tests {
+    use super::*;
+
+    #[test]
+    fn tool_search_finds_and_promotes_deferred_tools() {
+        let mut mgr = ToolManager::new();
+        mgr.register_typed(qaqh_file_tools::file_glob::GlobTool);
+        mgr.register_tool_search();
+        assert_eq!(mgr.defer_tools(["glob"]), 1, "glob 降为 Deferred");
+        assert!(
+            !mgr.all_defs().iter().any(|d| d.function.name == "glob"),
+            "Deferred 工具不进首轮 defs"
+        );
+        assert!(mgr.builtins.contains_key("glob"), "注册仍在，可执行");
+
+        let hits = mgr.search_tools("glob", 8);
+        assert_eq!(hits.first().expect("hit").name, "glob");
+        assert_eq!(hits.first().expect("hit").exposure, "deferred");
+        mgr.promote_tools(["glob"]);
+        assert!(
+            mgr.all_defs().iter().any(|d| d.function.name == "glob"),
+            "提升后下一轮 defs 注入"
+        );
+    }
+
+    #[test]
+    fn tool_search_hides_internal_and_skips_itself() {
+        let mut mgr = ToolManager::new();
+        mgr.register_tool_search();
+        let hits = mgr.search_tools("search", 8);
+        assert!(
+            !hits.iter().any(|hit| hit.name == TOOL_SEARCH_NAME),
+            "元工具自身不出现在命中里"
+        );
+        assert!(mgr.search_tools("", 8).is_empty(), "空查询不命中");
+    }
+
+    #[test]
+    fn namespace_aggregation_collapses_per_server_and_restores_singletons() {
+        let mut mgr = ToolManager::new();
+        for (server, tool) in [("alpha", "list"), ("alpha", "get"), ("beta", "ping")] {
+            let (name, dyn_tool) = crate::build_dynamic_tool(
+                server,
+                tool,
+                &format!("{server} {tool}"),
+                serde_json::json!({"type": "object"}),
+                |_name, _ctx, _args| {
+                    Ok(qaqh_tool_core::tool_api::result::map_tool_result(
+                        qaqh_types::ToolResult::ok("ok"),
+                    ))
+                },
+                crate::permission::ToolCategory::Read,
+                std::time::Duration::from_secs(30),
+            );
+            mgr.register_dynamic(name, dyn_tool).expect("register");
+        }
+        eprintln!("keys before: {:?}", {
+            let mut v: Vec<String> = mgr.dynamic.keys().cloned().collect();
+            v.sort();
+            v
+        });
+        let aggregated = mgr.aggregate_mcp_namespaces();
+        eprintln!("keys after: {:?}", {
+            let mut v: Vec<String> = mgr.dynamic.keys().cloned().collect();
+            v.sort();
+            v
+        });
+        assert_eq!(
+            aggregated,
+            vec!["mcp__alpha".to_string()],
+            "双工具 server 聚合"
+        );
+        assert!(
+            mgr.dynamic.contains_key("mcp__beta__ping"),
+            "单工具 server 保留直连原语义"
+        );
+        assert_eq!(mgr.dynamic.len(), 2, "3 → 2 个动态条目");
+        let entry = &mgr.dynamic["mcp__alpha"];
+        let schema = entry.descriptor.input_schema.to_string();
+        assert!(
+            schema.contains("\"list\"") && schema.contains("\"get\""),
+            "入口 schema 列出工具"
+        );
     }
 }
