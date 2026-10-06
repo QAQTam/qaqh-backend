@@ -31,6 +31,21 @@ pub type ToolRegistrar = fn(&mut ToolManager);
 pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     let mut mgr = ToolManager::new();
 
+    // P2(d)：向工具组 crate 注入门面线程态钩子（OnceLock 幂等，首个注册者生效）。
+    // 回调在调用线程执行，thread-local（runtime ctx / fold policy）语义与拆分前一致。
+    qaqh_file_tools::hooks::set_ambient_provider(|| qaqh_file_tools::hooks::AmbientRuntime {
+        mode: crate::runtime::current_mode(),
+        permission_level: crate::runtime::context()
+            .map(|context| context.permission_level)
+            .unwrap_or(0),
+        subagent_sandbox: crate::authorization::is_subagent_sandbox(),
+    });
+    qaqh_file_tools::hooks::set_image_model_supported(crate::runtime::image_model_supported);
+    qaqh_process_tools::hooks::set_exec_max_output_tokens(|| {
+        crate::tool_side_fold::policy().exec_max_output_tokens()
+    });
+    qaqh_process_tools::hooks::set_project_process(crate::display::project_process);
+
     // ── 系统工具 ──
     exec::register(&mut mgr);
     web::register(&mut mgr);
@@ -68,6 +83,9 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
 
     // ── Agent Skills ──
     skill::register(&mut mgr);
+
+    // ── P3-1：工具搜索元工具（首轮 defs 携带；Deferred 工具经它按需检索）──
+    mgr.register_tool_search();
 
     // ── 外部注册器 ──
     for reg in extra_registrars {
@@ -111,6 +129,7 @@ mod tests {
                 "todo_list",
                 "todo_update",
                 "todo_write",
+                "tool_search",
                 "web_fetch",
                 "write",
             ]

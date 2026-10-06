@@ -486,8 +486,8 @@ fn read_error(
     ToolExecutionError::Recoverable(error)
 }
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(ReadTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(ReadTool);
 }
 
 #[cfg(test)]
@@ -626,9 +626,9 @@ fn out_of_range_start_still_rejects() {
 
 #[test]
 fn read_registration_is_typed_and_schema_is_type_generated() {
-    let mut manager = crate::ToolManager::new();
+    let mut manager = qaqh_workspace::ToolManager::new();
     register(&mut manager);
-    let registered = manager.builtins.get("read").expect("read registered");
+    let registered = manager.builtin("read").expect("read registered");
     assert_eq!(
         registered.descriptor.name.as_str(),
         "read",

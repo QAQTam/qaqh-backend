@@ -68,3 +68,16 @@ pub use output::{
 pub use progress::{ProgressSink, ProgressStream, ToolProgress};
 pub use result::map_tool_result;
 pub use typed::{TypedTool, TypedToolAdapter};
+
+/// 抽象「可注册 typed 工具的注册表」。
+///
+/// 工具组 crate（qaqh-file-tools / qaqh-process-tools）的 `register` 粘合层
+/// 经此 trait 接受门面 `ToolManager`，生产依赖图不出现 工具组→workspace 边
+/// （`ToolManager` 本体留在门面；门面负责 impl）。测试经 cargo 允许的
+/// dev-dependency 环拿到具体 `ToolManager`。
+pub trait RegistersTyped {
+    fn register_typed_tool<T: TypedTool + 'static>(&mut self, tool: T);
+
+    /// 注册旧会话记录重建兜底的 display 投影（无执行 handler）。
+    fn register_display_fn(&mut self, name: &str, projector: ToolDisplayFn);
+}

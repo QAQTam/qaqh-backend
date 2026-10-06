@@ -190,9 +190,7 @@ pub(crate) fn run_exec(
     let argv = shell.derive_exec_args_with(&shell_command, extra_args);
 
     // ── Execution limits / cwd / env ──
-    let policy_default = crate::tool_side_fold::policy()
-        .exec_max_output_tokens()
-        .unwrap_or(u32::MAX);
+    let policy_default = crate::hooks::exec_max_output_tokens().unwrap_or(u32::MAX);
     let max_output_tokens = args
         .max_output_tokens
         .filter(|&n| (100..=50000).contains(&n))
@@ -384,5 +382,3 @@ pub(crate) fn detect_background_derivation(command: &str) -> bool {
 }
 
 // ── Registration ──
-
-
