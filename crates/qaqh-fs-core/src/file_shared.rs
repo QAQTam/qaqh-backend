@@ -4,20 +4,21 @@ use std::io::Write;
 use std::path::Path;
 
 // ── Shared limits (read/edit 统一上限，单点维护) ──
-pub(crate) const READ_MAX_LINES: usize = 400;
-pub(crate) const READ_MAX_CHARS: usize = 24_000;
+pub const READ_MAX_LINES: usize = 400;
+pub const READ_MAX_CHARS: usize = 24_000;
 /// 单文件读取字节上限（防止大文件/特殊文件全量读入内存）。
-pub(crate) const READ_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub const READ_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Stable content fingerprint exposed by `read` and accepted as a write precondition.
-pub(crate) fn content_hash(content: &str) -> String {
+pub fn content_hash(content: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(content.as_bytes()))
 }
 
+
 /// Write through a sibling temporary file, so a failed write never leaves a partially
 /// truncated destination. Rename is atomic on supported filesystems.
-pub(super) fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
+pub fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
     let target = Path::new(path);
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let name = target
@@ -78,14 +79,15 @@ fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
 }
 
 /// 行尾风格。
+/// 行尾风格。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Ending {
+pub enum Ending {
     Lf,
     Crlf,
 }
 
 impl Ending {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Ending::Lf => "\n",
             Ending::Crlf => "\r\n",
@@ -95,11 +97,11 @@ impl Ending {
 
 /// LF 规范视图的还原信息。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LineEndings {
+pub struct LineEndings {
     /// 出现次数更多的行尾（平票取 CRLF；无换行 → LF）。
-    pub(crate) preferred: Ending,
+    pub preferred: Ending,
     /// 文件是否包含多种行尾。
-    pub(crate) mixed: bool,
+    pub mixed: bool,
 }
 
 /// 统一归一化：`\r\n` 与孤立 `\r` 一律视为换行，返回 LF 视图 + 行尾信息。
@@ -111,7 +113,7 @@ pub(crate) struct LineEndings {
 /// - `edit` 写回只把**插入文本**按命中行的行尾还原，文件其余字节原样保留；
 ///   copy_range 等整段写回按 `endings.preferred` 选行尾；
 /// - 新文件/`write` 按模型给定内容原样落盘（不归一化）。
-pub(crate) fn normalize_newlines(content: &str) -> (String, LineEndings) {
+pub fn normalize_newlines(content: &str) -> (String, LineEndings) {
     let mut lf = String::with_capacity(content.len());
     let mut crlf = 0usize;
     let mut other_lf = 0usize;
@@ -163,13 +165,13 @@ pub(crate) fn normalize_newlines(content: &str) -> (String, LineEndings) {
 ///
 /// 语义与 `read` 完全一致：结尾换行不产生额外空行；空文件是 1 行空行。
 #[derive(Debug)]
-pub(crate) struct LineIndex<'a> {
+pub struct LineIndex<'a> {
     lines: Vec<&'a str>,
     byte_starts: Vec<usize>,
 }
 
 impl<'a> LineIndex<'a> {
-    pub(crate) fn new(content: &'a str) -> Self {
+    pub fn new(content: &'a str) -> Self {
         let mut lines: Vec<&'a str> = content.split('\n').collect();
         if content.ends_with('\n') {
             lines.pop();
@@ -183,23 +185,23 @@ impl<'a> LineIndex<'a> {
         Self { lines, byte_starts }
     }
 
-    pub(crate) fn lines(&self) -> &[&'a str] {
+    pub fn lines(&self) -> &[&'a str] {
         &self.lines
     }
 
-    pub(crate) fn line_count(&self) -> usize {
+    pub fn line_count(&self) -> usize {
         self.lines.len()
     }
 
     /// `byte`（LF 视图字节偏移）所在行，1-based。
-    pub(crate) fn line_of_byte(&self, byte: usize) -> usize {
+    pub fn line_of_byte(&self, byte: usize) -> usize {
         self.byte_starts.partition_point(|&s| s <= byte).max(1)
     }
 }
 
 /// LF 视图字节偏移 → 原始内容字节偏移（`\r\n`/孤立 `\r` 折叠为 `\n` 的逆映射）。
 /// 目标偏移不在字符边界上时返回 None。
-pub(crate) fn raw_offset_for_lf_offset(raw: &str, lf_offset: usize) -> Option<usize> {
+pub fn raw_offset_for_lf_offset(raw: &str, lf_offset: usize) -> Option<usize> {
     let mut lf_bytes = 0usize;
     let mut iter = raw.char_indices().peekable();
     while let Some((raw_i, ch)) = iter.next() {
@@ -220,7 +222,7 @@ pub(crate) fn raw_offset_for_lf_offset(raw: &str, lf_offset: usize) -> Option<us
 }
 
 /// `raw_pos` 所在行的行尾；找不到行终止符的末行 → None。
-pub(crate) fn ending_at(raw: &str, raw_pos: usize) -> Option<Ending> {
+pub fn ending_at(raw: &str, raw_pos: usize) -> Option<Ending> {
     let rest = raw.get(raw_pos..)?;
     for (i, b) in rest.bytes().enumerate() {
         match b {
@@ -240,7 +242,7 @@ pub(crate) fn ending_at(raw: &str, raw_pos: usize) -> Option<Ending> {
 
 /// 路径守卫错误（read/write/edit/apply_patch 共用）。
 #[derive(Debug)]
-pub(crate) enum PathGuardError {
+pub enum PathGuardError {
     /// Windows 保留设备名或设备命名空间路径。
     DevicePath(String),
     /// 最终组件是符号链接（写路径按策略拒绝；读路径跟随）。
@@ -250,7 +252,7 @@ pub(crate) enum PathGuardError {
 }
 
 impl PathGuardError {
-    pub(crate) fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::DevicePath(_) => "unsupported_path",
             Self::Symlink { .. } => "symlink_target",
@@ -258,7 +260,7 @@ impl PathGuardError {
         }
     }
 
-    pub(crate) fn message(&self) -> String {
+    pub fn message(&self) -> String {
         match self {
             Self::DevicePath(path) => {
                 format!("'{path}' is a reserved device name or device namespace path")
@@ -272,7 +274,7 @@ impl PathGuardError {
         }
     }
 
-    pub(crate) fn hint(&self) -> Option<String> {
+    pub fn hint(&self) -> Option<String> {
         match self {
             Self::DevicePath(_) => None,
             Self::Symlink { .. } => {
@@ -315,7 +317,7 @@ fn file_kind(meta: &std::fs::Metadata) -> &'static str {
 }
 
 /// Windows 保留设备名（大小写不敏感；带扩展名/尾随点空格同样命中）。
-pub(crate) fn is_windows_reserved_name(name: &str) -> bool {
+pub fn is_windows_reserved_name(name: &str) -> bool {
     let trimmed = name.trim_end_matches([' ', '.']);
     let stem = trimmed.split('.').next().unwrap_or(trimmed);
     let upper = stem.to_ascii_uppercase();
@@ -347,7 +349,7 @@ fn reject_device_path(path: &str) -> Result<(), PathGuardError> {
 
 /// 读守卫：符号链接跟随后的目标必须是普通文件；设备/FIFO/目录拒绝。
 /// 不存在或其它 IO 错误放行，由后续读取报具体错误。
-pub(crate) fn ensure_readable_regular_file(path: &str) -> Result<(), PathGuardError> {
+pub fn ensure_readable_regular_file(path: &str) -> Result<(), PathGuardError> {
     reject_device_path(path)?;
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_file() => Ok(()),
@@ -361,7 +363,7 @@ pub(crate) fn ensure_readable_regular_file(path: &str) -> Result<(), PathGuardEr
 
 /// 写守卫：最终组件是符号链接 → 拒绝（策略：不替换链接、不穿透写）；
 /// 已存在的设备/FIFO/目录 → 拒绝；目标不存在 → 允许创建。
-pub(crate) fn ensure_writable_regular_target(path: &str) -> Result<(), PathGuardError> {
+pub fn ensure_writable_regular_target(path: &str) -> Result<(), PathGuardError> {
     reject_device_path(path)?;
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -384,7 +386,7 @@ pub(crate) fn ensure_writable_regular_target(path: &str) -> Result<(), PathGuard
 
 /// Produce a unified diff between two file contents.
 /// Shows the first diff region with context.
-pub(crate) fn unified_diff(before: &str, after: &str, path: &str) -> String {
+pub fn unified_diff(before: &str, after: &str, path: &str) -> String {
     use similar::TextDiff;
 
     if before == after {
@@ -423,7 +425,7 @@ fn is_absolute_path(path: &str) -> bool {
 ///
 /// `first_line` is the 1-based line of the first actual change in `before`
 /// (more precise than the unified-diff hunk header, which includes context).
-pub(crate) fn diff_stats_between(before: &str, after: &str) -> (u32, u32, u32) {
+pub fn diff_stats_between(before: &str, after: &str) -> (u32, u32, u32) {
     use similar::DiffTag;
     let diff = similar::TextDiff::from_lines(before, after);
     let mut added = 0u32;
@@ -451,7 +453,7 @@ pub(crate) fn diff_stats_between(before: &str, after: &str) -> (u32, u32, u32) {
     (added, removed, first_line)
 }
 
-pub(super) fn is_binary_read_error(err: &str) -> bool {
+pub fn is_binary_read_error(err: &str) -> bool {
     err.contains("valid UTF-8")
         || err.contains("utf8")
         || err.contains("utf-8")

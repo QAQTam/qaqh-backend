@@ -56,7 +56,7 @@ pub fn check(path: &str, content: &str) -> Option<String> {
                 );
                 return Some(
                     serde_json::json!({
-                        "timeis": crate::now_utc8(),
+                        "timeis": qaqh_types::platform::now_utc8(),
                         "status": "ok",
                         "path": path,
                         "hash": crate::file_shared::content_hash(content),

@@ -14,19 +14,22 @@ use serde::{Deserialize, Serialize};
 use crate::ToolRisk;
 use crate::process_registry::{KillOutcome, ProcessRegistry};
 use crate::tool_api::{
-    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
-    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
-    ToolSource, TypedTool,
+    ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
+    ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessArgs {
+    /// check: query status; wait: block; write: stdin; kill: terminate
     action: String,
+    /// Process id from backgrounded exec
     #[serde(default)]
     id: Option<u32>,
+    /// Wait timeout (default 120)
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Text for write action
     #[serde(default)]
     text: Option<String>,
 }
@@ -42,15 +45,6 @@ impl ToolProjection for ProcessOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        self.0
-            .get("content")
-            .or_else(|| self.0.get("message"))
-            .or_else(|| self.0.get("status"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-    }
-
     fn display(&self, args: &serde_json::Value) -> ToolDisplay {
         crate::display::project_process(args, &self.0.to_string())
     }
@@ -62,23 +56,14 @@ impl TypedTool for ProcessTool {
     type Args = ProcessArgs;
     type Output = ProcessOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("process").expect("valid process tool name"),
-            display_name: None,
-            description: "Control backgrounded process: check/wait/write/kill.".into(),
-            input_schema: process_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(ProcessOutput))
-                .expect("process output schema"),
-            category: crate::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(180),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("process")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "process",
+            "Control backgrounded process: check/wait/write/kill.",
+            crate::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(180),
+        )
     }
 
     fn run(
@@ -240,35 +225,6 @@ fn process_error(code: &str, message: impl Into<String>, hint: &str) -> ToolExec
     ToolExecutionError::Recoverable(error)
 }
 
-fn process_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["check", "wait", "write", "kill"],
-                "description": "check: query status; wait: block; write: stdin; kill: terminate"
-            },
-            "id": {
-                "type": "integer",
-                "description": "Process id from backgrounded exec"
-            },
-            "timeout_secs": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 3600,
-                "description": "Wait timeout (default 120)"
-            },
-            "text": {
-                "type": "string",
-                "description": "Text for write action"
-            }
-        },
-        "required": ["action", "id"],
-        "additionalProperties": false
-    })
-}
-
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_display("process", crate::display::project_process);
     mgr.register_typed(ProcessTool);
@@ -324,7 +280,6 @@ mod tests {
             _ => panic!("process output must have a text model block"),
         };
         assert_eq!(model, output.0.to_string());
-        assert_eq!(output.summary().as_deref(), Some("process 7: running"));
         let display = output.display(&serde_json::json!({"action": "check", "id": 7}));
         assert_eq!(display.summary.as_deref(), Some("ok"));
         assert_ne!(

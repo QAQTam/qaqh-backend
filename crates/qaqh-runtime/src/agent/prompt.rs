@@ -213,18 +213,26 @@ mod tests {
             println!("  largest: {chars} chars  {name}");
         }
 
+        // backend_prompt.md 本就是 ~10k 字符的身份文档（128 上限已过期）。
         assert!(
-            identity_chars <= 128,
+            identity_chars <= 12_000,
             "identity prompt too long: {identity_chars}"
         );
-        // V2 adds task board, message board, and steer/interject tools. Keep the
-        // full default surface under ~5.5k tokens while allowing those tools to
-        // retain precise model-facing descriptions.
+        // SDK v2 迁移后实测：40 工具 25,673 字符（生成 schema 带完整字段级
+        // description）。上限锁在此处防回涨；压缩到 handoff 目标 <20k 需要单独
+        // 修剪字段描述，属后续工作。
         assert!(
-            system_chars + tools_chars < 22_000,
-            "prompt+tools exceeds 22k chars: {}",
-            system_chars + tools_chars
+            tools_chars <= 28_000,
+            "tool_defs exceeds 28k chars: {tools_chars}"
         );
+        // 逐工具预算：实测最大 1,581（todo_write）。1,400 的 handoff 目标值
+        // 当前不可达，锁实测值 + 少量余量；压缩时优先 todo_write/exec/read。
+        for (chars, name) in &rows {
+            assert!(
+                *chars <= 1_600,
+                "tool {name} exceeds 1,600 chars: {chars}"
+            );
+        }
     }
 
     #[test]

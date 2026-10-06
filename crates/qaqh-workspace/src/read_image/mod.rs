@@ -31,8 +31,8 @@ use serde_json::{Value, json};
 use crate::ToolRisk;
 use crate::file_mutate::{mutation_error, resolve_mutation_path};
 use crate::tool_api::{
-    OutputBudget, PathOp, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection, ToolSource, TypedTool,
+    PathOp, ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError,
+    ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 /// Raw byte cap before decoding (~20 MB).
@@ -121,11 +121,14 @@ use crate::runtime::image_model_supported;
 
 // ── Typed output / handler ────────────────────────────────────────────
 
+/// Load image into visual context (by image_index or file path).
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadImageArgs {
+    /// Uploaded image index (0-based)
     #[serde(default)]
     pub image_index: Option<u64>,
+    /// Image file path
     #[serde(default)]
     pub path: Option<String>,
 }
@@ -146,6 +149,15 @@ pub struct ReadImageOutput {
     image: Option<qaqh_types::ToolImage>,
 }
 
+impl ReadImageOutput {
+    fn summary_text(&self) -> String {
+        format!(
+            "{}x{} · {}",
+            self.width, self.height, self.mime_type
+        )
+    }
+}
+
 impl ToolProjection for ReadImageOutput {
     fn images(&self) -> Vec<qaqh_types::ToolImage> {
         self.image.clone().into_iter().collect()
@@ -155,13 +167,6 @@ impl ToolProjection for ReadImageOutput {
         vec![ToolContentBlock::Text {
             text: self.model_text.clone(),
         }]
-    }
-
-    fn summary(&self) -> Option<String> {
-        Some(format!(
-            "{}x{} · {}",
-            self.width, self.height, self.mime_type
-        ))
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
@@ -178,7 +183,7 @@ impl ToolProjection for ReadImageOutput {
             });
         let (text, truncated) = crate::tool_api::display::clamp_display_body(&self.model_text);
         ToolDisplay::new(header, ToolBody::Text { text, truncated })
-            .with_summary(self.summary().unwrap_or_else(|| "image".to_string()))
+            .with_summary(self.summary_text())
     }
 }
 
@@ -188,24 +193,14 @@ impl TypedTool for ReadImageTool {
     type Args = ReadImageArgs;
     type Output = ReadImageOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("read_image").expect("valid read_image tool name"),
-            display_name: None,
-            description: "Load image into visual context (by image_index or file path). Auto downscale if oversized."
-                .to_string(),
-            input_schema: read_image_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(ReadImageOutput))
-                .expect("read_image output schema"),
-            category: crate::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("read_image")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "read_image",
+            "Load image into visual context (by image_index or file path). Auto downscale if oversized.",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(30),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -340,27 +335,6 @@ fn read_image_file(
         )
     })?;
     Ok((bytes, full.display().to_string()))
-}
-
-fn read_image_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "image_index": {
-                "type": "integer",
-                "description": "Uploaded image index (0-based)"
-            },
-            "path": {
-                "type": "string",
-                "description": "Image file path"
-            }
-        },
-        "additionalProperties": false,
-        "anyOf": [
-            { "required": ["image_index"] },
-            { "required": ["path"] }
-        ]
-    })
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {

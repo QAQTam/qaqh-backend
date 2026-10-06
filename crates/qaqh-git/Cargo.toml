@@ -1,0 +1,16 @@
+[package]
+name = "qaqh-git"
+version.workspace = true
+edition.workspace = true
+description = "QAQ-Harness git panel API: thin git2 wrappers for the daemon control protocol (P2 crate split from qaqh-workspace)"
+
+[dependencies]
+git2 = { version = "0.21", features = ["vendored-libgit2"] }
+serde_json = "1"
+log = "0.4"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"

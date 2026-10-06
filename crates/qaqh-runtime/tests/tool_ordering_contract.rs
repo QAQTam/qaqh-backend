@@ -610,13 +610,13 @@ fn skill_effects_apply_in_model_order() {
     let calls = [
         (
             "sk-alpha",
-            "skills",
-            serde_json::json!({"action": "activate", "name": "alpha"}),
+            "skill_activate",
+            serde_json::json!({"name": "alpha"}),
         ),
         (
             "sk-beta",
-            "skills",
-            serde_json::json!({"action": "activate", "name": "beta"}),
+            "skill_activate",
+            serde_json::json!({"name": "beta"}),
         ),
     ];
     // alpha 串行（后执行）、beta 并行（先执行）：若按完成序应用 effects，
