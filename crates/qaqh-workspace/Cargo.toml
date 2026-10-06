@@ -9,6 +9,8 @@ description = "QAQ-Harness in-process tool execution library"
 qaqh-tool-core = { path = "../qaqh-tool-core" }
 # 权限引擎 + 全局状态（P2 拆分）：单一事实源在 qaqh-permission。
 qaqh-permission = { path = "../qaqh-permission" }
+# FS 核心层（P2 拆分）：file_shared/cache/state 单一事实源。
+qaqh-fs-core = { path = "../qaqh-fs-core" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
