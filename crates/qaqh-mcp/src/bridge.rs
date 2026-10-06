@@ -26,7 +26,7 @@ use qaqh_types::{
     ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader, ToolResultDisplayOutcome,
     ToolResultDisplayOutcomeState,
 };
-use qaqh_workspace::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
 use qaqh_workspace::{DynamicTool, MCP_DYNAMIC_PREFIX, ToolResult, ToolStatus, now_utc8};
 use rmcp::model::{CallToolResult, ContentBlock};
 
