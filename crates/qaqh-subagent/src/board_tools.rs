@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use qaqh_workspace::ToolRisk;
 use qaqh_workspace::tool_api::{
-    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
-    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
-    ToolSource, TypedTool,
+    ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
+    ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,7 +20,9 @@ use crate::host::{
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BoardChannelCreateArgs {
+    /// Lowercase channel slug.
     name: String,
+    /// Optional channel topic.
     #[serde(default)]
     topic: Option<String>,
 }
@@ -31,6 +32,7 @@ pub struct BoardChannelCreateArgs {
 pub struct BoardThreadCreateArgs {
     channel_id: String,
     title: String,
+    /// Optional task id in the same root tree.
     #[serde(default)]
     task_id: Option<String>,
 }
@@ -39,7 +41,9 @@ pub struct BoardThreadCreateArgs {
 #[serde(deny_unknown_fields)]
 pub struct BoardPostArgs {
     thread_id: String,
+    /// Post body, at most 16 KiB.
     body: String,
+    /// Optional task id in the same root tree.
     #[serde(default)]
     task_id: Option<String>,
 }
@@ -61,6 +65,7 @@ pub struct BoardListArgs {
     thread_id: Option<String>,
     #[serde(default)]
     include_posts: bool,
+    /// Cap on returned posts when include_posts is set (1..=200).
     #[serde(default)]
     post_limit: Option<usize>,
 }
@@ -103,22 +108,17 @@ macro_rules! simple_projection {
                 }]
             }
 
-            fn summary(&self) -> Option<String> {
-                Some($label.to_string())
-            }
-
             fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-                let summary = self.summary().unwrap_or_default();
                 ToolDisplay::new(
                     qaqh_workspace::tool_api::ToolHeader::Other {
                         label: "board".to_string(),
                     },
                     qaqh_workspace::tool_api::ToolBody::Text {
-                        text: summary.clone(),
+                        text: $label.to_string(),
                         truncated: false,
                     },
                 )
-                .with_summary(summary)
+                .with_summary($label.to_string())
             }
         }
     };
@@ -135,12 +135,8 @@ impl ToolProjection for BoardPostOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(format!("posted {}", self.post.post_id))
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        let summary = self.summary().unwrap_or_default();
+        let summary = format!("posted {}", self.post.post_id);
         ToolDisplay::new(
             qaqh_workspace::tool_api::ToolHeader::Other {
                 label: "board".to_string(),
@@ -161,17 +157,13 @@ impl ToolProjection for BoardListOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(format!(
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        let summary = format!(
             "{} channel(s), {} thread(s), {} post(s)",
             self.board.channels.len(),
             self.board.threads.len(),
             self.board.posts.len()
-        ))
-    }
-
-    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        let summary = self.summary().unwrap_or_default();
+        );
         ToolDisplay::new(
             qaqh_workspace::tool_api::ToolHeader::Other {
                 label: "board".to_string(),
@@ -191,31 +183,14 @@ impl TypedTool for BoardChannelCreateTool {
     type Args = BoardChannelCreateArgs;
     type Output = BoardChannelOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("board_channel_create").expect("valid board tool name"),
-            display_name: None,
-            description: "Create a persistent channel on the current root tree's message board."
-                .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Lowercase channel slug." },
-                    "topic": { "type": "string", "description": "Optional channel topic." }
-                },
-                "required": ["name"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(BoardChannelOutput))
-                .expect("board_channel_create output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "board_channel_create",
+            "Create a persistent channel on the current root tree's message board.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -240,31 +215,14 @@ impl TypedTool for BoardThreadCreateTool {
     type Args = BoardThreadCreateArgs;
     type Output = BoardThreadOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("board_thread_create").expect("valid board tool name"),
-            display_name: None,
-            description: "Create a persistent thread in a message board channel.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "channel_id": { "type": "string" },
-                    "title": { "type": "string" },
-                    "task_id": { "type": "string", "description": "Optional task id in the same root tree." }
-                },
-                "required": ["channel_id", "title"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(BoardThreadOutput))
-                .expect("board_thread_create output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "board_thread_create",
+            "Create a persistent thread in a message board channel.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -290,33 +248,14 @@ impl TypedTool for BoardPostTool {
     type Args = BoardPostArgs;
     type Output = BoardPostOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("board_post").expect("valid board tool name"),
-            display_name: None,
-            description:
-                "Append a persistent post to a message board thread and best-effort notify running subscribers."
-                    .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "thread_id": { "type": "string" },
-                    "body": { "type": "string", "description": "Post body, at most 16 KiB." },
-                    "task_id": { "type": "string", "description": "Optional task id in the same root tree." }
-                },
-                "required": ["thread_id", "body"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(BoardPostOutput))
-                .expect("board_post output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "board_post",
+            "Append a persistent post to a message board thread and best-effort notify running subscribers.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -351,32 +290,14 @@ impl TypedTool for BoardSubscribeTool {
     type Args = BoardSubscribeArgs;
     type Output = BoardSubscriptionOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("board_subscribe").expect("valid board tool name"),
-            display_name: None,
-            description: "Subscribe or unsubscribe the caller from a board channel or thread."
-                .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target_kind": { "type": "string", "enum": ["channel", "thread"] },
-                    "target_id": { "type": "string" },
-                    "action": { "type": "string", "enum": ["subscribe", "unsubscribe"] }
-                },
-                "required": ["target_kind", "target_id", "action"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(BoardSubscriptionOutput))
-                .expect("board_subscribe output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "board_subscribe",
+            "Subscribe or unsubscribe the caller from a board channel or thread.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -402,32 +323,14 @@ impl TypedTool for BoardListTool {
     type Args = BoardListArgs;
     type Output = BoardListOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("board_list").expect("valid board tool name"),
-            display_name: None,
-            description: "List message board channels, threads, posts, and subscriptions."
-                .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "channel_id": { "type": "string" },
-                    "thread_id": { "type": "string" },
-                    "include_posts": { "type": "boolean", "default": false },
-                    "post_limit": { "type": "integer", "minimum": 1, "maximum": 200 }
-                },
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(BoardListOutput))
-                .expect("board_list output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "board_list",
+            "List message board channels, threads, posts, and subscriptions.",
+            qaqh_workspace::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
