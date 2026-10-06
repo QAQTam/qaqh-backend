@@ -3871,6 +3871,7 @@ dependencies = [
  "lsp-types",
  "process-wrap",
  "qaqh-config",
+ "qaqh-tool-core",
  "qaqh-types",
  "qaqh-workspace",
  "serde",
@@ -3890,6 +3891,7 @@ dependencies = [
  "log",
  "process-wrap",
  "qaqh-config",
+ "qaqh-tool-core",
  "qaqh-types",
  "qaqh-workspace",
  "reqwest",
@@ -4034,6 +4036,7 @@ dependencies = [
  "qaqh-config",
  "qaqh-domain",
  "qaqh-ringing",
+ "qaqh-tool-core",
  "qaqh-workspace",
  "schemars 1.2.2",
  "serde",
@@ -4049,6 +4052,20 @@ dependencies = [
  "qaqh-message",
  "qaqh-session",
  "qaqh-types",
+]
+
+[[package]]
+name = "qaqh-tool-core"
+version = "2.0.0-beta.2"
+dependencies = [
+ "anyhow",
+ "log",
+ "qaqh-policy",
+ "qaqh-skills",
+ "qaqh-types",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4101,6 +4118,7 @@ dependencies = [
  "qaqh-sandbox",
  "qaqh-skills",
  "qaqh-spy",
+ "qaqh-tool-core",
  "qaqh-types",
  "regex",
  "sbx-win",

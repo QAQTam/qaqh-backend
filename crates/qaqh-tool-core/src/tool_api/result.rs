@@ -26,7 +26,8 @@ use std::time::Duration;
 use super::error::{ToolError, ToolErrorCode, ToolErrorKind};
 use super::output::{ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue};
 use super::progress::{ProgressSink, ProgressStream, ToolProgress};
-use crate::{ExecProgressSender, ToolResult};
+use crate::ExecProgressSender;
+use qaqh_types::ToolResult;
 
 /// `ToolResult` → [`ToolOutcome`] 映射（唯一权威；MCP/LSP 内部 v1 管线经此收口）。
 pub fn map_tool_result(result: ToolResult) -> ToolOutcome {
@@ -123,7 +124,7 @@ fn map_error(error: &qaqh_types::ToolError) -> ToolError {
 ///
 /// 返回给 handle 侧的 sender 被丢弃后，转发线程自行退出；线程分离运行
 /// （不 join）——后台进程可能在工具返回后继续产生进度帧。
-pub(crate) fn bridge_progress(sink: &ProgressSink) -> ExecProgressSender {
+pub fn bridge_progress(sink: &ProgressSink) -> ExecProgressSender {
     let (tx, rx) = crate::bounded_exec_progress_channel();
     let sink = sink.clone();
     let spawned = std::thread::Builder::new()

@@ -148,3 +148,82 @@ mod schema_spot_check {
         );
     }
 }
+
+/// 能力迁移表 ↔ 注册表交叉验证（tool_capabilities 随 SDK 拆至
+/// qaqh-tool-core；需要 build_tool_manager 的断言留在门面侧）。
+mod tool_capabilities_cross_check {
+    use crate::registration::build_tool_manager;
+    use qaqh_policy::ToolCategory;
+    use qaqh_tool_core::tool_api::Concurrency;
+    use qaqh_tool_core::tool_capabilities::{builtin_capabilities, table_tool_names};
+
+    #[test]
+    fn table_covers_registry_exactly() {
+        let registry: Vec<String> = build_tool_manager(&[])
+            .all_defs()
+            .into_iter()
+            .map(|def| def.function.name)
+            .collect();
+        let table: Vec<String> = table_tool_names()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        assert_eq!(
+            table, registry,
+            "迁移表必须与注册表词表逐项一致（新增/删除工具必须同步本表）"
+        );
+    }
+
+    #[test]
+    fn parallel_tools_are_pure_reads() {
+        let manager = build_tool_manager(&[]);
+        for name in table_tool_names() {
+            let capabilities = builtin_capabilities(name).expect("表内条目");
+            if capabilities.concurrency == Concurrency::Parallel {
+                let category = manager.category_of(name).expect("注册工具");
+                assert!(
+                    matches!(category, ToolCategory::Read | ToolCategory::Net),
+                    "{name} 声明 Parallel 但 category={category:?}（只读才可并行）"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exclusive_tools_are_process_or_rewrite() {
+        let manager = build_tool_manager(&[]);
+        let exclusive: Vec<&str> = table_tool_names()
+            .into_iter()
+            .filter(|name| {
+                builtin_capabilities(name).expect("表内条目").concurrency == Concurrency::Exclusive
+            })
+            .collect();
+        assert_eq!(
+            exclusive,
+            vec!["exec", "journal", "process"],
+            "独占档变更必须显式审查（spec §3.4）"
+        );
+        for name in exclusive {
+            let category = manager.category_of(name).expect("注册工具");
+            assert!(
+                matches!(category, ToolCategory::Exec | ToolCategory::Write),
+                "{name} 独占但 category={category:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn idempotent_tools_are_pure_reads() {
+        let manager = build_tool_manager(&[]);
+        for name in table_tool_names() {
+            let capabilities = builtin_capabilities(name).expect("表内条目");
+            if capabilities.idempotent {
+                let category = manager.category_of(name).expect("注册工具");
+                assert!(
+                    matches!(category, ToolCategory::Read | ToolCategory::Net),
+                    "{name} 声明幂等但 category={category:?}（重放安全仅限纯读取）"
+                );
+            }
+        }
+    }
+}
