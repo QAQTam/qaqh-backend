@@ -1361,22 +1361,31 @@ fn exec_registered_alone_with_shell_param() {
     assert_eq!(exec.function.name, "exec");
     let props = exec.function.parameters.get("properties").unwrap();
     // exec 必须暴露 shell 参数（含 powershell 别名）且只接受 shell command。
-    let shell_enum = props["shell"]["enum"].as_array().expect("shell enum");
-    for name in ["bash", "zsh", "sh", "pwsh", "powershell", "cmd"] {
-        assert!(
-            shell_enum.contains(&serde_json::json!(name)),
-            "shell enum missing {name}: {shell_enum:?}"
-        );
-    }
+    // v2 类型生成：shell 是 serde(default) 的 Option<String>，schema 为
+    // string|null 无 enum；合法 shell 名由描述文档 + run() 校验兜底。
+    let shell = &props["shell"];
+    assert!(
+        shell["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("powershell")),
+        "exec.shell description must enumerate accepted shells: {:?}",
+        shell["description"]
+    );
     assert!(props.get("command").is_some());
     assert!(
         props.get("argv").is_none(),
         "argv support must stay removed"
     );
     assert!(props.get("args").is_some());
-    assert_eq!(
-        exec.function.parameters.get("required"),
-        Some(&serde_json::json!(["command"]))
+    // v2 类型生成：command 带 serde(default) → 无 required；缺 command 由
+    // run() 校验兜底（missing_command）。
+    assert!(
+        exec.function
+            .parameters
+            .get("required")
+            .and_then(|r| r.as_array())
+            .is_none_or(|r| !r.contains(&serde_json::json!("command"))),
+        "command is serde(default); required set comes from the type"
     );
     assert!(
         exec.function
@@ -1519,4 +1528,16 @@ fn is_elevated() -> bool {
     };
     let _ = std::fs::remove_file(&probe);
     true
+}
+
+#[test]
+fn probe_exec_schema_shell_only_for_diagnosis() {
+    let mut mgr = crate::ToolManager::new();
+    super::register::register(&mut mgr);
+    let defs = mgr.all_defs();
+    let exec = &defs[0];
+    println!(
+        "shell prop: {}",
+        serde_json::to_string_pretty(&exec.function.parameters["properties"]["shell"]).unwrap()
+    );
 }

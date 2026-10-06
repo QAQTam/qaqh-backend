@@ -1,9 +1,9 @@
-//! Agent Skill activation tool.
+//! Agent Skill 工具（SDK v2 三件套）。
 //!
-//! The public `skills` action surface remains `activate/list/resource/validate`.
-//! The implementation is a typed tool so model/display/service projections
-//! derive from one output value and skill activation travels as a trusted
-//! typed effect rather than being parsed back out of tool text.
+//! 原 `skills` 聚合工具（action + oneOf 判别）拆为 `skill_activate` /
+//! `skill_list` / `skill_resource` 三个单职责工具；`validate` 动作自模型面
+//! 退役（`qaqh_skills::validate_file` 保留为宿主侧诊断入口）。skill activation
+//! 经 typed effect 传输，不从工具文本反解。
 
 #![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
 
@@ -14,20 +14,33 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::tool_api::{
-    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
-    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
-    ToolSource, TypedTool,
+    clamp_display_body, ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError,
+    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection,
+    TypedTool,
 };
 use crate::{ToolEffect, ToolRisk};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SkillsArgs {
-    action: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
+/// Activate a skill by exact catalog name.
+pub struct SkillActivateArgs {
+    /// Skill name (exact match from the current skill catalog).
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// List the effective skill catalog.
+pub struct SkillListArgs {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// Read a bundled skill resource file.
+pub struct SkillResourceArgs {
+    /// Skill name (exact match from the current skill catalog).
+    pub name: String,
+    /// Resource path relative to the skill's manifest.
+    pub path: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -46,7 +59,8 @@ pub struct SkillDiagnosticEntry {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SkillsActivateOutput {
+/// Activation result; instructions arrive via the trailing system envelope.
+pub struct SkillActivateOutput {
     status: &'static str,
     skill: String,
     resources: Vec<String>,
@@ -57,144 +71,154 @@ pub struct SkillsActivateOutput {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SkillsListOutput {
+/// Effective skill catalog with load diagnostics.
+pub struct SkillListOutput {
     skills: Vec<SkillListEntry>,
     diagnostics: Vec<SkillDiagnosticEntry>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct SkillsResourceOutput(String);
+/// Bundled skill resource content.
+pub struct SkillResourceOutput(String);
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SkillsValidateOutput {
-    name: String,
-    source: PathBuf,
-    valid: bool,
-    errors: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum SkillsOutput {
-    Activate(Box<SkillsActivateOutput>),
-    List(SkillsListOutput),
-    Resource(SkillsResourceOutput),
-    Validate(SkillsValidateOutput),
-}
-
-impl ToolProjection for SkillsOutput {
+impl ToolProjection for SkillActivateOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
-            text: model_text(self),
+            text: serde_json::to_string(self).unwrap_or_default(),
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        match self {
-            Self::Activate(output) => Some(output.content.clone()),
-            Self::List(output) => Some(format!(
-                "{} skill(s), {} diagnostic(s)",
-                output.skills.len(),
-                output.diagnostics.len()
-            )),
-            Self::Resource(output) => output.0.lines().next().map(str::to_string),
-            Self::Validate(output) if output.valid => {
-                Some(format!("skill '{}' is valid", output.name))
-            }
-            Self::Validate(output) => Some(format!(
-                "skill '{}' has {} validation error(s)",
-                output.name,
-                output.errors.len()
-            )),
-        }
-    }
-
-    fn display(&self, args: &serde_json::Value) -> ToolDisplay {
-        crate::display::project_skills(args, &model_text(self))
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        ToolDisplay::new(
+            crate::tool_api::ToolHeader::Other {
+                label: "skills activate".into(),
+            },
+            crate::tool_api::ToolBody::None,
+        )
+        .with_summary(self.content.clone())
     }
 
     fn effects(&self) -> Vec<ToolEffect> {
-        match self {
-            Self::Activate(output) => vec![ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(
-                output.activation.clone(),
-            ))],
-            _ => Vec::new(),
-        }
+        vec![ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(
+            self.activation.clone(),
+        ))]
     }
 }
 
-fn model_text(output: &SkillsOutput) -> String {
-    match output {
-        SkillsOutput::Resource(resource) => resource.0.clone(),
-        _ => serde_json::to_string(output).unwrap_or_default(),
+impl ToolProjection for SkillListOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_default(),
+        }]
+    }
+
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        ToolDisplay::new(
+            crate::tool_api::ToolHeader::Other {
+                label: "skills list".into(),
+            },
+            crate::tool_api::ToolBody::None,
+        )
+        .with_summary(format!(
+            "listed {} skills · {} diagnostics",
+            self.skills.len(),
+            self.diagnostics.len()
+        ))
     }
 }
 
-pub struct SkillsTool;
+impl ToolProjection for SkillResourceOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text { text: self.0.clone() }]
+    }
 
-impl TypedTool for SkillsTool {
-    type Args = SkillsArgs;
-    type Output = SkillsOutput;
+    fn display(&self, args: &serde_json::Value) -> ToolDisplay {
+        let (text, truncated) = clamp_display_body(&self.0);
+        let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        ToolDisplay::new(
+            ToolHeader::Other {
+                label: "skills resource".into(),
+            },
+            ToolBody::Text { text, truncated },
+        )
+        .with_summary(format!("resource · {name}/{path}"))
+    }
+}
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("skills").expect("valid skills tool name"),
-            display_name: None,
-            description: "Skills: activate/list/resource/validate. activate injects envelope as trailing system message.".into(),
-            input_schema: skills_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(SkillsOutput))
-                .expect("skills output schema"),
-            category: crate::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(15),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("skills")
-                .unwrap_or_default(),
-        }
+pub struct SkillActivateTool;
+
+impl TypedTool for SkillActivateTool {
+    type Args = SkillActivateArgs;
+    type Output = SkillActivateOutput;
+
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "skill_activate",
+            "Activate a skill: injects the full instructions as a trailing <skill_context_envelope> system message (authoritative — it replaces all older skill instructions).",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(15),
+        )
     }
 
     fn run(
         &self,
         ctx: &ToolCallContext,
-        args: SkillsArgs,
+        args: SkillActivateArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let name = args.name.as_deref();
-        let path = args.path.as_deref();
-        match args.action.as_str() {
-            "activate" if name.is_some() && path.is_none() => {
-                activate_skill(ctx, name.expect("checked above"))
-            }
-            "list" if name.is_none() && path.is_none() => list_skills(ctx),
-            "resource" if name.is_some() && path.is_some() => read_resource(
-                ctx,
-                name.expect("checked above"),
-                path.expect("checked above"),
-            ),
-            "validate" if name.is_some() && path.is_none() => {
-                validate_skill(ctx, name.expect("checked above"))
-            }
-            "activate" | "list" | "resource" | "validate" => Err(recoverable(legacy_error(
-                ToolErrorKind::InvalidArguments,
-                "invalid_arguments",
-                "arguments do not match the selected skills action",
-            )
-            .with_hint(
-                "activate and validate require name; list accepts only action; resource requires name and path.",
-            ))),
-            _ => Err(recoverable(legacy_error(
-                ToolErrorKind::InvalidArguments,
-                "invalid_action",
-                "skills action must be activate, list, resource, or validate",
-            )
-            .with_hint("Choose the action matching the required skill operation."))),
-        }
+        activate_skill(ctx, &args.name)
     }
 }
 
-fn activate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillsOutput, ToolExecutionError> {
+pub struct SkillListTool;
+
+impl TypedTool for SkillListTool {
+    type Args = SkillListArgs;
+    type Output = SkillListOutput;
+
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "skill_list",
+            "List the effective skill catalog (names, descriptions, scopes) with load diagnostics.",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(15),
+        )
+    }
+
+    fn run(&self, ctx: &ToolCallContext, _args: SkillListArgs) -> Result<Self::Output, ToolExecutionError> {
+        list_skills(ctx)
+    }
+}
+
+pub struct SkillResourceTool;
+
+impl TypedTool for SkillResourceTool {
+    type Args = SkillResourceArgs;
+    type Output = SkillResourceOutput;
+
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "skill_resource",
+            "Read a bundled skill resource file on demand (relative path from the activated skill's manifest).",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(15),
+        )
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        args: SkillResourceArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        read_resource(ctx, &args.name, &args.path)
+    }
+}
+
+fn activate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillActivateOutput, ToolExecutionError> {
     let activation = qaqh_skills::load_named(&ctx.workspace_root, name).map_err(|error| {
         recoverable(
             legacy_error(ToolErrorKind::NotFound, "skill_not_available", error)
@@ -208,18 +232,18 @@ fn activate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillsOutput, Too
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     let content = format!(
-        "[OK] skill '{skill}' activated. The full instructions are injected as the trailing <skill_context_envelope> system message (authoritative — it replaces all older skill instructions). If the envelope is not visible, call resource to read bundled files on demand."
+        "[OK] skill '{skill}' activated. The full instructions are injected as the trailing <skill_context_envelope> system message (authoritative — it replaces all older skill instructions). If the envelope is not visible, call skill_resource to read bundled files on demand."
     );
-    Ok(SkillsOutput::Activate(Box::new(SkillsActivateOutput {
+    Ok(SkillActivateOutput {
         status: "ok",
         skill,
         resources,
         content,
         activation,
-    })))
+    })
 }
 
-fn list_skills(ctx: &ToolCallContext) -> Result<SkillsOutput, ToolExecutionError> {
+fn list_skills(ctx: &ToolCallContext) -> Result<SkillListOutput, ToolExecutionError> {
     let catalog = qaqh_skills::discover(&ctx.workspace_root);
     let skills = catalog
         .skills
@@ -246,17 +270,17 @@ fn list_skills(ctx: &ToolCallContext) -> Result<SkillsOutput, ToolExecutionError
             message: diagnostic.message.clone(),
         })
         .collect();
-    Ok(SkillsOutput::List(SkillsListOutput {
+    Ok(SkillListOutput {
         skills,
         diagnostics,
-    }))
+    })
 }
 
 fn read_resource(
     ctx: &ToolCallContext,
     name: &str,
     path: &str,
-) -> Result<SkillsOutput, ToolExecutionError> {
+) -> Result<SkillResourceOutput, ToolExecutionError> {
     if name.is_empty() || path.is_empty() {
         return Err(recoverable(
             legacy_error(
@@ -279,44 +303,7 @@ fn read_resource(
             )
         },
     )?;
-    Ok(SkillsOutput::Resource(SkillsResourceOutput(
-        resource.content,
-    )))
-}
-
-fn validate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillsOutput, ToolExecutionError> {
-    if name.is_empty() {
-        return Err(recoverable(
-            legacy_error(
-                ToolErrorKind::InvalidArguments,
-                "missing_name",
-                "skill name is required",
-            )
-            .with_hint("Use an exact name from the current skill catalog."),
-        ));
-    }
-    let catalog = qaqh_skills::discover(&ctx.workspace_root);
-    let Some(skill) = catalog.skills.iter().find(|skill| skill.name == name) else {
-        return Err(recoverable(
-            legacy_error(
-                ToolErrorKind::NotFound,
-                "skill_not_available",
-                format!("unknown skill '{name}'"),
-            )
-            .with_hint("Use an exact name from the current skill catalog."),
-        ));
-    };
-    let diagnostics = qaqh_skills::validate_file(&skill.path);
-    let errors = diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.message.clone())
-        .collect::<Vec<_>>();
-    Ok(SkillsOutput::Validate(SkillsValidateOutput {
-        name: name.to_owned(),
-        source: skill.path.clone(),
-        valid: errors.is_empty(),
-        errors,
-    }))
+    Ok(SkillResourceOutput(resource.content))
 }
 
 fn recoverable(error: ToolError) -> ToolExecutionError {
@@ -329,53 +316,11 @@ fn legacy_error(kind: ToolErrorKind, code: &str, detail: impl Into<String>) -> T
     error
 }
 
-fn skills_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["activate", "list", "resource", "validate"],
-                "description": "Action"
-            },
-            "name": {
-                "type": "string",
-                "description": "Skill name"
-            },
-            "path": {
-                "type": "string",
-                "description": "Resource path (for resource)"
-            }
-        },
-        "required": ["action"],
-        "additionalProperties": false,
-        "oneOf": [
-            {
-                "title": "Activate a skill",
-                "properties": {"action": {"const": "activate"}},
-                "required": ["action", "name"]
-            },
-            {
-                "title": "List effective skills",
-                "properties": {"action": {"const": "list"}},
-                "required": ["action"],
-                "not": {"anyOf": [{"required": ["name"]}, {"required": ["path"]}]}
-            },
-            {
-                "title": "Read a skill resource",
-                "properties": {"action": {"const": "resource"}},
-                "required": ["action", "name", "path"]
-            },
-            {
-                "title": "Validate a skill",
-                "properties": {"action": {"const": "validate"}},
-                "required": ["action", "name"]
-            }
-        ]
-    })
-}
-
 pub fn register(mgr: &mut crate::ToolManager) {
+    // 旧 `skills` 记录的重建兜底：typed 工具始终自带 display，历史会话
+    // （messages.jsonl 中的 "skills" 名字）经此投影。
     mgr.register_display("skills", crate::display::project_skills);
-    mgr.register_typed(SkillsTool);
+    mgr.register_typed(SkillActivateTool);
+    mgr.register_typed(SkillListTool);
+    mgr.register_typed(SkillResourceTool);
 }

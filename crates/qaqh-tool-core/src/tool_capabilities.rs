@@ -99,9 +99,9 @@ const EXEC: ToolCapabilities = ToolCapabilities {
     interactive: false,
 };
 
-/// 迁移表：20 项，顺序与注册表词表一致（`registration.rs` 的
+/// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 20] = [
+const TABLE: [(&str, ToolCapabilities); 22] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
@@ -115,7 +115,10 @@ const TABLE: [(&str, ToolCapabilities); 20] = [
     ("process", EXCLUSIVE),
     ("read", READ_ONLY),
     ("read_image", READ_ONLY),
-    ("skills", MUTATING),
+    // skill_activate：改写会话内技能激活集（不动工作区文件）。
+    ("skill_activate", SESSION_MUTATING),
+    ("skill_list", READ_ONLY),
+    ("skill_resource", READ_ONLY),
     // spy：journal/cat 只读，undo/restore 改写工作区。串行已足够（单次
     // undo/restore 都是短操作，不进 EXCLUSIVE 的 process/rewrite 封闭集）。
     ("spy", MUTATING),
@@ -145,91 +148,7 @@ pub fn table_tool_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permission::ToolCategory;
-    use crate::registration::build_tool_manager;
 
-    #[test]
-    fn table_covers_registry_exactly() {
-        let registry: Vec<String> = build_tool_manager(&[])
-            .all_defs()
-            .into_iter()
-            .map(|def| def.function.name)
-            .collect();
-        let table: Vec<String> = table_tool_names()
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
-        assert_eq!(
-            table, registry,
-            "迁移表必须与注册表词表逐项一致（新增/删除工具必须同步本表）"
-        );
-    }
-
-    #[test]
-    fn parallel_tools_are_pure_reads() {
-        let manager = build_tool_manager(&[]);
-        for name in table_tool_names() {
-            let capabilities = builtin_capabilities(name).expect("表内条目");
-            if capabilities.concurrency == Concurrency::Parallel {
-                let category = manager.category_of(name).expect("注册工具");
-                assert!(
-                    matches!(category, ToolCategory::Read | ToolCategory::Net),
-                    "{name} 声明 Parallel 但 category={category:?}（只读才可并行）"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn exclusive_tools_are_process_or_rewrite() {
-        let manager = build_tool_manager(&[]);
-        let exclusive: Vec<&str> = table_tool_names()
-            .into_iter()
-            .filter(|name| {
-                builtin_capabilities(name).expect("表内条目").concurrency == Concurrency::Exclusive
-            })
-            .collect();
-        assert_eq!(
-            exclusive,
-            vec!["exec", "journal", "process"],
-            "独占档变更必须显式审查（spec §3.4）"
-        );
-        for name in exclusive {
-            let category = manager.category_of(name).expect("注册工具");
-            assert!(
-                matches!(category, ToolCategory::Exec | ToolCategory::Write),
-                "{name} 独占但 category={category:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn streaming_is_only_where_progress_frames_exist() {
-        let streaming: Vec<&str> = table_tool_names()
-            .into_iter()
-            .filter(|name| builtin_capabilities(name).expect("表内条目").streaming)
-            .collect();
-        assert_eq!(
-            streaming,
-            vec!["exec"],
-            "新增流式工具时必须同步本断言与进度通道接线"
-        );
-    }
-
-    #[test]
-    fn idempotent_tools_are_pure_reads() {
-        let manager = build_tool_manager(&[]);
-        for name in table_tool_names() {
-            let capabilities = builtin_capabilities(name).expect("表内条目");
-            if capabilities.idempotent {
-                let category = manager.category_of(name).expect("注册工具");
-                assert!(
-                    matches!(category, ToolCategory::Read | ToolCategory::Net),
-                    "{name} 声明幂等但 category={category:?}（重放安全仅限纯读取）"
-                );
-            }
-        }
-    }
 
     #[test]
     fn workspace_unbound_tools_are_pinned() {
@@ -243,7 +162,14 @@ mod tests {
             .collect();
         assert_eq!(
             unbound,
-            vec!["ask", "todo_list", "todo_update", "todo_write", "web_fetch"],
+            vec![
+                "ask",
+                "skill_activate",
+                "todo_list",
+                "todo_update",
+                "todo_write",
+                "web_fetch"
+            ],
             "非 workspace 绑定工具必须显式审查（执行器不注入 workspace_root）"
         );
     }

@@ -39,7 +39,7 @@ Under the default `workspace-write` tier, `exec` and every network call prompt t
 
 # exec and process
 
-- Your command is wrapped by the session shell; on Windows that is pwsh unless you pass `shell`. Pass `shell: "bash"` for POSIX syntax. Under pwsh, arguments arrive in `$args` — `$argN` does not exist. `cmd` rejects `args`.
+- Your command is wrapped by the session shell; on Windows that is pwsh unless you pass `shell`. Pass `shell: "bash"` for POSIX syntax. Under bash/zsh/sh, extra `args` arrive as `$1`/`$2`/`$@` (`$0` is the placeholder `_`). Under pwsh, arguments arrive in `$args` — `$argN` does not exist. `cmd` rejects `args`.
 - The child environment is cleared to a minimal whitelist plus your `env` overrides. The daemon's environment and secrets are not inherited; pass explicitly what the command needs.
 - `cwd` defaults to the workspace root.
 - A timeout does not kill the process: you get `status: "backgrounded"` and a `process_id`. Continue with `process {action: check|wait|write|kill, id}`. There is no `list` action, and exited processes are evicted after ~10 minutes.
@@ -62,12 +62,12 @@ Under the default `workspace-write` tier, `exec` and every network call prompt t
 # Delegation
 
 - `spawn_subagent {task_description, agent_name, context}` starts an isolated session with its own context and returns immediately. Its final answer is injected later as a `[SUBAGENT]` message. Do not poll — no wait loops, no repeated `list_agents`. `wait_agent` only signals mailbox activity and returns no content.
-- A subagent cannot see your conversation, so put everything it needs into `task_description` and `context`. Its allowlist defaults to `read` + `exec` + `skills`, and it has no approval channel: workspace file writes auto-approve while `exec` and network calls are denied silently. Delegate research and reading, not builds or installs.
+- A subagent cannot see your conversation, so put everything it needs into `task_description` and `context`. Its allowlist defaults to `read` + `exec` + the `skill_*` tools, and it has no approval channel: workspace file writes auto-approve while `exec` and network calls are denied silently. Delegate research and reading, not builds or installs.
 - `agent_name` is a lowercase `verb_task` label. `steer_agent` and `interject_agent` merge into a running turn; `send_message` queues; `followup_task` queues and triggers a turn. `task_*` and `board_*` coordinate several agents through a shared task board and message board.
 
 # Skills, MCP, web
 
-- `skills {action: "list"}` discovers skills; `activate` injects the SKILL.md body as a trailing system message that replaces older skill instructions. Activation executes nothing — you still do the work with normal tools. `resource` reads a bundled file, because `read` on a skill-managed path is rejected with `use_skills_tool`.
+- `skill_list` discovers skills; `skill_activate {name}` injects the SKILL.md body as a trailing system message that replaces older skill instructions. Activation executes nothing — you still do the work with normal tools. `skill_resource {name, path}` reads a bundled file, because `read` on a skill-managed path is rejected with `use_skills_tool`.
 - MCP tools appear as `mcp__<server>__<tool>` carrying the server's own schema. The aggregate `mcp` tool covers resources and prompts only.
 - `web_fetch` accepts http/https, caps the body at 512 KB, and converts HTML to plain text rather than markdown. There are no range requests — fetch a narrower URL. Web search is a provider built-in, not one of these tools.
 

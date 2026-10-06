@@ -32,10 +32,9 @@ use std::time::{Duration, Instant};
 
 use qaqh_domain::ConversationCommand;
 use qaqh_ringing::RingingCommand;
-use qaqh_workspace::tool_api::{
-    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
-    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolName, ToolProjection,
-    ToolSource, TypedTool,
+use qaqh_tool_core::tool_api::{
+    ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
+    ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
 };
 use qaqh_workspace::{ToolManager, ToolRisk};
 use schemars::JsonSchema;
@@ -72,11 +71,15 @@ const WAIT_AGENT_MAX_TIMEOUT_MS: u64 = 3_600_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSubagentArgs {
+    /// Short description of the task for the subagent.
     task_description: String,
+    /// Name for this subagent, verb+task phrase (e.g. 'explore_task', 'review_code').
     #[serde(default)]
     agent_name: Option<String>,
+    /// Optional background context to hand to the subagent before the task.
     #[serde(default)]
     context: Option<String>,
+    /// Maximum time in seconds before the subagent is cancelled. Default 120.
     #[serde(default)]
     timeout_secs: Option<u64>,
 }
@@ -130,16 +133,12 @@ impl ToolProjection for SpawnSubagentOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(self.content.clone())
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "subagent".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Subagent {
+            qaqh_tool_core::tool_api::ToolBody::Subagent {
                 name: self.name.clone(),
                 session_id: self.session_id.clone(),
             },
@@ -147,8 +146,8 @@ impl ToolProjection for SpawnSubagentOutput {
         .with_summary(self.content.clone())
     }
 
-    fn effects(&self) -> Vec<qaqh_workspace::ToolEffect> {
-        vec![qaqh_workspace::ToolEffect::SubagentSpawned {
+    fn effects(&self) -> Vec<qaqh_tool_core::ToolEffect> {
+        vec![qaqh_tool_core::ToolEffect::SubagentSpawned {
             session_id: self.session_id.clone(),
             child_session_id: self.child_session_id.clone(),
             name: self.name.clone(),
@@ -171,6 +170,7 @@ impl ToolProjection for SpawnSubagentOutput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListAgentsArgs {
+    /// Absolute or caller-relative AgentPath prefix. Defaults to /root.
     #[serde(default)]
     path_prefix: Option<String>,
 }
@@ -180,6 +180,12 @@ pub struct ListAgentsOutput {
     agents: Vec<ListedAgent>,
 }
 
+impl ListAgentsOutput {
+    fn summary_text(&self) -> String {
+        format!("{} agent(s)", self.agents.len())
+    }
+}
+
 impl ToolProjection for ListAgentsOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
@@ -187,21 +193,18 @@ impl ToolProjection for ListAgentsOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(format!("{} agent(s)", self.agents.len()))
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agents".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
-                text: self.summary().unwrap_or_default(),
+            qaqh_tool_core::tool_api::ToolBody::Text {
+                text: summary.clone(),
                 truncated: false,
             },
         )
-        .with_summary(self.summary().unwrap_or_default())
+        .with_summary(summary)
     }
 }
 
@@ -211,33 +214,14 @@ impl TypedTool for ListAgentsTool {
     type Args = ListAgentsArgs;
     type Output = ListAgentsOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("list_agents").expect("valid list_agents tool name"),
-            display_name: None,
-            description: "List logical agents at or below a path prefix in the current root \
-                tree. Defaults to /root. Relative prefixes resolve below the caller."
-                .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path_prefix": {
-                        "type": "string",
-                        "description": "Absolute or caller-relative AgentPath prefix. Defaults to /root."
-                    }
-                },
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(ListAgentsOutput))
-                .expect("list_agents output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "list_agents",
+            "List logical agents at or below a path prefix in the current root tree. Defaults to /root. Relative prefixes resolve below the caller.",
+            qaqh_workspace::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -274,7 +258,9 @@ impl TypedTool for ListAgentsTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMessageArgs {
+    /// Absolute AgentPath or caller-relative path of the recipient.
     to: String,
+    /// Message body to deliver to the recipient.
     message: String,
 }
 
@@ -285,6 +271,17 @@ pub struct AgentMessageOutput {
     delivery: String,
 }
 
+impl AgentMessageOutput {
+    fn summary_text(&self) -> String {
+        match self.delivery.as_str() {
+            "queue" => format!("message queued to {}", self.recipient),
+            "trigger" => format!("task triggered at {}", self.recipient),
+            "interrupt" => format!("interrupt requested for {}", self.recipient),
+            other => format!("{other} message for {}", self.recipient),
+        }
+    }
+}
+
 impl ToolProjection for AgentMessageOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
@@ -292,22 +289,13 @@ impl ToolProjection for AgentMessageOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(match self.delivery.as_str() {
-            "queue" => format!("message queued to {}", self.recipient),
-            "trigger" => format!("task triggered at {}", self.recipient),
-            "interrupt" => format!("interrupt requested for {}", self.recipient),
-            other => format!("{other} message for {}", self.recipient),
-        })
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        let summary = self.summary().unwrap_or_default();
+        let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agent-message".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -322,24 +310,14 @@ impl TypedTool for SendMessageTool {
     type Args = AgentMessageArgs;
     type Output = AgentMessageOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("send_message").expect("valid send_message tool name"),
-            display_name: None,
-            description: "Queue a canonical message to another agent in the current root tree \
-                without starting a turn."
-                .to_string(),
-            input_schema: agent_message_schema("Message to queue."),
-            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
-                .expect("send_message output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "send_message",
+            "Queue a canonical message to another agent in the current root tree without starting a turn.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -357,23 +335,14 @@ impl TypedTool for FollowupTaskTool {
     type Args = AgentMessageArgs;
     type Output = AgentMessageOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("followup_task").expect("valid followup_task tool name"),
-            display_name: None,
-            description: "Queue a canonical task to another agent and trigger its turn when idle."
-                .to_string(),
-            input_schema: agent_message_schema("Task to deliver."),
-            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
-                .expect("followup_task output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "followup_task",
+            "Queue a canonical task to another agent and trigger its turn when idle.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -391,23 +360,14 @@ impl TypedTool for SteerAgentTool {
     type Args = AgentMessageArgs;
     type Output = AgentMessageOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("steer_agent").expect("valid steer_agent tool name"),
-            display_name: None,
-            description: "Merge a steering message into the target's current turn at the next safe point. Does not start an idle turn."
-                .to_string(),
-            input_schema: agent_message_schema("Steering guidance."),
-            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
-                .expect("steer_agent output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "steer_agent",
+            "Merge a steering message into the target's current turn at the next safe point. Does not start an idle turn.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -425,23 +385,14 @@ impl TypedTool for InterjectAgentTool {
     type Args = AgentMessageArgs;
     type Output = AgentMessageOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("interject_agent").expect("valid interject_agent tool name"),
-            display_name: None,
-            description: "Merge an urgent correction into the target's current turn at the next safe point. Does not cancel the turn or start an idle turn."
-                .to_string(),
-            input_schema: agent_message_schema("Urgent correction."),
-            output_schema: serde_json::to_value(schemars::schema_for!(AgentMessageOutput))
-                .expect("interject_agent output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "interject_agent",
+            "Merge an urgent correction into the target's current turn at the next safe point. Does not cancel the turn or start an idle turn.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -456,6 +407,7 @@ impl TypedTool for InterjectAgentTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitAgentArgs {
+    /// Timeout in milliseconds. Defaults to 30000.
     #[serde(default)]
     timeout_ms: Option<u64>,
 }
@@ -466,6 +418,12 @@ pub struct WaitAgentOutput {
     timed_out: bool,
 }
 
+impl WaitAgentOutput {
+    fn summary_text(&self) -> String {
+        self.message.clone()
+    }
+}
+
 impl ToolProjection for WaitAgentOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
@@ -473,17 +431,13 @@ impl ToolProjection for WaitAgentOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(self.message.clone())
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        let summary = self.summary().unwrap_or_default();
+        let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agents".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -498,38 +452,16 @@ impl TypedTool for WaitAgentTool {
     type Args = WaitAgentArgs;
     type Output = WaitAgentOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("wait_agent").expect("valid wait_agent tool name"),
-            display_name: None,
-            description: "Wait for a mailbox update from another agent. The wait does not return \
-                message content; queued communications are merged by the runtime at the next \
-                turn boundary."
-                .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "timeout_ms": {
-                        "type": "integer",
-                        "minimum": WAIT_AGENT_MIN_TIMEOUT_MS,
-                        "maximum": WAIT_AGENT_MAX_TIMEOUT_MS,
-                        "description": "Timeout in milliseconds. Defaults to 30000."
-                    }
-                },
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(WaitAgentOutput))
-                .expect("wait_agent output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            // The typed handler enforces the tighter mailbox wait bound. The
-            // descriptor must not kill a valid long wait before it returns.
-            default_timeout: Duration::from_millis(WAIT_AGENT_MAX_TIMEOUT_MS),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        // The typed handler enforces the tighter mailbox wait bound. The
+        // descriptor must not kill a valid long wait before it returns.
+        ToolMeta::new(
+            "wait_agent",
+            "Wait for a mailbox update from another agent. The wait does not return message content; queued communications are merged by the runtime at the next turn boundary.",
+            qaqh_workspace::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_millis(WAIT_AGENT_MAX_TIMEOUT_MS),
+        )
     }
 
     fn run(
@@ -589,6 +521,7 @@ impl TypedTool for WaitAgentTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InterruptAgentArgs {
+    /// Absolute AgentPath or caller-relative target.
     target: String,
 }
 
@@ -598,6 +531,15 @@ pub struct InterruptAgentOutput {
     previous_status: String,
 }
 
+impl InterruptAgentOutput {
+    fn summary_text(&self) -> String {
+        format!(
+            "interrupt requested for {} (was {})",
+            self.recipient, self.previous_status
+        )
+    }
+}
+
 impl ToolProjection for InterruptAgentOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
@@ -605,20 +547,13 @@ impl ToolProjection for InterruptAgentOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(format!(
-            "interrupt requested for {} (was {})",
-            self.recipient, self.previous_status
-        ))
-    }
-
     fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        let summary = self.summary().unwrap_or_default();
+        let summary = self.summary_text();
         ToolDisplay::new(
-            qaqh_workspace::tool_api::ToolHeader::Other {
+            qaqh_tool_core::tool_api::ToolHeader::Other {
                 label: "agents".to_string(),
             },
-            qaqh_workspace::tool_api::ToolBody::Text {
+            qaqh_tool_core::tool_api::ToolBody::Text {
                 text: summary.clone(),
                 truncated: false,
             },
@@ -633,34 +568,14 @@ impl TypedTool for InterruptAgentTool {
     type Args = InterruptAgentArgs;
     type Output = InterruptAgentOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("interrupt_agent").expect("valid interrupt_agent tool name"),
-            display_name: None,
-            description: "Interrupt an agent's current turn without deleting its identity. The \
-                agent remains available for later messages and follow-up tasks."
-                .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Absolute AgentPath or caller-relative target."
-                    }
-                },
-                "required": ["target"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::to_value(schemars::schema_for!(InterruptAgentOutput))
-                .expect("interrupt_agent output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "interrupt_agent",
+            "Interrupt an agent's current turn without deleting its identity. The agent remains available for later messages and follow-up tasks.",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -699,24 +614,6 @@ impl TypedTool for InterruptAgentTool {
             previous_status: interrupted.previous_status,
         })
     }
-}
-
-fn agent_message_schema(message_description: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "to": {
-                "type": "string",
-                "description": "Absolute AgentPath or caller-relative path of the recipient."
-            },
-            "message": {
-                "type": "string",
-                "description": message_description
-            }
-        },
-        "required": ["to", "message"],
-        "additionalProperties": false
-    })
 }
 
 fn handle_agent_message(
@@ -779,25 +676,14 @@ impl TypedTool for SpawnSubagentTool {
     type Args = SpawnSubagentArgs;
     type Output = SpawnSubagentOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("spawn_subagent").expect("valid subagent tool name"),
-            display_name: None,
-            description: "Spawn an isolated subagent for a focused task. Returns process_id; \
-                its final answer is injected as a [SUBAGENT] message when done - do not poll. \
-                agent_name = verb+task phrase (e.g. 'explore_task')."
-                .to_string(),
-            input_schema: spawn_subagent_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(SpawnSubagentOutput))
-                .expect("subagent output schema"),
-            category: qaqh_workspace::permission::ToolCategory::Exec,
-            risk: ToolRisk::Administrative,
-            default_timeout: Duration::from_secs(180),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: qaqh_workspace::tool_api::ToolCapabilities::default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "spawn_subagent",
+            "Spawn an isolated subagent for a focused task. Returns process_id; its final answer is injected as a [SUBAGENT] message when done - do not poll. agent_name = verb+task phrase (e.g. 'explore_task').",
+            qaqh_workspace::permission::ToolCategory::Exec,
+            ToolRisk::Administrative,
+            Duration::from_secs(180),
+        )
     }
 
     fn run(
@@ -959,7 +845,7 @@ impl SubagentTransport for HostTransport {
 fn project_subagent_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<SpawnSubagentOutput>(output) {
         return output.display(args);
     }
@@ -969,11 +855,11 @@ fn project_subagent_display(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("sub");
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "subagent".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Subagent {
+        qaqh_tool_core::tool_api::ToolBody::Subagent {
             name: name.to_string(),
             session_id: String::new(),
         },
@@ -983,15 +869,15 @@ fn project_subagent_display(
 fn project_list_agents_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<ListAgentsOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agents".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "0 agent(s)".to_string(),
             truncated: false,
         },
@@ -1001,15 +887,15 @@ fn project_list_agents_display(
 fn project_agent_message_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<AgentMessageOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agent-message".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "agent message rejected".to_string(),
             truncated: false,
         },
@@ -1019,15 +905,15 @@ fn project_agent_message_display(
 fn project_wait_agent_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<WaitAgentOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agents".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "wait failed".to_string(),
             truncated: false,
         },
@@ -1037,15 +923,15 @@ fn project_wait_agent_display(
 fn project_interrupt_agent_display(
     args: &serde_json::Value,
     output: &str,
-) -> qaqh_workspace::tool_api::ToolDisplay {
+) -> qaqh_tool_core::tool_api::ToolDisplay {
     if let Ok(output) = serde_json::from_str::<InterruptAgentOutput>(output) {
         return output.display(args);
     }
-    qaqh_workspace::tool_api::ToolDisplay::new(
-        qaqh_workspace::tool_api::ToolHeader::Other {
+    qaqh_tool_core::tool_api::ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
             label: "agents".to_string(),
         },
-        qaqh_workspace::tool_api::ToolBody::Text {
+        qaqh_tool_core::tool_api::ToolBody::Text {
             text: "interrupt rejected".to_string(),
             truncated: false,
         },
@@ -1225,20 +1111,6 @@ fn subagent_error(
     let mut error = ToolError::new(kind, message).with_hint(hint);
     error.code = ToolErrorCode::parse_or_builtin(code, kind);
     ToolExecutionError::Recoverable(error)
-}
-
-fn spawn_subagent_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "task_description": {"type": "string", "description": "Short description of the task for the subagent."},
-            "agent_name": {"type": "string", "description": "Name for this subagent, verb+task phrase (e.g. 'explore_task', 'review_code')."},
-            "context": {"type": "string", "description": "Optional background context to hand to the subagent before the task."},
-            "timeout_secs": {"type": "integer", "description": "Maximum time in seconds before the subagent is cancelled. Default 120."}
-        },
-        "required": ["task_description"],
-        "additionalProperties": false
-    })
 }
 
 /// Start task delivery and the background result collector.
@@ -1864,7 +1736,7 @@ mod tests {
             Some("Subagent 'review_code' spawned (process 7)")
         );
         match display.body {
-            qaqh_workspace::tool_api::ToolBody::Subagent { name, session_id } => {
+            qaqh_tool_core::tool_api::ToolBody::Subagent { name, session_id } => {
                 assert_eq!(name, "review_code");
                 assert_eq!(session_id, "sub-seed");
             }
@@ -1878,17 +1750,17 @@ mod tests {
             call_id: "call-subagent".to_string(),
             session_id: "parent-seed".to_string(),
             workspace_root: std::path::PathBuf::from("/tmp/workspace"),
-            mode: qaqh_workspace::tool_api::AgentMode::Code,
+            mode: qaqh_tool_core::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
-            sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
-            sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::workspace_write(
+            sandbox: qaqh_tool_core::tool_api::SandboxMode::Main,
+            sandbox_spec: qaqh_tool_core::tool_api::SandboxSpec::workspace_write(
                 std::path::PathBuf::from("/tmp/workspace"),
             ),
             exec_default_shell: None,
             timeout: Duration::from_secs(180),
-            cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
+            cancellation: qaqh_tool_core::tool_api::CancellationToken::new(),
             progress: None,
-            source: qaqh_workspace::tool_api::ToolCallSource::Model,
+            source: qaqh_tool_core::tool_api::ToolCallSource::Model,
         };
         let error = SpawnSubagentTool
             .run(

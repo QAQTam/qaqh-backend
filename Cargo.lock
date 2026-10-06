@@ -3844,6 +3844,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-fs-core"
+version = "2.0.0-beta.2"
+dependencies = [
+ "hex",
+ "log",
+ "qaqh-permission",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar",
+ "tempfile",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "qaqh-gate"
 version = "2.0.0-beta.2"
 dependencies = [
@@ -3861,6 +3877,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-git"
+version = "2.0.0-beta.2"
+dependencies = [
+ "git2",
+ "log",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "qaqh-lsp"
 version = "2.0.0-beta.2"
 dependencies = [
@@ -3871,6 +3897,7 @@ dependencies = [
  "lsp-types",
  "process-wrap",
  "qaqh-config",
+ "qaqh-tool-core",
  "qaqh-types",
  "qaqh-workspace",
  "serde",
@@ -3890,6 +3917,7 @@ dependencies = [
  "log",
  "process-wrap",
  "qaqh-config",
+ "qaqh-tool-core",
  "qaqh-types",
  "qaqh-workspace",
  "reqwest",
@@ -3907,6 +3935,19 @@ dependencies = [
  "qaqh-session",
  "qaqh-types",
  "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "qaqh-permission"
+version = "2.0.0-beta.2"
+dependencies = [
+ "log",
+ "qaqh-policy",
+ "qaqh-sandbox",
+ "qaqh-skills",
+ "qaqh-types",
  "serde_json",
  "tempfile",
 ]
@@ -4034,6 +4075,7 @@ dependencies = [
  "qaqh-config",
  "qaqh-domain",
  "qaqh-ringing",
+ "qaqh-tool-core",
  "qaqh-workspace",
  "schemars 1.2.2",
  "serde",
@@ -4049,6 +4091,20 @@ dependencies = [
  "qaqh-message",
  "qaqh-session",
  "qaqh-types",
+]
+
+[[package]]
+name = "qaqh-tool-core"
+version = "2.0.0-beta.2"
+dependencies = [
+ "anyhow",
+ "log",
+ "qaqh-policy",
+ "qaqh-skills",
+ "qaqh-types",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4097,20 +4153,22 @@ dependencies = [
  "libc",
  "log",
  "qaqh-domain",
+ "qaqh-fs-core",
+ "qaqh-git",
+ "qaqh-permission",
  "qaqh-policy",
  "qaqh-sandbox",
  "qaqh-skills",
  "qaqh-spy",
+ "qaqh-tool-core",
  "qaqh-types",
  "regex",
- "ropey",
  "sbx-win",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "similar",
- "strsim",
  "tempfile",
  "unicode-normalization",
  "ureq",
@@ -4473,16 +4531,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "ropey"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
-dependencies = [
- "smallvec",
- "str_indices",
 ]
 
 [[package]]
@@ -5186,12 +5234,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "str_indices"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "string_cache"

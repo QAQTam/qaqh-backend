@@ -12,10 +12,9 @@ use super::file_shared::{
 };
 use crate::ToolRisk;
 use crate::tool_api::{
-    AgentMode, CancellationToken, OutputBudget, SandboxMode, ToolBody, ToolCallContext,
-    ToolCallSource, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError, ToolErrorCode,
-    ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection,
-    ToolSource, TypedTool,
+    AgentMode, CancellationToken, SandboxMode, ToolBody, ToolCallContext, ToolCallSource,
+    ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError,
+    ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 // ── Shared helpers ──
@@ -50,14 +49,6 @@ fn write_error(path: &str, error: &std::io::Error) -> String {
         _ => "Check disk space, file locks (another process may hold the file), and permissions.",
     };
     format!("[ERROR] Cannot write {path}: {error} [HINT] {hint}")
-}
-
-fn first_line(output: &str) -> Option<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(160).collect())
 }
 
 /// 文件变更工具的展示摘要：只承载路径 + 变更元信息。
@@ -181,12 +172,17 @@ pub(crate) fn mutation_display(
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteArgs {
+    /// File
     pub path: String,
+    /// Content
     pub content: String,
+    /// Append (default false)
     #[serde(default)]
     pub append: bool,
+    /// Preview only
     #[serde(default)]
     pub dry_run: bool,
+    /// Hash from prior read (optional)
     #[serde(default)]
     pub expected_hash: Option<String>,
 }
@@ -222,10 +218,6 @@ impl ToolProjection for WriteOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        first_line(&self.model_text)
-    }
-
     fn display(&self, args: &Value) -> ToolDisplay {
         let summary = if self.dry_run {
             format!(
@@ -259,24 +251,14 @@ impl TypedTool for WriteTool {
     type Args = WriteArgs;
     type Output = WriteOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("write").expect("valid write tool name"),
-            display_name: None,
-            description: "Write/overwrite/append a file. dry_run previews a diff; use edit for targeted changes."
-                .to_string(),
-            input_schema: write_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(WriteOutput))
-                .expect("write output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: ToolRisk::Write,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("write")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "write",
+            "Write/overwrite/append a file. dry_run previews a diff; use edit for targeted changes.",
+            crate::permission::ToolCategory::Write,
+            ToolRisk::Write,
+            Duration::from_secs(30),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -580,26 +562,12 @@ impl TypedTool for WriteTool {
     }
 }
 
-fn write_schema() -> Value {
-    json!({
-        "type":"object",
-        "properties":{
-            "path":{"type":"string","description":"File"},
-            "content":{"type":"string","description":"Content"},
-            "append":{"type":"boolean","description":"Append (default false)","default":false},
-            "dry_run":{"type":"boolean","description":"Preview only","default":false},
-            "expected_hash":{"type":"string","description":"Hash from prior read (optional)"}
-        },
-        "required":["path","content"],
-        "additionalProperties":false
-    })
-}
-
 // ── delete ──
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteArgs {
+    /// File
     pub path: String,
 }
 
@@ -618,10 +586,6 @@ impl ToolProjection for DeleteOutput {
         vec![ToolContentBlock::Text {
             text: self.content.clone(),
         }]
-    }
-
-    fn summary(&self) -> Option<String> {
-        first_line(&self.content)
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
@@ -643,23 +607,14 @@ impl TypedTool for DeleteTool {
     type Args = DeleteArgs;
     type Output = DeleteOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("delete").expect("valid delete tool name"),
-            display_name: None,
-            description: "Move file to trash (.qaqh/trash/).".to_string(),
-            input_schema: delete_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(DeleteOutput))
-                .expect("delete output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: ToolRisk::Destructive,
-            default_timeout: Duration::from_secs(15),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("delete")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "delete",
+            "Move file to trash (.qaqh/trash/).",
+            crate::permission::ToolCategory::Write,
+            ToolRisk::Destructive,
+            Duration::from_secs(15),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -833,15 +788,6 @@ impl TypedTool for DeleteTool {
     }
 }
 
-fn delete_schema() -> Value {
-    json!({
-        "type":"object",
-        "properties":{"path":{"type":"string","description":"File"}},
-        "required":["path"],
-        "additionalProperties":false
-    })
-}
-
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
@@ -961,12 +907,24 @@ mod tests {
             );
         }
         assert_eq!(
-            manager.builtins["write"].descriptor.input_schema,
-            write_schema()
+            manager.builtins["write"].descriptor.input_schema["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert!(
+            manager.builtins["write"].descriptor.input_schema["properties"]["path"].is_object(),
+            "write input schema 由 WriteArgs 类型生成"
+        );
+        assert!(
+            manager.builtins["write"].descriptor.input_schema["properties"]["content"].is_object(),
+            "write input schema 由 WriteArgs 类型生成"
         );
         assert_eq!(
-            manager.builtins["delete"].descriptor.input_schema,
-            delete_schema()
+            manager.builtins["delete"].descriptor.input_schema["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert!(
+            manager.builtins["delete"].descriptor.input_schema["properties"]["path"].is_object(),
+            "delete input schema 由 DeleteArgs 类型生成"
         );
     }
 

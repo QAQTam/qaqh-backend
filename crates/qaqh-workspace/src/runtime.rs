@@ -47,6 +47,15 @@ thread_local! {
 }
 
 pub fn set_context(session: &str, permission_level: u8) {
+    // P2 拆分：qaqh-permission 的取消状态需要知道本线程绑定的会话——
+    // 首次 set_context 时注册一个读 RUNTIME_CTX 的 resolver（幂等），
+    // 打断 lib.rs ↔ runtime 的反向依赖环。
+    static RESOLVER_REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if RESOLVER_REGISTERED.set(()).is_ok() {
+        qaqh_permission::set_cancel_session_resolver(|| {
+            crate::runtime::context().map(|ctx| ctx.active_session)
+        });
+    }
     RUNTIME_CTX.with(|ctx| {
         *ctx.borrow_mut() = Some(RuntimeContext {
             active_session: session.to_string(),

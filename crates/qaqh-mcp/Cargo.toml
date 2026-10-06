@@ -12,6 +12,7 @@ qaqh-types = { path = "../qaqh-types" }
 # 工具投影（PR-M1-4）：DynamicTool/register_dynamic/build_dynamic_tool。
 # 依赖方向单向（设计 §4）：qaqh-mcp → qaqh-workspace，不反向。
 qaqh-workspace = { path = "../qaqh-workspace" }
+qaqh-tool-core = { path = "../qaqh-tool-core" }
 rmcp = { workspace = true, features = [
     "client",
     "transport-child-process",
