@@ -137,6 +137,21 @@ mod schema_spot_check {
             "write missing edit guidance: {write_desc}"
         );
 
+        // Todo v4（全量覆写形态）：items 上限 20（P1 迁移曾丢失，靠
+        // todo_contract 集成测试兜住后补回）；条目内 status 必填。
+        let tw = params("todo_write");
+        assert!(tw["items"].is_object(), "todo_write.items missing");
+        assert!(
+            tw["items"]["maxItems"].is_number(),
+            "todo_write.items.maxItems missing: {tw}"
+        );
+        let tw_item = &tw["items"]["items"];
+        assert_eq!(
+            tw_item["required"].as_array().map(|r| r.len()),
+            Some(1),
+            "todo_write items[] must require exactly status"
+        );
+
         // skills 三件套已上线，聚合名/validate 退役。
         for name in ["skill_activate", "skill_list", "skill_resource"] {
             let _ = by_name(name);

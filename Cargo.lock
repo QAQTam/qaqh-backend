@@ -3877,6 +3877,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-git"
+version = "2.0.0-beta.2"
+dependencies = [
+ "git2",
+ "log",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "qaqh-lsp"
 version = "2.0.0-beta.2"
 dependencies = [
@@ -4144,6 +4154,7 @@ dependencies = [
  "log",
  "qaqh-domain",
  "qaqh-fs-core",
+ "qaqh-git",
  "qaqh-permission",
  "qaqh-policy",
  "qaqh-sandbox",

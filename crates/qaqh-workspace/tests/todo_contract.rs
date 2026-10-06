@@ -105,9 +105,17 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
         list.function.parameters["additionalProperties"],
         json!(false)
     );
+    // v2 类型生成：Option<enum>（serde default）的 schema 是扁平
+    // enum + "null" 成员，type 为 [string, null]。
     assert_eq!(
         list.function.parameters["properties"]["status"]["enum"],
-        json!(["pending", "in_progress", "completed", "cancelled"])
+        json!([
+            "pending",
+            "in_progress",
+            "completed",
+            "cancelled",
+            serde_json::Value::Null
+        ])
     );
 }
 
@@ -312,3 +320,4 @@ fn web_fetch_output_enters_authorization_resources() {
         "web_fetch output missing from authorization resources: {paths:?}"
     );
 }
+
