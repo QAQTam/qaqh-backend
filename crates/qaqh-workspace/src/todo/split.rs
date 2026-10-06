@@ -113,57 +113,6 @@ pub fn handle_list(args: &Value) -> ToolResult {
 // Schemas（单一职责：无 oneOf、无参数归属说明文字）
 // ═══════════════════════════════════════════════════════
 
-pub(crate) fn todo_write_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "maxItems": 20,
-                "description": "The FULL task list — replaces the previous list entirely. Each item needs status; keep every prior item you want to keep. `title` is optional when `id` references an existing task (the previous title is kept).",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": ["string", "integer"], "description": "Existing T<n> to keep/update this task; omit to assign a new one."},
-                        "title": {"type": "string", "description": "Task title (1-100 chars). Required for new items; optional when `id` references an existing task."},
-                        "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Exactly one item should be in_progress while working."},
-                        "description": {"type": "string", "description": "Optional context (<=200 chars)."},
-                        "evidence": {"type": "string", "description": "Completion evidence (for completed items)."}
-                    },
-                    "required": ["status"],
-                    "additionalProperties": false
-                }
-            },
-            "explanation": {"type": "string", "description": "Optional one-liner on why the plan changed."}
-        },
-        "required": ["items"],
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn todo_update_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "id": {"type": ["string", "integer"], "description": "Target ID (e.g. T1)."},
-            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Target status."},
-            "evidence": {"type": "string", "description": "Completion summary (required when completed)."}
-        },
-        "required": ["id", "status"],
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn todo_list_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Optional filter."}
-        },
-        "additionalProperties": false
-    })
-}
-
 // ═══════════════════════════════════════════════════════
 // Registration
 // ═══════════════════════════════════════════════════════

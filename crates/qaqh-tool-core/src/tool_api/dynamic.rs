@@ -29,7 +29,7 @@ pub struct DynamicToolAdapter {
 }
 
 impl DynamicToolAdapter {
-    pub(crate) fn new(descriptor: ToolDescriptor, dispatch: DynamicDispatch) -> Self {
+    pub fn new(descriptor: ToolDescriptor, dispatch: DynamicDispatch) -> Self {
         let name = descriptor.name.as_str().to_owned();
         Self {
             name,
@@ -72,7 +72,7 @@ mod tests {
         args: serde_json::Value,
     ) -> Result<ToolOutcome, FatalToolError> {
         Ok(super::super::result::map_tool_result(
-            crate::ToolResult::ok_data(
+            qaqh_types::ToolResult::ok_data(
                 serde_json::json!({
                     "name_is_full": true,
                     "workspace": ctx.workspace_root.to_string_lossy(),

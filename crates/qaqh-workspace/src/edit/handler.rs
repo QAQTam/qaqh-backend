@@ -17,17 +17,21 @@ use crate::file_shared::{
     unified_diff,
 };
 use crate::tool_api::{
-    ErasedTool, OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolExecutionError, ToolExposure, ToolName, ToolProjection, ToolSource, TypedTool,
-    TypedToolAdapter,
+    ErasedTool, ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError, ToolMeta,
+    ToolProjection, TypedTool, TypedToolAdapter,
 };
 
+/// Replace an exact string in a file.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditArgs {
+    /// Target file
     pub path: String,
+    /// Exact text to replace (must appear exactly once)
     pub old_str: String,
+    /// Replacement text
     pub new_str: String,
+    /// Replace every occurrence (default false)
     #[serde(default)]
     pub replace_all: bool,
 }
@@ -58,14 +62,6 @@ impl ToolProjection for EditOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        self.model_text
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(160).collect())
-    }
-
     fn display(&self, args: &Value) -> ToolDisplay {
         mutation_display(
             args.get("path").and_then(Value::as_str),
@@ -90,24 +86,14 @@ impl TypedTool for EditTool {
     type Args = EditArgs;
     type Output = EditOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("edit").expect("valid edit tool name"),
-            display_name: None,
-            description: "Replace an exact string in a file. 'old_str' must appear exactly once; set 'replace_all' to true to replace every occurrence. Do not include read's 'L<n>: ' prefix. Failures return a diff against the closest match."
-                .to_string(),
-            input_schema: edit_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(EditOutput))
-                .expect("edit output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: ToolRisk::Write,
-            default_timeout: Duration::from_secs(60),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("edit")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "edit",
+            "Replace an exact string in a file. 'old_str' must appear exactly once; set 'replace_all' to true to replace every occurrence. Do not include read's 'L<n>: ' prefix. Failures return a diff against the closest match.",
+            crate::permission::ToolCategory::Write,
+            ToolRisk::Write,
+            Duration::from_secs(60),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -283,20 +269,6 @@ impl TypedTool for EditTool {
             diff: has_diff.then_some(diff_text),
         })
     }
-}
-
-fn edit_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "Target file"},
-            "old_str": {"type": "string", "description": "Exact text to replace (must appear exactly once)"},
-            "new_str": {"type": "string", "description": "Replacement text"},
-            "replace_all": {"type": "boolean", "default": false, "description": "Replace every occurrence (default false)"}
-        },
-        "required": ["path", "old_str", "new_str"],
-        "additionalProperties": false
-    })
 }
 
 /// 把 LF 视图上的命中区间映射回原始内容并替换；插入文本按命中行的行尾还原
