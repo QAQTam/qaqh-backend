@@ -6,15 +6,16 @@ description = "QAQ-Harness LLM API gateway — HTTP streaming, message conversio
 
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
+mutil-ai = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13.4", default-features = false, features = ["stream", "rustls", "json"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+# 仅用其 HeaderName/HeaderValue 类型（与 mutil-ai 同一 reqwest 版本谱系）；
+# HTTP 客户端本体已由 mutil-ai 承担。
+reqwest = { version = "0.13.4", default-features = false }
 futures = "0.3"
 anyhow = "1"
 log = "0.4"
-# retry-after HTTP-date 解析（hyper 传递依赖，零新增代码）
-httpdate = "1.0.3"
 unicode-normalization = "0.1"
 
 [dev-dependencies]

@@ -89,25 +89,23 @@ pub struct ExecConfig {
 /// overrides. All fields are concrete (no Option wrapping).
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// API key for the selected provider.
+    /// API key for the active endpoint (never persisted in clear text).
     pub api_key: String,
-    /// Base URL for API requests (from provider registry).
+    /// BYOK 的 endpoint：scheme + host + 可选前缀，不含 wire 自身路径。
     pub base_url: String,
+    /// 该 endpoint 说的 wire 协议。
+    pub wire: qaqh_types::Wire,
+    /// 该 endpoint 与 wire 缺省的差异（请求形状开关）。
+    pub compat: qaqh_types::EndpointCompat,
     /// Active model identifier.
     pub model: String,
     /// Max output tokens per turn.
     pub max_tokens: u32,
-    /// Maximum context window size in tokens.
-    pub context_limit: u32,
-    /// 端点声明的硬上下文窗口（输入 token）；`None` = 回落 `context_limit`。
-    /// 本地 pre-flight（`engine_turn::compact_preflight`）用它判「必然 400」，
-    /// `context_limit` 继续作为 auto-compact 软阈值的基数（N-1 / D-15）。
-    pub context_window: Option<u32>,
-    /// Selected provider ID (e.g. "deepseek", "qwen").
-    pub provider_id: String,
-    /// Selected endpoint within the provider (e.g. "openai").
-    pub endpoint: String,
-    /// Reasoning effort: one of `low|medium|high|xhigh|max`, or empty (provider default).
+    /// 端点声明的上下文窗口（输入 token）——本地压缩的唯一分母：auto-compact 软
+    /// 阈值（`context_length × auto_compact_threshold`）与发送前硬 pre-flight
+    /// 都由它推得（BYOK 前的 `context_limit`/`context_window` 双口径已收敛）。
+    pub context_length: u32,
+    /// Reasoning effort: one of `low|medium|high|xhigh|max`, or empty (endpoint default).
     pub reasoning_effort: String,
     /// Named profiles for quick config switching.
     pub profiles: HashMap<String, qaqh_types::ProfileConfig>,
@@ -602,34 +600,144 @@ fn validate_server_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// BYOK 未声明上下文窗口时的保守分母：宁可早压缩，也不把超限推给上游换 400。
+pub const DEFAULT_CONTEXT_LENGTH: u32 = 128_000;
+
+/// 首次启动落盘的预设配置（带注释，可直接编辑）。
+///
+/// 存在的前提是"配置文件不在"（`load` 只在 `!store.exists()` 时写），因此损坏的
+/// 用户文件绝不会被它覆盖。示例端点用的是 DeepSeek 的 OpenAI 兼容端点——换成自己的
+/// 服务商只改 `base_url` / `wire` / `model` / `context_length` 四项；这里**不含任何
+/// 密钥**（api key 走设置页 → `secrets.toml`，本文件只留 `api_key = "set"` 标记）。
+const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生成，改这份即可）。
+#
+# BYOK：一个端点只需要六个字段——
+#   1. endpoint        → base_url       （scheme + host + 可选前缀，不含协议自身路径）
+#   2. wire            → 协议            （openai | responses | anthropic）
+#   3. apikey          → 设置页填一次，密文进同目录 secrets.toml（这里只留 api_key = "set"）
+#   4. model           → model
+#   5. max_token       → max_tokens     （单次回复上限）
+#   6. context_length  → 端点声明的上下文窗口，也是本地压缩的唯一分母
+#
+# 下面是一份可直接改写的起点（DeepSeek 的 OpenAI 兼容端点）。换服务商时改
+# base_url / wire / model / context_length 四项即可；要多几个端点就整段复制
+# [profiles.<名字>]，切换走设置页的 profile。
+
+active_profile = "default"
+
+[profiles.default]
+model = "deepseek-chat"
+max_tokens = 16384
+effort = "high"
+context_length = 128000
+base_url = "https://api.deepseek.com"
+wire = "openai"
+
+# 可选：只有该端点与 wire 缺省语义不一致时才需要写；整段删掉即全用缺省。
+# 这些字段描述的是"这一个端点的请求形状"，gate 照原样转发，不做厂商名判断。
+# [profiles.default.compat]
+# path = "/v1/chat/completions"           # 覆写 wire 的规范路径
+# thinking_mode = "OpenAi"                # OpenAi | QwenEnableThinking | MiniMaxAdaptive
+# cache_field = "PromptCacheHitTokens"    # PromptCacheHitTokens | PromptDetailsCached | UsageCachedTokens | None
+# include_stream_usage = true             # 请求末帧 usage（部分兼容端点不接受）
+# supports_thinking = false
+# thinking_budget_large = true            # Anthropic 大上下文 thinking 预算档（16k-96k）
+# supports_reasoning_effort = false
+# effort_allowlist = ["high", "max"]      # 稀疏档位白名单（路由器常见）
+# tool_call_content_null = true
+# supports_reasoning_content = false
+# require_provider_parameters = true
+# do_sample = false
+# user_id_mode = "Body"
+# responses_web_search = false
+# responses_effort_max = "xhigh"          # reasoning.effort 上限（超出即钳制）
+# responses_search_function_alias = "web_search"
+# supports_image_tool = true              # 打开后模型才会看到 read_image 工具
+# image_models = ["vision-*"]             # 逐模型视觉白名单（`*` 后缀 = 前缀匹配）
+# [profiles.default.compat.retry]         # 不写 = 统一传输层缺省（5 次 / 1s / 30s / 空闲 300s）
+# max_retries = 8
+# idle_timeout_secs = 600
+"#;
+
+/// 旧形状 profile → BYOK 记录。
+///
+/// 判据是 `endpoint` 键（预设内的 endpoint id）——BYOK 记录不会写出这个键，
+/// 而迁移前的保存路径每次都写。命中即按 BYOK 前语义从迁移表补 `wire` /
+/// `base_url` / `compat`，并把 `context_limit` + `context_window` 双口径折叠进
+/// `context_length`。返回是否发生了迁移，调用方据此决定要不要重写磁盘。
+fn migrate_profile(
+    mut profile: qaqh_types::ProfileConfig,
+    active_preset: Option<&crate::registry::LegacyPreset>,
+    legacy_provider_id: &str,
+) -> (qaqh_types::ProfileConfig, bool) {
+    let mut migrated = false;
+    if let Some(endpoint_id) = profile
+        .preset_endpoint
+        .take()
+        .filter(|endpoint| !endpoint.is_empty())
+    {
+        migrated = true;
+        match crate::registry::legacy_preset(legacy_provider_id, &endpoint_id)
+            .or_else(|| active_preset.cloned())
+        {
+            Some(preset) => {
+                profile.wire = preset.wire;
+                if profile.base_url.is_empty() {
+                    profile.base_url = preset.base_url;
+                }
+                if profile.model.is_empty() && !preset.model.is_empty() {
+                    profile.model = preset.model;
+                }
+                if profile.compat.is_none() {
+                    profile.compat = Some(preset.compat);
+                }
+            }
+            None => log::warn!(
+                "[config] {legacy_provider_id}/{endpoint_id} 不在 BYOK 迁移表内，\
+                 按 wire 缺省继续（用户已保存的值不受影响）"
+            ),
+        }
+    }
+    let folded = profile.resolved_context_length(DEFAULT_CONTEXT_LENGTH);
+    if profile.context_length != folded {
+        profile.context_length = folded;
+        migrated = true;
+    }
+    // 双口径旧键已并入 context_length，内存里也不再保留。
+    migrated |= profile.context_limit.take().is_some();
+    migrated |= profile.context_window.take().is_some();
+    (profile, migrated)
+}
+
 impl Default for Config {
     fn default() -> Self {
-        let (provider_id, endpoint) = crate::registry::first_provider_endpoint();
-        let base_url = crate::registry::base_url_for(&provider_id, &endpoint);
-        let model = crate::registry::default_model_for(&provider_id, &endpoint);
-
+        // BYOK：没有内置默认端点。endpoint/model/api_key 为空即"未配置"，
+        // 由设置面填入——曾经 deepseek 预设兜底是最后一处运营商特判。
+        let profile = qaqh_types::ProfileConfig {
+            model: String::new(),
+            max_tokens: 16384,
+            effort: Some("high".into()),
+            context_length: DEFAULT_CONTEXT_LENGTH,
+            base_url: String::new(),
+            wire: qaqh_types::Wire::default(),
+            compat: None,
+            preset_endpoint: None,
+            context_limit: None,
+            context_window: None,
+        };
+        let wire = profile.wire;
+        let compat = profile.compat_or_default();
         let mut profiles = HashMap::new();
-        profiles.insert(
-            "default".into(),
-            qaqh_types::ProfileConfig {
-                model: model.clone(),
-                max_tokens: 16384,
-                effort: Some("high".into()),
-                context_limit: 1_000_000,
-                context_window: None,
-                base_url: base_url.clone(),
-                endpoint: None,
-            },
-        );
+        profiles.insert("default".into(), profile);
+
         Self {
             api_key: String::new(),
-            base_url,
-            model,
+            base_url: String::new(),
+            wire,
+            compat,
+            model: String::new(),
             max_tokens: 16384,
-            context_limit: 1_000_000,
-            context_window: None,
-            provider_id,
-            endpoint,
+            context_length: DEFAULT_CONTEXT_LENGTH,
             reasoning_effort: "high".into(),
             profiles,
             active_profile: "default".into(),
@@ -704,7 +812,19 @@ impl Config {
     pub fn load_from_paths_with(store: ConfigStore, secrets: SecretStore) -> Result<Self, String> {
         let mut cfg = Self::default();
 
-        let pc = store.load();
+        let mut pc = store.load();
+        // 首次启动（文件不存在，而非解析失败）：落一份带注释的 BYOK 预设，
+        // 让"配置在哪、要填哪六项"在磁盘上自解释，而不是静默跑在内存缺省值上。
+        // 按 `exists()` 二次判定：损坏的用户文件走不到这里，绝不被模板覆盖。
+        if pc.is_none() && !store.exists() {
+            if store.write_content(FIRST_RUN_CONFIG) {
+                log::info!(
+                    "[config] 首次运行：已写入预设配置 {}",
+                    store.path().display()
+                );
+                pc = store.load();
+            }
+        }
 
         let mut needs_rewrite = false;
         // 审计 P0-1：API key 不落 config.toml 明文。
@@ -722,31 +842,42 @@ impl Config {
                 || pc.endpoint.is_some()
                 || pc.reasoning_effort.is_some();
             needs_rewrite |= legacy_flat_fields;
-            // ── Backward compat: migrate old provider_id → new (provider_id, endpoint) ──
-            let raw_pid = pc.provider_id.unwrap_or_default();
-            let (provider_id, endpoint) = if raw_pid.is_empty() {
-                crate::registry::first_provider_endpoint()
-            } else {
-                crate::registry::migrate_provider_id(&raw_pid)
-            };
-            cfg.provider_id = provider_id;
-            // New endpoint field takes priority over backward-compat migration
-            cfg.endpoint = pc.endpoint.filter(|e| !e.is_empty()).unwrap_or(endpoint);
+            // ── BYOK 迁移：旧 `(provider_id, endpoint)` 坐标 → 具体端点记录 ──
+            // 预设不再是可选项，只在这里被读一次：把 wire / base_url / compat 补进
+            // 老配置，使升级后请求形状不变。迁移结果随 needs_rewrite 落盘一次，
+            // 之后配置文件里不再有 provider_id / endpoint 键。
+            let legacy_provider_id = pc.provider_id.clone().unwrap_or_default();
+            let legacy_endpoint_id = pc
+                .endpoint
+                .clone()
+                .filter(|ep| !ep.is_empty())
+                .or_else(|| crate::registry::legacy_first_endpoint(&legacy_provider_id))
+                .unwrap_or_default();
+            let legacy = crate::registry::legacy_preset(&legacy_provider_id, &legacy_endpoint_id);
 
-            // ── Resolve base_url from endpoint ──
-            // 预设仅作空值兜底：仅当配置文件中未保存 base_url（空文件/旧版无此字段）
-            // 时才用 endpoint 预设；用户已保存的值（含自定义 URL）绝不在此覆盖，
-            // 由下方 pc.base_url 权威回填。修复：改 max_tokens 后端点被强制改回预设。
-            if pc.base_url.as_deref().is_none_or(|u| u.is_empty()) {
-                let endpoint_base_url =
-                    crate::registry::base_url_for(&cfg.provider_id, &cfg.endpoint);
-                if !endpoint_base_url.is_empty() {
-                    cfg.base_url = endpoint_base_url.clone();
+            // 顶层六字段的老形态：wire/compat 取自预设；用户已保存的值（含自定义
+            // URL）绝不覆盖——空值才兜底。
+            if let Some(ref preset) = legacy {
+                cfg.wire = preset.wire;
+                cfg.compat = preset.compat.clone();
+                if pc.base_url.as_deref().is_none_or(|u| u.is_empty())
+                    && !preset.base_url.is_empty()
+                {
+                    cfg.base_url = preset.base_url.clone();
+                }
+                if pc.model.as_deref().is_none_or(|m| m.is_empty()) && !preset.model.is_empty() {
+                    cfg.model = preset.model.clone();
                 }
             }
 
+            // profile 是持久化真相：逐条迁移后接管 cfg 的端点族字段。
             if let Some(profiles) = pc.profiles {
-                cfg.profiles = profiles;
+                for (name, profile) in profiles {
+                    let (profile, changed) =
+                        migrate_profile(profile, legacy.as_ref(), &legacy_provider_id);
+                    needs_rewrite |= changed;
+                    cfg.profiles.insert(name, profile);
+                }
             }
             if let Some(ref active) = pc.active_profile {
                 cfg.active_profile = active.clone();
@@ -754,20 +885,10 @@ impl Config {
                     cfg.model = profile.model.clone();
                     cfg.max_tokens = profile.max_tokens;
                     cfg.reasoning_effort = profile.effort.clone().unwrap_or_else(|| "high".into());
-                    cfg.context_limit = profile.context_limit;
-                    cfg.context_window = profile.context_window;
+                    cfg.context_length = profile.context_length;
                     cfg.base_url = profile.base_url.clone();
-                    if let Some(ref ep) = profile.endpoint
-                        && !ep.is_empty()
-                    {
-                        cfg.endpoint = ep.clone();
-                        // 仅 profile 未配置 base_url（空值）时回退到 endpoint 预设；
-                        // profile 已保存的值（含自定义 URL）绝不覆盖。
-                        let ep_burl = crate::registry::base_url_for(&cfg.provider_id, ep);
-                        if cfg.base_url.is_empty() && !ep_burl.is_empty() {
-                            cfg.base_url = ep_burl;
-                        }
-                    }
+                    cfg.wire = profile.wire;
+                    cfg.compat = profile.compat_or_default();
                 }
             }
             if let Some(k) = pc.api_key
@@ -801,7 +922,7 @@ impl Config {
                 cfg.max_tokens = mt;
             }
             if let Some(cl) = pc.context_limit {
-                cfg.context_limit = cl;
+                cfg.context_length = cl;
             }
             if let Some(ref l) = pc.lang
                 && !l.is_empty()
@@ -979,6 +1100,20 @@ falling back to 1 (read-only)"
                 {
                     s.api_key = Some(CONFIG_MARKER.to_owned());
                 }
+                // BYOK 迁移写回：把磁盘上的旧形状 profile（带 `endpoint` 预设键）
+                // 补成自述的六字段记录。此后 `[profiles.*]` 里不再有预设坐标，
+                // `provider_id` / `endpoint` 键也不再落盘。
+                if let Some(profiles) = fresh.profiles.as_mut() {
+                    for (name, profile) in profiles.iter_mut() {
+                        let (migrated, _) = migrate_profile(
+                            std::mem::take(profile),
+                            legacy.as_ref(),
+                            &legacy_provider_id,
+                        );
+                        *profile = migrated;
+                        log::info!("[config] profile {name} 已迁移为 BYOK 记录");
+                    }
+                }
                 // C3 迁移：扁平值先固化进 active/default profile（**无条件覆盖**
                 // 同名条目——扁平值为最新意图），再剥离顶层键。fresh 无 profiles
                 // 时就地建表；缺失的分量用合并结果 cfg 兜底，确保零丢失。
@@ -988,7 +1123,9 @@ falling back to 1 (read-only)"
                         .clone()
                         .unwrap_or_else(|| "default".to_string());
                     // 先在 profiles 借用前固化兜底条目，避免可变借用重叠。
-                    let fallback = qaqh_types::ProfileConfig {
+                    // 旧键（context_limit / endpoint 预设坐标）原样带上，交给
+                    // migrate_profile 统一折叠与补全。
+                    let raw_fallback = qaqh_types::ProfileConfig {
                         model: fresh.model.clone().unwrap_or_else(|| cfg.model.clone()),
                         max_tokens: fresh.max_tokens.unwrap_or(cfg.max_tokens),
                         effort: Some(
@@ -997,19 +1134,16 @@ falling back to 1 (read-only)"
                                 .clone()
                                 .unwrap_or_else(|| cfg.reasoning_effort.clone()),
                         ),
-                        context_limit: fresh.context_limit.unwrap_or(cfg.context_limit),
-                        context_window: cfg.context_window,
-                        base_url: fresh
-                            .base_url
-                            .clone()
-                            .unwrap_or_else(|| cfg.base_url.clone()),
-                        endpoint: Some(
-                            fresh
-                                .endpoint
-                                .clone()
-                                .unwrap_or_else(|| cfg.endpoint.clone()),
-                        ),
+                        context_length: 0,
+                        base_url: fresh.base_url.clone().unwrap_or_default(),
+                        wire: cfg.wire,
+                        compat: None,
+                        preset_endpoint: fresh.endpoint.clone(),
+                        context_limit: fresh.context_limit.or(Some(cfg.context_length)),
+                        context_window: None,
                     };
+                    let (fallback, _) =
+                        migrate_profile(raw_fallback, legacy.as_ref(), &legacy_provider_id);
                     let profiles = fresh.profiles.get_or_insert_with(HashMap::new);
                     // 无条件以扁平值覆盖：历史读语义是"扁平胜出"，扁平即用户
                     // 最新意图；旧条目只可能是更早一次保存的陈值。
@@ -1021,6 +1155,8 @@ falling back to 1 (read-only)"
                     fresh.endpoint = None;
                     fresh.reasoning_effort = None;
                 }
+                // 预设坐标已固化进 profile：顶层 provider_id 不再写出。
+                fresh.provider_id = None;
                 log::info!("[config] legacy flat model fields migrated into [profiles.*]");
                 let _ = store.save(&fresh);
             }
@@ -1033,10 +1169,13 @@ falling back to 1 (read-only)"
                     model: cfg.model.clone(),
                     max_tokens: cfg.max_tokens,
                     effort: Some(cfg.reasoning_effort.clone()),
-                    context_limit: cfg.context_limit,
-                    context_window: cfg.context_window,
+                    context_length: cfg.context_length,
                     base_url: cfg.base_url.clone(),
-                    endpoint: Some(cfg.endpoint.clone()),
+                    wire: cfg.wire,
+                    compat: Some(cfg.compat.clone()),
+                    preset_endpoint: None,
+                    context_limit: None,
+                    context_window: None,
                 },
             );
         }
@@ -1092,10 +1231,13 @@ falling back to 1 (read-only)"
                 model: self.model.clone(),
                 max_tokens: self.max_tokens,
                 effort: Some(self.reasoning_effort.clone()),
-                context_limit: self.context_limit,
-                context_window: self.context_window,
+                context_length: self.context_length,
                 base_url: self.base_url.clone(),
-                endpoint: Some(self.endpoint.clone()),
+                wire: self.wire,
+                compat: Some(self.compat.clone()),
+                preset_endpoint: None,
+                context_limit: None,
+                context_window: None,
             },
         );
         let pc = PersistentConfig {
@@ -1110,7 +1252,8 @@ falling back to 1 (read-only)"
             base_url: None,
             max_tokens: None,
             context_limit: None,
-            provider_id: Some(self.provider_id.clone()),
+            // BYOK：预设坐标不再写出（profile 自身就是端点记录）。
+            provider_id: None,
             endpoint: None,
             reasoning_effort: None,
             profiles: Some(profiles),
@@ -1257,22 +1400,15 @@ falling back to 1 (read-only)"
     /// [`Config::update`] — profile methods must not create another write port.
     pub fn apply_profile(&mut self, name: &str) -> Option<String> {
         let profile = self.profiles.get(name)?.clone();
+        // BYOK：profile 自述端点，切换 profile 就是切换 endpoint / wire / compat。
+        // 不再有"回退到预设 base_url"那一步——它曾把自定义 URL 改回预设并落盘。
+        self.compat = profile.compat_or_default();
+        self.wire = profile.wire;
         self.model = profile.model;
         self.max_tokens = profile.max_tokens;
         self.reasoning_effort = profile.effort.unwrap_or_else(|| "high".into());
-        self.context_limit = profile.context_limit;
-        self.context_window = profile.context_window;
+        self.context_length = profile.context_length;
         self.base_url = profile.base_url;
-        if let Some(ref ep) = profile.endpoint {
-            self.endpoint = ep.clone();
-            // 仅 profile 未配置 base_url（空值）时回退到 endpoint 预设；
-            // 已保存的值（含自定义 URL）绝不覆盖（此前 `ep_burl != self.base_url`
-            // 会把自定义 URL 强制改回预设并落盘——修改 max_tokens 后端点被重置的根因）。
-            let ep_burl = crate::registry::base_url_for(&self.provider_id, ep);
-            if self.base_url.is_empty() && !ep_burl.is_empty() {
-                self.base_url = ep_burl;
-            }
-        }
         self.active_profile = name.to_string();
         Some(name.to_string())
     }
@@ -1284,10 +1420,13 @@ falling back to 1 (read-only)"
                 model: self.model.clone(),
                 max_tokens: self.max_tokens,
                 effort: Some(self.reasoning_effort.clone()),
-                context_limit: self.context_limit,
-                context_window: self.context_window,
+                context_length: self.context_length,
                 base_url: self.base_url.clone(),
-                endpoint: Some(self.endpoint.clone()),
+                wire: self.wire,
+                compat: Some(self.compat.clone()),
+                preset_endpoint: None,
+                context_limit: None,
+                context_window: None,
             },
         );
         self.active_profile = name.to_string();
@@ -1450,6 +1589,7 @@ mod c3_migration_tests {
             && doc.get("context_limit").is_none()
             && doc.get("endpoint").is_none()
             && doc.get("reasoning_effort").is_none()
+            && doc.get("provider_id").is_none()
     }
 
     #[test]
@@ -1477,12 +1617,13 @@ mod c3_migration_tests {
     }
 
     /// 旧形态（纯扁平）：load 即触发一次性迁移——值固化进 profile、顶层剥离；
-    /// 重载后值不丢。
+    /// 重载后值不丢。BYOK 后还多一条：profile 自述端点，不再有预设坐标。
     #[test]
     fn legacy_flat_migrates_on_first_load() {
         let (dir, store, secrets) = setup(
             "legacy",
-            "model = \"legacy-model\"
+            "provider_id = \"deepseek\"
+             model = \"legacy-model\"
              base_url = \"https://legacy/v1\"
              max_tokens = 8192
              context_limit = 256000
@@ -1493,7 +1634,7 @@ mod c3_migration_tests {
         );
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
         assert_eq!(cfg.model, "legacy-model");
-        assert_eq!(cfg.context_limit, 256000);
+        assert_eq!(cfg.context_length, 256_000);
 
         // load 的 needs_rewrite 已完成迁移写回。
         let text = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
@@ -1502,19 +1643,19 @@ mod c3_migration_tests {
             "top-level flats must be stripped: {text}"
         );
         let doc: toml::Value = toml::from_str(&text).expect("toml");
-        assert_eq!(
-            doc["profiles"]["default"]["model"].as_str(),
-            Some("legacy-model")
-        );
-        assert_eq!(
-            doc["profiles"]["default"]["context_limit"].as_integer(),
-            Some(256000)
-        );
+        let profile = &doc["profiles"]["default"];
+        assert_eq!(profile["model"].as_str(), Some("legacy-model"));
+        // 双口径窗口折叠成单一分母，且写回的是 context_length。
+        assert_eq!(profile["context_length"].as_integer(), Some(256_000));
+        assert!(profile.get("context_limit").is_none(), "{text}");
+        // 预设坐标退役：wire 落到记录里，endpoint/provider_id 不再出现。
+        assert_eq!(profile["wire"].as_str(), Some("openai"));
+        assert!(profile.get("endpoint").is_none(), "{text}");
 
         // 重载幂等：值经 profile 回来，不再有扁平覆盖。
         let cfg2 = Config::load_from_paths_with(store, secrets).expect("reload");
         assert_eq!(cfg2.model, "legacy-model");
-        assert_eq!(cfg2.context_limit, 256000);
+        assert_eq!(cfg2.context_length, 256_000);
         assert_eq!(cfg2.reasoning_effort, "max");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1542,122 +1683,278 @@ mod c3_migration_tests {
         assert!(top_level_absent(&text), "{text}");
         let doc: toml::Value = toml::from_str(&text).expect("toml");
         // 扁平值为最新意图：迁移时无条件覆盖同名 profile 条目。
-        assert_eq!(
-            doc["profiles"]["default"]["model"].as_str(),
-            Some("flat-model")
-        );
+        let profile = &doc["profiles"]["default"];
+        assert_eq!(profile["model"].as_str(), Some("flat-model"));
+        assert_eq!(profile["context_length"].as_integer(), Some(128_000));
         let cfg2 = Config::load_from_paths_with(store, secrets).expect("reload");
         assert_eq!(cfg2.model, "flat-model");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 新形态（纯 profile）：读写稳定，无迁移发生。
+    /// BYOK 形态（自述端点）：读写稳定，不发生任何迁移改写。
     #[test]
-    fn new_format_profile_only_stable() {
-        let (dir, store, secrets) = setup(
-            "newfmt",
-            "active_profile = \"default\"
-             [profiles.default]
-             model = \"m1\"
-             max_tokens = 96000
-             effort = \"max\"
-             context_limit = 1000000
-             base_url = \"https://x/v1\"
-             endpoint = \"openai\"
-",
-        );
+    fn byok_profile_round_trips_without_migration() {
+        let source = "active_profile = \"default\"
+[profiles.default]
+model = \"m1\"
+max_tokens = 96000
+effort = \"max\"
+context_length = 1000000
+base_url = \"https://x/v1\"
+wire = \"responses\"
+
+[profiles.default.compat]
+responses_effort_max = \"max\"
+supports_image_tool = true
+";
+        let (dir, store, secrets) = setup("byok", source);
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
         assert_eq!(cfg.model, "m1");
-        assert_eq!(cfg.context_limit, 1_000_000);
+        assert_eq!(cfg.wire, qaqh_types::Wire::Responses);
+        assert_eq!(cfg.context_length, 1_000_000);
+        assert_eq!(cfg.compat.responses_effort_max, "max");
+        assert!(cfg.compat.supports_image_tool);
+        assert_eq!(
+            cfg.profiles.get("default").map(|p| p.wire),
+            Some(qaqh_types::Wire::Responses)
+        );
+
         cfg.save_with(&store, &secrets).expect("save");
         let text = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
-        assert!(top_level_absent(&text), "{text}");
+        let doc: toml::Value = toml::from_str(&text).expect("toml");
+        let profile = &doc["profiles"]["default"];
+        assert_eq!(profile["wire"].as_str(), Some("responses"));
+        assert_eq!(
+            profile["compat"]["responses_effort_max"].as_str(),
+            Some("max")
+        );
+        assert!(
+            profile.get("endpoint").is_none() && profile.get("context_limit").is_none(),
+            "BYOK 记录不得被写回预设坐标: {text}"
+        );
+
         let cfg2 = Config::load_from_paths_with(store, secrets).expect("reload");
-        assert_eq!(cfg2.model, "m1");
+        assert_eq!(cfg2.wire, qaqh_types::Wire::Responses);
+        assert_eq!(cfg2.compat.responses_effort_max, "max");
         assert_eq!(cfg2.reasoning_effort, "max");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// N-1：profile 的 `context_window`（端点声明的硬窗口）必须能读写往返；
-    /// 缺该键的老配置照常解析（`None`，回落 `context_limit`）。
+    /// 首次启动（无配置文件）：落一份带注释的 BYOK 预设，且必须能原样解析回
+    /// 六字段形状——模板与 serde 结构一旦漂移，这条就红。
     #[test]
-    fn profile_context_window_round_trips() {
+    fn first_run_writes_a_parsable_preset_once() {
+        let dir = temp_dir("first-run");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = ConfigStore::new(dir.join("config.toml"));
+        let secrets = SecretStore::new(dir.join("secrets.toml"));
+        assert!(!store.exists(), "前置条件：还没有配置文件");
+
+        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        assert_eq!(cfg.model, "deepseek-chat");
+        assert_eq!(cfg.base_url, "https://api.deepseek.com");
+        assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
+        assert_eq!(cfg.max_tokens, 16_384);
+        assert_eq!(cfg.context_length, 128_000);
+        assert_eq!(cfg.reasoning_effort, "high");
+        assert!(cfg.api_key.is_empty(), "预设不得带密钥");
+        assert_eq!(
+            cfg.compat,
+            qaqh_types::EndpointCompat::default(),
+            "compat 示例只存在于注释里，解析结果必须是 wire 缺省"
+        );
+
+        let text = std::fs::read_to_string(dir.join("config.toml")).expect("read preset");
+        assert!(text.starts_with("# QAQ-Harness 配置"), "首启文件要自解释");
+        assert!(
+            text.contains("[profiles.default.compat]"),
+            "compat 例子要在（注释里）"
+        );
+        assert!(!text.contains("\napi_key"), "写出的文件里不得有 api_key");
+
+        // 幂等：再 load 不得改写（用户可能正在编辑它）。
+        Config::load_from_paths_with(store.clone(), secrets.clone()).expect("reload");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).expect("read again"),
+            text,
+            "预设只写一次"
+        );
+
+        // 损坏的用户文件绝不被模板覆盖（exists 判定与解析失败分开）。
+        std::fs::write(dir.join("config.toml"), "this is not = valid toml").expect("write junk");
+        let broken = Config::load_from_paths_with(store, secrets).expect("load survives junk");
+        assert!(broken.model.is_empty(), "解析失败时按缺省跑");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).expect("read junk"),
+            "this is not = valid toml",
+            "损坏文件必须原样留在盘上等人修"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 预设坐标 → 端点记录：wire 与 compat 从迁移表落地，请求形状不变。
+    #[test]
+    fn legacy_preset_coordinate_materializes_wire_and_compat() {
         let (dir, store, secrets) = setup(
-            "ctxwin",
-            "active_profile = \"default\"
-             [profiles.default]
-             model = \"m1\"
-             max_tokens = 96000
-             context_limit = 1000000
-             context_window = 200000
-             base_url = \"https://x/v1\"
-             endpoint = \"openai\"
+            "preset-compat",
+            "provider_id = \"minimax\"
+active_profile = \"default\"
+[profiles.default]
+model = \"mm\"
+max_tokens = 8192
+context_limit = 1000000
+base_url = \"https://api.minimaxi.com/v1\"
+endpoint = \"openai\"
 ",
         );
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
-        assert_eq!(cfg.context_limit, 1_000_000);
+        assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
         assert_eq!(
-            cfg.context_window,
-            Some(200_000),
-            "profile 值必须进运行时 Config"
+            cfg.compat.thinking_mode,
+            qaqh_types::ThinkingParamMode::MiniMaxAdaptive,
+            "旧预设的 thinking 参数口径必须由 compat 原样带过来"
         );
+        assert_eq!(cfg.compat.cache_field, qaqh_types::CacheTokenField::None);
+
+        let text = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
+        let doc: toml::Value = toml::from_str(&text).expect("toml");
+        let profile = &doc["profiles"]["default"];
+        assert_eq!(
+            profile["compat"]["thinking_mode"].as_str(),
+            Some("MiniMaxAdaptive"),
+            "compat 要落到盘上，下次 load 不再依赖迁移表: {text}"
+        );
+        assert!(profile.get("endpoint").is_none(), "{text}");
+        assert!(doc.get("provider_id").is_none(), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 预设的 responses 端点：wire 迁移后 gate 才走对协议；空 base_url 由预设兜底。
+    #[test]
+    fn legacy_preset_responses_coordinate_maps_to_responses_wire() {
+        let (dir, store, secrets) = setup(
+            "preset-responses",
+            "provider_id = \"deepseek\"
+active_profile = \"default\"
+[profiles.default]
+model = \"ds\"
+max_tokens = 8192
+context_limit = 128000
+endpoint = \"responses\"
+",
+        );
+        let cfg = Config::load_from_paths_with(store, secrets).expect("load");
+        assert_eq!(cfg.wire, qaqh_types::Wire::Responses);
+        assert_eq!(cfg.base_url, "https://api.deepseek.com");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 双口径窗口折叠：端点硬窗口优先于用户口径；两者皆无时用内置保守分母。
+    #[test]
+    fn dual_window_keys_fold_into_one_context_length() {
+        let (dir, store, secrets) = setup(
+            "fold-window",
+            "active_profile = \"default\"
+[profiles.default]
+model = \"m1\"
+max_tokens = 96000
+context_limit = 1000000
+context_window = 200000
+base_url = \"https://x/v1\"
+endpoint = \"openai\"
+",
+        );
+        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        assert_eq!(
+            cfg.context_length, 200_000,
+            "端点声明的窗口是压缩分母的真值"
+        );
+
         cfg.save_with(&store, &secrets).expect("save");
         let text = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
         let doc: toml::Value = toml::from_str(&text).expect("toml");
-        assert_eq!(
-            doc["profiles"]["default"]["context_window"].as_integer(),
-            Some(200_000),
-            "save 往返不得丢 context_window: {text}"
-        );
-        let cfg2 = Config::load_from_paths_with(store, secrets).expect("reload");
-        assert_eq!(cfg2.context_window, Some(200_000));
+        let profile = &doc["profiles"]["default"];
+        assert_eq!(profile["context_length"].as_integer(), Some(200_000));
+        assert!(profile.get("context_window").is_none(), "{text}");
+        assert!(profile.get("context_limit").is_none(), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
 
-        // 老配置（没有这个键）→ None，且照常解析。
+        // 只有用户口径的老配置：照常解析，取该值。
         let (dir2, store2, secrets2) = setup(
-            "ctxwin-old",
+            "fold-limit",
             "active_profile = \"default\"
-             [profiles.default]
-             model = \"m1\"
-             max_tokens = 96000
-             context_limit = 1000000
-             base_url = \"https://x/v1\"
-             endpoint = \"openai\"
+[profiles.default]
+model = \"m1\"
+max_tokens = 96000
+context_limit = 1000000
+base_url = \"https://x/v1\"
+endpoint = \"openai\"
 ",
         );
-        let old = Config::load_from_paths_with(store2, secrets2).expect("load old");
-        assert_eq!(old.context_window, None, "缺键必须是 None 而不是解析失败");
-        let _ = std::fs::remove_dir_all(&dir);
+        let only_limit = Config::load_from_paths_with(store2, secrets2).expect("load old");
+        assert_eq!(only_limit.context_length, 1_000_000);
         let _ = std::fs::remove_dir_all(&dir2);
+
+        // 两个键都没有（全新 BYOK 记录）：内置保守分母，零值不留。
+        let (dir3, store3, secrets3) = setup(
+            "fold-none",
+            "active_profile = \"default\"
+[profiles.default]
+model = \"m1\"
+max_tokens = 96000
+base_url = \"https://x/v1\"
+wire = \"openai\"
+",
+        );
+        let bare = Config::load_from_paths_with(store3, secrets3).expect("load bare");
+        assert_eq!(bare.context_length, DEFAULT_CONTEXT_LENGTH);
+        let _ = std::fs::remove_dir_all(&dir3);
     }
 
-    /// N-1：切 profile 时硬窗口必须跟着切——没有声明的 profile 要把它清成
-    /// `None`（否则会沿用上一个 profile 的窗口）。
+    /// 切 profile = 切端点：wire / compat / 分母都要跟着换，
+    /// 否则会沿用上一个 profile 的端点身份。
     #[test]
-    fn apply_profile_switches_context_window() {
+    fn apply_profile_switches_endpoint_identity() {
         let (dir, store, secrets) = setup(
-            "ctxwin-switch",
+            "switch-endpoint",
             "active_profile = \"a\"
-             [profiles.a]
-             model = \"ma\"
-             max_tokens = 1000
-             context_limit = 100000
-             context_window = 200000
-             base_url = \"https://a/v1\"
-             endpoint = \"openai\"
-             [profiles.b]
-             model = \"mb\"
-             max_tokens = 1000
-             context_limit = 100000
-             base_url = \"https://b/v1\"
-             endpoint = \"openai\"
+[profiles.a]
+model = \"ma\"
+max_tokens = 1000
+context_length = 200000
+base_url = \"https://a/v1\"
+wire = \"anthropic\"
+
+[profiles.a.compat]
+thinking_budget_large = true
+
+[profiles.b]
+model = \"mb\"
+max_tokens = 1000
+context_length = 32000
+base_url = \"https://b/v1\"
+wire = \"responses\"
 ",
         );
         let mut cfg = Config::load_from_paths_with(store, secrets).expect("load");
-        assert_eq!(cfg.context_window, Some(200_000));
+        assert_eq!(cfg.wire, qaqh_types::Wire::Anthropic);
+        assert!(cfg.compat.thinking_budget_large);
         cfg.apply_profile("b");
-        assert_eq!(cfg.context_window, None, "无声明的 profile 必须清掉硬窗口");
+        assert_eq!(
+            cfg.wire,
+            qaqh_types::Wire::Responses,
+            "wire 必须跟着 profile 换"
+        );
+        assert!(
+            !cfg.compat.thinking_budget_large,
+            "上一个端点的 compat 不得残留"
+        );
+        assert_eq!(cfg.context_length, 32_000);
+        assert_eq!(cfg.base_url, "https://b/v1");
         cfg.apply_profile("a");
-        assert_eq!(cfg.context_window, Some(200_000));
+        assert_eq!(cfg.wire, qaqh_types::Wire::Anthropic);
+        assert!(cfg.compat.thinking_budget_large);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

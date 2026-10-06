@@ -376,7 +376,7 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
         .clone();
     agent.skills = qaqh_skills::SkillContextManager::new(
         std::path::Path::new(&workspace),
-        agent.config.context_limit as usize,
+        agent.config.context_length as usize,
     );
     agent.msg.push_system(qaqh_types::Message::system(
         &crate::agent::prompt::system_prompt_for_mode(&agent.session.tool_mode),
@@ -421,7 +421,7 @@ pub fn create_session(agent: &mut AgentState) {
     let workspace = qaqh_workspace::current_workspace();
     agent.skills = qaqh_skills::SkillContextManager::new(
         std::path::Path::new(&workspace),
-        agent.config.context_limit as usize,
+        agent.config.context_length as usize,
     );
     agent.msg.push_system(qaqh_types::Message::system(
         &crate::agent::prompt::system_prompt_for_mode(&agent.session.tool_mode),
@@ -449,7 +449,7 @@ pub fn create_session_with_session(agent: &mut AgentState) {
     let workspace = qaqh_workspace::current_workspace();
     agent.skills = qaqh_skills::SkillContextManager::new(
         std::path::Path::new(&workspace),
-        agent.config.context_limit as usize,
+        agent.config.context_length as usize,
     );
     // 应用持久化的工具模式（PLAN-TOOL-MODES.md 4.3/4.4）：preset-seed 新建路径
     // 此前不读 meta.json，导致会话级 tool_mode 丢失、工具回退全量。

@@ -1162,7 +1162,7 @@ mod reload_loop_tests {
         let (tx, _bootstrap) = tokio::sync::watch::channel::<Option<Arc<Config>>>(None);
         // 订阅前已有一版快照（模拟「daemon 启动时 manager 已按当前配置装配」）。
         tx.send(Some(Arc::new(Config {
-            context_limit: 1,
+            context_length: 1,
             ..Default::default()
         })))
         .unwrap();
@@ -1172,7 +1172,7 @@ mod reload_loop_tests {
         let handle = tokio::spawn(reload_loop(rx, move |published| {
             let seen_tx = seen_tx.clone();
             async move {
-                let _ = seen_tx.send(published.context_limit);
+                let _ = seen_tx.send(published.context_length);
             }
         }));
 
@@ -1186,7 +1186,7 @@ mod reload_loop_tests {
 
         // 订阅后的第一次真实变更必须被观察到（旧前置守卫在此处吞掉本次变更）。
         tx.send(Some(Arc::new(Config {
-            context_limit: 4242,
+            context_length: 4242,
             ..Default::default()
         })))
         .unwrap();

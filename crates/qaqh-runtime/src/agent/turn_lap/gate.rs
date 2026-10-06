@@ -51,8 +51,9 @@ impl ArgLineSlot {
             if self.pending.len() < ARG_PENDING_CAP {
                 self.pending.push_str(args_chunk);
             }
-            self.estimator =
-                Some(qaqh_workspace::arg_estimate::ArgLineEstimator::for_tool(tool_name)?);
+            self.estimator = Some(qaqh_workspace::arg_estimate::ArgLineEstimator::for_tool(
+                tool_name,
+            )?);
         }
         let estimator = self.estimator.as_mut()?;
         if self.pending.is_empty() {
@@ -97,11 +98,20 @@ pub(crate) struct GateRequestResult {
     pub(crate) timeline_tools_open: HashSet<String>,
     pub(crate) had_error: bool,
     pub(crate) done_seen: bool,
-    pub(crate) gate_error: Option<String>,
+    pub(crate) gate_error: Option<GateError>,
     pub(crate) current_request_usage: Option<UsageInfo>,
     pub(crate) request_error: Option<String>,
     pub(crate) stop_reason: Option<String>,
     pub(crate) last_usage: Option<UsageInfo>,
+}
+
+/// gate 侧终态错误：统一 SDK 的结构化类别 + 可展示的脱敏文案。
+///
+/// 分支一律走 `kind`；`message` 只用于日志与 UI。错误分类是 gate 的职责，
+/// 让调用方认文案会把 provider 差异漏进 runtime。
+pub(crate) struct GateError {
+    pub(crate) kind: qaqh_gate::ErrorKind,
+    pub(crate) message: String,
 }
 
 // ── stream / block 辅助 ──
@@ -689,9 +699,11 @@ pub(crate) fn gate_request(
                 // 重试提示曾按 v1 ProviderRetrying 双发；重试可见性走日志与 timeline，
                 // 不再另发领域事件。
             }
-            qaqh_gate::StreamEvent::Error(msg) => {
-                log::error!("[TURN] gate error turn_id={turn_id} round_num={round_num}: {msg}");
-                gate_error = Some(msg);
+            qaqh_gate::StreamEvent::Error { kind, message } => {
+                log::error!(
+                    "[TURN] gate error turn_id={turn_id} round_num={round_num} kind={kind:?}: {message}"
+                );
+                gate_error = Some(GateError { kind, message });
                 had_error = true;
             }
         },
@@ -728,7 +740,7 @@ pub(crate) fn gate_request(
 
 // ── provider 构建（唯一构造器） ──
 
-/// 全 runtime 唯一的 `ProviderConfig` 构造器：依当前 config / endpoint 重建 provider（Responses / Anthropic / OpenAI 形态）。
+/// 全 runtime 唯一的 `ProviderConfig` 构造器：按当前配置的 `wire` + `compat` 重建 provider 形态。
 ///
 /// 全 runtime 唯一的 `ProviderConfig` 构造器。engine_compact / engine_title
 /// 不再自建镜像，统一经由本函数，避免多处镜像漂移（T6）。
@@ -736,101 +748,68 @@ pub(crate) fn gate_request(
 /// request id): pass the turn id for normal rounds; "compact" / "title" for
 /// the background LLM calls.
 pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::ProviderConfig {
-    let ep = ctx.agent.endpoint_spec.clone();
-    let is_responses = ep.as_ref().map(|e| e.protocol.as_str()) == Some("responses");
-    let is_anthropic = ep.as_ref().map(|e| e.protocol.as_str()) == Some("anthropic");
-    // responses 协议没有增量语义：端点上声明 stateful 不会生效（不读 provider.stateful）。
-    // 显式提示一次，避免"配置里写了 stateful 却静默按无状态全量发送"。
-    if is_responses && ep.as_ref().is_some_and(|e| e.stateful) {
-        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            log::warn!(
-                "[gate] endpoint {}/{} declares stateful=true, but the responses protocol has no incremental mode — sending full input",
-                ctx.agent.config.provider_id,
-                ctx.agent.config.endpoint
+    // BYOK：端点由配置自述——`wire` 决定形态，`compat` 决定与该 wire 缺省的差异。
+    // 不再解析 (provider_id, endpoint) 预设坐标，也不再有按模型名兜底的专项。
+    let cfg = &ctx.agent.config;
+    let compat = cfg.compat.clone();
+    // 路径覆写按 wire 生效；未覆写传 None，由 gate 用该 wire 的规范路径。
+    let provider = match cfg.wire {
+        qaqh_types::Wire::Anthropic => {
+            let mut p = qaqh_gate::ProviderConfig::anthropic(
+                &cfg.base_url,
+                &cfg.api_key,
+                &cfg.model,
+                compat.path.clone(),
             );
+            p.supports_thinking = compat.supports_thinking;
+            p.supports_reasoning_effort = compat.supports_reasoning_effort;
+            p.supports_reasoning_content = compat.supports_reasoning_content;
+            p.thinking_budget_large = compat.thinking_budget_large;
+            p
         }
-    }
-    // T9/T10: 端点级重试策略随 EndpointSpec 一起传递（None = gate 内置缺省）。
-    let retry = ep.as_ref().and_then(|e| e.retry.clone());
-    if is_anthropic {
-        let mut p = qaqh_gate::ProviderConfig::anthropic(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.anthropic_path.clone()),
-        );
-        if let Some(endpoint) = ep.as_ref() {
-            p.supports_thinking = endpoint.supports_thinking;
-            p.supports_reasoning_effort = endpoint.supports_reasoning_effort;
-            p.supports_reasoning_content = endpoint.supports_reasoning_content;
-            p.thinking_budget_large = endpoint.thinking_budget_large;
-        }
-        return p
-            .with_opencode_headers(&ctx.agent.session.session_id, request_tag)
-            .with_retry(retry.clone());
-    }
-    if is_responses {
-        let mut p = qaqh_gate::ProviderConfig::responses(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.responses_path.clone()),
-        );
-        if let Some(endpoint) = ep.as_ref() {
+        qaqh_types::Wire::Responses => {
+            let mut p = qaqh_gate::ProviderConfig::responses(
+                &cfg.base_url,
+                &cfg.api_key,
+                &cfg.model,
+                compat.path.clone(),
+            );
             p.responses_compat = qaqh_gate::ResponsesCompat {
-                web_search: endpoint.responses_web_search,
-                echo_web_search_call: endpoint.responses_echo_web_search_call,
-                send_include: endpoint.responses_send_include,
-                effort_max: endpoint.responses_effort_max.clone(),
-                supports_user: endpoint.responses_supports_user,
-                search_function_alias: endpoint.responses_search_function_alias.clone(),
-                echo_reasoning_content: endpoint.responses_echo_reasoning_content,
+                web_search: compat.responses_web_search,
+                echo_web_search_call: compat.responses_echo_web_search_call,
+                send_include: compat.responses_send_include,
+                effort_max: compat.responses_effort_max.clone(),
+                supports_user: compat.responses_supports_user,
+                search_function_alias: compat.responses_search_function_alias.clone(),
+                echo_reasoning_content: compat.responses_echo_reasoning_content,
             };
+            p
         }
-        // Muse Spark 专项：物理前缀缓存 + 关明文回放 + 放宽档位至 xhigh
-        if p.model.contains("muse-spark") {
-            p.prompt_cache_key = Some(ctx.agent.session.session_id.clone());
-            p.responses_compat.echo_reasoning_content = false;
-            p.responses_compat.send_include = false;
-            p.responses_compat.effort_max = "xhigh".into();
-            p.responses_compat.web_search = false;
-            p.responses_compat.echo_web_search_call = false;
+        qaqh_types::Wire::OpenAi => {
+            let mut p = qaqh_gate::ProviderConfig::openai(
+                &cfg.base_url,
+                &cfg.api_key,
+                &cfg.model,
+                compat.user_id_mode.clone(),
+                compat.path.clone(),
+                compat.thinking_mode.clone(),
+                compat.cache_field.clone(),
+                compat.supports_thinking,
+                compat.do_sample,
+            )
+            .with_stream_usage(compat.include_stream_usage);
+            p.supports_reasoning_effort = compat.supports_reasoning_effort;
+            p.effort_allowlist = compat.effort_allowlist.clone();
+            p.tool_call_content_null = compat.tool_call_content_null;
+            p.supports_reasoning_content = compat.supports_reasoning_content;
+            p.require_provider_parameters = compat.require_provider_parameters;
+            p
         }
-        p.with_opencode_headers(&ctx.agent.session.session_id, request_tag)
-            .with_retry(retry.clone())
-    } else {
-        let mut p = qaqh_gate::ProviderConfig::openai(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.user_id_mode.clone()),
-            ep.as_ref().and_then(|e| e.chat_path.clone()),
-            ep.as_ref()
-                .map(|e| e.thinking_mode.clone())
-                .unwrap_or_default(),
-            ep.as_ref()
-                .map(|e| e.cache_field.clone())
-                .unwrap_or_default(),
-            ep.as_ref().map(|e| e.supports_thinking).unwrap_or(false),
-            ep.as_ref().and_then(|e| e.do_sample),
-        )
-        // 缺省归一为 false：与 compact/title 镜像一致；None（端点配置错误）
-        // 时欠配置端不发 thinking 参数，保守方向。
-        .with_stateful(ep.as_ref().map(|e| e.stateful).unwrap_or(false))
-        .with_stream_usage(ep.as_ref().map(|e| e.include_stream_usage).unwrap_or(false));
-        if let Some(endpoint) = ep.as_ref() {
-            p.supports_reasoning_effort = endpoint.supports_reasoning_effort;
-            p.effort_allowlist = endpoint.effort_allowlist.clone();
-            p.tool_call_content_null = endpoint.tool_call_content_null;
-            p.supports_reasoning_content = endpoint.supports_reasoning_content;
-            p.require_provider_parameters = endpoint.require_provider_parameters;
-        }
-        p.with_opencode_headers(&ctx.agent.session.session_id, request_tag)
-            .with_retry(retry.clone())
-    }
+    };
+    provider
+        .with_opencode_headers(&ctx.agent.session.session_id, request_tag)
+        .with_retry(compat.retry.clone())
 }
-
 #[cfg(test)]
 mod arg_line_slot_tests {
     use super::{ArgLineSlot, ESTIMATE_INTERVAL};

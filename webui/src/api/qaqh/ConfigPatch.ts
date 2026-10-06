@@ -5,8 +5,8 @@ import type { SubagentPatch } from "./SubagentPatch";
  * 写模型：JSON Merge Patch（K3）。反序列化时缺失即 None = 不动；
  * 序列化时跳过 None，保证 wire 上永不出现 `"field": null`。
  *
- * 刻意**不含**：providers/profiles 名录（服务端派生）、active_profile
- * （切换走 `profile.apply`）、api_key_set（服务端派生）。
+ * 刻意**不含**：profiles 名录（服务端派生）、active_profile（切换走
+ * `profile.apply`）、api_key_set（服务端派生）。BYOK 后没有 provider 目录可下发。
  * `permissionLevel` 在 patch 中受 1..=3 值域校验（BUG-2026-09-13-15；三档制 2026-10-03）。
  *
  * 特例语义冻结：`apiKey`/`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
@@ -16,7 +16,7 @@ export type ConfigPatch = {
 /**
  * 主密钥：仅用户显式输入新值时 Some；掩码 `"****"`/空串 = 保持现值。
  */
-apiKey: string | null, model: string | null, baseUrl: string | null, providerId: string | null, endpoint: string | null, maxTokens: number | null, contextLimit: number | null, reasoningEffort: string | null, 
+apiKey: string | null, model: string | null, baseUrl: string | null, wire: string | null, maxTokens: number | null, contextLength: number | null, reasoningEffort: string | null, 
 /**
  * 值域 `[0,1]`；`0` = 关闭自动压缩。
  */

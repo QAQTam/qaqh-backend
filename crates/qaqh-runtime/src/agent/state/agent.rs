@@ -223,11 +223,6 @@ pub struct AgentState {
     /// Loop bookkeeping queue (PR-1-5 / B6): title / context-stats / mode /
     /// usage / skills writes, drained by [`Self::drain_persist_ops`].
     pub pending_meta_ops: Vec<MetaOp>,
-    /// Endpoint spec resolved once from the config's (provider, endpoint)
-    /// pair (PR-1-9 / B7). Refreshed whenever the config is replaced
-    /// ([`Self::new`] / reload `apply_config`); engines read this field
-    /// instead of re-walking the provider registry per request.
-    pub endpoint_spec: Option<qaqh_types::EndpointSpec>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -241,7 +236,7 @@ impl AgentState {
         // Seed is empty until create_session / init_session assigns a real one.
         // This prevents accidental persistence of a placeholder seed.
         let msg = qaqh_message::MessageStore::new("");
-        let effective_input_tokens = config.context_limit as usize;
+        let effective_input_tokens = config.context_length as usize;
         let mut agent = Self {
             msg,
             config,
@@ -265,16 +260,8 @@ impl AgentState {
             tool_ledger_session: None,
             fact_causation: FactCausation::new(),
             pending_meta_ops: Vec::new(),
-            endpoint_spec: None,
         };
-        agent.refresh_endpoint_spec();
         agent
-    }
-
-    /// Re-resolve [`Self::endpoint_spec`] from the current config (PR-1-9).
-    /// Call after any mutation of `config.provider_id` / `config.endpoint`.
-    pub fn refresh_endpoint_spec(&mut self) {
-        self.endpoint_spec = qaqh_config::registry::resolve_for_config(&self.config);
     }
 
     /// Return this actor's canonical tool ledger, opening it on first use.
@@ -327,16 +314,11 @@ impl AgentState {
     /// workspace runtime (PR-1-10 / D2): tool-call paths read the snapshot,
     /// never the disk. Call at assembly and after every config reload.
     pub fn refresh_image_capability(&self) {
+        // BYOK：图片能力是这条端点自己的声明（compat），不再有 provider 目录可查。
+        let enabled = self.config.compat.supports_image_tool;
         qaqh_workspace::runtime::set_image_capability(
-            qaqh_config::registry::image_tool_enabled(
-                &self.config.provider_id,
-                &self.config.endpoint,
-            ),
-            qaqh_config::registry::image_model_supported(
-                &self.config.provider_id,
-                &self.config.endpoint,
-                &self.config.model,
-            ),
+            enabled,
+            enabled && self.config.compat.supports_image_for_model(&self.config.model),
         );
     }
 
@@ -380,15 +362,11 @@ impl AgentState {
     }
 
     pub(crate) fn token_calibration_fingerprint(&self) -> String {
-        let protocol =
-            qaqh_config::registry::protocol_for(&self.config.provider_id, &self.config.endpoint);
         format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             self.session.session_id,
-            self.config.provider_id,
-            self.config.endpoint,
             self.config.base_url,
-            protocol,
+            self.config.wire.as_str(),
             self.config.model,
             self.config
                 .tokenizer_path
@@ -1238,7 +1216,7 @@ mod tests {
     #[test]
     fn post_compact_next_lap_keeps_last_api_context_until_fresh_usage() {
         let config = qaqh_config::Config {
-            context_limit: 1_000,
+            context_length: 1_000,
             ..Default::default()
         };
         let mut agent = AgentState::new(config);

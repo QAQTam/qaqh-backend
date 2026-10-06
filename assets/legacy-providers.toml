@@ -1,8 +1,8 @@
-# QAQ-Harness 内置 provider/endpoint 能力基线（T9）。
-# 本文件由 registry.rs 内置表导出生成（example export_providers）；运行时按
-# override > config.toml > assets 优先级合并。
-# 字段缺省 = OpenAI 纯协议语义（见 docs/current/architecture.md）。
-
+# 一次性迁移数据（BYOK 前）。这里的内容不再是"可选 provider 目录"——
+# 设置面只有六个字段（endpoint / wire / apikey / model / max_token / context_length）。
+# 本文件只用于把老配置里的 (provider_id, endpoint) 坐标解析成具体的
+# base_url + wire + compat，让升级不改变任何在途端点的请求形状。
+# 迁移完成后（下个大版本）连同 registry 的 legacy 模块一起删除。
 [[providers]]
 id = "deepseek"
 display = "DeepSeek"
