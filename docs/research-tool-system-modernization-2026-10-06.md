@@ -20,6 +20,13 @@ tool defs 上下文开销、多事实面结构与 workspace 拆分可行性。
 
 实测数据：38 个内置工具 defs 序列化 **22,048 字符 ≈ 5.5K tokens**，随每个请求全量发送。
 
+> **P1 迁移后实测（2026-10-06）**：全量面 40 工具（skills 拆三 +2）defs 序列化
+> **25,673 字符**；identity prompt（backend_prompt.md）10,211 字符；逐工具最大
+> todo_write 1,581 / exec 1,533 / read 1,467。字符回涨来自生成 schema 携带完整
+> 字段级 doc comment description（v1 手写 schema 大多无字段描述）——这是语义
+> 增益，但 handoff 目标 <20k 不可达；预算测试已按实测锁 28k（总量）/1,600
+> （逐工具），压缩字段描述属后续工作。
+
 ## 1. 注册体系现状（不变的部分）
 
 | 层 | 位置 | 形态 |
