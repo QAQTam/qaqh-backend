@@ -50,28 +50,53 @@ fn build_material(cert_pem: &str, key_pem: &str) -> Result<TlsMaterial, String> 
     })
 }
 
-/// 载入持久化自签证书；不存在则生成并落盘。
-pub fn load_or_generate(data_dir: &Path) -> Result<TlsMaterial, String> {
+/// 载入持久化自签证书；不存在（或 SAN 集合变化）则重签并落盘。
+///
+/// SAN 集合写在 `tls/sans.txt`：非回环 bind 必须把**手机实际连接的 IP**写进
+/// iPAddress SAN，原生端（ArkTS HTTP / 系统信任链）才会做标准主机名校验而不用
+/// 关校验。rcgen 会把形如 IP 的字符串解析成 IpAddress 类型的 SAN。
+/// SAN 变化 = 证书轮换 = 全部已配对设备重新扫码（与模块头一致）。
+pub fn load_or_generate(data_dir: &Path, subject_alt_names: &[String]) -> Result<TlsMaterial, String> {
     let dir = data_dir.join("tls");
     std::fs::create_dir_all(&dir).map_err(|error| format!("create tls dir: {error}"))?;
     let cert_path = dir.join("cert.pem");
     let key_path = dir.join("key.pem");
+    let sans_path = dir.join("sans.txt");
 
-    let (cert_pem, key_pem) = if cert_path.exists() && key_path.exists() {
+    let mut sans: Vec<String> = subject_alt_names.to_vec();
+    sans.sort();
+    sans.dedup();
+    let wanted = sans.join("\n");
+
+    let cached = if cert_path.exists() && key_path.exists() && sans_path.exists() {
         let cert = std::fs::read_to_string(&cert_path).map_err(|e| format!("read cert: {e}"))?;
         let key = std::fs::read_to_string(&key_path).map_err(|e| format!("read key: {e}"))?;
-        (cert, key)
+        let stored = std::fs::read_to_string(&sans_path).unwrap_or_default();
+        if stored == wanted {
+            Some((cert, key))
+        } else {
+            log::warn!(
+                "[tls] subject alternative names changed; re-issuing the self-signed \
+                 certificate (paired devices must re-scan the QR)"
+            );
+            None
+        }
     } else {
-        let certified = rcgen::generate_simple_self_signed(vec![
-            "qaqh-daemon".to_string(),
-            "localhost".to_string(),
-        ])
-        .map_err(|error| format!("generate self-signed cert: {error}"))?;
-        let cert = certified.cert.pem();
-        let key = certified.signing_key.serialize_pem();
-        std::fs::write(&cert_path, &cert).map_err(|e| format!("write cert: {e}"))?;
-        std::fs::write(&key_path, &key).map_err(|e| format!("write key: {e}"))?;
-        (cert, key)
+        None
+    };
+
+    let (cert_pem, key_pem) = match cached {
+        Some(material) => material,
+        None => {
+            let certified = rcgen::generate_simple_self_signed(sans)
+                .map_err(|error| format!("generate self-signed cert: {error}"))?;
+            let cert = certified.cert.pem();
+            let key = certified.signing_key.serialize_pem();
+            std::fs::write(&cert_path, &cert).map_err(|e| format!("write cert: {e}"))?;
+            std::fs::write(&key_path, &key).map_err(|e| format!("write key: {e}"))?;
+            std::fs::write(&sans_path, &wanted).map_err(|e| format!("write sans: {e}"))?;
+            (cert, key)
+        }
     };
 
     build_material(&cert_pem, &key_pem)
