@@ -100,17 +100,15 @@ impl SessionEngine {
         agent.config.api_key = cfg.api_key;
         agent.config.model = cfg.model;
         agent.config.base_url = cfg.base_url;
-        agent.config.endpoint = cfg.endpoint;
-        agent.config.provider_id = cfg.provider_id;
+        // BYOK：端点记录自身（wire/compat）随配置刷新，不再有预设坐标。
+        agent.config.wire = cfg.wire;
+        agent.config.compat = cfg.compat;
         agent.config.reasoning_effort = cfg.reasoning_effort;
         agent.config.max_tokens = cfg.max_tokens;
-        agent.config.context_limit = cfg.context_limit;
-        agent.config.context_window = cfg.context_window;
+        agent.config.context_length = cfg.context_length;
         agent.config.auto_compact_threshold = cfg.auto_compact_threshold;
         agent.config.permission_level = cfg.permission_level;
         agent.config.exec = cfg.exec;
-        // (provider, endpoint) 解析随配置刷新（PR-1-9：engines 只读字段）。
-        agent.refresh_endpoint_spec();
         // 图片能力快照随配置刷新（PR-1-10：工具调用路径零磁盘读）。
         agent.refresh_image_capability();
     }
@@ -128,12 +126,14 @@ mod tests {
             api_key: "sk-new".into(),
             model: "model-new".into(),
             base_url: "https://new.example/v1".into(),
-            endpoint: "openai".into(),
-            provider_id: "prov-new".into(),
+            wire: qaqh_types::Wire::Responses,
+            compat: qaqh_types::EndpointCompat {
+                responses_effort_max: "max".into(),
+                ..Default::default()
+            },
             reasoning_effort: "max".into(),
             max_tokens: 123_456,
-            context_limit: 2_000_000,
-            context_window: Some(1_500_000),
+            context_length: 2_000_000,
             auto_compact_threshold: 0.95,
             permission_level: 3,
             exec: qaqh_config::config::ExecConfig {
@@ -145,10 +145,9 @@ mod tests {
             api_key: "sk-old".into(),
             model: "model-old".into(),
             base_url: "https://old.example/v1".into(),
-            provider_id: "prov-old".into(),
             reasoning_effort: "low".into(),
             max_tokens: 4096,
-            context_limit: 10_000,
+            context_length: 10_000,
             auto_compact_threshold: 0.3,
             permission_level: 1,
             ..Default::default()
@@ -159,13 +158,13 @@ mod tests {
         assert_eq!(agent.config.api_key, "sk-new");
         assert_eq!(agent.config.model, "model-new");
         assert_eq!(agent.config.base_url, "https://new.example/v1");
-        assert_eq!(agent.config.endpoint, "openai");
-        assert_eq!(agent.config.provider_id, "prov-new");
         assert_eq!(agent.config.reasoning_effort, "max");
         assert_eq!(agent.config.max_tokens, 123_456);
-        assert_eq!(agent.config.context_limit, 2_000_000);
-        // N-1：端点声明的硬窗口也是热字段（reload 后 pre-flight 必须用新窗口）。
-        assert_eq!(agent.config.context_window, Some(1_500_000));
+        // BYOK：端点自述的 wire/compat 也是热字段（reload 后请求形状必须跟着换）。
+        assert_eq!(agent.config.wire, qaqh_types::Wire::Responses);
+        assert_eq!(agent.config.compat.responses_effort_max, "max");
+        // 单一压缩分母（软阈值与硬 pre-flight 同源）。
+        assert_eq!(agent.config.context_length, 2_000_000);
         // R1 主角：阈值必须随 reload 同步到运行中会话。
         assert!((agent.config.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(agent.config.permission_level, 3);

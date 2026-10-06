@@ -133,33 +133,6 @@ const MAX_STREAM_CONTINUATIONS: u32 = 3;
 /// plus one re-sent request; past this the turn fails as before.
 const MAX_CONTEXT_OVERFLOW_RECOVERIES: u32 = 2;
 
-/// Substrings identifying a provider-side context-overflow rejection.
-///
-/// Endpoints word the same condition differently (OpenAI
-/// `context_length_exceeded` / "maximum context length", Anthropic "prompt is
-/// too long", gateways "context window" / "context limit"). The gate forwards
-/// the provider body into `StreamEvent::Error`, so a case-insensitive
-/// substring match is the only provider-agnostic signal available locally.
-const CONTEXT_OVERFLOW_MARKERS: &[&str] = &[
-    "context_length_exceeded",
-    "maximum context length",
-    "context window",
-    "context limit",
-    "prompt is too long",
-    "too many tokens",
-    "reduce the length of the messages",
-];
-
-/// True when a gate/provider error message looks like a context-overflow
-/// rejection (HTTP 400/413 "too much context") rather than a transport or
-/// authentication failure.
-fn is_context_overflow_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    CONTEXT_OVERFLOW_MARKERS
-        .iter()
-        .any(|marker| lower.contains(marker))
-}
-
 /// What the local pre-flight wants to do about the estimated request size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompactPreflight {
@@ -204,17 +177,6 @@ pub(crate) fn compact_preflight(
         };
     }
     CompactPreflight::None
-}
-
-/// Hard context window for the local pre-flight (N-1 / D-15).
-///
-/// The profile may declare the endpoint's real window (`context_window`); when
-/// it is absent the user-facing `context_limit` is used as before. The two are
-/// deliberately separate: `context_limit` stays the base of the auto-compact
-/// soft threshold, while this value answers "would the endpoint reject this
-/// request outright?".
-pub(crate) fn hard_context_limit(cfg: &qaqh_config::Config) -> u64 {
-    cfg.context_window.unwrap_or(cfg.context_limit) as u64
 }
 
 /// TurnEngine manages a single LLM turn lifecycle.
@@ -1327,7 +1289,7 @@ impl TurnEngine {
             .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
         // 硬窗口：优先用 profile 声明的端点真实窗口（`context_window`，N-1），
         // 缺失时回落用户侧口径 `context_limit`。
-        let limit = hard_context_limit(&ctx.agent.config);
+        let limit = u64::from(ctx.agent.config.context_length);
         let threshold = ctx.agent.config.auto_compact_threshold;
         let api_context_tokens = request_estimate.api_context_tokens;
         let decision_tokens = ctx.agent.auto_compact_decision_tokens(&request_estimate);
@@ -1644,7 +1606,14 @@ impl TurnEngine {
             }
 
             if (had_error || request_error.is_some()) && !done_seen {
+                // 超限判定用 gate 的结构化类别（`StreamEvent::Error.kind`，即统一
+                // SDK 的 ErrorKind）——端点无论用 code 还是只用文案报超限，都由
+                // gate 归类，runtime 不再认错误文案。
+                let overflow_rejected = gate_error
+                    .as_ref()
+                    .is_some_and(|e| e.kind == qaqh_gate::ErrorKind::ContextLengthExceeded);
                 let message = gate_error
+                    .map(|e| e.message)
                     .or_else(|| request_error.clone())
                     .unwrap_or_else(|| "Model request failed".into());
                 // ── 超限兜底（D-15 / BUG-2026-09-16-04）──
@@ -1660,7 +1629,7 @@ impl TurnEngine {
                 if streamed_nothing
                     && !turn_context.runtime().cancellation().is_set()
                     && self.context_overflow_recoveries < MAX_CONTEXT_OVERFLOW_RECOVERIES
-                    && is_context_overflow_error(&message)
+                    && overflow_rejected
                 {
                     self.context_overflow_recoveries += 1;
                     log::warn!(
@@ -1724,7 +1693,7 @@ impl TurnEngine {
                     turn_id,
                     round_num,
                     gate_error
-                        .clone()
+                        .map(|e| e.message)
                         .or(request_error.clone())
                         .unwrap_or_default()
                 );
@@ -2070,58 +2039,4 @@ mod tests {
         );
     }
 
-    /// N-1 验收：硬窗口取「端点声明的 `context_window`」，缺失时回落
-    /// `context_limit`；软阈值基数仍是 `context_limit`（两者不得互相顶替）。
-    #[test]
-    fn hard_context_limit_prefers_the_endpoint_declared_window() {
-        use super::hard_context_limit;
-
-        let base = qaqh_config::Config {
-            context_limit: 1_000_000,
-            context_window: None,
-            ..Default::default()
-        };
-        assert_eq!(
-            hard_context_limit(&base),
-            1_000_000,
-            "缺失时回落 context_limit"
-        );
-
-        let declared = qaqh_config::Config {
-            context_window: Some(200_000),
-            ..base.clone()
-        };
-        assert_eq!(hard_context_limit(&declared), 200_000, "声明了就用端点窗口");
-
-        // 声明窗口 > 用户口径时也照用（口径分工：软阈值仍按 context_limit）。
-        let wider = qaqh_config::Config {
-            context_window: Some(2_000_000),
-            ..base
-        };
-        assert_eq!(hard_context_limit(&wider), 2_000_000);
-    }
-
-    /// 端点侧超限文案（各 provider 口径）必须被识别为 `CONTEXT_OVERFLOW`，
-    /// 否则回收分支不会被走到。
-    #[test]
-    fn endpoint_context_overflow_errors_are_recognized() {
-        use super::is_context_overflow_error;
-
-        assert!(is_context_overflow_error(
-            "OpenAI API HTTP 400 (Bad Request): {\"error\":{\"code\":\"context_length_exceeded\",\
-             \"message\":\"This model's maximum context length is 131072 tokens.\"}}"
-        ));
-        assert!(is_context_overflow_error(
-            "HTTP 400: prompt is too long: 210000 tokens > 200000 maximum"
-        ));
-        assert!(is_context_overflow_error(
-            "HTTP 400 (Bad Request): input length and `max_tokens` exceed context limit"
-        ));
-        assert!(!is_context_overflow_error(
-            "OpenAI API HTTP 401 (Unauthorized): authentication failed"
-        ));
-        assert!(!is_context_overflow_error(
-            "HTTP transport error: connection reset by peer"
-        ));
-    }
 }
