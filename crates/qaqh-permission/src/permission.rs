@@ -239,6 +239,16 @@ pub fn resolve_target_path(path: PathBuf) -> PathBuf {
         }
     };
     let normalized = normalize_lexically(&absolute);
+    // 纯根路径（`/`、`\`、盘根）不做 canonicalize：Windows 上 `canonicalize("/")`
+    // 解析为**当前盘**根（如 `C:\`），让分隔符垃圾信任条目逃过 `trimmed_key`
+    // 的 fail-open 守卫，把整块盘当成信任子树。原样返回使 `path_within_dir`
+    // 走 fail-closed（弹审批）。
+    if !normalized
+        .components()
+        .any(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return normalized;
+    }
     let mut ancestor = normalized.as_path();
     let mut missing = Vec::new();
 
@@ -1207,5 +1217,34 @@ mod w3_w7_tests {
                 level.to_u8()
             );
         }
+    }
+
+    /// 回归（Windows）：纯根信任条目不得被 `canonicalize` 折成当前盘根。
+    /// `canonicalize("/")` 在 Windows 得到 `C:\`（当前盘），会让 `/` 这样的
+    /// 分隔符垃圾条目逃过 `trimmed_key` 的 fail-open 守卫 → 全盘 AutoApprove。
+    #[test]
+    fn root_only_trust_entry_is_not_resolved_to_current_drive_root() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for bogus in ["/", "\\", "C:\\"] {
+            let resolved = resolve_target_path(PathBuf::from(bogus));
+            assert!(
+                !resolved
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::Normal(_))),
+                "root-only entry {bogus:?} must stay root-only, got {resolved:?}"
+            );
+        }
+        // 真实子路径仍走 canonicalize（存在性解析语义不变）。
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = resolve_target_path(tmp.path().to_path_buf());
+        assert_eq!(
+            resolved
+                .components()
+                .any(|c| matches!(c, std::path::Component::Normal(_))),
+            true,
+            "a real directory must still resolve"
+        );
     }
 }
