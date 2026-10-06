@@ -112,7 +112,11 @@ mod schema_spot_check {
         // 不得残留 legacy 字段。
         assert_eq!(
             required_of("edit"),
-            vec!["path".to_string(), "old_str".to_string(), "new_str".to_string()]
+            vec![
+                "path".to_string(),
+                "old_str".to_string(),
+                "new_str".to_string()
+            ]
         );
         let edit_params = &by_name("edit").function.parameters;
         for legacy in [

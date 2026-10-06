@@ -1,0 +1,33 @@
+[package]
+name = "qaqh-process-tools"
+version.workspace = true
+edition.workspace = true
+description = "QAQ-Harness process tool group: exec + process registry/inspect (P2 crate split from qaqh-workspace)"
+
+[dependencies]
+qaqh-types = { path = "../qaqh-types" }
+qaqh-permission = { path = "../qaqh-permission" }
+qaqh-tool-core = { path = "../qaqh-tool-core" }
+qaqh-file-tools = { path = "../qaqh-file-tools" }
+qaqh-policy = { path = "../qaqh-policy" }
+qaqh-sandbox = { path = "../qaqh-sandbox" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+anyhow = "1"
+log = "0.4"
+regex = "1"
+
+[target.'cfg(windows)'.dependencies]
+sbx-win = { path = "../sbx-win" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# 测试需要具体 ToolManager（生产依赖图为单向；cargo 允许 dev-dependency 环）。
+qaqh-workspace = { path = "../qaqh-workspace" }

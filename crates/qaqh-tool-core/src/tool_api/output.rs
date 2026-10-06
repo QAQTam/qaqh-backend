@@ -425,7 +425,8 @@ fn to_wire_outcome(outcome: &ToolDisplayOutcome) -> ToolResultDisplayOutcome {
     }
 }
 
-pub fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {    ToolDisplay {
+pub fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
+    ToolDisplay {
         summary: display.summary.clone(),
         diff: display.diff.clone(),
         lines_added: display.lines_added,

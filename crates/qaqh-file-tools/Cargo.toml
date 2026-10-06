@@ -1,0 +1,37 @@
+[package]
+name = "qaqh-file-tools"
+version.workspace = true
+edition.workspace = true
+description = "QAQ-Harness file tool group: mutate/query/glob/grep/edit/apply_patch/journal/read_image (P2 crate split from qaqh-workspace)"
+
+[dependencies]
+qaqh-types = { path = "../qaqh-types" }
+qaqh-permission = { path = "../qaqh-permission" }
+qaqh-fs-core = { path = "../qaqh-fs-core" }
+qaqh-tool-core = { path = "../qaqh-tool-core" }
+qaqh-skills = { path = "../qaqh-skills" }
+qaqh-domain = { path = "../qaqh-domain" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+sha2 = "0.11"
+similar = { version = "3.1", features = ["text"] }
+hex = "0.4"
+base64 = "0.22"
+globset = "0.4.20"
+ignore = "0.4.33"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+log = "0.4"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# 测试需要具体 ToolManager（生产依赖图为单向：workspace → file-tools；
+# cargo 允许 dev-dependency 环）。
+qaqh-workspace = { path = "../qaqh-workspace" }
+git2 = { version = "0.21", features = ["vendored-libgit2"] }

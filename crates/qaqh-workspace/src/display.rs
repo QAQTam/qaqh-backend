@@ -265,7 +265,7 @@ pub(crate) fn project_skills(args: &serde_json::Value, output: &str) -> ToolDisp
     with_line_summary(display, summary.or_else(|| json_summary(output)))
 }
 
-pub(crate) fn project_process(args: &serde_json::Value, output: &str) -> ToolDisplay {
+pub fn project_process(args: &serde_json::Value, output: &str) -> ToolDisplay {
     let action = args
         .get("action")
         .and_then(|value| value.as_str())

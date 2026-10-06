@@ -32,7 +32,9 @@ fn cmdline_of(argv: &[String]) -> String {
 
 fn quote_windows_arg(arg: &str, out: &mut String) {
     if !arg.is_empty()
-        && !arg.bytes().any(|b| matches!(b, b' ' | b'\t' | b'"' | b'\n'))
+        && !arg
+            .bytes()
+            .any(|b| matches!(b, b' ' | b'\t' | b'"' | b'\n'))
     {
         out.push_str(arg);
         return;
@@ -66,10 +68,12 @@ fn quote_windows_arg(arg: &str, out: &mut String) {
 
 /// 子进程环境:qaqh 最小白名单透传 → sbx 重指表(TMP/TEMP/USERPROFILE/HOME
 /// → scratch)→ 模型显式 env 最后覆盖(spec §5.5 顺序)。
-fn child_env(scratch_tmp: &std::path::Path, scratch_home: &std::path::Path) -> Vec<(String, String)> {
-    let mut env: std::collections::BTreeMap<String, String> = super::direct::minimal_child_env()
-        .into_iter()
-        .collect();
+fn child_env(
+    scratch_tmp: &std::path::Path,
+    scratch_home: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut env: std::collections::BTreeMap<String, String> =
+        super::direct::minimal_child_env().into_iter().collect();
     let repoint = [
         ("TEMP", scratch_tmp.display().to_string()),
         ("TMP", scratch_tmp.display().to_string()),
@@ -140,10 +144,16 @@ pub(crate) fn sbx_exec(
     // 无 workspace 时一次性随机 SID。
     let workspace = spec.workspace_root.clone();
     let identity = match &workspace {
-        Some(ws) => match sbx_win::sidstore::load_or_create_identity(ws, sbx_win::policy::IsolationKind::Token) {
+        Some(ws) => match sbx_win::sidstore::load_or_create_identity(
+            ws,
+            sbx_win::policy::IsolationKind::Token,
+        ) {
             Ok((id, _created)) => id,
             Err(e) => {
-                return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: sbx sidstore: {e}"));
+                return sandboxed_failure(
+                    display_name,
+                    format!("SANDBOX PREPARE FAILED: sbx sidstore: {e}"),
+                );
             }
         },
         None => match sbx_win::sid::capability_sid() {
@@ -154,7 +164,10 @@ pub(crate) fn sbx_exec(
                 created: true,
             },
             Err(e) => {
-                return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: sbx sidgen: {e}"));
+                return sandboxed_failure(
+                    display_name,
+                    format!("SANDBOX PREPARE FAILED: sbx sidgen: {e}"),
+                );
             }
         },
     };
@@ -185,20 +198,27 @@ pub(crate) fn sbx_exec(
     let scratch_tmp = scratch.join("tmp");
     let scratch_home = scratch.join("home");
     let view_root = scratch.join("view");
-    if let Err(e) = std::fs::create_dir_all(&scratch_tmp).and_then(|_| std::fs::create_dir_all(&scratch_home)) {
-        return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: scratch: {e}"));
+    if let Err(e) =
+        std::fs::create_dir_all(&scratch_tmp).and_then(|_| std::fs::create_dir_all(&scratch_home))
+    {
+        return sandboxed_failure(
+            display_name,
+            format!("SANDBOX PREPARE FAILED: scratch: {e}"),
+        );
     }
 
     // 子进程令牌:token 后端 = WRITE_RESTRICTED 受限令牌(直接子令牌,免提权)。
-    let child_token = match sbx_win::token::create_restricted_token(&[
-        cap.clone(),
-        sbx_win::sid::everyone_sid(),
-    ]) {
-        Ok(t) => t,
-        Err(e) => {
-            return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: restricted token: {e}"));
-        }
-    };
+    let child_token =
+        match sbx_win::token::create_restricted_token(&[cap.clone(), sbx_win::sid::everyone_sid()])
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return sandboxed_failure(
+                    display_name,
+                    format!("SANDBOX PREPARE FAILED: restricted token: {e}"),
+                );
+            }
+        };
 
     // spawn 前 ACL 计划:redirect 下工作区内授权目标进视图(真实工作区不挂
     // 任何 cap ACE),工作区外就地;非 redirect 全部就地。
@@ -207,7 +227,10 @@ pub(crate) fn sbx_exec(
         match sbx_win::redirect::split_plan(&policy, &cap, ws, &view_root) {
             Ok(s) => (s.inplace, Some(s.view)),
             Err(e) => {
-                return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: split redirect plan: {e}"));
+                return sandboxed_failure(
+                    display_name,
+                    format!("SANDBOX PREPARE FAILED: split redirect plan: {e}"),
+                );
             }
         }
     } else {
@@ -225,7 +248,10 @@ pub(crate) fn sbx_exec(
     let snapshots = match sbx_win::acl::apply_ops(&plan, sink.as_ref()) {
         Ok(s) => s,
         Err(e) => {
-            return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: apply acl plan: {e}"));
+            return sandboxed_failure(
+                display_name,
+                format!("SANDBOX PREPARE FAILED: apply acl plan: {e}"),
+            );
         }
     };
 
@@ -265,7 +291,10 @@ pub(crate) fn sbx_exec(
         match sbx_win::redirect::prepare_turn(ws, &view_root, view_ops) {
             Ok(t) => Some(t),
             Err(e) => {
-                return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: prepare view turn: {e}"));
+                return sandboxed_failure(
+                    display_name,
+                    format!("SANDBOX PREPARE FAILED: prepare view turn: {e}"),
+                );
             }
         }
     } else {
@@ -275,7 +304,10 @@ pub(crate) fn sbx_exec(
     let desktop = match sbx_win::desktop::create_private_desktop(&identity.sid_text) {
         Ok(d) => d,
         Err(e) => {
-            return sandboxed_failure(display_name, format!("SANDBOX PREPARE FAILED: private desktop: {e}"));
+            return sandboxed_failure(
+                display_name,
+                format!("SANDBOX PREPARE FAILED: private desktop: {e}"),
+            );
         }
     };
 
@@ -388,9 +420,7 @@ pub(crate) fn sbx_exec(
                 sbx_win::projfs::Notification::Renamed { path, dest } => {
                     ("renamed", path, Some(dest))
                 }
-                sbx_win::projfs::Notification::Overwritten { path } => {
-                    ("overwritten", path, None)
-                }
+                sbx_win::projfs::Notification::Overwritten { path } => ("overwritten", path, None),
                 sbx_win::projfs::Notification::NewFile { path } => ("new_file", path, None),
             };
             sink.emit(
@@ -409,13 +439,13 @@ pub(crate) fn sbx_exec(
         );
         match turn.merge() {
             Ok(r) => {
-                sink.emit(
-                    &sbx_win::events::Event::new("overlay_merge").with_detail(serde_json::json!({
+                sink.emit(&sbx_win::events::Event::new("overlay_merge").with_detail(
+                    serde_json::json!({
                         "applied": r.applied,
                         "deleted": r.deleted,
                         "skipped_deletions": r.skipped_deletions,
-                    })),
-                );
+                    }),
+                ));
                 if r.skipped_deletions > 0 {
                     let note = format!(
                         "[sbx] {} deletion(s) NOT applied (ADR-0004: deletions require explicit \
@@ -467,7 +497,10 @@ pub(crate) fn sbx_exec(
     let cleaned = super::truncate::strip_ansi(&format!("{stderr_out}{stdout_out}"));
     let total_tokens = qaqh_types::token::count_tokens(&cleaned);
     let (output_str, truncated) = if total_tokens > max_output_tokens {
-        (super::truncate::token_truncate(&cleaned, max_output_tokens), true)
+        (
+            super::truncate::token_truncate(&cleaned, max_output_tokens),
+            true,
+        )
     } else {
         (cleaned, false)
     };

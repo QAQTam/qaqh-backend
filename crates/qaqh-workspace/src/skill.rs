@@ -14,9 +14,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::tool_api::{
-    clamp_display_body, ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError,
-    ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection,
-    TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode,
+    ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
+    clamp_display_body,
 };
 use crate::{ToolEffect, ToolRisk};
 
@@ -130,7 +130,9 @@ impl ToolProjection for SkillListOutput {
 
 impl ToolProjection for SkillResourceOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
-        vec![ToolContentBlock::Text { text: self.0.clone() }]
+        vec![ToolContentBlock::Text {
+            text: self.0.clone(),
+        }]
     }
 
     fn display(&self, args: &serde_json::Value) -> ToolDisplay {
@@ -188,7 +190,11 @@ impl TypedTool for SkillListTool {
         )
     }
 
-    fn run(&self, ctx: &ToolCallContext, _args: SkillListArgs) -> Result<Self::Output, ToolExecutionError> {
+    fn run(
+        &self,
+        ctx: &ToolCallContext,
+        _args: SkillListArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
         list_skills(ctx)
     }
 }
@@ -218,7 +224,10 @@ impl TypedTool for SkillResourceTool {
     }
 }
 
-fn activate_skill(ctx: &ToolCallContext, name: &str) -> Result<SkillActivateOutput, ToolExecutionError> {
+fn activate_skill(
+    ctx: &ToolCallContext,
+    name: &str,
+) -> Result<SkillActivateOutput, ToolExecutionError> {
     let activation = qaqh_skills::load_named(&ctx.workspace_root, name).map_err(|error| {
         recoverable(
             legacy_error(ToolErrorKind::NotFound, "skill_not_available", error)

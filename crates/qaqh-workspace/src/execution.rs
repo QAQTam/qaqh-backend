@@ -775,11 +775,7 @@ mod tests {
         let _test_guard = setup_test_manager();
         let definitions = crate::runtime::all_tools();
         // v2：skills 聚合工具拆为三件套；聚合名与 validate 不在模型面。
-        let skill_names = [
-            "skill_activate",
-            "skill_list",
-            "skill_resource",
-        ];
+        let skill_names = ["skill_activate", "skill_list", "skill_resource"];
         for name in skill_names {
             assert_eq!(
                 definitions

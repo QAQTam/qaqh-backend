@@ -19,11 +19,10 @@ fn builtin_sdk_parity_matches_registry_capabilities_and_dynamic_fallback() {
         registry, capabilities,
         "builtin registry order and capability table must match exactly"
     );
-    // 冻结数随内置工具增减手动推进：20 → 22 是 P1「skills 拆三」
-    // （skill_activate/skill_list/skill_resource 替代单一 skills）的结果，
-    // 能力表已同步 22 条；注册表与能力表的一致性由上方断言保证，
-    // 此处数字仅防无意增删。
-    assert_eq!(registry.len(), 22, "P3 freezes the 22 builtin tools");
+    // 冻结数随内置工具增减手动推进：22 → 23 是 P3「tool_search 元工具」
+    // （研究文档 §5.1，Deferred 工具的检索入口）的结果，能力表已同步；
+    // 注册表与能力表的一致性由上方断言保证，此处数字仅防无意增删。
+    assert_eq!(registry.len(), 23, "P3 freezes the 23 builtin tools");
     for definition in &defs {
         assert!(
             !definition.function.description.trim().is_empty(),

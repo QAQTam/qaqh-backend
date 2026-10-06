@@ -9,11 +9,11 @@
 use super::handler::ExecTool;
 use super::shell::Shell;
 
-pub fn register(mgr: &mut crate::ToolManager) {
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
     // 触发探测缓存（Windows git-bash / pwsh 解析链）。description 已点名默认
     // 壳（pwsh on Windows, bash elsewhere），但选壳仍是每次调用的运行时决策，
     // 可经 shell= 覆盖。
     let _ = Shell::detect();
     let _ = Shell::from_name("bash");
-    mgr.register_typed(ExecTool);
+    mgr.register_typed_tool(ExecTool);
 }

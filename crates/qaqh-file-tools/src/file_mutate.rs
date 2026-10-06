@@ -55,7 +55,7 @@ fn write_error(path: &str, error: &std::io::Error) -> String {
 ///
 /// 这里刻意不采用 `output` 首行：`output` 是模型面文本，可能自带工具名和
 /// `[OK]` 终态标记；展示面已有 header 与结构化 state，再回捞文本必然重复。
-pub(crate) fn mutation_change_summary(path: &str, added: u32, removed: u32) -> String {
+pub fn mutation_change_summary(path: &str, added: u32, removed: u32) -> String {
     if added == 0 && removed == 0 {
         format!("{path} · no changes")
     } else {
@@ -63,7 +63,7 @@ pub(crate) fn mutation_change_summary(path: &str, added: u32, removed: u32) -> S
     }
 }
 
-pub(crate) fn mutation_error(
+pub fn mutation_error(
     code: &str,
     message: impl Into<String>,
     hint: Option<&str>,
@@ -107,7 +107,7 @@ fn write_io_error(path: &str, error: &std::io::Error) -> ToolExecutionError {
     )
 }
 
-pub(crate) fn resolve_mutation_path(ctx: &ToolCallContext, raw_path: &str) -> String {
+pub fn resolve_mutation_path(ctx: &ToolCallContext, raw_path: &str) -> String {
     if raw_path.is_empty() {
         return String::new();
     }
@@ -137,7 +137,7 @@ fn trash_dir(ctx: &ToolCallContext) -> PathBuf {
     root.join(".qaqh/trash")
 }
 
-pub(crate) fn mutation_display(
+pub fn mutation_display(
     raw_path: Option<&str>,
     fallback_path: &str,
     op: crate::tool_api::PathOp,
@@ -790,9 +790,9 @@ impl TypedTool for DeleteTool {
 
 // ── Registration ──
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(WriteTool);
-    mgr.register_typed(DeleteTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(WriteTool);
+    mgr.register_typed_tool(DeleteTool);
 }
 
 /// Compatibility entry retained until `confirm_apply` is typed (Wave 6).
@@ -811,7 +811,7 @@ pub(super) fn exec_write_file(args: &Value) -> crate::ToolResult {
         .to_tool_result()
 }
 
-pub(crate) fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext {
+pub fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext {
     let workspace = crate::current_workspace();
     let workspace_root = if workspace.is_empty() {
         PathBuf::from(".")
@@ -822,18 +822,17 @@ pub(crate) fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCall
     if crate::is_cancel() {
         cancellation.cancel();
     }
+    let ambient = crate::hooks::ambient();
     ToolCallContext {
         call_id: call_id.to_string(),
         session_id: crate::current_session().unwrap_or_default(),
         workspace_root: workspace_root.clone(),
-        mode: match crate::runtime::current_mode() {
+        mode: match ambient.mode {
             1 => AgentMode::Plan,
             _ => AgentMode::Code,
         },
-        permission_level: crate::runtime::context()
-            .map(|context| crate::permission::PermissionLevel::from_u8(context.permission_level))
-            .unwrap_or(crate::permission::PermissionLevel::ReadOnly),
-        sandbox: if crate::authorization::is_subagent_sandbox() {
+        permission_level: crate::permission::PermissionLevel::from_u8(ambient.permission_level),
+        sandbox: if ambient.subagent_sandbox {
             SandboxMode::Subagent
         } else {
             SandboxMode::Main
@@ -893,12 +892,11 @@ mod tests {
 
     #[test]
     fn write_and_delete_registration_carries_no_legacy_executor() {
-        let mut manager = crate::ToolManager::new();
+        let mut manager = qaqh_workspace::ToolManager::new();
         register(&mut manager);
         for name in ["write", "delete"] {
             let tool = manager
-                .builtins
-                .get(name)
+                .builtin(name)
                 .unwrap_or_else(|| panic!("{name} must be registered"));
             assert_eq!(
                 tool.descriptor.name.as_str(),
@@ -907,23 +905,26 @@ mod tests {
             );
         }
         assert_eq!(
-            manager.builtins["write"].descriptor.input_schema["additionalProperties"],
+            manager.builtin("write").unwrap().descriptor.input_schema["additionalProperties"],
             serde_json::json!(false)
         );
         assert!(
-            manager.builtins["write"].descriptor.input_schema["properties"]["path"].is_object(),
+            manager.builtin("write").unwrap().descriptor.input_schema["properties"]["path"]
+                .is_object(),
             "write input schema 由 WriteArgs 类型生成"
         );
         assert!(
-            manager.builtins["write"].descriptor.input_schema["properties"]["content"].is_object(),
+            manager.builtin("write").unwrap().descriptor.input_schema["properties"]["content"]
+                .is_object(),
             "write input schema 由 WriteArgs 类型生成"
         );
         assert_eq!(
-            manager.builtins["delete"].descriptor.input_schema["additionalProperties"],
+            manager.builtin("delete").unwrap().descriptor.input_schema["additionalProperties"],
             serde_json::json!(false)
         );
         assert!(
-            manager.builtins["delete"].descriptor.input_schema["properties"]["path"].is_object(),
+            manager.builtin("delete").unwrap().descriptor.input_schema["properties"]["path"]
+                .is_object(),
             "delete input schema 由 DeleteArgs 类型生成"
         );
     }

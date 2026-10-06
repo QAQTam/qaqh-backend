@@ -3911,6 +3911,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-file-tools"
+version = "2.0.0-beta.2"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "git2",
+ "globset",
+ "grep-regex",
+ "grep-searcher",
+ "hex",
+ "ignore",
+ "image",
+ "log",
+ "qaqh-domain",
+ "qaqh-fs-core",
+ "qaqh-permission",
+ "qaqh-skills",
+ "qaqh-tool-core",
+ "qaqh-types",
+ "qaqh-workspace",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "qaqh-fs-core"
 version = "2.0.0-beta.2"
 dependencies = [
@@ -4025,6 +4054,28 @@ version = "2.0.0-beta.2"
 dependencies = [
  "serde",
  "unicode-normalization",
+]
+
+[[package]]
+name = "qaqh-process-tools"
+version = "2.0.0-beta.2"
+dependencies = [
+ "anyhow",
+ "libc",
+ "log",
+ "qaqh-file-tools",
+ "qaqh-permission",
+ "qaqh-policy",
+ "qaqh-sandbox",
+ "qaqh-tool-core",
+ "qaqh-types",
+ "qaqh-workspace",
+ "regex",
+ "sbx-win",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -4220,10 +4271,12 @@ dependencies = [
  "libc",
  "log",
  "qaqh-domain",
+ "qaqh-file-tools",
  "qaqh-fs-core",
  "qaqh-git",
  "qaqh-permission",
  "qaqh-policy",
+ "qaqh-process-tools",
  "qaqh-sandbox",
  "qaqh-skills",
  "qaqh-spy",

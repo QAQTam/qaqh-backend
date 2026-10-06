@@ -237,8 +237,8 @@ fn glob_error(message: impl Into<String>) -> ToolExecutionError {
 
 // ── Registration ──
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(GlobTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(GlobTool);
 }
 
 #[cfg(test)]
@@ -440,9 +440,9 @@ mod tests {
 
     #[test]
     fn glob_registration_is_typed_and_schema_is_type_generated() {
-        let mut manager = crate::ToolManager::new();
+        let mut manager = qaqh_workspace::ToolManager::new();
         register(&mut manager);
-        let registered = manager.builtins.get("glob").expect("glob registered");
+        let registered = manager.builtin("glob").expect("glob registered");
         assert_eq!(
             registered.descriptor.name.as_str(),
             "glob",

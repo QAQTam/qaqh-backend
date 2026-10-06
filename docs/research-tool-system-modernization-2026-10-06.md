@@ -206,3 +206,35 @@ wire 规则已定型为 OpenAI function-calling（`tool_parser.rs` 只认 flat/n
 外部消费者耦合度：qaqh-runtime 极深（几乎全部模块）；qaqh-subagent 中等（SDK+permission+
 process）；qaqh-mcp / qaqh-lsp 仅 SDK（DynamicToolAdapter/DynamicTool + runtime）；qaqh-config
 仅 permission 的类型簇。
+
+---
+
+## 实施记录（2026-10-06 晚，P2(d)(e) + P3 落地）
+
+- **P2(d) 完成**：`qaqh-file-tools`（journal/pending/file_mutate/file_query/file_glob/
+  grep_tool/edit/read_image/apply_patch 全家/arg_estimate/code_delta/copy_range/
+  confirm_apply，~8.4k 行）与 `qaqh-process-tools`（exec/process_registry/
+  process_inspect）独立成 crate。组内环（journal↔file_mutate、file_query→edit::core）
+  随同 crate 自然合法化。**exec 组与门面的双向耦合按钩子解**（先例：
+  qaqh-permission resolver）——`hooks.rs` OnceLock 注入 ambient 运行时快照
+  （mode/permission_level/subagent sandbox）、image 模型能力、exec 输出 token
+  上限（仍读调用线程 fold policy，thread-local 语义不变）、process 显示投影
+  （fallback 自洽，process-tools 单测不依赖门面）。`ToolManager` 留守门面：
+  工具组 `register()` 签名改为 `impl RegistersTyped`（tool-core 新 trait），
+  组内测试经 cargo 允许的 dev-dep 环拿具体 manager；
+  `ToolManager::builtin()`/`RegisteredTool.descriptor` 转 pub 作受限读通道。
+- **P2(e) 完成（结构性）**：门面留守 manager/runtime/registration/execution/
+  authorization/audit/tool_side_fold/display/probe + todo/ask_user/skill/
+  spy_tool/web/dashboard；所有 `qaqh_workspace::X` 旧路径经 re-export 零破坏。
+- **P3-1 完成**：`tool_search` 元工具（第 23 个内置工具，READ_ONLY）；prepare
+  期拦截执行——检索（名字精确/前缀/子串/分词/描述打分）+ 命中 Deferred 工具
+  即时提升，下一轮 defs 注入。`defer_tools`/`promote_tools`/`search_tools` API。
+- **P3-3 完成**：exposure 策略化生效——`all_defs` 只放行 Direct（提升的
+  Deferred 除外），Hidden/Internal 永不进模型面；能力表同步 23 条。
+- **P3-2 完成**：`aggregate_mcp_namespaces()`——同一 server 的
+  `mcp__{server}__{tool}`（≥2 个）聚合为入口 `mcp__{server}`
+  （args: {name, args}），经 `NamespaceAggregatedAdapter` 还原全名复用 E-5
+  单一 dispatcher；单工具 server 保留直连。聚合入口 category 取组内最宽。
+  注册侧（MCP tools/list 变更时调 `aggregate_mcp_namespaces()`）留给接入方。
+- 验证：workspace 全量测试绿（含 daemon）；clippy 0 error；新增 manager
+  p3_tests 3 条 + 注册词表/能力表/预算守卫同步（40→41 工具）。

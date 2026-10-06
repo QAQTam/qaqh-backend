@@ -317,30 +317,6 @@ mod tests {
     }
 
     #[test]
-    fn builtin_manager_registers_contracted_projectors() {
-        let manager = crate::registration::build_tool_manager(&[]);
-        let args = serde_json::json!({"command": "ls"});
-        let output = r#"{"status":"completed","exit_code":0,"output":"ok","truncated":false,"timed_out":false}"#;
-        assert!(
-            manager.project_display("exec", &args, output).is_none(),
-            "exec is typed and carries display in ToolResult"
-        );
-        let view: ExecOutput = serde_json::from_str(output).expect("exec output");
-        let display = view.display(&args);
-        assert!(display.summary.is_some());
-        assert!(
-            manager.project_display("read", &args, "L1: ok").is_none(),
-            "read is typed and carries display in ToolResult"
-        );
-        assert!(
-            manager
-                .project_display("read_image", &serde_json::json!({"path": "a.png"}), "image")
-                .is_none(),
-            "未迁移工具必须保持 display=None，client 完整回退"
-        );
-    }
-
-    #[test]
     fn exec_display_normalizes_carriage_return_overwrite_in_body_only() {
         let args = serde_json::json!({"command": "apt install"});
         let output = r#"{"status":"completed","exit_code":0,"output":"10%\r20%\r100%\n\rdone\n","truncated":false,"timed_out":false}"#;

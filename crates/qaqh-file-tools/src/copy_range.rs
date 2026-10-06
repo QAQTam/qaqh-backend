@@ -522,8 +522,8 @@ impl TypedTool for CopyRangeTool {
     }
 }
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(CopyRangeTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(CopyRangeTool);
 }
 
 /// Compatibility entry retained for existing in-process callers/tests.
@@ -834,7 +834,7 @@ mod tests {
 
         // 全程用绝对路径（resolve_workspace_path 对绝对路径直接返回），
         // 不依赖全局 CURRENT_WORKSPACE，可与其它并行测试共存。
-        let _serial = crate::TEST_RUNTIME_SERIAL
+        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         crate::CURRENT_WORKSPACE
@@ -912,10 +912,10 @@ mod tests {
 
     #[test]
     fn typed_copy_range_registration_and_display_are_same_source() {
-        let mut manager = crate::ToolManager::new();
+        let mut manager = qaqh_workspace::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins.contains_key("copy_range"),
+            manager.builtin("copy_range").is_some(),
             "copy_range must be on the typed execution surface"
         );
 

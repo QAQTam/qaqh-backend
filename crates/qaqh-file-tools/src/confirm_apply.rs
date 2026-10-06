@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use crate::file_mutate::mutation_error;
 use crate::tool_api::{
     ErasedTool, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode,
-    ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, ToolStatus,
-    TypedTool, TypedToolAdapter,
+    ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, ToolStatus, TypedTool,
+    TypedToolAdapter,
 };
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
@@ -256,8 +256,8 @@ impl TypedTool for ConfirmApplyTool {
     }
 }
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_typed(ConfirmApplyTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_typed_tool(ConfirmApplyTool);
 }
 
 /// Compatibility entry retained for existing in-process tests.
@@ -313,10 +313,10 @@ mod tests {
 
     #[test]
     fn typed_confirm_apply_registration_and_discard() {
-        let mut manager = crate::ToolManager::new();
+        let mut manager = qaqh_workspace::ToolManager::new();
         register(&mut manager);
         assert!(
-            manager.builtins.contains_key("confirm_apply"),
+            manager.builtin("confirm_apply").is_some(),
             "confirm_apply must be on the typed execution surface"
         );
         let id = crate::pending::store("write", &serde_json::json!({}));
@@ -361,7 +361,7 @@ mod tests {
     fn apply_patch_dry_run_then_confirm() {
         // 本测试写全局 CURRENT_WORKSPACE：仅靠模块内 WS_LOCK 不足以与
         // 其他模块的并行测试互斥，必须按家规叠加全仓串行锁。
-        let _serial = crate::TEST_RUNTIME_SERIAL
+        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = WS_LOCK.lock().unwrap();

@@ -46,7 +46,7 @@ impl ToolProjection for ProcessOutput {
     }
 
     fn display(&self, args: &serde_json::Value) -> ToolDisplay {
-        crate::display::project_process(args, &self.0.to_string())
+        crate::hooks::project_process(args, &self.0.to_string())
     }
 }
 
@@ -225,9 +225,9 @@ fn process_error(code: &str, message: impl Into<String>, hint: &str) -> ToolExec
     ToolExecutionError::Recoverable(error)
 }
 
-pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_display("process", crate::display::project_process);
-    mgr.register_typed(ProcessTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
+    mgr.register_display_fn("process", crate::hooks::project_process);
+    mgr.register_typed_tool(ProcessTool);
 }
 
 #[cfg(test)]

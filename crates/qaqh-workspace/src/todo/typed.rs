@@ -284,7 +284,9 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
         .items
         .iter()
         .filter(|item| {
-            filter.as_ref().is_none_or(|status| TodoStatusView::from(&item.status) == *status)
+            filter
+                .as_ref()
+                .is_none_or(|status| TodoStatusView::from(&item.status) == *status)
         })
         .map(TodoItemView::from)
         .collect();
