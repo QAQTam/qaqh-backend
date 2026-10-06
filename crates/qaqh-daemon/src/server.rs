@@ -138,6 +138,22 @@ fn guess_lan_ip() -> Option<std::net::IpAddr> {
     socket.local_addr().ok().map(|addr| addr.ip())
 }
 
+/// LAN 模式自签证书的 SAN 集合：DNS 名 + 手机会去连的两个 IP。
+///
+/// ArkTS/系统信任链按 URL 主机名校验：只有 IP 字面量在 iPAddress SAN 里
+/// 才能直连 `https://<局域网 IP>:<port>`，否则只能关校验（等于没有 MITM
+/// 防护）或塞自定义 verifier。回环不进这里——回环从不启用 TLS。
+fn server_subject_alt_names(bind_ip: std::net::IpAddr, advertise_ip: std::net::IpAddr) -> Vec<String> {
+    let mut names: Vec<String> = vec!["qaqh-daemon".to_string(), "localhost".to_string()];
+    for ip in [bind_ip, advertise_ip] {
+        if ip.is_unspecified() {
+            continue;
+        }
+        names.push(ip.to_string());
+    }
+    names
+}
+
 pub async fn run() -> Result<(), String> {
     run_with(ServerNetworkConfig::default()).await
 }
@@ -158,12 +174,24 @@ fn resolve_run_port(configured: u16) -> u16 {
 
 pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     let data_root = qaqh_types::platform::ensure_data_root().map_err(stringify)?;
+    // 0.0.0.0 不可被远端直连：discovery 与 display_host 换成可路由的局域网 IP。
+    let advertise_ip = if config.bind_ip.is_unspecified() {
+        guess_lan_ip().unwrap_or(config.bind_ip)
+    } else {
+        config.bind_ip
+    };
     // 传输安全（移动端 M0）：非回环 bind 启用 TLS，自签证书持久化于数据目录。
     // 回环保持明文 HTTP——桌面壳 / CLI / TUI / 探针连接行为零变化。
     let tls = if config.bind_ip.is_loopback() {
         None
     } else {
-        Some(crate::tls::load_or_generate(&data_root).map_err(stringify)?)
+        Some(
+            crate::tls::load_or_generate(&data_root, &server_subject_alt_names(
+                config.bind_ip,
+                advertise_ip,
+            ))
+            .map_err(stringify)?,
+        )
     };
     // PR-3-1：SessionManager::init 收敛到 daemon main 装配点，全进程经注入
     // 句柄访问会话存储（hub / service / registry 均在此注入）。
@@ -184,12 +212,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         .await
         .map_err(stringify)?;
     let address = listener.local_addr().map_err(stringify)?;
-    // 0.0.0.0 不可被远端直连：discovery 与 display_host 换成可路由的局域网 IP。
-    let advertise_ip = if config.bind_ip.is_unspecified() {
-        guess_lan_ip().unwrap_or(config.bind_ip)
-    } else {
-        config.bind_ip
-    };
     let discovery = DaemonDiscovery {
         endpoint: format!(
             "{}://{advertise_ip}:{}",
@@ -594,6 +616,26 @@ fn restrict_discovery_permissions(_path: &std::path::Path) -> Result<(), String>
 mod tests {
     use super::*;
     use qaqh_session::canonical::CanonicalSessionStore;
+
+    #[test]
+    fn lan_cert_subject_alt_names_cover_the_address_clients_type_in() {
+        // 手机连的是 IP 字面量：它必须进 iPAddress SAN，否则原生端只能关校验。
+        let bind: std::net::IpAddr = "60.0.0.65".parse().unwrap();
+        let names = server_subject_alt_names(bind, bind);
+        assert!(names.contains(&"60.0.0.65".to_string()));
+        assert!(names.contains(&"qaqh-daemon".to_string()));
+        assert!(names.contains(&"localhost".to_string()));
+        assert!(!names.iter().any(|name| name == "0.0.0.0"));
+
+        // 0.0.0.0 bind：证书要带上 guess_lan_ip 出来的可路由地址。
+        let unspecified: std::net::IpAddr = "0.0.0.0".parse().unwrap();
+        let advertised: std::net::IpAddr = "192.168.1.7".parse().unwrap();
+        let wildcard = server_subject_alt_names(unspecified, advertised);
+        assert!(wildcard.contains(&"192.168.1.7".to_string()));
+        assert!(!wildcard.contains(&"0.0.0.0".to_string()));
+        // bind 与 advertise 不同时不重复出现。
+        assert_eq!(wildcard.len(), wildcard.iter().collect::<std::collections::HashSet<_>>().len());
+    }
 
     #[test]
     fn server_parse_defaults_to_loopback_and_requires_token_for_lan() {
