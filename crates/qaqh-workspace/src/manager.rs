@@ -566,7 +566,7 @@ impl ToolManager {
         let files_affected = extract_files_affected(&prepared.name, &prepared.audit_args);
         if success {
             match prepared.name.as_str() {
-                "read" | "skills" => {
+                "read" => {
                     for f in &files_affected {
                         if !self.files_read.contains(f) {
                             self.files_read.push(f.clone());
