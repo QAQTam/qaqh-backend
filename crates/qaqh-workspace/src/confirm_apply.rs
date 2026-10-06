@@ -17,15 +17,17 @@ use serde_json::{Value, json};
 
 use crate::file_mutate::mutation_error;
 use crate::tool_api::{
-    ErasedTool, OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
-    ToolName, ToolProjection, ToolSource, ToolStatus, TypedTool, TypedToolAdapter,
+    ErasedTool, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode,
+    ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, ToolStatus,
+    TypedTool, TypedToolAdapter,
 };
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmApplyArgs {
+    /// Pending ID from dry_run
     pub pending_id: String,
+    /// apply or discard
     #[serde(default = "default_confirm_action")]
     pub action: String,
 }
@@ -78,11 +80,6 @@ impl ToolProjection for ConfirmApplyOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        let summary = self.wire.summary();
-        (!summary.is_empty()).then(|| summary.to_string())
-    }
-
     fn display(&self, _args: &Value) -> ToolDisplay {
         self.display.clone()
     }
@@ -94,25 +91,14 @@ impl TypedTool for ConfirmApplyTool {
     type Args = ConfirmApplyArgs;
     type Output = ConfirmApplyOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("confirm_apply").expect("valid confirm_apply tool name"),
-            display_name: None,
-            description:
-                "Apply or discard a dry_run pending_id (apply_patch/write). One-shot, 30min TTL."
-                    .to_string(),
-            input_schema: confirm_apply_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(ConfirmApplyOutput))
-                .expect("confirm_apply output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: crate::ToolRisk::Write,
-            default_timeout: std::time::Duration::from_secs(60),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("confirm_apply")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "confirm_apply",
+            "Apply or discard a dry_run pending_id (apply_patch/write). One-shot, 30min TTL.",
+            crate::permission::ToolCategory::Write,
+            crate::ToolRisk::Write,
+            std::time::Duration::from_secs(60),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -268,18 +254,6 @@ impl TypedTool for ConfirmApplyTool {
             )),
         }
     }
-}
-
-fn confirm_apply_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "pending_id": {"type": "string", "description": "Pending ID from dry_run"},
-            "action": {"type": "string", "enum": ["apply", "discard"], "default": "apply", "description": "apply or discard"}
-        },
-        "required": ["pending_id"],
-        "additionalProperties": false
-    })
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {

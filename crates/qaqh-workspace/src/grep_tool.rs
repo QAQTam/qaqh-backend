@@ -22,9 +22,8 @@ use std::time::Duration;
 
 use crate::ToolRisk;
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolError, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader, ToolName,
-    ToolProjection, ToolSource, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorKind,
+    ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 const DEFAULT_MAX_RESULTS: usize = 200;
@@ -33,18 +32,25 @@ const MAX_RESULTS_CAP: usize = 2_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GrepArgs {
+    /// Regex (rg syntax)
     #[serde(default)]
     pub pattern: String,
+    /// Dirs to search
     #[serde(default)]
     pub paths: Option<Vec<String>>,
+    /// File filters (rg -g)
     #[serde(default)]
     pub glob: Option<Vec<String>>,
+    /// Case-sensitive (default false)
     #[serde(default)]
     pub case_sensitive: Option<bool>,
+    /// Context before
     #[serde(default)]
     pub context_before: Option<u64>,
+    /// Context after
     #[serde(default)]
     pub context_after: Option<u64>,
+    /// Max results (default 200)
     #[serde(default)]
     pub max_results: Option<u64>,
 }
@@ -139,10 +145,6 @@ impl ToolProjection for GrepOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(self.display_summary())
-    }
-
     fn display(&self, args: &Value) -> ToolDisplay {
         let query = args
             .get("pattern")
@@ -194,24 +196,14 @@ impl TypedTool for GrepTool {
     type Args = GrepArgs;
     type Output = GrepOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("grep").expect("valid grep tool name"),
-            display_name: None,
-            description: "Search file contents with ripgrep regex. Returns path:line:content; filter files with glob."
-                .to_string(),
-            input_schema: grep_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(GrepOutput))
-                .expect("grep output schema"),
-            category: crate::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(60),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("grep")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "grep",
+            "Search file contents with ripgrep regex. Returns path:line:content; filter files with glob.",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(60),
+        )
     }
 
     fn run(
@@ -397,23 +389,6 @@ fn grep_error(message: impl Into<String>) -> ToolExecutionError {
     ToolExecutionError::Recoverable(ToolError::new(ToolErrorKind::Execution, message))
 }
 
-fn grep_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "pattern": {"type": "string", "description": "Regex (rg syntax)"},
-            "paths": {"type": "array", "items": {"type": "string"}, "description": "Dirs to search"},
-            "glob": {"type": "array", "items": {"type": "string"}, "description": "File filters (rg -g)"},
-            "case_sensitive": {"type": "boolean", "default": false, "description": "Case-sensitive (default false)"},
-            "context_before": {"type": "integer", "minimum": 0, "description": "Context before"},
-            "context_after": {"type": "integer", "minimum": 0, "description": "Context after"},
-            "max_results": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Max results (default 200)"}
-        },
-        "required": ["pattern"],
-        "additionalProperties": false
-    })
-}
-
 /// Sink：按 searcher 的回调顺序收集匹配行与上下文行（顺序天然正确）。
 /// 达到 max_results 条匹配后返回 `Ok(false)` 停止当前文件。
 struct CollectSink {
@@ -471,24 +446,6 @@ impl Sink for CollectSink {
         });
         Ok(true)
     }
-}
-
-/// Lexically resolve `.`/`..` components without touching the filesystem.
-fn lexically_normalize(p: &std::path::Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut out = std::path::PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push(Component::ParentDir.as_os_str());
-                }
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
@@ -679,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn grep_registration_is_typed_and_descriptor_keeps_legacy_schema() {
+    fn grep_registration_is_typed_and_schema_is_type_generated() {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         let registered = manager.builtins.get("grep").expect("grep registered");
@@ -688,9 +645,14 @@ mod tests {
             "grep",
             "grep must be on the typed execution surface"
         );
-        assert_eq!(
-            registered.descriptor.input_schema["required"],
-            serde_json::json!(["pattern"])
+        // v2：schema 由 GrepArgs 类型生成——pattern 带 serde(default)，不再是 required。
+        assert!(
+            registered.descriptor.input_schema["properties"]["pattern"].is_object(),
+            "generated input schema must carry pattern"
+        );
+        assert!(
+            registered.descriptor.input_schema["properties"]["paths"].is_object(),
+            "generated input schema must carry paths"
         );
         assert_eq!(
             registered.descriptor.input_schema["additionalProperties"],

@@ -15,6 +15,7 @@
 //! | [`output`] | [`ToolProjection`] / [`ToolOutcome`] / 投影与指标 |
 //! | [`progress`] | [`ToolProgress`] / [`ProgressSink`] |
 //! | [`typed`] / [`erased`] | [`TypedTool`] / [`ErasedTool`] |
+//! | [`schema`] | 紧凑 schema 生成器（SDK v2：schema 单一事实源 = 类型） |
 //! | [`dynamic`] | [`DynamicToolAdapter`]（MCP/LSP 动态工具 typed 适配器） |
 //! | [`result`] | [`map_tool_result`]（v1 `ToolResult` → [`ToolOutcome`] 映射 + 进度桥） |
 //! | [`boundary`] | 工具 ↔ loop 执行边界（[`ExecuteBatch`] / [`BatchOutcome`]） |
@@ -39,6 +40,7 @@ pub mod error;
 pub mod output;
 pub mod progress;
 pub mod result;
+pub mod schema;
 pub mod typed;
 
 pub use args::{CommandArgs, OffsetLimit, PathArg, PatternArg};
@@ -51,12 +53,14 @@ pub use context::{
     AgentMode, CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
 };
 pub use descriptor::{
-    DescriptorError, Namespace, OutputBudget, ToolDescriptor, ToolExposure, ToolName, ToolSource,
+    DescriptorError, Namespace, OutputBudget, ToolDescriptor, ToolExposure, ToolMeta, ToolName,
+    ToolSource,
 };
 pub use display::{
     PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolHeader, ToolMetrics,
     ToolTerminalState,
 };
+pub(crate) use display::clamp_display_body;
 pub use dynamic::{DynamicDispatch, DynamicToolAdapter};
 pub use erased::ErasedTool;
 pub use error::{

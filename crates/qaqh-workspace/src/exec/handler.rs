@@ -12,10 +12,7 @@ use crate::ExecProgressSender;
 use crate::ToolResult;
 use crate::ToolRisk;
 use crate::file_mutate::{mutation_error, resolve_mutation_path};
-use crate::tool_api::{
-    OutputBudget, ToolCallContext, ToolDescriptor, ToolExecutionError, ToolExposure, ToolName,
-    ToolSource, TypedTool,
-};
+use crate::tool_api::{ToolCallContext, ToolExecutionError, ToolMeta, TypedTool};
 #[cfg(test)]
 use crate::tool_api::{
     ToolError, ToolExecutionMetrics, ToolModelProjection, ToolOutcome, ToolOutputValue,
@@ -26,21 +23,30 @@ use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Run a shell command.
 pub struct ExecArgs {
+    /// Shell command string (runs via `shell`, default auto-detected).
     #[serde(default)]
     pub command: Option<String>,
+    /// Extra args for command (see the harness system prompt for per-shell rules).
     #[serde(default)]
     pub args: Option<Vec<String>>,
+    /// Shell for command: bash | zsh | sh | pwsh | powershell | cmd (default auto-detected: pwsh on Windows, bash elsewhere).
     #[serde(default)]
     pub shell: Option<String>,
+    /// Workdir (default workspace root).
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Env overrides.
     #[serde(default)]
     pub env: Option<BTreeMap<String, String>>,
+    /// Timeout secs (1-3600, default 30).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Background after secs -> backgrounded+process_id.
     #[serde(default)]
     pub background_after_secs: Option<u64>,
+    /// Max output tokens (default 10000, range 100-50000).
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
 }
@@ -51,24 +57,14 @@ impl TypedTool for ExecTool {
     type Args = ExecArgs;
     type Output = super::direct::ExecOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("exec").expect("valid exec tool name"),
-            display_name: None,
-            description: "Run a shell command. The command is wrapped by the selected shell (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id."
-                .to_string(),
-            input_schema: exec_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(super::direct::ExecOutput))
-                .expect("exec output schema"),
-            category: crate::permission::ToolCategory::Exec,
-            risk: ToolRisk::Destructive,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("exec")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "exec",
+            "Run a shell command. The command is wrapped by the selected shell (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id.",
+            crate::permission::ToolCategory::Exec,
+            ToolRisk::Destructive,
+            Duration::from_secs(30),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -389,45 +385,4 @@ pub(crate) fn detect_background_derivation(command: &str) -> bool {
 
 // ── Registration ──
 
-/// exec 的 input schema 模板。
-pub(crate) fn exec_schema() -> serde_json::Value {
-    let mut props = serde_json::Map::new();
-    props.insert(
-        "command".into(),
-        serde_json::json!({ "type": "string", "description": "Shell command string (runs via `shell`, default auto-detected)" }),
-    );
-    props.insert(
-        "args".into(),
-        serde_json::json!({ "type": "array", "items": {"type": "string"}, "description": "Extra args for command: bash/zsh/sh fills $1/$2/$@ ($0 is placeholder `_`); pwsh fills $args (-CommandWithArgs; read as $args[0]/$args.Count, $argN does not exist). cmd does not support args." }),
-    );
-    props.insert(
-        "shell".into(),
-        serde_json::json!({ "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "powershell", "cmd"], "description": "Shell for command (default auto-detected: pwsh on Windows, bash elsewhere)" }),
-    );
-    props.insert(
-        "cwd".into(),
-        serde_json::json!({"type": "string", "description": "Workdir (default workspace root)"}),
-    );
-    props.insert(
-        "env".into(),
-        serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "Env overrides"}),
-    );
-    props.insert(
-        "timeout_secs".into(),
-        serde_json::json!({"type": "integer", "description": "Timeout secs (1-3600, default 30)"}),
-    );
-    props.insert(
-        "background_after_secs".into(),
-        serde_json::json!({"type": "integer", "description": "Background after secs -> backgrounded+process_id"}),
-    );
-    props.insert(
-        "max_output_tokens".into(),
-        serde_json::json!({ "type": "integer", "description": "Max output tokens (10000, 100-50000)" }),
-    );
-    serde_json::json!({
-        "type": "object",
-        "properties": props,
-        "required": ["command"],
-        "additionalProperties": false
-    })
-}
+

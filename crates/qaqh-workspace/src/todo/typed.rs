@@ -14,9 +14,8 @@ use serde_json::Value;
 use crate::ToolRisk;
 use crate::permission::ToolCategory;
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolError,
-    ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader, ToolName, ToolProjection,
-    ToolSource, TypedTool,
+    ToolBody, ToolContentBlock, ToolDisplay, ToolError, ToolErrorKind, ToolExecutionError,
+    ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 use super::actions::{parse_edit_field, parse_status};
@@ -28,7 +27,9 @@ use super::store::{
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// List session tasks.
 pub struct TodoListArgs {
+    /// Optional status filter (pending | in_progress | completed | cancelled).
     #[serde(default)]
     pub status: Option<String>,
 }
@@ -92,32 +93,47 @@ impl From<&TodoItem> for TodoItemView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// One task entry of the full-replace list.
 pub struct TodoWriteItemArgs {
+    /// Existing T<n> to keep/update this task; omit to assign a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
+    /// Task title (1-100 chars). Required for new items; optional when `id` references an existing task (the previous title is kept).
     /// 省略 = 沿用同 `id` 既有条目的标题（仅既有 id 成立；新条目必填）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Exactly one item should be in_progress while working (pending | in_progress | completed | cancelled).
     pub status: TodoStatusView,
+    /// Optional context (<=200 chars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Completion evidence (for completed items).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Replace the whole task list (full-replace). Each item needs status; keep every
+/// prior item you want to keep; exactly one in_progress.
 pub struct TodoWriteArgs {
+    /// The FULL task list — replaces the previous list entirely (max 20 items).
     pub items: Vec<TodoWriteItemArgs>,
+    /// Optional one-liner on why the plan changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Set one task's status (one task per call — loop for batches).
 pub struct TodoUpdateArgs {
+    /// Target ID (e.g. T1).
     pub id: Value,
+    /// Target status (pending | in_progress | completed | cancelled).
     pub status: TodoStatusView,
+    /// Completion summary (required when completed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
 }
@@ -222,10 +238,6 @@ impl ToolProjection for TodoListOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(self.summary_text())
-    }
-
     fn display(&self, _args: &Value) -> ToolDisplay {
         todo_display(self.summary_text())
     }
@@ -238,10 +250,6 @@ impl ToolProjection for TodoWriteOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(self.message.clone())
-    }
-
     fn display(&self, _args: &Value) -> ToolDisplay {
         todo_display(self.message.clone())
     }
@@ -252,10 +260,6 @@ impl ToolProjection for TodoUpdateOutput {
         vec![ToolContentBlock::Text {
             text: self.to_envelope_string().unwrap_or_default(),
         }]
-    }
-
-    fn summary(&self) -> Option<String> {
-        Some(self.message.clone())
     }
 
     fn display(&self, _args: &Value) -> ToolDisplay {
@@ -693,45 +697,19 @@ fn to_args_value<T: Serialize>(args: &T) -> Result<Value, ToolExecutionError> {
     })
 }
 
-fn descriptor(
-    name: &str,
-    description: &str,
-    input_schema: Value,
-    output_schema: Value,
-    category: ToolCategory,
-    risk: ToolRisk,
-) -> ToolDescriptor {
-    ToolDescriptor {
-        name: ToolName::new(name).expect("valid todo tool name"),
-        display_name: None,
-        description: description.to_string(),
-        input_schema,
-        output_schema,
-        category,
-        risk,
-        default_timeout: Duration::from_secs(15),
-        exposure: ToolExposure::Direct,
-        source: ToolSource::Builtin,
-        output_budget: OutputBudget::default(),
-        capabilities: crate::tool_capabilities::builtin_capabilities(name).unwrap_or_default(),
-    }
-}
-
 pub struct TodoWriteTool;
 
 impl TypedTool for TodoWriteTool {
     type Args = TodoWriteArgs;
     type Output = TodoWriteOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        descriptor(
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
             "todo_write",
             "Replace the whole task list (full-replace). Each item needs status; keep ids to preserve items; exactly one in_progress. `title` may be omitted when `id` references an existing task.",
-            super::split::todo_write_schema(),
-            serde_json::to_value(schemars::schema_for!(TodoWriteOutput))
-                .expect("todo_write output schema"),
             ToolCategory::Write,
             ToolRisk::Write,
+            Duration::from_secs(15),
         )
     }
 
@@ -751,15 +729,13 @@ impl TypedTool for TodoUpdateTool {
     type Args = TodoUpdateArgs;
     type Output = TodoUpdateOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        descriptor(
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
             "todo_update",
             "Set one task's status: {id, status, evidence?}. One task per call — loop for batches.",
-            super::split::todo_update_schema(),
-            serde_json::to_value(schemars::schema_for!(TodoUpdateOutput))
-                .expect("todo_update output schema"),
             ToolCategory::Write,
             ToolRisk::Write,
+            Duration::from_secs(15),
         )
     }
 
@@ -779,15 +755,13 @@ impl TypedTool for TodoListTool {
     type Args = TodoListArgs;
     type Output = TodoListOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        descriptor(
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
             "todo_list",
             "List session tasks; optional status filter. Read-only (allowed in plan mode).",
-            super::split::todo_list_schema(),
-            serde_json::to_value(schemars::schema_for!(TodoListOutput))
-                .expect("todo_list output schema"),
             ToolCategory::Read,
             ToolRisk::ReadOnly,
+            Duration::from_secs(15),
         )
     }
 

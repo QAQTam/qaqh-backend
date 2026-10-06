@@ -14,16 +14,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::ToolRisk;
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
-    ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode,
+    ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WebFetchArgs {
+    /// URL
     #[serde(default)]
     pub url: String,
+    /// Save to file (optional)
     #[serde(default)]
     pub output: Option<String>,
 }
@@ -84,24 +85,14 @@ impl TypedTool for WebFetchTool {
     type Args = WebFetchArgs;
     type Output = WebFetchOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("web_fetch").expect("valid web_fetch tool name"),
-            display_name: None,
-            description: "Fetch URL (http). Plain HTTP; web_search is server-side built-in."
-                .to_string(),
-            input_schema: web_fetch_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(WebFetchOutput))
-                .expect("web_fetch output schema"),
-            category: crate::permission::ToolCategory::Net,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("web_fetch")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "web_fetch",
+            "Fetch URL (http). Plain HTTP; web_search is server-side built-in.",
+            crate::permission::ToolCategory::Net,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -255,18 +246,6 @@ fn web_error(
     ToolExecutionError::Recoverable(error)
 }
 
-fn web_fetch_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "URL"},
-            "output": {"type": "string", "description": "Save to file (optional)"}
-        },
-        "required": ["url"],
-        "additionalProperties": false
-    })
-}
-
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_typed(WebFetchTool);
 }
@@ -343,14 +322,20 @@ mod tests {
     }
 
     #[test]
-    fn registration_is_typed_and_schema_keeps_required_url() {
+    fn registration_is_typed_and_schema_is_type_generated() {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         let registered = manager.builtins.get("web_fetch").expect("registered");
         assert_eq!(registered.descriptor.name.as_str(), "web_fetch");
-        assert_eq!(
-            registered.descriptor.input_schema["required"],
-            serde_json::json!(["url"])
+        // v2：schema 由 WebFetchArgs 类型生成——url 仍出现在 properties 中
+        // （required 约束由 run() 的 missing_url 校验兜底）。
+        assert!(
+            registered.descriptor.input_schema["properties"]["url"].is_object(),
+            "generated schema must expose url"
+        );
+        assert!(
+            registered.descriptor.input_schema["properties"]["output"].is_object(),
+            "generated schema must expose output"
         );
         assert_eq!(
             registered.descriptor.input_schema["additionalProperties"],

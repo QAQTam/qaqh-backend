@@ -186,6 +186,97 @@ pub struct ToolDescriptor {
     pub capabilities: ToolCapabilities,
 }
 
+/// 工具元数据（SDK v2）：typed 工具作者声明的部分——schema 不在其中，
+/// 由 [`TypedTool`](super::typed::TypedTool) 的 `Args`/`Output` 类型经
+/// [`super::schema::schema_of`] 生成。
+#[derive(Debug, Clone)]
+pub struct ToolMeta {
+    /// 规范名（唯一查找键）。
+    pub name: ToolName,
+    /// 上游原名（动态工具规范化后保留展示用；不参与查找）。
+    pub display_name: Option<String>,
+    /// 模型可见描述（不得为空）。
+    pub description: String,
+    /// 权限类别（权限决策单一事实源）。
+    pub category: ToolCategory,
+    /// 安全档位（路径范围 fail-closed 判定输入）。
+    pub risk: ToolRisk,
+    /// 默认超时（调用方显式 timeout 可覆盖）。
+    pub default_timeout: Duration,
+    /// 暴露面。
+    pub exposure: ToolExposure,
+    /// 来源。
+    pub source: ToolSource,
+    /// 输出预算。
+    pub output_budget: OutputBudget,
+    /// 编排能力声明（09-19 补充稿 §3）。
+    pub capabilities: ToolCapabilities,
+}
+
+impl ToolMeta {
+    /// 内置工具的最短构造：名称/描述/权限/档位/超时必填，其余取默认。
+    pub fn new(
+        name: &str,
+        description: impl Into<String>,
+        category: ToolCategory,
+        risk: ToolRisk,
+        default_timeout: Duration,
+    ) -> Self {
+        Self {
+            name: ToolName::new(name).expect("内置工具名必须合法"),
+            display_name: None,
+            description: description.into(),
+            category,
+            risk,
+            default_timeout,
+            exposure: ToolExposure::Direct,
+            source: ToolSource::Builtin,
+            output_budget: OutputBudget::default(),
+            capabilities: ToolCapabilities::default(),
+        }
+    }
+
+    /// 覆写暴露面。
+    #[must_use]
+    pub fn with_exposure(mut self, exposure: ToolExposure) -> Self {
+        self.exposure = exposure;
+        self
+    }
+
+    /// 覆写编排能力声明。
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: ToolCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// 覆写输出预算。
+    #[must_use]
+    pub fn with_output_budget(mut self, output_budget: OutputBudget) -> Self {
+        self.output_budget = output_budget;
+        self
+    }
+}
+
+impl From<ToolMeta> for ToolDescriptor {
+    fn from(meta: ToolMeta) -> Self {
+        ToolDescriptor {
+            name: meta.name,
+            display_name: meta.display_name,
+            description: meta.description,
+            input_schema: serde_json::Value::Null,
+            output_schema: serde_json::Value::Null,
+            category: meta.category,
+            risk: meta.risk,
+            default_timeout: meta.default_timeout,
+            exposure: meta.exposure,
+            source: meta.source,
+            output_budget: meta.output_budget,
+            capabilities: meta.capabilities,
+        }
+    }
+}
+
 impl ToolDescriptor {
     /// 注册前校验（P1-②）：
     /// - 描述非空；

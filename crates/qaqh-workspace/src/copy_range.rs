@@ -24,8 +24,8 @@ use serde_json::{Value, json};
 use crate::ToolRisk;
 use crate::file_mutate::{mutation_display, mutation_error, resolve_mutation_path};
 use crate::tool_api::{
-    OutputBudget, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolExecutionError, ToolExposure, ToolName, ToolProjection, ToolSource, TypedTool,
+    ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError, ToolMeta, ToolProjection,
+    TypedTool,
 };
 
 const MODES: &[&str] = &["insert_after", "insert_before", "append", "prepend"];
@@ -334,13 +334,19 @@ fn run_copy_range(
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CopyRangeArgs {
+    /// Source file
     pub source_path: String,
+    /// Start anchor line (exact)
     pub source_start: String,
+    /// End anchor inclusive; omit=single line
     #[serde(default)]
     pub source_end: Option<String>,
+    /// Target file
     pub target_path: String,
+    /// Anchor for insert_after/before
     #[serde(default)]
     pub target_anchor: Option<String>,
+    /// Insert position (default append)
     #[serde(default = "default_mode")]
     pub mode: String,
 }
@@ -378,14 +384,6 @@ impl ToolProjection for CopyRangeOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        self.model_text
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(160).collect())
-    }
-
     fn display(&self, args: &Value) -> ToolDisplay {
         mutation_display(
             args.get("target_path").and_then(Value::as_str),
@@ -409,24 +407,14 @@ impl TypedTool for CopyRangeTool {
     type Args = CopyRangeArgs;
     type Output = CopyRangeOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("copy_range").expect("valid copy_range tool name"),
-            display_name: None,
-            description: "Copy a line range by exact line anchors: source_start/source_end; mode=insert_after|insert_before|append|prepend."
-                .to_string(),
-            input_schema: copy_range_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(CopyRangeOutput))
-                .expect("copy_range output schema"),
-            category: crate::permission::ToolCategory::Write,
-            risk: ToolRisk::Write,
-            default_timeout: Duration::from_secs(60),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("copy_range")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "copy_range",
+            "Copy a line range by exact line anchors: source_start/source_end; mode=insert_after|insert_before|append|prepend.",
+            crate::permission::ToolCategory::Write,
+            ToolRisk::Write,
+            Duration::from_secs(60),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -532,22 +520,6 @@ impl TypedTool for CopyRangeTool {
             diff: has_diff.then_some(diff_text),
         })
     }
-}
-
-fn copy_range_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "source_path": {"type": "string", "description": "Source file"},
-            "source_start": {"type": "string", "description": "Start anchor line (exact)"},
-            "source_end": {"type": "string", "description": "End anchor inclusive; omit=single line", "default": null},
-            "target_path": {"type": "string", "description": "Target file"},
-            "target_anchor": {"type": "string", "description": "Anchor for insert_after/before"},
-            "mode": {"type": "string", "enum": ["insert_after", "insert_before", "append", "prepend"], "description": "Insert position (default append)", "default": "append"}
-        },
-        "required": ["source_path", "source_start", "target_path"],
-        "additionalProperties": false
-    })
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {

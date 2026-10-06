@@ -77,10 +77,6 @@ impl ToolProjection for ExecOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(shell_summary(self, None))
-    }
-
     fn display(&self, args: &serde_json::Value) -> ToolDisplay {
         display_from_output(self, command_from_args(args))
     }
@@ -429,8 +425,8 @@ mod tests {
         // 的是合并 `output`。锁的是形状不变：合并正文仍在模型面。
         assert!(text.contains("partial"), "合并正文仍在模型面");
         assert!(!text.contains("stdout"), "display-only 流字段不进模型 JSON");
-        // summary() 不带 args（命令后缀走 display(&args) 路径），此处只锁
+        // shell_summary 不带 args（命令后缀走 display(&args) 路径），此处只锁
         // 「错误槽改造未影响 summary 投影」。
-        assert_eq!(view.summary(), Some("exit 101".to_string()));
+        assert_eq!(shell_summary(&view, None), "exit 101");
     }
 }

@@ -20,9 +20,8 @@ use serde_json::Value;
 
 use crate::ToolRisk;
 use crate::tool_api::{
-    OutputBudget, ToolBody, ToolCallContext, ToolContentBlock, ToolDescriptor, ToolDisplay,
-    ToolError, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader, ToolName,
-    ToolProjection, ToolSource, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorKind,
+    ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 /// 默认返回上限：防超大仓库结果爆炸（`rg --files` 语义下的熔断）。
@@ -32,10 +31,13 @@ const MAX_RESULTS_CAP: usize = 10_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GlobArgs {
+    /// Glob pattern
     #[serde(default)]
     pub pattern: String,
+    /// Search root
     #[serde(default)]
     pub path: Option<String>,
+    /// Max results (default 500)
     #[serde(default)]
     pub max_results: Option<u64>,
 }
@@ -82,10 +84,6 @@ impl ToolProjection for GlobOutput {
         }]
     }
 
-    fn summary(&self) -> Option<String> {
-        Some(self.display_summary())
-    }
-
     fn display(&self, args: &Value) -> ToolDisplay {
         glob_display(args, self)
     }
@@ -97,24 +95,14 @@ impl TypedTool for GlobTool {
     type Args = GlobArgs;
     type Output = GlobOutput;
 
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: ToolName::new("glob").expect("valid glob tool name"),
-            display_name: None,
-            description: "List files by glob (gitignore-aware, native). Pattern vs rg -g."
-                .to_string(),
-            input_schema: glob_schema(),
-            output_schema: serde_json::to_value(schemars::schema_for!(GlobOutput))
-                .expect("glob output schema"),
-            category: crate::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: Duration::from_secs(30),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: crate::tool_capabilities::builtin_capabilities("glob")
-                .unwrap_or_default(),
-        }
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            "glob",
+            "List files by glob (gitignore-aware, native). Pattern vs rg -g.",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(30),
+        )
     }
 
     fn run(
@@ -245,30 +233,6 @@ fn glob_display(args: &Value, output: &GlobOutput) -> ToolDisplay {
 
 fn glob_error(message: impl Into<String>) -> ToolExecutionError {
     ToolExecutionError::Recoverable(ToolError::new(ToolErrorKind::Execution, message))
-}
-
-fn glob_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "pattern": {
-                "type": "string",
-                "description": "Glob pattern"
-            },
-            "path": {
-                "type": "string",
-                "description": "Search root"
-            },
-            "max_results": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 10000,
-                "description": "Max results (default 500)"
-            }
-        },
-        "required": ["pattern"],
-        "additionalProperties": false
-    })
 }
 
 // ── Registration ──
@@ -475,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_registration_is_typed_and_descriptor_keeps_legacy_schema() {
+    fn glob_registration_is_typed_and_schema_is_type_generated() {
         let mut manager = crate::ToolManager::new();
         register(&mut manager);
         let registered = manager.builtins.get("glob").expect("glob registered");
@@ -484,9 +448,14 @@ mod tests {
             "glob",
             "glob must be on the typed execution surface"
         );
-        assert_eq!(
-            registered.descriptor.input_schema["required"],
-            serde_json::json!(["pattern"])
+        // v2：schema 由 GlobArgs 类型生成——pattern 带 serde(default)，不再是 required。
+        assert!(
+            registered.descriptor.input_schema["properties"]["pattern"].is_object(),
+            "generated input schema must carry pattern"
+        );
+        assert!(
+            registered.descriptor.input_schema["properties"]["max_results"].is_object(),
+            "generated input schema must carry max_results"
         );
         assert_eq!(
             registered.descriptor.input_schema["additionalProperties"],
