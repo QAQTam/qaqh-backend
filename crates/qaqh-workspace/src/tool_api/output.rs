@@ -65,21 +65,26 @@ pub trait ToolProjection: Serialize {
     }
 
     /// 模型投影。为空时由适配器按 base spec §8.1 默认规则生成
-    /// （文本序列化 / summary + 有界 JSON）。
+    /// （Output 的紧凑 JSON 序列化）。
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         Vec::new()
-    }
-
-    /// 单行人类可读摘要（展示与模型提示共用）。不得是 JSON（H1）。
-    fn summary(&self) -> Option<String> {
-        None
     }
 
     /// 展示投影。`args` 是**已通过 typed 校验的原始参数值**，供 header 提取
     /// 真相字段（path / command / query）；实现不得读取线程局部，也不得重新
     /// 解析未经校验的输入（H13）。
-    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
-        ToolDisplay::default()
+    ///
+    /// v2 默认派生：header 从 args 的 canonical 字段提取（path/command/
+    /// pattern/query），body 为模型面文本；需要 richer 展示（diff、双流、
+    /// 精确 op）的工具覆写本方法。`display.summary` 缺省时由模型面首行派生。
+    fn display(&self, args: &serde_json::Value) -> ToolDisplay {
+        let model_text = joined_model_text(&self.model_blocks());
+        let (text, truncated) = super::display::clamp_display_body(&model_text);
+        ToolDisplay {
+            header: super::display::derive_default_header(args),
+            body: ToolBody::Text { text, truncated },
+            ..ToolDisplay::default()
+        }
     }
 
     /// 宿主侧 typed effects。默认无副作用；需要注入 skill activation 等
@@ -182,8 +187,14 @@ impl ToolOutcome {
             }
         };
         let mut result = qaqh_types::ToolResult::text(self.status, self.model.text.clone());
-        if let Some(summary) = &self.display.summary {
-            result = result.with_summary(summary.clone());
+        // summary 派生（v2）：工具声明的 display.summary 优先，否则模型面首行。
+        let summary = self
+            .display
+            .summary
+            .clone()
+            .or_else(|| self.model.text.lines().next().map(str::to_owned));
+        if let Some(summary) = summary {
+            result = result.with_summary(summary);
         }
         result.data = data;
         result.images = self.images.clone();
@@ -284,6 +295,29 @@ impl ToolOutcome {
             truncated,
         }
     }
+}
+
+/// 模型面文本的统一拼装：块间以换行连接（[`ToolContentBlock`] → String）。
+///
+/// 这是「模型面默认派生」的单一实现点：`TypedToolAdapter::project_output`
+/// 与 `ToolProjection::display` 默认实现都经此取正文。
+pub(crate) fn joined_model_text(blocks: &[ToolContentBlock]) -> String {
+    if blocks.is_empty() {
+        return String::new();
+    }
+    blocks
+        .iter()
+        .map(|block| match block {
+            ToolContentBlock::Text { text } => text.clone(),
+            ToolContentBlock::Json { value } => {
+                serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+            }
+            ToolContentBlock::Image(image) => {
+                serde_json::to_string(image).unwrap_or_else(|_| "[image]".to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn body_terminal_fields(body: &ToolBody) -> (Option<i32>, Option<bool>) {
@@ -391,8 +425,7 @@ fn to_wire_outcome(outcome: &ToolDisplayOutcome) -> ToolResultDisplayOutcome {
     }
 }
 
-pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
-    ToolDisplay {
+pub(crate) fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {    ToolDisplay {
         summary: display.summary.clone(),
         diff: display.diff.clone(),
         lines_added: display.lines_added,
@@ -711,10 +744,14 @@ mod tests {
         impl ToolProjection for Empty {}
 
         assert!(Empty.model_blocks().is_empty());
-        assert_eq!(Empty.summary(), None);
+        let display = Empty.display(&serde_json::json!({}));
+        assert_eq!(display.header, ToolHeader::None);
         assert_eq!(
-            Empty.display(&serde_json::json!({})),
-            ToolDisplay::default()
+            display.body,
+            ToolBody::Text {
+                text: String::new(),
+                truncated: false,
+            }
         );
     }
 }
