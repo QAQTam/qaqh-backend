@@ -1,0 +1,28 @@
+[package]
+name = "qaqh-fs-core"
+version.workspace = true
+edition.workspace = true
+description = "QAQ-Harness filesystem core: shared file IO helpers, line cache, file state ledger (P2 crate split from qaqh-workspace)"
+
+[dependencies]
+# file_state 经 resolve_workspace_path 解析相对路径（全局工作区状态的单一
+# 事实源在 qaqh-permission）。
+qaqh-permission = { path = "../qaqh-permission" }
+qaqh-types = { path = "../qaqh-types" }
+serde_json = "1"
+sha2 = "0.11"
+hex = "0.4"
+similar = { version = "3.1", features = ["text"] }
+log = "0.4"
+
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+# atomic_write 的 MoveFileExW 原子替换路径。
+windows = { version = "0.58", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

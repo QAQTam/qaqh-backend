@@ -3844,6 +3844,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-fs-core"
+version = "2.0.0-beta.2"
+dependencies = [
+ "hex",
+ "log",
+ "qaqh-permission",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar",
+ "tempfile",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "qaqh-gate"
 version = "2.0.0-beta.2"
 dependencies = [
@@ -4127,6 +4143,7 @@ dependencies = [
  "libc",
  "log",
  "qaqh-domain",
+ "qaqh-fs-core",
  "qaqh-permission",
  "qaqh-policy",
  "qaqh-sandbox",

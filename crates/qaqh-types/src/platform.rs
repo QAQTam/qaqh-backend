@@ -415,6 +415,23 @@ fn background_command(program: &str) -> std::process::Command {
     command
 }
 
+/// 当前时间的 UTC+8 文本戳（`UTC+8 YYYY-MM-DD HH:MM`）。
+///
+/// 自 qaqh-workspace 下沉（P2 拆分）：fs-core 缓存 / SDK 工具输出 / 审计
+/// 时间线共用同一格式，底层日历换算本就在本模块（civil_from_days）。
+pub fn now_utc8() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs() + 8 * 3600;
+    let days = secs / 86400;
+    let day_secs = secs % 86400;
+    let hours = day_secs / 3600;
+    let minutes = (day_secs % 3600) / 60;
+    let (y, m, d) = civil_from_days(days as i64);
+    format!("UTC+8 {y:04}-{m:02}-{d:02} {hours:02}:{minutes:02}")
+}
+
 /// Convert days since epoch 0000-01-01 to (year, month, day).
 /// Algorithm from Howard Hinnant's civil_from_days.
 pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
