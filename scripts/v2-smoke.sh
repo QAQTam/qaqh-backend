@@ -95,7 +95,11 @@ renew() {
         > /dev/null 2>&1 || true
 }
 # Poll the canonical seat via an observer lease. `-` means "no holder".
-# The observer renews its own lease so it stays alive while another seat expires.
+# The observer renews its own lease so it stays alive while another seat
+# expires. Renew cannot resurrect an expired lease (401 lease_expired), so a
+# poll that comes back unauthorized means the observer outlived its TTL —
+# open a fresh one and keep polling; the expected holder is compared against
+# canonical state, never against the observer identity.
 wait_driver() {
     local expected_holder="$1" expected_epoch="$2" observer="$3" got=""
     for _ in $(seq 1 80); do
@@ -104,7 +108,12 @@ wait_driver() {
             > /dev/null 2>&1 || true
         got="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
             -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $observer" \
-            | python3 -c "import json,sys;d=json.load(sys.stdin)['control']['state']['driver'];print(d.get('holder') or '-', d.get('driver_epoch'))")"
+            | python3 -c "import json,sys;d=json.load(sys.stdin)['control']['state']['driver'];print(d.get('holder') or '-', d.get('driver_epoch'))" \
+            2>/dev/null || echo "- lease-gone")"
+        if [ "$got" = "- lease-gone" ]; then
+            observer="$(open_client "smoke-obs-$expected_epoch-$$")"
+            continue
+        fi
         [ "$got" = "$expected_holder $expected_epoch" ] && return 0
         sleep 0.5
     done
@@ -149,7 +158,7 @@ say "== bootstrap =="
 BOOTSTRAP="$(curl -sS "$ENDPOINT/ringing/v2/sessions/$SEED/bootstrap" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A")"
 [ "$(printf '%s' "$BOOTSTRAP" | json_get "['version']")" = "2" ] || fail "bootstrap version"
-[ "$(printf '%s' "$BOOTSTRAP" | json_get "['seed']")" = "$SEED" ] || fail "bootstrap seed"
+[ "$(printf '%s' "$BOOTSTRAP" | json_get "['session_id']")" = "$SEED" ] || fail "bootstrap session_id"
 [ "$(printf '%s' "$BOOTSTRAP" | json_get "['control']['state']['driver']['can_claim']")" = "True" ] \
     || fail "driver can_claim before claim"
 CURSOR="$(printf '%s' "$BOOTSTRAP" | json_get "['snapshot_cursor']")"
@@ -164,6 +173,12 @@ CLAIM_A="$(driver "$A" claim)"
 wait_driver "$A" 1 "$A"
 CLAIM_B="$(driver "$B" claim)"
 [ "$(printf '%s' "$CLAIM_B" | json_get "['reason']")" = "driver_busy" ] || fail "claim b busy"
+# B's lease clock has been running since clients/open (the busy probe only
+# requires a live lease, it does not renew), and the reconnect phase below can
+# spend what remains of the short smoke TTL. Renew now — while B is provably
+# still alive — so the later driver-gate probes see a live holder instead of
+# 401 lease_required.
+renew "$B"
 
 say "== reliable reconnect replays driver handover =="
 # `CURSOR` was taken before the claim, so the canonical DriverChanged fact must
@@ -206,32 +221,36 @@ raise SystemExit("missing replaceable driver current value")
 
 say "== not_driver gate =="
 renew "$A"
+# Renew cannot resurrect an expired lease (the server answers 401
+# lease_expired), so this only works because the claim-b phase renewed B while
+# it was still alive; here it just refreshes the TTL before the gate probes.
+renew "$B"
 GATED="$(command "$B" conversation \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"conversation\",\"command_id\":\"smoke-b-cancel\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"conversation\",\"type\":\"conversation_cancel\"}}")"
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"conversation\",\"command_id\":\"smoke-b-cancel-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"conversation\",\"type\":\"conversation_cancel\"}}")"
 [ "$(printf '%s' "$GATED" | json_get "['code']")" = "not_driver" ] || fail "not_driver gate"
 
 say "== workspace service driver gate =="
 # Service RPCs are outside the command envelope; seeded workspace writes must
 # enforce the same live-holder rule after lease ownership is established.
 command "$B" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-b-attach\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"seed\":\"$SEED\"}}" \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-b-attach-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"session_id\":\"$SEED\"}}" \
     > /dev/null
 B_SERVICE_STATUS="$(curl -sS -o "$DATA/../workspace-b.json" -w '%{http_code}' \
     -X POST "$ENDPOINT/ringing/v2/service/workspace.set" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $B" \
-    -H 'content-type: application/json' -d "{\"seed\":\"$SEED\",\"path\":\"/tmp\"}")"
+    -H 'content-type: application/json' -d "{\"session_id\":\"$SEED\",\"path\":\"/tmp\"}")"
 [ "$B_SERVICE_STATUS" = "403" ] || fail "non-driver workspace.set must be 403 (got $B_SERVICE_STATUS)"
 [ "$(json_get "['code']" < "$DATA/../workspace-b.json")" = "not_driver" ] \
     || fail "non-driver workspace.set code"
 A_SERVICE_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
     -X POST "$ENDPOINT/ringing/v2/service/workspace.set" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" \
-    -H 'content-type: application/json' -d "{\"seed\":\"$SEED\",\"path\":\"/tmp\"}")"
+    -H 'content-type: application/json' -d "{\"session_id\":\"$SEED\",\"path\":\"/tmp\"}")"
 [ "$A_SERVICE_STATUS" = "200" ] || fail "driver workspace.set must pass (got $A_SERVICE_STATUS)"
 
 say "== first-answer-wins typed verdict =="
 LOSER="$(command "$B" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-answer\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"interaction_ask_respond\",\"interaction_id\":\"$ASK_ID\",\"answers\":[]}}")"
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-answer-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"interaction_ask_respond\",\"interaction_id\":\"$ASK_ID\",\"answers\":[]}}")"
 [ "$(printf '%s' "$LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
     || fail "second answer code"
 [ "$(printf '%s' "$LOSER" | json_get "['existing']['source']")" = "interaction_resolved" ] \
@@ -241,7 +260,7 @@ LOSER="$(command "$B" control \
 
 say "== permission first-answer-wins typed verdict =="
 PERMISSION_LOSER="$(command "$B" tool \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"tool\",\"command_id\":\"smoke-second-permission\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"tool\",\"type\":\"tool_permission_respond\",\"tool_call_id\":\"$PERMISSION_CALL\",\"approved\":false,\"trust_folder\":false}}")"
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"tool\",\"command_id\":\"smoke-second-permission-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"tool\",\"type\":\"tool_permission_respond\",\"tool_call_id\":\"$PERMISSION_CALL\",\"approved\":false,\"trust_folder\":false}}")"
 [ "$(printf '%s' "$PERMISSION_LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
     || fail "second permission answer code"
 [ "$(printf '%s' "$PERMISSION_LOSER" | json_get "['existing']['result']['kind']")" = "permission_resolved" ] \
@@ -251,7 +270,7 @@ PERMISSION_LOSER="$(command "$B" tool \
 
 say "== plan first-answer-wins typed verdict =="
 PLAN_LOSER="$(command "$B" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-plan\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"plan_review_respond\",\"interaction_id\":\"$PLAN_ID\",\"approved\":true,\"autonomous\":false}}")"
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-plan-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"plan_review_respond\",\"interaction_id\":\"$PLAN_ID\",\"approved\":true,\"autonomous\":false}}")"
 [ "$(printf '%s' "$PLAN_LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
     || fail "second plan answer code"
 [ "$(printf '%s' "$PLAN_LOSER" | json_get "['existing']['result']['kind']")" = "plan_review_resolved" ] \
@@ -262,7 +281,7 @@ PLAN_LOSER="$(command "$B" control \
 say "== command replay + status =="
 renew "$A"
 REPLAY_ID="smoke-replay-$$"
-ATTACH="{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"$REPLAY_ID\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"seed\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"seed\":\"$SEED\"}}"
+ATTACH="{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"$REPLAY_ID\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"session_id\":\"$SEED\"}}"
 command "$A" control "$ATTACH" > /dev/null
 REPLAY="$(command "$A" control "$ATTACH")"
 [ "$(printf '%s' "$REPLAY" | json_get "['existing']['source']")" = "command_receipt" ] \
@@ -283,19 +302,21 @@ say "== 命令回执折叠到终态（fact 因果链）=="
 STUCK=""
 for _ in $(seq 1 40); do
     renew "$A"
+    # Windows python3 cannot open MSYS-style /c/... paths embedded in `-c`
+    # code; feed the ledger via stdin like every other json_get call.
     STUCK="$(python3 -c "
-import json
-receipts = json.load(open('$DATA/ringing-command-receipts.json'))
+import json,sys
+receipts = json.load(sys.stdin)
 print(' '.join(sorted(
     r['state'] for r in receipts.values()
     if r['state'] in ('accepted', 'running'))))
-" 2>/dev/null || echo unreadable)"
+" < "$DATA/ringing-command-receipts.json" 2>/dev/null || echo unreadable)"
     [ -z "$STUCK" ] && break
     sleep 0.5
 done
 [ -z "$STUCK" ] || fail "command receipts never folded to a terminal state: $STUCK"
 # 账本非空才算通过：空账本意味着上面的检查根本没观测到命令。
-[ "$(python3 -c "import json;print(len(json.load(open('$DATA/ringing-command-receipts.json'))))")" != "0" ] \
+[ "$(python3 -c "import json,sys;print(len(json.load(sys.stdin)))" < "$DATA/ringing-command-receipts.json")" != "0" ] \
     || fail "command receipt ledger is empty; the fold check observed nothing"
 
 say "== SSE subscribe (single stream) =="
