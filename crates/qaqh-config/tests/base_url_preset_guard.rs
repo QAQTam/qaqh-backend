@@ -114,22 +114,32 @@ max_tokens = 16384
         "空配置（无 base_url）应回退到 endpoint 预设"
     );
 
-    // 4) 完全没有配置文件 → Config::default()：BYOK 不预置任何服务商。
-    //    端点为空 = 未配置（设置面填），分母用内置保守值，不带厂商窗口。
+    // 4) 完全没有配置文件 → 首次启动落一份 BYOK 预设，load 直接用它。
+    //    预设是"可直接改写的起点"（DeepSeek OpenAI 兼容端点），不再依赖运行期
+    //    厂商目录，也没有明文密钥。
     let root = setup("missing");
-    let _ = root; // 不写文件
     let cfg = qaqh_config::Config::load().expect("load ok");
     assert!(
-        cfg.base_url.is_empty(),
-        "BYOK 不得凭空预置服务商端点: {}",
+        root.join("config.toml").exists(),
+        "首次启动必须把预设配置写到盘上，用户才有可编辑的起点"
+    );
+    assert!(
+        !cfg.base_url.is_empty(),
+        "预设起点不得留空端点: {}",
         cfg.base_url
     );
     assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
-    assert_eq!(
-        cfg.context_length,
-        qaqh_config::DEFAULT_CONTEXT_LENGTH,
-        "未配置时也得有一个保守的压缩分母"
+    assert_eq!(cfg.context_length, 128_000);
+    let first_text = std::fs::read_to_string(root.join("config.toml")).expect("read preset");
+    assert!(
+        !first_text.contains("\napi_key"),
+        "预设里绝不得写 api_key 值（密钥只经设置页进 secrets.toml；模板里只允许出现在注释）"
     );
+    // 幂等：第二次 load 不再改写模板（用户可能已经在编辑它）。
+    let text_before = std::fs::read_to_string(root.join("config.toml")).expect("read");
+    let _ = qaqh_config::Config::load().expect("reload ok");
+    let text_after = std::fs::read_to_string(root.join("config.toml")).expect("read again");
+    assert_eq!(text_before, text_after, "首启模板只写一次");
 
     // 5) 用户显式保存的 base_url 恰为预设值 → load 后保持一致（无漂移）
     let root = setup("preset");

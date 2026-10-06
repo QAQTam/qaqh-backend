@@ -263,12 +263,12 @@ impl EndpointCompat {
             None => true,
             Some(patterns) => {
                 let model = model.to_lowercase();
-                patterns.iter().any(|pattern| {
-                    match pattern.strip_suffix('*') {
+                patterns
+                    .iter()
+                    .any(|pattern| match pattern.strip_suffix('*') {
                         Some(prefix) => model.starts_with(&prefix.to_lowercase()),
                         None => model == pattern.to_lowercase(),
-                    }
-                })
+                    })
             }
         }
     }
