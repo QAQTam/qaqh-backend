@@ -15,40 +15,18 @@
 
 use crate::config::Config;
 use qaqh_config_api::{
-    ConfigDto, ConfigPatch, EndpointDto, LspDto, LspServerDto, McpDto, McpServerDto, ProviderDto,
-    SubagentDto,
+    ConfigDto, ConfigPatch, LspDto, LspServerDto, McpDto, McpServerDto, SubagentDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
 pub fn to_dto(cfg: &Config) -> ConfigDto {
-    let providers: Vec<ProviderDto> = crate::registry::all_providers()
-        .into_iter()
-        .map(|p| ProviderDto {
-            id: p.id.clone(),
-            display: p.display.clone(),
-            endpoints: p
-                .endpoints
-                .into_iter()
-                .map(|e| EndpointDto {
-                    id: e.id,
-                    display: e.display,
-                    protocol: e.protocol,
-                    base_url: e.base_url,
-                    default_model: e.default_model,
-                    models: e.models,
-                    stateful: e.stateful,
-                    beta: e.beta,
-                })
-                .collect(),
-        })
-        .collect();
+    // BYOK：没有 provider 目录可下发——设置面就是这六个字段自身。
     ConfigDto {
         model: cfg.model.clone(),
         base_url: cfg.base_url.clone(),
-        provider_id: cfg.provider_id.clone(),
-        endpoint: cfg.endpoint.clone(),
+        wire: cfg.wire.as_str().to_string(),
         max_tokens: u64::from(cfg.max_tokens),
-        context_limit: u64::from(cfg.context_limit),
+        context_length: u64::from(cfg.context_length),
         reasoning_effort: cfg.reasoning_effort.clone(),
         auto_compact_threshold: cfg.auto_compact_threshold,
         permission_level: cfg.permission_level,
@@ -60,7 +38,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
         active_profile: cfg.active_profile.clone(),
         profiles: cfg.profiles.keys().cloned().collect(),
         compliance_enabled: cfg.compliance_enabled,
-        providers,
         subagent: SubagentDto {
             model: cfg.subagent.model.clone(),
             base_url: cfg.subagent.base_url.clone(),
@@ -140,17 +117,15 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     if let Some(v) = meaningful(&patch.base_url) {
         cfg.base_url = v;
     }
-    if let Some(v) = meaningful(&patch.provider_id) {
-        cfg.provider_id = v;
-    }
-    if let Some(v) = meaningful(&patch.endpoint) {
-        cfg.endpoint = v;
+    if let Some(v) = meaningful(&patch.wire) {
+        // validate() 已把值域限制在三个 wire 内；解析失败只可能是绕过校验的调用。
+        cfg.wire = qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?;
     }
     if let Some(v) = patch.max_tokens {
         cfg.max_tokens = u32::try_from(v).unwrap_or(u32::MAX);
     }
-    if let Some(v) = patch.context_limit {
-        cfg.context_limit = u32::try_from(v).unwrap_or(u32::MAX);
+    if let Some(v) = patch.context_length {
+        cfg.context_length = u32::try_from(v).unwrap_or(u32::MAX);
     }
     if let Some(v) = meaningful(&patch.reasoning_effort) {
         cfg.reasoning_effort = v;
@@ -235,7 +210,7 @@ mod tests {
             ..Default::default()
         };
         cfg.model = "m".into();
-        cfg.context_limit = 1_000_000;
+        cfg.context_length = 1_000_000;
         cfg.auto_compact_threshold = 0.95;
         cfg.subagent.api_key = "sk-sub".into();
         cfg.profiles.insert(
@@ -244,10 +219,13 @@ mod tests {
                 model: "m".into(),
                 max_tokens: 4096,
                 effort: Some("high".into()),
-                context_limit: 128_000,
-                context_window: None,
+                context_length: 128_000,
                 base_url: String::new(),
-                endpoint: None,
+                wire: qaqh_types::Wire::OpenAi,
+                compat: None,
+                preset_endpoint: None,
+                context_limit: None,
+                context_window: None,
             },
         );
 
@@ -255,7 +233,7 @@ mod tests {
         assert_eq!(dto.api_key, "****");
         assert_eq!(dto.subagent.api_key, "****");
         assert!(dto.subagent.api_key_set);
-        assert_eq!(dto.context_limit, 1_000_000);
+        assert_eq!(dto.context_length, 1_000_000);
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert!(dto.profiles.contains(&"default".to_string()));
         let empty = to_dto(&Config::default());
@@ -272,13 +250,13 @@ mod tests {
         };
         let patch = ConfigPatch {
             model: Some("new".into()),
-            context_limit: Some(2_000_000),
+            context_length: Some(2_000_000),
             auto_compact_threshold: Some(0.95),
             ..Default::default()
         };
         apply_patch(&mut cfg, &patch).expect("apply");
         assert_eq!(cfg.model, "new");
-        assert_eq!(cfg.context_limit, 2_000_000);
+        assert_eq!(cfg.context_length, 2_000_000);
         assert!((cfg.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
     }
 
@@ -354,10 +332,10 @@ mod tests {
     fn apply_patch_saturates_u32_overflow() {
         let mut cfg = Config::default();
         let patch = ConfigPatch {
-            context_limit: Some(u64::MAX),
+            context_length: Some(u64::MAX),
             ..Default::default()
         };
         apply_patch(&mut cfg, &patch).expect("apply");
-        assert_eq!(cfg.context_limit, u32::MAX);
+        assert_eq!(cfg.context_length, u32::MAX);
     }
 }
