@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::provider::{EndpointCompat, Wire};
+
 // ── Config persistence ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistentConfig {
-    /// Provider ID (e.g. "deepseek", "mimo")
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 旧预设坐标 `(provider_id, endpoint)`：BYOK 后不再写出（读入仅用于一次性
+    /// 迁移——把预设解析成具体的 endpoint/wire/model/窗口，见 qaqh-config）。
+    #[serde(default, skip_serializing)]
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -243,40 +246,71 @@ pub struct PersistentLspServerConfig {
 }
 
 // ── Profile / Preferences ──
-/// Named profile bundling model, token, and effort settings.
+/// One BYOK endpoint record: the six fields the user owns, plus the optional
+/// request-shape notes for endpoints that deviate from their wire.
 ///
-/// Profiles let users switch between config presets (e.g. "fast" vs "deep")
-/// without manually changing individual settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Profiles are how the user keeps several endpoints (e.g. "fast" vs "deep")
+/// and switches between them; the API key is not part of this record — it lives
+/// in `secrets.toml` and only a `"set"` marker is written here.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfileConfig {
-    /// Model identifier for this profile.
+    /// Model identifier sent to the endpoint.
+    #[serde(default)]
     pub model: String,
     /// Max output tokens per turn.
+    #[serde(default)]
     pub max_tokens: u32,
-    /// Reasoning effort: one of `low|medium|high|xhigh|max`, or `None` to use default.
+    /// Reasoning effort: one of `low|medium|high|xhigh|max`, or `None` to use
+    /// the endpoint default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// Maximum context window size (input tokens).
-    pub context_limit: u32,
-    /// 端点声明的真实上下文窗口（输入 token）；`None` = 用 `context_limit`。
-    ///
-    /// 与 `context_limit` 的分工（N-1 / D-15 / BUG-2026-09-16-04）：
-    /// `context_limit` 是**用户侧**口径（auto-compact 软阈值以它为基数），
-    /// `context_window` 是**端点硬窗口**——发请求前的本地 pre-flight 用后者
-    /// 判定「这一发必然被 400」，缺失时回落 `context_limit`。
-    /// 可选字段：老配置文件没有它时必须照常解析（默认 `None`）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u32>,
-    /// API base URL for this profile.
-    #[serde(default = "default_base_url")]
+    /// 端点声明的上下文窗口（输入 token）——**本地压缩的唯一分母**：
+    /// auto-compact 软阈值（`context_length × auto_compact_threshold`）与发送前
+    /// 硬 pre-flight 都由它推得。
+    #[serde(default)]
+    pub context_length: u32,
+    /// BYOK 的 endpoint：scheme + host + 可选前缀，不含 wire 自身路径。
+    #[serde(default)]
     pub base_url: String,
-    /// Endpoint within the provider for this profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
+    /// Wire protocol spoken at that endpoint.
+    #[serde(default)]
+    pub wire: Wire,
+    /// Optional request-shape overrides. `None`/absent = the wire's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<EndpointCompat>,
+
+    // ── 读兼容（永不写出）：BYOK 前的预设坐标与双口径窗口 ──
+    /// 旧 `[profiles.*] endpoint = "openai"` —— 预设内的 endpoint id，
+    /// 仅 load 时用于查 legacy 预设表迁移成 `base_url` + `wire` + `compat`。
+    #[serde(default, rename = "endpoint", skip_serializing)]
+    pub preset_endpoint: Option<String>,
+    /// 旧用户口径上限（软阈值基数）。迁移时优先取 `context_window`，
+    /// 再退 `context_limit`，再退预设/内置缺省。
+    #[serde(default, skip_serializing)]
+    pub context_limit: Option<u32>,
+    /// 旧端点硬窗口。合并进 `context_length`（N-1 双口径已收敛）。
+    #[serde(default, skip_serializing)]
+    pub context_window: Option<u32>,
 }
 
-fn default_base_url() -> String {
-    "https://api.deepseek.com".into()
+impl ProfileConfig {
+    /// The compat block the gate should use (wire defaults when unset).
+    pub fn compat_or_default(&self) -> EndpointCompat {
+        self.compat.clone().unwrap_or_default()
+    }
+
+    /// 单一压缩分母的迁移取值：`context_length` → `context_window` →
+    /// `context_limit` → `fallback`。老配置只有后两个键时行为不变。
+    pub fn resolved_context_length(&self, fallback: u32) -> u32 {
+        [
+            self.context_length,
+            self.context_window.unwrap_or(0),
+            self.context_limit.unwrap_or(0),
+        ]
+        .into_iter()
+        .find(|value| *value > 0)
+        .unwrap_or(fallback)
+    }
 }
 
 // ── ConfigStore: unified config I/O with atomic writes ──
@@ -321,13 +355,18 @@ impl ConfigStore {
     /// Atomically write the config to disk using temp-file + rename.
     /// Returns `true` on success.
     pub fn save(&self, config: &PersistentConfig) -> bool {
-        let content = match toml::to_string_pretty(config) {
-            Ok(c) => c,
+        match toml::to_string_pretty(config) {
+            Ok(content) => self.write_content(&content),
             Err(e) => {
                 eprintln!("ConfigStore: serialization failed: {e}");
-                return false;
+                false
             }
-        };
+        }
+    }
+
+    /// 原子写入给定的 TOML 文本（首启预设模板用；与 [`Self::save`] 同一
+    /// temp-file + rename 语义）。
+    pub fn write_content(&self, content: &str) -> bool {
         let tmp = self.path.with_extension("toml.tmp");
         if let Some(parent) = self.path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)

@@ -21,10 +21,9 @@ function dto(overrides: Partial<ConfigDto> = {}): ConfigDto {
   const base: ConfigDto = {
     model: "ox-alpha-free",
     baseUrl: "https://opencode.ai/zen/go/v1",
-    providerId: "opencode-go",
-    endpoint: "openai",
+    wire: "openai",
     maxTokens: 96000,
-    contextLimit: 1000000,
+    contextLength: 1000000,
     reasoningEffort: "max",
     autoCompactThreshold: 0.95,
     permissionLevel: 2,
@@ -36,24 +35,6 @@ function dto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     activeProfile: "default",
     profiles: ["default"],
     complianceEnabled: false,
-    providers: [
-      {
-        id: "opencode-go",
-        display: "OpenCode",
-        endpoints: [
-          {
-            id: "openai",
-            display: "OpenAI",
-            protocol: "openai",
-            baseUrl: "https://opencode.ai/zen/go/v1",
-            defaultModel: "",
-            models: ["ox-alpha-free"],
-            stateful: false,
-            beta: false,
-          },
-        ],
-      },
-    ],
     subagent: {
       model: "",
       baseUrl: "",
@@ -156,10 +137,18 @@ describe("validatePatch", () => {
     expect(validatePatch({ autoCompactThreshold: Number.NaN })).toContain("autoCompactThreshold");
   });
 
-  test("maxTokens/contextLimit 必须 > 0(后端 u64→u32 饱和,0 无意义)", () => {
+  test("maxTokens/contextLength 必须 > 0(后端 u64→u32 饱和,0 无意义)", () => {
     expect(validatePatch({ maxTokens: 0 })).toContain("maxTokens");
-    expect(validatePatch({ contextLimit: 0 })).toContain("contextLimit");
+    expect(validatePatch({ contextLength: 0 })).toContain("contextLength");
     expect(validatePatch({ maxTokens: 96000 })).toBeNull();
+  });
+
+  test("wire 只认三条 BYOK 协议(没有 provider 目录可兜底)", () => {
+    for (const wire of ["openai", "responses", "anthropic"]) {
+      expect(validatePatch({ wire })).toBeNull();
+    }
+    expect(validatePatch({ wire: "deepseek" })).toContain("wire");
+    expect(validatePatch({ wire: "" })).toContain("wire");
   });
 
   test("reasoningEffort 只认后端词表;旧四档时代的 off 会被拒", () => {
