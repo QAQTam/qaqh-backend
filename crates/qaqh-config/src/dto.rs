@@ -119,8 +119,7 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     }
     if let Some(v) = meaningful(&patch.wire) {
         // validate() 已把值域限制在三个 wire 内；解析失败只可能是绕过校验的调用。
-        cfg.wire = qaqh_types::Wire::parse(&v)
-            .ok_or_else(|| format!("无法识别的 wire: {v}"))?;
+        cfg.wire = qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?;
     }
     if let Some(v) = patch.max_tokens {
         cfg.max_tokens = u32::try_from(v).unwrap_or(u32::MAX);

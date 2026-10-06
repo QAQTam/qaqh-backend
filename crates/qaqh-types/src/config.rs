@@ -355,13 +355,18 @@ impl ConfigStore {
     /// Atomically write the config to disk using temp-file + rename.
     /// Returns `true` on success.
     pub fn save(&self, config: &PersistentConfig) -> bool {
-        let content = match toml::to_string_pretty(config) {
-            Ok(c) => c,
+        match toml::to_string_pretty(config) {
+            Ok(content) => self.write_content(&content),
             Err(e) => {
                 eprintln!("ConfigStore: serialization failed: {e}");
-                return false;
+                false
             }
-        };
+        }
+    }
+
+    /// 原子写入给定的 TOML 文本（首启预设模板用；与 [`Self::save`] 同一
+    /// temp-file + rename 语义）。
+    pub fn write_content(&self, content: &str) -> bool {
         let tmp = self.path.with_extension("toml.tmp");
         if let Some(parent) = self.path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)

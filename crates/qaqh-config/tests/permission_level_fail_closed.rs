@@ -50,10 +50,10 @@ fn config_patch_rejects_invalid_permission_level_without_mutating() {
 #[test]
 fn config_load_migrates_legacy_four_tier_values() {
     for (legacy, expect_tier) in [
-        (1u8, PermissionLevel::ReadOnly),          // 旧 MaxLockdown
-        (2, PermissionLevel::ReadOnly),            // 旧 ReadFree ≈ read-only
-        (3, PermissionLevel::WorkspaceWrite),      // 旧 WorkspaceFree
-        (4, PermissionLevel::SkipPermissions),     // 旧 Unrestricted
+        (1u8, PermissionLevel::ReadOnly),      // 旧 MaxLockdown
+        (2, PermissionLevel::ReadOnly),        // 旧 ReadFree ≈ read-only
+        (3, PermissionLevel::WorkspaceWrite),  // 旧 WorkspaceFree
+        (4, PermissionLevel::SkipPermissions), // 旧 Unrestricted
     ] {
         let temp_home = std::env::temp_dir().join(format!(
             "qaqh-permission-mig-{}-{}-{}",
@@ -94,10 +94,10 @@ fn config_load_migrates_legacy_four_tier_values() {
 #[test]
 fn config_load_prefers_tier_key_and_validates_range() {
     for (tier, level, expect) in [
-        (1u8, Some(4u8), PermissionLevel::ReadOnly),          // 新键胜过旧键
-        (3, Some(1), PermissionLevel::SkipPermissions),       // 新键胜过旧键
-        (4, None, PermissionLevel::ReadOnly),                 // 新键越界 → 最严档
-        (0, Some(3), PermissionLevel::ReadOnly),              // 新键越界 → 最严档
+        (1u8, Some(4u8), PermissionLevel::ReadOnly), // 新键胜过旧键
+        (3, Some(1), PermissionLevel::SkipPermissions), // 新键胜过旧键
+        (4, None, PermissionLevel::ReadOnly),        // 新键越界 → 最严档
+        (0, Some(3), PermissionLevel::ReadOnly),     // 新键越界 → 最严档
     ] {
         let temp_home = std::env::temp_dir().join(format!(
             "qaqh-permission-tier-{}-{}-{}",

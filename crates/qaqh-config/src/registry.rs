@@ -175,10 +175,7 @@ impl LegacyEndpoint {
             cache_field: self.cache_field.clone().unwrap_or(defaults.cache_field),
             include_stream_usage: flag(self.include_stream_usage, defaults.include_stream_usage),
             supports_thinking: flag(self.supports_thinking, defaults.supports_thinking),
-            thinking_budget_large: flag(
-                self.thinking_budget_large,
-                defaults.thinking_budget_large,
-            ),
+            thinking_budget_large: flag(self.thinking_budget_large, defaults.thinking_budget_large),
             supports_reasoning_effort: flag(
                 self.supports_reasoning_effort,
                 defaults.supports_reasoning_effort,
@@ -305,8 +302,14 @@ mod tests {
     fn legacy_preset_keeps_request_shape_deviations() {
         // 每一项都是"该 wire 之外的差异"，迁移后必须由 compat 原样表达。
         let qwen = legacy_preset("qwen", "openai").expect("qwen/openai");
-        assert_eq!(qwen.compat.thinking_mode, ThinkingParamMode::QwenEnableThinking);
-        assert_eq!(qwen.compat.cache_field, CacheTokenField::PromptDetailsCached);
+        assert_eq!(
+            qwen.compat.thinking_mode,
+            ThinkingParamMode::QwenEnableThinking
+        );
+        assert_eq!(
+            qwen.compat.cache_field,
+            CacheTokenField::PromptDetailsCached
+        );
         assert_eq!(
             qwen.compat.path.as_deref(),
             Some("/compatible-mode/v1/chat/completions")
@@ -330,12 +333,19 @@ mod tests {
         let openrouter = legacy_preset("openrouter", "openai").expect("openrouter/openai");
         assert_eq!(
             openrouter.compat.effort_allowlist,
-            Some(vec!["max".to_string(), "high".to_string(), "low".to_string()])
+            Some(vec![
+                "max".to_string(),
+                "high".to_string(),
+                "low".to_string()
+            ])
         );
 
         let zcode = legacy_preset("zcode", "anthropic").expect("zcode/anthropic");
         assert_eq!(zcode.wire, Wire::Anthropic);
-        assert_eq!(zcode.compat.path.as_deref(), Some("/api/anthropic/v1/messages"));
+        assert_eq!(
+            zcode.compat.path.as_deref(),
+            Some("/api/anthropic/v1/messages")
+        );
         assert!(zcode.compat.thinking_budget_large);
     }
 
@@ -346,7 +356,10 @@ mod tests {
         assert!(!legacy_provider_exists("nope"));
         assert!(legacy_provider_exists("deepseek"));
         // endpoint id 缺失时对不上号 → 取该 provider 的第一条。
-        assert_eq!(legacy_preset("deepseek", ""), legacy_preset("deepseek", "openai"));
+        assert_eq!(
+            legacy_preset("deepseek", ""),
+            legacy_preset("deepseek", "openai")
+        );
     }
 
     #[test]
@@ -354,7 +367,10 @@ mod tests {
         assert!(validate_endpoint_url("https://api.example.com/v1").is_ok());
         assert!(validate_endpoint_url("http://localhost:8317/v1").is_ok());
         assert!(validate_endpoint_url("http://127.0.0.1:11434").is_ok());
-        assert!(validate_endpoint_url("").is_ok(), "空值由调用方按未配置处理");
+        assert!(
+            validate_endpoint_url("").is_ok(),
+            "空值由调用方按未配置处理"
+        );
 
         let remote_http = validate_endpoint_url("http://api.example.com").unwrap_err();
         assert!(remote_http.contains("localhost"), "{remote_http}");
