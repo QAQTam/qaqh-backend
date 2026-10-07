@@ -1,0 +1,783 @@
+{
+  "schema_version": 1,
+  "measured_date": "2026-10-07",
+  "method": "Cargo metadata --no-deps; physical lines of crates/*/src/**/*.rs, including inline tests, comments and blank lines; excludes tests/ and build.rs. Local normal dependency edges include target-specific edges, exclude dev/build edges; transitive dependency weight is not measured.",
+  "baseline_commit": "35fa46ea127e5a720f46b07d970002160b413875",
+  "crates": [
+    {
+      "name": "qaqh-runtime",
+      "version": "2.0.0-beta.3",
+      "src_files": 77,
+      "src_lines": 38533,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-runtime/src/registry.rs",
+          "lines": 2781
+        },
+        {
+          "path": "crates/qaqh-runtime/src/timeline.rs",
+          "lines": 2490
+        },
+        {
+          "path": "crates/qaqh-runtime/src/agent/engine_turn.rs",
+          "lines": 2158
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-config",
+        "qaqh-config-api",
+        "qaqh-domain",
+        "qaqh-gate",
+        "qaqh-lsp",
+        "qaqh-mcp",
+        "qaqh-message",
+        "qaqh-policy",
+        "qaqh-ringing",
+        "qaqh-sandbox",
+        "qaqh-session",
+        "qaqh-skills",
+        "qaqh-spy",
+        "qaqh-subagent",
+        "qaqh-title",
+        "qaqh-types",
+        "qaqh-workspace"
+      ],
+      "default_features": [
+        "memory"
+      ]
+    },
+    {
+      "name": "qaqh-session",
+      "version": "2.0.0-beta.3",
+      "src_files": 45,
+      "src_lines": 19063,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-session/src/manager.rs",
+          "lines": 2624
+        },
+        {
+          "path": "crates/qaqh-session/src/canonical/tool_ledger.rs",
+          "lines": 1520
+        },
+        {
+          "path": "crates/qaqh-session/src/session_fact_v2/validation.rs",
+          "lines": 1021
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-domain",
+        "qaqh-message",
+        "qaqh-types"
+      ],
+      "default_features": []
+    },
+    {
+      "name": "qaqh-workspace",
+      "version": "2.0.0-beta.3",
+      "src_files": 28,
+      "src_lines": 12188,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-workspace/src/manager.rs",
+          "lines": 1726
+        },
+        {
+          "path": "crates/qaqh-workspace/src/execution.rs",
+          "lines": 1574
+        },
+        {
+          "path": "crates/qaqh-workspace/src/audit/v2.rs",
+          "lines": 950
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-domain",
+        "qaqh-file-tools",
+        "qaqh-fs-core",
+        "qaqh-git",
+        "qaqh-permission",
+        "qaqh-policy",
+        "qaqh-process-tools",
+        "qaqh-sandbox",
+        "qaqh-skills",
+        "qaqh-spy",
+        "qaqh-tool-core",
+        "qaqh-types",
+        "sbx-win"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-file-tools",
+      "version": "2.0.0-beta.3",
+      "src_files": 26,
+      "src_lines": 11403,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-file-tools/src/file_mutate.rs",
+          "lines": 1161
+        },
+        {
+          "path": "crates/qaqh-file-tools/src/journal.rs",
+          "lines": 955
+        },
+        {
+          "path": "crates/qaqh-file-tools/src/copy_range.rs",
+          "lines": 950
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-domain",
+        "qaqh-fs-core",
+        "qaqh-permission",
+        "qaqh-skills",
+        "qaqh-tool-core",
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-daemon",
+      "version": "2.0.0-beta.3",
+      "src_files": 18,
+      "src_lines": 9655,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-daemon/src/axum_server.rs",
+          "lines": 2741
+        },
+        {
+          "path": "crates/qaqh-daemon/src/axum_server/axum_impl/v2.rs",
+          "lines": 1416
+        },
+        {
+          "path": "crates/qaqh-daemon/src/server.rs",
+          "lines": 706
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-config",
+        "qaqh-domain",
+        "qaqh-mcp",
+        "qaqh-ringing",
+        "qaqh-runtime",
+        "qaqh-sandbox",
+        "qaqh-session",
+        "qaqh-subagent",
+        "qaqh-types"
+      ],
+      "default_features": [
+        "memory"
+      ]
+    },
+    {
+      "name": "qaqh-process-tools",
+      "version": "2.0.0-beta.3",
+      "src_files": 14,
+      "src_lines": 6021,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-process-tools/src/exec/tests.rs",
+          "lines": 1578
+        },
+        {
+          "path": "crates/qaqh-process-tools/src/process_registry.rs",
+          "lines": 938
+        },
+        {
+          "path": "crates/qaqh-process-tools/src/exec/direct.rs",
+          "lines": 619
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-file-tools",
+        "qaqh-permission",
+        "qaqh-policy",
+        "qaqh-sandbox",
+        "qaqh-tool-core",
+        "qaqh-types",
+        "sbx-win"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-message",
+      "version": "2.0.0-beta.3",
+      "src_files": 6,
+      "src_lines": 5463,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-message/src/store.rs",
+          "lines": 3251
+        },
+        {
+          "path": "crates/qaqh-message/src/wal.rs",
+          "lines": 1125
+        },
+        {
+          "path": "crates/qaqh-message/src/context_flow.rs",
+          "lines": 954
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-client",
+      "version": "2.0.0-beta.3",
+      "src_files": 13,
+      "src_lines": 5197,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-client/src/v2.rs",
+          "lines": 888
+        },
+        {
+          "path": "crates/qaqh-client/src/client.rs",
+          "lines": 880
+        },
+        {
+          "path": "crates/qaqh-client/src/endpoint.rs",
+          "lines": 790
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-domain",
+        "qaqh-ringing",
+        "qaqh-session",
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-gate",
+      "version": "2.0.0-beta.3",
+      "src_files": 9,
+      "src_lines": 5171,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-gate/src/responses_sdk.rs",
+          "lines": 1513
+        },
+        {
+          "path": "crates/qaqh-gate/src/openai_sdk.rs",
+          "lines": 1103
+        },
+        {
+          "path": "crates/qaqh-gate/src/anthropic_sdk.rs",
+          "lines": 917
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-config",
+      "version": "2.0.0-beta.3",
+      "src_files": 7,
+      "src_lines": 4213,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-config/src/config.rs",
+          "lines": 2122
+        },
+        {
+          "path": "crates/qaqh-config/src/secrets.rs",
+          "lines": 806
+        },
+        {
+          "path": "crates/qaqh-config/src/mcp_import.rs",
+          "lines": 417
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-config-api",
+        "qaqh-policy",
+        "qaqh-types"
+      ],
+      "default_features": []
+    },
+    {
+      "name": "sbx-win",
+      "version": "0.1.0",
+      "src_files": 17,
+      "src_lines": 4087,
+      "largest_files": [
+        {
+          "path": "crates/sbx-win/src/projfs.rs",
+          "lines": 973
+        },
+        {
+          "path": "crates/sbx-win/src/acl.rs",
+          "lines": 798
+        },
+        {
+          "path": "crates/sbx-win/src/spawn.rs",
+          "lines": 320
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "sbx-nt"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-tool-core",
+      "version": "2.0.0-beta.3",
+      "src_files": 17,
+      "src_lines": 3712,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-tool-core/src/tool_api/output.rs",
+          "lines": 758
+        },
+        {
+          "path": "crates/qaqh-tool-core/src/tool_api/descriptor.rs",
+          "lines": 444
+        },
+        {
+          "path": "crates/qaqh-tool-core/src/tool_api/error.rs",
+          "lines": 418
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-policy",
+        "qaqh-skills",
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-mcp",
+      "version": "2.0.0-beta.3",
+      "src_files": 9,
+      "src_lines": 3545,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-mcp/src/connection.rs",
+          "lines": 1081
+        },
+        {
+          "path": "crates/qaqh-mcp/src/resources.rs",
+          "lines": 704
+        },
+        {
+          "path": "crates/qaqh-mcp/src/bridge.rs",
+          "lines": 555
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-config",
+        "qaqh-tool-core",
+        "qaqh-types",
+        "qaqh-workspace"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-subagent",
+      "version": "2.0.0-beta.3",
+      "src_files": 4,
+      "src_lines": 3455,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-subagent/src/lib.rs",
+          "lines": 2177
+        },
+        {
+          "path": "crates/qaqh-subagent/src/host.rs",
+          "lines": 567
+        },
+        {
+          "path": "crates/qaqh-subagent/src/board_tools.rs",
+          "lines": 377
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-config",
+        "qaqh-domain",
+        "qaqh-ringing",
+        "qaqh-tool-core",
+        "qaqh-workspace"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-types",
+      "version": "2.0.0-beta.3",
+      "src_files": 15,
+      "src_lines": 3397,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-types/src/tool_result.rs",
+          "lines": 749
+        },
+        {
+          "path": "crates/qaqh-types/src/session.rs",
+          "lines": 575
+        },
+        {
+          "path": "crates/qaqh-types/src/platform.rs",
+          "lines": 530
+        }
+      ],
+      "normal_workspace_dependencies": [],
+      "default_features": [
+        "tokenizers"
+      ]
+    },
+    {
+      "name": "qaqh-lsp",
+      "version": "2.0.0-beta.3",
+      "src_files": 8,
+      "src_lines": 2523,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-lsp/src/tool.rs",
+          "lines": 717
+        },
+        {
+          "path": "crates/qaqh-lsp/src/connection.rs",
+          "lines": 583
+        },
+        {
+          "path": "crates/qaqh-lsp/src/manager.rs",
+          "lines": 480
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-config",
+        "qaqh-tool-core",
+        "qaqh-types",
+        "qaqh-workspace"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-domain",
+      "version": "2.0.0-beta.3",
+      "src_files": 7,
+      "src_lines": 2232,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-domain/src/timeline.rs",
+          "lines": 901
+        },
+        {
+          "path": "crates/qaqh-domain/src/event.rs",
+          "lines": 626
+        },
+        {
+          "path": "crates/qaqh-domain/src/command.rs",
+          "lines": 339
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-spy",
+      "version": "2.0.0-beta.3",
+      "src_files": 5,
+      "src_lines": 2075,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-spy/src/store.rs",
+          "lines": 717
+        },
+        {
+          "path": "crates/qaqh-spy/src/scan.rs",
+          "lines": 448
+        },
+        {
+          "path": "crates/qaqh-spy/src/lib.rs",
+          "lines": 355
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-skills",
+      "version": "2.0.0-beta.3",
+      "src_files": 3,
+      "src_lines": 1983,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-skills/src/lib.rs",
+          "lines": 1129
+        },
+        {
+          "path": "crates/qaqh-skills/src/runtime.rs",
+          "lines": 846
+        },
+        {
+          "path": "crates/qaqh-skills/src/session_state.rs",
+          "lines": 8
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-permission",
+      "version": "2.0.0-beta.3",
+      "src_files": 4,
+      "src_lines": 1919,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-permission/src/permission.rs",
+          "lines": 1250
+        },
+        {
+          "path": "crates/qaqh-permission/src/lib.rs",
+          "lines": 331
+        },
+        {
+          "path": "crates/qaqh-permission/src/conflict.rs",
+          "lines": 210
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-policy",
+        "qaqh-sandbox",
+        "qaqh-skills",
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-ringing",
+      "version": "2.0.0-beta.3",
+      "src_files": 10,
+      "src_lines": 1643,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-ringing/src/v2/types.rs",
+          "lines": 968
+        },
+        {
+          "path": "crates/qaqh-ringing/src/v2/cursor.rs",
+          "lines": 265
+        },
+        {
+          "path": "crates/qaqh-ringing/src/worker.rs",
+          "lines": 146
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-domain"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-fs-core",
+      "version": "2.0.0-beta.3",
+      "src_files": 4,
+      "src_lines": 1242,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-fs-core/src/file_shared.rs",
+          "lines": 652
+        },
+        {
+          "path": "crates/qaqh-fs-core/src/file_state.rs",
+          "lines": 442
+        },
+        {
+          "path": "crates/qaqh-fs-core/src/file_cache.rs",
+          "lines": 128
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-permission",
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-sandbox",
+      "version": "2.0.0-beta.3",
+      "src_files": 6,
+      "src_lines": 1187,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-sandbox/src/lib.rs",
+          "lines": 571
+        },
+        {
+          "path": "crates/qaqh-sandbox/src/linux.rs",
+          "lines": 238
+        },
+        {
+          "path": "crates/qaqh-sandbox/src/capability.rs",
+          "lines": 231
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-policy",
+        "sbx-win"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "sbx-cli",
+      "version": "0.1.0",
+      "src_files": 1,
+      "src_lines": 969,
+      "largest_files": [
+        {
+          "path": "crates/sbx-cli/src/main.rs",
+          "lines": 969
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "sbx-nt",
+        "sbx-win"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-policy",
+      "version": "2.0.0-beta.3",
+      "src_files": 3,
+      "src_lines": 627,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-policy/src/lib.rs",
+          "lines": 284
+        },
+        {
+          "path": "crates/qaqh-policy/src/approval.rs",
+          "lines": 213
+        },
+        {
+          "path": "crates/qaqh-policy/src/input_guard.rs",
+          "lines": 130
+        }
+      ],
+      "normal_workspace_dependencies": [],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-config-api",
+      "version": "2.0.0-beta.3",
+      "src_files": 1,
+      "src_lines": 491,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-config-api/src/lib.rs",
+          "lines": 491
+        }
+      ],
+      "normal_workspace_dependencies": [],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-git",
+      "version": "2.0.0-beta.3",
+      "src_files": 1,
+      "src_lines": 249,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-git/src/lib.rs",
+          "lines": 249
+        }
+      ],
+      "normal_workspace_dependencies": [],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "qaqh-title",
+      "version": "2.0.0-beta.3",
+      "src_files": 1,
+      "src_lines": 180,
+      "largest_files": [
+        {
+          "path": "crates/qaqh-title/src/lib.rs",
+          "lines": 180
+        }
+      ],
+      "normal_workspace_dependencies": [
+        "qaqh-gate",
+        "qaqh-message",
+        "qaqh-session",
+        "qaqh-types"
+      ],
+      "default_features": [
+        null
+      ]
+    },
+    {
+      "name": "sbx-nt",
+      "version": "0.1.0",
+      "src_files": 1,
+      "src_lines": 171,
+      "largest_files": [
+        {
+          "path": "crates/sbx-nt/src/lib.rs",
+          "lines": 171
+        }
+      ],
+      "normal_workspace_dependencies": [],
+      "default_features": [
+        null
+      ]
+    }
+  ]
+}
