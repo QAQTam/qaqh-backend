@@ -208,16 +208,36 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         eprintln!("[qaqh-daemon] generated server token: {token}");
     }
     let epoch = random_hex();
-    let listener = TcpListener::bind((config.bind_ip, resolve_run_port(config.port)))
-        .await
-        .map_err(stringify)?;
+    // 双 listener 装配：非回环 bind（LAN 模式）= TLS listener 绑 --bind 地址
+    // （远端配对设备走这里）+ 附加 loopback 明文 listener。discovery.endpoint
+    // 始终指向 loopback http://——桌面壳 / `stop` / `status` / 探针连接行为
+    // 零变化，CLI stop 路径也无需 TLS 客户端栈。
+    let (listener, lan_listener) = if config.bind_ip.is_loopback() {
+        let listener = TcpListener::bind((config.bind_ip, resolve_run_port(config.port)))
+            .await
+            .map_err(stringify)?;
+        (listener, None)
+    } else {
+        let lan_listener = TcpListener::bind((config.bind_ip, resolve_run_port(config.port)))
+            .await
+            .map_err(stringify)?;
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(stringify)?;
+        (listener, Some(lan_listener))
+    };
     let address = listener.local_addr().map_err(stringify)?;
+    let lan_address = match &lan_listener {
+        Some(lan_listener) => Some(lan_listener.local_addr().map_err(stringify)?),
+        None => None,
+    };
     let discovery = DaemonDiscovery {
-        endpoint: format!(
-            "{}://{advertise_ip}:{}",
-            if tls.is_some() { "https" } else { "http" },
-            address.port()
-        ),
+        endpoint: format!("http://{address}"),
+        lan_endpoint: lan_address
+            .map(|lan_address| format!("https://{advertise_ip}:{}", lan_address.port())),
+        tls_fingerprint: tls
+            .as_ref()
+            .map(|material| material.fingerprint.clone()),
         token: token.clone(),
         pid: std::process::id(),
         server_epoch: epoch.clone(),
@@ -238,7 +258,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             .unwrap_or("n/a");
         log::warn!(
             "[qaqh-daemon] lan server mode on {advertise_ip}:{} — TLS enabled, cert fp {fingerprint} (rotate = re-pair all devices)",
-            address.port()
+            lan_address.map(|a| a.port()).unwrap_or_default()
         );
     }
     let hub = Arc::new(
@@ -387,28 +407,38 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // 也让 ensure_daemon_running 的轮询与真实就绪时刻对齐。
     write_discovery(&discovery)?;
     let app = crate::axum_server::build_router(app_state);
+    // LAN TLS accept loop 与 loopback accept loop 共用同一 router/state；
+    // 两个 graceful 都挂在同一 shutdown watch 上，stop/信号同时收掉。
+    let lan_serve = match (tls, lan_listener) {
+        (Some(material), Some(lan_listener)) => {
+            // 无 ConnectInfo handler：TLS 路径用不带 connect-info 的 make service。
+            let serve = axum::serve(
+                crate::tls::TlsListener::new(lan_listener, material.acceptor),
+                app.clone().into_make_service(),
+            )
+            .with_graceful_shutdown({
+                let mut shutdown_rx = shutdown.subscribe();
+                async move {
+                    let _ = shutdown_rx.changed().await;
+                }
+            });
+            Some(tokio::spawn(async move { serve.await }))
+        }
+        _ => None,
+    };
     let mut shutdown_rx = shutdown.subscribe();
     let graceful = async move {
         let _ = shutdown_rx.changed().await;
     };
-    match tls {
-        Some(material) => {
-            let listener = crate::tls::TlsListener::new(listener, material.acceptor);
-            // 无 ConnectInfo handler：TLS 路径用不带 connect-info 的 make service。
-            axum::serve(listener, app.into_make_service())
-                .with_graceful_shutdown(graceful)
-                .await
-                .map_err(stringify)?;
-        }
-        None => {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(graceful)
-            .await
-            .map_err(stringify)?;
-        }
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(graceful)
+    .await
+    .map_err(stringify)?;
+    if let Some(lan_serve) = lan_serve {
+        lan_serve.abort();
     }
     service.shutdown();
     // 退出前主动收尾孤儿（stop 协议已在 handler 做过；此处兜底其他退出
