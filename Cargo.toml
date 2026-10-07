@@ -30,7 +30,6 @@ members = [
     "crates/sbx-nt",
     "crates/sbx-win",
     "crates/sbx-cli",
-    "webui/src-tauri",
 ]
 
 [workspace.dependencies]

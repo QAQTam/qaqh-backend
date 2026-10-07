@@ -34,15 +34,20 @@ qaqh-gate        OpenAI Chat / Responses / Anthropic provider HTTP
 qaqh-workspace   typed tools、permission、audit、sandbox integration
 qaqh-types       shared types / storage contracts
 qaqh-client      Ringing v2 共享传输(TUI / 桌面壳)
-qaqh-webui-app   Tauri 2 桌面壳宿主(webui/src-tauri,sidecar 托管 daemon)
 ```
 
-## 桌面壳(WebUI)
+## 桌面客户端(已拆仓)
 
-webui 渲染层(SolidJS)运行在 Tauri 2 桌面壳内,宿主经 `qaqh-client` 直连
-daemon并以 sidecar 分发(`just desktop-build` 产出自包含安装包)。原浏览器
-gateway(`qaqh-webui-gateway`)已移除,daemon token 不进 webview。
-详见 [`webui/README.md`](webui/README.md)。
+Tauri 2 桌面壳 + SolidJS 渲染层（原 `webui/`）已于 **2026-10-07** 抽成独立仓
+**`qaqh-desktop-app`**（同级目录 `../qaqh-desktop-app`，含完整 git 历史）。
+本仓不再包含前端、也不构建它。
+
+该仓经 path 依赖吃本仓的 `qaqh-client` / `qaqh-types`，并以 sidecar 托管 daemon
+（daemon 的权威构建仍在本仓）；渲染层的类型契约 `src/api/qaqh/*.ts` 由本仓
+crate 的 `derive(TS)` 导出、但生成动作从那边发起。原浏览器 gateway
+(`qaqh-webui-gateway`)已移除，daemon token 不进 webview。
+
+改 `wire` 类型后：去 `../qaqh-desktop-app` 跑 `just ts-export` 并提交那边的生成物。
 
 ## 当前事实源
 
