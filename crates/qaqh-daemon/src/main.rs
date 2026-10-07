@@ -128,21 +128,22 @@ fn status() {
     }
 }
 
+/// 从 discovery endpoint 提取 socket 地址，兼容全部 scheme
+/// （`http(s)://`、`ws(s)://`——LAN 模式的 lan_endpoint 是 `https://`）。
+fn endpoint_socket(endpoint: &str) -> Option<std::net::SocketAddr> {
+    let host = endpoint.split("://").nth(1).unwrap_or(endpoint);
+    let address = host.split('/').next().unwrap_or(host);
+    address.parse().ok()
+}
+
 fn discovery_reachable(discovery: &qaqh_types::DaemonDiscovery) -> bool {
     if !qaqh_types::platform::process_is_running(discovery.pid) {
         return false;
     }
-    let address = discovery
-        .endpoint
-        .trim_start_matches("ws://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or_default();
-    address.parse().ok().is_some_and(|address| {
-        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(300))
-            .is_ok()
-    })
+    let Some(address) = endpoint_socket(&discovery.endpoint) else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(300)).is_ok()
 }
 
 fn stop() {
@@ -153,15 +154,13 @@ fn stop() {
             return;
         }
     };
-    let endpoint = discovery
-        .endpoint
-        .trim_start_matches("ws://")
-        .trim_start_matches("http://");
-    let address = endpoint.split('/').next().unwrap_or(endpoint);
-    let Ok(socket_address) = address.parse() else {
+    // stop 始终打 loopback endpoint（LAN 模式下 lan_endpoint 是 TLS 面，
+    // 明文 CLI 没有客户端栈；discovery.endpoint 恒为 http://127.0.0.1）。
+    let Some(socket_address) = endpoint_socket(&discovery.endpoint) else {
         eprintln!("invalid daemon address");
         return;
     };
+    let address = socket_address.to_string();
     match std::net::TcpStream::connect_timeout(&socket_address, std::time::Duration::from_secs(2)) {
         Ok(mut stream) => {
             let request = format!(
@@ -699,4 +698,31 @@ fn mcp_cli(args: &[String]) -> i32 {
     }
     println!("(config saved; restart daemon or wait for config reload to take effect)");
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoint_socket;
+
+    #[test]
+    fn endpoint_socket_parses_all_schemes() {
+        assert_eq!(
+            endpoint_socket("http://127.0.0.1:64413"),
+            "127.0.0.1:64413".parse().ok()
+        );
+        assert_eq!(
+            endpoint_socket("https://192.168.1.10:64413"),
+            "192.168.1.10:64413".parse().ok()
+        );
+        assert_eq!(
+            endpoint_socket("ws://127.0.0.1:42/control/v1"),
+            "127.0.0.1:42".parse().ok()
+        );
+        assert_eq!(
+            endpoint_socket("wss://[::1]:42/control"),
+            "[::1]:42".parse().ok()
+        );
+        assert_eq!(endpoint_socket("127.0.0.1:9"), "127.0.0.1:9".parse().ok());
+        assert_eq!(endpoint_socket("not an address"), None);
+    }
 }
