@@ -41,7 +41,8 @@ pub use provider::{
     CacheTokenField, EndpointCompat, RetrySpec, ThinkingParamMode, UserSendMode, Wire,
 };
 pub use session::{
-    SessionListEntry, SessionMeta, SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2,
+    SessionListEntry, SessionMeta, SessionRunStatus, SkillSessionEntry, SkillSessionEntryState,
+    SkillSessionStateV2,
 };
 pub use state::DebugLevel;
 pub use tool_def::{ToolDef, ToolFunction};

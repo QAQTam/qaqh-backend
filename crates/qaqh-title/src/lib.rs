@@ -17,8 +17,10 @@ use qaqh_session::SessionManager;
 /// LLM 标题生成 prompt（专用小调用）。
 pub const TITLE_SYSTEM: &str = "你是会话标题生成器。根据用户的第一条消息，用不超过 20 个字符的中文概括其需求。只输出标题本身：不要引号、不要标点、不要解释、不要换行。";
 
-/// 截断标题上限（字符）。
-pub const FALLBACK_MAX_CHARS: usize = 20;
+/// 截断标题上限（字符）。2026-10-06 归一裁决：LLM 生成失败时的回退标题 =
+/// 首条用户消息截 14 字符；标题来源只有 LLM 生成与此回退两个，不再有
+/// 「最后一条回复」类漂移来源。
+pub const FALLBACK_MAX_CHARS: usize = 14;
 /// LLM 标题清洗上限（字符）。
 pub const LLM_MAX_CHARS: usize = 30;
 
@@ -58,7 +60,8 @@ pub fn truncate_title(raw: &str) -> String {
         }
     }
     let out = out.trim();
-    out.chars().take(FALLBACK_MAX_CHARS).collect()
+    // 截断后去尾空格:第 14 个字符落在词间空格上时,标题不得以空格结尾。
+    out.chars().take(FALLBACK_MAX_CHARS).collect::<String>().trim_end().to_owned()
 }
 
 /// LLM 输出清洗：剥引号/首尾空白/换行 → 截断。
@@ -162,11 +165,11 @@ mod tests {
         );
         assert_eq!(
             truncate_title("- 运行 cargo test\n- 看看结果"),
-            "运行 cargo test 看看结果"
+            "运行 cargo test" // 截 14 字符后去尾空格
         );
         assert_eq!(
             truncate_title("这是一个超过二十个字符的非常长的用户需求描述文本内容"),
-            "这是一个超过二十个字符的非常长的用户需求"
+            "这是一个超过二十个字符的非常" // FALLBACK_MAX_CHARS = 14
         );
     }
 

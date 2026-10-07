@@ -77,8 +77,6 @@ pub struct SessionMeta {
     /// Number of conversation turns (one user query + its assistant/tool chain).
     #[serde(default)]
     pub turn_count: usize,
-    #[serde(default)]
-    pub last_summary: String,
     /// Number of earliest turns compacted (skipped in LLM context).
     #[serde(default)]
     pub compact_skip: usize,
@@ -227,10 +225,9 @@ impl SessionMeta {
     /// 会话列表/tab 的**展示标题**（前端契约 **G2** 定死的口径）：
     /// `title` → `cwd` 尾段 → `session_id`。
     ///
-    /// **`last_summary` 不参与**：它是「最后一条 assistant 回复首行」的预览
-    /// （每轮 `save_append` 覆盖一次），拿它当标题会让列表标题随对话漂移成
-    /// 「模型最近说了什么的开头」。TUI 已踩过这个坑并把结论写在代码里，
-    /// 这里把它提成三端共用的口径——winui / web 不该各自再判一次。
+    /// 标题只有两个来源（2026-10-06 归一裁决）：worker 首 turn 后 LLM 生成，
+    /// 或生成失败时回退的首条用户消息截断（`FALLBACK_MAX_CHARS`）。不存在
+    /// 「最后一条回复」类的漂移来源——列表标题不随对话内容变化。
     pub fn display_title(&self) -> String {
         if let Some(title) = self.title.as_deref().filter(|s| !s.is_empty()) {
             return title.to_owned();
@@ -249,6 +246,39 @@ impl SessionMeta {
     }
 }
 
+/// `session.list` / `session.meta` 条目的**统一运行状态词表**（前端契约 **G2**）。
+///
+/// 2026-10-06 归一裁决：废除「worker 进程存在性」（旧 `running: bool`）语义，
+/// 会话当前状态一律用 agentloop 状态表达。权威来源是 **canonical fact 投影**
+/// （control 频道 activity + 挂起交互 + conversation 最近回合终态）——它从
+/// 持久 fact 重放，daemon 重启后可重建；live tracker 只作投影不可读时的退路。
+///
+/// 驻留语义：`canceled` / `error` 是**最近一个回合的终态**，驻留到下一回合
+/// 开始（`TurnStarted` 后进入 `working`）；`idle` 表示 loop 空闲等待输入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum SessionRunStatus {
+    /// daemon 本进程内没有该会话的 worker：不读投影、不做任何合成。
+    /// 未加载 ≠ idle——前端不得把本状态渲染成「空闲」。
+    #[default]
+    NotRunning,
+    Idle,
+    Working,
+    /// 等待工具授权（interaction kind = permission）。
+    WaitingPermission,
+    /// 等待用户回答 ask。
+    WaitingAsk,
+    /// 等待计划评审。
+    WaitingPlan,
+    /// 最近一个回合被取消（terminal = cancelled，或 interrupt reason =
+    /// cancel_before_seal）。
+    Canceled,
+    /// 最近一个回合失败或被非用户原因打断（terminal = failed，interrupt
+    /// reason = crash / restart / unknown_fact）。
+    Error,
+}
+
 /// `session.list` 的条目 = [`SessionMeta`] + daemon 运行期附加字段（前端契约 **G2**）。
 ///
 /// 此前这个形状只活在 `qaqh-runtime` 的 `serde_json::Value` 拼装里
@@ -258,17 +288,18 @@ impl SessionMeta {
 /// 因为手抄的失败模式是**静默的**：漏字段不报错，只让某个功能永远显示缺省值。
 ///
 /// **加法式**：`session.list` 回包仍是同一个 JSON 对象（[`SessionMeta`] 的键经
-/// `flatten` 平铺，外加 `running` / `workspace_id`），wire 未变。
+/// `flatten` 平铺，外加 `status` / `workspace_id`），wire 未变。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionListEntry {
     /// 持久化元数据。`flatten` 让它在 wire 上与下面两个运行期字段**同层**
     /// （历史形状如此，不能改成嵌套）。
     #[serde(flatten)]
     pub meta: SessionMeta,
-    /// 该会话当前是否有 worker 在跑——daemon registry 的**实时**查询结果，
-    /// 不落盘，故不属于 [`SessionMeta`]。
+    /// 统一运行状态（[`SessionRunStatus`]）——daemon 投影/registry 的**实时**
+    /// 查询结果，不落盘，故不属于 [`SessionMeta`]。取代旧 `running: bool`
+    /// （worker 进程存在性语义已于 2026-10-06 废除）。
     #[serde(default)]
-    pub running: bool,
+    pub status: SessionRunStatus,
     /// 所属 workspace id；`null` = 未分组。
     /// 只有 `session.list` 带此键，`session.meta`（单条）不带。
     #[serde(default)]
@@ -290,7 +321,6 @@ mod tests {
             profile: Some("deep".into()),
             message_count: 3,
             turn_count: 4,
-            last_summary: "最后一条回复首行".into(),
             compact_skip: 5,
             compact_covered_through_msg_id: Some(9),
             mode: 1,
@@ -322,7 +352,7 @@ mod tests {
     fn session_list_entry_wire_keys_are_locked() {
         let entry = SessionListEntry {
             meta: fully_populated_meta(),
-            running: true,
+            status: SessionRunStatus::Working,
             workspace_id: Some("w1".into()),
         };
         let wire = serde_json::to_value(&entry).expect("serialize");
@@ -347,7 +377,6 @@ mod tests {
             "effort",
             "ephemeral",
             "frozen_annotation",
-            "last_summary",
             "last_usage",
             "message_count",
             "mode",
@@ -355,14 +384,14 @@ mod tests {
             "profile",
             "session_id",
             "skills",
+            // ── 运行期附加字段 ──
+            "status",
             "title",
             "tool_mode",
             "turn_count",
             "updated_at",
             "usage_requests",
             "usage_totals",
-            // ── 运行期附加字段 ──
-            "running",
             "workspace_id",
         ];
         expected.sort_unstable();
@@ -386,7 +415,7 @@ mod tests {
     fn session_list_entry_recovers_fields_the_hand_parse_dropped() {
         let entry = SessionListEntry {
             meta: fully_populated_meta(),
-            running: true,
+            status: SessionRunStatus::Working,
             workspace_id: Some("w1".into()),
         };
         let wire = serde_json::to_value(&entry).expect("serialize");
@@ -396,7 +425,6 @@ mod tests {
         assert_eq!(back.meta.created_at, 1);
         assert_eq!(back.meta.turn_count, 4);
         assert_eq!(back.meta.message_count, 3);
-        assert_eq!(back.meta.last_summary, "最后一条回复首行");
         assert_eq!(back.meta.tool_mode, "custom");
         // 连带的其余持久化字段同样够得着。
         assert_eq!(back.meta.compact_skip, 5);
@@ -405,7 +433,7 @@ mod tests {
         assert_eq!(back.meta.cache_reported_requests, 7);
 
         // 运行期字段是**类型上的字段**，不再靠 `value["running"]`。
-        assert!(back.running);
+        assert_eq!(back.status, SessionRunStatus::Working);
         assert_eq!(back.workspace_id.as_deref(), Some("w1"));
 
         // 往返无损（flatten 下 Option/skip_serializing_if 语义不得变）。
@@ -414,7 +442,7 @@ mod tests {
         // 未分组会话（无 workspace）仍须带键——历史形状是 `null`，不是缺键。
         let entry = SessionListEntry {
             meta: fully_populated_meta(),
-            running: true,
+            status: SessionRunStatus::NotRunning,
             workspace_id: None,
         };
         let wire = serde_json::to_value(&entry).unwrap();
@@ -425,6 +453,27 @@ mod tests {
         );
     }
 
+    /// 统一状态词表在 wire 上是 snake_case 字符串，且缺省 = `not_running`
+    /// （旧回包缺 `status` 键时不得被误读成 idle）。
+    #[test]
+    fn session_run_status_wire_vocabulary_is_locked() {
+        assert_eq!(
+            serde_json::to_value(SessionRunStatus::WaitingPermission).unwrap(),
+            serde_json::json!("waiting_permission")
+        );
+        assert_eq!(
+            serde_json::to_value(SessionRunStatus::NotRunning).unwrap(),
+            serde_json::json!("not_running")
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionRunStatus>(serde_json::json!("waiting_plan")).unwrap(),
+            SessionRunStatus::WaitingPlan
+        );
+        // 没有 `#[serde(other)]` 兜底臂：未知取值必须**响亮地失败**而不是
+        // 静默降级成一个错的状态（对齐 InteractionKind 的决策记录）。
+        assert!(serde_json::from_value::<SessionRunStatus>(serde_json::json!("running")).is_err());
+    }
+
     /// 展示标题口径（G2 一并定死，三端共用）。
     #[test]
     fn display_title_prefers_title_then_cwd_tail_then_session() {
@@ -432,7 +481,6 @@ mod tests {
             session_id: "0123abcd".into(),
             title: Some("Bun 引导 daemon".into()),
             cwd: Some("/home/me/proj".into()),
-            last_summary: "修复 SSE 解码".into(),
             ..Default::default()
         };
         assert_eq!(meta.display_title(), "Bun 引导 daemon");
@@ -445,7 +493,7 @@ mod tests {
         meta.cwd = Some("qaqh".into());
         assert_eq!(meta.display_title(), "qaqh");
 
-        // 都没有 → session_id。**last_summary 全程不参与**。
+        // 都没有 → session_id。
         meta.cwd = None;
         assert_eq!(meta.display_title(), "0123abcd");
     }
