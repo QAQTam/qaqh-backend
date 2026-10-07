@@ -31,6 +31,15 @@ pub struct DaemonDiscovery {
     /// checks during upgrades.
     #[serde(default)]
     pub executable: String,
+    /// LAN-mode HTTPS endpoint (`https://<advertise-ip>:<port>`), present only
+    /// when the daemon bound a non-loopback address. Local clients keep using
+    /// `endpoint` (plain loopback HTTP); remote pairing clients use this.
+    #[serde(default)]
+    pub lan_endpoint: Option<String>,
+    /// SHA-256 fingerprint of the self-signed LAN certificate, hex-encoded.
+    /// Remote devices pin this during QR pairing.
+    #[serde(default)]
+    pub tls_fingerprint: Option<String>,
 }
 
 #[cfg(test)]
@@ -49,11 +58,23 @@ mod tests {
             build_id: "commit".into(),
             channel: "stable".into(),
             executable: "/opt/qaqh/qaqh-daemon".into(),
+            lan_endpoint: Some("https://192.168.1.10:64413".into()),
+            tls_fingerprint: Some("ab12".into()),
         };
         let json = serde_json::to_string(&discovery).unwrap();
         assert_eq!(
             serde_json::from_str::<DaemonDiscovery>(&json).unwrap(),
             discovery
         );
+    }
+
+    #[test]
+    fn discovery_reads_legacy_file_without_lan_fields() {
+        let discovery: DaemonDiscovery = serde_json::from_str(
+            r#"{"endpoint":"http://127.0.0.1:64413","token":"t","pid":1,"server_epoch":"e","protocol_version":1}"#,
+        )
+        .unwrap();
+        assert_eq!(discovery.lan_endpoint, None);
+        assert_eq!(discovery.tls_fingerprint, None);
     }
 }
