@@ -256,6 +256,27 @@ impl TurnActor {
         InteractionState::Unknown
     }
 
+    /// 与 `interaction_state` 相同，但入站形态同时接受 wire 与 canonical
+    /// （`int_<ULID>`）：v2 投影只暴露 canonical id，挂起表按 wire id 记账。
+    pub(crate) fn interaction_state_canonical(&self, interaction_id: &str) -> InteractionState {
+        let is_match = |stored: &str| {
+            stored == interaction_id
+                || qaqh_session::session_fact_v2::InteractionId::new(format!(
+                    "int_{}",
+                    qaqh_session::canonical::ulid_from_text(stored)
+                ))
+                .as_str()
+                    == interaction_id
+        };
+        if self.pending_interactions.iter().any(|id| is_match(id)) {
+            return InteractionState::Pending;
+        }
+        if self.resolved_interactions.iter().any(|id| is_match(id)) {
+            return InteractionState::AlreadyResolved;
+        }
+        InteractionState::Unknown
+    }
+
     /// Admit a tool intent through the same serialized actor boundary as
     /// interaction resolution and cancellation.
     ///
