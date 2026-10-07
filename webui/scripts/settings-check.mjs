@@ -128,7 +128,8 @@ const steps = [
     code: `
       __t.key(",", { ctrlKey: true });
       await __t.wait(600);
-      return { ok: __t.modal() != null && __t.calls("config.load").length === 1,
+      // 2026-10-06 起宿主启动时会多拉一次 config.load(主题预取),故 ≥1。
+      return { ok: __t.modal() != null && __t.calls("config.load").length >= 1,
                detail: { modal: __t.modal() != null, loads: __t.calls("config.load").length } };
     `,
   },
@@ -138,7 +139,8 @@ const steps = [
       const sections = document.querySelectorAll(".settings-section").length;
       const inputs = document.querySelectorAll(".settings-body input, .settings-body select").length;
       const readonlyTables = document.querySelectorAll(".readonly-table").length;
-      return { ok: sections === 7 && inputs >= 26 && readonlyTables === 2
+      // 2026-10-06 起 8 个分区:BYOK/档案/权限/上下文/外观/子代理/设备配对/MCP-LSP。
+      return { ok: sections === 8 && inputs >= 26 && readonlyTables === 2
                  && __t.value("model") === "ox-alpha-free" && __t.value("maxTokens") === "96000",
                detail: { sections, inputs, readonlyTables, model: __t.value("model"), maxTokens: __t.value("maxTokens") } };
     `,

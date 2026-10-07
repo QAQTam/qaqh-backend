@@ -194,6 +194,48 @@ export function omittedLinesBefore(file: ParsedFile, hunkIndex: number): number 
   return Math.max(0, hunk.oldStart - (previous.oldStart + previous.oldLines));
 }
 
+// ── 渲染行展平(虚拟化用) ─────────────────────────────────────────────────────
+
+/** 展平后的渲染行:虚拟化按「一行一个槽位」开窗,不再按 hunk 嵌套挂载。 */
+export type DiffRow =
+  | { kind: "omit"; count: number }
+  | { kind: "hunkhead"; text: string }
+  | { kind: "line"; line: ParsedLine };
+
+/** 文件 → 扁平行列表(hunk 间省略行与 hunk 头各占一行,行对象与解析结果共享引用)。 */
+export function flattenFileRows(file: ParsedFile): DiffRow[] {
+  const rows: DiffRow[] = [];
+  file.hunks.forEach((hunk, index) => {
+    const omitted = omittedLinesBefore(file, index);
+    if (omitted > 0) rows.push({ kind: "omit", count: omitted });
+    rows.push({
+      kind: "hunkhead",
+      text: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+    });
+    for (const line of hunk.lines) rows.push({ kind: "line", line });
+  });
+  return rows;
+}
+
+export function fileTotalLines(file: ParsedFile): number {
+  let total = 0;
+  for (const hunk of file.hunks) total += hunk.lines.length;
+  return total;
+}
+
+export function fileContentChars(file: ParsedFile): number {
+  let total = 0;
+  for (const hunk of file.hunks) for (const line of hunk.lines) total += line.text.length;
+  return total;
+}
+
+/** 降级渲染的截断:保留 head+tail,中段合成一条省略行。 */
+export function truncateRows(rows: DiffRow[], head: number, tail: number): DiffRow[] {
+  if (rows.length <= head + tail) return rows;
+  const omitted = rows.length - head - tail;
+  return [...rows.slice(0, head), { kind: "omit", count: omitted }, ...rows.slice(rows.length - tail)];
+}
+
 // ── 词级高亮配对(spec §9.3) ──────────────────────────────────────────────────
 
 const WORD_DIFF_MAX_CHARS = 2000;
@@ -201,6 +243,41 @@ const WORD_DIFF_MAX_CHARS = 2000;
 export interface WordPair {
   del: ParsedLine;
   add: ParsedLine;
+}
+
+/**
+ * 廉价配对扫描:等长 del/add 连续段按位置对齐,只建映射、**不做**词级 diff。
+ * 词级 Myers 的代价挪到渲染时逐行惰性付(见 DiffView 的 segments 缓存),
+ * 展开大文件时不再一次性算完整个 hunk。
+ */
+export function pairLines(hunk: ParsedHunk): Map<ParsedLine, ParsedLine> {
+  const pairs = new Map<ParsedLine, ParsedLine>();
+  const lines = hunk.lines;
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i]!.t !== "del") {
+      i += 1;
+      continue;
+    }
+    let delEnd = i;
+    while (delEnd < lines.length && lines[delEnd]!.t === "del") delEnd += 1;
+    let addEnd = delEnd;
+    while (addEnd < lines.length && lines[addEnd]!.t === "add") addEnd += 1;
+    const delCount = delEnd - i;
+    const addCount = addEnd - delEnd;
+    if (delCount > 0 && delCount === addCount) {
+      for (let offset = 0; offset < delCount; offset += 1) {
+        const del = lines[i + offset]!;
+        const add = lines[delEnd + offset]!;
+        if (del.text.length <= WORD_DIFF_MAX_CHARS && add.text.length <= WORD_DIFF_MAX_CHARS) {
+          pairs.set(del, add);
+          pairs.set(add, del);
+        }
+      }
+    }
+    i = addEnd > delEnd ? addEnd : delEnd;
+  }
+  return pairs;
 }
 
 /**

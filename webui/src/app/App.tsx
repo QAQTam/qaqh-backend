@@ -46,6 +46,8 @@ import {
 } from "../settings/store";
 import { STR } from "../lib/strings";
 import { isTauriRuntime, listenHostDiagnostics, openExternalUrl, transport, tauriHost } from "../lib/transport";
+import { applyConfigTheme } from "../lib/theme";
+import { ToastHost } from "../ui/toast";
 import "../styles/app.css";
 
 const inTauri = isTauriRuntime();
@@ -92,6 +94,12 @@ const App: Component = () => {
       if (tab != null && tab.store.connection[0]() !== "connected") tab.store.retry();
     };
     window.addEventListener("focus", onFocus);
+
+    // 启动即取一次主题配置(失败静默:跟随系统),避免「设置过深色但重开是浅色」。
+    void transport
+      .rpc<{ theme: string | null }>("config.load")
+      .then((config) => applyConfigTheme(config.theme))
+      .catch(() => {});
 
     // Tauri:外链一律走系统浏览器;宿主诊断事件(兼容性失败/宿主错误)。
     let unlistenHost: (() => void) | null = null;
@@ -292,6 +300,7 @@ const App: Component = () => {
       <Show when={settingsOpen()}>
         <SettingsView />
       </Show>
+      <ToastHost />
     </div>
   );
 };
