@@ -1,5 +1,10 @@
 # 架构收敛施工单（architecture-convergence）
 
+> **当前执行入口（2026-10-07 owner 更新）**：clean 分支只做 RC 前架构收敛、砍刀和 crate 减负，
+> 任务顺序、删除要求与派工口径以 **§10 CLEAN-0–CLEAN-7** 为准。§1–§9 保留证据与旧任务追溯，
+> 不再独立派发被 §10 接管的任务。职责图和现状/目标区分见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+> owner 明确要求大砍、事后回归；取消生产 shadow 双写、长期兼容层和正常读取 fallback。
+
 > **状态**：施工单。规则见根目录 [`AGENTS-x.md`](../AGENTS-x.md)；本文件只列"要建什么、按什么顺序、怎么算完成"。
 > **来源**：2026-10-06 一次架构评审会话（session `01a11215-7ee1-7615-aa6d-92f5575ddf5a`）给出的裁决。
 > 该会话在动笔写施工单时被 429 中断，本文由后续会话从它的 messages.jsonl 转录，
@@ -148,8 +153,8 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
       "payload 引用的 blob 必须已存在"（`AGENTS-x.md` I5）。
 - [ ] **T1.2** 补 fact 生产者：turn 生命周期（`TurnStarted`/`TurnFinished`/`TurnInterrupted`）、
       整轮模型消息（取代 `AssistantBlockSealed`）、`ContextInjected`、`ContextRewound`、`CompactionApplied` 补字段。
-- [ ] **T1.3** shadow 双写：`MessageCommitted` 与现有 MessageStore 并行写，每个 lap 边界比对，
-      要求 **零 diff**（金标语料：工具/并行工具/图片/压缩/undo/steer/子代理注入/取消中工具/溢出恢复/流续写）。
+- [ ] **T1.3（由 CLEAN-3 接管）** 离线导入/重放对比后一次切换：不在生产 live 路径双写。
+      新上下文与离线基线要求 **零 diff**（金标语料：工具/并行工具/图片/压缩/undo/steer/子代理注入/取消中工具/溢出恢复/流续写）。
 - [ ] **T1.4** 收口内容读取面：wire 的内容端点先读 ContentStore 缓存，未命中回落 blob（wire 不变）。
 
 ### P2 事件词汇收敛（与 T3 独立，可并行）
@@ -272,7 +277,8 @@ bash scripts/v2-legacy-compat-probe.sh                 # 触到 migrate-on-read 
 
 ## 7. 禁止动作（对执行模型）
 
-- 不许为了过测试改测试断言；不许加 `#[ignore]`；不许留"临时兼容桥"（除本 spec 声明窗口内的 shadow 双写，且必须写明删除任务）。
+- 不许为了掩盖行为回退改测试断言；不许加 `#[ignore]`；不许留"临时兼容桥"或生产 shadow 双写。
+  只验证旧结构/源码字符串的测试随 CLEAN 任务删除或改为真实行为验证，不能锁死待删除实现。
 - 不许在 wire 类型上动手（`AGENTS-x.md` I14）。
 - 不许用"运行时注册 `fn` 钩子"绕依赖方向（I13）。
 - 不许对**别人**的未提交改动动刀；工作区里并行的 webui 线不属于本 spec。
@@ -400,3 +406,199 @@ CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS-x.md` 
       本次未提交、也未删，等 owner 表态。
     - 新仓远端：`https://github.com/QAQTam/qaqh-desktop-app`（public，MIT，署名年份 2027）。
       推送前已扫全历史：严格凭据模式、敏感文件名均零命中。
+
+## 10. clean：RC 前砍刀与 crate 减负
+
+### 10.1 owner 范围与实施规则
+
+2026-10-07：owner 要求先更新主线到 2.0.0-beta.3，再建 clean 本地/远端分支与 PR。
+规划模型负责审计、拆任务与验收设计；owner 自行安排执行模型。本轮不启动执行代理。
+clean PR 是整项动作的 draft 集成 PR；下面的任务 ID 是交付/提交单元。
+本轮按 owner 授权采用一项集成 PR，不为满足旧 P2 机械拆成多个并行清单。
+
+* 一个任务改完完整链路并删除旧路径，然后做回归；失败修新实现或整体回滚该任务。
+* 不留 deprecated/shim/no-op feature、生产双写、旧存储回落、迁移开关和备用执行入口。
+* 旧数据转换只在一次性 migrate 入口，正常读取只认当前格式。禁止损坏/缺失时猜出成功终态。
+* 开工前保留 Git/数据快照及测试样本，不先给旧壳大量补测试；崩溃接缝需要专项验证。
+* 每个迁移任务包括调用者、exports、Cargo 依赖、真实行为测试和 ARCHITECTURE 更新。
+* 被其他仓使用的 Rust API 同步改实际调用者；不为潜在消费者维持兼容层。
+* 不加新产品功能、v3、远端执行协议、不全异步重写、不凭行数制造新 crate。
+* 不动用户已有未提交项：AGENTS.md 的本地删除、AGENTS-x.md、prompt.md、.zcode/。
+  它们不属于本轮提交。AGENTS-x.md 是读取的参考文件，不自动更名、恢复或提交。
+
+### 10.2 依赖和派工顺序
+
+```text
+CLEAN-0 基线（本轮）
+  -> CLEAN-1 空转删除
+  -> CLEAN-2 一次收敛内部事件
+  -> CLEAN-3 事实/正文/上下文完整 cutover
+  -> CLEAN-4 显式状态与执行生命周期
+  -> CLEAN-5 crate 职责迁移与依赖减负
+  -> CLEAN-6 文件/API/文档收尾
+  -> CLEAN-7 完整回归与 RC 判定
+```
+
+CLEAN-2 只能删除已在该任务中由事实或显式动作完整承接的事件；其余生产者随 CLEAN-3
+补齐后删除。这是一项有界依赖，不允许提前加一个 DomainEvent 内部桥再做第二次迁移。
+CLEAN-5 的 session-api 抽取可提前完成准备，但 contract 的最终删除/导出与 CLEAN-3 对齐；
+不在事实 schema 正在变化时让两个模型同时改同一套类型。
+
+派工以当前顺序串行合入 clean。确需并行，仅允许不共享写集的子任务（如 provider
+内部模块整理与文件工具内部模块整理）；registry、service、事实 schema、workspace 执行入口
+各自同一时间只有一个修改者。每次派工给出任务 ID、起始 SHA、允许修改的路径、依赖任务
+的交付 SHA。其他发现记回本文，不顺手扩范围。
+
+### 10.3 可直接派发的任务
+
+#### CLEAN-0 — 基线与规划（本轮完成）
+
+交付：版本 2.0.0-beta.3；main 同步；clean 分支与 draft PR；ARCHITECTURE 29 crate 职责表；
+metrics/clean-baseline.json 的物理行数、最大文件、普通直接依赖与默认 features；本节派工单。
+版本更新包含 26 个 qaqh-* workspace 包，sbx-* 三个独立 0.1.0 不改。
+源码职责结论是已核对模块的分析，不宣称全仓行为审计完成。
+
+#### CLEAN-1 — 一批砍掉无独立语义的外壳
+
+写集：workspace/tool_api/boundary.rs、workspace/execution.rs 与旧入口调用者；runtime/registry.rs；
+旧订阅 service 链、启动调用者及对应测试/exports/Cargo features。
+
+删除 ExecuteBatch/BatchOutcome/ResumeInteraction 未接线协议；subscription_actor 与旧订阅 API；
+单分支 AgentTransport；spawn_with 无效参数与转发层；runtime memory no-op feature。
+把旧工具入口调用者一次迁到 ToolCallContext 后删旧入口，保留解析/准入/审计语义。
+manager/fold policy 的剩余 TLS 不在这里裸删，留给 CLEAN-4 完整迁移。
+
+验收：上述符号/feature 无生产残留；仅构造旧壳、扫描函数名的测试删除；实际 V2 SSE、授权拒绝、
+会话/workspace 绑定、取消、线程退出/join、尾部排空回归。删除项逐条附搜索结果。
+接管：旧 Next 3 Actions 的第一项、部分 T4.1。
+
+#### CLEAN-2 — 事件直接收敛，副作用显式化
+
+写集：runtime/actor.rs、agent/paced_emitter.rs、types.rs、engine_title.rs、engine_compact.rs；
+registry 交互副作用、activity；domain/event.rs、ringing/event.rs/worker.rs 及生产调用者。
+
+先列出每种旧事件的构造点、消费者和真实动作。actor 输出职责收敛为持久 fact/易失 live，
+交互内容/pin/activity 改显式动作或由提交事实触发。跨线程需要排队仍用有类型的内部队列，
+不再把 wire envelope 当内部语义。对外序列化只发生在传输边界。
+无独立行为的旧事件与桥接删除；缺事实的生命周期事件必须在删除前承接，必要时与 CLEAN-3 同交付。
+保留真实流式顺序，不因 RoundDelta/RoundCompleted 有旧名字就忽略其实际调用。
+
+验收：ask/plan 正文、pin 释放、权限交互、工具结果、activity、流式次序、SSE 重连；
+证明事件路径不再通过 wire 往返触发业务。最终 DomainEvent/emit_domain 及转换实现为零。
+接管：T2.1/T2.2。命令模型不随事件删除。
+
+#### CLEAN-3 — 一次完整切换事实源与正文
+
+写集：session/canonical、session_fact_v2、projection、manager、team/store；message/store、effect、wal；
+runtime 上下文/持久化/恢复/timeline；daemon 内容读取；types/image_store 调用者与 migrate 模块。
+这是完整垂直任务，可多个提交，不能以只接通新 writer 为完成条件。
+
+实施顺序：
+1. 持久 blob 落盘与引用校验；事实引用不能指向 TTL 缓存或未落盘哈希。
+2. 完整 turn 生命周期/整轮模型消息/工具结果/压缩/撤回/注入生产者；类型改名必须匹配真实职责，
+   先审 ToolLedger 的全部写入与消费者，再确定 SessionLedger 的公开入口。
+3. 单一 apply(ContextOp)，live 与 replay 共用；保留 thinking signature/加密 reasoning/工具顺序。
+4. 在静态样本上离线导入并比对，上下文和人类归档分别验证，不启动生产双写。
+5. 停写、备份、一次性幂等 migrate、版本标记、切换全部正式读写入口。
+6. 删除 messages.wal、LegacyWriterFacade、消息独立直写、SaveFull/重写归档、migrate-on-read、
+   timeline 推算 turn ID 与统一 Completed 补偿、以 TTL 代替业务终态的路径。
+7. 补齐 ARCHITECTURE 存储表：包含 team/board、meta 的配置字段、索引、recovery intent，
+   不把独立配置/密钥/设备登记误称会话缓存。
+
+历史旧数据没有的终态记录为未知/历史导入，不伪造成功。文件 undo journal 保留必要职责。
+迁移故障不能默默跳过；备份和恢复入口由离线运维控制，正常 reader 没有旧格式 fallback。
+
+验收：删可重建投影后完整恢复；live==replay；正文可解析；各落盘/执行接缝崩溃注入；
+副作用工具不重复执行；不确定执行明确拒绝盲重放；取消/失败/重启中断终态正确；
+重启后不可答交互明确收口；重复迁移幂等且数据不丢。历史终态未知单独断言。
+接管：T1.1–T1.4、T2.3、T3.1–T3.3、T4.4/T4.5 的恢复部分；禁止旧 T1.3 shadow。
+
+#### CLEAN-4 — 状态显式、取消单树、锁与生命周期
+
+写集：permission/lib.rs、fs-core/file_state.rs、file-tools/pending/read_image；workspace/runtime、
+tool_side_fold、audit；process registry；runtime/types、loop_outcome、registry/service；
+MCP/LSP/gate runtime 装配，daemon composition。
+
+建立由会话/工作区拥有的显式状态，工具仅拿调用需要的句柄。进程共享资源与会话状态分别列所有者。
+删除 session/workspace/cancel 全局/TLS 与 resolver fn 钩子、双取消机制；取消树覆盖工具和子代理。
+lap 递归改循环，按职责拆函数；Registry 锁内不 IO/block_on/阻塞 send/回调。
+runtime 共享方式先取证；没有性能问题证据也要消除隐藏全局构造入口，但不声称提速。
+
+验收：两会话同时读写/取消不串状态；子代理取消传播；小栈大量 lap；退出无悬挂线程；
+并发工具和锁顺序探针；若改 runtime，记录前后同负载延迟及阻塞栈。
+接管：T0.1、T4.1–T4.3，T4.4 剩余运行态部分。
+
+#### CLEAN-5 — crate 职责迁移，拆完旧门面一起删
+
+写集与目标由 ARCHITECTURE §3/§4 决定，先提交符号/消费者迁移清单再动代码。
+
+* 抽 session-api 纯契约，client 不再依赖 session 存储；清理旧路径导出与 DTO 重复镜像。
+* 抽 platform 数据根/bootstrap；图片 IO 进入 session blob；tokenizer/上下文计数脱离 types
+  默认依赖。纯 types 不初始化环境、不读写磁盘。
+* runtime 的 device/lease/driver/wire hub 归 daemon 模块；纯 timeline 折叠/重建归 session。
+  只迁其职责内代码，不能将全部 ringing/ 机械搬到 daemon 而产生循环依赖。
+* service 初始化/全局安装归 daemon composition；workspace/git 转导出删，服务直接依赖 git。
+* 工具登记契约归 tool-core；MCP/LSP/subagent 只依赖登记契约，不依赖 workspace 具体 manager。
+  登记抽象只覆盖真实使用的 register 操作，不把授权/执行/会话状态搬进 SDK。
+* Skill effect 契约与实现解耦；domain 展示适配退出文件工具；process→file-tools 边按调用点削减。
+* types/tool-core 的 ToolResult/ToolOutcome/display 转换逐消费者收敛，provider 与 UI 各自
+  在边界取所需投影，删中间往返与旧 helper；不复制第二套同义类型。
+* title 的 session 依赖按实际调用者决定是否删除；小 crate 不为数量好看强行合并。
+
+验收：普通生产依赖图无环；client 不带 session writer；MCP/LSP/subagent 不依赖 workspace；
+tool-core 不依赖 skills 实现；types 无环境 IO/默认 tokenizer；旧 shim、exports、Cargo 依赖为零。
+desktop/TUI 实际外部调用者与 TS 导出同步验证，提交 SHA 写回这里；外部未验证就不能称 RC 可用。
+两个新增 crate 各有纯契约/平台接缝测试；不要给机械搬动逐函数造镜像测试。
+
+#### CLEAN-6 — 文件、公共 API 和文档收尾
+
+将超过 1500 行的热点按现有职责拆模块：registry/timeline/engine_turn/manager/store/
+axum_server/config/subagent lib。先删重复逻辑，再拆留存行为。tests 从大文件分离时分别报告行数。
+拆模块不扩大 pub，优先 pub(crate)；公共错误改具名类型；过多参数收敛为职责明确的输入结构。
+删除迁移历史注释、无消费导出、重复 schema/声明、无用 features/依赖、已失效工具脚本。
+清理 version 脚本的旧仓名字、root package 描述、无消费者版本锁等须附引用核对。
+architecture-report.md 明确归档历史，所有当前说明只引用 ARCHITECTURE 与本节。
+不删除用户未跟踪文件，不把批量格式化混到职责迁移里。
+
+验收：无正常读取兼容分支、无旧符号 shim；修改的大文件不增肥、新文件 <=1000 行；
+职责/依赖/存储表与代码一致；记录真实净删、搬移、新增生产代码、测试代码和第三方依赖变化。
+接管：T0.2/T0.4 余项与旧注释/文档收尾。
+
+#### CLEAN-7 — 完整回归与 RC 判定
+
+每刀完成后已做专项回归；本任务在最终 clean HEAD 上跑：
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked -- --test-threads=1
+```
+
+补充：新显式状态测试正常并发运行，不能靠单线程掩盖串会话；跨平台构建/CI、daemon/client
+冒烟、desktop/TUI、迁移/重启/断线、长会话压缩/undo/steer/并行工具/图片/子代理/文件变化。
+不依赖外部模型服务的确定性接缝用 mock；在线模型探针单独记录环境和结果。
+现有 fmt/clippy 基线失败重新实测定位，不用永久白名单、放宽 lint 或删行为测试解决。
+无法完成的项目列“未验证 + 原因”，RC 判定保持未通过；不以文档或行数降幅替代行为验证。
+
+### 10.4 执行模型交付模板
+
+```text
+任务：CLEAN-N；起始/结束 SHA：
+本次解决的职责冲突：
+删除的符号/路径/依赖（附搜索证据）：
+迁移到的唯一所有者与正式调用链：
+净删 / 搬移 / 新增代码（生产与测试分别说明）：
+专项回归命令、结果与未验证项：
+异常/崩溃/数据迁移结果（如涉及）：
+同步的外部消费者与 SHA（如涉及）：
+ARCHITECTURE 更新：
+新发现但未扩大实施的问题：
+```
+
+### 10.5 本轮验证记录
+
+版本来源 version.txt/Cargo.toml/package.json 一致，Cargo.lock 的 26 个 qaqh-* 已同步。
+cargo metadata --locked 完整依赖解析通过；只解析 metadata，没有编译或运行测试。
+metrics 中登记了 29 个 crate 的源码体量与普通直接依赖（含 target 条件、不含 dev/build 边）。
+本轮不改 Rust 行为，因此不执行全工作区编译/回归；CLEAN-1–CLEAN-7 均未实施。
+原 main 领先远端的 6 个提交已由 owner 明确授权一并同步。
