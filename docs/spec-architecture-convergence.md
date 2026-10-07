@@ -290,13 +290,13 @@ bash scripts/v2-legacy-compat-probe.sh                 # 触到 migrate-on-read 
 
 CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS-x.md` I16/I17/I18/I19）：
 
-| 项 | 模式 | 基线值（T0.4 填） |
+| 项 | 模式（在仓库根执行） | 基线值（35fa46e 复测） |
 |---|---|---|
-| 会话级 static / thread_local | `pub static .*AtomicBool\|thread_local!` in crates | 待测 |
-| 变更日志式注释 | `BUG-20\d\d`、`阶段 \dd`、`PR-\d-\d`、`§\d+\.\d+\.\d+` | 待测 |
-| 超参函数 | `#[allow(clippy::too_many_arguments)]` | 待测（2026-10-06 记 50） |
-| 身份残留 | `\bseeds?\b` in crates（排除 tests） | **765 行**（2026-10-07 实测） |
-| 裸字符串错误 | `Result<_, String>` 新增 pub API | 由 review 守 |
+| 会话级 static / thread_local | `grep -rnE "pub static .*AtomicBool\|thread_local!" crates --include=*.rs \| wc -l` | **8** |
+| 变更日志式注释 | `grep -rnE "BUG-20[0-9]{2}\|阶段 [0-9]\|PR-[0-9]+-[0-9]+\|§[0-9]+\.[0-9]+\.[0-9]+" crates --include=*.rs \| wc -l` | **329** |
+| 超参函数 | `grep -rc "#\[allow(clippy::too_many_arguments)\]" crates --include=*.rs` 求和 | **48**（旧记 50 是按 `too_many_arguments` 字样数行，含注释与 expect 变体） |
+| 身份残留 | `grep -rnE "\bseeds?\b" crates --include=*.rs \| wc -l` | **765**；排除 `/tests/` 为 **657**。原表标注"排除 tests"与所记 765 不一致，已按两种口径同时登记 |
+| 裸字符串错误 | `grep -rnE "Result<[^>]*, *String>" crates --include=*.rs \| wc -l` | 信息值 **310**；仍由 review 守新增 pub API |
 
 ---
 
@@ -309,9 +309,11 @@ CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS-x.md` 
    后在动笔时改成"P0 卫生 → P1 blob 存储 + 补生产者 → P2 shadow → P3 cutover"。
    本文按**依赖关系**合并（见 §5）：事实源链条（T1→T3）与事件词汇/上下文（T2、T4）互不依赖。
    若执行方认为必须单选一版顺序，请在此签名裁决。
-2. **`docs/ARCHITECTURE.md` 不存在但被 `AGENTS-x.md` 引用**（I1/I10/I13/P6 都指向它）。
-   `AGENTS-x.md` 已被 agent 当宪法读，这个悬空引用会让接手方找不到存储表与 global 账。
-   → 落在 T0.2；在补齐之前，`AGENTS-x.md` 的 I1/I10 属**无法验收**状态。
+2. **~~`docs/ARCHITECTURE.md` 不存在但被 `AGENTS.md` 引用~~ 已闭合（2026-10-07，提交 `ee40274`）**：
+   `docs/ARCHITECTURE.md` 已入库（29 crate 职责表 + 存储权威表 + 依赖目标），I1/I10 恢复可验收。
+   **新增事实**：宪法文件已改名入库为根目录 `AGENTS-x.md`（内容与 `git show HEAD:AGENTS.md` 逐字节一致）。
+   本文与 ARCHITECTURE 里所有"见 `AGENTS.md` I-x"引用在本机解析到 `AGENTS-x.md`；派工时要点名这一条，
+   否则执行模型会以为宪法丢失。
 3. **`architecture-report.md` 会误导人**：它写 20 crate / 有 `qaqh-webui-gateway`，
    实际 29 crate、gateway 已随 Tauri 化删除，gate 已换 `*_sdk.rs`。它自称"只读探索、不修改代码"，
    但作为事实报告已过期 → T0.2 里决定归档还是重写。
@@ -462,6 +464,29 @@ metrics/clean-baseline.json 的物理行数、最大文件、普通直接依赖�
 
 写集：workspace/tool_api/boundary.rs、workspace/execution.rs 与旧入口调用者；runtime/registry.rs；
 旧订阅 service 链、启动调用者及对应测试/exports/Cargo features。
+起始 SHA = `35fa46e`（登记见 §10.6）。
+
+2026-10-07 复核的删除清单与证据：
+
+* `ExecuteBatch/BatchOutcome/ResumeInteraction`（`workspace/src/tool_api/boundary.rs:24/51/90`）：
+  全仓无构造点（`ExecuteBatch {` 只命中结构体定义本身），仅 `tool_api/mod.rs:11-12` re-export。
+  `tool-core/src/tool_api/mod.rs:21` 的文档把 boundary 归给 tool-core，实际文件在 workspace，随本次删除一并清。
+* 旧订阅桥：`registry.rs:264 subscription_actor`（自述 "P2-2d-b migration bridge"）+
+  `apply_subscription:1995` + `subscribe_channel:1507`/`unsubscribe_channel:1528`/`connection_closed:1545`
+  + `session/src/actor.rs:335-460` 的 `SubscriptionCommand/SubscriptionEffect`。
+  生产调用者为零，只剩 registry 自测（2503/2636）。
+* `AgentTransport`（`registry.rs:242`）只有 `InProcess` 单变体，9 处 match 全为单臂解构 → 展平成直接字段。
+* `spawn_with`（`registry.rs:1120`）纯转发；两个调用点（782/1117）都传 `&[]`，
+  下游 `spawn_session_inprocess` 收 `_extra_args` 后丢弃 → 删参数与转发层。
+* runtime `memory` feature：`default = ["memory"]` 且 `memory = []` 为 no-op，
+  唯一消费者是 `daemon/Cargo.toml:43` 的 `memory = ["qaqh-runtime/memory"]`，两处同删。
+* 旧工具入口：`execution.rs:27 execute_authorized` 自述为 "Legacy adapter … pre-P2-4d entry point"；
+  runtime 侧 `tool_runtime.rs:943` 已在用 `execute_authorized_with_context`，其余调用点均在 execution.rs 自测内。
+
+**`subscribe` 同名保护名单（按字样清扫会误删活路径）**：真正的 V2 SSE 是
+`ringing/v2.rs:318 subscribe`（调用者 `daemon/axum_server/axum_impl/v2.rs:576`、`host_impl.rs:535`）；
+`host_impl.rs` 的 board subscription 是团队看板产品功能；`daemon/server.rs` 的
+`shutdown.subscribe()` 与 `config/watch.rs:33 subscribe()` 是 tokio/watch 原语。这四者不属于删除范围。
 
 删除 ExecuteBatch/BatchOutcome/ResumeInteraction 未接线协议；subscription_actor 与旧订阅 API；
 单分支 AgentTransport；spawn_with 无效参数与转发层；runtime memory no-op feature。
@@ -470,7 +495,8 @@ manager/fold policy 的剩余 TLS 不在这里裸删，留给 CLEAN-4 完整迁�
 
 验收：上述符号/feature 无生产残留；仅构造旧壳、扫描函数名的测试删除；实际 V2 SSE、授权拒绝、
 会话/workspace 绑定、取消、线程退出/join、尾部排空回归。删除项逐条附搜索结果。
-接管：旧 Next 3 Actions 的第一项、部分 T4.1。
+接管：旧工具入口 → `ToolCallContext` 的调用者迁移（= 部分 T4.1）。
+注：本条原文写"旧 Next 3 Actions 的第一项"，该说法在现库与 `docs/archive/` 中查无出处，已删（见 §10.6）。
 
 #### CLEAN-2 — 事件直接收敛，副作用显式化
 
@@ -602,3 +628,52 @@ cargo metadata --locked 完整依赖解析通过；只解析 metadata，没有�
 metrics 中登记了 29 个 crate 的源码体量与普通直接依赖（含 target 条件、不含 dev/build 边）。
 本轮不改 Rust 行为，因此不执行全工作区编译/回归；CLEAN-1–CLEAN-7 均未实施。
 原 main 领先远端的 6 个提交已由 owner 明确授权一并同步。
+
+### 10.6 基线与 worktree 变更（2026-10-07 晚）
+
+clean 工作树此前混着**两条无关线**的未提交改动（+477/−197，9 个 tracked 文件 + 1 新测试）。
+按文件与 hunk 内容分组后分别落库，`AGENTS.md` 的本地删除、`AGENTS-x.md`、`prompt.md`、`.zcode/`
+按 §10.1 保持在未提交状态、未进任何提交：
+
+* **`35fa46e`（在 clean）** 交互终态收敛（幽灵审批）：`runtime/agent/engine_turn.rs`(+153)、
+  `turn_actor.rs`(+21)、`turn_lap_test_api.rs`(+66)、新测试 `ask_resolution_projection_fold.rs`(296 行)、
+  `session/projection/control.rs`(+40)、`session/tests/control_projection.rs`(+101)、
+  `daemon/axum_server/axum_impl/v2.rs`(+14 模态优先级)。
+  这是 **D9/E21 的运行态部分**，也是 §5 T0.3（重启僵尸交互取证）的实施证据：`InteractionExpired` 的
+  生产点不再只有 `session/actor.rs:628` 一处，**E21 的记录已过期**，CLEAN-2/3 复核时要按现状重数。
+* **`feat/lan-pairing`（从 main 切，不在 clean）** LAN 双 listener + `discovery` 的
+  `lan_endpoint`/`tls_fingerprint`（`daemon/main.rs`、`daemon/server.rs`、`types/discovery.rs`）。
+  属 `docs/plan-mobile-remote-access.md` 产品线；§1 明确 clean 不加产品功能，故不入 clean 历史。
+
+**约束（对后续派工有效）**：CLEAN-3/CLEAN-4 **不得另起第二套 expiry 生产者**。turn 终态与挂起表
+清理由 `35fa46e` 承接后，事件词汇收敛（CLEAN-2）与事实 schema 迁移（CLEAN-3）必须复用
+`canonical_interaction_id` 的 id 对齐口径（wire id 与 `int_<ULID>` 两侧都认），不得再引入第三种 id 形态。
+
+验证（在 clean HEAD `35fa46e` 上实测，非声称）：`cargo check --workspace --all-targets` = 0 error；
+`cargo test -p qaqh-session -p qaqh-runtime -p qaqh-daemon -p qaqh-types` = **766 passed / 0 failed**
+（76 个目标）；新回归 `ask_resolution_projection_fold` 3 passed、`control_projection` 6 passed。
+**未验证项**：全工作区 `cargo test --workspace`（DoD 要求的 172 目标/1842 测试那次是在 T5 上跑的，
+本提交未重跑）、`cargo clippy -D warnings`、v2-smoke/v2-legacy-compat-probe、`just ts-check`（在
+`qaqh-desktop-app` 仓）。CLEAN-1 完成后须在施工 worktree 内补齐这几项。
+
+**量尺基线**：新增快照 `docs/metrics/clean-start-35fa46e.json`（29 crate 合计 **152,594** 行；
+runtime 38,533 / session 19,063 / daemon 9,655，相对 `ebcf0f8` 各 +194/+40/+4）。
+固定基线 `clean-baseline.json`（`ebcf0f8`）**未被覆盖**，净删一律以 `clean-start-35fa46e.json` 为分母。
+§8 的 ratchet 计数已填实测值并固化测量命令；同时更正两处：原"765 行（排除 tests）"实为**含 tests** 口径
+（排除 `/tests/` 是 657），原"too_many_arguments 50"按属性字面计数应为 **48**。
+另更正 §10.3 CLEAN-1 的"旧 Next 3 Actions"悬空引用（现库与 `docs/archive/` 均查无出处）。
+
+**worktree 拓扑（施工期固定）**：
+
+```text
+E:/qaqh-backend        -> main         可用基线；qaqh-tui-app 的 path 依赖指向这里，保持可编译
+E:/qaqh-backend-clean  -> clean        CLEAN-1…7 唯一施工处；独立 ./target
+E:/qaqh-backend-v2.1   -> feat/profile-p1  原样保留：8 个未推送提交 + 9 个脏文件（含 config/migrate.rs、
+                                    permission/tier_file.rs 两个新源文件），从未 push，不做任何移动或删除
+```
+
+已移除 `C:/Users/tsy3m/.qoder/worktrees/app/8ebe21/qaqh-backend`（refactor/sdk-gate-and-byok：
+工作树零脏文件、零 stash、分支已并入 main 且与 origin 同步）及其**本地**分支；
+`origin/refactor/sdk-gate-and-byok` 未动。`v2.1`、`fix/hotfix`、`webui-export`、
+`research/tool-system-modernization` 全部保留未删——删除属不可恢复动作，未获逐条确认。
+`origin/clean` 现落后本地 1 个提交（`35fa46e`）；推送会改动共享分支与 PR #13，等 owner 点头。
