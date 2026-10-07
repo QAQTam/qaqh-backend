@@ -128,5 +128,5 @@
 
 - `E:\win-sandbox-rs`(独立仓,已三次提交,23 测试绿):Windows 沙箱 TokenPlane,
   M1 完成,待合入 qaqh-backend(方案见该仓 README/ADR-0001 与
-  `docs/spec/windows-sandbox-cross-review.md`)。合入时的 `write_paths` 审批接线
+  `docs/archive/windows-sandbox-cross-review.md`)。合入时的 `write_paths` 审批接线
   将消费本次三档制的 `writable_files` 语义。

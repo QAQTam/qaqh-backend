@@ -79,4 +79,4 @@ pnpm exec node scripts/stress-cdp.mjs              # 终端 B:全套场景 + 每
 - **页面一旦被 OS 遮挡/切后台，Chromium 就不发 rAF**：贴底推进、delta 合帧、`requestIdleCallback` 淘汰全挂在帧上 → 测量**静默停摆**（表现像 bug：场景不推进、翻页请求数停在 0、`document.hidden === true`）。自己起 headless 时这几个参数是必需的：`--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-features=CalculateNativeWinOcclusion`，量堆再加 `--expose-gc --enable-precise-memory-info`。
 - 驱动滚动时**赋同一个 `scrollTop` 不产生 scroll 事件**，要制造一次变化；`SessionView` 的 `swallowScroll` 会吞掉一次滚动事件（代码注释已承认），所以「程序化贴底后的第一次用户滚轮」可能被吃掉一次。
 - `attach` 会抢 daemon 的**单一 active seat**，能把正在跑的 TUI 挤掉；本会话全程离线（夹具假页），没碰 daemon。
-- ⚠️ 旧 handoff（`docs/handoff/beta-readiness-2026-09-29.md`）W2 里写的 `webui/tests/transcript-pagination.test.ts` 路径已失效，现在是 `webui/tests/pagination.test.ts`。
+- ⚠️ 旧 handoff（`docs/archive/beta-readiness-2026-09-29.md`）W2 里写的 `webui/tests/transcript-pagination.test.ts` 路径已失效，现在是 `webui/tests/pagination.test.ts`。
