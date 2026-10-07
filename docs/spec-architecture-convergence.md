@@ -464,7 +464,7 @@ metrics/clean-baseline.json 的物理行数、最大文件、普通直接依赖�
 
 写集：workspace/tool_api/boundary.rs、workspace/execution.rs 与旧入口调用者；runtime/registry.rs；
 旧订阅 service 链、启动调用者及对应测试/exports/Cargo features。
-起始 SHA = `35fa46e`（登记见 §10.6）。
+起始 SHA = `bb2973b`（其 `crates/` 内容与 `35fa46e` 逐字节相同，量尺快照按 `35fa46e` 测，两者可互换引用）。
 
 2026-10-07 复核的删除清单与证据：
 
