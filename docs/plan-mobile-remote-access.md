@@ -2,8 +2,8 @@
 
 > 状态：提案——平台决策已定（见 §0），排期未定。前置事实基于 2026-10-04 代码实证。
 > 关联：`docs/audit-security-2026-10-01.md`（H3 传输安全 / M7 信任文件夹）、
-> `docs/plan-permission-extraction-v2.md`（交互域合并 = 客户端归因的接缝）、
-> `docs/plan-webui-tauri.md`（qaqh-client 定位为可共享客户端核心）。
+> `docs/archive/plan-permission-extraction-v2.md`（交互域合并 = 客户端归因的接缝）、
+> `docs/archive/plan-webui-tauri.md`（qaqh-client 定位为可共享客户端核心）。
 
 ## 0. 已定决策（2026-10-04）
 

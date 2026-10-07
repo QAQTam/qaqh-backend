@@ -118,7 +118,7 @@
 
 ## 跟进:webui Tauri 化后的信任边界变化(2026-10-02)
 
-按 `docs/plan-webui-tauri.md` 完成 A→D 阶段后,本报告与 webui 相关的结论按
+按 `docs/archive/plan-webui-tauri.md` 完成 A→D 阶段后,本报告与 webui 相关的结论按
 下述口径更新:
 
 **已移除的面(随 `qaqh-webui-gateway` 删除)**

@@ -198,7 +198,7 @@
 
 - **`docs/current/*.md` 悬空引用**：**不算缺陷**。`docs/current/` 在 commit `4ffc362 "clean"` 被整体删除，
   但该前缀锚点在全仓 41 处 `.rs` 中仍被引用（architecture/status/decisions/debug-backlog…），
-  且已有明确豁免记录 `docs/handoff-permission-three-tiers.md:107`。属整仓文档清理事项，非单文件注释问题。
+  且已有明确豁免记录 `docs/archive/handoff-permission-three-tiers.md:107`。属整仓文档清理事项，非单文件注释问题。
 - **错侧为字符串常量**：`auth.rs:28` 的 `"open a Ringing v1 client session first"`（5 处消费方均为 v2 端点，
   `v2.rs:1190`/`command.rs:73` 同 `code` 提示为 v2）——需改**代码**而非注释，且涉及用户可见文案，单列待议。
 - 各分片报告 `report/unit-*.md` 中未列入本轮的少量边界项（如已被前轮顺带修掉者）。
