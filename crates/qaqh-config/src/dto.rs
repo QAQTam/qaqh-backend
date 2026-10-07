@@ -223,6 +223,7 @@ mod tests {
                 base_url: String::new(),
                 wire: qaqh_types::Wire::OpenAi,
                 compat: None,
+                api_key: None,
                 preset_endpoint: None,
                 context_limit: None,
                 context_window: None,

@@ -75,6 +75,8 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "session.activity" => Some(READ),
         "session.dashboard" => Some(READ_SEEDED),
         "session.get_activity" => Some(READ_SEEDED),
+        // 会话级 profile 选择：写 meta.profile 并定向重载该会话（不动全局）。
+        "session.set_profile" => Some(WRITE_SEEDED),
         // workspace
         "workspace.get" => Some(READ_SEEDED),
         "workspace.list" => Some(READ),

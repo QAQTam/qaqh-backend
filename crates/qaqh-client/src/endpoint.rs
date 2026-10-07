@@ -165,6 +165,12 @@ pub enum ActionRequest {
     ProfileDelete {
         name: String,
     },
+    /// 只改该会话的 profile（写入 meta.profile 并定向重载，不动全局
+    /// `active_profile`，也不影响其它会话）。
+    SessionSetProfile {
+        session_id: String,
+        name: String,
+    },
     WorkspaceSet {
         session_id: String,
         path: String,
@@ -259,6 +265,10 @@ impl ActionRequest {
             Self::ProfileApply { name } => ("profile.apply", json!({ "name": name })),
             Self::ProfileSaveCurrent { name } => ("profile.save_current", json!({ "name": name })),
             Self::ProfileDelete { name } => ("profile.delete", json!({ "name": name })),
+            Self::SessionSetProfile { session_id, name } => (
+                "session.set_profile",
+                json!({ "session_id": session_id, "name": name }),
+            ),
             Self::WorkspaceSet { session_id, path } => (
                 "workspace.set",
                 json!({ "session_id": session_id, "path": path }),
@@ -662,6 +672,10 @@ mod tests {
             ActionRequest::ProfileApply { name: "p".into() },
             ActionRequest::ProfileSaveCurrent { name: "p".into() },
             ActionRequest::ProfileDelete { name: "p".into() },
+            ActionRequest::SessionSetProfile {
+                session_id: "s".into(),
+                name: "p".into(),
+            },
             ActionRequest::WorkspaceSet {
                 session_id: "s".into(),
                 path: "/".into(),
@@ -711,6 +725,7 @@ mod tests {
                 | ActionRequest::ProfileApply { .. }
                 | ActionRequest::ProfileSaveCurrent { .. }
                 | ActionRequest::ProfileDelete { .. }
+                | ActionRequest::SessionSetProfile { .. }
                 | ActionRequest::WorkspaceSet { .. }
                 | ActionRequest::WorkspaceCreate { .. }
                 | ActionRequest::WorkspaceRename { .. }
@@ -766,8 +781,10 @@ mod tests {
             assert_route_shape(name);
             assert!(seen.insert(name), "重复的 {kind} 路由: {name}");
         }
-        // 两个枚举**合计** 34 条路由。条数写死是刻意的：它与上面两份清单一起
+        // 两个枚举**合计** 35 条路由。条数写死是刻意的：它与上面两份清单一起
         // 构成「新增方法必须显式过一次」的检查点。
-        assert_eq!(seen.len(), 34, "服务面路由总数变了——确认是新增而非改错");
+        // 34 → 35：新增 `session.set_profile`（会话级 profile 选择，走既有
+        // catch-all `POST /ringing/v2/service/{method}`，无新路由类型）。
+        assert_eq!(seen.len(), 35, "服务面路由总数变了——确认是新增而非改错");
     }
 }

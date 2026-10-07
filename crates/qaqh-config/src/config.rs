@@ -721,6 +721,7 @@ impl Default for Config {
             base_url: String::new(),
             wire: qaqh_types::Wire::default(),
             compat: None,
+            api_key: None,
             preset_endpoint: None,
             context_limit: None,
             context_window: None,
@@ -1138,6 +1139,7 @@ falling back to 1 (read-only)"
                         base_url: fresh.base_url.clone().unwrap_or_default(),
                         wire: cfg.wire,
                         compat: None,
+                        api_key: None,
                         preset_endpoint: fresh.endpoint.clone(),
                         context_limit: fresh.context_limit.or(Some(cfg.context_length)),
                         context_window: None,
@@ -1173,6 +1175,7 @@ falling back to 1 (read-only)"
                     base_url: cfg.base_url.clone(),
                     wire: cfg.wire,
                     compat: Some(cfg.compat.clone()),
+                    api_key: None,
                     preset_endpoint: None,
                     context_limit: None,
                     context_window: None,
@@ -1235,6 +1238,13 @@ falling back to 1 (read-only)"
                 base_url: self.base_url.clone(),
                 wire: self.wire,
                 compat: Some(self.compat.clone()),
+                // 保留该 profile 既有密钥标记。apply_profile 刻意不碰 api_key，
+                // 而这里每次存盘都重建条目——抹掉标记会让自带 key 的 profile
+                // 静默退回主密钥。
+                api_key: self
+                    .profiles
+                    .get(&self.active_profile)
+                    .and_then(|profile| profile.api_key.clone()),
                 preset_endpoint: None,
                 context_limit: None,
                 context_window: None,
@@ -1396,8 +1406,15 @@ falling back to 1 (read-only)"
         Ok(())
     }
 
-    /// Pure profile switch. Persistence is the caller's responsibility via
+    /// Pure profile switch: copies the profile's endpoint/model fields and marks
+    /// it active. Persistence is the caller's responsibility via
     /// [`Config::update`] — profile methods must not create another write port.
+    ///
+    /// **`api_key` is deliberately NOT touched.** `api_key` is the *main* key
+    /// (the one [`Self::save_with`] writes to `SecretSlot::Main`); assigning a
+    /// profile's key here would silently copy it into the main slot on the next
+    /// save. The *effective* key for a profile is resolved by the caller —
+    /// see [`Self::profile_carries_key`] + [`Self::for_session`].
     pub fn apply_profile(&mut self, name: &str) -> Option<String> {
         let profile = self.profiles.get(name)?.clone();
         // BYOK：profile 自述端点，切换 profile 就是切换 endpoint / wire / compat。
@@ -1413,7 +1430,44 @@ falling back to 1 (read-only)"
         Some(name.to_string())
     }
 
-    pub fn save_profile(&mut self, name: &str) {
+    /// Whether `name` carries its own key (marker `"set"`), i.e. the caller must
+    /// read the plaintext from `secrets.toml` instead of inheriting the main key.
+    pub fn profile_carries_key(&self, name: &str) -> bool {
+        self.profiles
+            .get(name)
+            .is_some_and(|profile| profile.api_key.is_some())
+    }
+
+    /// 合成一份**只属于某个会话**的有效配置（不落盘，不广播）。
+    ///
+    /// `profile` = 该会话选定的 profile 名；`None` = 跟随全局 `active_profile`。
+    /// `own_key` = 调用方从 `secrets.toml` 解析出的该 profile 自带密钥；
+    /// `None` = 继承主密钥（profile 无自带 key，或名字进不了 secrets.toml）。
+    pub fn for_session(
+        global: &Self,
+        profile: Option<&str>,
+        own_key: Option<String>,
+    ) -> Self {
+        let effective = profile.unwrap_or(global.active_profile.as_str());
+        let mut cfg = global.clone();
+        if cfg.apply_profile(effective).is_none() {
+            // 会话指定的 profile 已被删除：退回全局 active_profile，而不是
+            // 让 agent 继续跑在旧端点上。
+            let fallback = global.active_profile.clone();
+            if fallback != effective {
+                cfg = global.clone();
+                let _ = cfg.apply_profile(&fallback);
+            }
+        }
+        if let Some(key) = own_key {
+            cfg.api_key = key;
+        }
+        cfg
+    }
+
+    /// 把当前扁平字段快照成命名 profile。`api_key_saved` 表示调用方已把当前
+    /// 主密钥写入该 profile 的 secret 槽（本函数只写 `"set"` 标记，绝不落明文）。
+    pub fn save_profile(&mut self, name: &str, api_key_saved: bool) {
         self.profiles.insert(
             name.to_string(),
             qaqh_types::ProfileConfig {
@@ -1424,6 +1478,7 @@ falling back to 1 (read-only)"
                 base_url: self.base_url.clone(),
                 wire: self.wire,
                 compat: Some(self.compat.clone()),
+                api_key: api_key_saved.then(|| CONFIG_MARKER.to_owned()),
                 preset_endpoint: None,
                 context_limit: None,
                 context_window: None,
@@ -1955,6 +2010,113 @@ wire = \"responses\"
         cfg.apply_profile("a");
         assert_eq!(cfg.wire, qaqh_types::Wire::Anthropic);
         assert!(cfg.compat.thinking_budget_large);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归守卫：`apply_profile` 不得改 `api_key`。
+    ///
+    /// `api_key` 是**主**密钥（`save_with` 会把它写进 `SecretSlot::Main`）。
+    /// 若切换 profile 时顺带赋值，下一次存盘就会把 profile 的密钥复制成主密钥
+    /// ——静默换掉用户的主凭据。
+    #[test]
+    fn apply_profile_leaves_main_key_untouched() {
+        let (dir, store, secrets) = setup(
+            "profile-key-isolation",
+            "active_profile = \"a\"
+[profiles.a]
+model = \"ma\"
+base_url = \"https://a/v1\"
+wire = \"anthropic\"
+
+[profiles.b]
+model = \"mb\"
+base_url = \"https://b/v1\"
+wire = \"anthropic\"
+",
+        );
+        let mut cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        cfg.api_key = "sk-main".into();
+        cfg.apply_profile("b");
+        assert_eq!(cfg.api_key, "sk-main", "切换 profile 不得动摇主密钥");
+        cfg.save_with(&store, &secrets).expect("save");
+        assert_eq!(
+            secrets.load(SecretSlot::Main).as_deref(),
+            Some("sk-main"),
+            "存盘后主槽位必须仍是主密钥"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// profile 自带密钥：标记随存盘保留，明文只进 secrets.toml。
+    #[test]
+    fn profile_key_marker_survives_save_and_secret_round_trips() {
+        let (dir, store, secrets) = setup(
+            "profile-key-round-trip",
+            "active_profile = \"a\"
+[profiles.a]
+model = \"ma\"
+base_url = \"https://a/v1\"
+wire = \"anthropic\"
+",
+        );
+        let mut cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        cfg.api_key = "sk-a".into();
+        secrets
+            .set_profile_key("a", "sk-a")
+            .expect("store profile key");
+        cfg.save_profile("a", true);
+        cfg.save_with(&store, &secrets).expect("save");
+
+        let text = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
+        assert!(!text.contains("sk-a"), "明文密钥不得进 config.toml: {text}");
+        let doc: toml::Value = toml::from_str(&text).expect("toml");
+        assert_eq!(doc["profiles"]["a"]["api_key"].as_str(), Some("set"));
+
+        let reloaded = Config::load_from_paths_with(store, secrets.clone()).expect("reload");
+        assert!(reloaded.profile_carries_key("a"));
+        assert_eq!(secrets.load_profile_key("a").as_deref(), Some("sk-a"));
+        assert_eq!(reloaded.api_key, "sk-a", "主密钥仍从主槽位读");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `for_session`：会话指定的 profile 覆盖端点；自带 key 用之，否则继承主密钥；
+    /// profile 已被删则退回全局 `active_profile`，不留在旧端点上。
+    #[test]
+    fn for_session_overrides_endpoint_and_resolves_key() {
+        let (dir, store, secrets) = setup(
+            "for-session",
+            "active_profile = \"a\"
+[profiles.a]
+model = \"ma\"
+base_url = \"https://a/v1\"
+wire = \"anthropic\"
+
+[profiles.b]
+model = \"mb\"
+base_url = \"https://b/v1\"
+wire = \"responses\"
+",
+        );
+        let mut global = Config::load_from_paths_with(store, secrets).expect("load");
+        global.api_key = "sk-main".into();
+
+        let scoped = Config::for_session(&global, Some("b"), Some("sk-b".into()));
+        assert_eq!(scoped.api_key, "sk-b");
+        assert_eq!(scoped.base_url, "https://b/v1");
+        assert_eq!(scoped.wire, qaqh_types::Wire::Responses);
+        assert_eq!(global.api_key, "sk-main", "合成不得改全局");
+
+        let inherited = Config::for_session(&global, Some("b"), None);
+        assert_eq!(inherited.api_key, "sk-main", "无自带 key 则继承主密钥");
+        assert_eq!(inherited.base_url, "https://b/v1");
+
+        let followed = Config::for_session(&global, None, None);
+        assert_eq!(followed.base_url, "https://a/v1");
+        assert_eq!(followed.active_profile, "a");
+
+        let fallback = Config::for_session(&global, Some("gone"), None);
+        assert_eq!(fallback.base_url, "https://a/v1");
+        assert_eq!(fallback.active_profile, "a");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
