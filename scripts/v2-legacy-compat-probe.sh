@@ -2,7 +2,7 @@
 # Ringing v2 legacy migrate-on-read 存量审计探针（P2 前置）。
 #
 # 用途：删除任何一条"读取旧格式并惰性迁移"的兼容路径之前，先跑本探针确认**存量数据里
-# 已经没有那种形状**。审计口径来自 `docs/audit-legacy-protocol-2026-10-04.md` §3.2。
+# 已经没有那种形状**。审计口径来自 `docs/archive/audit-legacy-protocol-2026-10-04.md` §3.2。
 #
 # 只读：本脚本不写任何文件、不改任何数据。
 #

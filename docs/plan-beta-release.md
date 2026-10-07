@@ -1,8 +1,8 @@
 # Beta 发版前计划（beta-release）
 
 > 状态：规划稿，2026-09-29。目标：完成"从当前 HEAD 到 beta 发布"的全部动作。
-> 前提：`docs/plan-beta-readiness.md` 第 0/1/2 节已全部完结（G1-G5 门禁 + W1-W6 窗口项，
-> 记录见 `docs/handoff/beta-readiness-2026-09-29.md`）。
+> 前提：`docs/archive/plan-beta-readiness.md` 第 0/1/2 节已全部完结（G1-G5 门禁 + W1-W6 窗口项，
+> 记录见 `docs/archive/beta-readiness-2026-09-29.md`）。
 > 本计划**不含任何新功能**；只含验证、打包、发版说明与观察点。
 > 裁决前提：WinUI 暂不交付（W5 不升级门禁）；daemon/后端按 v2 严格语义演进。
 

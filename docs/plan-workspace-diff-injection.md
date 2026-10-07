@@ -4,7 +4,7 @@
 > **Anthropic `/v1/messages` 通路未完成，显式挂起**（见 §6 关闭条件）。
 > 依据 2026-10-02 代码实证 + 本地端点实测（8317 TraeRelay、8788 anthropic 兼容代理）。
 > 关联：`E:\spy\DESIGN.md`（codespy 集成分析）、`docs/spec-file-mutation-delta-v2.md`
-> （file_state 归位）、`docs/plan-permission-extraction-v2.md`（无交集，可并行）。
+> （file_state 归位）、`docs/archive/plan-permission-extraction-v2.md`（无交集，可并行）。
 
 ## 0. 问题（实证）
 
