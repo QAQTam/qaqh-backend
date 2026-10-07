@@ -53,6 +53,26 @@ fn validate_mcp_secret_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Profile 密钥槽名校验：与 MCP secret 名同规（非空、仅 `[a-z0-9_-]`、≤64）。
+///
+/// profile 名是 config.toml `[profiles.<name>]` 的 TOML 键，可以是任意可引用
+/// 的键名；进不了本字符集的 profile 不能自带密钥——`load_profile_key` 返回
+/// `None`，于是该 profile 继承 main 密钥。
+fn validate_profile_secret_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(format!("profile 名长度必须 1..=64（得到 {name:?}）"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "profile 名 {name:?} 不能自带密钥：仅允许小写字母、数字、'_'、'-'"
+        ));
+    }
+    Ok(())
+}
+
 /// Opaque marker stored in `config.toml` for a configured key.
 pub const CONFIG_MARKER: &str = "set";
 
@@ -256,6 +276,151 @@ impl SecretStore {
             };
             if mcp.remove(name).is_some() {
                 secrets.insert("mcp".to_owned(), toml::Value::Table(mcp));
+                doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
+                return Ok(true);
+            }
+            Ok(false)
+        })
+        .map(|_| ())
+    }
+
+    // ── 命名 profile 密钥（`[secrets.profiles.<name>]` map 段）──
+    //
+    // 与 MCP 命名 secret 同款加密/权限/跨进程事务机制，只是段名不同。
+    // profile 名额外受限（[`validate_profile_secret_name`]）：进不了 secrets.toml
+    // 的 profile 名不能自带密钥，只能继承 main。
+
+    /// Load a profile's own key (decrypts). `None` when the profile has no own
+    /// key, the name is not representable in `secrets.toml`, or decryption
+    /// fails (same no-fallback policy as slots).
+    pub fn load_profile_key(&self, name: &str) -> Option<String> {
+        if validate_profile_secret_name(name).is_err() {
+            return None;
+        }
+        self.load_named_slot("profiles", name)
+    }
+
+    /// Whether the profile carries its own key (does not decrypt).
+    pub fn has_profile_key(&self, name: &str) -> bool {
+        if validate_profile_secret_name(name).is_err() {
+            return false;
+        }
+        self.has_named_slot("profiles", name)
+    }
+
+    /// All profile names that carry their own key, sorted.
+    pub fn list_profile_key_names(&self) -> Vec<String> {
+        self.list_named_slots("profiles")
+    }
+
+    /// Encrypt and store a profile's own key (idempotent).
+    pub fn set_profile_key(&self, name: &str, plaintext: &str) -> Result<(), String> {
+        validate_profile_secret_name(name)?;
+        self.set_named_slot("profiles", name, plaintext)
+    }
+
+    /// Remove a profile's own key (idempotent).
+    pub fn delete_profile_key(&self, name: &str) -> Result<(), String> {
+        validate_profile_secret_name(name)?;
+        self.delete_named_slot("profiles", name)
+    }
+
+    // ── 命名 map 段的通用实现（新调用方用；MCP 侧保留自己的实现不动）──
+
+    fn load_named_slot(&self, section: &str, name: &str) -> Option<String> {
+        let data = std::fs::read_to_string(&self.path).ok()?;
+        let doc: toml::Value = toml::from_str(&data).ok()?;
+        let raw = doc
+            .get("secrets")?
+            .get(section)?
+            .get(name)?
+            .as_str()?;
+        decrypt(raw).ok()
+    }
+
+    fn has_named_slot(&self, section: &str, name: &str) -> bool {
+        let Ok(data) = std::fs::read_to_string(&self.path) else {
+            return false;
+        };
+        let Ok(doc) = toml::from_str::<toml::Value>(&data) else {
+            return false;
+        };
+        doc.get("secrets")
+            .and_then(|s| s.get(section))
+            .and_then(|m| m.get(name))
+            .and_then(|v| v.as_str())
+            .is_some_and(|raw| !raw.is_empty())
+    }
+
+    fn list_named_slots(&self, section: &str) -> Vec<String> {
+        let Ok(data) = std::fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        let Ok(doc) = toml::from_str::<toml::Value>(&data) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = doc
+            .get("secrets")
+            .and_then(|s| s.get(section))
+            .and_then(|m| m.as_table())
+            .map(|table| {
+                table
+                    .iter()
+                    .filter(|(_, v)| v.as_str().is_some_and(|raw| !raw.is_empty()))
+                    .map(|(k, _)| k.to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn set_named_slot(&self, section: &str, name: &str, plaintext: &str) -> Result<(), String> {
+        let encoded = encrypt(plaintext.as_bytes())?;
+        self.transaction(|doc| {
+            let mut secrets = match doc.get("secrets").cloned() {
+                Some(toml::Value::Table(t)) => t,
+                _ => toml::map::Map::new(),
+            };
+            let mut map = match secrets.get(section).cloned() {
+                Some(toml::Value::Table(t)) => t,
+                _ => toml::map::Map::new(),
+            };
+            map.insert(name.to_owned(), toml::Value::String(encoded));
+            secrets.insert(section.to_owned(), toml::Value::Table(map));
+            doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
+            Ok(true)
+        })
+        .map(|_| ())
+    }
+
+    fn delete_named_slot(&self, section: &str, name: &str) -> Result<(), String> {
+        let first = self.transaction(|doc| {
+            let Some(toml::Value::Table(mut secrets)) = doc.get("secrets").cloned() else {
+                return Ok(false); // 段不存在 = 已删除
+            };
+            let Some(toml::Value::Table(mut map)) = secrets.get(section).cloned() else {
+                return Ok(false);
+            };
+            map.remove(name);
+            secrets.insert(section.to_owned(), toml::Value::Table(map));
+            doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
+            Ok(true)
+        })?;
+        if first {
+            return Ok(());
+        }
+        // 同 [`Self::delete_mcp`]：并发写者可能刚提交了同一段，锁内复查一次，
+        // 避免"已删除"假象下留下对方刚写入的键。
+        self.transaction(|doc| {
+            let Some(toml::Value::Table(mut secrets)) = doc.get("secrets").cloned() else {
+                return Ok(false);
+            };
+            let Some(toml::Value::Table(mut map)) = secrets.get(section).cloned() else {
+                return Ok(false);
+            };
+            if map.remove(name).is_some() {
+                secrets.insert(section.to_owned(), toml::Value::Table(map));
                 doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
                 return Ok(true);
             }

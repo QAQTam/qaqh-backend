@@ -81,9 +81,22 @@ pub(crate) fn spawn_agent(
 ) {
     // 权威配置读收敛 config 单入口（PR-1-8 同向）；图片能力快照
     // 就地注入（PR-1-10：actor 进程的工具调用路径零磁盘读）。
-    let agent_config = qaqh_config::watch::authoritative().unwrap_or_default();
+    //
+    // 会话级 profile 与热重载共用 `session_effective_config`：恢复出来的会话
+    // 必须一上来就跑在该会话选定的端点上，而不是先跑全局、等一次
+    // `AgentReloadConfig` 才纠正。
+    let manager = qaqh_session::SessionManager::try_global();
+    let (agent_config, session_profile) =
+        super::engine_session::session_effective_config(manager.as_deref(), session_id)
+            .unwrap_or_default();
     let mut agent = AgentState::new(agent_config);
+    agent.session.profile = session_profile;
     agent.refresh_image_capability();
+    log::info!(
+        "[ACTOR] session={session_id} profile={:?} model={}",
+        agent.session.profile,
+        agent.config.model
+    );
 
     // Both session actors and subagent actors use an actor-private
     // ToolManager so daemon-side `skills.list_tools` stays stable while a

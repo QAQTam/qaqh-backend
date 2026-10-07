@@ -1612,6 +1612,15 @@ impl TurnEngine {
                 let overflow_rejected = gate_error
                     .as_ref()
                     .is_some_and(|e| e.kind == qaqh_gate::ErrorKind::ContextLengthExceeded);
+                // 失败槽 code 结构化：有 gate 结构化错误时用统一 ErrorKind 的
+                // snake_case 码（timeline 消费方可以按码分支，不再对着无差别的
+                // "model_request_failed" 猜）；仅本地构造失败（request_error，
+                // 请求未到 gate）时保留历史字面量兜底。
+                let failure_code = gate_error
+                    .as_ref()
+                    .map(|e| e.kind.as_str())
+                    .unwrap_or("model_request_failed")
+                    .to_string();
                 let message = gate_error
                     .map(|e| e.message)
                     .or_else(|| request_error.clone())
@@ -1674,7 +1683,7 @@ impl TurnEngine {
                     &timeline_tools_open,
                     qaqh_domain::TimelineTurnState::Failed,
                     Some(qaqh_domain::TimelineFailure {
-                        code: "model_request_failed".into(),
+                        code: failure_code,
                         message: message.clone(),
                     }),
                 );
