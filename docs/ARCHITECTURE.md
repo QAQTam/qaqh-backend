@@ -2,7 +2,9 @@
 
 测量日期：2026-10-07。版本基线：2.0.0-beta.3。本文区分当前事实与清理目标，
 不宣称目标已经实现。唯一执行清单见 [收敛施工单 §10](spec-architecture-convergence.md#10-clean-rc-前砍刀与-crate-减负)。
-机器可读的体量、最大文件和直接依赖见 [clean-baseline.json](metrics/clean-baseline.json)。
+机器可读的体量、最大文件和直接依赖见 [clean-baseline.json](metrics/clean-baseline.json)
+（固定基线，`ebcf0f8`）与 [clean-start-35fa46e.json](metrics/clean-start-35fa46e.json)
+（CLEAN-1 施工起点，净删一律以后者为分母）。
 复测命令：在仓库根运行 `./scripts/measure-clean.ps1 -OutputPath <输出路径>`，另存结果后
 与固定基线比较；不要覆盖基线来掩盖增长。
 
@@ -25,6 +27,10 @@ HTTP/client → daemon 身份与控制权 → QaqhService/Registry → 每 sessi
 timeline 有自己的存储与重建。canonical/store.rs 明确尚未接管旧消息写入。
 runtime/ringing/timeline_rebuild.rs 从消息与 meta 推算回合号，恢复终态统一为 Completed。
 因此 events.jsonl 目前不能被当成完整上下文的唯一恢复来源。
+`35fa46e` 起交互侧已有终态生产者：turn 中止/被取代/落终态时为挂起交互追加
+`InteractionExpired(TurnCancelled)`，control 投影在 turn 终态折叠点清除仍未决的 ask/plan，
+应答 id 与请求 fact id 对齐（wire id 与 `int_<ULID>` 两侧都认）。这是 D9 的运行态部分，
+CLEAN-3/CLEAN-4 不得另起第二套 expiry 生产者，也不得引入第三种交互 id 形态。
 
 进程内事件仍经过 DomainEvent → RingingEvent → WorkerEventEnvelope → DomainEvent，
 actor.rs 消费后触发交互正文、pin 和 activity 副作用。它不是可直接拔掉的空队列。
