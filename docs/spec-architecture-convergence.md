@@ -378,9 +378,25 @@ CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS.md` I1
       `TS_RS_EXPORT_DIR` 指回本仓 `src/api/`）→ exit 0；重新生成的 129 个 `.ts` 与已入库版本
       **逐字节一致（零漂移）**。注：首次 `git status` 会把 130 个文件报成 `M`——那是 EOL 噪声
       （导出时没有 `.gitattributes`），`git add` 后即归零；`* text=auto` 现已入库，不再复发。
-    - 遗留（未做，需 owner 定）：① 后端工作区仍留 **388M 未跟踪**构建产物
-      （`webui/{node_modules,out,src-tauri/{binaries,gen}}`）与非源码的 `webui/.zcode/`，git 没删；
-      ② 新仓同时带 `bun.lock` 与 `pnpm-lock.yaml`——`plan-legacy-protocol-cleanup.md` §5 早点点名的
-      「锁文件二选一」仍未决；③ `scripts/smoke-g1.ps1` 引用的 `qaqh-webui-gateway` 是早已删除的 crate
-      （既有腐化，非本次引入）；④ 后端根 `package.json` 描述仍写 "desktop layer lives in qaqh-winui-app"（过时）；
-      ⑤ `docs/` 下仍有多份文档按 `webui/...` 路径描述前端，本次只改了 README 与 justfile。
+    - 遗留（未做，需 owner 定）：① `scripts/smoke-g1.ps1` 引用的 `qaqh-webui-gateway` 是早已删除的 crate
+      （既有腐化，非本次引入）；② 后端根 `package.json` 描述仍写 "desktop layer lives in qaqh-winui-app"（过时）；
+      ③ `docs/` 下仍有多份文档按 `webui/...` 路径描述前端，本次只改了 README 与 justfile。
+17. **【T6 收尾，2026-10-07】** owner 定了三件事，均已执行：
+    - **后端 388M 残留已删**（`webui/` 整目录，全是未跟踪的构建产物 + `.zcode/`；真源码已在
+      `qaqh-desktop-app` 与后端 git 历史里，删除无损失）。
+    - **新仓改用 pnpm**（`bun.lock` 删除，只认 `pnpm-lock.yaml`）。连带把测试运行器从
+      `bun test` 换成 **vitest**——`bun:test` 只在 9 个测试文件里各 import 一次
+      `describe/expect/test`、无 bun 专有 API、且测试不碰 DOM，所以迁移是 9 行 import + 一个
+      `test: { environment: "node" }`（vitest 5 默认环境会去找 jsdom 而拒绝启动 worker）。
+      `devDependencies` 去掉 `@types/bun`（src 不用 bun 运行时，tsconfig 只取 `vite/client`）。
+      `tauri.conf.json` 的 `beforeDevCommand`/`beforeBuildCommand` 也必须一起换——否则 Tauri 仍去调 bun。
+      验证：`pnpm install --frozen-lockfile` / `typecheck` / `test`（117 pass）/ `build` 全 0。
+    - **`AGENTS.md` 与本文已入库**（提交 `3a66f97`），收敛了 AGENTS.md 那条悬空引用。
+    - **发现（未处置）：根 `prompt.md` 是 `crates/qaqh-runtime/src/agent/prompts/backend_prompt.md`
+      的过期副本**——探针：`diff <(tr -d '\r' < prompt.md) <(tr -d '\r' < backend_prompt.md)` 报 4 处漂移
+      （bash 参数说明、子代理白名单 `skills` vs `the skill_* tools`、`skills{action:"list"}` vs
+      `skill_list`/`skill_activate`/`skill_resource`）。它无任何代码引用、从未入库。
+      → **建议删除**（留着就是第二份会漂的系统提示词，正是 `AGENTS.md` I16 禁的"并存"）；
+      本次未提交、也未删，等 owner 表态。
+    - 新仓远端：`https://github.com/QAQTam/qaqh-desktop-app`（public，MIT，署名年份 2027）。
+      推送前已扫全历史：严格凭据模式、敏感文件名均零命中。
