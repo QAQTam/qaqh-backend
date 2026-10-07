@@ -1,4 +1,4 @@
-# G1 beta smoke (docs/plan-beta-readiness.md): daemon -> gateway -> browser flow.
+# G1 beta smoke (docs/archive/plan-beta-readiness.md): daemon -> gateway -> browser flow.
 # Covers: bootstrap nonce -> gateway session (cookie+CSRF) -> sessions ->
 # SessionCreate command -> ack -> SSE event frames -> approvals query.
 # Simulates the browser at HTTP level. Runs against an ISOLATED data root under
