@@ -17,13 +17,14 @@ use qaqh_session::canonical::{
     EVENTS_FILE, generate_ulid,
 };
 use qaqh_session::projection::{
-    ControlDriverState, ControlInteractionState, Projection, ProjectionSet, ProjectionSetSnapshot,
-    ProjectionSink, projection_events_for_fact, projection_replaceable_events_for_fact,
-    replaceable_identity,
+    ControlDriverState, ControlInteractionState, ConversationTurnOutcome, Projection,
+    ProjectionSet, ProjectionSetSnapshot, ProjectionSink, projection_events_for_fact,
+    projection_replaceable_events_for_fact, replaceable_identity,
 };
 use qaqh_session::session_fact_v2::{
-    Delivery, LogId, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
-    TeamAgentResidency, TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot,
+    ActivityState as FactActivityState, Delivery, InteractionKind, LogId, ProjectionEvent,
+    ProjectionPayload, SessionFact, SessionId, StreamKey, TeamAgentResidency, TeamBoardSnapshot,
+    TeamDelta, TeamTaskSnapshot, TurnTerminal,
 };
 use tokio::sync::broadcast;
 
@@ -207,6 +208,67 @@ impl V2ProjectionHub {
             .lock()
             .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
         Ok(state.projections.control.snapshot().driver)
+    }
+
+    /// 统一运行状态（`SessionRunStatus`，2026-10-06 归一裁决）——**只对已加载
+    /// 会话调用**：首次访问会把该会话的 canonical fact log 从磁盘重放进投影，
+    /// 对全量 `session.list` 逐条调用未加载会话会造成全库重放。
+    ///
+    /// 派生规则（优先级从高到低）：
+    /// 1. 挂起交互（control 投影里未 resolve 且未 expire 的最后一条）→
+    ///    `waiting_permission` / `waiting_ask` / `waiting_plan`——等待盖过
+    ///    working，因为交互发生在回合中途；
+    /// 2. control activity = `running` → `working`；
+    /// 3. 最近一个回合的终态（conversation 投影按序保留 outcome）→
+    ///    `Finished{cancelled}` → `canceled`，`Finished{failed}` → `error`，
+    ///    `Interrupted`（crash/restart/unknown_fact 等非用户原因）→ `error`；
+    /// 4. 其余（无回合 / 最近回合 completed）→ `idle`。
+    pub fn projected_run_status(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+    ) -> Result<qaqh_types::SessionRunStatus, V2HubError> {
+        let session_dir = session_dir.as_ref();
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
+        let state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        let control = state.projections.control.snapshot();
+        if let Some(kind) = control
+            .interactions
+            .iter()
+            .rev()
+            .find(|i| i.resolution.is_none() && i.expired_reason.is_none())
+            .map(|i| i.kind)
+        {
+            return Ok(match kind {
+                InteractionKind::Permission => qaqh_types::SessionRunStatus::WaitingPermission,
+                InteractionKind::Ask => qaqh_types::SessionRunStatus::WaitingAsk,
+                InteractionKind::Plan => qaqh_types::SessionRunStatus::WaitingPlan,
+            });
+        }
+        if control.activity == FactActivityState::Running {
+            return Ok(qaqh_types::SessionRunStatus::Working);
+        }
+        let conversation = state.projections.conversation.snapshot();
+        let last_outcome = conversation
+            .turns
+            .last()
+            .and_then(|turn| turn.outcome.as_ref());
+        Ok(match last_outcome {
+            Some(ConversationTurnOutcome::Finished {
+                terminal: TurnTerminal::Cancelled,
+                ..
+            }) => qaqh_types::SessionRunStatus::Canceled,
+            Some(ConversationTurnOutcome::Finished {
+                terminal: TurnTerminal::Failed,
+                ..
+            }) => qaqh_types::SessionRunStatus::Error,
+            Some(ConversationTurnOutcome::Interrupted { .. }) => qaqh_types::SessionRunStatus::Error,
+            _ => qaqh_types::SessionRunStatus::Idle,
+        })
     }
 
     /// Overlay daemon-local worker residency for one logical agent.

@@ -359,8 +359,15 @@ impl QaqhService {
                 // 单条与 `session.list` 的条目**同一个形状**（G2）：同样的
                 // `SessionMeta` + 运行期字段。此前这里也是手拼 `value["running"]`，
                 // 且不带 `workspace_id`——同一个形状两处各拼一次，正是漂移的温床。
+                let registry = self.registry()?;
+                let loaded = registry.is_running(&meta.session_id);
+                let fallback = registry
+                    .activities()
+                    .into_iter()
+                    .find(|activity| activity.session_id == meta.session_id)
+                    .map(|activity| activity.state);
                 let entry = qaqh_types::SessionListEntry {
-                    running: self.registry()?.is_running(&meta.session_id),
+                    status: self.session_run_status(loaded, fallback, &meta.session_id),
                     workspace_id: qaqh_session::WorkspaceStore::global()
                         .workspace_of(&meta.session_id),
                     meta,
@@ -782,6 +789,43 @@ impl QaqhService {
         Ok(Value::Null)
     }
 
+    /// 统一运行状态（2026-10-06 归一裁决）：未加载 → `not_running`（不读投影、
+    /// 不做任何合成）；已加载 → 优先 canonical fact 投影（持久可重放，重启后
+    /// 语义可重建），投影不可读时退回 live tracker 的六态映射。
+    ///
+    /// 注意此处**有意只对已加载会话**调 `projected_run_status`——hub 首次访问
+    /// 一个会话会把整个 fact log 从磁盘重放，`session.list` 对未加载会话逐条
+    /// 调用等于全库重放。
+    fn session_run_status(
+        &self,
+        loaded: bool,
+        fallback: Option<ActivityState>,
+        session_id: &str,
+    ) -> qaqh_types::SessionRunStatus {
+        if !loaded {
+            return qaqh_types::SessionRunStatus::NotRunning;
+        }
+        if let Some(hub) = self.v2_hub.get() {
+            let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
+            match hub.projected_run_status(&session_dir, session_id) {
+                Ok(status) => return status,
+                Err(error) => log::warn!(
+                    "[session] run status projection fallback for {session_id}: {error:?}"
+                ),
+            }
+        }
+        match fallback {
+            Some(ActivityState::Starting | ActivityState::Working) => {
+                qaqh_types::SessionRunStatus::Working
+            }
+            // 投影不可读时无法细分等待类别；loop 仍在回合中途，归 working。
+            Some(ActivityState::WaitingUser) => qaqh_types::SessionRunStatus::Working,
+            Some(ActivityState::Failed) => qaqh_types::SessionRunStatus::Error,
+            Some(ActivityState::Disconnected) => qaqh_types::SessionRunStatus::NotRunning,
+            _ => qaqh_types::SessionRunStatus::Idle,
+        }
+    }
+
     /// `session.list` 的条目（前端契约 **G2**）。
     ///
     /// 返回**类型化**条目而非 `Value`：形状由 `qaqh_types::SessionListEntry` 承载，
@@ -800,11 +844,17 @@ impl QaqhService {
             .list()
             .into_iter()
             .map(|meta| {
-                let running = registry.is_running(&meta.session_id);
+                let loaded = registry.is_running(&meta.session_id);
+                let fallback = registry
+                    .activities()
+                    .into_iter()
+                    .find(|activity| activity.session_id == meta.session_id)
+                    .map(|activity| activity.state);
+                let status = self.session_run_status(loaded, fallback, &meta.session_id);
                 let workspace_id = workspaces.workspace_of(&meta.session_id);
                 qaqh_types::SessionListEntry {
                     meta,
-                    running,
+                    status,
                     workspace_id,
                 }
             })

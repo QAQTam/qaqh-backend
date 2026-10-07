@@ -1091,7 +1091,6 @@ impl SessionManager {
             .unwrap_or(now);
 
         let existing = self.load_meta(session_id).unwrap_or_default();
-        let last_summary = Self::extract_summary(messages);
 
         // BUG-2026-09-13-05：整条继承既有 meta，再覆写本次调用真正拥有的字
         // 段。此前 `..Default::default()` 只保留 mode/skills/tool_mode/
@@ -1109,7 +1108,6 @@ impl SessionManager {
         meta.effort = effort.map(String::from);
         meta.message_count = messages.len();
         meta.turn_count = turn_count;
-        meta.last_summary = last_summary;
         meta.compact_skip = compact_skip;
         meta.compact_covered_through_msg_id = compact_covered_through_msg_id;
         // 保留字段保持既有注释语义：tool_mode/custom_tools（工具模式不随
@@ -1218,14 +1216,12 @@ impl SessionManager {
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
-            let last_summary = Self::extract_summary(new_messages);
             meta.session_id = session_id.to_string();
             meta.updated_at = now;
             meta.model = model.to_string();
             meta.effort = effort.map(String::from);
             meta.message_count = meta.message_count.saturating_add(fresh.len());
             meta.turn_count = turn_count;
-            meta.last_summary = last_summary;
             meta.compact_skip = compact_skip;
             if let Some(covered) = compact_covered_through_msg_id {
                 meta.compact_covered_through_msg_id = Some(covered);
@@ -1439,33 +1435,6 @@ impl SessionManager {
             .filter_map(|message| message.msg_id)
             .max()
             .unwrap_or(0)
-    }
-
-    fn extract_summary(messages: &[Message]) -> String {
-        messages
-            .iter()
-            .rev()
-            .find(|m| m.role == "assistant" && !m.content.is_empty())
-            .and_then(|m| {
-                m.content.iter().find_map(|b| {
-                    if let qaqh_types::ContentBlock::Text { text } = b {
-                        Some(text.lines().next().unwrap_or(text))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .map(|s| {
-                if s.len() <= 80 {
-                    return s.to_string();
-                }
-                let mut end = 80;
-                while !s.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}..", &s[..end])
-            })
-            .unwrap_or_default()
     }
 }
 
