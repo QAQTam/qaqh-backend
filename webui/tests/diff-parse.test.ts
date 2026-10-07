@@ -1,6 +1,6 @@
 /** diff 配对与词级高亮(spec §1.3 允许的纯逻辑单测)。 */
 import { describe, expect, test } from "bun:test";
-import { findWordPairs, languageOf, omittedLinesBefore, parseUnifiedDiff, trailingWhitespace, wordSegments } from "../src/diff/parse";
+import { findWordPairs, flattenFileRows, languageOf, omittedLinesBefore, pairLines, parseUnifiedDiff, trailingWhitespace, truncateRows, wordSegments, type DiffRow } from "../src/diff/parse";
 
 const SAMPLE = `diff --git a/src/a.ts b/src/a.ts
 index 111..222 100644
@@ -156,5 +156,59 @@ describe("findWordPairs / wordSegments(§9.3 宁缺毋滥)", () => {
   test("语言推断", () => {
     expect(languageOf("a/b/c.rs")).toBe("rust");
     expect(languageOf("noext")).toBeNull();
+  });
+});
+
+describe("flattenFileRows / truncateRows(虚拟化与降级)", () => {
+  const SAMPLE = `diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ ctx one
+-del one
++add one
+ ctx two
+@@ -20,2 +20,2 @@
+-del x
++add x
+`;
+
+  test("flattenFileRows:hunk 间省略行与 hunk 头各占一行,行对象共享引用", () => {
+    const file = parseUnifiedDiff(SAMPLE)[0]!;
+    const rows = flattenFileRows(file);
+    // hunkhead×2 + 行 4+2 + hunk 间省略 16 行 = 9(首 hunk 前无省略,不出 omit 行)
+    expect(rows).toHaveLength(9);
+    expect(rows[0]!.kind).toBe("hunkhead");
+    expect(rows[1]).toMatchObject({ kind: "line", line: { text: "ctx one" } });
+    const omit = rows.find((row) => row.kind === "omit" && row.count > 0);
+    expect(omit).toEqual({ kind: "omit", count: 16 });
+  });
+
+  test("truncateRows:保留 head+tail,中段合成省略行", () => {
+    const rows: DiffRow[] = Array.from({ length: 10 }, (_, i) => ({
+      kind: "line",
+      line: { t: "ctx" as const, oldNo: i + 1, newNo: i + 1, text: `l${i}`, noeol: false },
+    }));
+    const truncated = truncateRows(rows, 3, 3);
+    expect(truncated).toHaveLength(7);
+    expect(truncated[3]).toEqual({ kind: "omit", count: 4 });
+    expect(truncated[6]).toMatchObject({ line: { text: "l9" } });
+    expect(truncateRows(rows, 5, 5)).toHaveLength(10);
+  });
+
+  test("pairLines:廉价映射,含超长行守卫", () => {
+    const text = `diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,2 +1,2 @@
+-del one
++add one
+-${"x".repeat(2_001)}
++${"x".repeat(2_001)}y
+`;
+    const hunk = parseUnifiedDiff(text)[0]!.hunks[0]!;
+    const pairs = pairLines(hunk);
+    expect(pairs.size).toBe(2); // 只有第一对;超长行不入映射
+    expect(pairs.get(hunk.lines[0]!)).toBe(hunk.lines[1]);
   });
 });
