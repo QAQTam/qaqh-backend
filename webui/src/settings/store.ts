@@ -14,6 +14,8 @@
  */
 import { createMemo, createSignal } from "solid-js";
 import { transport } from "../lib/transport";
+import { applyConfigTheme } from "../lib/theme";
+import { toast } from "../ui/toast";
 import type { ConfigDto } from "../api/qaqh/ConfigDto";
 import {
   buildPatch,
@@ -56,6 +58,7 @@ async function fetchConfig(): Promise<void> {
     const dto = await transport.rpc<ConfigDto>("config.load");
     setBaseline(dto);
     setDraft(structuredClone(dto));
+    applyConfigTheme(dto.theme);
     setRequireBypass(false);
     setBypassAck("");
     setConfirmDiscard(false);
@@ -117,6 +120,8 @@ export function toggleSettings(): void {
 export function discard(): void {
   const base = baseline();
   if (base != null) setDraft(structuredClone(base));
+  // 放弃编辑 = 主题回到基线值(编辑中是即时预览)。
+  applyConfigTheme(base?.theme);
   setConfirmDiscard(false);
   setRequireBypass(false);
   setBypassAck("");
@@ -151,8 +156,10 @@ export async function save(): Promise<void> {
     await transport.rpc("config.save", next as Record<string, unknown>);
     await fetchConfig();
     setNote(`已保存 ${Object.keys(next).length} 项改动`);
+    toast(`配置已保存(${Object.keys(next).length} 项),已热载生效`, "ok", { dedupeKey: "config-saved" });
   } catch (cause) {
     setError(messageOf(cause));
+    toast(`保存失败:${messageOf(cause)}`, "err", { dedupeKey: "config-save-error" });
   } finally {
     setBusy(false);
   }
@@ -176,8 +183,10 @@ async function runService(
     await transport.rpc(method, params);
     await fetchConfig();
     setNote(done);
+    toast(done, "ok", { dedupeKey: `profile:${method}` });
   } catch (cause) {
     setError(messageOf(cause));
+    toast(`${method} 失败:${messageOf(cause)}`, "err", { dedupeKey: `profile:${method}` });
   } finally {
     setBusy(false);
   }
@@ -196,6 +205,8 @@ export const deleteProfile = (name: string): Promise<void> =>
  *  否则「已保存 N 项改动」会一直压在脚注上,把当前的「没有改动」挡住。 */
 export function setField<K extends keyof ConfigDto>(key: K, value: ConfigDto[K]): void {
   setDraft((prev) => (prev == null ? prev : { ...prev, [key]: value }));
+  // 主题即时预览:改下拉立刻生效,保存落盘、放弃回滚(discard)。
+  if (key === "theme") applyConfigTheme(value as string | null);
   setNote(null);
 }
 

@@ -7,6 +7,7 @@ mod challenge;
 mod commands;
 mod daemon;
 mod events;
+mod pairing;
 
 use tauri::{Manager, RunEvent};
 
@@ -37,6 +38,9 @@ pub fn run() {
             commands::streams_retry,
             commands::stop_stale_daemon,
             commands::timeline_status,
+            pairing::pairing_create,
+            pairing::devices_list,
+            pairing::device_revoke,
         ])
         .setup(|app| {
             // 启动即校验/拉起 daemon(D1);不阻塞窗口显示,失败经事件上报。

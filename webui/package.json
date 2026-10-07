@@ -16,6 +16,7 @@
     "diff": "^8.0.2",
     "dompurify": "^3.2.7",
     "marked": "^16.4.1",
+    "qrcode": "^1.5.4",
     "shiki": "^3.15.0",
     "solid-js": "2.0.0-rc.13"
   },
@@ -24,6 +25,7 @@
     "@solidjs/vite-plugin": "3.0.0-next.47",
     "@tauri-apps/cli": "^2",
     "@types/bun": "^1.4.2",
+    "@types/qrcode": "^1.5.6",
     "happy-dom": "^20.14.5",
     "typescript": "^7.0.2",
     "unplugin-icons": "^22.4.2",
