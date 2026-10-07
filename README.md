@@ -6,8 +6,12 @@ facts、Ringing v2 单流、工具执行、权限/沙箱、compact 和 provider 
 - Edition 2024
 - License MIT
 - 状态：beta / RC 前架构清理
-- 当前文档基线：`docs/current/`
+- 当前架构基线：[ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - 当前代码基线：`2.0.0-beta.3`
+
+RC 前架构清理在 `clean` 分支推进，唯一派工单是
+[架构收敛施工单 §10](docs/spec-architecture-convergence.md#10-clean-rc-前砍刀与-crate-减负)。
+本轮聚焦删除旧路径、明确状态与存储所有权、crate 职责减负及回归。
 
 ## 当前协议面
 
