@@ -250,8 +250,10 @@ pub struct PersistentLspServerConfig {
 /// request-shape notes for endpoints that deviate from their wire.
 ///
 /// Profiles are how the user keeps several endpoints (e.g. "fast" vs "deep")
-/// and switches between them; the API key is not part of this record — it lives
-/// in `secrets.toml` and only a `"set"` marker is written here.
+/// and switches between them. A profile may carry its own API key: the
+/// plaintext lives in `secrets.toml` under `[secrets.profiles.<name>]`, and
+/// only the opaque `"set"` marker is written to `api_key` here. `None` =
+/// inherit the main key.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfileConfig {
     /// Model identifier sent to the endpoint.
@@ -278,6 +280,10 @@ pub struct ProfileConfig {
     /// Optional request-shape overrides. `None`/absent = the wire's defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<EndpointCompat>,
+    /// 该 profile 自带密钥的标记（`"set"`）；明文只在 `secrets.toml`，
+    /// 与顶层 `api_key` 同一约定。`None` = 继承 main 密钥。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 
     // ── 读兼容（永不写出）：BYOK 前的预设坐标与双口径窗口 ──
     /// 旧 `[profiles.*] endpoint = "openai"` —— 预设内的 endpoint id，

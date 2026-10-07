@@ -597,6 +597,23 @@ impl SessionManager {
         });
     }
 
+    /// 会话选定的 BYOK profile 名（meta.json）。`None`/空 = 跟随全局
+    /// `active_profile`。宿主（agent loop / service）经注入句柄调用。
+    pub fn session_profile(&self, session_id: &str) -> Option<String> {
+        self.load_meta(session_id)?
+            .profile
+            .filter(|name| !name.is_empty())
+    }
+
+    /// 写入会话 profile（不重写 messages）。已加载的 agent 需要另行触发重载
+    /// （`AgentReloadConfig`）才会生效。
+    pub fn persist_profile(&self, session_id: &str, profile: Option<&str>) {
+        self.with_meta_locked(session_id, false, |dir, meta| {
+            meta.profile = profile.filter(|name| !name.is_empty()).map(str::to_owned);
+            let _ = store::write_meta(dir, meta);
+        });
+    }
+
     /// Persist tool mode (standard/minimal/custom) to meta.json without
     /// rewriting messages — survives agent restart (PLAN-TOOL-MODES.md 4.3).
     ///

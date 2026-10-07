@@ -570,8 +570,22 @@ impl QaqhService {
             }
             "profile.save_current" => {
                 let name = pstr(params, "name")?;
+                // 顺序不可反：先把当前主密钥写进该 profile 的 secret 槽，再落
+                // `"set"` 标记。反了就会留下"声称有 key 却取不到"的 profile。
+                // 无 key 时同步清掉旧槽位，保证标记与 secret 始终一致。
+                let secrets = qaqh_config::secrets::SecretStore::default_location();
+                let key = qaqh_config::watch::authoritative()
+                    .map(|cfg| cfg.api_key)
+                    .unwrap_or_default();
+                let saved_key = !key.is_empty();
+                let stored = if saved_key {
+                    secrets.set_profile_key(&name, &key)
+                } else {
+                    secrets.delete_profile_key(&name)
+                };
+                stored.map_err(|e| format!("failed to store profile api key: {e}"))?;
                 self.update_config_and_reload(|cfg| {
-                    cfg.save_profile(&name);
+                    cfg.save_profile(&name, saved_key);
                     Ok(())
                 })?;
                 Ok(Value::Null)
@@ -586,6 +600,38 @@ impl QaqhService {
                     }
                     Ok(())
                 })?;
+                // profile 已从配置摘除；secret 槽位随后清理。名字不合法等失败
+                // 只告警——配置里已经不存在引用它的条目了。
+                if let Err(error) =
+                    qaqh_config::secrets::SecretStore::default_location()
+                        .delete_profile_key(&name)
+                {
+                    log::warn!("[profile] secret cleanup for profile '{name}' skipped: {error}");
+                }
+                Ok(Value::Null)
+            }
+            // 只改本会话的 profile（不动全局 active_profile，也不广播）。落
+            // meta.json 后定向重载该会话——`AgentReloadConfig` 走
+            // `send_ringing_cmd` 而不是 registry 广播，所以别的会话不受影响。
+            // `name` 传空串 = 清除该会话的选择，回到跟随全局 `active_profile`。
+            "session.set_profile" => {
+                let session_id = session_id()?;
+                let name = pstr(params, "name")?;
+                if name.is_empty() {
+                    self.sessions.persist_profile(&session_id, None);
+                } else {
+                    let known = qaqh_config::watch::authoritative()
+                        .is_some_and(|cfg| cfg.profiles.contains_key(&name));
+                    if !known {
+                        return Err(format!("profile '{name}' not found"));
+                    }
+                    self.sessions
+                        .persist_profile(&session_id, Some(name.as_str()));
+                }
+                self.send_ringing_cmd(
+                    session_id,
+                    RingingCommand::Control(ControlCommand::AgentReloadConfig),
+                )?;
                 Ok(Value::Null)
             }
             "todo.status" => qaqh_workspace::todo::todo_status_value(&session_id()?),

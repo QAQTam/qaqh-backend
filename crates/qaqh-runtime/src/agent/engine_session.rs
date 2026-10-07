@@ -9,6 +9,42 @@ use crate::agent::state::lifecycle;
 /// Number of recent turns sent on session restore.
 const INITIAL_LOAD_COUNT: usize = 20;
 
+/// 解析某 profile 的自带密钥。
+///
+/// 只有 profile 带 `"set"` 标记时才读 `secrets.toml`（`None` = 该 profile
+/// 不自带 key → 继承主密钥）。带标记但取不回明文时返回**空串**而不是 `None`：
+/// 宁可这一轮不带凭据报错，也不把主密钥发到别的端点去。
+fn resolve_profile_key(cfg: &qaqh_config::Config, name: &str) -> Option<String> {
+    if !cfg.profile_carries_key(name) {
+        return None;
+    }
+    Some(
+        qaqh_config::secrets::SecretStore::default_location()
+            .load_profile_key(name)
+            .unwrap_or_default(),
+    )
+}
+
+/// 该会话的**有效配置** + 它选中的 profile 名。
+///
+/// `spawn_agent`（首启/恢复）与 [`SessionEngine::reload_config`]（热重载）共用
+/// 这一个函数——两条路若各算一份，恢复出来的会话会先跑在全局 profile 上，
+/// 直到下一次 `AgentReloadConfig` 才纠正。
+///
+/// `None` = 权威配置不可用（调用方按 `Config::default()` 兜底）。
+pub(crate) fn session_effective_config(
+    manager: Option<&qaqh_session::SessionManager>,
+    session_id: &str,
+) -> Option<(qaqh_config::Config, Option<String>)> {
+    let global = qaqh_config::watch::authoritative()?;
+    let profile = manager.and_then(|manager| manager.session_profile(session_id));
+    let own_key = profile
+        .as_deref()
+        .and_then(|name| resolve_profile_key(&global, name));
+    let cfg = qaqh_config::Config::for_session(&global, profile.as_deref(), own_key);
+    Some((cfg, profile))
+}
+
 pub struct SessionEngine;
 
 impl Default for SessionEngine {
@@ -70,6 +106,9 @@ impl SessionEngine {
     }
 
     /// Reload config from disk and apply to agent.
+    ///
+    /// 会话若选定了 profile（`meta.profile`），在本会话的有效配置是
+    /// "全局配置 + 该 profile 覆盖"，**不广播**、不影响其它会话。
     pub fn reload_config(
         &self,
         agent: &mut crate::agent::state::agent::AgentState,
@@ -77,10 +116,15 @@ impl SessionEngine {
     ) {
         // P2-D1：磁盘为权威源；磁盘读失败时回退单写口广播的最新镜像。
         // 权威读收敛到 config crate 单入口（PR-1-8）。
-        if let Some(cfg) = qaqh_config::watch::authoritative() {
-            Self::apply_config(cfg, agent);
-            crate::agent::state::lifecycle::load_session_workspace(agent);
-        }
+        let Some((cfg, profile)) = session_effective_config(
+            agent.session_manager.as_deref(),
+            &agent.session.session_id,
+        ) else {
+            return;
+        };
+        agent.session.profile = profile;
+        Self::apply_config(cfg, agent);
+        crate::agent::state::lifecycle::load_session_workspace(agent);
     }
 
     /// 把磁盘配置的热同步字段整体拷入运行中 agent（[`Self::reload_config`] 的

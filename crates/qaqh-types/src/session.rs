@@ -68,6 +68,11 @@ pub struct SessionMeta {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// 会话选定的 BYOK profile（`config.toml` 的 `[profiles.<name>]`）。
+    /// `None`/空 = 跟随全局 `active_profile`。它决定本会话的
+    /// endpoint/model/wire，以及（若该 profile 自带密钥）用哪把 key。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     pub message_count: usize,
     /// Number of conversation turns (one user query + its assistant/tool chain).
     #[serde(default)]
@@ -282,6 +287,7 @@ mod tests {
             updated_at: 2,
             model: "m1".into(),
             effort: Some("high".into()),
+            profile: Some("deep".into()),
             message_count: 3,
             turn_count: 4,
             last_summary: "最后一条回复首行".into(),
@@ -346,6 +352,7 @@ mod tests {
             "message_count",
             "mode",
             "model",
+            "profile",
             "session_id",
             "skills",
             "title",
