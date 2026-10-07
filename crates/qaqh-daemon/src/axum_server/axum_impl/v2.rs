@@ -372,14 +372,18 @@ pub(crate) async fn handle_pending_approvals_v2(
         .filter(pending)
         .find(|interaction| interaction.kind == InteractionKind::Permission)
         .and_then(|interaction| pending_permission_view(&state, interaction));
+    // 引擎的模态优先级是 plan 先于 ask（PlanReview 挂起期间 ask 尚不可应答），
+    // 而同一挂起内 fact 的落盘序是 ask 在 plan 之前——选取必须按引擎优先级
+    // 而非 fact 顺序，否则 ask 卡会遮住真正可应答的 plan 卡。
     let pending_interaction = interactions
         .iter()
         .filter(pending)
-        .find(|interaction| {
-            matches!(
-                interaction.kind,
-                InteractionKind::Ask | InteractionKind::Plan
-            )
+        .find(|interaction| interaction.kind == InteractionKind::Plan)
+        .or_else(|| {
+            interactions
+                .iter()
+                .filter(pending)
+                .find(|interaction| interaction.kind == InteractionKind::Ask)
         })
         .map(|interaction| {
             serde_json::json!({

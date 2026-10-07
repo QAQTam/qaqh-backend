@@ -7,10 +7,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use qaqh_domain::AskAnswer;
-use qaqh_session::canonical::{causation_for_command, generate_ulid, sha256_content_hash};
+use qaqh_session::canonical::{
+    ToolLedgerError, causation_for_command, generate_ulid, sha256_content_hash,
+};
 use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, ContentHash, ContentRef, EventId, InteractionDecision, InteractionKind,
-    InteractionRequested, InteractionResolved,
+    ActorKind, ActorRef, ContentHash, ContentRef, EventId, InteractionDecision, InteractionExpired,
+    InteractionExpiryReason, InteractionKind, InteractionRequested, InteractionResolved,
 };
 use qaqh_types::UsageInfo;
 
@@ -488,6 +490,90 @@ impl TurnEngine {
         ids
     }
 
+    /// 中止/丢弃悬空回合时，把挂起表登记的全部交互按 `TurnCancelled` 落 expiry
+    /// fact（2026-10-07 幽灵审批回归）。`InteractionRequested` 已在 fact 链上，
+    /// 只清内存态会让投影把这些交互永远投影成待审批，壳层反复拉起审批卡且
+    /// 点击永远被拒。与先到的 resolution 冲突时按 first-answer-wins 忽略。
+    fn expire_suspended_interactions(ctx: &mut RingContext, saved: &TurnState) {
+        let ledger = match ctx.agent.tool_ledger_mut() {
+            Ok(Some(ledger)) => ledger,
+            Ok(None) => return,
+            Err(error) => {
+                log::warn!("[TURN] tool ledger unavailable for interaction expiry: {error}");
+                return;
+            }
+        };
+        let turn_id = canonical_turn_id(&saved.turn_id);
+        for wire_id in Self::pending_interaction_ids(saved) {
+            let payload = InteractionExpired {
+                interaction_id: canonical_interaction_id(&wire_id),
+                reason: InteractionExpiryReason::TurnCancelled,
+                recovery_ref: None,
+                expired_at_ms: unix_ms(),
+            };
+            if let Err(error) = ledger.append_interaction_expired(
+                EventId::new(generate_ulid()),
+                Some(turn_id.clone()),
+                Some(canonical_call_id(&wire_id)),
+                payload,
+                unix_ms(),
+            ) {
+                Self::warn_expiry_failure(&wire_id, error);
+            }
+        }
+    }
+
+    /// 幽灵交互收敛：worker 已不认识该 interaction（崩溃重启、会话切换、回合
+    /// 被取代），它永远不可再被应答——给请求 fact 的 id 补 `TurnCancelled`
+    /// expiry 终态，投影随之停止把它投影成待审批。仍登记在挂起表里的（排队
+    /// 中的后续 ask / plan）保持 pending，轮到它时照常应答。
+    ///
+    /// wire 与 canonical 两种形态各落一条：请求 fact 的 id 可能是任一形态
+    /// （v2 壳层透传 canonical，TUI 透传 wire），对不存在 id 的 expiry 追加
+    /// 是无害的孤儿 fact。
+    fn expire_unanswerable_interaction(&self, ctx: &mut RingContext, interaction_id: &str) {
+        if self.actor.interaction_state_canonical(interaction_id) != InteractionState::Unknown {
+            return;
+        }
+        let ledger = match ctx.agent.tool_ledger_mut() {
+            Ok(Some(ledger)) => ledger,
+            Ok(None) => return,
+            Err(error) => {
+                log::warn!("[TURN] tool ledger unavailable for interaction expiry: {error}");
+                return;
+            }
+        };
+        let mut target_ids = vec![canonical_interaction_id(interaction_id)];
+        let direct = qaqh_session::session_fact_v2::InteractionId::new(interaction_id.to_string());
+        if !target_ids.contains(&direct) {
+            target_ids.push(direct);
+        }
+        for target_id in target_ids {
+            let payload = InteractionExpired {
+                interaction_id: target_id.clone(),
+                reason: InteractionExpiryReason::TurnCancelled,
+                recovery_ref: None,
+                expired_at_ms: unix_ms(),
+            };
+            if let Err(error) = ledger.append_interaction_expired(
+                EventId::new(generate_ulid()),
+                None,
+                None,
+                payload,
+                unix_ms(),
+            ) {
+                Self::warn_expiry_failure(target_id.as_str(), error);
+            }
+        }
+    }
+
+    fn warn_expiry_failure(interaction_id: &str, error: ToolLedgerError) {
+        match error {
+            ToolLedgerError::InteractionTerminalConflict { .. } => {}
+            error => log::warn!("[TURN] failed to expire interaction {interaction_id}: {error}"),
+        }
+    }
+
     // ── Public API ──
 
     /// Run one full lap around the gate→tools ring.
@@ -545,6 +631,8 @@ impl TurnEngine {
         }
         log::warn!("[TURN] dropping suspension belonging to a replaced session");
         if let Some(saved) = self.suspended.take() {
+            // 注意：此处 ctx.agent 已是被替换后的新会话，ledger 不能再写——
+            // 旧会话的交互 expiry 由该会话自身的应答/中止路径收敛。
             if let Err(error) = self.actor.cancel(&saved.turn_id) {
                 log::error!(
                     "[TURN] SessionActor rejected stale turn {}: {error}",
@@ -574,6 +662,7 @@ impl TurnEngine {
     /// 悬空 tool_use 由调用方用 remove_last_step_if_incomplete 清理。
     pub fn abort_suspended(&mut self, ctx: &mut RingContext) -> Option<String> {
         let saved = self.suspended.take()?;
+        Self::expire_suspended_interactions(ctx, &saved);
         if let Err(error) = self.actor.cancel(&saved.turn_id) {
             log::error!(
                 "[TURN] SessionActor rejected superseded turn {}: {error}",
@@ -737,22 +826,25 @@ impl TurnEngine {
             return Outcome::Handled;
         }
         let active = match self.suspended.as_ref() {
-            Some(state) if state.reason == YieldReason::AskUser => {
-                match state.pending_asks.front() {
-                    Some(active) => active,
-                    None => {
-                        Self::emit_ask_rejected(ctx, ask_id, "No active ask_user prompt");
-                        return Outcome::Handled;
-                    }
+            Some(state) if state.reason == YieldReason::AskUser => match state.pending_asks.front()
+            {
+                Some(active) => active,
+                None => {
+                    Self::expire_unanswerable_interaction(self, ctx, ask_id);
+                    Self::emit_ask_rejected(ctx, ask_id, "No active ask_user prompt");
+                    return Outcome::Handled;
                 }
-            }
+            },
             _ => {
+                Self::expire_unanswerable_interaction(self, ctx, ask_id);
                 Self::emit_ask_rejected(ctx, ask_id, "No active ask_user prompt");
                 return Outcome::Handled;
             }
         };
 
-        if !crate::agent::tool_runtime::interaction_id_matches(&active.call_id, ask_id) {
+        let active_wire_id = active.call_id.clone();
+        if !crate::agent::tool_runtime::interaction_id_matches(&active_wire_id, ask_id) {
+            Self::expire_unanswerable_interaction(self, ctx, ask_id);
             Self::emit_ask_rejected(ctx, ask_id, "ask_id does not match the active prompt");
             return Outcome::Handled;
         }
@@ -763,9 +855,16 @@ impl TurnEngine {
                 return Outcome::Handled;
             }
         };
-        if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, ask_id, "answered", Some(command_id), actor)
-        {
+        // resolution fact 必须落在请求 fact 的 id 上（canonical_interaction_id
+        // (wire)）。入站 id 已是 canonical 形态时再派生一次会得到错位 id，投影
+        // 永远折叠不了 resolution，壳层反复拉起审批卡（2026-10-07 回归）。
+        if let Err(error) = Self::record_interaction_resolution(
+            ctx.agent,
+            &active_wire_id,
+            "answered",
+            Some(command_id),
+            actor,
+        ) {
             log::error!("[TURN] failed to persist ask resolution {ask_id}: {error}");
         }
 
@@ -839,15 +938,18 @@ impl TurnEngine {
                             .map(|t| t.call_id.as_str())
                     })
             });
-        if !active_id
-            .is_some_and(|id| crate::agent::tool_runtime::interaction_id_matches(id, call_id))
-        {
+        let Some(active_id) = active_id
+            .filter(|id| crate::agent::tool_runtime::interaction_id_matches(id, call_id))
+        else {
             log::warn!("[TURN] plan response without a suspended review: {call_id}");
+            Self::expire_unanswerable_interaction(self, ctx, call_id);
             return Outcome::Handled;
-        }
+        };
+        // 与 ask 同理：resolution fact 落在请求 fact 的 id（wire 形态）上，
+        // canonical 入站 id 不得再派生一次。
         if let Err(error) = Self::record_interaction_resolution(
             ctx.agent,
-            call_id,
+            active_id,
             if approved { "approved" } else { "rejected" },
             Some(command_id),
             actor,
@@ -965,12 +1067,17 @@ impl TurnEngine {
         if !active_id
             .is_some_and(|id| crate::agent::tool_runtime::interaction_id_matches(id, ask_id))
         {
+            Self::expire_unanswerable_interaction(self, ctx, ask_id);
             Self::emit_ask_rejected(ctx, ask_id, "ask_id does not match the active prompt");
             return Outcome::Handled;
         }
-        if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, ask_id, "dismissed", Some(command_id), actor)
-        {
+        if let Err(error) = Self::record_interaction_resolution(
+            ctx.agent,
+            active_id.expect("dismiss matched the active ask"),
+            "dismissed",
+            Some(command_id),
+            actor,
+        ) {
             log::error!("[TURN] failed to persist ask dismissal {ask_id}: {error}");
         }
 

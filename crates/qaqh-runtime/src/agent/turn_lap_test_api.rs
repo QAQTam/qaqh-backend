@@ -165,6 +165,72 @@ pub fn observe_permission_yield_for_test(
         .map_err(|error| error.to_string())
 }
 
+/// Append one more ask to the existing AskUser suspension (queue semantics regression test).
+pub fn queue_extra_ask_for_test(
+    engine: &mut TurnEngine,
+    call_id: &str,
+    mode: qaqh_domain::AskMode,
+    questions: Vec<qaqh_domain::AskQuestion>,
+) {
+    let state = engine.suspended.as_mut().expect("ask suspension exists");
+    assert_eq!(state.reason, YieldReason::AskUser);
+    state
+        .pending_asks
+        .push_back(crate::agent::types::PendingAsk {
+            call_id: call_id.to_string(),
+            mode,
+            questions,
+        });
+}
+
+/// 同 `observe_ask_yield_for_test`，但一次压入多条 ask（同批队列回归用），
+/// 保证每条 ask 的 `InteractionRequested` 都在同一次 yield 里落盘。
+pub fn observe_multi_ask_yield_for_test(
+    engine: &mut TurnEngine,
+    agent: &mut AgentState,
+    turn_id: &str,
+    input_id: &str,
+    pending_call_ids: &[&str],
+    mode: qaqh_domain::AskMode,
+    questions: Vec<qaqh_domain::AskQuestion>,
+) -> Result<(), String> {
+    engine
+        .begin_input(turn_id, input_id)
+        .map_err(|error| error.to_string())?;
+    let mut pending_asks = std::collections::VecDeque::new();
+    for call_id in pending_call_ids {
+        pending_asks.push_back(crate::agent::types::PendingAsk {
+            call_id: (*call_id).to_string(),
+            mode,
+            questions: questions.clone(),
+        });
+    }
+    engine.suspended = Some(TurnState {
+        session_id: agent.session.session_id.clone(),
+        turn_id: turn_id.to_string(),
+        round_num: 0,
+        pending_permission_ids: Vec::new(),
+        pending_permission_bodies: Vec::new(),
+        deferred_authorized: Vec::new(),
+        tool_call_order: pending_call_ids.iter().map(|id| id.to_string()).collect(),
+        serial_call_ids: HashSet::new(),
+        pending_asks,
+        pending_plans: std::collections::VecDeque::new(),
+        pending_todo_activation: None,
+        usage: None,
+        reason: YieldReason::AskUser,
+    });
+    engine
+        .observe_outcome(
+            agent,
+            &Outcome::YieldToUser {
+                turn_id: turn_id.to_string(),
+                reason: YieldReason::AskUser,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
 /// Exercise the production interaction-resolution write path from integration
 /// tests.
 pub fn record_interaction_resolution_for_test(

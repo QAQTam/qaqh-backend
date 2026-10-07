@@ -51,17 +51,20 @@ fn content_ref(session_id: u8) -> ContentRef {
 }
 
 fn turn_started(ordinal: u64) -> SessionFact {
-    let turn_id = turn_id();
+    turn_started_for(ordinal, turn_id())
+}
+
+fn turn_started_for(ordinal: u64, turn: TurnId) -> SessionFact {
     let mut fact = with_payload(
         fact(ordinal),
         FactPayload::TurnStarted(qaqh_session::session_fact_v2::TurnStarted {
-            turn_id: turn_id.clone(),
+            turn_id: turn.clone(),
             input_id: InputId::new("input_01J00000000000000000000000"),
             mode: TurnMode::Normal,
             recovery_ref: None,
         }),
     );
-    fact.turn_id = Some(turn_id);
+    fact.turn_id = Some(turn);
     fact
 }
 
@@ -140,14 +143,20 @@ fn tool_finished(ordinal: u64) -> SessionFact {
 }
 
 fn interaction_requested(ordinal: u64) -> SessionFact {
-    let interaction_id = interaction_id();
-    let turn_id = turn_id();
+    interaction_requested_for(ordinal, interaction_id(), turn_id())
+}
+
+fn interaction_requested_for(
+    ordinal: u64,
+    interaction_id: InteractionId,
+    turn: TurnId,
+) -> SessionFact {
     let mut fact = with_payload(
         fact(ordinal),
         FactPayload::InteractionRequested(InteractionRequested {
             interaction_id: interaction_id.clone(),
             call_id: Some(call_id()),
-            turn_id: turn_id.clone(),
+            turn_id: turn.clone(),
             kind: InteractionKind::Ask,
             request_ref: content_ref(2),
             expires_at_ms: Some(1_789_830_000_100),
@@ -155,12 +164,15 @@ fn interaction_requested(ordinal: u64) -> SessionFact {
         }),
     );
     fact.interaction_id = Some(interaction_id);
-    fact.turn_id = Some(turn_id);
+    fact.turn_id = Some(turn);
     fact
 }
 
 fn interaction_resolved(ordinal: u64) -> SessionFact {
-    let interaction_id = interaction_id();
+    interaction_resolved_for(ordinal, interaction_id())
+}
+
+fn interaction_resolved_for(ordinal: u64, interaction_id: InteractionId) -> SessionFact {
     let mut fact = with_payload(
         fact(ordinal),
         FactPayload::InteractionResolved(InteractionResolved {
@@ -181,18 +193,21 @@ fn interaction_resolved(ordinal: u64) -> SessionFact {
 }
 
 fn turn_finished(ordinal: u64) -> SessionFact {
-    let turn_id = turn_id();
+    turn_finished_for(ordinal, turn_id())
+}
+
+fn turn_finished_for(ordinal: u64, turn: TurnId) -> SessionFact {
     let mut fact = with_payload(
         fact(ordinal),
         FactPayload::TurnFinished(TurnFinished {
-            turn_id: turn_id.clone(),
+            turn_id: turn.clone(),
             terminal: TurnTerminal::Completed,
             usage: None,
             error: None,
             finished_at_ms: 1_789_830_000_008,
         }),
     );
-    fact.turn_id = Some(turn_id);
+    fact.turn_id = Some(turn);
     fact
 }
 
@@ -392,4 +407,68 @@ fn control_snapshot_roundtrips() {
     let decoded: qaqh_session::projection::ControlSnapshot =
         serde_json::from_slice(&encoded).expect("deserialize control snapshot");
     assert_eq!(snapshot, decoded);
+}
+
+/// 2026-10-07 幽灵审批回归：应答 fact 恒先于其 turn 的终态落盘，因此终态
+/// 折叠点上仍未决的 interaction 只可能是「失去挂起」的残留（崩溃重启、
+/// fact 链与内存态 id 错位），永远不可再被应答——终态折叠必须清掉它，
+/// 否则壳层会挂一张永远点不动的审批卡。
+#[test]
+fn turn_terminal_discards_unresolved_interactions() {
+    let answered = InteractionId::new("int_01J0000000000000000000000A");
+    let unanswered = InteractionId::new("int_01J0000000000000000000000B");
+    let facts = vec![
+        fact(1),
+        turn_started(2),
+        interaction_requested_for(3, answered.clone(), turn_id()),
+        interaction_resolved_for(4, answered.clone()),
+        interaction_requested_for(5, unanswered.clone(), turn_id()),
+        turn_finished(6),
+    ];
+
+    let snapshot = ControlProjection::rebuild(facts.into_iter()).snapshot();
+    assert_eq!(snapshot.interactions.len(), 1);
+    assert_eq!(snapshot.interactions[0].interaction_id, answered);
+    assert!(snapshot.interactions[0].resolution.is_some());
+}
+
+#[test]
+fn new_turn_buries_unresolved_interactions_of_prior_turns() {
+    let prior = InteractionId::new("int_01J0000000000000000000000A");
+    let next_turn = TurnId::new("turn_01J00000000000000000000001");
+    let facts = vec![
+        fact(1),
+        turn_started(2),
+        interaction_requested_for(3, prior.clone(), turn_id()),
+        turn_started_for(4, next_turn.clone()),
+    ];
+
+    let snapshot = ControlProjection::rebuild(facts.into_iter()).snapshot();
+    assert!(
+        snapshot.interactions.is_empty(),
+        "上一个 turn 的未决 interaction 必须被清理"
+    );
+    assert_eq!(snapshot.current_turn_id, Some(next_turn));
+}
+
+/// ask/plan 是回合引擎的单出口模态:挂起期间不可能有新 tool_intent fact。
+/// 出现新 intent 即证明挂起已被绕过(应答记到错位 id / 崩溃重启),仍未决的
+/// ask 必须清理;已应答的保留。
+#[test]
+fn new_tool_intent_buries_unresolved_ask_interactions() {
+    let answered = InteractionId::new("int_01J0000000000000000000000A");
+    let ghost = InteractionId::new("int_01J0000000000000000000000B");
+    let facts = vec![
+        fact(1),
+        turn_started(2),
+        interaction_requested_for(3, answered.clone(), turn_id()),
+        interaction_resolved_for(4, answered.clone()),
+        interaction_requested_for(5, ghost.clone(), turn_id()),
+        tool_intent(6),
+    ];
+
+    let snapshot = ControlProjection::rebuild(facts.into_iter()).snapshot();
+    assert_eq!(snapshot.interactions.len(), 1);
+    assert_eq!(snapshot.interactions[0].interaction_id, answered);
+    assert!(snapshot.interactions[0].resolution.is_some());
 }

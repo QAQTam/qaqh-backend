@@ -119,6 +119,7 @@ impl Projection for ControlProjection {
                 self.snapshot.activity = ActivityState::Running;
                 self.snapshot.current_turn_id = Some(payload.turn_id.clone());
                 self.snapshot.current_call_id = None;
+                self.discard_unresolved_interactions_except(&payload.turn_id);
                 Some(ControlDelta::Activity {
                     revision: self.next_revision(),
                     turn_id: Some(payload.turn_id.clone()),
@@ -143,6 +144,7 @@ impl Projection for ControlProjection {
             }
             FactPayload::ToolIntent(payload) => {
                 self.apply_tool_intent(payload);
+                self.discard_unresolved_ask_plan_interactions();
                 Some(ControlDelta::ToolIntent {
                     revision: self.next_revision(),
                     call_id: payload.call_id.clone(),
@@ -211,6 +213,7 @@ impl Projection for ControlProjection {
                 self.snapshot.activity = ActivityState::Idle;
                 self.snapshot.current_turn_id = Some(payload.turn_id.clone());
                 self.snapshot.current_call_id = None;
+                self.discard_all_unresolved_interactions();
                 Some(ControlDelta::Activity {
                     revision: self.next_revision(),
                     turn_id: Some(payload.turn_id.clone()),
@@ -222,6 +225,7 @@ impl Projection for ControlProjection {
                 self.snapshot.activity = ActivityState::Interrupted;
                 self.snapshot.current_turn_id = Some(payload.turn_id.clone());
                 self.snapshot.current_call_id = None;
+                self.discard_all_unresolved_interactions();
                 Some(ControlDelta::Activity {
                     revision: self.next_revision(),
                     turn_id: Some(payload.turn_id.clone()),
@@ -441,6 +445,42 @@ impl ControlProjection {
     fn next_revision(&mut self) -> u64 {
         self.snapshot.revision = self.snapshot.revision.saturating_add(1);
         self.snapshot.revision
+    }
+
+    /// 未决 interaction 的生命周期以所属 turn 为界:turn 终态(或被新 turn 取代)
+    /// 后仍无 resolution/expiry 的条目,只可能是「失去挂起」的残留(崩溃重启、
+    /// fact 链与内存态 id 错位),永远不可再被应答——折叠侧直接清理,不再投影
+    /// 为待审批。已 resolved/expired 的条目保留(历史可回放)。
+    ///
+    /// 时序依据:应答 fact 恒先于其 turn 的终态 fact 落盘(引擎先记录
+    /// resolution 再收尾回合),因此终态折叠点上仍未决的条目必为幽灵。
+    fn discard_unresolved_interactions_except(&mut self, turn_id: &TurnId) {
+        self.snapshot.interactions.retain(|state| {
+            state.resolution.is_some()
+                || state.expired_reason.is_some()
+                || state.turn_id.as_ref() == Some(turn_id)
+        });
+    }
+
+    fn discard_all_unresolved_interactions(&mut self) {
+        self.snapshot
+            .interactions
+            .retain(|state| state.resolution.is_some() || state.expired_reason.is_some());
+    }
+
+    /// ask/plan 是回合引擎的单出口模态:挂起期间引擎不可能发出新 tool_intent,
+    /// 一旦发出即证明该挂起已被绕过(应答记到了错位 id、崩溃重启丢失挂起),
+    /// 仍未决的 ask/plan 从此不可应答,按幽灵清理。permission 允许批量共存
+    /// (同一挂起内多个授权请求同时待决),不适用此规则。
+    fn discard_unresolved_ask_plan_interactions(&mut self) {
+        self.snapshot.interactions.retain(|state| {
+            state.resolution.is_some()
+                || state.expired_reason.is_some()
+                || !matches!(
+                    state.kind,
+                    InteractionKind::Ask | InteractionKind::Plan
+                )
+        });
     }
 }
 
