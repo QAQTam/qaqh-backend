@@ -3,7 +3,9 @@ name = "sbx-win"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+# 全量 Windows 语义：非 Windows 平台本 crate 编译为空 lib（见 src/lib.rs 的
+# `#![cfg(windows)]`），依赖无需参与构建。
+[target.'cfg(windows)'.dependencies]
 sbx-nt = { path = "../sbx-nt" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

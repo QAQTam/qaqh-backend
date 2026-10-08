@@ -7,7 +7,7 @@ edition = "2024"
 name = "sbx"
 path = "src/main.rs"
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 sbx-nt = { path = "../sbx-nt" }
 sbx-win = { path = "../sbx-win" }
 serde_json = "1"
