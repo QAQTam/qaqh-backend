@@ -6,18 +6,21 @@
 //! `crates/qaqh-runtime/src/agent/tool_runtime.rs`) acts as a forwarding layer
 //! that pushes these into UI events.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 #[cfg(any(test, feature = "test-harness"))]
 use crate::probe::ProbeTool;
-use crate::tool_api::{
-    DynamicDispatch, DynamicToolAdapter, ErasedTool, OutputBudget, ToolCapabilities,
-    ToolDescriptor, ToolExposure, ToolName, ToolSource, TypedTool, TypedToolAdapter,
+use crate::{
+    SafetyVerdict, ToolRisk,
+    tool_api::{
+        DynamicDispatch, DynamicToolAdapter, ErasedTool, OutputBudget, ToolCapabilities,
+        ToolDescriptor, ToolExposure, ToolName, ToolSource, TypedTool, TypedToolAdapter,
+    },
 };
-use crate::{SafetyVerdict, ToolRisk};
 
 // ── Execution metadata ──
 
@@ -521,17 +524,32 @@ impl ToolManager {
         }
 
         // P3-1：`tool_search` 元工具 prepare 期拦截——检索 + 提升都在锁内
-        // 完成，执行体只回放快照结果。
+        // 完成，执行体只回放快照结果。参数经 [`ToolSearchArgs`] typed 解析：
+        // 缺 query / 类型不符 / 未知字段在这里显式失败，不再静默缺省。
         if name == TOOL_SEARCH_NAME {
-            let query = args
-                .get("query")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let max_results = args
-                .get("max_results")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(8) as usize;
-            let hits = self.search_tools(query, max_results);
+            let search_args: ToolSearchArgs = match serde_json::from_value(args.clone()) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let msg = format!(
+                        "[ERROR] tool_search invalid args: {error}. Expected {{\"query\": string, \"max_results\"?: integer}}."
+                    );
+                    return Err(ToolExecReport {
+                        success: false,
+                        content: msg.clone(),
+                        files_affected: Vec::new(),
+                        meta: ToolExecMeta {
+                            name: name.to_string(),
+                            elapsed_ms: 0,
+                            output_size: msg.len(),
+                            success: false,
+                            args_summary: String::new(),
+                        },
+                    });
+                }
+            };
+            let query = search_args.query;
+            let max_results = search_args.max_results.max(1) as usize;
+            let hits = self.search_tools(&query, max_results);
             // 命中的 Deferred 工具升回 Direct：下一轮 defs 注入。
             let deferred_hits: Vec<&String> = hits
                 .iter()
@@ -547,20 +565,7 @@ impl ToolManager {
                 "hits": hits,
                 "promoted_next_round": promoted,
             });
-            let descriptor = ToolDescriptor {
-                name: ToolName::new(TOOL_SEARCH_NAME).expect("tool_search is a valid name"),
-                display_name: None,
-                description: "tool registry search".to_owned(),
-                input_schema: serde_json::json!({"type": "object"}),
-                output_schema: serde_json::json!({"type": "object"}),
-                category: crate::permission::ToolCategory::Read,
-                risk: ToolRisk::ReadOnly,
-                default_timeout: std::time::Duration::from_secs(15),
-                exposure: ToolExposure::Direct,
-                source: ToolSource::Builtin,
-                output_budget: OutputBudget::default(),
-                capabilities: ToolCapabilities::default(),
-            };
+            let descriptor = tool_search_descriptor();
             self.inflight_tasks.insert(id.clone(), cancel_flag);
             return Ok(PreparedCall {
                 id,
@@ -825,8 +830,10 @@ fn audit_args_summary(_tool: &str, args: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::{ProbeBody, ProbeTool};
-    use crate::{ToolResult, ToolRisk};
+    use crate::{
+        ToolResult, ToolRisk,
+        probe::{ProbeBody, ProbeTool},
+    };
 
     fn noop(_ctx: &crate::tool_api::ToolCallContext, _args: serde_json::Value) -> ToolResult {
         ToolResult::ok("noop")
@@ -1267,6 +1274,47 @@ mod safety_e2e_tests {
 /// `tool_search` 元工具名：模型首轮即见，按需检索其余 Deferred 工具。
 pub const TOOL_SEARCH_NAME: &str = "tool_search";
 
+/// `tool_search` 的 typed 参数面：schema（schemars）与 prepare 期校验共用
+/// 本类型，杜绝手写 schema 与手取字段两套事实源漂移。
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSearchArgs {
+    /// keyword(s) for the capability you need.
+    pub query: String,
+    /// maximum hits to return (default 8).
+    #[serde(default = "default_tool_search_max_results")]
+    pub max_results: u32,
+}
+
+fn default_tool_search_max_results() -> u32 {
+    8
+}
+
+/// `tool_search` 的单一 descriptor 源：注册面与 prepare 拦截面共用，
+/// schema 由 [`ToolSearchArgs`] 生成、能力声明取自 capability 表。
+pub(crate) fn tool_search_descriptor() -> ToolDescriptor {
+    let input_schema = crate::tool_api::schema::schema_of::<ToolSearchArgs>();
+    ToolDescriptor {
+        name: ToolName::new(TOOL_SEARCH_NAME).expect("tool_search is a valid name"),
+        display_name: None,
+        description: "Search the tool registry by keyword when you need a capability not in \
+                      your current tool list. Returns matching tool names and descriptions; \
+                      matching deferred tools become available in the next turn."
+            .to_owned(),
+        output_schema: serde_json::json!({"type": "object"}),
+        input_schema,
+        category: crate::permission::ToolCategory::Read,
+        risk: ToolRisk::ReadOnly,
+        default_timeout: std::time::Duration::from_secs(15),
+        exposure: ToolExposure::Direct,
+        source: ToolSource::Builtin,
+        output_budget: OutputBudget::default(),
+        // 能力声明单源：capability 表（READ_ONLY 档），不是 ToolCapabilities::default。
+        capabilities: crate::tool_capabilities::builtin_capabilities(TOOL_SEARCH_NAME)
+            .expect("tool_search is on the capability table"),
+    }
+}
+
 /// 一条工具检索命中。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
@@ -1461,39 +1509,10 @@ impl ToolManager {
     }
 
     /// P3-1：`tool_search` 元工具注册（描述面 Direct；真实执行被 prepare
-    /// 拦截，注册的 execute 仅兜底不可达路径）。
+    /// 拦截，注册的 execute 仅兜底不可达路径）。schema 与能力声明来自
+    /// [`tool_search_descriptor`] 单源。
     pub fn register_tool_search(&mut self) {
-        let descriptor = ToolDescriptor {
-            name: ToolName::new(TOOL_SEARCH_NAME).expect("tool_search is a valid name"),
-            display_name: None,
-            description: "Search the tool registry by keyword when you need a capability not in \
-                          your current tool list. Returns matching tool names and descriptions; \
-                          matching deferred tools become available in the next turn."
-                .to_owned(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "keyword(s) for the capability you need"
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "maximum hits to return (default 8)"
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            }),
-            output_schema: serde_json::json!({"type": "object"}),
-            category: crate::permission::ToolCategory::Read,
-            risk: ToolRisk::ReadOnly,
-            default_timeout: std::time::Duration::from_secs(15),
-            exposure: ToolExposure::Direct,
-            source: ToolSource::Builtin,
-            output_budget: OutputBudget::default(),
-            capabilities: ToolCapabilities::default(),
-        };
+        let descriptor = tool_search_descriptor();
         self.builtins.insert(
             TOOL_SEARCH_NAME.to_owned(),
             RegisteredTool {
@@ -1674,6 +1693,48 @@ mod p3_tests {
             "元工具自身不出现在命中里"
         );
         assert!(mgr.search_tools("", 8).is_empty(), "空查询不命中");
+    }
+
+    #[test]
+    fn tool_search_descriptor_is_single_source() {
+        let descriptor = tool_search_descriptor();
+        // 能力声明与 capability 表同源（READ_ONLY 档），不再落回 default。
+        assert_eq!(
+            descriptor.capabilities,
+            crate::tool_capabilities::builtin_capabilities(TOOL_SEARCH_NAME)
+                .expect("tool_search is on the capability table"),
+        );
+        assert_ne!(descriptor.capabilities, ToolCapabilities::default());
+        // schema 由 ToolSearchArgs 生成：query 必填、字段封闭。
+        assert_eq!(descriptor.input_schema["required"][0], "query");
+        assert_eq!(descriptor.input_schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn tool_search_prepare_rejects_invalid_args() {
+        let mut mgr = ToolManager::new();
+        mgr.register_tool_search();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let root = std::path::Path::new(".");
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"query": 42}),
+            serde_json::json!({"query": "x", "bogus": 1}),
+        ] {
+            let prepared = mgr.prepare_req_with_cancel(
+                "call-search-args".to_owned(),
+                TOOL_SEARCH_NAME,
+                bad,
+                root,
+                None,
+                None,
+                cancel.clone(),
+            );
+            assert!(prepared.is_err(), "invalid args must fail prepare");
+        }
+        let parsed: ToolSearchArgs = serde_json::from_value(serde_json::json!({"query": "x"}))
+            .expect("max_results 缺省合法");
+        assert_eq!(parsed.max_results, 8);
     }
 
     #[test]

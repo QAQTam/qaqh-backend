@@ -1,21 +1,21 @@
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use qaqh_domain::ActivityState;
-use qaqh_domain::ControlCommand;
-use qaqh_domain::RingingChannel;
-use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
-use qaqh_session::actor::ConnectionId;
-use qaqh_session::canonical::{
-    CanonicalSessionIdentity, CanonicalSessionStore, CommittedFactReader, WriterId, generate_ulid,
+use std::{
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use qaqh_session::session_fact_v2::{
-    EventId, FactPayload, FactSchema, SessionCreated, SessionFact, SessionId,
+
+use qaqh_domain::{ActivityState, ControlCommand, RingingChannel};
+use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
+use qaqh_session::{
+    actor::ConnectionId,
+    canonical::{
+        CanonicalSessionIdentity, CanonicalSessionStore, CommittedFactReader, WriterId,
+        generate_ulid,
+    },
+    session_fact_v2::{EventId, FactPayload, FactSchema, SessionCreated, SessionFact, SessionId},
 };
 use serde_json::{Value, json};
 
-use crate::ringing::V2ProjectionHub;
-use crate::{AgentRegistry, RingingHub};
+use crate::{AgentRegistry, RingingHub, ringing::V2ProjectionHub};
 
 #[derive(Clone)]
 pub struct QaqhService {
@@ -556,7 +556,9 @@ impl QaqhService {
                     .and_then(Value::as_u64)
                     .ok_or_else(|| "permission level (1-3) is required".to_string())?;
                 if !(1..=3).contains(&level) {
-                    return Err(format!("invalid permission level {level} (must be 1-3: 1=read-only, 2=workspace-write, 3=skip-permissions)"));
+                    return Err(format!(
+                        "invalid permission level {level} (must be 1-3: 1=read-only, 2=workspace-write, 3=skip-permissions)"
+                    ));
                 }
                 self.update_config_and_reload(|cfg| {
                     cfg.permission_level = level as u8;
@@ -610,8 +612,7 @@ impl QaqhService {
                 // profile 已从配置摘除；secret 槽位随后清理。名字不合法等失败
                 // 只告警——配置里已经不存在引用它的条目了。
                 if let Err(error) =
-                    qaqh_config::secrets::SecretStore::default_location()
-                        .delete_profile_key(&name)
+                    qaqh_config::secrets::SecretStore::default_location().delete_profile_key(&name)
                 {
                     log::warn!("[profile] secret cleanup for profile '{name}' skipped: {error}");
                 }
@@ -643,9 +644,21 @@ impl QaqhService {
             }
             "todo.status" => qaqh_workspace::todo::todo_status_value(&session_id()?),
             "todo.cancel" => {
-                qaqh_workspace::todo::todo_cancel_value(&session_id()?, &pstr(params, "id")?)
+                let sid = session_id()?;
+                let result = qaqh_workspace::todo::todo_cancel_value(&sid, &pstr(params, "id")?);
+                if result.is_ok() {
+                    self.publish_resource_changed_best_effort(&sid, "todo");
+                }
+                result
             }
-            "todo.set" => qaqh_workspace::todo::todo_set_value_for(&session_id()?, params),
+            "todo.set" => {
+                let sid = session_id()?;
+                let result = qaqh_workspace::todo::todo_set_value_for(&sid, params);
+                if result.is_ok() {
+                    self.publish_resource_changed_best_effort(&sid, "todo");
+                }
+                result
+            }
             "todo.list" => qaqh_workspace::todo::todo_list_value_for(&session_id()?, params),
             "plan.context_stats" => context_stats(&self.sessions, &session_id()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
@@ -787,6 +800,22 @@ impl QaqhService {
         let env = RingingWorkerCommandEnvelope::new(session_id.clone(), command_id(), command);
         self.send_ringing_command(&session_id, &env)?;
         Ok(Value::Null)
+    }
+
+    /// Ask the session actor to publish a canonical resource fact after an
+    /// off-actor workspace mutation. The RPC has already persisted its file, so
+    /// a missing/unreachable worker (idle session, subagent race) only costs
+    /// the notification — never fail the mutation for it.
+    fn publish_resource_changed_best_effort(&self, session_id: &str, resource_kind: &str) {
+        let command = RingingCommand::Control(ControlCommand::PublishResourceChanged {
+            resource_kind: resource_kind.to_string(),
+        });
+        let env = RingingWorkerCommandEnvelope::new(session_id.to_string(), command_id(), command);
+        if let Err(error) = self.send_ringing_command(session_id, &env) {
+            log::debug!(
+                "[todo] resource fact publication skipped for {session_id} (no worker): {error}"
+            );
+        }
     }
 
     /// 统一运行状态（2026-10-06 归一裁决）：未加载 → `not_running`（不读投影、
@@ -1127,21 +1156,24 @@ pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod stats;
 
-use self::common::{command_id, err, release_freed_heap_memory};
-use self::fs_git::{git, list_remote_directory, read_remote_file, workspace};
-use self::params::{
-    optional_tool_mode, pbool, pstr, pstr2, pstrings, pu64, scope_session_param_value,
-    session_param, validate_tool_mode, value2,
+use self::{
+    common::{command_id, err, release_freed_heap_memory},
+    fs_git::{git, list_remote_directory, read_remote_file, workspace},
+    params::{
+        optional_tool_mode, pbool, pstr, pstr2, pstrings, pu64, scope_session_param_value,
+        session_param, validate_tool_mode, value2,
+    },
+    plan::{plan_action, read_plan, token_stats},
+    stats::{activity, context_stats, dashboard, load_config},
 };
-use self::plan::{plan_action, read_plan, token_stats};
-use self::stats::{activity, context_stats, dashboard, load_config};
 
 #[cfg(test)]
 mod canonical_session_materialization_tests {
-    use super::*;
     use qaqh_session::canonical::{
         CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE, WRITER_FENCE_FILE, WriterFence,
     };
+
+    use super::*;
 
     #[test]
     fn session_creation_materializes_one_canonical_baseline() {
@@ -1243,11 +1275,11 @@ mod tool_mode_tests {
 
 #[cfg(test)]
 mod reload_loop_tests {
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
+
+    use qaqh_config::Config;
 
     use super::reload_loop;
-    use qaqh_config::Config;
 
     /// T-6-1 回归（BUG-2026-09-15-07 / E2）：`qaqh_config::watch::subscribe()`
     /// 走 `Sender::subscribe`，返回的 receiver **已消费到当前版本** ⇒ 订阅后的

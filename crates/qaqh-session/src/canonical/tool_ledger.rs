@@ -6,23 +6,26 @@
 //! resume CAS lives in `SessionActor::admit_tool_intent` and the cancel CAS in
 //! `SessionActor::cancel_tool_batch`.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use thiserror::Error;
 
+use super::{
+    AppendOutcome, CanonicalError, CanonicalIdentityError, CanonicalSessionStore,
+    CommittedFactReader, SessionBlobStore, WriterId, WriterLease, causation_for_command,
+    generate_ulid,
+};
 use crate::session_fact_v2::{
     CheckpointId, CompactionApplied, ContentRef, DriverChanged, EventId, ExecutionId, FactPayload,
     FactSchema, InputAccepted, InputId, InterAgentCommunication, InteractionExpired, InteractionId,
-    InteractionRequested, InteractionResolved, MessageId, RecoveryRef, SessionFact, SessionId,
-    SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
-};
-
-use super::{
-    AppendOutcome, CanonicalError, CanonicalIdentityError, CanonicalSessionStore,
-    CommittedFactReader, WriterId, WriterLease, causation_for_command, generate_ulid,
+    InteractionRequested, InteractionResolved, MessageId, RecoveryRef, ResourceId, ResourceKind,
+    SessionFact, SessionId, SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId,
+    ToolError, ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    TurnId, WorkspaceResourceChanged,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -164,6 +167,9 @@ pub enum ToolLedgerError {
 
     #[error("inter-agent message {message_id} already has a conflicting communication")]
     InterAgentCommunicationConflict { message_id: MessageId },
+
+    #[error("session blob write failed: {0}")]
+    BlobWrite(String),
 }
 
 /// Outcome of a canonical driver-seat claim.
@@ -256,6 +262,11 @@ pub struct ToolLedger {
     subagent_finished: HashMap<SessionId, SessionFact>,
     input_accepteds: HashMap<InputId, SessionFact>,
     inter_agent_communications: HashMap<MessageId, SessionFact>,
+    /// Persistent body store backing every `ContentRef` this ledger writes.
+    blobs: SessionBlobStore,
+    /// Last published revision per workspace resource, rebuilt from committed
+    /// facts on open so new facts keep revisions monotonic.
+    workspace_resource_revisions: HashMap<(ResourceKind, ResourceId), u64>,
     /// Canonical driver seat, rebuilt from `DriverChanged` facts on open.
     driver_holder: Option<String>,
     driver_epoch: u64,
@@ -294,6 +305,7 @@ impl ToolLedger {
         let mut subagent_finished = HashMap::new();
         let mut input_accepteds = HashMap::new();
         let mut inter_agent_communications = HashMap::new();
+        let mut workspace_resource_revisions = HashMap::new();
         let mut driver_holder = None;
         let mut driver_epoch = 0;
         for fact in reader.read_all()? {
@@ -309,9 +321,12 @@ impl ToolLedger {
                 &mut subagent_finished,
                 &mut input_accepteds,
                 &mut inter_agent_communications,
+                &mut workspace_resource_revisions,
                 fact,
             )?;
         }
+        let blobs = SessionBlobStore::open(&session_dir)
+            .map_err(|error| ToolLedgerError::BlobWrite(error.to_string()))?;
         Ok(Self {
             store,
             lease,
@@ -326,6 +341,8 @@ impl ToolLedger {
             subagent_finished,
             input_accepteds,
             inter_agent_communications,
+            blobs,
+            workspace_resource_revisions,
             driver_holder,
             driver_epoch,
         })
@@ -1130,6 +1147,73 @@ impl ToolLedger {
         Ok(outcome.fact)
     }
 
+    /// Store `bytes` in the persistent session blob store and return a
+    /// `ContentRef` that resolves for the lifetime of the session.
+    pub fn put_blob(&mut self, bytes: &[u8]) -> Result<ContentRef, ToolLedgerError> {
+        self.blobs
+            .put(bytes)
+            .map_err(|error| ToolLedgerError::BlobWrite(error.to_string()))
+    }
+
+    /// Read back a body from the persistent session blob store.
+    pub fn get_blob(&self, content_ref: &ContentRef) -> Result<Vec<u8>, ToolLedgerError> {
+        self.blobs
+            .get(content_ref)
+            .map_err(|error| ToolLedgerError::BlobWrite(error.to_string()))
+    }
+
+    /// Durably publish a workspace resource change.
+    ///
+    /// `summary` is persisted to the session blob store (fsync) *before* the
+    /// fact is appended, so `summary_ref` is always resolvable (I2/I5). The
+    /// per-resource `revision` is assigned here and strictly increases across
+    /// restarts (it is rebuilt from committed facts on open).
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_workspace_resource_changed(
+        &mut self,
+        event_id: EventId,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+        resource_kind: ResourceKind,
+        resource_id: ResourceId,
+        summary: &[u8],
+        source_call_id: Option<ToolCallId>,
+        deleted: bool,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let summary_ref = self.put_blob(summary)?;
+        let revision_key = (resource_kind, resource_id.clone());
+        let revision = self
+            .workspace_resource_revisions
+            .get(&revision_key)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let payload = WorkspaceResourceChanged {
+            resource_kind,
+            resource_id,
+            source_call_id,
+            revision,
+            summary_ref,
+            deleted,
+        };
+        let mut fact = self.envelope(
+            event_id,
+            now_ms,
+            FactPayload::WorkspaceResourceChanged(payload),
+        );
+        fact.turn_id = turn_id;
+        fact.call_id = call_id;
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        if let FactPayload::WorkspaceResourceChanged(published) = &outcome.fact.payload {
+            self.workspace_resource_revisions.insert(
+                (published.resource_kind, published.resource_id.clone()),
+                published.revision,
+            );
+        }
+        Ok(outcome.fact)
+    }
+
     fn build_conversation_fact(
         &self,
         event_id: EventId,
@@ -1167,12 +1251,7 @@ impl ToolLedger {
     /// site from silently shipping without causation (2026-10-05: three of the
     /// five builders hardcoded `causation_id: None`, so their command receipts
     /// never reached a terminal state).
-    fn envelope(
-        &self,
-        event_id: EventId,
-        ts_ms: i64,
-        payload: FactPayload,
-    ) -> SessionFact {
+    fn envelope(&self, event_id: EventId, ts_ms: i64, payload: FactPayload) -> SessionFact {
         SessionFact {
             schema: FactSchema::v2(),
             session_id: self.session_id.clone(),
@@ -1233,8 +1312,14 @@ fn index_fact(
     subagent_finished: &mut HashMap<SessionId, SessionFact>,
     input_accepteds: &mut HashMap<InputId, SessionFact>,
     inter_agent_communications: &mut HashMap<MessageId, SessionFact>,
+    workspace_resource_revisions: &mut HashMap<(ResourceKind, ResourceId), u64>,
     fact: SessionFact,
 ) -> Result<(), ToolLedgerError> {
+    if let FactPayload::WorkspaceResourceChanged(payload) = &fact.payload {
+        let key = (payload.resource_kind, payload.resource_id.clone());
+        let revision = workspace_resource_revisions.entry(key).or_insert(0);
+        *revision = (*revision).max(payload.revision);
+    }
     match &fact.payload {
         FactPayload::InputAccepted(payload) => {
             let input_id = payload.input_id.clone();

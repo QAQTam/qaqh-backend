@@ -1,8 +1,10 @@
 //! Knife-1 step-2 regression: normal session agents must also run as in-process
 //! daemon actors, not as `qaqh agent --seed` child processes.
 
-use std::sync::{Arc, Mutex, Once};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex, Once},
+    time::{Duration, Instant},
+};
 
 use qaqh_runtime::{AgentRegistry, QaqhService, RingingHub};
 
@@ -338,7 +340,7 @@ fn close_session_cleans_per_session_resident_state() {
     let service = QaqhService::init(qaqh_session::SessionManager::global());
     service.attach_ringing(hub.clone());
 
-    qaqh_workspace::read_image::store_image(&session_id, "image/png", "QUJD");
+    qaqh_workspace::read_image::store_image(&session_id, "image/png", "QUJD").expect("store");
     let content_id = hub.put_content(&session_id, "text/plain", b"hello".to_vec(), false);
     assert!(qaqh_workspace::read_image::peek_image(&session_id, 0).is_some());
     assert!(hub.get_content(&session_id, &content_id).is_some());

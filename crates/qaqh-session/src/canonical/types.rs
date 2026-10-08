@@ -16,8 +16,7 @@ pub const UPGRADE_FENCE_SCHEMA: &str = "qaqh.upgrade-fence/v1";
 pub const EVENTS_POISON_SCHEMA: &str = "qaqh.events-poison/v1";
 
 mod u128_string {
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
     pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
     where

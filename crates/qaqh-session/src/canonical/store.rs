@@ -2,15 +2,16 @@
 
 use std::path::Path;
 
-use crate::projection::{
-    ProjectionSet, ProjectionSetSnapshot, projection_events_for_fact,
-    projection_replaceable_events_for_fact,
-};
-use crate::session_fact_v2::{LogId, ProjectionEvent, SessionFact, SessionId};
-
 use super::{
     CanonicalError, CanonicalLog, CommittedFactReader, EventsCommit, WriterFence, WriterId,
     WriterLease,
+};
+use crate::{
+    projection::{
+        ProjectionSet, ProjectionSetSnapshot, projection_events_for_fact,
+        projection_replaceable_events_for_fact,
+    },
+    session_fact_v2::{LogId, ProjectionEvent, SessionFact, SessionId},
 };
 
 /// Result of one durable canonical append.
