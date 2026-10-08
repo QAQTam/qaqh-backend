@@ -111,21 +111,20 @@ pub(crate) fn project_todo_list(args: &serde_json::Value, output: &str) -> ToolD
 /// `ToolDisplayFn`。这保证 display 不再从 model JSON 字符串考古。
 pub(crate) fn project_typed_tool_display(
     name: &str,
-    args: &serde_json::Value,
     data: &serde_json::Value,
 ) -> Option<ToolDisplay> {
     match name {
         "todo_write" => serde_json::from_value::<crate::todo::typed::TodoWriteOutput>(data.clone())
             .ok()
-            .map(|output| output.display(args)),
+            .map(|output| output.display(&serde_json::Value::Null)),
         "todo_update" => {
             serde_json::from_value::<crate::todo::typed::TodoUpdateOutput>(data.clone())
                 .ok()
-                .map(|output| output.display(args))
+                .map(|output| output.display(&serde_json::Value::Null))
         }
         "todo_list" => serde_json::from_value::<crate::todo::typed::TodoListOutput>(data.clone())
             .ok()
-            .map(|output| output.display(args)),
+            .map(|output| output.display(&serde_json::Value::Null)),
         _ => None,
     }
 }
