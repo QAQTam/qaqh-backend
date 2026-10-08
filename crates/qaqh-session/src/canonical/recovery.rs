@@ -4,20 +4,19 @@
 //! execution and plan construction remain separate so the intent can be made
 //! durable before any canonical recovery fact is appended.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::{CanonicalError, log::write_json_atomic};
 use crate::session_fact_v2::{
     ContentHash, EventId, FactPayload, LogId, MAX_SAFE_FACT_SEQ, RecoveryId, RecoveryRef,
     SessionFact,
 };
-
-use super::CanonicalError;
-use super::log::write_json_atomic;
 
 pub const RECOVERY_INTENT_FILE: &str = "recovery.intent.json";
 pub const RECOVERY_INTENT_SCHEMA: &str = "qaqh.recovery-intent/v1";

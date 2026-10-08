@@ -1,17 +1,21 @@
 //! Durable ToolLedger core contract.
 
-use qaqh_session::canonical::{
-    CommittedFactReader, FactCausation, ToolLedger, ToolLedgerError, ToolRecoveryDisposition,
-    WriterId, causation_for_command, generate_ulid, ulid_from_text,
-};
-use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
-    InputAccepted, InputId, InputKind, InputPurpose, InterAgentCommunication, InterAgentContent,
-    InterAgentDelivery, InteractionDecision, InteractionExpired, InteractionExpiryReason,
-    InteractionId, InteractionKind, InteractionRequested, InteractionResolved, LogId, MessageId,
-    PolicyDecisionRef, RecoveryId, RecoveryRef, SessionId, SideEffectClass, SubagentFinished,
-    SubagentSpawned, SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
-    ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+use qaqh_session::{
+    canonical::{
+        CommittedFactReader, FactCausation, ToolLedger, ToolLedgerError, ToolRecoveryDisposition,
+        WriterId, causation_for_command, generate_ulid, stable_workspace_resource_id,
+        ulid_from_text,
+    },
+    session_fact_v2::{
+        ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
+        InputAccepted, InputId, InputKind, InputPurpose, InterAgentCommunication,
+        InterAgentContent, InterAgentDelivery, InteractionDecision, InteractionExpired,
+        InteractionExpiryReason, InteractionId, InteractionKind, InteractionRequested,
+        InteractionResolved, LogId, MessageId, PolicyDecisionRef, RecoveryId, RecoveryRef,
+        ResourceId, ResourceKind, SessionId, SideEffectClass, SubagentFinished, SubagentSpawned,
+        SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
+        ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+    },
 };
 
 const NOW_MS: i64 = 1_789_830_000_000;
@@ -1267,4 +1271,88 @@ fn causation_for_command_normalises_client_ids_onto_the_ulid_lane() {
         "an oversized client id still fits the 26-char lane"
     );
     assert_eq!(causation_for_command(""), None);
+}
+
+#[test]
+fn workspace_resource_fact_persists_summary_and_revisions_survive_reopen() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+    let resource_id = stable_workspace_resource_id(session_id().as_str(), ResourceKind::Todo);
+
+    let first = ledger
+        .append_workspace_resource_changed(
+            event_id(901),
+            None,
+            Some(call_id(901)),
+            ResourceKind::Todo,
+            resource_id.clone(),
+            b"todo-v1",
+            Some(call_id(901)),
+            false,
+            NOW_MS + 1,
+        )
+        .expect("append first resource fact");
+    let FactPayload::WorkspaceResourceChanged(first_payload) = &first.payload else {
+        panic!("expected WorkspaceResourceChanged payload");
+    };
+    assert_eq!(first_payload.revision, 1);
+    assert_eq!(first_payload.resource_id, resource_id);
+    assert_eq!(
+        ledger.get_blob(&first_payload.summary_ref).expect("blob"),
+        b"todo-v1"
+    );
+    first.validate().expect("first fact validates");
+
+    let second = ledger
+        .append_workspace_resource_changed(
+            event_id(902),
+            None,
+            None,
+            ResourceKind::Todo,
+            resource_id.clone(),
+            b"todo-v2",
+            None,
+            false,
+            NOW_MS + 2,
+        )
+        .expect("append second resource fact");
+    let FactPayload::WorkspaceResourceChanged(second_payload) = &second.payload else {
+        panic!("expected WorkspaceResourceChanged payload");
+    };
+    assert_eq!(second_payload.revision, 2);
+
+    // Reopen: revision continuity is rebuilt from committed facts and the
+    // appended summary stays resolvable (I5).
+    drop(ledger);
+    let mut reopened = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + LEASE_MS + 1,
+        LEASE_MS,
+    )
+    .expect("reopen ledger");
+    let third = reopened
+        .append_workspace_resource_changed(
+            event_id(903),
+            None,
+            None,
+            ResourceKind::Todo,
+            resource_id,
+            b"todo-v3",
+            None,
+            false,
+            NOW_MS + LEASE_MS + 2,
+        )
+        .expect("append after reopen");
+    let FactPayload::WorkspaceResourceChanged(third_payload) = &third.payload else {
+        panic!("expected WorkspaceResourceChanged payload");
+    };
+    assert_eq!(third_payload.revision, 3);
+    assert_eq!(
+        reopened.get_blob(&third_payload.summary_ref).expect("blob"),
+        b"todo-v3"
+    );
+    third.validate().expect("third fact validates");
 }

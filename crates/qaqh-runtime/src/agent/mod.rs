@@ -59,6 +59,7 @@ pub mod loop_outcome;
 pub mod paced_emitter;
 pub mod plugins;
 pub mod prompt;
+pub(crate) mod resource_publish;
 pub(crate) mod spawn;
 pub mod state;
 pub mod tool_recovery;
@@ -78,5 +79,4 @@ pub mod workspace_audit;
 // paths resolving without touching their call sites.
 pub use plugins::engine_compact;
 pub(crate) use plugins::{dashboard, engine_misc};
-
 pub(crate) use spawn::{ActorKind, SubagentSpawnSpec, spawn_agent};

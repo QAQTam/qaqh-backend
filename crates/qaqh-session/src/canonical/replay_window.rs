@@ -3,22 +3,23 @@
 //! `ReplayWindowManifest` is the canonical source for the retained fact
 //! window. It copies the session logical clock and never advances time itself.
 
-use std::fs;
-use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::projection::ReplayWindow;
-use crate::session_fact_v2::{
-    ContentHash, END_OF_FACT, LogId, MAX_SAFE_FACT_SEQ, ReliableCursor, ResetReason, ResetRequired,
-    SessionFact, projection_slots,
+use super::{
+    CanonicalError, clock::ContentClock, log::write_json_atomic, recovery::sha256_content_hash,
 };
-
-use super::CanonicalError;
-use super::clock::ContentClock;
-use super::log::write_json_atomic;
-use super::recovery::sha256_content_hash;
+use crate::{
+    projection::ReplayWindow,
+    session_fact_v2::{
+        ContentHash, END_OF_FACT, LogId, MAX_SAFE_FACT_SEQ, ReliableCursor, ResetReason,
+        ResetRequired, SessionFact, projection_slots,
+    },
+};
 
 pub const REPLAY_WINDOW_FILE: &str = "replay-window.json";
 pub const REPLAY_WINDOW_SCHEMA: &str = "qaqh.replay-window/v1";

@@ -1,7 +1,8 @@
 //! Session lifecycle: initialization, health status.
 
-use super::agent::AgentState;
 use qaqh_workspace;
+
+use super::agent::AgentState;
 
 /// cwd 宿主注入（PR-3-3 / D3）：宿主侧经注入句柄解析会话工作目录后注入
 /// workspace（`set_process_workspace`），workspace 侧不再直读 qaqh_session。
@@ -41,13 +42,15 @@ fn recover_canonical_tool_ledger_in(
     session_dir: &std::path::Path,
     session_id: &str,
 ) -> Result<(), String> {
-    use qaqh_session::canonical::{
-        CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_FILE,
-        RecoveryExecutionOutcome, RecoveryIntentStatus, WriterId, execute_recovery_intent,
-        generate_ulid, load_recovery_intent, persist_recovery_intent, plan_recovery_intent,
-        sha256_content_hash,
+    use qaqh_session::{
+        canonical::{
+            CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_FILE,
+            RecoveryExecutionOutcome, RecoveryIntentStatus, WriterId, execute_recovery_intent,
+            generate_ulid, load_recovery_intent, persist_recovery_intent, plan_recovery_intent,
+            sha256_content_hash,
+        },
+        session_fact_v2::{EventId, RecoveryId},
     };
-    use qaqh_session::session_fact_v2::{EventId, RecoveryId};
 
     if !session_dir.join(CANONICAL_IDENTITY_FILE).exists()
         && !session_dir.join(EVENTS_FILE).exists()
@@ -255,12 +258,18 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                     for block in &message.content {
                         match block {
                             // 旧会话 inline Image：借重建时机外置落盘（内容寻址幂等）。
+                            // 消息本体仍持有字节，落盘失败不丢数据，但 registry
+                            // 索引缺失会让 image_index 不可用——显式 error 上报。
                             qaqh_types::ContentBlock::Image { mime_type, data } => {
-                                qaqh_workspace::read_image::store_image(
+                                if let Err(error) = qaqh_workspace::read_image::store_image(
                                     &agent.session.session_id,
                                     mime_type,
                                     data,
-                                );
+                                ) {
+                                    log::error!(
+                                        "[LIFECYCLE] inline image externalization failed (image_index unavailable until re-attach): {error}"
+                                    );
+                                }
                             }
                             // 新写入一律 ImageRef：直接按引用登记，无需字节。
                             qaqh_types::ContentBlock::ImageRef {
@@ -478,17 +487,22 @@ pub fn create_session_with_session(agent: &mut AgentState) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use qaqh_session::canonical::{
-        CanonicalSessionIdentity, CommittedFactReader, RecoveryExecutionOutcome, ToolLedger,
-        WriterId, execute_recovery_intent, generate_ulid, load_recovery_intent,
-        persist_recovery_intent, plan_recovery_intent, sha256_content_hash,
-    };
-    use qaqh_session::session_fact_v2::{
-        EventId, ExecutionId, FactPayload, PolicyDecisionRef, RecoveryId, SideEffectClass,
-        ToolCallId, ToolIntent, ToolIntentPolicyOutcome, ToolReplayCapability, ToolTerminalStatus,
-    };
     use std::time::Duration;
+
+    use qaqh_session::{
+        canonical::{
+            CanonicalSessionIdentity, CommittedFactReader, RecoveryExecutionOutcome, ToolLedger,
+            WriterId, execute_recovery_intent, generate_ulid, load_recovery_intent,
+            persist_recovery_intent, plan_recovery_intent, sha256_content_hash,
+        },
+        session_fact_v2::{
+            EventId, ExecutionId, FactPayload, PolicyDecisionRef, RecoveryId, SideEffectClass,
+            ToolCallId, ToolIntent, ToolIntentPolicyOutcome, ToolReplayCapability,
+            ToolTerminalStatus,
+        },
+    };
+
+    use super::*;
 
     #[test]
     fn canonical_recovery_seals_open_intent_before_session_resume() {

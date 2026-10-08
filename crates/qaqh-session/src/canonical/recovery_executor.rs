@@ -12,22 +12,19 @@
 //! reconcile step — the fail-closed check is `validate_open_set`, and sealing
 //! is done by `ToolLedger::recover_open_intents`.
 
-use std::collections::HashSet;
-use std::fs;
-use std::path::Path;
+use std::{collections::HashSet, fs, path::Path};
 
 use thiserror::Error;
-
-use crate::session_fact_v2::{
-    ContentHash, EventId, FactPayload, LogId, RecoveryAction, RecoveryId, RecoveryOutcome,
-    RecoveryToolCompletion, SessionFact, SessionId, SessionRecovered, ToolCallId, ToolFinished,
-    ToolReplayCapability,
-};
 
 use super::{
     CanonicalError, CanonicalSessionStore, CommittedFactReader, RecoveryIntent,
     RecoveryIntentStatus, ToolLedger, ToolLedgerError, ToolRecoveryDisposition, WriterId,
     generate_ulid, load_recovery_intent, remove_recovery_intent_if_stale, sha256_content_hash,
+};
+use crate::session_fact_v2::{
+    ContentHash, EventId, FactPayload, LogId, RecoveryAction, RecoveryId, RecoveryOutcome,
+    RecoveryToolCompletion, SessionFact, SessionId, SessionRecovered, ToolCallId, ToolFinished,
+    ToolReplayCapability,
 };
 
 #[derive(Debug, Error)]

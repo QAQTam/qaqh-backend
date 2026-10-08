@@ -8,30 +8,27 @@
 //!
 //! sandbox 不在本层实现。P4 只需在这个边界外包/注入 sandbox 执行器。
 
-use std::collections::HashSet;
-use std::sync::mpsc::Receiver;
-use std::thread::JoinHandle;
+use std::{collections::HashSet, sync::mpsc::Receiver, thread::JoinHandle};
 
 use qaqh_message::PendingTool;
-use qaqh_session::actor::ToolAdmission;
-use qaqh_session::canonical::{
-    ToolLedgerError, generate_ulid, sha256_content_hash, ulid_from_text,
+use qaqh_session::{
+    actor::ToolAdmission,
+    canonical::{ToolLedgerError, generate_ulid, sha256_content_hash, ulid_from_text},
+    session_fact_v2::{
+        AgentPath, ContentRef, EventId, ExecutionId, PolicyDecisionRef, SessionId, SideEffectClass,
+        SubagentFinished, SubagentSpawnConfig, SubagentSpawned, SubagentTerminalStatus, ToolCallId,
+        ToolError, ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics,
+        ToolReplayCapability, ToolTerminalStatus, TurnId,
+    },
 };
-use qaqh_session::session_fact_v2::{
-    AgentPath, ContentRef, EventId, ExecutionId, PolicyDecisionRef, SessionId, SideEffectClass,
-    SubagentFinished, SubagentSpawnConfig, SubagentSpawned, SubagentTerminalStatus, ToolCallId,
-    ToolError, ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics,
-    ToolReplayCapability, ToolTerminalStatus, TurnId,
-};
-use qaqh_workspace::AuthorizedToolCall;
-use qaqh_workspace::ExecProgressEvent;
-use qaqh_workspace::runtime::ToolExecutionScope;
+use qaqh_workspace::{AuthorizedToolCall, ExecProgressEvent, runtime::ToolExecutionScope};
 
-use crate::agent::dashboard;
-use crate::agent::engine_tool::ToolEngine;
-use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
-use crate::agent::turn_actor::TurnActor;
-use crate::agent::types::{AdmittedTool, RingContext};
+use crate::agent::{
+    engine_tool::ToolEngine,
+    state::agent::{tool_ledger_lease_ms, unix_ms},
+    turn_actor::TurnActor,
+    types::{AdmittedTool, RingContext},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolBatchOrigin {
@@ -417,7 +414,16 @@ impl ToolRuntime {
             .ensure_lease(now, tool_ledger_lease_ms())
             .map_err(|error| format!("tool ledger lease renewal failed: {error}"))?;
         let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
-        let intent = Self::build_intent(item, &execution_id, now);
+        let mut intent = Self::build_intent(item, &execution_id, now);
+        // CLEAN-3（E10）：effective_args_ref 的正文先落持久 blob，再提交引用
+        // 它的 intent fact（I2/I5）。ref 即 args 哈希，与 blob 内容寻址一致。
+        if intent.effective_args_ref.is_some() {
+            let args_bytes = serde_json::to_vec(item.auth.args()).unwrap_or_default();
+            let args_ref = ledger
+                .put_blob(&args_bytes)
+                .map_err(|error| format!("effective args blob write failed: {error}"))?;
+            intent.effective_args_ref = Some(args_ref);
+        }
         let actor_turn = TurnId::new(wire_turn_id);
         let canonical_turn = canonical_turn_id(wire_turn_id);
         let event_id = EventId::new(generate_ulid());
@@ -563,6 +569,17 @@ impl ToolRuntime {
         };
         let now = unix_ms();
         ledger.ensure_lease(now, tool_ledger_lease_ms())?;
+        // CLEAN-3（E12）：终态正文先落持久 blob，再提交引用它的 fact（I2）。
+        let output_ref = match outcome {
+            ToolRunOutcome::Completed(result) => {
+                if result.content.is_empty() {
+                    None
+                } else {
+                    Some(ledger.put_blob(result.content.as_bytes())?)
+                }
+            }
+            _ => None,
+        };
         let (terminal_status, error, output_bytes) = match outcome {
             ToolRunOutcome::Completed(result) => (
                 terminal_status(&result.result),
@@ -594,7 +611,7 @@ impl ToolRuntime {
             call_id: canonical_call_id(call_id),
             execution_id: Some(ledger_run.execution_id.clone()),
             terminal_status,
-            output_ref: None,
+            output_ref,
             error,
             metrics: ToolMetrics {
                 started_at_ms: ledger_run.intent_at_ms,
@@ -1211,28 +1228,17 @@ fn backfill_executed_result(
     if let Some(ref delta) = code_delta {
         ctx.stats.push_delta(delta.clone());
     }
-    // Instant refresh for todo tools
-    // 注意：legacy 名 "todo" 已退役（todo_contract 锁定）——此处曾匹配 "todo"，
-    // 本回填路径的即时刷新从未命中（engine_tool.rs 同款分支与
-    // turn_lap/backfill.rs 的逐 round 刷新一直在工作，故用户可见影响有限）。
-    // 2026-10-05 注释审计 §3.4 修正；判定收敛到 dashboard::is_todo_tool。
-    if crate::agent::plugins::dashboard::is_todo_tool(tool_name) {
-        // Ringing 双发：DashboardUpdated（replaceable 覆盖）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-            qaqh_domain::ControlEvent::DashboardUpdated {
-                hp_connected: true,
-                session_id: ctx.agent.session.session_id.clone(),
-                tool_calls_total: 0,
-                tool_failures: 0,
-                current_phase: "single".into(),
-                streaming: false,
-            },
-        ));
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-            qaqh_domain::ControlEvent::DashboardSnapshot {
-                snapshot: dashboard::build_snapshot(ctx.agent.session.session_id.clone()),
-            },
-        ));
+    // Todo 变更通知走 canonical `WorkspaceResourceChanged` fact：仅在工具
+    // 真正持久化成功时发布（旧 DashboardUpdated 双发在 Ringing 分支只做
+    // 副作用、事件本体从不出口，已删除）。
+    if canonical_result.error.is_none()
+        && crate::agent::resource_publish::is_todo_mutation_tool(tool_name)
+    {
+        crate::agent::resource_publish::publish_todo_resource_fact_for_ctx(
+            ctx,
+            None,
+            Some(canonical_call_id(call_id)),
+        );
     }
 }
 

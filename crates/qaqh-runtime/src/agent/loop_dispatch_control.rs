@@ -2,15 +2,17 @@
 //!
 //! 由 `loop_core.rs` 拆分（Phase 2-5）：`impl Loop` 跨文件块，对外 API 不变。
 
-use super::loop_core::Loop;
-use super::turn_actor::{InteractionAdmission, InteractionState};
-use super::types::*;
-
 use qaqh_domain::{ControlCommand, DomainEvent};
-use qaqh_session::canonical::{causation_for_command, generate_ulid};
-use qaqh_session::session_fact_v2::EventId;
-use qaqh_session::session_fact_v2::ActorRef;
+use qaqh_session::{
+    canonical::{causation_for_command, generate_ulid},
+    session_fact_v2::{ActorRef, EventId},
+};
 
+use super::{
+    loop_core::Loop,
+    turn_actor::{InteractionAdmission, InteractionState},
+    types::*,
+};
 use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
 
 impl Loop {
@@ -144,6 +146,36 @@ impl Loop {
             ControlCommand::AgentReloadConfig => {
                 self.lifecycle
                     .reload_config(&mut self.session.agent, &self.cancel);
+                self.emit_operation_completed(command_id, qaqh_domain::ErrorScope::Control);
+            }
+            ControlCommand::PublishResourceChanged { resource_kind } => {
+                if resource_kind == "todo" {
+                    let session_id = self.session.agent.session.session_id.clone();
+                    let ledger = match self.session.agent.tool_ledger_mut() {
+                        Ok(Some(ledger)) => Some(ledger),
+                        Ok(None) => None,
+                        Err(error) => {
+                            log::warn!(
+                                "[todo] resource fact skipped (ledger unavailable): {error}"
+                            );
+                            None
+                        }
+                    };
+                    if let Some(ledger) = ledger {
+                        if let Err(error) =
+                            crate::agent::resource_publish::append_todo_resource_fact(
+                                ledger,
+                                &session_id,
+                                None,
+                                None,
+                            )
+                        {
+                            log::warn!("[todo] service mutation resource fact failed: {error}");
+                        }
+                    }
+                } else {
+                    log::warn!("[resources] unknown PublishResourceChanged kind '{resource_kind}'");
+                }
                 self.emit_operation_completed(command_id, qaqh_domain::ErrorScope::Control);
             }
             ControlCommand::SetToolMode {

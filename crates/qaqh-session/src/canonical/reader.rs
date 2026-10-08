@@ -1,14 +1,17 @@
 //! Read-only access to the committed prefix of a canonical session log.
 
-use std::fs::{self, File};
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File},
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
 
+use super::{
+    EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_POISON_FILE,
+    log::CanonicalError,
+    types::{EVENTS_COMMIT_SCHEMA, EventsCommit},
+};
 use crate::session_fact_v2::{LogId, MAX_SAFE_FACT_SEQ, SessionFact, SessionId};
-
-use super::log::CanonicalError;
-use super::types::{EVENTS_COMMIT_SCHEMA, EventsCommit};
-use super::{EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_POISON_FILE};
 
 /// A snapshot reader for `events.jsonl` bounded by `events.commit.json`.
 ///

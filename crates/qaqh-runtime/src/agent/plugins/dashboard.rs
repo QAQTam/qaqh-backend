@@ -1,35 +1,10 @@
-//! Native replaceable dashboard snapshot assembly (PR-1-4 / B4).
+//! dashboard.rs — dashboard 快照装配。
 //!
-//! Pure assembly only: `qaqh_workspace::dashboard` now produces `qaqh-domain`
-//! models directly (PR-3-3 单源化，proto 侧投影层已删）。All
-//! four engine consumers call [`build_snapshot`] directly.
-
-/// 注册名意义上的 todo 工具（todo/split.rs：todo_write / todo_update / todo_list）。
-///
-/// legacy 名 `"todo"` 已退役（todo_contract 锁定）。这是 dashboard 即时刷新的
-/// 触发判定，流式（engine_tool）与结果回填（tool_runtime）路径共用——
-/// tool_runtime 侧曾各自手写 `matches!(name, "todo")` 而漂移成死分支
-/// （2026-10-05 注释审计 §3.4），故收敛到本函数。
-pub(crate) fn is_todo_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "todo_write" | "todo_update" | "todo_list")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_todo_tool;
-
-    /// 锁定 dashboard 即时刷新的触发名单：现役三名，legacy 名不得再混入。
-    #[test]
-    fn is_todo_tool_matches_only_active_trio() {
-        for name in ["todo_write", "todo_update", "todo_list"] {
-            assert!(is_todo_tool(name), "{name} 应命中");
-        }
-        for retired in ["todo", "todo_create", "todo_insert", "todo_set"] {
-            assert!(!is_todo_tool(retired), "legacy 名 {retired} 不得命中");
-        }
-        assert!(!is_todo_tool("exec"));
-    }
-}
+//! Pure assembly only: `qaqh_workspace::dashboard` produces `qaqh-domain`
+//! models directly（proto 侧投影层已删）。Engine consumers call
+//! [`build_snapshot`] directly. Todo 变更通知不在这里：即时刷新的
+//! DashboardUpdated 双发已退役，canonical `WorkspaceResourceChanged` fact
+//! 由 `agent/resource_publish.rs` 统一发布。
 
 /// Builds the native replaceable dashboard record without exposing the legacy
 /// `Agent2Ui::Dashboard` schema to new consumers.

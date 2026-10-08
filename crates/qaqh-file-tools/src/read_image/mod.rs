@@ -56,24 +56,21 @@ struct ImageEntry {
 /// Register an uploaded image for a session. Called from engine_input.
 ///
 /// A-2 L0：字节外置磁盘（内容寻址，幂等去重），registry 只留 `{mime, sha256}`
-/// 索引；`peek_image` 时按需读盘。落盘失败则丢弃条目并告警（调用方拿到
-/// peek None，会引导用户重新附加——与"上传离开上下文"同一语义）。
-pub fn store_image(session_id: &str, mime_type: &str, data: &str) {
-    let sha256 = match qaqh_types::image_store::store_image_b64(data, mime_type) {
-        Ok(sha) => sha,
-        Err(e) => {
-            log::warn!("[read_image] registry store failed (entry dropped): {e}");
-            return;
-        }
-    };
-    if let Ok(mut reg) = IMAGE_REGISTRY.lock() {
-        reg.entry(session_id.to_string())
-            .or_default()
-            .push(ImageEntry {
-                mime_type: mime_type.to_string(),
-                sha256,
-            });
-    }
+/// 索引；`peek_image` 时按需读盘。落盘失败返回 `Err`——调用方必须上报
+/// （I20），不能再把"上传失败"与"图片离开上下文"混成同一种静默结果。
+pub fn store_image(session_id: &str, mime_type: &str, data: &str) -> Result<(), String> {
+    let sha256 = qaqh_types::image_store::store_image_b64(data, mime_type)
+        .map_err(|error| format!("image persist failed: {error}"))?;
+    let mut reg = IMAGE_REGISTRY
+        .lock()
+        .map_err(|_| "image registry poisoned".to_string())?;
+    reg.entry(session_id.to_string())
+        .or_default()
+        .push(ImageEntry {
+            mime_type: mime_type.to_string(),
+            sha256,
+        });
+    Ok(())
 }
 
 /// 按 ImageRef 重建 registry 条目（resume 路径专用）：磁盘文件已在场，
@@ -361,7 +358,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
         let session_id = "read_image_registry_test";
-        store_image(session_id, "image/png", "Zm9v");
+        store_image(session_id, "image/png", "Zm9v").expect("store");
         assert_eq!(
             peek_image(session_id, 0),
             Some(("image/png".into(), "Zm9v".into()))
@@ -388,12 +385,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
         let session_id = "read_image_reset_test";
-        store_image(session_id, "image/png", "AAA");
-        store_image(session_id, "image/jpeg", "BBB");
+        store_image(session_id, "image/png", "AAA").expect("store");
+        store_image(session_id, "image/jpeg", "BBB").expect("store");
         reset_images(session_id);
         reset_images(session_id); // 幂等
-        store_image(session_id, "image/png", "AAA");
-        store_image(session_id, "image/jpeg", "BBB");
+        store_image(session_id, "image/png", "AAA").expect("store");
+        store_image(session_id, "image/jpeg", "BBB").expect("store");
         assert_eq!(
             peek_image(session_id, 0),
             Some(("image/png".into(), "AAA".into()))

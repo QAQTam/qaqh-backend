@@ -4,22 +4,24 @@
 //! and the `events.commit.json` barrier; it does not own SessionActor state,
 //! projections or recovery-plan execution.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
-
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use thiserror::Error;
-
-use crate::session_fact_v2::{
-    EventId, FactPayload, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError,
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
 };
 
-use super::reader::scan_committed_facts;
-use super::types::{
-    AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, UPGRADE_FENCE_SCHEMA, UpgradeFence,
-    UpgradeState, WRITER_FENCE_SCHEMA, WriterFence, WriterId, WriterLease,
+use serde::{Serialize, de::DeserializeOwned};
+use thiserror::Error;
+
+use super::{
+    reader::scan_committed_facts,
+    types::{
+        AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, UPGRADE_FENCE_SCHEMA, UpgradeFence,
+        UpgradeState, WRITER_FENCE_SCHEMA, WriterFence, WriterId, WriterLease,
+    },
+};
+use crate::session_fact_v2::{
+    EventId, FactPayload, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError,
 };
 
 pub const EVENTS_FILE: &str = "events.jsonl";
