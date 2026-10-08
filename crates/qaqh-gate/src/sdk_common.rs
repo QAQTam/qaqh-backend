@@ -112,7 +112,9 @@ impl StreamState {
     }
 }
 
-fn uuid_simple() -> String {
+/// 合成缺失的 tool-call id（`toolu_…` 形态）。Anthropic 掐流与 Gemini
+/// （协议本身不带 id）两条路径共用。
+pub(crate) fn uuid_simple() -> String {
     use std::hash::{Hash, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
     let mut h = std::collections::hash_map::DefaultHasher::new();
