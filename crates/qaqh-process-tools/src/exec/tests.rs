@@ -48,7 +48,7 @@ fn platform_shell_priority_is_fixed() {
         &[Shell::Bash, Shell::Zsh, Shell::Sh]
     );
     #[cfg(target_os = "macos")]
-    assert_eq!(Shell::auto_candidates(), &[Shell::Bash, Shell::Zsh]);
+    assert_eq!(Shell::auto_candidates(), &[Shell::Zsh, Shell::Bash]);
 }
 
 fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::ToolCallContext {
