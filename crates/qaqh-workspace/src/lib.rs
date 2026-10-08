@@ -19,6 +19,7 @@ pub mod authorization;
 pub use qaqh_file_tools::code_delta;
 pub use qaqh_file_tools::edit;
 pub mod execution;
+pub mod exec_audit;
 pub use qaqh_file_tools::file_glob;
 pub use qaqh_file_tools::file_mutate;
 pub use qaqh_file_tools::file_query;
