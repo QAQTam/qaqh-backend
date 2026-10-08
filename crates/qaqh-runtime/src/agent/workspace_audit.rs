@@ -51,6 +51,9 @@ pub struct BatchAudit {
     tool_label: String,
     /// 记入 SMJ 的 tool_use_id：单调用批填该 call id，否则留空（与既有调用方一致）。
     tool_use_id: String,
+    /// exec 调用级归因的账本键（finish 时由 tool_runtime 传入）。backfill
+    /// 跳过这些路径：exec_audit 已按 call_id 记过 SMJ 并刷新账本。
+    attributed: HashSet<String>,
 }
 
 impl BatchAudit {
@@ -128,18 +131,32 @@ pub fn begin(admitted: &[AdmittedTool]) -> Option<BatchAudit> {
         declared_writes,
         tool_label,
         tool_use_id,
+        attributed: HashSet::new(),
     })
 }
 
 /// 批执行**之后**收口：补一次扫描 → 回填宿主审计链与文件账本 → 渲染限额报告
 /// （含可执行回滚命令）→ 注入落盘。
 ///
+/// `exec_attributed`：批内 exec 调用经 `exec_audit` 双扫归因、**已记入
+/// SMJ（tool=exec）并刷新 file_state** 的路径账本键（CLEAN-3/T9）。回填
+/// 时跳过这些路径——同一变更不得既记 exec 又记 scan。
+///
 /// 提交后立即 drain_turn_boundary，不能只 submit。Loop::drain_injections 在总线
 /// 无投递时**提前返回**，不会排空 ContextFlow 的 pending 队列；只 submit 会让报告
 /// 长期滞留在内存里永不进 messages.jsonl（即“落盘 != 传输”分叉的反向形态）。
 /// 此刻整批 tool 结果均已回填，排空点与 lap 边界语义等价。
-pub fn finish(ctx: &mut RingContext, audit: Option<BatchAudit>, turn_id: &str, round_num: u32) {
-    let Some(audit) = audit else { return };
+pub fn finish(
+    ctx: &mut RingContext,
+    audit: Option<BatchAudit>,
+    turn_id: &str,
+    round_num: u32,
+    exec_attributed: &[String],
+) {
+    let Some(mut audit) = audit else { return };
+    audit
+        .attributed
+        .extend(exec_attributed.iter().cloned());
     let changes = match audit.session.changes_after_tool_end(&audit.mark) {
         Ok(changes) => changes,
         Err(error) => {
@@ -208,9 +225,14 @@ fn backfill(ctx: &RingContext, audit: &BatchAudit, changes: &[Change]) -> Vec<St
     let mut skipped_binary = 0usize;
     for change in changes {
         let abs = absolutize(&audit.root, &change.path);
+        let ledger_key = qaqh_workspace::file_state::ledger_key(&abs);
+        // exec 调用级归因已记过（tool=exec, use_id=call_id），不得重复记 scan。
+        if audit.attributed.contains(&ledger_key) {
+            continue;
+        }
         if audit
             .declared_writes
-            .contains(&qaqh_workspace::file_state::ledger_key(&abs))
+            .contains(&ledger_key)
         {
             continue;
         }
