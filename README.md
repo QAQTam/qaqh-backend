@@ -34,7 +34,7 @@ qaqh-daemon      axum HTTP/SSE、lease、driver、service
 qaqh-runtime     Agent loop、TurnActor、ToolRuntime、RingingHub
 qaqh-session     canonical facts、projection、replay、messages.jsonl
 qaqh-message     MessageStore、WAL、compact archive watermark
-qaqh-gate        OpenAI Chat / Responses / Anthropic provider HTTP
+qaqh-gate        OpenAI Chat / Responses / Anthropic / Gemini provider HTTP
 qaqh-workspace   typed tools、permission、audit、sandbox integration
 qaqh-types       shared types / storage contracts
 qaqh-client      Ringing v2 共享传输(TUI / 桌面壳)

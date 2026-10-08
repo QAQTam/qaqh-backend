@@ -28,6 +28,11 @@ pub enum Wire {
     Responses,
     /// Anthropic Messages (`/v1/messages`).
     Anthropic,
+    /// Gemini `generateContent` (`/models/{model}:generateContent`).
+    ///
+    /// Streaming uses the sibling `:streamGenerateContent` path with
+    /// `alt=sse`; authentication is the `key` query parameter, not a header.
+    Gemini,
 }
 
 impl Wire {
@@ -37,6 +42,7 @@ impl Wire {
             Self::OpenAi => "openai",
             Self::Responses => "responses",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -49,6 +55,11 @@ impl Wire {
             }
             "responses" | "openai-responses" => Some(Self::Responses),
             "anthropic" | "messages" | "claude" => Some(Self::Anthropic),
+            "gemini"
+            | "google"
+            | "generatecontent"
+            | "generate_content"
+            | "gemini-generate-content" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -227,11 +238,16 @@ impl Default for EndpointCompat {
 
 impl EndpointCompat {
     /// The path to request: the override when set, else the wire's canonical suffix.
+    ///
+    /// The Gemini suffix carries a `{model}` placeholder that the transport
+    /// substitutes; streaming switches it to the `:streamGenerateContent`
+    /// sibling (`Wire::Gemini` doc).
     pub fn path_for(&self, wire: Wire) -> String {
         self.path.clone().unwrap_or_else(|| match wire {
             Wire::OpenAi => "/chat/completions".to_string(),
             Wire::Responses => "/responses".to_string(),
             Wire::Anthropic => "/v1/messages".to_string(),
+            Wire::Gemini => "/models/{model}:generateContent".to_string(),
         })
     }
 }
@@ -250,6 +266,7 @@ mod tests {
             (Wire::OpenAi, "openai"),
             (Wire::Responses, "responses"),
             (Wire::Anthropic, "anthropic"),
+            (Wire::Gemini, "gemini"),
         ] {
             assert_eq!(wire.as_str(), name);
             assert_eq!(Wire::parse(name), Some(wire));
@@ -257,6 +274,7 @@ mod tests {
             assert_eq!(row.wire, wire);
         }
         assert_eq!(Wire::parse("  OpenAI-Compatible "), Some(Wire::OpenAi));
+        assert_eq!(Wire::parse("google"), Some(Wire::Gemini));
         assert_eq!(Wire::parse("unknown"), None);
         assert_eq!(Wire::default(), Wire::OpenAi);
     }
@@ -304,6 +322,10 @@ idle_timeout_secs = 60
         assert_eq!(
             EndpointCompat::default().path_for(Wire::Responses),
             "/responses"
+        );
+        assert_eq!(
+            EndpointCompat::default().path_for(Wire::Gemini),
+            "/models/{model}:generateContent"
         );
         let compat = EndpointCompat {
             path: Some("/v1/inner/responses".into()),
