@@ -80,6 +80,7 @@ pub enum ProviderKind {
     OpenAi,
     Responses,
     Anthropic,
+    Gemini,
 }
 
 impl ProviderKind {
@@ -88,6 +89,7 @@ impl ProviderKind {
         match s {
             "responses" => Self::Responses,
             "anthropic" => Self::Anthropic,
+            "gemini" => Self::Gemini,
             _ => Self::OpenAi,
         }
     }
@@ -167,6 +169,8 @@ pub struct ProviderConfig {
     pub chat_path: Option<String>,
     pub responses_path: Option<String>,
     pub anthropic_path: Option<String>,
+    /// Gemini 路径覆写（可含 `{model}` 占位）；`None` = 该 wire 的规范路径。
+    pub gemini_path: Option<String>,
     pub thinking_mode: ThinkingParamMode,
     pub cache_field: CacheTokenField,
     pub include_stream_usage: bool,
@@ -285,6 +289,7 @@ impl ProviderConfig {
             chat_path,
             responses_path: None,
             anthropic_path: None,
+            gemini_path: None,
             thinking_mode,
             cache_field,
             include_stream_usage: false,
@@ -320,6 +325,7 @@ impl ProviderConfig {
             chat_path: None,
             responses_path,
             anthropic_path: None,
+            gemini_path: None,
             thinking_mode: ThinkingParamMode::OpenAi,
             cache_field: CacheTokenField::default(),
             include_stream_usage: false,
@@ -360,6 +366,42 @@ impl ProviderConfig {
             chat_path: None,
             responses_path: None,
             anthropic_path,
+            gemini_path: None,
+            thinking_mode: ThinkingParamMode::OpenAi,
+            cache_field: CacheTokenField::default(),
+            include_stream_usage: false,
+            supports_thinking: true,
+            thinking_budget_large: false,
+            supports_reasoning_effort: true,
+            effort_allowlist: None,
+            tool_call_content_null: false,
+            supports_reasoning_content: true,
+            require_provider_parameters: false,
+            do_sample: None,
+            supports_tail_system: true,
+            responses_compat: ResponsesCompat::default(),
+            prompt_cache_key: None,
+            opencode_headers: None,
+            retry: None,
+        }
+    }
+
+    /// Build a Gemini `generateContent` provider config.
+    ///
+    /// Authentication is the `key` query parameter (not a header), and the
+    /// model is part of the request path, so the transport derives the
+    /// streaming sibling path from `gemini_path`.
+    pub fn gemini(base_url: &str, api_key: &str, model: &str, gemini_path: Option<String>) -> Self {
+        Self {
+            kind: ProviderKind::Gemini,
+            base_url: base_url.to_string(),
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+            user_id_mode: None,
+            chat_path: None,
+            responses_path: None,
+            anthropic_path: None,
+            gemini_path,
             thinking_mode: ThinkingParamMode::OpenAi,
             cache_field: CacheTokenField::default(),
             include_stream_usage: false,

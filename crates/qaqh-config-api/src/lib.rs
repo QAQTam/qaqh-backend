@@ -33,7 +33,7 @@ pub struct ConfigDto {
     pub model: String,
     /// BYOK 的 endpoint：scheme + host + 可选前缀（不含 wire 自身路径）。
     pub base_url: String,
-    /// 该 endpoint 说的 wire：`openai` | `responses` | `anthropic`。
+    /// 该 endpoint 说的 wire：`openai` | `responses` | `anthropic` | `gemini`。
     pub wire: String,
     pub max_tokens: u64,
     /// 端点声明的上下文窗口——本地压缩的唯一分母（软阈值与硬 pre-flight 同源）。
@@ -265,10 +265,10 @@ impl ConfigPatch {
             return Err("contextLength 必须大于 0".to_string());
         }
         if let Some(w) = &self.wire
-            && !matches!(w.as_str(), "openai" | "responses" | "anthropic")
+            && !matches!(w.as_str(), "openai" | "responses" | "anthropic" | "gemini")
         {
             return Err(format!(
-                "wire 仅允许 openai|responses|anthropic，收到 {w}"
+                "wire 仅允许 openai|responses|anthropic|gemini，收到 {w}"
             ));
         }
         if let Some(e) = &self.reasoning_effort

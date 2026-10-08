@@ -10,6 +10,7 @@
 //! level (see Cargo.toml).
 
 mod anthropic_sdk;
+mod gemini_sdk;
 mod openai_sdk;
 mod responses_sdk;
 #[cfg(test)]
@@ -78,6 +79,17 @@ pub fn chat_stream(
             cancel,
             on_event,
         ),
+        ProviderKind::Gemini => gemini_sdk::chat_stream_gemini(
+            provider,
+            &provider.model,
+            messages,
+            tools,
+            max_tokens,
+            effort,
+            user_id,
+            cancel,
+            on_event,
+        ),
     }
 }
 
@@ -96,6 +108,9 @@ pub fn chat_sync(
         }
         ProviderKind::OpenAi => {
             openai_sdk::chat_sync_openai(provider, &provider.model, messages, max_tokens)
+        }
+        ProviderKind::Gemini => {
+            gemini_sdk::chat_sync_gemini(provider, &provider.model, messages, max_tokens)
         }
     }
 }

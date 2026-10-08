@@ -805,6 +805,21 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             p.require_provider_parameters = compat.require_provider_parameters;
             p
         }
+        qaqh_types::Wire::Gemini => {
+            // API key 走 `key` query 参数（gate 侧固定 QueryKey），路径含
+            // `{model}` 占位；`cache_field` / `user_id_mode` 等 chat 侧旋钮
+            // 在这条 wire 上没有意义，保持结构化缺省。
+            let mut p = qaqh_gate::ProviderConfig::gemini(
+                &cfg.base_url,
+                &cfg.api_key,
+                &cfg.model,
+                compat.path.clone(),
+            );
+            p.supports_thinking = compat.supports_thinking;
+            p.supports_reasoning_effort = compat.supports_reasoning_effort;
+            p.effort_allowlist = compat.effort_allowlist.clone();
+            p
+        }
     };
     provider
         .with_opencode_headers(&ctx.agent.session.session_id, request_tag)

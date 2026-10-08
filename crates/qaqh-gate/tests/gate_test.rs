@@ -1691,3 +1691,173 @@ fn responses_empty_input_sync_reports_diagnostic_error() {
         "不得向 responses 端点发出 input: [] 请求"
     );
 }
+
+// ── Gemini generateContent tests ─────────────────────────────────────
+
+fn make_gemini_provider(mock: &MockServer) -> ProviderConfig {
+    ProviderConfig::gemini(&mock.base_url(), "sk-test-key", "gemini-3-flash", None)
+}
+
+/// 一个 thought 帧 + 文本/函数调用帧 + 终帧（`finishReason: STOP`）。
+/// Gemini 流没有 `[DONE]` 哨兵：body 结束即触发 mapper 的 `finish()`。
+fn gemini_sse_scenario() -> Vec<SseChunk> {
+    vec![
+        SseChunk::Data(json!({
+            "candidates": [{"content": {"parts": [{"text": "想", "thought": true}]}}]
+        })),
+        SseChunk::Data(json!({
+            "candidates": [{"content": {"parts": [
+                {"text": "你好"},
+                {"functionCall": {"name": "exec", "args": {"cmd": "ls"}}}
+            ]}}],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 3,
+                "cachedContentTokenCount": 4,
+                "thoughtsTokenCount": 2
+            }
+        })),
+        SseChunk::Data(json!({
+            "candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]
+        })),
+    ]
+}
+
+/// 模型进路径、API key 走 query、流式加 `alt=sse`——三条 wire 事实与
+/// chat/messages 端点完全不同，必须在真实请求上钉住。
+#[test]
+fn gemini_stream_uses_model_path_key_query_and_alt_sse() {
+    let mock = MockServer::new(gemini_sse_scenario());
+    let provider = make_gemini_provider(&mock);
+    let _ = collect_events(&provider, vec![Message::user("hi")], None);
+
+    let url = mock.last_request_url().expect("url captured");
+    assert!(
+        url.starts_with("/models/gemini-3-flash:streamGenerateContent"),
+        "model-scoped streaming path expected, got: {url}"
+    );
+    assert!(
+        url.contains("key=sk-test-key"),
+        "Gemini authenticates via the key query parameter: {url}"
+    );
+    assert!(url.contains("alt=sse"), "streaming needs alt=sse: {url}");
+}
+
+#[test]
+fn gemini_stream_projects_thought_text_tool_call_and_usage() {
+    let mock = MockServer::new(gemini_sse_scenario());
+    let provider = make_gemini_provider(&mock);
+    let events = collect_events(&provider, vec![Message::user("hi")], None);
+
+    let texts: Vec<&str> = events.iter().filter_map(event_text).collect();
+    assert_eq!(texts, vec!["你好"], "text parts become content deltas");
+
+    let reasoning: Vec<&str> = events.iter().filter_map(event_reasoning).collect();
+    assert_eq!(
+        reasoning,
+        vec!["想"],
+        "thought parts become reasoning deltas"
+    );
+
+    // Gemini 不给 function-call id：gate 必须合成一个非空 id，且进度事件与
+    // Done 载荷共用同一个值（runtime 的 timeline block 以 `tool:<id>` 为键）。
+    let progress_id = events
+        .iter()
+        .find_map(|ev| match ev {
+            StreamEvent::ToolCallProgress { id, name, .. } if name == "exec" => Some(id.clone()),
+            _ => None,
+        })
+        .expect("tool call progress emitted");
+    assert!(
+        progress_id.starts_with("toolu_"),
+        "synthesized id expected, got: {progress_id}"
+    );
+
+    let done = events.iter().find_map(event_done).expect("Done emitted");
+    let tool_use = done
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => Some((id, name, input)),
+            _ => None,
+        })
+        .expect("tool use block in Done");
+    assert_eq!(tool_use.0, &progress_id, "progress and Done must agree");
+    assert_eq!(tool_use.1, "exec");
+    assert_eq!(tool_use.2, &json!({"cmd": "ls"}));
+    assert!(
+        matches!(done.content.first(), Some(ContentBlock::Reasoning { .. })),
+        "reasoning block must lead the assistant message: {:?}",
+        done.content
+    );
+
+    let usage = events
+        .iter()
+        .find_map(|ev| match ev {
+            StreamEvent::UsageUpdate(u) => Some(u.clone()),
+            _ => None,
+        })
+        .expect("usage emitted");
+    assert_eq!(usage.prompt_tokens, 10);
+    assert_eq!(usage.completion_tokens, 3);
+    // promptTokenCount 是含缓存的输入总量：命中取 cached，余量为 miss。
+    assert_eq!(usage.prompt_cache_hit_tokens, 4);
+    assert_eq!(usage.prompt_cache_miss_tokens, 6);
+    assert_eq!(usage.reasoning_tokens, 2);
+}
+
+#[test]
+fn gemini_body_carries_system_instruction_and_thinking_level() {
+    let mock = MockServer::new(gemini_sse_scenario());
+    let provider = make_gemini_provider(&mock);
+    let tools = vec![ToolDef {
+        call_type: "function".into(),
+        function: ToolFunction {
+            name: "exec".into(),
+            description: "run a command".into(),
+            parameters: json!({"type": "object"}),
+        },
+    }];
+    let _ = collect_events(
+        &provider,
+        vec![Message::system("be terse"), Message::user("hi")],
+        Some(tools),
+    );
+
+    let body = mock.last_request_json().expect("request body captured");
+    assert_eq!(
+        body.pointer("/systemInstruction/parts/0/text")
+            .and_then(|v| v.as_str()),
+        Some("be terse"),
+        "instruction turns merge into systemInstruction: {body}"
+    );
+    assert!(
+        body.pointer("/contents/0/parts/0/text").is_some(),
+        "history rides `contents`: {body}"
+    );
+    assert_eq!(
+        body.pointer("/generationConfig/thinkingConfig/thinkingLevel")
+            .and_then(|v| v.as_str()),
+        Some("HIGH"),
+        "effort=high must map onto thinkingLevel: {body}"
+    );
+    assert_eq!(
+        body.pointer("/generationConfig/thinkingConfig/includeThoughts")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "thoughts must be requested so reasoning is streamed: {body}"
+    );
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0/name")
+            .and_then(|v| v.as_str()),
+        Some("exec"),
+        "tools become functionDeclarations: {body}"
+    );
+    // chat 侧旋钮在这条 wire 上必须一个都不出现。
+    assert!(body.get("stream").is_none(), "no stream field: {body}");
+    assert!(
+        body.get("stream_options").is_none(),
+        "no stream_options: {body}"
+    );
+    assert!(body.get("do_sample").is_none(), "no do_sample: {body}");
+}

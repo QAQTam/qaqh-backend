@@ -139,6 +139,8 @@ pub struct MockServer {
     pub request_count: Arc<AtomicUsize>,
     /// Last request body (for inspection).
     pub last_request_body: Arc<Mutex<Option<String>>>,
+    /// Last request path + query (for inspection; e.g. Gemini's `key` / `alt`).
+    pub last_request_url: Arc<Mutex<Option<String>>>,
 }
 
 fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk], base_headers: &ScenarioHeaders) {
@@ -220,6 +222,7 @@ fn run_server(
     stop: Arc<Mutex<bool>>,
     request_count: Arc<AtomicUsize>,
     last_body: Arc<Mutex<Option<String>>>,
+    last_url: Arc<Mutex<Option<String>>>,
 ) {
     let mut seq_index: usize = 0;
     loop {
@@ -235,11 +238,13 @@ fn run_server(
             }
         };
 
+        let url = req.url().to_string();
         let mut body = String::new();
         if req.as_reader().read_to_string(&mut body).is_ok() {
             // body read successfully
         }
         *last_body.lock().expect("body lock") = Some(body);
+        *last_url.lock().expect("url lock") = Some(url);
         request_count.fetch_add(1, Ordering::SeqCst);
 
         // Get the scenario (+ extra response headers) for this request
@@ -284,14 +289,16 @@ impl MockServer {
         let stop = Arc::new(Mutex::new(false));
         let request_count = Arc::new(AtomicUsize::new(0));
         let last_body = Arc::new(Mutex::new(None));
+        let last_url = Arc::new(Mutex::new(None));
         let source = Arc::new(Mutex::new(source));
 
         let handle = {
             let stop = stop.clone();
             let rc = request_count.clone();
             let lb = last_body.clone();
+            let lu = last_url.clone();
             let src = source.clone();
-            thread::spawn(|| run_server(server, src, stop, rc, lb))
+            thread::spawn(|| run_server(server, src, stop, rc, lb, lu))
         };
 
         MockServer {
@@ -300,6 +307,7 @@ impl MockServer {
             stop,
             request_count,
             last_request_body: last_body,
+            last_request_url: last_url,
         }
     }
 
@@ -310,6 +318,14 @@ impl MockServer {
     pub fn last_request_json(&self) -> Option<serde_json::Value> {
         let guard = self.last_request_body.lock().expect("request body lock");
         guard.as_ref().and_then(|s| serde_json::from_str(s).ok())
+    }
+
+    /// Path + query of the last request (e.g. `/models/x:streamGenerateContent?key=…&alt=sse`).
+    pub fn last_request_url(&self) -> Option<String> {
+        self.last_request_url
+            .lock()
+            .expect("request url lock")
+            .clone()
     }
 }
 
