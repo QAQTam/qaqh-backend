@@ -145,10 +145,6 @@ struct LegacyEndpoint {
     #[serde(default)]
     responses_echo_reasoning_content: Option<bool>,
     #[serde(default)]
-    supports_image_tool: Option<bool>,
-    #[serde(default)]
-    image_models: Option<Vec<String>>,
-    #[serde(default)]
     retry: Option<qaqh_types::RetrySpec>,
 }
 
@@ -217,8 +213,6 @@ impl LegacyEndpoint {
                 self.responses_echo_reasoning_content,
                 defaults.responses_echo_reasoning_content,
             ),
-            supports_image_tool: flag(self.supports_image_tool, defaults.supports_image_tool),
-            image_models: self.image_models.clone(),
             retry: self.retry.clone(),
         }
     }
@@ -280,12 +274,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_preset_maps_wire_url_and_image_capability() {
+    fn legacy_preset_maps_wire_url_and_compat_defaults() {
         let preset = legacy_preset("deepseek", "openai").expect("deepseek/openai");
         assert_eq!(preset.wire, Wire::OpenAi);
         assert_eq!(preset.base_url, "https://api.deepseek.com");
         assert!(preset.compat.include_stream_usage);
-        assert!(preset.compat.supports_image_tool);
         assert_eq!(
             preset.compat.cache_field,
             CacheTokenField::PromptCacheHitTokens

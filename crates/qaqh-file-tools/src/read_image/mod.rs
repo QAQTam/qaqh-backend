@@ -12,8 +12,6 @@
 //! - `path`: an image file inside the workspace (admission authorizes the
 //!   path resource before the handler runs).
 //!
-//! The tool is only usable on endpoints that declare vision input support
-//! ([`image_model_supported`]: registry flag + optional per-model allowlist).
 //! Rejections are actionable: the error tells the model to stop retrying,
 //! inform the user, and fall back to a text-only approach.
 
@@ -114,11 +112,6 @@ pub fn peek_image(session_id: &str, index: usize) -> Option<(String, String)> {
     Some((entry.mime_type.clone(), data))
 }
 
-// ── Capability gate ───────────────────────────────────────────────────
-
-/// Whether the currently configured (provider, endpoint, model) accepts image input.
-use crate::hooks::image_model_supported;
-
 // ── Typed output / handler ────────────────────────────────────────────
 
 /// Load image into visual context (by image_index or file path).
@@ -206,15 +199,6 @@ impl TypedTool for ReadImageTool {
         ctx: &ToolCallContext,
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
-        if !image_model_supported() {
-            return Err(mutation_error(
-                "tool_error",
-                "read_image: the active model does not support image input. Do NOT retry read_image. Tell the user this model cannot see images, and continue with a text-only approach (e.g. ask the user to describe the image or paste relevant text).",
-                None,
-                json!({}),
-            ));
-        }
-
         let (raw_bytes, display) = if let Some(index) = args.image_index {
             let index = index as usize;
             let session_id = &ctx.session_id;
