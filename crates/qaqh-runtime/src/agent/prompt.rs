@@ -74,6 +74,13 @@ fn detect_shells() -> &'static str {
                 shells.push("bash (Git for Windows)");
             }
             shells.push("cmd");
+        } else if cfg!(target_os = "macos") {
+            // macOS 默认壳是 zsh（系统自带 bash 长期停在 3.2），顺序与 exec 判序一致。
+            if std::path::Path::new("/bin/zsh").exists() {
+                shells.push("zsh");
+            }
+            shells.push("bash");
+            shells.push("sh");
         } else {
             shells.push("bash");
             shells.push("sh");
