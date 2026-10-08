@@ -153,8 +153,6 @@ impl SessionEngine {
         agent.config.auto_compact_threshold = cfg.auto_compact_threshold;
         agent.config.permission_level = cfg.permission_level;
         agent.config.exec = cfg.exec;
-        // 图片能力快照随配置刷新（PR-1-10：工具调用路径零磁盘读）。
-        agent.refresh_image_capability();
     }
 }
 

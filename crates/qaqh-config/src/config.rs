@@ -652,8 +652,6 @@ wire = "openai"
 # responses_web_search = false
 # responses_effort_max = "xhigh"          # reasoning.effort 上限（超出即钳制）
 # responses_search_function_alias = "web_search"
-# supports_image_tool = true              # 打开后模型才会看到 read_image 工具
-# image_models = ["vision-*"]             # 逐模型视觉白名单（`*` 后缀 = 前缀匹配）
 # [profiles.default.compat.retry]         # 不写 = 统一传输层缺省（5 次 / 1s / 30s / 空闲 300s）
 # max_retries = 8
 # idle_timeout_secs = 600
@@ -1760,7 +1758,6 @@ wire = \"responses\"
 
 [profiles.default.compat]
 responses_effort_max = \"max\"
-supports_image_tool = true
 ";
         let (dir, store, secrets) = setup("byok", source);
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
@@ -1768,7 +1765,6 @@ supports_image_tool = true
         assert_eq!(cfg.wire, qaqh_types::Wire::Responses);
         assert_eq!(cfg.context_length, 1_000_000);
         assert_eq!(cfg.compat.responses_effort_max, "max");
-        assert!(cfg.compat.supports_image_tool);
         assert_eq!(
             cfg.profiles.get("default").map(|p| p.wire),
             Some(qaqh_types::Wire::Responses)

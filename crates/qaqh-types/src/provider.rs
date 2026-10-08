@@ -184,18 +184,6 @@ pub struct EndpointCompat {
     #[serde(default = "default_true")]
     pub responses_echo_reasoning_content: bool,
 
-    // ── Capability gates ──
-    /// Whether the endpoint accepts image parts (vision input). Gates the
-    /// `read_image` client tool so a model never sees a tool it cannot use.
-    /// Default: false — a BYOK endpoint opts in.
-    #[serde(default)]
-    pub supports_image_tool: bool,
-    /// Per-model vision allowlist for endpoints serving heterogeneous models.
-    /// When `supports_image_tool` is true: `None` = every model accepts images,
-    /// `Some` = only the listed ids, matched exactly or by `*` suffix
-    /// (e.g. `"gemini-*"`), case-insensitively against the active model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_models: Option<Vec<String>>,
     /// Per-endpoint retry policy override. `None` = transport defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetrySpec>,
@@ -232,8 +220,6 @@ impl Default for EndpointCompat {
             responses_supports_user: true,
             responses_search_function_alias: None,
             responses_echo_reasoning_content: true,
-            supports_image_tool: false,
-            image_models: None,
             retry: None,
         }
     }
@@ -247,30 +233,6 @@ impl EndpointCompat {
             Wire::Responses => "/responses".to_string(),
             Wire::Anthropic => "/v1/messages".to_string(),
         })
-    }
-
-    /// Whether `model` accepts image input on this endpoint — the gate for the
-    /// `read_image` client tool, so a model never sees a tool it cannot use.
-    ///
-    /// `image_models` is the finer cut for endpoints serving heterogeneous
-    /// models: absent = every model accepts images, present = only the listed
-    /// ids, matched exactly or by `*` suffix, case-insensitively.
-    pub fn supports_image_for_model(&self, model: &str) -> bool {
-        if !self.supports_image_tool {
-            return false;
-        }
-        match &self.image_models {
-            None => true,
-            Some(patterns) => {
-                let model = model.to_lowercase();
-                patterns
-                    .iter()
-                    .any(|pattern| match pattern.strip_suffix('*') {
-                        Some(prefix) => model.starts_with(&prefix.to_lowercase()),
-                        None => model == pattern.to_lowercase(),
-                    })
-            }
-        }
     }
 }
 
@@ -303,7 +265,6 @@ mod tests {
     fn compat_needs_no_declaration_to_use_wire_defaults() {
         let compat: EndpointCompat = toml::from_str("").expect("empty table");
         assert!(compat.supports_thinking);
-        assert!(!compat.supports_image_tool);
         assert_eq!(compat.responses_effort_max, "high");
         assert_eq!(compat.path, None);
         assert!(compat.retry.is_none());
@@ -315,8 +276,6 @@ mod tests {
 path = "/api/v1/messages"
 thinking_mode = "MiniMaxAdaptive"
 cache_field = "UsageCachedTokens"
-supports_image_tool = true
-image_models = ["vision-*"]
 responses_effort_max = "max"
 [retry]
 max_retries = 3
@@ -326,11 +285,6 @@ idle_timeout_secs = 60
         assert_eq!(compat.path.as_deref(), Some("/api/v1/messages"));
         assert_eq!(compat.thinking_mode, ThinkingParamMode::MiniMaxAdaptive);
         assert_eq!(compat.cache_field, CacheTokenField::UsageCachedTokens);
-        assert!(compat.supports_image_tool);
-        assert_eq!(
-            compat.image_models.as_deref(),
-            Some(["vision-*".to_string()].as_slice())
-        );
 
         let written = toml::to_string(&compat).expect("serialize");
         let back: EndpointCompat = toml::from_str(&written).expect("reparse");
@@ -356,29 +310,5 @@ idle_timeout_secs = 60
             ..Default::default()
         };
         assert_eq!(compat.path_for(Wire::OpenAi), "/v1/inner/responses");
-    }
-
-    #[test]
-    fn image_gate_layers_endpoint_flag_and_model_allowlist() {
-        let off = EndpointCompat::default();
-        assert!(!off.supports_image_for_model("anything"));
-
-        let uniform = EndpointCompat {
-            supports_image_tool: true,
-            ..Default::default()
-        };
-        assert!(uniform.supports_image_for_model("any-model"));
-
-        let allowlist = EndpointCompat {
-            supports_image_tool: true,
-            image_models: Some(vec!["Vision-*".into(), "exact-id".into()]),
-            ..Default::default()
-        };
-        assert!(allowlist.supports_image_for_model("vision-pro"));
-        assert!(allowlist.supports_image_for_model("EXACT-ID"));
-        assert!(
-            !allowlist.supports_image_for_model("text-only"),
-            "文本模型不得拿到 read_image"
-        );
     }
 }

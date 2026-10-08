@@ -91,7 +91,6 @@ pub(crate) fn spawn_agent(
             .unwrap_or_default();
     let mut agent = AgentState::new(agent_config);
     agent.session.profile = session_profile;
-    agent.refresh_image_capability();
     log::info!(
         "[ACTOR] session={session_id} profile={:?} model={}",
         agent.session.profile,
