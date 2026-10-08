@@ -328,6 +328,8 @@ mod tests {
             build_id: String::new(),
             channel: String::new(),
             executable: String::new(),
+            lan_endpoint: None,
+            tls_fingerprint: None,
         };
         assert_eq!(legacy.base_url().unwrap(), "http://127.0.0.1:9101");
 
@@ -406,6 +408,8 @@ mod tests {
             build_id: String::new(),
             channel: String::new(),
             executable: String::new(),
+            lan_endpoint: None,
+            tls_fingerprint: None,
         }
     }
 
