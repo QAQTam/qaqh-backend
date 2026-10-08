@@ -310,18 +310,6 @@ impl AgentState {
         self.fact_causation = causation;
     }
 
-    /// Push the image capability snapshot for the current config into the
-    /// workspace runtime (PR-1-10 / D2): tool-call paths read the snapshot,
-    /// never the disk. Call at assembly and after every config reload.
-    pub fn refresh_image_capability(&self) {
-        // BYOK：图片能力是这条端点自己的声明（compat），不再有 provider 目录可查。
-        let enabled = self.config.compat.supports_image_tool;
-        qaqh_workspace::runtime::set_image_capability(
-            enabled,
-            enabled && self.config.compat.supports_image_for_model(&self.config.model),
-        );
-    }
-
     /// Queue a loop-bookkeeping write for the host flush service (PR-1-5).
     pub fn enqueue_meta_op(&mut self, op: MetaOp) {
         self.pending_meta_ops.push(op);
@@ -481,7 +469,6 @@ impl AgentState {
         runtime::init_tools(caller, &agent_tool_registrars(), vec![]);
         let mut agent = Self::new(config);
         agent.tool_defs = runtime::all_tools(); // all tools, no allowlist
-        agent.refresh_image_capability();
         agent
     }
 

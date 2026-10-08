@@ -26,7 +26,6 @@ supports_reasoning_effort = true
 tool_call_content_null = false
 supports_reasoning_content = true
 require_provider_parameters = false
-image_models = ["deepseek-v4-flash-vision-exp"]
 stateful = false
 beta = false
 responses_web_search = true
@@ -35,7 +34,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = true
 
 [[providers.endpoints]]
 id = "responses"
@@ -58,7 +56,6 @@ supports_reasoning_effort = true
 tool_call_content_null = false
 supports_reasoning_content = false
 require_provider_parameters = false
-image_models = ["deepseek-v4-flash-vision-exp"]
 stateful = false
 beta = true
 responses_web_search = true
@@ -68,7 +65,6 @@ responses_effort_max = "max"
 responses_supports_user = true
 responses_search_function_alias = "qaqh_search"
 responses_echo_reasoning_content = true
-supports_image_tool = true
 
 [[providers]]
 id = "qwen"
@@ -101,7 +97,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers.endpoints]]
 id = "responses"
@@ -130,7 +125,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "glm"
@@ -155,13 +149,6 @@ supports_reasoning_effort = true
 tool_call_content_null = false
 supports_reasoning_content = true
 require_provider_parameters = false
-image_models = [
-    "glm-5.3-flash",
-    "glm-5v*",
-    "glm-4.6v*",
-    "glm-4.5v*",
-    "glm-4v-plus*",
-]
 stateful = false
 beta = false
 do_sample = false
@@ -171,7 +158,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = true
 
 [[providers]]
 id = "kimi"
@@ -204,7 +190,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "mimo"
@@ -236,7 +221,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers.endpoints]]
 id = "responses"
@@ -265,7 +249,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "minimax"
@@ -297,7 +280,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "doubao"
@@ -330,7 +312,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers.endpoints]]
 id = "responses"
@@ -359,7 +340,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "openai"
@@ -391,7 +371,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers.endpoints]]
 id = "responses"
@@ -419,7 +398,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "openrouter"
@@ -448,17 +426,6 @@ effort_allowlist = [
 tool_call_content_null = true
 supports_reasoning_content = false
 require_provider_parameters = true
-image_models = [
-    "stealth/ox-alpha",
-    "google/gemini*",
-    "openai/gpt-4o*",
-    "openai/gpt-5*",
-    "anthropic/claude-*",
-    "x-ai/grok-*",
-    "meta-llama/llama-4*",
-    "qwen/qwen*vl*",
-    "mistralai/pixtral*",
-]
 stateful = false
 beta = false
 responses_web_search = true
@@ -467,7 +434,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = true
 
 [[providers]]
 id = "zcode"
@@ -507,7 +473,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = true
 
 [[providers]]
 id = "workbuddy"
@@ -555,7 +520,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "deepseek-web"
@@ -591,7 +555,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = false
 
 [[providers]]
 id = "opencode-go"
@@ -639,7 +602,6 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = true
 
 [[providers.endpoints]]
 id = "responses"
@@ -671,4 +633,3 @@ responses_send_include = true
 responses_effort_max = "high"
 responses_supports_user = true
 responses_echo_reasoning_content = true
-supports_image_tool = true
