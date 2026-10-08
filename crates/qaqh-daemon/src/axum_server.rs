@@ -624,6 +624,78 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// CLEAN-3（T1.4）：ContentStore 未命中时回落会话持久 blob，且只对
+    /// 「拥有该会话」的调用方可见；未知 hex 一律 404。
+    #[tokio::test]
+    async fn v2_content_falls_back_to_session_blobs_with_ownership() {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("qaqh-blob-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // platform::sessions_dir 每次调用读 QAQH_DATA_DIR；本测试模块的其他
+        // 用例不读该路径，进程内切换环境变量在此是安全的。
+        unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
+        let body = b"tool output body".to_vec();
+        let hash = qaqh_session::canonical::sha256_content_hash(&body);
+        let hex = hash.as_str().trim_start_matches("sha256:").to_string();
+        let blob_dir = tmp.join("sessions").join("seed-blob").join("blobs");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        std::fs::write(blob_dir.join(&hex), &body).unwrap();
+
+        let state = test_state();
+        {
+            let mut leases = state.leases.lock().unwrap();
+            // attach_session 要求 client 会话本身有活跃 lease（is_active_session）。
+            leases.open("cs-owner".into(), "inst-owner".into());
+            leases.open("cs-other".into(), "inst-other".into());
+            leases.attach_session("cs-owner", "seed-blob");
+            leases.attach_session("cs-other", "seed-other");
+        }
+        let app = build_router(state.clone());
+        let get = |client: &str, id: String| {
+            Request::builder()
+                .uri(format!("/ringing/v2/content/{id}"))
+                .header("authorization", "Bearer test-token")
+                .header("x-qaqh-client-session-id", client)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // 拥有者：200、正文一致、合法 UTF-8 回 text/plain。
+        let resp = app
+            .clone()
+            .oneshot(get("cs-owner", format!("sha256:{hex}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(&bytes[..], &body[..]);
+
+        // 非拥有者：404（不泄漏存在性）。
+        let resp = app
+            .clone()
+            .oneshot(get("cs-other", format!("sha256:{hex}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // 未知 hex：404。
+        let resp = app
+            .oneshot(get("cs-owner", format!("sha256:{}", "0".repeat(64))))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        unsafe { std::env::remove_var("QAQH_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// 纯 v2：timeline 的 v1 路径已硬切（v2 路径见其它 timeline 用例）。
     #[tokio::test]
     async fn timeline_v1_routes_are_hard_cut() {
