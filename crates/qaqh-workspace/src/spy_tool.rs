@@ -173,6 +173,19 @@ impl TypedTool for SpyTool {
             "restore" => {
                 let scan_id = required(&args.scan_id, "scan_id")?;
                 let prune = args.prune.unwrap_or(false);
+                // CLEAN-3/T10 契约②：redirect turn 进行中拒绝 restore。
+                // turn 未 merge 前工作区是「上位盘 + ProjFS 视图」拼合态，
+                // 在其上全量重写会与 merge 互相覆盖、产生不可归因净变更。
+                // fail closed：模型看到错误后等 redirect 结束重试即可。
+                let inflight = qaqh_process_tools::exec::redirect_guard::redirect_turns_in_flight();
+                if inflight > 0 {
+                    return Err(spy_error(
+                        "restore_refused_redirect_turn",
+                        format!(
+                            "{inflight} redirect turn(s) in flight; retry after the sandboxed exec finishes"
+                        ),
+                    ));
+                }
                 let out = session
                     .restore(&qaqh_spy::ScanId(scan_id.to_string()), prune)
                     .map_err(|e| spy_error("restore_failed", e.to_string()))?;

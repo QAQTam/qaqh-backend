@@ -286,6 +286,8 @@ pub(crate) fn sbx_exec(
     }
 
     // redirect:启动 turn(视图随 run 起、随 turn 止,水合由本进程服务)。
+    // 契约②（CLEAN-3/T10）：turn 存续期内（直到 merge 完成随本函数返回
+    // 而drop）持有 RedirectTurnGuard，spy restore 在此期间被拒绝。
     let turn = if let Some(view_ops) = &view_ops {
         let ws = workspace.as_deref().expect("redirect requires workspace");
         match sbx_win::redirect::prepare_turn(ws, &view_root, view_ops) {
@@ -300,6 +302,8 @@ pub(crate) fn sbx_exec(
     } else {
         None
     };
+    let _turn_guard =
+        turn.is_some().then(crate::exec::redirect_guard::RedirectTurnGuard::acquire);
 
     let desktop = match sbx_win::desktop::create_private_desktop(&identity.sid_text) {
         Ok(d) => d,
@@ -437,6 +441,10 @@ pub(crate) fn sbx_exec(
                 "count": changes.len(),
             })),
         );
+        // 契约①（CLEAN-3/T10）：merge 必须在返回前同步完成——批级 tool_end
+        // spy 扫描在本调用返回后才发生，merge 滞后会让扫描读到「上位盘 +
+        // 视图」拼合态、产生不可归因的净变更。此处同步等待 merge 结果，
+        // 失败如实进 stderr，绝不推迟到后台。
         match turn.merge() {
             Ok(r) => {
                 sink.emit(&sbx_win::events::Event::new("overlay_merge").with_detail(
