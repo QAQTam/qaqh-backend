@@ -364,6 +364,11 @@ pub fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
 ///
 /// 也是远端 `fs.read`/`fs.list` 的单一事实源（T-2-1）：白名单放行的数据根下，
 /// 这些敏感路径必须单独拦掉。
+///
+/// 判定对象始终是**本产品数据根**子树：权威路径（`sessions/**`、`config.toml`）
+/// 按组件级包含比较，数据根内其余文件（`token_stats.jsonl`、`secrets.toml` …）
+/// 才走文件名名单。数据根之外同名的目录/文件（第三方产品的 `…\sessions\…log`、
+/// 仓库里的 `meta.json`）不在此列——否则只读工具会被无端弹审批。
 pub fn is_sensitive_session_path(path: &Path) -> bool {
     // Block the agent from reading its own persistent history / credentials.
     // These live under the platform data dir (e.g. ~/.config/qaqh/sessions/…/messages.jsonl,
@@ -376,9 +381,9 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
     // 目录本身（无尾分隔符），且数据根可被 `QAQH_DATA_DIR` 重定向到任意名字
     // ——所以这里按平台权威路径做组件级包含判定（T-2-1 让 `fs.list` 拦下
     // `sessions/` 目录本身）。
+    let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
     let sessions_dir = qaqh_types::platform::sessions_dir();
     if sessions_dir.is_absolute() {
-        let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
         let sessions_norm = normalize_lexically(&resolve_target_path(sessions_dir));
         if path_within_dir(&candidate, &sessions_norm) {
             return true;
@@ -391,13 +396,15 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
     // 配置只从平台数据根读取，按权威路径做组件级判定，不靠宽泛子串。
     let config_file = qaqh_types::platform::config_path();
     if config_file.is_absolute() {
-        let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
         let config_norm = normalize_lexically(&resolve_target_path(config_file));
         if path_within_dir(&candidate, &config_norm) {
             return true;
         }
     }
-    let s = path.to_string_lossy().to_ascii_lowercase();
+    if !within_own_data_root(&candidate) {
+        return false;
+    }
+    let s = candidate.to_string_lossy().to_ascii_lowercase();
     s.contains("messages.jsonl")
         || s.contains("meta.json")
         || s.contains("token_stats.jsonl")
@@ -405,6 +412,22 @@ pub fn is_sensitive_session_path(path: &Path) -> bool {
         || s.contains("/sessions/")
         || s.contains("\\sessions\\")
         || s.contains(".qaqh/sessions")
+}
+
+/// 名单尾巴的定界谓词：只有落在**本产品数据根**子树内的路径才允许参与文件名
+/// 子串判定（2026-10-08 修，见 [`is_sensitive_session_path`]）。
+///
+/// 数据根不可定界（`HOME`/`USERPROFILE` 皆缺，`data_dir()` 非绝对）时返回
+/// `true`，保持旧的保守姿态——宁多弹一次审批，也不在无法判定归属时放行。
+fn within_own_data_root(candidate: &Path) -> bool {
+    let data_dir = qaqh_types::platform::data_dir();
+    if !data_dir.is_absolute() {
+        return true;
+    }
+    path_within_dir(
+        candidate,
+        &normalize_lexically(&resolve_target_path(data_dir)),
+    )
 }
 
 /// Whether `path` lies inside a skill discovery root (audit 2026-10-01 H2).
@@ -876,24 +899,33 @@ mod tests {
         // SkipPermissions they'd otherwise auto-approve. This must be forced to
         // AskUser to avoid
         // the model silently reading prior turns and feeding them into the gateway.
+        //
+        // 路径取自权威数据根（`QAQH_DATA_DIR` 或 `~/.qaqh`），不用手抄的
+        // `/home/test/.config/qaqh/…` 字面量——那只能命中文件名启发式，
+        // 换机器/换数据根就与真实判定脱钩。
+        let sessions = qaqh_types::platform::sessions_dir();
+        let data = qaqh_types::platform::data_dir();
+        if !sessions.is_absolute() || !data.is_absolute() {
+            return; // 数据根不可定界：权威判定无法构造
+        }
         let ws = std::env::temp_dir().join("qaqh-ws-sensitive");
-        let session_file = dirs_next();
         for path in [
-            "/home/test/.config/qaqh/sessions/abc/messages.jsonl",
-            "/home/test/.config/qaqh/sessions/abc/meta.json",
-            "/home/test/.config/qaqh/token_stats.jsonl",
+            sessions.join("abc").join("messages.jsonl"),
+            sessions.join("abc").join("meta.json"),
+            data.join("token_stats.jsonl"),
+            data.join("secrets.toml"),
         ] {
             let decision = needs_permission(
                 PermissionLevel::SkipPermissions,
                 "read",
-                &serde_json::json!({"path": path}),
+                &serde_json::json!({"path": path.display().to_string()}),
                 &ws,
                 &HashSet::new(),
                 ToolCategory::Read,
             );
             assert!(
                 matches!(decision, PermissionDecision::AskUser { .. }),
-                "sensitive path {path} must require approval even under SkipPermissions, got {decision:?}"
+                "sensitive path {path:?} must require approval even under SkipPermissions, got {decision:?}"
             );
         }
         // Normal workspace file under SkipPermissions still auto-approves.
@@ -906,11 +938,56 @@ mod tests {
             ToolCategory::Read,
         );
         assert!(matches!(normal, PermissionDecision::AutoApprove));
-        let _ = session_file;
     }
 
-    fn dirs_next() -> PathBuf {
-        PathBuf::from("/tmp")
+    #[test]
+    fn foreign_sessions_dir_is_not_own_session_history() {
+        // 回归 2026-10-08：文件名子串名单曾对**任意**路径生效，第三方产品里名为
+        // `…\qodercli\sessions\<id>.log` 的日志目录、以及仓库里任何 `meta.json`，
+        // 都被判成自家会话历史 → grep 在 skip-permissions 下仍弹审批
+        // （`~/.qaqh/audit.csv` 实证 3 例 user_approved）。名单尾巴现已限定在
+        // 数据根子树内，工作区外的普通读取在任何档位都放行。
+        let sessions = qaqh_types::platform::sessions_dir();
+        if !sessions.is_absolute() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        let foreign = dir
+            .path()
+            .join("Roaming")
+            .join("qodercli")
+            .join("sessions")
+            .join("08fce531-de22.log");
+        std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+        std::fs::write(&foreign, "x").unwrap();
+        for path in [foreign, ws.join("src").join("meta.json")] {
+            assert!(
+                !is_sensitive_session_path(&path),
+                "{path:?} is outside the data root and must not be treated as session history"
+            );
+            for level in [
+                PermissionLevel::ReadOnly,
+                PermissionLevel::WorkspaceWrite,
+                PermissionLevel::SkipPermissions,
+            ] {
+                let decision = needs_permission(
+                    level,
+                    "grep",
+                    &serde_json::json!({"paths": [path.display().to_string()]}),
+                    &ws,
+                    &HashSet::new(),
+                    ToolCategory::Read,
+                );
+                assert!(
+                    matches!(decision, PermissionDecision::AutoApprove),
+                    "grep at L{} must not ask for {path:?}, got {decision:?}",
+                    level.to_u8()
+                );
+            }
+        }
     }
 
     #[test]
