@@ -118,7 +118,7 @@ impl ToolRuntime {
         serial_call_ids: &HashSet<String>,
         turn_id: &str,
         round_num: u32,
-    ) -> bool {
+    ) -> (bool, Vec<String>) {
         let mut actor = actor;
         let mut admitted = Self::prepare_admitted(ctx, admitted, turn_id);
         admitted.sort_by_key(|(item, _)| {
@@ -128,6 +128,9 @@ impl ToolRuntime {
                 .unwrap_or(usize::MAX)
         });
         let mut ordered_skill_effects = Vec::new();
+        // exec 调用级归因（CLEAN-3/T9）：workspace exec_audit 双扫测得、已
+        // 记 SMJ(tool=exec) 的账本键，供批级 spy 审计 finish 去重。
+        let mut exec_attributed: Vec<String> = Vec::new();
         let (mut parallel, serial): (Vec<_>, Vec<_>) = admitted
             .into_iter()
             .partition(|(item, _)| !serial_call_ids.contains(&item.call_id));
@@ -143,7 +146,7 @@ impl ToolRuntime {
                 let actor = actor.as_deref_mut();
                 seal_unexecuted_as_cancelled(ctx, actor, remaining, CANCELLED_TOOL_RESULT, turn_id);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-                return false;
+                return (false, exec_attributed);
             }
             let batch_len = parallel.len().min(MAX_PARALLEL_TOOL_WORKERS);
             let batch: Vec<_> = parallel.drain(..batch_len).collect();
@@ -172,6 +175,7 @@ impl ToolRuntime {
                 match result.outcome {
                     ToolRunOutcome::Completed(result) => {
                         let result = *result;
+                        exec_attributed.extend(result.attributed_paths.iter().cloned());
                         backfill_executed_result(
                             ctx,
                             &call_id,
@@ -228,7 +232,7 @@ impl ToolRuntime {
                 let actor = actor.as_deref_mut();
                 seal_unexecuted_as_cancelled(ctx, actor, remaining, CANCELLED_TOOL_RESULT, turn_id);
                 apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-                return false;
+                return (false, exec_attributed);
             }
             let call_id = admitted.call_id.clone();
             let tool_name = admitted.auth.tool_name().to_string();
@@ -244,6 +248,7 @@ impl ToolRuntime {
                 match result.outcome {
                     ToolRunOutcome::Completed(result) => {
                         let result = *result;
+                        exec_attributed.extend(result.attributed_paths.iter().cloned());
                         backfill_executed_result(
                             ctx,
                             &call_id,
@@ -278,10 +283,10 @@ impl ToolRuntime {
             // 串行循环收尾后仍可能落在取消态（最后一项 join 期间收到取消）：
             // 结果已回填，这里只做终态兜底，绝不丢弃。
             apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-            return false;
+            return (false, exec_attributed);
         }
         apply_ordered_skill_effects(ctx, ordered_skill_effects, tool_call_order);
-        true
+        (true, exec_attributed)
     }
 
     /// Classify every admitted call against the durable ledger before
@@ -1071,6 +1076,7 @@ fn blocked_tool_exec_result(
         },
         code_delta: None,
         skill_effects: Vec::new(),
+        attributed_paths: Vec::new(),
     }
 }
 

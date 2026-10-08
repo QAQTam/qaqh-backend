@@ -109,7 +109,7 @@ pub fn execute_admitted_batch(
     round_num: u32,
 ) -> bool {
     let audit = crate::agent::workspace_audit::begin(&admitted);
-    let completed = ToolRuntime::execute_batch(
+    let (completed, exec_attributed) = ToolRuntime::execute_batch(
         ctx,
         tool,
         actor,
@@ -120,7 +120,7 @@ pub fn execute_admitted_batch(
         turn_id,
         round_num,
     );
-    crate::agent::workspace_audit::finish(ctx, audit, turn_id, round_num);
+    crate::agent::workspace_audit::finish(ctx, audit, turn_id, round_num, &exec_attributed);
     completed
 }
 

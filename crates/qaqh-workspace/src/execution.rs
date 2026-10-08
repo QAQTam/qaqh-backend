@@ -17,6 +17,10 @@ pub struct ToolExecResult {
     pub meta: crate::ToolExecMeta,
     pub code_delta: Option<qaqh_domain::CodeDeltaRecord>,
     pub skill_effects: Vec<crate::ToolEffect>,
+    /// exec 调用级归因（CLEAN-3/T9）：`exec_audit` 双扫测得、已记入 SMJ
+    /// （tool=exec）并刷新 file_state 的路径账本键。批级审计据此去重。
+    /// 非 exec 工具恒为空。
+    pub attributed_paths: Vec<String>,
 }
 
 /// Consume an authorization proof and dispatch the bound handler.
@@ -219,6 +223,7 @@ pub fn execute_authorized_with_context(
                 meta: report.meta,
                 code_delta: None,
                 skill_effects: Vec::new(),
+                attributed_paths: Vec::new(),
             };
         }
         None => {
@@ -320,7 +325,10 @@ pub fn execute_authorized_with_context(
         }
     }
 
-    let (mut tool_result, skill_effects) =
+    let exec_audit = (category == crate::permission::ToolCategory::Exec)
+        .then(|| crate::exec_audit::begin(&context.workspace_root, &call_id, &session_id))
+        .flatten();
+    let (mut tool_result, skill_effects) = {
         match prepared.executor.clone().execute(exec_ctx, args.clone()) {
             Ok(outcome) => {
                 let effects = outcome.effects.clone();
@@ -338,7 +346,12 @@ pub fn execute_authorized_with_context(
                     Vec::new(),
                 )
             }
-        };
+        }
+    };
+    // CLEAN-3（T9）：exec 是归因盲区——权限面只取 cwd、journal 无调用方，
+    // 脚本改了什么只有事后扫描知道。在真实执行点前后双扫，把净变更精确
+    // 归因到本 call_id（SMJ tool=exec + file_state 账本刷新）。
+    let attributed_paths = exec_audit.map(|a| a.finish()).unwrap_or_default();
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
     crate::tool_side_fold::apply(&name, &mut tool_result);
@@ -415,6 +428,7 @@ pub fn execute_authorized_with_context(
                 meta: report.meta,
                 code_delta,
                 skill_effects,
+                attributed_paths,
             };
             if let Err(e) = crate::audit::append_audit(&audit_entry) {
                 log::error!("audit: append failed for {name}: {e}");
@@ -621,6 +635,7 @@ fn failure(name: &str, error: crate::ToolError) -> ToolExecResult {
         },
         code_delta: None,
         skill_effects: Vec::new(),
+        attributed_paths: Vec::new(),
     }
 }
 
