@@ -408,6 +408,17 @@ CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS-x.md` 
       本次未提交、也未删，等 owner 表态。
     - 新仓远端：`https://github.com/QAQTam/qaqh-desktop-app`（public，MIT，署名年份 2027）。
       推送前已扫全历史：严格凭据模式、敏感文件名均零命中。
+18. **【2026-10-08 施工记录】审计优先级 1/2/3 的实施边界。** 按桌面仓
+    `docs/backend-tool-upgrade-audit.md` 落地：① Todo canonical 资源 fact（工具路径经
+    `tool_runtime::backfill_executed_result` / UI 直调 / goal 转换统一走
+    `agent/resource_publish.rs`；service 路径经新 `ControlCommand::PublishResourceChanged`，
+    ADR：`docs/adr/2026-10-08-publish-resource-changed.md`）；② `read_image::store_image`
+    改返回 `Result`（I20）；③ `tool_search` 收敛 typed Args/schema/能力单源；
+    ④ CLEAN-3 的 `effective_args_ref`/`output_ref` 接 `SessionBlobStore`（ARCHITECTURE
+    存储表已更新）。**仍未覆盖**：会话未加载时 service 直写无 fact（无 worker 可投递）；
+    wire 内容端点未接 blob 回落（T1.4）；`RoundDelta` 等其余 fire-into-void 的
+    DashboardUpdated（`turn_lap/backfill.rs:98`、`engine_misc.rs:82`）留给 CLEAN-2；
+    Deferred/MCP 聚合仍未在生产接线（P3 接入，原审计优先级 5）。
 
 ## 10. clean：RC 前砍刀与 crate 减负
 

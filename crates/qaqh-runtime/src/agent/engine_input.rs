@@ -2,8 +2,7 @@
 //!
 //! Receives raw user text, handles auto-session-creation, compliance guard,
 //! and routes to TurnEngine for LLM processing.
-use super::engine_turn::TurnEngine;
-use super::types::*;
+use super::{engine_turn::TurnEngine, types::*};
 
 pub struct InputEngine;
 
@@ -77,7 +76,16 @@ impl InputEngine {
                     item.status = qaqh_workspace::todo::TodoStatus::Pending;
                 }
                 store.mode = qaqh_workspace::todo::TodoMode::Manual;
-                let _ = qaqh_workspace::todo::save_todo(&store);
+                match qaqh_workspace::todo::save_todo(&store) {
+                    Ok(()) => {
+                        crate::agent::resource_publish::publish_todo_resource_fact_for_ctx(
+                            ctx, None, None,
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!("[INPUT] goal-mode todo reset failed to persist: {error}");
+                    }
+                }
             }
             text.to_string()
         };
@@ -205,11 +213,44 @@ impl InputEngine {
                 );
                 continue;
             }
-            qaqh_workspace::read_image::store_image(
+            if let Err(error) = qaqh_workspace::read_image::store_image(
                 &ctx.agent.session.session_id,
                 &img.mime_type,
                 &img.data,
-            );
+            ) {
+                // I20：持久化失败必须显式上报。消息本体已带上图片（见上
+                // push_image_to_last_user），丢的只是 registry 索引——向控制
+                // 频道发具名错误终态，用户/模型都能看到原因。
+                log::error!("[INPUT] image persist failed (source={source_id}): {error}");
+                ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
+                    qaqh_domain::ControlEvent::OperationFailed {
+                        occurrence_id: format!(
+                            "op-failed-{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0),
+                        ),
+                        scope: qaqh_domain::ErrorScope::Control,
+                        error: qaqh_domain::DomainError {
+                            error_id: format!(
+                                "image-persist-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0),
+                            ),
+                            code: "image_persist_failed".into(),
+                            message: format!(
+                                "image attachment could not be persisted (image_index unavailable): {error}"
+                            ),
+                            retryable: true,
+                            dedupe_key: Some("image_persist_failed".into()),
+                        },
+                        operation_id: None,
+                    },
+                ));
+            }
         }
         log::info!("[INPUT] flushing meta");
         ctx.agent

@@ -4,24 +4,24 @@
 //! validates the committed prefix, repairs `events.commit.json`, and removes
 //! poison evidence after the repair is durable.
 
-use std::fs::{self, File, OpenOptions};
-use std::io;
-use std::path::Path;
+use std::{
+    fs::{self, File, OpenOptions},
+    io,
+    path::Path,
+};
 
+use super::{
+    CanonicalError, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE, EVENTS_POISON_FILE,
+    UPGRADE_FENCE_FILE, WRITER_FENCE_FILE,
+    log::write_json_atomic,
+    reader::scan_committed_facts,
+    types::{
+        EVENTS_COMMIT_SCHEMA, EventsCommit, UPGRADE_FENCE_SCHEMA, UpgradeFence, UpgradeState,
+        WRITER_FENCE_SCHEMA, WriterFence,
+    },
+};
 use crate::session_fact_v2::{
     EventId, FactPayload, LogId, MAX_SAFE_FACT_SEQ, RecoveryOutcome, SessionId,
-};
-
-use super::CanonicalError;
-use super::log::write_json_atomic;
-use super::reader::scan_committed_facts;
-use super::types::{
-    EVENTS_COMMIT_SCHEMA, EventsCommit, UPGRADE_FENCE_SCHEMA, UpgradeFence, UpgradeState,
-    WRITER_FENCE_SCHEMA, WriterFence,
-};
-use super::{
-    EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE, EVENTS_POISON_FILE, UPGRADE_FENCE_FILE,
-    WRITER_FENCE_FILE,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
