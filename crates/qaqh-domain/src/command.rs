@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::channel::RingingChannel;
-use crate::event::ContentRef;
+use crate::{channel::RingingChannel, event::ContentRef};
 
 /// 用户消息中的图片附件（multimodal）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +155,17 @@ pub enum ControlCommand {
         operation_id: String,
         action: String,
         name: String,
+    },
+    /// 请求会话 actor 为一块非 actor 线程写入的 workspace 资源补一条
+    /// canonical `WorkspaceResourceChanged` fact（service 直写 todo 等）。
+    ///
+    /// `resource_kind` 是 wire 侧资源名（目前 `"todo"`，与 fact 的
+    /// `ResourceKind` snake_case 序列化一致）；未知值在 worker 侧拒绝。
+    /// actor 线程自行读取资源现状并落 summary blob，保证 blob → fact 的
+    /// 持久化顺序（I2/I5）。
+    PublishResourceChanged {
+        #[serde(default)]
+        resource_kind: String,
     },
 }
 

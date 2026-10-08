@@ -1,5 +1,7 @@
 # RC 前架构与 crate 职责基线
 
+专项设计：用户于 2026-10-08 授权 [AskUser Form](spec-ask-user-form.md) 及其 [局部 wire 解冻 ADR](adr/2026-10-08-ask-user-form.md)。这是独立功能切片，不扩展 clean 的清理范围；文档定义目标，不表示当前 Rust 已实现新表单链路。
+
 测量日期：2026-10-07。版本基线：2.0.0-beta.3。本文区分当前事实与清理目标，
 不宣称目标已经实现。唯一执行清单见 [收敛施工单 §10](spec-architecture-convergence.md#10-clean-rc-前砍刀与-crate-减负)。
 机器可读的体量、最大文件和直接依赖见 [clean-baseline.json](metrics/clean-baseline.json)
@@ -113,7 +115,7 @@ CLEAN-3 必须补齐实际路径、写入者、崩溃窗口及其他持久文件
 | 数据 | 当前事实 | cutover 后职责/恢复来源 |
 |---|---|---|
 | events.jsonl + commit marker/identity | canonical 事实，生产面未覆盖完整消息 | 会话持久权威；只暴露已提交前缀 |
-| 会话 blobs/ | 完整持久正文能力尚未接通 | 会话持久权威；fact 引用须先持久化；无 TTL |
+| 会话 blobs/ | 已接通（2026-10-08）：`ToolIntent.effective_args_ref`、`ToolFinished.output_ref`、`WorkspaceResourceChanged.summary_ref` 经 `SessionBlobStore` 先落盘再提交 fact；wire 内容端点的 blob 回落（T1.4）未接 | 会话持久权威；fact 引用须先持久化；无 TTL，随会话回收 |
 | messages.jsonl | 当前实际消息归档与恢复输入 | 可删除上下文/归档投影，来源为事实+blob；不能继续直写为另一事实源 |
 | messages.wal | 消息旧写入/回放 | 删除，不另外造新 WAL 并存 |
 | meta.json / index.jsonl | 部分元信息与回合数量参与恢复 | 会话派生字段归投影；配置/运行态逐字段登记，不能假设全文件可从已有事实恢复 |

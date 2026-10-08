@@ -1,15 +1,14 @@
 //! Durable logical clock shared by replay window and content GC.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
+use super::{CanonicalError, log::write_json_atomic};
 use crate::session_fact_v2::{EventId, SessionFact};
-
-use super::CanonicalError;
-use super::log::write_json_atomic;
 
 pub const CONTENT_DIR: &str = "content";
 pub const CONTENT_CLOCK_FILE: &str = "content/clock.json";

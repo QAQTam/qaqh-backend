@@ -7,16 +7,16 @@
 //! Key design: a single admit() entry point for both UI and LLM paths.
 //! The old code had two separate code paths; now they converge here.
 
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
-use super::dashboard;
-use super::tool_runtime::{ToolRunOutcome, ToolRuntime};
-use crate::agent::state::agent::{PendingApproval, unix_ms};
 use qaqh_domain::{AskMode, AskQuestion};
 use qaqh_policy::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 
-use super::types::*;
+use super::{
+    tool_runtime::{ToolRunOutcome, ToolRuntime},
+    types::*,
+};
+use crate::agent::state::agent::{PendingApproval, unix_ms};
 
 #[allow(clippy::too_many_arguments)] // display 为 09-18 契约新增参数；参数面塑形另立项（PLAN D-5）
 fn timeline_tool(
@@ -140,11 +140,22 @@ impl ToolEngine {
         // result.error 取，**不抄 output**——output 是正文证据，复制进失败槽
         // 会让 TUI 状态行与正文双重显示同一错误。
         let failure = qaqh_domain::tool_failure_of(result);
-        let mut display = serde_json::from_str::<serde_json::Value>(args)
-            .ok()
-            .and_then(|args| {
-                qaqh_workspace::runtime::project_tool_display_from_result(name, &args, result)
-            });
+        // 先消费 ToolResult 自带的结构化 display/data：大多数 typed 工具卡
+        // 不需要再解析一次 LLM 原始 args。只有旧 display projector 才回退到
+        // args + model text，保持尚未 typed 化的工具兼容。
+        let mut display =
+            qaqh_workspace::runtime::project_tool_display_from_result_payload(name, result)
+                .or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(args)
+                        .ok()
+                        .and_then(|args| {
+                            qaqh_workspace::runtime::project_tool_display(
+                                name,
+                                &args,
+                                result.model_text(),
+                            )
+                        })
+                });
         if let Some(display) = display.as_mut() {
             crate::timeline::apply_result_metrics(display, &result.metrics);
         }
@@ -805,24 +816,16 @@ impl ToolEngine {
 
         ctx.agent.apply_tool_effects(skill_effects, ctx.flow);
 
-        // Instant refresh for todo tools
-        if crate::agent::plugins::dashboard::is_todo_tool(name) {
-            // Ringing 双发：DashboardUpdated（replaceable 覆盖）
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                qaqh_domain::ControlEvent::DashboardUpdated {
-                    hp_connected: true,
-                    session_id: ctx.agent.session.session_id.clone(),
-                    tool_calls_total: 0,
-                    tool_failures: 0,
-                    current_phase: "single".into(),
-                    streaming: false,
-                },
-            ));
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                qaqh_domain::ControlEvent::DashboardSnapshot {
-                    snapshot: dashboard::build_snapshot(ctx.agent.session.session_id.clone()),
-                },
-            ));
+        // Todo 变更通知走 canonical `WorkspaceResourceChanged` fact（工具
+        // 路径由 tool_runtime 回填接缝统一发布；这里是 UI 直调路径）。
+        if result.error.is_none() && crate::agent::resource_publish::is_todo_mutation_tool(name) {
+            crate::agent::resource_publish::publish_todo_resource_fact_for_ctx(
+                ctx,
+                Some(crate::agent::tool_runtime::canonical_turn_id(
+                    turn_id.as_str(),
+                )),
+                Some(crate::agent::tool_runtime::canonical_call_id(&tid)),
+            );
         }
 
         if let Some(ref delta) = code_delta {

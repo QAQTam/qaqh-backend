@@ -7,10 +7,12 @@
 
 #[cfg(unix)]
 use std::fs::File;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
