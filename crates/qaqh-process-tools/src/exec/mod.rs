@@ -11,6 +11,7 @@ pub mod direct;
 pub mod display;
 pub mod handler;
 pub mod pipe;
+pub mod redirect_guard;
 pub mod register;
 pub mod shell;
 pub mod truncate;

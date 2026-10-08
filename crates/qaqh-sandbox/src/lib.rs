@@ -123,16 +123,25 @@ pub fn wrap_command(
             sbx_policy_json: None,
         });
     }
-    // Windows sbx 后端:显式请求 + 可行性校验 fail closed;映射出的
-    // SbxPolicy JSON 随 launch 交给 exec 旁路(direct.rs cfg(windows) 分支)。
+    // Windows sbx 后端:显式请求 + 可行性校验 fail closed;Auto 在转正开
+    // 关开启时也进入本路径(CLEAN-3/T10:RedirectPlane 优先,ProjFS 不可用
+    // 落 TokenPlane,不再 fail-open)。映射出的 SbxPolicy JSON 随 launch
+    // 交给 exec 旁路(direct.rs cfg(windows) 分支)。
     #[cfg(windows)]
     if matches!(
         spec.backend,
         SandboxBackend::WindowsToken | SandboxBackend::WindowsRedirect
-    ) {
+    ) || (spec.backend == SandboxBackend::Auto
+        && sbx_map::redirect_promoted()
+        && spec.workspace_root.is_some())
+    {
         let backend = sbx_map::resolve_windows_backend(spec)?;
         let backend = backend.unwrap_or(SandboxBackend::WindowsToken);
-        let policy = sbx_map::map_policy(spec);
+        // 映射用 resolved 后端：Auto 晋升 Redirect 时 SbxPolicy.redirect
+        // 必须为 true（map_policy 是读 spec.backend 的纯映射）。
+        let mut resolved_spec = spec.clone();
+        resolved_spec.backend = backend;
+        let policy = sbx_map::map_policy(&resolved_spec);
         log::info!(
             target: "qaqh_sandbox",
             "{}",
