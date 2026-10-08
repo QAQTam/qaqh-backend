@@ -22,9 +22,9 @@ use qaqh_session::projection::{
     projection_replaceable_events_for_fact, replaceable_identity,
 };
 use qaqh_session::session_fact_v2::{
-    ActivityState as FactActivityState, Delivery, InteractionKind, LogId, ProjectionEvent,
-    ProjectionPayload, SessionFact, SessionId, StreamKey, TeamAgentResidency, TeamBoardSnapshot,
-    TeamDelta, TeamTaskSnapshot, TurnTerminal,
+    ActivityState as FactActivityState, Delivery, InteractionKind, InterruptReason, LogId,
+    ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey, TeamAgentResidency,
+    TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot, TurnTerminal,
 };
 use tokio::sync::broadcast;
 
@@ -266,6 +266,11 @@ impl V2ProjectionHub {
                 terminal: TurnTerminal::Failed,
                 ..
             }) => qaqh_types::SessionRunStatus::Error,
+            Some(ConversationTurnOutcome::Interrupted {
+                reason: InterruptReason::CancelBeforeSeal,
+                ..
+            }) => qaqh_types::SessionRunStatus::Canceled,
+            // cancel_before_seal 是用户取消，不是故障；crash/restart/unknown_fact 仍归 error。
             Some(ConversationTurnOutcome::Interrupted { .. }) => qaqh_types::SessionRunStatus::Error,
             _ => qaqh_types::SessionRunStatus::Idle,
         })
