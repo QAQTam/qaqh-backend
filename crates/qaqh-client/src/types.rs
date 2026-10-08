@@ -34,8 +34,8 @@ pub use qaqh_ringing::{
     RingingCommandAckStatus, RingingCommandState, is_safe_integer,
 };
 pub use qaqh_types::{
-    SessionListEntry, SessionMeta, ToolContinuation, ToolError, ToolImage, ToolModelPayload,
-    ToolResult, ToolStatus, UsageInfo,
+    SessionListEntry, SessionMeta, SessionRunStatus, ToolContinuation, ToolError, ToolImage,
+    ToolModelPayload, ToolResult, ToolStatus, UsageInfo,
 };
 
 /// 服务端主动终止流的结构化原因。
