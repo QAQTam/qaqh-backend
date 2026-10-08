@@ -425,8 +425,8 @@ clean PR 是整项动作的 draft 集成 PR；下面的任务 ID 是交付/提�
 * 每个迁移任务包括调用者、exports、Cargo 依赖、真实行为测试和 ARCHITECTURE 更新。
 * 被其他仓使用的 Rust API 同步改实际调用者；不为潜在消费者维持兼容层。
 * 不加新产品功能、v3、远端执行协议、不全异步重写、不凭行数制造新 crate。
-* 不动用户已有未提交项：AGENTS.md 的本地删除、AGENTS-x.md、prompt.md、.zcode/。
-  它们不属于本轮提交。AGENTS-x.md 是读取的参考文件，不自动更名、恢复或提交。
+* 不动用户已有未提交项：prompt.md、.zcode/。它们不属于本轮提交。
+  （`AGENTS.md` 的本地删除与 `AGENTS-x.md` 改名已于 `9d0a26c` 入库，不再属未提交项。）
 
 ### 10.2 依赖和派工顺序
 
@@ -632,8 +632,8 @@ metrics 中登记了 29 个 crate 的源码体量与普通直接依赖（含 tar
 ### 10.6 基线与 worktree 变更（2026-10-07 晚）
 
 clean 工作树此前混着**两条无关线**的未提交改动（+477/−197，9 个 tracked 文件 + 1 新测试）。
-按文件与 hunk 内容分组后分别落库，`AGENTS.md` 的本地删除、`AGENTS-x.md`、`prompt.md`、`.zcode/`
-按 §10.1 保持在未提交状态、未进任何提交：
+按文件与 hunk 内容分组后分别落库；`prompt.md`、`.zcode/` 按 §10.1 保持在未提交状态、未进任何提交
+（`AGENTS.md` 的本地删除与 `AGENTS-x.md` 改名已于 `9d0a26c` 入库）：
 
 * **`35fa46e`（在 clean）** 交互终态收敛（幽灵审批）：`runtime/agent/engine_turn.rs`(+153)、
   `turn_actor.rs`(+21)、`turn_lap_test_api.rs`(+66)、新测试 `ask_resolution_projection_fold.rs`(296 行)、
