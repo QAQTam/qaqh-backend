@@ -113,7 +113,8 @@ impl Shell {
         }
         #[cfg(target_os = "macos")]
         {
-            &[Shell::Bash, Shell::Zsh]
+            // macOS 自带 zsh（系统 bash 长期停在 3.2），默认判序 zsh > bash。
+            &[Shell::Zsh, Shell::Bash]
         }
         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
@@ -186,13 +187,13 @@ impl Shell {
         }
         #[cfg(target_os = "macos")]
         {
-            // macOS 优先级：bash > zsh。
-            for shell in [Shell::Bash, Shell::Zsh] {
+            // macOS 优先级：zsh > bash（系统 bash 长期停在 3.2，zsh 才是默认壳）。
+            for shell in [Shell::Zsh, Shell::Bash] {
                 if shell.available() {
                     return shell;
                 }
             }
-            Shell::Bash
+            Shell::Zsh
         }
         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
