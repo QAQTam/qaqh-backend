@@ -1,11 +1,11 @@
 # 架构收敛施工单（architecture-convergence）
 
-> **状态**：施工单。规则见根目录 [`AGENTS.md`](../AGENTS.md)；本文件只列"要建什么、按什么顺序、怎么算完成"。
+> **状态**：施工单。规则见根目录 [`AGENTS-x.md`](../AGENTS-x.md)；本文件只列"要建什么、按什么顺序、怎么算完成"。
 > **来源**：2026-10-06 一次架构评审会话（session `01a11215-7ee1-7615-aa6d-92f5575ddf5a`）给出的裁决。
 > 该会话在动笔写施工单时被 429 中断，本文由后续会话从它的 messages.jsonl 转录，
 > 并对**全部** `file:line` 于 2026-10-07 逐条复核（漂移处已按当前代码为准，见 §2 复核表）。
-> **性质**：转录 + 复核，不含新裁决。凡本文与代码事实冲突，按 `AGENTS.md` P3 停下来记进 §9。
-> **不变量编号**（I1–I21 / P1–P6）在 `AGENTS.md`，本文只引用不复制，避免两处漂移。
+> **性质**：转录 + 复核，不含新裁决。凡本文与代码事实冲突，按 `AGENTS-x.md` P3 停下来记进 §9。
+> **不变量编号**（I1–I21 / P1–P6）在 `AGENTS-x.md`，本文只引用不复制，避免两处漂移。
 
 ---
 
@@ -47,7 +47,7 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
 | E12 | `ToolFinished.output_ref` 生产侧几乎全 `None`（10 处），只有 2 处会填 | `None`：`util/format.rs:168`、`engine_tool.rs:762`、`tool_recovery.rs:390/443`、`tool_runtime.rs:531/597/1160`、`qaqh-types/src/tool_result.rs:400`、`qaqh-session/src/actor.rs:297`、`tool_ledger.rs:1478`；会填：`host_impl.rs:1647`、`recovery_executor.rs:314` | **本文首列** |
 | E13 | 零生产者变体的消费方仍在（删了会编译错但不会少功能） | `projection/conversation.rs:157`、`projection/timeline.rs:111`、`session_fact_v2/projection.rs:56` | **本文首列** |
 | E14 | 磁盘格式被既有 spec 冻结 | `docs/spec/hub-fact-bus-refactor.md:247`（§6"不动 canonical log 磁盘格式"）、`:124` | 交接文档已引 |
-| E15 | 会话级全局/TLS 状态 | `crates/qaqh-permission/src/lib.rs:42`(`CANCEL`)/`:43`(`CURRENT_SESSION`)/`:54`(`CURRENT_WORKSPACE`)/`:56`(TLS)/`:158`(`SESSION_CANCELS`)/`:190`(resolver 钩子) | AGENTS.md 记 :187 → 已漂 |
+| E15 | 会话级全局/TLS 状态 | `crates/qaqh-permission/src/lib.rs:42`(`CANCEL`)/`:43`(`CURRENT_SESSION`)/`:54`(`CURRENT_WORKSPACE`)/`:56`(TLS)/`:158`(`SESSION_CANCELS`)/`:190`(resolver 钩子) | AGENTS-x.md 记 :187 → 已漂 |
 | E16 | 取消机制两套并存 | `crates/qaqh-runtime/src/agent/engine_turn.rs:1442`（`cancellation().is_set() \|\| qaqh_workspace::is_cancel()`） | 同 |
 | E17 | 进程级字符串键全局表 | `process_registry.rs:195`、`fs-core/file_state.rs:25/42/55`、`file-tools/read_image/mod.rs:47`、`file-tools/pending.rs:29`、`workspace/audit/v2.rs:45` | **本文首列** |
 | E18 | gate 同步面走**进程级 current-thread** runtime | `crates/qaqh-gate/src/transport.rs:29-37`（`FALLBACK_RT` = `new_current_thread`） | **本文首列** |
@@ -64,7 +64,7 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
 - 定义的 `AssistantBlockSealed`（assistant 内容）**没有生产者** → log 里根本没有 assistant 正文；
 - `TurnFinished` 只在子代理恢复路径构造 → **主会话的 turn 生命周期事实不存在**；
 - 于是 `pending_store` 折叠 `TurnFinished` 的路径对普通会话永不触发，回执只能靠 `RECEIPT_TTL`（300s）过期（E8）——
-  正是 `AGENTS.md` I9"每条客户端命令都必须有终态"要禁的那件事；
+  正是 `AGENTS-x.md` I9"每条客户端命令都必须有终态"要禁的那件事；
 - 而 fact 里**已有的** `ContentRef` 又不可解析：指向 30 分钟就会被 `sweep_expired` 删盘的 ContentStore（E9），
   或者干脆是"只算了哈希、正文从未存过"的指纹（E10/E11），`ToolFinished.output_ref` 则几乎全是 `None`（E12）。
 
@@ -76,7 +76,7 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
 
 ## 3. 裁决（D1–D10）
 
-> 以下为 2026-10-06 评审给出的定论，本文原样转录并复核其证据。术语与 `AGENTS.md` I7 对齐：
+> 以下为 2026-10-06 评审给出的定论，本文原样转录并复核其证据。术语与 `AGENTS-x.md` I7 对齐：
 > **fact**（持久，经 `SessionLedger`）/ **live 帧**（易失，经 `Emitter`）。
 
 - **D1 wire 冻结。** Ringing v2 只允许新增带 `#[serde(default)]` 的字段；不改语义、不删字段、不加路由。
@@ -85,7 +85,7 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
   `index.jsonl`、timeline 快照、`messages.wal` 全部降级为**可删除重建的投影/缓存**。
   命令回执属于 daemon 层运行态，允许保留，但**终态必须能由 fact 折叠得出**（不得再靠 TTL 兜底）。
 - **D3 持久 CAS blob 存储。** 新增每会话 `blobs/`（sha256 内容寻址、**无 TTL**、
-  仅在会话删除或显式 GC 时回收）。**写入顺序**：blob 写 + fsync → 再追加引用它的 fact（`AGENTS.md` I2）。
+  仅在会话删除或显式 GC 时回收）。**写入顺序**：blob 写 + fsync → 再追加引用它的 fact（`AGENTS-x.md` I2）。
   8 KiB 以内内联，超过走 blob。ContentStore 保留但**降级为 wire 传输缓存**，fact 不得直接指向它。
 - **D4 上下文即投影。** LLM 上下文 = 从 fact 折叠出来的 `ContextView`（archive / active /
   covered_through / next_msg_id）。为此新增追加型 fact（`ContextRewound`、`MessageCommitted`、
@@ -106,7 +106,7 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
 - **D8 并发模型保留但修 runtime。** 保留线程-每-会话（同步落盘显式、易推理）；
   `FALLBACK_RT` 由 current-thread 换为 **daemon 持有的共享 multi-thread runtime**，
   gate/LSP/MCP 在构造期拿 `Handle`。理由：current-thread runtime 上多线程 `block_on` 会串行化 IO 驱动，
-  会话间互相拖慢延迟——**这是怀疑项，实施前后都要压测取证**（`AGENTS.md` P5：跑不了要写明）。
+  会话间互相拖慢延迟——**这是怀疑项，实施前后都要压测取证**（`AGENTS-x.md` P5：跑不了要写明）。
   全异步重写不在本 spec 范围。
 - **D9 交互必须有终态。** 权限类交互：daemon 重启后不可恢复的挂起 turn 一律
   以 `InteractionExpired(RestartPolicy)` 收口（现在 `/approvals` 重启后会留下永不可答的僵尸条目，是真 bug）；
@@ -133,19 +133,19 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
 
 ## 5. 阶段与任务
 
-任务 ID = `T<阶段>.<序号>`，一个 PR 对应一个任务 ID（`AGENTS.md` P2）。
+任务 ID = `T<阶段>.<序号>`，一个 PR 对应一个任务 ID（`AGENTS-x.md` P2）。
 **依赖**：T3 必须等 T1 完成（blob 存储先于 cutover）；T2 与 T3 互不依赖，**可并行**（分 worktree，各自 rebase）。
 
 ### P0 卫生（低风险，先做；纯机械）
 - [ ] **T0.1** `apply_outcome` 递归改循环（E19）。验收：新增测试——小栈线程上跑大量 lap 不溢出。
 - [ ] **T0.2** 文档与现实对齐（E22）：修 `README.md` 状态/版本；`architecture-report.md` 改为归档或重写基线；
-      建 `docs/ARCHITECTURE.md` 骨架（含存储表：每个持久文件登记"投影/缓存/诊断/运行态"+ 重建来源；见 `AGENTS.md` I1/I10/I13/P6）。
+      建 `docs/ARCHITECTURE.md` 骨架（含存储表：每个持久文件登记"投影/缓存/诊断/运行态"+ 重建来源；见 `AGENTS-x.md` I1/I10/I13/P6）。
 - [ ] **T0.3** 重启僵尸交互取证：daemon 重启后 `/approvals` 是否仍展示不可答条目（D9 的现场证据）。
 - [ ] **T0.4** 量尺基线（§8）：测出各项 ratchet 计数的当前值并落配置。
 
 ### P1 唯一事实源（最大一笔，最后收益最大）
 - [ ] **T1.1** 持久 CAS blob 存储（D3）：写入用 tmp + fsync + rename；`SessionLedger::append` 校验
-      "payload 引用的 blob 必须已存在"（`AGENTS.md` I5）。
+      "payload 引用的 blob 必须已存在"（`AGENTS-x.md` I5）。
 - [ ] **T1.2** 补 fact 生产者：turn 生命周期（`TurnStarted`/`TurnFinished`/`TurnInterrupted`）、
       整轮模型消息（取代 `AssistantBlockSealed`）、`ContextInjected`、`ContextRewound`、`CompactionApplied` 补字段。
 - [ ] **T1.3** shadow 双写：`MessageCommitted` 与现有 MessageStore 并行写，每个 lap 边界比对，
@@ -161,7 +161,7 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
 ### P3 cutover + 存储布局迁移
 - [ ] **T3.1** 读路径切到 fact 折叠（D4/D5）；`build_context` 改读 `ContextView`。
 - [ ] **T3.2** 删 legacy 写路径：`messages.jsonl` 直写、`messages.wal`、`LegacyWriterFacade`（E2/E3）。
-- [ ] **T3.3** 一次性迁移（daemon 启动、幂等、写 `data_version`，`AGENTS.md` I6）：
+- [ ] **T3.3** 一次性迁移（daemon 启动、幂等、写 `data_version`，`AGENTS-x.md` I6）：
       旧 session 的 `messages.jsonl` 以 `LegacyTranscriptImported` 引用入 blob；**同一次**把
       `seed` 目录名迁到 canonical id（BETA-01）与 `ringing-driver-watch.json` 的 seed 键，迁移前备份。
 
@@ -254,7 +254,7 @@ Wire 层是整个系统里最容易改的部分，所以它被改了三遍；真
 
 ## 6. 完成定义（DoD）与探针
 
-每个任务的 PR 必须全绿（`AGENTS.md` P5）：
+每个任务的 PR 必须全绿（`AGENTS-x.md` P5）：
 
 ```bash
 cargo fmt --all -- --check
@@ -273,7 +273,7 @@ bash scripts/v2-legacy-compat-probe.sh                 # 触到 migrate-on-read 
 ## 7. 禁止动作（对执行模型）
 
 - 不许为了过测试改测试断言；不许加 `#[ignore]`；不许留"临时兼容桥"（除本 spec 声明窗口内的 shadow 双写，且必须写明删除任务）。
-- 不许在 wire 类型上动手（`AGENTS.md` I14）。
+- 不许在 wire 类型上动手（`AGENTS-x.md` I14）。
 - 不许用"运行时注册 `fn` 钩子"绕依赖方向（I13）。
 - 不许对**别人**的未提交改动动刀；工作区里并行的 webui 线不属于本 spec。
 - 不许把 `to_tool_result()` 折回层当"旧协议残留"删——它是当前所有工具的共同收敛面（审计稿 §1.3）。
@@ -282,7 +282,7 @@ bash scripts/v2-legacy-compat-probe.sh                 # 触到 migrate-on-read 
 
 ## 8. 量尺（ratchet 基线，T0.4 测）
 
-CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS.md` I16/I17/I18/I19）：
+CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS-x.md` I16/I17/I18/I19）：
 
 | 项 | 模式 | 基线值（T0.4 填） |
 |---|---|---|
@@ -296,16 +296,16 @@ CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS.md` I1
 
 ## 9. 发现记录
 
-> `AGENTS.md` P2/P3 指定的落点：发现的问题写这里，不要就地改。
+> `AGENTS-x.md` P2/P3 指定的落点：发现的问题写这里，不要就地改。
 
 1. **【需裁决】阶段顺序有两版，属转录内的不确定。** 2026-10-06 会话先在推理里给出
    "P0 卫生 → P1 事件词汇 → P2 SessionScope → P3 唯一事实源 → P4 删 legacy"，
    后在动笔时改成"P0 卫生 → P1 blob 存储 + 补生产者 → P2 shadow → P3 cutover"。
    本文按**依赖关系**合并（见 §5）：事实源链条（T1→T3）与事件词汇/上下文（T2、T4）互不依赖。
    若执行方认为必须单选一版顺序，请在此签名裁决。
-2. **`docs/ARCHITECTURE.md` 不存在但被 `AGENTS.md` 引用**（I1/I10/I13/P6 都指向它）。
-   `AGENTS.md` 已被 agent 当宪法读，这个悬空引用会让接手方找不到存储表与 global 账。
-   → 落在 T0.2；在补齐之前，`AGENTS.md` 的 I1/I10 属**无法验收**状态。
+2. **`docs/ARCHITECTURE.md` 不存在但被 `AGENTS-x.md` 引用**（I1/I10/I13/P6 都指向它）。
+   `AGENTS-x.md` 已被 agent 当宪法读，这个悬空引用会让接手方找不到存储表与 global 账。
+   → 落在 T0.2；在补齐之前，`AGENTS-x.md` 的 I1/I10 属**无法验收**状态。
 3. **`architecture-report.md` 会误导人**：它写 20 crate / 有 `qaqh-webui-gateway`，
    实际 29 crate、gateway 已随 Tauri 化删除，gate 已换 `*_sdk.rs`。它自称"只读探索、不修改代码"，
    但作为事实报告已过期 → T0.2 里决定归档还是重写。
@@ -342,7 +342,7 @@ CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS.md` I1
 13. **【工具链漂移，非本次引入】** `cargo fmt --all -- --check` 在 **57 个未改动文件**上失败
     （rustfmt 版本差异）；clippy（1.99）报 54 条既有 warning，例：`qaqh-types/src/config.rs:386`
     的 `needless_borrows_for_generic_args`。本次改动的 10 个文件 fmt 干净、未新增 clippy warning。
-    → 这两条闸门在本机需要先降噪，否则 `AGENTS.md` P5 的 DoD 无法真正执行。
+    → 这两条闸门在本机需要先降噪，否则 `AGENTS-x.md` P5 的 DoD 无法真正执行。
 14. **【未做】** `ConfigDto.profiles` 仍是纯名字列表，未暴露"哪些 profile 自带 key"；设置页要显示
     该标记需要新增字段。但 `ConfigDto` 现由 `dto_rejects_a_partial_payload` 锁定"缺字段即失败"，
     加必填字段会破坏旧载荷解析，需先定策略（加 `#[serde(default)]` 还是另立只读方法）。
@@ -391,12 +391,12 @@ CI 只做"计数不许增加"，不要求立刻清零（改法见 `AGENTS.md` I1
       `devDependencies` 去掉 `@types/bun`（src 不用 bun 运行时，tsconfig 只取 `vite/client`）。
       `tauri.conf.json` 的 `beforeDevCommand`/`beforeBuildCommand` 也必须一起换——否则 Tauri 仍去调 bun。
       验证：`pnpm install --frozen-lockfile` / `typecheck` / `test`（117 pass）/ `build` 全 0。
-    - **`AGENTS.md` 与本文已入库**（提交 `3a66f97`），收敛了 AGENTS.md 那条悬空引用。
+    - **`AGENTS-x.md` 与本文已入库**（提交 `3a66f97`），收敛了 AGENTS-x.md 那条悬空引用。
     - **发现（未处置）：根 `prompt.md` 是 `crates/qaqh-runtime/src/agent/prompts/backend_prompt.md`
       的过期副本**——探针：`diff <(tr -d '\r' < prompt.md) <(tr -d '\r' < backend_prompt.md)` 报 4 处漂移
       （bash 参数说明、子代理白名单 `skills` vs `the skill_* tools`、`skills{action:"list"}` vs
       `skill_list`/`skill_activate`/`skill_resource`）。它无任何代码引用、从未入库。
-      → **建议删除**（留着就是第二份会漂的系统提示词，正是 `AGENTS.md` I16 禁的"并存"）；
+      → **建议删除**（留着就是第二份会漂的系统提示词，正是 `AGENTS-x.md` I16 禁的"并存"）；
       本次未提交、也未删，等 owner 表态。
     - 新仓远端：`https://github.com/QAQTam/qaqh-desktop-app`（public，MIT，署名年份 2027）。
       推送前已扫全历史：严格凭据模式、敏感文件名均零命中。
