@@ -454,11 +454,21 @@ pub fn project_tool_display_from_result(
     args: &serde_json::Value,
     result: &qaqh_types::ToolResult,
 ) -> Option<crate::tool_api::ToolDisplay> {
+    project_tool_display_from_result_payload(name, result)
+        .or_else(|| project_tool_display(name, args, result.model_text()))
+}
+
+/// Project display from structured result data without decoding the model-call
+/// arguments. Legacy display projectors can still use
+/// [`project_tool_display_from_result`] as a compatibility fallback.
+pub fn project_tool_display_from_result_payload(
+    name: &str,
+    result: &qaqh_types::ToolResult,
+) -> Option<crate::tool_api::ToolDisplay> {
     result
         .display()
         .map(crate::tool_api::output::from_wire_display)
-        .or_else(|| crate::display::project_typed_tool_display(name, args, &result.data))
-        .or_else(|| project_tool_display(name, args, result.model_text()))
+        .or_else(|| crate::display::project_typed_tool_display(name, &result.data))
 }
 
 /// Rehydrate a canonical display payload without re-parsing tool text.
