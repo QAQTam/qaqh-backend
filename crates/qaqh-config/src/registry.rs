@@ -162,6 +162,8 @@ impl LegacyEndpoint {
             Wire::OpenAi => self.chat_path.clone(),
             Wire::Responses => self.responses_path.clone(),
             Wire::Anthropic => self.anthropic_path.clone(),
+            // 迁移表里没有 Gemini 端点（该 wire 是 BYOK 之后新增的）。
+            Wire::Gemini => None,
         }
         .filter(|p| *p != defaults.path_for(wire));
         let flag = |given: Option<bool>, fallback: bool| given.unwrap_or(fallback);
@@ -261,7 +263,7 @@ mod tests {
                     provider.id,
                     endpoint.id
                 );
-                // 旧 protocol 字面量必须都能落到三条 wire 之一。
+                // 旧 protocol 字面量必须都能落到某条 wire。
                 assert!(
                     Wire::parse(&endpoint.protocol).is_some(),
                     "{}/{} 的 protocol 无法识别: {}",

@@ -613,7 +613,7 @@ const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生�
 #
 # BYOK：一个端点只需要六个字段——
 #   1. endpoint        → base_url       （scheme + host + 可选前缀，不含协议自身路径）
-#   2. wire            → 协议            （openai | responses | anthropic）
+#   2. wire            → 协议            （openai | responses | anthropic | gemini）
 #   3. apikey          → 设置页填一次，密文进同目录 secrets.toml（这里只留 api_key = "set"）
 #   4. model           → model
 #   5. max_token       → max_tokens     （单次回复上限）
