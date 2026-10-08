@@ -25,8 +25,13 @@ pub(crate) async fn handle_content_get(
     let store_id = content_id
         .strip_prefix("sha256:")
         .unwrap_or(content_id.as_str());
-    let Some(entry) = state.hub.get_content_any(store_id) else {
-        return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
+    let entry = state.hub.get_content_any(store_id);
+    let Some(entry) = entry else {
+        // CLEAN-3（T1.4）：ContentStore 只是 wire 传输缓存（有 TTL、有上限），
+        // fact 引用的正文本体在每会话持久 blob 里。缓存未命中回落 blob——
+        // 归属校验改为「存在一个调用方拥有的会话，其 blobs/ 内有该文件」，
+        // 找不到同样 404，不泄漏存在性。
+        return serve_session_blob(&state, &headers, &session_id, store_id);
     };
     let owns = {
         let mut leases = state.leases.lock().unwrap_or_else(|e| e.into_inner());
@@ -44,16 +49,65 @@ pub(crate) async fn handle_content_get(
         )
             .into_response();
     }
+    serve_content_bytes(&headers, &entry.media_type, entry.bytes)
+}
+
+/// ContentStore 未命中时的持久 blob 回落（CLEAN-3 T1.4）。
+///
+/// 遍历数据根下各会话的 `blobs/<hex>`，**仅当存在一个调用方拥有的会话**
+/// 持有该文件时返回 200；否则 404，与既有语义一致（不泄漏存在性）。
+/// blob 不存 media type：合法 UTF-8 回 `text/plain`，其余 `octet-stream`。
+fn serve_session_blob(
+    state: &AppState,
+    headers: &HeaderMap,
+    client_session_id: &str,
+    store_id: &str,
+) -> Response {
+    let hex = store_id.to_ascii_lowercase();
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
+    }
+    let sessions_root = qaqh_types::platform::sessions_dir();
+    let Ok(entries) = std::fs::read_dir(&sessions_root) else {
+        log::warn!("[content] blob fallback: sessions dir unreadable: {}", sessions_root.display());
+        return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
+    };
+    let listed: Vec<_> = entries.flatten().collect();
+    for candidate in listed {
+        let seed = candidate.file_name().to_string_lossy().to_string();
+        let owns = state
+            .leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .owns_session(client_session_id, &seed);
+        if !owns {
+            continue;
+        }
+        let blob_path = candidate.path().join("blobs").join(&hex);
+        let Ok(bytes) = std::fs::read(&blob_path) else {
+            continue;
+        };
+        let media_type = match std::str::from_utf8(&bytes) {
+            Ok(_) => "text/plain; charset=utf-8",
+            Err(_) => "application/octet-stream",
+        };
+        return serve_content_bytes(headers, media_type, bytes);
+    }
+    (StatusCode::NOT_FOUND, "content not found or expired").into_response()
+}
+
+/// 统一的正文出站面：media_type 出站校验 + RFC 9110 单区间 Range。
+fn serve_content_bytes(headers: &HeaderMap, media_type: &str, bytes: Vec<u8>) -> Response {
     // BUG-2026-09-13-03 双保险：历史上可能已入库非法 media_type（注入
     // 面修复前），直接拼响应头会让 axum TryInto<HeaderValue> 失败 →
     // panic（存储型 DoS）。出站前校验，非法回退 octet-stream。
-    let content_type = if is_valid_media_type(&entry.media_type) {
-        HeaderValue::from_str(&entry.media_type)
+    let content_type = if is_valid_media_type(media_type) {
+        HeaderValue::from_str(media_type)
             .unwrap_or(HeaderValue::from_static("application/octet-stream"))
     } else {
         HeaderValue::from_static("application/octet-stream")
     };
-    let total = entry.bytes.len();
+    let total = bytes.len();
     let range = match parse_byte_range(headers.get(header::RANGE), total) {
         Ok(range) => range,
         Err(()) => return range_not_satisfiable(total),
@@ -61,10 +115,10 @@ pub(crate) async fn handle_content_get(
     let (status, bytes, content_range) = match range {
         Some((start, end)) => (
             StatusCode::PARTIAL_CONTENT,
-            entry.bytes[start..=end].to_vec(),
+            bytes[start..=end].to_vec(),
             Some(format!("bytes {start}-{end}/{total}")),
         ),
-        None => (StatusCode::OK, entry.bytes, None),
+        None => (StatusCode::OK, bytes, None),
     };
     let mut builder = Response::builder()
         .status(status)
