@@ -387,16 +387,7 @@ pub(crate) fn active_workspace_root() -> PathBuf {
 }
 
 pub fn all_tools() -> Vec<ToolDef> {
-    let defs = with_manager(|manager| manager.filtered_defs()).unwrap_or_default();
-    if image_tool_enabled() {
-        defs
-    } else {
-        // 端点不支持视觉输入（未声明 supports_image_tool）时，
-        // read_image 不进入模型工具清单。
-        defs.into_iter()
-            .filter(|def| def.function.name != "read_image")
-            .collect()
-    }
+    with_manager(|manager| manager.filtered_defs()).unwrap_or_default()
 }
 
 /// 回合边界 MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义）。
@@ -443,49 +434,6 @@ pub fn merge_dynamic_tools(batch: Vec<(String, crate::DynamicTool)>) -> usize {
         rejected
     })
     .unwrap_or(0)
-}
-
-/// 当前配置的 provider endpoint 是否接受图片输入（read_image 工具开关）。
-///
-/// PR-1-10 / D2：能力快照由宿主注入（[`set_image_capability`]：daemon
-/// 未注入时（单元测试 / 未装配进程）默认放行——工具可见性交给注册方，
-/// 执行路径的自然错误兜底真实不支持的场景。
-pub fn image_tool_enabled() -> bool {
-    image_caps().map(|c| c.endpoint).unwrap_or(true)
-}
-
-/// 当前 (provider, endpoint, model) 组合是否接受图片输入。
-///
-/// 比端点级 [`image_tool_enabled`] 更精确：路由器端点（如 OpenRouter）的
-/// 模型异构，文本-only 模型需要在此处被拒绝，而不是让带图请求打到上游
-/// 换回一个不透明的 400。快照语义同上（PR-1-10）。
-pub fn image_model_supported() -> bool {
-    image_caps().map(|c| c.model).unwrap_or(true)
-}
-
-#[derive(Clone, Copy)]
-struct ImageCaps {
-    endpoint: bool,
-    model: bool,
-}
-
-static IMAGE_CAPS: Mutex<Option<ImageCaps>> = Mutex::new(None);
-
-/// 注入图片能力快照（PR-1-10 / D2）。宿主在装配 / reload 时
-/// 以当前配置计算后调用；快照存活期内工具调用路径不再触碰磁盘。
-pub fn set_image_capability(endpoint_enabled: bool, model_supported: bool) {
-    *IMAGE_CAPS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ImageCaps {
-        endpoint: endpoint_enabled,
-        model: model_supported,
-    });
-}
-
-fn image_caps() -> Option<ImageCaps> {
-    *IMAGE_CAPS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 按工具名调用作者声明的展示投影（09-18 展示契约 §3.4）。
