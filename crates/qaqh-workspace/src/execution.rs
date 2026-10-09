@@ -122,8 +122,11 @@ pub fn execute_authorized_with_context(
         );
     }
 
-    let mut current_resources =
-        crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
+    let mut current_resources = crate::permission::extract_target_paths_in(
+        &invocation.tool_name,
+        &invocation.args,
+        context.workspace_root.as_path(),
+    );
     current_resources.sort();
     current_resources.dedup();
     let mut authorized_resources = authorized_resources;

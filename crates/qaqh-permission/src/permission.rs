@@ -46,7 +46,15 @@ pub fn classify_risk(
 // ──────────────────────────────────────
 
 /// Extract file/directory paths from tool arguments that the tool will read or write.
-pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
+///
+/// Relative targets resolve against `base` — the caller's workspace root —
+/// instead of thread-local state, so the authorization snapshot and the
+/// pre-execution re-check derive identical resources from identical args.
+pub fn extract_target_paths_in(
+    tool_name: &str,
+    args: &serde_json::Value,
+    base: &Path,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     if tool_name == "read"
@@ -119,7 +127,29 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
         }
     }
 
-    paths.into_iter().map(resolve_target_path).collect()
+    paths
+        .into_iter()
+        .map(|path| resolve_target_path_in(path, base))
+        .collect()
+}
+
+/// Workspace base for relative-target resolution: the actor-local or
+/// process-global workspace, empty when unset (resolving against the
+/// process cwd).
+fn workspace_base() -> PathBuf {
+    let ws = crate::current_workspace();
+    if ws.is_empty() || ws == "." {
+        PathBuf::new()
+    } else {
+        PathBuf::from(ws)
+    }
+}
+
+/// Thread-local-backed variant for callers outside a tool context.
+/// Production authorization and execution paths must use
+/// [`extract_target_paths_in`] with an explicit base.
+pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
+    extract_target_paths_in(tool_name, args, &workspace_base())
 }
 
 /// Build the bounded, user-facing operation summary for an approval dialog.
@@ -224,19 +254,20 @@ pub fn patch_target_paths(patch: &str) -> Vec<String> {
 /// Resolve symlinks/junctions in the nearest existing ancestor, then append
 /// any missing suffix. This keeps authorization checks correct for new files.
 pub fn resolve_target_path(path: PathBuf) -> PathBuf {
+    resolve_target_path_in(path, &workspace_base())
+}
+
+/// [`resolve_target_path`] with an explicit base for relative targets, so the
+/// result never depends on which thread performs the resolution.
+pub fn resolve_target_path_in(path: PathBuf, base: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path
+    } else if base.as_os_str().is_empty() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
     } else {
-        // W7：与执行侧对齐——相对路径以工作区根为基准，而非进程 cwd；
-        // 否则授权/审计绑定的资源与实际写入路径错位。
-        let ws = crate::current_workspace();
-        if ws.is_empty() || ws == "." {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(&path))
-                .unwrap_or(path)
-        } else {
-            std::path::Path::new(&ws).join(&path)
-        }
+        base.join(&path)
     };
     let normalized = normalize_lexically(&absolute);
     // 纯根路径（`/`、`\`、盘根）不做 canonicalize：Windows 上 `canonicalize("/")`
@@ -485,7 +516,7 @@ pub fn needs_permission(
     // The paths are outside the workspace already, but SkipPermissions would otherwise
     // bypass the outside-workspace check. Treat them as High risk and force a
     // dialog so the user sees "read messages.jsonl" before it happens.
-    let paths = extract_target_paths(tool_name, args);
+    let paths = extract_target_paths_in(tool_name, args, workspace_root);
     if paths.iter().any(|p| is_sensitive_session_path(p)) {
         let risk = PermissionRisk::High;
         return PermissionDecision::AskUser {
@@ -1177,6 +1208,39 @@ mod w3_w7_tests {
         }
 
         crate::set_workspace(&old);
+    }
+
+    #[test]
+    fn extract_resolves_relative_targets_against_explicit_base_not_tls() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("session-ws");
+        std::fs::create_dir_all(&base).unwrap();
+        let elsewhere = tmp.path().join("other-ws");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        // TLS 工作区指向另一目录：显式 base 必须完全接管相对路径解析，
+        // 授权快照与执行复核才不因线程上下文不同而错位（resource_mismatch）。
+        let old = crate::current_workspace();
+        crate::set_workspace(elsewhere.to_str().unwrap());
+        let args = serde_json::json!({ "path": "src/lib.rs" });
+        let res = extract_target_paths_in("read", &args, &base);
+        crate::set_workspace(&old);
+
+        let base_canon = std::fs::canonicalize(&base).unwrap();
+        let elsewhere_canon = std::fs::canonicalize(&elsewhere).unwrap();
+        assert_eq!(res.len(), 1, "{res:?}");
+        assert!(
+            res[0].starts_with(&base_canon),
+            "relative target must resolve against the explicit base {base_canon:?}, got {:?}",
+            res[0]
+        );
+        assert!(
+            !res[0].starts_with(&elsewhere_canon),
+            "thread-local workspace must not leak into explicit-base resolution"
+        );
     }
 
     #[test]
