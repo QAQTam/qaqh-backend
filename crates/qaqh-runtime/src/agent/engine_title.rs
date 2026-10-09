@@ -1,15 +1,15 @@
 //! 会话标题生成的 loop 侧 glue。
 //!
 //! 纯文本逻辑与后台 LLM 总结已外移至 `qaqh-title` crate；本模块只保留
-//! 与 `RingContext`/`AgentState` 状态耦合的部分：冻结守卫、截断降级的
-//! 落盘广播、以及把 summary 回调桥接回 Ringing 事件通道。
+//! 与 `RingContext`/`AgentState` 状态耦合的部分：首轮开始时冻结标题输入，
+//! 立即写入可见回退标题，并把异步 LLM 标题结果桥接到 v2 Meta SSE。
 
 use super::types::{RingContext, WriterEvent};
 
-/// 首 turn 完成挂点（engine `turn_completed` 于 `Outcome::TurnComplete` 分支调用）。
+/// 用户首条消息接收后、首个模型请求开始前调用；summary 在线程中与模型请求并行。
 ///
 /// 幂等：title 已存在（冻结）或 ephemeral 或无可总结的用户消息时零副作用。
-pub fn maybe_generate_title(ctx: &mut RingContext) {
+pub fn maybe_start_title(ctx: &mut RingContext) {
     // 冻结守卫：已有标题（含本次会话早前生成）不再生成。
     if ctx.agent.session.title.is_some() {
         return;
@@ -31,7 +31,7 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
         return;
     }
 
-    // ── ① 立即：截断标题（instant 可见）──
+    // ── ① 立即：截断标题（模型请求开始前可见）──
     let _ = apply_fallback_title(ctx, &session_id, first_user);
 
     // ── ② 异步：LLM 总结覆盖（失败/超时保持截断版）──
@@ -47,32 +47,21 @@ pub fn maybe_generate_title(ctx: &mut RingContext) {
         user_msg,
         session_manager,
         on_title: Some(Box::new(move |title| {
-            emit_title_changed(&session_id, event_tx, &title);
+            emit_title_changed(event_tx, session_id, title);
         })),
     });
 }
 
-/// 把 LLM 总结出的标题经 Ringing 事件通道广播为 `SessionMetaChanged`。
+/// 把标题变化送到 worker event reader，由它通过 v2 Meta projection 推送。
 fn emit_title_changed(
-    session_id: &str,
     event_tx: Option<std::sync::mpsc::SyncSender<WriterEvent>>,
-    title: &str,
+    session_id: String,
+    title: String,
 ) {
     let Some(tx) = event_tx else {
         return;
     };
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let env = qaqh_ringing::RingingWorkerEventEnvelope::new(
-        session_id,
-        format!("w-title-{seq}"),
-        qaqh_domain::DomainEvent::Control(qaqh_domain::ControlEvent::SessionMetaChanged {
-            session_id: session_id.to_string(),
-            title: Some(title.to_string()),
-        })
-        .into(),
-    );
-    let _ = tx.send(WriterEvent::Ringing(env));
+    let _ = tx.send(WriterEvent::TitleChanged { session_id, title });
 }
 
 /// Apply the synchronous fallback title. Returns the title applied to the
@@ -86,52 +75,41 @@ fn apply_fallback_title(
         return None;
     }
     let fallback = qaqh_title::truncate_title(first_user);
-    ctx.agent
-        .enqueue_meta_op(crate::agent::state::agent::MetaOp::UpdateTitle {
-            session_id: session_id.to_string(),
-            title: fallback.clone(),
-        });
+    if let Some(session_manager) = ctx.agent.session_manager_handle() {
+        session_manager.update_title(session_id, &fallback);
+    } else {
+        ctx.agent
+            .enqueue_meta_op(crate::agent::state::agent::MetaOp::UpdateTitle {
+                session_id: session_id.to_string(),
+                title: fallback.clone(),
+            });
+    }
     ctx.agent.session.title = Some(fallback.clone());
-    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-        qaqh_domain::ControlEvent::SessionMetaChanged {
-            session_id: session_id.to_string(),
-            title: Some(fallback.clone()),
-        },
-    ));
+    emit_title_changed(
+        ctx.emitter.event_tx(),
+        session_id.to_string(),
+        fallback.clone(),
+    );
     Some(fallback)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-
-    #[derive(Default)]
-    struct RecordingEmitter {
-        titles: RefCell<Vec<String>>,
-    }
-
-    impl crate::agent::types::Emitter for RecordingEmitter {
-        fn emit_domain(&self, event: qaqh_domain::DomainEvent) {
-            if let qaqh_domain::DomainEvent::Control(
-                qaqh_domain::ControlEvent::SessionMetaChanged {
-                    title: Some(title), ..
-                },
-            ) = event
-            {
-                self.titles.borrow_mut().push(title);
-            }
-        }
-    }
 
     #[test]
     fn fallback_title_is_applied_once_and_frozen() {
         let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config::default());
         agent.session.session_id = "seed-title".to_string();
         agent.msg.push_user("## 修复标题生成链路");
-        let emitter = RecordingEmitter::default();
-        let cancel = crate::agent::types::CancelToken::new();
         let writer_dead = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(8);
+        let emitter = crate::agent::paced_emitter::PacedEmitter::new(
+            "seed-title",
+            event_tx,
+            writer_dead.clone(),
+        );
+        let cancel = crate::agent::types::CancelToken::new();
         let mut phase = crate::agent::types::LoopPhase::Idle;
         let mut pending = crate::agent::types::PendingState::default();
         let mut stats = crate::agent::types::StatsCollector::new();
@@ -153,9 +131,10 @@ mod tests {
 
         let second = apply_fallback_title(&mut ctx, "seed-title", "另一个标题");
         assert_eq!(second, None, "title must freeze after the first write");
-        assert_eq!(
-            emitter.titles.into_inner(),
-            vec!["修复标题生成链路".to_string()]
-        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(WriterEvent::TitleChanged { title, .. }) if title == "修复标题生成链路"
+        ));
+        assert!(event_rx.try_recv().is_err(), "frozen title emits no second event");
     }
 }

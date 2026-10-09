@@ -23,8 +23,8 @@ use qaqh_session::projection::{
 };
 use qaqh_session::session_fact_v2::{
     ActivityState as FactActivityState, Delivery, InteractionKind, InterruptReason, LogId,
-    ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey, TeamAgentResidency,
-    TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot, TurnTerminal,
+    EventId, MetaDelta, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
+    TeamAgentResidency, TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot, TitleSource, TurnTerminal,
 };
 use tokio::sync::broadcast;
 
@@ -91,6 +91,7 @@ struct V2SessionState {
     /// not persist across process restart: no worker survives the daemon.
     runtime_residency: HashMap<SessionId, TeamAgentResidency>,
     replaceables: BTreeMap<String, ProjectionEvent>,
+    title_revision: u64,
     live_tx: broadcast::Sender<V2Envelope>,
     /// Monotonic revision for ephemeral task board deltas.
     task_revision: u64,
@@ -372,6 +373,49 @@ impl V2ProjectionHub {
         if let Some(envelope) =
             ephemeral_team_envelope(&self.epoch, session_id, last_fact_seq, delta)
         {
+            let _ = state.live_tx.send(envelope);
+        }
+        Ok(())
+    }
+
+    /// Publish an auto-title update on the v2 Meta stream. The title is already
+    /// persisted in session metadata; this replaceable event makes connected
+    /// clients update immediately and is replayed to reconnecting subscribers.
+    pub fn publish_title_changed(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        title: String,
+    ) -> Result<(), V2HubError> {
+        let session_dir = session_dir.as_ref();
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        let meta_revision = state.projections.meta.snapshot().revision;
+        state.title_revision = state.title_revision.max(meta_revision).saturating_add(1);
+        let revision = state.title_revision;
+        let event_id = EventId::new(generate_ulid());
+        let event = ProjectionEvent {
+            event_id: event_id.clone(),
+            source_fact_seq: state.last_fact_seq.max(1),
+            source_event_id: event_id,
+            causation_id: None,
+            ts_ms: None,
+            stream_key: StreamKey::Channel(qaqh_domain::RingingChannel::Control),
+            delivery: Delivery::Replaceable { revision },
+            projection_slot: None,
+            projection_index: None,
+            payload: ProjectionPayload::MetaDelta(MetaDelta::TitleChanged {
+                revision,
+                title,
+                source: TitleSource::Auto,
+            }),
+        };
+        state.replaceables.insert("meta:title".into(), event.clone());
+        if let Some(envelope) = event_to_envelope(&self.epoch, session_id, &event) {
             let _ = state.live_tx.send(envelope);
         }
         Ok(())
@@ -678,6 +722,7 @@ fn load_session_state(
     let (live_tx, _) = broadcast::channel(live_capacity);
     Ok(V2SessionState {
         last_fact_seq,
+        title_revision: projections.meta.snapshot().revision,
         projections,
         runtime_residency: HashMap::new(),
         replaceables,

@@ -272,6 +272,10 @@ impl InputEngine {
                 },
             ));
 
+        // Start the title summary alongside the first model request rather
+        // than waiting for the complete turn/tool cycle to finish.
+        crate::agent::engine_title::maybe_start_title(ctx);
+
         Outcome::ContinueTurn {
             turn_id,
             round_num: 0,

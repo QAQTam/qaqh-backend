@@ -438,6 +438,7 @@ mod tests {
                     )
                 ),
                 WriterEvent::Timeline(_) => false,
+                WriterEvent::TitleChanged { .. } => false,
             })
             .count()
     }

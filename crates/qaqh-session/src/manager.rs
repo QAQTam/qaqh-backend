@@ -1028,7 +1028,7 @@ impl SessionManager {
         });
     }
 
-    /// 更新会话标题（冻结语义：调用方负责只在首轮后调用一次；幂等覆盖）。
+    /// 更新会话标题（自动标题在首个用户请求开始时触发；后续 LLM 总结可覆盖回退标题）。
     /// 写 meta + index（daemon 的 `list()` 每次读盘，无需跨进程通知即可见）。
     pub fn update_title(&self, session_id: &str, title: &str) {
         self.with_meta_locked(session_id, false, |dir, meta| {

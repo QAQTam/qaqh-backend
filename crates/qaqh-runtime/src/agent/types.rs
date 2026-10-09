@@ -441,6 +441,8 @@ pub enum WriterEvent {
     Ringing(qaqh_ringing::RingingWorkerEventEnvelope),
     /// Native ordered transcript intent (`wire: "Ringing_timeline_intent_v1"`).
     Timeline(qaqh_ringing::RingingTimelineIntentEnvelope),
+    /// Auto-title is emitted through the canonical v2 Meta projection stream.
+    TitleChanged { session_id: String, title: String },
 }
 
 /// 命令通道载荷：原生 Ringing 命令信封（legacy Ui2Agent 帧已拆除）。
