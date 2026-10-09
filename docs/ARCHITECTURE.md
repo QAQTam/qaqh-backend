@@ -2,6 +2,8 @@
 
 专项设计：用户于 2026-10-08 授权 [AskUser Form](spec-ask-user-form.md) 及其 [局部 wire 解冻 ADR](adr/2026-10-08-ask-user-form.md)。这是独立功能切片，不扩展 clean 的清理范围；文档定义目标，不表示当前 Rust 已实现新表单链路。
 
+专项设计：用户于 2026-10-09 授权 [沙箱内 exec 分级自动放行与写拒绝重试 ADR](adr/2026-10-09-sandbox-exec-autoapprove.md)。独立功能切片，不解冻 wire（仅 `#[serde(default)]` 可选字段）；同样不表示已实施。
+
 测量日期：2026-10-07。版本基线：2.0.0-beta.3。本文区分当前事实与清理目标，
 不宣称目标已经实现。唯一执行清单见 [收敛施工单 §10](spec-architecture-convergence.md#10-clean-rc-前砍刀与-crate-减负)。
 机器可读的体量、最大文件和直接依赖见 [clean-baseline.json](metrics/clean-baseline.json)
