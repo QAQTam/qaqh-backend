@@ -96,7 +96,8 @@ fn config_load_prefers_tier_key_and_validates_range() {
     for (tier, level, expect) in [
         (1u8, Some(4u8), PermissionLevel::ReadOnly), // 新键胜过旧键
         (3, Some(1), PermissionLevel::SkipPermissions), // 新键胜过旧键
-        (4, None, PermissionLevel::ReadOnly),        // 新键越界 → 最严档
+        (4, None, PermissionLevel::SandboxRun),      // 档位 4 = sandbox-run（ADR 2026-10-09 决策 5）
+        (5, None, PermissionLevel::ReadOnly),        // 新键越界 → 最严档
         (0, Some(3), PermissionLevel::ReadOnly),     // 新键越界 → 最严档
     ] {
         let temp_home = std::env::temp_dir().join(format!(

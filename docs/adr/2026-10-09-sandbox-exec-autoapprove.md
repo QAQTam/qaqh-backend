@@ -37,6 +37,13 @@ Windows TokenPlane 的执行强制是分项的：文件写由内核强制（WRIT
 
 **4. 审计与告知。** 自动放行与沙箱写拒绝均落工具审计账（沿用现有 kind，扩展走 `#[serde(default)]` 字段）；审批对话框维持 H1 义务 —— 沙箱未强制网络必须明示。
 
+**5. 沙箱优先档 SandboxRun（owner 2026-10-09 追加授权，含 wire 档位值 4）。**
+
+- `PermissionLevel` 新增 `SandboxRun = 4`（wire 语义新增，owner 于 2026-10-09 设计会话授权；旧客户端不识别该值，降级保持现档，能力协商安全）。单调性例外：数值比 SkipPermissions 大，但网络审批不放行。
+- 行为：exec 全部自动放行（只读分类命中与不可判定形态一致对待——分类器在本档降级为摩擦优化器，不是裁决者）；越权写由 DACL 在发生时刻内核拦截，拒绝经 v2a 导流文案（含疑似目标路径）回模型。
+- 保持审批的例外：Risky deny 形态（递归删除、secret 读、下载管道执行、代码执行、环境倾倒、云 metadata 端点）、独立下载/联网命令（网络未强制前唯一 fail-closed 边界）、Net 类工具、会话敏感路径命令文本。
+- 生效前置：沙箱启用且 `filesystem_write_isolation == true`；平台无写强制时本档自动退化为 workspace-write 行为（fail-closed）。
+
 ## 理由
 
 - 静态判 Read 与 DACL 构成双层：第一层降摩擦，第二层（内核写强制）才是安全边界。pwsh 文法（backtick 转义、`$()`、PS7 `&&`、splatting、`-Command` 内嵌脚本）使静态判定不可靠，故 pwsh 侧取"沙箱优先"而非"分类优先"。

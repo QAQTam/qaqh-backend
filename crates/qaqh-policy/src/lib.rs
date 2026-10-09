@@ -66,7 +66,7 @@ impl PermissionRisk {
 /// 2026-10-03 起为三档制(read-only / workspace-write / skip-permissions),
 /// 取代旧 L1–L4(MaxLockdown/ReadFree/WorkspaceFree/Unrestricted)。旧配置数值
 /// 在 config load 处经 [`PermissionLevel::from_legacy_u8`] 迁移;wire 上仍是
-/// 裸 u8(1/2/3),语义单调:数值越大越放行。
+/// 裸 u8,语义大体单调:数值越大越放行——唯一例外见 [`PermissionLevel::SandboxRun`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum PermissionLevel {
@@ -79,6 +79,14 @@ pub enum PermissionLevel {
     /// Skip permissions: 显式旁路——普通工具全部自动(含 exec/net)。
     /// 敏感路径守卫(会话文件/平台 config/skill 根)在所有档位都强制审批。
     SkipPermissions = 3,
+    /// Sandbox-run(ADR 2026-10-09 决策 5):exec 全部自动放行,越权写由沙箱在
+    /// 发生时刻内核拦截,拒绝经导流文案回模型;deny 形态(递归删除/secret 读/
+    /// 下载管道执行/metadata 端点)与 Net 类工具仍逐次审批——TokenPlane 网络
+    /// 未强制前,这是唯一 fail-closed 边界。需要沙箱文件写强制成立才生效。
+    ///
+    /// 单调性例外:数值比 SkipPermissions 大,但网络审批不放行;不得以数值
+    /// 大小推断档位更宽松。
+    SandboxRun = 4,
 }
 
 impl PermissionLevel {
@@ -88,14 +96,15 @@ impl PermissionLevel {
         Self::try_from_u8(value).unwrap_or(Self::ReadOnly)
     }
 
-    /// Strict scalar parser: rejects anything outside `1..=3`.
+    /// Strict scalar parser: rejects anything outside `1..=4`.
     pub fn try_from_u8(value: u8) -> Result<Self, String> {
         match value {
             1 => Ok(Self::ReadOnly),
             2 => Ok(Self::WorkspaceWrite),
             3 => Ok(Self::SkipPermissions),
+            4 => Ok(Self::SandboxRun),
             other => Err(format!(
-                "invalid permission level {other} (must be 1-3: 1=read-only, 2=workspace-write, 3=skip-permissions)"
+                "invalid permission level {other} (must be 1-4: 1=read-only, 2=workspace-write, 3=skip-permissions, 4=sandbox-run)"
             )),
         }
     }
@@ -118,7 +127,7 @@ impl PermissionLevel {
     }
 
     pub fn is_valid_u8(value: u8) -> bool {
-        (1..=3).contains(&value)
+        (1..=4).contains(&value)
     }
 
     pub fn to_u8(self) -> u8 {
@@ -131,6 +140,7 @@ impl PermissionLevel {
             Self::ReadOnly => "read-only",
             Self::WorkspaceWrite => "workspace-write",
             Self::SkipPermissions => "skip-permissions",
+            Self::SandboxRun => "sandbox-run",
         }
     }
 
@@ -139,14 +149,24 @@ impl PermissionLevel {
             Self::ReadOnly => "Read-Only",
             Self::WorkspaceWrite => "Workspace-Write",
             Self::SkipPermissions => "Skip Permissions",
+            Self::SandboxRun => "Sandbox Run",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::ReadOnly => "Workspace reads auto-approve. Every mutation (write/exec/net) requires per-call approval.",
-            Self::WorkspaceWrite => "Auto-approve within the workspace; cross-workspace writes are trusted once per folder. Exec/net require approval.",
-            Self::SkipPermissions => "Explicit bypass: ordinary tools auto-approve, including exec/net. Sensitive-path guards still ask.",
+            Self::ReadOnly => {
+                "Workspace reads auto-approve. Every mutation (write/exec/net) requires per-call approval."
+            }
+            Self::WorkspaceWrite => {
+                "Auto-approve within the workspace; cross-workspace writes are trusted once per folder. Exec/net require approval."
+            }
+            Self::SkipPermissions => {
+                "Explicit bypass: ordinary tools auto-approve, including exec/net. Sensitive-path guards still ask."
+            }
+            Self::SandboxRun => {
+                "Exec auto-runs inside the enforced sandbox; unauthorized writes are denied by the kernel and reported back. Deny patterns (recursive delete/secrets/download pipes/metadata) and net tools still ask."
+            }
         }
     }
 }
@@ -259,15 +279,33 @@ mod tests {
         assert_eq!(PermissionLevel::from_u8(0), PermissionLevel::ReadOnly);
         assert_eq!(PermissionLevel::from_u8(99), PermissionLevel::ReadOnly);
         assert!(PermissionLevel::try_from_u8(0).is_err());
-        assert!(PermissionLevel::try_from_u8(4).is_err());
+        assert!(PermissionLevel::try_from_u8(5).is_err());
+        // 档位 4 = SandboxRun（ADR 2026-10-09 决策 5）：合法值映射到自身
+        assert_eq!(PermissionLevel::from_u8(4), PermissionLevel::SandboxRun);
+        assert_eq!(
+            PermissionLevel::try_from_u8(4),
+            Ok(PermissionLevel::SandboxRun)
+        );
     }
 
     #[test]
     fn legacy_values_migrate_to_three_tiers() {
-        assert_eq!(PermissionLevel::from_legacy_u8(1), Some(PermissionLevel::ReadOnly));
-        assert_eq!(PermissionLevel::from_legacy_u8(2), Some(PermissionLevel::ReadOnly));
-        assert_eq!(PermissionLevel::from_legacy_u8(3), Some(PermissionLevel::WorkspaceWrite));
-        assert_eq!(PermissionLevel::from_legacy_u8(4), Some(PermissionLevel::SkipPermissions));
+        assert_eq!(
+            PermissionLevel::from_legacy_u8(1),
+            Some(PermissionLevel::ReadOnly)
+        );
+        assert_eq!(
+            PermissionLevel::from_legacy_u8(2),
+            Some(PermissionLevel::ReadOnly)
+        );
+        assert_eq!(
+            PermissionLevel::from_legacy_u8(3),
+            Some(PermissionLevel::WorkspaceWrite)
+        );
+        assert_eq!(
+            PermissionLevel::from_legacy_u8(4),
+            Some(PermissionLevel::SkipPermissions)
+        );
         assert_eq!(PermissionLevel::from_legacy_u8(0), None);
         assert_eq!(PermissionLevel::from_legacy_u8(5), None);
     }

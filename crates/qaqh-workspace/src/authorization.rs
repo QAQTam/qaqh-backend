@@ -409,18 +409,32 @@ pub fn admit_with_context(
         [] | [std::path::Component::CurDir]
     );
     let workspace_root = crate::permission::resolve_target_path(context.workspace_root.clone());
-    // ADR 2026-10-09 决策 1/2：沙箱文件写强制成立时，分类为只读的 exec 自动放行。
+    // ADR 2026-10-09 决策 1/2/5：沙箱文件写强制成立时 exec 走分类器判据——
+    // WorkspaceWrite 档仅只读分类自动放行；SandboxRun 档 exec 全部自动
+    // （ReadOnly/Unclassified），Risky(deny 形态/网络) 落回常规审批。
     // 分类器只决定摩擦，不是安全边界——误判的兜底是 DACL 与 deny 模式。
     // 会话历史/凭据路径不可借 exec 自动放行外泄，命中即回退常规审批。
-    let exec_classified_auto = !sandboxed
-        && level == crate::permission::PermissionLevel::WorkspaceWrite
+    let exec_class = if !sandboxed
         && invocation.tool_name == "exec"
         && context.sandbox_spec.enabled
         && qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
-        && matches!(
-            crate::permission::classify_exec_args(&invocation.args),
-            crate::permission::ExecCommandClass::ReadOnly
-        );
+    {
+        Some(crate::permission::classify_exec_args(&invocation.args))
+    } else {
+        None
+    };
+    let exec_classified_auto = matches!(
+        (&level, &exec_class),
+        (crate::permission::PermissionLevel::WorkspaceWrite, Some(crate::permission::ExecCommandClass::ReadOnly))
+            | (
+                crate::permission::PermissionLevel::SandboxRun,
+                Some(crate::permission::ExecCommandClass::ReadOnly),
+            )
+            | (
+                crate::permission::PermissionLevel::SandboxRun,
+                Some(crate::permission::ExecCommandClass::Unclassified),
+            )
+    );
     let exec_auto = exec_classified_auto
         && !crate::permission::exec_argument_tokens(&invocation.args)
             .into_iter()
@@ -725,6 +739,93 @@ mod tests {
             &HashSet::new(),
         );
         assert!(matches!(admission, Admission::ApprovalRequired(_)));
+    }
+
+    #[test]
+    fn sandbox_run_tier_auto_runs_exec_but_keeps_deny_net_and_session_gates() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let workspace = std::env::temp_dir().join("qaqh-authorization-sandbox-run");
+        let invocation = |tool: &str,
+                          category: crate::permission::ToolCategory,
+                          args: serde_json::Value| ToolInvocation {
+            session_id: "seed-a".into(),
+            call_id: "call-sandbox-run".into(),
+            tool_name: tool.into(),
+            args,
+            category,
+        };
+        let write_enforced = qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation;
+        let tier = crate::permission::PermissionLevel::SandboxRun as u8;
+        let asks = |admission: Admission| matches!(admission, Admission::ApprovalRequired(_));
+
+        // pwsh 无法判定形态 → 沙箱优先自动放行（写强制平台上）；无强制平台回退审批
+        let admission = admit(
+            invocation(
+                "exec",
+                crate::permission::ToolCategory::Exec,
+                serde_json::json!({ "command": "Get-ChildItem src", "shell": "pwsh" }),
+            ),
+            tier,
+            &workspace,
+            &HashSet::new(),
+        );
+        if write_enforced {
+            let Admission::Authorized(proof) = admission else {
+                panic!("sandbox-run tier must auto-run unclassified exec under enforced sandbox");
+            };
+            assert_eq!(proof.grant(), GrantKind::SandboxClassified);
+        } else {
+            assert!(asks(admission));
+        }
+
+        // deny 形态与网络面任何平台都保持审批
+        assert!(asks(admit(
+            invocation(
+                "exec",
+                crate::permission::ToolCategory::Exec,
+                serde_json::json!({ "command": "rm -rf build", "shell": "bash" }),
+            ),
+            tier,
+            &workspace,
+            &HashSet::new(),
+        )));
+        assert!(asks(admit(
+            invocation(
+                "exec",
+                crate::permission::ToolCategory::Exec,
+                serde_json::json!({ "command": "curl http://x.example", "shell": "bash" }),
+            ),
+            tier,
+            &workspace,
+            &HashSet::new(),
+        )));
+        assert!(asks(admit(
+            invocation(
+                "web_fetch",
+                crate::permission::ToolCategory::Net,
+                serde_json::json!({ "url": "http://x.example" }),
+            ),
+            tier,
+            &workspace,
+            &HashSet::new(),
+        )));
+
+        // 会话历史文件经命令文本引用：保持审批
+        let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");
+        assert!(asks(admit(
+            invocation(
+                "exec",
+                crate::permission::ToolCategory::Exec,
+                serde_json::json!({ "command": format!("cat {}", session_log.display()), "shell": "bash" }),
+            ),
+            tier,
+            &workspace,
+            &HashSet::new(),
+        )));
+
+        // 平台无写强制时 pwsh 分支已断言审批；有强制时 above 分支已断言自动
     }
 
     // ── 子代理沙箱（方案 B）──
