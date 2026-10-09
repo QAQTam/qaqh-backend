@@ -795,7 +795,7 @@ mod tests {
         for raw in 0u8..=255 {
             let level = PermissionLevel::from_u8(raw);
             match raw {
-                1..=3 => {
+                1..=4 => {
                     assert_eq!(level.to_u8(), raw, "legal tier {raw} must map to itself");
                     assert!(PermissionLevel::is_valid_u8(raw));
                     assert_eq!(PermissionLevel::try_from_u8(raw), Ok(level));
