@@ -205,6 +205,7 @@ impl QaqhService {
         }
         // 阶段 3b：SessionStateChanged{Closed} 的 v1 广播已删（A1：wire 零消费方）。
         self.release_session_resident_state(session_id);
+        qaqh_memwatch::global().mark_session_unloaded(session_id);
         release_freed_heap_memory();
         Ok(())
     }
@@ -242,11 +243,106 @@ impl QaqhService {
         // 阶段 3b：Closed 广播已删（A1）。
         for session_id in &unloaded {
             self.release_session_resident_state(session_id);
+            qaqh_memwatch::global().mark_session_unloaded(session_id);
         }
         if !unloaded.is_empty() {
             release_freed_heap_memory();
         }
         unloaded
+    }
+
+    fn refresh_memory_components(&self) {
+        let monitor = qaqh_memwatch::global();
+        if !monitor.is_enabled() {
+            return;
+        }
+        if let Ok(registry) = self.registry.lock() {
+            for component in registry.memory_components() {
+                monitor.update_component(component);
+            }
+        }
+        if let Some(hub) = self.hub.get() {
+            for component in hub.memory_components() {
+                monitor.update_component(component);
+            }
+        }
+        if let Some(hub) = self.v2_hub.get() {
+            for component in hub.memory_components() {
+                monitor.update_component(component);
+            }
+        }
+        let task_stores = self
+            .task_stores
+            .lock()
+            .map(|stores| stores.len() as u64)
+            .unwrap_or_default();
+        let board_stores = self
+            .board_stores
+            .lock()
+            .map(|stores| stores.len() as u64)
+            .unwrap_or_default();
+        monitor.update_component(qaqh_memwatch::ComponentMemory {
+            name: "service.task_stores".into(),
+            item_count: task_stores,
+            payload_bytes: None,
+            heap_estimate_bytes: None,
+            ..Default::default()
+        });
+        monitor.update_component(qaqh_memwatch::ComponentMemory {
+            name: "service.board_stores".into(),
+            item_count: board_stores,
+            payload_bytes: None,
+            heap_estimate_bytes: None,
+            ..Default::default()
+        });
+        let mcp_connections = qaqh_mcp::manager_slot().connections();
+        let mcp_name_bytes = mcp_connections
+            .iter()
+            .map(|connection| connection.name().len() as u64)
+            .sum();
+        monitor.update_component(qaqh_memwatch::ComponentMemory {
+            name: "mcp.connections".into(),
+            item_count: mcp_connections.len() as u64,
+            payload_bytes: Some(mcp_name_bytes),
+            heap_estimate_bytes: None,
+            ..Default::default()
+        });
+        let lsp_connections = qaqh_lsp::manager_slot().connections();
+        let lsp_name_bytes = lsp_connections
+            .iter()
+            .map(|connection| connection.server().len() as u64)
+            .sum();
+        monitor.update_component(qaqh_memwatch::ComponentMemory {
+            name: "lsp.connections".into(),
+            item_count: lsp_connections.len() as u64,
+            payload_bytes: Some(lsp_name_bytes),
+            heap_estimate_bytes: None,
+            ..Default::default()
+        });
+        let images = qaqh_workspace::read_image::memory_stats();
+        monitor.update_component(qaqh_memwatch::ComponentMemory {
+            name: "workspace.image_registry".into(),
+            item_count: images.entry_count as u64,
+            payload_bytes: None,
+            heap_estimate_bytes: Some(images.heap_estimate_bytes),
+            ..Default::default()
+        });
+    }
+
+    /// Whether the opt-in memory probe is currently recording.
+    pub fn diagnostics_memory_enabled(&self) -> bool {
+        qaqh_memwatch::global().is_enabled()
+    }
+
+    /// Build one diagnostics snapshot for the admin SSE push channel. Component
+    /// gauges are refreshed first; `after_sequence` keeps phase rows incremental.
+    pub fn diagnostics_memory_snapshot(
+        &self,
+        after_sequence: Option<u64>,
+    ) -> Result<Value, String> {
+        self.refresh_memory_components();
+        let monitor = qaqh_memwatch::global();
+        serde_json::to_value(monitor.snapshot_since(after_sequence)).map_err(err)
     }
 
     /// 归档会话（标签 × 语义）：关闭 registry 实例 + meta `archived=true`。
@@ -284,6 +380,23 @@ impl QaqhService {
         let session_id = || session_param(params);
         match method {
             "daemon.version" => Ok(json!(env!("CARGO_PKG_VERSION"))),
+            "diagnostics.memory.start" => {
+                let monitor = qaqh_memwatch::global();
+                monitor.start();
+                self.refresh_memory_components();
+                Ok(json!({
+                    "enabled": true,
+                    "started_at_ms": monitor.started_at_ms()
+                }))
+            }
+            "diagnostics.memory.stop" => {
+                qaqh_memwatch::global().stop();
+                Ok(json!({ "enabled": false }))
+            }
+            "diagnostics.memory.snapshot" => {
+                let after_sequence = params.get("after_sequence").and_then(Value::as_u64);
+                self.diagnostics_memory_snapshot(after_sequence)
+            }
             // ── UI 工作区注册表（组织语义，与运行环境 workspace 解耦）──
             "workspace.list" => {
                 let ws = qaqh_session::WorkspaceStore::global();
@@ -409,13 +522,17 @@ impl QaqhService {
                 let canonical_cwd = self
                     .sessions
                     .workspace_cwd(&session_id)
-                    .filter(|cwd| !cwd.is_empty())
-                    .or_else(|| {
-                        std::env::current_dir()
-                            .ok()
-                            .map(|cwd| cwd.to_string_lossy().into_owned())
-                    })
-                    .unwrap_or_else(|| "/".to_string());
+                    .filter(|cwd| !cwd.is_empty() && cwd != ".")
+                    .unwrap_or_else(|| {
+                        // 未绑定工作区：与会话执行面同一个默认工作根
+                        // （`load_session_workspace` 注入的就是这个目录）。
+                        // 旧实现兜底 `std::env::current_dir()`，在 daemon 里
+                        // 就是安装目录，canonical `SessionCreated.cwd` 因此
+                        // 把 harness 自身目录投影给前端/模型。
+                        qaqh_types::platform::default_session_workspace_dir(&session_id)
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                 let model = qaqh_config::Config::load()
                     .map(|config| config.model)
                     .unwrap_or_else(|_| "unknown".to_string());
@@ -660,8 +777,6 @@ impl QaqhService {
                 result
             }
             "todo.list" => qaqh_workspace::todo::todo_list_value_for(&session_id()?, params),
-            "plan.context_stats" => context_stats(&self.sessions, &session_id()?),
-            "stats.token_usage" => token_stats(pu64(params, "days") as u32),
             "plan.read" => {
                 serde_json::to_value(read_plan(&self.sessions, &session_id()?)).map_err(err)
             }
@@ -1160,11 +1275,11 @@ use self::{
     common::{command_id, err, release_freed_heap_memory},
     fs_git::{git, list_remote_directory, read_remote_file, workspace},
     params::{
-        optional_tool_mode, pbool, pstr, pstr2, pstrings, pu64, scope_session_param_value,
-        session_param, validate_tool_mode, value2,
+        optional_tool_mode, pbool, pstr, pstr2, pstrings, scope_session_param_value, session_param,
+        validate_tool_mode, value2,
     },
-    plan::{plan_action, read_plan, token_stats},
-    stats::{activity, context_stats, dashboard, load_config},
+    plan::{plan_action, read_plan},
+    stats::{activity, dashboard, load_config},
 };
 
 #[cfg(test)]
@@ -1329,22 +1444,6 @@ mod reload_loop_tests {
 
 #[cfg(test)]
 mod plan_service_tests {
-    use super::plan::token_stats;
-
-    /// `days` 直取 IPC 参数且决定条目数与循环数：未封顶时
-    /// `stats.token_usage {days: 200000}` 产出 20 万条目（daemon 线程内存 +
-    /// 延迟无界）。窗口必须有硬上限。
-    #[test]
-    fn token_stats_clamps_the_requested_day_window() {
-        let value = token_stats(200_000).expect("token_stats");
-        let daily = value["daily"].as_array().expect("daily array");
-        assert!(
-            daily.len() <= 366,
-            "token_stats must clamp the day window; got {} entries",
-            daily.len()
-        );
-    }
-
     /// `plan_action` 用 `lines()` + `join("\n")` 回写，文件以非空行结尾时
     /// 每次裁决静默剥掉末尾换行。
     #[test]

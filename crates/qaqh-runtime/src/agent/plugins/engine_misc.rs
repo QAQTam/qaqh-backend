@@ -54,31 +54,6 @@ impl MiscEngine {
     // ── Dashboard ──
 
     pub fn emit_dashboard(&self, agent: &AgentState, emitter: &dyn Emitter) {
-        // Write context stats to disk
-        let (
-            chat_text,
-            thinking,
-            tool_calls,
-            tool_results,
-            tools_schema,
-            system_prompt,
-            thinking_blocks,
-            tool_call_blocks,
-        ) = agent.msg.compute_context_stats(Some(&agent.tool_defs));
-        let stats = serde_json::json!({
-            "chat_text": chat_text, "thinking": thinking,
-            "tool_calls": tool_calls, "tool_results": tool_results,
-            "tools_schema": tools_schema, "system_prompt": system_prompt,
-            "thinking_blocks": thinking_blocks, "tool_call_blocks": tool_call_blocks,
-            "messages": 0,
-        });
-        // 统一数据源：上下文统计并入 meta.json（原 context_stats.json 退役）。
-        // Dashboard 刷新走注入句柄直写（&AgentState 不可变借用，且该写是
-        // 覆盖式快照、无 dispatch 时序约束，不入 MetaOp 队列——PR-1-5）。
-        if let Some(sm) = agent.session_manager.as_ref() {
-            sm.set_context_stats(&agent.session.session_id, &stats);
-        }
-
         // Ringing 双发：DashboardUpdated（replaceable 覆盖）
         emitter.emit_domain(qaqh_domain::DomainEvent::Control(
             qaqh_domain::ControlEvent::DashboardUpdated {

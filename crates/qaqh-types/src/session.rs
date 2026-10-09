@@ -124,11 +124,11 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_annotation: Option<String>,
     /// Provider-confirmed usage accumulated across model requests in this session.
+    ///
+    /// The single aggregation point for usage: nothing else persists these numbers,
+    /// and every consumer derives from here instead of counting separately.
     #[serde(default)]
     pub usage_totals: crate::UsageInfo,
-    /// Last provider-confirmed request usage, used to restore the live Info panel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_usage: Option<crate::UsageInfo>,
     /// Number of model requests included in `usage_totals`.
     #[serde(default)]
     pub usage_requests: u32,
@@ -140,9 +140,6 @@ pub struct SessionMeta {
     /// If set, this seed is passed as a CLI argument to the agent subprocess for auto-restore on startup.
     #[serde(skip)]
     pub resume_session: Option<String>,
-    /// Cumulative tokens consumed across all turns.
-    #[serde(skip)]
-    pub tokens: u64,
     /// 会话标题（首个用户请求启动时开始生成并冻结；persisted）。
     /// 先写首条用户消息的截断回退标题，再由并行的异步 LLM 总结覆盖；每次写入
     /// 都经 v2 Meta SSE 即时通知前端。
@@ -152,10 +149,6 @@ pub struct SessionMeta {
     /// None = 未分组（零迁移兼容）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// 上下文统计快照（可再生缓存：compact/dashboard 时重算）。原独立文件
-    /// `sessions/{seed}/context_stats.json` 已退役，并入 meta.json。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_stats: Option<serde_json::Value>,
     /// True if session was restored from disk — system prompt preserved.
     #[serde(skip)]
     pub from_resume: bool,
@@ -212,14 +205,10 @@ impl SessionMeta {
         if usage.cache_usage_reported == Some(true) {
             self.cache_reported_requests = self.cache_reported_requests.saturating_add(1);
         }
-        self.last_usage = Some(usage.clone());
-        self.tokens = self.usage_totals.total_tokens.into();
     }
 
     pub fn reset_usage(&mut self) {
-        self.tokens = 0;
         self.usage_totals = crate::UsageInfo::default();
-        self.last_usage = None;
         self.usage_requests = 0;
         self.cache_reported_requests = 0;
     }
@@ -333,14 +322,11 @@ mod tests {
             skills: SkillSessionStateV2::default(),
             frozen_annotation: Some("<today>2026-09-15</today>".into()),
             usage_totals: crate::UsageInfo::default(),
-            last_usage: Some(crate::UsageInfo::default()),
             usage_requests: 6,
             cache_reported_requests: 7,
             title: Some("Bun 引导 daemon".into()),
             cwd: Some("F:\\code\\qaqh".into()),
-            context_stats: Some(serde_json::json!({ "tokens": 1 })),
             resume_session: Some("skip-me".into()),
-            tokens: 8,
             from_resume: true,
         }
     }
@@ -372,14 +358,12 @@ mod tests {
             "cache_reported_requests",
             "compact_covered_through_msg_id",
             "compact_skip",
-            "context_stats",
             "created_at",
             "custom_tools",
             "cwd",
             "effort",
             "ephemeral",
             "frozen_annotation",
-            "last_usage",
             "message_count",
             "mode",
             "model",
@@ -400,7 +384,7 @@ mod tests {
         assert_eq!(keys, expected, "session.list 条目的 wire 键集合变了");
 
         // 运行期字段**不落 wire**：`#[serde(skip)]` 掉了就必须一直是掉的。
-        for runtime_only in ["resume_session", "tokens", "from_resume"] {
+        for runtime_only in ["resume_session", "from_resume"] {
             assert!(
                 !wire.as_object().unwrap().contains_key(runtime_only),
                 "{runtime_only} 是运行期字段，不得出现在 session.list 里"

@@ -1,0 +1,11 @@
+[package]
+name = "qaqh-memwatch"
+version.workspace = true
+edition.workspace = true
+description = "Bounded release-mode process and runtime memory observability"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

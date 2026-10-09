@@ -141,6 +141,55 @@ impl RingingHub {
             .remove(session_id);
     }
 
+    pub fn memory_components(&self) -> Vec<qaqh_memwatch::ComponentMemory> {
+        let mut components = Vec::new();
+        if let Ok(timeline) = self.timeline.lock() {
+            components.extend(timeline.memory_components());
+        }
+        if let Ok(content) = self.content_store.lock() {
+            components.extend(content.memory_components());
+        }
+        let live_interactions = self
+            .live_interaction_content
+            .lock()
+            .map(|live| live.len() as u64)
+            .unwrap_or_default();
+        let live_workers = self
+            .live_workers
+            .lock()
+            .map(|workers| workers.len() as u64)
+            .unwrap_or_default();
+        let lazy_loads = self
+            .lazy_loads
+            .lock()
+            .map(|loads| loads.len() as u64)
+            .unwrap_or_default();
+        components.extend([
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.live_interactions".into(),
+                item_count: live_interactions,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.live_workers".into(),
+                item_count: live_workers,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.lazy_load_locks".into(),
+                item_count: lazy_loads,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+        ]);
+        components
+    }
+
     /// D-1：会话关闭后丢弃该 seed 的全部常驻内存态（活交互正文表、
     /// live_workers、大内容条目）。
     ///

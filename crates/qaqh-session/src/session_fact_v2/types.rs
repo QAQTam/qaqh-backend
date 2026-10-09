@@ -907,6 +907,19 @@ pub enum SubagentTerminalStatus {
     TimedOut,
 }
 
+/// Context compaction terminal status. Wire values mirror
+/// `qaqh_domain::CompactStatus`; declared here because the v2 delta vocabulary
+/// is self-contained and carries the TS export.
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactStatus {
+    Completed,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

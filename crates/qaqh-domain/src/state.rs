@@ -17,24 +17,25 @@ use crate::{ActivityState, AgentLifecycleState, DashboardSnapshot, SessionState,
 
 /// conversation 频道 `state`。
 ///
-/// 不派生 `PartialEq`：含 `TurnData` / `UsageInfo`，二者未派生该 trait；本类型是
+/// 不派生 `PartialEq`：含 `TurnData`，未派生该 trait；本类型是
 /// DTO，消费侧不需要相等比较，故不为它去改动共享类型。
+///
+/// 只保留**真有生产者**的字段：`turns`/`total_turns`/`has_more` 来自分页投影。
+/// 曾经的 `usage`/`usage_totals`/`usage_requests`/`cache_reported_requests`/
+/// `context_limit` 是 Info 面板时代的遗留视图字段——面板已移除，且全仓无一处
+/// 赋值（真正的快照 `qaqh_session::projection::ConversationSnapshot` 里也没有
+/// 这些字段），故一并删除。usage 的真值走每轮 `ConversationDelta` 的 `usage`。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConversationState {
-    // ── 持久化投影字段（bootstrap 快照的 turns/usage 等）──────────────────
+    // ── 持久化投影字段（bootstrap 快照的 turns 等）────────────────────────
     /// 完整对话回合投影（与 `RoundData` 逐字段同构）。
     pub turns: Vec<TurnData>,
     /// 会话**持久化的真实回合数**（与 `turns.len()` 未必相等：快照窗口可能被裁剪）。
     pub total_turns: usize,
     /// 快照窗口是否还有更早的回合未交付。
     pub has_more: bool,
-    pub usage: Option<qaqh_types::UsageInfo>,
-    pub usage_totals: Option<qaqh_types::UsageInfo>,
-    pub usage_requests: Option<u64>,
-    pub cache_reported_requests: Option<u64>,
     pub model: Option<String>,
-    pub context_limit: Option<u64>,
 
     // ── 事件折叠（`ConversationEvent` 分支）──────────────────────────────
     /// 当前进行中的回合 id；`None` = 无进行中回合。

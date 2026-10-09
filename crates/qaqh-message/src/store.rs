@@ -1,3 +1,4 @@
+use std::mem::size_of;
 use std::path::Path;
 
 use crate::effect::{PendingTool, PersistOp};
@@ -194,6 +195,35 @@ pub struct MessageStore {
     /// 发 SaveFull 时复用，避免把 meta.model 回写为空串。克隆店（后台压缩
     /// 快照）继承该值。
     last_flush_model: (String, Option<String>),
+}
+
+/// Allocation-free payload/heap estimate for one live message store.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageStoreMemoryUsage {
+    pub message_count: u64,
+    pub turn_count: u64,
+    pub content_block_count: u64,
+    pub pending_persist_ops: u64,
+    pub payload_bytes: u64,
+    pub text_bytes: u64,
+    pub image_bytes: u64,
+    pub heap_estimate_bytes: u64,
+}
+
+impl MessageStoreMemoryUsage {
+    fn add_message(&mut self, message: &Message) {
+        let item = message.memory_usage_estimate();
+        self.message_count = self.message_count.saturating_add(1);
+        self.content_block_count = self
+            .content_block_count
+            .saturating_add(message.content.len() as u64);
+        self.payload_bytes = self.payload_bytes.saturating_add(item.payload_bytes);
+        self.text_bytes = self.text_bytes.saturating_add(item.text_bytes);
+        self.image_bytes = self.image_bytes.saturating_add(item.image_bytes);
+        self.heap_estimate_bytes = self
+            .heap_estimate_bytes
+            .saturating_add(item.heap_estimate_bytes);
+    }
 }
 
 impl std::fmt::Debug for MessageStore {
@@ -1214,6 +1244,149 @@ impl MessageStore {
                         .sum::<usize>()
                 })
                 .sum::<usize>()
+    }
+
+    /// Return a low-overhead estimate of message payloads and owned heap
+    /// capacities. This traverses the live store but does not clone or encode
+    /// message bodies, so it is suitable for opt-in runtime probes.
+    pub fn memory_usage_estimate(&self) -> MessageStoreMemoryUsage {
+        let mut usage = MessageStoreMemoryUsage {
+            turn_count: self.turns.len() as u64,
+            pending_persist_ops: self.pending_persist.len() as u64,
+            heap_estimate_bytes: size_of::<Self>() as u64,
+            ..MessageStoreMemoryUsage::default()
+        };
+        usage.heap_estimate_bytes = usage
+            .heap_estimate_bytes
+            .saturating_add(self.session_id.capacity() as u64)
+            .saturating_add(
+                self.system_messages
+                    .capacity()
+                    .saturating_mul(size_of::<Message>()) as u64,
+            )
+            .saturating_add(
+                self.trailing_messages
+                    .capacity()
+                    .saturating_mul(size_of::<Message>()) as u64,
+            )
+            .saturating_add(
+                self.deferred_trailing
+                    .capacity()
+                    .saturating_mul(size_of::<Message>()) as u64,
+            )
+            .saturating_add(
+                self.orphan_tool_results
+                    .capacity()
+                    .saturating_mul(size_of::<String>()) as u64,
+            )
+            .saturating_add(self.turns.capacity().saturating_mul(size_of::<Turn>()) as u64)
+            .saturating_add(
+                self.pending_save
+                    .capacity()
+                    .saturating_mul(size_of::<Message>()) as u64,
+            )
+            .saturating_add(
+                self.pending_persist
+                    .capacity()
+                    .saturating_mul(size_of::<PersistOp>()) as u64,
+            )
+            .saturating_add(self.last_flush_model.0.capacity() as u64);
+        if let Some(effort) = &self.last_flush_model.1 {
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(effort.capacity() as u64);
+        }
+
+        for message in &self.system_messages {
+            usage.add_message(message);
+        }
+        for message in &self.trailing_messages {
+            usage.add_message(message);
+        }
+        for message in &self.deferred_trailing {
+            usage.add_message(message);
+        }
+        for id in &self.orphan_tool_results {
+            usage.payload_bytes = usage.payload_bytes.saturating_add(id.len() as u64);
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(id.capacity() as u64);
+        }
+        for turn in &self.turns {
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(size_of::<Turn>() as u64)
+                .saturating_add(turn.steps.capacity().saturating_mul(size_of::<Step>()) as u64);
+            usage.add_message(&turn.user);
+            for step in &turn.steps {
+                usage.add_message(&step.assistant);
+                for result in &step.tool_results {
+                    usage.add_message(result);
+                }
+            }
+        }
+        for message in &self.pending_save {
+            usage.add_message(message);
+        }
+        for operation in &self.pending_persist {
+            match operation {
+                PersistOp::Append {
+                    session_id,
+                    messages,
+                    model,
+                    effort,
+                    ..
+                }
+                | PersistOp::SaveFull {
+                    session_id,
+                    messages,
+                    model,
+                    effort,
+                    ..
+                } => {
+                    usage.payload_bytes = usage
+                        .payload_bytes
+                        .saturating_add(session_id.len() as u64)
+                        .saturating_add(model.len() as u64);
+                    usage.heap_estimate_bytes = usage
+                        .heap_estimate_bytes
+                        .saturating_add(session_id.capacity() as u64)
+                        .saturating_add(model.capacity() as u64)
+                        .saturating_add(
+                            messages.capacity().saturating_mul(size_of::<Message>()) as u64
+                        );
+                    if let Some(effort) = effort {
+                        usage.heap_estimate_bytes = usage
+                            .heap_estimate_bytes
+                            .saturating_add(effort.capacity() as u64);
+                    }
+                    for message in messages {
+                        usage.add_message(message);
+                    }
+                }
+                PersistOp::UpdateMeta {
+                    session_id,
+                    model,
+                    effort,
+                    ..
+                } => {
+                    usage.payload_bytes = usage
+                        .payload_bytes
+                        .saturating_add(session_id.len() as u64)
+                        .saturating_add(model.len() as u64);
+                    usage.heap_estimate_bytes = usage
+                        .heap_estimate_bytes
+                        .saturating_add(session_id.capacity() as u64)
+                        .saturating_add(model.capacity() as u64);
+                    if let Some(effort) = effort {
+                        usage.heap_estimate_bytes = usage
+                            .heap_estimate_bytes
+                            .saturating_add(effort.capacity() as u64);
+                    }
+                }
+            }
+        }
+        usage
     }
 
     pub fn turns(&self) -> &[Turn] {
