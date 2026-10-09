@@ -22,9 +22,10 @@ use qaqh_session::projection::{
     projection_replaceable_events_for_fact, replaceable_identity,
 };
 use qaqh_session::session_fact_v2::{
-    ActivityState as FactActivityState, Delivery, InteractionKind, InterruptReason, LogId,
-    EventId, MetaDelta, ProjectionEvent, ProjectionPayload, SessionFact, SessionId, StreamKey,
-    TeamAgentResidency, TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot, TitleSource, TurnTerminal,
+    ActivityState as FactActivityState, CompactStatus, ConversationDelta, Delivery, EventId,
+    InteractionKind, InterruptReason, LogId, MetaDelta, ProjectionEvent, ProjectionPayload,
+    SessionFact, SessionId, StreamKey, TeamAgentResidency, TeamBoardSnapshot, TeamDelta,
+    TeamTaskSnapshot, TitleSource, TurnTerminal,
 };
 use tokio::sync::broadcast;
 
@@ -97,6 +98,8 @@ struct V2SessionState {
     task_revision: u64,
     /// Monotonic revision for ephemeral message board snapshot deltas.
     board_revision: u64,
+    /// Monotonic revision shared by transient compaction lifecycle deltas.
+    compact_revision: u64,
 }
 
 pub struct V2Subscription {
@@ -137,6 +140,62 @@ impl V2ProjectionHub {
 
     pub fn server_epoch(&self) -> &str {
         &self.epoch
+    }
+
+    pub fn memory_components(&self) -> Vec<qaqh_memwatch::ComponentMemory> {
+        let Ok(sessions) = self.sessions.read() else {
+            return Vec::new();
+        };
+        let mut lower_bound = sessions
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(SessionId, Arc<V2Session>)>());
+        let mut overlay_items = 0_u64;
+        let mut replaceable_items = 0_u64;
+        for session in sessions.values() {
+            lower_bound = lower_bound.saturating_add(std::mem::size_of::<V2Session>());
+            if let Ok(state) = session.state.lock() {
+                lower_bound = lower_bound
+                    .saturating_add(std::mem::size_of::<V2SessionState>())
+                    .saturating_add(
+                        state
+                            .runtime_residency
+                            .len()
+                            .saturating_mul(std::mem::size_of::<(SessionId, TeamAgentResidency)>()),
+                    )
+                    .saturating_add(
+                        state
+                            .replaceables
+                            .len()
+                            .saturating_mul(std::mem::size_of::<(String, ProjectionEvent)>()),
+                    );
+                overlay_items = overlay_items.saturating_add(state.runtime_residency.len() as u64);
+                replaceable_items =
+                    replaceable_items.saturating_add(state.replaceables.len() as u64);
+            }
+        }
+        vec![
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.v2.projection_sessions".into(),
+                item_count: sessions.len() as u64,
+                payload_bytes: None,
+                heap_estimate_bytes: Some(lower_bound as u64),
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.v2.runtime_overlays".into(),
+                item_count: overlay_items,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.v2.replaceable_events".into(),
+                item_count: replaceable_items,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+        ]
     }
 
     /// Install this hub as the process-wide canonical projection sink.
@@ -272,7 +331,9 @@ impl V2ProjectionHub {
                 ..
             }) => qaqh_types::SessionRunStatus::Canceled,
             // cancel_before_seal 是用户取消，不是故障；crash/restart/unknown_fact 仍归 error。
-            Some(ConversationTurnOutcome::Interrupted { .. }) => qaqh_types::SessionRunStatus::Error,
+            Some(ConversationTurnOutcome::Interrupted { .. }) => {
+                qaqh_types::SessionRunStatus::Error
+            }
             _ => qaqh_types::SessionRunStatus::Idle,
         })
     }
@@ -414,7 +475,129 @@ impl V2ProjectionHub {
                 source: TitleSource::Auto,
             }),
         };
-        state.replaceables.insert("meta:title".into(), event.clone());
+        state
+            .replaceables
+            .insert("meta:title".into(), event.clone());
+        if let Some(envelope) = event_to_envelope(&self.epoch, session_id, &event) {
+            let _ = state.live_tx.send(envelope);
+        }
+        Ok(())
+    }
+
+    /// Publish a manual/auto context compaction start on the v2 Conversation
+    /// stream. Mirrors `ConversationEvent::CompactStarted`; the card stays
+    /// replayable until [`Self::publish_compact_finished`] clears the slot.
+    pub fn publish_compact_started(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        compact_id: &str,
+        turns_total: u32,
+        turns_keeping: u32,
+    ) -> Result<(), V2HubError> {
+        self.publish_compact_delta(
+            session_dir.as_ref(),
+            session_id,
+            compact_id,
+            false,
+            |revision| ConversationDelta::CompactStarted {
+                revision,
+                compact_id: compact_id.to_string(),
+                turns_total,
+                turns_keeping,
+            },
+        )
+    }
+
+    /// Publish the streaming compaction summary. `text` is the cumulative
+    /// summary so far (the worker bridge coalesces provider chunks), which is
+    /// what makes a dropped or duplicated delivery harmless.
+    pub fn publish_compact_progress(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        compact_id: &str,
+        text: String,
+    ) -> Result<(), V2HubError> {
+        self.publish_compact_delta(
+            session_dir.as_ref(),
+            session_id,
+            compact_id,
+            false,
+            |revision| ConversationDelta::CompactProgress {
+                revision,
+                compact_id: compact_id.to_string(),
+                delta: text,
+            },
+        )
+    }
+
+    /// Publish the compaction terminal state and clear the in-flight slot, so a
+    /// later reconnect never replays a finished compaction as a running card.
+    pub fn publish_compact_finished(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        compact_id: &str,
+        status: CompactStatus,
+        summary_chars: Option<usize>,
+        turns_compacted: Option<u32>,
+        turns_removed: Option<u32>,
+    ) -> Result<(), V2HubError> {
+        self.publish_compact_delta(
+            session_dir.as_ref(),
+            session_id,
+            compact_id,
+            true,
+            |revision| ConversationDelta::CompactFinished {
+                revision,
+                compact_id: compact_id.to_string(),
+                status,
+                summary_chars,
+                turns_compacted,
+                turns_removed,
+            },
+        )
+    }
+
+    /// Shared shape for the three transient compaction deltas: same
+    /// double-tagged payload as the fact-derived conversation deltas, published
+    /// straight to live subscribers plus a per-`compact_id` current-value slot.
+    fn publish_compact_delta(
+        &self,
+        session_dir: &Path,
+        session_id: &str,
+        compact_id: &str,
+        terminal: bool,
+        build: impl FnOnce(u64) -> ConversationDelta,
+    ) -> Result<(), V2HubError> {
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        state.compact_revision = state.compact_revision.saturating_add(1);
+        let revision = state.compact_revision;
+        let event_id = EventId::new(generate_ulid());
+        let event = ProjectionEvent {
+            event_id: event_id.clone(),
+            source_fact_seq: state.last_fact_seq.max(1),
+            source_event_id: event_id,
+            causation_id: None,
+            ts_ms: None,
+            stream_key: StreamKey::Channel(qaqh_domain::RingingChannel::Conversation),
+            delivery: Delivery::Replaceable { revision },
+            projection_slot: None,
+            projection_index: None,
+            payload: ProjectionPayload::ConversationDelta(build(revision)),
+        };
+        let slot = format!("conversation:compact:{compact_id}");
+        if terminal {
+            state.replaceables.remove(&slot);
+        } else {
+            state.replaceables.insert(slot, event.clone());
+        }
         if let Some(envelope) = event_to_envelope(&self.epoch, session_id, &event) {
             let _ = state.live_tx.send(envelope);
         }
@@ -729,6 +912,7 @@ fn load_session_state(
         live_tx,
         task_revision: 0,
         board_revision: 0,
+        compact_revision: 0,
     })
 }
 
@@ -1173,6 +1357,121 @@ mod tests {
             replay[0].ts_ms,
             Some(u64::try_from(changed.ts_ms).expect("ts_ms"))
         );
+    }
+
+    /// The three transient compaction deltas must land on the conversation
+    /// channel with the same double-tagged shape as the fact-derived deltas.
+    #[test]
+    fn compact_deltas_publish_on_the_conversation_stream() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-1"));
+        let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+
+        hub.publish_compact_started(dir.path(), "seed", "compact-1", 12, 3)
+            .expect("started");
+        hub.publish_compact_progress(dir.path(), "seed", "compact-1", "累积摘要".into())
+            .expect("progress");
+        hub.publish_compact_finished(
+            dir.path(),
+            "seed",
+            "compact-1",
+            CompactStatus::Completed,
+            Some(4),
+            Some(9),
+            Some(6),
+        )
+        .expect("finished");
+
+        let mut payloads = Vec::new();
+        while let Some(V2StreamItem::Event(envelope)) = subscription.try_next() {
+            assert_eq!(
+                envelope.stream_key,
+                RingingV2StreamKey::Channel(qaqh_domain::RingingChannel::Conversation)
+            );
+            assert_eq!(envelope.delivery, RingingV2Delivery::Replaceable);
+            assert_eq!(envelope.cursor, None, "transient deltas carry no cursor");
+            assert_eq!(envelope.fact_seq, Some(bootstrap.last_fact_seq));
+            payloads.push(serde_json::to_value(&envelope.payload).expect("payload json"));
+        }
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0]["kind"], "conversation_delta");
+        assert_eq!(payloads[0]["data"]["kind"], "compact_started");
+        assert_eq!(payloads[0]["data"]["data"]["turns_total"], 12);
+        assert_eq!(payloads[1]["data"]["kind"], "compact_progress");
+        assert_eq!(payloads[1]["data"]["data"]["delta"], "累积摘要");
+        assert_eq!(payloads[2]["data"]["kind"], "compact_finished");
+        assert_eq!(payloads[2]["data"]["data"]["status"], "completed");
+        // One monotonic revision per publish, carried by both envelope and delta.
+        assert_eq!(payloads[0]["data"]["data"]["revision"], 1);
+        assert_eq!(payloads[2]["data"]["data"]["revision"], 3);
+    }
+
+    /// Reconnecting mid-compaction recovers the in-flight card from the hub's
+    /// current-value slot; after the terminal event the slot must be gone, or a
+    /// finished compaction would replay as a permanently running card.
+    #[test]
+    fn compact_slot_replays_while_running_and_clears_on_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-1"));
+        let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
+
+        hub.publish_compact_started(dir.path(), "seed", "compact-7", 20, 4)
+            .expect("started");
+        hub.publish_compact_progress(dir.path(), "seed", "compact-7", "第一段".into())
+            .expect("progress");
+        hub.publish_compact_progress(dir.path(), "seed", "compact-7", "第一段第二段".into())
+            .expect("progress");
+
+        let running = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+        let slots = compact_slot_kinds(&running);
+        assert_eq!(
+            slots,
+            vec!["compact_progress"],
+            "only the latest value replays"
+        );
+
+        hub.publish_compact_finished(
+            dir.path(),
+            "seed",
+            "compact-7",
+            CompactStatus::Cancelled,
+            None,
+            None,
+            None,
+        )
+        .expect("finished");
+        let settled = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+        assert!(compact_slot_kinds(&settled).is_empty());
+    }
+
+    fn compact_slot_kinds(subscription: &V2Subscription) -> Vec<String> {
+        subscription
+            .replay
+            .iter()
+            .filter_map(|envelope| match &envelope.payload {
+                ProjectionPayload::ConversationDelta(
+                    ConversationDelta::CompactStarted { .. }
+                    | ConversationDelta::CompactProgress { .. }
+                    | ConversationDelta::CompactFinished { .. },
+                ) => Some(
+                    serde_json::to_value(&envelope.payload).expect("json")["data"]["kind"]
+                        .as_str()?
+                        .to_string(),
+                ),
+                _ => None,
+            })
+            .collect()
     }
 
     #[tokio::test]

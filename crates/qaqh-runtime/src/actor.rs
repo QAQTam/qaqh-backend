@@ -28,11 +28,15 @@ pub(crate) fn run_inprocess_event_reader(
     sessions: Arc<qaqh_session::SessionManager>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 压缩三态（CompactStarted/Progress/Finished）的 v2 镜像出口：v1 广播面
+        // 已删除，域事件只有经这条桥才到得了客户端。
+        let mut compact = crate::ringing::CompactMirror::new(v2_hub.as_deref(), sessions.as_ref());
         for event in event_rx {
             publish_worker_event(
                 hub.as_deref(),
                 v2_hub.as_deref(),
                 sessions.as_ref(),
+                &mut compact,
                 &activity,
                 &session_id,
                 generation,
@@ -55,6 +59,7 @@ fn publish_worker_event(
     hub: Option<&RingingHub>,
     v2_hub: Option<&V2ProjectionHub>,
     sessions: &qaqh_session::SessionManager,
+    compact: &mut crate::ringing::CompactMirror<'_>,
     activity: &SessionActivityTracker,
     session_id: &str,
     generation: u64,
@@ -68,8 +73,10 @@ fn publish_worker_event(
             }
         }
         crate::agent::types::WriterEvent::Ringing(env) => {
-            let Some(hub) = hub else { return; };
             let domain: qaqh_domain::DomainEvent = env.event.into();
+            // 先做 v2 镜像：压缩三态只存在于域事件里，v1 的 `hub` 缺失时也不能丢。
+            compact.observe(&env.session_id, &domain);
+            let Some(hub) = hub else { return; };
             // #345：交互正文（ask/plan）在发布前入 content store 并 pin——canonical
             // fact 里只有 ref，正文走展示面旁路。
             crate::registry::stash_interaction_body(hub, &env.session_id, &domain);

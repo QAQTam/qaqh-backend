@@ -10,6 +10,7 @@ pub mod api_types;
 pub mod config;
 pub mod discovery;
 pub mod image_store;
+pub mod memory;
 pub mod message;
 pub mod provider;
 pub mod session;

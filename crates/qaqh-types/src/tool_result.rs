@@ -4,6 +4,7 @@
 //! the bounded model projection are separate fields so transport and UI code
 //! never have to infer failure from the shape of textual output.
 
+use crate::memory::MemoryUsageEstimate;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
@@ -293,6 +294,115 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    /// Estimate owned heap bytes and payload categories without serializing.
+    pub fn memory_usage_estimate(&self) -> MemoryUsageEstimate {
+        let mut usage = MemoryUsageEstimate {
+            heap_estimate_bytes: std::mem::size_of::<Self>() as u64,
+            item_count: 1,
+            ..MemoryUsageEstimate::default()
+        };
+        usage.add_value(&self.data);
+        usage.add_string(&self.summary, true);
+        usage.add_string(&self.model.text, true);
+        usage.add_vec_capacity::<ToolImage>(self.images.capacity());
+        for image in &self.images {
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(std::mem::size_of::<ToolImage>() as u64);
+            usage.add_string(&image.mime_type, false);
+            usage.add_image_string(&image.data);
+        }
+        if let Some(diff) = &self.diff {
+            usage.add_string(diff, true);
+        }
+        if let Some(display) = &self.display {
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(std::mem::size_of::<ToolResultDisplay>() as u64);
+            if let Some(summary) = &display.summary {
+                usage.add_string(summary, true);
+            }
+            if let Some(diff) = &display.diff {
+                usage.add_string(diff, true);
+            }
+            if let Some(header) = &display.header {
+                usage.heap_estimate_bytes = usage
+                    .heap_estimate_bytes
+                    .saturating_add(std::mem::size_of::<ToolResultDisplayHeader>() as u64);
+                match header {
+                    ToolResultDisplayHeader::Path { path, .. } => usage.add_string(path, false),
+                    ToolResultDisplayHeader::Shell { command } => usage.add_string(command, false),
+                    ToolResultDisplayHeader::Query { query, scope } => {
+                        usage.add_string(query, false);
+                        if let Some(scope) = scope {
+                            usage.add_string(scope, false);
+                        }
+                    }
+                    ToolResultDisplayHeader::Other { label } => usage.add_string(label, false),
+                }
+            }
+            if let Some(body) = &display.body {
+                usage.heap_estimate_bytes = usage
+                    .heap_estimate_bytes
+                    .saturating_add(std::mem::size_of::<ToolResultDisplayBody>() as u64);
+                match body {
+                    ToolResultDisplayBody::None | ToolResultDisplayBody::Unknown => {}
+                    ToolResultDisplayBody::Text { text, .. } => usage.add_string(text, true),
+                    ToolResultDisplayBody::Diff { unified, files } => {
+                        usage.add_string(unified, true);
+                        usage.add_vec_capacity::<String>(files.capacity());
+                        for file in files {
+                            usage.add_string(file, false);
+                        }
+                    }
+                    ToolResultDisplayBody::Shell { output, .. } => usage.add_string(output, true),
+                    ToolResultDisplayBody::Streams { stdout, stderr, .. } => {
+                        usage.add_string(stdout, true);
+                        usage.add_string(stderr, true);
+                    }
+                    ToolResultDisplayBody::Subagent { name, session_id } => {
+                        usage.add_string(name, false);
+                        usage.add_string(session_id, false);
+                    }
+                }
+            }
+            if display.outcome.is_some() {
+                usage.heap_estimate_bytes = usage
+                    .heap_estimate_bytes
+                    .saturating_add(std::mem::size_of::<ToolResultDisplayOutcome>() as u64);
+            }
+        }
+        if let Some(error) = &self.error {
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(std::mem::size_of::<ToolError>() as u64);
+            usage.add_string(&error.code, false);
+            usage.add_string(&error.message, true);
+            if let Some(hint) = &error.hint {
+                usage.add_string(hint, true);
+            }
+        }
+        if let Some(name) = &self.metrics.effective_tool_name {
+            usage.add_string(name, false);
+        }
+        if let Some(continuation) = &self.model.continuation {
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(std::mem::size_of::<ToolContinuation>() as u64);
+            usage.add_string(&continuation.tool, false);
+            usage.add_value(&continuation.args);
+        }
+        if let Some(reference) = &self.output_ref {
+            usage.heap_estimate_bytes = usage
+                .heap_estimate_bytes
+                .saturating_add(std::mem::size_of::<ContentRef>() as u64);
+            usage.add_string(&reference.content_id, false);
+            usage.add_string(&reference.media_type, false);
+            usage.add_string(&reference.sha256, false);
+        }
+        usage
+    }
+
     pub fn ok(text: impl Into<String>) -> Self {
         Self::ok_with_limit(text.into(), Some(TOOL_MODEL_MAX_CHARS))
     }

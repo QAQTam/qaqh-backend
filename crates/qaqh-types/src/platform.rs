@@ -324,6 +324,33 @@ pub fn plans_dir() -> PathBuf {
     data_dir().join("plans")
 }
 
+/// 未绑定工作区会话的**默认工作根**：`{data_dir}/workspace/{session_id}`。
+///
+/// 会话没有 `meta.cwd` 时，执行面（exec 缺省 cwd）、授权边界
+/// （`ToolCallContext.workspace_root`）与沙箱写根需要一个确定落点。此前这些
+/// 位置统一兜底到**进程 cwd**，在 daemon 里就是安装目录——模型 `ls` 看到的是
+/// harness 自身的资源目录，且 WorkspaceWrite 档把边界画在安装目录上（写安装
+/// 目录被当"区内"自动放行）。
+///
+/// 落点与 `qaqh_dir()` 的 fallback 同源（`{data_dir}/workspace`），按会话分
+/// 目录以保证并发会话不共享写根。纯路径计算，不建目录（调用侧决定何时创建
+/// 并向模型暴露失败）。
+pub fn default_session_workspace_dir(session_id: &str) -> PathBuf {
+    let root = data_dir().join("workspace");
+    let session_id = session_id.trim();
+    // 会话 id 正常由内部生成（ULID/UUID），仍拒分隔符与 `.`/`..` 分量：
+    // 这个路径会成为沙箱写根，不能因异常 id 逃逸出数据根。
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id == "."
+        || session_id == ".."
+    {
+        return root;
+    }
+    root.join(session_id)
+}
+
 /// 在 **PATH 目录**里查找可执行文件（审计 2026-10-01 M2 的共用原语）。
 ///
 /// 关键约束：候选目录**只来自 `PATH` 环境变量，绝不含当前工作目录**——
@@ -469,6 +496,26 @@ mod data_root_tests {
             "/definitely/missing/tool"
         };
         assert_eq!(resolve_command_path(absolute), PathBuf::from(absolute));
+    }
+
+    #[test]
+    fn default_session_workspace_dir_stays_under_data_root() {
+        // 会话未绑定工作区时的落点：必须是数据根下的会话子目录，绝不落回
+        // 进程 cwd（daemon 里=安装目录，会让模型 ls 看见 harness 自身）。
+        let root = data_dir().join("workspace");
+        assert_eq!(
+            default_session_workspace_dir("01JSESSIONID"),
+            root.join("01JSESSIONID")
+        );
+
+        // 异常 id（空 / 分量逃逸）收敛到 workspace 根，不出数据根。
+        for hostile in ["", "   ", "../escape", r"..\\escape", ".", ".."] {
+            assert_eq!(
+                default_session_workspace_dir(hostile),
+                root,
+                "id {hostile:?} must not escape the workspace root"
+            );
+        }
     }
 
     #[test]

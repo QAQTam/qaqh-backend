@@ -106,6 +106,15 @@ fn dump_request_log(
             serde_json::json!({ "role": m.role, "text": text })
         }).collect::<Vec<_>>(),
     });
+    // Keep diagnostics metadata-only while exposing whether the opt-in full
+    // request logger was building its additional in-memory JSON tree.
+    qaqh_memwatch::global().record_phase(
+        "request_log.value_built",
+        Some(session_id),
+        None,
+        None,
+        None,
+    );
     use std::io::Write;
     let _ = writeln!(f, "{rec}");
 }
@@ -728,9 +737,13 @@ impl TurnEngine {
         } else {
             "rejected"
         };
-        if let Err(error) =
-            Self::record_interaction_resolution(ctx.agent, call_id, decision, Some(command_id), actor)
-        {
+        if let Err(error) = Self::record_interaction_resolution(
+            ctx.agent,
+            call_id,
+            decision,
+            Some(command_id),
+            actor,
+        ) {
             log::error!("[TURN] failed to persist permission resolution {call_id}: {error}");
         }
 
@@ -938,8 +951,8 @@ impl TurnEngine {
                             .map(|t| t.call_id.as_str())
                     })
             });
-        let Some(active_id) = active_id
-            .filter(|id| crate::agent::tool_runtime::interaction_id_matches(id, call_id))
+        let Some(active_id) =
+            active_id.filter(|id| crate::agent::tool_runtime::interaction_id_matches(id, call_id))
         else {
             log::warn!("[TURN] plan response without a suspended review: {call_id}");
             Self::expire_unanswerable_interaction(self, ctx, call_id);
@@ -2154,5 +2167,4 @@ mod tests {
             CompactPreflight::Compact
         );
     }
-
 }

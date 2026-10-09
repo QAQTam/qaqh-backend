@@ -212,20 +212,54 @@ impl SessionTokenCalibrator {
 pub(crate) fn prepared_request_metrics(
     messages: &[Message],
     tools: Option<&[ToolDef]>,
-) -> (u64, String) {
+    session_id: Option<&str>,
+) -> (u64, String, u64) {
     use std::hash::{Hash, Hasher};
 
     // Account a redacted copy: inline image bytes are billed by the endpoint
     // per pixel, never per base64 character (BUG-2026-09-16-05 / D-14).
     let mut accounted = messages.to_vec();
+    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+        qaqh_memwatch::global().record_phase(
+            "context.estimate.copy",
+            Some(session_id),
+            None,
+            None,
+            None,
+        );
+    }
     let images = redact_image_payloads(&mut accounted);
     let serialized = serde_json::to_string(&(&accounted, tools)).unwrap_or_default();
+    let serialized_bytes = serialized.len() as u64;
+    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+        qaqh_memwatch::global().update_estimate_json_bytes(session_id, serialized_bytes);
+        qaqh_memwatch::global().record_phase(
+            "context.estimate.serialized",
+            Some(session_id),
+            None,
+            None,
+            Some(serialized_bytes),
+        );
+    }
     let raw_tokens = u64::from(qaqh_types::count_tokens(&serialized))
         .max(1)
         .saturating_add(image_token_charge(images));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     serialized.hash(&mut hasher);
-    (raw_tokens, format!("{:016x}", hasher.finish()))
+    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+        qaqh_memwatch::global().record_phase(
+            "context.estimate.complete",
+            Some(session_id),
+            None,
+            None,
+            Some(serialized_bytes),
+        );
+    }
+    (
+        raw_tokens,
+        format!("{:016x}", hasher.finish()),
+        serialized_bytes,
+    )
 }
 
 fn push_bounded<T>(values: &mut VecDeque<T>, value: T) {
@@ -348,8 +382,8 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             },
         };
-        let (without_tools, without_key) = prepared_request_metrics(&messages, None);
-        let (with_tools, with_key) = prepared_request_metrics(&messages, Some(&[tool]));
+        let (without_tools, without_key, _) = prepared_request_metrics(&messages, None, None);
+        let (with_tools, with_key, _) = prepared_request_metrics(&messages, Some(&[tool]), None);
         assert!(with_tools > without_tools);
         assert_ne!(with_key, without_key);
     }
@@ -372,8 +406,9 @@ mod tests {
     fn image_payload_bytes_are_not_counted_as_prose() {
         let small = image_message(1_024);
         let huge = image_message(1_048_576);
-        let (small_tokens, _) = prepared_request_metrics(std::slice::from_ref(&small), None);
-        let (huge_tokens, _) = prepared_request_metrics(std::slice::from_ref(&huge), None);
+        let (small_tokens, _, _) =
+            prepared_request_metrics(std::slice::from_ref(&small), None, None);
+        let (huge_tokens, _, _) = prepared_request_metrics(std::slice::from_ref(&huge), None, None);
         assert!(
             huge_tokens <= small_tokens + 64,
             "image bytes must not grow the estimate linearly: small={small_tokens} huge={huge_tokens}"
@@ -390,8 +425,9 @@ mod tests {
     fn tool_result_images_use_the_same_fixed_budget() {
         let small = tool_image_message(1_024);
         let huge = tool_image_message(1_048_576);
-        let (small_tokens, _) = prepared_request_metrics(std::slice::from_ref(&small), None);
-        let (huge_tokens, _) = prepared_request_metrics(std::slice::from_ref(&huge), None);
+        let (small_tokens, _, _) =
+            prepared_request_metrics(std::slice::from_ref(&small), None, None);
+        let (huge_tokens, _, _) = prepared_request_metrics(std::slice::from_ref(&huge), None, None);
         assert!(
             huge_tokens <= small_tokens + 64,
             "ToolResult.images[].data must be redacted too: small={small_tokens} huge={huge_tokens}"
@@ -402,8 +438,8 @@ mod tests {
     fn every_image_is_charged_the_fixed_budget() {
         let one = image_message(4_096);
         let twenty: Vec<Message> = (0..20).map(|_| image_message(4_096)).collect();
-        let (one_tokens, _) = prepared_request_metrics(std::slice::from_ref(&one), None);
-        let (twenty_tokens, _) = prepared_request_metrics(&twenty, None);
+        let (one_tokens, _, _) = prepared_request_metrics(std::slice::from_ref(&one), None, None);
+        let (twenty_tokens, _, _) = prepared_request_metrics(&twenty, None, None);
         assert!(
             twenty_tokens >= one_tokens + 19 * IMAGE_TOKEN_BUDGET,
             "each image must be charged separately: one={one_tokens} twenty={twenty_tokens}"
@@ -414,8 +450,8 @@ mod tests {
     fn base64_looking_text_is_not_redacted() {
         let small = Message::user(&"A".repeat(1_000));
         let large = Message::user(&"A".repeat(100_000));
-        let (small_tokens, _) = prepared_request_metrics(&[small], None);
-        let (large_tokens, _) = prepared_request_metrics(&[large], None);
+        let (small_tokens, _, _) = prepared_request_metrics(&[small], None, None);
+        let (large_tokens, _, _) = prepared_request_metrics(&[large], None, None);
         assert!(
             large_tokens > small_tokens + 10_000,
             "ordinary text must keep its linear cost: small={small_tokens} large={large_tokens}"
