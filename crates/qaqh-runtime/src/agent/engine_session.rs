@@ -116,10 +116,9 @@ impl SessionEngine {
     ) {
         // P2-D1：磁盘为权威源；磁盘读失败时回退单写口广播的最新镜像。
         // 权威读收敛到 config crate 单入口（PR-1-8）。
-        let Some((cfg, profile)) = session_effective_config(
-            agent.session_manager.as_deref(),
-            &agent.session.session_id,
-        ) else {
+        let Some((cfg, profile)) =
+            session_effective_config(agent.session_manager.as_deref(), &agent.session.session_id)
+        else {
             return;
         };
         agent.session.profile = profile;
@@ -153,6 +152,11 @@ impl SessionEngine {
         agent.config.auto_compact_threshold = cfg.auto_compact_threshold;
         agent.config.permission_level = cfg.permission_level;
         agent.config.exec = cfg.exec;
+        // compliance_enabled 按回合读（engine_input.rs）；subagent.* 在 spawn 时
+        // 读（spawn.rs 的 apply_subagent_config）——两者都不在早期清单里，漏同步
+        // 会让设置页改完对已开会话不生效。
+        agent.config.compliance_enabled = cfg.compliance_enabled;
+        agent.config.subagent = cfg.subagent;
     }
 }
 
@@ -181,6 +185,14 @@ mod tests {
             exec: qaqh_config::config::ExecConfig {
                 default_shell: Some("zsh".into()),
             },
+            // 按回合读（engine_input.rs）：必须与旧值不同以证明确实同步。
+            compliance_enabled: false,
+            // spawn 时读（spawn.rs）：至少要改 model / max_tokens 以证明整体同步。
+            subagent: qaqh_config::config::SubagentConfig {
+                model: "sub-new".into(),
+                max_tokens: 8192,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config {
@@ -192,6 +204,12 @@ mod tests {
             context_length: 10_000,
             auto_compact_threshold: 0.3,
             permission_level: 1,
+            compliance_enabled: true,
+            subagent: qaqh_config::config::SubagentConfig {
+                model: "sub-old".into(),
+                max_tokens: 1024,
+                ..Default::default()
+            },
             ..Default::default()
         });
 
@@ -211,5 +229,10 @@ mod tests {
         assert!((agent.config.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(agent.config.permission_level, 3);
         assert_eq!(agent.config.exec.default_shell.as_deref(), Some("zsh"));
+        // compliance_enabled 按回合读；subagent.* 在 spawn 时读——漏同步会让
+        // 设置页改完对已开会话不生效。
+        assert!(!agent.config.compliance_enabled);
+        assert_eq!(agent.config.subagent.model, "sub-new");
+        assert_eq!(agent.config.subagent.max_tokens, 8192);
     }
 }
