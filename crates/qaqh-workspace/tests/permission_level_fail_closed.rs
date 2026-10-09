@@ -4,6 +4,7 @@
 //! 静默升级为旧 L4(免审批),fail-open 反向放大权限;修复后收敛到最严档。
 //! 2026-10-03 起档位为三档(read-only=1 / workspace-write=2 / skip-permissions=3),
 //! 取代旧 L1–L4;非法值 fail-closed 落 read-only(最严档)。
+//! 2026-10-09 新增档位 4 = sandbox-run(ADR 2026-10-09 决策 5),越界口径随之 5..。
 //!
 //! 配置载荷/加载面(`permissionLevel` patch、磁盘 config.toml 旧值迁移)的回归
 //! 用例见 `qaqh-config` 侧(`permission_level_fail_closed.rs`)。
@@ -16,8 +17,8 @@ use std::path::Path;
 /// 非法档位必须保守降级到 read-only(最严档),绝不允许拿到 skip-permissions。
 #[test]
 fn invalid_levels_never_resolve_to_skip_permissions() {
-    // 0 与 4..=255 全部非法(文档口径:1-3)。
-    let invalid: Vec<u8> = std::iter::once(0u8).chain(4u8..=255).collect();
+    // 0 与 5..=255 全部非法(文档口径:1-4)。
+    let invalid: Vec<u8> = std::iter::once(0u8).chain(5u8..=255).collect();
 
     for raw in invalid {
         let level = PermissionLevel::from_u8(raw);
@@ -39,7 +40,7 @@ fn invalid_levels_never_resolve_to_skip_permissions() {
     }
 }
 
-/// 合法档位(1..=3)映射稳定。
+/// 合法档位(1..=4)映射稳定。
 #[test]
 fn valid_levels_keep_their_meaning() {
     assert_eq!(PermissionLevel::from_u8(1), PermissionLevel::ReadOnly);
@@ -48,7 +49,8 @@ fn valid_levels_keep_their_meaning() {
         PermissionLevel::from_u8(3),
         PermissionLevel::SkipPermissions
     );
-    for raw in 1..=3u8 {
+    assert_eq!(PermissionLevel::from_u8(4), PermissionLevel::SandboxRun);
+    for raw in 1..=4u8 {
         assert_eq!(PermissionLevel::try_from_u8(raw).unwrap().to_u8(), raw);
     }
 }
@@ -81,7 +83,7 @@ fn invalid_level_requires_approval_for_workspace_write() {
     std::fs::create_dir_all(&workspace).expect("create temp workspace");
     let target = workspace.join("src").join("lib.rs");
 
-    for raw in [0u8, 4, 5, 128, 255] {
+    for raw in [0u8, 5, 128, 255] {
         let level = PermissionLevel::from_u8(raw);
         let decision = needs_permission(
             level,
@@ -105,7 +107,7 @@ fn invalid_level_admits_write_as_approval_required_not_authorized() {
     let workspace = std::env::temp_dir().join("qaqh-permission-fail-closed-admit");
     std::fs::create_dir_all(&workspace).expect("create temp workspace");
 
-    for raw in [0u8, 4, 5, 255] {
+    for raw in [0u8, 5, 255] {
         let invocation = ToolInvocation {
             session_id: "fail-closed".into(),
             call_id: format!("call-{raw}"),
@@ -137,10 +139,10 @@ fn read_only_tier_asks_for_mutations_but_autos_workspace_reads() {
     );
     assert!(
         matches!(mutation, PermissionDecision::AskUser { .. }),
-        "read-only tier must ask for writes"
+        "read-only tier must ask for workspace writes"
     );
 
-    let read = needs_permission(
+    let workspace_read = needs_permission(
         PermissionLevel::ReadOnly,
         "read",
         &serde_json::json!({ "path": "src/lib.rs" }),
@@ -149,7 +151,43 @@ fn read_only_tier_asks_for_mutations_but_autos_workspace_reads() {
         ToolCategory::Read,
     );
     assert!(
-        matches!(read, PermissionDecision::AutoApprove),
-        "read-only tier auto-approves workspace reads (default open face)"
+        matches!(workspace_read, PermissionDecision::AutoApprove),
+        "read-only tier keeps workspace-read auto-approve"
+    );
+}
+
+/// 档位 4 = sandbox-run(ADR 2026-10-09 决策 5):exec 自动面由授权层按
+/// 沙箱能力裁决;本文件只锁 needs_permission 的策略面——写与 workspace-write
+/// 同宽(工作区内自动),net 仍逐次审批。
+#[test]
+fn sandbox_run_tier_policy_face_matches_workspace_write() {
+    let workspace = std::env::temp_dir().join("qaqh-permission-sandbox-run-ws");
+    std::fs::create_dir_all(&workspace).expect("create temp workspace");
+    let target = workspace.join("inside.txt");
+
+    let write_decision = needs_permission(
+        PermissionLevel::SandboxRun,
+        "write",
+        &serde_json::json!({ "path": target }),
+        &workspace,
+        &HashSet::new(),
+        ToolCategory::Write,
+    );
+    assert!(
+        matches!(write_decision, PermissionDecision::AutoApprove),
+        "sandbox-run must keep workspace-write's write policy"
+    );
+
+    let net_decision = needs_permission(
+        PermissionLevel::SandboxRun,
+        "web_fetch",
+        &serde_json::json!({ "url": "http://x.example" }),
+        &workspace,
+        &HashSet::new(),
+        ToolCategory::Net,
+    );
+    assert!(
+        matches!(net_decision, PermissionDecision::AskUser { .. }),
+        "sandbox-run must keep net per-call approval (no enforced network isolation)"
     );
 }
