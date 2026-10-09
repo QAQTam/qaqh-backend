@@ -76,8 +76,6 @@ pub struct PersistentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compliance_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compliance_extra_keywords: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub compliance_allowlist: Option<Vec<String>>,
 
     // ── Permission ──
