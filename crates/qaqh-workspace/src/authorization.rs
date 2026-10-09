@@ -36,6 +36,24 @@ pub fn is_subagent_sandbox() -> bool {
     SUBAGENT_SANDBOX.with(|slot| slot.get())
 }
 
+/// 沙箱内的「跨区」判定。
+///
+/// 参数路径在 `extract_target_paths` 里已经解析成绝对路径
+/// （`permission.rs` 末尾的 `map(resolve_target_path)`，基准是当前会话工作区），
+/// 所以这里只剩一件事要处理：**会话没有绑定工作区**（`""` / `"."`）时不做跨区
+/// 判定——没有工作区就没有「区外」。否则子代理连自己会话里的普通文件都读不了，
+/// 实测报错正是 `reads outside the workspace are host-only`。
+///
+/// 放宽只覆盖文件读写：调用方仅在文件操作分支使用本函数；exec / 网络 / MCP 的
+/// 拒绝不依赖工作区，不受影响。
+fn sandbox_within_workspace(
+    resources: &[PathBuf],
+    workspace_root: &Path,
+    workspace_unset: bool,
+) -> bool {
+    workspace_unset || crate::permission::all_within_workspace(resources, workspace_root)
+}
+
 /// Identity of a single tool invocation destined for a handler.
 #[derive(Debug, Clone)]
 pub struct ToolInvocation {
@@ -361,8 +379,11 @@ pub fn admit_with_context(
             crate::permission::ToolCategory::Exec | crate::permission::ToolCategory::Net
         ) || level == crate::permission::PermissionLevel::SkipPermissions;
         if d5_bypass {
-            let mut resources =
-                crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
+            let mut resources = crate::permission::extract_target_paths_in(
+                &invocation.tool_name,
+                &invocation.args,
+                context.workspace_root.as_path(),
+            );
             resources.sort();
             resources.dedup();
             return Admission::Authorized(AuthorizedToolCall::new(
@@ -374,6 +395,16 @@ pub fn admit_with_context(
         }
     }
 
+    // 会话未绑定工作区（`""` / `"."` ⇒ 无边界）时，沙箱不做跨区判定——
+    // 没有工作区就没有「区外」。见 `sandbox_within_workspace`。
+    let workspace_unset = matches!(
+        context
+            .workspace_root
+            .components()
+            .collect::<Vec<_>>()
+            .as_slice(),
+        [] | [std::path::Component::CurDir]
+    );
     let workspace_root = crate::permission::resolve_target_path(context.workspace_root.clone());
     match crate::permission::needs_permission(
         level,
@@ -384,8 +415,11 @@ pub fn admit_with_context(
         invocation.category,
     ) {
         crate::permission::PermissionDecision::AutoApprove => {
-            let mut resources =
-                crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
+            let mut resources = crate::permission::extract_target_paths_in(
+                &invocation.tool_name,
+                &invocation.args,
+                context.workspace_root.as_path(),
+            );
             resources.sort();
             resources.dedup();
             // S3 兜底（2026-10-05 读自由规则后必读）：needs_permission 对 Read
@@ -393,7 +427,7 @@ pub fn admit_with_context(
             // 沙箱上下文没有审批通道，跨 workspace 读必须保持自动拒绝（防越狱）。
             if sandboxed
                 && invocation.category == crate::permission::ToolCategory::Read
-                && !crate::permission::all_within_workspace(&resources, &workspace_root)
+                && !sandbox_within_workspace(&resources, &workspace_root, workspace_unset)
             {
                 return Admission::Denied(format!(
                     "subagent sandbox denied '{}': reads outside the workspace are host-only",
@@ -420,11 +454,20 @@ pub fn admit_with_context(
                     category,
                     crate::permission::ToolCategory::Read | crate::permission::ToolCategory::Write
                 );
-                if file_ops && crate::permission::all_within_workspace(&paths, &workspace_root) {
+                // 敏感会话文件（历史 / 凭据）必须保持拒绝：沙箱没有审批通道，
+                // 被「未设置工作区」放宽顺带放行就等于把数据外泄面直接打开。
+                let sensitive = paths
+                    .iter()
+                    .any(|path| crate::permission::is_sensitive_session_path(path));
+                if file_ops
+                    && !sensitive
+                    && sandbox_within_workspace(&paths, &workspace_root, workspace_unset)
+                {
                     // workspace 内文件操作：自动批准（等价 Level 3 语义）。
-                    let mut resources = crate::permission::extract_target_paths(
+                    let mut resources = crate::permission::extract_target_paths_in(
                         &invocation.tool_name,
                         &invocation.args,
+                        context.workspace_root.as_path(),
                     );
                     resources.sort();
                     resources.dedup();
@@ -687,6 +730,114 @@ mod tests {
                 assert!(reason.contains("sandbox"), "{reason}");
             }
             _other => panic!("cross-workspace read must be denied in sandbox, got non-denied"),
+        }
+    }
+
+    /// 设置本线程的 actor 工作区并 Drop 时清除。
+    ///
+    /// `extract_target_paths` 用 `current_workspace()` 解析相对路径；生产里由
+    /// actor 线程捕获后 install 到工具线程，测试里就地设置以对齐语义。
+    fn actor_workspace_guard(ws: &std::path::Path) -> impl Drop {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                crate::clear_actor_context();
+            }
+        }
+        crate::set_actor_context(&ws.to_string_lossy(), "seed-sandbox");
+        Guard
+    }
+
+    #[test]
+    fn sandbox_approves_workspace_relative_paths() {
+        // `read` 的路径契约允许工作区相对路径（`qaqh-file-tools/src/file_query.rs:20`
+        // "workspace-relative or absolute"），授权侧按同一基准解析
+        // （`extract_target_paths` 末尾 `map(resolve_target_path)`）。工作区内的
+        // 相对路径必须放行，`..` 逃逸出去仍然拒。
+        let _g = sandbox_guard();
+        let ws = std::env::temp_dir().join("qaqh-sandbox-rel");
+        let _wsg = actor_workspace_guard(&ws);
+        for (tool, category) in [
+            ("read", crate::permission::ToolCategory::Read),
+            ("write", crate::permission::ToolCategory::Write),
+        ] {
+            let admission = invoke(
+                tool,
+                serde_json::json!({ "path": "src/main.rs" }),
+                &ws,
+                category,
+            );
+            assert!(
+                matches!(admission, Admission::Authorized(_)),
+                "{tool} with a workspace-relative path must be authorized in sandbox"
+            );
+        }
+        let admission = invoke(
+            "read",
+            serde_json::json!({ "path": "../qaqh-sandbox-escape.txt" }),
+            &ws,
+            crate::permission::ToolCategory::Read,
+        );
+        match admission {
+            Admission::Denied(reason) => assert!(reason.contains("sandbox"), "{reason}"),
+            _other => panic!("relative path escaping the workspace must stay denied"),
+        }
+    }
+
+    #[test]
+    fn sandbox_allows_file_ops_when_workspace_is_unset() {
+        // 会话未绑定工作区（`""` / `"."`）：没有「区外」可言，文件读写放行——
+        // 大多数 coding agent 允许不选目录，不设工作区也必须能用。
+        // exec / 网络 / MCP 不依赖工作区，仍然一律拒。
+        let _g = sandbox_guard();
+        let anywhere = std::env::temp_dir().join("qaqh-sandbox-nounset-any.txt");
+        for ws in [PathBuf::from(""), PathBuf::from(".")] {
+            for (tool, category) in [
+                ("read", crate::permission::ToolCategory::Read),
+                ("write", crate::permission::ToolCategory::Write),
+            ] {
+                let admission =
+                    invoke(tool, serde_json::json!({ "path": anywhere }), &ws, category);
+                assert!(
+                    matches!(admission, Admission::Authorized(_)),
+                    "{tool} must not be confined when the workspace is unset ({ws:?})"
+                );
+            }
+        }
+        for (tool, category) in [
+            ("exec", crate::permission::ToolCategory::Exec),
+            ("web_fetch", crate::permission::ToolCategory::Net),
+        ] {
+            let admission = invoke(
+                tool,
+                serde_json::json!({ "command": "whoami" }),
+                &PathBuf::from("."),
+                category,
+            );
+            assert!(
+                matches!(admission, Admission::Denied(_)),
+                "{tool} must stay denied in sandbox even when the workspace is unset"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_denies_sensitive_session_files_even_when_workspace_is_unset() {
+        // 放宽「未设置工作区」不能顺带打开数据外泄面：会话历史 / 凭据在任何
+        // 情况下都不给子代理读（沙箱没有审批通道，只能拒）。
+        let _g = sandbox_guard();
+        let secret = qaqh_types::platform::sessions_dir()
+            .join("seed-other")
+            .join("messages.jsonl");
+        let admission = invoke(
+            "read",
+            serde_json::json!({ "path": secret }),
+            &PathBuf::from("."),
+            crate::permission::ToolCategory::Read,
+        );
+        match admission {
+            Admission::Denied(reason) => assert!(reason.contains("sandbox"), "{reason}"),
+            _other => panic!("sensitive session files must stay denied in sandbox"),
         }
     }
 
