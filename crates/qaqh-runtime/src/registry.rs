@@ -1048,6 +1048,8 @@ impl AgentRegistry {
         let event_session = session_id.to_string();
         let activity = self.activity.clone();
         let hub = self.hub.clone();
+        let v2_hub = self.v2_hub.clone();
+        let sessions = self.sessions.clone();
         let reader = std::thread::spawn(move || {
             crate::actor::run_inprocess_event_reader(
                 event_rx,
@@ -1055,6 +1057,8 @@ impl AgentRegistry {
                 generation,
                 activity,
                 hub,
+                v2_hub,
+                sessions,
             );
         });
 
@@ -1153,6 +1157,8 @@ impl AgentRegistry {
         let event_session = session_id.to_string();
         let activity = self.activity.clone();
         let hub = self.hub.clone();
+        let v2_hub = self.v2_hub.clone();
+        let sessions = self.sessions.clone();
         let reader = std::thread::spawn(move || {
             crate::actor::run_inprocess_event_reader(
                 event_rx,
@@ -1160,6 +1166,8 @@ impl AgentRegistry {
                 generation,
                 activity,
                 hub,
+                v2_hub,
+                sessions,
             );
         });
 

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender};
 
 use crate::agent::{ActorKind, SubagentSpawnSpec};
+use crate::ringing::v2::V2ProjectionHub;
 use crate::{RingingHub, SessionActivityTracker};
 
 fn short_session(session_id: &str) -> String {
@@ -23,10 +24,20 @@ pub(crate) fn run_inprocess_event_reader(
     generation: u64,
     activity: SessionActivityTracker,
     hub: Option<Arc<RingingHub>>,
+    v2_hub: Option<Arc<V2ProjectionHub>>,
+    sessions: Arc<qaqh_session::SessionManager>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for event in event_rx {
-            publish_worker_event(hub.as_deref(), &activity, &session_id, generation, event);
+            publish_worker_event(
+                hub.as_deref(),
+                v2_hub.as_deref(),
+                sessions.as_ref(),
+                &activity,
+                &session_id,
+                generation,
+                event,
+            );
         }
     }));
     if let Err(panic) = result {
@@ -42,21 +53,22 @@ pub(crate) fn run_inprocess_event_reader(
 
 fn publish_worker_event(
     hub: Option<&RingingHub>,
+    v2_hub: Option<&V2ProjectionHub>,
+    sessions: &qaqh_session::SessionManager,
     activity: &SessionActivityTracker,
     session_id: &str,
     generation: u64,
     event: crate::agent::types::WriterEvent,
 ) {
-    let Some(hub) = hub else {
-        return;
-    };
     match event {
         crate::agent::types::WriterEvent::Timeline(env) => {
+            let Some(hub) = hub else { return; };
             if let Err(error) = hub.publish_timeline(&env.session_id, env.intent) {
                 log::error!("[timeline] rejected intent for {}: {error}", env.session_id);
             }
         }
         crate::agent::types::WriterEvent::Ringing(env) => {
+            let Some(hub) = hub else { return; };
             let domain: qaqh_domain::DomainEvent = env.event.into();
             // #345：交互正文（ask/plan）在发布前入 content store 并 pin——canonical
             // fact 里只有 ref，正文走展示面旁路。
@@ -70,6 +82,13 @@ fn publish_worker_event(
             if let Some(observe) = crate::activity::domain_activity_observe(&domain) {
                 // tracker 状态机保留（/activity 查询权威）；v1 广播面已删除，观察只驱动状态机。
                 let _ = activity.observe(session_id, generation, &observe);
+            }
+        }
+        crate::agent::types::WriterEvent::TitleChanged { session_id, title } => {
+            let Some(v2_hub) = v2_hub else { return; };
+            let session_dir = sessions.session_path_dir(&session_id);
+            if let Err(error) = v2_hub.publish_title_changed(&session_dir, &session_id, title) {
+                log::warn!("[title] v2 publish failed for {session_id}: {error}");
             }
         }
     }

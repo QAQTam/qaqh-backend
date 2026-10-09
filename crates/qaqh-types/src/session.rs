@@ -143,9 +143,9 @@ pub struct SessionMeta {
     /// Cumulative tokens consumed across all turns.
     #[serde(skip)]
     pub tokens: u64,
-    /// 会话标题（**首轮后生成一次即冻结**，对齐主流 AI 工具行为；persisted）。
-    /// 生成链路：worker 首 turn 完成后异步 LLM 总结用户需求（失败降级为
-    /// 首条用户消息截断）→ 写盘 → daemon 广播 `SessionMetaChanged` → 前端刷新。
+    /// 会话标题（首个用户请求启动时开始生成并冻结；persisted）。
+    /// 先写首条用户消息的截断回退标题，再由并行的异步 LLM 总结覆盖；每次写入
+    /// 都经 v2 Meta SSE 即时通知前端。
     pub title: Option<String>,
     /// 会话创建时的工作目录（canonical path，persisted）。Workspace 归属判定
     /// 基础：新会话 cwd 位于某 workspace path 内自动 attach；旧 meta.json 缺省
