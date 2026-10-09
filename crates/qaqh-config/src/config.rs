@@ -125,8 +125,6 @@ pub struct Config {
     pub exec: ExecConfig,
     /// Whether the content filter is active.
     pub compliance_enabled: bool,
-    /// Additional banned keywords for the content filter.
-    pub compliance_extra_keywords: Vec<String>,
     /// Whitelisted patterns exempt from content filtering.
     pub compliance_allowlist: Vec<String>,
     /// Agent permission tier (裸 u8,wire 兼容;2026-10-03 三档制取代 L1–L4):
@@ -747,7 +745,6 @@ impl Default for Config {
             subagent: SubagentConfig::default(),
             exec: ExecConfig::default(),
             compliance_enabled: true,
-            compliance_extra_keywords: Vec::new(),
             compliance_allowlist: Vec::new(),
             permission_level: 2, // workspace-write — safe autonomous default
             tokenizer_path: None,
@@ -1014,9 +1011,6 @@ impl Config {
             // ── Compliance ──
             if let Some(enabled) = pc.compliance_enabled {
                 cfg.compliance_enabled = enabled;
-            }
-            if let Some(ref keywords) = pc.compliance_extra_keywords {
-                cfg.compliance_extra_keywords = keywords.clone();
             }
             if let Some(ref allowlist) = pc.compliance_allowlist {
                 cfg.compliance_allowlist = allowlist.clone();
@@ -1313,11 +1307,6 @@ falling back to 1 (read-only)"
                     .cloned(),
             }),
             compliance_enabled: Some(self.compliance_enabled),
-            compliance_extra_keywords: if self.compliance_extra_keywords.is_empty() {
-                None
-            } else {
-                Some(self.compliance_extra_keywords.clone())
-            },
             compliance_allowlist: if self.compliance_allowlist.is_empty() {
                 None
             } else {
@@ -1441,11 +1430,7 @@ falling back to 1 (read-only)"
     /// `profile` = 该会话选定的 profile 名；`None` = 跟随全局 `active_profile`。
     /// `own_key` = 调用方从 `secrets.toml` 解析出的该 profile 自带密钥；
     /// `None` = 继承主密钥（profile 无自带 key，或名字进不了 secrets.toml）。
-    pub fn for_session(
-        global: &Self,
-        profile: Option<&str>,
-        own_key: Option<String>,
-    ) -> Self {
+    pub fn for_session(global: &Self, profile: Option<&str>, own_key: Option<String>) -> Self {
         let effective = profile.unwrap_or(global.active_profile.as_str());
         let mut cfg = global.clone();
         if cfg.apply_profile(effective).is_none() {

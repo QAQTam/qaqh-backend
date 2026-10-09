@@ -59,7 +59,14 @@ pub struct ConfigDto {
     pub mcp: McpDto,
     /// LSP 客户端配置（M1 只读；写模型另立）。
     pub lsp: LspDto,
+    /// Path to a HuggingFace tokenizer.json。
+    /// 空 = 启发式估算兜底（agent 状态层的 `<heuristic>`）；变更需**重启 daemon**
+    /// （tokenizer 是 qaqh-types 的进程级 `OnceLock`，仅在 load 时初始化一次）。
     pub tokenizer_path: Option<String>,
+    /// exec 工具默认执行配置（热字段；`exec.default_shell` 被 exec 真正消费）。
+    pub exec: ExecDto,
+    /// 空闲会话 worker 自动卸载阈值（秒）。0 = 禁用（缺省）；由 daemon 周期任务读取。
+    pub session_idle_unload_secs: u64,
 }
 
 /// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。
@@ -72,10 +79,14 @@ pub struct SubagentDto {
     pub api_key: String,
     pub api_key_set: bool,
     pub max_tokens: u64,
+    /// Maximum lifetime in seconds before the subagent is killed.
+    /// 仅作用于模型调用的 `spawn_subagent` 工具路径（qaqh-subagent 的 collector
+    /// deadline）；`subagent.spawn` RPC 路径不读它。
     pub timeout_secs: u64,
     /// 空数组 = 全部工具可用（配置语义，非缺省）。
     pub default_tools: Vec<String>,
     /// Maximum subagent tree depth. Default 1.
+    /// **只在 daemon 启动时读取**（qaqh-runtime service.rs）；改动需**重启 daemon**。
     #[serde(default = "default_subagent_max_depth")]
     pub max_depth: u64,
     /// Max queued messages from one sender to one recipient. 0 = unlimited.
@@ -96,6 +107,15 @@ fn default_subagent_message_in_flight() -> u64 {
 
 fn default_subagent_message_outbound() -> u64 {
     1024
+}
+
+/// exec 工具默认执行配置（读模型）。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecDto {
+    /// `None` / 空 / "auto" = 平台优先级自动探测。
+    pub default_shell: Option<String>,
 }
 
 /// MCP 客户端配置读模型（docs/current/architecture.md）。
@@ -191,15 +211,9 @@ pub struct ConfigPatch {
     pub auto_compact_threshold: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compliance_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub font_family: Option<String>,
-    /// None = 不动；Some("") = 跟随系统。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notifications_enabled: Option<bool>,
+    // 客户端本地偏好（theme / lang / fontFamily / notificationsEnabled）刻意
+    // **不出现在写模型里**：它们不是 daemon 设置，只是桌面壳的本地展示偏好，
+    // 仍保留在读模型 [`ConfigDto`] 供其它客户端读取。
     /// 权限档位（1=read-only，2=workspace-write，
     /// 3=skip-permissions：显式危险 bypass，普通工具全部自动放行）。
     ///
@@ -211,6 +225,12 @@ pub struct ConfigPatch {
     pub permission_level: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokenizer_path: Option<String>,
+    /// exec 工具默认 shell。空串 / "auto" = 平台自动探测。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ExecPatch>,
+    /// 空闲会话卸载阈值（秒）；0 = 禁用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_idle_unload_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentPatch>,
 }
@@ -239,6 +259,16 @@ pub struct SubagentPatch {
     pub message_in_flight_per_pair: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_outbound_per_sender: Option<u64>,
+}
+
+/// exec 工具默认执行配置（写模型），嵌套于 [`ConfigPatch::exec`]。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExecPatch {
+    /// 空串 / "auto" = 平台自动探测；其它值 = 指定默认 shell。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<String>,
 }
 
 impl ConfigPatch {
@@ -384,7 +414,9 @@ mod tests {
             },
             "mcp": { "enabled": false, "idleShutdownSecs": 300, "servers": [] },
             "lsp": { "enabled": false, "idleShutdownSecs": 600, "servers": [] },
-            "tokenizerPath": null
+            "tokenizerPath": null,
+            "exec": { "defaultShell": "bash" },
+            "sessionIdleUnloadSecs": 900
         });
         let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
         assert_eq!(dto.context_length, 1_000_000);
@@ -394,6 +426,8 @@ mod tests {
         assert_eq!(dto.api_key, "****");
         assert_eq!(dto.subagent.timeout_secs, 120);
         assert_eq!(dto.subagent.default_tools, vec!["read".to_string()]);
+        assert_eq!(dto.exec.default_shell.as_deref(), Some("bash"));
+        assert_eq!(dto.session_idle_unload_secs, 900);
         assert!(!dto.mcp.enabled && !dto.lsp.enabled);
     }
 
