@@ -65,14 +65,6 @@ pub enum QueryRequest {
     PlanRead {
         session_id: String,
     },
-    /// 当前会话 context 统计（daemon `plan.context_stats`）。
-    PlanContextStats {
-        session_id: String,
-    },
-    /// 最近 token 用量（daemon `stats.token_usage`）。
-    StatsTokenUsage {
-        days: u32,
-    },
     /// Git working tree 状态（daemon `git.diff`）。
     GitDiff {
         session_id: String,
@@ -118,10 +110,6 @@ impl QueryRequest {
                 ("session.meta", json!({ "session_id": session_id }))
             }
             Self::PlanRead { session_id } => ("plan.read", json!({ "session_id": session_id })),
-            Self::PlanContextStats { session_id } => {
-                ("plan.context_stats", json!({ "session_id": session_id }))
-            }
-            Self::StatsTokenUsage { days } => ("stats.token_usage", json!({ "days": days })),
             Self::GitDiff { session_id } => ("git.diff", json!({ "session_id": session_id })),
             Self::GitBranch { session_id } => ("git.branch", json!({ "session_id": session_id })),
             Self::GitBranches { session_id } => {
@@ -440,9 +428,6 @@ mod tests {
             QueryRequest::PlanRead {
                 session_id: "s".into(),
             },
-            QueryRequest::PlanContextStats {
-                session_id: "s".into(),
-            },
             QueryRequest::GitDiff {
                 session_id: "s".into(),
             },
@@ -522,16 +507,6 @@ mod tests {
                 "plan.read",
             ),
             (
-                QueryRequest::PlanContextStats {
-                    session_id: "s".into(),
-                },
-                "plan.context_stats",
-            ),
-            (
-                QueryRequest::StatsTokenUsage { days: 30 },
-                "stats.token_usage",
-            ),
-            (
                 QueryRequest::GitDiff {
                     session_id: "s".into(),
                 },
@@ -570,10 +545,6 @@ mod tests {
             params,
             json!({ "session_id": "s", "file_path": "src/lib.rs" })
         );
-
-        let (name, params) = QueryRequest::StatsTokenUsage { days: 30 }.into_parts();
-        assert_eq!(name, "stats.token_usage");
-        assert_eq!(params, json!({ "days": 30 }));
     }
 
     /// **变体清单 + 穷举闸（G3）**：Rust 的枚举无法被迭代，清单只能手写。
@@ -611,10 +582,6 @@ mod tests {
             QueryRequest::PlanRead {
                 session_id: "s".into(),
             },
-            QueryRequest::PlanContextStats {
-                session_id: "s".into(),
-            },
-            QueryRequest::StatsTokenUsage { days: 30 },
             QueryRequest::GitDiff {
                 session_id: "s".into(),
             },
@@ -643,8 +610,6 @@ mod tests {
                 | QueryRequest::TodoStatus { .. }
                 | QueryRequest::SessionMeta { .. }
                 | QueryRequest::PlanRead { .. }
-                | QueryRequest::PlanContextStats { .. }
-                | QueryRequest::StatsTokenUsage { .. }
                 | QueryRequest::GitDiff { .. }
                 | QueryRequest::GitBranch { .. }
                 | QueryRequest::GitBranches { .. }
@@ -781,10 +746,12 @@ mod tests {
             assert_route_shape(name);
             assert!(seen.insert(name), "重复的 {kind} 路由: {name}");
         }
-        // 两个枚举**合计** 35 条路由。条数写死是刻意的：它与上面两份清单一起
-        // 构成「新增方法必须显式过一次」的检查点。
+        // 两个枚举**合计** 33 条路由。条数写死是刻意的：它与上面两份清单一起
+        // 构成「新增/删除方法必须显式过一次」的检查点。
         // 34 → 35：新增 `session.set_profile`（会话级 profile 选择，走既有
         // catch-all `POST /ringing/v2/service/{method}`，无新路由类型）。
-        assert_eq!(seen.len(), 35, "服务面路由总数变了——确认是新增而非改错");
+        // 35 → 33：退役 `plan.context_stats` 与 `stats.token_usage`——前者的
+        // 估算口径已被每轮 usage 真值取代，后者的 token_stats.jsonl 日报无消费者。
+        assert_eq!(seen.len(), 33, "服务面路由总数变了——确认是新增而非改错");
     }
 }

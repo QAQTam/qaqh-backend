@@ -4,6 +4,7 @@
 //! - `hub`：daemon 侧 Ringing 运行时聚合入口 `RingingHub`
 
 pub mod attachment;
+pub(crate) mod compact_mirror;
 pub mod content_store;
 pub mod device_registry;
 pub mod driver_watch;
@@ -19,6 +20,7 @@ pub(crate) mod timeline_rebuild;
 pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;
+pub(crate) use compact_mirror::CompactMirror;
 pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
 pub use device_registry::{DeviceRecord, DeviceRegistry, Scope};
 pub use driver_watch::RingingDriverWatch;

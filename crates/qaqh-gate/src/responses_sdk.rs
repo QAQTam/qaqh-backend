@@ -26,6 +26,7 @@ use mutil_ai::{
 };
 use reqwest::header::HeaderValue;
 
+use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
@@ -600,22 +601,24 @@ fn build_request(
 fn usage_to_info_responses(u: &WireUsage) -> UsageInfo {
     let input = u.input_tokens.unwrap_or(0) as u32;
     let output = u.output_tokens.unwrap_or(0) as u32;
-    let total = u.total_tokens.unwrap_or(input as u64 + output as u64) as u32;
     let cached_hit = u.cache_read_tokens.map(|v| v as u32);
     let reported = cached_hit.is_some();
-    UsageInfo {
-        prompt_tokens: input,
-        completion_tokens: output,
-        total_tokens: total,
-        prompt_cache_hit_tokens: cached_hit.unwrap_or(0),
-        prompt_cache_miss_tokens: if reported {
-            input.saturating_sub(cached_hit.unwrap_or(0))
-        } else {
-            0
+    usage::normalize(
+        usage::UsageSeed {
+            prompt_tokens: input,
+            completion_tokens: output,
+            total_tokens: u.total_tokens.map(|v| v as u32),
+            cache_hit_tokens: cached_hit.unwrap_or(0),
+            cache_miss_tokens: if reported {
+                input.saturating_sub(cached_hit.unwrap_or(0))
+            } else {
+                0
+            },
+            cache_reported: reported,
+            reasoning_tokens: u.reasoning_tokens.unwrap_or(0) as u32,
         },
-        reasoning_tokens: u.reasoning_tokens.unwrap_or(0) as u32,
-        cache_usage_reported: Some(reported),
-    }
+        u.raw.as_ref(),
+    )
 }
 
 fn server_tool_status_name(state: ServerToolState) -> &'static str {
@@ -717,21 +720,27 @@ fn interpret_provider_stream(raw: &str) -> Option<IncompleteTerminal> {
             .get("input_tokens_details")
             .and_then(|d| d.get("cached_tokens"));
         let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        UsageInfo {
-            prompt_tokens: input_tokens,
-            completion_tokens: output_tokens,
-            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            prompt_cache_hit_tokens: cached,
-            prompt_cache_miss_tokens: cached_value
-                .map(|_| input_tokens.saturating_sub(cached))
-                .unwrap_or(0),
-            reasoning_tokens: u
-                .get("output_tokens_details")
-                .and_then(|d| d.get("reasoning_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            cache_usage_reported: cached_value.and_then(|v| v.as_u64()).map(|_| true),
-        }
+        let reported = cached_value.and_then(|v| v.as_u64()).is_some();
+        usage::normalize(
+            usage::UsageSeed {
+                prompt_tokens: input_tokens,
+                completion_tokens: output_tokens,
+                total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+                cache_hit_tokens: cached,
+                cache_miss_tokens: if reported {
+                    input_tokens.saturating_sub(cached)
+                } else {
+                    0
+                },
+                cache_reported: reported,
+                reasoning_tokens: u
+                    .get("output_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+            },
+            Some(u),
+        )
     });
     Some(IncompleteTerminal {
         stop_reason,

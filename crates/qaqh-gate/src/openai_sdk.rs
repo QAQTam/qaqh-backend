@@ -27,6 +27,7 @@ use mutil_ai::{
 };
 use reqwest::header::HeaderValue;
 
+use crate::usage;
 use qaqh_types::{CacheTokenField, ContentBlock, Message, ThinkingParamMode, ToolDef, UsageInfo};
 
 use super::sdk_common::{
@@ -393,8 +394,9 @@ fn build_chat_request(
     request
 }
 
-/// Chat-completions usage：缓存 token 字段名按端点声明选取
-/// （`CacheTokenField`），从 SDK 保留的原生 usage JSON 读取——与退役前逐字段一致。
+/// Chat-completions usage：缓存 token 字段名按端点声明选取（`CacheTokenField`），
+/// 从 SDK 保留的原生 usage JSON 读取。字段名差异留在本函数，口径与 `extras`
+/// 交给 [`usage::normalize`]。
 fn usage_to_info_chat(cache_field: &CacheTokenField, u: &WireUsage) -> UsageInfo {
     let raw = u.raw.as_ref();
     let get = |key: &str| -> Option<u32> {
@@ -441,15 +443,20 @@ fn usage_to_info_chat(cache_field: &CacheTokenField, u: &WireUsage) -> UsageInfo
         .and_then(|v| v.as_u64())
         .or(u.reasoning_tokens)
         .unwrap_or(0) as u32;
-    UsageInfo {
-        prompt_tokens: pt,
-        completion_tokens: ct,
-        total_tokens: pt.saturating_add(ct),
-        prompt_cache_hit_tokens: hit,
-        prompt_cache_miss_tokens: miss,
-        reasoning_tokens: rt,
-        cache_usage_reported: Some(reported),
-    }
+    usage::normalize(
+        usage::UsageSeed {
+            prompt_tokens: pt,
+            completion_tokens: ct,
+            // chat 端点自报的 total 历史上没被采用（一律 prompt + completion），
+            // 保持原口径不动。
+            total_tokens: None,
+            cache_hit_tokens: hit,
+            cache_miss_tokens: miss,
+            cache_reported: reported,
+            reasoning_tokens: rt,
+        },
+        raw,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // strangler 内部管道函数（PLAN D-5 同口径）

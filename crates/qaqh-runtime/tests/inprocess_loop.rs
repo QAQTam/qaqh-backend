@@ -68,6 +68,8 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
                     }
                 }
                 WriterEvent::Timeline(_) => {}
+                // Title changes ride the V2 projection hub, not the worker wire.
+                WriterEvent::TitleChanged { .. } => {}
             }
         }
     });

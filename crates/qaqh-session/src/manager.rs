@@ -752,23 +752,6 @@ impl SessionManager {
         });
     }
 
-    /// 上下文统计快照（可再生缓存）。写入 meta.json；只有正规会话
-    /// （`created_at > 0`，即 persist_new_session 建立过）才同步索引——
-    /// 子代理 worker 的 dashboard/compact 路径不会污染会话列表。
-    pub fn set_context_stats(&self, session_id: &str, stats: &serde_json::Value) {
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            if meta.session_id.is_empty() {
-                meta.session_id = session_id.to_string();
-            }
-            meta.context_stats = Some(stats.clone());
-            meta.updated_at = Self::now_epoch();
-            let _ = store::write_meta(dir, meta);
-            if meta.created_at > 0 {
-                store::upsert_index(&self.sessions_dir, meta);
-            }
-        });
-    }
-
     /// Synchronously create a new session directory and initial meta.json
     /// on disk, so that the session exists before the agent process starts.
     /// This prevents the race where the frontend receives a seed from
@@ -957,7 +940,6 @@ impl SessionManager {
         &self,
         session_id: &str,
         totals: qaqh_types::UsageInfo,
-        last_usage: Option<qaqh_types::UsageInfo>,
         requests: u32,
         cache_reported_requests: u32,
     ) {
@@ -965,7 +947,6 @@ impl SessionManager {
             meta.session_id = session_id.to_string();
             meta.updated_at = Self::now_epoch();
             meta.usage_totals = totals;
-            meta.last_usage = last_usage;
             meta.usage_requests = requests;
             meta.cache_reported_requests = cache_reported_requests;
             let _ = store::write_meta(dir, meta);
@@ -1095,7 +1076,7 @@ impl SessionManager {
         // BUG-2026-09-13-05：整条继承既有 meta，再覆写本次调用真正拥有的字
         // 段。此前 `..Default::default()` 只保留 mode/skills/tool_mode/
         // custom_tools/title 五项，cwd/frozen_annotation/usage_*/archived/
-        // ephemeral/context_stats 七项在每次 undo/compact 全量重写时被冲掉：
+        // ephemeral 六项在每次 undo/compact 全量重写时被冲掉：
         // resume 后 cwd 退回 `"."`（load_session_workspace 读 meta.cwd）、
         // frozen_annotation 丢失导致首条 [Environment] 注解重生成（日期变
         // 化击穿 provider 前缀缓存）、归档/临时标记丢失。新增持久化字段
@@ -1328,7 +1309,7 @@ impl SessionManager {
     /// (`store::upsert_index`) deliberately stay per call-site: error policy
     /// differs by path (CK-PERSIST `persist_tool_mode` returns `Result` while
     /// fire-and-forget paths swallow I/O errors, and index sync is
-    /// conditional in `set_cwd`/`set_context_stats`).
+    /// conditional in `set_cwd`).
     fn with_meta_locked<R>(
         &self,
         session_id: &str,
@@ -2529,7 +2510,7 @@ mod save_full_meta_preservation_tests {
 
     /// BUG-2026-09-13-05 回归：save_full（undo/compact 全量重写）必须保留
     /// 全部持久化字段——不只 mode/tool_mode/title，还包括 cwd、
-    /// frozen_annotation、usage_*、archived、ephemeral、context_stats。
+    /// frozen_annotation、usage_*、archived、ephemeral。
     #[test]
     fn save_full_preserves_all_persisted_meta_fields() {
         let (_root, manager) = manager();
@@ -2551,14 +2532,12 @@ mod save_full_meta_preservation_tests {
             frozen_annotation: Some("<Environment>frozen</Environment>".into()),
             archived: true,
             ephemeral: true,
-            context_stats: Some(serde_json::json!({"k": "v"})),
             usage_totals: qaqh_types::UsageInfo {
                 prompt_cache_hit_tokens: 111,
                 ..Default::default()
             },
             usage_requests: 3,
             cache_reported_requests: 2,
-            last_usage: Some(qaqh_types::UsageInfo::default()),
             ..Default::default()
         };
         store::write_meta(&dir, &existing).expect("write existing meta");
@@ -2581,11 +2560,9 @@ mod save_full_meta_preservation_tests {
         );
         assert!(saved.archived, "archived must survive save_full");
         assert!(saved.ephemeral, "ephemeral must survive save_full");
-        assert_eq!(saved.context_stats.as_ref().unwrap()["k"], "v");
         assert_eq!(saved.usage_totals.prompt_cache_hit_tokens, 111);
         assert_eq!(saved.usage_requests, 3);
         assert_eq!(saved.cache_reported_requests, 2);
-        assert!(saved.last_usage.is_some());
         assert_eq!(saved.mode, 1);
         assert_eq!(saved.tool_mode, "custom");
         assert_eq!(saved.title.as_deref(), Some("kept-title"));

@@ -70,6 +70,11 @@ pub struct V2EventsQuery {
     pub since_cursor: Option<String>,
 }
 
+/// Cadence for the admin-only memory diagnostics frames that ride the session
+/// SSE. Sampling is opt-in (`diagnostics.memory.start`), so this only ticks
+/// while a probe window is open.
+const MEMORY_PUSH_INTERVAL: Duration = Duration::from_secs(1);
+
 pub(crate) async fn handle_open_v2(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -585,10 +590,54 @@ pub(crate) async fn handle_events_v2(
     // 断流。与 `sse.rs::handle_timeline_events` 的逐事件存活检查同款。
     let leases = state.leases.clone();
     let stream_session = session_id.clone();
+    // B：诊断内存快照直接混进这条会话流，但**只对 admin 订阅者**追加——非 admin
+    // 连 ticker 都不建，越权面为零。帧用独立 event 名 `diagnostics.memory`，旧客户端
+    // 按名 demux 不受影响；采集开关仍由 `diagnostics.memory.start/stop` 控制。
+    let diagnostics_service = state.service.clone();
+    let diagnostics_admin = identity.is_admin();
     tokio::spawn(async move {
+        let mut diagnostics_tick = diagnostics_admin.then(|| {
+            let mut interval = tokio::time::interval(MEMORY_PUSH_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval
+        });
+        if let Some(interval) = diagnostics_tick.as_mut() {
+            interval.tick().await; // 消费 interval 的立即首跳
+        }
+        let mut diagnostics_cursor: Option<u64> = None;
         loop {
-            match subscription.next().await {
-                V2StreamItem::Event(event) => {
+            // 取消安全：`next()` 只 await 在 broadcast `recv()` 上，select 丢弃
+            // 另一个分支不会丢事件。非 admin 时 ticker 分支永久 pending。
+            let tick = async {
+                match diagnostics_tick.as_mut() {
+                    Some(interval) => {
+                        interval.tick().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            let item = tokio::select! {
+                item = subscription.next() => Some(item),
+                _ = tick => None,
+            };
+            match item {
+                None => {
+                    if diagnostics_service.diagnostics_memory_enabled()
+                        && let Ok(snapshot) =
+                            diagnostics_service.diagnostics_memory_snapshot(diagnostics_cursor)
+                    {
+                        diagnostics_cursor = snapshot
+                            .get("latest_phase_sequence")
+                            .and_then(serde_json::Value::as_u64);
+                        let frame = Event::default()
+                            .event("diagnostics.memory")
+                            .data(snapshot.to_string());
+                        if tx.send(Ok(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Some(V2StreamItem::Event(event)) => {
                     if !leases
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
@@ -618,7 +667,7 @@ pub(crate) async fn handle_events_v2(
                         break;
                     }
                 }
-                V2StreamItem::Reset(reset) => {
+                Some(V2StreamItem::Reset(reset)) => {
                     let data = serde_json::to_string(&reset).unwrap_or_else(|_| "{}".into());
                     let frame = Event::default().event("ringing.reset_required").data(data);
                     let _ = tx.send(Ok(frame)).await;

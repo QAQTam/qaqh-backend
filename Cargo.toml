@@ -8,6 +8,7 @@ members = [
     "crates/qaqh-skills",
     "crates/qaqh-message",
     "crates/qaqh-types",
+    "crates/qaqh-memwatch",
     "crates/qaqh-runtime",
     "crates/qaqh-ringing",
     "crates/qaqh-daemon",

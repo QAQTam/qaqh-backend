@@ -19,6 +19,7 @@ mod sdk_common;
 pub mod tool_parser;
 mod transport;
 mod types;
+mod usage;
 
 pub use transport::RetryPolicy;
 pub use types::{ErrorKind, ProviderConfig, ProviderKind, ResponsesCompat, StreamEvent};

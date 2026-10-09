@@ -53,6 +53,46 @@ struct ImageEntry {
     sha256: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImageRegistryMemoryStats {
+    pub session_count: usize,
+    pub entry_count: usize,
+    pub heap_estimate_bytes: u64,
+}
+
+/// Return metadata-only registry gauges; image bodies remain on disk.
+pub fn memory_stats() -> ImageRegistryMemoryStats {
+    let Ok(registry) = IMAGE_REGISTRY.lock() else {
+        return ImageRegistryMemoryStats::default();
+    };
+    let mut stats = ImageRegistryMemoryStats {
+        session_count: registry.len(),
+        heap_estimate_bytes: registry
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, Vec<ImageEntry>)>())
+            as u64,
+        ..ImageRegistryMemoryStats::default()
+    };
+    for (session_id, entries) in registry.iter() {
+        stats.entry_count = stats.entry_count.saturating_add(entries.len());
+        stats.heap_estimate_bytes = stats
+            .heap_estimate_bytes
+            .saturating_add(session_id.capacity() as u64)
+            .saturating_add(
+                entries
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ImageEntry>()) as u64,
+            );
+        for entry in entries {
+            stats.heap_estimate_bytes = stats
+                .heap_estimate_bytes
+                .saturating_add(entry.mime_type.capacity() as u64)
+                .saturating_add(entry.sha256.capacity() as u64);
+        }
+    }
+    stats
+}
+
 /// Register an uploaded image for a session. Called from engine_input.
 ///
 /// A-2 L0：字节外置磁盘（内容寻址，幂等去重），registry 只留 `{mime, sha256}`

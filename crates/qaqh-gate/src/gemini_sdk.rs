@@ -34,6 +34,7 @@ use mutil_ai::{
 };
 use reqwest::header::HeaderValue;
 
+use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
@@ -346,18 +347,18 @@ fn usage_to_info(u: &WireUsage) -> UsageInfo {
     let prompt = u.input_tokens.unwrap_or(0) as u32;
     let completion = u.output_tokens.unwrap_or(0) as u32;
     let hit = u.cache_read_tokens.unwrap_or(0) as u32;
-    UsageInfo {
-        prompt_tokens: prompt,
-        completion_tokens: completion,
-        total_tokens: u
-            .total_tokens
-            .map(|v| v as u32)
-            .unwrap_or_else(|| prompt.saturating_add(completion)),
-        prompt_cache_hit_tokens: hit,
-        prompt_cache_miss_tokens: prompt.saturating_sub(hit),
-        reasoning_tokens: u.reasoning_tokens.unwrap_or(0) as u32,
-        cache_usage_reported: Some(u.cache_read_tokens.is_some()),
-    }
+    usage::normalize(
+        usage::UsageSeed {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: u.total_tokens.map(|v| v as u32),
+            cache_hit_tokens: hit,
+            cache_miss_tokens: prompt.saturating_sub(hit),
+            cache_reported: u.cache_read_tokens.is_some(),
+            reasoning_tokens: u.reasoning_tokens.unwrap_or(0) as u32,
+        },
+        u.raw.as_ref(),
+    )
 }
 
 async fn run_sdk_stream(

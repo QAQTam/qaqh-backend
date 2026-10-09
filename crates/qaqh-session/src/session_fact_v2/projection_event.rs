@@ -12,14 +12,15 @@ use ts_rs::TS;
 use super::agent::AgentPath;
 use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex};
 use super::types::{
-    ActivityState, ActorRef, AssistantBlockKind, CheckpointId, ContentHash, ContentRef,
-    ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind, InputPurpose,
-    InterAgentCommunication, InterAgentDelivery, InteractionDecision, InteractionExpiryReason,
-    InteractionId, InteractionKind, InterruptReason, LogId, MAX_SAFE_FACT_SEQ, MessageId,
-    PolicyDecisionRef, ProjectionSlot, RecoveryAction, RecoveryOutcome, RecoveryRef, ResourceId,
-    ResourceKind, SessionFact, SessionId, SessionMetadataPatch, SideEffectClass,
-    SubagentTerminalStatus, TitleSource, ToolCallId, ToolError, ToolMetrics, ToolReplayCapability,
-    ToolTerminalStatus, TurnError, TurnId, TurnMode, TurnTerminal,
+    ActivityState, ActorRef, AssistantBlockKind, CheckpointId, CompactStatus, ContentHash,
+    ContentRef, ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind,
+    InputPurpose, InterAgentCommunication, InterAgentDelivery, InteractionDecision,
+    InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason, LogId,
+    MAX_SAFE_FACT_SEQ, MessageId, PolicyDecisionRef, ProjectionSlot, RecoveryAction,
+    RecoveryOutcome, RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId,
+    SessionMetadataPatch, SideEffectClass, SubagentTerminalStatus, TitleSource, ToolCallId,
+    ToolError, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnError, TurnId, TurnMode,
+    TurnTerminal,
 };
 use super::validation::ValidationError;
 
@@ -641,6 +642,37 @@ pub enum ConversationDelta {
         replaces_through_fact_seq: u64,
         summary: ContentValue,
         context_revision: u64,
+    },
+    /// Transient mirror of `ConversationEvent::CompactStarted`. Never
+    /// fact-derived: the hub replays it from its current-value slot only while a
+    /// compaction is in flight, so a reconnect can still show the running state.
+    CompactStarted {
+        revision: u64,
+        compact_id: String,
+        turns_total: u32,
+        turns_keeping: u32,
+    },
+    /// Streaming compaction summary. `delta` is the **cumulative** summary text
+    /// so far, not the provider chunk — the worker bridge coalesces chunks and
+    /// republishes whole snapshots, so a dropped event self-heals and duplicate
+    /// deliveries stay idempotent under the per-`compact_id` replaceable slot.
+    CompactProgress {
+        revision: u64,
+        compact_id: String,
+        delta: String,
+    },
+    /// Transient compaction terminal. The durable watermark stays in
+    /// `CompactionApplied`; this only closes the in-flight card.
+    CompactFinished {
+        revision: u64,
+        compact_id: String,
+        status: CompactStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary_chars: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turns_compacted: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turns_removed: Option<u32>,
     },
 }
 

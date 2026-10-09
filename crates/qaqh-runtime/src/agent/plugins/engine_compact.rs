@@ -85,6 +85,7 @@ pub(crate) fn build_prompt_and_meta(
     ctx: &mut RingContext,
 ) -> Option<(String, usize, usize, qaqh_gate::ProviderConfig, String)> {
     const KEEP_TOKENS: usize = 4_000;
+    ctx.agent.record_memory_marker("compact.prompt.build.begin");
     let turns_total = ctx.agent.msg.turn_count();
     log::info!("[COMPACT] {} turns", turns_total);
 
@@ -210,6 +211,16 @@ pub(crate) fn build_prompt_and_meta(
             contexts.join("\n\n"),
         )
     };
+
+    if !ctx.agent.session.session_id.is_empty() {
+        qaqh_memwatch::global().record_phase(
+            "compact.prompt.build.end",
+            Some(&ctx.agent.session.session_id),
+            Some(ctx.agent.msg.memory_usage_estimate().heap_estimate_bytes),
+            Some(prompt.len() as u64),
+            None,
+        );
+    }
 
     // T6: 唯一构造器（turn_lap::gate::provider_for），与主 turn 完全同构；
     // 历史镜像缺 thinking_budget_large / effort_allowlist / stateful /
@@ -346,32 +357,6 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
     if !compact_noop {
         // D10 fact 产生侧：durable append 先于 CompactFinished 域事件发布。
         publish_compaction_fact(ctx, &meta.summary);
-    }
-
-    let (
-        chat_text,
-        thinking,
-        tool_calls,
-        tool_results,
-        tools_schema,
-        system_prompt,
-        thinking_blocks,
-        tool_call_blocks,
-    ) = ctx
-        .agent
-        .msg
-        .compute_context_stats(Some(&ctx.agent.tool_defs));
-    let stats = serde_json::json!({
-        "messages": ctx.agent.msg.turn_count(),
-        "chat_text": chat_text, "thinking": thinking,
-        "tool_calls": tool_calls, "tool_results": tool_results,
-        "tools_schema": tools_schema, "system_prompt": system_prompt,
-        "thinking_blocks": thinking_blocks, "tool_call_blocks": tool_call_blocks,
-    });
-    // 统一数据源：上下文统计并入 meta.json（原 context_stats.json 退役）。
-    // 覆盖式快照写，无 dispatch 时序约束，走注入句柄直写（PR-1-5）。
-    if let Some(sm) = ctx.agent.session_manager.as_ref() {
-        sm.set_context_stats(&ctx.agent.session.session_id, &stats);
     }
 
     // Ringing 双发：CompactFinished（成功/零压缩如实区分终态）

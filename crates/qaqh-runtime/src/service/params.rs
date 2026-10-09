@@ -25,9 +25,6 @@ pub(crate) fn pstr2(params: &Value, snake: &str, camel: &str) -> Result<String, 
 pub(crate) fn pbool(params: &Value, key: &str) -> bool {
     params.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
-pub(crate) fn pu64(params: &Value, key: &str) -> u64 {
-    params.get(key).and_then(Value::as_u64).unwrap_or_default()
-}
 pub(crate) fn pstrings(params: &Value, key: &str) -> Vec<String> {
     params
         .get(key)

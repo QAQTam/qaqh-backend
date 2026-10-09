@@ -402,6 +402,147 @@ impl TimelineAppender {
         self.sessions.contains_key(session_id)
     }
 
+    /// Approximate resident transcript footprint without cloning snapshots.
+    pub fn memory_components(&self) -> Vec<qaqh_memwatch::ComponentMemory> {
+        let mut turns = 0_u64;
+        let mut rounds = 0_u64;
+        let mut blocks = 0_u64;
+        let mut next_fragments = 0_u64;
+        let mut journal_entries = 0_u64;
+        let mut journal_payload_bytes = 0_u64;
+        let mut payload_bytes = 0_u64;
+        let mut heap_estimate = self
+            .sessions
+            .capacity()
+            .saturating_mul(size_of::<(String, SessionTimeline)>());
+        for (session_id, timeline) in &self.sessions {
+            heap_estimate = heap_estimate
+                .saturating_add(session_id.capacity())
+                .saturating_add(size_of::<SessionTimeline>())
+                .saturating_add(
+                    timeline
+                        .turns
+                        .len()
+                        .saturating_mul(size_of::<(String, qaqh_domain::TimelineTurn)>()),
+                )
+                .saturating_add(
+                    timeline
+                        .journal
+                        .capacity()
+                        .saturating_mul(size_of::<TimelineEntry>()),
+                )
+                .saturating_add(timeline.next_fragment.capacity().saturating_mul(size_of::<(
+                    (String, u32, String),
+                    u64,
+                )>(
+                )));
+            journal_entries = journal_entries.saturating_add(timeline.journal.len() as u64);
+            next_fragments = next_fragments.saturating_add(timeline.next_fragment.len() as u64);
+            journal_payload_bytes = journal_payload_bytes.saturating_add(timeline.journal_bytes);
+            payload_bytes = payload_bytes.saturating_add(timeline.journal_bytes);
+            for (turn_id, turn) in &timeline.turns {
+                turns = turns.saturating_add(1);
+                heap_estimate = heap_estimate
+                    .saturating_add(turn_id.capacity())
+                    .saturating_add(size_of::<qaqh_domain::TimelineTurn>())
+                    .saturating_add(turn.turn_id.capacity())
+                    .saturating_add(turn.user_text.capacity())
+                    .saturating_add(
+                        turn.rounds
+                            .capacity()
+                            .saturating_mul(size_of::<qaqh_domain::TimelineRound>()),
+                    );
+                payload_bytes = payload_bytes.saturating_add(turn.user_text.len() as u64);
+                for round in &turn.rounds {
+                    rounds = rounds.saturating_add(1);
+                    heap_estimate = heap_estimate.saturating_add(
+                        round
+                            .blocks
+                            .capacity()
+                            .saturating_mul(size_of::<qaqh_domain::TimelineBlock>()),
+                    );
+                    for block in &round.blocks {
+                        blocks = blocks.saturating_add(1);
+                        heap_estimate = heap_estimate
+                            .saturating_add(size_of::<qaqh_domain::TimelineBlock>())
+                            .saturating_add(block.block_id.capacity())
+                            .saturating_add(block.text.capacity());
+                        payload_bytes = payload_bytes.saturating_add(block.text.len() as u64);
+                        if let Some(tool) = &block.tool {
+                            heap_estimate = heap_estimate
+                                .saturating_add(size_of::<qaqh_domain::TimelineTool>())
+                                .saturating_add(tool.tool_call_id.capacity())
+                                .saturating_add(tool.name.capacity())
+                                .saturating_add(tool.progress.capacity());
+                            payload_bytes =
+                                payload_bytes.saturating_add(tool.progress.len() as u64);
+                            for value in [
+                                tool.summary.as_ref(),
+                                tool.args_json.as_ref(),
+                                tool.output.as_ref(),
+                                tool.diff.as_ref(),
+                                tool.progress_stream.as_ref(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            {
+                                heap_estimate = heap_estimate.saturating_add(value.capacity());
+                                payload_bytes = payload_bytes.saturating_add(value.len() as u64);
+                            }
+                        }
+                    }
+                }
+            }
+            for (turn_id, round, block_id) in timeline.next_fragment.keys() {
+                heap_estimate = heap_estimate
+                    .saturating_add(turn_id.capacity())
+                    .saturating_add(block_id.capacity())
+                    .saturating_add(size_of_val(round));
+            }
+        }
+        // Timeline strings are already accounted by their capacities above;
+        // the journal currently exposes only a payload-byte counter, so add
+        // that estimate here without double-counting transcript text.
+        heap_estimate = heap_estimate.saturating_add(journal_payload_bytes as usize);
+        vec![
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.timeline.sessions".into(),
+                item_count: self.sessions.len() as u64,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.timeline.appender".into(),
+                item_count: turns,
+                payload_bytes: Some(payload_bytes),
+                heap_estimate_bytes: Some(heap_estimate as u64),
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.timeline.structure".into(),
+                item_count: rounds.saturating_add(blocks),
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.timeline.replay_journal".into(),
+                item_count: journal_entries,
+                payload_bytes: Some(journal_payload_bytes),
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.timeline.next_fragments".into(),
+                item_count: next_fragments,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+        ]
+    }
+
     pub fn open_turn(
         &mut self,
         session_id: &str,
@@ -1560,12 +1701,7 @@ mod tests {
         appender
             .open_block("s", "t", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
             .unwrap();
-        let before = appender
-            .snapshot("s")
-            .unwrap()
-            .turns[0]
-            .rounds[0]
-            .blocks[0]
+        let before = appender.snapshot("s").unwrap().turns[0].rounds[0].blocks[0]
             .tool
             .clone()
             .unwrap();

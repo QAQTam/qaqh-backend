@@ -26,18 +26,12 @@ pub enum MetaOp {
     /// Title update (instant truncation path; the async LLM override writes
     /// through the injected handle directly — it runs off-dispatch).
     UpdateTitle { session_id: String, title: String },
-    /// Context statistics merged into meta.json (dashboard surface).
-    SetContextStats {
-        session_id: String,
-        stats: serde_json::Value,
-    },
     /// Internal tool-mode code persisted to meta.json.
     PersistMode { session_id: String, mode: u8 },
     /// Usage totals after a provider round.
     PersistUsage {
         session_id: String,
         totals: qaqh_types::UsageInfo,
-        last_usage: Option<qaqh_types::UsageInfo>,
         requests: u32,
         cache_reported_requests: u32,
     },
@@ -368,7 +362,8 @@ impl AgentState {
         messages: &[qaqh_types::Message],
         tools: Option<&[qaqh_types::ToolDef]>,
     ) -> RequestTokenEstimate {
-        let (raw_tokens, request_key) = prepared_request_metrics(messages, tools);
+        let (raw_tokens, request_key, _) =
+            prepared_request_metrics(messages, tools, Some(&self.session.session_id));
         self.token_calibration.estimate(
             &self.token_calibration_fingerprint(),
             &request_key,
@@ -428,7 +423,7 @@ impl AgentState {
         messages: &[qaqh_types::Message],
         tools: Option<&[qaqh_types::ToolDef]>,
     ) -> String {
-        prepared_request_metrics(messages, tools).1
+        prepared_request_metrics(messages, tools, None).1
     }
 
     pub(crate) fn observe_prepared_request(
@@ -458,7 +453,7 @@ impl AgentState {
         observed_tokens: u64,
     ) -> bool {
         let fingerprint = self.token_calibration_fingerprint();
-        let (raw_tokens, request_key) = prepared_request_metrics(messages, tools);
+        let (raw_tokens, request_key, _) = prepared_request_metrics(messages, tools, None);
         self.observe_prepared_request(&fingerprint, &request_key, raw_tokens, observed_tokens)
     }
 
@@ -573,19 +568,35 @@ impl AgentState {
     /// break the prefix cache at the first user message. The frozen snapshot
     /// is generated on the first gate call of the session and reused forever.
     pub fn build_context(&mut self) -> Vec<qaqh_types::Message> {
-        let workspace = qaqh_workspace::CURRENT_WORKSPACE
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        self.record_memory_marker("context.build.begin");
+        // 读 TLS 优先的 `current_workspace()`，不直读 `CURRENT_WORKSPACE`：
+        // daemon 的会话工作区只存在于 actor thread-local
+        // （`set_process_workspace` 在 actor 上下文不写进程全局），旧写法在
+        // daemon 里恒空 ⇒ `<workspace_path>` 从不注入、skills 工作区锚到空值
+        // 兜底，模型只能靠前端转述自己在工作哪个目录。口径同
+        // `lifecycle.rs::load_session_workspace` 与
+        // `authorization.rs::effective_workspace_root`。
+        let workspace = qaqh_workspace::current_workspace();
         self.skills.set_workspace(Path::new(&workspace));
         let snapshot = self.skills.snapshot_for_context();
+
+        // 冻结 annotation 里嵌的 `<workspace_path>` 与当前工作区不一致时必须
+        // 重算：首条消息先于前端选工作区（或会话中途换/解绑目录）时，沿用旧
+        // annotation 会让模型照着上一个目录 ls/读写。代价是一次前缀缓存失效，
+        // 只在工作区真正变化时发生。
+        if self.frozen_annotation.as_deref().is_some_and(|frozen| {
+            annotation_workspace_path(frozen) != workspace_tag_value(&workspace)
+        }) {
+            self.frozen_annotation = None;
+            self.session.frozen_annotation = None;
+        }
 
         let annotations: Vec<String> = if let Some(ref frozen) = self.frozen_annotation {
             vec![frozen.clone()]
         } else {
             let mut parts: Vec<String> = Vec::new();
-            if !workspace.is_empty() && workspace != "." {
-                parts.push(format!("<workspace_path>{workspace}</workspace_path>"));
+            if let Some(tag) = workspace_tag_value(&workspace) {
+                parts.push(format!("<workspace_path>{tag}</workspace_path>"));
             }
             // The date lives in the frozen per-session annotation (first user
             // message), NOT in the system prompt: a per-day date in the base
@@ -640,7 +651,120 @@ impl AgentState {
             self.prev_prefix = cur;
         }
 
+        self.record_memory_phase("context.build.end", Some(&context), None);
         context
+    }
+
+    /// Update the bounded memory monitor with payload-only session/context
+    /// estimates. This never stores message contents in diagnostics.
+    pub(crate) fn record_memory_phase(
+        &self,
+        phase: &str,
+        context: Option<&[qaqh_types::Message]>,
+        estimate_json_bytes: Option<u64>,
+    ) {
+        let monitor = qaqh_memwatch::global();
+        if !monitor.is_enabled() || self.session.session_id.is_empty() {
+            return;
+        }
+        let store = self.msg.memory_usage_estimate();
+        let mut context_payload_bytes = 0_u64;
+        let mut context_message_count = 0_u64;
+        if let Some(messages) = context {
+            context_message_count = messages.len() as u64;
+            for message in messages {
+                context_payload_bytes = context_payload_bytes
+                    .saturating_add(message.memory_usage_estimate().payload_bytes);
+            }
+            for tool in &self.tool_defs {
+                context_payload_bytes = context_payload_bytes
+                    .saturating_add(tool.call_type.len() as u64)
+                    .saturating_add(tool.function.name.len() as u64)
+                    .saturating_add(tool.function.description.len() as u64);
+                let mut value = qaqh_types::memory::MemoryUsageEstimate::default();
+                value.add_value(&tool.function.parameters);
+                context_payload_bytes = context_payload_bytes.saturating_add(value.payload_bytes);
+            }
+        }
+        let mut agent_aux_heap = std::mem::size_of::<Self>()
+            .saturating_sub(std::mem::size_of::<qaqh_message::MessageStore>())
+            .saturating_add(
+                self.tool_defs
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<qaqh_types::ToolDef>()),
+            )
+            .saturating_add(
+                self.prev_prefix
+                    .msg_hashes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u64>()),
+            )
+            .saturating_add(
+                self.pending_meta_ops
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<MetaOp>()),
+            )
+            .saturating_add(std::mem::size_of_val(&self.token_calibration));
+        if let Some(annotation) = &self.frozen_annotation {
+            agent_aux_heap = agent_aux_heap.saturating_add(annotation.capacity());
+        }
+        if let Some(annotation) = &self.last_mcp_env_block {
+            agent_aux_heap = agent_aux_heap.saturating_add(annotation.capacity());
+        }
+        agent_aux_heap = agent_aux_heap
+            .saturating_add(self.prev_prefix.system_hash.capacity())
+            .saturating_add(self.prev_prefix.tools_hash.capacity());
+        for tool in &self.tool_defs {
+            agent_aux_heap = agent_aux_heap
+                .saturating_add(std::mem::size_of::<qaqh_types::ToolDef>())
+                .saturating_add(tool.call_type.capacity())
+                .saturating_add(tool.function.name.capacity())
+                .saturating_add(tool.function.description.capacity());
+            let mut value = qaqh_types::memory::MemoryUsageEstimate::default();
+            value.add_value(&tool.function.parameters);
+            agent_aux_heap = agent_aux_heap.saturating_add(value.heap_estimate_bytes as usize);
+        }
+        let message_count = self
+            .msg
+            .message_count()
+            .saturating_add(self.msg.trailing_messages().len()) as u64;
+        monitor.update_session(qaqh_memwatch::SessionMemory {
+            session_id: self.session.session_id.clone(),
+            resident: true,
+            message_count,
+            turn_count: self.msg.turn_count() as u64,
+            content_block_count: store.content_block_count,
+            text_bytes: store.text_bytes,
+            image_bytes: store.image_bytes,
+            store_heap_estimate_bytes: store.heap_estimate_bytes,
+            agent_aux_heap_estimate_bytes: agent_aux_heap as u64,
+            pending_persist_ops: store.pending_persist_ops,
+            context_message_count,
+            context_payload_bytes,
+            estimate_json_bytes: estimate_json_bytes.unwrap_or_default(),
+            last_phase: phase.to_string(),
+            ..Default::default()
+        });
+        monitor.record_phase(
+            phase,
+            Some(&self.session.session_id),
+            Some(store.heap_estimate_bytes),
+            context.map(|_| context_payload_bytes),
+            estimate_json_bytes,
+        );
+    }
+
+    pub(crate) fn record_memory_marker(&self, phase: &str) {
+        if self.session.session_id.is_empty() {
+            return;
+        }
+        qaqh_memwatch::global().record_phase(
+            phase,
+            Some(&self.session.session_id),
+            None,
+            None,
+            None,
+        );
     }
 
     /// Refresh the in-memory skill catalog without writing it to history.
@@ -814,23 +938,38 @@ impl AgentState {
     }
 }
 
+/// 会话工作区在 [Environment] annotation 里的标签值；未绑定（空 / `"."`）为
+/// `None`，与 `build_context` 的注入条件同源。
+fn workspace_tag_value(workspace: &str) -> Option<&str> {
+    (!workspace.is_empty() && workspace != ".").then_some(workspace)
+}
+
+/// 从冻结的 [Environment] annotation 里取 `<workspace_path>` 值；无该标签
+/// （旧会话冻结、或未绑定工作区）返回 `None`。
+fn annotation_workspace_path(annotation: &str) -> Option<&str> {
+    let open = "<workspace_path>";
+    let close = "</workspace_path>";
+    let start = annotation.find(open)? + open.len();
+    let value = annotation[start..]
+        .find(close)
+        .map(|end| &annotation[start..start + end])?;
+    workspace_tag_value(value.trim())
+}
+
 /// The single op→session-manager mapping for loop bookkeeping (PR-1-5).
 /// Every variant must replay the exact call the engine used to make inline.
 fn execute_meta_op(op: &MetaOp, sm: &SessionManager) {
     match op {
         MetaOp::UpdateTitle { session_id, title } => sm.update_title(session_id, title),
-        MetaOp::SetContextStats { session_id, stats } => sm.set_context_stats(session_id, stats),
         MetaOp::PersistMode { session_id, mode } => sm.persist_mode(session_id, *mode),
         MetaOp::PersistUsage {
             session_id,
             totals,
-            last_usage,
             requests,
             cache_reported_requests,
         } => sm.persist_usage(
             session_id,
             totals.clone(),
-            last_usage.clone(),
             *requests,
             *cache_reported_requests,
         ),

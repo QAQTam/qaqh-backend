@@ -1,0 +1,14 @@
+elevated=false
+derive nonexistent name: OK
+standard before profile: ERR 0x80070002 系统找不到指定的文件。 (0x80070002)
+ensure_profile returned S-1-15-2-1486524305-1985723093-199346395-2687470545-951355131-1942568621-1847484982
+standard after ensure_profile: ERR 0x80070002 系统找不到指定的文件。 (0x80070002)
+actual CreateAppContainerProfile: OK (ensure_profile had NOT created it)
+standard after actual create: OK exit=0 wait=WAIT_EVENT(0)
+capabilities requested=2 native_count=2 helper_count=1
+exec backend=Auto outside_written=true exit=0 process_id=1 output=""
+exec backend=WindowsToken outside_written=false exit=1 process_id=null output="Access is denied.\r\n[win-sbx] 写入受沙箱保护的路径被拒绝(内核 DACL 策略)。\n受保护的文件请改用受管控的文件工具(走权限审批),或先在 policy 的 writable_files / writable_"
+exec backend=WindowsRedirect outside_written=false exit=1 process_id=null output="Access is denied.\r\n[win-sbx] 写入受沙箱保护的路径被拒绝(内核 DACL 策略)。\n受保护的文件请改用受管控的文件工具(走权限审批),或先在 policy 的 writable_files / writable_"
+scratch inherited cap + protected view: unauthorized_written=true exit=0 stderr=
+verbose baseline exit=0 bytes=124000 elapsed_ms=117
+verbose sbx stalled_before_wait=true captured_bytes=4092 exit=0

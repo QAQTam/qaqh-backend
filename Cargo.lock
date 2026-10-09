@@ -2289,6 +2289,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-memwatch"
+version = "2.0.0-beta.3"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "qaqh-message"
 version = "2.0.0-beta.3"
 dependencies = [
@@ -2368,6 +2375,7 @@ dependencies = [
  "qaqh-gate",
  "qaqh-lsp",
  "qaqh-mcp",
+ "qaqh-memwatch",
  "qaqh-message",
  "qaqh-policy",
  "qaqh-ringing",

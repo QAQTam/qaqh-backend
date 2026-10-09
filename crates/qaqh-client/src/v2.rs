@@ -52,6 +52,11 @@ pub use qaqh_session::session_fact_v2::ControlDelta as ClientV2ControlDelta;
 /// `ClientV2ControlDelta::SubagentFinished.status`。
 pub use qaqh_session::session_fact_v2::SubagentTerminalStatus as ClientV2SubagentTerminalStatus;
 
+/// 压缩瞬态终态（`ConversationDelta::CompactFinished.status`）。
+///
+/// 与 `qaqh_client::types::CompactStatus`（域事件面）wire 值一致，但这是 v2 契约
+/// 自己的类型；壳层 match delta 变体时用它。
+pub use qaqh_session::session_fact_v2::CompactStatus as ClientV2CompactStatus;
 /// 会话删除原因（`MetaDelta::Deleted.reason`）。
 pub use qaqh_session::session_fact_v2::DeleteReason as ClientV2DeleteReason;
 /// 会话回合 id（`ConversationDelta::TurnStarted.turn_id` 等）。

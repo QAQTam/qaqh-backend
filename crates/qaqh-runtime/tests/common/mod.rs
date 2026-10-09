@@ -57,6 +57,9 @@ pub fn spawn_pipe_loop(
             let written = match channels.event_rx.recv() {
                 Ok(WriterEvent::Ringing(env)) => write_event_env(&mut writer, &env),
                 Ok(WriterEvent::Timeline(env)) => write_timeline_env(&mut writer, &env),
+                // Titles travel through the V2 projection hub, not the worker
+                // wire; the harness has nothing to serialize here.
+                Ok(WriterEvent::TitleChanged { .. }) => Ok(()),
                 Err(_) => break,
             };
             if written.is_err() {

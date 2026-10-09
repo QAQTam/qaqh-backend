@@ -7,15 +7,31 @@ use super::agent::AgentState;
 /// cwd 宿主注入（PR-3-3 / D3）：宿主侧经注入句柄解析会话工作目录后注入
 /// workspace（`set_process_workspace`），workspace 侧不再直读 qaqh_session。
 /// 解析权威：meta.cwd（旧 workspace.txt 惰性迁移见
-/// `SessionManager::workspace_cwd`）；无句柄（单测）或解析为空时落 "."，
-/// 与旧 workspace 侧 `load_session_workspace` 行为一致。
+/// `SessionManager::workspace_cwd`）。
+///
+/// 解析为空（未绑定工作区）时落**数据根下的会话默认工作区**，不再落 `"."`：
+/// `"."` 会让下游全部兜底到进程 cwd，而 daemon 的进程 cwd 是安装目录——
+/// 模型 `ls` 看见 harness 自身资源，且 WorkspaceWrite 档把工作区边界画在
+/// 安装目录上（写安装目录被判"区内"自动放行）。默认根按会话分目录，
+/// 需要目录不存在时可见地失败（exec spawn 报错），绝不静默退回。
 pub(crate) fn load_session_workspace(agent: &AgentState) {
     let cwd = agent
         .session_manager
         .as_ref()
         .and_then(|sm| sm.workspace_cwd(&agent.session.session_id))
         .unwrap_or_default();
-    qaqh_workspace::workspace::set_process_workspace(if cwd.is_empty() { "." } else { &cwd });
+    if !cwd.is_empty() && cwd != "." {
+        qaqh_workspace::workspace::set_process_workspace(&cwd);
+        return;
+    }
+    let fallback = qaqh_types::platform::default_session_workspace_dir(&agent.session.session_id);
+    if let Err(error) = std::fs::create_dir_all(&fallback) {
+        log::warn!(
+            "[WORKSPACE] cannot create default session workspace '{}': {error}",
+            fallback.display()
+        );
+    }
+    qaqh_workspace::workspace::set_process_workspace(&fallback.to_string_lossy());
 }
 
 /// L2：为真实会话的 MessageStore 启用 enqueue 级 WAL。临时（子代理）store
@@ -139,6 +155,7 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
     let session_id = match restore_session {
         Some(s) => {
             log::info!("[LIFECYCLE] init_session: loading seed={s}");
+            qaqh_memwatch::global().record_phase("session.resume.begin", Some(s), None, None, None);
             // Fast check: if the session directory doesn't exist at all, fail early
             // instead of silently creating a new session. This lets the caller
             // send a proper Error event rather than a confusing SessionCreated.
@@ -158,6 +175,13 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                 .as_ref()
                 .and_then(|sm| sm.load_for_resume(s))
             {
+                qaqh_memwatch::global().record_phase(
+                    "session.resume.archive_loaded",
+                    Some(s),
+                    None,
+                    None,
+                    None,
+                );
                 log::info!(
                     "[LIFECYCLE] loaded session, {} archived messages, {} active messages",
                     archive_messages.len(),
@@ -173,7 +197,6 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                 };
                 agent.session = meta;
                 agent.session.from_resume = true;
-                agent.session.tokens = agent.session.usage_totals.total_tokens.into();
                 let (msg, repairs) = qaqh_message::MessageStore::from_messages(
                     &agent.session.session_id,
                     &active_messages,
@@ -185,6 +208,10 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                     .max()
                     .unwrap_or(0)
                     .saturating_add(1);
+                // No further archive reads are needed after computing the id
+                // floor. Release the full archive before rebuilding auxiliary
+                // session state; resume diagnostics sample this overlap above.
+                drop(archive_messages);
                 let mut msg = msg;
                 msg.set_compact_covered_through_msg_id(compact_covered_through_msg_id);
                 msg.ensure_next_msg_id(archive_next_id);
@@ -285,6 +312,7 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                         }
                     }
                 }
+                agent.record_memory_phase("session.resume.store_ready", None, None);
                 // V2 state is restored only from typed session metadata. Old
                 // protected skill/catalog system messages must not reactivate
                 // instructions by surviving in message history.
@@ -327,10 +355,10 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                     );
                 }
                 log::info!(
-                    "qaqh-agent: restored session {} ({} msgs, {} tokens)",
+                    "qaqh-agent: restored session {} ({} msgs, {} tokens used)",
                     agent.session.session_id,
                     agent.msg.message_count(),
-                    agent.session.tokens
+                    agent.session.usage_totals.total_tokens
                 );
                 if !repairs.is_empty() {
                     log::warn!("session restore: {:?} repairs", repairs);

@@ -450,13 +450,8 @@ pub fn admit_with_context(
             Some(crate::permission::ExecCommandClass::Unclassified),
         )
     );
-    let exec_auto = exec_classified_auto
-        && !crate::permission::exec_argument_tokens(&invocation.args)
-            .into_iter()
-            .filter(|token| token.contains('/') || token.contains('\\'))
-            .any(|token| {
-                crate::permission::is_sensitive_session_path(std::path::Path::new(&token))
-            });
+    let exec_auto =
+        exec_classified_auto && !exec_hits_sensitive_session_paths(&invocation, &workspace_root);
     let decision = if exec_auto {
         crate::permission::PermissionDecision::AutoApprove
     } else {
@@ -590,6 +585,32 @@ pub fn trust_folder(dir: &Path) {
 
 fn trusted_snapshot() -> HashSet<PathBuf> {
     with_global_trusted(|set| set.set().clone())
+}
+
+/// exec 自动放行档的会话敏感路径门禁（审计 2026-10-09 复核）。
+///
+/// 命令词元与 `cwd` **一律按该次命令的实际落点解析**：给了 `cwd` 就锚 `cwd`，
+/// 否则锚会话工作区。旧实现只看含 `/`/`\` 的词元、且按工作区解析，于是
+/// `cwd=<sessions 目录>` + `cat messages.jsonl` 这种形态既不解析 cwd、词元也过不了
+/// 分隔符过滤——会话历史可在 WorkspaceWrite/SandboxRun 档被静默读出。口径对齐
+/// Codex 不变量「`:workspace_roots` 的落点依据是该命令的 cwd，不是 server cwd」。
+///
+/// 命中只回退到常规审批（多弹一次窗），不影响命令本身能否执行。
+fn exec_hits_sensitive_session_paths(invocation: &ToolInvocation, workspace_root: &Path) -> bool {
+    let base = invocation
+        .args
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .filter(|cwd| !cwd.trim().is_empty())
+        .map(|cwd| crate::permission::resolve_target_path_in(PathBuf::from(cwd), workspace_root))
+        .unwrap_or_else(|| workspace_root.to_path_buf());
+    if crate::permission::is_sensitive_session_path(&base) {
+        return true;
+    }
+    crate::permission::exec_argument_tokens(&invocation.args)
+        .into_iter()
+        .map(|token| crate::permission::resolve_target_path_in(PathBuf::from(token), &base))
+        .any(|path| crate::permission::is_sensitive_session_path(&path))
 }
 
 /// Resolve the effective workspace root the way the loop's engines did

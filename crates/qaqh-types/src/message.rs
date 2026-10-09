@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ToolResult;
+use crate::memory::MemoryUsageEstimate;
 
 // ── OpenAI-native content blocks ──
 
@@ -83,6 +84,48 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
+    /// Estimate owned payload and heap capacity without serializing or
+    /// allocating a temporary representation.
+    pub fn memory_usage_estimate(&self) -> MemoryUsageEstimate {
+        let mut usage = MemoryUsageEstimate {
+            heap_estimate_bytes: std::mem::size_of::<Self>() as u64,
+            item_count: 1,
+            ..MemoryUsageEstimate::default()
+        };
+        match self {
+            Self::Text { text } => usage.add_string(text, true),
+            Self::Reasoning { reasoning } => usage.add_string(reasoning, true),
+            Self::ToolUse { id, name, input } => {
+                usage.add_string(id, false);
+                usage.add_string(name, false);
+                usage.add_value(input);
+            }
+            Self::ToolResult {
+                tool_use_id,
+                result,
+            } => {
+                usage.add_string(tool_use_id, false);
+                usage.add(result.memory_usage_estimate());
+            }
+            Self::Image { mime_type, data } => {
+                usage.add_string(mime_type, false);
+                usage.add_image_string(data);
+            }
+            Self::ImageRef {
+                sha256, mime_type, ..
+            } => {
+                usage.add_string(sha256, false);
+                usage.add_string(mime_type, false);
+            }
+            Self::WebSearchCall { id, action } => {
+                usage.add_string(id, false);
+                usage.add_value(action);
+            }
+            Self::ResponseOutputItem { item } => usage.add_value(item),
+        }
+        usage
+    }
+
     /// Convenience constructor for a text content block.
     pub fn text(text: &str) -> Self {
         ContentBlock::Text {
@@ -152,6 +195,28 @@ pub struct Message {
 }
 
 impl Message {
+    /// Estimate owned heap bytes and payload sizes for diagnostics.
+    pub fn memory_usage_estimate(&self) -> MemoryUsageEstimate {
+        let mut usage = MemoryUsageEstimate {
+            heap_estimate_bytes: (std::mem::size_of::<Self>()
+                + self
+                    .content
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ContentBlock>()))
+                as u64,
+            item_count: 1,
+            ..MemoryUsageEstimate::default()
+        };
+        usage.add_string(&self.role, false);
+        if let Some(name) = &self.name {
+            usage.add_string(name, false);
+        }
+        for block in &self.content {
+            usage.add(block.memory_usage_estimate());
+        }
+        usage
+    }
+
     /// Role constants — the open roles of the context flow.
     pub const ROLE_SYSTEM: &'static str = "system";
     pub const ROLE_USER: &'static str = "user";

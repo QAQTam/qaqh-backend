@@ -7,6 +7,7 @@ use super::*;
 /// `/queries/{name}` 与 `/actions/{name}` 双端点已并入此处。
 pub(crate) async fn handle_service(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(name): Path<String>,
     body: Bytes,
@@ -23,6 +24,11 @@ pub(crate) async fn handle_service(
         )
             .into_response();
     };
+    if info.admin_only
+        && let Err(response) = require_scope(&identity, Scope::Admin)
+    {
+        return response;
+    }
     let params: serde_json::Value = if body.is_empty() {
         serde_json::json!({})
     } else {

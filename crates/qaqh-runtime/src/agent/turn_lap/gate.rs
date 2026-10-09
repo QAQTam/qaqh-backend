@@ -12,7 +12,6 @@ static GLOBAL_TIMELINE_SEGMENT: AtomicU32 = AtomicU32::new(0);
 use qaqh_types::UsageInfo;
 
 use crate::agent::types::{Emitter, LoopPhase, Outcome, RingContext};
-use crate::agent::util;
 
 // ── 流式节流常量（原 engine_turn.rs） ──
 
@@ -455,6 +454,7 @@ pub(crate) fn gate_request(
         turn_id,
         round_num
     );
+    ctx.agent.record_memory_marker("gate.request.begin");
     let result = qaqh_gate::chat_stream(
         provider,
         messages,
@@ -564,19 +564,19 @@ pub(crate) fn gate_request(
                 done_seen = true;
                 stop_reason = reason;
                 if let Some(ref u) = usage {
+                    // 单一聚合点：内存累计 + 一次 meta.json 落盘。usage 的真值
+                    // 只走这一处与投影流，不再另写日报（原 token_stats.jsonl）。
                     ctx.agent.session.record_usage(u);
                     if !ctx.agent.ephemeral {
                         ctx.agent.enqueue_meta_op(
                             crate::agent::state::agent::MetaOp::PersistUsage {
                                 session_id: ctx.agent.session.session_id.clone(),
                                 totals: ctx.agent.session.usage_totals.clone(),
-                                last_usage: ctx.agent.session.last_usage.clone(),
                                 requests: ctx.agent.session.usage_requests,
                                 cache_reported_requests: ctx.agent.session.cache_reported_requests,
                             },
                         );
                     }
-                    util::record_token_usage(u, &ctx.agent.config.model);
                     last_usage = usage.clone();
                     current_request_usage = usage.clone();
                 }
@@ -687,7 +687,6 @@ pub(crate) fn gate_request(
             qaqh_gate::StreamEvent::UsageUpdate(u) => {
                 last_usage = Some(u.clone());
                 current_request_usage = Some(u.clone());
-                ctx.agent.session.tokens = ctx.agent.session.tokens.max(u.total_tokens as u64);
                 // A3：记住"已播报过"的用量水位（~1s 节流），Done 分支据此判断终值要不要补发。
                 let due = last_usage_emit_at.is_none_or(|at| at.elapsed() >= USAGE_EMIT_INTERVAL);
                 if due {
@@ -708,6 +707,7 @@ pub(crate) fn gate_request(
             }
         },
     );
+    ctx.agent.record_memory_marker("gate.request.end");
     // A1 收口：流结束、deltas 冻结后，为仍开着的块补最终 checkpoint。
     // 覆盖此后全部 seal 点（parse 尾封 / cancel / 失败终态 / 续写封口）——
     // 它们只改块状态不再追加文本，此处一次补发即可全部受益。
