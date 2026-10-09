@@ -947,12 +947,8 @@ fn workspace_tag_value(workspace: &str) -> Option<&str> {
 /// 从冻结的 [Environment] annotation 里取 `<workspace_path>` 值；无该标签
 /// （旧会话冻结、或未绑定工作区）返回 `None`。
 fn annotation_workspace_path(annotation: &str) -> Option<&str> {
-    let open = "<workspace_path>";
-    let close = "</workspace_path>";
-    let start = annotation.find(open)? + open.len();
-    let value = annotation[start..]
-        .find(close)
-        .map(|end| &annotation[start..start + end])?;
+    let (_, rest) = annotation.split_once("<workspace_path>")?;
+    let (value, _) = rest.split_once("</workspace_path>")?;
     workspace_tag_value(value.trim())
 }
 
@@ -1039,6 +1035,35 @@ mod tests {
     use std::sync::Mutex;
 
     static SKILL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn frozen_annotation_workspace_tag_drives_invalidation() {
+        // build_context 的工作区失效判定靠这两枚纯函数：同目录复用冻结
+        // annotation（前缀缓存不碎），换目录/解绑必须重算（否则模型按上一个
+        // 目录 ls、写文件）。
+        let frozen = "<workspace_path>D:\\proj</workspace_path>\n<today>2026-10-09</today>";
+        assert_eq!(
+            annotation_workspace_path(frozen),
+            workspace_tag_value(r"D:\proj")
+        );
+        // 未绑定工作区时冻结的 annotation 没有标签，解析必须为 None。
+        assert_eq!(
+            annotation_workspace_path("<today>2026-10-09</today>"),
+            None
+        );
+        assert_eq!(workspace_tag_value(""), None);
+        assert_eq!(workspace_tag_value("."), None);
+        // 换工作区 ⇒ 标签不等 ⇒ stale；同值 ⇒ 相等 ⇒ 复用。
+        assert_ne!(
+            annotation_workspace_path(frozen),
+            workspace_tag_value(r"D:\other")
+        );
+        assert_eq!(
+            annotation_workspace_path(frozen),
+            workspace_tag_value(r"D:\proj"),
+            "same workspace must not break the prefix cache"
+        );
+    }
 
     #[test]
     fn prefix_shape_detects_message_level_breaks_but_not_appends() {

@@ -796,6 +796,116 @@ mod tests {
         assert!(asks(admission));
     }
 
+    /// 纯函数锁（与平台能力无关）：门禁必须按**该次命令的 cwd** 解析词元。
+    /// 旧实现只看含分隔符的词元、且一律按会话工作区解析，所以
+    /// `cat messages.jsonl` + `cwd=<sessions dir>` 两头都不命中。
+    #[test]
+    fn exec_sensitive_guard_resolves_tokens_against_command_cwd() {
+        let workspace = std::env::temp_dir().join("qaqh-exec-sensitive-base");
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        let invocation = |command: &str, cwd: Option<String>| ToolInvocation {
+            session_id: "seed-a".into(),
+            call_id: "call-sensitive".into(),
+            tool_name: "exec".into(),
+            args: serde_json::json!({ "command": command, "shell": "bash", "cwd": cwd }),
+            category: crate::permission::ToolCategory::Exec,
+        };
+        let sessions_text = sessions_dir.to_string_lossy().into_owned();
+
+        assert!(
+            exec_hits_sensitive_session_paths(
+                &invocation("cat messages.jsonl", Some(sessions_text.clone())),
+                &workspace
+            ),
+            "cwd 落在会话数据根时，相对文件名必须命中敏感门禁"
+        );
+        assert!(
+            exec_hits_sensitive_session_paths(
+                &invocation(&format!("cat {sessions_text}/messages.jsonl"), None),
+                &workspace
+            ),
+            "绝对路径词元照常命中"
+        );
+        assert!(
+            !exec_hits_sensitive_session_paths(
+                &invocation("cat messages.jsonl", None),
+                &workspace
+            ),
+            "普通工作区内的相对读不得误伤"
+        );
+    }
+
+    /// 回归锁（审计 2026-10-09 复核）：exec 的 `cwd` 落在会话数据根内时，
+    /// 命令里用**相对文件名**读历史也不得自动放行。旧门禁只扫含分隔符的词元
+    /// 并按工作区解析，`cwd=<sessions dir>` + `cat messages.jsonl` 两头都漏。
+    #[test]
+    fn exec_cwd_in_session_dir_blocks_auto_approve_even_for_relative_reads() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let workspace = std::env::temp_dir().join("qaqh-authorization-exec-cwd");
+        let sessions_dir = qaqh_types::platform::sessions_dir();
+        let invocation = ToolInvocation {
+            session_id: "seed-a".into(),
+            call_id: "call-exec-cwd".into(),
+            tool_name: "exec".into(),
+            args: serde_json::json!({
+                "command": "cat messages.jsonl",
+                "shell": "bash",
+                "cwd": sessions_dir.to_string_lossy(),
+            }),
+            category: crate::permission::ToolCategory::Exec,
+        };
+        let asks = |admission: Admission| matches!(admission, Admission::ApprovalRequired(_));
+        for level in [
+            crate::permission::PermissionLevel::WorkspaceWrite as u8,
+            crate::permission::PermissionLevel::SandboxRun as u8,
+        ] {
+            let mut context = legacy_tool_call_context(&invocation, level, &workspace);
+            context.sandbox_spec.backend = qaqh_sandbox::SandboxBackend::WindowsToken;
+            let admission = admit_with_context(invocation.clone(), &context, &HashSet::new());
+            assert!(
+                asks(admission),
+                "level {level}: cwd 指向会话数据根时必须弹审批"
+            );
+        }
+    }
+
+    /// 对照面：同一只读命令落在普通工作区，门禁不得误伤（有写强制时仍
+    /// 走自动放行；无写强制的平台保持常规审批）。
+    #[test]
+    fn exec_cwd_inside_workspace_keeps_classified_auto_approve() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation {
+            return;
+        }
+        let workspace = std::env::temp_dir().join("qaqh-authorization-exec-cwd-ok");
+        let invocation = ToolInvocation {
+            session_id: "seed-a".into(),
+            call_id: "call-exec-cwd-ok".into(),
+            tool_name: "exec".into(),
+            args: serde_json::json!({
+                "command": "cat messages.jsonl",
+                "shell": "bash",
+                "cwd": workspace.join("src").to_string_lossy(),
+            }),
+            category: crate::permission::ToolCategory::Exec,
+        };
+        let mut context = legacy_tool_call_context(
+            &invocation,
+            crate::permission::PermissionLevel::WorkspaceWrite as u8,
+            &workspace,
+        );
+        context.sandbox_spec.backend = qaqh_sandbox::SandboxBackend::WindowsToken;
+        let Admission::Authorized(proof) = admit_with_context(invocation, &context, &HashSet::new())
+        else {
+            panic!("工作区内 cwd 的只读分类 exec 必须自动放行");
+        };
+        assert_eq!(proof.grant(), GrantKind::SandboxClassified);
+    }
+
     #[test]
     fn sandbox_run_tier_auto_runs_exec_but_keeps_deny_net_and_session_gates() {
         let _serial = crate::TEST_RUNTIME_SERIAL
