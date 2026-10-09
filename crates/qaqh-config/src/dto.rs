@@ -9,13 +9,13 @@
 //! - apiKey / subagent.apiKey：`"****"` 或空串 = 保持现值（显式删除走专用接口）；
 //! - model / baseUrl / providerId / endpoint / reasoningEffort：空串 = 保持
 //!   （防未加载草稿整包写回时清空用户配置——2026-08 根因 1 同类防御）；
-//! - lang / theme / tokenizerPath：空串 = 清除（None，跟随系统/未设置）；
-//! - fontFamily：原样赋值（空串 = 跟随系统默认）；
+//! - tokenizerPath：空串 = 清除（None，未设置）；
+//! - exec.defaultShell：空串 / "auto" = 回到平台自动探测（None）；
 //! - 数值：validate() 已保证值域；u64→u32 饱和转换防回绕。
 
 use crate::config::Config;
 use qaqh_config_api::{
-    ConfigDto, ConfigPatch, LspDto, LspServerDto, McpDto, McpServerDto, SubagentDto,
+    ConfigDto, ConfigPatch, ExecDto, LspDto, LspServerDto, McpDto, McpServerDto, SubagentDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
@@ -95,6 +95,10 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
                 .collect(),
         },
         tokenizer_path: cfg.tokenizer_path.clone(),
+        exec: ExecDto {
+            default_shell: cfg.exec.default_shell.clone(),
+        },
+        session_idle_unload_secs: cfg.session_idle_unload_secs,
     }
 }
 
@@ -140,22 +144,18 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         // validate() 已保证 1..=3（BUG-2026-09-13-15；三档制 2026-10-03）。
         cfg.permission_level = u8::try_from(v).unwrap_or(1);
     }
-    if let Some(v) = &patch.lang {
-        cfg.lang = if v.is_empty() { None } else { Some(v.clone()) };
-    }
-    if let Some(v) = &patch.font_family
-        && v != "****"
-    {
-        cfg.font_family = v.clone();
-    }
-    if let Some(v) = &patch.theme {
-        cfg.theme = if v.is_empty() { None } else { Some(v.clone()) };
-    }
-    if let Some(v) = patch.notifications_enabled {
-        cfg.notifications_enabled = Some(v);
-    }
     if let Some(v) = &patch.tokenizer_path {
         cfg.tokenizer_path = (!v.is_empty()).then(|| v.clone());
+    }
+    if let Some(exec) = &patch.exec
+        && let Some(v) = &exec.default_shell
+    {
+        // 与 load 路径同口径归一化（trim + 小写）；空串 / "auto" = 自动探测。
+        let shell = v.trim().to_ascii_lowercase();
+        cfg.exec.default_shell = (!shell.is_empty() && shell != "auto").then_some(shell);
+    }
+    if let Some(v) = patch.session_idle_unload_secs {
+        cfg.session_idle_unload_secs = v;
     }
     if let Some(sub) = &patch.subagent {
         if let Some(v) = meaningful(&sub.model) {
@@ -268,8 +268,6 @@ mod tests {
             ..Default::default()
         };
         cfg.model = "m".into();
-        cfg.lang = Some("zh".into());
-        cfg.theme = Some("dark".into());
         // 掩码/空串 = 保持现值。
         let patch = ConfigPatch {
             api_key: Some("****".into()),
@@ -286,15 +284,35 @@ mod tests {
         };
         apply_patch(&mut cfg, &replace).expect("apply");
         assert_eq!(cfg.api_key, "sk-new");
-        // 空串 lang/theme = 清除（跟随系统）。
-        let clear = ConfigPatch {
-            lang: Some(String::new()),
-            theme: Some(String::new()),
+    }
+
+    /// exec / session_idle_unload_secs 是「后端有、前端新补」的写字段。
+    #[test]
+    fn apply_patch_writes_exec_and_idle_unload() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.exec.default_shell, None);
+        let patch = ConfigPatch {
+            exec: Some(qaqh_config_api::ExecPatch {
+                default_shell: Some("Bash".into()),
+            }),
+            session_idle_unload_secs: Some(900),
             ..Default::default()
         };
-        apply_patch(&mut cfg, &clear).expect("apply");
-        assert_eq!(cfg.lang, None);
-        assert_eq!(cfg.theme, None);
+        apply_patch(&mut cfg, &patch).expect("apply");
+        // 与 load 同口径归一化：小写。
+        assert_eq!(cfg.exec.default_shell.as_deref(), Some("bash"));
+        assert_eq!(cfg.session_idle_unload_secs, 900);
+        // 空串 / "auto" = 回到自动探测。
+        let auto = ConfigPatch {
+            exec: Some(qaqh_config_api::ExecPatch {
+                default_shell: Some("auto".into()),
+            }),
+            session_idle_unload_secs: Some(0),
+            ..Default::default()
+        };
+        apply_patch(&mut cfg, &auto).expect("apply");
+        assert_eq!(cfg.exec.default_shell, None);
+        assert_eq!(cfg.session_idle_unload_secs, 0);
     }
 
     #[test]
