@@ -15,6 +15,12 @@ use std::path::{Component, Path, PathBuf};
 
 pub use qaqh_policy::{PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory};
 
+// 分类器经本模块路径对外可达（qaqh-workspace 以 `crate::permission::*` 引用）。
+pub use crate::command_class::{
+    ExecCommandClass, ExecShellKind, classify_exec_args, classify_exec_command, default_shell_kind,
+    exec_argument_tokens, exec_shell_kind,
+};
+
 /// Classify action impact from authoritative category and normalized resources.
 pub fn classify_risk(
     category: ToolCategory,
