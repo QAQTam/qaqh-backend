@@ -414,9 +414,23 @@ pub fn admit_with_context(
     // （ReadOnly/Unclassified），Risky(deny 形态/网络) 落回常规审批。
     // 分类器只决定摩擦，不是安全边界——误判的兜底是 DACL 与 deny 模式。
     // 会话历史/凭据路径不可借 exec 自动放行外泄，命中即回退常规审批。
+    // 审计 F1/P0（analysis-windows-appcontainer-projfs-2026-10-09）：自动放行
+    // 不得信任平台级 detect——必须该次 launch 计划确实解析到 sbx 后端
+    // （显式 Token/Redirect，或 Auto 已晋升 Redirect）；Auto 未晋升 = 不强制
+    // = 不自动放行（fail-safe，与 direct.rs 的实际分派条件一致）。
+    let exec_backend_resolved = matches!(
+        qaqh_sandbox::sbx_map::resolve_windows_backend(&context.sandbox_spec)
+            .ok()
+            .flatten(),
+        Some(
+            qaqh_sandbox::SandboxBackend::WindowsToken
+                | qaqh_sandbox::SandboxBackend::WindowsRedirect
+        )
+    );
     let exec_class = if !sandboxed
         && invocation.tool_name == "exec"
         && context.sandbox_spec.enabled
+        && exec_backend_resolved
         && qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
     {
         Some(crate::permission::classify_exec_args(&invocation.args))
@@ -425,15 +439,16 @@ pub fn admit_with_context(
     };
     let exec_classified_auto = matches!(
         (&level, &exec_class),
-        (crate::permission::PermissionLevel::WorkspaceWrite, Some(crate::permission::ExecCommandClass::ReadOnly))
-            | (
-                crate::permission::PermissionLevel::SandboxRun,
-                Some(crate::permission::ExecCommandClass::ReadOnly),
-            )
-            | (
-                crate::permission::PermissionLevel::SandboxRun,
-                Some(crate::permission::ExecCommandClass::Unclassified),
-            )
+        (
+            crate::permission::PermissionLevel::WorkspaceWrite,
+            Some(crate::permission::ExecCommandClass::ReadOnly)
+        ) | (
+            crate::permission::PermissionLevel::SandboxRun,
+            Some(crate::permission::ExecCommandClass::ReadOnly),
+        ) | (
+            crate::permission::PermissionLevel::SandboxRun,
+            Some(crate::permission::ExecCommandClass::Unclassified),
+        )
     );
     let exec_auto = exec_classified_auto
         && !crate::permission::exec_argument_tokens(&invocation.args)
@@ -694,13 +709,23 @@ mod tests {
             category: crate::permission::ToolCategory::Exec,
         };
         let write_enforced = qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation;
+        let ctx_for = |invocation: ToolInvocation, backend: qaqh_sandbox::SandboxBackend| {
+            let mut context = legacy_tool_call_context(
+                &invocation,
+                crate::permission::PermissionLevel::WorkspaceWrite as u8,
+                &workspace,
+            );
+            context.sandbox_spec.backend = backend;
+            context
+        };
+        let asks = |admission: Admission| matches!(admission, Admission::ApprovalRequired(_));
 
-        // WorkspaceWrite 档：只读分类命中 → 授权凭证带 SandboxClassified；
-        // 平台无写强制时保持常规审批（fail-closed）。
-        let admission = admit(
-            invocation("rg foo src", Some("bash")),
-            crate::permission::PermissionLevel::WorkspaceWrite as u8,
-            &workspace,
+        // WorkspaceWrite 档：只读分类命中 + 后端确实解析到 sbx → 凭证带
+        // SandboxClassified；平台无写强制时保持常规审批（fail-closed）。
+        let inv = invocation("rg foo src", Some("bash"));
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         );
         if write_enforced {
@@ -709,36 +734,45 @@ mod tests {
             };
             assert_eq!(proof.grant(), GrantKind::SandboxClassified);
         } else {
-            assert!(matches!(admission, Admission::ApprovalRequired(_)));
+            assert!(asks(admission));
         }
 
-        // deny 形态（递归删除）任何平台都不得自动放行
-        let admission = admit(
-            invocation("rm -rf build", Some("bash")),
-            crate::permission::PermissionLevel::WorkspaceWrite as u8,
-            &workspace,
+        // 审计 F1/P0 回归锁：Auto 未晋升 = 实际 plain spawn = 不得自动放行
+        let inv = invocation("rg foo src", Some("bash"));
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::Auto),
             &HashSet::new(),
         );
-        assert!(matches!(admission, Admission::ApprovalRequired(_)));
+        assert!(asks(admission));
+
+        // deny 形态（递归删除）任何平台都不得自动放行
+        let inv = invocation("rm -rf build", Some("bash"));
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
+            &HashSet::new(),
+        );
+        assert!(asks(admission));
 
         // pwsh 侧不做文法判定：Unclassified 保持常规审批
-        let admission = admit(
-            invocation("Get-ChildItem src", Some("pwsh")),
-            crate::permission::PermissionLevel::WorkspaceWrite as u8,
-            &workspace,
+        let inv = invocation("Get-ChildItem src", Some("pwsh"));
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         );
-        assert!(matches!(admission, Admission::ApprovalRequired(_)));
+        assert!(asks(admission));
 
         // 命令文本引用会话历史文件（真实平台 sessions 目录）：不自动放行
         let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");
-        let admission = admit(
-            invocation(&format!("cat {}", session_log.display()), Some("bash")),
-            crate::permission::PermissionLevel::WorkspaceWrite as u8,
-            &workspace,
+        let inv = invocation(&format!("cat {}", session_log.display()), Some("bash"));
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         );
-        assert!(matches!(admission, Admission::ApprovalRequired(_)));
+        assert!(asks(admission));
     }
 
     #[test]
@@ -759,16 +793,21 @@ mod tests {
         let write_enforced = qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation;
         let tier = crate::permission::PermissionLevel::SandboxRun as u8;
         let asks = |admission: Admission| matches!(admission, Admission::ApprovalRequired(_));
+        let ctx_for = |invocation: ToolInvocation, backend: qaqh_sandbox::SandboxBackend| {
+            let mut context = legacy_tool_call_context(&invocation, tier, &workspace);
+            context.sandbox_spec.backend = backend;
+            context
+        };
 
         // pwsh 无法判定形态 → 沙箱优先自动放行（写强制平台上）；无强制平台回退审批
-        let admission = admit(
-            invocation(
-                "exec",
-                crate::permission::ToolCategory::Exec,
-                serde_json::json!({ "command": "Get-ChildItem src", "shell": "pwsh" }),
-            ),
-            tier,
-            &workspace,
+        let inv = invocation(
+            "exec",
+            crate::permission::ToolCategory::Exec,
+            serde_json::json!({ "command": "Get-ChildItem src", "shell": "pwsh" }),
+        );
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         );
         if write_enforced {
@@ -780,25 +819,38 @@ mod tests {
             assert!(asks(admission));
         }
 
+        // 审计 F1/P0 回归锁：Auto 未晋升 = 实际 plain spawn = 不得自动放行
+        let inv = invocation(
+            "exec",
+            crate::permission::ToolCategory::Exec,
+            serde_json::json!({ "command": "Get-ChildItem src", "shell": "pwsh" }),
+        );
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::Auto),
+            &HashSet::new(),
+        );
+        assert!(asks(admission));
+
         // deny 形态与网络面任何平台都保持审批
-        assert!(asks(admit(
-            invocation(
-                "exec",
-                crate::permission::ToolCategory::Exec,
-                serde_json::json!({ "command": "rm -rf build", "shell": "bash" }),
-            ),
-            tier,
-            &workspace,
+        let inv = invocation(
+            "exec",
+            crate::permission::ToolCategory::Exec,
+            serde_json::json!({ "command": "rm -rf build", "shell": "bash" }),
+        );
+        assert!(asks(admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         )));
-        assert!(asks(admit(
-            invocation(
-                "exec",
-                crate::permission::ToolCategory::Exec,
-                serde_json::json!({ "command": "curl http://x.example", "shell": "bash" }),
-            ),
-            tier,
-            &workspace,
+        let inv = invocation(
+            "exec",
+            crate::permission::ToolCategory::Exec,
+            serde_json::json!({ "command": "curl http://x.example", "shell": "bash" }),
+        );
+        assert!(asks(admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         )));
         assert!(asks(admit(
@@ -814,14 +866,14 @@ mod tests {
 
         // 会话历史文件经命令文本引用：保持审批
         let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");
-        assert!(asks(admit(
-            invocation(
-                "exec",
-                crate::permission::ToolCategory::Exec,
-                serde_json::json!({ "command": format!("cat {}", session_log.display()), "shell": "bash" }),
-            ),
-            tier,
-            &workspace,
+        let inv = invocation(
+            "exec",
+            crate::permission::ToolCategory::Exec,
+            serde_json::json!({ "command": format!("cat {}", session_log.display()), "shell": "bash" }),
+        );
+        assert!(asks(admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         )));
 
