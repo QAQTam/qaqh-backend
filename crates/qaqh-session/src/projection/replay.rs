@@ -6,7 +6,7 @@ use qaqh_domain::RingingChannel;
 use serde::{Deserialize, Serialize};
 
 use crate::session_fact_v2::{
-    ControlDelta, EventId, FactPayload, LogId, MAX_SAFE_FACT_SEQ, ProjectionEvent,
+    ControlDelta, EventId, FactPayload, LogId, MAX_SAFE_FACT_SEQ, MetaDelta, ProjectionEvent,
     ProjectionPayload, ProjectionSlot, ReliableCursor, ResetReason, ResetRequired, ResourceDelta,
     ResourceKind, SessionFact, StreamKey, ValidationError, projection_slots,
 };
@@ -108,6 +108,7 @@ pub fn replaceable_identity(payload: &ProjectionPayload) -> Option<String> {
         ProjectionPayload::ControlDelta(ControlDelta::DriverChanged { .. }) => {
             Some("control:driver".into())
         }
+        ProjectionPayload::MetaDelta(MetaDelta::TitleChanged { .. }) => Some("meta:title".into()),
         ProjectionPayload::ResourceDelta(ResourceDelta::WorkspaceResourceChanged {
             resource_kind,
             resource_id,

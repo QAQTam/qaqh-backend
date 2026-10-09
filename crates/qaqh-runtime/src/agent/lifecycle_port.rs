@@ -1,16 +1,15 @@
 //! Runtime lifecycle port.
 //!
-//! P2-4b moves liveness bookkeeping, session lifecycle calls, and the
-//! first-turn title hook behind one boundary. The default implementation keeps
-//! the legacy synchronous behavior; later actor/task migration can replace the
-//! port without teaching `Loop` those details.
+//! P2-4b moves liveness bookkeeping and session lifecycle calls behind one
+//! boundary. First-turn title generation starts in `InputEngine` so it can run
+//! concurrently with the initial model request.
 
 use std::sync::Arc;
 
 use super::engine_session::SessionEngine;
 use super::liveness::WorkerLiveness;
 use super::state::agent::AgentState;
-use super::types::{CancelToken, RingContext};
+use super::types::CancelToken;
 
 pub(crate) trait LifecyclePort {
     fn dispatch_started(&self);
@@ -26,7 +25,6 @@ pub(crate) trait LifecyclePort {
     ) -> bool;
     fn reload_config(&self, agent: &mut AgentState, cancel: &CancelToken);
 
-    fn turn_completed(&self, ctx: &mut RingContext<'_>);
 }
 
 /// Default in-process lifecycle port. It delegates to the existing runtime
@@ -77,9 +75,6 @@ impl LifecyclePort for RuntimeLifecyclePort {
         self.session.reload_config(agent, cancel);
     }
 
-    fn turn_completed(&self, ctx: &mut RingContext<'_>) {
-        crate::agent::engine_title::maybe_generate_title(ctx);
-    }
 }
 
 #[cfg(test)]
