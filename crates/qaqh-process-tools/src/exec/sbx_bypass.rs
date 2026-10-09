@@ -115,6 +115,7 @@ pub(crate) fn sbx_exec(
     tool_call_id: &str,
     display_name: &str,
     spec: &SandboxSpec,
+    command_text: &str,
 ) -> ExecOutput {
     use sbx_win::events::EventSink;
     use std::io::Write;
@@ -302,8 +303,9 @@ pub(crate) fn sbx_exec(
     } else {
         None
     };
-    let _turn_guard =
-        turn.is_some().then(crate::exec::redirect_guard::RedirectTurnGuard::acquire);
+    let _turn_guard = turn
+        .is_some()
+        .then(crate::exec::redirect_guard::RedirectTurnGuard::acquire);
 
     let desktop = match sbx_win::desktop::create_private_desktop(&identity.sid_text) {
         Ok(d) => d,
@@ -407,9 +409,11 @@ pub(crate) fn sbx_exec(
     let stdout_out = sbx_win::console::decode_console_bytes(&exit.stdout);
     let mut stderr_out = sbx_win::console::decode_console_bytes(&exit.stderr);
 
-    // deny-steer:内核拒绝 → 冻结导流文案(与 CLI run 同源)。
+    // deny-steer:内核拒绝 → 冻结导流文案 + 疑似被拒写目标(v2a,ADR 2026-10-09)。
     if sbx_win::feedback::is_likely_sandbox_denied(exit.code, &stderr_out) {
-        stderr_out.push_str(sbx_win::feedback::DENIAL_FEEDBACK);
+        stderr_out.push_str(&sbx_win::feedback::denial_feedback_with_targets(
+            command_text,
+        ));
     }
 
     // turn 边界:通知流 + diff + merge(ConfirmDeletions 默认,ADR-0004)。

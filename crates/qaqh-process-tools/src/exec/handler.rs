@@ -238,6 +238,7 @@ pub(crate) fn run_exec(
         progress_tx,
         &ctx.call_id,
         sandbox,
+        &shell_command,
     );
     // 观测线纪律（事故 2026-09-02 预防）：检测 shell 命令中的后台派生 `&`，
     // 以强提示引导走 background_after_secs + process 工具的受控路径。
