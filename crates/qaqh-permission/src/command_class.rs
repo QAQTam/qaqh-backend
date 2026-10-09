@@ -339,8 +339,11 @@ fn classify_posix(command: &str) -> ExecCommandClass {
                         reason: "downloaded script piped into a shell".into(),
                     };
                 }
-                // 单独的下载命令：网络未强制，不自动放行
-                result = ExecCommandClass::Unclassified;
+                // 单独的下载命令：网络未强制，任何档位都不过闸——
+                // 沙箱优先档(SandboxRun)也保持审批，唯一 fail-closed 网络边界。
+                return ExecCommandClass::Risky {
+                    reason: "network access without enforced network isolation".into(),
+                };
             }
             StageKind::ShellInterp => result = ExecCommandClass::Unclassified,
             StageKind::EnvDump => {
@@ -780,6 +783,12 @@ fn classify_non_posix(command: &str) -> ExecCommandClass {
     if downloads && pipes_to_interp {
         return ExecCommandClass::Risky {
             reason: "downloaded script piped into a shell".into(),
+        };
+    }
+    if downloads {
+        // 网络未强制：下载/联网命令任何档位都不过闸
+        return ExecCommandClass::Risky {
+            reason: "network access without enforced network isolation".into(),
         };
     }
 
