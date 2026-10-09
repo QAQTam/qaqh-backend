@@ -237,9 +237,30 @@ impl SessionManager {
         let dir = self
             .session_dir(session_id)
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
+        // 未绑定工作区的会话把默认工作根建在 `data_dir/workspace/<id>`
+        // （`qaqh_types::platform::default_session_workspace_dir`）。删除会话
+        // 必须连它一起清，否则长驻 daemon 每删一个无工作区会话就留一个孤儿
+        // 目录（无界增长）。判定在删除 meta 之前取：只有从未绑过工作区的会话
+        // 才可能是我们建的目录，用户显式选的目录绝不代删。
+        let user_bound_workspace = self
+            .load_meta(session_id)
+            .and_then(|meta| meta.cwd)
+            .is_some_and(|cwd| !cwd.trim().is_empty() && cwd.trim() != ".");
 
         let _legacy_writer = LegacyWriterFacade::lock();
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete session: {e}"))?;
+
+        if !user_bound_workspace {
+            let scratch = qaqh_types::platform::default_session_workspace_dir(session_id);
+            if let Err(error) = std::fs::remove_dir_all(&scratch)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!(
+                    "SessionManager: cannot remove default workspace '{}': {error}",
+                    scratch.display()
+                );
+            }
+        }
 
         store::remove_from_index(&self.sessions_dir, session_id);
         // 同步清理 workspace 账户（会话删除后不留悬空引用）。
