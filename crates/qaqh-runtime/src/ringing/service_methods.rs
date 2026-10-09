@@ -26,6 +26,8 @@ pub struct MethodInfo {
     /// 要求会话参数并做 lease 归属校验（Read 中带会话作用域的子集；
     /// Write 一律在 params 携带会话键时校验归属）。
     pub requires_session: bool,
+    /// Process-wide diagnostics expose other sessions and require admin scope.
+    pub admin_only: bool,
 }
 
 /// 服务面会话参数键。
@@ -51,18 +53,32 @@ pub fn scope_session_param_value(params: &Value) -> Option<&str> {
 const READ: MethodInfo = MethodInfo {
     kind: MethodKind::Read,
     requires_session: false,
+    admin_only: false,
+};
+const READ_ADMIN: MethodInfo = MethodInfo {
+    kind: MethodKind::Read,
+    requires_session: false,
+    admin_only: true,
 };
 const READ_SEEDED: MethodInfo = MethodInfo {
     kind: MethodKind::Read,
     requires_session: true,
+    admin_only: false,
 };
 const WRITE: MethodInfo = MethodInfo {
     kind: MethodKind::Write,
     requires_session: false,
+    admin_only: false,
+};
+const WRITE_ADMIN: MethodInfo = MethodInfo {
+    kind: MethodKind::Write,
+    requires_session: false,
+    admin_only: true,
 };
 const WRITE_SEEDED: MethodInfo = MethodInfo {
     kind: MethodKind::Write,
     requires_session: true,
+    admin_only: false,
 };
 
 /// 方法表：未列出的名字返回 `None`（HTTP 404）。
@@ -106,8 +122,10 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "todo.list" => Some(READ_SEEDED),
         "todo.set" => Some(WRITE_SEEDED),
         "plan.read" => Some(READ_SEEDED),
-        "plan.context_stats" => Some(READ_SEEDED),
-        "stats.token_usage" => Some(READ),
+        // Process-wide memory view is intentionally admin-scope only.
+        "diagnostics.memory.snapshot" => Some(READ_ADMIN),
+        "diagnostics.memory.start" => Some(WRITE_ADMIN),
+        "diagnostics.memory.stop" => Some(WRITE_ADMIN),
         // git（只读与变更分列）
         "git.diff" => Some(READ_SEEDED),
         "git.branch" => Some(READ_SEEDED),

@@ -23,6 +23,7 @@ qaqh-gate = { path = "../qaqh-gate" }
 unicode-normalization = "0.1"
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-types = { path = "../qaqh-types" }
+qaqh-memwatch = { path = "../qaqh-memwatch" }
 log = "0.4"
 chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }

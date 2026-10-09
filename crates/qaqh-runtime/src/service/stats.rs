@@ -86,18 +86,3 @@ pub(crate) fn load_config() -> Result<Value, String> {
     // qaqh-config::dto），service 层不再手拼 json。
     serde_json::to_value(qaqh_config::dto::to_dto(&cfg)).map_err(err)
 }
-pub(crate) fn context_stats(
-    sessions: &qaqh_session::SessionManager,
-    session_id: &str,
-) -> Result<Value, String> {
-    // 统一数据源：meta.json 的 context_stats 字段（原独立文件退役）。
-    // 旧 context_stats.json 为可再生缓存，忽略不迁移。
-    if let Some(meta) = sessions.load_meta(session_id)
-        && let Some(stats) = meta.context_stats
-    {
-        return Ok(stats);
-    }
-    Ok(
-        json!({"messages":0,"chat_text":0,"thinking":0,"tool_calls":0,"tool_results":0,"tools_schema":0,"system_prompt":0,"thinking_blocks":0,"tool_call_blocks":0}),
-    )
-}

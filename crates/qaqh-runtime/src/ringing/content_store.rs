@@ -291,6 +291,68 @@ impl ContentStore {
         self.entries.is_empty()
     }
 
+    pub fn memory_components(&self) -> Vec<qaqh_memwatch::ComponentMemory> {
+        let mut loaded_entries = 0_u64;
+        let mut loaded_bytes = 0_u64;
+        let mut loaded_heap = 0_u64;
+        let mut pinned_entries = 0_u64;
+        let mut metadata_heap = self
+            .entries
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, ContentEntry)>());
+        for (content_id, entry) in &self.entries {
+            metadata_heap = metadata_heap
+                .saturating_add(content_id.capacity())
+                .saturating_add(std::mem::size_of::<ContentEntry>())
+                .saturating_add(entry.content_id.capacity())
+                .saturating_add(entry.media_type.capacity())
+                .saturating_add(entry.sha256.capacity())
+                .saturating_add(
+                    entry
+                        .owners
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                );
+            for owner in &entry.owners {
+                metadata_heap = metadata_heap.saturating_add(owner.capacity());
+            }
+            if entry.pinned {
+                pinned_entries = pinned_entries.saturating_add(1);
+            }
+            if entry.bytes_loaded {
+                loaded_entries = loaded_entries.saturating_add(1);
+                loaded_bytes = loaded_bytes.saturating_add(entry.bytes.len() as u64);
+                loaded_heap = loaded_heap.saturating_add(entry.bytes.capacity() as u64);
+            }
+            if let Some(pin_key) = &entry.pin_key {
+                metadata_heap = metadata_heap.saturating_add(pin_key.capacity());
+            }
+        }
+        vec![
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.content_store".into(),
+                item_count: self.entries.len() as u64,
+                payload_bytes: None,
+                heap_estimate_bytes: Some(metadata_heap as u64),
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.content_store.loaded_bodies".into(),
+                item_count: loaded_entries,
+                payload_bytes: Some(loaded_bytes),
+                heap_estimate_bytes: Some(loaded_heap),
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "ringing.content_store.pinned".into(),
+                item_count: pinned_entries,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+        ]
+    }
+
     fn upsert(
         &mut self,
         session_id: &str,

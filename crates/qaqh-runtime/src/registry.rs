@@ -371,6 +371,83 @@ impl AgentRegistry {
         }
     }
 
+    /// Bounded-cardinality logical memory gauges for the daemon diagnostic API.
+    pub fn memory_components(&self) -> Vec<qaqh_memwatch::ComponentMemory> {
+        let mut worker_heap = self
+            .instances
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, AgentInstance)>());
+        let mut session_id_bytes = 0usize;
+        let mut session_workers = 0_u64;
+        let mut subagent_workers = 0_u64;
+        let mut live_threads = 0_u64;
+        for (session_id, instance) in &self.instances {
+            session_id_bytes = session_id_bytes.saturating_add(session_id.capacity());
+            worker_heap = worker_heap.saturating_add(std::mem::size_of::<AgentInstance>());
+            match &instance.kind {
+                AgentKind::Session => session_workers += 1,
+                AgentKind::Subagent(_) => subagent_workers += 1,
+            }
+            if instance
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+            {
+                live_threads += 1;
+            }
+            if instance
+                .reader
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+            {
+                live_threads += 1;
+            }
+        }
+        vec![
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.workers".into(),
+                item_count: self.instances.len() as u64,
+                payload_bytes: Some(session_id_bytes as u64),
+                heap_estimate_bytes: Some(worker_heap as u64),
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.lifecycle_maps".into(),
+                item_count: self
+                    .last_spawn
+                    .len()
+                    .saturating_add(self.residency.len())
+                    .saturating_add(self.quota_ledgers.len())
+                    .saturating_add(self.outbound_attempts.len())
+                    .saturating_add(self.armed_collectors.len()) as u64,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.session_workers".into(),
+                item_count: session_workers,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.subagent_workers".into(),
+                item_count: subagent_workers,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.live_threads".into(),
+                item_count: live_threads,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+        ]
+    }
+
     /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。
     pub fn attach_ringing(&mut self, hub: Arc<RingingHub>) {
         self.hub = Some(hub);
@@ -883,13 +960,20 @@ impl AgentRegistry {
         let cwd = self
             .sessions
             .workspace_cwd(session_id)
-            .or_else(|| self.sessions.workspace_cwd(parent_session_id))
+            .filter(|cwd| !cwd.is_empty() && cwd != ".")
             .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
+                self.sessions
+                    .workspace_cwd(parent_session_id)
+                    .filter(|cwd| !cwd.is_empty() && cwd != ".")
             })
-            .unwrap_or_else(|| "/".to_string());
+            .unwrap_or_else(|| {
+                // 父子会话都没有工作区：落默认工作根（与
+                // `load_session_workspace` 同源），绝不兜底进程 cwd——
+                // daemon 的进程 cwd 是安装目录。
+                qaqh_types::platform::default_session_workspace_dir(session_id)
+                    .to_string_lossy()
+                    .into_owned()
+            });
         crate::service::materialize_canonical_session_in(
             &child_dir,
             &cwd,
