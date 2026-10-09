@@ -22,8 +22,9 @@ pub mod workspace;
 
 pub use permission::{
     PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory, TrustedFolderSet,
-    classify_risk, extract_target_paths, is_sensitive_session_path, normalize_lexically,
-    patch_target_paths, path_within_dir, resolve_target_path,
+    classify_risk, extract_target_paths, extract_target_paths_in, is_sensitive_session_path,
+    normalize_lexically, patch_target_paths, path_within_dir, resolve_target_path,
+    resolve_target_path_in,
 };
 
 use std::cell::{Cell, RefCell};
