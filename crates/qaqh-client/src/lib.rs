@@ -22,7 +22,7 @@ pub mod v2;
 pub mod v2_stream;
 
 pub use client::{
-    Client, ClientHandlers, ClientOptions, RemoteEndpoint, StopStatus, runtime_handle,
+    Client, ClientHandlers, ClientOptions, PairScope, RemoteEndpoint, StopStatus, runtime_handle,
 };
 pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_discovery};
 pub use endpoint::{ActionRequest, QueryRequest};
@@ -37,6 +37,11 @@ pub use qaqh_domain::state::{
     ControlState, ConversationState, InteractionKind, LastFailure, LastRound, PendingInteraction,
     RunningTool, ToolState,
 };
+/// 设备配对 / 设备管理的 wire 类型（`Client::issue_pairing_token` 等方法的返回值）。
+///
+/// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
+/// 否则壳层就只能手解 JSON——那正是本客户端存在的理由要反对的事。
+pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
 pub use remote_path::{display_host, display_path, remote_path_from_display};
 pub use session::RingingSession;
 pub use timeline::TimelineStream;
