@@ -1494,6 +1494,7 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
         None,
         "sbx-smoke-echo",
         &spec,
+        "echo sbx-ok",
     );
     assert_eq!(out.exit_code, Some(0), "output: {}", out.output);
     assert!(
@@ -1519,6 +1520,7 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
         None,
         "sbx-smoke-allow",
         &spec,
+        "echo sbx-data > sbx_smoke.txt",
     );
     assert_eq!(out.exit_code, Some(0), "output: {}", out.output);
     assert!(
@@ -1545,6 +1547,7 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
         None,
         "sbx-smoke-deny",
         &spec,
+        &format!("echo escape > {}", target.display()),
     );
     assert!(
         !target.exists(),

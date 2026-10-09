@@ -42,6 +42,7 @@ pub(crate) fn direct_exec(
         progress_tx,
         tool_call_id,
         None,
+        "",
     )
 }
 
@@ -58,6 +59,7 @@ pub(crate) fn direct_exec_sandboxed(
     progress_tx: Option<ExecProgressSender>,
     tool_call_id: &str,
     sandbox: &qaqh_sandbox::SandboxSpec,
+    command_text: &str,
 ) -> ExecOutput {
     direct_exec_inner(
         argv,
@@ -70,6 +72,7 @@ pub(crate) fn direct_exec_sandboxed(
         progress_tx,
         tool_call_id,
         Some(sandbox),
+        command_text,
     )
 }
 
@@ -85,6 +88,7 @@ fn direct_exec_inner(
     progress_tx: Option<ExecProgressSender>,
     tool_call_id: &str,
     sandbox: Option<&qaqh_sandbox::SandboxSpec>,
+    command_text: &str,
 ) -> ExecOutput {
     let start_time = std::time::Instant::now();
     let display_name = if argv.len() > 1 {
@@ -116,6 +120,7 @@ fn direct_exec_inner(
                 tool_call_id,
                 &display_name,
                 spec,
+                command_text,
             );
         }
     }
