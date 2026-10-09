@@ -24,7 +24,10 @@ use crate::types::{
 };
 use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
-use qaqh_ringing::v2::{RingingV2CommandAck, RingingV2CommandStatus};
+use qaqh_ringing::v2::{
+    RingingV2CommandAck, RingingV2CommandStatus, RingingV2DeviceWire, RingingV2DevicesResponse,
+    RingingV2PairTokenRequest, RingingV2PairTokenResponse,
+};
 
 /// `reqwest` 以 `rustls-no-provider` 特征编译（换掉 `rustls` 是为绕开 OHOS 上
 /// 构建不了的 aws-lc-rs，见 `qaqh-client/Cargo.toml`），该特征的硬契约是：建
@@ -131,6 +134,40 @@ pub enum StopStatus {
     Stopping,
     Busy,
     Unsupported,
+}
+
+/// 配对令牌的授予档位（daemon `parse_scope` 的闭集：`view | interact | admin`）。
+///
+/// 用枚举而不是 `&str`：档位名写错时 daemon 回 400，壳层只会看到一个没有原因的
+/// `HTTP 400`。语义是单调递增的能力面，`Admin` 授予等同运维权限，界面该把它和
+/// 前两档拉开距离显示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairScope {
+    View,
+    Interact,
+    Admin,
+}
+
+impl PairScope {
+    /// daemon `parse_scope` 认识的 wire 名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Interact => "interact",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// `RingingV2DeviceWire.scope` 的反向解析；未知词返回 `None`（不兜成 `View`，
+    /// 那会把一个不认识的能力面显示成最小的那个）。
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "view" => Some(Self::View),
+            "interact" => Some(Self::Interact),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
 }
 
 /// A connected Ringing v2 client. Cloneable handle; `close()` stops all tasks.
@@ -772,6 +809,94 @@ impl Client {
         Ok(response.json().await?)
     }
 
+    /// 设备配对：申请一次性配对令牌（`POST /ringing/v2/pairing/tokens`，Admin）。
+    ///
+    /// 令牌只在 daemon 侧存活很短（`expires_in_ms`），且**二维码由壳层拼**：daemon
+    /// 不知道自己对外该报哪个 `base_url`（手机走的是 `lan_endpoint` 而不是回环
+    /// `endpoint`），也不出图。响应里的 `tls_fp` 是给原生端做 pinning 的参考值，
+    /// 本客户端自己的连接面并不消费它。
+    pub async fn issue_pairing_token(
+        &self,
+        scope: PairScope,
+        device_name: &str,
+        platform: &str,
+    ) -> Result<RingingV2PairTokenResponse> {
+        let path = "/ringing/v2/pairing/tokens";
+        let body = RingingV2PairTokenRequest {
+            scope_grant: scope.as_str().to_string(),
+            device_name: device_name.to_string(),
+            platform: platform.to_string(),
+        };
+        let response = self
+            .inner
+            .http
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path: path.into(),
+            });
+        }
+        Ok(response.json().await?)
+    }
+
+    /// 已配对设备列表（`GET /ringing/v2/devices`，Admin）。
+    ///
+    /// 响应体**不含任何 token 材料**（daemon 的 authz 矩阵测试专门钉了这条），所以
+    /// 壳层可以把整张表直接画到界面上，不需要自己再脱敏。
+    pub async fn list_devices(&self) -> Result<Vec<RingingV2DeviceWire>> {
+        let path = "/ringing/v2/devices";
+        let response = self
+            .inner
+            .http
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path: path.into(),
+            });
+        }
+        Ok(response.json::<RingingV2DevicesResponse>().await?.devices)
+    }
+
+    /// 吊销设备（`POST /ringing/v2/devices/{id}/revoke`，204 = 已吊销）。
+    ///
+    /// `device_id` 直接进 URL 路径段，所以先按白名单收口：非 `[A-Za-z0-9_-:]` 一律
+    /// 拒掉，免得一个来自界面的 id 串把 `../` 或换行拼进请求路径。
+    pub async fn revoke_device(&self, device_id: &str) -> Result<()> {
+        let safe = !device_id.is_empty()
+            && device_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
+        if !safe {
+            return Err(ClientError::Protocol(format!(
+                "device_id 含非路径安全字符，已拒绝: {device_id:?}"
+            )));
+        }
+        let path = format!("/ringing/v2/devices/{device_id}/revoke");
+        let response = self
+            .inner
+            .http
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path,
+            });
+        }
+        Ok(())
+    }
+
     /// `POST /control/v1/stop` / `stop-if-idle` — graceful daemon stop.
     pub async fn stop_daemon(&self, idle_only: bool) -> Result<StopStatus> {
         let path = if idle_only {
@@ -877,4 +1002,72 @@ async fn wait_for_daemon(
 /// 正确命中。审计 M5（2026-10-01）：候选序已移除 cwd，PATH 兜底改为 opt-in。
 fn default_daemon_path() -> Result<std::path::PathBuf> {
     crate::discovery::daemon_executable()
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+
+    /// 档位词表必须与 daemon 的 `parse_scope` 同一闭集：壳层拼错一个字母换来的是
+    /// 一个没有原因的 `HTTP 400`，所以这里把名字钉在客户端侧。
+    #[test]
+    fn pair_scope_names_match_the_daemon_closed_set() {
+        let words = [
+            PairScope::View.as_str(),
+            PairScope::Interact.as_str(),
+            PairScope::Admin.as_str(),
+        ];
+        assert_eq!(words, ["view", "interact", "admin"]);
+        for word in words {
+            assert_eq!(PairScope::parse(word).map(|s| s.as_str()), Some(word));
+        }
+        // 未知词不得兜成最小的那一档（那会把不认识的能力面显示成「只读」）。
+        assert_eq!(PairScope::parse("read"), None);
+        assert_eq!(PairScope::parse("View"), None);
+    }
+
+    /// 请求体的字段名是 daemon 的解析契约（`RingingV2PairTokenRequest` 没有
+    /// `rename_all`，wire 就是 snake_case）。
+    #[test]
+    fn pairing_token_request_body_carries_daemon_field_names() {
+        let body = RingingV2PairTokenRequest {
+            scope_grant: PairScope::Interact.as_str().to_string(),
+            device_name: "studio-phone".to_string(),
+            platform: "ohos".to_string(),
+        };
+        let value = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(value["scope_grant"], "interact");
+        assert_eq!(value["device_name"], "studio-phone");
+        assert_eq!(value["platform"], "ohos");
+    }
+
+    /// 配对响应与设备表要能按 daemon 的字段解出来；`tls_fp` 允许缺席
+    /// （`#[serde(default)]`，回环模式下 daemon 根本没有 TLS 证书）。
+    #[test]
+    fn pairing_and_device_payloads_parse() {
+        let ticket: RingingV2PairTokenResponse = serde_json::from_value(serde_json::json!({
+            "pairing_token": "3f9c…",
+            "expires_in_ms": 120_000,
+        }))
+        .expect("缺 tls_fp 的响应必须可解析");
+        assert_eq!(ticket.tls_fp, "", "回环模式没有证书 → 空串而不是缺字段");
+
+        let devices: RingingV2DevicesResponse = serde_json::from_value(serde_json::json!({
+            "devices": [{
+                "device_id": "01JDEV",
+                "name": "studio-phone",
+                "platform": "ohos",
+                "scope": "view",
+                "created_at_ms": 1,
+                "last_seen_ms": 2,
+            }],
+        }))
+        .expect("设备表可解析");
+        assert_eq!(devices.devices[0].device_id, "01JDEV");
+        assert_eq!(
+            devices.devices[0].scope,
+            PairScope::View.as_str(),
+            "设备表里的 scope 与档位词表同源"
+        );
+    }
 }
