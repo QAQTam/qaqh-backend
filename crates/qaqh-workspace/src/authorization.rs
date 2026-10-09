@@ -77,6 +77,8 @@ pub enum GrantKind {
     UserApproved,
     /// 子代理沙箱内自动批准（工作区内文件操作）。
     SandboxAuto,
+    /// 沙箱文件写强制成立时，只读分类器批准的 exec（ADR 2026-10-09 决策 1/2）。
+    SandboxClassified,
 }
 
 impl GrantKind {
@@ -86,6 +88,7 @@ impl GrantKind {
             Self::Auto => "auto",
             Self::UserApproved => "user_approved",
             Self::SandboxAuto => "sandbox_auto",
+            Self::SandboxClassified => "sandbox_classified",
         }
     }
 }
@@ -406,14 +409,38 @@ pub fn admit_with_context(
         [] | [std::path::Component::CurDir]
     );
     let workspace_root = crate::permission::resolve_target_path(context.workspace_root.clone());
-    match crate::permission::needs_permission(
-        level,
-        &invocation.tool_name,
-        &invocation.args,
-        &workspace_root,
-        trusted_dirs,
-        invocation.category,
-    ) {
+    // ADR 2026-10-09 决策 1/2：沙箱文件写强制成立时，分类为只读的 exec 自动放行。
+    // 分类器只决定摩擦，不是安全边界——误判的兜底是 DACL 与 deny 模式。
+    // 会话历史/凭据路径不可借 exec 自动放行外泄，命中即回退常规审批。
+    let exec_classified_auto = !sandboxed
+        && level == crate::permission::PermissionLevel::WorkspaceWrite
+        && invocation.tool_name == "exec"
+        && context.sandbox_spec.enabled
+        && qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
+        && matches!(
+            crate::permission::classify_exec_args(&invocation.args),
+            crate::permission::ExecCommandClass::ReadOnly
+        );
+    let exec_auto = exec_classified_auto
+        && !crate::permission::exec_argument_tokens(&invocation.args)
+            .into_iter()
+            .filter(|token| token.contains('/') || token.contains('\\'))
+            .any(|token| {
+                crate::permission::is_sensitive_session_path(std::path::Path::new(&token))
+            });
+    let decision = if exec_auto {
+        crate::permission::PermissionDecision::AutoApprove
+    } else {
+        crate::permission::needs_permission(
+            level,
+            &invocation.tool_name,
+            &invocation.args,
+            &workspace_root,
+            trusted_dirs,
+            invocation.category,
+        )
+    };
+    match decision {
         crate::permission::PermissionDecision::AutoApprove => {
             let mut resources = crate::permission::extract_target_paths_in(
                 &invocation.tool_name,
@@ -434,11 +461,16 @@ pub fn admit_with_context(
                     invocation.tool_name
                 ));
             }
+            let grant = if exec_auto {
+                GrantKind::SandboxClassified
+            } else {
+                GrantKind::Auto
+            };
             Admission::Authorized(AuthorizedToolCall::new(
                 invocation,
                 resources,
                 workspace_root,
-                GrantKind::Auto,
+                grant,
             ))
         }
         crate::permission::PermissionDecision::AskUser {
@@ -629,6 +661,70 @@ mod tests {
             challenge.consequence(),
             "Changes files inside the current workspace."
         );
+    }
+
+    #[test]
+    fn exec_read_only_auto_approves_only_under_write_enforced_sandbox() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let workspace = std::env::temp_dir().join("qaqh-authorization-exec-class");
+        let invocation = |command: &str, shell: Option<&str>| ToolInvocation {
+            session_id: "seed-a".into(),
+            call_id: "call-exec".into(),
+            tool_name: "exec".into(),
+            args: serde_json::json!({
+                "command": command,
+                "shell": shell,
+            }),
+            category: crate::permission::ToolCategory::Exec,
+        };
+        let write_enforced = qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation;
+
+        // WorkspaceWrite 档：只读分类命中 → 授权凭证带 SandboxClassified；
+        // 平台无写强制时保持常规审批（fail-closed）。
+        let admission = admit(
+            invocation("rg foo src", Some("bash")),
+            crate::permission::PermissionLevel::WorkspaceWrite as u8,
+            &workspace,
+            &HashSet::new(),
+        );
+        if write_enforced {
+            let Admission::Authorized(proof) = admission else {
+                panic!("classified read-only exec must auto-approve under workspace-write");
+            };
+            assert_eq!(proof.grant(), GrantKind::SandboxClassified);
+        } else {
+            assert!(matches!(admission, Admission::ApprovalRequired(_)));
+        }
+
+        // deny 形态（递归删除）任何平台都不得自动放行
+        let admission = admit(
+            invocation("rm -rf build", Some("bash")),
+            crate::permission::PermissionLevel::WorkspaceWrite as u8,
+            &workspace,
+            &HashSet::new(),
+        );
+        assert!(matches!(admission, Admission::ApprovalRequired(_)));
+
+        // pwsh 侧不做文法判定：Unclassified 保持常规审批
+        let admission = admit(
+            invocation("Get-ChildItem src", Some("pwsh")),
+            crate::permission::PermissionLevel::WorkspaceWrite as u8,
+            &workspace,
+            &HashSet::new(),
+        );
+        assert!(matches!(admission, Admission::ApprovalRequired(_)));
+
+        // 命令文本引用会话历史文件（真实平台 sessions 目录）：不自动放行
+        let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");
+        let admission = admit(
+            invocation(&format!("cat {}", session_log.display()), Some("bash")),
+            crate::permission::PermissionLevel::WorkspaceWrite as u8,
+            &workspace,
+            &HashSet::new(),
+        );
+        assert!(matches!(admission, Admission::ApprovalRequired(_)));
     }
 
     // ── 子代理沙箱（方案 B）──

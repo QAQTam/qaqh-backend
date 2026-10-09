@@ -16,10 +16,15 @@
 //! 门面在 `runtime::set_context` 首次调用时注册一个读 ctx 的 fn 指针，本 crate
 //! 不再依赖门面。
 
+pub mod command_class;
 pub mod conflict;
 pub mod permission;
 pub mod workspace;
 
+pub use command_class::{
+    ExecCommandClass, ExecShellKind, classify_exec_args, classify_exec_command, default_shell_kind,
+    exec_argument_tokens, exec_shell_kind,
+};
 pub use permission::{
     PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory, TrustedFolderSet,
     classify_risk, extract_target_paths, extract_target_paths_in, is_sensitive_session_path,
@@ -281,7 +286,9 @@ pub fn resolve_workspace_path(path: &str) -> String {
     }
     let p = Path::new(path);
     if p.is_absolute() {
-        return crate::permission::normalize_lexically(p).to_string_lossy().to_string();
+        return crate::permission::normalize_lexically(p)
+            .to_string_lossy()
+            .to_string();
     }
     let ws = current_workspace();
     if ws.is_empty() || ws == "." {
