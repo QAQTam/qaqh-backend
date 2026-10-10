@@ -31,7 +31,7 @@ pub struct ExecArgs {
     /// Positional args; per-shell rules in the system prompt.
     #[serde(default)]
     pub args: Option<Vec<String>>,
-    /// bash | zsh | sh | pwsh | powershell | cmd; default auto-detected.
+    /// Shell for command: bash | zsh | sh | pwsh | powershell | cmd (default auto-detected: pwsh on Windows, zsh on macOS, bash elsewhere).
     #[serde(default)]
     pub shell: Option<String>,
     /// Defaults to workspace root.
@@ -60,7 +60,7 @@ impl TypedTool for ExecTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "exec",
-            "Run a shell command; returns exit_code/output; long runs return process_id.",
+            "Run a shell command. The command is wrapped by the selected shell (pwsh on Windows, zsh on macOS, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id.",
             crate::permission::ToolCategory::Exec,
             ToolRisk::Destructive,
             Duration::from_secs(30),
