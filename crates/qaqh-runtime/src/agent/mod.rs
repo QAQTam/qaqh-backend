@@ -59,6 +59,7 @@ pub mod loop_outcome;
 pub mod paced_emitter;
 pub mod plugins;
 pub mod prompt;
+pub(crate) mod request_context;
 pub(crate) mod resource_publish;
 pub(crate) mod spawn;
 pub mod state;

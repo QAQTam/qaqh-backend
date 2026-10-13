@@ -80,7 +80,7 @@ mod schema_spot_check {
             read_desc.contains("requests"),
             "read description must point at the requests field: {read_desc}"
         );
-        for field in ["path", "start_line", "end_line", "if_hash", "requests"] {
+        for field in ["requests"] {
             let f = &params("read")[field];
             assert!(
                 f["description"].as_str().is_some_and(|d| !d.is_empty()),
@@ -88,11 +88,11 @@ mod schema_spot_check {
             );
         }
         assert!(
-            params("read")["if_hash"]["description"]
+            params("read")["requests"]["items"]["properties"]["if_hash"]["description"]
                 .as_str()
                 .unwrap()
                 .contains("NOT_MODIFIED"),
-            "read.if_hash description must explain NOT_MODIFIED"
+            "read requests[].if_hash description must explain NOT_MODIFIED"
         );
 
         // web_fetch：url 带 serde(default) → 生成 schema 不再 required

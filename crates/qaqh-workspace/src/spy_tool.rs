@@ -32,17 +32,11 @@ pub struct SpyTool;
 pub struct SpyArgs {
     /// undo=single-change rollback; restore=workspace back to scan point; journal=change flow; cat=historical blob
     pub action: String,
-    /// Change id for undo
     pub change_id: Option<String>,
-    /// Scan id / mark for restore
     pub scan_id: Option<String>,
-    /// undo: skip after-sha guard (default false)
     pub force: Option<bool>,
-    /// restore: delete extra files newer than the scan point (default false)
     pub prune: Option<bool>,
-    /// journal: max entries (default 50)
     pub limit: Option<usize>,
-    /// blob sha for cat
     pub sha: Option<String>,
 }
 

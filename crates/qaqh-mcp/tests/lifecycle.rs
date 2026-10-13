@@ -16,7 +16,7 @@
 //!
 //! 状态隔离：manager 均为本测试私有实例，不触碰全局槽默认值（槽位用例
 //! 自装自卸）；无 TEST_RUNTIME_SERIAL 需求。子进程 reap 验证依赖 /proc
-//! （Linux；Windows 专项归 M1-5，见 handover §四）。
+//! （仅 Linux——macOS 同样无 /proc；Windows 专项归 M1-5，见 handover §四）。
 //!
 //! Auto 生命周期注：生产与测试都用 `ClientLifecycleMode::Auto`——legacy
 //! mock/fixture 对 `server/discover` 回 -32601（rmcp 默认），客户端据此
@@ -234,8 +234,9 @@ async fn wait_pid_file(path: &Path) -> Option<u32> {
     None
 }
 
-/// 轮询直到 /proc/<pid> 消失（RAII reap 验证；Linux）。
-#[cfg(unix)]
+/// 轮询直到 /proc/<pid> 消失（RAII reap 验证；/proc 为 procfs 专属——
+/// 门必须是 `target_os = "linux"`，`unix` 会把 macOS 假绿成恒真）。
+#[cfg(target_os = "linux")]
 async fn wait_pid_gone(pid: u32, timeout: Duration) -> bool {
     let path = PathBuf::from(format!("/proc/{pid}"));
     let deadline = Instant::now() + timeout;
@@ -291,8 +292,9 @@ async fn connect_in_memory_serves_tools_list() {
 }
 
 // ── 用例 2：connect 超时（子进程 deaf fixture；失败路径组杀验证）──
+// reap 断言经 wait_pid_gone 依赖 /proc → 与之同门 target_os = "linux"。
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_timeout_kills_deaf_child() {
     // 生产工厂（adapter：真 spawn + Auto 握手）+ 短 connect_timeout。
@@ -462,8 +464,9 @@ async fn shutdown_gate_rejects_further_work() {
 }
 
 // ── 用例 7：子进程 connect + shutdown RAII reap ──
+// reap 断言经 wait_pid_gone 依赖 /proc → 与之同门 target_os = "linux"。
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subprocess_connect_and_shutdown_reaps_child() {
     let manager = McpManager::new(subprocess_cfg("real", "normal", 0));

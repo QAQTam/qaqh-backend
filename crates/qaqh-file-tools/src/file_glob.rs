@@ -31,10 +31,8 @@ const MAX_RESULTS_CAP: usize = 10_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GlobArgs {
-    /// Glob pattern
     #[serde(default)]
     pub pattern: String,
-    /// Search root
     #[serde(default)]
     pub path: Option<String>,
     /// Max results (default 500)

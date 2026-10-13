@@ -2,7 +2,46 @@
 //!
 //! Receives raw user text, handles auto-session-creation, compliance guard,
 //! and routes to TurnEngine for LLM processing.
+use qaqh_session::canonical::{generate_ulid, ulid_from_text};
+use qaqh_session::session_fact_v2::{EventId, InputId, TurnMode, TurnStarted};
+
 use super::{engine_turn::TurnEngine, types::*};
+
+/// Durably append the canonical `TurnStarted` fact for a freshly begun turn.
+///
+/// This is the fact `projected_run_status` folds into `working`; without it a
+/// reloaded session reports `idle` for its whole run (2026-10-12 root cause).
+/// Best-effort: a ledger failure degrades status tracking but must not block
+/// the turn — the input is already accepted and the model lap is about to run.
+fn record_turn_started(ctx: &mut RingContext, turn_id: &str, input_id: &str) {
+    use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
+    use crate::agent::tool_runtime::canonical_turn_id;
+
+    let ledger = match ctx.agent.tool_ledger_mut() {
+        Ok(Some(ledger)) => ledger,
+        Ok(None) => return,
+        Err(error) => {
+            log::warn!("[INPUT] tool ledger unavailable for turn_started: {error}");
+            return;
+        }
+    };
+    let now = unix_ms();
+    if let Err(error) = ledger.ensure_lease(now, tool_ledger_lease_ms()) {
+        log::warn!("[INPUT] canonical lease failed for turn_started: {error}");
+        return;
+    }
+    let payload = TurnStarted {
+        turn_id: canonical_turn_id(turn_id),
+        input_id: InputId::new(format!("input_{}", ulid_from_text(input_id))),
+        mode: TurnMode::Normal,
+        recovery_ref: None,
+    };
+    if let Err(error) =
+        ledger.append_turn_started(EventId::new(generate_ulid()), payload, now)
+    {
+        log::warn!("[INPUT] failed to append turn_started: {error}");
+    }
+}
 
 pub struct InputEngine;
 
@@ -181,6 +220,9 @@ impl InputEngine {
             Self::emit_input_rejected(ctx, input_id, &error.to_string());
             return Outcome::Handled;
         }
+        // Canonical turn lifecycle: this fact is what flips the session's
+        // projected status to `working` after reload (R3 root-cause fix).
+        record_turn_started(ctx, &turn_id, input_id);
         let receipt = ctx.flow.ingest(
             &mut ctx.agent.msg,
             source_id,
@@ -253,6 +295,9 @@ impl InputEngine {
             }
         }
         log::info!("[INPUT] flushing meta");
+        // 注入回合同样开事实：canonical 状态机需要 started→finished 配对，
+        // 否则该路径开的回合在投影里永远停在 running。
+        record_turn_started(ctx, &turn_id, input_id);
         ctx.agent
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
@@ -354,6 +399,9 @@ impl InputEngine {
                 .flow
                 .drain_turn_boundary(&mut ctx.agent.msg, &model, &effort);
         }
+        // 注入回合同样开事实：canonical 状态机需要 started→finished 配对，
+        // 否则该路径开的回合在投影里永远停在 running。
+        record_turn_started(ctx, &turn_id, input_id);
         ctx.agent
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);

@@ -193,6 +193,7 @@ impl LegacyEndpoint {
             ),
             do_sample: self.do_sample,
             user_id_mode: self.user_id_mode.clone(),
+            send_request_context: defaults.send_request_context,
             responses_web_search: flag(self.responses_web_search, defaults.responses_web_search),
             responses_echo_web_search_call: flag(
                 self.responses_echo_web_search_call,

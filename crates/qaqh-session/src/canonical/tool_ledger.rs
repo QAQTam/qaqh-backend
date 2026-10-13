@@ -20,12 +20,13 @@ use super::{
     generate_ulid,
 };
 use crate::session_fact_v2::{
-    CheckpointId, CompactionApplied, ContentRef, DriverChanged, EventId, ExecutionId, FactPayload,
-    FactSchema, InputAccepted, InputId, InterAgentCommunication, InteractionExpired, InteractionId,
-    InteractionRequested, InteractionResolved, MessageId, RecoveryRef, ResourceId, ResourceKind,
-    SessionFact, SessionId, SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId,
-    ToolError, ToolFinished, ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-    TurnId, WorkspaceResourceChanged,
+    AssistantBlockSealed, CheckpointId, CompactionApplied, ContentRef, DriverChanged, EventId,
+    ExecutionId, FactPayload, FactSchema, InputAccepted, InputId, InterAgentCommunication,
+    InteractionExpired, InteractionId, InteractionRequested, InteractionResolved, MessageId,
+    ModelRoundStarted, RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId,
+    SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished,
+    TurnInterrupted, TurnId, TurnStarted, WorkspaceResourceChanged,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -457,6 +458,15 @@ impl ToolLedger {
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    /// Latest committed fact sequence (`0` before the first append).
+    ///
+    /// Turn lifecycle facts reference the previous fact's sequence
+    /// (`TurnInterrupted::last_fact_seq`), so the live writer needs the same
+    /// watermark the recovery path rebuilds from disk.
+    pub fn last_fact_seq(&self) -> u64 {
+        self.store.last_fact_seq()
     }
 
     pub fn log_id(&self) -> &crate::session_fact_v2::LogId {
@@ -1144,6 +1154,89 @@ impl ToolLedger {
         let outcome = self.append_and_publish(fact, now_ms)?;
         self.inter_agent_communications
             .insert(message_id, outcome.fact.clone());
+        Ok(outcome.fact)
+    }
+
+    // ── 回合生命周期事实（TurnStarted / ModelRoundStarted /
+    //    AssistantBlockSealed / TurnFinished / TurnInterrupted）──
+    //
+    // 这些是 `projected_run_status`（ringing/v2.rs）与 usage 出账的事实源：
+    // working/idle/error、tok/s、context% 全部依赖它们。此前生产侧从未写过
+    // 这五类 fact（2026-10-12 生产 events.jsonl 实证：回合生命周期计数恒为
+    // 0），会话加载后的运行状态只能停留在 idle。追加方法保持无状态：每个
+    // 生命周期转换至多追加一次；崩溃后的中断由恢复路径写
+    // `SessionRecovered`/`TurnInterrupted` 收敛，无需按 id 幂等。
+
+    /// Durably append a turn start.
+    pub fn append_turn_started(
+        &mut self,
+        event_id: EventId,
+        payload: TurnStarted,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let turn_id = payload.turn_id.clone();
+        let mut fact = self.envelope(event_id, now_ms, FactPayload::TurnStarted(payload));
+        fact.turn_id = Some(turn_id);
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        Ok(outcome.fact)
+    }
+
+    /// Durably append a model round start.
+    pub fn append_model_round_started(
+        &mut self,
+        event_id: EventId,
+        payload: ModelRoundStarted,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let turn_id = payload.turn_id.clone();
+        let mut fact = self.envelope(event_id, now_ms, FactPayload::ModelRoundStarted(payload));
+        fact.turn_id = Some(turn_id);
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        Ok(outcome.fact)
+    }
+
+    /// Durably append a sealed assistant block.
+    ///
+    /// This is the fact that carries per-round `UsageInfo`; without it the
+    /// projections never publish usage deltas and tok/s / context% stay dead.
+    pub fn append_assistant_block_sealed(
+        &mut self,
+        event_id: EventId,
+        payload: AssistantBlockSealed,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let turn_id = payload.turn_id.clone();
+        let mut fact = self.envelope(event_id, now_ms, FactPayload::AssistantBlockSealed(payload));
+        fact.turn_id = Some(turn_id);
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        Ok(outcome.fact)
+    }
+
+    /// Durably append a turn terminal.
+    pub fn append_turn_finished(
+        &mut self,
+        event_id: EventId,
+        payload: TurnFinished,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let turn_id = payload.turn_id.clone();
+        let mut fact = self.envelope(event_id, now_ms, FactPayload::TurnFinished(payload));
+        fact.turn_id = Some(turn_id);
+        let outcome = self.append_and_publish(fact, now_ms)?;
+        Ok(outcome.fact)
+    }
+
+    /// Durably append a turn interruption.
+    pub fn append_turn_interrupted(
+        &mut self,
+        event_id: EventId,
+        payload: TurnInterrupted,
+        now_ms: i64,
+    ) -> Result<SessionFact, ToolLedgerError> {
+        let turn_id = payload.turn_id.clone();
+        let mut fact = self.envelope(event_id, now_ms, FactPayload::TurnInterrupted(payload));
+        fact.turn_id = Some(turn_id);
+        let outcome = self.append_and_publish(fact, now_ms)?;
         Ok(outcome.fact)
     }
 

@@ -350,6 +350,13 @@ fn build_chat_request(
     streaming: bool,
 ) -> ChatRequest {
     let mut request = ChatRequest::new(projected);
+    if provider.send_request_context
+        && let Some(context) = &provider.request_context
+    {
+        request
+            .extra_body
+            .insert("metadata".into(), context.metadata());
+    }
     request.tools = convert_tools(tools);
     request.max_output_tokens = Some(max_tokens);
     if provider.supports_thinking {

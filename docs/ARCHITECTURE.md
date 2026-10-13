@@ -24,6 +24,10 @@ clean 只做架构收敛、旧代码删除、职责迁移、crate 减负及其�
 
 ## 2. 当前链路与核心缺口
 
+模型请求的会话/任务 metadata 由 runtime 从已提交的 `TurnStarted` 投影，并以会话内缓存复用；
+每轮显式传入 gate，不新增全局状态、持久文件或会话事实。OpenAI Chat 端点通过
+`compat.send_request_context` 声明接收能力；默认关闭，不按供应商名称或 URL 猜测。
+
 HTTP/client → daemon 身份与控制权 → QaqhService/Registry → 每 session 一个线程的 Loop
 → ToolRuntime → workspace 授权与工具装配 → 具体工具/sandbox → 结果回填。
 

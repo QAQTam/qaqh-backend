@@ -95,6 +95,15 @@ pub(crate) fn run_replace(
                 .collect(),
         });
     }
+    // 删除语义（Claude Code hW2）：new 为空且 old 不以 \n 结尾时，
+    // 自动尝试 old+"\n"——连行尾一起删，不留空行；old 以 \n 结尾或
+    // 文件中无 old+"\n" 形态时退回裸匹配。
+    let (old, new) = if new.is_empty() && !old.ends_with('\n') && content.contains(&format!("{old}\n"))
+    {
+        (&*format!("{old}\n"), new)
+    } else {
+        (old, new)
+    };
     let targets = if replace_all {
         non_overlapping_occurrences(content, old)
     } else {
@@ -239,7 +248,7 @@ pub(crate) fn render_not_found(path: &str, old: &str, nearest: Option<&NearestMa
 /// `AMBIGUOUS_MATCH` 的模型可见正文：命中总数 + 前 3 处的位置与上下文。
 pub(crate) fn render_ambiguous(path: &str, total: usize, occurrences: &[Occurrence]) -> String {
     let mut out = format!(
-        "[ERROR] edit {path}\n  AMBIGUOUS_MATCH: old_str matches {total} locations; extend it with surrounding lines so it matches exactly one.\n"
+        "[ERROR] edit {path}\n  AMBIGUOUS_MATCH: old_str matches {total} locations. To replace only one occurrence, extend 'old_str' with surrounding lines so it matches exactly one; to replace all, set replace_all=true.\n"
     );
     for (i, occ) in occurrences.iter().enumerate() {
         out.push_str(&format!("  occurrence #{} at L{}:\n", i + 1, occ.line));
@@ -256,6 +265,28 @@ pub(crate) fn render_ambiguous(path: &str, total: usize, occurrences: &[Occurren
         ));
     }
     out
+}
+
+/// 成功回复的编辑点内容锚（Claude Code「snippet of the edited file」模式，
+/// 皮用本项目 `L<n>: ` 约定与 read 同源）：new_string 落点前后各
+/// [`SNIPPET_RADIUS`] 行。行号基于编辑后内容；`start_line` 是替换起始行
+/// （插入语义下新旧内容同一起点）。输入 `edited` 是 LF 规范视图。
+pub(crate) const SNIPPET_RADIUS: usize = 3;
+
+pub(crate) fn render_success_snippet(edited: &str, start_line: usize, new_lf: &str) -> String {
+    let index = LineIndex::new(edited);
+    let lines = index.lines();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let start0 = start_line.saturating_sub(1).min(lines.len() - 1);
+    let inserted = count_lf(new_lf) + 1;
+    let lo = start0.saturating_sub(SNIPPET_RADIUS);
+    let hi = (start0 + inserted + SNIPPET_RADIUS).min(lines.len()).max(lo + 1);
+    (lo..hi)
+        .map(|i| format!("L{}: {}", i + 1, lines[i]))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn truncate_for_diff(text: &str) -> std::borrow::Cow<'_, str> {

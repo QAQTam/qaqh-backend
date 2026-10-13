@@ -166,6 +166,9 @@ pub struct EndpointCompat {
     /// Where to send the user identifier. `None` = not sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id_mode: Option<UserSendMode>,
+    /// Send explicit session/task metadata on the OpenAI Chat request path.
+    #[serde(default)]
+    pub send_request_context: bool,
 
     // ── Responses wire ──
     /// Inject the built-in `web_search` tool for server-side execution. Default: true.
@@ -224,6 +227,7 @@ impl Default for EndpointCompat {
             require_provider_parameters: false,
             do_sample: None,
             user_id_mode: None,
+            send_request_context: false,
             responses_web_search: true,
             responses_echo_web_search_call: true,
             responses_send_include: true,

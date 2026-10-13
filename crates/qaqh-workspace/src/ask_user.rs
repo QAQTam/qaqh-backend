@@ -37,13 +37,26 @@ pub struct AskUserError {
     pub message: String,
 }
 
+/// 报错回显实际收到的 JSON 类型，调用方一次即可改对参数形态。
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
     let raw_questions = match args.get("questions") {
         Some(Value::Array(questions)) => questions.clone(),
         Some(_) => {
+            let kind = json_kind(args.get("questions").expect("checked above"));
             return Err(AskUserError {
                 code: "invalid_questions",
-                message: "questions must be an array".into(),
+                message: format!("questions must be an array (got {kind})"),
             });
         }
         None => vec![json!({
@@ -120,9 +133,10 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
                 options
             }
             Some(_) => {
+                let kind = json_kind(raw.get("options").expect("checked above"));
                 return Err(AskUserError {
                     code: "invalid_options",
-                    message: format!("question {id} options must be an array"),
+                    message: format!("question {id} options must be an array (got {kind})"),
                 });
             }
         };
@@ -165,21 +179,39 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
 }
 
 /// Ask user questions (Ringing interaction).
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AskArgs {
-    /// Questions
-    #[serde(default)]
-    pub questions: Option<Value>,
-    /// Single question (deprecated, use questions)
-    #[serde(default)]
-    pub question: Option<Value>,
-    /// Choices (deprecated)
-    #[serde(default)]
-    pub options: Option<Value>,
-    /// Allow custom (deprecated)
-    #[serde(default)]
-    pub allow_custom: Option<Value>,
+    /// Questions: 每项 {id?, question, options?: string[], allow_custom?}
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<Vec<AskQuestionArgs>>,
+    /// Single question text (deprecated, use questions)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// Choices (deprecated, use questions[].options): array of strings
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+    /// Allow custom answers (deprecated, use questions[].allow_custom)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_custom: Option<bool>,
+}
+
+/// 单个问题参数。typed 形态让生成的 schema 自带类型约束，
+/// 调用方在 wire 层就看到 `options: string[]`，弱类型误传被前置拒绝。
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AskQuestionArgs {
+    /// 问题文本（不可为空白）。
+    pub question: String,
+    /// 稳定 id；缺省自动生成 q1..qn。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 选项列表（字符串数组；去空白后不可为空项、不可重复）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+    /// 是否允许自由作答（默认 true）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_custom: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -240,24 +272,17 @@ impl TypedTool for AskTool {
         _ctx: &ToolCallContext,
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let mut raw = serde_json::Map::new();
-        if let Some(questions) = args.questions {
-            raw.insert("questions".to_string(), questions);
-        }
-        if let Some(question) = args.question {
-            raw.insert("question".to_string(), question);
-        }
-        if let Some(options) = args.options {
-            raw.insert("options".to_string(), options);
-        }
-        if let Some(allow_custom) = args.allow_custom {
-            raw.insert("allow_custom".to_string(), allow_custom);
-        }
-        let ask = normalize_ask_user(&Value::Object(raw)).map_err(|error| {
+        // Typed Args 的反序列化失败已由边界报 InvalidArguments；
+        // 这里经 Serialize 回到 normalize 层做语义校验（空选项/重复等）。
+        let raw = serde_json::to_value(&args).expect("AskArgs 必可序列化回 normalize 输入");
+        let ask = normalize_ask_user(&raw).map_err(|error| {
             crate::file_mutate::mutation_error(
                 error.code,
                 format!("ask: {}", error.message),
-                Some("Fix the ask arguments and retry."),
+                Some(
+                    "Pass `questions` as an array of {id?, question, options?: [string], \
+                     allow_custom?} objects; `options` must be an array of non-empty strings.",
+                ),
                 json!({}),
             )
         })?;
@@ -379,15 +404,25 @@ mod tests {
 
     #[test]
     fn missing_question_in_array_error() {
-        let args = serde_json::json!({
+        // typed 边界层（AskQuestionArgs.question 必填）会提前拒绝该形态；
+        // 结构化 missing_question 语义由 normalize 层保留（不经 typed 入口时）。
+        let error = normalize_ask_user(&serde_json::json!({
             "questions": [
                 { "id": "q1", "question": "Valid?" },
                 { "id": "q2" }
             ]
-        });
-        let result = exec_ask_user(&args);
+        }))
+        .unwrap_err();
+        assert_eq!(error.code, "missing_question");
+    }
+
+    #[test]
+    fn typed_boundary_rejects_questionless_entry() {
+        let result = exec_ask_user(&serde_json::json!({
+            "questions": [{ "id": "q2" }]
+        }));
         let err = result.error.as_ref().expect("structured error");
-        assert_eq!(err.code, "missing_question");
+        assert_eq!(err.code, "invalid_arguments");
     }
 
     #[test]
@@ -482,5 +517,80 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, "invalid_question_id");
+    }
+
+    #[test]
+    fn invalid_options_error_reports_received_type() {
+        let error = normalize_ask_user(&serde_json::json!({
+            "question": "Pick",
+            "options": "A,B"
+        }))
+        .unwrap_err();
+
+        assert_eq!(error.code, "invalid_options");
+        assert!(error.message.contains("got string"), "{}", error.message);
+    }
+
+    #[test]
+    fn invalid_questions_error_reports_received_type() {
+        let error = normalize_ask_user(&serde_json::json!({
+            "questions": "What?"
+        }))
+        .unwrap_err();
+
+        assert_eq!(error.code, "invalid_questions");
+        assert!(error.message.contains("got string"), "{}", error.message);
+    }
+
+    fn type_allows(schema_type: &serde_json::Value, kind: &str) -> bool {
+        match schema_type {
+            serde_json::Value::String(s) => s == kind,
+            serde_json::Value::Array(items) => {
+                items.iter().any(|item| item.as_str() == Some(kind))
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn published_schema_types_options_as_string_array() {
+        let schema = crate::tool_api::schema::schema_of::<AskArgs>();
+
+        // 顶层 deprecated options 必须带数组类型约束，而不是 any。
+        let options = &schema["properties"]["options"];
+        assert!(
+            type_allows(&options["type"], "array"),
+            "options schema type: {}",
+            options["type"]
+        );
+        assert_eq!(options["items"]["type"], "string");
+
+        // questions[].options / questions[].question 同样收紧。
+        let question = &schema["properties"]["questions"]["items"];
+        assert!(
+            type_allows(&question["properties"]["question"]["type"], "string"),
+            "question schema type: {}",
+            question["properties"]["question"]["type"]
+        );
+        let q_options = &question["properties"]["options"];
+        assert!(
+            type_allows(&q_options["type"], "array"),
+            "questions[].options schema type: {}",
+            q_options["type"]
+        );
+        assert_eq!(q_options["items"]["type"], "string");
+        assert_eq!(question["required"][0], "question");
+    }
+
+    #[test]
+    fn typed_boundary_rejects_non_array_options() {
+        // 弱类型误传在 Deserialize 层被前置拒绝，而不是走到语义校验。
+        let result = exec_ask_user(&serde_json::json!({
+            "question": "Pick",
+            "options": "A,B"
+        }));
+
+        let err = result.error.as_ref().expect("structured error");
+        assert_eq!(err.code, "invalid_arguments");
     }
 }

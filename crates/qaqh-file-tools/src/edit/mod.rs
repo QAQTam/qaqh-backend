@@ -5,7 +5,7 @@
 //! - `old_str` 必须精确命中文件中的**唯一**位置：
 //!   - 0 处命中 → `NOT_FOUND`，返回一份「old_str → 文件实际内容」的 diff 供模型自纠；
 //!   - 多处命中 → `AMBIGUOUS_MATCH`，列出各命中位置与上下文，提示扩展 `old_str`；
-//!   - 恰好 1 处 → 替换并返回紧凑回执（pass）。
+//!   - 恰好 1 处 → 替换并返回回执 + 编辑点内容锚片段（`L<n>: `，与 read 同源）。
 //!   - 多处命中且 `replace_all=true` → 全部替换（非重叠，`str::replace` 语义）。
 //! - 匹配在 LF 规范视图上做，写回按原文件 CRLF 还原；成功写盘走 `atomic_write`，
 //!   并维护 `file_state` 行号偏移链与 session journal。

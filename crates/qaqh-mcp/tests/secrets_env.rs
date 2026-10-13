@@ -27,7 +27,9 @@ fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_stdio_server.mjs")
 }
 
-#[cfg(unix)]
+// reap 断言轮询 /proc/<pid>——/proc 是 procfs 专属，门必须收窄到
+// `target_os = "linux"`：`unix` 会让 macOS 跑进恒真的假绿（L94-99）。
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_placeholder_resolves_into_child_env() {
     let dir = std::env::temp_dir().join(format!("qaqh-mcp-secrets-env-{}", std::process::id()));
