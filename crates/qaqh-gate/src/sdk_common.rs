@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use mutil_ai::{
     AuditEvent, AuditSink, CancellationToken, Error as SdkError, ErrorKind, RequestOptions,
-    RetryPolicy as SdkRetryPolicy,
+    ResponseLimits, RetryPolicy as SdkRetryPolicy,
 };
 use reqwest::header::{HeaderName, HeaderValue};
 
@@ -126,6 +126,62 @@ pub(crate) fn uuid_simple() -> String {
     format!("{:016x}", h.finish())
 }
 
+/// mutil-ai 0.4.0 matches a tool result to its assistant call by BOTH id and
+/// name, and the harness stores the function name only on the assistant
+/// `ToolUse` block (`Message::tool_result` leaves `name: None`). Build the
+/// `tool_use_id → name` map from history so the projection can fill the result.
+pub(crate) fn tool_names_by_id(messages: &[Message]) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    for msg in messages {
+        if msg.role != "assistant" {
+            continue;
+        }
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, .. } = block {
+                names.insert(id.clone(), name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Name to attach to a projected tool result: explicit `msg.name`, else the
+/// assistant call's function name for this id, else the id itself (the pre-0.4
+/// shape, only reached when history has no matching call).
+pub(crate) fn tool_result_name(
+    names: &HashMap<String, String>,
+    msg_name: Option<&str>,
+    tool_use_id: &str,
+) -> String {
+    msg_name
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .or_else(|| names.get(tool_use_id).cloned())
+        .unwrap_or_else(|| tool_use_id.to_string())
+}
+
+/// Generous decoded-response budgets (mutil-ai 0.4.0 `ResponseLimits`). The SDK
+/// defaults are 16 MiB body / 16,384 events, which a long reasoning stream or a
+/// large tool-argument payload can hit; overshooting now and tightening per
+/// provider later is cheaper than an unexpected `ResponseLimit` (which the SDK
+/// surfaces as non-retryable `ErrorKind::Decode`).
+pub(crate) fn roomy_response_limits() -> ResponseLimits {
+    // `ResponseLimits` is `#[non_exhaustive]`, so it cannot be built with a
+    // struct literal from this crate — start from `default()` and set fields.
+    let mut limits = ResponseLimits::default();
+    limits.max_body_bytes = 64 * 1024 * 1024;
+    limits.max_stream_events = 131_072;
+    limits.max_tool_argument_bytes = 4 * 1024 * 1024;
+    limits
+}
+
+/// mutil-ai 0.4.0 redefines `RequestOptions.timeout` as one monotonic absolute
+/// deadline spanning header injection, HTTP attempts, retries, and all stream
+/// reads/reconnects (previously effectively per-attempt). Keep a generous total
+/// cap so long agentic turns aren't cut off, while `idle_timeout` still guards
+/// a stalled stream.
+pub(crate) const REQUEST_TOTAL_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+
 /// Split an absolute request URL into (origin, path) for
 /// `mutil_ai::EndpointSpec{base_url, path}`.
 pub(crate) fn split_url(full_url: &str) -> (String, String) {
@@ -164,8 +220,15 @@ pub(crate) fn sdk_error_detail(label: &str, e: &SdkError, api_key: &str) -> (Str
             (msg.clone(), format!("{msg}: {detail}"))
         }
         None => {
+            // 0.4.0 redacts ProviderStream/ResponseLimit payloads from Display;
+            // pull the raw body back through the explicit accessor so the
+            // harness keeps the same bounded, key-redacted detail it had before.
             let msg = format!("{label} API error: {e}");
-            (msg.clone(), msg)
+            let detail = match e.raw_body() {
+                Some(body) => safe_provider_error_body(body, api_key),
+                None => return (msg.clone(), msg),
+            };
+            (msg.clone(), format!("{msg}: {detail}"))
         }
     }
 }
