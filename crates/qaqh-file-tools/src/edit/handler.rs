@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::ToolRisk;
-use crate::edit::core::{ReplaceError, count_lf, render_ambiguous, render_not_found, run_replace};
+use crate::edit::core::{
+    ReplaceError, count_lf, render_ambiguous, render_not_found, render_success_snippet, run_replace,
+};
 use crate::file_mutate::{
     ambient_tool_context, mutation_display, mutation_error, mutation_error_with_retryable,
     resolve_mutation_path,
@@ -89,7 +91,7 @@ impl TypedTool for EditTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "edit",
-            "Replace an exact string in a file. 'old_str' must appear exactly once; set 'replace_all' to true to replace every occurrence. Do not include read's 'L<n>: ' prefix. Failures return a diff against the closest match.",
+            "Replace an exact string in a file; 'old_str' must be unique ('replace_all' for every occurrence). Failures return a diff vs the closest match; success returns a receipt + edited-region snippet.",
             crate::permission::ToolCategory::Write,
             ToolRisk::Write,
             Duration::from_secs(60),
@@ -112,7 +114,7 @@ impl TypedTool for EditTool {
             return Err(mutation_error(
                 "parse_error",
                 "edit: 'old_str' must be non-empty (use write to create a file)",
-                None,
+                Some("To create a new file, call write with the full content instead."),
                 json!({}),
             ));
         }
@@ -120,7 +122,7 @@ impl TypedTool for EditTool {
             return Err(mutation_error(
                 "parse_error",
                 "edit: 'old_str' and 'new_str' are identical",
-                None,
+                Some("No-op edit rejected: change 'new_str' to something different, or skip the call."),
                 json!({}),
             ));
         }
@@ -143,16 +145,18 @@ impl TypedTool for EditTool {
                 return Err(mutation_error(
                     "file_not_found",
                     format!("edit: {raw_path}: file not found (use write to create a new file)"),
-                    None,
-                    json!({}),
+                    Some(
+                        "Verify the path against a directory listing; to create this file, call write with the full content.",
+                    ),
+                    json!({"path": &raw_path}),
                 ));
             }
             Err(error) => {
                 return Err(mutation_error(
                     "read_failed",
                     format!("edit: cannot read {raw_path}: {error}"),
-                    None,
-                    json!({}),
+                    Some("Check file permissions, or whether another process still holds the file."),
+                    json!({"path": &raw_path}),
                 ));
             }
         };
@@ -162,8 +166,10 @@ impl TypedTool for EditTool {
                 return Err(mutation_error(
                     "not_utf8_text",
                     format!("edit: {raw_path} is not valid UTF-8 text (treated as binary)"),
-                    None,
-                    json!({}),
+                    Some(
+                        "The file may use a legacy encoding (Windows-1252, Shift-JIS, GBK) or be binary; writing it back as text would corrupt it. Convert to UTF-8 or edit via exec.",
+                    ),
+                    json!({"path": &raw_path}),
                 ));
             }
         };
@@ -188,6 +194,11 @@ impl TypedTool for EditTool {
                         "status": "error",
                         "code": "not_found",
                         "path": &raw_path,
+                        "closest_match": nearest.as_ref().map(|n| json!({
+                            "lines": [n.start_line, n.end_line],
+                            "similarity": n.score,
+                            "text": n.text,
+                        })),
                     }),
                 ));
             }
@@ -197,13 +208,22 @@ impl TypedTool for EditTool {
                     "ambiguous_match",
                     text,
                     Some(true),
-                    Some("Extend 'old_str' with surrounding lines to make it unique."),
+                    Some(&format!(
+                        "Extend 'old_str' with surrounding lines to match exactly one, or set replace_all=true to replace all {total}."
+                    )),
                     json!({
                         "timeis": crate::now_utc8(),
                         "status": "error",
                         "code": "ambiguous_match",
                         "path": &raw_path,
                         "match_count": total,
+                        "occurrences": occurrences
+                            .iter()
+                            .map(|o| json!({
+                                "line": o.line,
+                                "context": o.context,
+                            }))
+                            .collect::<Vec<_>>(),
                     }),
                 ));
             }
@@ -216,7 +236,9 @@ impl TypedTool for EditTool {
                 format!(
                     "edit: atomic write failed for {raw_path}: {error} — the file on disk was NOT modified"
                 ),
-                None,
+                Some(
+                    "No changes were written; resolve the issue (permissions, disk, file lock) and retry the edit.",
+                ),
                 json!({}),
             ));
         }
@@ -233,11 +255,15 @@ impl TypedTool for EditTool {
             "ok",
         );
 
-        // 模型面：只回紧凑回执（pass）。diff 走展示面（with_diff），不进模型投影。
+        // 模型面：单命中回执 + 编辑点内容锚片段（Claude Code「edited region」模式，
+        // 沿用本项目 `L<n>: ` 约定与 read 同源）。diff 走展示面（with_diff），不进模型投影。
         let model_text = if outcome.replaced == 1 {
             let start = outcome.lines[0];
             let end = start + count_lf(&new);
-            format!("[OK] edit {raw_path}\n  replaced 1 occurrence (L{start}-L{end})\n")
+                format!(
+                    "[OK] edit {raw_path}\n  replaced 1 occurrence (L{start}-L{end})\n  edited region:\n{}\n",
+                    render_success_snippet(&outcome.edited, start, &new)
+                )
         } else {
             let shown = outcome
                 .lines
@@ -313,32 +339,46 @@ pub fn exec_edit(args: &Value) -> crate::ToolResult {
 }
 
 fn legacy_parse_error(args: &Value) -> Option<crate::ToolResult> {
-    let fail = |code: &str, message: String| {
-        crate::ToolResult::error_data(code, message, false, None, json!({}))
+    let fail = |code: &str, message: String, hint: &str| {
+        crate::ToolResult::error_data(code, message, false, Some(hint.to_string()), json!({}))
     };
     let Some(raw_path) = args
         .get("path")
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
     else {
-        return Some(fail("parse_error", "edit: missing 'path'".to_string()));
+        return Some(fail(
+            "parse_error",
+            "edit: missing 'path'".to_string(),
+            "Supply the workspace-relative or absolute file path.",
+        ));
     };
     let Some(old_arg) = args.get("old_str").and_then(Value::as_str) else {
-        return Some(fail("parse_error", "edit: missing 'old_str'".to_string()));
+        return Some(fail(
+            "parse_error",
+            "edit: missing 'old_str'".to_string(),
+            "Provide the exact current text to replace; use read to obtain it.",
+        ));
     };
     let Some(new_arg) = args.get("new_str").and_then(Value::as_str) else {
-        return Some(fail("parse_error", "edit: missing 'new_str'".to_string()));
+        return Some(fail(
+            "parse_error",
+            "edit: missing 'new_str'".to_string(),
+            "Provide the replacement text.",
+        ));
     };
     if old_arg.is_empty() {
         return Some(fail(
             "parse_error",
             "edit: 'old_str' must be non-empty (use write to create a file)".to_string(),
+            "To create a new file, call write with the full content instead.",
         ));
     }
     if old_arg == new_arg {
         return Some(fail(
             "parse_error",
             "edit: 'old_str' and 'new_str' are identical".to_string(),
+            "No-op edit rejected: change 'new_str' to something different, or skip the call.",
         ));
     }
     let _ = raw_path;

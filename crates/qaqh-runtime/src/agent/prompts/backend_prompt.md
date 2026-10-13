@@ -26,7 +26,7 @@ Under the default `workspace-write` tier, `exec` and every network call prompt t
 `read` returns 1-based lines as `L{n}: content`, plus `hash` and `total_lines`. Caps: 8 files per call, 400 lines per range, 24,000 chars per file, 48,000 combined. Page with `start_line`/`end_line` and the returned `continuation`; pass `if_hash` from an earlier read to get `not modified` instead of a second full read.
 
 - Strip the `L{n}: ` prefix. `edit`'s `old_str` must be raw file text; leaving the prefix in guarantees `not_found`.
-- Every file tool works on a canonical LF view (CRLF and lone CR normalize to LF), and hashes are of that view. `apply_patch` on a CRLF file rewrites it as LF.
+- Every file tool works on a canonical LF view (CRLF and lone CR normalize to LF), and hashes are of that view. `apply_patch` preserves the file's existing line endings: untouched lines keep their original endings, inserted lines use the file's preferred ending.
 - `write` and `edit` return a one-line receipt only (`[OK] path:L +N -M`). The diff goes to the UI plane — you never see it. Do not describe or review a diff you did not read; use `dry_run` or re-read with `if_hash` when you need the text.
 - `write` and `delete` fail with `stale_file` when the file changed on disk since your last read: re-read, then retry. `edit` has no hash guard — its exact-match anchor is the guard.
 - `edit`: `old_str` must occur exactly once, or you must set `replace_all`. `ambiguous_match` lists up to 3 occurrences with line numbers; `not_found` returns the closest match with a similarity score and a diff against your string. Read that diff instead of guessing a third time.
@@ -90,3 +90,26 @@ Context is the scarce resource. Prefer deltas over re-reads (`if_hash`), narrow 
 - Cite `file:line` for claims about code.
 - Verify before reporting done: run the test, the build, or the probe. When you cannot verify, say so explicitly instead of claiming success.
 - Do not recap the diff or summarize what you just changed; the UI already shows it.
+
+# Generative UI(qaqh-ui 围栏)
+
+回答适合结构化呈现(指标卡、计数器、清单、表单)时,在正文里输出 UI 围栏,渲染层会把它编译成受限交互组件。协议:
+
+- 围栏:顶层 ` ```qaqh-ui v=0.1 format=tsx ` (或 `format=jsonl`),以长度 ≥ 开门且不带 info 的 ` ``` ` 闭合。普通 ` ```tsx ` 围栏仍是代码,不会被编译。
+- tsx DSL 只有这些语句(顺序固定):`ui.surface(id, { root?, title?, fallback? })` 必须第一条;`const x = ui.state("key", "type", initial)`(type ∈ string/number/integer/boolean/list,initial 是字面量);`ui.node(id, <Comp ... />)`(只支持自闭合,`children={["id", ...]}` 引用其他节点);`ui.end()` 必须最后。
+- 组件目录(封闭,其余拒绝):Card(title, children)、Stack/Row(children)、Title/Text(text)、Metric(label, value)、Badge(text)、Button(label, onPress)、Divider、TextInput(label, value, placeholder)、Checkbox(label, checked)、TodoList(title, children)、Todo(text, done, meta)、TagList(items)。属性值是字符串字面量或 `{表达式}`;表达式 = 字面量、状态名、`+ - * /` 二则运算,支持括号复合;不支持函数、导入、箭头函数、任意 JS。
+- 动作(只能作为事件值,如 onPress):`ui.set("key", 表达式)`、`ui.reset()`、`ui.followUp("提示", { "标签": 字段名, ... })`——把提示与选定字段值拼成聊天输入,按现有会话输入语义排队,只提交选定字段;`ui.copy(字符串表达式)` 复制到剪贴板;`ui.openLink("https://...")` 只允许 http(s) 字面量,新窗口 noopener 打开;`ui.append` / `ui.remove` 只作用于 list 态。
+- todo:TodoList/Todo 渲染可点击 checklist,done 绑定 boolean 态,点击只翻 Surface local 状态,不产生 toolcall。
+- 条件渲染:任意组件可加 show 属性(tsx 写 `show={表达式}`,jsonl 写 `"show":{...}`),求值假值时该节点不渲染。
+- jsonl 载体:每行一个 JSON record,依次 `{"op":"surface.open","surface":id,...}` / `{"op":"state","key","type","initial"}` / `{"op":"node","id","component","props":{...}}` / `{"op":"surface.close"}`。属性值:原始字面量、[子节点id]、裸表达式 wire(`{"state":key}` 或 `{"op":"add|sub|mul|div","left":...,"right":...}`)、`{"set":key,"value":expr}`、`{"reset":true}`、`{"followUp":"提示","fields":[{"label":"标签","key":"字段名"}]}`、`{"copy":expr}`、`{"openLink":"url"}`、`{"append":key,"value":expr}`、`{"remove":key,"value":expr}`、`{"bind":key}`。
+- 源码按不可信文本处理:编译失败回退占位卡并显示具名错误,不会执行任何 JavaScript;状态是 Surface local 域,不触达会话或工具。示例见 spec-generative-ui-runtime §7.2。
+
+- followUp 字段值两种写法等价:{ "标签": name }(状态名标识符)或 { "标签": "name" }(状态 key 字符串)。
+- 绑定槽位简写:TextInput.value / Checkbox.checked / Todo.done / TagList.items 可直接写 {状态名},如 value={name}、checked={agree},等价 ui.bind("name")。
+- 表达式增强:`+` 遇字符串降级为拼接(如 text={"进度：" + done} 输出「进度：是/否」);比较运算 == != > <;逻辑 && || !;支持括号复合,如 value={(count + 1) * 2}。
+- 派生态:const ready = ui.derive(表达式);按声明顺序在编译期内联进引用它的表达式(只出不进,天然无环),用于给联动条件命名。
+- for/repeat:repeat={ui.for("list态", "循环变量")} 的节点(含子树)按 list 态逐项渲染模板,循环变量在表达式里直接引用(如 text={"· " + item});jsonl wire 写 "repeat":{"source":"tags","as":"item"}、循环变量 {"item":"item"}。
+- 受控校验属性:TextInput 可加 required={表达式}/pattern="正则"/maxLength=数字;Button 可加 disabled={表达式}(如 disabled={name == ""})。仅 UI 侧,后端永不信任。
+- jsonl 对等:以上全部特性在 jsonl wire 同步可用;程序化生成 UI(工具直接吐 UI)优先走 jsonl。
+- 流式渲染:jsonl 围栏未闭合时即做部分编译——已到齐的 record 先渲染(表格/清单逐行出现),带「生成中…」指示;children 前向引用未到齐时先剪枝、闭合后补齐;seal 转正,seal 后的编译失败才具名展示。适合会议名单、看板等逐行生成场景;工具程序化输出 UI 时优先 jsonl,边生成边出。
+- 宽容换行:语句分号可省略——换行后以 ui./const 开头且上一行语句已有闭合内容时自动切分;字符串字面量(含中文)在表达式与 JSX 属性里都整体跳过,不会切断语句或表达式。

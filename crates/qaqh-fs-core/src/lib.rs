@@ -10,7 +10,7 @@ pub mod file_state;
 
 pub use file_shared::{
     content_hash, is_binary_read_error, normalize_newlines, LineIndex, READ_MAX_BYTES,
-    READ_MAX_CHARS, READ_MAX_LINES,
+    READ_MAX_CHARS, READ_MAX_LINE_CHARS, READ_MAX_LINES,
 };
 
 /// Unit tests mutate process-wide runtime state. Keep those mutations

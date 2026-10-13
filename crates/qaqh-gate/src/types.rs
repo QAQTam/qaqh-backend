@@ -159,6 +159,8 @@ fn derive_opencode_id(prefix: &str, key: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
+    pub send_request_context: bool,
+    pub request_context: Option<crate::RequestContext>,
     pub kind: ProviderKind,
     pub base_url: String,
     pub api_key: String,
@@ -282,6 +284,8 @@ impl ProviderConfig {
     ) -> Self {
         Self {
             kind: ProviderKind::OpenAi,
+            send_request_context: false,
+            request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -318,6 +322,8 @@ impl ProviderConfig {
     ) -> Self {
         Self {
             kind: ProviderKind::Responses,
+            send_request_context: false,
+            request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -359,6 +365,8 @@ impl ProviderConfig {
     ) -> Self {
         Self {
             kind: ProviderKind::Anthropic,
+            send_request_context: false,
+            request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -394,6 +402,8 @@ impl ProviderConfig {
     pub fn gemini(base_url: &str, api_key: &str, model: &str, gemini_path: Option<String>) -> Self {
         Self {
             kind: ProviderKind::Gemini,
+            send_request_context: false,
+            request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
