@@ -101,6 +101,27 @@ pub(crate) fn project_chat_messages(
     let mut pending_media: Vec<WireMessage> = Vec::new();
     let mut img_idx = image_index_base;
 
+    // WIRE-LOSS 断言基线：store 视图里带可见文本的 assistant 消息（提前
+    // 取快照——messages 随后按值迭代）。2026-10-14 事故哨兵：SDK 层曾在
+    // 序列化后处理中静默丢弃 content，模型因此看不到自己的历史叙述。
+    let expected: Vec<(usize, String)> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "assistant")
+        .filter_map(|(i, m)| {
+            let text: String = m
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            (!text.is_empty()).then_some((i, text))
+        })
+        .collect();
+
     for msg in messages {
         if msg.role != "tool" && !pending_media.is_empty() {
             out.append(&mut pending_media);
@@ -228,6 +249,47 @@ pub(crate) fn project_chat_messages(
             _ => {}
         }
     }
+
+    // WIRE-LOSS 校验：投影后逐条比对（expected 在函数头已取快照）。
+    let mut produced = out.iter().filter(|w| w.role == Role::Assistant);
+    for (input_idx, text) in &expected {
+        match produced.next() {
+            Some(wire) => {
+                let wire_text: String = wire
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if wire_text != *text {
+                    log::error!(
+                        "[WIRE-LOSS] assistant 文本在投影后变化（输入消息 #{input_idx}，\
+                         store {}B → wire {}B）——上下文数据丢失回归",
+                        text.len(),
+                        wire_text.len()
+                    );
+                }
+            }
+            None => {
+                log::error!(
+                    "[WIRE-LOSS] assistant 文本消息在投影后消失（输入消息 #{input_idx}，\
+                     store {}B）——上下文数据丢失回归",
+                    text.len()
+                );
+            }
+        }
+    }
+    if !expected.is_empty() {
+        let extra = produced.by_ref().count();
+        if extra > 0 {
+            log::error!("[WIRE-LOSS] 投影多出 {extra} 条带文本的 assistant 消息");
+        }
+    }
+    drop(produced);
+
     out.append(&mut pending_media);
     out
 }
@@ -331,11 +393,13 @@ fn build_options(
         options.idle_timeout = Some(policy.idle_timeout);
     }
     let switches = ProviderRequestOptions {
-        tool_call_content: Some(if provider.tool_call_content_null {
-            mutil_ai::ToolCallContentMode::Null
-        } else {
-            mutil_ai::ToolCallContentMode::Omit
-        }),
+        // 语义回归修复（mutil-ai 迁移引入）：旧实现仅在 `tool_call_content_null=true`
+        // 且 content 键缺失（文本为空）时补 null，false 时完全不干预。
+        // 这里误配成 `Some(Null/Omit)` 会无条件清空带 tool_calls 的 assistant 消息的
+        // content——模型看不到自己历史轮的可见文本，只能在思考里重建上下文。
+        // SDK 默认序列化本就把空文本写为 "content": null、非空保留，与旧语义等价，
+        // 故恒不干预；`tool_call_content_null` 在 SDK 路径下无对应需求，保留字段仅作兼容。
+        tool_call_content: None,
         include_stream_usage: streaming.then_some(provider.include_stream_usage),
         do_sample: streaming.then_some(provider.do_sample).flatten(),
         ..Default::default()
