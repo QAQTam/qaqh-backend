@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 use futures::StreamExt;
 use mutil_ai::{
@@ -31,8 +30,9 @@ use crate::usage;
 use qaqh_types::{CacheTokenField, ContentBlock, Message, ThinkingParamMode, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, StreamState, apply_management_headers, empty_stream_retry,
-    sdk_error_detail, sdk_retry_policy, split_url,
+    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, StreamState, apply_management_headers,
+    empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
+    tool_names_by_id, tool_result_name, uuid_simple,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
@@ -96,6 +96,7 @@ pub(crate) fn project_chat_messages(
     messages: Vec<Message>,
     image_index_base: usize,
 ) -> Vec<WireMessage> {
+    let names = tool_names_by_id(&messages);
     let mut out: Vec<WireMessage> = Vec::new();
     let mut pending_media: Vec<WireMessage> = Vec::new();
     let mut img_idx = image_index_base;
@@ -160,7 +161,9 @@ pub(crate) fn project_chat_messages(
                         ContentBlock::Reasoning { reasoning: r } => reasoning.push_str(r),
                         ContentBlock::ToolUse { id, name, input } => {
                             let mut call = WireToolCall::new(name.clone(), input.clone());
-                            call.id = Some(id.clone());
+                            // 0.4.0 rejects an empty explicit id; leave it unset so
+                            // the SDK's normalizer assigns a collision-free one.
+                            call.id = if id.is_empty() { None } else { Some(id.clone()) };
                             calls.push(call);
                         }
                         _ => {}
@@ -188,9 +191,13 @@ pub(crate) fn project_chat_messages(
                             tool_use_id,
                             result,
                         } => {
-                            let name = msg.name.clone().unwrap_or_else(|| tool_use_id.clone());
+                            let name = tool_result_name(&names, msg.name.as_deref(), tool_use_id);
                             let mut tr = WireToolResult::new(
-                                Some(tool_use_id.clone()),
+                                if tool_use_id.is_empty() {
+                                    None
+                                } else {
+                                    Some(tool_use_id.clone())
+                                },
                                 name,
                                 result.render_xml_envelope(),
                             );
@@ -318,7 +325,8 @@ fn build_options(
     streaming: bool,
 ) -> RequestOptions {
     let mut options = RequestOptions::new();
-    options.timeout = Some(Duration::from_secs(30 * 60));
+    options.timeout = Some(REQUEST_TOTAL_TIMEOUT);
+    options.response_limits = roomy_response_limits();
     if streaming {
         options.idle_timeout = Some(policy.idle_timeout);
     }
@@ -565,9 +573,13 @@ async fn consume(
             }) => {
                 // id/name 只在首帧采集（与退役前 or_insert 语义一致），
                 // 仅参数增量触发进度事件；无参数的首帧不发帧（旧实现同）。
+                // 0.4.0 起 SDK 不再为缺 id 的 chat 帧伪造 call_{index}；这里补一个
+                // 非空且全局唯一的 id——runtime 时间线以 `tool:<id>` 为键，且 0.4.0
+                // 归一器拒绝空 id 与跨轮重复 id。
                 let entry = state.tools.entry(index).or_insert_with(|| {
                     (
-                        id.unwrap_or_default(),
+                        id.filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| format!("toolu_{}", uuid_simple())),
                         name.unwrap_or_default(),
                         String::new(),
                     )
