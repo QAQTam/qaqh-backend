@@ -178,18 +178,17 @@ pub struct AgentState {
     /// consumed by the engine to emit a CacheDiagnostics event.
     pending_cache_diagnostics: Option<Vec<String>>,
     /// Per-session/provider online calibration plus exact API context readings
-    /// for prepared request shapes.
+    /// for prepared request shapes. Auto-compact is disabled (2026-10-12), so
+    /// these readings are telemetry only — no decision path consumes them.
     token_calibration: SessionTokenCalibrator,
     /// Most recent provider-reported input context plus the MessageStore
-    /// revision that produced it. It remains authoritative after a successful
-    /// compact (one revision change), but not after arbitrary later mutations.
+    /// revision that produced it. Telemetry only since auto-compact was
+    /// disabled (2026-10-12).
     last_api_context: Option<ApiContextObservation>,
     /// True while the loop owns a background manual compaction transaction.
-    /// TurnEngine reads this session-scoped flag to suppress auto compaction.
+    /// Manual compaction is the only compaction path since auto-compact was
+    /// disabled (2026-10-12).
     manual_compact_running: bool,
-    /// Failed/skipped automatic compaction candidate. Retried only after the
-    /// request candidate changes, preventing one failed attempt per gate lap.
-    auto_compact_blocked_revision: Option<u64>,
     /// Last skill activation-set epoch that was materialized as a persisted
     /// system message. The envelope is injected once per change (Codex-style
     /// world-state diff), not on every request build.
@@ -197,10 +196,7 @@ pub struct AgentState {
     /// PR-M2-2：最近一次物化的 MCP 资源清单文本（变化才注入；None = 尚未
     /// 注入过。内容直接对比而非 hash——清单文本 ≤ 数 KB，比对开销可忽略）。
     last_mcp_env_block: Option<String>,
-    /// Persistence handle for draining `MessageStore`'s `PersistOp` queue
-    /// (PR-1-6). Captured from the process-level singleton at construction
-    /// (PR-3-1: `Arc` handle; `None` only in unit tests that never init the
-    /// session store — their ops simply never flush).
+    /// Persistence handle for this actor's message and metadata operations.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Canonical tool lifecycle ledger owned by this session actor.
     ///
@@ -208,6 +204,7 @@ pub struct AgentState {
     /// the actor lifetime so a single writer lease covers all ToolIntent /
     /// ToolFinished appends. Ephemeral sessions leave this `None`.
     tool_ledger: Option<ToolLedger>,
+    pub(crate) model_request_context: Option<(String, qaqh_gate::RequestContext)>,
     /// Seed that owns `tool_ledger`; guards against stale reuse when the
     /// same `AgentState` is rebound to another session.
     tool_ledger_session: Option<String>,
@@ -220,6 +217,7 @@ pub struct AgentState {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // 自动压缩禁用后仅作遥测记账（observe_prepared_request 仍写入）
 struct ApiContextObservation {
     tokens: u64,
     context_revision: u64,
@@ -231,7 +229,7 @@ impl AgentState {
         // This prevents accidental persistence of a placeholder seed.
         let msg = qaqh_message::MessageStore::new("");
         let effective_input_tokens = config.context_length as usize;
-        let mut agent = Self {
+        let agent = Self {
             msg,
             config,
             session: SessionMeta::default(),
@@ -246,11 +244,11 @@ impl AgentState {
             token_calibration: SessionTokenCalibrator::default(),
             last_api_context: None,
             manual_compact_running: false,
-            auto_compact_blocked_revision: None,
             last_injected_epoch: 0,
             last_mcp_env_block: None,
             session_manager: SessionManager::try_global(),
             tool_ledger: None,
+            model_request_context: None,
             tool_ledger_session: None,
             fact_causation: FactCausation::new(),
             pending_meta_ops: Vec::new(),
@@ -371,27 +369,6 @@ impl AgentState {
         )
     }
 
-    pub(crate) fn auto_compact_decision_tokens(&self, estimate: &RequestTokenEstimate) -> u64 {
-        estimate
-            .api_context_tokens
-            .or_else(|| {
-                self.last_api_context
-                    .filter(|observation| {
-                        self.msg
-                            .context_revision()
-                            .saturating_sub(observation.context_revision)
-                            <= 1
-                    })
-                    .map(|observation| observation.tokens)
-            })
-            .unwrap_or(estimate.upper_bound_tokens)
-    }
-
-    pub(crate) fn auto_compact_allowed(&self) -> bool {
-        !self.manual_compact_running
-            && self.auto_compact_blocked_revision != Some(self.msg.context_revision())
-    }
-
     pub(crate) fn manual_compact_running(&self) -> bool {
         self.manual_compact_running
     }
@@ -404,17 +381,8 @@ impl AgentState {
         self.manual_compact_running = false;
     }
 
-    pub(crate) fn record_auto_compact_result(&mut self, succeeded: bool) {
-        self.auto_compact_blocked_revision = if succeeded {
-            None
-        } else {
-            Some(self.msg.context_revision())
-        };
-    }
-
     pub(crate) fn reset_compaction_coordination(&mut self) {
         self.manual_compact_running = false;
-        self.auto_compact_blocked_revision = None;
         self.last_api_context = None;
     }
 
@@ -539,8 +507,9 @@ impl AgentState {
         }
     }
 
-    /// Consume any pending cache diagnostics set by build_context().
+    /// Build-consume any pending cache diagnostics set by build_context().
     /// Returns (prefix_hash, change_reasons) if the prefix changed.
+    #[allow(dead_code)] // 自动压缩禁用后暂无生产消费方；build_context 仍写入，诊断保留
     pub fn take_cache_diagnostics(&mut self) -> Option<(String, Vec<String>)> {
         self.pending_cache_diagnostics
             .take()
@@ -1047,10 +1016,7 @@ mod tests {
             workspace_tag_value(r"D:\proj")
         );
         // 未绑定工作区时冻结的 annotation 没有标签，解析必须为 None。
-        assert_eq!(
-            annotation_workspace_path("<today>2026-10-09</today>"),
-            None
-        );
+        assert_eq!(annotation_workspace_path("<today>2026-10-09</today>"), None);
         assert_eq!(workspace_tag_value(""), None);
         assert_eq!(workspace_tag_value("."), None);
         // 换工作区 ⇒ 标签不等 ⇒ stale；同值 ⇒ 相等 ⇒ 复用。
@@ -1335,11 +1301,6 @@ mod tests {
         let changed = vec![qaqh_types::Message::user("changed request")];
         let changed_estimate = agent.estimate_prepared_request(&changed, None);
         assert_eq!(changed_estimate.api_context_tokens, None);
-        assert_eq!(
-            agent.auto_compact_decision_tokens(&changed_estimate),
-            observed,
-            "a changed request must retain the last normal API context until it returns replacement usage"
-        );
     }
 
     #[test]
@@ -1349,71 +1310,13 @@ mod tests {
         agent.session.session_id = "token-session".into();
         let normal = vec![qaqh_types::Message::user(&"normal request ".repeat(80))];
         let compact = vec![qaqh_types::Message::user("[COMPACT] summarize history")];
-        let normal_raw = agent.estimate_prepared_request(&normal, None).raw_tokens;
-        let observed = normal_raw.saturating_add(32);
+        let observed = agent.estimate_prepared_request(&normal, None).raw_tokens;
 
         // Compaction uses qaqh_gate directly and must not call the normal-request
         // observation API. Only the normal request is bound into session state.
         assert!(agent.observe_current_prepared_request_for_test(&normal, None, observed));
         let compact_estimate = agent.estimate_prepared_request(&compact, None);
         assert_eq!(compact_estimate.api_context_tokens, None);
-        assert_eq!(
-            agent.auto_compact_decision_tokens(&compact_estimate),
-            observed,
-            "constructing a compact request must not observe or replace normal-request usage"
-        );
-    }
-
-    #[test]
-    fn post_compact_next_lap_keeps_last_api_context_until_fresh_usage() {
-        let config = qaqh_config::Config {
-            context_length: 1_000,
-            ..Default::default()
-        };
-        let mut agent = AgentState::new(config);
-        agent.session.session_id = "token-session".into();
-
-        let before = vec![qaqh_types::Message::user(&"large context ".repeat(400))];
-        let before_raw = agent.estimate_prepared_request(&before, None).raw_tokens;
-        let before_observed = before_raw.clamp(700, 900);
-        assert!(agent.observe_current_prepared_request_for_test(&before, None, before_observed));
-
-        // A successful compact changes MessageStore exactly once. The previous
-        // normal API usage remains the safe decision source for this first lap.
-        agent.msg.push_user("revision changed by compact");
-        let after = vec![qaqh_types::Message::user(&format!(
-            "[Compacted 8 turns]\n{}",
-            "checkpoint ".repeat(80)
-        ))];
-        let after_estimate = agent.estimate_prepared_request(&after, None);
-        assert_eq!(after_estimate.api_context_tokens, None);
-        assert_eq!(
-            agent.auto_compact_decision_tokens(&after_estimate),
-            before_observed
-        );
-        assert!(
-            agent.auto_compact_decision_tokens(&after_estimate) < 1_000,
-            "the first post-compact lap must not immediately compact again from a stale local upper bound"
-        );
-
-        let after_raw = after_estimate.raw_tokens;
-        let after_observed = after_raw.max(32).saturating_mul(6) / 5;
-        assert!(agent.observe_current_prepared_request_for_test(&after, None, after_observed));
-        let exact_after = agent.estimate_prepared_request(&after, None);
-        assert_eq!(
-            agent.auto_compact_decision_tokens(&exact_after),
-            after_observed
-        );
-
-        agent.msg.push_user("later mutation one");
-        agent.msg.push_user("later mutation two");
-        let later = vec![qaqh_types::Message::user("substantially newer context")];
-        let later_estimate = agent.estimate_prepared_request(&later, None);
-        assert_eq!(
-            agent.auto_compact_decision_tokens(&later_estimate),
-            later_estimate.upper_bound_tokens,
-            "usage older than one context revision must not mask a newer oversized request"
-        );
     }
 
     #[test]

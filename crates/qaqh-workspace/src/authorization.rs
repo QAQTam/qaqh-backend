@@ -417,16 +417,10 @@ pub fn admit_with_context(
     // 审计 F1/P0（analysis-windows-appcontainer-projfs-2026-10-09）：自动放行
     // 不得信任平台级 detect——必须该次 launch 计划确实解析到 sbx 后端
     // （显式 Token/Redirect，或 Auto 已晋升 Redirect）；Auto 未晋升 = 不强制
-    // = 不自动放行（fail-safe，与 direct.rs 的实际分派条件一致）。
-    let exec_backend_resolved = matches!(
-        qaqh_sandbox::sbx_map::resolve_windows_backend(&context.sandbox_spec)
-            .ok()
-            .flatten(),
-        Some(
-            qaqh_sandbox::SandboxBackend::WindowsToken
-                | qaqh_sandbox::SandboxBackend::WindowsRedirect
-        )
-    );
+    // = 不自动放行（fail-safe，与 direct.rs 的实际分派条件一致）。非 Windows
+    // 平台没有已接线的写强制后端，该判定恒 false ⇒ exec 一律落回常规审批。
+    let exec_backend_resolved =
+        qaqh_sandbox::exec_backend_enforces_write_isolation(&context.sandbox_spec);
     let exec_class = if !sandboxed
         && invocation.tool_name == "exec"
         && context.sandbox_spec.enabled

@@ -347,10 +347,8 @@ fn export_patches(steps: &[Step]) -> String {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JournalArgs {
-    /// Action
     #[serde(default = "default_journal_action")]
     pub action: String,
-    /// Session seed
     #[serde(default)]
     pub session: Option<String>,
     /// File filter / replay target

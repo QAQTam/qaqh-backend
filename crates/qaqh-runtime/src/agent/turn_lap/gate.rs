@@ -455,8 +455,18 @@ pub(crate) fn gate_request(
         round_num
     );
     ctx.agent.record_memory_marker("gate.request.begin");
-    let result = qaqh_gate::chat_stream(
-        provider,
+    let request_context = if provider.send_request_context {
+        ctx.agent
+            .model_request_context(turn_id, round_num)
+            .map(Some)
+    } else {
+        Ok(None)
+    };
+    let result = request_context.and_then(|request_context| {
+        let mut provider = provider.clone();
+        provider.request_context = request_context;
+        qaqh_gate::chat_stream(
+        &provider,
         messages,
         tools,
         ctx.agent.config.max_tokens,
@@ -706,7 +716,8 @@ pub(crate) fn gate_request(
                 had_error = true;
             }
         },
-    );
+    )
+    });
     ctx.agent.record_memory_marker("gate.request.end");
     // A1 收口：流结束、deltas 冻结后，为仍开着的块补最终 checkpoint。
     // 覆盖此后全部 seal 点（parse 尾封 / cancel / 失败终态 / 续写封口）——
@@ -753,7 +764,7 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
     let cfg = &ctx.agent.config;
     let compat = cfg.compat.clone();
     // 路径覆写按 wire 生效；未覆写传 None，由 gate 用该 wire 的规范路径。
-    let provider = match cfg.wire {
+    let mut provider = match cfg.wire {
         qaqh_types::Wire::Anthropic => {
             let mut p = qaqh_gate::ProviderConfig::anthropic(
                 &cfg.base_url,
@@ -821,6 +832,7 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             p
         }
     };
+    provider.send_request_context = compat.send_request_context;
     provider
         .with_opencode_headers(&ctx.agent.session.session_id, request_tag)
         .with_retry(compat.retry.clone())

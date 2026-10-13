@@ -17,16 +17,16 @@ use crate::tool_api::{
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadRequest {
-    /// File path (workspace-relative or absolute).
+    /// Workspace-relative or absolute.
     #[serde(default)]
     pub path: String,
-    /// Start line (1-based).
+    /// 1-based; omit for whole file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_line: Option<u64>,
-    /// End line inclusive.
+    /// Inclusive; omit for whole file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u64>,
-    /// Hash from prior read; NOT_MODIFIED if unchanged.
+    /// Prior read hash; NOT_MODIFIED if unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_hash: Option<String>,
 }
@@ -36,20 +36,24 @@ pub struct ReadRequest {
 /// Read files (L-prefixed lines, hash+line_count). Batch via `requests` (up to 8);
 /// single-file fields are sugar for one request. Dirs -> IS_DIRECTORY.
 pub struct ReadArgs {
-    /// Batch of up to 8 file requests (mirrors single-file fields).
+    /// Batch of 1-8 file requests; top-level path/start_line/end_line/if_hash are accepted as sugar for one request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests: Option<Vec<ReadRequest>>,
-    /// File path (single-request sugar).
+    /// Path (single-request sugar).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
     pub path: Option<String>,
-    /// Start line (1-based).
+    /// Start line, 1-based (single-request sugar).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
     pub start_line: Option<u64>,
-    /// End line inclusive.
+    /// End line inclusive (single-request sugar).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
     pub end_line: Option<u64>,
-    /// Hash from prior read; NOT_MODIFIED if unchanged.
+    /// Hash from prior read; NOT_MODIFIED if unchanged (single-request sugar).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
     pub if_hash: Option<String>,
 }
 
@@ -351,10 +355,29 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
             }
         }
     }
+    let mut any_line_truncated = false;
     let body = lines[first..end_index]
         .iter()
         .enumerate()
-        .map(|(offset, line)| format!("L{}: {line}", first + offset + 1))
+        .map(|(offset, line)| {
+            let n = first + offset + 1;
+            // 单行截断：超长行压到 READ_MAX_LINE_CHARS（char boundary 安全）。
+            if line.chars().count() > qaqh_fs_core::READ_MAX_LINE_CHARS {
+                any_line_truncated = true;
+                let cut = line
+                    .char_indices()
+                    .nth(qaqh_fs_core::READ_MAX_LINE_CHARS)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(line.len());
+                format!(
+                    "L{n}: {}…[line truncated, {} chars total]",
+                    line.get(..cut).unwrap_or_default(),
+                    line.chars().count()
+                )
+            } else {
+                format!("L{n}: {line}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     if explicit && body.chars().count() > MAX_MODEL_CHARS {
@@ -365,7 +388,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
             json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
         ));
     }
-    let truncated = end_index < total_lines;
+    let truncated = end_index < total_lines || any_line_truncated;
     let mut metadata = ReadFileMetadata {
         path,
         start_line: Some(first + 1),
@@ -563,6 +586,38 @@ mod tests {
             .expect("read must return hash");
         assert_eq!(hash, crate::file_shared::content_hash("one\ntwo\nthree\n"));
     }
+
+    #[test]
+    fn read_truncates_overlong_lines_with_marker() {
+        // 单行截断：3000 字符的行压到 READ_MAX_LINE_CHARS，标记留行内，
+        // metadata.truncated 置位，后续行不受影响。
+        let dir = tempfile::tempdir().unwrap();
+        let long_line = "x".repeat(3000);
+        std::fs::write(
+            dir.path().join("long.txt"),
+            format!("{long_line}\ntail\n"),
+        )
+        .unwrap();
+
+        let result = exec_read(&serde_json::json!({
+            "path": dir.path().join("long.txt").to_string_lossy(),
+        }));
+
+        assert!(result.is_success(), "{}", result.model_text());
+        let text = result.model_text();
+        assert!(
+            text.contains("…[line truncated, 3000 chars total]"),
+            "{text}"
+        );
+        assert!(text.contains("L2: tail"), "{text}");
+        assert_eq!(result.data["files"][0]["truncated"], serde_json::json!(true));
+        // 截断后 body 仍计入 hash 的原文内容不变（hash 基于完整 LF 内容）。
+        let hash = result.data["files"][0]["hash"].as_str().unwrap();
+        assert_eq!(
+            hash,
+            crate::file_shared::content_hash(&format!("{long_line}\ntail\n"))
+        );
+    }
 }
 
 #[test]
@@ -644,7 +699,8 @@ fn read_registration_is_typed_and_schema_is_type_generated() {
         "generated schema must not carry oneOf"
     );
     assert!(registered.descriptor.input_schema["properties"]["requests"].is_object());
-    assert!(registered.descriptor.input_schema["properties"]["path"].is_object());
+    // 糖字段已藏出 schema（schemars skip），宿主侧归一仍接受。
+    assert!(registered.descriptor.input_schema["properties"].get("path").is_none());
     assert_eq!(registered.descriptor.output_schema["type"], "object");
 }
 

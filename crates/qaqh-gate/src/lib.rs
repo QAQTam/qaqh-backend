@@ -12,6 +12,7 @@
 mod anthropic_sdk;
 mod gemini_sdk;
 mod openai_sdk;
+mod request_context;
 mod responses_sdk;
 #[cfg(test)]
 mod rt_test;
@@ -21,6 +22,8 @@ mod transport;
 mod types;
 mod usage;
 
+pub use anyhow::Error as GateError;
+pub use request_context::RequestContext;
 pub use transport::RetryPolicy;
 pub use types::{ErrorKind, ProviderConfig, ProviderKind, ResponsesCompat, StreamEvent};
 

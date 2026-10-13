@@ -27,17 +27,6 @@ pub use file_update::{AppliedPatch, derive_new_contents_from_chunks};
 pub use parser::{Hunk, ParseError, UpdateFileChunk, parse_patch, patch_stats};
 pub use streaming_parser::{PatchStats, StreamingPatchParser};
 
-/// Controls how updates reconstruct the target file after matching a patch.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum UpdateMode {
-    /// Preserve the historical behavior of normalizing updated files to LF
-    /// (matches the workspace LF-canonical-view contract of read/hash).
-    #[default]
-    NormalizeToLf,
-    /// Preserve existing line endings and use the file's preferred ending for new lines.
-    PreserveLineEndings,
-}
-
 #[derive(Debug)]
 pub enum EngineError {
     Parse(ParseError),
@@ -58,6 +47,11 @@ pub enum EngineError {
     SymlinkTarget {
         path: String,
         target: String,
+    },
+    /// 多个 hunk 解析后指向同一文件（如 `a.txt` 与 `./a.txt`）：落盘前拒绝
+    /// （上游 a1c88e865，#37867）。
+    DuplicatePath {
+        path: String,
     },
     /// `*** Add File:` targeted a path that already exists. Dry-run reports this
     /// instead of a plain `[DRY RUN] … ok`; a real apply keeps the upstream
@@ -90,6 +84,10 @@ impl fmt::Display for EngineError {
             EngineError::SymlinkTarget { path, target } => write!(
                 f,
                 "refusing to patch '{path}': it is a symbolic link to '{target}'; use the target path directly"
+            ),
+            EngineError::DuplicatePath { path } => write!(
+                f,
+                "multiple operations target the same resolved path: {path}; merge them into a single hunk or use distinct paths"
             ),
             EngineError::WouldOverwrite { path } => {
                 write!(f, "Add File target already exists: {path}")
@@ -248,18 +246,31 @@ pub(crate) fn resolve_workspace_path(cwd: &Path, path: &Path) -> Result<PathBuf,
 }
 
 /// Apply a `*** Begin Patch` patch to the workspace rooted at `cwd`.
-pub fn apply_patch_engine(
-    patch: &str,
-    cwd: &Path,
-    mode: UpdateMode,
-) -> Result<ApplyOutcome, EngineError> {
+pub fn apply_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, EngineError> {
     let hunks = parse_patch(patch)?.hunks;
     if hunks.is_empty() {
         return Err(EngineError::EmptyPatch);
     }
+    // 上游 a1c88e865（#37867）：拒绝解析后指向同一文件的多个 hunk
+    // （如 `duplicate.txt` 与 `./duplicate.txt`）。逐 hunk 顺序套用下，
+    // 第二个 Update 的上下文匹配会基于第一个改完的内容，语义混沌；
+    // 在任何落盘前拒绝，保持引擎的 all-or-nothing 判定面。
+    // Windows 路径大小写不敏感 → 键做大小写折叠。
+    {
+        let mut seen = std::collections::HashSet::new();
+        for hunk in &hunks {
+            let resolved = resolve_workspace_path(cwd, hunk.path())?;
+            let key = resolved.to_string_lossy().to_lowercase();
+            if !seen.insert(key) {
+                return Err(EngineError::DuplicatePath {
+                    path: resolved.to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
     let mut outcome = ApplyOutcome::default();
     for (idx, hunk) in hunks.iter().enumerate() {
-        if let Err(err) = apply_hunk(hunk, cwd, mode, &mut outcome) {
+        if let Err(err) = apply_hunk(hunk, cwd, &mut outcome) {
             // Hunks are written one at a time (non-atomic, inherited from
             // upstream): everything already in `outcome` is on disk. Report it
             // with the error instead of letting the caller claim otherwise.
@@ -278,7 +289,6 @@ pub fn apply_patch_engine(
 fn apply_hunk(
     hunk: &Hunk,
     cwd: &Path,
-    mode: UpdateMode,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), EngineError> {
     let affected_path = hunk.path().to_string_lossy().to_string();
@@ -338,7 +348,7 @@ fn apply_hunk(
         } => {
             let resolved = resolve_workspace_path(cwd, src_path)?;
             let applied =
-                derive_new_contents_from_chunks(&resolved, chunks, mode).map_err(|e| match e {
+                derive_new_contents_from_chunks(&resolved, chunks).map_err(|e| match e {
                     EngineError::Compute(msg) => EngineError::Compute(format!(
                         "Failed to update file {}: {msg}",
                         resolved.to_string_lossy()
@@ -464,7 +474,7 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                 // Full compute (read + match + rebuild) — same failure surface
                 // as a real apply, minus the write.
                 let applied =
-                    derive_new_contents_from_chunks(&resolved, chunks, UpdateMode::default())
+                    derive_new_contents_from_chunks(&resolved, chunks)
                         .map_err(|e| match e {
                             EngineError::Compute(msg) => EngineError::Compute(format!(
                                 "Failed to update file {}: {msg}",
@@ -534,7 +544,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "old one\nold two\n").unwrap();
         let outcome =
-            apply_patch_engine(&add_file_patch("a.txt"), dir.path(), UpdateMode::default())
+            apply_patch_engine(&add_file_patch("a.txt"), dir.path())
                 .expect("overwrite keeps upstream semantics");
         assert_eq!(outcome.deltas.len(), 1);
         assert_eq!(outcome.deltas[0].old.as_deref(), Some("old one\nold two\n"));
@@ -579,7 +589,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: a.txt\n*** Move to: *** End Patch\n@@\n-alpha\n+ALPHA\n*** End Patch\n",
         ];
         for patch in cases {
-            let err = apply_patch_engine(patch, dir.path(), UpdateMode::default())
+            let err = apply_patch_engine(patch, dir.path())
                 .expect_err(&format!("marker path must be rejected: {patch}"));
             assert!(
                 matches!(err, EngineError::Parse(_)),
@@ -608,7 +618,7 @@ mod tests {
             "*** Begin Patch\n*** Add File: \n+x\n*** End Patch\n",
             "*** Begin Patch\n*** Delete File: \n*** End Patch\n",
         ] {
-            let err = apply_patch_engine(patch, dir.path(), UpdateMode::default())
+            let err = apply_patch_engine(patch, dir.path())
                 .expect_err(&format!("empty path must be rejected: {patch}"));
             assert!(
                 matches!(err, EngineError::Parse(_)),
@@ -628,7 +638,7 @@ mod tests {
             "*** End Patch\n+x\n*** End Patch\n",
             "*** Begin Patch\n*** Add File: c.txt\n+x\n*** End Patch\n*** Add File: d.txt\n+y\n*** End Patch\n",
         ] {
-            let err = apply_patch_engine(patch, dir.path(), UpdateMode::default())
+            let err = apply_patch_engine(patch, dir.path())
                 .expect_err(&format!("must not parse: {patch}"));
             assert!(
                 matches!(err, EngineError::Parse(_)),
@@ -658,7 +668,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: {}\n@@\n-alpha\n+ALPHA\n*** End Patch\n",
             real.join("a.txt").display()
         );
-        apply_patch_engine(&patch, &link, UpdateMode::default()).expect("link cwd + real abs path");
+        apply_patch_engine(&patch, &link).expect("link cwd + real abs path");
         assert_eq!(
             std::fs::read_to_string(real.join("a.txt")).unwrap(),
             "ALPHA\n"
@@ -669,7 +679,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: {}\n@@\n-ALPHA\n+ALPHA2\n*** End Patch\n",
             link.join("a.txt").display()
         );
-        apply_patch_engine(&patch, &real, UpdateMode::default()).expect("real cwd + link abs path");
+        apply_patch_engine(&patch, &real).expect("real cwd + link abs path");
         assert_eq!(
             std::fs::read_to_string(real.join("a.txt")).unwrap(),
             "ALPHA2\n"
@@ -681,7 +691,7 @@ mod tests {
         let escape = real.join("escape");
         std::os::unix::fs::symlink(&outside, &escape).unwrap();
         let patch = "*** Begin Patch\n*** Add File: escape/leak.txt\n+x\n*** End Patch\n";
-        let err = apply_patch_engine(patch, &real, UpdateMode::default()).unwrap_err();
+        let err = apply_patch_engine(patch, &real).unwrap_err();
         assert!(
             matches!(err, EngineError::PathOutsideWorkspace { .. }),
             "got: {err:?}"
@@ -713,7 +723,7 @@ mod tests {
             "*** Begin Patch\n*** Add File: {}\n+cross\n*** End Patch\n",
             outside.join("new.txt").display()
         );
-        apply_patch_engine(&patch, &ws, UpdateMode::default())
+        apply_patch_engine(&patch, &ws)
             .expect("lexically-outside absolute path must apply (admission owns the boundary)");
         assert_eq!(
             std::fs::read_to_string(outside.join("new.txt")).unwrap(),
@@ -722,7 +732,7 @@ mod tests {
 
         // `..` 逃逸：词法归一后落在工作区外 → 同样放行。
         let escape = "*** Begin Patch\n*** Update File: ../outside/new.txt\n@@\n-cross\n+cross2\n*** End Patch\n";
-        apply_patch_engine(escape, &ws, UpdateMode::default())
+        apply_patch_engine(escape, &ws)
             .expect("'..' escape is lexically outside → admission-approved write applies");
         assert_eq!(
             std::fs::read_to_string(outside.join("new.txt")).unwrap(),
@@ -778,7 +788,7 @@ mod tests {
 +whatever
 *** End Patch
 ";
-        let err = apply_patch_engine(patch, dir.path(), UpdateMode::default()).unwrap_err();
+        let err = apply_patch_engine(patch, dir.path()).unwrap_err();
         match err {
             EngineError::Partial {
                 applied,
@@ -804,10 +814,61 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
         let patch =
             "*** Begin Patch\n*** Update File: a.txt\n@@\n-ABSENT\n+whatever\n*** End Patch\n";
-        let err = apply_patch_engine(patch, dir.path(), UpdateMode::default()).unwrap_err();
+        let err = apply_patch_engine(patch, dir.path()).unwrap_err();
         assert!(
             matches!(err, EngineError::Compute(_)),
             "expected plain Compute, got {err:?}"
+        );
+    }
+
+    // ── 上游修复移植验证 ──────────────────────────────────────
+
+    /// 上游 685270a（#51203）：CRLF 文件 apply_patch 后未改动行保 CRLF，
+    /// 插入行用文件首选行尾；文件不再被整体归一成 LF。
+    #[test]
+    fn crlf_file_preserves_line_endings() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("crlf.txt"), "alpha\r\nbeta\r\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: crlf.txt\n@@\n-alpha\n+ALPHA\n*** End Patch\n";
+        apply_patch_engine(patch, dir.path()).expect("apply ok");
+        assert_eq!(
+            std::fs::read(dir.path().join("crlf.txt")).unwrap(),
+            b"ALPHA\r\nbeta\r\n",
+            "untouched line keeps CRLF; replaced segment uses the file's preferred ending"
+        );
+    }
+
+    /// 上游 4883b1dd52：EOF 纯插入落点 = 最后一个真实行之后
+    /// （不再受 split 表示的尾空行影响）。
+    #[test]
+    fn eof_pure_addition_lands_after_last_real_line() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("eof.txt"), "one\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: eof.txt\n@@\n+two\n*** End Patch\n";
+        apply_patch_engine(patch, dir.path()).expect("apply ok");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("eof.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+    }
+
+    /// 上游 a1c88e865（#37867）：两个 hunk 解析后指向同一文件 → 落盘前拒绝。
+    #[test]
+    fn duplicate_resolved_paths_are_rejected() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("duplicate.txt"), "before\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: duplicate.txt\n@@\n-before\n+first\n*** Update File: ./duplicate.txt\n@@\n-before\n+second\n*** End Patch\n";
+        let err = apply_patch_engine(patch, dir.path()).unwrap_err();
+        match err {
+            EngineError::DuplicatePath { path } => {
+                assert!(path.contains("duplicate.txt"), "path: {path}");
+            }
+            other => panic!("expected DuplicatePath, got {other:?}"),
+        }
+        // 未落盘。
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("duplicate.txt")).unwrap(),
+            "before\n"
         );
     }
 }
