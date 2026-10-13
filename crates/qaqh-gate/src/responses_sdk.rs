@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 use futures::StreamExt;
 use mutil_ai::{
@@ -30,8 +29,9 @@ use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, apply_management_headers, empty_stream_retry, sdk_error_detail,
-    sdk_retry_policy, split_url,
+    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, apply_management_headers,
+    empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
+    tool_result_name,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, empty_request_noop_done_event,
@@ -266,6 +266,21 @@ pub(crate) fn project_responses_messages(
     messages: &[Message],
     compat: &ResponsesCompat,
 ) -> Vec<WireMessage> {
+    // mutil-ai 0.4.0 matches a tool result to its call by BOTH id and name, and
+    // the projected call name is the provider-mapped function name — so resolve
+    // result names from history against that same mapping (`Message::tool_result`
+    // carries no name of its own).
+    let names: HashMap<String, String> = messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, .. } => {
+                Some((id.clone(), provider_function_name(name, compat).to_string()))
+            }
+            _ => None,
+        })
+        .collect();
     let mut out: Vec<WireMessage> = Vec::new();
     let mut top_taken = false;
     let mut img_idx: usize = 0;
@@ -384,7 +399,9 @@ pub(crate) fn project_responses_messages(
                             provider_function_name(name, compat).to_string(),
                             input.clone(),
                         );
-                        call.id = Some(id.clone());
+                        // 0.4.0 rejects an empty explicit id; leave it unset so the
+                        // SDK's normalizer assigns a collision-free one.
+                        call.id = if id.is_empty() { None } else { Some(id.clone()) };
                         parts.push(Part::ToolCall(call));
                     }
                 }
@@ -419,9 +436,13 @@ pub(crate) fn project_responses_messages(
                             tool_use_id,
                             result,
                         } => {
-                            let name = msg.name.clone().unwrap_or_else(|| tool_use_id.clone());
+                            let name = tool_result_name(&names, msg.name.as_deref(), tool_use_id);
                             let mut tr = WireToolResult::new(
-                                Some(tool_use_id.clone()),
+                                if tool_use_id.is_empty() {
+                                    None
+                                } else {
+                                    Some(tool_use_id.clone())
+                                },
                                 name,
                                 result.render_xml_envelope(),
                             );
@@ -523,7 +544,8 @@ fn build_adapter(
 fn build_options(provider: &ProviderConfig, policy: &GateRetryPolicy) -> RequestOptions {
     let mut options = RequestOptions::new();
     options.idle_timeout = Some(policy.idle_timeout);
-    options.timeout = Some(Duration::from_secs(30 * 60));
+    options.timeout = Some(REQUEST_TOTAL_TIMEOUT);
+    options.response_limits = roomy_response_limits();
     let mut switches = ProviderRequestOptions::default();
     if let Some(ref pk) = provider.prompt_cache_key {
         switches.prompt_cache_key = Some(pk.clone());

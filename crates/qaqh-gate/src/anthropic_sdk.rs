@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 use futures::StreamExt;
 use mutil_ai::{
@@ -21,8 +20,9 @@ use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, StreamState, apply_management_headers, empty_stream_retry,
-    insert_header, sdk_error_detail, sdk_retry_policy,
+    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, StreamState, apply_management_headers,
+    empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
+    tool_names_by_id, tool_result_name,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
@@ -109,6 +109,7 @@ pub(crate) fn project_messages(
     messages: Vec<Message>,
     image_index_base: usize,
 ) -> Vec<WireMessage> {
+    let names = tool_names_by_id(&messages);
     let mut system_parts: Vec<String> = Vec::new();
     let mut projected: Vec<WireMessage> = Vec::new();
     let mut img_idx = image_index_base;
@@ -176,7 +177,9 @@ pub(crate) fn project_messages(
                         }
                         ContentBlock::ToolUse { id, name, input } => {
                             let mut call = WireToolCall::new(name.clone(), input.clone());
-                            call.id = Some(id.clone());
+                            // 0.4.0 rejects an empty explicit id; leave it unset so
+                            // the SDK's normalizer assigns a collision-free one.
+                            call.id = if id.is_empty() { None } else { Some(id.clone()) };
                             parts.push(Part::ToolCall(call));
                         }
                         _ => {}
@@ -203,9 +206,13 @@ pub(crate) fn project_messages(
                             tool_use_id,
                             result,
                         } => {
-                            let name = msg.name.clone().unwrap_or_else(|| tool_use_id.clone());
+                            let name = tool_result_name(&names, msg.name.as_deref(), tool_use_id);
                             let mut tr = WireToolResult::new(
-                                Some(tool_use_id.clone()),
+                                if tool_use_id.is_empty() {
+                                    None
+                                } else {
+                                    Some(tool_use_id.clone())
+                                },
                                 name,
                                 result.render_xml_envelope(),
                             );
@@ -335,7 +342,8 @@ fn build_options(
 ) -> RequestOptions {
     let mut options = RequestOptions::new();
     options.idle_timeout = Some(policy.idle_timeout);
-    options.timeout = Some(Duration::from_secs(30 * 60));
+    options.timeout = Some(REQUEST_TOTAL_TIMEOUT);
+    options.response_limits = roomy_response_limits();
     insert_header(
         &mut options,
         "Authorization",
@@ -905,6 +913,120 @@ mod tests {
             .filter(|p| matches!(p, Part::ToolResult(_)))
             .collect();
         assert_eq!(trs.len(), 2);
+    }
+
+    /// 回归 0.4.0：tool_result 消息不带 `name`（`Message::tool_result` 恒 None），
+    /// 归一器又要求 id 与 name 同时匹配。投影必须从历史的 assistant ToolUse
+    /// 回填真实函数名，否则 result 被判 orphan 而丢弃。
+    #[test]
+    fn nameless_tool_result_resolves_function_name() {
+        let msgs = vec![
+            Message::user("read it"),
+            qa_msg(
+                "assistant",
+                vec![ContentBlock::ToolUse {
+                    id: "toolu_9".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({ "path": "a.txt" }),
+                }],
+            ),
+            qa_msg(
+                "tool",
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_9".into(),
+                    result: qaqh_types::ToolResult::ok("contents"),
+                }],
+            ),
+        ];
+        let request = ChatRequest::new(project_messages(msgs, 0));
+        let norm = normalized(&request);
+        let trs: Vec<&mutil_ai::ToolResult> = norm
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                Part::ToolResult(tr) => Some(tr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(trs.len(), 1, "tool result 不该被当作 orphan 丢弃");
+        assert_eq!(trs[0].name, "read", "name 必须回填成真实函数名");
+        assert_eq!(trs[0].call_id.as_deref(), Some("toolu_9"));
+    }
+
+    /// 回归 0.4.0：空 tool-call id 直接触发 `Error::Normalize`。投影遇到空 id 时
+    /// 必须留 `None`，交给归一器分配无冲突 id。
+    #[test]
+    fn empty_assistant_call_id_is_assigned_by_sdk() {
+        let msgs = vec![
+            Message::user("run"),
+            qa_msg(
+                "assistant",
+                vec![ContentBlock::ToolUse {
+                    id: String::new(),
+                    name: "exec".into(),
+                    input: serde_json::json!({ "command": "ls" }),
+                }],
+            ),
+            qa_msg(
+                "tool",
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: String::new(),
+                    result: qaqh_types::ToolResult::ok("done"),
+                }],
+            ),
+        ];
+        let projected = project_messages(msgs, 0);
+        // 空 id 投影为 None，归一器补号；旧实现会把 Some("") 送进 SDK 直接报错。
+        let request = ChatRequest::new(projected);
+        let norm = normalize(&request, Protocol::AnthropicMessages)
+            .expect("空 id 不应触发 normalize 失败")
+            .0;
+        let trs: Vec<&mutil_ai::ToolResult> = norm
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                Part::ToolResult(tr) => Some(tr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(trs.len(), 1, "按 name 回填后仍应配对成功");
+        assert!(
+            trs[0].call_id.as_deref().is_some_and(|id| !id.is_empty()),
+            "SDK 必须补一个非空 call id，实际：{:?}",
+            trs[0].call_id
+        );
+    }
+
+    /// 锁定 0.5.0 语义：配对只看 call id；result 的 name 为空也不再丢弃工具输出。
+    /// 我们的投影总会填对 name，这里直接构造 SDK 消息，保证万一 name 侧回退也不
+    /// 重现 0.4.0"静默丢输出、模型每轮重答"的坑。
+    #[test]
+    fn tool_result_pairs_by_id_even_when_name_is_blank() {
+        let mut call = WireToolCall::new("lookup".to_string(), serde_json::json!({}));
+        call.id = Some("call_1".to_string());
+        let mut result =
+            WireToolResult::new(Some("call_1".to_string()), String::new(), "real output".to_string());
+        result.is_error = false;
+        let request = ChatRequest::new(vec![
+            WireMessage::new(mutil_ai::Role::Assistant, vec![Part::ToolCall(call)]),
+            WireMessage::new(mutil_ai::Role::Tool, vec![Part::ToolResult(result)]),
+        ]);
+        let norm = normalize(&request, Protocol::AnthropicMessages)
+            .expect("id 命中即应配对")
+            .0;
+        let trs: Vec<&mutil_ai::ToolResult> = norm
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                Part::ToolResult(tr) => Some(tr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(trs.len(), 1, "name 为空不该导致 result 被丢弃");
+        assert_eq!(trs[0].content, "real output", "真实输出必须保住");
     }
 
     #[test]
