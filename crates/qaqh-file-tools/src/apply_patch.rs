@@ -135,7 +135,7 @@ impl TypedTool for ApplyPatchTool {
         let outcome = if dry_run {
             dry_run_patch_engine(&patch, &ctx.workspace_root)
         } else {
-            apply_patch_engine(&patch, &ctx.workspace_root, Default::default())
+            apply_patch_engine(&patch, &ctx.workspace_root)
         };
         let outcome = match outcome {
             Ok(outcome) => outcome,
@@ -299,6 +299,11 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
         EngineError::WouldOverwrite { .. } => (
             "would_overwrite",
             "dry-run finding: '*** Add File:' would replace an existing file wholesale. Use '*** Update File:' to edit it in place (or '*** Delete File:' first). To overwrite deliberately, re-send the same patch without dry_run — a real apply keeps the upstream overwrite semantics and records the replaced contents in the delta/journal for rollback.".to_string(),
+        ),
+        EngineError::DuplicatePath { .. } => (
+            "duplicate_path",
+            "Two or more hunks resolve to the same file (e.g. 'a.txt' and './a.txt', or case-variant spellings on Windows). Merge them into a single '*** Update File:' hunk, or target distinct paths — nothing was written."
+                .to_string(),
         ),
     }
 }

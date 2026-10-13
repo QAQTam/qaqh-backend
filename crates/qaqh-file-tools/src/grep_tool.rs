@@ -32,25 +32,25 @@ const MAX_RESULTS_CAP: usize = 2_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GrepArgs {
-    /// Regex (rg syntax)
+    /// ripgrep regex.
     #[serde(default)]
     pub pattern: String,
     /// Dirs to search
     #[serde(default)]
     pub paths: Option<Vec<String>>,
-    /// File filters (rg -g)
+    /// ripgrep --glob filters.
     #[serde(default)]
     pub glob: Option<Vec<String>>,
-    /// Case-sensitive (default false)
+    /// Default false.
     #[serde(default)]
     pub case_sensitive: Option<bool>,
-    /// Context before
+    /// Context lines before each match.
     #[serde(default)]
     pub context_before: Option<u64>,
-    /// Context after
+    /// Context lines after each match.
     #[serde(default)]
     pub context_after: Option<u64>,
-    /// Max results (default 200)
+    /// Default 200.
     #[serde(default)]
     pub max_results: Option<u64>,
 }

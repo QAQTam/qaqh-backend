@@ -172,9 +172,7 @@ pub fn mutation_display(
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteArgs {
-    /// File
     pub path: String,
-    /// Content
     pub content: String,
     /// Append (default false)
     #[serde(default)]
@@ -567,7 +565,6 @@ impl TypedTool for WriteTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteArgs {
-    /// File
     pub path: String,
 }
 

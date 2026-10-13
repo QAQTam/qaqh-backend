@@ -11,7 +11,13 @@
 //! 组杀证据链：adapter spawn 设独立进程组（ProcessGroup::leader）→ pid 文件
 //! 记录 server/孙进程 pid → shutdown 前读 `/proc/<pid>/stat` 取 pgrp →
 //! shutdown 后 `pgrep -g <pgrp>` 退出码 1（组内零进程）。
+//!
+//! 整文件 crate 级门 `#![cfg(target_os = "linux")]`（与 sandbox_helper /
+//! linux_sandbox 同款）：探测链路 `/proc` + `pgrep -g` 都是 procfs/procps
+//! 专属，`cfg(unix)` 会把 macOS 放进来——`pgrp_of` 读不到 /proc 后
+//! `.expect` 直接 panic，绝不能让「macOS 红」伪装成「macOS 绿」。
 
+#![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used)] // 测试代码豁免（仓库惯例，见 clippy.toml）
 
 use std::collections::BTreeMap;

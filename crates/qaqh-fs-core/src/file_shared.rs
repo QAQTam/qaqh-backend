@@ -6,6 +6,9 @@ use std::path::Path;
 // ── Shared limits (read/edit 统一上限，单点维护) ──
 pub const READ_MAX_LINES: usize = 400;
 pub const READ_MAX_CHARS: usize = 24_000;
+/// 单行模型可见字符上限：一行超长内容不灌爆本次 read 预算（Claude Code
+/// 同款纪律），截断标记留在行内，模型可用 rg 精查该行。
+pub const READ_MAX_LINE_CHARS: usize = 2_000;
 /// 单文件读取字节上限（防止大文件/特殊文件全量读入内存）。
 pub const READ_MAX_BYTES: u64 = 8 * 1024 * 1024;
 

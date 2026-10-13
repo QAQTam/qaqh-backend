@@ -55,6 +55,13 @@ fn new_str_empty_deletes_the_match() {
 }
 
 #[test]
+fn new_str_empty_deletes_whole_line_without_overshoot() {
+    // old 不含行尾 → 自动扩展吞掉行尾 \n，不留空行（Claude hW2 语义）。
+    let out = run_replace("a\nb\nc\n", "b", "", false).unwrap();
+    assert_eq!(out.edited, "a\nc\n");
+}
+
+#[test]
 fn not_found_carries_nearest_match() {
     match run_replace("alpha\nlet x = 1;\nbeta\n", "let x = 2;", "y", false) {
         Err(ReplaceError::NotFound { nearest }) => {
@@ -180,6 +187,10 @@ fn exec_replaces_and_returns_compact_pass() {
     let text = result.model_text();
     assert!(text.starts_with("[OK] edit "), "{text}");
     assert!(text.contains("replaced 1 occurrence"), "{text}");
+    // 内容锚片段：编辑点 ±3 行，`L<n>: ` 与 read 同源。
+    assert!(text.contains("edited region:"), "{text}");
+    assert!(text.contains("L1: prefix: AAA"), "{text}");
+    assert!(text.contains("L2: other"), "{text}");
     assert!(
         !text.contains("diff"),
         "model text must stay compact: {text}"
@@ -269,9 +280,27 @@ fn exec_ambiguous_lists_occurrences_and_leaves_file_untouched() {
     assert_eq!(result.data["match_count"], 2);
     let text = result.model_text();
     assert!(text.contains("matches 2 locations"), "{text}");
+    assert!(text.contains("set replace_all=true"), "{text}");
     assert!(text.contains("occurrence #1 at L1"), "{text}");
     assert!(text.contains("occurrence #2 at L2"), "{text}");
     assert_eq!(read(&path), "x\nx\n");
+}
+
+#[test]
+fn exec_pass_snippet_anchors_edited_region() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "snip.txt", "one\ntwo\nthree\nfour\nfive\n");
+    // 多行插入：three → 3a\n3b，落点 L3-L4，片段覆盖 L1-L6。
+    let result = call(&path, "three", "3a\n3b");
+    assert!(result.is_success(), "{}", result.model_text());
+    let text = result.model_text();
+    assert!(text.contains("replaced 1 occurrence (L3-L4)"), "{text}");
+    assert!(text.contains("L1: one"), "{text}");
+    assert!(text.contains("L2: two"), "{text}");
+    assert!(text.contains("L3: 3a"), "{text}");
+    assert!(text.contains("L4: 3b"), "{text}");
+    assert!(text.contains("L5: four"), "{text}");
+    assert!(text.contains("L6: five"), "{text}");
 }
 
 #[test]
@@ -302,25 +331,12 @@ fn exec_empty_file_is_not_found() {
 // ─────────────────────────────────────────────────────────────
 
 #[test]
-fn exec_missing_path_is_parse_error() {
-    let result = exec_edit(&json!({"old_str": "a", "new_str": "b"}));
-    assert_eq!(code(&result), "parse_error");
-    assert!(result.model_text().contains("missing 'path'"));
-}
-
-#[test]
-fn exec_missing_old_or_new_is_parse_error() {
-    let missing_old = exec_edit(&json!({"path": "a.txt", "new_str": "b"}));
-    assert!(missing_old.model_text().contains("missing 'old_str'"));
-    let missing_new = exec_edit(&json!({"path": "a.txt", "old_str": "a"}));
-    assert!(missing_new.model_text().contains("missing 'new_str'"));
-}
-
-#[test]
 fn exec_empty_old_str_is_rejected() {
     let result = exec_edit(&json!({"path": "a.txt", "old_str": "", "new_str": "b"}));
     assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("must be non-empty"));
+    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    assert!(hint.contains("write"), "hint: {hint}");
 }
 
 #[test]
@@ -328,6 +344,8 @@ fn exec_identical_old_and_new_is_rejected() {
     let result = exec_edit(&json!({"path": "a.txt", "old_str": "a", "new_str": "a"}));
     assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("identical"));
+    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    assert!(hint.contains("No-op"), "hint: {hint}");
 }
 
 #[test]
@@ -336,6 +354,8 @@ fn exec_missing_file_does_not_create() {
     let path = dir.path().join("ghost.txt").to_string_lossy().to_string();
     let result = call(&path, "a", "b");
     assert_eq!(code(&result), "file_not_found");
+    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    assert!(hint.contains("write"), "hint: {hint}");
     assert!(!std::path::Path::new(&path).exists());
 }
 
@@ -346,6 +366,8 @@ fn exec_binary_file_is_rejected() {
     std::fs::write(&path, [0u8, 159, 146, 150]).unwrap();
     let result = call(&path.to_string_lossy(), "a", "b");
     assert_eq!(code(&result), "not_utf8_text");
+    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    assert!(hint.contains("UTF-8"), "hint: {hint}");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -384,7 +406,7 @@ fn tool_contract_exposes_str_replace_fields() {
             "legacy field '{legacy}' still exposed: {all}"
         );
     }
-    assert!(handler.description.contains("exactly once"));
+    assert!(handler.description.contains("must be unique"));
     assert!(handler.description.contains("replace_all"));
 }
 

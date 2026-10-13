@@ -1,7 +1,6 @@
 //! 4-tier content matching: exact → rstrip → trim → Unicode-normalised.
 //! Ported from OpenAI `codex-rs/apply-patch` (Apache-2.0).
 
-use crate::apply_patch_engine::UpdateMode;
 
 /// Find `pattern` inside `lines` starting at `start`.
 ///
@@ -14,7 +13,6 @@ pub(crate) fn seek_sequence(
     pattern: &[String],
     start: usize,
     eof: bool,
-    update_file_mode: UpdateMode,
 ) -> Option<usize> {
     if pattern.is_empty() {
         return Some(start);
@@ -27,11 +25,9 @@ pub(crate) fn seek_sequence(
         return None;
     }
     let search_start = if eof && lines.len() >= pattern.len() {
-        let eof_start = lines.len() - pattern.len();
-        match update_file_mode {
-            UpdateMode::NormalizeToLf => eof_start,
-            UpdateMode::PreserveLineEndings => eof_start.max(start),
-        }
+        // 上游 685270a/a95b425f：EOF 锚定无条件 clamp 到 start——带上下文的
+        // End-of-File hunk 不得匹配到上下文指定位置之前的区域。
+        (lines.len() - pattern.len()).max(start)
     } else {
         start
     };
@@ -111,8 +107,7 @@ fn normalise(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::seek_sequence;
-    use crate::apply_patch_engine::UpdateMode;
-
+    
     fn to_vec(strings: &[&str]) -> Vec<String> {
         strings.iter().map(ToString::to_string).collect()
     }
@@ -122,7 +117,7 @@ mod tests {
         let lines = to_vec(&["foo", "bar", "baz"]);
         let pattern = to_vec(&["bar", "baz"]);
         assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false, UpdateMode::NormalizeToLf),
+            seek_sequence(&lines, &pattern, 0, false),
             Some(1)
         );
     }
@@ -132,7 +127,7 @@ mod tests {
         let lines = to_vec(&["foo   ", "bar\t\t"]);
         let pattern = to_vec(&["foo", "bar"]);
         assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false, UpdateMode::NormalizeToLf),
+            seek_sequence(&lines, &pattern, 0, false),
             Some(0)
         );
     }
@@ -142,7 +137,7 @@ mod tests {
         let lines = to_vec(&["    foo   ", "   bar\t"]);
         let pattern = to_vec(&["foo", "bar"]);
         assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false, UpdateMode::NormalizeToLf),
+            seek_sequence(&lines, &pattern, 0, false),
             Some(0)
         );
     }
@@ -153,7 +148,7 @@ mod tests {
         let pattern = to_vec(&["too", "many", "lines"]);
         // Should not panic – must return None when pattern cannot possibly fit.
         assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false, UpdateMode::NormalizeToLf),
+            seek_sequence(&lines, &pattern, 0, false),
             None
         );
     }
@@ -164,7 +159,7 @@ mod tests {
         let lines = to_vec(&["let x = a — b;"]);
         let pattern = to_vec(&["let x = a - b;"]);
         assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false, UpdateMode::NormalizeToLf),
+            seek_sequence(&lines, &pattern, 0, false),
             Some(0)
         );
     }

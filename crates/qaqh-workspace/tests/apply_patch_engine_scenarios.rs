@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use qaqh_workspace::apply_patch_engine::{UpdateMode, apply_patch_engine};
+use qaqh_workspace::apply_patch_engine::apply_patch_engine;
 use tempfile::tempdir;
 
 #[test]
@@ -45,9 +45,9 @@ fn run_scenario(dir: &Path) {
     let patch = fs::read_to_string(dir.join("patch.txt"))
         .unwrap_or_else(|e| panic!("{name}: read patch.txt: {e}"));
 
-    // Run with PreserveLineEndings, matching the upstream runner (fixtures
-    // 023/024 exercise CRLF / mixed line endings).
-    let result = apply_patch_engine(&patch, tmp.path(), UpdateMode::PreserveLineEndings);
+    // 行尾无条件保持（上游 685270a 移植后无 mode 参数；fixtures
+    // 023/024 的 CRLF / mixed line endings 期望不变——未改动行尾字节保真）。
+    let result = apply_patch_engine(&patch, tmp.path());
 
     let expects_error = name.contains("rejects")
         || name.contains("requires")
@@ -120,7 +120,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 // ── BUG-2026-09-13-01 回归：apply_patch 工作区逃逸（词法消解 `..` + 边界拦截）──
 #[cfg(test)]
 mod escape_probes {
-    use qaqh_workspace::apply_patch_engine::{UpdateMode, apply_patch_engine};
+    use qaqh_workspace::apply_patch_engine::apply_patch_engine;
     use tempfile::tempdir;
 
     fn patch_add(path: &str) -> String {
@@ -136,9 +136,7 @@ mod escape_probes {
         let _ = std::fs::remove_file(&outside);
         let result = apply_patch_engine(
             &patch_add("a/b/../../evil.txt"),
-            tmp.path(),
-            UpdateMode::PreserveLineEndings,
-        );
+            tmp.path());
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert!(
             tmp.path().join("evil.txt").exists(),
@@ -173,9 +171,7 @@ mod escape_probes {
         // ws/a/../../outside/evil.txt → 词法消解为 tmp/outside/evil.txt（受控目录）。
         let result = apply_patch_engine(
             &patch_add("a/../../outside/evil.txt"),
-            &ws,
-            UpdateMode::PreserveLineEndings,
-        );
+            &ws);
         assert!(
             result.is_ok(),
             "lexical `..` escape applies after admission, got {result:?}"

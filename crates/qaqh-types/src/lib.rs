@@ -58,7 +58,9 @@ pub use tool_result::{
 pub use arg::{parse_arg, parse_arg_or, parse_opt};
 
 // ── Shared utilities ──
-pub use token::{count_tokens, init_tokenizer};
+pub use token::count_tokens;
+#[cfg(feature = "tokenizers")]
+pub use token::init_tokenizer;
 
 pub use tool_mode::{
     CUSTOM, KNOWN_MODES, MINIMAL, MINIMAL_B, MINIMAL_C, MINIMAL_PREFIX, MINIMAL_TOOLS,

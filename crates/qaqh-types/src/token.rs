@@ -1,5 +1,6 @@
 //! Token counting: CJK heuristic + optional HuggingFace tokenizer.
 
+#[cfg(feature = "tokenizers")]
 use std::sync::OnceLock;
 
 #[cfg(feature = "tokenizers")]

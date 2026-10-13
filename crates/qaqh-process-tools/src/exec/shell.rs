@@ -13,7 +13,9 @@ pub fn bootstrap() -> String {
 /// 显式钉住壳路径（embedder/测试用；`bootstrap()` 之外的第二入口）。
 /// 传空串 = no-op。钉住的路径在 `Shell::path()` 中优先于 git-bash 路径、
 /// 候选解析与名义名，但并非处处最高：`cmd`/`WindowsPowerShell` 仍先取
-/// System32 系统壳固定路径（审计 M2），`Zsh`/`Sh` 则完全不使用该值。
+/// System32 系统壳固定路径（审计 M2）。此前 `Zsh`/`Sh` 完全不消费该值，
+/// 使 macOS（默认壳恰为 Zsh）上的钉壳成为静默 no-op——Zsh 现与
+/// Bash/PowerShell 同序消费；`Sh` 从不作为任何平台的默认壳，维持原样。
 pub fn register_shell(path: &str) {
     Shell::register_shell(path);
 }
@@ -211,8 +213,9 @@ impl Shell {
     /// > 候选集解析出的**绝对路径**（`resolved_shell_name`，仅 PATH 查找）>
     /// 名义名 `bash`；`PowerShell` 为 显式注册 > 候选解析 > `pwsh`；
     /// `cmd`/`WindowsPowerShell` 先取 Windows 系统壳固定路径（审计 M2），
-    /// 再到显式注册 > 候选解析 > 名义名；`Zsh`/`Sh` 只用候选解析，回落到
-    /// 名义名 `zsh`/`sh`（不使用显式注册）。
+    /// 再到显式注册 > 候选解析 > 名义名；`Zsh` 为 显式注册 > 候选解析 >
+    /// 名义名 `zsh`（macOS 默认壳即 Zsh，钉壳必须生效）；`Sh` 只用候选
+    /// 解析，回落到名义名 `sh`（不使用显式注册）。
     /// 候选解析是「探测与派生同源」的关键：探测口径与实际 argv 都经
     /// `resolved_shell_name` 落到同一绝对路径，二者不再漂移。
     pub(crate) fn path(&self) -> &str {
@@ -224,7 +227,10 @@ impl Shell {
                 .map(String::as_str)
                 .or(resolved)
                 .unwrap_or("bash"),
-            Shell::Zsh => resolved.unwrap_or("zsh"),
+            Shell::Zsh => registered
+                .map(String::as_str)
+                .or(resolved)
+                .unwrap_or("zsh"),
             Shell::Sh => resolved.unwrap_or("sh"),
             Shell::PowerShell => registered
                 .map(String::as_str)

@@ -106,6 +106,32 @@ pub fn filesystem_and_network_isolation_enforced() -> bool {
     capabilities.filesystem_write_isolation && capabilities.network_isolation
 }
 
+/// Whether **this launch's plan** resolves to a backend that enforces
+/// filesystem writes. Approval surfaces must consult this rather than
+/// [`SandboxCapabilities::detect`] (audit F1/P0): detection answers "does this
+/// machine have a sandbox", while auto-approval needs "is this specific command
+/// actually inside one". Auto that never got promoted means a plain spawn, so
+/// it reports `false` and the caller falls back to asking the user.
+///
+/// Non-Windows platforms have no wired write-enforcing backend, so the answer
+/// is a hard `false` there — a missing sandbox must never widen auto-approval.
+/// Keeping that branch inside this crate is also what makes the gate compile on
+/// those targets: `sbx_map` is `#[cfg(windows)]`-only.
+pub fn exec_backend_enforces_write_isolation(spec: &SandboxSpec) -> bool {
+    #[cfg(windows)]
+    {
+        return matches!(
+            sbx_map::resolve_windows_backend(spec).ok().flatten(),
+            Some(SandboxBackend::WindowsToken | SandboxBackend::WindowsRedirect)
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = spec;
+        false
+    }
+}
+
 /// Wrap a target command with the strongest configured backend.
 ///
 /// `Auto` prefers bubblewrap, then the Landlock/seccomp helper. Explicitly

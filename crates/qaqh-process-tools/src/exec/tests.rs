@@ -1390,7 +1390,7 @@ fn exec_registered_alone_with_shell_param() {
     assert!(
         exec.function
             .description
-            .contains("wrapped by the selected shell"),
+            .contains("exit_code/output"),
         "desc: {}",
         exec.function.description
     );

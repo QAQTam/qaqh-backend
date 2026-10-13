@@ -29,7 +29,7 @@ use super::store::{
 #[serde(deny_unknown_fields)]
 /// List session tasks.
 pub struct TodoListArgs {
-    /// Optional status filter (pending | in_progress | completed | cancelled).
+    /// pending | in_progress | completed | cancelled.
     #[serde(default)]
     pub status: Option<TodoStatusView>,
 }
@@ -96,19 +96,17 @@ impl From<&TodoItem> for TodoItemView {
 #[serde(deny_unknown_fields)]
 /// One task entry of the full-replace list.
 pub struct TodoWriteItemArgs {
-    /// Existing T<n> to keep/update this task; omit to assign a new one.
+    /// Existing T<n>; omit for a new item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
-    /// Task title (1-100 chars). Required for new items; optional when `id` references an existing task (the previous title is kept).
-    /// 省略 = 沿用同 `id` 既有条目的标题（仅既有 id 成立；新条目必填）。
+    /// Task title (1-100 chars); omit when `id` references an existing task.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Exactly one item should be in_progress while working (pending | in_progress | completed | cancelled).
+    /// pending | in_progress | completed | cancelled.
     pub status: TodoStatusView,
-    /// Optional context (<=200 chars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Completion evidence (for completed items).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
 }
@@ -118,11 +116,11 @@ pub struct TodoWriteItemArgs {
 /// Replace the whole task list (full-replace). Each item needs status; keep every
 /// prior item you want to keep; exactly one in_progress.
 pub struct TodoWriteArgs {
-    /// The FULL task list — replaces the previous list entirely (max 20 items).
+
     #[schemars(length(max = 20))]
     pub items: Vec<TodoWriteItemArgs>,
-    /// Optional one-liner on why the plan changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional one-liner on why the plan changed.
     pub explanation: Option<String>,
 }
 
@@ -132,9 +130,9 @@ pub struct TodoWriteArgs {
 pub struct TodoUpdateArgs {
     /// Target ID (e.g. T1).
     pub id: Value,
-    /// Target status (pending | in_progress | completed | cancelled).
+    /// pending | in_progress | completed | cancelled.
     pub status: TodoStatusView,
-    /// Completion summary (required when completed).
+    /// Required when completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
 }

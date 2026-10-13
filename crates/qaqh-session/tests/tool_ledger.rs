@@ -2,19 +2,21 @@
 
 use qaqh_session::{
     canonical::{
-        CommittedFactReader, FactCausation, ToolLedger, ToolLedgerError, ToolRecoveryDisposition,
-        WriterId, causation_for_command, generate_ulid, stable_workspace_resource_id,
-        ulid_from_text,
+        CanonicalError, CommittedFactReader, FactCausation, ToolLedger, ToolLedgerError,
+        ToolRecoveryDisposition, WriterId, causation_for_command, generate_ulid,
+        stable_workspace_resource_id, ulid_from_text,
     },
     session_fact_v2::{
         ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
         InputAccepted, InputId, InputKind, InputPurpose, InterAgentCommunication,
         InterAgentContent, InterAgentDelivery, InteractionDecision, InteractionExpired,
         InteractionExpiryReason, InteractionId, InteractionKind, InteractionRequested,
-        InteractionResolved, LogId, MessageId, PolicyDecisionRef, RecoveryId, RecoveryRef,
-        ResourceId, ResourceKind, SessionId, SideEffectClass, SubagentFinished, SubagentSpawned,
-        SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
-        ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnId,
+        InteractionResolved, InterruptReason, LogId, MessageId, PolicyDecisionRef, RecoveryId,
+        RecoveryRef, ResourceId, ResourceKind, SessionId, SideEffectClass, SubagentFinished,
+        SubagentSpawned, SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
+        ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+        AssistantBlockKind, AssistantBlockSealed, BlockId, ModelRoundStarted, TurnFinished,
+        TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal, UsageInfo,
     },
 };
 
@@ -54,6 +56,31 @@ fn recovery_ref() -> RecoveryRef {
         recovery_id: RecoveryId::new("recovery_01J00000000000000000000000"),
         recovery_event_id: EventId::new("01J00000000000000000000099"),
         recovery_input_fingerprint: content_hash(9),
+    }
+}
+
+fn turn_id(ordinal: u64) -> TurnId {
+    TurnId::new(format!("turn_{ordinal:026}"))
+}
+
+fn input_id(ordinal: u64) -> InputId {
+    InputId::new(format!("input_{ordinal:026}"))
+}
+
+fn block_id(ordinal: u64) -> BlockId {
+    BlockId::new(format!("block_{ordinal:026}"))
+}
+
+fn usage() -> UsageInfo {
+    UsageInfo {
+        prompt_tokens: 120,
+        completion_tokens: 80,
+        total_tokens: 200,
+        prompt_cache_hit_tokens: 0,
+        prompt_cache_miss_tokens: 120,
+        cache_usage_reported: Some(false),
+        reasoning_tokens: 0,
+        extras: Default::default(),
     }
 }
 
@@ -203,6 +230,123 @@ fn open_ledger(dir: &std::path::Path) -> ToolLedger {
         LEASE_MS,
     )
     .expect("open tool ledger")
+}
+
+#[test]
+fn turn_lifecycle_appends_flow_through_and_rebuild() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut ledger = open_ledger(temp.path());
+    let tid = turn_id(60);
+
+    // Complete lifecycle: start → round → block(usage) → finish(usage).
+    let started = ledger
+        .append_turn_started(
+            event_id(80),
+            TurnStarted {
+                turn_id: tid.clone(),
+                input_id: input_id(61),
+                mode: TurnMode::Normal,
+                recovery_ref: None,
+            },
+            NOW_MS + 80,
+        )
+        .expect("append turn started");
+    assert_eq!(
+        started.turn_id.as_ref().map(|id| id.as_str()),
+        Some(tid.as_str())
+    );
+    assert_eq!(ledger.last_fact_seq(), started.fact_seq);
+
+    ledger
+        .append_model_round_started(
+            event_id(81),
+            ModelRoundStarted {
+                turn_id: tid.clone(),
+                round: 0,
+                request_hash: content_hash(3),
+                context_revision: 7,
+            },
+            NOW_MS + 81,
+        )
+        .expect("append round started");
+
+    let sealed = ledger
+        .append_assistant_block_sealed(
+            event_id(82),
+            AssistantBlockSealed {
+                turn_id: tid.clone(),
+                block_id: block_id(62),
+                kind: AssistantBlockKind::Answer,
+                content_ref: content_ref(4),
+                model: "test-model".into(),
+                usage: Some(usage()),
+            },
+            NOW_MS + 82,
+        )
+        .expect("append assistant block sealed");
+    assert!(matches!(
+        &sealed.payload,
+        FactPayload::AssistantBlockSealed(p) if p.usage.is_some()
+    ));
+
+    let finished = ledger
+        .append_turn_finished(
+            event_id(83),
+            TurnFinished {
+                turn_id: tid.clone(),
+                terminal: TurnTerminal::Completed,
+                usage: Some(usage()),
+                error: None,
+                finished_at_ms: NOW_MS + 83,
+            },
+            NOW_MS + 83,
+        )
+        .expect("append turn finished");
+    assert_eq!(finished.fact_seq, started.fact_seq + 3);
+
+    // Interrupted facts carry the previous fact sequence and a recovery ref.
+    ledger
+        .append_turn_interrupted(
+            event_id(84),
+            TurnInterrupted {
+                turn_id: turn_id(63),
+                reason: InterruptReason::Crash,
+                last_fact_seq: finished.fact_seq,
+                recovery_ref: recovery_ref(),
+            },
+            NOW_MS + 84,
+        )
+        .expect("append turn interrupted");
+
+    // A failed terminal must carry an error (canonical validation).
+    assert!(matches!(
+        ledger.append_turn_finished(
+            event_id(85),
+            TurnFinished {
+                turn_id: turn_id(64),
+                terminal: TurnTerminal::Failed,
+                usage: None,
+                error: None,
+                finished_at_ms: NOW_MS + 85,
+            },
+            NOW_MS + 85,
+        ),
+        Err(ToolLedgerError::Canonical(
+            CanonicalError::Validation(_)
+        ))
+    ));
+
+    drop(ledger);
+    let reopened = ToolLedger::open(
+        temp.path(),
+        session_id(),
+        log_id(),
+        WriterId::new("writer-b"),
+        NOW_MS + LEASE_MS + 1,
+        LEASE_MS,
+    )
+    .expect("reopen ledger");
+    assert_eq!(reopened.last_fact_seq(), 5);
 }
 
 #[test]

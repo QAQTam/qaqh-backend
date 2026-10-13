@@ -25,28 +25,28 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 /// Run a shell command.
 pub struct ExecArgs {
-    /// Shell command string (runs via `shell`, default auto-detected).
+    /// Shell command to run.
     #[serde(default)]
     pub command: Option<String>,
-    /// Extra args for command (see the harness system prompt for per-shell rules).
+    /// Positional args; per-shell rules in the system prompt.
     #[serde(default)]
     pub args: Option<Vec<String>>,
-    /// Shell for command: bash | zsh | sh | pwsh | powershell | cmd (default auto-detected: pwsh on Windows, bash elsewhere).
+    /// bash | zsh | sh | pwsh | powershell | cmd; default auto-detected.
     #[serde(default)]
     pub shell: Option<String>,
-    /// Workdir (default workspace root).
+    /// Defaults to workspace root.
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Env overrides.
+    /// Environment overrides.
     #[serde(default)]
     pub env: Option<BTreeMap<String, String>>,
-    /// Timeout secs (1-3600, default 30).
+    /// 1-3600; default 30.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// Background after secs -> backgrounded+process_id.
+    /// Background after N secs; returns process_id.
     #[serde(default)]
     pub background_after_secs: Option<u64>,
-    /// Max output tokens (default 10000, range 100-50000).
+    /// 100-50000; default 10000.
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
 }
@@ -60,7 +60,7 @@ impl TypedTool for ExecTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "exec",
-            "Run a shell command. The command is wrapped by the selected shell (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id.",
+            "Run a shell command; returns exit_code/output; long runs return process_id.",
             crate::permission::ToolCategory::Exec,
             ToolRisk::Destructive,
             Duration::from_secs(30),

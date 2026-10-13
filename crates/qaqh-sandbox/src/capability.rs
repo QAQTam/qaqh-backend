@@ -81,7 +81,10 @@ impl SandboxCapabilities {
                 bubblewrap: false,
                 filesystem_write_isolation: false,
                 network_isolation: false,
-                process_hardening: true,
+                // 仓内没有任何 macOS 加固实现（linux.rs 是 cfg(linux)，
+                // sbx_bypass 是 cfg(windows)）——报 true 就是谎报能力位。
+                // Seatbelt 接线前恒 false（审计 P4：遥测/启动日志诚实口径）。
+                process_hardening: false,
                 detail: "macOS Seatbelt backend is not wired in the Linux-first cut".into(),
             };
         }

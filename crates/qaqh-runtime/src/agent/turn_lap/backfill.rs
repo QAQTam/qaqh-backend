@@ -2,11 +2,68 @@
 //!
 //! 从 `engine_turn.rs` 原样搬运，行为不变，仅可见性 `pub(crate)` 化。
 
+use qaqh_session::canonical::generate_ulid;
+use qaqh_session::session_fact_v2::{EventId, TurnFinished, TurnTerminal};
 use qaqh_types::UsageInfo;
 
 use crate::agent::dashboard;
 use crate::agent::engine_tool::ToolEngine;
+use crate::agent::state::agent::{tool_ledger_lease_ms, unix_ms};
+use crate::agent::tool_runtime::canonical_turn_id;
 use crate::agent::types::{Outcome, RingContext};
+
+/// Durably append the canonical `TurnFinished` fact for a terminal outcome.
+///
+/// This is the fact `projected_run_status` folds into `idle` (and its
+/// `usage` payload is the durable tok/s / context% source). Best-effort:
+/// a ledger failure must not swallow the turn result.
+pub(crate) fn record_turn_finished(
+    ctx: &mut RingContext,
+    turn_id: &str,
+    terminal: TurnTerminal,
+    usage: Option<UsageInfo>,
+    error_code: Option<&str>,
+) {
+    let ledger = match ctx.agent.tool_ledger_mut() {
+        Ok(Some(ledger)) => ledger,
+        Ok(None) => return,
+        Err(error) => {
+            log::warn!("[TURN] tool ledger unavailable for turn_finished: {error}");
+            return;
+        }
+    };
+    let now = unix_ms();
+    if let Err(error) = ledger.ensure_lease(now, tool_ledger_lease_ms()) {
+        log::warn!("[TURN] canonical lease failed for turn_finished: {error}");
+        return;
+    }
+    // Canonical validation: `Failed` terminals require a structured error.
+    let error = terminal_error(error_code);
+    if terminal == TurnTerminal::Failed && error.is_none() {
+        log::warn!("[TURN] turn_finished(Failed) without an error code; falling back to completed");
+        return record_turn_finished(ctx, turn_id, TurnTerminal::Completed, usage, None);
+    }
+    let payload = TurnFinished {
+        turn_id: canonical_turn_id(turn_id),
+        terminal,
+        usage,
+        error,
+        finished_at_ms: now,
+    };
+    if let Err(error) = ledger.append_turn_finished(EventId::new(generate_ulid()), payload, now) {
+        log::warn!("[TURN] failed to append turn_finished: {error}");
+    }
+}
+
+fn terminal_error(error_code: Option<&str>) -> Option<qaqh_session::session_fact_v2::TurnError> {
+    error_code.map(|code| qaqh_session::session_fact_v2::TurnError {
+        code: code.to_string(),
+        message: String::new(),
+        retryable: false,
+        details_ref: None,
+    })
+}
+
 // ── helpers (from engine_turn.rs, moved for phase decoupling) ──
 
 fn domain_failure(
@@ -194,6 +251,15 @@ pub(crate) fn handle_turn_complete(
             usage: last_usage,
         };
     }
+    // Canonical terminal fact (R3): flips projected status back to `idle`
+    // and carries the durable usage payload for tok/s / context%.
+    record_turn_finished(
+        ctx,
+        &turn_id,
+        TurnTerminal::Completed,
+        last_usage.clone(),
+        None,
+    );
     ctx.emitter
         .emit_timeline(qaqh_domain::TimelineIntent::TurnSealed {
             turn_id: turn_id.clone(),
