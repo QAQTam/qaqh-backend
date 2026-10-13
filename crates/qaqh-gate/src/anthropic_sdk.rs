@@ -41,11 +41,16 @@ fn build_anthropic_url(base_url: &str, anthropic_path: Option<&str>) -> String {
         return format!("{}{}", base, path);
     }
     let base = base_url.trim_end_matches('/');
-    if base.ends_with("/v1/messages") || base.ends_with("/api/anthropic/v1/messages") {
-        base.to_string()
-    } else {
-        format!("{}/v1/messages", base)
+    // 已是完整 messages URL 就原样返回。
+    if base.ends_with("/messages") {
+        return base.to_string();
     }
+    // base 已带 `/v1` 版本根（OpenAI 习惯写法）时只补 `/messages`——0.4.0+ 关了
+    // 重定向，`/v1/v1/messages` 不再被 3xx 兜底而是直接 404。
+    if base.ends_with("/v1") {
+        return format!("{base}/messages");
+    }
+    format!("{base}/v1/messages")
 }
 
 fn sdk_base_url(full_url: &str) -> String {
@@ -717,6 +722,25 @@ mod tests {
         );
         let abs = build_anthropic_url("ignored", Some("http://localhost:8080/v1/messages"));
         assert_eq!(abs, "http://localhost:8080/v1/messages");
+    }
+
+    /// 回归：base 结尾裸 `/v1`（OpenAI 习惯写法）不得产出 `/v1/v1/messages`。
+    /// 关重定向后这条双路径是硬 404，不再被 3xx 兜底。
+    #[test]
+    fn anthropic_url_does_not_double_the_v1_segment() {
+        let full = build_anthropic_url("https://api.anthropic.com/v1", None);
+        assert_eq!(full, "https://api.anthropic.com/v1/messages");
+        assert_eq!(sdk_base_url(&full), "https://api.anthropic.com/v1");
+        // 无版本根时仍补满 /v1/messages。
+        assert_eq!(
+            build_anthropic_url("https://api.anthropic.com", None),
+            "https://api.anthropic.com/v1/messages"
+        );
+        // 已是完整 messages URL 原样返回。
+        assert_eq!(
+            build_anthropic_url("https://gw.example.com/api/anthropic/v1/messages", None),
+            "https://gw.example.com/api/anthropic/v1/messages"
+        );
     }
 
     #[test]
