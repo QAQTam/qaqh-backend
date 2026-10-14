@@ -2,6 +2,7 @@
 name = "qaqh-daemon"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Headless QAQ-Harness application daemon"
 build = "build.rs"
 

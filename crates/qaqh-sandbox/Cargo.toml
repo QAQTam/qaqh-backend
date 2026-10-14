@@ -2,6 +2,7 @@
 name = "qaqh-sandbox"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Platform capability discovery and Linux process sandboxing"
 
 [dependencies]

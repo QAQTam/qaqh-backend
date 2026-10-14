@@ -2,6 +2,7 @@
 name = "qaqh-runtime"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "GUI-independent QAQ-Harness daemon application runtime"
 
 [dependencies]

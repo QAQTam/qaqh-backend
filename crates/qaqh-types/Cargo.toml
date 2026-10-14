@@ -2,6 +2,7 @@
 name = "qaqh-types"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness shared type definitions"
 
 [dependencies]

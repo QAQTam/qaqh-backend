@@ -2,6 +2,7 @@
 name = "qaqh-session"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness session manager — singleton, list/load/save/active"
 
 [features]

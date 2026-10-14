@@ -4,7 +4,7 @@ QAQ-Harness 的 Rust 后端 monorepo。daemon 承载多会话 Agent 循环、can
 facts、Ringing v2 单流、工具执行、权限/沙箱、compact 和 provider gate。
 
 - Edition 2024
-- License MIT
+- License MIT OR Apache-2.0（`LICENSE-MIT` + `LICENSE-APACHE`，下游可任选）
 - 状态：beta / RC 前架构清理
 - 当前架构基线：[ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - 当前代码基线：`2.0.0-beta.3`

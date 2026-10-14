@@ -2,6 +2,7 @@
 name = "qaqh-file-tools"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness file tool group: mutate/query/glob/grep/edit/apply_patch/journal/read_image (P2 crate split from qaqh-workspace)"
 
 [dependencies]

@@ -2,6 +2,7 @@
 name = "qaqh-tool-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness Tool SDK core: typed tool contract, descriptor, projection, schema (P2 crate split from qaqh-workspace)"
 
 [dependencies]
