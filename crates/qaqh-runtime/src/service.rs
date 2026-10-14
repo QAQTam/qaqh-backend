@@ -942,6 +942,9 @@ impl QaqhService {
                     .map_err(|error| error.message().to_string())?;
                 Ok(Value::Null)
             }
+            // 「这把凭据现在还有效吗」：唯一能回答它的动作。失效即清（见
+            // `DsAccountManager::verify`），失败原因原样交回前端展示。
+            "dsaccount.verify" => Ok(self.dsaccount()?.verify()),
             "dsaccount.bonus.ack" => {
                 let order_id = pstr(params, "order_id")?;
                 self.dsaccount()?
