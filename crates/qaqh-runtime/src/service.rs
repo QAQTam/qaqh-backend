@@ -846,6 +846,13 @@ impl QaqhService {
                         "expiresAtMs": status["flow"]["expires_at_ms"],
                         "error": status["flow"]["error"],
                     },
+                    // 远端撤销的结局（daemon 内存态）：本地断开是权威的，但"有没有
+                    // 向平台声明成功"必须让用户看得到——官网上那时仍有授权。
+                    "revoke": {
+                        "state": status["revoke"]["state"],
+                        "attempts": status["revoke"]["attempts"],
+                        "message": status["revoke"]["message"],
+                    },
                 }))
             }
             "dsaccount.balance" => {
