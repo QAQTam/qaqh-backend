@@ -37,9 +37,10 @@ pub use config::{
 };
 pub use discovery::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 pub use image_store::sha256_hex;
-pub use message::{ContentBlock, FunctionCall, Message, ToolCall};
+pub use message::{ContentBlock, FunctionCall, Message, ReasoningKind, ToolCall};
 pub use provider::{
-    CacheTokenField, EndpointCompat, RetrySpec, ThinkingParamMode, UserSendMode, Wire,
+    CacheTokenField, CredentialSource, EndpointCompat, RetrySpec, ThinkingParamMode, UserSendMode,
+    Wire,
 };
 pub use session::{
     SessionListEntry, SessionMeta, SessionRunStatus, SkillSessionEntry, SkillSessionEntryState,

@@ -56,7 +56,15 @@ fn event_text(ev: &StreamEvent) -> Option<&str> {
 
 fn event_reasoning(ev: &StreamEvent) -> Option<&str> {
     match ev {
-        StreamEvent::ReasoningDelta(t) => Some(t.as_str()),
+        StreamEvent::ReasoningDelta { text, .. } => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+/// 思考帧的类别（`summary` / `text`）——断言「摘要与完整思考不混为一谈」用。
+fn event_reasoning_kind(ev: &StreamEvent) -> Option<qaqh_types::ReasoningKind> {
+    match ev {
+        StreamEvent::ReasoningDelta { kind, .. } => Some(*kind),
         _ => None,
     }
 }
@@ -532,6 +540,7 @@ fn openrouter_tool_history_uses_strict_compatible_shape() {
             content: vec![
                 ContentBlock::Reasoning {
                     reasoning: "private chain".into(),
+                    kind: Some(qaqh_types::ReasoningKind::Text),
                 },
                 ContentBlock::ToolUse {
                     id: "call_1".into(),
@@ -1096,6 +1105,71 @@ fn retry_policy_from_spec_falls_back_to_defaults_on_zero_fields() {
     assert_eq!(custom.idle_timeout, Duration::from_secs(600));
 }
 
+/// 订阅套餐路径**唯一**的可显示思考来源就是
+/// `response.reasoning_summary_text.delta`——此前没有任何用例喂过这一帧（盲区）。
+/// kind 一丢，前端就会把「摘要」当成模型的完整思考展示。这条用例把
+/// 「摘要帧 → StreamEvent → Done 落盘块」三段的类别全部钉住。
+#[test]
+fn responses_summary_delta_keeps_kind_all_the_way_to_the_done_block() {
+    let mock = MockServer::new(vec![
+        mock_server::SseChunk::Raw(
+            "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"先查资料。\"}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":1,\"content_index\":0,\"delta\":\"答案是 42\"}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"m1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"答案是 42\",\"annotations\":[]}]}}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"test-model\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"total_tokens\":13}}}\n\n".into()
+        ),
+        mock_server::SseChunk::done(),
+    ]);
+    let provider = make_responses_provider(&mock);
+    let events = collect_events(&provider, vec![Message::user("hi")], None);
+
+    // 1) 流上：摘要帧是一段带 Summary 类别的增量，不是无名无姓的「思考」。
+    let deltas: Vec<(qaqh_types::ReasoningKind, &str)> = events
+        .iter()
+        .filter_map(|ev| {
+            if let StreamEvent::ReasoningDelta { kind, text } = ev {
+                Some((*kind, text.as_str()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec![(qaqh_types::ReasoningKind::Summary, "先查资料。")],
+        "摘要帧必须以 Summary 类别出现"
+    );
+
+    // 2) 落盘：Done 的 assistant 消息里同一个块也标 Summary——timeline 重建
+    //    （`RoundBlock::Reasoning.kind`）与 UI 标签都靠它。
+    let done = events.iter().find_map(event_done).expect("Done 事件");
+    let reasoning: Vec<(Option<qaqh_types::ReasoningKind>, &str)> = done
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Reasoning { reasoning, kind } => Some((*kind, reasoning.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert!(!reasoning.is_empty(), "摘要必须落成 reasoning 块：{done:?}");
+    assert!(
+        reasoning
+            .iter()
+            .all(|(kind, _)| *kind == Some(qaqh_types::ReasoningKind::Summary)),
+        "落盘块的类别必须是 Summary，否则 UI 会把摘要当完整思考：{reasoning:?}"
+    );
+    assert!(
+        reasoning.iter().any(|(_, text)| *text == "先查资料。"),
+        "摘要原文必须落盘：{reasoning:?}"
+    );
+}
+
 /// Build a Responses-format SSE stream with text, reasoning, and completion.
 fn responses_sse_scenario() -> Vec<mock_server::SseChunk> {
     vec![
@@ -1157,14 +1231,19 @@ fn responses_chat_stream_basic_text() {
     let reasoning: Vec<&str> = events
         .iter()
         .filter_map(|ev| {
-            if let StreamEvent::ReasoningDelta(t) = ev {
-                Some(t.as_str())
+            if let StreamEvent::ReasoningDelta { text, .. } = ev {
+                Some(text.as_str())
             } else {
                 None
             }
         })
         .collect();
     assert_eq!(reasoning, vec!["thinking..."]);
+    // 该帧来自 `response.reasoning_text.delta`（完整思考），不得被标成摘要。
+    assert_eq!(
+        events.iter().find_map(event_reasoning_kind),
+        Some(qaqh_types::ReasoningKind::Text)
+    );
 
     // Should have a Done event with usage
     let done = events
@@ -1860,4 +1939,48 @@ fn gemini_body_carries_system_instruction_and_thinking_level() {
         "no stream_options: {body}"
     );
     assert!(body.get("do_sample").is_none(), "no do_sample: {body}");
+}
+
+/// plan 直连路由的 **HTTP 级**契约（M1 收口）：请求体必须 `stream:true` + `store:false`，
+/// 被禁字段一个都不能出现；而**非流式入口**（压缩走的 `chat_sync`）在 plan 模式下
+/// 也必须改走流式并收集文本——这条测试守的就是那个「改走流式」。
+///
+/// 为什么值得单独立一条：`store:false` + `stream:true` 是该路由的硬要求
+/// （文档 preview-limitations），漏了它上游只回一个
+/// `subscription_sharing_route_not_supported`/`unsupported_capability`，
+/// 而那种错误在本地看起来像「上游抽风」——最难查的一类。
+#[test]
+fn siwc_plan_sync_runs_over_the_streaming_route() {
+    let mock = MockServer::new(responses_sse_scenario());
+    let mut provider = make_responses_provider(&mock);
+    provider.responses_compat.siwc_plan = true;
+
+    let text = qaqh_gate::chat_sync(&provider, vec![Message::user("compact this")], 4096)
+        .expect("plan 模式的 sync 应改走流式并成功");
+    assert_eq!(text, "Hello world");
+
+    let request = mock.last_request_json().expect("request body");
+    assert_eq!(request["stream"], json!(true), "plan 路由必须流式");
+    assert_eq!(request["store"], json!(false));
+    assert!(
+        request.get("max_output_tokens").is_none(),
+        "plan 路由禁用 max_output_tokens: {request}"
+    );
+    for field in [
+        "user",
+        "temperature",
+        "top_p",
+        "metadata",
+        "truncation",
+        "previous_response_id",
+        "prompt_cache_retention",
+        "prompt_cache_key",
+        "max_tool_calls",
+        "safety_identifier",
+        "prompt",
+        "background",
+        "conversation",
+    ] {
+        assert!(request.get(field).is_none(), "plan 请求体不得出现 {field}: {request}");
+    }
 }

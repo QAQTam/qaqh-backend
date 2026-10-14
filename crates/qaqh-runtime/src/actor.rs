@@ -94,7 +94,9 @@ fn publish_worker_event(
         crate::agent::types::WriterEvent::TitleChanged { session_id, title } => {
             let Some(v2_hub) = v2_hub else { return; };
             let session_dir = sessions.session_path_dir(&session_id);
-            if let Err(error) = v2_hub.publish_title_changed(&session_dir, &session_id, title) {
+            if let Err(error) =
+                v2_hub.publish_title_changed(&session_dir, &session_id, title, qaqh_session::session_fact_v2::TitleSource::Auto)
+            {
                 log::warn!("[title] v2 publish failed for {session_id}: {error}");
             }
         }

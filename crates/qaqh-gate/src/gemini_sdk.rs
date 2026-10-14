@@ -45,6 +45,7 @@ use super::transport::{
 };
 use super::types::{
     ProviderConfig, StreamEvent, clamp_effort_to_allowlist, normalize_reasoning_effort,
+    stored_reasoning_kind,
 };
 
 const MEDIA_ATTACHMENT_TEXT: &str = "Attached media from tool result:";
@@ -127,7 +128,7 @@ pub(crate) fn project_messages(
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } => content.push_str(text),
-                        ContentBlock::Reasoning { reasoning: r } => reasoning.push_str(r),
+                        ContentBlock::Reasoning { reasoning: r, .. } => reasoning.push_str(r),
                         ContentBlock::ToolUse { id, name, input } => {
                             let mut call = WireToolCall::new(name.clone(), input.clone());
                             // 0.4.0 rejects an empty explicit id; leave it unset so
@@ -236,6 +237,7 @@ fn gemini_effort(effort: &str) -> Option<ReasoningEffort> {
         "high" => ReasoningEffort::High,
         "xhigh" => ReasoningEffort::XHigh,
         "max" => ReasoningEffort::Max,
+        "ultra" => ReasoningEffort::Ultra,
         _ => return None,
     })
 }
@@ -406,10 +408,10 @@ async fn consume(
                     on_event(StreamEvent::ContentDelta(text));
                 }
             }
-            Ok(SdkEvent::ReasoningDelta { text, .. }) => {
-                if !text.is_empty() {
-                    state.reasoning.push_str(&text);
-                    on_event(StreamEvent::ReasoningDelta(text));
+            Ok(SdkEvent::ReasoningDelta { kind, text }) => {
+                let kind = stored_reasoning_kind(kind);
+                if !text.is_empty() && state.push_reasoning(kind, &text) {
+                    on_event(StreamEvent::ReasoningDelta { kind, text });
                 }
             }
             Ok(SdkEvent::ToolCallDelta {
@@ -623,7 +625,7 @@ mod tests {
         assert_eq!(gemini_effort("high"), Some(ReasoningEffort::High));
         assert_eq!(gemini_effort("xhigh"), Some(ReasoningEffort::XHigh));
         assert_eq!(gemini_effort("max"), Some(ReasoningEffort::Max));
-        assert_eq!(gemini_effort("ultra"), None);
+        assert_eq!(gemini_effort("ultra"), Some(ReasoningEffort::Ultra));
     }
 
     #[test]
@@ -690,6 +692,7 @@ mod tests {
             name: None,
             content: vec![ContentBlock::Reasoning {
                 reasoning: "先规划。".into(),
+                kind: Some(qaqh_types::ReasoningKind::Text),
             }],
         }];
         let projected = project_messages(history, 0);

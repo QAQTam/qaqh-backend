@@ -39,6 +39,7 @@ pub(crate) fn parse_and_ingest(
     round_num: u32,
     content: &str,
     reasoning: &str,
+    reasoning_kind: Option<qaqh_types::ReasoningKind>,
     tool_calls_raw: &serde_json::Value,
     response_output_items: Vec<ContentBlock>,
     active_stream_block: &mut Option<(qaqh_domain::TimelineBlockKind, String)>,
@@ -58,6 +59,7 @@ pub(crate) fn parse_and_ingest(
                     round_num,
                     block_id: format!("tool:{}", tool_call.id),
                     kind: qaqh_domain::TimelineBlockKind::Tool,
+                    reasoning_kind: None,
                     tool: Some(qaqh_domain::TimelineTool {
                         exit_code: None,
                         completed_at_ms: None,
@@ -79,7 +81,8 @@ pub(crate) fn parse_and_ingest(
                 });
         }
     }
-    let mut assistant_msg = util::build_assistant_message(content, reasoning, &parsed);
+    let mut assistant_msg =
+        util::build_assistant_message(content, reasoning, reasoning_kind, &parsed);
     assistant_msg.content.extend(response_output_items);
     let receipt = ctx.flow.ingest(
         &mut ctx.agent.msg,

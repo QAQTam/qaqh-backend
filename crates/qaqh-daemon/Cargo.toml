@@ -36,6 +36,9 @@ rcgen = "0.14.10"
 winresource = "0.1"
 
 [dev-dependencies]
+# 越权矩阵用例需要 `qaqh_siwc::methods::ALL`（方法清单真源）与临时目录的管理器；
+# 运行期依赖由 qaqh-runtime 传递，故只登记在 dev。
+qaqh-siwc = { path = "../qaqh-siwc" }
 tempfile = "3"
 
 [features]

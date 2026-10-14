@@ -66,6 +66,7 @@ pub(crate) fn parse_tool_calls_from_response(
 pub(crate) fn build_assistant_message(
     content: &str,
     reasoning: &str,
+    reasoning_kind: Option<qaqh_types::ReasoningKind>,
     parsed: &[qaqh_types::ToolCall],
 ) -> qaqh_types::Message {
     use qaqh_types::{ContentBlock, Message};
@@ -73,6 +74,7 @@ pub(crate) fn build_assistant_message(
     if !reasoning.is_empty() {
         blocks.push(ContentBlock::Reasoning {
             reasoning: reasoning.to_string(),
+            kind: reasoning_kind,
         });
     }
     if !content.is_empty() {
@@ -112,9 +114,10 @@ pub(crate) fn emit_round_complete_via_emitter(
     let mut tool_calls = Vec::new();
     for cb in &assistant_msg.content {
         match cb {
-            ContentBlock::Reasoning { reasoning } if !reasoning.is_empty() => {
+            ContentBlock::Reasoning { reasoning, kind } if !reasoning.is_empty() => {
                 blocks.push(qaqh_domain::RoundBlock::Reasoning {
                     content: reasoning.clone(),
+                    kind: *kind,
                 });
             }
             ContentBlock::Text { text } if !text.is_empty() => {
