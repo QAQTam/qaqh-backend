@@ -32,6 +32,7 @@ sha2 = "0.11"
 ureq = { version = "3", features = ["json"] }
 # Sign in with ChatGPT（套餐用量）：服务面 `siwc.*` 的全部实现。
 qaqh-siwc = { path = "../qaqh-siwc" }
+qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 tokio = { version = "1", features = ["sync", "time"] }
 
 [features]

@@ -232,6 +232,13 @@ pub enum CredentialSource {
     /// 用本机 ChatGPT 套餐额度：每回合向 SIWC 管理器取 access token，
     /// 并启用该直连路由的请求契约（只支持 `responses` wire + 官方 api base）。
     ChatgptPlan,
+    /// 用本机 DeepSeek 账号额度：每回合向 `qaqh-dsaccount` 管理器取账号 token，
+    /// 以 **`x-dsh-auth-token` 裸头**（无 `Bearer` 前缀）发往官方推理端点
+    /// （只支持 `openai` wire + `https://api.deepseek.com`）。
+    ///
+    /// 与 [`CredentialSource::ChatgptPlan`] 是两条**互不回退**的路：没登录就报错，
+    /// 绝不退回用 API key——那会让用户在不知情的情况下花自己的钱。
+    DeepseekAccount,
 }
 
 impl Default for EndpointCompat {

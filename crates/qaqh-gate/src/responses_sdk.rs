@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
 use mutil_ai::{
-    AuthStyle, ChatRequest, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart,
+    ChatRequest, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart,
     Message as WireMessage, ModelAdapter, Part, ProfileSelector, ProtocolSurface, ProviderProfile,
     ProviderRequestOptions, ReasoningConfig, ReasoningEffort, ReasoningSummary, RequestOptions,
     Role, ServerTool, ServerToolItem, ServerToolState, StreamEvent as SdkEvent,
@@ -29,7 +29,7 @@ use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, apply_management_headers,
+    CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, apply_management_headers,
     empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
     tool_result_name,
 };
@@ -403,7 +403,11 @@ pub(crate) fn project_responses_messages(
                         );
                         // 0.4.0 rejects an empty explicit id; leave it unset so the
                         // SDK's normalizer assigns a collision-free one.
-                        call.id = if id.is_empty() { None } else { Some(id.clone()) };
+                        call.id = if id.is_empty() {
+                            None
+                        } else {
+                            Some(id.clone())
+                        };
                         parts.push(Part::ToolCall(call));
                     }
                 }
@@ -523,7 +527,8 @@ fn build_adapter(
         ProtocolSurface::OpenAiResponses,
         base,
         path,
-        AuthStyle::Bearer,
+        // 凭据头由 provider 决定（账号类凭据不是 Bearer）。
+        provider.auth_style(),
     );
     spec.profile = ProfileSelector::Custom(responses_profile());
     let mut transport = TransportConfig::default();
@@ -799,7 +804,10 @@ fn interpret_provider_stream(raw: &str) -> Option<IncompleteTerminal> {
             usage::UsageSeed {
                 prompt_tokens: input_tokens,
                 completion_tokens: output_tokens,
-                total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+                total_tokens: u
+                    .get("total_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32),
                 cache_hit_tokens: cached,
                 cache_miss_tokens: if reported {
                     input_tokens.saturating_sub(cached)
@@ -1542,8 +1550,14 @@ mod tests {
             Some("u42".into()),
             true,
         );
-        assert!(request.max_output_tokens.is_none(), "max_output_tokens 被禁");
-        assert!(request.server_tools.is_empty(), "plan 路由不提供 hosted 工具");
+        assert!(
+            request.max_output_tokens.is_none(),
+            "max_output_tokens 被禁"
+        );
+        assert!(
+            request.server_tools.is_empty(),
+            "plan 路由不提供 hosted 工具"
+        );
         assert_eq!(request.extra_body["store"], serde_json::json!(false));
         assert_eq!(
             request.extra_body["parallel_tool_calls"],
@@ -1569,15 +1583,8 @@ mod tests {
     fn siwc_plan_strip_cannot_be_bypassed() {
         let mut p = provider();
         p.responses_compat.siwc_plan = true;
-        let mut request = build_request(
-            &p,
-            vec![WireMessage::user("hi")],
-            None,
-            0,
-            None,
-            None,
-            true,
-        );
+        let mut request =
+            build_request(&p, vec![WireMessage::user("hi")], None, 0, None, None, true);
         for field in SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS {
             request
                 .extra_body
