@@ -176,6 +176,20 @@ fn route(
             200,
             r#"{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":null}}"#,
         )),
+        // 凭据验证（`manager.verify()`）打的就是这条：账号模式下它是"这把 token
+        // 现在还能用吗"的唯一探针。`Rejected` 模式让它回 401。
+        "/models" => {
+            if matches!(mode, ExchangeMode::Rejected) {
+                return Some(Reply::json(
+                    401,
+                    r#"{"error":{"message":"Authentication Fails (invalid dsh token)"}}"#,
+                ));
+            }
+            Some(Reply::json(
+                200,
+                r#"{"object":"list","data":[{"id":"deepseek-flash"},{"id":"deepseek-v4-pro"}]}"#,
+            ))
+        }
         protocol::USERS_LOGOUT_PATH => {
             // 前 N 次故意 500：验「后台撤销会重试到成功或预算耗尽」。
             let failing = remaining_logout_failures
@@ -555,6 +569,75 @@ fn a_failed_revoke_is_retried_until_it_succeeds() {
     assert!(
         manager.store().load().expect("读").is_none(),
         "远端重试期间绝不恢复本地登录态"
+    );
+}
+
+/// 「验证」的两个方向：有效时原地不动；平台判失效时**顺手清掉**本地凭据。
+#[test]
+fn verify_keeps_a_live_credential_and_clears_a_rejected_one() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let platform = FakePlatform::start(ExchangeMode::Ok);
+    let manager = manager_for(&temp, &platform);
+    let record = StoredAccount::new("user-1", "测试用户", None, None, &platform.base, FAKE_TOKEN)
+        .expect("构造");
+    manager.store().save(&record).expect("落盘");
+
+    let ok = manager.verify();
+    assert_eq!(ok["valid"], true, "{ok}");
+    assert!(
+        manager.store().load().expect("读").is_some(),
+        "有效就不该碰凭据"
+    );
+
+    // 平台判 401（`Rejected` 模式让 `/models` 一起回 401）：失效 ⇒ 顺手清。
+    let dead_platform = FakePlatform::start(ExchangeMode::Rejected);
+    let dead_manager = manager_for(&temp, &dead_platform);
+    let dead_record = StoredAccount::new(
+        "user-1",
+        "测试用户",
+        None,
+        None,
+        &dead_platform.base,
+        FAKE_TOKEN,
+    )
+    .expect("构造");
+    dead_manager.store().save(&dead_record).expect("落盘");
+
+    let dead = dead_manager.verify();
+    assert_eq!(dead["valid"], false, "{dead}");
+    assert_eq!(dead["cleared"], true, "失效必须清掉本地凭据: {dead}");
+    assert!(
+        dead["reason"]
+            .as_str()
+            .is_some_and(|text| text.contains("Authentication")),
+        "原因要原样带回来: {dead}"
+    );
+    assert!(dead_manager.store().load().expect("读").is_none());
+}
+
+/// 「端点不可用」≠「凭据无效」（crate 不变量 2）：不可达时只报失败，凭据留着。
+#[test]
+fn verify_does_not_clear_when_the_endpoint_is_unreachable() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let origin = "http://127.0.0.1:9".to_string();
+    let manager = crate::manager::DsAccountManager::new(
+        crate::store::AccountStore::new(temp.path().join("deepseek-account.json")),
+        crate::client::DsClientConfig {
+            platform_origin: origin.clone(),
+            inference_origin: origin.clone(),
+            ..crate::client::DsClientConfig::default()
+        },
+    );
+    let record =
+        StoredAccount::new("user-1", "测试用户", None, None, &origin, FAKE_TOKEN).expect("构造");
+    manager.store().save(&record).expect("落盘");
+
+    let result = manager.verify();
+    assert_eq!(result["valid"], false, "{result}");
+    assert_eq!(result["cleared"], false, "端点不可用不该清凭据: {result}");
+    assert!(
+        manager.store().load().expect("读").is_some(),
+        "凭据必须留在原地"
     );
 }
 
