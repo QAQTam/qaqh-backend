@@ -2,6 +2,7 @@
 name = "qaqh-config"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness configuration: provider registry, config load/save"
 
 [features]

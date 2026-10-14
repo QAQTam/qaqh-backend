@@ -44,7 +44,7 @@ lsp-types = "0.95"
 [workspace.package]
 version = "2.0.0-RC1"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [profile.release]
 opt-level = "z"

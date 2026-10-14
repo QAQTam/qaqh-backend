@@ -2,6 +2,7 @@
 name = "qaqh-config-api"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "配置契约层（wire DTO）：ConfigDto 读模型 / ConfigPatch 写模型——winui/ratatui/web 三端共享的唯一真相"
 
 [dependencies]

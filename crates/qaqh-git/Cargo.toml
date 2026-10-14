@@ -2,6 +2,7 @@
 name = "qaqh-git"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness git panel API: thin git2 wrappers for the daemon control protocol (P2 crate split from qaqh-workspace)"
 
 [dependencies]

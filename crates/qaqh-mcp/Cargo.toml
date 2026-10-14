@@ -2,6 +2,7 @@
 name = "qaqh-mcp"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness MCP client support — dynamic tools/resources from MCP servers (docs/current/architecture.md)"
 
 [dependencies]
