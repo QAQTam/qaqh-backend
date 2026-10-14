@@ -2,6 +2,7 @@
 name = "sbx-win"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 # 全量 Windows 语义：非 Windows 平台本 crate 编译为空 lib（见 src/lib.rs 的
 # `#![cfg(windows)]`），依赖无需参与构建。

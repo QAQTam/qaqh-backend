@@ -2,6 +2,7 @@
 name = "qaqh-fs-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness filesystem core: shared file IO helpers, line cache, file state ledger (P2 crate split from qaqh-workspace)"
 
 [dependencies]
