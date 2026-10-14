@@ -118,9 +118,7 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     // 这样「两边任一被改动」都查得到：只查「本次补丁带没带 credential」会漏掉
     // 「已有 plan 的用户把 wire 改走」那一半。
     let next_wire = match meaningful(&patch.wire) {
-        Some(v) => {
-            qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?
-        }
+        Some(v) => qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?,
         None => cfg.wire,
     };
     let next_credential = match patch.credential.as_deref() {
@@ -128,6 +126,7 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         // ApiKey 正是「用户以为在用套餐、实际打自己的 key」那类最难查的问题。
         Some("api_key") => qaqh_types::CredentialSource::ApiKey,
         Some("chatgpt_plan") => qaqh_types::CredentialSource::ChatgptPlan,
+        Some("deepseek_account") => qaqh_types::CredentialSource::DeepseekAccount,
         Some(other) => return Err(format!("无法识别的 credential: {other}")),
         None => cfg.credential,
     };
@@ -141,6 +140,16 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     {
         return Err(format!(
             "credential=chatgpt_plan 必须配 responses 协议（wire={}）：套餐直连只提供 Responses API",
+            next_wire.as_str()
+        ));
+    }
+    // DeepSeek 账号余额走 OpenAI 兼容的 chat completions：同样在保存期拦掉。
+    // 官方 base_url 那一半同样不在这里查（权威在 `apply_deepseek_account`）。
+    if next_credential == qaqh_types::CredentialSource::DeepseekAccount
+        && next_wire != qaqh_types::Wire::OpenAi
+    {
+        return Err(format!(
+            "credential=deepseek_account 必须配 openai 协议（wire={}）：账号余额只提供 chat completions",
             next_wire.as_str()
         ));
     }
@@ -240,6 +249,7 @@ fn credential_wire(source: qaqh_types::CredentialSource) -> &'static str {
     match source {
         qaqh_types::CredentialSource::ApiKey => "api_key",
         qaqh_types::CredentialSource::ChatgptPlan => "chatgpt_plan",
+        qaqh_types::CredentialSource::DeepseekAccount => "deepseek_account",
     }
 }
 
@@ -478,6 +488,62 @@ mod tests {
         )
         .expect("apply");
         assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
+    }
+
+    /// DeepSeek 账号：配错 wire 在保存期就报，且**双向**都拦（与套餐那条同规矩）。
+    #[test]
+    fn apply_patch_rejects_account_on_a_non_openai_wire_and_vice_versa() {
+        let mut cfg = Config {
+            wire: qaqh_types::Wire::Responses,
+            ..Default::default()
+        };
+        let err = apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                credential: Some("deepseek_account".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("responses wire + account must be rejected");
+        assert!(err.contains("openai"), "{err}");
+        assert_eq!(
+            cfg.credential,
+            qaqh_types::CredentialSource::ApiKey,
+            "拒绝即不落地"
+        );
+
+        // 同一次补丁里把 wire 一起改对即通过。
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                wire: Some("openai".into()),
+                credential: Some("deepseek_account".into()),
+                ..Default::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(
+            cfg.credential,
+            qaqh_types::CredentialSource::DeepseekAccount
+        );
+        // 读回与写出必须同源（`credential_wire` 的穷尽 match 挡住漏改）。
+        assert_eq!(to_dto(&cfg).credential, "deepseek_account");
+
+        // 反向：已有账号凭据的用户把 wire 改走，同样在保存期报错。
+        let err = apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                wire: Some("anthropic".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("moving the wire away must be rejected");
+        assert!(err.contains("openai"), "{err}");
+        assert_eq!(
+            cfg.credential,
+            qaqh_types::CredentialSource::DeepseekAccount,
+            "拒绝即不落地"
+        );
     }
 
     /// 反向也要拦：已有 plan 的用户把 wire 改走，同样在保存期报错——只查「本次

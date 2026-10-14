@@ -2177,6 +2177,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-dsaccount"
+version = "2.0.0-beta.3"
+dependencies = [
+ "log",
+ "qaqh-config",
+ "qaqh-types",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "qaqh-file-tools"
 version = "2.0.0-beta.3"
 dependencies = [
@@ -2373,6 +2388,7 @@ dependencies = [
  "qaqh-config",
  "qaqh-config-api",
  "qaqh-domain",
+ "qaqh-dsaccount",
  "qaqh-gate",
  "qaqh-lsp",
  "qaqh-mcp",

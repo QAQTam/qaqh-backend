@@ -866,6 +866,9 @@ pub(crate) fn provider_for(
     if cfg.credential == qaqh_types::CredentialSource::ChatgptPlan {
         apply_chatgpt_plan(&mut provider, cfg)?;
     }
+    if cfg.credential == qaqh_types::CredentialSource::DeepseekAccount {
+        apply_deepseek_account(&mut provider, cfg)?;
+    }
     Ok(provider)
 }
 
@@ -911,6 +914,52 @@ fn apply_chatgpt_plan(
     provider.api_key = token;
     Ok(())
 }
+
+/// 把「用本机 DeepSeek 账号余额」落到 provider 上。
+///
+/// 与 [`apply_chatgpt_plan`] 同规矩：三条校验都是**配置错误**，一律拒绝不回退。
+/// 1. wire 必须是 `openai`——账号额度只提供 OpenAI 兼容的 chat completions；
+/// 2. base_url 为空则填官方推理 origin，非空必须是官方 origin
+///    （否则等于把账号 token 发往用户没预期的端点）；
+/// 3. 必须已登录（`token()` 的失败文案已经区分「没登录」与「本地凭据损坏」）。
+///
+/// 与套餐那条的**唯一形态差异**：账号 token 走 `x-dsh-auth-token` 裸头，不是
+/// `Authorization: Bearer`——这是实测出来的平台契约（见 `qaqh-dsaccount` 文档）。
+fn apply_deepseek_account(
+    provider: &mut qaqh_gate::ProviderConfig,
+    cfg: &qaqh_config::Config,
+) -> Result<(), String> {
+    if !matches!(cfg.wire, qaqh_types::Wire::OpenAi) {
+        return Err(format!(
+            "DeepSeek 账号额度只支持 openai（chat completions）协议（当前 profile 是 {:?}）：请在设置里把该 profile 的 wire 改为 openai",
+            cfg.wire
+        ));
+    }
+    let configured = cfg.base_url.trim().trim_end_matches('/');
+    if !configured.is_empty() && !qaqh_dsaccount::is_known_inference_origin(configured) {
+        return Err(format!(
+            "DeepSeek 账号额度只允许官方端点 {}（当前 profile 是 {configured}）：拒绝把账号凭据发往其它地址",
+            qaqh_dsaccount::protocol::INFERENCE_ORIGIN
+        ));
+    }
+    provider.base_url = qaqh_dsaccount::protocol::INFERENCE_ORIGIN.to_string();
+    // 凭据头：头名在这里一次性校验，非法即拒绝构建 provider（**不**回退 Bearer）。
+    let with_header = provider
+        .clone()
+        .with_auth_header(qaqh_dsaccount::protocol::AUTH_TOKEN_HEADER, None)
+        .map_err(|error| format!("账号凭据头不可用: {error}"))?;
+    *provider = with_header;
+    let manager = qaqh_dsaccount::manager().ok_or_else(|| {
+        "DeepSeek 账号额度需要先登录：请在设置页用 DeepSeek 账号登录后重试".to_string()
+    })?;
+    // 每回合现取：账号 grant 没有过期时间，失效只能由平台（401 / 40003）告诉我们。
+    let token = manager
+        .token()
+        .map_err(|error| error.message().to_string())?;
+    provider.api_key = token;
+    Ok(())
+}
+
 #[cfg(test)]
 mod arg_line_slot_tests {
     use super::{ArgLineSlot, ESTIMATE_INTERVAL};
@@ -1085,6 +1134,79 @@ mod final_checkpoint_tests {
 }
 
 #[cfg(test)]
+mod deepseek_account_tests {
+    use super::*;
+    use qaqh_types::{CredentialSource, Wire};
+
+    fn config(wire: Wire, base_url: &str) -> qaqh_config::Config {
+        qaqh_config::Config {
+            wire,
+            base_url: base_url.to_string(),
+            credential: CredentialSource::DeepseekAccount,
+            ..Default::default()
+        }
+    }
+
+    fn provider() -> qaqh_gate::ProviderConfig {
+        qaqh_gate::ProviderConfig::responses("", "", "test-model", None)
+    }
+
+    /// 账号余额只提供 openai（chat completions）：别的 wire 一律拒绝，不回退。
+    #[test]
+    fn account_route_rejects_a_non_openai_wire() {
+        let err = apply_deepseek_account(&mut provider(), &config(Wire::Anthropic, ""))
+            .expect_err("anthropic wire must be rejected");
+        assert!(err.contains("openai"), "{err}");
+        let err = apply_deepseek_account(&mut provider(), &config(Wire::Responses, ""))
+            .expect_err("responses wire must be rejected");
+        assert!(err.contains("openai"), "{err}");
+    }
+
+    /// 换端点不等于转发凭据：非官方 origin 一律拒绝（含 scheme 与子路径差异）。
+    #[test]
+    fn account_route_rejects_a_foreign_endpoint() {
+        for base in [
+            "https://proxy.example/v1",
+            "http://api.deepseek.com",
+            "https://api.deepseek.com/v1",
+        ] {
+            let err = apply_deepseek_account(&mut provider(), &config(Wire::OpenAi, base))
+                .expect_err("foreign endpoint must be rejected");
+            assert!(err.contains("官方端点"), "{base} → {err}");
+        }
+    }
+
+    /// 过了前两关：官方 base 与**裸头**先落位，再去找本机账号；
+    /// 测试里全局槽位没装配（与 chatgpt_plan 那条同前提），故文案要可操作。
+    #[test]
+    fn account_route_requires_a_signed_in_local_account_and_pins_the_bare_header() {
+        let mut p = provider();
+        let err = apply_deepseek_account(&mut p, &config(Wire::OpenAi, ""))
+            .expect_err("no signed-in account in tests");
+        assert!(err.contains("先登录"), "{err}");
+        assert_eq!(p.base_url, qaqh_dsaccount::protocol::INFERENCE_ORIGIN);
+        let auth = p.auth_header.as_ref().expect("凭据头必须已落位");
+        assert_eq!(auth.header.as_str(), "x-dsh-auth-token");
+        assert_eq!(auth.value_prefix, None, "账号 token 是裸值，不带任何前缀");
+        // adapter 侧必须是 `Custom`，不是 `Bearer`（否则凭据会发进错头）。
+        assert!(
+            format!("{:?}", p.auth_style()).contains("Custom"),
+            "凭据头形态必须是 Custom：{:?}",
+            p.auth_style()
+        );
+    }
+
+    /// 默认（无覆盖）仍是 `Bearer`：BYOK 的行为一个字节都没变。
+    #[test]
+    fn a_plain_provider_still_uses_bearer() {
+        let p = provider();
+        assert!(p.auth_header.is_none());
+        assert!(format!("{:?}", p.auth_style()).contains("Bearer"));
+        assert!(p.with_auth_header("not a header name", None).is_err());
+    }
+}
+
+#[cfg(test)]
 mod chatgpt_plan_tests {
     use super::*;
     use qaqh_types::{CredentialSource, Wire};
@@ -1145,7 +1267,11 @@ mod chatgpt_plan_tests {
         // 官方端点 + responses:两条配置校验都过，只会在取 token 时失败。
         let err = apply_chatgpt_plan(
             &mut p,
-            &config(Wire::Responses, qaqh_siwc::API_BASE, CredentialSource::ChatgptPlan),
+            &config(
+                Wire::Responses,
+                qaqh_siwc::API_BASE,
+                CredentialSource::ChatgptPlan,
+            ),
         )
         .expect_err("no token available in tests");
         assert!(err.contains("ChatGPT"), "{err}");
@@ -1173,12 +1299,8 @@ mod chatgpt_plan_tests {
     /// 缺省（BYOK）完全不受影响：不碰 base_url / api_key / compat。
     #[test]
     fn api_key_credentials_leave_the_provider_untouched() {
-        let mut p = qaqh_gate::ProviderConfig::responses(
-            "https://api.deepseek.com",
-            "sk-byok",
-            "m",
-            None,
-        );
+        let mut p =
+            qaqh_gate::ProviderConfig::responses("https://api.deepseek.com", "sk-byok", "m", None);
         // 未装配管理器时也**不得**报错——BYOK 用户从不需要它。
         let untouched = p.clone();
         assert!(!p.responses_compat.siwc_plan);

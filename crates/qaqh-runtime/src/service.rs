@@ -34,6 +34,9 @@ pub struct QaqhService {
     /// Sign in with ChatGPT（套餐用量）会话管理器。懒装配：只有真正用到该能力时
     /// 才去建目录、读 host id——未使用它的用户不该多出任何磁盘副作用。
     pub(crate) siwc: std::sync::OnceLock<Arc<qaqh_siwc::SiwcManager>>,
+    /// DeepSeek 账号（账号余额）管理器。同样懒装配，且**没有目录副作用**：
+    /// 凭据是 config 目录下的单文件（`deepseek-account.json`，DPAPI/0600 密文）。
+    pub(crate) dsaccount: std::sync::OnceLock<qaqh_dsaccount::DsAccountManager>,
 }
 
 impl QaqhService {
@@ -102,6 +105,7 @@ impl QaqhService {
             task_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
             board_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
             siwc: std::sync::OnceLock::new(),
+            dsaccount: std::sync::OnceLock::new(),
         }
     }
 
@@ -135,6 +139,35 @@ impl QaqhService {
         // 与懒装配同一语义：全局槽位是深层调用点的唯一入口。
         qaqh_siwc::install_manager(Arc::clone(&manager));
         let _ = self.siwc.set(manager);
+    }
+
+    /// DeepSeek 账号管理器（懒装配；凭据默认落在 config 目录）。
+    ///
+    /// 懒装配的理由与 SIWC 相同：不用该能力的用户不该多出任何磁盘副作用。
+    /// 构造本身不读盘、不联网——真正的读盘发生在第一次 `status()` / `token()`。
+    pub(crate) fn dsaccount(&self) -> Result<&qaqh_dsaccount::DsAccountManager, String> {
+        if let Some(manager) = self.dsaccount.get() {
+            return Ok(manager);
+        }
+        let manager = qaqh_dsaccount::DsAccountManager::new(
+            qaqh_dsaccount::AccountStore::default_location(),
+            qaqh_dsaccount::DsClientConfig::default(),
+        );
+        // 进程级装配：`provider_for` 每回合重建 provider，深层调用点只认全局槽位
+        // （理由见 `qaqh_dsaccount::global`）。克隆共享同一份内部状态，不是两份。
+        qaqh_dsaccount::install_manager(manager.clone());
+        // 竞态：两个线程可能同时装配；`set` 失败即沿用先到者的实例。
+        let _ = self.dsaccount.set(manager);
+        self.dsaccount
+            .get()
+            .ok_or_else(|| "dsaccount manager unavailable".to_string())
+    }
+
+    /// 测试/运维钩子：注入指定位置的 DeepSeek 账号管理器。
+    #[doc(hidden)]
+    pub fn attach_dsaccount(&self, manager: qaqh_dsaccount::DsAccountManager) {
+        qaqh_dsaccount::install_manager(manager.clone());
+        let _ = self.dsaccount.set(manager);
     }
 
     /// 挂载 Ringing 运行时（worker 事件双投）。
@@ -754,7 +787,10 @@ impl QaqhService {
                             .and_then(Value::as_str)
                             .map(str::to_owned),
                         new_profile: pbool(params, "new_profile"),
-                        label: params.get("label").and_then(Value::as_str).map(str::to_owned),
+                        label: params
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
                         reconsent: pbool(params, "reconsent"),
                     })
                     .map_err(String::from)?;
@@ -773,16 +809,148 @@ impl QaqhService {
             }
             "siwc.sign_in.cancel" => {
                 let flow_id = pstr(params, "flow_id")?;
-                self.siwc()?.cancel_sign_in(&flow_id).map_err(String::from)?;
+                self.siwc()?
+                    .cancel_sign_in(&flow_id)
+                    .map_err(String::from)?;
                 Ok(Value::Null)
             }
             "siwc.profile.select" => {
                 let profile_id = pstr(params, "profile_id")?;
-                self.siwc()?.select_profile(&profile_id).map_err(String::from)
+                self.siwc()?
+                    .select_profile(&profile_id)
+                    .map_err(String::from)
             }
             "siwc.sign_out" => {
                 let profile_id = params.get("profile_id").and_then(Value::as_str);
                 self.siwc()?.sign_out(profile_id).map_err(String::from)
+            }
+            // ── DeepSeek 账号（账号余额）──────────────────────────────────────
+            // 方法表已把这八个方法标为 admin_only；响应形状**结构上不含凭据**
+            // （投影见 `qaqh_dsaccount::StoredAccount::to_public_json`）。
+            // 金额一律**原串**下发（平台用 big.js 语法：`0E-16` 就是 0）。
+            "dsaccount.status" => {
+                // 服务面统一 camelCase（crate 内部的投影是 snake_case，那是它自己的
+                // 契约；转发层做一次形状归一，别让前端同时面对两套命名）。
+                let status = self.dsaccount()?.status();
+                Ok(json!({
+                    "signedIn": status["signed_in"],
+                    "account": status["account"],
+                    "storageError": status["storage_error"],
+                    "inferenceOrigin": status["inference_origin"],
+                    "usageUrl": qaqh_dsaccount::protocol::USAGE_URL,
+                    "topUpUrl": qaqh_dsaccount::protocol::TOP_UP_URL,
+                    "flow": {
+                        "attemptId": status["flow"]["attempt_id"],
+                        "state": status["flow"]["state"],
+                        "authorizeUrl": status["flow"]["authorize_url"],
+                        "expiresAtMs": status["flow"]["expires_at_ms"],
+                        "error": status["flow"]["error"],
+                    },
+                }))
+            }
+            "dsaccount.balance" => {
+                let summary = self
+                    .dsaccount()?
+                    .balance()
+                    .map_err(|error| error.message().to_string())?;
+                let wallet = |wallets: &[qaqh_dsaccount::Wallet]| -> Vec<Value> {
+                    wallets
+                        .iter()
+                        .map(|wallet| {
+                            json!({
+                                "currency": wallet.currency,
+                                "balance": wallet.balance,
+                                "tokenEstimation": wallet.token_estimation,
+                            })
+                        })
+                        .collect()
+                };
+                let total_cost: Vec<Value> = summary
+                    .total_costs
+                    .iter()
+                    .map(|cost| json!({ "currency": cost.currency, "amount": cost.amount }))
+                    .collect();
+                Ok(json!({
+                    "recharge": wallet(&summary.normal_wallets),
+                    "bonus": wallet(&summary.bonus_wallets),
+                    "totalCost": total_cost,
+                    "hasUsableBalance": summary.has_usable_balance(),
+                }))
+            }
+            "dsaccount.bonuses" => {
+                let bonuses = self
+                    .dsaccount()?
+                    .bonuses()
+                    .map_err(|error| error.message().to_string())?;
+                Ok(Value::Array(
+                    bonuses
+                        .iter()
+                        .map(|bonus| {
+                            json!({
+                                "orderId": bonus.order_id,
+                                "campaign": bonus.campaign,
+                                "amount": bonus.amount,
+                                "currency": bonus.currency,
+                                "grantedAt": bonus.granted_at,
+                                "expiresAt": bonus.expires_at,
+                                "message": bonus.msg,
+                            })
+                        })
+                        .collect(),
+                ))
+            }
+            "dsaccount.sign_in.start" => {
+                // 语言只影响平台下发的页面/文案；缺省按中文（本产品主要用户）。
+                let locale = qaqh_dsaccount::Locale::from_ui_language(
+                    params.get("locale").and_then(Value::as_str).unwrap_or("zh"),
+                );
+                // 端口可选：被占用时 crate 内部会回退到临时端口并如实回报。
+                let port = params
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .map(|port| u16::try_from(port).unwrap_or(0))
+                    .unwrap_or(qaqh_dsaccount::protocol::DEFAULT_CALLBACK_PORT);
+                let start = self
+                    .dsaccount()?
+                    .sign_in_start(locale, qaqh_dsaccount::auth::LOGIN_SOURCE_DESKTOP, port)
+                    .map_err(|error| error.message().to_string())?;
+                Ok(json!({
+                    "attemptId": start.attempt_id,
+                    "authorizeUrl": start.authorize_url,
+                    "redirectUri": start.redirect_uri,
+                    "expiresIn": start.expires_in,
+                }))
+            }
+            "dsaccount.sign_in.status" => Ok(self.dsaccount()?.sign_in_status()),
+            "dsaccount.sign_in.cancel" => {
+                let attempt_id = pstr(params, "attempt_id")?;
+                self.dsaccount()?
+                    .sign_in_cancel(&attempt_id)
+                    .map_err(|error| error.message().to_string())?;
+                Ok(Value::Null)
+            }
+            "dsaccount.sign_out" => {
+                self.dsaccount()?
+                    .sign_out()
+                    .map_err(|error| error.message().to_string())?;
+                Ok(Value::Null)
+            }
+            "dsaccount.bonus.ack" => {
+                let order_id = pstr(params, "order_id")?;
+                self.dsaccount()?
+                    .ack_bonus(&order_id)
+                    .map_err(|error| error.message().to_string())?;
+                Ok(Value::Null)
+            }
+            "dsaccount.models" => {
+                // 目录**原样**转发（平台条目比 OpenAI 标准形态多几个字段：上下文
+                // 窗口、输出上限、能力位、`effort.supported_levels`）——在转发层
+                // 猜键名就是造第二个真相源，猜错还会静默给错档位。
+                let catalog = self
+                    .dsaccount()?
+                    .models()
+                    .map_err(|error| error.message().to_string())?;
+                Ok(catalog.get("data").cloned().unwrap_or_else(|| json!([])))
             }
             "profile.save_current" => {
                 let name = pstr(params, "name")?;
