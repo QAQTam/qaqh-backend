@@ -172,6 +172,19 @@ fn derive_opencode_id(prefix: &str, key: &str) -> String {
     format!("{prefix}_{time_hex}{rand_part}")
 }
 
+/// 凭据头（头名 + 可选值前缀）。
+///
+/// 头名在 [`ProviderConfig::with_auth_header`] 里**一次性**校验成 `HeaderName`，
+/// adapter 只做搬运——刻意不留「头名非法就退回 `Authorization: Bearer`」这条会把
+/// 凭据发进错头的退路。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthHeader {
+    /// 头名（如 `x-dsh-auth-token`）。
+    pub header: reqwest::header::HeaderName,
+    /// 值前缀（如 `"Bearer "`）；`None` = 裸值。
+    pub value_prefix: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
     pub send_request_context: bool,
@@ -179,6 +192,10 @@ pub struct ProviderConfig {
     pub kind: ProviderKind,
     pub base_url: String,
     pub api_key: String,
+    /// 凭据头覆盖：账号类凭据（如 DeepSeek 账号的 `x-dsh-auth-token`）**不是** Bearer。
+    /// `None` = 该 adapter 的默认 `Authorization: Bearer`。只被 `openai` / `responses`
+    /// 两个 adapter 消费（`anthropic` 走 `x-api-key`、`gemini` 走 `key` 查询参数）。
+    pub auth_header: Option<AuthHeader>,
     pub model: String,
     pub user_id_mode: Option<qaqh_types::UserSendMode>,
 
@@ -292,6 +309,32 @@ pub(crate) fn safe_provider_error_body(body: &str, api_key: &str) -> String {
 }
 
 impl ProviderConfig {
+    /// 把凭据挂到自定义头上。头名非法即 `Err`（**不**静默退回 Bearer）。
+    pub fn with_auth_header(
+        mut self,
+        header: &str,
+        value_prefix: Option<String>,
+    ) -> Result<Self, String> {
+        let parsed = reqwest::header::HeaderName::from_bytes(header.as_bytes())
+            .map_err(|_| format!("非法的凭据头名: {header:?}"))?;
+        self.auth_header = Some(AuthHeader {
+            header: parsed,
+            value_prefix,
+        });
+        Ok(self)
+    }
+
+    /// 本 provider 的凭据头形态（**adapter 的唯一取值点**）。
+    pub fn auth_style(&self) -> mutil_ai::AuthStyle {
+        match &self.auth_header {
+            Some(over) => mutil_ai::AuthStyle::Custom {
+                header: over.header.clone(),
+                value_prefix: over.value_prefix.clone(),
+            },
+            None => mutil_ai::AuthStyle::Bearer,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
     pub fn openai(
         base_url: &str,
@@ -310,6 +353,7 @@ impl ProviderConfig {
             request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            auth_header: None,
             model: model.to_string(),
             user_id_mode,
             chat_path,
@@ -348,6 +392,7 @@ impl ProviderConfig {
             request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            auth_header: None,
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,
@@ -391,6 +436,7 @@ impl ProviderConfig {
             request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            auth_header: None,
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,
@@ -428,6 +474,7 @@ impl ProviderConfig {
             request_context: None,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            auth_header: None,
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,

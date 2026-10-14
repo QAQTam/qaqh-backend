@@ -125,6 +125,17 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "siwc.sign_in.cancel" => Some(WRITE_ADMIN),
         "siwc.profile.select" => Some(WRITE_ADMIN),
         "siwc.sign_out" => Some(WRITE_ADMIN),
+        // DeepSeek 账号（账号余额）。与 siwc 同一档待遇：**全部 admin_only**——
+        // 配对设备不得触发登录 / 登出 / 读余额。方法名真源在 qaqh_dsaccount::methods。
+        "dsaccount.status" => Some(READ_ADMIN),
+        "dsaccount.balance" => Some(READ_ADMIN),
+        "dsaccount.bonuses" => Some(READ_ADMIN),
+        "dsaccount.sign_in.start" => Some(WRITE_ADMIN),
+        "dsaccount.sign_in.status" => Some(READ_ADMIN),
+        "dsaccount.sign_in.cancel" => Some(WRITE_ADMIN),
+        "dsaccount.sign_out" => Some(WRITE_ADMIN),
+        "dsaccount.bonus.ack" => Some(WRITE_ADMIN),
+        "dsaccount.models" => Some(READ_ADMIN),
         // skills
         "skills.list_tools" => Some(READ),
         "skills.operation" => Some(WRITE),
@@ -197,6 +208,25 @@ mod tests {
             listed.push(*method);
         }
         for method in listed {
+            assert!(lookup(method).is_some(), "{method} 应可解析");
+        }
+    }
+
+    /// DeepSeek 账号：与 siwc 同一档（全部 admin_only + 清单全覆盖）。
+    ///
+    /// 越权面的意义与上面那条相同：账号凭据同样是「本机身份」，配对设备
+    /// 不得碰它——尤其 `sign_in.start`（会打开浏览器并把新账号接进本机）。
+    #[test]
+    fn dsaccount_methods_are_admin_only_and_fully_enumerated() {
+        assert!(!qaqh_dsaccount::methods::ALL.is_empty());
+        for method in qaqh_dsaccount::methods::ALL {
+            let info = lookup(method).unwrap_or_else(|| panic!("方法表缺少 {method}"));
+            assert!(
+                info.admin_only,
+                "{method} 必须 admin_only：配对设备不得触碰本机账号凭据"
+            );
+        }
+        for method in qaqh_dsaccount::methods::ALL {
             assert!(lookup(method).is_some(), "{method} 应可解析");
         }
     }
