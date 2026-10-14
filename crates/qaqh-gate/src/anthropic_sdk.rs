@@ -27,7 +27,7 @@ use super::sdk_common::{
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
 };
-use super::types::{ProviderConfig, StreamEvent};
+use super::types::{ProviderConfig, StreamEvent, stored_reasoning_kind};
 
 /// Same shape as the retired `message_api::build_anthropic_url`; the SDK
 /// adapter appends `/messages` itself, so the result is stripped back into
@@ -79,6 +79,8 @@ fn thinking_budget(effort: &str, large: bool) -> u32 {
             "high" => 65536,
             "xhigh" => 81920,
             "max" => 96000,
+            // ultra 是阶梯顶端：必须显式给出，否则掉进 `_` 兜底反而**比 max 还小**。
+            "ultra" => 96000,
             _ => 32768,
         }
     } else {
@@ -88,6 +90,7 @@ fn thinking_budget(effort: &str, large: bool) -> u32 {
             "high" => 4096,
             "xhigh" => 8192,
             "max" => 16384,
+            "ultra" => 16384,
             _ => 4096,
         }
     }
@@ -172,7 +175,7 @@ pub(crate) fn project_messages(
                         ContentBlock::Text { text } if !text.is_empty() => {
                             parts.push(Part::text(text));
                         }
-                        ContentBlock::Reasoning { reasoning } if !reasoning.is_empty() => {
+                        ContentBlock::Reasoning { reasoning, .. } if !reasoning.is_empty() => {
                             let mut r = WireReasoning::text(reasoning);
                             r.state = Some(ProviderState::new(
                                 ProviderStateFormat::AnthropicMessages,
@@ -469,10 +472,10 @@ async fn consume(
                     on_event(StreamEvent::ContentDelta(text));
                 }
             }
-            Ok(SdkEvent::ReasoningDelta { text, .. }) => {
-                if !text.is_empty() {
-                    state.reasoning.push_str(&text);
-                    on_event(StreamEvent::ReasoningDelta(text));
+            Ok(SdkEvent::ReasoningDelta { kind, text }) => {
+                let kind = stored_reasoning_kind(kind);
+                if !text.is_empty() && state.push_reasoning(kind, &text) {
+                    on_event(StreamEvent::ReasoningDelta { kind, text });
                 }
             }
             Ok(SdkEvent::ToolCallDelta {
@@ -870,6 +873,7 @@ mod tests {
                 vec![
                     ContentBlock::Reasoning {
                         reasoning: "hm hm".into(),
+                        kind: Some(qaqh_types::ReasoningKind::Text),
                     },
                     ContentBlock::text("done"),
                 ],

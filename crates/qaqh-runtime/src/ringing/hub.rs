@@ -414,6 +414,7 @@ mod tests {
                 round_num: 0,
                 block_id: "tool".into(),
                 kind: qaqh_domain::TimelineBlockKind::Tool,
+                reasoning_kind: None,
                 tool: Some(qaqh_domain::TimelineTool {
                     exit_code: None,
                     completed_at_ms: None,
@@ -590,6 +591,7 @@ mod tests {
                 round_num: 0,
                 block_id: "text".into(),
                 kind: qaqh_domain::TimelineBlockKind::Text,
+                reasoning_kind: None,
                 tool: None,
             },
         )
@@ -754,6 +756,7 @@ mod tests {
                 round_num: 0,
                 block_id: "tool".into(),
                 kind: qaqh_domain::TimelineBlockKind::Tool,
+                reasoning_kind: None,
                 tool: Some(qaqh_domain::TimelineTool {
                     exit_code: None,
                     completed_at_ms: None,
@@ -983,6 +986,7 @@ mod tests {
                     round_num: 0,
                     block_id: "text".into(),
                     kind: qaqh_domain::TimelineBlockKind::Text,
+                    reasoning_kind: None,
                     tool: None,
                 },
             )
@@ -1057,6 +1061,7 @@ mod tests {
                     round_num: 0,
                     block_id: "text".into(),
                     kind: qaqh_domain::TimelineBlockKind::Text,
+                    reasoning_kind: None,
                     tool: None,
                 },
             )
@@ -1180,6 +1185,7 @@ mod tests {
                     round_num: 0,
                     block_id: "text".into(),
                     kind: qaqh_domain::TimelineBlockKind::Text,
+                    reasoning_kind: None,
                     tool: None,
                 },
             )
@@ -1227,6 +1233,7 @@ mod tests {
                     round_num: 0,
                     block_id: "text2".into(),
                     kind: qaqh_domain::TimelineBlockKind::Text,
+                    reasoning_kind: None,
                     tool: None,
                 },
             )

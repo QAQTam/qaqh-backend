@@ -98,7 +98,7 @@ pub fn timeline_snapshot_from_turns(
 
             for block in &round.blocks {
                 match block {
-                    qaqh_domain::RoundBlock::Reasoning { content } => {
+                    qaqh_domain::RoundBlock::Reasoning { content, kind } => {
                         if content.is_empty() {
                             continue;
                         }
@@ -112,6 +112,7 @@ pub fn timeline_snapshot_from_turns(
                             round.round_num,
                             &block_id,
                             TimelineBlockKind::Reasoning,
+                            *kind,
                             content,
                         )?;
                         round_has_blocks = true;
@@ -129,6 +130,7 @@ pub fn timeline_snapshot_from_turns(
                             round.round_num,
                             &block_id,
                             TimelineBlockKind::Text,
+                            None,
                             content,
                         )?;
                         round_has_blocks = true;
@@ -143,6 +145,7 @@ pub fn timeline_snapshot_from_turns(
                                 round_num: round.round_num,
                                 block_id: block_id.clone(),
                                 kind: TimelineBlockKind::Tool,
+                                reasoning_kind: None,
                                 tool: Some(tool.clone()),
                             },
                         ) {
@@ -193,6 +196,7 @@ pub fn timeline_snapshot_from_turns(
                             round.round_num,
                             &block_id,
                             TimelineBlockKind::Text,
+                            None,
                             &content,
                         )?;
                         round_has_blocks = true;
@@ -213,6 +217,7 @@ pub fn timeline_snapshot_from_turns(
                         round.round_num,
                         &block_id,
                         TimelineBlockKind::Reasoning,
+                        None,
                         thinking,
                     )?;
                     round_has_blocks = true;
@@ -226,6 +231,7 @@ pub fn timeline_snapshot_from_turns(
                         round.round_num,
                         &block_id,
                         TimelineBlockKind::Text,
+                        None,
                         answer,
                     )?;
                     round_has_blocks = true;
@@ -266,6 +272,7 @@ pub fn timeline_snapshot_from_turns(
     Some((snapshot, journal))
 }
 
+#[allow(clippy::too_many_arguments)] // 参数面塑形另立项（同 gate::ensure_stream_block）
 fn rebuild_text_block(
     appender: &mut crate::timeline::TimelineAppender,
     session_id: &str,
@@ -273,6 +280,7 @@ fn rebuild_text_block(
     round_num: u32,
     block_id: &str,
     kind: TimelineBlockKind,
+    reasoning_kind: Option<qaqh_types::ReasoningKind>,
     text: &str,
 ) -> Option<()> {
     if let Err(error) = appender.apply_intent(
@@ -282,6 +290,7 @@ fn rebuild_text_block(
             round_num,
             block_id: block_id.to_string(),
             kind,
+            reasoning_kind,
             tool: None,
         },
     ) {
@@ -509,6 +518,7 @@ mod tests {
                 blocks: vec![
                     RoundBlock::Reasoning {
                         content: "thinking".into(),
+                        kind: None,
                     },
                     RoundBlock::Tool {
                         card: ToolCallDef {

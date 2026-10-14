@@ -282,6 +282,9 @@ pub struct ProfileConfig {
     /// 与顶层 `api_key` 同一约定。`None` = 继承 main 密钥。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// 凭据来源。`api_key`（缺省）= 既有 BYOK；`chatgpt_plan` = 用本机 ChatGPT 套餐额度。
+    #[serde(default)]
+    pub credential: crate::provider::CredentialSource,
 
     // ── 读兼容（永不写出）：BYOK 前的预设坐标与双口径窗口 ──
     /// 旧 `[profiles.*] endpoint = "openai"` —— 预设内的 endpoint id，

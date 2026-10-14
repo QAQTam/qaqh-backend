@@ -39,6 +39,7 @@ use super::transport::{
 };
 use super::types::{
     EFFORT_LADDER, ProviderConfig, ResponsesCompat, StreamEvent, normalize_reasoning_effort,
+    stored_reasoning_kind,
 };
 
 const MEDIA_ATTACHMENT_TEXT: &str = "Attached media from tool result:";
@@ -99,6 +100,7 @@ fn clamp_effort(effort: Option<String>, max: &str) -> ReasoningEffort {
         "high" => ReasoningEffort::High,
         "xhigh" => ReasoningEffort::XHigh,
         "max" => ReasoningEffort::Max,
+        "ultra" => ReasoningEffort::Ultra,
         _ => ReasoningEffort::Medium,
     }
 }
@@ -361,7 +363,7 @@ pub(crate) fn project_responses_messages(
                 // 2) 派生 reasoning（无回放 item 且开关开启时合成旧形态）。
                 if compat.echo_reasoning_content && !has_response_type("reasoning") {
                     for b in &msg.content {
-                        if let ContentBlock::Reasoning { reasoning } = b
+                        if let ContentBlock::Reasoning { reasoning, .. } = b
                             && !reasoning.is_empty()
                         {
                             parts.push(provider_state_item(serde_json::json!({
@@ -547,12 +549,56 @@ fn build_options(provider: &ProviderConfig, policy: &GateRetryPolicy) -> Request
     options.timeout = Some(REQUEST_TOTAL_TIMEOUT);
     options.response_limits = roomy_response_limits();
     let mut switches = ProviderRequestOptions::default();
-    if let Some(ref pk) = provider.prompt_cache_key {
+    // prompt 缓存族在 plan 直连路由按未知字段处理（文档禁用 `prompt_cache_retention`，
+    // `prompt_cache_key` 同族）→ 一律不下发，避免 400 unsupported_capability。
+    if !provider.responses_compat.siwc_plan
+        && let Some(ref pk) = provider.prompt_cache_key
+    {
         switches.prompt_cache_key = Some(pk.clone());
     }
     options.provider_request = switches;
     apply_management_headers(provider, None, &mut options, false);
     options
+}
+
+/// 「ChatGPT 套餐用量」直连路由**禁用**的请求字段
+/// （`developers.openai.com/siwc/token-sharing-open-source/preview-limitations`）。
+///
+/// 之所以做成「无论谁塞进来都摘掉」而不是「记得别塞」：被禁字段一旦上线就是
+/// 400 `subscription_sharing_unsupported_capability`，而该错误码按文档意味着
+/// **我方发错了字段**——它不该靠人工 review 守住。
+const SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS: &[&str] = &[
+    "background",
+    "conversation",
+    "max_output_tokens",
+    "max_tool_calls",
+    "metadata",
+    "moderation",
+    "multi_agent",
+    "prompt",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "temperature",
+    "top_logprobs",
+    "top_p",
+    "truncation",
+    "previous_response_id",
+    "user",
+];
+
+/// plan 模式的最终收口：清结构化字段 + 摘掉被禁成员 + 关闭 hosted 工具。
+///
+/// 放在 [`build_request`] 的**最后**一步：任何先于它的代码路径（现在的或将来加的）
+/// 塞进来的被禁字段都会被摘掉，不依赖调用方自觉。
+fn apply_siwc_plan(provider: &ProviderConfig, request: &mut ChatRequest) {
+    if !provider.responses_compat.siwc_plan {
+        return;
+    }
+    request.max_output_tokens = None;
+    request.server_tools.clear();
+    for field in SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS {
+        request.extra_body.remove(*field);
+    }
 }
 
 fn build_request(
@@ -579,10 +625,12 @@ fn build_request(
         .collect();
     request.tools = specs;
     // 服务端内置搜索工具（模型可自主触发）：typed server_tools，非 wire 手拼。
-    if compat.web_search {
+    // plan 直连路由不提供 hosted 工具（web search 在该路由也受账户策略约束）→ 不发。
+    if compat.web_search && !compat.siwc_plan {
         request.server_tools = vec![ServerTool::WebSearch];
     }
-    if max_tokens > 0 {
+    // plan 直连路由禁用 `max_output_tokens`（见 SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS）。
+    if max_tokens > 0 && !compat.siwc_plan {
         request.max_output_tokens = Some(max_tokens);
     }
     request.reasoning = Some(
@@ -605,7 +653,9 @@ fn build_request(
         request
             .extra_body
             .insert("parallel_tool_calls".into(), serde_json::json!(true));
+        // `user` 字段在 plan 直连路由被禁（不以 provider 的 supports_user 为准）。
         if compat.supports_user
+            && !compat.siwc_plan
             && let Some(uid) = user_id.filter(|s| !s.is_empty())
         {
             request
@@ -613,6 +663,8 @@ fn build_request(
                 .insert("user".into(), serde_json::json!(uid));
         }
     }
+    // 收口放在最后：上面任何分支（含将来新增的）塞进来的被禁字段都在这被摘掉。
+    apply_siwc_plan(provider, &mut request);
     request
 }
 
@@ -800,13 +852,20 @@ fn response_message_to_blocks(msg: &WireMessage, compat: &ResponsesCompat) -> Ve
                 }
             }
             Part::Reasoning(r) => {
+                // 类别来自 SDK 的分类位：`Text` = 完整思考，`Summary` = 摘要。
+                // 非可展示类别（密文 / 被安全策略抹除）即使带了文本也不进历史与
+                // UI——UI 分不清这两者时会把摘要（或密文）当成模型的思考展示。
+                let kind = stored_reasoning_kind(r.kind.clone());
                 let t = r
                     .text
                     .clone()
                     .or_else(|| r.summary.clone())
                     .filter(|s| !s.is_empty());
-                if let Some(reasoning) = t {
-                    blocks.push(ContentBlock::Reasoning { reasoning });
+                if let (true, Some(reasoning)) = (kind.is_displayable(), t) {
+                    blocks.push(ContentBlock::Reasoning {
+                        reasoning,
+                        kind: Some(kind),
+                    });
                 }
             }
             Part::ToolCall(call) => {
@@ -853,6 +912,8 @@ fn response_message_to_blocks(msg: &WireMessage, compat: &ResponsesCompat) -> Ve
 struct Resps {
     text: String,
     reasoning: String,
+    /// 思考类别（**首帧可展示类别胜出**，规则同 `sdk_common::StreamState`）。
+    reasoning_kind: Option<qaqh_types::ReasoningKind>,
     tools: HashMap<usize, (String, String, String)>,
     usage: Option<UsageInfo>,
 }
@@ -867,6 +928,7 @@ impl Resps {
         if !self.reasoning.is_empty() {
             blocks.push(ContentBlock::Reasoning {
                 reasoning: self.reasoning,
+                kind: self.reasoning_kind,
             });
         }
         if !self.text.is_empty() {
@@ -941,10 +1003,14 @@ async fn consume(
                     on_event(StreamEvent::ContentDelta(text));
                 }
             }
-            Ok(SdkEvent::ReasoningDelta { text, .. }) => {
-                if !text.is_empty() {
+            Ok(SdkEvent::ReasoningDelta { kind, text }) => {
+                let kind = stored_reasoning_kind(kind);
+                if !text.is_empty() && kind.is_displayable() {
+                    if resp.reasoning_kind.is_none() {
+                        resp.reasoning_kind = Some(kind);
+                    }
                     resp.reasoning.push_str(&text);
-                    on_event(StreamEvent::ReasoningDelta(text));
+                    on_event(StreamEvent::ReasoningDelta { kind, text });
                 }
             }
             Ok(SdkEvent::ToolCallDelta {
@@ -1107,6 +1173,7 @@ async fn consume(
                     if !resp.reasoning.is_empty() {
                         blocks.push(ContentBlock::Reasoning {
                             reasoning: std::mem::take(&mut resp.reasoning),
+                            kind: resp.reasoning_kind,
                         });
                     }
                     if !resp.text.is_empty() {
@@ -1205,6 +1272,13 @@ pub fn chat_sync_responses(
     messages: Vec<Message>,
     max_tokens: u32,
 ) -> Result<String, String> {
+    // 套餐用量直连路由要求**每个** HTTP 推理请求都带 `store:false` + `stream:true`
+    // （文档 preview-limitations），所以非流式的 `complete_with` 不能用于这条路由。
+    // 压缩（compact）走的就是本入口——直接报「不支持」会平白丢一个功能，
+    // 因此 plan 模式改走流式接口把文本收集回来。
+    if provider.responses_compat.siwc_plan {
+        return collect_plan_stream(provider, model, messages, max_tokens);
+    }
     let messages = normalize_skill_envelope(provider, messages)?;
     let projected = project_responses_messages(&messages, &provider.responses_compat);
     if projected.iter().all(|m| m.role == Role::System) {
@@ -1230,6 +1304,43 @@ pub fn chat_sync_responses(
             Err(full)
         }
     }
+}
+
+/// plan 模式下的同步语义：驱动**流式**接口并收集文本（见 `chat_sync_responses` 的注释）。
+fn collect_plan_stream(
+    provider: &ProviderConfig,
+    model: &str,
+    messages: Vec<Message>,
+    max_tokens: u32,
+) -> Result<String, String> {
+    let mut text = String::new();
+    let mut failure: Option<String> = None;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = chat_stream_responses(
+        provider,
+        model,
+        messages,
+        None,
+        max_tokens,
+        None,
+        None,
+        Some(&cancel),
+        &mut |event| match event {
+            StreamEvent::ContentDelta(delta) => text.push_str(&delta),
+            StreamEvent::Error { kind, message } => {
+                failure = Some(format!("{kind:?}: {message}"));
+            }
+            _ => {}
+        },
+    );
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    result.map_err(|e| format!("responses (plan usage, streaming): {e}"))?;
+    if text.trim().is_empty() {
+        return Err("compact: no content in responses response".to_string());
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -1346,6 +1457,7 @@ mod tests {
                     },
                     ContentBlock::Reasoning {
                         reasoning: "text".into(),
+                        kind: Some(qaqh_types::ReasoningKind::Text),
                     },
                 ],
             ),
@@ -1406,6 +1518,104 @@ mod tests {
             ReasoningEffort::Max
         );
         assert_eq!(clamp_effort(None, "high"), ReasoningEffort::Medium);
+    }
+
+    /// canary：plan 直连路由的请求体**一个被禁字段都不能有**。
+    ///
+    /// 这是发版前的最后一道闸：被禁字段上线即 400
+    /// `subscription_sharing_unsupported_capability`，而该错误码按文档意味着
+    /// **我方发错了字段**——它不该靠人工 review 守住。
+    #[test]
+    fn siwc_plan_request_omits_every_forbidden_field() {
+        let mut p = provider();
+        p.responses_compat.siwc_plan = true;
+        // 把「本会引入被禁字段」的开关全打开：`user` 字段与 hosted web_search。
+        p.responses_compat.supports_user = true;
+        p.responses_compat.web_search = true;
+        p.prompt_cache_key = Some("seed-1".into());
+        let request = build_request(
+            &p,
+            vec![WireMessage::user("hi")],
+            None,
+            4096, // 非 plan 端点会据此下发 max_output_tokens
+            Some("high".into()),
+            Some("u42".into()),
+            true,
+        );
+        assert!(request.max_output_tokens.is_none(), "max_output_tokens 被禁");
+        assert!(request.server_tools.is_empty(), "plan 路由不提供 hosted 工具");
+        assert_eq!(request.extra_body["store"], serde_json::json!(false));
+        assert_eq!(
+            request.extra_body["parallel_tool_calls"],
+            serde_json::json!(true)
+        );
+        for field in SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS {
+            assert!(
+                !request.extra_body.contains_key(*field),
+                "plan 请求体不得出现 {field}: {:?}",
+                request.extra_body
+            );
+        }
+        let opts = build_options(&p, &GateRetryPolicy::default());
+        assert!(
+            opts.provider_request.prompt_cache_key.is_none(),
+            "prompt 缓存族在 plan 路由不下发"
+        );
+    }
+
+    /// 收口是**不可绕过**的：即便有人事后往 extra_body 里塞被禁字段，
+    /// `apply_siwc_plan` 也必须摘干净（这是「不靠自觉」的那一半）。
+    #[test]
+    fn siwc_plan_strip_cannot_be_bypassed() {
+        let mut p = provider();
+        p.responses_compat.siwc_plan = true;
+        let mut request = build_request(
+            &p,
+            vec![WireMessage::user("hi")],
+            None,
+            0,
+            None,
+            None,
+            true,
+        );
+        for field in SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS {
+            request
+                .extra_body
+                .insert((*field).to_string(), serde_json::json!("injected"));
+        }
+        request.server_tools = vec![ServerTool::WebSearch];
+        request.max_output_tokens = Some(99);
+        apply_siwc_plan(&p, &mut request);
+        assert!(request.max_output_tokens.is_none());
+        assert!(request.server_tools.is_empty());
+        for field in SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS {
+            assert!(!request.extra_body.contains_key(*field), "{field} 未被摘除");
+        }
+        assert_eq!(
+            request.extra_body["store"],
+            serde_json::json!(false),
+            "store:false 必须保留"
+        );
+    }
+
+    /// 默认关闭：非 plan 端点的 wire 形状**不能**被这次改动碰到。
+    #[test]
+    fn non_plan_endpoints_keep_the_current_wire_shape() {
+        let mut p = provider();
+        p.responses_compat.supports_user = true;
+        p.responses_compat.web_search = true;
+        let request = build_request(
+            &p,
+            vec![WireMessage::user("hi")],
+            None,
+            4096,
+            None,
+            Some("u1".into()),
+            true,
+        );
+        assert_eq!(request.max_output_tokens, Some(4096));
+        assert_eq!(request.server_tools, vec![ServerTool::WebSearch]);
+        assert_eq!(request.extra_body["user"], serde_json::json!("u1"));
     }
 
     #[test]

@@ -499,3 +499,82 @@ async fn devices_list_excludes_token_material() {
         "/devices must not leak token material"
     );
 }
+
+/// SIWC（Sign in with ChatGPT）是**凭据写入面**：配对出来的设备（view/interact）
+/// 绝不得触发登录、切账户或登出；而 admin（桌面壳 / CLI / 探针）走完整链路。
+///
+/// 断言三层：
+/// 1. 设备档位对**每个** `siwc.*` 方法都拿到 403 `insufficient_scope`
+///    （清单取自 `qaqh_siwc::methods::ALL`，将来新增方法自动纳入覆盖）；
+/// 2. admin 路径可用，且响应里**没有** token 字段；
+/// 3. 设备请求从未触达凭据存储（临时目录里不出现 `chatgpt-auth.json`）。
+#[tokio::test]
+async fn siwc_methods_deny_devices_and_serve_admin_without_tokens() {
+    let state = super::axum_tests::test_state();
+    let app = build_router(state.clone());
+
+    // 先接到临时目录：万一某个设备请求真的漏过了 scope 裁决，污染的是 tmp
+    // 而不是用户的 data_dir（也正因如此，第 3 条断言才有意义）。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manager = std::sync::Arc::new(
+        qaqh_siwc::SiwcManager::new(
+            dir.path().to_path_buf(),
+            qaqh_siwc::SiwcConfig {
+                // 不可达的 issuer：本用例不触发任何网络调用。
+                issuer: "http://127.0.0.1:9".to_string(),
+                ..qaqh_siwc::SiwcConfig::default()
+            },
+        )
+        .expect("siwc manager"),
+    );
+    state.service.attach_siwc(manager);
+
+    for scope in [Scope::View, Scope::Interact] {
+        let (token, _, cs) = open_device(&app, &state, scope).await;
+        for method in qaqh_siwc::methods::ALL {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    &format!("/ringing/v2/service/{method}"),
+                    Some(&token),
+                    Some(&cs),
+                    Some(serde_json::json!({ "flow_id": "x", "profile_id": "y" })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{method} 对 {scope:?} 设备必须拒绝"
+            );
+            assert_eq!(body_json(response).await["code"], "insufficient_scope");
+        }
+    }
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/service/siwc.status",
+            Some(ADMIN),
+            Some("cs-admin"),
+            Some(serde_json::json!({})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["status"], "disconnected");
+    assert_eq!(body["sharing"], false);
+    assert_eq!(body["usageUrl"], qaqh_siwc::USAGE_URL);
+    let text = body.to_string();
+    for banned in ["access_token", "refresh_token", "id_token"] {
+        assert!(!text.contains(banned), "状态投影泄漏 {banned}: {text}");
+    }
+
+    assert!(
+        !dir.path().join("chatgpt-auth.json").exists(),
+        "设备请求不得触碰凭据存储"
+    );
+}

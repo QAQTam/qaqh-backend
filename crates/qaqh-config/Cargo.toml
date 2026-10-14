@@ -18,7 +18,10 @@ log = "0.4"
 tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+# `Win32_Storage_FileSystem` 是 `secrets.rs::replace_file` 用 `MoveFileExW` 所需：
+# 此前靠工作区里别的 crate 做 feature 合并才编得过，**单独构建本 crate 必炸**
+# （`cargo test -p qaqh-siwc` 实证）。用到什么就声明什么。
+windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem"] }
 [lints]
 workspace = true
 

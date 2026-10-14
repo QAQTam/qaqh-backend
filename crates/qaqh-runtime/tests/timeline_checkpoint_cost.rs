@@ -44,6 +44,7 @@ fn open_text_block(hub: &RingingHub, session_id: &str, turn: &str) {
             round_num: 0,
             block_id: "b1".into(),
             kind: TimelineBlockKind::Text,
+            reasoning_kind: None,
             tool: None,
         },
     )

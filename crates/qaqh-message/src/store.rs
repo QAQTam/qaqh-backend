@@ -1919,7 +1919,7 @@ impl MessageStore {
                         qaqh_types::ContentBlock::Text { text } => {
                             chat_text += qaqh_types::count_tokens(text) as u64;
                         }
-                        qaqh_types::ContentBlock::Reasoning { reasoning } => {
+                        qaqh_types::ContentBlock::Reasoning { reasoning, .. } => {
                             thinking += qaqh_types::count_tokens(reasoning) as u64;
                             thinking_blocks += 1;
                         }
@@ -1957,7 +1957,7 @@ impl MessageStore {
                         qaqh_types::ContentBlock::Text { text } => {
                             chat_text += qaqh_types::count_tokens(text) as u64;
                         }
-                        qaqh_types::ContentBlock::Reasoning { reasoning } => {
+                        qaqh_types::ContentBlock::Reasoning { reasoning, .. } => {
                             thinking += qaqh_types::count_tokens(reasoning) as u64;
                             thinking_blocks += 1;
                         }
@@ -3179,6 +3179,179 @@ mod tests {
         let ctx = store.build_context_for_gate(&[]);
         let names: Vec<Option<&str>> = ctx.iter().map(|m| m.name.as_deref()).collect();
         assert!(names.contains(&Some("workspace")), "{names:?}");
+    }
+
+    // ── T14：压缩不得剪坏 tool_use ↔ tool_result 配对 ──
+    //
+    // 背景（codex-thinking-block 多轮实测）：历史里缺了调用记录时，模型会连着
+    // 几轮不再发起工具调用；反过来，孤儿 tool_result 会被 provider 判成无效
+    // （anthropic 侧直接丢弃，因为回填不出函数名）。所以「压缩不得只剪掉一半」
+    // 是**协议级**约束，不是洁癖——这里把它钉在 store 上。
+
+    /// 活跃上下文里的工具配对是否闭合。返回 `(悬挂调用, 孤儿结果)`。
+    ///
+    /// 只对**已答完**的回合成立：run 进行中「调用已发、结果未回」是合法状态，
+    /// 那种悬挂由 `from_messages` 的 `[RESTORE]` 合成结果兜底，不在本判据内。
+    fn unpaired_tool_ids(context: &[Message]) -> (Vec<String>, Vec<String>) {
+        let mut calls: Vec<String> = Vec::new();
+        let mut results: Vec<String> = Vec::new();
+        for message in context {
+            for block in &message.content {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => calls.push(id.clone()),
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        results.push(tool_use_id.clone())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let dangling = calls
+            .iter()
+            .filter(|id| !results.contains(id))
+            .cloned()
+            .collect();
+        let orphans = results
+            .iter()
+            .filter(|id| !calls.contains(id))
+            .cloned()
+            .collect();
+        (dangling, orphans)
+    }
+
+    /// 调用与其结果在上下文里的位置（断言「结果必须排在调用之后」用）。
+    fn tool_pair_positions(context: &[Message], id: &str) -> (usize, usize) {
+        let call = context
+            .iter()
+            .position(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { id: cid, .. } if cid == id))
+            })
+            .expect("tool_use 必须在上下文里");
+        let result = context
+            .iter()
+            .position(|m| {
+                m.content.iter().any(
+                    |b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id),
+                )
+            })
+            .expect("tool_result 必须在上下文里");
+        (call, result)
+    }
+
+    /// 压缩按 **turn** 裁：被折叠的 turn 里，`tool_use` 与它的结果必须整体消失。
+    /// 裁前裁后配对都要闭合，保留区那一对要整对留下且结果排在调用之后。
+    #[test]
+    fn compaction_drops_tool_pairs_whole_and_keeps_the_rest_paired() {
+        let mut store = MessageStore::new("pair-compact");
+        // turn1：一对完整的调用/结果（会被压缩掉）。
+        store.push_user("读一下配置");
+        store.push_assistant(assistant_with_tools(&[("call_1", "read")]));
+        store.push_tool_result("call_1", "config body", true);
+        // turn2：保留区里的另一对。
+        store.push_user("再读日志");
+        store.push_assistant(assistant_with_tools(&[("call_2", "read")]));
+        store.push_tool_result("call_2", "log body", true);
+
+        let before = store.build_context_for_gate(&[]);
+        assert_eq!(
+            unpaired_tool_ids(&before),
+            (Vec::new(), Vec::new()),
+            "裁前必须闭合"
+        );
+        let (call, result) = tool_pair_positions(&before, "call_1");
+        assert!(call < result, "结果不得排到它的调用之前");
+
+        store.apply_compact("摘要", 1);
+
+        let after = store.build_context_for_gate(&[]);
+        assert_eq!(
+            unpaired_tool_ids(&after),
+            (Vec::new(), Vec::new()),
+            "裁后必须闭合"
+        );
+        let rendered = serde_json::to_string(&after).expect("serialize context");
+        assert!(
+            !rendered.contains("call_1") && !rendered.contains("config body"),
+            "被折叠那一对必须整对消失：{rendered}"
+        );
+        assert!(
+            rendered.contains("call_2") && rendered.contains("log body"),
+            "保留区那一对必须整对留下：{rendered}"
+        );
+        let (call, result) = tool_pair_positions(&after, "call_2");
+        assert!(call < result, "结果不得排到它的调用之前");
+    }
+
+    /// 工具**未完成**时用户直接开下一轮：`push_user` 会就地合成终态结果
+    /// （`auto_complete_unfulfilled`），把这一对**关在同一个 turn 里**——这正是
+    /// 「压缩按 turn 裁」得以成立的前提。若改成"结果落到当时最新的 turn"，这一对
+    /// 就横跨两个 turn，压缩必然剪在中间。
+    ///
+    /// 迟到的真结果此时是重复帧：不得再插一条，也不得被记成孤儿（daemon 会把孤儿
+    /// 结果当领域错误上报，见 `loop_outcome.rs`）。
+    #[test]
+    fn interrupting_a_pending_tool_closes_the_pair_inside_its_turn() {
+        let mut store = MessageStore::new("pair-interrupt");
+        store.push_user("跑个长命令");
+        store.push_assistant(assistant_with_tools(&[("call_9", "exec")]));
+        store.push_user("算了，先看看别的");
+
+        let before = store.build_context_for_gate(&[]);
+        assert_eq!(
+            unpaired_tool_ids(&before),
+            (Vec::new(), Vec::new()),
+            "打断后配对必须已经闭合"
+        );
+        let (call, result) = tool_pair_positions(&before, "call_9");
+        assert!(call < result, "结果必须排在调用之后");
+        assert!(
+            context_result(&before, "call_9").contains("CANCELLED"),
+            "合成结果要说明为什么没跑"
+        );
+
+        let call_turn = store
+            .turns
+            .iter()
+            .position(|t| {
+                t.steps.iter().any(|s| {
+                    s.assistant
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "call_9"))
+                })
+            })
+            .expect("调用所在 turn");
+        let result_turn = store
+            .turns
+            .iter()
+            .position(|t| {
+                t.steps.iter().any(|s| {
+                    s.tool_results.iter().any(|m| {
+                        m.content.iter().any(
+                            |b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call_9"),
+                        )
+                    })
+                })
+            })
+            .expect("结果所在 turn");
+        assert_eq!(call_turn, result_turn, "结果必须落在调用所在 turn");
+
+        // 迟到的真结果：重复帧，静默丢弃，且**不**算孤儿。
+        store.push_tool_result("call_9", "exec output", true);
+        let after = store.build_context_for_gate(&[]);
+        let rendered = serde_json::to_string(&after).expect("serialize context");
+        assert!(!rendered.contains("exec output"), "重复结果不得再插一条");
+        assert_eq!(
+            unpaired_tool_ids(&after),
+            (Vec::new(), Vec::new()),
+            "重复帧不得破坏配对"
+        );
+        assert!(
+            store.take_orphan_tool_results().is_empty(),
+            "重复结果不是孤儿，不该触发领域错误上报"
+        );
     }
 
     // ── BUG-2026-09-13-04 回归：用户图片必须随消息落盘 ──

@@ -275,6 +275,7 @@ impl ToolEngine {
                         round_num: 0,
                         block_id: format!("tool:{}", challenge.call_id()),
                         kind: qaqh_domain::TimelineBlockKind::Tool,
+                        reasoning_kind: None,
                         tool: Some(qaqh_domain::TimelineTool {
                             exit_code: None,
                             completed_at_ms: None,
@@ -724,6 +725,7 @@ impl ToolEngine {
                     round_num: 0,
                     block_id: format!("tool:{id}"),
                     kind: qaqh_domain::TimelineBlockKind::Tool,
+                    reasoning_kind: None,
                     tool: Some(timeline_tool(
                         id,
                         name,
@@ -966,6 +968,7 @@ impl ToolEngine {
                     round_num: 0,
                     block_id: format!("tool:{call_id}"),
                     kind: qaqh_domain::TimelineBlockKind::Tool,
+                    reasoning_kind: None,
                     tool: Some(timeline_tool(
                         call_id,
                         tool_name,
