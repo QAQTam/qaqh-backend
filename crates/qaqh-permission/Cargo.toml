@@ -2,6 +2,7 @@
 name = "qaqh-permission"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness permission engine + process-wide session/workspace/cancel state (P2 crate split from qaqh-workspace)"
 
 [dependencies]

@@ -2,6 +2,7 @@
 name = "qaqh-lsp"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "QAQ-Harness LSP client support — precise code navigation via language servers (docs/current/architecture.md)"
 
 [dependencies]

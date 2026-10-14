@@ -3,7 +3,7 @@ name = "qaqh-client"
 version.workspace = true
 edition = "2024"
 description = "QAQ-Harness Ringing v2 daemon client (HTTP/SSE) — shared by TUI and desktop shells"
-license = "MIT"
+license.workspace = true
 
 [dependencies]
 bytes = "1"
