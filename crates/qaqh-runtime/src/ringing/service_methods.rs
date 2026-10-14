@@ -136,6 +136,8 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "dsaccount.sign_out" => Some(WRITE_ADMIN),
         "dsaccount.bonus.ack" => Some(WRITE_ADMIN),
         "dsaccount.models" => Some(READ_ADMIN),
+        // 可能顺手清凭据，所以按写类报错（`action_failed`）而不是只读。
+        "dsaccount.verify" => Some(WRITE_ADMIN),
         // skills
         "skills.list_tools" => Some(READ),
         "skills.operation" => Some(WRITE),
