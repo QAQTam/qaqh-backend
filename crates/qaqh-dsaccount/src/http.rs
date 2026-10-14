@@ -129,10 +129,13 @@ impl Http {
 
     /// **无正文、无 `content-type`** 的 POST。
     ///
-    /// 登出就是这个形状：参照实现只发身份头 + `x-dsh-auth-token`，没有正文。实测
-    /// （2026-10-14）带 `content-type: application/json` + `{}` 的写法被平台以
-    /// `400` + `Authorization Failed (invalid token)` 拒绝——而**同一个凭据**同时
-    /// 打得通 `users/current` 与余额接口，所以那不是"凭据坏了"，是请求形状。
+    /// 登出就是这个形状：参照实现只发身份头 + `x-dsh-auth-token`，没有正文。
+    ///
+    /// **实测（2026-10-14，`examples/probe_logout.rs` 在真平台上逐形状跑）**：
+    /// 带 `content-type: application/json` + `{}` 的写法被平台以 `400` +
+    /// `Authorization Failed (invalid token)` 拒绝；同一份凭据换成这个裸 POST 就是
+    /// `200` + `code: 0`。同一时刻 `users/current` 与余额都能用——所以当时那句
+    /// "invalid token" 说的不是凭据，是请求形状（这个端点的措辞有误导性）。
     pub fn post_empty(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, DsError> {
         let mut request = self.agent.post(url);
         for (name, value) in headers {
