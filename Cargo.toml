@@ -9,6 +9,7 @@ members = [
     "crates/qaqh-message",
     "crates/qaqh-types",
     "crates/qaqh-siwc",
+    "crates/qaqh-dsaccount",
     "crates/qaqh-memwatch",
     "crates/qaqh-runtime",
     "crates/qaqh-ringing",

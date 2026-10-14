@@ -36,7 +36,7 @@ pub struct ConfigDto {
     /// 该 endpoint 说的 wire：`openai` | `responses` | `anthropic` | `gemini`。
     pub wire: String,
     /// 该 endpoint 的**凭据来源**：`api_key`（BYOK，缺省）| `chatgpt_plan`（本机
-    /// ChatGPT 套餐额度）。
+    /// ChatGPT 套餐额度）| `deepseek_account`（本机 DeepSeek 账号余额）。
     ///
     /// 显式声明而不是从「apiKey 是否为空」推导——隐式推导会把一个配置错误变成
     /// 「静默用了别的额度」。`chatgpt_plan` 只与 `responses` wire + 官方 base_url
@@ -207,7 +207,7 @@ pub struct ConfigPatch {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wire: Option<String>,
-    /// 凭据来源：`api_key` | `chatgpt_plan`。缺失 = 不动（K3）。
+    /// 凭据来源：`api_key` | `chatgpt_plan` | `deepseek_account`。缺失 = 不动（K3）。
     ///
     /// 值域在 [`ConfigPatch::validate`] 收口；这里刻意**不**给「未知值退化成
     /// api_key」的兜底——静默改变额度来源比报错难查得多。
@@ -315,10 +315,10 @@ impl ConfigPatch {
             ));
         }
         if let Some(c) = &self.credential
-            && !matches!(c.as_str(), "api_key" | "chatgpt_plan")
+            && !matches!(c.as_str(), "api_key" | "chatgpt_plan" | "deepseek_account")
         {
             return Err(format!(
-                "credential 仅允许 api_key|chatgpt_plan，收到 {c}"
+                "credential 仅允许 api_key|chatgpt_plan|deepseek_account，收到 {c}"
             ));
         }
         if let Some(e) = &self.reasoning_effort
@@ -472,7 +472,10 @@ mod tests {
                 ..Default::default()
             };
             let err = patch.validate().expect_err("未知取值必须拒绝");
-            assert!(err.contains("api_key|chatgpt_plan"), "{bad} → {err}");
+            assert!(
+                err.contains("api_key|chatgpt_plan|deepseek_account"),
+                "{bad} → {err}"
+            );
         }
     }
 

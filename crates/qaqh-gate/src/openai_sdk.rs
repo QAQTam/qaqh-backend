@@ -17,12 +17,11 @@ use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
 use mutil_ai::{
-    AuthStyle, ChatRequest, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart,
-    MaxTokensSemantics, Message as WireMessage, ModelAdapter, Part, ProfileSelector,
-    ProtocolSurface, ProviderProfile, ProviderRequestOptions, Reasoning as WireReasoning,
-    ReasoningConfig, ReasoningMode, ReasoningReplayPolicy, RequestOptions, Role,
-    StreamEvent as SdkEvent, ThinkingRequestProfile, ToolCall as WireToolCall,
-    ToolResult as WireToolResult, ToolSpec, Usage as WireUsage,
+    ChatRequest, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart, MaxTokensSemantics,
+    Message as WireMessage, ModelAdapter, Part, ProfileSelector, ProtocolSurface, ProviderProfile,
+    ProviderRequestOptions, Reasoning as WireReasoning, ReasoningConfig, ReasoningMode,
+    ReasoningReplayPolicy, RequestOptions, Role, StreamEvent as SdkEvent, ThinkingRequestProfile,
+    ToolCall as WireToolCall, ToolResult as WireToolResult, ToolSpec, Usage as WireUsage,
 };
 use reqwest::header::HeaderValue;
 
@@ -30,7 +29,7 @@ use crate::usage;
 use qaqh_types::{CacheTokenField, ContentBlock, Message, ThinkingParamMode, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, StreamState, apply_management_headers,
+    CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, StreamState, apply_management_headers,
     empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
     tool_names_by_id, tool_result_name, uuid_simple,
 };
@@ -185,7 +184,11 @@ pub(crate) fn project_chat_messages(
                             let mut call = WireToolCall::new(name.clone(), input.clone());
                             // 0.4.0 rejects an empty explicit id; leave it unset so
                             // the SDK's normalizer assigns a collision-free one.
-                            call.id = if id.is_empty() { None } else { Some(id.clone()) };
+                            call.id = if id.is_empty() {
+                                None
+                            } else {
+                                Some(id.clone())
+                            };
                             calls.push(call);
                         }
                         _ => {}
@@ -362,7 +365,13 @@ fn build_adapter(
 ) -> (EndpointAdapter, Arc<RetryHub>) {
     let full = build_chat_url(&provider.base_url, provider.chat_path.as_deref());
     let (base, path) = split_url(&full);
-    let mut spec = EndpointSpec::new(ProtocolSurface::OpenAiChat, base, path, AuthStyle::Bearer);
+    // 凭据头由 provider 决定（账号类凭据不是 Bearer）。
+    let mut spec = EndpointSpec::new(
+        ProtocolSurface::OpenAiChat,
+        base,
+        path,
+        provider.auth_style(),
+    );
     spec.profile = ProfileSelector::Custom(chat_profile(provider));
     let mut transport = mutil_ai::TransportConfig::default();
     transport.user_agent = HeaderValue::from_static(qaqh_types::QAQH_USER_AGENT);
