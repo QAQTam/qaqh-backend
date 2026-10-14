@@ -68,15 +68,22 @@ struct FakePlatform {
 
 impl FakePlatform {
     fn start(mode: ExchangeMode) -> Self {
+        Self::start_with_logout_failures(mode, 0)
+    }
+
+    /// 前 `logout_failures` 次登出请求回 500（用来验后台撤销的**重试**语义）。
+    fn start_with_logout_failures(mode: ExchangeMode, logout_failures: u32) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let log: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&log);
+        let remaining = Arc::new(std::sync::atomic::AtomicU32::new(logout_failures));
+        let counter = Arc::clone(&remaining);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
                 let request = read_request(&mut stream);
-                let reply = route(&request, mode);
+                let reply = route(&request, mode, &counter);
                 if let Some(reply) = reply {
                     sink.lock().expect("lock").push(request);
                     write_reply(&mut stream, &reply);
@@ -94,6 +101,12 @@ impl FakePlatform {
             platform_origin: self.base.clone(),
             inference_origin: self.base.clone(),
             timeout: Duration::from_secs(5),
+            // 次数与线上一致（5 次重试），退避压到 1ms：用例要的是**次数与终态**，
+            // 不是真的等 31 秒。
+            logout_retry: crate::client::LogoutRetry {
+                max_retries: 5,
+                base_delay: Duration::from_millis(1),
+            },
             ..DsClientConfig::default()
         }
     }
@@ -123,7 +136,11 @@ impl FakePlatform {
     }
 }
 
-fn route(request: &Recorded, mode: ExchangeMode) -> Option<Reply> {
+fn route(
+    request: &Recorded,
+    mode: ExchangeMode,
+    remaining_logout_failures: &std::sync::atomic::AtomicU32,
+) -> Option<Reply> {
     match request.path().as_str() {
         protocol::AUTH_INIT_PATH => {
             let state = request.json()["state"]
@@ -159,10 +176,26 @@ fn route(request: &Recorded, mode: ExchangeMode) -> Option<Reply> {
             200,
             r#"{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":null}}"#,
         )),
-        protocol::USERS_LOGOUT_PATH => Some(Reply::json(
-            200,
-            r#"{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":null}}"#,
-        )),
+        protocol::USERS_LOGOUT_PATH => {
+            // 前 N 次故意 500：验「后台撤销会重试到成功或预算耗尽」。
+            let failing = remaining_logout_failures
+                .try_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok();
+            if failing {
+                return Some(Reply::json(
+                    500,
+                    r#"{"code":50000,"msg":"平台开小差","data":null}"#,
+                ));
+            }
+            Some(Reply::json(
+                200,
+                r#"{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":null}}"#,
+            ))
+        }
         protocol::USER_SUMMARY_PATH => Some(Reply::json(
             200,
             r#"{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{"normal_wallets":[{"currency":"CNY","balance":"0E-16","token_estimation":"0"}],"bonus_wallets":[{"currency":"CNY","balance":"10.00"}],"total_costs":[{"currency":"CNY","amount":"12.3400000000000000"}]}}}"#,
@@ -491,6 +524,81 @@ fn sign_out_clears_locally_and_revokes_remotely_in_the_background() {
         .find(|entry| entry.path() == protocol::USERS_LOGOUT_PATH)
         .expect("远端撤销请求");
     assert_eq!(logout.header(protocol::AUTH_TOKEN_HEADER), Some(FAKE_TOKEN));
+    // 形状必须是**裸 POST**：平台对着带 JSON 正文的那版回 400「invalid token」。
+    assert_eq!(
+        logout.header("content-type"),
+        None,
+        "登出不能带 content-type / 正文"
+    );
+    // 后台撤销最终收敛：平台第一次就答应。
+    assert_eq!(wait_for_revoke(&manager, "done")["attempts"], 1);
+}
+
+#[test]
+fn a_failed_revoke_is_retried_until_it_succeeds() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    // 前两次 500、第三次 200：撤销必须重试到成功，且期间**不恢复本地登录**。
+    let platform = FakePlatform::start_with_logout_failures(ExchangeMode::Ok, 2);
+    let manager = manager_for(&temp, &platform);
+    let record = StoredAccount::new("user-1", "测试用户", None, None, &platform.base, FAKE_TOKEN)
+        .expect("构造");
+    manager.store().save(&record).expect("落盘");
+
+    manager.sign_out().expect("登出");
+    assert!(
+        manager.store().load().expect("读").is_none(),
+        "本地立刻断开"
+    );
+
+    let settled = wait_for_revoke(&manager, "done");
+    assert_eq!(settled["attempts"], 3, "两次失败后第三次成功");
+    assert!(
+        manager.store().load().expect("读").is_none(),
+        "远端重试期间绝不恢复本地登录态"
+    );
+}
+
+#[test]
+fn an_exhausted_revoke_budget_is_reported_as_failed() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let platform = FakePlatform::start_with_logout_failures(ExchangeMode::Ok, u32::MAX);
+    let manager = manager_for(&temp, &platform);
+    let record = StoredAccount::new("user-1", "测试用户", None, None, &platform.base, FAKE_TOKEN)
+        .expect("构造");
+    manager.store().save(&record).expect("落盘");
+
+    manager.sign_out().expect("登出");
+    let settled = wait_for_revoke(&manager, "failed");
+    assert_eq!(
+        settled["attempts"], 6,
+        "1 次首发 + 5 次重试（与参照实现的预算同量级）"
+    );
+    assert!(
+        settled["message"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "失败要留下可展示的原因: {settled}"
+    );
+    assert!(
+        manager.store().load().expect("读").is_none(),
+        "本地保持断开"
+    );
+}
+
+/// 等后台撤销收敛到某个状态（用例里的退避压到 1ms 级，5 秒足够）。
+fn wait_for_revoke(manager: &DsAccountManager, state: &str) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let revoke = manager.status()["revoke"].clone();
+        if revoke["state"] == state {
+            return revoke;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "撤销没有收敛到 {state}（当前 {revoke}）"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
