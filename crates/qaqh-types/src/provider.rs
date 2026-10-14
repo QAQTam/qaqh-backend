@@ -197,6 +197,14 @@ pub struct EndpointCompat {
     /// reject tool-loop continuations without them. Default: true.
     #[serde(default = "default_true")]
     pub responses_echo_reasoning_content: bool,
+    /// 按「ChatGPT 套餐用量」直连路由的请求契约收口。**默认关**。
+    ///
+    /// 开启后（`crates/qaqh-gate`）：不发 `max_output_tokens`、剥离一组被禁字段
+    /// （`temperature`/`top_p`/`metadata`/`user`/`prompt_cache_retention` …）、
+    /// 关闭 hosted 工具、不下发 prompt 缓存键，并要求走流式入口。
+    /// 依据：`developers.openai.com/siwc/token-sharing-open-source/preview-limitations`。
+    #[serde(default)]
+    pub responses_siwc_plan: bool,
 
     /// Per-endpoint retry policy override. `None` = transport defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,6 +217,21 @@ fn default_true() -> bool {
 
 fn default_effort_max() -> String {
     "high".into()
+}
+
+/// 端点凭据来源。
+///
+/// 显式声明而不是靠「api_key 为空 + 某个 compat 位」隐式触发：隐式推导会让一个
+/// 配置错误变成「静默用了别的额度」——最难查、也最伤用户信任的一类问题。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSource {
+    /// 常规 BYOK：密钥来自 config/secrets（既有行为，缺省）。
+    #[default]
+    ApiKey,
+    /// 用本机 ChatGPT 套餐额度：每回合向 SIWC 管理器取 access token，
+    /// 并启用该直连路由的请求契约（只支持 `responses` wire + 官方 api base）。
+    ChatgptPlan,
 }
 
 impl Default for EndpointCompat {
@@ -235,6 +258,7 @@ impl Default for EndpointCompat {
             responses_supports_user: true,
             responses_search_function_alias: None,
             responses_echo_reasoning_content: true,
+            responses_siwc_plan: false,
             retry: None,
         }
     }

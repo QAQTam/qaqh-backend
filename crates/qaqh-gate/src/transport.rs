@@ -230,7 +230,9 @@ impl SseTrace {
         };
         use std::io::Write;
         let tag = match event {
-            StreamEvent::ReasoningDelta(d) => format!("reasoning\t{}", d.chars().count()),
+            StreamEvent::ReasoningDelta { kind, text } => {
+                format!("reasoning:{kind:?}\t{}", text.chars().count())
+            }
             StreamEvent::ContentDelta(d) => format!("content\t{}", d.chars().count()),
             StreamEvent::ToolCallProgress { .. } => "tool_call_progress".to_string(),
             StreamEvent::Done { .. } => "done".to_string(),

@@ -466,6 +466,7 @@ mod tests {
                     kind: TimelineBlockKind::Tool,
                     state: TimelineBlockState::Sealed,
                     text: String::new(),
+                    reasoning_kind: None,
                     tool: Some(TimelineTool {
                         exit_code: None,
                         completed_at_ms: None,
@@ -637,6 +638,7 @@ mod tests {
                         kind: TimelineBlockKind::Text,
                         state: TimelineBlockState::Open,
                         text: String::new(),
+                        reasoning_kind: None,
                         tool: None,
                     },
                 },

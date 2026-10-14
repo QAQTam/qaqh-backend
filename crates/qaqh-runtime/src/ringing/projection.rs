@@ -74,7 +74,7 @@ fn build_turns(
         let mut rounds = Vec::new();
         for (ri, step) in turn.steps.iter().enumerate() {
             let thinking = step.assistant.content.iter().find_map(|b| {
-                if let ContentBlock::Reasoning { reasoning } = b {
+                if let ContentBlock::Reasoning { reasoning, .. } = b {
                     Some(reasoning.clone())
                 } else {
                     None
@@ -109,9 +109,10 @@ fn build_turns(
                 .content
                 .iter()
                 .filter_map(|b| match b {
-                    ContentBlock::Reasoning { reasoning } if !reasoning.is_empty() => {
+                    ContentBlock::Reasoning { reasoning, kind } if !reasoning.is_empty() => {
                         Some(qaqh_domain::RoundBlock::Reasoning {
                             content: reasoning.clone(),
+                            kind: *kind,
                         })
                     }
                     ContentBlock::Text { text } if !text.is_empty() => {

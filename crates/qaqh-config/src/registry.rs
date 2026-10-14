@@ -216,6 +216,9 @@ impl LegacyEndpoint {
                 self.responses_echo_reasoning_content,
                 defaults.responses_echo_reasoning_content,
             ),
+            // 旧平铺迁移表里没有这一项（plan usage 是 BYOK 之后新增的能力）：
+            // 与 `send_request_context` 同处理，取缺省而不是编造一个开关。
+            responses_siwc_plan: defaults.responses_siwc_plan,
             retry: self.retry.clone(),
         }
     }

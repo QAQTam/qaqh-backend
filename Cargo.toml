@@ -8,6 +8,7 @@ members = [
     "crates/qaqh-skills",
     "crates/qaqh-message",
     "crates/qaqh-types",
+    "crates/qaqh-siwc",
     "crates/qaqh-memwatch",
     "crates/qaqh-runtime",
     "crates/qaqh-ringing",
@@ -34,7 +35,7 @@ members = [
 ]
 
 [workspace.dependencies]
-mutil-ai = "0.5.0"
+mutil-ai = "0.6.0"
 rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process"] }
 async-lsp = { version = "0.2", default-features = false, features = ["tokio", "omni-trait"] }
 lsp-types = "0.95"

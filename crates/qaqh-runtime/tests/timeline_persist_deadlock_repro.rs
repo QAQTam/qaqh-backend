@@ -53,6 +53,7 @@ fn open_large_progress_tool(hub: &RingingHub, session_id: &str) {
             round_num: 0,
             block_id: "tool".into(),
             kind: TimelineBlockKind::Tool,
+            reasoning_kind: None,
             tool: Some(TimelineTool {
                 exit_code: None,
                 completed_at_ms: None,
