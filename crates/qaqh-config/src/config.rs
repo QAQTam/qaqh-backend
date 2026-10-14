@@ -97,6 +97,8 @@ pub struct Config {
     pub wire: qaqh_types::Wire,
     /// 该 endpoint 与 wire 缺省的差异（请求形状开关）。
     pub compat: qaqh_types::EndpointCompat,
+    /// 凭据来源：`api_key`（缺省）= 既有 BYOK；`chatgpt_plan` = 本机 ChatGPT 套餐额度。
+    pub credential: qaqh_types::CredentialSource,
     /// Active model identifier.
     pub model: String,
     /// Max output tokens per turn.
@@ -105,7 +107,7 @@ pub struct Config {
     /// 阈值（`context_length × auto_compact_threshold`）与发送前硬 pre-flight
     /// 都由它推得（BYOK 前的 `context_limit`/`context_window` 双口径已收敛）。
     pub context_length: u32,
-    /// Reasoning effort: one of `low|medium|high|xhigh|max`, or empty (endpoint default).
+    /// Reasoning effort: one of `low|medium|high|xhigh|max|ultra`, or empty (endpoint default).
     pub reasoning_effort: String,
     /// Named profiles for quick config switching.
     pub profiles: HashMap<String, qaqh_types::ProfileConfig>,
@@ -718,12 +720,14 @@ impl Default for Config {
             wire: qaqh_types::Wire::default(),
             compat: None,
             api_key: None,
+            credential: qaqh_types::CredentialSource::ApiKey,
             preset_endpoint: None,
             context_limit: None,
             context_window: None,
         };
         let wire = profile.wire;
         let compat = profile.compat_or_default();
+        let credential = profile.credential;
         let mut profiles = HashMap::new();
         profiles.insert("default".into(), profile);
 
@@ -732,6 +736,7 @@ impl Default for Config {
             base_url: String::new(),
             wire,
             compat,
+            credential,
             model: String::new(),
             max_tokens: 16384,
             context_length: DEFAULT_CONTEXT_LENGTH,
@@ -885,6 +890,7 @@ impl Config {
                     cfg.base_url = profile.base_url.clone();
                     cfg.wire = profile.wire;
                     cfg.compat = profile.compat_or_default();
+                    cfg.credential = profile.credential;
                 }
             }
             if let Some(k) = pc.api_key
@@ -1132,6 +1138,8 @@ falling back to 1 (read-only)"
                         wire: cfg.wire,
                         compat: None,
                         api_key: None,
+                        // 旧平铺配置没有凭据来源概念（那时只有 BYOK）→ 缺省即事实。
+                        credential: qaqh_types::CredentialSource::ApiKey,
                         preset_endpoint: fresh.endpoint.clone(),
                         context_limit: fresh.context_limit.or(Some(cfg.context_length)),
                         context_window: None,
@@ -1168,6 +1176,8 @@ falling back to 1 (read-only)"
                     wire: cfg.wire,
                     compat: Some(cfg.compat.clone()),
                     api_key: None,
+                    // 保留当前凭据来源：降回 api_key 会把「用套餐」静默改成 BYOK。
+                    credential: cfg.credential,
                     preset_endpoint: None,
                     context_limit: None,
                     context_window: None,
@@ -1230,6 +1240,9 @@ falling back to 1 (read-only)"
                 base_url: self.base_url.clone(),
                 wire: self.wire,
                 compat: Some(self.compat.clone()),
+                // 保留凭据来源：这是「把当前配置存成 profile」，
+                // 抹掉它会静默把套餐档降回 BYOK（与保留 api_key 标记同一类陷阱）。
+                credential: self.credential,
                 // 保留该 profile 既有密钥标记。apply_profile 刻意不碰 api_key，
                 // 而这里每次存盘都重建条目——抹掉标记会让自带 key 的 profile
                 // 静默退回主密钥。
@@ -1461,6 +1474,9 @@ falling back to 1 (read-only)"
                 base_url: self.base_url.clone(),
                 wire: self.wire,
                 compat: Some(self.compat.clone()),
+                // 保留凭据来源：这是「把当前配置存成 profile」，
+                // 抹掉它会静默把套餐档降回 BYOK（与保留 api_key 标记同一类陷阱）。
+                credential: self.credential,
                 api_key: api_key_saved.then(|| CONFIG_MARKER.to_owned()),
                 preset_endpoint: None,
                 context_limit: None,

@@ -72,6 +72,7 @@ fn build_long_turn(
             round_num: 0,
             block_id: "b1".into(),
             kind: qaqh_domain::TimelineBlockKind::Text,
+            reasoning_kind: None,
             tool: None,
         },
     )
@@ -207,6 +208,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
                 round_num: 0,
                 block_id: "b1".into(),
                 kind: qaqh_domain::TimelineBlockKind::Text,
+                reasoning_kind: None,
                 tool: None,
             },
         )

@@ -600,6 +600,20 @@ fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
     .map_err(|e| format!("secrets rename failed: {e}"))
 }
 
+/// 把任意载荷加密成可落盘的密文串（Windows: `dpapi:<base64>`；其它平台：明文 + 0600）。
+///
+/// 公开入口的动机：**同一台机器上不该有两套凭据加密实现**。SIWC 的
+/// OAuth token（`crates/qaqh-siwc`）复用这里，从而与 `secrets.toml`
+/// 的密钥享有一条一致的策略与一次代码审查。
+pub fn protect(plain: &[u8]) -> Result<String, String> {
+    encrypt(plain)
+}
+
+/// [`protect`] 的逆操作。**解密失败不得回退到读取旧的明文值**（与 secrets 同纪律）。
+pub fn unprotect(cipher: &str) -> Result<Vec<u8>, String> {
+    decrypt(cipher).map(String::into_bytes)
+}
+
 #[cfg(windows)]
 fn encrypt(plain: &[u8]) -> Result<String, String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};

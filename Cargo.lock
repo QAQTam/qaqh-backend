@@ -1767,9 +1767,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mutil-ai"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45f0eba51173289c8d067658cf38bc0354542a73c36c55a8455daba5536973a4"
+checksum = "c55089eede42dc1716cafec61eef5ddfeda5dc6e2de7b4241965530833bb19ae"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2146,6 +2146,7 @@ dependencies = [
  "qaqh-runtime",
  "qaqh-sandbox",
  "qaqh-session",
+ "qaqh-siwc",
  "qaqh-subagent",
  "qaqh-types",
  "rand 0.10.3",
@@ -2381,6 +2382,7 @@ dependencies = [
  "qaqh-ringing",
  "qaqh-sandbox",
  "qaqh-session",
+ "qaqh-siwc",
  "qaqh-skills",
  "qaqh-spy",
  "qaqh-subagent",
@@ -2431,6 +2433,21 @@ dependencies = [
  "toml",
  "ts-rs",
  "uuid",
+]
+
+[[package]]
+name = "qaqh-siwc"
+version = "2.0.0-beta.3"
+dependencies = [
+ "log",
+ "qaqh-config",
+ "qaqh-types",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+ "url",
 ]
 
 [[package]]

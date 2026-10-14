@@ -630,6 +630,7 @@ impl TimelineAppender {
         ))
     }
 
+    /// 开一个块（**无思考类别**的便捷形态：工具块与测试走这里）。
     pub fn open_block(
         &mut self,
         session_id: &str,
@@ -639,8 +640,30 @@ impl TimelineAppender {
         kind: TimelineBlockKind,
         tool: Option<TimelineTool>,
     ) -> Result<TimelineEntry, TimelineError> {
+        self.open_block_with_reasoning_kind(
+            session_id, turn_id, round_num, block_id, kind, tool, None,
+        )
+    }
+
+    /// 开一个块。`reasoning_kind` 只对思考块有意义；非思考块带类别即形状错误。
+    ///
+    /// 类别必须与块**同帧**落定：UI 的块标签来自 `BlockOpened`（整个
+    /// [`TimelineBlock`] 下发），事后补发就是第二条真相源。
+    #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（同 gate::ensure_stream_block）
+    pub fn open_block_with_reasoning_kind(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        round_num: u32,
+        block_id: impl Into<String>,
+        kind: TimelineBlockKind,
+        tool: Option<TimelineTool>,
+        reasoning_kind: Option<qaqh_types::ReasoningKind>,
+    ) -> Result<TimelineEntry, TimelineError> {
         let block_id = block_id.into();
-        if (kind == TimelineBlockKind::Tool) != tool.is_some() {
+        if (kind == TimelineBlockKind::Tool) != tool.is_some()
+            || (reasoning_kind.is_some() && kind != TimelineBlockKind::Reasoning)
+        {
             return Err(TimelineError::InvalidBlockShape(block_id));
         }
         let timeline = self.timeline_mut(session_id)?;
@@ -661,6 +684,7 @@ impl TimelineAppender {
             state: TimelineBlockState::Open,
             text: String::new(),
             tool,
+            reasoning_kind,
         };
         round.blocks.push(block.clone());
         Ok(next_entry(
@@ -962,8 +986,17 @@ impl TimelineAppender {
                 round_num,
                 block_id,
                 kind,
+                reasoning_kind,
                 tool,
-            } => self.open_block(session_id, &turn_id, round_num, block_id, kind, tool),
+            } => self.open_block_with_reasoning_kind(
+                session_id,
+                &turn_id,
+                round_num,
+                block_id,
+                kind,
+                tool,
+                reasoning_kind,
+            ),
             TimelineIntent::TextDelta {
                 turn_id,
                 round_num,
@@ -2009,6 +2042,43 @@ mod tests {
         assert_eq!(tail, vec![second]);
     }
 
+    /// 思考类别是**思考块专属**：形状校验必须挡住「text 块带类别」这类串台，
+    /// 否则 UI 会拿一个不存在的标签去渲染答案块。
+    #[test]
+    fn reasoning_kind_is_rejected_on_non_reasoning_blocks() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        let err = appender
+            .open_block_with_reasoning_kind(
+                "s",
+                "t",
+                0,
+                "answer",
+                TimelineBlockKind::Text,
+                None,
+                Some(qaqh_types::ReasoningKind::Summary),
+            )
+            .expect_err("text 块不得带思考类别");
+        assert!(matches!(err, TimelineError::InvalidBlockShape(_)));
+
+        appender
+            .open_block_with_reasoning_kind(
+                "s",
+                "t",
+                0,
+                "reasoning",
+                TimelineBlockKind::Reasoning,
+                None,
+                Some(qaqh_types::ReasoningKind::Summary),
+            )
+            .unwrap();
+        let snapshot = appender.snapshot("s").unwrap();
+        assert_eq!(
+            snapshot.turns[0].rounds[0].blocks[0].reasoning_kind,
+            Some(qaqh_types::ReasoningKind::Summary)
+        );
+    }
+
     #[test]
     fn intents_allocate_fragment_and_timeline_sequences_at_the_single_writer() {
         let mut appender = TimelineAppender::new();
@@ -2022,6 +2092,7 @@ mod tests {
                 round_num: 0,
                 block_id: "answer".into(),
                 kind: TimelineBlockKind::Text,
+                reasoning_kind: None,
                 tool: None,
             },
             TimelineIntent::TextDelta {
@@ -2114,6 +2185,7 @@ mod tests {
                 round_num: 0,
                 block_id: "reasoning".into(),
                 kind: TimelineBlockKind::Reasoning,
+                reasoning_kind: Some(qaqh_types::ReasoningKind::Summary),
                 tool: None,
             },
             TimelineIntent::BlockCheckpoint {

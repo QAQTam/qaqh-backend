@@ -38,6 +38,8 @@ pub(crate) enum Outcome {
 pub(crate) struct StreamState {
     pub text: String,
     pub reasoning: String,
+    /// 首帧思考的**可展示类别**（合并规则见 [`StreamState::push_reasoning`]）。
+    pub reasoning_kind: Option<qaqh_types::ReasoningKind>,
     pub tools: HashMap<usize, (String, String, String)>,
     pub usage: Option<UsageInfo>,
     pub stop: Option<String>,
@@ -49,11 +51,31 @@ impl StreamState {
         Self {
             text: String::new(),
             reasoning: String::new(),
+            reasoning_kind: None,
             tools: HashMap::new(),
             usage: None,
             stop: None,
             responded: false,
         }
+    }
+
+    /// 追加一段思考，并记下它的类别。返回 `false` 表示该类别**不可展示**
+    /// （密文 / 被安全策略抹除）：调用方不得把它播给下游，它也不该进历史——
+    /// 否则 UI 会把 `encrypted_content` 当模型的思考渲染。
+    ///
+    /// 合并规则 = **首帧可展示类别胜出**：一条 assistant 消息只落一个 reasoning
+    /// 块、块上只标一个类别；provider 实践里一轮只发一种（`reasoning_text.delta`
+    /// 与 `reasoning_summary_text.delta` 互斥），真出现混流也宁可标先到的那一种，
+    /// 而不是在流中途造第二个块——那会让 timeline 上的块与这里落盘的块对不上。
+    pub(crate) fn push_reasoning(&mut self, kind: qaqh_types::ReasoningKind, text: &str) -> bool {
+        if !kind.is_displayable() {
+            return false;
+        }
+        if self.reasoning_kind.is_none() {
+            self.reasoning_kind = Some(kind);
+        }
+        self.reasoning.push_str(text);
+        true
     }
 
     pub(crate) fn had_output(&self) -> bool {
@@ -71,6 +93,7 @@ impl StreamState {
         if !self.reasoning.is_empty() {
             blocks.push(ContentBlock::Reasoning {
                 reasoning: self.reasoning,
+                kind: self.reasoning_kind,
             });
         }
         if !self.text.is_empty() {

@@ -447,6 +447,7 @@ impl V2ProjectionHub {
         session_dir: impl AsRef<Path>,
         session_id: &str,
         title: String,
+        source: TitleSource,
     ) -> Result<(), V2HubError> {
         let session_dir = session_dir.as_ref();
         let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
@@ -472,7 +473,7 @@ impl V2ProjectionHub {
             payload: ProjectionPayload::MetaDelta(MetaDelta::TitleChanged {
                 revision,
                 title,
-                source: TitleSource::Auto,
+                source,
             }),
         };
         state

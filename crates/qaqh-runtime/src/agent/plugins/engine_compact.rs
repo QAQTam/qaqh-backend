@@ -225,7 +225,14 @@ pub(crate) fn build_prompt_and_meta(
     // T6: 唯一构造器（turn_lap::gate::provider_for），与主 turn 完全同构；
     // 历史镜像缺 thinking_budget_large / effort_allowlist / stateful /
     // stream_usage / muse-spark 专项，均在唯一构造器内补齐。
-    let provider = crate::agent::turn_lap::gate::provider_for(ctx, "compact");
+    let provider = match crate::agent::turn_lap::gate::provider_for(ctx, "compact") {
+        Ok(provider) => provider,
+        Err(e) => {
+            // 压缩可退：本回合不压缩，交由下一次阈值触发。
+            log::warn!("[COMPACT] provider 构造失败，跳过本次压缩：{e}");
+            return None;
+        }
+    };
     Some((
         prompt,
         kept_user_count,
@@ -523,10 +530,10 @@ pub(crate) fn run_compact_worker(
             };
             let _ = event_tx.send(crate::agent::types::WriterEvent::Ringing(env));
         }
-        qaqh_gate::StreamEvent::ReasoningDelta(delta) => {
+        qaqh_gate::StreamEvent::ReasoningDelta { text, .. } => {
             // legacy CompactDelta reasoning 透传已退役：Ringing 无 reasoning 专用事件，
             // 压缩过程的思考链由 CompactProgress（摘要流）覆盖（convergence-plan §4.2 登记）。
-            let _ = delta;
+            let _ = text;
         }
         _ => {}
     };

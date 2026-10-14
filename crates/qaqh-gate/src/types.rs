@@ -9,12 +9,27 @@
 pub use mutil_ai::ErrorKind;
 
 use qaqh_types::Message;
-use qaqh_types::{CacheTokenField, ThinkingParamMode};
+use qaqh_types::{CacheTokenField, ReasoningKind, ThinkingParamMode};
+
+/// 传输 SDK 的思考类别 → 本仓落盘/领域类别（[`qaqh_types::ReasoningKind`]）。
+///
+/// **穷尽 match，故意不留 `_ =>`**：SDK 的 `ReasoningKind` 不是
+/// `#[non_exhaustive]`，上游新增变体会在这里编译失败——新增类别必须被显式表态
+/// （可展示？可回放？），而不是被兜底分支静默吞成某一种。不复用同名 SDK 类型的
+/// 理由见 `qaqh_types::ReasoningKind` 的文档注释。
+pub fn stored_reasoning_kind(kind: mutil_ai::ReasoningKind) -> ReasoningKind {
+    match kind {
+        mutil_ai::ReasoningKind::Summary => ReasoningKind::Summary,
+        mutil_ai::ReasoningKind::Text => ReasoningKind::Text,
+        mutil_ai::ReasoningKind::Encrypted => ReasoningKind::Encrypted,
+        mutil_ai::ReasoningKind::Redacted => ReasoningKind::Redacted,
+    }
+}
 
 /// Global reasoning-effort ladder. QAQ-Harness always enables thinking, so the
 /// `none` / `disable` levels are not part of the presets: any value that
 /// would turn reasoning off is promoted to the lowest thinking level.
-pub const EFFORT_LADDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+pub const EFFORT_LADDER: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// Values that would disable or minimize reasoning. Never sent to the API:
 /// thinking is a hard requirement of QAQ-Harness, so they are promoted to `low`.
@@ -241,6 +256,12 @@ pub struct ResponsesCompat {
     /// without them (HTTP 400), Kimi K3 & k2.7-code require them for preserved
     /// thinking, and GLM / Qwen / MiniMax / OpenAI accept them silently.
     pub echo_reasoning_content: bool,
+    /// 「ChatGPT 套餐用量」直连路由的请求契约收口。**默认关。**
+    ///
+    /// 开启即启用一组**不可绕过**的收口（见 `SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS`
+    /// 与 [`apply_siwc_plan`]）：不发 `max_output_tokens`、摘除被禁字段、
+    /// 关闭 hosted 工具、不下发 prompt 缓存键；且非流式入口会被改为流式。
+    pub siwc_plan: bool,
 }
 
 impl Default for ResponsesCompat {
@@ -253,6 +274,7 @@ impl Default for ResponsesCompat {
             supports_user: true,
             search_function_alias: None,
             echo_reasoning_content: true,
+            siwc_plan: false,
         }
     }
 }
@@ -475,7 +497,14 @@ impl ProviderConfig {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     ContentDelta(String),
-    ReasoningDelta(String),
+    /// 一段思考。`kind` 区分**摘要**（`Summary`——订阅套餐路径实际只给这一种）
+    /// 与**完整思考文本**（`Text`）：两者是不同的产品，绝不能合成一个块当作
+    /// 「模型的思考」展示。`Encrypted` / `Redacted` 不可展示，见
+    /// [`qaqh_types::ReasoningKind::is_displayable`]。
+    ReasoningDelta {
+        kind: ReasoningKind,
+        text: String,
+    },
     ToolCallProgress {
         index: usize,
         id: String,

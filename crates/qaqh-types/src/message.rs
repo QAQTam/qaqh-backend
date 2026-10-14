@@ -1,9 +1,42 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ts")]
+use ts_rs::TS;
+
 use crate::ToolResult;
 use crate::memory::MemoryUsageEstimate;
 
 // ── OpenAI-native content blocks ──
+
+/// 思考内容（[`ContentBlock::Reasoning`]）的类别。
+///
+/// 与传输 SDK 的 `mutil_ai::ReasoningKind` 同名同形，但**故意不复用**：本类型
+/// 是落盘/回放契约（会长期躺在会话历史里），而 `qaqh-types` 刻意不依赖传输 SDK
+/// （见 `Cargo.toml`）。两者只在 `qaqh-gate` 一处做**穷尽 match** 映射——SDK 将来
+/// 新增变体会在那里编译失败，不会静默漂移。
+///
+/// 显示规则：只有 `Summary` / `Text` 可展示；`Encrypted` 是必须逐字回放的协议
+/// 状态（`response_output_item` 那块），`Redacted` 不可展示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum ReasoningKind {
+    /// 服务端给的思考**摘要**（订阅套餐路径实际只给这一种）。
+    Summary,
+    /// 模型可读的**完整**思考文本。
+    Text,
+    /// 加密思考（`encrypted_content`）：协议状态，仅用于逐字回放。
+    Encrypted,
+    /// 被安全策略抹除的思考：不可展示。
+    Redacted,
+}
+
+impl ReasoningKind {
+    /// 是否可作为思考文本展示给用户。
+    pub fn is_displayable(self) -> bool {
+        matches!(self, Self::Summary | Self::Text)
+    }
+}
 
 /// Content block within a message, matching OpenAI / DeepSeek Chat Completions API.
 ///
@@ -18,8 +51,16 @@ pub enum ContentBlock {
     Text { text: String },
     /// Model reasoning/thinking output (shown as collapsible in UI).
     /// Separate from `Text` so the frontend can style reasoning differently.
+    ///
+    /// `kind` 标注这份思考是「摘要」还是「完整文本」——订阅套餐路径只给摘要，
+    /// UI 必须分得清这两者，否则会把摘要当成模型的原话展示。`None` = 本字段
+    /// 引入前写入的历史数据（显示侧按 `Text` 处理）。
     #[serde(rename = "reasoning")]
-    Reasoning { reasoning: String },
+    Reasoning {
+        reasoning: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ReasoningKind>,
+    },
     /// A tool call the model wants to execute.
     /// Includes the tool name, input arguments, and a unique call ID for tracking.
     #[serde(rename = "tool_use")]
@@ -94,7 +135,7 @@ impl ContentBlock {
         };
         match self {
             Self::Text { text } => usage.add_string(text, true),
-            Self::Reasoning { reasoning } => usage.add_string(reasoning, true),
+            Self::Reasoning { reasoning, .. } => usage.add_string(reasoning, true),
             Self::ToolUse { id, name, input } => {
                 usage.add_string(id, false);
                 usage.add_string(name, false);
@@ -130,6 +171,14 @@ impl ContentBlock {
     pub fn text(text: &str) -> Self {
         ContentBlock::Text {
             text: text.to_string(),
+        }
+    }
+
+    /// 便捷构造器：思考块。`kind` 为 `None` 表示来源未标注（历史数据）。
+    pub fn reasoning(reasoning: &str, kind: Option<ReasoningKind>) -> Self {
+        ContentBlock::Reasoning {
+            reasoning: reasoning.to_string(),
+            kind,
         }
     }
 

@@ -25,6 +25,7 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
         model: cfg.model.clone(),
         base_url: cfg.base_url.clone(),
         wire: cfg.wire.as_str().to_string(),
+        credential: credential_wire(cfg.credential).to_string(),
         max_tokens: u64::from(cfg.max_tokens),
         context_length: u64::from(cfg.context_length),
         reasoning_effort: cfg.reasoning_effort.clone(),
@@ -112,6 +113,37 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
             .is_some_and(|v| !v.is_empty() && v != "****")
             .then(|| s.clone().expect("checked some"))
     };
+    // 一致性判定必须在**任何赋值之前**做：半途返回 Err 会留下半个改动，而调用方
+    // 未必有回滚。判据用「补丁应用后的形状」——补丁给了就用补丁的，没给就用现值，
+    // 这样「两边任一被改动」都查得到：只查「本次补丁带没带 credential」会漏掉
+    // 「已有 plan 的用户把 wire 改走」那一半。
+    let next_wire = match meaningful(&patch.wire) {
+        Some(v) => {
+            qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?
+        }
+        None => cfg.wire,
+    };
+    let next_credential = match patch.credential.as_deref() {
+        // 值域已由 validate() 收口；这里只解析，**不给未知值兜底**——静默改回
+        // ApiKey 正是「用户以为在用套餐、实际打自己的 key」那类最难查的问题。
+        Some("api_key") => qaqh_types::CredentialSource::ApiKey,
+        Some("chatgpt_plan") => qaqh_types::CredentialSource::ChatgptPlan,
+        Some(other) => return Err(format!("无法识别的 credential: {other}")),
+        None => cfg.credential,
+    };
+    // 套餐直连只提供 Responses API：保存期就拦掉，别等到第一回合请求才报。
+    //
+    // 官方 base_url 那一半刻意不在这里查：权威判定在 qaqh-runtime 的
+    // `apply_chatgpt_plan`（gate.rs），它持有 `qaqh_siwc::API_BASE`；本 crate
+    // 不依赖 qaqh-siwc，在这里再写一份 URL 字面量就是第二个真相源。
+    if next_credential == qaqh_types::CredentialSource::ChatgptPlan
+        && next_wire != qaqh_types::Wire::Responses
+    {
+        return Err(format!(
+            "credential=chatgpt_plan 必须配 responses 协议（wire={}）：套餐直连只提供 Responses API",
+            next_wire.as_str()
+        ));
+    }
     if let Some(v) = meaningful(&patch.api_key) {
         cfg.api_key = v;
     }
@@ -124,6 +156,10 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     if let Some(v) = meaningful(&patch.wire) {
         // validate() 已把值域限制在四个 wire 内；解析失败只可能是绕过校验的调用。
         cfg.wire = qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?;
+    }
+    if patch.credential.is_some() {
+        // 解析与一致性判定已在上方（赋值之前）完成，这里只落地。
+        cfg.credential = next_credential;
     }
     if let Some(v) = patch.max_tokens {
         cfg.max_tokens = u32::try_from(v).unwrap_or(u32::MAX);
@@ -198,6 +234,15 @@ fn masked_or_empty(key: &str) -> String {
     }
 }
 
+/// `CredentialSource` → wire 字面量。与 `ConfigPatch::credential` 的值域同源：
+/// 读写两侧都由 `qaqh_types::CredentialSource` 的 serde 表示定义。
+fn credential_wire(source: qaqh_types::CredentialSource) -> &'static str {
+    match source {
+        qaqh_types::CredentialSource::ApiKey => "api_key",
+        qaqh_types::CredentialSource::ChatgptPlan => "chatgpt_plan",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +269,7 @@ mod tests {
                 wire: qaqh_types::Wire::OpenAi,
                 compat: None,
                 api_key: None,
+                credential: qaqh_types::CredentialSource::ApiKey,
                 preset_endpoint: None,
                 context_limit: None,
                 context_window: None,
@@ -356,5 +402,117 @@ mod tests {
         };
         apply_patch(&mut cfg, &patch).expect("apply");
         assert_eq!(cfg.context_length, u32::MAX);
+    }
+
+    /// `credential` 是「显式声明额度来源」的唯一入口：必须能经 patch 落进配置，
+    /// 且**不因后续补丁而静默改回 BYOK**。
+    #[test]
+    fn apply_patch_sets_credential_and_never_resets_it() {
+        let mut cfg = Config {
+            wire: qaqh_types::Wire::Responses,
+            ..Default::default()
+        };
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                credential: Some("chatgpt_plan".into()),
+                ..Default::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
+
+        // 只改模型的补丁不得动额度来源（这正是「静默改回 BYOK」的回归位）。
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                model: Some("m2".into()),
+                ..Default::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
+
+        // 显式切回 BYOK 才是唯一能改回去的方式。
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                credential: Some("api_key".into()),
+                ..Default::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(cfg.credential, qaqh_types::CredentialSource::ApiKey);
+    }
+
+    /// 配错组合在**保存期**就报，并带出该怎么改；拒绝时不得留半个改动。
+    #[test]
+    fn apply_patch_rejects_plan_on_a_non_responses_wire() {
+        let mut cfg = Config {
+            wire: qaqh_types::Wire::OpenAi,
+            ..Default::default()
+        };
+        let err = apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                credential: Some("chatgpt_plan".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("openai wire + plan must be rejected");
+        assert!(err.contains("responses"), "{err}");
+        assert_eq!(
+            cfg.credential,
+            qaqh_types::CredentialSource::ApiKey,
+            "拒绝即不落地"
+        );
+
+        // 同一次补丁里把 wire 一起改对就该通过（判定用应用后的 cfg.wire）。
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                wire: Some("responses".into()),
+                credential: Some("chatgpt_plan".into()),
+                ..Default::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
+    }
+
+    /// 反向也要拦：已有 plan 的用户把 wire 改走，同样在保存期报错——只查「本次
+    /// 补丁带了 credential」会漏掉这一半。
+    #[test]
+    fn apply_patch_rejects_moving_the_wire_away_from_plan() {
+        let mut cfg = Config {
+            wire: qaqh_types::Wire::Responses,
+            credential: qaqh_types::CredentialSource::ChatgptPlan,
+            ..Default::default()
+        };
+        let err = apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                wire: Some("openai".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("plan + openai must be rejected");
+        assert!(err.contains("responses"), "{err}");
+        assert_eq!(cfg.wire, qaqh_types::Wire::Responses, "拒绝即不落地");
+    }
+
+    /// 读模型把额度来源投影成 wire 字面量（前端据此显示「本机套餐」）。
+    #[test]
+    fn to_dto_projects_the_credential_source() {
+        let byok = Config {
+            credential: qaqh_types::CredentialSource::ApiKey,
+            ..Default::default()
+        };
+        let plan = Config {
+            credential: qaqh_types::CredentialSource::ChatgptPlan,
+            ..Default::default()
+        };
+        assert_eq!(to_dto(&byok).credential, "api_key");
+        assert_eq!(to_dto(&plan).credential, "chatgpt_plan");
     }
 }

@@ -35,7 +35,14 @@ pub fn maybe_start_title(ctx: &mut RingContext) {
     let _ = apply_fallback_title(ctx, &session_id, first_user);
 
     // ── ② 异步：LLM 总结覆盖（失败/超时保持截断版）──
-    let provider = super::turn_lap::gate::provider_for(ctx, "title");
+    let provider = match super::turn_lap::gate::provider_for(ctx, "title") {
+        Ok(provider) => provider,
+        Err(e) => {
+            // 标题总结是尽力而为：构造失败就保留截断标题，不打断会话（也不吞掉原因）。
+            log::warn!("[TITLE] provider 构造失败，保留截断标题：{e}");
+            return;
+        }
+    };
     let event_tx = ctx.emitter.event_tx();
     let user_msg = first_user.to_string();
     // 后台线程拿注入句柄写盘（&'static 可跨线程；不入 dispatch 线程的

@@ -115,6 +115,7 @@ mod tests {
             state: TimelineBlockState::Open,
             text: String::new(),
             tool: None,
+            reasoning_kind: None,
         }
     }
 

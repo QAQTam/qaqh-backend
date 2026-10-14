@@ -35,6 +35,13 @@ pub struct ConfigDto {
     pub base_url: String,
     /// 该 endpoint 说的 wire：`openai` | `responses` | `anthropic` | `gemini`。
     pub wire: String,
+    /// 该 endpoint 的**凭据来源**：`api_key`（BYOK，缺省）| `chatgpt_plan`（本机
+    /// ChatGPT 套餐额度）。
+    ///
+    /// 显式声明而不是从「apiKey 是否为空」推导——隐式推导会把一个配置错误变成
+    /// 「静默用了别的额度」。`chatgpt_plan` 只与 `responses` wire + 官方 base_url
+    /// 配套；请求期的权威判定在 `qaqh-runtime` 的 `provider_for`。
+    pub credential: String,
     pub max_tokens: u64,
     /// 端点声明的上下文窗口——本地压缩的唯一分母（软阈值与硬 pre-flight 同源）。
     pub context_length: u64,
@@ -200,6 +207,12 @@ pub struct ConfigPatch {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wire: Option<String>,
+    /// 凭据来源：`api_key` | `chatgpt_plan`。缺失 = 不动（K3）。
+    ///
+    /// 值域在 [`ConfigPatch::validate`] 收口；这里刻意**不**给「未知值退化成
+    /// api_key」的兜底——静默改变额度来源比报错难查得多。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -301,11 +314,21 @@ impl ConfigPatch {
                 "wire 仅允许 openai|responses|anthropic|gemini，收到 {w}"
             ));
         }
-        if let Some(e) = &self.reasoning_effort
-            && !matches!(e.as_str(), "low" | "medium" | "high" | "xhigh" | "max")
+        if let Some(c) = &self.credential
+            && !matches!(c.as_str(), "api_key" | "chatgpt_plan")
         {
             return Err(format!(
-                "reasoningEffort 仅允许 low|medium|high|xhigh|max，收到 {e}"
+                "credential 仅允许 api_key|chatgpt_plan，收到 {c}"
+            ));
+        }
+        if let Some(e) = &self.reasoning_effort
+            && !matches!(
+                e.as_str(),
+                "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            )
+        {
+            return Err(format!(
+                "reasoningEffort 仅允许 low|medium|high|xhigh|max|ultra，收到 {e}"
             ));
         }
         if let Some(level) = self.permission_level
@@ -390,6 +413,7 @@ mod tests {
             "model": "ox-alpha-free",
             "baseUrl": "https://opencode.ai/zen/go/v1",
             "wire": "openai",
+            "credential": "chatgpt_plan",
             "maxTokens": 96000,
             "contextLength": 1000000,
             "reasoningEffort": "max",
@@ -421,6 +445,7 @@ mod tests {
         let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
         assert_eq!(dto.context_length, 1_000_000);
         assert_eq!(dto.wire, "openai");
+        assert_eq!(dto.credential, "chatgpt_plan");
         assert_eq!(dto.reasoning_effort, "max");
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(dto.api_key, "****");
@@ -429,6 +454,26 @@ mod tests {
         assert_eq!(dto.exec.default_shell.as_deref(), Some("bash"));
         assert_eq!(dto.session_idle_unload_secs, 900);
         assert!(!dto.mcp.enabled && !dto.lsp.enabled);
+    }
+
+    /// 凭据来源只有两个合法取值。写错必须在落盘前拦掉：静默退回 `api_key` 会让
+    /// 用户以为在用套餐、实际打的是自己的 key。
+    #[test]
+    fn patch_validate_rejects_an_unknown_credential() {
+        let ok = ConfigPatch {
+            credential: Some("chatgpt_plan".into()),
+            ..Default::default()
+        };
+        assert!(ok.validate().is_ok());
+
+        for bad in ["chatgpt", "chatgpt_plan ", "", "ApiKey"] {
+            let patch = ConfigPatch {
+                credential: Some(bad.into()),
+                ..Default::default()
+            };
+            let err = patch.validate().expect_err("未知取值必须拒绝");
+            assert!(err.contains("api_key|chatgpt_plan"), "{bad} → {err}");
+        }
     }
 
     /// K3：空 Patch 序列化为 `{}`——wire 上不发 null、不发未改动字段。
@@ -482,11 +527,19 @@ mod tests {
             ..Default::default()
         };
         assert!(bad.validate().is_err());
+        // `ultra` 曾在这里充当非法样本（旧值域 low|medium|high|xhigh|max）。
+        // 2026-10-14 起 `mutil-ai 0.6.0` 支持该档、值域随之放开，所以换成真正
+        // 越界的值，并把「ultra 合法」单独立一条——免得下次又被当反例改回来。
         let bad_effort = ConfigPatch {
-            reasoning_effort: Some("ultra".into()),
+            reasoning_effort: Some("bogus".into()),
             ..Default::default()
         };
         assert!(bad_effort.validate().is_err());
+        let ultra = ConfigPatch {
+            reasoning_effort: Some("ultra".into()),
+            ..Default::default()
+        };
+        assert!(ultra.validate().is_ok());
         // 0.0 = 关闭自动压缩，合法（真机回归：开区间曾误杀禁用流）。
         let disabled = ConfigPatch {
             auto_compact_threshold: Some(0.0),

@@ -31,6 +31,9 @@ pub struct QaqhService {
     /// Per-root message board stores, opened lazily.
     pub(crate) board_stores:
         Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<qaqh_session::team::BoardStore>>>>>,
+    /// Sign in with ChatGPT（套餐用量）会话管理器。懒装配：只有真正用到该能力时
+    /// 才去建目录、读 host id——未使用它的用户不该多出任何磁盘副作用。
+    pub(crate) siwc: std::sync::OnceLock<Arc<qaqh_siwc::SiwcManager>>,
 }
 
 impl QaqhService {
@@ -98,7 +101,40 @@ impl QaqhService {
             sessions,
             task_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
             board_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            siwc: std::sync::OnceLock::new(),
         }
+    }
+
+    /// SIWC 会话管理器（懒装配到 `<data_dir>/siwc`）。
+    ///
+    /// 懒装配而非 `init` 里装配：只有真正用到套餐用量时才建目录、读 host id；
+    /// 不用该能力的用户不该多出任何磁盘副作用。
+    pub(crate) fn siwc(&self) -> Result<Arc<qaqh_siwc::SiwcManager>, String> {
+        if let Some(manager) = self.siwc.get() {
+            return Ok(Arc::clone(manager));
+        }
+        let dir = qaqh_types::platform::data_dir().join("siwc");
+        let manager = Arc::new(
+            qaqh_siwc::SiwcManager::new(dir, qaqh_siwc::SiwcConfig::default())
+                .map_err(|e| e.to_string())?,
+        );
+        // 进程级装配：深层调用点（`provider_for` 每回合重建 provider）只认全局槽位，
+        // 理由见 `qaqh_siwc::global` 的模块说明。
+        qaqh_siwc::install_manager(Arc::clone(&manager));
+        // 竞态：两个线程可能同时装配；`set` 失败即沿用先到者的实例。
+        let _ = self.siwc.set(manager);
+        self.siwc
+            .get()
+            .map(Arc::clone)
+            .ok_or_else(|| "siwc manager unavailable".to_string())
+    }
+
+    /// 测试/运维钩子：注入指定目录的 SIWC 管理器（默认位置是用户的 data_dir）。
+    #[doc(hidden)]
+    pub fn attach_siwc(&self, manager: Arc<qaqh_siwc::SiwcManager>) {
+        // 与懒装配同一语义：全局槽位是深层调用点的唯一入口。
+        qaqh_siwc::install_manager(Arc::clone(&manager));
+        let _ = self.siwc.set(manager);
     }
 
     /// 挂载 Ringing 运行时（worker 事件双投）。
@@ -694,6 +730,60 @@ impl QaqhService {
                 })?;
                 Ok(Value::Null)
             }
+            // ── Sign in with ChatGPT（套餐用量）────────────────────────────────
+            // 方法表已把这八个方法标为 admin_only；这里只做参数整形与错误翻译。
+            // 响应形状**结构上不含 token**（状态投影见 qaqh_siwc::StoredProfile）。
+            "siwc.status" => Ok(self.siwc()?.status()),
+            "siwc.profiles" => Ok(self.siwc()?.profiles()),
+            "siwc.models" => {
+                let profile_id = params.get("profile_id").and_then(Value::as_str);
+                let models = self.siwc()?.list_models(profile_id).map_err(String::from)?;
+                Ok(Value::Array(
+                    models
+                        .iter()
+                        .map(|m| json!({ "slug": m.slug, "displayName": m.display_name }))
+                        .collect(),
+                ))
+            }
+            "siwc.sign_in.start" => {
+                let start = self
+                    .siwc()?
+                    .begin_sign_in(qaqh_siwc::SignInOptions {
+                        profile_id: params
+                            .get("profile_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        new_profile: pbool(params, "new_profile"),
+                        label: params.get("label").and_then(Value::as_str).map(str::to_owned),
+                        reconsent: pbool(params, "reconsent"),
+                    })
+                    .map_err(String::from)?;
+                // 浏览器由**宿主**（Tauri）打开：daemon 不 spawn 进程，也不内嵌 webview。
+                Ok(json!({
+                    "flowId": start.flow_id,
+                    "authorizeUrl": start.authorize_url,
+                    "redirectUri": start.redirect_uri,
+                    "expiresAtMs": start.expires_at_ms,
+                    "usageUrl": qaqh_siwc::SiwcManager::usage_url(),
+                }))
+            }
+            "siwc.sign_in.status" => {
+                let flow_id = pstr(params, "flow_id")?;
+                self.siwc()?.sign_in_status(&flow_id).map_err(String::from)
+            }
+            "siwc.sign_in.cancel" => {
+                let flow_id = pstr(params, "flow_id")?;
+                self.siwc()?.cancel_sign_in(&flow_id).map_err(String::from)?;
+                Ok(Value::Null)
+            }
+            "siwc.profile.select" => {
+                let profile_id = pstr(params, "profile_id")?;
+                self.siwc()?.select_profile(&profile_id).map_err(String::from)
+            }
+            "siwc.sign_out" => {
+                let profile_id = params.get("profile_id").and_then(Value::as_str);
+                self.siwc()?.sign_out(profile_id).map_err(String::from)
+            }
             "profile.save_current" => {
                 let name = pstr(params, "name")?;
                 // 顺序不可反：先把当前主密钥写进该 profile 的 secret 槽，再落
@@ -757,6 +847,31 @@ impl QaqhService {
                     session_id,
                     RingingCommand::Control(ControlCommand::AgentReloadConfig),
                 )?;
+                Ok(Value::Null)
+            }
+            // 用户重命名会话标题（方案B）：落 meta.title 并以 TitleSource::User
+            // 广播 TitleChanged —— 客户端经 v2 Meta SSE 即时回灌，session.list
+            // 每轮读盘自然可见。auto-title 的冻结守卫（title.is_some()）保证
+            // 首回合后不再重复生成；LLM 总结在飞时的窄窗口竞态见
+            // docs/session-rename-persistence-plan.md §3。
+            "session.rename" => {
+                let session_id = session_id()?;
+                let title = pstr(params, "title")?.trim().to_string();
+                if title.is_empty() {
+                    return Err("title must be a non-empty string".to_string());
+                }
+                self.sessions.update_title(&session_id, &title);
+                if let Some(hub) = self.v2_hub.get() {
+                    let session_dir = self.sessions.session_path_dir(&session_id);
+                    if let Err(error) = hub.publish_title_changed(
+                        &session_dir,
+                        &session_id,
+                        title,
+                        qaqh_session::session_fact_v2::TitleSource::User,
+                    ) {
+                        log::warn!("[session] rename publish failed for {session_id}: {error}");
+                    }
+                }
                 Ok(Value::Null)
             }
             "todo.status" => qaqh_workspace::todo::todo_status_value(&session_id()?),

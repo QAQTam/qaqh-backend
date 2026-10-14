@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use qaqh_domain::{TimelineBlockKind, TimelineToolState, TimelineTurnState};
 use qaqh_runtime::RingingHub;
 use qaqh_session::SessionManager;
-use qaqh_types::{ContentBlock, Message};
+use qaqh_types::{ContentBlock, Message, ReasoningKind};
 
 fn temp_root(tag: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -27,6 +27,9 @@ fn session_messages() -> Vec<Message> {
         content: vec![
             ContentBlock::Reasoning {
                 reasoning: "thinking".to_string(),
+                // 套餐路径的思考就是**摘要**：重建后这个类别必须还在，否则 UI
+                // 会把摘要当模型原话展示（本用例顺带钉住 rebuild 的类别链路）。
+                kind: Some(ReasoningKind::Summary),
             },
             ContentBlock::ToolUse {
                 id: "call-1".to_string(),
@@ -93,6 +96,11 @@ fn missing_or_corrupt_timeline_is_rebuilt_from_persisted_messages() {
     assert_eq!(round.blocks.len(), 3);
     assert_eq!(round.blocks[0].kind, TimelineBlockKind::Reasoning);
     assert_eq!(round.blocks[0].text, "thinking");
+    assert_eq!(
+        round.blocks[0].reasoning_kind,
+        Some(ReasoningKind::Summary),
+        "重建必须保住思考类别（ContentBlock.kind → RoundBlock.kind → TimelineBlock）"
+    );
     let tool = round.blocks[1].tool.as_ref().expect("tool block");
     assert_eq!(tool.state, TimelineToolState::Succeeded);
     assert!(tool.output.is_none());

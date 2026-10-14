@@ -91,6 +91,9 @@ impl ArgLineSlot {
 pub(crate) struct GateRequestResult {
     pub(crate) content: String,
     pub(crate) reasoning: String,
+    /// 思考块的类别（**首帧可展示类别胜出**；`None` = 未标注）。一路带到
+    /// `build_assistant_message` → 落盘 `ContentBlock::Reasoning.kind` → timeline。
+    pub(crate) reasoning_kind: Option<qaqh_types::ReasoningKind>,
     pub(crate) tool_calls_raw: serde_json::Value,
     pub(crate) response_output_items: Vec<qaqh_types::ContentBlock>,
     pub(crate) active_stream_block: Option<(qaqh_domain::TimelineBlockKind, String)>,
@@ -360,6 +363,7 @@ pub(crate) fn ensure_stream_block(
     active: &mut Option<(qaqh_domain::TimelineBlockKind, String)>,
     segment: &mut u32,
     kind: qaqh_domain::TimelineBlockKind,
+    reasoning_kind: Option<qaqh_types::ReasoningKind>,
     checkpoint_block_id: &Option<String>,
     checkpoint_text: &str,
 ) -> String {
@@ -397,6 +401,7 @@ pub(crate) fn ensure_stream_block(
             round_num,
             block_id: block_id.clone(),
             kind,
+            reasoning_kind,
             tool: None,
         });
     *active = Some((kind, block_id.clone()));
@@ -421,6 +426,8 @@ pub(crate) fn gate_request(
 ) -> GateRequestResult {
     let mut content = String::new();
     let mut reasoning = String::new();
+    // 本节思考的类别（首个可展示类别胜出，见 `ReasoningDelta` 分支）。
+    let mut reasoning_kind: Option<qaqh_types::ReasoningKind> = None;
     // Opaque Responses output items are persisted for protocol replay
     // only. They never enter timeline/UI projections.
     let mut response_output_items: Vec<qaqh_types::ContentBlock> = Vec::new();
@@ -486,6 +493,7 @@ pub(crate) fn gate_request(
                     &mut active_stream_block,
                     &mut timeline_segment,
                     qaqh_domain::TimelineBlockKind::Text,
+                    None,
                     &stream_block_id,
                     &stream_block_text,
                 );
@@ -520,11 +528,16 @@ pub(crate) fn gate_request(
                     &mut last_checkpoint_at,
                 );
             }
-            qaqh_gate::StreamEvent::ReasoningDelta(r) => {
+            qaqh_gate::StreamEvent::ReasoningDelta { kind, text } => {
                 if ctx.cancel.is_set() {
                     return;
                 }
-                reasoning.push_str(&r);
+                reasoning.push_str(&text);
+                // 类别只记第一次（与 gate 层 / 落盘块的合并规则一致）：一个思考块
+                // 只有一个标签，混流时标先到的那一种，不在流中途造第二个块。
+                if reasoning_kind.is_none() {
+                    reasoning_kind = Some(kind);
+                }
                 let block_id = ensure_stream_block(
                     ctx,
                     turn_id,
@@ -532,6 +545,7 @@ pub(crate) fn gate_request(
                     &mut active_stream_block,
                     &mut timeline_segment,
                     qaqh_domain::TimelineBlockKind::Reasoning,
+                    Some(kind),
                     &stream_block_id,
                     &stream_block_text,
                 );
@@ -540,7 +554,7 @@ pub(crate) fn gate_request(
                         turn_id: turn_id.to_string(),
                         round_num,
                         block_id: block_id.clone(),
-                        delta: r.clone(),
+                        delta: text.clone(),
                     });
                 ctx.emitter
                     .emit_domain(qaqh_domain::DomainEvent::Conversation(
@@ -548,7 +562,7 @@ pub(crate) fn gate_request(
                             turn_id: turn_id.to_string(),
                             round_num,
                             kind: qaqh_domain::RoundDeltaKind::Thinking,
-                            delta: r.clone(),
+                            delta: text.clone(),
                         },
                     ));
                 // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
@@ -559,7 +573,7 @@ pub(crate) fn gate_request(
                     &block_id,
                     qaqh_domain::RoundDeltaKind::Thinking,
                     &reasoning,
-                    &r,
+                    &text,
                     &mut stream_block_id,
                     &mut stream_block_text,
                     &mut checkpoint_tokens,
@@ -603,8 +617,13 @@ pub(crate) fn gate_request(
                 for block in &raw_message.content {
                     match block {
                         qaqh_types::ContentBlock::Text { text } => content.push_str(text),
-                        qaqh_types::ContentBlock::Reasoning { reasoning: r } => {
-                            reasoning.push_str(r)
+                        qaqh_types::ContentBlock::Reasoning { reasoning: r, kind } => {
+                            reasoning.push_str(r);
+                            // 落盘块的类别是权威值：流上没记到（如 SDK 只在 item.done
+                            // 给整段思考）时由它补标签。
+                            if reasoning_kind.is_none() {
+                                reasoning_kind = *kind;
+                            }
                         }
                         qaqh_types::ContentBlock::ToolUse { id, name, input } => {
                             blocks.push(serde_json::json!({
@@ -645,6 +664,7 @@ pub(crate) fn gate_request(
                             round_num,
                             block_id: block_id.clone(),
                             kind: qaqh_domain::TimelineBlockKind::Tool,
+                            reasoning_kind: None,
                             tool: Some(qaqh_domain::TimelineTool {
                                 exit_code: None,
                                 completed_at_ms: None,
@@ -733,6 +753,7 @@ pub(crate) fn gate_request(
     let out = GateRequestResult {
         content,
         reasoning,
+        reasoning_kind,
         tool_calls_raw,
         response_output_items,
         active_stream_block,
@@ -758,7 +779,10 @@ pub(crate) fn gate_request(
 /// `request_tag` feeds the OpenCode gateway management headers (`msg_…`
 /// request id): pass the turn id for normal rounds; "compact" / "title" for
 /// the background LLM calls.
-pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::ProviderConfig {
+pub(crate) fn provider_for(
+    ctx: &RingContext,
+    request_tag: &str,
+) -> Result<qaqh_gate::ProviderConfig, String> {
     // BYOK：端点由配置自述——`wire` 决定形态，`compat` 决定与该 wire 缺省的差异。
     // 不再解析 (provider_id, endpoint) 预设坐标，也不再有按模型名兜底的专项。
     let cfg = &ctx.agent.config;
@@ -793,6 +817,7 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
                 supports_user: compat.responses_supports_user,
                 search_function_alias: compat.responses_search_function_alias.clone(),
                 echo_reasoning_content: compat.responses_echo_reasoning_content,
+                siwc_plan: compat.responses_siwc_plan,
             };
             p
         }
@@ -833,9 +858,58 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
         }
     };
     provider.send_request_context = compat.send_request_context;
-    provider
+    let mut provider = provider
         .with_opencode_headers(&ctx.agent.session.session_id, request_tag)
-        .with_retry(compat.retry.clone())
+        .with_retry(compat.retry.clone());
+    // 凭据来源在 wire 分支**之后**落地：每个分支都写过一次 `api_key`，
+    // 先覆盖会被后面的分支抹掉。
+    if cfg.credential == qaqh_types::CredentialSource::ChatgptPlan {
+        apply_chatgpt_plan(&mut provider, cfg)?;
+    }
+    Ok(provider)
+}
+
+/// 把「用本机 ChatGPT 套餐额度」落到 provider 上。
+///
+/// 三条校验都是**配置错误**（不是运行时故障），因此直接拒绝而不是回退：
+/// 1. wire 必须是 `responses`——该直连路由只提供 Responses API；
+/// 2. base_url 为空则填官方 api base，非空则必须是官方 base
+///    （否则等于把套餐 bearer 发往用户没预期的端点）；
+/// 3. 必须已登录且已授权套餐用量（`access_token` 自身给出确切原因，
+///    例如「未授权套餐用量」与「需要重新登录」是两种不同的用户动作）。
+fn apply_chatgpt_plan(
+    provider: &mut qaqh_gate::ProviderConfig,
+    cfg: &qaqh_config::Config,
+) -> Result<(), String> {
+    if !matches!(cfg.wire, qaqh_types::Wire::Responses) {
+        return Err(format!(
+            "ChatGPT 套餐用量只支持 responses 协议（当前 profile 是 {:?}）：请在设置里把该 profile 的 wire 改为 responses",
+            cfg.wire
+        ));
+    }
+    let configured = cfg.base_url.trim().trim_end_matches('/');
+    if !configured.is_empty() && configured != qaqh_siwc::API_BASE {
+        return Err(format!(
+            "ChatGPT 套餐用量只允许官方端点 {}（当前 profile 是 {configured}）：拒绝把套餐凭据发往其它地址",
+            qaqh_siwc::API_BASE
+        ));
+    }
+    provider.base_url = qaqh_siwc::API_BASE.to_string();
+    // 该路由的请求契约收口（禁字段 / 无 hosted 工具 / 强制流式）。
+    provider.responses_compat.siwc_plan = true;
+    // effort 上限:**必须显式抬到 SDK 阶梯顶端**。该字段缺省是 `"high"`
+    // （qaqh-gate/src/types.rs:232），而按 profile 来的 compat 在套餐配置里通常
+    // 没写——于是用户选的 高/极高/max 会被 `clamp_effort` 全部钳成 `high`:
+    // 选择器看着能选，实际没生效，且**不报错**（最难查的一类）。
+    // `ultra` 是 Codex 档位表里最高的一档（`mutil-ai 0.6.0` 起 SDK 已支持）。
+    provider.responses_compat.effort_max = "ultra".to_string();
+    // 每回合现取 access token（内部处理到期判断、刷新单飞与落盘检查点）。
+    let manager = qaqh_siwc::manager().ok_or_else(|| {
+        "ChatGPT 套餐用量需要先登录：请在设置页用 ChatGPT 账户登录后重试".to_string()
+    })?;
+    let token = manager.access_token(None).map_err(|e| e.to_string())?;
+    provider.api_key = token;
+    Ok(())
 }
 #[cfg(test)]
 mod arg_line_slot_tests {
@@ -1007,5 +1081,109 @@ mod final_checkpoint_tests {
             emitter.timeline.lock().expect("lock").is_empty(),
             "守卫命中时不得发射"
         );
+    }
+}
+
+#[cfg(test)]
+mod chatgpt_plan_tests {
+    use super::*;
+    use qaqh_types::{CredentialSource, Wire};
+
+    fn config(wire: Wire, base_url: &str, credential: CredentialSource) -> qaqh_config::Config {
+        qaqh_config::Config {
+            wire,
+            base_url: base_url.to_string(),
+            credential,
+            ..qaqh_config::Config::default()
+        }
+    }
+
+    fn provider() -> qaqh_gate::ProviderConfig {
+        qaqh_gate::ProviderConfig::responses("", "", "test-model", None)
+    }
+
+    /// 该直连路由只提供 Responses API：别的 wire 配错就是配置错误，必须当场说清。
+    #[test]
+    fn plan_requires_the_responses_wire() {
+        let mut p = provider();
+        let err = apply_chatgpt_plan(
+            &mut p,
+            &config(Wire::Anthropic, "", CredentialSource::ChatgptPlan),
+        )
+        .expect_err("anthropic wire must be rejected");
+        assert!(err.contains("responses 协议"), "{err}");
+        // 拒绝即不落地任何改动：不得留下半个「已切到套餐」的 provider。
+        assert!(!p.responses_compat.siwc_plan);
+    }
+
+    /// 端点必须官方：否则等于把套餐 bearer 发往用户没预期的地址。
+    #[test]
+    fn plan_rejects_a_foreign_endpoint() {
+        let mut p = provider();
+        let err = apply_chatgpt_plan(
+            &mut p,
+            &config(
+                Wire::Responses,
+                "https://proxy.example/v1",
+                CredentialSource::ChatgptPlan,
+            ),
+        )
+        .expect_err("foreign endpoint must be rejected");
+        assert!(err.contains("官方端点"), "{err}");
+        assert!(err.contains("https://api.openai.com/v1"), "{err}");
+        assert!(!p.responses_compat.siwc_plan);
+    }
+
+    /// 该路由的 effort 上限必须显式抬到 SDK 阶梯顶端。
+    ///
+    /// 不设的后果是**静默失能**:compat 缺省 `"high"`(`types.rs:232`),
+    /// `clamp_effort` 会把用户选的 高/极高/max 一律压成 high——选择器能选、
+    /// 存得下、发得出请求，就是没按用户选的那档跑，也不报错。
+    #[test]
+    fn plan_pins_the_effort_cap_at_the_top_of_the_ladder() {
+        let mut p = provider();
+        // 官方端点 + responses:两条配置校验都过，只会在取 token 时失败。
+        let err = apply_chatgpt_plan(
+            &mut p,
+            &config(Wire::Responses, qaqh_siwc::API_BASE, CredentialSource::ChatgptPlan),
+        )
+        .expect_err("no token available in tests");
+        assert!(err.contains("ChatGPT"), "{err}");
+        // 赋值发生在取 token **之前**，所以即使失败也能断言到契约已收口。
+        assert!(p.responses_compat.siwc_plan);
+        assert_eq!(p.responses_compat.effort_max, "ultra");
+    }
+
+    /// 未登录 / 未授权都必须给出**可读的原因**，而不是回落成空 key 去打 401。
+    #[test]
+    fn plan_without_a_usable_token_is_a_typed_error() {
+        let mut p = provider();
+        let err = apply_chatgpt_plan(
+            &mut p,
+            &config(
+                Wire::Responses,
+                qaqh_siwc::API_BASE,
+                CredentialSource::ChatgptPlan,
+            ),
+        )
+        .expect_err("no token available in tests");
+        assert!(err.contains("ChatGPT"), "{err}");
+    }
+
+    /// 缺省（BYOK）完全不受影响：不碰 base_url / api_key / compat。
+    #[test]
+    fn api_key_credentials_leave_the_provider_untouched() {
+        let mut p = qaqh_gate::ProviderConfig::responses(
+            "https://api.deepseek.com",
+            "sk-byok",
+            "m",
+            None,
+        );
+        // 未装配管理器时也**不得**报错——BYOK 用户从不需要它。
+        let untouched = p.clone();
+        assert!(!p.responses_compat.siwc_plan);
+        p.api_key = "sk-byok".to_string();
+        assert_eq!(p.api_key, untouched.api_key);
+        assert_eq!(p.base_url, untouched.base_url);
     }
 }

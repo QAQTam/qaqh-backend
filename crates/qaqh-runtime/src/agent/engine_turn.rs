@@ -1254,7 +1254,12 @@ impl TurnEngine {
         // prefix cache 友好——与 skills envelope 同管线）。
         ctx.agent.sync_mcp_resource_injection(ctx.flow);
         // Rebuild provider from current config（gate_lap 准备逻辑，见 turn_lap::gate）
-        let provider = provider_for(ctx, &turn_id);
+        // 构造失败（如套餐用量未登录/未授权）必须**显式失败**这个回合：
+        // 回退成空 key 只会打出一个上游 401，把真正的原因埋掉。
+        let provider = match provider_for(ctx, &turn_id) {
+            Ok(provider) => provider,
+            Err(message) => return Outcome::Error(message),
+        };
 
         // 单回合执行块：所有路径均 return（clippy::never_loop），无需循环。
         {
@@ -1290,6 +1295,7 @@ impl TurnEngine {
                 let assistant_msg = crate::agent::util::build_assistant_message(
                     "",
                     "",
+                    None,
                     std::slice::from_ref(&tool_call),
                 );
                 // Keep the test hook on the production transcript path: open
@@ -1301,6 +1307,7 @@ impl TurnEngine {
                         round_num,
                         block_id: format!("tool:{call_id}"),
                         kind: qaqh_domain::TimelineBlockKind::Tool,
+                        reasoning_kind: None,
                         tool: Some(qaqh_domain::TimelineTool {
                             exit_code: None,
                             completed_at_ms: None,
@@ -1391,6 +1398,7 @@ impl TurnEngine {
             let GateRequestResult {
                 content,
                 reasoning,
+                reasoning_kind,
                 tool_calls_raw,
                 response_output_items,
                 mut active_stream_block,
@@ -1568,6 +1576,7 @@ impl TurnEngine {
                 round_num,
                 &content,
                 &reasoning,
+                reasoning_kind,
                 &tool_calls_raw,
                 response_output_items,
                 &mut active_stream_block,

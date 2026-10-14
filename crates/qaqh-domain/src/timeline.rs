@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
+use qaqh_types::ReasoningKind;
+
 /// A display block in one model round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -369,6 +371,13 @@ pub struct TimelineBlock {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<TimelineTool>,
+    /// 思考块的类别（只有 `kind == TimelineBlockKind::Reasoning` 时可能有值）。
+    ///
+    /// UI 靠它区分「服务端给的**摘要**」与「模型**完整思考**」——订阅套餐路径
+    /// 只有前者，把两者渲染成同一句话就是产品说谎。`None` = 未标注（重建自本
+    /// 字段引入前的历史，或非思考块）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_kind: Option<ReasoningKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +541,9 @@ pub enum TimelineIntent {
         round_num: u32,
         block_id: String,
         kind: TimelineBlockKind,
+        /// 思考块类别（仅 `kind == Reasoning` 时可为 `Some`；appender 校验形状）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_kind: Option<ReasoningKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool: Option<TimelineTool>,
     },
@@ -691,7 +703,13 @@ pub struct TurnData {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoundBlock {
     /// Model reasoning/thinking block (collapsible in UI).
-    Reasoning { content: String },
+    Reasoning {
+        content: String,
+        /// 思考类别（见 [`TimelineBlock::reasoning_kind`]）。`None` = 未标注
+        /// （重建自本字段引入前的历史）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ReasoningKind>,
+    },
     /// Plain text answer block.
     Text { content: String },
     /// A tool call the model wants to invoke.

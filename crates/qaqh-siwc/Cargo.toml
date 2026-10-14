@@ -1,0 +1,28 @@
+[package]
+name = "qaqh-siwc"
+description = "Sign in with ChatGPT（ChatGPT plan usage）：动态注册 OAuth、凭据存储、模型发现"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# 凭据密文盒子复用 secrets.toml 的同一套 DPAPI/0600 策略（单一实现，不重复造）。
+qaqh-config = { path = "../qaqh-config" }
+# `platform::data_dir()` 与 `sha256_hex`。
+qaqh-types = { path = "../qaqh-types" }
+log = "0.4"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+# URL 构造/查询解析：授权 URL 的参数编码与回环回调的查询串都交给它，
+# 手写百分号编码是安全 bug 的高发区（回调 URI 必须与 token 交换逐字一致）。
+url = "2"
+# 同步 HTTP：本 crate 的回环监听与 OAuth 流程跑在**专用 std 线程**上，
+# 不用 tokio（避免「阻塞 tokio worker」与「runtime 内建 runtime」两类事故）。
+ureq = { version = "3", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

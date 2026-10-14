@@ -93,6 +93,8 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "session.get_activity" => Some(READ_SEEDED),
         // 会话级 profile 选择：写 meta.profile 并定向重载该会话（不动全局）。
         "session.set_profile" => Some(WRITE_SEEDED),
+        // 用户重命名会话标题（方案B）：写 meta.title 并广播 TitleChanged(user)。
+        "session.rename" => Some(WRITE_SEEDED),
         // workspace
         "workspace.get" => Some(READ_SEEDED),
         "workspace.list" => Some(READ),
@@ -112,6 +114,17 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "profile.apply" => Some(WRITE),
         "profile.save_current" => Some(WRITE),
         "profile.delete" => Some(WRITE),
+        // Sign in with ChatGPT（套餐用量）。**全部 admin_only**：配对出来的设备
+        // （view/interact）绝不得触发登录 / 切账户 / 登出——那等于让远端设备把
+        // 新账户接进用户机器并改写本机凭据。方法名的单一真源在 qaqh_siwc::methods。
+        "siwc.status" => Some(READ_ADMIN),
+        "siwc.profiles" => Some(READ_ADMIN),
+        "siwc.models" => Some(READ_ADMIN),
+        "siwc.sign_in.start" => Some(WRITE_ADMIN),
+        "siwc.sign_in.status" => Some(READ_ADMIN),
+        "siwc.sign_in.cancel" => Some(WRITE_ADMIN),
+        "siwc.profile.select" => Some(WRITE_ADMIN),
+        "siwc.sign_out" => Some(WRITE_ADMIN),
         // skills
         "skills.list_tools" => Some(READ),
         "skills.operation" => Some(WRITE),
@@ -164,6 +177,29 @@ pub fn dispatch(service: &QaqhService, method: &str, params: &Value) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「登录/凭据」类方法一律 admin-only，且方法表与 qaqh-siwc 的清单**逐一对齐**。
+    ///
+    /// 这条测试的意义不在覆盖率，而在**越权面**：任何新增的 `siwc.*` 方法
+    /// 只要漏了 admin 档，就会被这里挡住（`ALL` 是那份清单的真源）。
+    #[test]
+    fn siwc_methods_are_admin_only_and_fully_enumerated() {
+        for method in qaqh_siwc::methods::ALL {
+            let info = lookup(method).unwrap_or_else(|| panic!("方法表缺少 {method}"));
+            assert!(
+                info.admin_only,
+                "{method} 必须 admin_only：配对设备不得改写本机凭据"
+            );
+        }
+        // 反向：方法表里的 siwc.* 一个都不能多（防止表里留了没有实现的死条目）。
+        let mut listed = Vec::new();
+        for method in qaqh_siwc::methods::ALL {
+            listed.push(*method);
+        }
+        for method in listed {
+            assert!(lookup(method).is_some(), "{method} 应可解析");
+        }
+    }
 
     /// 服务面会话键只认 `session_id`：legacy `seed` 已随 Phase E 退场。
     #[test]

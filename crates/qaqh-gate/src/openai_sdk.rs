@@ -39,6 +39,7 @@ use super::transport::{
 };
 use super::types::{
     ProviderConfig, StreamEvent, clamp_effort_to_allowlist, normalize_reasoning_effort,
+    stored_reasoning_kind,
 };
 
 const MEDIA_ATTACHMENT_TEXT: &str = "Attached media from tool result:";
@@ -179,7 +180,7 @@ pub(crate) fn project_chat_messages(
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } => content.push_str(text),
-                        ContentBlock::Reasoning { reasoning: r } => reasoning.push_str(r),
+                        ContentBlock::Reasoning { reasoning: r, .. } => reasoning.push_str(r),
                         ContentBlock::ToolUse { id, name, input } => {
                             let mut call = WireToolCall::new(name.clone(), input.clone());
                             // 0.4.0 rejects an empty explicit id; leave it unset so
@@ -615,18 +616,20 @@ async fn consume(
                         continue;
                     }
                     if is_reasoning {
-                        state.reasoning.push_str(&t);
-                        on_event(StreamEvent::ReasoningDelta(t));
+                        // 正文里 `<think>` 夹带的思考：来源可读、类别明确是完整文本。
+                        let kind = qaqh_types::ReasoningKind::Text;
+                        state.push_reasoning(kind, &t);
+                        on_event(StreamEvent::ReasoningDelta { kind, text: t });
                     } else {
                         state.text.push_str(&t);
                         on_event(StreamEvent::ContentDelta(t));
                     }
                 }
             }
-            Ok(SdkEvent::ReasoningDelta { text, .. }) => {
-                if !text.is_empty() {
-                    state.reasoning.push_str(&text);
-                    on_event(StreamEvent::ReasoningDelta(text));
+            Ok(SdkEvent::ReasoningDelta { kind, text }) => {
+                let kind = stored_reasoning_kind(kind);
+                if !text.is_empty() && state.push_reasoning(kind, &text) {
+                    on_event(StreamEvent::ReasoningDelta { kind, text });
                 }
             }
             Ok(SdkEvent::ToolCallDelta {
@@ -960,6 +963,7 @@ mod tests {
                 "assistant",
                 vec![ContentBlock::Reasoning {
                     reasoning: "hm".into(),
+                    kind: Some(qaqh_types::ReasoningKind::Text),
                 }],
             ),
         ];
@@ -981,6 +985,7 @@ mod tests {
                     "assistant",
                     vec![ContentBlock::Reasoning {
                         reasoning: "hm".into(),
+                        kind: Some(qaqh_types::ReasoningKind::Text),
                     }],
                 ),
             ],
