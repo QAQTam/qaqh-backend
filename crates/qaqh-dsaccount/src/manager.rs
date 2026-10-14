@@ -118,6 +118,33 @@ struct Inner {
     store: AccountStore,
     config: DsClientConfig,
     flow: Mutex<Flow>,
+    /// 上一次远端撤销的结果（**只在内存**：进程退出即丢，见 [`RevokeOutcome`]）。
+    revoke: Mutex<Option<RevokeOutcome>>,
+}
+
+/// 一次远端撤销的结局。
+///
+/// 为什么只在内存：撤销的前提是**本地凭据已删**。把"待撤销 + token"落盘，等于把
+/// 刚撤销掉的凭据又写回磁盘——那是拿撤销换一次重试，不划算。所以：本地立刻断开，
+/// 远端在后台有界重试，结果只留给这一次进程内的 UI 看。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RevokeOutcome {
+    /// `running` / `done` / `failed`。
+    state: &'static str,
+    /// 已经发出的尝试次数。
+    attempts: u32,
+    /// 最近一次失败的可展示文案（成功时为空）。
+    message: Option<String>,
+}
+
+impl RevokeOutcome {
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "state": self.state,
+            "attempts": self.attempts,
+            "message": self.message,
+        })
+    }
 }
 
 /// 账号管理器：本进程唯一的入口（daemon 服务面直接转发到它）。
@@ -134,6 +161,7 @@ impl DsAccountManager {
                 store,
                 config,
                 flow: Mutex::new(Flow::default()),
+                revoke: Mutex::new(None),
             }),
         }
     }
@@ -164,7 +192,21 @@ impl DsAccountManager {
             "storage_error": storage_error,
             "inference_origin": self.inner.config.inference_origin,
             "flow": flow.view.to_json(),
+            "revoke": self.revoke_json(),
         })
+    }
+
+    /// 远端撤销的结局投影（没登出过 = `idle`）。
+    fn revoke_json(&self) -> Value {
+        let guard = self
+            .inner
+            .revoke
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match guard.as_ref() {
+            Some(outcome) => outcome.to_json(),
+            None => serde_json::json!({ "state": "idle", "attempts": 0, "message": null }),
+        }
     }
 
     /// 解密出账号凭据。未登录 → [`DsCode::NotSignedIn`]（调用方**不得**回退）。
@@ -275,12 +317,19 @@ impl DsAccountManager {
         if let Some(account) = existing
             && let Ok(token) = account.token()
         {
-            let config = self.inner.config.clone();
-            // 远端撤销是 best-effort：本地已经登出，失败只记一句日志。
+            set_revoke(
+                &self.inner,
+                RevokeOutcome {
+                    state: "running",
+                    attempts: 0,
+                    message: None,
+                },
+            );
+            let inner = Arc::clone(&self.inner);
+            // 远端撤销在后台：本地已经登出，**远端失败绝不恢复本地登录态**
+            // （参照实现同款语义），但要按预算重试到成功或耗尽。
             std::thread::spawn(move || {
-                if let Err(error) = DsClient::new(config).logout(&token) {
-                    log::info!("[dsaccount] 远端撤销失败（本地已登出）: {error}");
-                }
+                revoke_remote(&inner, &token);
             });
         }
         Ok(())
@@ -356,6 +405,87 @@ impl DsAccountManager {
             .flow
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// 写一次远端撤销的结局（中毒的锁照旧不阻断：这里没有跨字段的不变量）。
+fn set_revoke(inner: &Arc<Inner>, outcome: RevokeOutcome) {
+    let mut guard = inner
+        .revoke
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(outcome);
+}
+
+/// 后台撤销远端授权：按 [`DsClientConfig::logout_retry`] 的预算重试到成功或耗尽。
+///
+/// 三类结果分开处理，这就是「撤销」这件事的全部判据：
+/// - 2xx：撤销完成；
+/// - `401` / 业务码 `40003`：远端**已经没有活着的授权**——目的已达成，不重试；
+/// - 其它（网络、5xx、形状被拒）：消耗一次尝试，退避后重试。
+///
+/// 一律**不动本地状态**：本地在 `sign_out()` 里已经断开了，远端失败绝不恢复登录
+/// （参照实现原话 "Remote failures never restore local login"）。
+fn revoke_remote(inner: &Arc<Inner>, token: &str) {
+    let client = DsClient::new(inner.config.clone());
+    let policy = inner.config.logout_retry;
+    for attempt in 0..=policy.max_retries {
+        let attempts = attempt + 1;
+        match client.logout(token) {
+            Ok(()) => {
+                set_revoke(
+                    inner,
+                    RevokeOutcome {
+                        state: "done",
+                        attempts,
+                        message: None,
+                    },
+                );
+                return;
+            }
+            Err(error) if error.requires_reauth() => {
+                // 「凭据无效」在撤销语境里等于**已经撤销**：远端没有活着的授权了。
+                log::info!("[dsaccount] 远端撤销：平台判为凭据已失效，视为撤销完成");
+                set_revoke(
+                    inner,
+                    RevokeOutcome {
+                        state: "done",
+                        attempts,
+                        message: None,
+                    },
+                );
+                return;
+            }
+            Err(error) => {
+                let message = error.message().to_string();
+                if attempt == policy.max_retries {
+                    log::warn!("[dsaccount] 远端撤销 {attempts} 次后放弃（本地已登出）: {error}");
+                    set_revoke(
+                        inner,
+                        RevokeOutcome {
+                            state: "failed",
+                            attempts,
+                            message: Some(message),
+                        },
+                    );
+                    return;
+                }
+                log::info!("[dsaccount] 远端撤销第 {attempts} 次失败，退避后重试: {error}");
+                set_revoke(
+                    inner,
+                    RevokeOutcome {
+                        state: "running",
+                        attempts,
+                        message: Some(message),
+                    },
+                );
+                std::thread::sleep(
+                    policy
+                        .base_delay
+                        .saturating_mul(2u32.saturating_pow(attempt)),
+                );
+            }
+        }
     }
 }
 

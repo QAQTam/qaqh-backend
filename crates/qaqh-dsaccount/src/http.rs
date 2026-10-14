@@ -67,6 +67,18 @@ impl HttpResponse {
         }
         format!("HTTP {}（响应体已省略：可能含凭据回显）", self.status)
     }
+
+    /// 信封里的业务码（`data.biz_code`，退化读顶层 `code`）。
+    ///
+    /// **非 2xx 的响应体同样要读**：平台把「凭据无效」放在 body 里（实测形状是
+    /// `400` + `code: 40003`），只看 HTTP 状态码会把它误判成「请求形状被拒」——
+    /// 于是「凭据已死」表现成「要改代码」。参照实现同样先解析 body 再判。
+    pub fn business_code(&self) -> Option<i64> {
+        let value: Value = serde_json::from_str(&self.body).ok()?;
+        dig(&value, &["data", "biz_code"])
+            .and_then(Value::as_i64)
+            .or_else(|| value.get("code").and_then(Value::as_i64))
+    }
 }
 
 /// 带超时的同步 HTTP 客户端。
@@ -113,6 +125,20 @@ impl Http {
             request = request.header(*name, *value);
         }
         self.finish(request.send_json(body))
+    }
+
+    /// **无正文、无 `content-type`** 的 POST。
+    ///
+    /// 登出就是这个形状：参照实现只发身份头 + `x-dsh-auth-token`，没有正文。实测
+    /// （2026-10-14）带 `content-type: application/json` + `{}` 的写法被平台以
+    /// `400` + `Authorization Failed (invalid token)` 拒绝——而**同一个凭据**同时
+    /// 打得通 `users/current` 与余额接口，所以那不是"凭据坏了"，是请求形状。
+    pub fn post_empty(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, DsError> {
+        let mut request = self.agent.post(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        self.finish(request.send_empty())
     }
 
     fn finish(
