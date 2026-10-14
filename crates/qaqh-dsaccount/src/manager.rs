@@ -369,6 +369,34 @@ impl DsAccountManager {
         DsClient::new(self.inner.config.clone()).models(&token)
     }
 
+    /// 验证凭据**现在**还有效吗——这是唯一能回答那个问题的动作。
+    ///
+    /// 本地有密文 ≠ 凭据有效：平台侧撤销、作废都会留下"看起来已登录"。所以这里
+    /// 打一次只读远端（模型目录：最便宜，且顺带就是选择器要的那份列表），按
+    /// [`DsError::requires_reauth`] 这个**全进程唯一判据**分流：
+    ///
+    /// - 成功 → `valid: true`；
+    /// - `401` / `40003` → 失效 ⇒ **顺手清掉本地凭据**（`cleared: true`，UI 才能
+    ///   说清"已经清掉了，请重新登录"）；
+    /// - 其它失败（网络、5xx）→ `valid: false` 但**不清**：端点不可用 ≠ 凭据无效
+    ///   （crate 不变量 2）。
+    pub fn verify(&self) -> Value {
+        match self.models() {
+            Ok(_) => serde_json::json!({ "valid": true, "reason": null, "cleared": false }),
+            Err(error) => {
+                let cleared = error.requires_reauth() && self.inner.store.clear().is_ok();
+                if cleared {
+                    log::info!("[dsaccount] 验证发现凭据已失效，已清除本地凭据");
+                }
+                serde_json::json!({
+                    "valid": false,
+                    "reason": error.message(),
+                    "cleared": cleared,
+                })
+            }
+        }
+    }
+
     /// 收掉当前尝试（幂等）。
     fn abort_running(&self, reason: &str) {
         let secrets = {

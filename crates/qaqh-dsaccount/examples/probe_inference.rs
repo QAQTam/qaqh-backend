@@ -22,7 +22,7 @@ use std::time::Duration;
 use qaqh_dsaccount::error::DsError;
 use qaqh_dsaccount::http::{Http, HttpResponse};
 use qaqh_dsaccount::protocol;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 与 `specs.ts` 的 account 桶对齐（平台实测的模型 id）。
 const MODEL: &str = "deepseek-flash";
@@ -36,6 +36,10 @@ Q3 命中率怎么算？A3 命中 token 除以（命中 + 未命中）提示 tok
 Q4 缓存何时失效？A4 前缀发生变化、或缓存过期后失效。\
 Q5 为什么要让前缀稳定？A5 前缀一动，从变动点之后全部失效，命中率归零。\
 材料结束。";
+
+/// 前缀重复次数。第一次实测用一倍材料（≈200 token）**没有命中**，所以这里把
+/// 共享前缀拉到几千 token——"命中率"是端点行为，只能靠试。
+const PREFIX_REPEAT: usize = 12;
 
 fn main() {
     qaqh_dsaccount::global::install_default();
@@ -74,19 +78,26 @@ fn main() {
         &token,
     );
 
-    // ②③ 同前缀两次：第一次是冷启动，第二次应当命中缓存。
-    let first = messages_in(&[("user", SHARED_PREFIX), ("assistant", "好的，请提问。"), ("user", "只回答两个字：收到")]);
-    let second = messages_in(&[("user", SHARED_PREFIX), ("assistant", "好的，请提问。"), ("user", "只回答两个字：明白")]);
-    report(
-        "② 长前缀第一次（预期：全未命中）",
-        call(&http, &url, &headers, &body(&first, "low", false)),
-        &token,
-    );
-    report(
-        "③ 长前缀第二次（预期：大部分命中）",
-        call(&http, &url, &headers, &body(&second, "low", false)),
-        &token,
-    );
+    // ②③ 同前缀多次：第一轮是冷启动，之后几轮应当命中缓存。
+    // 连打三轮（同一进程、背靠背），看命中是否**从来**不出现——出现在第几轮很关键：
+    // 第 2 轮就该命中的话没命中，说明不是"要预热"，而是这个前缀压根没进缓存。
+    let long_prefix = SHARED_PREFIX.repeat(PREFIX_REPEAT);
+    for round in 1..=3 {
+        let tail = format!("只回答两个字：第{round}轮");
+        let messages = messages_in(&[
+            ("user", long_prefix.as_str()),
+            ("assistant", "好的，请提问。"),
+            ("user", tail.as_str()),
+        ]);
+        report(
+            &format!(
+                "② 长前缀第 {round} 轮（{} 字前缀）",
+                long_prefix.chars().count()
+            ),
+            call(&http, &url, &headers, &body(&messages, "low", false)),
+            &token,
+        );
+    }
 
     // ④ 平台自报的最高档：我们刚把它放进档位表，这里验它认不认。
     report(
@@ -142,11 +153,9 @@ fn report(label: &str, result: Result<HttpResponse, DsError>, token: &str) {
     println!("── {label}");
     match result {
         Err(error) => println!("   传输失败：{error:?} / {error}"),
-        Ok(response) if !(200..300).contains(&response.status) => println!(
-            "   HTTP {} / {}",
-            response.status,
-            response.diagnostic()
-        ),
+        Ok(response) if !(200..300).contains(&response.status) => {
+            println!("   HTTP {} / {}", response.status, response.diagnostic())
+        }
         Ok(response) => {
             let stats = parse_stream(&response.body);
             println!(
@@ -163,8 +172,12 @@ fn report(label: &str, result: Result<HttpResponse, DsError>, token: &str) {
                     println!("   末帧 usage（原样）：{text}");
                     println!(
                         "   → 命中字段 {} / 未命中字段 {}",
-                        usage.get("prompt_cache_hit_tokens").map_or("缺失".into(), |v| v.to_string()),
-                        usage.get("prompt_cache_miss_tokens").map_or("缺失".into(), |v| v.to_string())
+                        usage
+                            .get("prompt_cache_hit_tokens")
+                            .map_or("缺失".into(), |v| v.to_string()),
+                        usage
+                            .get("prompt_cache_miss_tokens")
+                            .map_or("缺失".into(), |v| v.to_string())
                     );
                 }
                 None => println!("   **没有任何帧带 usage**（⇒ 前端那枚「缓存命中」芯片不会出现）"),
