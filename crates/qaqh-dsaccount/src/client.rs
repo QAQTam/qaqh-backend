@@ -37,6 +37,8 @@ pub struct DsClientConfig {
     pub timeout: Duration,
     /// 客户端身份（五个头 + 语言）。
     pub identity: ClientIdentity,
+    /// 登出时远端撤销的重试预算（见 [`LogoutRetry`]）。
+    pub logout_retry: LogoutRetry,
 }
 
 impl Default for DsClientConfig {
@@ -51,6 +53,30 @@ impl Default for DsClientConfig {
                 timezone_offset_seconds: ClientIdentity::system_timezone_offset_seconds(),
                 platform: ClientPlatform::current(),
             },
+            logout_retry: LogoutRetry::default(),
+        }
+    }
+}
+
+/// 远端撤销的重试预算。
+///
+/// 取值与参照实现的默认策略一致（`logoutMaxRetries` 5、`logoutRetryDelayMs` 1000，
+/// 每轮翻倍 ⇒ 1/2/4/8/16 秒，合计约 31 秒）。**必须有上限**：本地凭据在发起撤销
+/// 之前就已经删掉了，为了一次还没成功的撤销把 token 写回盘上重试，等于让撤销白做
+/// （参照实现同样明文写着 "pending revocations are not persisted"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogoutRetry {
+    /// 首次之外的额外尝试次数。
+    pub max_retries: u32,
+    /// 首次重试前的等待；此后每轮翻倍。
+    pub base_delay: Duration,
+}
+
+impl Default for LogoutRetry {
+    fn default() -> Self {
+        Self {
+            max_retries: 5,
+            base_delay: Duration::from_secs(1),
         }
     }
 }
@@ -97,6 +123,11 @@ impl DsClient {
     fn ensure_success(response: &HttpResponse) -> Result<(), DsError> {
         if response.is_success() {
             return Ok(());
+        }
+        // 非 2xx 先看信封：`40003` 是「凭据无效」，与 HTTP 401 同义。只看状态码
+        // 会把「凭据已死」判成 `Protocol`（请求形状被拒）——那是两种完全不同的处置。
+        if response.business_code() == Some(crate::error::BIZ_INVALID_AUTHORIZATION) {
+            return Err(DsError::new(DsCode::Unauthorized, response.diagnostic()));
         }
         Err(DsError::new(
             classify_http_status(response.status),
@@ -169,13 +200,17 @@ impl DsClient {
     }
 
     /// 登出 = **撤销账号授权**（本地凭据由调用方在同一动作里清掉）。
+    ///
+    /// 形状照参照实现：**裸 POST**（身份头 + 凭据头），没有正文、没有
+    /// `content-type`、没有 `accept`。理由见 [`Http::post_empty`]——带 JSON 正文的
+    /// 写法实测被平台以 400「Authorization Failed (invalid token)」拒掉。
     pub fn logout(&self, token: &str) -> Result<(), DsError> {
-        self.post_body(
-            protocol::USERS_LOGOUT_PATH,
-            Some(token),
-            &serde_json::json!({}),
-        )
-        .map(|_| ())
+        let headers = self.headers(Some(token));
+        let response = self.http.post_empty(
+            &self.url(protocol::USERS_LOGOUT_PATH),
+            &Self::pairs(&headers),
+        )?;
+        Self::ensure_success(&response)
     }
 
     /// 推理 origin 的模型目录（**不是**平台信封，是 OpenAI 风格 `{data:[…]}`）。
@@ -288,6 +323,7 @@ mod tests {
                     timezone_offset_seconds: 28_800,
                     platform: ClientPlatform::DesktopWin,
                 },
+                logout_retry: LogoutRetry::default(),
             }
         }
 
