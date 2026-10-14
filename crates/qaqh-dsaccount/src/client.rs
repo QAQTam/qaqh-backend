@@ -202,8 +202,9 @@ impl DsClient {
     /// 登出 = **撤销账号授权**（本地凭据由调用方在同一动作里清掉）。
     ///
     /// 形状照参照实现：**裸 POST**（身份头 + 凭据头），没有正文、没有
-    /// `content-type`、没有 `accept`。理由见 [`Http::post_empty`]——带 JSON 正文的
-    /// 写法实测被平台以 400「Authorization Failed (invalid token)」拒掉。
+    /// `content-type`、没有 `accept`。理由见 [`Http::post_empty`]：带 JSON 正文的
+    /// 写法被平台以 400「Authorization Failed (invalid token)」拒掉，裸 POST 是 200
+    /// （同一凭据、同一时刻，逐形状实测）。
     pub fn logout(&self, token: &str) -> Result<(), DsError> {
         let headers = self.headers(Some(token));
         let response = self.http.post_empty(
