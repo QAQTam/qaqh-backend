@@ -41,6 +41,45 @@ mod schema_spot_check {
         }
     }
 
+    /// 全量类型数组守卫：任何工具 input schema 的 `type` 都不得是数组形态。
+    ///
+    /// 这是 `invalid type: string "3", expected u64` 那类故障的根因锁——
+    /// `"type": ["integer","null"]` 发到部分 provider 会被降级成 `string`，
+    /// 模型于是把数字/数组写成字符串，typed 反序列化硬失败。oneOf/anyOf
+    /// 守卫（上一个测试）盖不住这种形态，必须单独查 `type`。
+    #[test]
+    fn no_union_type_array_reaches_the_wire() {
+        fn walk(value: &serde_json::Value, path: &str, hits: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, inner) in map {
+                        if key == "type" && inner.is_array() {
+                            hits.push(format!("{path}.{key}={inner}"));
+                        } else {
+                            walk(inner, &format!("{path}.{key}"), hits);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, inner) in items.iter().enumerate() {
+                        walk(inner, &format!("{path}[{index}]"), hits);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let defs = build_tool_manager(&[]).all_defs();
+        let mut hits = Vec::new();
+        for def in &defs {
+            walk(&def.function.parameters, &def.function.name, &mut hits);
+        }
+        assert!(
+            hits.is_empty(),
+            "union type arrays leaked into wire schema: {hits:?}"
+        );
+    }
+
     /// deny_unknown_fields Args 的生成形态：additionalProperties=false。
     #[test]
     fn closed_args_generate_additional_properties_false() {
