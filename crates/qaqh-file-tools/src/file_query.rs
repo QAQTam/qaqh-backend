@@ -21,10 +21,18 @@ pub struct ReadRequest {
     #[serde(default)]
     pub path: String,
     /// 1-based; omit for whole file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::tool_api::lenient::opt_u64"
+    )]
     pub start_line: Option<u64>,
     /// Inclusive; omit for whole file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::tool_api::lenient::opt_u64"
+    )]
     pub end_line: Option<u64>,
     /// Prior read hash; NOT_MODIFIED if unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,19 +49,23 @@ pub struct ReadArgs {
     pub requests: Option<Vec<ReadRequest>>,
     /// Path (single-request sugar).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     pub path: Option<String>,
     /// Start line, 1-based (single-request sugar).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::tool_api::lenient::opt_u64"
+    )]
     pub start_line: Option<u64>,
     /// End line inclusive (single-request sugar).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::tool_api::lenient::opt_u64"
+    )]
     pub end_line: Option<u64>,
     /// Hash from prior read; NOT_MODIFIED if unchanged (single-request sugar).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     pub if_hash: Option<String>,
 }
 
@@ -699,9 +711,65 @@ fn read_registration_is_typed_and_schema_is_type_generated() {
         "generated schema must not carry oneOf"
     );
     assert!(registered.descriptor.input_schema["properties"]["requests"].is_object());
-    // 糖字段已藏出 schema（schemars skip），宿主侧归一仍接受。
-    assert!(registered.descriptor.input_schema["properties"].get("path").is_none());
+    // 糖字段必须在模型面可见且带单类型：description 一直在教模型用它们，
+    // 藏出 schema 只会让「教用的形状」与「据以容错的形状」分叉（见下条测试）。
+    let properties = &registered.descriptor.input_schema["properties"];
+    assert_eq!(properties["path"]["type"], serde_json::json!("string"));
+    assert_eq!(properties["start_line"]["type"], serde_json::json!("integer"));
+    assert_eq!(properties["end_line"]["type"], serde_json::json!("integer"));
+    // `Option<u64>` 经 schemars 会产 `["integer","null"]`；折叠后必须是单类型，
+    // 且可选性只由「不在 required 里」表达。
+    assert!(!properties["end_line"]["type"].is_array(), "{properties}");
+    assert_eq!(properties["if_hash"]["type"], serde_json::json!("string"));
+    // 可选性由「字段不在 required 里」表达；schemars 在无必填字段时整个不发
+    // 该键，糖字段不得被写成必填。
+    let required: Vec<&serde_json::Value> = registered
+        .descriptor
+        .input_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().collect())
+        .unwrap_or_default();
+    assert!(required.is_empty(), "糖字段不得进 required：{required:?}");
     assert_eq!(registered.descriptor.output_schema["type"], "object");
+}
+
+/// 顶层 sugar 与 `requests[]` 两条形状都必须接受字符串形态的行号。
+///
+/// 真实回归：sugar 字段曾带 `#[schemars(skip)]`，schema 驱动的
+/// [`qaqh_tool_core::tool_api::coerce`] 结构上看不见它们，provider 把数字降级成
+/// 字符串后就是 `invalid arguments: invalid type: string "220", expected u64`
+/// ——而 schema 可见的 `requests[].end_line` 同一次调用里却是好的。补两层：
+/// 字段回到 schema（可见即可归一）+ 类型级 `lenient::opt_u64`（schema 缺席也兜得住）。
+#[test]
+fn read_accepts_stringified_line_ranges_in_both_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("z.txt");
+    std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
+    let path = p.to_string_lossy().to_string();
+
+    let sugar = exec_read(&json!({"path": path, "start_line": "2", "end_line": "3"}));
+    assert!(sugar.is_success(), "{}", sugar.model_text());
+    let batch = exec_read(&json!({
+        "requests": [{"path": path, "start_line": "2", "end_line": "3"}]
+    }));
+    assert!(batch.is_success(), "{}", batch.model_text());
+    assert_eq!(
+        sugar.model_text(),
+        batch.model_text(),
+        "两条形状必须解析成同一个读取窗口"
+    );
+
+    // 宽容只针对「同值的字符串拼写」；有损输入仍须硬失败，不得静默猜行号。
+    for raw in ["3.5", "abc", "", "-1", "true"] {
+        let bad = exec_read(&json!({"path": path, "end_line": raw}));
+        assert!(!bad.is_success(), "{raw} 不得被接受");
+        assert!(
+            bad.model_text().contains("expected u64"),
+            "{raw} → {}",
+            bad.model_text()
+        );
+    }
 }
 
 #[test]
