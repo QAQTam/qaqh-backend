@@ -1360,6 +1360,64 @@ fn responses_chat_stream_with_tool_calls() {
     assert_eq!(tool_events[0].1, "{\"path\":\"/x.txt\"}");
 }
 
+/// BUG(2026-10-15)：Responses 端点**有概率**丢工具调用。
+///
+/// 流里 `output_item.added` + `function_call_arguments.delta` + `output_item.done`
+/// 都把调用给了客户端，但 `response.completed.response.output` 只回填了 message
+/// 条目。SDK 只在终态 parts 完全为空时才回退自己的累计器，于是这条调用既不进
+/// 历史也不执行，回合以「模型说了半句话」的 completed 收口，前端毫无反馈。
+/// gate 必须拿流里见过的事实补齐终态。
+#[test]
+fn responses_completed_output_missing_function_call_is_backfilled_from_stream() {
+    let scenario = vec![
+        mock_server::SseChunk::Raw(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"我先看看\"}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"in_progress\",\"call_id\":\"call_x\",\"name\":\"read\",\"arguments\":\"\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":1,\"delta\":\"{\\\"path\\\":\\\"/x.txt\\\"}\"}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_x\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"/x.txt\\\"}\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_gap\",\"status\":\"completed\",\"model\":\"test-model\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"我先看看\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"total_tokens\":15}}}\n\n".into(),
+        ),
+        mock_server::SseChunk::done(),
+    ];
+
+    let mock = MockServer::new(scenario);
+    let provider = make_responses_provider(&mock);
+    let events = collect_events(&provider, vec![Message::user("read /x.txt")], None);
+
+    let done = events.iter().find_map(event_done).expect("Done emitted");
+    let tool_uses: Vec<(String, String, serde_json::Value)> = done
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => {
+                Some((id.clone(), name.clone(), input.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tool_uses,
+        vec![("call_x".to_string(), "read".to_string(), json!({"path": "/x.txt"}))],
+        "终态漏掉的 function_call 必须按流补齐，且只补一次: {:?}",
+        done.content
+    );
+    assert!(
+        done.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text == "我先看看")),
+        "正文不受影响: {:?}",
+        done.content
+    );
+}
+
 #[test]
 fn responses_search_alias_is_wire_only_with_web_search_enabled() {
     let scenario = vec![
@@ -1543,6 +1601,102 @@ fn anthropic_sse_scenario() -> Vec<mock_server::SseChunk> {
         mock_server::SseChunk::Raw("data: {\"type\":\"message_stop\"}\n\n".into()),
         mock_server::SseChunk::done(),
     ]
+}
+
+/// Anthropic tool_use 流式场景：`content_block_start` 带 id/name，参数走
+/// `input_json_delta`。与 qoder-proxy / 官方 Messages 端点实测同形。
+fn anthropic_tool_use_scenario() -> Vec<mock_server::SseChunk> {
+    vec![
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_tu\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"test-model\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"我先了解一下项目结构。\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_9f3d\",\"name\":\"list_dir\",\"input\":{}}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\": \"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"/tmp\\\"}\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw("data: {\"type\":\"message_stop\"}\n\n".into()),
+        mock_server::SseChunk::done(),
+    ]
+}
+
+/// BUG(2026-10-15)：Messages 端点的工具调用**一律无响应**。
+///
+/// mutil-ai 的 Anthropic 适配器把 `content_block_start` 里的 id/name 只放在
+/// `ToolCallProgress` 帧上（`ToolCallDelta.id/name` 恒为 `None`），而 gate 当时
+/// 把 `ToolCallProgress` 当「与增量重复」丢弃 → 每个 tool_use 的函数名都是空串
+/// → runtime 的 `parse_tool_calls` 无名整条跳过 → 回合里模型只留下一句话，
+/// 没有任何动作、也没有任何报错。
+#[test]
+fn anthropic_tool_call_keeps_block_start_identity() {
+    let mock = MockServer::new(anthropic_tool_use_scenario());
+    let provider = make_anthropic_provider(&mock);
+    let events = collect_events(&provider, vec![Message::user("list /tmp")], None);
+
+    let frames: Vec<(String, String, String)> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            StreamEvent::ToolCallProgress {
+                id,
+                name,
+                args_chunk,
+                ..
+            } => Some((id.clone(), name.clone(), args_chunk.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !frames.is_empty(),
+        "tool_use 必须产生进度帧，got: {frames:?}"
+    );
+    for (id, name, _) in &frames {
+        assert_eq!(id, "call_9f3d", "每一帧都要带上块起始的 call id");
+        assert_eq!(name, "list_dir", "每一帧都要带上块起始的函数名");
+    }
+    let joined: String = frames.iter().map(|(_, _, chunk)| chunk.as_str()).collect();
+    assert_eq!(
+        joined, "{\"path\": \"/tmp\"}",
+        "参数按帧拼接必须等于上游累计串（不得重发或漏发）"
+    );
+
+    let done = events.iter().find_map(event_done).expect("Done emitted");
+    let tool_use = done
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => Some((id, name, input)),
+            _ => None,
+        })
+        .expect("Done 里必须带回 tool_use 块");
+    assert_eq!(tool_use.0, "call_9f3d");
+    assert_eq!(tool_use.1, "list_dir");
+    assert_eq!(tool_use.2, &json!({"path": "/tmp"}));
+    assert!(
+        done.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text == "我先了解一下项目结构。")),
+        "正文与工具调用共存时两者都得留下: {:?}",
+        done.content
+    );
 }
 
 /// BUG-2026-09-13-27：user 消息的所有内容块都被转换逻辑忽略

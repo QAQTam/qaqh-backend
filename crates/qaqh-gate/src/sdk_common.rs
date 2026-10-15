@@ -3,7 +3,7 @@
 //! (the legacy hand-written stack) so the two can coexist during the
 //! strangler migration and the legacy half can be deleted wholesale.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -131,6 +131,76 @@ impl StreamState {
             },
             usage: self.usage,
             stop_reason: self.stop,
+        });
+    }
+}
+
+/// tool-call 身份的单字段收口：非空且槽位还空着才写入（first-writer-wins）。
+pub(crate) fn adopt_identity(slot: &mut String, value: Option<&str>) {
+    if slot.is_empty() {
+        *slot = value.unwrap_or_default().trim().to_string();
+    }
+}
+
+/// 把「SDK 事件里的 tool-call 身份/参数」收口成 runtime 需要的
+/// [`StreamEvent::ToolCallProgress`] 帧序列。
+///
+/// 为什么需要专门的收口器：SDK 把**块起始身份**（call id + 函数名）和
+/// **参数增量**放在不同的事件上，而且不同 wire 的摆放方式不一样——
+/// - Anthropic：`ToolCallDelta` 的 `id`/`name` **恒为 `None`**（mutil-ai 只在
+///   `content_block_start` 时把身份写进累计器，身份只随
+///   `ToolCallProgress` 出来）；
+/// - Responses：参数增量帧的 `id` 是 **item id**（`fc_1`），真正的
+///   `call_id` 只在块起始帧与 `ToolCallProgress` 里。
+///
+/// 于是「只盯 `ToolCallDelta`」的写法会得到 `name` 恒空的调用（旧缺陷：
+/// runtime 的 `parse_tool_calls` 把无名条目整条丢弃，回合就变成
+/// 「模型说了句话、什么都没做、前端也什么都没显示」）；而「谁先到算谁」
+/// 又会把 item id 当 call id 播出去，下一轮回放的 `function_call_output`
+/// 对不上号。这里统一成两条不变量：
+/// 1. **身份齐了才开块**——`id`/`name` 任一为空就不发首帧，runtime 不会
+///    建出 `tool:`（空 id）或无名工具的 timeline 块；
+/// 2. **参数按字节水位增量发**——同一帧序列里每个字节只投递一次，
+///    与累计形态（`arguments_so_far`）混用也不会重复计数。
+#[derive(Default)]
+pub(crate) struct ToolCallAnnouncer {
+    announced: HashSet<usize>,
+    watermark: HashMap<usize, usize>,
+}
+
+impl ToolCallAnnouncer {
+    /// 按当前缓冲通报 `index` 处的 tool call；身份未齐则跳过（等下一帧）。
+    /// `tools` 是 `StreamState::tools` / `Resps::tools` 同款三元组缓冲。
+    pub(crate) fn announce(
+        &mut self,
+        tools: &HashMap<usize, (String, String, String)>,
+        index: usize,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) {
+        let Some((id, name, args)) = tools.get(&index) else {
+            return;
+        };
+        let starting = !self.announced.contains(&index);
+        if starting && (id.is_empty() || name.is_empty()) {
+            return;
+        }
+        let sent = self.watermark.get(&index).copied().unwrap_or(0);
+        // 累计帧可能把缓冲换成更短的串：水位钳到边界，绝不越界切片。
+        let sent = sent.min(args.len());
+        if !starting && args.len() == sent {
+            return;
+        }
+        let chunk = args[sent..].to_string();
+        let (id, name) = (id.clone(), name.clone());
+        if starting {
+            self.announced.insert(index);
+        }
+        self.watermark.insert(index, args.len());
+        on_event(StreamEvent::ToolCallProgress {
+            index,
+            id,
+            name,
+            args_chunk: chunk,
         });
     }
 }
@@ -528,6 +598,64 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn announcer_holds_the_start_frame_until_identity_is_known() {
+        // Anthropic wire 的真实时序：先只有参数增量（身份还没到），随后
+        // ToolCallProgress 才带上 call id 与函数名。首帧必须等信息齐了再发，
+        // 且参数一次性带上——runtime 以 `tool:<id>` 为键开块，空 id 会开出
+        // 一个永远对不上的孤儿块。
+        let mut tools = HashMap::new();
+        tools.insert(
+            1usize,
+            (String::new(), String::new(), "{\"a\":1}".to_string()),
+        );
+        let mut announcer = ToolCallAnnouncer::default();
+        let mut frames = Vec::new();
+        announcer.announce(&tools, 1, &mut |ev| frames.push(ev));
+        assert!(frames.is_empty(), "身份未齐不得开块: {frames:?}");
+
+        let entry = tools.get_mut(&1).expect("entry");
+        adopt_identity(&mut entry.0, Some("call_9"));
+        adopt_identity(&mut entry.1, Some("exec"));
+        announcer.announce(&tools, 1, &mut |ev| frames.push(ev));
+        let StreamEvent::ToolCallProgress {
+            id,
+            name,
+            args_chunk,
+            ..
+        } = &frames[0]
+        else {
+            panic!("expected progress frame, got {frames:?}");
+        };
+        assert_eq!(
+            (id.as_str(), name.as_str(), args_chunk.as_str()),
+            ("call_9", "exec", "{\"a\":1}")
+        );
+
+        // 齐了之后再来一帧：不得重复投递已发出的字节。
+        let entry = tools.get_mut(&1).expect("entry");
+        entry.2.push_str(",\"b\":2}");
+        announcer.announce(&tools, 1, &mut |ev| frames.push(ev));
+        assert_eq!(frames.len(), 2);
+        let StreamEvent::ToolCallProgress { args_chunk, .. } = &frames[1] else {
+            panic!();
+        };
+        assert_eq!(args_chunk, ",\"b\":2}", "第二帧只带增量");
+    }
+
+    #[test]
+    fn adopt_identity_never_clobbers_a_known_field() {
+        let mut id = "call_1".to_string();
+        adopt_identity(&mut id, Some("fc_item_2"));
+        assert_eq!(
+            id, "call_1",
+            "first-writer-wins：item id 不得覆盖已知的 call id"
+        );
+        let mut blank = String::new();
+        adopt_identity(&mut blank, Some("  "));
+        assert_eq!(blank, "", "空白身份等同缺席");
     }
 
     #[test]

@@ -29,9 +29,9 @@ use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, apply_management_headers,
-    empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
-    tool_result_name,
+    CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, adopt_identity,
+    apply_management_headers, empty_stream_retry, roomy_response_limits, sdk_error_detail,
+    sdk_retry_policy, split_url, tool_result_name,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, empty_request_noop_done_event,
@@ -709,6 +709,59 @@ fn server_tool_status_name(state: ServerToolState) -> &'static str {
     }
 }
 
+/// 收口对账：流里明明出现过 `function_call`，terminal 帧却没把它带回来。
+///
+/// 兼容网关上这是真实形态：`response.output_item.done` 给了完整调用，
+/// `response.completed.response.output` 里却只剩 message/reasoning 条目。
+/// SDK 只在终态 parts **完全为空**时才回退到自己的累计器
+/// （`openai_responses.rs::complete`），所以只要同轮还吐了任何一个文本块，
+/// 这条调用就既不进历史也不执行——模型留下一句「我先看看」就静默结束回合，
+/// 前端什么也不会显示。这里按流里见过的事实补齐终态块。
+///
+/// 去重锚点：优先 `call_id`；身份缺席时退回 `name`+参数（不编造 id——
+/// 缺 id 的调用交给 runtime 的可见失败块处理）。
+fn reconcile_streamed_tool_calls(
+    blocks: &mut Vec<ContentBlock>,
+    streamed: &HashMap<usize, (String, String, String)>,
+) {
+    let mut sorted: Vec<(usize, String, String, String)> = streamed
+        .iter()
+        .map(|(index, (id, name, args))| (*index, id.clone(), name.clone(), args.clone()))
+        .collect();
+    sorted.sort_by_key(|(index, _, _, _)| *index);
+    for (_index, id, name, args) in sorted {
+        if name.is_empty() {
+            continue;
+        }
+        let input: serde_json::Value =
+            serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+        let input = if input.is_null() {
+            serde_json::json!({})
+        } else {
+            input
+        };
+        let duplicate = blocks.iter().any(|block| match block {
+            ContentBlock::ToolUse {
+                id: known_id,
+                name: known_name,
+                input: known_input,
+            } => {
+                if id.is_empty() || known_id.is_empty() {
+                    known_name == &name && known_input == &input
+                } else {
+                    known_id == &id
+                }
+            }
+            _ => false,
+        });
+        if duplicate {
+            continue;
+        }
+        log::warn!("Responses 收口缺 function_call(id={id:?},name={name:?})，按流补齐");
+        blocks.push(ContentBlock::ToolUse { id, name, input });
+    }
+}
+
 /// `response.incomplete` 等价收口：SDK 把它当流错误抛出（事件原文在
 /// `ProviderStream(json)`），旧契约里它是**带截断原因的正常终态**。这里把
 /// 事件里的 response 对象重新取用：output items → Done 块，reason → stop。
@@ -1031,14 +1084,18 @@ async fn consume(
                     .tools
                     .entry(index)
                     .or_insert_with(|| (String::new(), String::new(), String::new()));
-                if entry.0.is_empty() && id.is_some() {
-                    entry.0 = id.clone().unwrap_or_default();
-                }
-                if entry.1.is_empty() && name.is_some() {
-                    entry.1 = name
-                        .clone()
-                        .map(|n| canonical_function_name(&n, &compat))
+                // **参数增量帧的 `id` 是 item id（`fc_1`），不是 `call_id`**：
+                // 只有同时带函数名的块起始帧才配当身份来源。谁先到算谁的旧写法
+                // 会把 item id 当 call id 收进缓冲——下一轮回放的
+                // `function_call_output` 就再也对不上这次调用。
+                let named = name.as_deref().is_some_and(|n| !n.is_empty());
+                if named {
+                    adopt_identity(&mut entry.0, id.as_deref());
+                    let canonical = name
+                        .as_deref()
+                        .map(|n| canonical_function_name(n, &compat))
                         .unwrap_or_default();
+                    adopt_identity(&mut entry.1, Some(canonical.as_str()));
                 }
                 entry.2.push_str(&arguments_delta);
             }
@@ -1052,14 +1109,13 @@ async fn consume(
                     .tools
                     .entry(index)
                     .or_insert_with(|| (String::new(), String::new(), String::new()));
-                if entry.0.is_empty() {
-                    entry.0 = id.unwrap_or_default();
-                }
-                if entry.1.is_empty() {
-                    entry.1 = name
-                        .map(|n| canonical_function_name(&n, &compat))
-                        .unwrap_or_default();
-                }
+                // 累计帧的 id/name 来自 SDK 累计器里的 `call_id`/函数名，权威。
+                adopt_identity(&mut entry.0, id.as_deref());
+                let canonical = name
+                    .as_deref()
+                    .map(|n| canonical_function_name(n, &compat))
+                    .unwrap_or_default();
+                adopt_identity(&mut entry.1, Some(canonical.as_str()));
                 if !arguments_so_far.is_empty() {
                     entry.2 = arguments_so_far;
                 }
@@ -1139,7 +1195,9 @@ async fn consume(
                 {
                     resp.usage = Some(usage_to_info_responses(usage));
                 }
-                let blocks = response_message_to_blocks(&response.message, &compat);
+                let mut blocks = response_message_to_blocks(&response.message, &compat);
+                // 终态没带回来的调用按流补（见 `reconcile_streamed_tool_calls`）。
+                reconcile_streamed_tool_calls(&mut blocks, &resp.tools);
                 on_event(StreamEvent::Done {
                     raw_message: Message {
                         msg_id: None,
@@ -1189,6 +1247,8 @@ async fn consume(
                         blocks.push(ContentBlock::text(&text));
                     }
                     blocks.extend(term.raw_message.content);
+                    // 截断终态同样可能不带 function_call 条目：按流补齐。
+                    reconcile_streamed_tool_calls(&mut blocks, &resp.tools);
                     on_event(StreamEvent::Done {
                         raw_message: Message {
                             msg_id: None,

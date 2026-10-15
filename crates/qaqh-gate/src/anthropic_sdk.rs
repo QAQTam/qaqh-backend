@@ -20,9 +20,9 @@ use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, StreamState, apply_management_headers,
-    empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
-    tool_names_by_id, tool_result_name,
+    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, StreamState, ToolCallAnnouncer,
+    adopt_identity, apply_management_headers, empty_stream_retry, insert_header,
+    roomy_response_limits, sdk_error_detail, sdk_retry_policy, tool_names_by_id, tool_result_name,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
@@ -452,6 +452,8 @@ async fn consume(
     hub.drain(&mut *on_event);
 
     let mut state = StreamState::new();
+    // tool_use 身份/参数的通报收口（见 `ToolCallAnnouncer`）。
+    let mut announcer = ToolCallAnnouncer::default();
     // 帧内错误/流中断标记：有产出则走 partial-keep 收口（stop=None，
     // runtime 续写接管），零产出则 EmptyStream 整请求重试。
     let mut interrupted: Option<String> = None;
@@ -488,29 +490,35 @@ async fn consume(
                     .tools
                     .entry(index)
                     .or_insert_with(|| (String::new(), String::new(), String::new()));
-                if (id.is_some() || name.is_some()) && entry.0.is_empty() && entry.1.is_empty() {
-                    // 块起始：先按旧契约发一帧空参数（对齐 content_block_start）。
-                    entry.0 = id.clone().unwrap_or_default();
-                    entry.1 = name.clone().unwrap_or_default();
-                    on_event(StreamEvent::ToolCallProgress {
-                        index,
-                        id: entry.0.clone(),
-                        name: entry.1.clone(),
-                        args_chunk: String::new(),
-                    });
-                }
+                // 增量帧在 Anthropic wire 上恒不带身份（见 `ToolCallAnnouncer`
+                // 的文档）；这里顺手采纳，只为兼容自报身份的兼容端点。
+                adopt_identity(&mut entry.0, id.as_deref());
+                adopt_identity(&mut entry.1, name.as_deref());
                 if !arguments_delta.is_empty() {
                     entry.2.push_str(&arguments_delta);
-                    on_event(StreamEvent::ToolCallProgress {
-                        index,
-                        id: entry.0.clone(),
-                        name: entry.1.clone(),
-                        args_chunk: arguments_delta,
-                    });
                 }
+                announcer.announce(&state.tools, index, on_event);
             }
-            Ok(SdkEvent::ToolCallProgress { .. }) => {
-                // 累计形态与 ToolCallDelta 重复，缓冲已覆盖。
+            Ok(SdkEvent::ToolCallProgress {
+                index,
+                id,
+                name,
+                arguments_so_far,
+            }) => {
+                // `content_block_start` 的 id/name 只随这一帧出来：此前被当成
+                // 「与增量重复」丢弃，于是每个 tool_use 的函数名都是空串，
+                // runtime 侧整条调用被 `parse_tool_calls` 静默删掉。
+                let entry = state
+                    .tools
+                    .entry(index)
+                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                adopt_identity(&mut entry.0, id.as_deref());
+                adopt_identity(&mut entry.1, name.as_deref());
+                // 只发累计串的端点：缓冲落后于权威累计值时以它为准。
+                if arguments_so_far.len() > entry.2.len() {
+                    entry.2 = arguments_so_far;
+                }
+                announcer.announce(&state.tools, index, on_event);
             }
             Ok(SdkEvent::ServerToolStatus { .. }) => {}
             Ok(SdkEvent::Usage { usage }) => {
