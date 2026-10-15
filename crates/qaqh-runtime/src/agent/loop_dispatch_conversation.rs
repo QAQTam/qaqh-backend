@@ -416,7 +416,19 @@ impl Loop {
             }
             ConversationCommand::ConversationCancel { turn_id } => {
                 self.cancel.set();
-                qaqh_workspace::set_cancel(true);
+                // T1（BUG-2026-10-15）：全局 set_cancel(true) 是已废弃的 C2 残留——
+                // 本调用发生在 actor 线程，ACTOR_SESSION 已设，set_cancel 只写
+                // thread-local，对在途的工具 worker 线程不可见，且会在 daemon 侧
+                // 残留进程级脏标记（registry signal_shutdown 注释同源结论）。
+                // 会话键控表才是让在途工具在下一个轮询点中止的规范入口；registry
+                // send_ringing 的中断帧路径已设同款表项，这里对绕过该路径的
+                // 直连/宿主取消补齐同一语义。清零仍走 turn 边界的 clear_cancel。
+                if !self.session.agent.session.session_id.is_empty() {
+                    qaqh_workspace::set_session_cancel(
+                        &self.session.agent.session.session_id,
+                        true,
+                    );
+                }
                 let cancel_call_ids = {
                     let mut call_ids = Vec::new();
                     if let Some(suspended) = self.session.turn.suspended.as_ref() {
@@ -460,7 +472,23 @@ impl Loop {
                         true
                     }
                     Ok(TurnCancellation::Idle) => true,
-                    Ok(TurnCancellation::AlreadyTerminal) => false,
+                    Ok(TurnCancellation::AlreadyTerminal) => {
+                        // T1（BUG-2026-10-15）：actor 视角已终态但客户端仍显式指定
+                        // turn_id 取消 = 前端投影漏推了终态。不重复落
+                        // TurnInterrupted 事实——apply_turn_interrupted 非幂等，
+                        // 会把已完成回合的 outcome 污染成 Interrupted；只补发
+                        // legacy ConversationCancelled 镜像（activity 层
+                        // cancelled）。权威侧由前端取消看门狗（本地收口 +
+                        // resnapshot）兜底；T2 收割路径上线后这里保持静默即可。
+                        if turn_id.is_some() {
+                            log::warn!(
+                                "[CANCEL] turn already terminal but client asked to cancel {turn_id:?} (stale projection); emitting legacy cancelled mirror only"
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     Err(error) => {
                         log::error!("[CANCEL] SessionActor rejected cancellation: {error}");
                         true

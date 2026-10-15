@@ -30,7 +30,7 @@ use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, adopt_identity,
-    apply_management_headers, empty_stream_retry, roomy_response_limits, sdk_error_detail,
+    apply_management_headers, empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail,
     sdk_retry_policy, split_url, tool_result_name,
 };
 use super::transport::{
@@ -258,6 +258,41 @@ fn provider_state_item(item: serde_json::Value) -> Part {
     )))
 }
 
+/// 回放前的 item 归一化：OpenAI Responses 端点对 `input` 里的
+/// `reasoning` / `web_search_call` item 要求必填 `summary` 数组（缺失即
+/// HTTP 400 `missing_required_parameter: 'input[N].summary'`）。原样回放的
+/// provider item 自带该字段；但历史经过 timeline 重建等有损路径后只剩
+/// 语义块，派生合成（或旧版本持久化的）item 可能没有 `summary`——
+/// 统一在这里补空数组，语义等价（无摘要）且满足 schema。
+fn replay_item(mut item: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = item.as_object_mut() {
+        let it = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if (it == "reasoning" || it == "web_search_call")
+            && !obj.contains_key("summary")
+        {
+            obj.insert("summary".into(), serde_json::json!([]));
+        }
+        // id 卫生（对标 codex `prepare_response_items_for_request`，
+        // codex-rs/core/src/client.rs:1087-1096 + `ResponseItemId::is_prefixed`）：
+        // 端点只接受 `<prefix>_<suffix>` 形的 item id；有损历史留下的空 id /
+        // 无前缀 id 会被 400，直接摘除让端点重新分配。
+        let malformed_id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !is_prefixed_item_id(id));
+        if malformed_id {
+            obj.remove("id");
+        }
+    }
+    item
+}
+
+/// codex `ResponseItemId::is_prefixed` 的投影：`prefix_suffix` 且两段非空。
+fn is_prefixed_item_id(id: &str) -> bool {
+    id.split_once('_')
+        .is_some_and(|(prefix, suffix)| !prefix.is_empty() && !suffix.is_empty())
+}
+
 /// Project harness history onto the SDK's neutral Responses model.
 /// 第一条 system → `instructions`（提顶）；后续 system/developer → 原位
 /// `developer` item（与退役前逐字节同形态，依赖 SystemPlacement 策略）。
@@ -358,7 +393,7 @@ pub(crate) fn project_responses_messages(
                     if is_reasoning && !compat.echo_reasoning_content {
                         continue;
                     }
-                    parts.push(provider_state_item((*item).clone()));
+                    parts.push(provider_state_item(replay_item((*item).clone())));
                 }
                 // 2) 派生 reasoning（无回放 item 且开关开启时合成旧形态）。
                 if compat.echo_reasoning_content && !has_response_type("reasoning") {
@@ -369,6 +404,7 @@ pub(crate) fn project_responses_messages(
                             parts.push(provider_state_item(serde_json::json!({
                                 "type": "reasoning",
                                 "content": [{"type": "reasoning_text", "text": reasoning}],
+                                "summary": [],
                             })));
                         }
                     }
@@ -397,9 +433,11 @@ pub(crate) fn project_responses_messages(
                         if already {
                             continue;
                         }
+                        // Null input（上游参数不可还原）在 wire 层折叠成 {}，
+                        // 端点不接受 "arguments": "null"（T-7-1）。
                         let mut call = WireToolCall::new(
                             provider_function_name(name, compat).to_string(),
-                            input.clone(),
+                            super::sdk_common::wire_tool_input(input),
                         );
                         // 0.4.0 rejects an empty explicit id; leave it unset so the
                         // SDK's normalizer assigns a collision-free one.
@@ -426,6 +464,7 @@ pub(crate) fn project_responses_messages(
                                 "type": "web_search_call",
                                 "id": id,
                                 "action": action,
+                                "summary": [],
                             })));
                         }
                     }
@@ -563,6 +602,11 @@ fn build_options(provider: &ProviderConfig, policy: &GateRetryPolicy) -> Request
     }
     options.provider_request = switches;
     apply_management_headers(provider, None, &mut options, false);
+    // OAuth 账号面头（ChatgptPlan 凭据来源注入）：多账号/工作区按 id_token
+    // claim 路由 + FedRAMP 标记。空 Vec = 普通端点，一个头都不加。
+    for (name, value) in &provider.chatgpt_account_headers {
+        insert_header(&mut options, name, value);
+    }
     options
 }
 
@@ -603,6 +647,28 @@ fn apply_siwc_plan(provider: &ProviderConfig, request: &mut ChatRequest) {
     request.server_tools.clear();
     for field in SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS {
         request.extra_body.remove(*field);
+    }
+    strip_reasoning_content_for_plan(request);
+}
+
+/// plan 直连路由上 `reasoning` 回放 item 的 `content` 数组是**禁写**字段：
+/// schema 上限 0 条，非空即 HTTP 400 `Invalid 'input[N].content': array too
+/// long. Expected an array with maximum length 0`（OAuth ChatGPT 线上实测，
+/// 任何工具调用后的下一回合回放历史时触发）。`content` 的两条来源——
+/// 原样回放的 provider item（模型产出的 reasoning text）与派生合成的旧形态
+/// （`project_responses_messages` 显式构造）——都统一在这里摘除，不依赖投影侧
+/// 自觉（与 extra_body 收口同一设计：被禁内容一旦上线就是 400）。
+fn strip_reasoning_content_for_plan(request: &mut ChatRequest) {
+    for msg in &mut request.messages {
+        for part in &mut msg.parts {
+            if let Part::ProviderItem(item) = part
+                && item.provider_state.data.get("type").and_then(|v| v.as_str())
+                    == Some("reasoning")
+                && let Some(obj) = item.provider_state.data.as_object_mut()
+            {
+                obj.remove("content");
+            }
+        }
     }
 }
 
@@ -720,6 +786,18 @@ fn server_tool_status_name(state: ServerToolState) -> &'static str {
 ///
 /// 去重锚点：优先 `call_id`；身份缺席时退回 `name`+参数（不编造 id——
 /// 缺 id 的调用交给 runtime 的可见失败块处理）。
+///
+/// BUG-2026-10-15（missing-field 假错 + 副作用已落盘）：本函数曾把解析失败
+/// 的流内参数**伪造成 `{}`** 塞进 ToolUse。一旦去重锚点失配（item id 与
+/// call_id 形态别名、或单侧 id 为空而参数又不等），终态里的真调用（完整
+/// 参数 → 正常执行 → 落盘）与这里的幽灵副本（`{}` 参数 → 执行 →
+/// 「invalid arguments: missing field `patch`」）会**同时**进执行面——模型
+/// 看到假错，盘上却已有补丁。修正：
+/// 1. 参数还原失败不再是「空对象」：终态已带同名调用 → 本次流条目只是同一
+///    调用的损坏副本，按重复丢弃；终态没带 → 以 `Null` input 如实收口，
+///    由 runtime 执行界面向模型报告「上游参数流损坏，未执行」。
+/// 2. id 别名场景（双侧 id 非空但不等）补参数语义一致性判重——同调用的
+///    两份上报不得执行两次。
 fn reconcile_streamed_tool_calls(
     blocks: &mut Vec<ContentBlock>,
     streamed: &HashMap<usize, (String, String, String)>,
@@ -733,12 +811,28 @@ fn reconcile_streamed_tool_calls(
         if name.is_empty() {
             continue;
         }
-        let input: serde_json::Value =
-            serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-        let input = if input.is_null() {
-            serde_json::json!({})
-        } else {
-            input
+        let parsed: Option<serde_json::Value> = serde_json::from_str(&args).ok();
+        let input = match parsed {
+            // `null` / 非对象同样视为「参数不可还原」——不伪造。
+            Some(v) if v.is_object() => v,
+            _ => {
+                let covered = blocks.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { name: known_name, .. } if known_name == &name)
+                });
+                if covered {
+                    // 终态已带同名调用：流内条目是同一调用的损坏副本，丢弃。
+                    log::warn!(
+                        "Responses 收口流条目参数损坏(name={name:?},args_head={:?})且终态已带同名调用，按重复丢弃",
+                        args.chars().take(80).collect::<String>()
+                    );
+                    continue;
+                }
+                log::warn!(
+                    "Responses 收口流条目参数损坏(name={name:?},args_head={:?})，按 Null 参数收口交 runtime 如实报错",
+                    args.chars().take(80).collect::<String>()
+                );
+                serde_json::Value::Null
+            }
         };
         let duplicate = blocks.iter().any(|block| match block {
             ContentBlock::ToolUse {
@@ -746,10 +840,15 @@ fn reconcile_streamed_tool_calls(
                 name: known_name,
                 input: known_input,
             } => {
+                if known_name != &name {
+                    return false;
+                }
                 if id.is_empty() || known_id.is_empty() {
-                    known_name == &name && known_input == &input
+                    known_input == &input
                 } else {
-                    known_id == &id
+                    // id 形态别名（item id `fc_…` vs call_id `call_…`）时
+                    // 参数逐值一致也判重复：同一调用的两份上报只执行一次。
+                    known_id == &id || known_input == &input
                 }
             }
             _ => false,
@@ -1116,7 +1215,12 @@ async fn consume(
                     .map(|n| canonical_function_name(n, &compat))
                     .unwrap_or_default();
                 adopt_identity(&mut entry.1, Some(canonical.as_str()));
-                if !arguments_so_far.is_empty() {
+                // 字节水位守卫（与 anthropic_sdk 同款不变量）：累计快照只增不回退。
+                // 网关/SDK 的 `arguments_so_far` 可能滞后于已 append 的 delta——
+                // 无守卫的赋值会把缓冲**截短**，拼出非法 JSON；下游一旦解析失败，
+                // 旧代码会伪造 `{}` 当参数，模型就看到「missing field `patch`」
+                // 这种假错（参数明明发过）。这里宁可用已累积的更长缓冲。
+                if arguments_so_far.len() > entry.2.len() {
                     entry.2 = arguments_so_far;
                 }
             }
@@ -1535,6 +1639,55 @@ mod tests {
         assert_eq!(out.len(), 1, "reasoning-only assistant 应被丢弃：{out:?}");
     }
 
+    /// canary：回放给 OpenAI Responses 端点的 `reasoning` / `web_search_call`
+    /// item **必须带 `summary` 字段**——缺失即 HTTP 400
+    /// `missing_required_parameter: 'input[N].summary'`（OAuth ChatGPT 线上实测）。
+    /// 覆盖两条路径：有损历史（raw item 缺 summary / 只剩语义块走派生合成）。
+    #[test]
+    fn replayed_provider_items_always_carry_summary() {
+        let mut compat = provider().responses_compat.clone();
+        compat.echo_reasoning_content = true;
+        compat.echo_web_search_call = true;
+        let msgs = vec![
+            Message::user("go"),
+            qa_msg(
+                "assistant",
+                vec![
+                    // 旧版本持久化 / 有损路径留下的无 summary raw item。
+                    ContentBlock::ResponseOutputItem {
+                        item: serde_json::json!({"type": "reasoning"}),
+                    },
+                    ContentBlock::WebSearchCall {
+                        id: "ws_1".into(),
+                        action: serde_json::json!({"type": "search"}),
+                    },
+                ],
+            ),
+        ];
+        let out = project_responses_messages(&msgs, &compat);
+        let assistant = &out[1];
+        let items: Vec<serde_json::Value> = assistant
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::ProviderItem(it) => Some(it.provider_state.data.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 2, "raw reasoning + 派生 web_search_call");
+        for item in &items {
+            let it = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                item.get("summary").is_some(),
+                "{it} 回放 item 必须带 summary（OpenAI 400 守卫）：{item}"
+            );
+        }
+        // 补的是空数组（语义等价：无摘要），不覆盖原有字段。
+        assert_eq!(items[0]["summary"], serde_json::json!([]));
+        assert_eq!(items[1]["summary"], serde_json::json!([]));
+        assert_eq!(items[1]["id"], "ws_1");
+    }
+
     #[test]
     fn search_alias_roundtrip() {
         let mut p = provider();
@@ -1663,6 +1816,198 @@ mod tests {
             serde_json::json!(false),
             "store:false 必须保留"
         );
+    }
+
+    /// canary：plan 直连路由上 `reasoning` 回放 item 的 `content` 数组必须被
+    /// 摘除（该路由 schema 上限 0 条）——HTTP 400 `Invalid 'input[N].content':
+    /// array too long. Expected an array with maximum length 0`（OAuth ChatGPT
+    /// 线上实测，任何工具调用后的下一回合回放历史即触发）。两条来源都要盖住：
+    /// 原样回放的 provider item 与派生合成。
+    #[test]
+    fn siwc_plan_replayed_reasoning_items_carry_no_content() {
+        let mut p = provider();
+        p.responses_compat.siwc_plan = true;
+        p.responses_compat.echo_reasoning_content = true;
+        let history = vec![
+            Message::user("go"),
+            qa_msg(
+                "assistant",
+                vec![ContentBlock::ResponseOutputItem {
+                    item: serde_json::json!({
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "s"}],
+                        "content": [{"type": "reasoning_text", "text": "cot"}],
+                    }),
+                }],
+            ),
+            qa_msg(
+                "assistant",
+                vec![ContentBlock::Reasoning {
+                    reasoning: "derived".into(),
+                    kind: Some(qaqh_types::ReasoningKind::Text),
+                }],
+            ),
+        ];
+        let projected = project_responses_messages(&history, &p.responses_compat);
+        let request = build_request(&p, projected, None, 0, None, None, true);
+        let mut reasoning = 0;
+        for msg in &request.messages {
+            for part in &msg.parts {
+                if let Part::ProviderItem(item) = part
+                    && item.provider_state.data.get("type").and_then(|v| v.as_str())
+                        == Some("reasoning")
+                {
+                    reasoning += 1;
+                    assert!(
+                        item.provider_state.data.get("content").is_none(),
+                        "reasoning item 的 content 必须被摘除：{:?}",
+                        item.provider_state.data
+                    );
+                    assert!(
+                        item.provider_state.data.get("summary").is_some(),
+                        "summary 收口不受影响（schema 必填）：{:?}",
+                        item.provider_state.data
+                    );
+                }
+            }
+        }
+        assert_eq!(reasoning, 2, "原样回放 + 派生合成两条来源都要投影出来");
+    }
+
+    /// 收口不可绕过：即便回放 item 事后被塞上 content，`apply_siwc_plan`
+    /// 也必须摘干净（与 extra_body 收口同一半边）。
+    #[test]
+    fn siwc_plan_reasoning_content_strip_cannot_be_bypassed() {
+        let mut p = provider();
+        p.responses_compat.siwc_plan = true;
+        let mut request = build_request(
+            &p,
+            vec![WireMessage::new(
+                Role::Assistant,
+                vec![provider_state_item(serde_json::json!({
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": "injected"}],
+                }))],
+            )],
+            None,
+            0,
+            None,
+            None,
+            true,
+        );
+        // 模拟「收口之后」又被塞入的路径：直接重放收口本身也应摘除。
+        apply_siwc_plan(&p, &mut request);
+        let msg = &request.messages[0];
+        let Part::ProviderItem(item) = &msg.parts[0] else {
+            panic!("期望 ProviderItem");
+        };
+        assert!(item.provider_state.data.get("content").is_none());
+    }
+
+    /// 非 plan 端点（echo_reasoning_content 开启的兼容网关）回放形状**不变**：
+    /// content 原样保留，摘除只属于 plan 直连路由的契约。
+    #[test]
+    fn non_plan_endpoints_keep_replayed_reasoning_content() {
+        let p = provider();
+        let mut compat = p.responses_compat.clone();
+        compat.echo_reasoning_content = true;
+        let history = vec![
+            Message::user("go"),
+            qa_msg(
+                "assistant",
+                vec![ContentBlock::Reasoning {
+                    reasoning: "cot".into(),
+                    kind: Some(qaqh_types::ReasoningKind::Text),
+                }],
+            ),
+        ];
+        let request = build_request(
+            &p,
+            project_responses_messages(&history, &compat),
+            None,
+            0,
+            None,
+            None,
+            true,
+        );
+        let mut found = false;
+        for msg in &request.messages {
+            for part in &msg.parts {
+                if let Part::ProviderItem(item) = part {
+                    assert_eq!(
+                        item.provider_state.data["content"][0]["text"],
+                        serde_json::json!("cot"),
+                        "非 plan 端点保持原样回放"
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "派生 reasoning item 应被投影出来");
+    }
+
+    /// OAuth 账号面头（ChatgptPlan 凭据来源注入）经 `build_options` 统一下发；
+    /// 缺省（BYOK）端点一个账号头都不加。
+    #[test]
+    fn account_headers_flow_into_request_options() {
+        let mut p = provider();
+        p.chatgpt_account_headers = vec![
+            ("chatgpt-account-id".to_string(), "acct_123".to_string()),
+            ("x-openai-fedramp".to_string(), "true".to_string()),
+        ];
+        let opts = build_options(&p, &GateRetryPolicy::default());
+        assert_eq!(
+            opts.headers
+                .get("chatgpt-account-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("acct_123")
+        );
+        assert_eq!(
+            opts.headers
+                .get("x-openai-fedramp")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+        let opts = build_options(&provider(), &GateRetryPolicy::default());
+        assert!(opts.headers.get("chatgpt-account-id").is_none());
+    }
+
+    /// 回放 item id 卫生（对标 codex `ResponseItemId::is_prefixed`）：
+    /// 无前缀 id 摘除让端点重发，合法前缀 id 原样保留。
+    #[test]
+    fn replayed_items_drop_unprefixed_ids() {
+        let compat = provider().responses_compat;
+        let msgs = vec![
+            Message::user("go"),
+            qa_msg(
+                "assistant",
+                vec![
+                    ContentBlock::ResponseOutputItem {
+                        item: serde_json::json!({
+                            "type": "reasoning", "id": "badid", "summary": [],
+                        }),
+                    },
+                    ContentBlock::ResponseOutputItem {
+                        item: serde_json::json!({
+                            "type": "reasoning", "id": "rs_abc", "summary": [],
+                        }),
+                    },
+                ],
+            ),
+        ];
+        let out = project_responses_messages(&msgs, &compat);
+        let items: Vec<serde_json::Value> = out[1]
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::ProviderItem(it) => Some(it.provider_state.data.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].get("id").is_none(), "无前缀 id 必须摘除: {items:?}");
+        assert_eq!(items[1]["id"], "rs_abc", "合法前缀 id 原样保留");
     }
 
     /// 默认关闭：非 plan 端点的 wire 形状**不能**被这次改动碰到。
@@ -1817,5 +2162,81 @@ mod tests {
         assert!(cleaned["properties"]["cmd"].get("format").is_none());
         assert_eq!(cleaned["properties"]["n"]["type"], "number");
         assert_eq!(cleaned["required"], serde_json::json!(["cmd"]));
+    }
+
+    /// BUG-2026-10-15 根因锁：流内参数损坏 + 终态已带同名调用 → 流条目按
+    /// 重复丢弃。旧代码在此伪造 `{}` 参数，幽灵副本与终态真调用同时进执行，
+    /// 造成「补丁已落盘 + 模型看到 missing field `patch` 假错」。
+    #[test]
+    fn reconcile_drops_corrupt_duplicate_when_terminal_carries_same_name() {
+        let mut blocks = vec![ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "apply_patch".into(),
+            input: serde_json::json!({"patch": "*** Begin Patch\n*** End Patch"}),
+        }];
+        // 流内缓冲被陈旧快照截断 → 非法 JSON；id 又是 item id 形态（别名）。
+        let mut streamed = HashMap::new();
+        streamed.insert(
+            0usize,
+            (
+                "fc_1".to_string(),
+                "apply_patch".to_string(),
+                "{\"patch\": \"*** Begin Pa".to_string(),
+            ),
+        );
+        reconcile_streamed_tool_calls(&mut blocks, &streamed);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "损坏副本不得入执行面：{blocks:?}"
+        );
+    }
+
+    /// 同上但终态没带调用：以 Null 参数如实收口，交 runtime 执行界面
+    /// 报「上游参数流损坏，未执行」。不得伪造 `{}`（missing-field 假错）。
+    #[test]
+    fn reconcile_keeps_null_truth_when_terminal_lacks_the_call() {
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        let mut streamed = HashMap::new();
+        streamed.insert(
+            0usize,
+            (
+                "call_1".to_string(),
+                "apply_patch".to_string(),
+                "{\"patch\": \"*** Begin Pa".to_string(),
+            ),
+        );
+        reconcile_streamed_tool_calls(&mut blocks, &streamed);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "apply_patch");
+                assert!(input.is_null(), "损坏参数保持 Null 真值: {input:?}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// id 形态别名（终态 call_id vs 流内 item id）+ 参数语义一致 → 判同一
+    /// 调用，不得二次入执行面。
+    #[test]
+    fn reconcile_treats_aliased_ids_with_identical_args_as_duplicate() {
+        let mut blocks = vec![ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "read".into(),
+            input: serde_json::json!({"path": "a.rs"}),
+        }];
+        let mut streamed = HashMap::new();
+        streamed.insert(
+            0usize,
+            (
+                "fc_1".to_string(),
+                "read".to_string(),
+                "{\"path\": \"a.rs\"}".to_string(),
+            ),
+        );
+        reconcile_streamed_tool_calls(&mut blocks, &streamed);
+        assert_eq!(blocks.len(), 1, "别名 id + 同参不得重复执行: {blocks:?}");
     }
 }

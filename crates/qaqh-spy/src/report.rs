@@ -16,13 +16,33 @@ const MAX_FULL_DIFFS: usize = 3;
 /// 为折叠/截断提示预留的字节数，保证提示总能出现在报告里
 const NOTICE_RESERVE: usize = 160;
 
+/// 危险信号区的字节上限。此前 ⚠ 清单无封顶地全量列出，只靠末尾截断兜底，
+/// 结果会截在句子中间；而且几千个信号要先把全文拼出来再砍，纯白做工。
+const WARN_BUDGET_BYTES: usize = 768;
+
+/// 单个文件的 diff 节上限。没有它，一份 108 KB 的 `Cargo.lock` 就能独占整份
+/// 预算（排序键是「字节差绝对值」降序，锁文件天然靠前），真正的代码 diff 全被
+/// 折叠掉——注入很贵却不传递信息。超出只留 stat + 增删计数。
+const MAX_SECTION_BYTES: usize = 800;
+
+/// 限额报告的渲染结果。
+pub struct Report {
+    /// 报告正文（已受 `max_bytes` 约束）
+    pub text: String,
+    /// 正文里**实际展开**的文件路径。宿主据此只为这些文件产回滚提示：折叠掉的
+    /// 条目即使给了命令也读不到 diff，等于纯字节浪费。
+    /// 审计链回填（SMJ + file_state 账本）**不受此字段影响**，仍覆盖全部变更，
+    /// 所以收窄文本量不会削减恢复能力。
+    pub expanded: Vec<String>,
+}
+
 pub(crate) fn build_report(
     store: &Store,
     changes: &[Change],
     max_bytes: usize,
     ctx_before: usize,
     ctx_after: usize,
-) -> Result<String> {
+) -> Result<Report> {
     // 1) 按 path 归并净变更：first.before → last.after
     struct Net {
         before: Option<String>,
@@ -132,8 +152,12 @@ pub(crate) fn build_report(
 
     // 3) 渲染
     let mut out = String::new();
+    let mut expanded: Vec<String> = Vec::new();
     if items.is_empty() {
-        return Ok(out);
+        return Ok(Report {
+            text: out,
+            expanded,
+        });
     }
     out.push_str(&format!(
         "[workspace] 自标记以来 {} 个文件变更\n",
@@ -145,8 +169,23 @@ pub(crate) fn build_report(
             "[workspace] ⚠ 危险信号：{} 个文件可疑，脚本可能没按预期工作（可 spy action=journal 查流水，用 spy action=undo 回滚）\n",
             warned.len()
         ));
+        // 逐条受 WARN_BUDGET_BYTES 约束，超出的折叠成计数——但**计数本身说全部**，
+        // 所以"有 N 个可疑文件"这个事实不会因封顶而丢失。
+        let mut warn_bytes = 0usize;
+        let mut warned_folded = 0usize;
         for i in &warned {
-            out.push_str(&format!("  ⚠ {}: {}\n", i.path, i.warnings.join("；")));
+            let line = format!("  ⚠ {}: {}\n", i.path, i.warnings.join("；"));
+            if warn_bytes + line.len() > WARN_BUDGET_BYTES {
+                warned_folded += 1;
+                continue;
+            }
+            warn_bytes += line.len();
+            out.push_str(&line);
+        }
+        if warned_folded > 0 {
+            out.push_str(&format!(
+                "  …另有 {warned_folded} 个危险信号未列出（spy action=journal）\n"
+            ));
         }
     }
 
@@ -188,6 +227,13 @@ pub(crate) fn build_report(
             );
             if d.is_empty() {
                 format!("─── {stat}\n(内容无文本差异)\n")
+            } else if d.len() > MAX_SECTION_BYTES {
+                // 保留体量信息（增删行数），diff 本体交给 spy/journal 按需取。
+                let added = d.lines().filter(|l| l.starts_with('+')).count();
+                let removed = d.lines().filter(|l| l.starts_with('-')).count();
+                format!(
+                    "─── {stat}\n(+{added}/-{removed} 行，diff 过大未展开：spy action=journal)\n"
+                )
             } else {
                 format!("─── {stat}\n{d}")
             }
@@ -199,6 +245,7 @@ pub(crate) fn build_report(
             continue;
         }
         out.push_str(&section);
+        expanded.push(it.path.clone());
         full += 1;
     }
     if collapsed > 0 {
@@ -214,7 +261,10 @@ pub(crate) fn build_report(
         out.truncate(cut);
         out.push_str("\n[workspace] 报告超限已截断\n");
     }
-    Ok(out)
+    Ok(Report {
+        text: out,
+        expanded,
+    })
 }
 
 fn status_zh(s: ChangeStatus) -> &'static str {
@@ -256,6 +306,7 @@ mod tests {
             size_before: None,
             size_after: None,
             trigger: "manual".into(),
+            owner: String::new(),
         }
     }
 
@@ -268,7 +319,7 @@ mod tests {
         let b_empty = store.write_blob(b"").unwrap();
 
         let changes = vec![change("app.py", Some(b_old), Some(b_empty))];
-        let r = build_report(&store, &changes, 4096, 5, 3).unwrap();
+        let r = build_report(&store, &changes, 4096, 5, 3).unwrap().text;
         assert!(r.contains("⚠"), "应命中清空启发式:\n{r}");
         assert!(r.contains("app.py"));
         assert!(r.contains("@@"));
@@ -287,7 +338,7 @@ mod tests {
             change(".gitkeep", None, Some(b_empty)),
             change("placeholder.md", None, Some(b_ws)),
         ];
-        let r = build_report(&store, &changes, 4096, 5, 3).unwrap();
+        let r = build_report(&store, &changes, 4096, 5, 3).unwrap().text;
         assert!(!r.contains("⚠"), "新建空/空白文件不是危险信号:\n{r}");
         assert!(r.contains(".gitkeep"), "新增文件仍应列出:\n{r}");
         assert!(r.contains("placeholder.md"));
@@ -303,7 +354,7 @@ mod tests {
         let b_ws = store.write_blob(b"  \n\t\n").unwrap();
 
         let changes = vec![change("app.py", Some(b_old), Some(b_ws))];
-        let r = build_report(&store, &changes, 4096, 5, 3).unwrap();
+        let r = build_report(&store, &changes, 4096, 5, 3).unwrap().text;
         assert!(r.contains("⚠"), "既有文件被改成纯空白应命中启发式:\n{r}");
         assert!(r.contains("纯空白"));
     }
@@ -320,7 +371,7 @@ mod tests {
             let a = store.write_blob(format!("new {i}\n").as_bytes()).unwrap();
             changes.push(change(&format!("f{i}.txt"), Some(b), Some(a)));
         }
-        let r = build_report(&store, &changes, 300, 5, 3).unwrap();
+        let r = build_report(&store, &changes, 300, 5, 3).unwrap().text;
         assert!(r.contains("未展开"), "应折叠剩余文件:\n{r}");
         assert!(r.len() < 900);
     }
@@ -329,7 +380,7 @@ mod tests {
     fn no_changes_yields_empty() {
         let dir = tmp_dir("report-empty");
         let store = Store::open(&dir, None).unwrap();
-        let r = build_report(&store, &[], 4096, 5, 3).unwrap();
+        let r = build_report(&store, &[], 4096, 5, 3).unwrap().text;
         assert!(r.is_empty());
     }
 }

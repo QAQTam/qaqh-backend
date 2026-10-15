@@ -1213,6 +1213,64 @@ impl TurnEngine {
         messages.push(qaqh_types::Message::user(prompt));
     }
 
+    /// ChatGPT 套餐直连的 401 恢复（对标 codex `ProviderUnauthorizedRecovery::Recovered`，
+    /// codex-rs/model-provider/src/provider.rs:48-53）：Authentication 类失败 →
+    /// 强制刷新（旋转式 refresh token：单飞 + 先落盘）→ 重建 provider 整请求
+    /// 重试一次。刷新或重建失败一律返回原始结果——原 401 的信息量高于恢复失败。
+    ///
+    /// 只有 `credential == ChatgptPlan` 的会话才有可刷新凭据；其余来源的 401
+    /// 走原有失败路径（零克隆）。
+    fn gate_request_with_plan_auth_retry(
+        ctx: &mut RingContext,
+        provider: &qaqh_gate::ProviderConfig,
+        messages: Vec<qaqh_types::Message>,
+        turn_id: &str,
+        round_num: u32,
+        last_usage: Option<UsageInfo>,
+    ) -> GateRequestResult {
+        let retry_messages = (ctx.agent.config.credential
+            == qaqh_types::CredentialSource::ChatgptPlan)
+            .then(|| messages.clone());
+        let result = gate_request(
+            ctx,
+            provider,
+            messages,
+            Some(ctx.agent.tool_defs.clone()),
+            turn_id,
+            round_num,
+            last_usage.clone(),
+        );
+        let needs_retry = retry_messages.is_some()
+            && result
+                .gate_error
+                .as_ref()
+                .is_some_and(|e| e.kind == qaqh_gate::ErrorKind::Authentication);
+        if !needs_retry {
+            return result;
+        }
+        log::warn!(
+            "[TURN] plan route got 401: force-refreshing ChatGPT token and retrying once"
+        );
+        let refreshed = qaqh_siwc::manager()
+            .map(|manager| manager.force_refresh(None))
+            .is_some_and(|refresh| refresh.is_ok());
+        if !refreshed {
+            return result;
+        }
+        let Ok(rebuilt) = provider_for(ctx, turn_id) else {
+            return result;
+        };
+        gate_request(
+            ctx,
+            &rebuilt,
+            retry_messages.unwrap_or_default(),
+            Some(ctx.agent.tool_defs.clone()),
+            turn_id,
+            round_num,
+            last_usage,
+        )
+    }
+
     fn run_lap(
         &mut self,
         ctx: &mut RingContext,
@@ -1410,11 +1468,10 @@ impl TurnEngine {
                 request_error,
                 stop_reason,
                 last_usage,
-            } = gate_request(
+            } = Self::gate_request_with_plan_auth_retry(
                 ctx,
                 &provider,
                 messages,
-                Some(ctx.agent.tool_defs.clone()),
                 &turn_id,
                 round_num,
                 last_usage,

@@ -108,13 +108,13 @@ impl StreamState {
         for (_idx, id, name, args_json) in sorted {
             let input: serde_json::Value =
                 serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
-            // 空/非法参数收敛为 `{}`：掐流时 `"arguments": "null"` 会被端点判 400
-            // （T-7-1 / BUG-2026-09-13-13）。
-            let input = if input.is_null() {
-                serde_json::json!({})
-            } else {
-                input
-            };
+            // 参数损坏（截断 / delta+快照混流）时保持 `Null` 真值，**不得**
+            // 伪造 `{}`：`{}` 会让 typed 工具报「invalid arguments: missing
+            // field `x`」假错——模型明明发过参数，却被告知参数缺失，无从
+            // 自纠。Null input 会被 runtime 执行界面如实转换为「上游参数流
+            // 损坏，未执行」。wire 回放兼容（掐流时 `"arguments": "null"`
+            // 会被端点判 400，T-7-1 / BUG-2026-09-13-13）由出站
+            // [`wire_tool_input`] 统一收敛，语义层不再掺假。
             let id = if id.is_empty() && synth_missing_tool_ids {
                 format!("toolu_{}", uuid_simple())
             } else {
@@ -132,6 +132,18 @@ impl StreamState {
             usage: self.usage,
             stop_reason: self.stop,
         });
+    }
+}
+
+/// 出站 wire 的 tool-call input 收敛：语义层允许 `Null`（= 上游参数不可
+/// 还原的真值），但端点不接受 `"arguments": "null"` / `"input": null`
+/// （T-7-1 / BUG-2026-09-13-13 会 400）。回放前在此统一折叠成 `{}`——
+/// 只动 wire 形态，不动语义层；执行面看到的仍是 Null。
+pub(crate) fn wire_tool_input(input: &serde_json::Value) -> serde_json::Value {
+    if input.is_null() {
+        serde_json::json!({})
+    } else {
+        input.clone()
     }
 }
 
@@ -305,6 +317,10 @@ pub(crate) fn sdk_error_detail(label: &str, e: &SdkError, api_key: &str) -> (Str
             );
             let detail = if status == 401 {
                 "authentication failed".to_string()
+            } else if status == 429
+                && let Some(human) = humanize_usage_limit(e.raw_body())
+            {
+                human
             } else {
                 let fallback = e.to_string();
                 let body = e.raw_body().unwrap_or(fallback.as_str());
@@ -324,6 +340,54 @@ pub(crate) fn sdk_error_detail(label: &str, e: &SdkError, api_key: &str) -> (Str
             (msg.clone(), format!("{msg}: {detail}"))
         }
     }
+}
+
+/// OAuth 套餐额度（5h/周窗口）的 429 人性化：错误体形如
+/// `{"error":{"type":"usage_limit_reached","resets_at":<unix 秒>}}`（或
+/// `resets_in_seconds`）。能解析出恢复时间就给用户可读文案；解析不出返回
+/// `None`，走原 safe body。对标 codex `usage_limit_reached` 的 resets_at 语义。
+fn humanize_usage_limit(body: Option<&str>) -> Option<String> {
+    let body = body?;
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = value.get("error").unwrap_or(&value);
+    let is_usage_limit = ["usage_limit_reached", "rate_limit_exceeded"]
+        .iter()
+        .any(|code| {
+            error.get("type").and_then(|v| v.as_str()) == Some(*code)
+                || error.get("code").and_then(|v| v.as_str()) == Some(*code)
+        });
+    if !is_usage_limit {
+        return None;
+    }
+    let in_secs = match error
+        .get("resets_in_seconds")
+        .and_then(|v| v.as_i64())
+    {
+        Some(secs) => Some(secs),
+        None => error
+            .get("resets_at")
+            .and_then(|v| v.as_i64())
+            .map(|at| at - now_unix_secs()),
+    }?;
+    if in_secs <= 0 {
+        return Some("套餐额度已用尽：用量窗口即将重置，请稍后重试".to_string());
+    }
+    let minutes = (in_secs + 59) / 60;
+    if minutes >= 60 {
+        Some(format!(
+            "套餐额度已用尽：用量窗口约 {} 小时后重置",
+            (minutes + 59) / 60
+        ))
+    } else {
+        Some(format!("套餐额度已用尽：用量窗口约 {minutes} 分钟后重置"))
+    }
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Bridges the harness `AtomicBool` cancel flag to the SDK
@@ -568,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_converges_null_args_to_empty_object_and_sorts_by_index() {
+    fn finalize_keeps_null_truth_for_unrecoverable_args_and_sorts_by_index() {
         let mut state = StreamState::new();
         state.text = "hi".into();
         state
@@ -582,8 +646,9 @@ mod tests {
         let StreamEvent::Done { raw_message, .. } = &events[0] else {
             panic!("expected Done");
         };
-        // [Text, ToolUse(a), ToolUse(b)] — reasoning absent, tools index-sorted,
-        // empty args converged to {}.
+        // [Text, ToolUse(a), ToolUse(b)] — reasoning absent, tools index-sorted.
+        // b 的参数缓冲损坏（截断/混流）：保持 Null 真值，**不得**伪造 `{}`——
+        // `{}` 会让 typed 工具报「missing field `x`」假错（BUG-2026-10-15）。
         match &raw_message.content[1] {
             ContentBlock::ToolUse { id, input, .. } => {
                 assert_eq!(id, "a");
@@ -594,10 +659,24 @@ mod tests {
         match &raw_message.content[2] {
             ContentBlock::ToolUse { id, input, .. } => {
                 assert_eq!(id, "b");
-                assert_eq!(input, &serde_json::json!({}));
+                assert!(input.is_null(), "损坏参数必须保持 Null 真值: {input:?}");
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn wire_tool_input_folds_null_for_replay_only() {
+        // wire 层折叠：端点不接受 "arguments": "null"（T-7-1）；语义层 Null
+        // 只在此处收敛，执行面看到的仍是真值。
+        assert_eq!(
+            super::wire_tool_input(&serde_json::Value::Null),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            super::wire_tool_input(&serde_json::json!({"p": 1})),
+            serde_json::json!({"p": 1})
+        );
     }
 
     #[test]
@@ -708,5 +787,49 @@ mod tests {
             "detail must stay bounded: {}",
             full.chars().count()
         );
+    }
+
+    /// OAuth 套餐窗口的 429：`usage_limit_reached` + `resets_in_seconds` /
+    /// `resets_at` 必须变成用户可读的重置时间，而不是裸 safe body。
+    #[test]
+    fn usage_limit_429_is_humanized() {
+        let e = SdkError::Api {
+            provider: "openai",
+            status: 429,
+            body: r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":7250}}"#.into(),
+            retry_after: None,
+            retry_source: None,
+            request_id: None,
+        };
+        let (_, full) = sdk_error_detail("OpenAI", &e, "sk-x");
+        assert!(full.contains("套餐额度已用尽"), "{full}");
+        assert!(full.contains("小时后重置"), "{full}");
+
+        // 非 usage-limit 的 429 走原 safe body 路径。
+        let e = SdkError::Api {
+            provider: "openai",
+            status: 429,
+            body: r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#.into(),
+            retry_after: None,
+            retry_source: None,
+            request_id: None,
+        };
+        let (_, full) = sdk_error_detail("OpenAI", &e, "sk-x");
+        assert!(!full.contains("套餐额度已用尽"), "{full}");
+    }
+
+    /// `resets_at` 已过期（服务器时钟差 / 刚跨过重置点）→ 「即将重置」。
+    #[test]
+    fn usage_limit_resets_at_in_the_past_reads_as_imminent() {
+        let e = SdkError::Api {
+            provider: "openai",
+            status: 429,
+            body: r#"{"error":{"type":"usage_limit_reached","resets_at":1}}"#.into(),
+            retry_after: None,
+            retry_source: None,
+            request_id: None,
+        };
+        let (_, full) = sdk_error_detail("OpenAI", &e, "sk-x");
+        assert!(full.contains("即将重置"), "{full}");
     }
 }

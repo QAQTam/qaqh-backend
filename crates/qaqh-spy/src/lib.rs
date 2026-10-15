@@ -1,9 +1,12 @@
 //! qaqh-spy：工作区文件变动审计与紧急备份。
 //!
 //! 用法：**进程内库**。qaqh 在工具批边界做一次全量扫描——调用点位于
-//! `qaqh-runtime/src/agent/workspace_audit.rs`（`begin` 调 `Session::scan`、
-//! `finish` 调 `Session::report_since`），把限额报告作为注入消息下发给
-//! 模型（设计见 `docs/plan-workspace-diff-injection.md`）。
+//! `qaqh-runtime/src/agent/workspace_audit.rs`：`begin` 调 `Session::scan`
+//! 打边界，`finish` 调 `Session::changes_after_tool_end` 取净变更、**先**做宿主
+//! 回填（SMJ + file_state 账本）、再调 `Session::render_report` 渲染限额报告。
+//! 拆成两步是 PR3 的决定：报告里的回滚提示要用到回填产出的 SMJ 序号，而序号
+//! 只能由宿主提供（见 `changes_after_tool_end` 方法说明）。
+//! 设计见 `docs/plan-workspace-diff-injection.md`。
 //!
 //! 核心原则（源自 codespy DESIGN.md，已随本仓调整）：全量状态扫描是事实来源；
 //! 存储在工作区外（CAS blob + journal + manifests）；报告限额 + 危险启发式。
@@ -18,10 +21,24 @@ pub mod scan;
 pub mod store;
 
 pub use diff::asymmetric_unified_diff;
+pub use report::Report;
 pub use scan::{ScanOpts, ScanOutcome};
 pub use store::{Change, ChangeStatus, GcOutcome};
 
-use std::path::PathBuf;
+/// 按归属切分变更：`(可归因给本会话, 外部)`。
+///
+/// 两侧都算"可归因"的情形：条目 `owner` 为空（加字段之前的存量、或未带归属的
+/// 外部扫描），以及宿主自己没有 session id（`owner` 传入空串）——**宁可多报，
+/// 也不静默吞掉别人的真实变更**。只有"明确属于另一个会话"的条目才被压成计数。
+pub fn split_by_owner(changes: &[Change], owner: &str) -> (Vec<Change>, Vec<Change>) {
+    changes.iter().cloned().partition(|c| {
+        // 空 owner（存量/无主）与无 session 的宿主都算可归因，见函数说明。
+        c.owner.is_empty() || owner.is_empty() || c.owner == owner
+    })
+}
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -35,6 +52,22 @@ fn gc_keep() -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| (16..=100_000).contains(n))
         .unwrap_or(256)
+}
+
+/// GC 的字节预算（blob 目录引用总量上限，第二道闸）。`QAQH_SPY_MAX_BYTES`
+/// 可覆盖；**0 = 不限**（只用份数窗口）。默认 512 MiB；显式配置低于 1 MiB
+/// 时抬到 1 MiB——预算过小会把窗口挤到只剩 1 份，undo 能力名存实亡。
+fn gc_max_bytes() -> Option<u64> {
+    const DEFAULT: u64 = 512 * 1024 * 1024;
+    const FLOOR: u64 = 1024 * 1024;
+    match std::env::var("QAQH_SPY_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(n) => Some(n.max(FLOOR)),
+        None => Some(DEFAULT),
+    }
 }
 
 /// 一次扫描的唯一标识（manifest id）。库调用方用它划定工具调用的边界：
@@ -100,6 +133,9 @@ pub struct Session {
     opts: ScanOpts,
     ctx_before: usize,
     ctx_after: usize,
+    /// 归属标识（宿主传 agent session id）。写进每条 `Change.owner`，
+    /// 供 [`split_by_owner`] 把并发会话/子代理的变更与自己的分开。
+    owner: String,
 }
 
 impl Session {
@@ -120,18 +156,38 @@ impl Session {
         let keep = gc_keep();
         let over_window = store.all_manifest_ids().is_ok_and(|ids| ids.len() > keep);
         if over_window {
-            let _ = store.gc(keep, std::time::Duration::from_millis(100));
+            let _ = store.gc(keep, gc_max_bytes(), std::time::Duration::from_millis(100));
         }
         Ok(Session {
             root,
             store,
             opts: ScanOpts::default(),
-            ctx_before: 5,
-            ctx_after: 3,
+            // 零上下文：`@@ -old,cnt +new,cnt @@` 头已带精确行号锚点，上下文行
+            // 只是字节放大器（一次单行编辑被 5+3 行上下文膨胀 ~8 倍），而 spy
+            // diff 的用途是**审计自查**——「这批改动是否符合意图」，不是编辑素材
+            // （编辑有 read/apply_patch 的精确内容与 hash）。压缩后的 diff 能在
+            // 同样的 4KB 报告预算里展开更多文件。需要上下文时用 [`Self::with_context`]。
+            ctx_before: 0,
+            ctx_after: 0,
+            owner: String::new(),
         })
     }
 
-    /// 设置报告里 diff 的非对称上下文（默认 5 前 / 3 后）。
+    /// 设置归属标识（宿主的 agent session id）。扫描落进 journal 的每条变更都会带上它，
+    /// 于是共享同一 store 的并发会话能把自己的变更和别人的分开（见 [`split_by_owner`]）。
+    /// 不设则为空串——所有条目一律算"可归因"，等价于本字段引入前的行为。
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = owner.into();
+        self
+    }
+
+    /// 本会话的归属标识。
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// 覆盖报告里 diff 的上下文行数（默认 **0 前 / 0 后**——行号锚点由 `@@` 头
+    /// 承担，见 `Session::open` 内注释）。仅在有特殊消费方需要原文邻接时才设。
     pub fn with_context(mut self, before: usize, after: usize) -> Self {
         self.ctx_before = before;
         self.ctx_after = after;
@@ -151,7 +207,13 @@ impl Session {
 
     /// 全量扫描：落 blob + journal + manifest。稳态（无改动）只有 walk + stat 成本。
     pub fn scan(&self, trigger: Trigger) -> Result<ScanOutcome> {
-        scan::run_scan(&self.root, &self.store, trigger.as_str(), &self.opts)
+        scan::run_scan(
+            &self.root,
+            &self.store,
+            trigger.as_str(),
+            &self.owner,
+            &self.opts,
+        )
     }
 
     /// 审计视图：mark 之后 journal 里的全部变更（按发生顺序，未按 path 归并）。
@@ -164,11 +226,35 @@ impl Session {
             .collect())
     }
 
+    /// 漂移窗口（PR-D）：owner 上次边界 `from` 到边界 `to`（含 `to` 当批、不含
+    /// `to` 之后）之间 journal 里的**去重文件数**，以及两个边界的扫描时间差毫秒。
+    ///
+    /// 时间差取两端 manifest 的 `ts`；任一 manifest 缺失（容量闸挤掉/损坏）返回
+    /// `None`——调用方自行决定 fail-open 还是 fail-closed。窗口开区间语义与
+    /// [`Session::changes_since`] 对齐：`from` 当批的变更不算漂移。
+    pub fn drift_window(&self, from: &ScanId, to: &ScanId) -> Result<(usize, Option<u64>)> {
+        let files: HashSet<String> = self
+            .store
+            .read_journal()?
+            .into_iter()
+            .filter(|c| c.scan > from.0 && c.scan <= to.0)
+            .map(|c| c.path)
+            .collect();
+        let gap = (|| -> Option<u64> {
+            let a = self.store.load_manifest(&from.0).ok()?;
+            let b = self.store.load_manifest(&to.0).ok()?;
+            let a = chrono::DateTime::parse_from_rfc3339(&a.ts).ok()?;
+            let b = chrono::DateTime::parse_from_rfc3339(&b.ts).ok()?;
+            Some((b - a).num_milliseconds().max(0) as u64)
+        })();
+        Ok((files.len(), gap))
+    }
+
     /// 工具边界报告：先补一次扫描（确保边界之后的改动全部入账），
     /// 再对 mark 之后的净变更渲染限额报告。返回纯文本，如何注入由调用方决定。
     pub fn report_since(&self, from: &ScanId, max_bytes: usize) -> Result<String> {
         let changes = self.changes_after_tool_end(from)?;
-        self.render_report(&changes, max_bytes)
+        Ok(self.render_report(&changes, max_bytes)?.text)
     }
 
     /// 补一次 ToolEnd 扫描（确保边界之后的改动全部入账）并返回 mark 之后的全部
@@ -179,9 +265,10 @@ impl Session {
         self.changes_since(from)
     }
 
-    /// 渲染限额报告（不扫描、不推进指针）。与 [`Session::changes_after_tool_end`]
-    /// 拆分的目的见该方法说明。
-    pub fn render_report(&self, changes: &[Change], max_bytes: usize) -> Result<String> {
+    /// 渲染限额报告（不扫描、不推进指针），返回正文**与实际展开的文件清单**。
+    /// 与 [`Session::changes_after_tool_end`] 拆分的目的见该方法说明；展开清单
+    /// 供宿主决定给哪些文件产回滚提示——逐文件产提示正是注入超出预算的主因。
+    pub fn render_report(&self, changes: &[Change], max_bytes: usize) -> Result<Report> {
         report::build_report(
             &self.store,
             changes,
@@ -350,6 +437,51 @@ impl Session {
     /// 启动路径的自动 GC 在 [`Session::open`]；本方法留给外部 hook / 人工
     /// 审计，锁等待沿用 opts 的值。
     pub fn gc(&self, keep: usize) -> Result<GcOutcome> {
-        self.store.gc(keep, self.opts.lock_wait)
+        self.store.gc(keep, gc_max_bytes(), self.opts.lock_wait)
+    }
+
+    /// spy 存储根（`<QAQH_SPY_DIR 或 data_dir>/spy`）——与 [`store::Store`] 的
+    /// `default_dir` 同一拼装规则（去掉工作区哈希那一级）。启动 GC 据此枚举
+    /// 所有工作区 store。
+    fn stores_root() -> PathBuf {
+        let base = std::env::var("QAQH_SPY_DIR")
+            .ok()
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(qaqh_types::platform::data_dir);
+        base.join("spy")
+    }
+
+    /// daemon 启动钩子：对**所有**工作区 store 立即跑一遍窗口 + 字节预算 GC。
+    ///
+    /// 为什么 Session::open 里的 GC 不够：它挂在「第一个带写路径的工具批」上，
+    /// daemon 重启后的空闲期旧 blob 不回收。这里在启动时就把上界收紧；单 store
+    /// 失败静默跳过（GC 永不影响主流程）。返回人类可读摘要（供宿主日志）。
+    pub fn startup_gc() -> String {
+        let entries = match std::fs::read_dir(Self::stores_root()) {
+            Ok(entries) => entries,
+            Err(_) => return "spy startup gc: no stores yet".to_string(),
+        };
+        let (keep, max_bytes) = (gc_keep(), gc_max_bytes());
+        let (mut stores, mut manifests, mut blobs) = (0usize, 0usize, 0usize);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // workspace 实参在 override_dir 模式下不参与路径拼装，传空即可。
+            let opened = store::Store::open(Path::new(""), Some(&path));
+            if let Ok(out) =
+                opened.and_then(|s| s.gc(keep, max_bytes, std::time::Duration::from_secs(2)))
+            {
+                stores += 1;
+                manifests += out.dropped_manifests;
+                blobs += out.dropped_blobs;
+            }
+        }
+        if stores == 0 {
+            return "spy startup gc: no stores yet".to_string();
+        }
+        format!("spy startup gc: {stores} stores, -{manifests} manifests, -{blobs} blobs")
     }
 }
