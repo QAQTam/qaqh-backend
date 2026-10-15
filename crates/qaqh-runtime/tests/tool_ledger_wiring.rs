@@ -134,6 +134,7 @@ fn tool_scope(call_id: &str, session_id: &str) -> qaqh_workspace::runtime::ToolE
             timeout: Duration::ZERO,
             cancellation: qaqh_workspace::tool_api::CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: qaqh_workspace::tool_api::ToolCallSource::Model,
         },
     )

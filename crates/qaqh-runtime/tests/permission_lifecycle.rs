@@ -356,6 +356,8 @@ fn run_case(
     + 'static,
 ) -> Vec<String> {
     SESSION_INIT.call_once(|| {
+        // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
+        common::init_isolated_data_root();
         qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
     });
     let mock = MockServer::sequential(scenarios);

@@ -14,6 +14,8 @@ use qaqh_runtime::agent::loop_core::{Loop, LoopChannels};
 use qaqh_runtime::agent::state::agent::AgentState;
 use qaqh_runtime::agent::types::{WorkerCommand, WriterEvent};
 
+mod common;
+
 static SESSION_INIT: Once = Once::new();
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -49,7 +51,11 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).expect("test channel/thread must not fail");
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| {
+        // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
+        common::init_isolated_data_root();
+        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+    });
 
     let mut agent = AgentState::init("test", qaqh_config::Config::default());
     agent.ephemeral = true;

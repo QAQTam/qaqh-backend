@@ -180,6 +180,15 @@ impl ExecProgressSender {
     }
 }
 
+impl std::fmt::Debug for ExecProgressSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 手动实现：`ToolCallContext` derive Debug，而内部 SyncSender 不 Debug。
+        f.debug_struct("ExecProgressSender")
+            .field("dropped_bytes", &self.dropped_bytes())
+            .finish_non_exhaustive()
+    }
+}
+
 pub const EXEC_PROGRESS_CHANNEL_CAPACITY: usize = 256;
 
 pub fn bounded_exec_progress_channel() -> (

@@ -81,6 +81,7 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
             base_url: None,
             max_tokens: None,
             workspace: None,
+            permission_level: 3,
         })
         .expect("host spawn_subagent must succeed");
     let session_id = spawned.session_id;
@@ -446,6 +447,7 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
             base_url: None,
             max_tokens: Some(2048),
             workspace: None,
+            permission_level: 3,
         })
         .expect("spawn child before unload");
     let child = spawned.child_session_id.clone();
@@ -712,6 +714,7 @@ fn broadcast_targets_and_outbound_quota_are_rejected() {
             base_url: None,
             max_tokens: None,
             workspace: None,
+            permission_level: 3,
         })
         .expect("spawn child for quota test");
     let child = spawned.child_session_id;
@@ -923,6 +926,7 @@ fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
             base_url: None,
             max_tokens: None,
             workspace: None,
+            permission_level: 3,
         })
         .expect("spawn idle board subscriber");
     let child = spawned.child_session_id.clone();
@@ -1030,6 +1034,7 @@ fn steer_and_interject_are_canonical_safe_point_deliveries() {
             base_url: None,
             max_tokens: None,
             workspace: None,
+            permission_level: 3,
         })
         .expect("spawn steer target");
     let child = spawned.child_session_id.clone();

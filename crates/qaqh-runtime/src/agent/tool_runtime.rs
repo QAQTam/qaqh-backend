@@ -8,7 +8,12 @@
 //!
 //! sandbox 不在本层实现。P4 只需在这个边界外包/注入 sandbox 执行器。
 
-use std::{collections::HashSet, sync::mpsc::Receiver, thread::JoinHandle};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex, mpsc::Receiver},
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
 use qaqh_message::PendingTool;
 use qaqh_session::{
@@ -42,6 +47,17 @@ pub(crate) const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
 /// 取消收尾的取消原因文案（进入模型上下文的 tool_result）。
 const CANCELLED_TOOL_RESULT: &str = "[CANCELLED] Tool was not executed (user interrupted).";
 
+/// T2（BUG-2026-10-15）：宽限期内未观察取消、被 detach 的孤儿 worker 的
+/// 收尾文案（进入模型上下文的 tool_result）。与 `CANCELLED_TOOL_RESULT`
+/// 区分开：孤儿线程真实执行过，副作用可能已落地。
+pub(crate) const CANCELLED_ORPHAN_TOOL_RESULT: &str =
+    "[CANCELLED] Tool did not observe cancellation; orphaned worker detached (side effects may still land).";
+
+/// 取消收割宽限期：cancel 置位后给在途工具的最后一跳窗口。
+const CANCEL_HARVEST_GRACE: Duration = Duration::from_secs(5);
+/// 收割窗口内的 handle 轮询间隔（与 `drain_bounded` 的 tick 同拍）。
+const HARVEST_POLL: Duration = Duration::from_millis(50);
+
 #[derive(Clone)]
 struct LedgerRun {
     execution_id: ExecutionId,
@@ -70,11 +86,17 @@ pub(crate) struct ToolRun {
 }
 
 /// worker 的归一结果；panic 保留给调用方决定回填文案/路径。
+#[derive(Debug)]
 pub(crate) enum ToolRunOutcome {
     Completed(Box<qaqh_workspace::execution::ToolExecResult>),
     Panicked,
     /// Handler completed but the canonical terminal could not be committed.
     LedgerFailed(String),
+    /// T2（BUG-2026-10-15）：工具线程在取消宽限期内未返回，已被 detach 为
+    /// 孤儿（继续在后台跑，inflight 表项由其自身 finalize 收尾）。副作用
+    /// 结果未知；canonical 侧补 `Cancelled` 终态，保证每个 tool_use 恰有
+    /// 一条 tool_result、turn 必然收口。
+    CancelledOrphan,
 }
 
 pub(crate) struct ToolRunResult {
@@ -190,6 +212,11 @@ impl ToolRuntime {
                         "[ERROR] tool thread panicked",
                         false,
                     ),
+                    ToolRunOutcome::CancelledOrphan => ctx.agent.msg.push_tool_result_direct(
+                        &call_id,
+                        CANCELLED_ORPHAN_TOOL_RESULT,
+                        false,
+                    ),
                     ToolRunOutcome::LedgerFailed(message) => {
                         ctx.agent.msg.push_tool_result_canonical(
                             &call_id,
@@ -261,6 +288,11 @@ impl ToolRuntime {
                     ToolRunOutcome::Panicked => ctx.agent.msg.push_tool_result_direct(
                         &call_id,
                         "[ERROR] tool thread panicked",
+                        false,
+                    ),
+                    ToolRunOutcome::CancelledOrphan => ctx.agent.msg.push_tool_result_direct(
+                        &call_id,
+                        CANCELLED_ORPHAN_TOOL_RESULT,
                         false,
                     ),
                     ToolRunOutcome::LedgerFailed(message) => {
@@ -611,6 +643,16 @@ impl ToolRuntime {
                 }),
                 0,
             ),
+            ToolRunOutcome::CancelledOrphan => (
+                ToolTerminalStatus::Cancelled,
+                Some(ToolError {
+                    code: "cancel_unobserved".into(),
+                    message: CANCELLED_ORPHAN_TOOL_RESULT.into(),
+                    retryable: false,
+                    details_ref: None,
+                }),
+                0,
+            ),
         };
         let finished = ToolFinished {
             call_id: canonical_call_id(call_id),
@@ -908,9 +950,50 @@ impl ToolRuntime {
         turn_id: &str,
         round_num: u32,
     ) -> Vec<ToolRunResult> {
-        tool.drain_progress_external(ctx, progress_rx, turn_id, round_num, || {
-            runs.iter().all(|run| run.handle.is_finished())
-        });
+        // T2（BUG-2026-10-15）：取消收割。cancel 可能在 spawn 之后、collect
+        // 中途由 reader 线程置位（「工具先卡死、用户后停」正是本次事故的主
+        // 场景），所以完成谓词必须每 tick 重查取消：置位即广播 per-call 取消
+        // 位并布防宽限截止；到期仍不返回的 worker detach 为孤儿并合成
+        // CancelledOrphan，保证 collect 必然返回、turn 必然收口。
+        let cancel = ctx.cancel.clone();
+        let harvest: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        {
+            let cancel = cancel.clone();
+            let harvest = Arc::clone(&harvest);
+            let runs_ref = &runs;
+            let progress_done = move || {
+                if runs_ref.iter().all(|run| run.handle.is_finished()) {
+                    return true;
+                }
+                if cancel.is_set() {
+                    let mut slot = harvest.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot.is_none() {
+                        // 广播一次 per-call 取消位：exec/wait 等按标志轮询的
+                        // 工具随即自行中止；仍有检查点的工具继续跑完。
+                        qaqh_workspace::runtime::cancel_current_tool();
+                        *slot = Some(Instant::now() + CANCEL_HARVEST_GRACE);
+                    }
+                    if let Some(deadline) = *slot
+                        && Instant::now() >= deadline
+                    {
+                        return true;
+                    }
+                }
+                false
+            };
+            tool.drain_progress_external(ctx, progress_rx, turn_id, round_num, progress_done);
+        }
+
+        // drain 期间谓词可能从未走到取消分支（信道立即断开等）：补一次布防，
+        // 保证下方 join 阶段不会退化回无限期阻塞。
+        if cancel.is_set() {
+            let mut slot = harvest.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                qaqh_workspace::runtime::cancel_current_tool();
+                *slot = Some(Instant::now() + CANCEL_HARVEST_GRACE);
+            }
+        }
+        let deadline = *harvest.lock().unwrap_or_else(|e| e.into_inner());
 
         runs.into_iter()
             .map(|run| {
@@ -920,10 +1003,8 @@ impl ToolRuntime {
                     handle,
                     ledger,
                 } = run;
-                let outcome = match handle.join() {
-                    Ok(result) => ToolRunOutcome::Completed(Box::new(result)),
-                    Err(_) => ToolRunOutcome::Panicked,
-                };
+                let outcome = Self::harvest_handle(handle, deadline, &call_id)
+                    .unwrap_or(ToolRunOutcome::CancelledOrphan);
                 let mut outcome = outcome;
                 if let ToolRunOutcome::Completed(result) = &mut outcome
                     && let Err(error) = Self::apply_subagent_spawn_effects(ctx, &call_id, result)
@@ -947,6 +1028,40 @@ impl ToolRuntime {
                 }
             })
             .collect()
+    }
+
+    /// join 一个 worker。`deadline` 为收割截止（`Some` 仅在取消已置位时出现）：
+    /// 到期仍未结束则 detach 为孤儿（线程继续跑，inflight 表项由其自身
+    /// finalize 收尾），返回 `None` 由调用方合成 `CancelledOrphan` 终态。
+    fn harvest_handle(
+        handle: JoinHandle<qaqh_workspace::execution::ToolExecResult>,
+        deadline: Option<Instant>,
+        call_id: &str,
+    ) -> Option<ToolRunOutcome> {
+        match deadline {
+            None => Some(match handle.join() {
+                Ok(result) => ToolRunOutcome::Completed(Box::new(result)),
+                Err(_) => ToolRunOutcome::Panicked,
+            }),
+            Some(deadline) => loop {
+                if handle.is_finished() {
+                    return Some(match handle.join() {
+                        Ok(result) => ToolRunOutcome::Completed(Box::new(result)),
+                        Err(_) => ToolRunOutcome::Panicked,
+                    });
+                }
+                if Instant::now() >= deadline {
+                    log::warn!(
+                        "[CANCEL] tool {call_id} ignored cancellation within grace; detaching orphan worker"
+                    );
+                    // std JoinHandle drop 即 detach：线程继续跑，inflight 表项
+                    // 由其自身 finalize 收尾。
+                    drop(handle);
+                    return None;
+                }
+                std::thread::sleep(HARVEST_POLL);
+            },
+        }
     }
 
     fn spawn(
@@ -1292,6 +1407,89 @@ mod tests {
             terminal_status(&result),
             ToolTerminalStatus::Indeterminate,
             "quarantined side effects must not be reported as a definite failure"
+        );
+    }
+}
+
+#[cfg(test)]
+mod harvest_tests {
+    //! T2（BUG-2026-10-15）取消收割窗口的单元测试：`harvest_handle` 是
+    //! 「通知 → 宽限 → 孤儿化」链条里纯函数的一段，无需 RingContext 即可验证。
+
+    use super::*;
+    use std::time::Duration;
+
+    fn exec_result(content: &str) -> qaqh_workspace::execution::ToolExecResult {
+        qaqh_workspace::execution::ToolExecResult {
+            content: content.to_string(),
+            success: true,
+            result: qaqh_types::ToolResult::ok(content),
+            meta: qaqh_workspace::ToolExecMeta {
+                name: "unit-test".into(),
+                elapsed_ms: 0,
+                output_size: content.len(),
+                success: true,
+                args_summary: String::new(),
+            },
+            code_delta: None,
+            skill_effects: Vec::new(),
+            attributed_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn harvest_handle_joins_finished_worker_without_deadline() {
+        let handle = std::thread::spawn(|| exec_result("done"));
+        let outcome = ToolRuntime::harvest_handle(handle, None, "call-ok");
+        assert!(
+            matches!(outcome, Some(ToolRunOutcome::Completed(_))),
+            "无截止时必须正常 join，实测 {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn harvest_handle_maps_panic_to_panicked() {
+        let handle = std::thread::spawn(|| -> qaqh_workspace::execution::ToolExecResult {
+            panic!("boom");
+        });
+        let outcome = ToolRuntime::harvest_handle(handle, None, "call-panic");
+        assert!(
+            matches!(outcome, Some(ToolRunOutcome::Panicked)),
+            "panic 必须映射为 Panicked，实测 {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn harvest_handle_returns_none_and_detaches_unresponsive_worker() {
+        let handle = std::thread::spawn(|| {
+            // 模拟无取消检查点的工具：不理会任何取消信号，只管睡。
+            std::thread::sleep(Duration::from_millis(300));
+            exec_result("late-orphan-output")
+        });
+        // 已过期的截止 → 不等待，立即孤儿化返回 None。
+        let outcome = ToolRuntime::harvest_handle(handle, Some(Instant::now()), "call-orphan");
+        assert!(
+            outcome.is_none(),
+            "到期必须返回 None（孤儿），实测 {outcome:?}"
+        );
+        // 孤儿线程仍在后台跑：留出完成时间，证明进程不因 join 悬挂。
+        std::thread::sleep(Duration::from_millis(400));
+    }
+
+    #[test]
+    fn harvest_handle_joins_worker_that_finishes_within_grace() {
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(20));
+            exec_result("graceful")
+        });
+        let deadline = Some(Instant::now() + Duration::from_secs(2));
+        let outcome = ToolRuntime::harvest_handle(handle, deadline, "call-graceful");
+        assert!(
+            matches!(
+                outcome,
+                Some(ToolRunOutcome::Completed(ref result)) if result.content == "graceful"
+            ),
+            "宽限期内结束的 worker 必须正常回收，实测 {outcome:?}"
         );
     }
 }

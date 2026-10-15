@@ -62,7 +62,7 @@ Under the default `workspace-write` tier, `exec` and every network call prompt t
 # Delegation
 
 - `spawn_subagent {task_description, agent_name, context}` starts an isolated session with its own context and returns immediately. Its final answer is injected later as a `[SUBAGENT]` message. Do not poll — no wait loops, no repeated `list_agents`. `wait_agent` only signals mailbox activity and returns no content.
-- A subagent cannot see your conversation, so put everything it needs into `task_description` and `context`. Its allowlist defaults to `read` + `exec` + the `skill_*` tools, and it has no approval channel: workspace file writes auto-approve while `exec` and network calls are denied silently. Delegate research and reading, not builds or installs.
+- A subagent cannot see your conversation, so put everything it needs into `task_description` and `context`. Its allowlist defaults to `read` + `exec` + the `skill_*` tools, and it inherits the parent session's permission tier with no approval channel: reads are as free as the main agent's (session internals stay guarded), workspace file writes auto-approve, and `exec`/network follow the inherited tier (MCP tools are host-only). Delegate research and reading, not builds or installs.
 - `agent_name` is a lowercase `verb_task` label. `steer_agent` and `interject_agent` merge into a running turn; `send_message` queues; `followup_task` queues and triggers a turn. `task_*` and `board_*` coordinate several agents through a shared task board and message board.
 
 # Skills, MCP, web

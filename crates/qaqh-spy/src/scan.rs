@@ -40,6 +40,9 @@ impl Default for ScanOpts {
             max_file_bytes: 2 * 1024 * 1024,
             lock_wait: std::time::Duration::from_millis(1_000),
             exclude_dirs: [
+                // 宿主自己的运行时目录（delete 的 trash、todo/journal 缓存等）就落在工作区里。
+                // 快照它 = 把备份当"工作区净变更"上报，曾在一次目录删除里报出 9337 个文件。
+                ".qaqh",
                 ".git",
                 "node_modules",
                 "target",
@@ -69,17 +72,24 @@ pub struct ScanOutcome {
     pub added: usize,
     pub modified: usize,
     pub deleted: usize,
+    /// **本 owner** 上次看到这个 store 时的扫描 id；`None` = 该 owner 首次出现
+    /// （或已被容量闸挤掉）。宿主用它算"你离开期间攒了多少变更"（PR-D）——
+    /// 注意它与 `id` 不是一回事：`id` 是全局最新边界，别人的批会不停推进它。
+    pub prior_mark: Option<String>,
 }
 
 pub(crate) fn run_scan(
     root: &Path,
     store: &Store,
     trigger: &str,
+    owner: &str,
     opts: &ScanOpts,
 ) -> Result<ScanOutcome> {
     let _guard = store.lock_timeout(opts.lock_wait)?;
     let state = store.load_state()?;
     let is_baseline = state.last_scan.is_none();
+    // 本 owner 上次看到这个 store 的位置（可能没有：首次出现，或被容量闸挤掉）。
+    let prior_mark = state.owner_marks.get(owner).cloned();
     // 增量链：prev 的链深用于锚点判定；文件集必须物化为全量（prev 可能是 delta）
     let prev_depth = match &state.last_scan {
         Some(id) => store.load_manifest(id)?.depth,
@@ -142,6 +152,7 @@ pub(crate) fn run_scan(
                 size_before: sb,
                 size_after: sa,
                 trigger: trigger.to_string(),
+                owner: owner.to_string(),
             });
         };
         for (rel, e) in &files {
@@ -199,6 +210,18 @@ pub(crate) fn run_scan(
             .last_scan
             .clone()
             .context("非基线扫描但 state.last_scan 缺失")?;
+        // 空扫描不落新 manifest，但**首次见到这个 owner** 时仍要登记指针（一次小 JSON 写），
+        // 否则它的 prior_mark 永远是 None，恢复批就说不出漂移摘要。已有指针则零额外写。
+        if !owner.is_empty() && prior_mark.is_none() {
+            let mut marks = state.owner_marks.clone();
+            note_owner(&mut marks, owner, &prev_id);
+            store.save_state(&crate::store::State {
+                last_scan: Some(prev_id.clone()),
+                last_report: state.last_report.clone(),
+                seq: state.seq,
+                owner_marks: prune_owner_marks(marks),
+            })?;
+        }
         return Ok(ScanOutcome {
             id: prev_id,
             files: n_files,
@@ -206,6 +229,7 @@ pub(crate) fn run_scan(
             added: 0,
             modified: 0,
             deleted: 0,
+            prior_mark,
         });
     }
 
@@ -255,10 +279,13 @@ pub(crate) fn run_scan(
         }
     };
     store.save_manifest(&manifest)?;
+    let mut owner_marks = state.owner_marks;
+    note_owner(&mut owner_marks, owner, &id);
     store.save_state(&crate::store::State {
         last_scan: Some(id.clone()),
         last_report: state.last_report,
         seq,
+        owner_marks: prune_owner_marks(owner_marks),
     })?;
 
     Ok(ScanOutcome {
@@ -268,7 +295,35 @@ pub(crate) fn run_scan(
         added: n_add,
         modified: n_mod,
         deleted: n_del,
+        prior_mark,
     })
+}
+
+/// 归属指针的容量闸：只保留最近 `OWNER_MARKS_KEEP` 个 owner 的边界。超出的最老
+/// owner 掉出后，它回来时 `prior_mark` 为 None——只是不再说漂移摘要，不影响正确性。
+/// （没有这道闸，state.json 会随历史会话数无界增长。）
+const OWNER_MARKS_KEEP: usize = 512;
+
+fn prune_owner_marks(marks: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    if marks.len() <= OWNER_MARKS_KEEP {
+        return marks;
+    }
+    // mark 字典序 == 时间序（`s{millis:016}_{seq:04}`），按它降序保留。
+    let mut by_mark: Vec<(String, String)> = marks.into_iter().map(|(o, m)| (m, o)).collect();
+    by_mark.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    by_mark
+        .into_iter()
+        .take(OWNER_MARKS_KEEP)
+        .map(|(m, o)| (o, m))
+        .collect()
+}
+
+/// 登记「owner 刚看到这个扫描点」。空 owner（未接归属的调用方，如 `spy` 工具本体
+/// 或外部 hook）不登记，免得往指针里塞一个万能键、把所有会话都判成外部。
+fn note_owner(marks: &mut BTreeMap<String, String>, owner: &str, scan: &str) {
+    if !owner.is_empty() {
+        marks.insert(owner.to_string(), scan.to_string());
+    }
 }
 
 /// 只列当前存在的文件（restore 找“多余文件”用）。
@@ -307,9 +362,15 @@ fn walk(cx: &WalkCx<'_>) -> Result<Vec<(PathBuf, String, fs::Metadata)>> {
             return false;
         }
         match p.strip_prefix(&root_c) {
-            Ok(rel) => !rel
-                .components()
-                .any(|c| excl.iter().any(|d| c.as_os_str() == d.as_str())),
+            // 全等**或** `{name}.` 前缀命中即剪。前缀分支专为 `{name}.{ts}` 这类改名留的：
+            // `delete` 把目录移成 `.qaqh/trash/target.1791993394`，原件因名为 `target` 被排除，
+            // 副本却因名字带了时间戳而整棵进了快照——一次删除报出 9337 个净变更（含 hints 约
+            // 1.2–3.5 MB 的一条注入）。手写 starts_with 而不引入 globset：本 crate 依赖表里没有。
+            Ok(rel) => !rel.components().any(|c| {
+                let name = c.as_os_str().to_string_lossy();
+                excl.iter()
+                    .any(|d| name == *d || name.starts_with(&format!("{d}.")))
+            }),
             Err(_) => true, // 根目录本身
         }
     });
@@ -362,13 +423,13 @@ mod tests {
         let store = Store::open(&ws, Some(&store_dir)).unwrap();
         let opts = ScanOpts::default();
 
-        let o1 = run_scan(&ws, &store, "manual", &opts).unwrap();
+        let o1 = run_scan(&ws, &store, "manual", "", &opts).unwrap();
         assert!(o1.baseline);
         assert_eq!(o1.files, 2);
 
         // 无变更（mtime/size 缓存命中，不产生 journal 行）
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let o2 = run_scan(&ws, &store, "manual", &opts).unwrap();
+        let o2 = run_scan(&ws, &store, "manual", "", &opts).unwrap();
         assert_eq!(o2.added + o2.modified + o2.deleted, 0);
         assert!(store.read_journal().unwrap().is_empty());
 
@@ -377,7 +438,7 @@ mod tests {
         fs::write(ws.join("a.txt"), "AAAA\n").unwrap();
         fs::remove_file(ws.join("sub/b.txt")).unwrap();
         fs::write(ws.join("c.txt"), "ccc\n").unwrap();
-        let o3 = run_scan(&ws, &store, "tool_end", &opts).unwrap();
+        let o3 = run_scan(&ws, &store, "tool_end", "", &opts).unwrap();
         assert_eq!((o3.modified, o3.deleted, o3.added), (1, 1, 1));
 
         let journal = store.read_journal().unwrap();
@@ -405,7 +466,7 @@ mod tests {
         // 黑名单目录被剪掉
         fs::create_dir_all(ws.join("node_modules/x")).unwrap();
         fs::write(ws.join("node_modules/x/junk.js"), "junk\n").unwrap();
-        let o4 = run_scan(&ws, &store, "manual", &opts).unwrap();
+        let o4 = run_scan(&ws, &store, "manual", "", &opts).unwrap();
         assert_eq!(o4.added, 0);
     }
 
@@ -420,19 +481,19 @@ mod tests {
         let opts = ScanOpts::default();
 
         // 基线：1 份 manifest
-        let o1 = run_scan(&ws, &store, "manual", &opts).unwrap();
+        let o1 = run_scan(&ws, &store, "manual", "", &opts).unwrap();
         assert_eq!(store.all_manifest_ids().unwrap().len(), 1);
 
         // 空扫描：复用 manifest id，不新增文件
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let o2 = run_scan(&ws, &store, "manual", &opts).unwrap();
+        let o2 = run_scan(&ws, &store, "manual", "", &opts).unwrap();
         assert_eq!(o2.id, o1.id);
         assert_eq!(store.all_manifest_ids().unwrap().len(), 1);
 
         // 有变更的扫描：拿新 id、落新 manifest，journal 照常记账
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(ws.join("a.txt"), "bbb\n").unwrap();
-        let o3 = run_scan(&ws, &store, "tool_end", &opts).unwrap();
+        let o3 = run_scan(&ws, &store, "tool_end", "", &opts).unwrap();
         assert_ne!(o3.id, o2.id);
         assert_eq!(store.all_manifest_ids().unwrap().len(), 2);
         assert!(
@@ -443,6 +504,90 @@ mod tests {
                 .any(|c| c.path == "a.txt" && c.status == ChangeStatus::Modified)
         );
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// B1 回归：`delete` 把目录改名成 `{name}.{ts}` 移进 `.qaqh/trash/` 之后，原件因名为
+    /// `target` 被 exclude 剪掉，副本却因名字带了时间戳整棵进快照——实测一次删除报出
+    /// 9337 个净变更、灌入 3275 条假 SMJ 记录、单条注入 ≈1.2–3.5 MB。
+    /// 两层都必须挡住：`.qaqh` 在名单里，且 `{name}.` 前缀命中 `target.1791993394`。
+    #[test]
+    fn trashed_directory_copy_is_excluded() {
+        let base = tmp_dir("scan-trash");
+        let ws = base.join("ws");
+        fs::create_dir_all(ws.join("target")).unwrap();
+        fs::write(ws.join("target/dep.o"), "obj\n").unwrap();
+        let store = Store::open(&ws, Some(&base.join("store-trash"))).unwrap();
+        let opts = ScanOpts::default();
+
+        // 基线：target/ 被排除 → 工作区内 0 个受快照文件
+        let o1 = run_scan(&ws, &store, "tool_start", "", &opts).unwrap();
+        assert_eq!(o1.files, 0, "exclude_dirs 应剪掉 target/");
+
+        // 模拟 delete 的 rename：带时间戳的兄弟名字 + 落在 .qaqh/trash 下
+        let trash = ws.join(".qaqh/trash");
+        fs::create_dir_all(&trash).unwrap();
+        fs::rename(&ws.join("target"), trash.join("target.1791993394")).unwrap();
+        fs::write(trash.join("target.1791993394/dep.o"), "obj2\n").unwrap();
+
+        let o2 = run_scan(&ws, &store, "tool_end", "", &opts).unwrap();
+        assert_eq!(
+            o2.added, 0,
+            "trash 副本不得进快照（.qaqh 排除 + {{name}}. 前缀匹配）"
+        );
+        assert_eq!(o2.files, 0);
+        assert!(
+            store.read_journal().unwrap().is_empty(),
+            "无净变更不得写 journal"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// PR-C：扫描落的每一行都带归属；`split_by_owner` 只在"明确属于另一个会话"时
+    /// 才判外部；缺 owner 的存量行读回来必须是空串（`#[serde(default)]` 的兼容性
+    /// ——老 journal.jsonl 不能被新二进制读崩）。
+    #[test]
+    fn owner_is_recorded_and_legacy_rows_default_to_unowned() {
+        let base = tmp_dir("scan-owner");
+        let ws = base.join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let store = Store::open(&ws, Some(&base.join("store-owner"))).unwrap();
+        let opts = ScanOpts::default();
+
+        run_scan(&ws, &store, "tool_start", "session-A", &opts).unwrap(); // 基线，不落 journal
+        fs::write(ws.join("a.txt"), "a\n").unwrap();
+        run_scan(&ws, &store, "tool_end", "session-A", &opts).unwrap();
+
+        let journal = store.read_journal().unwrap();
+        assert_eq!(journal.len(), 1, "基线不刷屏，只应有 A 自己那一行");
+        assert_eq!(
+            journal[0].owner, "session-A",
+            "扫描必须记下是谁的边界观测到它"
+        );
+
+        // 另一个会话的扫描 → 对 A 而言是外部变更
+        fs::write(ws.join("b.txt"), "b\n").unwrap();
+        run_scan(&ws, &store, "tool_end", "session-B", &opts).unwrap();
+        let journal = store.read_journal().unwrap();
+        let (mine, external) = crate::split_by_owner(&journal, "session-A");
+        assert_eq!(mine.len(), 1, "A 只该认领自己那一行");
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].path, "b.txt");
+
+        // 宿主自己没有 session id（owner="") 时一律全认领：宁可多报，不静默吞。
+        let (all, none) = crate::split_by_owner(&journal, "");
+        assert_eq!((all.len(), none.len()), (journal.len(), 0));
+
+        // 向后兼容：没有 owner 字段的旧行必须仍能解析，且判为"无主"而非"外部"。
+        let legacy = r#"{"id":"s1#0","scan":"s2","ts":"t","path":"old.txt","status":"modified","before":"0000000000000000000000000000000000000000000000000000000000000000","after":"0000000000000000000000000000000000000000000000000000000000000000","size_before":1,"size_after":1,"trigger":"manual"}"#;
+        let parsed: Change = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.owner.is_empty(), "缺 owner 的存量行应回落空串");
+        let (mine, external) = crate::split_by_owner(std::slice::from_ref(&parsed), "session-A");
+        assert_eq!(
+            (mine.len(), external.len()),
+            (1, 0),
+            "无主行不得被当成别人的变更"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }

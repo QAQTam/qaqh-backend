@@ -1774,9 +1774,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mutil-ai"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c55089eede42dc1716cafec61eef5ddfeda5dc6e2de7b4241965530833bb19ae"
+checksum = "afbd2cdbdbd7af3089b90e54950ddefa78d94be2ab942c4cf21c244a688aa5e9"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2093,7 +2093,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qaqh-client"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "log",
  "qaqh-config-api",
@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config-api"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2141,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-daemon"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "axum",
  "futures-util",
@@ -2154,6 +2154,7 @@ dependencies = [
  "qaqh-sandbox",
  "qaqh-session",
  "qaqh-siwc",
+ "qaqh-spy",
  "qaqh-subagent",
  "qaqh-types",
  "rand 0.10.3",
@@ -2175,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-domain"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "qaqh-types",
  "serde",
@@ -2185,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-dsaccount"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2200,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-file-tools"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2229,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-fs-core"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "hex",
  "log",
@@ -2245,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-gate"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "anyhow",
  "futures",
@@ -2262,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-git"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "git2",
  "log",
@@ -2272,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-lsp"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "async-lsp",
  "futures",
@@ -2294,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-mcp"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "axum",
  "libc",
@@ -2313,14 +2314,14 @@ dependencies = [
 
 [[package]]
 name = "qaqh-memwatch"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qaqh-message"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "log",
  "qaqh-session",
@@ -2332,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-permission"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "log",
  "qaqh-policy",
@@ -2345,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-policy"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "serde",
  "unicode-normalization",
@@ -2353,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-process-tools"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "anyhow",
  "libc",
@@ -2375,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "base64 0.22.1",
  "qaqh-domain",
@@ -2386,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-runtime"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "chrono",
  "libc",
@@ -2426,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-sandbox"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "landlock",
  "libc",
@@ -2441,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-session"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "hex",
  "log",
@@ -2460,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-siwc"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2475,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-skills"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "qaqh-types",
  "serde",
@@ -2485,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-spy"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2500,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-subagent"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2515,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-title"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "log",
  "qaqh-gate",
@@ -2526,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-tool-core"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "anyhow",
  "log",
@@ -2540,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-types"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2552,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-workspace"
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 dependencies = [
  "anyhow",
  "chrono",

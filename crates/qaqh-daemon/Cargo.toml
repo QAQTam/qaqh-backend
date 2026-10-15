@@ -15,6 +15,7 @@ qaqh-runtime = { path = "../qaqh-runtime" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-session = { path = "../qaqh-session" }
+qaqh-spy = { path = "../qaqh-spy" }
 qaqh-types = { path = "../qaqh-types" }
 log = { version = "0.4", features = ["std"] }
 rand = "0.10"

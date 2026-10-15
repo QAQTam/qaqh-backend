@@ -24,7 +24,8 @@ fn ten_parallel_reads_same_file() {
     std::fs::write(&file_path, "0123456789").unwrap();
     qaqh_workspace::set_workspace(&tmp.path().to_string_lossy());
 
-    // ── Init agent ──
+    // ── Init agent（先钉隔离 data root，见 common::init_isolated_data_root 文档）──
+    common::init_isolated_data_root();
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
     let mut agent = AgentState::init("test", qaqh_config::Config::default());
     // Make the session ephemeral to avoid disk I/O interference

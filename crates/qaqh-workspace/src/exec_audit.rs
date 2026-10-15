@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use qaqh_spy::{Change, ChangeStatus, ScanId, ScanOpts, Session, Trigger};
+use qaqh_spy::{ChangeStatus, ScanId, ScanOpts, Session, Trigger};
 
 /// 争锁等待上界：与 runtime 批级审计同口径。并行 exec 各自开 session 扫描
 /// 时会争 store 锁，超时即放弃本次归因（批级兜底），不阻塞工具线程。
@@ -43,10 +43,14 @@ pub fn begin(root: &Path, call_id: &str, session_id: &str) -> Option<ExecAudit> 
         return None;
     }
     let session = Session::open(root, None)
-        .map(|s| s.with_opts(ScanOpts {
-            lock_wait: LOCK_WAIT,
-            ..ScanOpts::default()
-        }))
+        .map(|s| {
+            s.with_opts(ScanOpts {
+                lock_wait: LOCK_WAIT,
+                ..ScanOpts::default()
+            })
+            // 归属 = 本次 exec 所属会话：否则这些行会被别的会话当成自己的变更。
+            .with_owner(session_id.to_string())
+        })
         .map_err(|e| log::warn!("[spy] exec 归因：打开会话失败，本调用跳过: {e}"))
         .ok()?;
     let outcome = session
@@ -88,8 +92,8 @@ impl ExecAudit {
             let before_text = before.as_deref().and_then(|b| std::str::from_utf8(b).ok());
             let after_text = after.as_deref().and_then(|b| std::str::from_utf8(b).ok());
             // 任一侧解不出 UTF-8 才算二进制（删除/新增的单侧 None 是正常形态）。
-            let binary =
-                before.is_some() && before_text.is_none() || after.is_some() && after_text.is_none();
+            let binary = before.is_some() && before_text.is_none()
+                || after.is_some() && after_text.is_none();
             if binary {
                 continue; // SMJ 只存文本；二进制文件由批级报告的快照路径覆盖。
             }
@@ -171,7 +175,8 @@ mod tests {
     /// 幂等收口：exec 无净变更时返回空归因集，不产生 SMJ 记录。
     #[test]
     fn exec_audit_without_changes_attributes_nothing() {
-        let tmp = std::env::temp_dir().join(format!("qaqh-exec-audit-clean-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("qaqh-exec-audit-clean-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 

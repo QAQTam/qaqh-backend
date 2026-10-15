@@ -36,13 +36,13 @@ members = [
 ]
 
 [workspace.dependencies]
-mutil-ai = "0.6.0"
+mutil-ai = "0.6.1"
 rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process"] }
 async-lsp = { version = "0.2", default-features = false, features = ["tokio", "omni-trait"] }
 lsp-types = "0.95"
 
 [workspace.package]
-version = "2.0.0-RC1"
+version = "2.0.0-RC2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

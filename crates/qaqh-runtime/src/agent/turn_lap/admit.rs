@@ -108,7 +108,7 @@ pub fn execute_admitted_batch(
     turn_id: &str,
     round_num: u32,
 ) -> bool {
-    let audit = crate::agent::workspace_audit::begin(&admitted);
+    let audit = crate::agent::workspace_audit::begin(ctx, &admitted);
     let (completed, exec_attributed) = ToolRuntime::execute_batch(
         ctx,
         tool,
@@ -201,6 +201,52 @@ pub(crate) fn admit_and_dispatch(
                 usage: last_usage.clone(),
             });
         }
+    }
+
+    // ── 执行界面真值收口（BUG-2026-10-15「missing field」假错）──
+    // gate 收口层对「参数不可还原」保留 Null 真值（不再伪造 `{}`），这里把
+    // 两类不能如实执行的情况在进工具前拦下：
+    // 1. Null 参数：上游参数流损坏/截断。喂给 typed 工具只会报
+    //    「invalid type: null, expected struct …」假错；如实告知模型
+    //    「参数没送达、未执行、无副作用」，让它带着原始意图完整重发。
+    // 2. 字节级同参重复：网关收口 / SDK 累计偶尔把同一调用上报两份（id
+    //    别名 item id vs call_id 时 gate 去重也可能失手）。第二份若照常
+    //    执行，写工具会二次落盘——apply_patch 第二次报 NO_MATCH /
+    //    WOULD_OVERWRITE 假错，模型看到的又是假象。保留首份真实执行，
+    //    重复份回执指回权威结果。
+    {
+        let mut seen: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        pending.retain(|call| {
+            if call.args.is_null() {
+                ctx.agent.msg.push_tool_result_direct(
+                    &call.id,
+                    &format!(
+                        "[ERROR] 上游 provider 返回的参数流损坏：tool `{}` 的 arguments 无法还原为 JSON（被截断或网关畸形），本次调用未执行、未产生任何副作用。请完整重发该调用。",
+                        call.name
+                    ),
+                    false,
+                );
+                return false;
+            }
+            let key = (call.name.clone(), call.args.to_string());
+            match seen.get(&key) {
+                Some(first_id) => {
+                    ctx.agent.msg.push_tool_result_direct(
+                        &call.id,
+                        &format!(
+                            "[NOTE] 该调用与本轮 call `{first_id}` 的 name+arguments 逐字节相同，判定为上游重复上报，未重复执行；以 `{first_id}` 的返回结果为准。"
+                        ),
+                        true,
+                    );
+                    false
+                }
+                None => {
+                    seen.insert(key, call.id.clone());
+                    true
+                }
+            }
+        });
     }
 
     // A model response must not create unbounded work. Rejected

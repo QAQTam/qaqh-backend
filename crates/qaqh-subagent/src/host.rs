@@ -125,6 +125,8 @@ pub struct SpawnSubagentRequest<'a> {
     pub base_url: Option<&'a str>,
     pub max_tokens: Option<u32>,
     pub workspace: Option<&'a str>,
+    /// P1-⑤：父会话权限档位，子代理原样继承。
+    pub permission_level: u8,
 }
 
 #[derive(Debug, Clone)]

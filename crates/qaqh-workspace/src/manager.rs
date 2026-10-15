@@ -472,7 +472,6 @@ impl ToolManager {
         args: serde_json::Value,
         workspace_root: &std::path::Path,
         timeout_secs: Option<u64>,
-        progress_tx: Option<crate::ExecProgressSender>,
     ) -> Result<PreparedCall, ToolExecReport> {
         self.prepare_req_with_cancel(
             id,
@@ -480,15 +479,15 @@ impl ToolManager {
             args,
             workspace_root,
             timeout_secs,
-            progress_tx,
             Arc::new(AtomicBool::new(false)),
         )
     }
 
     /// Phase 1 variant for a runtime-owned cancellation token.
     ///
-    /// `progress_tx` 目前在 typed 执行面无消费方（streaming 能力字段无生产
-    /// 读取点，见审计 §6）；保留入参以免调用侧（runtime 进度通道）连带改动。
+    /// exec 进度通道不再经 prepare 传递：`execute_authorized_with_context`
+    /// 在执行入口把 sender 直通注入 `ToolCallContext.exec_progress`
+    /// （v2.1 client-tools `Progress` 帧生产点），prepare 只做准入。
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项
     pub(crate) fn prepare_req_with_cancel(
@@ -498,7 +497,6 @@ impl ToolManager {
         args: serde_json::Value,
         workspace_root: &std::path::Path,
         timeout_secs: Option<u64>,
-        _progress_tx: Option<crate::ExecProgressSender>,
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<PreparedCall, ToolExecReport> {
         if let Some(ref allowed) = self.allowed
@@ -950,7 +948,6 @@ mod tests {
             serde_json::json!({"command": "echo hi"}),
             std::path::Path::new("."),
             None,
-            None,
         );
         assert!(err.is_err());
         let ok = mgr.prepare_req(
@@ -958,7 +955,6 @@ mod tests {
             "read",
             serde_json::json!({"path": "x"}),
             std::path::Path::new("."),
-            None,
             None,
         );
         assert!(ok.is_ok());
@@ -997,7 +993,6 @@ mod tests {
                 serde_json::json!({}),
                 std::path::Path::new("."),
                 None,
-                None,
             )
             .map_err(|report| report.content)
             .expect("dynamic tool prepare should succeed");
@@ -1024,6 +1019,7 @@ mod tests {
                     timeout: prepared.effective_timeout,
                     cancellation: crate::tool_api::CancellationToken::new(),
                     progress: None,
+                    exec_progress: None,
                     source: crate::tool_api::ToolCallSource::Model,
                 },
                 serde_json::json!({}),
@@ -1036,7 +1032,6 @@ mod tests {
             "mcp__demo__nope",
             serde_json::json!({}),
             std::path::Path::new("."),
-            None,
             None,
         ) {
             Err(report) => report,
@@ -1223,7 +1218,6 @@ mod safety_e2e_tests {
                 serde_json::json!({}),
                 ws.as_path(),
                 None,
-                None,
             )
             .err()
             .expect("file-scoped Destructive tool without path must be blocked");
@@ -1241,7 +1235,6 @@ mod safety_e2e_tests {
                 serde_json::json!({ "path": ws.join("trash-me.txt").to_str().unwrap() }),
                 ws.as_path(),
                 None,
-                None,
             )
             .is_ok(),
             "in-workspace destructive target must stay allowed"
@@ -1254,7 +1247,6 @@ mod safety_e2e_tests {
                 "delete",
                 serde_json::json!({ "path": tmp.path().join("outside.txt").to_str().unwrap() }),
                 ws.as_path(),
-                None,
                 None,
             )
             .err()
@@ -1726,7 +1718,6 @@ mod p3_tests {
                 TOOL_SEARCH_NAME,
                 bad,
                 root,
-                None,
                 None,
                 cancel.clone(),
             );

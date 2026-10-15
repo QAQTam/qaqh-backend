@@ -546,6 +546,7 @@ pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
         timeout: Duration::from_secs(15),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
+        exec_progress: None,
         source: crate::tool_api::ToolCallSource::Model,
     };
     crate::tool_api::TypedToolAdapter::new(ReadTool)

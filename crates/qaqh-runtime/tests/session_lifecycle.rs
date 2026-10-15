@@ -252,7 +252,11 @@ fn create_session_emits_session_state() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| {
+        // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
+        common::init_isolated_data_root();
+        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+    });
 
     let mut agent = AgentState::init("test", qaqh_config::Config::default());
     agent.ephemeral = true;
@@ -295,7 +299,11 @@ fn send_message_triggers_turn_lifecycle() {
     std::fs::create_dir(&ws).unwrap();
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
 
-    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| {
+        // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
+        common::init_isolated_data_root();
+        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+    });
 
     let mut agent = AgentState::init("test", qaqh_config::Config::default());
     agent.ephemeral = true;
@@ -395,7 +403,11 @@ fn system_injection_lands_inside_running_turn() {
         text_round("done after tool"),
     ]);
 
-    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| {
+        // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
+        common::init_isolated_data_root();
+        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+    });
 
     let mut agent = AgentState::init("test", qaqh_config::Config::default());
     agent.ephemeral = true;
@@ -513,7 +525,11 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| {
+        // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
+        common::init_isolated_data_root();
+        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+    });
 
     let mut agent = AgentState::init("test", qaqh_config::Config::default());
     agent.ephemeral = true;

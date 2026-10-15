@@ -274,6 +274,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             cancellation: CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: crate::tool_api::ToolCallSource::Model,
         }
     }

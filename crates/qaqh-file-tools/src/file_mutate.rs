@@ -127,7 +127,28 @@ pub fn resolve_mutation_path(ctx: &ToolCallContext, raw_path: &str) -> String {
         .to_string()
 }
 
+/// 回收站根目录。默认 `<workspace>/.qaqh/trash/`。
+///
+/// 为什么不默认搬到 `data_dir()` 下——尽管"备份放在工作区之外"才是一贯原则
+/// （见 `qaqh-spy/src/store.rs::default_dir`）：`delete` 的快路径是 **rename**，
+/// 而跨卷 rename 必然失败（`EXDEV`）。家目录与工程分处不同卷是常见部署
+/// （Windows 上 `C:\Users` + `D:\project`；macOS 外接盘），默认搬出去会让**每一次**
+/// 删除退化成整份复制（文件），或者干脆拒绝（目录，见下方 `cross_device_dir` 分支）
+/// ——那比"备份留在工作区里"糟得多。
+///
+/// 留在工作区里之所以安全，是因为 PR-B1 已经把 `.qaqh` 纳入 spy 的 `exclude_dirs`，
+/// 并把目录名匹配从全等改成「全等或 `{name}.` 前缀」：`target.1791993394` 这类
+/// 带时间戳的 trash 副本不会再被当成工作区净变更快照/上报（曾一次报出 9337 个
+/// 变更、单条注入 ≈1.2–3.5 MB）。
+///
+/// `QAQH_TRASH_DIR` 可覆盖：给"就是想把备份放到别处/别盘"的用法（自己承担跨卷
+/// 复制代价），也给测试隔离。
 fn trash_dir(ctx: &ToolCallContext) -> PathBuf {
+    if let Ok(dir) = std::env::var("QAQH_TRASH_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
     let workspace = ctx.workspace_root.to_string_lossy();
     let root = if !workspace.is_empty() && workspace != "." {
         ctx.workspace_root.clone()
@@ -135,6 +156,18 @@ fn trash_dir(ctx: &ToolCallContext) -> PathBuf {
         qaqh_types::platform::data_dir().join("workspace")
     };
     root.join(".qaqh/trash")
+}
+
+/// trash 条目的展示路径。
+///
+/// 在工作区内时给相对形（`.qaqh/trash/x.<ts>`）——短、对模型友好，且与既有
+/// 文案/断言口径一致；被 `QAQH_TRASH_DIR` 搬到工作区外时**只能**给绝对路径，
+/// 因为相对形在那儿指向一个并不存在的落点（照旧硬编码 `.qaqh/trash/` 就是假线索）。
+fn trash_display_path(trash: &Path, project_root: &Path) -> String {
+    trash
+        .strip_prefix(project_root)
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| trash.to_string_lossy().to_string())
 }
 
 pub fn mutation_display(
@@ -695,10 +728,7 @@ impl TypedTool for DeleteTool {
                     "ok",
                 );
                 let trash_path_abs = trash_path.clone();
-                let trash_path = format!(
-                    ".qaqh/trash/{}",
-                    trash_path.file_name().unwrap_or_default().to_string_lossy()
-                );
+                let trash_path = trash_display_path(&trash_path, project_root);
                 Ok(DeleteOutput {
                     status: "ok".to_string(),
                     path: path.clone(),
@@ -745,10 +775,7 @@ impl TypedTool for DeleteTool {
                             "ok",
                         );
                         let trash_path_abs = trash_path.clone();
-                        let trash_path = format!(
-                            ".qaqh/trash/{}",
-                            trash_path.file_name().unwrap_or_default().to_string_lossy()
-                        );
+                        let trash_path = trash_display_path(&trash_path, project_root);
                         Ok(DeleteOutput {
                             status: "ok".to_string(),
                             path: path.clone(),
@@ -769,13 +796,7 @@ impl TypedTool for DeleteTool {
                         )),
                         json!({
                             "path": &path,
-                            "trash_path": format!(
-                                ".qaqh/trash/{}",
-                                trash_path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                            ),
+                            "trash_path": trash_display_path(&trash_path, project_root),
                             "copied_to_trash": true,
                         }),
                     )),
@@ -839,6 +860,7 @@ pub fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext
         timeout,
         cancellation,
         progress: None,
+        exec_progress: None,
         source: ToolCallSource::Model,
     }
 }
@@ -851,12 +873,33 @@ mod tests {
         CancellationToken as TestCancellationToken, ErasedTool, SandboxMode as TestSandboxMode,
         ToolCallSource as TestToolCallSource, TypedToolAdapter,
     };
+    use std::sync::{Mutex, OnceLock};
+
+    /// 串行所有涉及 trash 环境变量/落点的用例：`QAQH_TRASH_DIR` 是进程级状态，
+    /// 而 cargo 默认多线程跑测试。
+    static DELETE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 测试隔离：写/删路径都会 `journal::record_change`，而 SMJ 落在
+    /// `platform::data_dir()` —— 不设隔离就是往**真实用户数据根**里写测试记录。
+    /// 口径同 `journal.rs` 的 `with_temp_journal`；本模块用例多且共用 `test_ctx`，
+    /// 所以用进程级 `OnceLock` 一次钉住，不逐个包裹。
+    static JOURNAL_ISOLATION: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+    fn isolate_journal_root() {
+        JOURNAL_ISOLATION.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("journal tempdir");
+            // SAFETY: 在本模块首次构造 ToolCallContext 之前执行，此后只读不改。
+            unsafe { std::env::set_var("QAQH_JOURNAL_DIR", dir.path()) };
+            dir
+        });
+    }
 
     fn write(args: Value) -> String {
         exec_write_file(&args).model_text().to_string()
     }
 
     fn test_ctx(root: &Path) -> ToolCallContext {
+        isolate_journal_root();
         ToolCallContext {
             call_id: "test-call".to_string(),
             session_id: "test-session".to_string(),
@@ -869,6 +912,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             cancellation: TestCancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: TestToolCallSource::Model,
         }
     }
@@ -1108,6 +1152,7 @@ mod tests {
 
     #[test]
     fn delete_returns_typed_output_and_moves_file_to_trash() {
+        let _guard = DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("delete-me.txt");
         std::fs::write(&path, "bye\n").unwrap();
@@ -1129,7 +1174,71 @@ mod tests {
         );
         assert!(!path.exists());
         let trash_path = result.data["trash_path"].as_str().unwrap();
-        assert!(dir.path().join(trash_path).exists());
+        // 默认落点在工作区内 → 展示给相对形（短，且与既有模型文案口径一致）。
+        assert!(
+            trash_path.starts_with(".qaqh/trash/"),
+            "工作区内 trash 应给相对形，实得 {trash_path}"
+        );
+        assert!(
+            dir.path().join(trash_path).exists(),
+            "trash 副本必须真的存在：{trash_path}"
+        );
+        // 默认落点仍在工作区内：那是 rename 快路径的前提（跨卷 rename 会 EXDEV，
+        // 默认搬出去 = 每次删除都退化成整份复制 / 目录直接拒删）。
+        // 它不再污染变更审计，靠 PR-B1 的 `.qaqh` 排除 + `{name}.` 前缀匹配保证，
+        // 那两层由 qaqh-spy 的 trashed_directory_copy_is_excluded 钉住。
+        // 名字带时间戳后缀，同名连续删除不得互相覆盖。
+        let file_name = Path::new(trash_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            file_name.starts_with("delete-me.txt."),
+            "trash 条目名应带时间戳后缀，实得 {file_name}"
+        );
+    }
+
+    /// `QAQH_TRASH_DIR` 生效时备份必须完全落在工作区之外——这是"我愿意承担跨卷
+    /// 复制代价，就是不想让 trash 待在工程目录里"的显式出口。
+    #[test]
+    fn delete_honors_trash_dir_override() {
+        let _guard = DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out-trash.txt");
+        std::fs::write(&path, "bye\n").unwrap();
+
+        // SAFETY: DELETE_LOCK 串行本模块所有 trash 相关用例；用完立刻撤掉。
+        unsafe { std::env::set_var("QAQH_TRASH_DIR", outside.path()) };
+        let result = TypedToolAdapter::new(DeleteTool)
+            .execute(test_ctx(dir.path()), json!({ "path": path }))
+            .expect("delete must not return fatal")
+            .to_tool_result();
+        unsafe { std::env::remove_var("QAQH_TRASH_DIR") };
+
+        assert!(result.is_success(), "{}", result.model_text());
+        let trash_path = result.data["trash_path"].as_str().unwrap();
+        let trash = Path::new(trash_path);
+        // 搬出工作区后相对形就是假线索，必须给绝对路径。
+        assert!(
+            trash.is_absolute(),
+            "工作区外的 trash 必须给绝对路径，实得 {trash_path}"
+        );
+        assert!(trash.exists(), "覆盖后的 trash 必须存在：{trash_path}");
+        assert!(
+            trash.starts_with(outside.path()),
+            "QAQH_TRASH_DIR 必须生效，实得 {trash_path}"
+        );
+        assert!(
+            !trash.starts_with(dir.path()),
+            "覆盖后不得有任何副本留在工作区内：{trash_path}"
+        );
+        // 工作区里除了被删文件消失，不该多出 .qaqh/trash。
+        assert!(
+            !dir.path().join(".qaqh").join("trash").exists(),
+            "覆盖生效后不得回退创建 .qaqh/trash"
+        );
     }
 
     #[test]

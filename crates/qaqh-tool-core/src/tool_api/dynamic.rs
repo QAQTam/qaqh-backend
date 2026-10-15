@@ -113,6 +113,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: ToolCallSource::Model,
         }
     }

@@ -31,6 +31,9 @@ pub(crate) struct SubagentSpawnSpec {
     pub(crate) base_url: Option<String>,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) ephemeral: bool,
+    /// P1-⑤：继承父会话权限档位（spawn 时由 ToolCallContext 带入），
+    /// 不再回落全局 config 的 permission_tier。
+    pub(crate) permission_level: u8,
 }
 
 /// Apply subagent config defaults (`cfg.subagent.*`) and explicit overrides.
@@ -123,6 +126,9 @@ pub(crate) fn spawn_agent(
     match kind {
         ActorKind::Subagent(spec) => {
             agent.ephemeral = spec.ephemeral;
+            // P1-⑤：子代理档位继承父会话（spawn 请求携带），覆盖
+            // session_effective_config 读到的全局 permission_tier。
+            agent.config.permission_level = spec.permission_level;
             apply_subagent_config(
                 &mut agent,
                 spec.model.as_deref(),

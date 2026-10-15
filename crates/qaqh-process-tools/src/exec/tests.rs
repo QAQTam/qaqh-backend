@@ -65,6 +65,7 @@ fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::Tool
         timeout: Duration::from_secs(30),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
+        exec_progress: None,
         source: crate::tool_api::ToolCallSource::Model,
     }
 }
@@ -1284,6 +1285,7 @@ fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
             timeout: std::time::Duration::from_secs(30),
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: crate::tool_api::ToolCallSource::Model,
         },
         args,

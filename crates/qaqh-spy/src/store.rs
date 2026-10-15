@@ -12,7 +12,7 @@
 //!
 //! 崩溃安全：先写 blob，后 append journal，再写 manifest/state；恢复前校验 sha。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -45,6 +45,14 @@ pub struct Change {
     pub size_after: Option<u64>,
     /// 触发来源（tool_start / tool_end / periodic / manual）
     pub trigger: String,
+    /// 归属会话（agent session id）。空串 = 无主（历史存量条目，或加字段之前落的行）。
+    ///
+    /// 为什么要这个字段：存储按**工作区路径哈希**共享（见 `default_dir`），而 `Change`
+    /// 过去没有归属维度，`changes_since` 只做 `c.scan > mark` 的时间过滤——于是并发会话、
+    /// 子代理、后台进程的变更会被每个 agent 整批重述一遍：N 个上下文各吃一份同样的 diff，
+    /// 还都归因到自己头上。有了 owner，宿主才能把"别人的变更"压成一行计数。
+    #[serde(default)]
+    pub owner: String,
 }
 
 /// 变更类型。
@@ -62,6 +70,14 @@ pub struct State {
     pub last_scan: Option<String>,
     pub last_report: Option<String>,
     pub seq: u64,
+    /// 每个归属会话**上次看到这个 store 时**的扫描 id（owner → scan id）。
+    ///
+    /// 为什么不能只看 `last_scan`：那是**全局**最新边界，`begin()` 每批都会把
+    /// `mark` 重锚到它上面，于是"这个会话离开期间攒了多少变更"在批级报告里
+    /// 永远说不出来（漂移被静默吸进基线）。按 owner 记一条，恢复批才有可比对象。
+    /// 缺失 = 该 owner 在本 store 里第一次出现（或已被容量闸挤掉）→ 不说漂移。
+    #[serde(default)]
+    pub owner_marks: BTreeMap<String, String>,
 }
 
 /// 一次 GC 的回收统计。
@@ -268,25 +284,100 @@ impl Store {
         Ok(ids)
     }
 
-    /// 保留窗口 GC：回收窗口外的 manifest、journal 条目与孤儿 blob。
+    /// blob 尺寸表（sha → 字节）：GC 字节预算的度量基础，一次目录遍历。
+    fn blob_sizes(&self) -> Result<HashMap<String, u64>> {
+        let mut map = HashMap::new();
+        for shard in fs::read_dir(self.dir.join("objects"))? {
+            let shard = shard?.path();
+            if !shard.is_dir() {
+                continue;
+            }
+            for f in fs::read_dir(&shard)? {
+                let p = f?.path();
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                    map.insert(name.to_string(), size);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    /// 窗口（最近 `kept` 份 manifest）的引用集与引用字节数：
+    /// 保留 manifest 物化为全量后的条目 + 窗口内 journal 条目的 before/after。
+    /// 两者都必须计入——journal 的 before 是「改动前」blob，窗口内 undo 仍需要它。
+    fn retained_state(
+        &self,
+        ids: &[String],
+        kept: usize,
+        sizes: &HashMap<String, u64>,
+    ) -> Result<(HashSet<String>, u64)> {
+        let cut = ids.len().saturating_sub(kept);
+        let mut referenced: HashSet<String> = HashSet::new();
+        for id in &ids[cut..] {
+            for e in self.materialize_manifest(id)?.values() {
+                referenced.insert(e.sha.clone());
+            }
+        }
+        if let Some(oldest) = ids.get(cut) {
+            for c in self.read_journal()? {
+                if c.scan >= *oldest {
+                    if let Some(b) = &c.before {
+                        referenced.insert(b.clone());
+                    }
+                    if let Some(a) = &c.after {
+                        referenced.insert(a.clone());
+                    }
+                }
+            }
+        }
+        let bytes = referenced.iter().filter_map(|s| sizes.get(s)).sum();
+        Ok((referenced, bytes))
+    }
+
+    /// 保留窗口 GC（可选字节预算）：回收窗口外的 manifest、journal 条目与孤儿 blob。
     ///
     /// 保留最近 `keep` 份 manifest 为窗口；journal 压缩到
     /// `scan >= 最老保留 manifest id`（id 字典序即时间序）；blob 只保留被
     /// 保留 manifest 与窗口内 journal 条目（before/after）引用的内容。
     /// 代价：undo/restore 只保证窗口内可回溯，窗口外的历史变更不可恢复。
     ///
+    /// `max_bytes` 是**第二道闸**：份数窗口收口不了「少量 manifest 引用巨量
+    /// blob」的场景（大 diff 批）。超预算时窗口从 `keep` 逐级减半到最少 1 份
+    /// （含其 base 锚点链与窗口内 journal 引用），先把最老的历史挤出去。
+    /// `None` = 只按份数。
+    ///
     /// `lock_wait` 为存储锁等待上界；争锁超时返回 Err——调用方在高频路径
     /// （工具批边界 / `Session::open`）上应传小值并容忍本次跳过。
-    pub fn gc(&self, keep: usize, lock_wait: std::time::Duration) -> Result<GcOutcome> {
+    pub fn gc(
+        &self,
+        keep: usize,
+        max_bytes: Option<u64>,
+        lock_wait: std::time::Duration,
+    ) -> Result<GcOutcome> {
         let _guard = self.lock_timeout(lock_wait)?;
         let ids = self.all_manifest_ids()?;
-        if ids.len() <= keep {
+        let sizes = self.blob_sizes()?;
+
+        // 窗口选择：keep 起步；超字节预算则减半收紧（最少 1 份，链保护在下）。
+        let mut kept = keep.min(ids.len());
+        let (mut referenced, mut bytes) = self.retained_state(&ids, kept, &sizes)?;
+        if let Some(max) = max_bytes {
+            while bytes > max && kept > 1 {
+                kept = (kept / 2).max(1);
+                let (r, b) = self.retained_state(&ids, kept, &sizes)?;
+                referenced = r;
+                bytes = b;
+            }
+        }
+        let cut = ids.len().saturating_sub(kept);
+        // 窗口未超且预算内：无事可做（高频路径的常态，零写放大）。
+        if cut == 0 && max_bytes.is_none_or(|max| bytes <= max) {
             return Ok(GcOutcome {
                 dropped_manifests: 0,
                 dropped_blobs: 0,
             });
         }
-        let cut = ids.len() - keep;
         let oldest_kept = ids[cut].clone();
 
         // 0) 链感知：窗口最老一份若是增量，其 base 链上溯到锚点途经的
@@ -303,27 +394,13 @@ impl Store {
             cur = next.context("增量 manifest 缺少 base 指针，GC 无法定位锚点")?;
         }
 
-        // 1) 引用集：保留 manifest 物化为全量后的条目 + 窗口内 journal 的
-        //    before/after（不能用 delta 的稀疏条目，否则会误删活跃 blob）
-        let mut referenced: HashSet<String> = HashSet::new();
-        for id in &ids[cut..] {
-            for e in self.materialize_manifest(id)?.values() {
-                referenced.insert(e.sha.clone());
-            }
-        }
+        // 1) journal 压缩集（窗口内条目；引用集已含其 before/after，
+        //    由 retained_state 统一算出——不能用 delta 的稀疏条目，否则会误删活跃 blob）
         let retained: Vec<Change> = self
             .read_journal()?
             .into_iter()
             .filter(|c| c.scan >= oldest_kept)
             .collect();
-        for c in &retained {
-            if let Some(b) = &c.before {
-                referenced.insert(b.clone());
-            }
-            if let Some(a) = &c.after {
-                referenced.insert(a.clone());
-            }
-        }
 
         // 2) journal 压缩（原子重写；崩溃后最坏残留 = 未删的旧 manifest，
         //    下次 GC 再收）
@@ -516,6 +593,7 @@ mod tests {
             size_before: Some(1),
             size_after: Some(2),
             trigger: "manual".into(),
+            owner: String::new(),
         };
         store.append_journal(std::slice::from_ref(&c)).unwrap();
         assert_eq!(store.read_journal().unwrap(), vec![c.clone()]);
@@ -584,6 +662,7 @@ mod tests {
             size_before: Some(2),
             size_after: Some(2),
             trigger: "manual".into(),
+            owner: String::new(),
         };
         store
             .append_journal(&[ch(2, &v1, &v2), ch(3, &v2, &v3)])
@@ -591,7 +670,9 @@ mod tests {
 
         // 保留最近 2 份：m1 丢弃；journal 全在窗口内 → v1 经 before 引用保留；
         // 唯一孤儿是手动写入的 orphan blob
-        let out = store.gc(2, std::time::Duration::from_millis(100)).unwrap();
+        let out = store
+            .gc(2, None, std::time::Duration::from_millis(100))
+            .unwrap();
         assert_eq!(out.dropped_manifests, 1);
         assert_eq!(out.dropped_blobs, 1);
         assert_eq!(
@@ -605,7 +686,9 @@ mod tests {
         assert!(store.read_blob(&orphan).is_err());
 
         // 未超窗口：空操作
-        let again = store.gc(2, std::time::Duration::from_millis(100)).unwrap();
+        let again = store
+            .gc(2, None, std::time::Duration::from_millis(100))
+            .unwrap();
         assert_eq!(again.dropped_manifests + again.dropped_blobs, 0);
     }
 
@@ -704,7 +787,9 @@ mod tests {
         }
 
         // keep=1：窗口只有 m3，但 m1/m2 是 m3 的 base 链，必须保留
-        let out = store.gc(1, std::time::Duration::from_millis(100)).unwrap();
+        let out = store
+            .gc(1, None, std::time::Duration::from_millis(100))
+            .unwrap();
         assert_eq!(out.dropped_manifests, 0);
         assert_eq!(store.all_manifest_ids().unwrap().len(), 3);
         // 物化仍成功 = 链未断
@@ -713,5 +798,74 @@ mod tests {
                 .materialize_manifest(&format!("s{:016}_0001", 3))
                 .is_ok()
         );
+    }
+
+    /// 字节预算是第二道闸：份数窗口收口不了大 diff 场景。超预算时窗口逐级
+    /// 减半到最少 1 份，最老的历史先被挤出去（manifest → journal → blob）。
+    #[test]
+    fn gc_byte_budget_shrinks_window() {
+        let dir = tmp_dir("gc-bytes");
+        let store = Store::open(&dir, Some(&dir)).unwrap();
+        // 4 份 anchor manifest，各引用一个 1KB 且内容互不相同的 blob。
+        let mk = |seq: u64, sha: &str| Manifest {
+            id: format!("s{seq:016}_0001"),
+            ts: "t".into(),
+            trigger: "manual".into(),
+            base: None,
+            anchor: true,
+            depth: 0,
+            tombstones: Vec::new(),
+            files: BTreeMap::from([(
+                "a.txt".into(),
+                FileEntry {
+                    sha: sha.into(),
+                    mtime: 1,
+                    size: 1024,
+                },
+            )]),
+        };
+        let shas: Vec<String> = (1..=4u64)
+            .map(|i| store.write_blob(format!("v{i}").repeat(512).as_bytes()).unwrap())
+            .collect();
+        for (i, sha) in shas.iter().enumerate() {
+            store.save_manifest(&mk(i as u64 + 1, sha)).unwrap();
+        }
+        let ch = |seq: u64, before: &str, after: &str| Change {
+            id: format!("s{seq:016}_0001#0"),
+            scan: format!("s{seq:016}_0001"),
+            ts: "t".into(),
+            path: "a.txt".into(),
+            status: ChangeStatus::Modified,
+            before: Some(before.into()),
+            after: Some(after.into()),
+            size_before: Some(1024),
+            size_after: Some(1024),
+            trigger: "manual".into(),
+            owner: String::new(),
+        };
+        for i in 1..=3u64 {
+            store
+                .append_journal(&[ch(
+                    i + 1,
+                    &shas[(i - 1) as usize],
+                    &shas[i as usize],
+                )])
+                .unwrap();
+        }
+        // 全量引用 = 4KB（4 个 blob，journal 的 before 链把 v1..v3 都拉进来）。
+        // 预算 1.2KB：keep=4(4KB)→2(3KB)→1(2KB) 仍超，但已到最少窗口，就此收敛。
+        let out = store
+            .gc(4, Some(1200), std::time::Duration::from_millis(100))
+            .unwrap();
+        // 窗口收到 1 份（m4）；m1..m3 是各自独立的 anchor，不在 m4 的链上 → 全删
+        assert_eq!(out.dropped_manifests, 3);
+        // v3 经 ch(4).before 引用保留；v1/v2 成孤儿 → 回收
+        assert_eq!(out.dropped_blobs, 2);
+        assert_eq!(store.all_manifest_ids().unwrap().len(), 1);
+        assert_eq!(store.read_journal().unwrap().len(), 1);
+        assert!(store.read_blob(&shas[3]).is_ok(), "最新 blob 必须保留");
+        assert!(store.read_blob(&shas[2]).is_ok(), "journal before 引用保留");
+        assert!(store.read_blob(&shas[0]).is_err());
+        assert!(store.read_blob(&shas[1]).is_err());
     }
 }

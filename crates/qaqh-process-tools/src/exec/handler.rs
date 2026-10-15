@@ -73,12 +73,19 @@ impl TypedTool for ExecTool {
         ctx: &ToolCallContext,
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let progress = ctx
-            .progress
-            .as_ref()
-            .map(crate::tool_api::result::bridge_progress);
+        let progress = exec_progress_of(ctx);
         run_exec(ctx, args, None, progress)
     }
+}
+
+/// exec 进度出口：runtime 直通 sender 优先，ProgressSink → v1 进度桥兜底。
+///
+/// 直通（`exec_progress`）是 v2.1 client-tools `Progress` 帧的生产点——
+/// 此前 runtime 的 sender 在 prepare 阶段被丢弃，exec 全程无实时进度。
+fn exec_progress_of(ctx: &ToolCallContext) -> Option<ExecProgressSender> {
+    ctx.exec_progress
+        .clone()
+        .or_else(|| ctx.progress.as_ref().map(crate::tool_api::result::bridge_progress))
 }
 
 fn exec_error(code: &str, message: impl Into<String>, hint: Option<&str>) -> ToolExecutionError {
@@ -265,10 +272,7 @@ pub(crate) fn run_exec_for_test(
             );
         }
     };
-    let progress = ctx
-        .progress
-        .as_ref()
-        .map(crate::tool_api::result::bridge_progress);
+    let progress = exec_progress_of(ctx);
     match run_exec(ctx, parsed, fixed, progress) {
         Ok(output) => exec_output_to_tool_result(&output, &args),
         Err(ToolExecutionError::Recoverable(error)) => tool_result_from_error(error),

@@ -1025,6 +1025,8 @@ fn handle_spawn_subagent(
             base_url,
             max_tokens: max_tokens_opt,
             workspace: workspace.as_deref(),
+            // P1-⑤：子代理档位继承父会话，不再回落全局 permission_tier。
+            permission_level: ctx.permission_level as u8,
         })
         .map_err(|error| {
             subagent_error(
@@ -1240,6 +1242,17 @@ pub fn arm_subagent_collector(
 /// direct host connection) until a terminal event, a kill request, or the
 /// timeout — mirroring the old stdout-frame collector, but over the Ringing
 /// event plane.
+/// P1-⑥：终态标签不再整段覆盖已收到的部分答案。超时/失败路径会把
+/// `<partial_answer>` 随注入带给父代理；取消路径正文被 T-1-2 压制，但
+/// 注册表（process check）仍可取回部分工作成果。
+fn terminal_answer_with_partial(tag: String, partial: &str) -> String {
+    if partial.trim().is_empty() {
+        tag
+    } else {
+        format!("{tag}\n\n<partial_answer>\n{partial}\n</partial_answer>")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_subagent_result(
     transport: Box<dyn SubagentTransport>,
@@ -1263,6 +1276,28 @@ fn collect_subagent_result(
     let mut first_event_logged = false;
 
     while !did_finish && !did_cancel {
+        // P0-①：deadline 检查必须在每轮循环执行。此前只在 recv_timeout
+        // 返回 Timeout 时检查——子代理事件持续流出时每个 300ms 轮询都命中
+        // Ok(batch) 分支，deadline 永不被评估，timeout_secs 形同虚设
+        // （实例：会话 01a13dd7 配置 120s 实跑 847s）。
+        if Instant::now() >= deadline {
+            log::warn!(
+                "[SUBAGENT] '{name}' timeout after {timeout_secs}s (first_event={first_event_logged}) — cancelling sub turn"
+            );
+            let cancel = RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
+            );
+            if let Err(e) = transport.send_command(session_id, cancel) {
+                log::warn!("[SUBAGENT] '{name}' timeout cancel send failed: {e}");
+            }
+            final_answer = terminal_answer_with_partial(
+                format!("[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]"),
+                &final_answer,
+            );
+            exit_code = 1;
+            terminal = qaqh_domain::SubagentTerminalKind::TimedOut;
+            break;
+        }
         // Kill requested (process kill {id}) → cancel the sub turn.
         if registry_ref.killed() {
             log::info!("[SUBAGENT] '{name}' kill requested via process registry — cancelling");
@@ -1272,7 +1307,10 @@ fn collect_subagent_result(
             if let Err(e) = transport.send_command(session_id, cancel) {
                 log::warn!("[SUBAGENT] '{name}' cancel send failed: {e}");
             }
-            final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
+            final_answer = terminal_answer_with_partial(
+                format!("[SUBAGENT '{name}' CANCELLED]"),
+                &final_answer,
+            );
             terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
             did_cancel = true;
             break;
@@ -1312,15 +1350,21 @@ fn collect_subagent_result(
                         } => {
                             if failed {
                                 log::warn!("[SUBAGENT] '{name}' turn failed: {error:?}");
-                                final_answer = format!(
-                                    "[SUBAGENT '{name}' ERROR] {}",
-                                    error.unwrap_or_else(|| "unknown".into())
+                                final_answer = terminal_answer_with_partial(
+                                    format!(
+                                        "[SUBAGENT '{name}' ERROR] {}",
+                                        error.unwrap_or_else(|| "unknown".into())
+                                    ),
+                                    &final_answer,
                                 );
                                 exit_code = 1;
                                 terminal = qaqh_domain::SubagentTerminalKind::Failed;
                             } else if cancelled {
                                 log::info!("[SUBAGENT] '{name}' conversation cancelled");
-                                final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
+                                final_answer = terminal_answer_with_partial(
+                                    format!("[SUBAGENT '{name}' CANCELLED]"),
+                                    &final_answer,
+                                );
                                 terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
                                 did_cancel = true;
                             } else {
@@ -1335,21 +1379,7 @@ fn collect_subagent_result(
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if Instant::now() >= deadline {
-                    log::warn!(
-                        "[SUBAGENT] '{name}' timeout after {timeout_secs}s (first_event={first_event_logged}) — cancelling sub turn"
-                    );
-                    let cancel = RingingCommand::Conversation(
-                        qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
-                    );
-                    if let Err(e) = transport.send_command(session_id, cancel) {
-                        log::warn!("[SUBAGENT] '{name}' timeout cancel send failed: {e}");
-                    }
-                    final_answer = format!("[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]");
-                    exit_code = 1;
-                    terminal = qaqh_domain::SubagentTerminalKind::TimedOut;
-                    did_finish = true;
-                }
+                // 本 300ms 无事件；deadline 已在循环顶部统一检查。
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // Event stream closed before a terminal event (daemon gone?).
@@ -1364,6 +1394,11 @@ fn collect_subagent_result(
     }
 
     let answer_len = final_answer.len();
+
+    // P0-②：先落注册表再注入。注入可能全部被拒（父会话忙碌 / lease 竞争），
+    // 此时 `process check {id}` 是父代理唯一可自助取回结果的通道，必须
+    // 在任何注入尝试之前就绪。
+    registry_ref.finish(&final_answer, exit_code);
 
     // ── 结果回传：注入主代理会话。 ──
     // 主代理 idle 时这条消息触发新回合（模型自动看到子代理结果并继续）；
@@ -1473,14 +1508,61 @@ fn collect_subagent_result(
         if accepted {
             log::info!("[SUBAGENT] '{name}' inject accepted ({} bytes)", answer_len);
         } else {
-            log::error!(
-                "[SUBAGENT] '{name}' inject FAILED after {INJECT_ATTEMPTS} attempts: {:?}",
-                last_rejected
-            );
+            // P0-② 兜底：原 purpose（TriggerTurn 在父会话忙碌时被拒）失败后，
+            // 改用 QueueOnly 重投——不触发新回合，仅在下一轮 lap 边界合并进
+            // 父会话。message_id 不变（幂等去重）；非取消场景在正文末尾追加
+            // 结果指针（process id / 子会话 id），注册表此时已 finish 可查。
+            let mut fallback = inject.clone();
+            if let RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationSendMessage {
+                    input_purpose,
+                    text,
+                    ..
+                },
+            ) = &mut fallback
+            {
+                *input_purpose = qaqh_domain::ConversationInputPurpose::QueueOnly;
+                if !did_cancel && !text.is_empty() {
+                    text.push_str(&format!(
+                        "\n[result-pointer] process {} · child session {}",
+                        registry_ref.id(),
+                        session_id
+                    ));
+                }
+            }
+            const FALLBACK_ATTEMPTS: usize = 3;
+            for attempt in 0..FALLBACK_ATTEMPTS {
+                if attempt > 0 {
+                    // 线性退避：300ms → 600ms → 1200ms
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        300 * (1 << attempt.min(2)),
+                    ));
+                }
+                match transport.send_command(parent_session, fallback.clone()) {
+                    Ok(true) => {
+                        accepted = true;
+                        log::info!(
+                            "[SUBAGENT] '{name}' queue-only fallback accepted ({} bytes) after primary inject rejected: {:?}",
+                            answer_len,
+                            last_rejected
+                        );
+                        break;
+                    }
+                    other => {
+                        last_rejected = Some(format!("{other:?}"));
+                    }
+                }
+            }
+            if !accepted {
+                log::error!(
+                    "[SUBAGENT] '{name}' inject FAILED after {INJECT_ATTEMPTS}+{FALLBACK_ATTEMPTS} attempts; result recoverable via process check {} / child session {}: {:?}",
+                    registry_ref.id(),
+                    session_id,
+                    last_rejected
+                );
+            }
         }
     }
-
-    registry_ref.finish(&final_answer, exit_code);
 
     // ── 自动卸载：终态后关闭子 agent（actor / worker 进程），释放后台资源。──
     // SessionClose 语义由进程内宿主直接执行（registry.close + 临时会话清理）。
@@ -1760,6 +1842,7 @@ mod tests {
             timeout: Duration::from_secs(180),
             cancellation: qaqh_tool_core::tool_api::CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: qaqh_tool_core::tool_api::ToolCallSource::Model,
         };
         let error = SpawnSubagentTool
