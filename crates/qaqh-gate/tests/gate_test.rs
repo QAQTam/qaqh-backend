@@ -2108,6 +2108,7 @@ fn siwc_plan_sync_runs_over_the_streaming_route() {
     let mock = MockServer::new(responses_sse_scenario());
     let mut provider = make_responses_provider(&mock);
     provider.responses_compat.siwc_plan = true;
+    provider.prompt_cache_key = Some("sess-cache-1".into());
 
     let text = qaqh_gate::chat_sync(&provider, vec![Message::user("compact this")], 4096)
         .expect("plan 模式的 sync 应改走流式并成功");
@@ -2120,6 +2121,12 @@ fn siwc_plan_sync_runs_over_the_streaming_route() {
         request.get("max_output_tokens").is_none(),
         "plan 路由禁用 max_output_tokens: {request}"
     );
+    // 不在禁用清单里、且是缓存亲和键：必须出现在 HTTP 请求体里。
+    assert_eq!(
+        request["prompt_cache_key"],
+        json!("sess-cache-1"),
+        "plan 路由必须下发 prompt_cache_key: {request}"
+    );
     for field in [
         "user",
         "temperature",
@@ -2128,7 +2135,6 @@ fn siwc_plan_sync_runs_over_the_streaming_route() {
         "truncation",
         "previous_response_id",
         "prompt_cache_retention",
-        "prompt_cache_key",
         "max_tool_calls",
         "safety_identifier",
         "prompt",
