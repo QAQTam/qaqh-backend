@@ -42,7 +42,8 @@ pub fn is_subagent_sandbox() -> bool {
 /// （`permission.rs` 末尾的 `map(resolve_target_path)`，基准是当前会话工作区），
 /// 所以这里只剩一件事要处理：**会话没有绑定工作区**（`""` / `"."`）时不做跨区
 /// 判定——没有工作区就没有「区外」。否则子代理连自己会话里的普通文件都读不了，
-/// 实测报错正是 `reads outside the workspace are host-only`。
+/// 实测报错正是 `reads outside the workspace are host-only`（该守卫已于
+/// 2026-10-15 随「读自由对齐」撤销，但 workspace_unset 不做跨区判定的理由不变）。
 ///
 /// 放宽只覆盖文件读写：调用方仅在文件操作分支使用本函数；exec / 网络 / MCP 的
 /// 拒绝不依赖工作区，不受影响。
@@ -329,6 +330,7 @@ fn legacy_tool_call_context(
         timeout: Duration::ZERO,
         cancellation,
         progress: None,
+        exec_progress: None,
         source: ToolCallSource::Model,
     }
 }
@@ -467,16 +469,18 @@ pub fn admit_with_context(
             );
             resources.sort();
             resources.dedup();
-            // S3 兜底（2026-10-05 读自由规则后必读）：needs_permission 对 Read
-            // 已无条件放行，子代理沙箱的「跨 workspace 拒读」姿态改在此兑现——
-            // 沙箱上下文没有审批通道，跨 workspace 读必须保持自动拒绝（防越狱）。
+            // S3 改判（2026-10-15 用户拍板「读自由对齐」）：子代理与主代理
+            // 共享读自由——跨 workspace 的 Read / exec 不再是沙箱边界（原先
+            // 的「跨区拒读」守卫与 P1-④ exec 守卫一并撤销）。真正的线是
+            // 敏感路径守卫（会话历史/凭据）：needs_permission 在 Read 规则
+            // 前先行拦截，落到 AutoApprove 的沙箱 exec 在此补充强制——
+            // skip-permissions bypass 不豁免会话文件外泄面。
             if sandboxed
-                && invocation.category == crate::permission::ToolCategory::Read
-                && !sandbox_within_workspace(&resources, &workspace_root, workspace_unset)
+                && invocation.tool_name == "exec"
+                && exec_hits_sensitive_session_paths(&invocation, &workspace_root)
             {
                 return Admission::Denied(format!(
-                    "subagent sandbox denied '{}': reads outside the workspace are host-only",
-                    invocation.tool_name
+                    "subagent sandbox denied 'exec': session files are host-only"
                 ));
             }
             let grant = if exec_auto {
@@ -1091,20 +1095,18 @@ mod tests {
             }
             _other => panic!("cross-workspace write must be denied, got non-denied"),
         }
-        // 2026-10-05 读自由规则后沙箱兜底：needs_permission 对 Read 无条件
-        // 放行，沙箱的「跨 workspace 拒读」改在 admit 的 AutoApprove 分支兑现。
+        // 2026-10-15 读自由对齐（S3 改判）：跨 workspace 读不再拒绝——
+        // 子代理与主代理共享读自由；敏感路径守卫仍在前先行拦截。
         let admission = invoke(
             "read",
             serde_json::json!({ "path": outside.join("secret.txt") }),
             &ws,
             crate::permission::ToolCategory::Read,
         );
-        match admission {
-            Admission::Denied(reason) => {
-                assert!(reason.contains("sandbox"), "{reason}");
-            }
-            _other => panic!("cross-workspace read must be denied in sandbox, got non-denied"),
-        }
+        assert!(
+            matches!(admission, Admission::Authorized(_)),
+            "cross-workspace read must be auto-approved in sandbox (读自由对齐), got non-authorized"
+        );
     }
 
     /// 设置本线程的 actor 工作区并 Drop 时清除。
@@ -1127,7 +1129,8 @@ mod tests {
         // `read` 的路径契约允许工作区相对路径（`qaqh-file-tools/src/file_query.rs:20`
         // "workspace-relative or absolute"），授权侧按同一基准解析
         // （`extract_target_paths` 末尾 `map(resolve_target_path)`）。工作区内的
-        // 相对路径必须放行，`..` 逃逸出去仍然拒。
+        // 相对路径必须放行；2026-10-15 读自由对齐后，读侧 `..` 逃逸不再拒
+        // （与主代理一致），写侧逃逸仍由跨区写守卫拦截。
         let _g = sandbox_guard();
         let ws = std::env::temp_dir().join("qaqh-sandbox-rel");
         let _wsg = actor_workspace_guard(&ws);
@@ -1146,15 +1149,27 @@ mod tests {
                 "{tool} with a workspace-relative path must be authorized in sandbox"
             );
         }
+        // 读自由对齐：读侧 `..` 逃逸不再拒绝，与主代理共享读自由。
         let admission = invoke(
             "read",
             serde_json::json!({ "path": "../qaqh-sandbox-escape.txt" }),
             &ws,
             crate::permission::ToolCategory::Read,
         );
+        assert!(
+            matches!(admission, Admission::Authorized(_)),
+            "relative read escaping the workspace must be authorized (读自由对齐)"
+        );
+        // 写侧 `..` 逃逸仍然拒——跨区写是真实的线。
+        let admission = invoke(
+            "write",
+            serde_json::json!({ "path": "../qaqh-sandbox-escape.txt" }),
+            &ws,
+            crate::permission::ToolCategory::Write,
+        );
         match admission {
             Admission::Denied(reason) => assert!(reason.contains("sandbox"), "{reason}"),
-            _other => panic!("relative path escaping the workspace must stay denied"),
+            _other => panic!("relative write escaping the workspace must stay denied"),
         }
     }
 

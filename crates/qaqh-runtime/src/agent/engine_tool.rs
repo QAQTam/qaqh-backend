@@ -804,6 +804,14 @@ impl ToolEngine {
                 None,
                 Vec::new(),
             ),
+            ToolRunOutcome::CancelledOrphan => (
+                id.to_string(),
+                qaqh_types::ToolResult::cancelled(
+                    crate::agent::tool_runtime::CANCELLED_ORPHAN_TOOL_RESULT,
+                ),
+                None,
+                Vec::new(),
+            ),
             ToolRunOutcome::LedgerFailed(message) => (
                 id.to_string(),
                 qaqh_types::ToolResult::error_with("ledger_write_failed", message, false, None),

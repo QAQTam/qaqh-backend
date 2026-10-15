@@ -123,6 +123,11 @@ pub struct ToolCallContext {
     pub cancellation: CancellationToken,
     /// 进度出口（`capabilities.streaming == true` 且宿主启用时非空）。
     pub progress: Option<ProgressSink>,
+    /// exec 直通进度出口（v2.1 client-tools `Progress` 帧的宿主侧生产点）。
+    ///
+    /// runtime 在执行入口把 exec 进度通道 sender 注入；exec handler 优先
+    /// 直用，`progress`（ProgressSink → v1 进度桥）退为兜底。非 exec 工具忽略。
+    pub exec_progress: Option<crate::ExecProgressSender>,
     /// 调用来源。
     pub source: ToolCallSource,
 }
@@ -161,6 +166,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: ToolCallSource::Model,
         };
         assert_eq!(ctx.mode, AgentMode::Code);
@@ -185,6 +191,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: ToolCallSource::Model,
         };
 

@@ -278,6 +278,28 @@ mod tests {
     // 用 OnceLock 共享一个 service 实例（并行测试也不会重复初始化）。
     static SERVICE: std::sync::OnceLock<QaqhService> = std::sync::OnceLock::new();
 
+    fn service() -> &'static QaqhService {
+        SERVICE.get_or_init(|| {
+            // 隔离 data root：lib 单测不读/不写真实用户根（sessions/、
+            // workspaces.json），与其他测试二进制同一纪律。
+            static ISOLATED_DATA_ROOT: std::sync::OnceLock<tempfile::TempDir> =
+                std::sync::OnceLock::new();
+            let tmp = ISOLATED_DATA_ROOT.get_or_init(|| {
+                let tmp = tempfile::tempdir().expect("isolated data root tempdir");
+                // SAFETY: OnceLock 初始化窗口内的单次进程级设置，此后只读。
+                unsafe {
+                    std::env::set_var("QAQH_DATA_DIR", tmp.path().join(".qaqh"));
+                    std::env::set_var("HOME", tmp.path());
+                    std::env::set_var("USERPROFILE", tmp.path());
+                }
+                tmp
+            });
+            let _ = tmp;
+            qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+            QaqhService::init(qaqh_session::SessionManager::global())
+        })
+    }
+
     #[test]
     fn todo_cli_methods_are_registered() {
         let set = lookup("todo.set").expect("todo.set registered");
@@ -301,13 +323,6 @@ mod tests {
                 "{method} must require seed ownership"
             );
         }
-    }
-
-    fn service() -> &'static QaqhService {
-        SERVICE.get_or_init(|| {
-            qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
-            QaqhService::init(qaqh_session::SessionManager::global())
-        })
     }
 
     #[test]

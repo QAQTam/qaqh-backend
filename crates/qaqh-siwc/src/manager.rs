@@ -549,14 +549,72 @@ impl SiwcManager {
         if !set.expires_within(now_ms(), self.config.refresh_window_ms) {
             return Ok(set.access_token.unwrap_or_default());
         }
-        self.refresh_access_token(&profile.id, set)
+        self.refresh_access_token(&profile.id, set, false)
     }
 
-    /// 刷新（单飞）。返回新的 access token。
+    /// 账号面请求头（对标 codex `ChatGPT-Account-ID` / `X-OpenAI-Fedramp`，
+    /// 来源 `codex-rs/model-provider/src/auth.rs:105-111`）。
+    ///
+    /// 多账号 / 工作区场景下服务端按 `chatgpt-account-id` 路由到 id_token
+    /// 指向的账号。id_token 缺失或解析失败返回空 Vec——账号头是**增强项**，
+    /// 不下发只可能损失工作区路由精度，绝不阻塞推理请求。
+    pub fn account_headers(&self, profile_id: Option<&str>) -> Vec<(String, String)> {
+        let file = self.store.load();
+        let Some(profile) = (
+            match profile_id {
+                Some(id) => file.profile(id),
+                None => file.active(),
+            }
+        ) else {
+            return Vec::new();
+        };
+        let Ok(Some(set)) = profile.token_set() else {
+            return Vec::new();
+        };
+        let Some(id_token) = set.id_token.as_deref() else {
+            return Vec::new();
+        };
+        let Some(info) = crate::account::account_info_from_id_token(id_token) else {
+            return Vec::new();
+        };
+        let mut headers = Vec::new();
+        if let Some(account_id) = info.account_id {
+            headers.push(("chatgpt-account-id".to_string(), account_id));
+        }
+        if info.is_fedramp {
+            headers.push(("x-openai-fedramp".to_string(), "true".to_string()));
+        }
+        headers
+    }
+
+    /// 401 恢复入口：**无视缓存窗口**强制刷新（单飞与「先落盘再使用」检查点
+    /// 语义同 [`Self::refresh_access_token`]）。对标 codex 的
+    /// `ProviderUnauthorizedRecovery::Recovered`（`model-provider/src/provider.rs:48-53`）：
+    /// 401 → 强刷 → 整请求重试一次。返回新的 access token。
+    pub fn force_refresh(&self, profile_id: Option<&str>) -> Result<String, SiwcError> {
+        let file = self.store.load();
+        let profile = match profile_id {
+            Some(id) => file.profile(id).cloned().ok_or_else(|| {
+                SiwcError::new(SiwcCode::ProfileNotFound, format!("找不到 profile: {id}"))
+            })?,
+            None => file
+                .active()
+                .cloned()
+                .ok_or_else(|| SiwcError::new(SiwcCode::SignInRequired, "尚未登录 ChatGPT"))?,
+        };
+        let set = profile
+            .token_set()?
+            .ok_or_else(|| SiwcError::new(SiwcCode::SignInRequired, "该连接没有可用凭据"))?;
+        self.refresh_access_token(&profile.id, set, true)
+    }
+
+    /// 刷新（单飞）。`forced=false` 时不刷新仍在窗口内的缓存 token；
+    /// `forced=true`（401 恢复）跳过该捷径。返回 access token。
     fn refresh_access_token(
         &self,
         profile_id: &str,
         observed: TokenSet,
+        forced: bool,
     ) -> Result<String, SiwcError> {
         // 单飞：同一 profile 的并发刷新会互相作废（旋转式 token）。
         let _guard = self
@@ -575,11 +633,12 @@ impl SiwcManager {
             })?
         };
         let current = profile.token_set()?.unwrap_or_default();
-        if current
-            .access_token
-            .as_deref()
-            .filter(|token| !token.is_empty())
-            .is_some()
+        if !forced
+            && current
+                .access_token
+                .as_deref()
+                .filter(|token| !token.is_empty())
+                .is_some()
             && !current.expires_within(now_ms(), self.config.refresh_window_ms)
         {
             return Ok(current.access_token.unwrap_or_default());

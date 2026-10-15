@@ -196,6 +196,11 @@ pub struct ProviderConfig {
     /// `None` = 该 adapter 的默认 `Authorization: Bearer`。只被 `openai` / `responses`
     /// 两个 adapter 消费（`anthropic` 走 `x-api-key`、`gemini` 走 `key` 查询参数）。
     pub auth_header: Option<AuthHeader>,
+    /// OAuth 账号面请求头（`chatgpt-account-id` / `x-openai-fedramp`）。
+    /// 由账号类凭据来源（ChatgptPlan）每回合构建 provider 时注入，
+    /// `build_options` 统一下发；多账号/工作区按 id_token claim 路由。
+    /// 空 = 不发。对标 codex `model-provider/src/auth.rs:105-111`。
+    pub chatgpt_account_headers: Vec<(String, String)>,
     pub model: String,
     pub user_id_mode: Option<qaqh_types::UserSendMode>,
 
@@ -354,6 +359,7 @@ impl ProviderConfig {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             auth_header: None,
+            chatgpt_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode,
             chat_path,
@@ -393,6 +399,7 @@ impl ProviderConfig {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             auth_header: None,
+            chatgpt_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,
@@ -437,6 +444,7 @@ impl ProviderConfig {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             auth_header: None,
+            chatgpt_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,
@@ -475,6 +483,7 @@ impl ProviderConfig {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             auth_header: None,
+            chatgpt_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,

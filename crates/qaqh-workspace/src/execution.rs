@@ -10,6 +10,7 @@ use crate::permission::PermissionLevel;
 use crate::tool_api::{AgentMode, CancellationToken, SandboxMode, ToolCallContext, ToolCallSource};
 
 /// Return type for tool execution with interrupt support.
+#[derive(Debug)]
 pub struct ToolExecResult {
     pub content: String,
     pub success: bool,
@@ -69,6 +70,7 @@ pub fn execute_authorized(
         timeout: Duration::ZERO,
         cancellation,
         progress: None,
+        exec_progress: None,
         source: ToolCallSource::Model,
     };
     execute_authorized_with_context(call, context, progress_tx)
@@ -194,7 +196,6 @@ pub fn execute_authorized_with_context(
             args.clone(),
             &context.workspace_root,
             timeout_secs,
-            progress_tx,
             cancel_flag,
         )
     });
@@ -258,6 +259,10 @@ pub fn execute_authorized_with_context(
     // 补进显式上下文——准入侧构造的上下文超时为零值。
     let mut exec_ctx = context.clone();
     exec_ctx.timeout = prepared.effective_timeout;
+    // M1（v2.1 client-tools `Progress` 帧的宿主侧生产点）：runtime 侧 exec
+    // 进度通道 sender 在此直通注入 handler。此前该 sender 在 prepare 阶段被
+    // `_progress_tx` 丢弃，exec 全程零 realtime tool_progress。
+    exec_ctx.exec_progress = progress_tx;
     let _ = (authorized_workspace, authorized_resources);
     // 审计对象 before 指纹：派发前按与 finalize 同源的 args 口径快照
     // file_state 账本（键一致，命中即 before，未命中为 None）。
@@ -755,6 +760,47 @@ mod tests {
         test_guard
     }
 
+    /// M1 端到端回归：exec 进度通道 sender 经 `execute_authorized_with_context`
+    /// 直通注入 handler 后，realtime stdout chunk 必须到达 runtime 进度通道。
+    /// 旧行为：sender 在 prepare 阶段被 `_progress_tx` 丢弃，全程零事件。
+    #[test]
+    fn exec_progress_sender_reaches_the_exec_handler() {
+        let _test_guard = setup_test_manager();
+        let (tx, rx) = crate::bounded_exec_progress_channel();
+        let workspace_root = std::path::PathBuf::from(crate::current_workspace());
+        let context = crate::tool_api::ToolCallContext {
+            call_id: "exec-progress-1".to_string(),
+            session_id: "test_session".to_string(),
+            workspace_root: workspace_root.clone(),
+            mode: crate::tool_api::AgentMode::Code,
+            permission_level: crate::permission::PermissionLevel::SkipPermissions,
+            sandbox: crate::tool_api::SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+            exec_default_shell: None,
+            timeout: Duration::ZERO,
+            cancellation: crate::tool_api::CancellationToken::new(),
+            progress: None,
+            exec_progress: None,
+            source: crate::tool_api::ToolCallSource::Model,
+        };
+        let authorized = match crate::authorization::authorize_call_with_context(
+            "exec",
+            &serde_json::json!({ "command": "printf hello; sleep 0.4; printf world" }),
+            &context,
+        ) {
+            crate::authorization::Admission::Authorized(authorized) => authorized,
+            _ => panic!("exec must be admitted under skip-permissions"),
+        };
+        let handle = std::thread::spawn(move || {
+            crate::execution::execute_authorized_with_context(authorized, context, Some(tx))
+        });
+        let first = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("exec must stream progress chunks through the injected sender");
+        assert!(!first.chunk.is_empty(), "progress chunk must carry output");
+        let _ = handle.join().expect("exec completes");
+    }
+
     #[test]
     fn mcp_dynamic_execution_keeps_upstream_tool_name_in_metrics() {
         let _test_guard = setup_test_manager();
@@ -980,6 +1026,7 @@ mod tests {
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         let authorized = match crate::authorization::authorize_call_with_context(
@@ -1032,6 +1079,7 @@ mod tests {
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
+            exec_progress: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         assert!(matches!(
@@ -1075,6 +1123,7 @@ mod tests {
             timeout: Duration::ZERO,
             cancellation,
             progress: None,
+            exec_progress: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         let authorized = match crate::authorization::authorize_call_with_context(

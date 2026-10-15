@@ -326,6 +326,8 @@ fn assert_provider_plan_pair(body: &serde_json::Value, expected_result: &str) {
 #[test]
 fn plan_review_hook_yields_then_resumes_on_approve_and_reject() {
     SESSION_INIT.call_once(|| {
+        // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
+        common::init_isolated_data_root();
         qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
     });
 

@@ -287,6 +287,8 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     pub(crate) base_url: Option<&'a str>,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) ephemeral: bool,
+    /// P1-⑤：父会话档位；legacy/bootstrap 路径回落全局 config。
+    pub(crate) permission_level: u8,
 }
 
 pub(crate) struct CollectorArmSpec {
@@ -884,6 +886,11 @@ impl AgentRegistry {
             base_url,
             max_tokens,
             ephemeral: !persist,
+            // legacy/bootstrap 无父会话上下文，回落全局 config（fail-closed 1）。
+            permission_level: qaqh_config::Config::load()
+                .ok()
+                .map(|cfg| cfg.permission_level)
+                .unwrap_or(1),
         };
         let parent_session = qaqh_workspace::runtime::context()
             .map(|ctx| ctx.active_session)
@@ -1021,6 +1028,7 @@ impl AgentRegistry {
             base_url,
             max_tokens,
             ephemeral,
+            permission_level,
         } = options;
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}"));
@@ -1045,6 +1053,7 @@ impl AgentRegistry {
                 base_url: base_url.map(str::to_string),
                 max_tokens,
                 ephemeral,
+                permission_level,
             },
             parent_cancel,
         ) {
@@ -1479,6 +1488,11 @@ impl AgentRegistry {
                 base_url: config.base_url,
                 max_tokens: config.max_tokens,
                 ephemeral: config.ephemeral,
+                // reload 路径无父会话上下文，回落全局 config（fail-closed 1）。
+                permission_level: qaqh_config::Config::load()
+                    .ok()
+                    .map(|cfg| cfg.permission_level)
+                    .unwrap_or(1),
             },
             parent_cancel,
         )?;
@@ -2771,6 +2785,7 @@ mod tests {
                 base_url: None,
                 max_tokens: None,
                 ephemeral: true,
+                permission_level: 3,
             }),
             subscription_actor: SessionActor::new(4),
             liveness: None,

@@ -91,6 +91,9 @@ fn main() {
             qaqh_runtime::detect_os_info();
             let capabilities = qaqh_sandbox::configure_from_current_exe();
             log::info!("sandbox capabilities: {capabilities:?}");
+            // spy 快照 GC（启动即收）：Session::open 的 GC 挂在第一个写路径批上，
+            // 空闲期不回收——启动时对所有工作区 store 立即执行窗口 + 字节预算 GC。
+            log::info!("{}", qaqh_spy::Session::startup_gc());
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(server::run());
             // MCP 优雅收尾（同上）：显式 shutdown_all，防子进程孤儿。

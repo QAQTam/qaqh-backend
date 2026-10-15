@@ -912,6 +912,9 @@ fn apply_chatgpt_plan(
     })?;
     let token = manager.access_token(None).map_err(|e| e.to_string())?;
     provider.api_key = token;
+    // 账号面头：多账号/工作区按 id_token claim 路由（对标 codex
+    // `ChatGPT-Account-ID`）；解析不出则空 Vec（增强项，不阻塞推理请求）。
+    provider.chatgpt_account_headers = manager.account_headers(None);
     Ok(())
 }
 
