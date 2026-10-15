@@ -864,7 +864,7 @@ pub(crate) fn provider_for(
     // 凭据来源在 wire 分支**之后**落地：每个分支都写过一次 `api_key`，
     // 先覆盖会被后面的分支抹掉。
     if cfg.credential == qaqh_types::CredentialSource::ChatgptPlan {
-        apply_chatgpt_plan(&mut provider, cfg)?;
+        apply_chatgpt_plan(&mut provider, cfg, &ctx.agent.session.session_id)?;
     }
     if cfg.credential == qaqh_types::CredentialSource::DeepseekAccount {
         apply_deepseek_account(&mut provider, cfg)?;
@@ -883,6 +883,7 @@ pub(crate) fn provider_for(
 fn apply_chatgpt_plan(
     provider: &mut qaqh_gate::ProviderConfig,
     cfg: &qaqh_config::Config,
+    session_id: &str,
 ) -> Result<(), String> {
     if !matches!(cfg.wire, qaqh_types::Wire::Responses) {
         return Err(format!(
@@ -915,7 +916,28 @@ fn apply_chatgpt_plan(
     // 账号面头：多账号/工作区按 id_token claim 路由（对标 codex
     // `ChatGPT-Account-ID`）；解析不出则空 Vec（增强项，不阻塞推理请求）。
     provider.chatgpt_account_headers = manager.account_headers(None);
+    // 缓存亲和：对标 codex（codex-rs/core/src/client.rs:641-663，注释原文
+    // "ChatGPT derives cache affinity from the Responses session-id header"）。
+    // 该路由是 store:false 的无状态请求、每轮重发整段历史，没有稳定的亲和键，
+    // 前缀缓存几乎命中不了。body 的 `prompt_cache_key` 与 `session-id` 头同值。
+    let session_id = session_id.trim();
+    if !session_id.is_empty() {
+        provider.prompt_cache_key = Some(session_id.to_string());
+        provider
+            .chatgpt_account_headers
+            .extend(session_affinity_headers(session_id));
+    }
     Ok(())
+}
+
+/// 缓存亲和头（名字与 codex `build_session_headers` / `x-client-request-id` 一致）。
+/// 值都取本会话 id：本项目没有 thread 与 session 的区分，codex 在根线程上两者也同值。
+fn session_affinity_headers(session_id: &str) -> Vec<(String, String)> {
+    vec![
+        ("session-id".to_string(), session_id.to_string()),
+        ("thread-id".to_string(), session_id.to_string()),
+        ("x-client-request-id".to_string(), session_id.to_string()),
+    ]
 }
 
 /// 把「用本机 DeepSeek 账号余额」落到 provider 上。
@@ -1234,6 +1256,7 @@ mod chatgpt_plan_tests {
         let err = apply_chatgpt_plan(
             &mut p,
             &config(Wire::Messages, "", CredentialSource::ChatgptPlan),
+            "sess-1",
         )
         .expect_err("anthropic wire must be rejected");
         assert!(err.contains("responses 协议"), "{err}");
@@ -1252,6 +1275,7 @@ mod chatgpt_plan_tests {
                 "https://proxy.example/v1",
                 CredentialSource::ChatgptPlan,
             ),
+            "sess-1",
         )
         .expect_err("foreign endpoint must be rejected");
         assert!(err.contains("官方端点"), "{err}");
@@ -1275,6 +1299,7 @@ mod chatgpt_plan_tests {
                 qaqh_siwc::API_BASE,
                 CredentialSource::ChatgptPlan,
             ),
+            "sess-1",
         )
         .expect_err("no token available in tests");
         assert!(err.contains("ChatGPT"), "{err}");
@@ -1294,9 +1319,19 @@ mod chatgpt_plan_tests {
                 qaqh_siwc::API_BASE,
                 CredentialSource::ChatgptPlan,
             ),
+            "sess-1",
         )
         .expect_err("no token available in tests");
         assert!(err.contains("ChatGPT"), "{err}");
+    }
+
+    /// 亲和头三件套都取会话 id，名字与 codex 一致。
+    #[test]
+    fn session_affinity_headers_all_carry_the_session_id() {
+        let headers = session_affinity_headers("sess-42");
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["session-id", "thread-id", "x-client-request-id"]);
+        assert!(headers.iter().all(|(_, v)| v == "sess-42"));
     }
 
     /// 缺省（BYOK）完全不受影响：不碰 base_url / api_key / compat。

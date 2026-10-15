@@ -287,7 +287,8 @@ pub struct ResponsesCompat {
     ///
     /// 开启即启用一组**不可绕过**的收口（见 `SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS`
     /// 与 [`apply_siwc_plan`]）：不发 `max_output_tokens`、摘除被禁字段、
-    /// 关闭 hosted 工具、不下发 prompt 缓存键；且非流式入口会被改为流式。
+    /// 关闭 hosted 工具；且非流式入口会被改为流式。`prompt_cache_key` 不在禁用
+    /// 清单里，照常下发（缓存亲和，见 `build_options`）。
     pub siwc_plan: bool,
 }
 

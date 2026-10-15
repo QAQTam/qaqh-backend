@@ -593,11 +593,12 @@ fn build_options(provider: &ProviderConfig, policy: &GateRetryPolicy) -> Request
     options.timeout = Some(REQUEST_TOTAL_TIMEOUT);
     options.response_limits = roomy_response_limits();
     let mut switches = ProviderRequestOptions::default();
-    // prompt 缓存族在 plan 直连路由按未知字段处理（文档禁用 `prompt_cache_retention`，
-    // `prompt_cache_key` 同族）→ 一律不下发，避免 400 unsupported_capability。
-    if !provider.responses_compat.siwc_plan
-        && let Some(ref pk) = provider.prompt_cache_key
-    {
+    // plan 直连路由**要**下发 `prompt_cache_key`：官方 preview-limitations 的禁用
+    // 清单只有 `prompt_cache_retention`（见 SIWC_PLAN_FORBIDDEN_EXTRA_FIELDS），
+    // 没有 `prompt_cache_key`；codex 在同一路由上总是发它（codex-rs/core/src/
+    // client.rs:1049）。此前按「同族」一并屏蔽是误判，直接后果是 store:false 的
+    // 无状态请求每轮都拿不到前缀缓存。
+    if let Some(ref pk) = provider.prompt_cache_key {
         switches.prompt_cache_key = Some(pk.clone());
     }
     options.provider_request = switches;
@@ -1785,8 +1786,8 @@ mod tests {
         }
         let opts = build_options(&p, &GateRetryPolicy::default());
         assert!(
-            opts.provider_request.prompt_cache_key.is_none(),
-            "prompt 缓存族在 plan 路由不下发"
+            opts.provider_request.prompt_cache_key.as_deref() == Some("seed-1"),
+            "prompt_cache_key 不在禁用清单里，plan 路由必须下发（缓存亲和）"
         );
     }
 
@@ -1971,6 +1972,26 @@ mod tests {
         );
         let opts = build_options(&provider(), &GateRetryPolicy::default());
         assert!(opts.headers.get("chatgpt-account-id").is_none());
+    }
+
+    /// 缓存亲和头经 `chatgpt_account_headers` 通道统一下发（与账号头同一出口）。
+    #[test]
+    fn session_affinity_headers_flow_into_request_options() {
+        let mut p = provider();
+        p.responses_compat.siwc_plan = true;
+        p.chatgpt_account_headers = vec![
+            ("session-id".to_string(), "sess-7".to_string()),
+            ("thread-id".to_string(), "sess-7".to_string()),
+            ("x-client-request-id".to_string(), "sess-7".to_string()),
+        ];
+        let opts = build_options(&p, &GateRetryPolicy::default());
+        for name in ["session-id", "thread-id", "x-client-request-id"] {
+            assert_eq!(
+                opts.headers.get(name).and_then(|v| v.to_str().ok()),
+                Some("sess-7"),
+                "{name} 必须出现在出站请求头里"
+            );
+        }
     }
 
     /// 回放 item id 卫生（对标 codex `ResponseItemId::is_prefixed`）：
