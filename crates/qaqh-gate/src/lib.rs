@@ -9,9 +9,9 @@
 //! boundaries.  The clippy `string_slice` lint is allowed at the crate
 //! level (see Cargo.toml).
 
-mod anthropic_sdk;
+mod messages_sdk;
 mod gemini_sdk;
-mod openai_sdk;
+mod chat_sdk;
 mod request_context;
 mod responses_sdk;
 #[cfg(test)]
@@ -61,7 +61,7 @@ pub fn chat_stream(
             cancel,
             on_event,
         ),
-        ProviderKind::Anthropic => anthropic_sdk::chat_stream_anthropic(
+        ProviderKind::Messages => messages_sdk::chat_stream_messages(
             provider,
             &provider.model,
             messages,
@@ -72,7 +72,7 @@ pub fn chat_stream(
             cancel,
             on_event,
         ),
-        ProviderKind::OpenAi => openai_sdk::chat_stream_openai(
+        ProviderKind::Chat => chat_sdk::chat_stream_chat(
             provider,
             &provider.model,
             messages,
@@ -107,11 +107,11 @@ pub fn chat_sync(
         ProviderKind::Responses => {
             responses_sdk::chat_sync_responses(provider, &provider.model, messages, max_tokens)
         }
-        ProviderKind::Anthropic => {
-            anthropic_sdk::chat_sync_anthropic(provider, &provider.model, messages, max_tokens)
+        ProviderKind::Messages => {
+            messages_sdk::chat_sync_messages(provider, &provider.model, messages, max_tokens)
         }
-        ProviderKind::OpenAi => {
-            openai_sdk::chat_sync_openai(provider, &provider.model, messages, max_tokens)
+        ProviderKind::Chat => {
+            chat_sdk::chat_sync_chat(provider, &provider.model, messages, max_tokens)
         }
         ProviderKind::Gemini => {
             gemini_sdk::chat_sync_gemini(provider, &provider.model, messages, max_tokens)

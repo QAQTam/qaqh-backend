@@ -159,9 +159,9 @@ impl LegacyEndpoint {
         let defaults = EndpointCompat::default();
         let wire = self.wire();
         let path = match wire {
-            Wire::OpenAi => self.chat_path.clone(),
+            Wire::Chat => self.chat_path.clone(),
             Wire::Responses => self.responses_path.clone(),
-            Wire::Anthropic => self.anthropic_path.clone(),
+            Wire::Messages => self.anthropic_path.clone(),
             // 迁移表里没有 Gemini 端点（该 wire 是 BYOK 之后新增的）。
             Wire::Gemini => None,
         }
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn legacy_preset_maps_wire_url_and_compat_defaults() {
         let preset = legacy_preset("deepseek", "openai").expect("deepseek/openai");
-        assert_eq!(preset.wire, Wire::OpenAi);
+        assert_eq!(preset.wire, Wire::Chat);
         assert_eq!(preset.base_url, "https://api.deepseek.com");
         assert!(preset.compat.include_stream_usage);
         assert_eq!(
@@ -340,7 +340,7 @@ mod tests {
         );
 
         let zcode = legacy_preset("zcode", "anthropic").expect("zcode/anthropic");
-        assert_eq!(zcode.wire, Wire::Anthropic);
+        assert_eq!(zcode.wire, Wire::Messages);
         assert_eq!(
             zcode.compat.path.as_deref(),
             Some("/api/anthropic/v1/messages")

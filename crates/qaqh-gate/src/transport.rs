@@ -1,6 +1,6 @@
 //! gate::transport — SDK 桥接层共享的传输零件。
 //!
-//! HTTP/SSE/重试已整体移交 mutil-ai（`anthropic_sdk` / `openai_sdk` /
+//! HTTP/SSE/重试已整体移交 mutil-ai（`messages_sdk` / `chat_sdk` /
 //! `responses_sdk` + `sdk_common`）；本模块只保留仍被复用的同步门面
 //! （crate 级 current-thread runtime 的 `block_on`）、可取消睡眠、
 //! `RetryPolicy`（gate 侧旋钮，编译成 SDK 策略）、错误描述表、
