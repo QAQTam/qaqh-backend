@@ -16,6 +16,8 @@
 //! | [`progress`] | [`ToolProgress`] / [`ProgressSink`] |
 //! | [`typed`] / [`erased`] | [`TypedTool`] / [`ErasedTool`] |
 //! | [`schema`] | 紧凑 schema 生成器（SDK v2：schema 单一事实源 = 类型） |
+//! | [`coerce`] | 模型侧参数的 schema 归一（stringified 数字/数组 → JSON 字面量） |
+//! | [`lenient`] | 类型级 wire 容错（`deserialize_with`）：schema 看不见的字段也吃字符串数字 |
 //! | [`dynamic`] | [`DynamicToolAdapter`]（MCP/LSP 动态工具 typed 适配器） |
 //! | [`result`] | [`map_tool_result`]（v1 `ToolResult` → [`ToolOutcome`] 映射 + 进度桥） |
 //! | [`boundary`] | 工具 ↔ loop 执行边界（[`ExecuteBatch`] / [`BatchOutcome`]） |
@@ -30,12 +32,14 @@
 
 pub mod args;
 pub mod capabilities;
+pub mod coerce;
 pub mod context;
 pub mod descriptor;
 pub mod display;
 pub mod dynamic;
 pub mod erased;
 pub mod error;
+pub mod lenient;
 pub mod output;
 pub mod progress;
 pub mod result;

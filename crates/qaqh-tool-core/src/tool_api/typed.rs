@@ -4,6 +4,7 @@
 //! 生产工具一律经 `register_typed` 接入；本模块是 typed 契约的落点。
 //! 新工具只能实现本 trait。
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
@@ -51,11 +52,29 @@ pub trait TypedTool: Send + Sync {
 /// model/display/canonical 三面；描述符由 meta + 类型生成 schema 组装。
 pub struct TypedToolAdapter<T> {
     tool: T,
+    /// `T::Args` 的生成 schema（首次用到时算一次，之后复用）。
+    ///
+    /// 注册面（`descriptor()`）与执行面（参数归一、失败
+    /// hint）必须看同一份 schema，否则「发给模型的类型」与「我们据以容错
+    /// 的类型」会漂移。
+    input_schema: OnceLock<serde_json::Value>,
 }
 
 impl<T> TypedToolAdapter<T> {
     pub fn new(tool: T) -> Self {
-        Self { tool }
+        Self {
+            tool,
+            input_schema: OnceLock::new(),
+        }
+    }
+}
+
+impl<T: TypedTool> TypedToolAdapter<T> {
+    /// 缓存版 `schema_of::<T::Args>()`（见 `input_schema` 字段注释）。
+    fn cached_input_schema(&self) -> serde_json::Value {
+        self.input_schema
+            .get_or_init(|| schema_of::<T::Args>())
+            .clone()
     }
 }
 
@@ -65,7 +84,7 @@ where
 {
     fn descriptor(&self) -> ToolDescriptor {
         let mut descriptor = ToolDescriptor::from(self.tool.meta());
-        descriptor.input_schema = schema_of::<T::Args>();
+        descriptor.input_schema = self.cached_input_schema();
         descriptor.output_schema = schema_of::<T::Output>();
         descriptor
     }
@@ -77,11 +96,20 @@ where
     ) -> Result<ToolOutcome, FatalToolError> {
         let started = Instant::now();
         let raw_args = args.clone();
-        let args = match serde_json::from_value::<T::Args>(args) {
+        // 先按 schema 归一再反序列化：模型把 3 / true / ["a"] 写成字符串是
+        // 常态而非异常（见 [`super::coerce`]），这里兜不住才轮到报错。
+        let args = match serde_json::from_value::<T::Args>(super::coerce::coerce(
+            &args,
+            &self.cached_input_schema(),
+        )) {
             Ok(args) => args,
             Err(error) => {
                 return Ok(recoverable_outcome(
-                    ToolError::invalid_arguments(format!("invalid arguments: {error}")),
+                    ToolError::invalid_arguments(format!("invalid arguments: {error}"))
+                        .with_retryable(true)
+                        .with_hint(super::coerce::expected_shape_hint(
+                            &self.cached_input_schema(),
+                        )),
                     started.elapsed(),
                 ));
             }
@@ -296,5 +324,112 @@ mod tests {
             outcome.display.summary, None,
             "display.summary must be explicitly constructed by the tool projector"
         );
+    }
+
+    mod coercion {
+        use super::*;
+        use crate::tool_api::ToolErrorKind;
+
+        #[derive(Debug, Deserialize, JsonSchema)]
+        /// 需要类型归一的参数（模型爱把这三个可选字段写成字符串）。
+        #[allow(dead_code)] // 仅用于 execute 路径断言，字段值由 run 拼回文本。
+        struct CoercionArgs {
+            /// 文本。
+            text: String,
+            /// 上限。
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            max: Option<u64>,
+            /// 过滤模式。
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            globs: Option<Vec<String>>,
+            /// 干跑。
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            dry: Option<bool>,
+        }
+
+        struct CoercionTool;
+
+        impl TypedTool for CoercionTool {
+            type Args = CoercionArgs;
+            type Output = EchoOutput;
+
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::new(
+                    "coercion_probe",
+                    "参数归一探针",
+                    ToolCategory::Read,
+                    ToolRisk::ReadOnly,
+                    Duration::from_secs(5),
+                )
+            }
+
+            fn run(
+                &self,
+                _ctx: &ToolCallContext,
+                args: Self::Args,
+            ) -> Result<Self::Output, ToolExecutionError> {
+                Ok(EchoOutput {
+                    text: format!(
+                        "{}|{}|{:?}|{}",
+                        args.text,
+                        args.max.unwrap_or_default(),
+                        args.globs.unwrap_or_default(),
+                        args.dry.unwrap_or(false),
+                    ),
+                })
+            }
+        }
+
+        #[test]
+        fn stringified_numbers_arrays_bools_are_accepted() {
+            let adapter = TypedToolAdapter::new(CoercionTool);
+            let outcome = adapter
+                .execute(
+                    ctx(),
+                    serde_json::json!({
+                        "text": "hi",
+                        "max": "3",
+                        "globs": "[\"*.rs\"]",
+                        "dry": "true"
+                    }),
+                )
+                .expect("execute ok");
+            assert!(
+                outcome.error.is_none(),
+                "归一后不该再报参数错: {:?}",
+                outcome.error
+            );
+            assert_eq!(outcome.model.text, "hi|3|[\"*.rs\"]|true");
+        }
+
+        #[test]
+        fn uncoercible_args_fail_with_field_typed_hint() {
+            let adapter = TypedToolAdapter::new(CoercionTool);
+            let outcome = adapter
+                .execute(ctx(), serde_json::json!({ "text": "hi", "max": "abc" }))
+                .expect("execute ok");
+            let error = outcome.error.expect("坏参数必须报错");
+            assert!(matches!(error.kind, ToolErrorKind::InvalidArguments));
+            assert!(error.retryable, "类型错模型可自行纠正 → 允许重试");
+            let hint = error.hint.expect("必须带字段级 hint");
+            assert!(hint.contains("max?=integer"), "{hint}");
+            assert!(hint.contains("globs?=array<string>"), "{hint}");
+            assert!(hint.contains("text=string"), "{hint}");
+            assert!(
+                outcome.model.text.contains("Hint:"),
+                "hint 要渲染进模型面: {}",
+                outcome.model.text
+            );
+        }
+
+        #[test]
+        fn registered_and_coercion_schemas_are_the_same_object() {
+            // descriptor 与归一面共用缓存 schema，否则「发给模型的类型」与
+            // 「据以容错的类型」会漂移。
+            let adapter = TypedToolAdapter::new(CoercionTool);
+            let registered = adapter.descriptor().input_schema;
+            assert_eq!(registered["properties"]["max"]["type"], "integer");
+            assert_eq!(registered["properties"]["globs"]["type"], "array");
+        }
     }
 }
