@@ -789,8 +789,8 @@ pub(crate) fn provider_for(
     let compat = cfg.compat.clone();
     // 路径覆写按 wire 生效；未覆写传 None，由 gate 用该 wire 的规范路径。
     let mut provider = match cfg.wire {
-        qaqh_types::Wire::Anthropic => {
-            let mut p = qaqh_gate::ProviderConfig::anthropic(
+        qaqh_types::Wire::Messages => {
+            let mut p = qaqh_gate::ProviderConfig::messages(
                 &cfg.base_url,
                 &cfg.api_key,
                 &cfg.model,
@@ -821,8 +821,8 @@ pub(crate) fn provider_for(
             };
             p
         }
-        qaqh_types::Wire::OpenAi => {
-            let mut p = qaqh_gate::ProviderConfig::openai(
+        qaqh_types::Wire::Chat => {
+            let mut p = qaqh_gate::ProviderConfig::chat(
                 &cfg.base_url,
                 &cfg.api_key,
                 &cfg.model,
@@ -932,7 +932,7 @@ fn apply_deepseek_account(
     provider: &mut qaqh_gate::ProviderConfig,
     cfg: &qaqh_config::Config,
 ) -> Result<(), String> {
-    if !matches!(cfg.wire, qaqh_types::Wire::OpenAi) {
+    if !matches!(cfg.wire, qaqh_types::Wire::Chat) {
         return Err(format!(
             "DeepSeek 账号额度只支持 openai（chat completions）协议（当前 profile 是 {:?}）：请在设置里把该 profile 的 wire 改为 openai",
             cfg.wire
@@ -1157,7 +1157,7 @@ mod deepseek_account_tests {
     /// 账号余额只提供 openai（chat completions）：别的 wire 一律拒绝，不回退。
     #[test]
     fn account_route_rejects_a_non_openai_wire() {
-        let err = apply_deepseek_account(&mut provider(), &config(Wire::Anthropic, ""))
+        let err = apply_deepseek_account(&mut provider(), &config(Wire::Messages, ""))
             .expect_err("anthropic wire must be rejected");
         assert!(err.contains("openai"), "{err}");
         let err = apply_deepseek_account(&mut provider(), &config(Wire::Responses, ""))
@@ -1173,7 +1173,7 @@ mod deepseek_account_tests {
             "http://api.deepseek.com",
             "https://api.deepseek.com/v1",
         ] {
-            let err = apply_deepseek_account(&mut provider(), &config(Wire::OpenAi, base))
+            let err = apply_deepseek_account(&mut provider(), &config(Wire::Chat, base))
                 .expect_err("foreign endpoint must be rejected");
             assert!(err.contains("官方端点"), "{base} → {err}");
         }
@@ -1184,7 +1184,7 @@ mod deepseek_account_tests {
     #[test]
     fn account_route_requires_a_signed_in_local_account_and_pins_the_bare_header() {
         let mut p = provider();
-        let err = apply_deepseek_account(&mut p, &config(Wire::OpenAi, ""))
+        let err = apply_deepseek_account(&mut p, &config(Wire::Chat, ""))
             .expect_err("no signed-in account in tests");
         assert!(err.contains("先登录"), "{err}");
         assert_eq!(p.base_url, qaqh_dsaccount::protocol::INFERENCE_ORIGIN);
@@ -1233,7 +1233,7 @@ mod chatgpt_plan_tests {
         let mut p = provider();
         let err = apply_chatgpt_plan(
             &mut p,
-            &config(Wire::Anthropic, "", CredentialSource::ChatgptPlan),
+            &config(Wire::Messages, "", CredentialSource::ChatgptPlan),
         )
         .expect_err("anthropic wire must be rejected");
         assert!(err.contains("responses 协议"), "{err}");

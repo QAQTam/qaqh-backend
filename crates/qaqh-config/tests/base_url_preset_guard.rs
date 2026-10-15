@@ -128,7 +128,7 @@ max_tokens = 16384
         "预设起点不得留空端点: {}",
         cfg.base_url
     );
-    assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
+    assert_eq!(cfg.wire, qaqh_types::Wire::Chat);
     assert_eq!(cfg.context_length, 128_000);
     let first_text = std::fs::read_to_string(root.join("config.toml")).expect("read preset");
     assert!(

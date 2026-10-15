@@ -1703,7 +1703,7 @@ mod c3_migration_tests {
         assert_eq!(profile["context_length"].as_integer(), Some(256_000));
         assert!(profile.get("context_limit").is_none(), "{text}");
         // 预设坐标退役：wire 落到记录里，endpoint/provider_id 不再出现。
-        assert_eq!(profile["wire"].as_str(), Some("openai"));
+        assert_eq!(profile["wire"].as_str(), Some("chat"));
         assert!(profile.get("endpoint").is_none(), "{text}");
 
         // 重载幂等：值经 profile 回来，不再有扁平覆盖。
@@ -1806,7 +1806,7 @@ responses_effort_max = \"max\"
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
         assert_eq!(cfg.model, "deepseek-chat");
         assert_eq!(cfg.base_url, "https://api.deepseek.com");
-        assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
+        assert_eq!(cfg.wire, qaqh_types::Wire::Chat);
         assert_eq!(cfg.max_tokens, 16_384);
         assert_eq!(cfg.context_length, 128_000);
         assert_eq!(cfg.reasoning_effort, "high");
@@ -1861,7 +1861,7 @@ endpoint = \"openai\"
 ",
         );
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
-        assert_eq!(cfg.wire, qaqh_types::Wire::OpenAi);
+        assert_eq!(cfg.wire, qaqh_types::Wire::Chat);
         assert_eq!(
             cfg.compat.thinking_mode,
             qaqh_types::ThinkingParamMode::MiniMaxAdaptive,
@@ -1990,7 +1990,7 @@ wire = \"responses\"
 ",
         );
         let mut cfg = Config::load_from_paths_with(store, secrets).expect("load");
-        assert_eq!(cfg.wire, qaqh_types::Wire::Anthropic);
+        assert_eq!(cfg.wire, qaqh_types::Wire::Messages);
         assert!(cfg.compat.thinking_budget_large);
         cfg.apply_profile("b");
         assert_eq!(
@@ -2005,7 +2005,7 @@ wire = \"responses\"
         assert_eq!(cfg.context_length, 32_000);
         assert_eq!(cfg.base_url, "https://b/v1");
         cfg.apply_profile("a");
-        assert_eq!(cfg.wire, qaqh_types::Wire::Anthropic);
+        assert_eq!(cfg.wire, qaqh_types::Wire::Messages);
         assert!(cfg.compat.thinking_budget_large);
         let _ = std::fs::remove_dir_all(&dir);
     }
