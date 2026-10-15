@@ -35,3 +35,4 @@ crates/*/bindings/
 
 # 本地 git worktree 与代理工作区（约定见 docs/todo/README.md §5.2）
 /.codex/worktree/
+.DS_Store
