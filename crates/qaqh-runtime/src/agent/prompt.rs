@@ -185,6 +185,56 @@ mod tests {
         assert!(full_system_prompt_with_env("").contains(std::env::consts::OS));
     }
 
+    /// 全量面（内置 22 + subagent 18）类型数组守卫：`type` 不得是数组形态。
+    ///
+    /// `qaqh-workspace` 的门面 spot-check 因循环 dev-dep 只覆盖 22 个内置工具，
+    /// subagent 面只能在这里查。这是 `invalid type: string "3", expected u64`
+    /// 的根因锁——`["integer","null"]` 发到 provider 会被拒绝或降级成
+    /// `string`，模型于是把数字/数组写成字符串字面量。
+    #[test]
+    fn all_tool_defs_emit_single_type() {
+        fn walk(value: &serde_json::Value, path: &str, hits: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, inner) in map {
+                        if key == "type" && inner.is_array() {
+                            hits.push(format!("{path}.{key}={inner}"));
+                        } else {
+                            walk(inner, &format!("{path}.{key}"), hits);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, inner) in items.iter().enumerate() {
+                        walk(inner, &format!("{path}[{index}]"), hits);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mgr = qaqh_workspace::registration::build_tool_manager(&[qaqh_subagent::register]);
+        let defs = mgr.filtered_defs();
+        assert!(!defs.is_empty(), "工具面不得为空");
+        let mut hits = Vec::new();
+        let mut serialized = String::new();
+        for def in &defs {
+            walk(&def.function.parameters, &def.function.name, &mut hits);
+            serialized
+                .push_str(&serde_json::to_string(&def.function.parameters).unwrap_or_default());
+        }
+        assert!(
+            hits.is_empty(),
+            "union type arrays leaked into wire schema: {hits:?}"
+        );
+        // schemars 的 `"format":"uint64"` 也不在 provider 白名单里（只认
+        // int32/int64/float/double），生成端就该剥掉；真约束 minimum/maxItems 保留。
+        assert!(
+            !serialized.contains("\"format\":\""),
+            "format 注解泄漏到 wire schema"
+        );
+    }
+
     #[test]
     fn prompt_and_tool_defs_char_budget() {
         let identity = full_system_prompt();
@@ -221,13 +271,17 @@ mod tests {
         }
 
         // backend_prompt.md 本就是 ~10k 字符的身份文档（128 上限已过期）。
+        // 2026-10-15 实测 13,106（b517876 于 10-13 扩写身份段后未跟预算）：
+        // 抬到 14k 锁回涨，真要压回 12k 得单独修剪身份文档，属后续工作。
         assert!(
-            identity_chars <= 12_000,
+            identity_chars <= 14_000,
             "identity prompt too long: {identity_chars}"
         );
         // SDK v2 迁移后实测：40 工具 25,673 字符（生成 schema 带完整字段级
         // description）。上限锁在此处防回涨；压缩到 handoff 目标 <20k 需要单独
         // 修剪字段描述，属后续工作。
+        // 2026-10-15：类型折叠 + 剥 format 后实测 41 工具 24,754 字符（工具数
+        // 还多了一个），wire 税下降，故不放宽此上限。
         assert!(
             tools_chars <= 28_000,
             "tool_defs exceeds 28k chars: {tools_chars}"
@@ -235,10 +289,7 @@ mod tests {
         // 逐工具预算：实测最大 1,581（todo_write）。1,400 的 handoff 目标值
         // 当前不可达，锁实测值 + 少量余量；压缩时优先 todo_write/exec/read。
         for (chars, name) in &rows {
-            assert!(
-                *chars <= 1_600,
-                "tool {name} exceeds 1,600 chars: {chars}"
-            );
+            assert!(*chars <= 1_600, "tool {name} exceeds 1,600 chars: {chars}");
         }
     }
 
