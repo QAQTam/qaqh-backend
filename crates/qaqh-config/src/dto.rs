@@ -146,10 +146,10 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     // DeepSeek 账号余额走 OpenAI 兼容的 chat completions：同样在保存期拦掉。
     // 官方 base_url 那一半同样不在这里查（权威在 `apply_deepseek_account`）。
     if next_credential == qaqh_types::CredentialSource::DeepseekAccount
-        && next_wire != qaqh_types::Wire::OpenAi
+        && next_wire != qaqh_types::Wire::Chat
     {
         return Err(format!(
-            "credential=deepseek_account 必须配 openai 协议（wire={}）：账号余额只提供 chat completions",
+            "credential=deepseek_account 必须配 chat 协议（wire={}）：账号余额只提供 chat completions",
             next_wire.as_str()
         ));
     }
@@ -276,7 +276,7 @@ mod tests {
                 effort: Some("high".into()),
                 context_length: 128_000,
                 base_url: String::new(),
-                wire: qaqh_types::Wire::OpenAi,
+                wire: qaqh_types::Wire::Chat,
                 compat: None,
                 api_key: None,
                 credential: qaqh_types::CredentialSource::ApiKey,
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn apply_patch_rejects_plan_on_a_non_responses_wire() {
         let mut cfg = Config {
-            wire: qaqh_types::Wire::OpenAi,
+            wire: qaqh_types::Wire::Chat,
             ..Default::default()
         };
         let err = apply_patch(
@@ -505,7 +505,7 @@ mod tests {
             },
         )
         .expect_err("responses wire + account must be rejected");
-        assert!(err.contains("openai"), "{err}");
+        assert!(err.contains("chat"), "{err}");
         assert_eq!(
             cfg.credential,
             qaqh_types::CredentialSource::ApiKey,
@@ -538,7 +538,7 @@ mod tests {
             },
         )
         .expect_err("moving the wire away must be rejected");
-        assert!(err.contains("openai"), "{err}");
+        assert!(err.contains("chat"), "{err}");
         assert_eq!(
             cfg.credential,
             qaqh_types::CredentialSource::DeepseekAccount,

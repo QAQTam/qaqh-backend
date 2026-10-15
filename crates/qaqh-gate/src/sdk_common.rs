@@ -1,5 +1,5 @@
 //! Shared machinery for the `mutil-ai`-powered transports
-//! (`anthropic_sdk`, `openai_sdk`). Kept separate from `transport.rs`
+//! (`messages_sdk`, `chat_sdk`). Kept separate from `transport.rs`
 //! (the legacy hand-written stack) so the two can coexist during the
 //! strangler migration and the legacy half can be deleted wholesale.
 

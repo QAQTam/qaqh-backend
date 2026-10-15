@@ -135,7 +135,18 @@ fn main() {
     );
 
     let mut provider = match wire.as_str() {
-        "anthropic" => ProviderConfig::anthropic(&url, "probe-key", &model, None),
+        "messages" => ProviderConfig::messages(&url, "probe-key", &model, None),
+        "chat" => ProviderConfig::chat(
+            &url,
+            "probe-key",
+            &model,
+            None,               // user_id_mode
+            None,               // chat_path
+            Default::default(), // thinking_mode
+            Default::default(), // cache_field
+            false,              // supports_thinking
+            None,               // do_sample
+        ),
         _ => ProviderConfig::responses(&url, "probe-key", &model, None),
     };
     provider.retry = Some(qaqh_types::RetrySpec {

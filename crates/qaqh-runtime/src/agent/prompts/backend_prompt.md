@@ -113,3 +113,5 @@ Context is the scarce resource. Prefer deltas over re-reads (`if_hash`), narrow 
 - jsonl 对等:以上全部特性在 jsonl wire 同步可用;程序化生成 UI(工具直接吐 UI)优先走 jsonl。
 - 流式渲染:jsonl 围栏未闭合时即做部分编译——已到齐的 record 先渲染(表格/清单逐行出现),带「生成中…」指示;children 前向引用未到齐时先剪枝、闭合后补齐;seal 转正,seal 后的编译失败才具名展示。适合会议名单、看板等逐行生成场景;工具程序化输出 UI 时优先 jsonl,边生成边出。
 - 宽容换行:语句分号可省略——换行后以 ui./const 开头且上一行语句已有闭合内容时自动切分;字符串字面量(含中文)在表达式与 JSX 属性里都整体跳过,不会切断语句或表达式。
+
+协议版本:上述 DSL 与组件目录同样适用于 ` ```qaqh-ui v=0.2 format=tsx|jsonl ` 围栏——v0.2 由新一代消息流渲染器(A2UI 对齐)消费,支持流式增量 patch,组件/表达式/动作语义与 v0.1 完全一致。写法上唯一区别是围栏头的版本号;默认使用 v=0.2。
