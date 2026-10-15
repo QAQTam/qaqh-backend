@@ -18,16 +18,31 @@ pub enum UserSendMode {
 }
 
 /// The wire protocol an endpoint speaks.
+///
+/// 统一命名对齐各上游官方称谓：Chat（OpenAI Chat Completions）、
+/// Responses（OpenAI Responses）、Messages（Anthropic Messages）、
+/// Gemini（Gemini `generateContent`）。序列化键即官方短名；历史拼写
+/// （`"openai"` / `"anthropic"` / `"claude"` / `"chat_completions"` 等）
+/// 经 serde alias 与 [`Wire::parse`] 继续接受，旧配置零迁移。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Wire {
     /// OpenAI Chat Completions (`/chat/completions`).
     #[default]
-    OpenAi,
+    #[serde(
+        rename = "chat",
+        alias = "openai",
+        alias = "openai-compatible",
+        alias = "chat_completions",
+        alias = "chat/completions"
+    )]
+    Chat,
     /// OpenAI Responses (`/responses`).
+    #[serde(alias = "openai-responses")]
     Responses,
     /// Anthropic Messages (`/v1/messages`).
-    Anthropic,
+    #[serde(rename = "messages", alias = "anthropic", alias = "claude")]
+    Messages,
     /// Gemini `generateContent` (`/models/{model}:generateContent`).
     ///
     /// Streaming uses the sibling `:streamGenerateContent` path with
@@ -39,22 +54,22 @@ impl Wire {
     /// Stable identifier, matching the serialized form and the gate's dispatch key.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::OpenAi => "openai",
+            Self::Chat => "chat",
             Self::Responses => "responses",
-            Self::Anthropic => "anthropic",
+            Self::Messages => "messages",
             Self::Gemini => "gemini",
         }
     }
 
     /// Parse a wire name. Legacy protocol spellings are accepted so migrated
-    /// configurations keep resolving (`"openai-compatible"` → [`Wire::OpenAi`]).
+    /// configurations keep resolving (`"openai-compatible"` → [`Wire::Chat`]).
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "openai" | "openai-compatible" | "chat" | "chat_completions" | "chat/completions" => {
-                Some(Self::OpenAi)
+                Some(Self::Chat)
             }
             "responses" | "openai-responses" => Some(Self::Responses),
-            "anthropic" | "messages" | "claude" => Some(Self::Anthropic),
+            "anthropic" | "messages" | "claude" => Some(Self::Messages),
             "gemini"
             | "google"
             | "generatecontent"
@@ -279,9 +294,9 @@ impl EndpointCompat {
     /// sibling (`Wire::Gemini` doc).
     pub fn path_for(&self, wire: Wire) -> String {
         self.path.clone().unwrap_or_else(|| match wire {
-            Wire::OpenAi => "/chat/completions".to_string(),
+            Wire::Chat => "/chat/completions".to_string(),
             Wire::Responses => "/responses".to_string(),
-            Wire::Anthropic => "/v1/messages".to_string(),
+            Wire::Messages => "/v1/messages".to_string(),
             Wire::Gemini => "/models/{model}:generateContent".to_string(),
         })
     }
@@ -298,9 +313,9 @@ mod tests {
             wire: Wire,
         }
         for (wire, name) in [
-            (Wire::OpenAi, "openai"),
+            (Wire::Chat, "chat"),
             (Wire::Responses, "responses"),
-            (Wire::Anthropic, "anthropic"),
+            (Wire::Messages, "messages"),
             (Wire::Gemini, "gemini"),
         ] {
             assert_eq!(wire.as_str(), name);
@@ -308,10 +323,22 @@ mod tests {
             let row: Row = toml::from_str(&format!("wire = \"{name}\"")).expect(name);
             assert_eq!(row.wire, wire);
         }
-        assert_eq!(Wire::parse("  OpenAI-Compatible "), Some(Wire::OpenAi));
+        // 旧拼写经 serde alias / parse 继续可用：已发布配置零迁移。
+        for (legacy, wire) in [
+            ("openai", Wire::Chat),
+            ("openai-compatible", Wire::Chat),
+            ("chat_completions", Wire::Chat),
+            ("anthropic", Wire::Messages),
+            ("claude", Wire::Messages),
+        ] {
+            assert_eq!(Wire::parse(legacy), Some(wire), "parse: {legacy}");
+            let row: Row = toml::from_str(&format!("wire = \"{legacy}\"")).expect(legacy);
+            assert_eq!(row.wire, wire, "serde: {legacy}");
+        }
+        assert_eq!(Wire::parse("  OpenAI-Compatible "), Some(Wire::Chat));
         assert_eq!(Wire::parse("google"), Some(Wire::Gemini));
         assert_eq!(Wire::parse("unknown"), None);
-        assert_eq!(Wire::default(), Wire::OpenAi);
+        assert_eq!(Wire::default(), Wire::Chat);
     }
 
     #[test]
@@ -366,6 +393,6 @@ idle_timeout_secs = 60
             path: Some("/v1/inner/responses".into()),
             ..Default::default()
         };
-        assert_eq!(compat.path_for(Wire::OpenAi), "/v1/inner/responses");
+        assert_eq!(compat.path_for(Wire::Chat), "/v1/inner/responses");
     }
 }

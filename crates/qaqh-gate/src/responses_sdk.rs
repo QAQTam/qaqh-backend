@@ -1215,7 +1215,7 @@ async fn consume(
                     .map(|n| canonical_function_name(n, &compat))
                     .unwrap_or_default();
                 adopt_identity(&mut entry.1, Some(canonical.as_str()));
-                // 字节水位守卫（与 anthropic_sdk 同款不变量）：累计快照只增不回退。
+                // 字节水位守卫（与 messages_sdk 同款不变量）：累计快照只增不回退。
                 // 网关/SDK 的 `arguments_so_far` 可能滞后于已 append 的 delta——
                 // 无守卫的赋值会把缓冲**截短**，拼出非法 JSON；下游一旦解析失败，
                 // 旧代码会伪造 `{}` 当参数，模型就看到「missing field `patch`」

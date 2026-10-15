@@ -595,7 +595,7 @@ async fn consume(
 }
 
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
-pub fn chat_stream_anthropic(
+pub fn chat_stream_messages(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,
@@ -652,7 +652,7 @@ pub fn chat_stream_anthropic(
     )
 }
 
-pub fn chat_sync_anthropic(
+pub fn chat_sync_messages(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,

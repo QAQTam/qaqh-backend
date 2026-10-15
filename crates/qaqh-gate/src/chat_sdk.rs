@@ -1,5 +1,5 @@
 //! OpenAI Chat Completions transport built on the `mutil-ai` SDK (Phase 1
-//! strangler). Same contract-preserving rules as `anthropic_sdk`; endpoint
+//! strangler). Same contract-preserving rules as `messages_sdk`; endpoint
 //! quirks (thinking shapes, cache-token field, tool-call content encoding,
 //! stream usage opt-in) are expressed as a declarative `ProviderProfile` +
 //! `ProviderRequestOptions` instead of wire-level branches.
@@ -752,7 +752,7 @@ async fn consume(
 }
 
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
-pub fn chat_stream_openai(
+pub fn chat_stream_chat(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,
@@ -800,7 +800,7 @@ pub fn chat_stream_openai(
     )
 }
 
-pub fn chat_sync_openai(
+pub fn chat_sync_chat(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,
@@ -849,7 +849,7 @@ mod tests {
     use super::*;
 
     fn provider() -> ProviderConfig {
-        ProviderConfig::openai(
+        ProviderConfig::chat(
             "https://example.com/v1",
             "sk-test",
             "m",

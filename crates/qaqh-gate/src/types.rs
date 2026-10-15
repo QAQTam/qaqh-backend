@@ -92,9 +92,13 @@ pub fn clamp_effort_to_allowlist(effort: &str, allowlist: &[String]) -> String {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderKind {
-    OpenAi,
+    /// OpenAI Chat Completions (`/chat/completions`).
+    Chat,
+    /// OpenAI Responses (`/responses`).
     Responses,
-    Anthropic,
+    /// Anthropic Messages (`/v1/messages`).
+    Messages,
+    /// Gemini `generateContent`.
     Gemini,
 }
 
@@ -102,10 +106,11 @@ impl ProviderKind {
     #[allow(clippy::should_implement_trait)] // 固有方法名为既有公开 API
     pub fn from_str(s: &str) -> Self {
         match s {
+            "chat" | "openai" | "openai-compatible" => Self::Chat,
             "responses" => Self::Responses,
-            "anthropic" => Self::Anthropic,
+            "messages" | "anthropic" | "claude" => Self::Messages,
             "gemini" => Self::Gemini,
-            _ => Self::OpenAi,
+            _ => Self::Chat,
         }
     }
 }
@@ -341,7 +346,7 @@ impl ProviderConfig {
     }
 
     #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
-    pub fn openai(
+    pub fn chat(
         base_url: &str,
         api_key: &str,
         model: &str,
@@ -353,7 +358,7 @@ impl ProviderConfig {
         do_sample: Option<bool>,
     ) -> Self {
         Self {
-            kind: ProviderKind::OpenAi,
+            kind: ProviderKind::Chat,
             send_request_context: false,
             request_context: None,
             base_url: base_url.to_string(),
@@ -431,14 +436,14 @@ impl ProviderConfig {
     /// `messages` entry), per the Anthropic spec verified via
     /// `proxybun/src/index.ts:292 openAIToAnthropic` and
     /// `https://open.bigmodel.cn/api/anthropic/v1/messages`.
-    pub fn anthropic(
+    pub fn messages(
         base_url: &str,
         api_key: &str,
         model: &str,
         anthropic_path: Option<String>,
     ) -> Self {
         Self {
-            kind: ProviderKind::Anthropic,
+            kind: ProviderKind::Messages,
             send_request_context: false,
             request_context: None,
             base_url: base_url.to_string(),
@@ -633,7 +638,7 @@ mod opencode_headers_tests {
 
     #[test]
     fn with_opencode_headers_only_attaches_on_opencode_gateway() {
-        let base = ProviderConfig::openai(
+        let base = ProviderConfig::chat(
             "https://example.com/v1",
             "k",
             "m",
@@ -650,7 +655,7 @@ mod opencode_headers_tests {
                 .opencode_headers
                 .is_none()
         );
-        let oc = ProviderConfig::openai(
+        let oc = ProviderConfig::chat(
             "https://opencode.ai/zen/go/v1",
             "k",
             "m",

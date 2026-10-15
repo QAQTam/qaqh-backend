@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn make_provider(mock: &MockServer) -> ProviderConfig {
-    ProviderConfig::openai(
+    ProviderConfig::chat(
         &mock.base_url(),
         "sk-test-key",
         "test-model",
@@ -976,7 +976,7 @@ fn endpoint_retry_spec_drives_actual_retry_behavior() {
             mock_server::SseChunk::done(),
         ],
     ]);
-    let provider = ProviderConfig::openai(
+    let provider = ProviderConfig::chat(
         &mock.base_url(),
         "sk-test-key",
         "test-model",
@@ -1572,7 +1572,7 @@ fn tool_result_image_ref_is_lowered_to_data_uri() {
 // ── Anthropic Messages API tests (BUG-2026-09-13-27) ─────────────────
 
 fn make_anthropic_provider(mock: &MockServer) -> ProviderConfig {
-    ProviderConfig::anthropic(
+    ProviderConfig::messages(
         &mock.base_url(),
         "sk-test-key",
         "test-model",
