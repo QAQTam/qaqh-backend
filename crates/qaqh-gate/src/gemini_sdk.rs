@@ -130,7 +130,12 @@ pub(crate) fn project_messages(
                         ContentBlock::Text { text } => content.push_str(text),
                         ContentBlock::Reasoning { reasoning: r, .. } => reasoning.push_str(r),
                         ContentBlock::ToolUse { id, name, input } => {
-                            let mut call = WireToolCall::new(name.clone(), input.clone());
+                            // Null input（上游参数不可还原）在 wire 层折叠成 {}，
+                            // 端点不接受 "arguments": "null"（T-7-1）。
+                            let mut call = WireToolCall::new(
+                                name.clone(),
+                                super::sdk_common::wire_tool_input(input),
+                            );
                             // 0.4.0 rejects an empty explicit id; leave it unset so
                             // the SDK's normalizer assigns a collision-free one.
                             call.id = if id.is_empty() { None } else { Some(id.clone()) };

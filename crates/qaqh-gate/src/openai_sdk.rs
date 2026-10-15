@@ -181,7 +181,12 @@ pub(crate) fn project_chat_messages(
                         ContentBlock::Text { text } => content.push_str(text),
                         ContentBlock::Reasoning { reasoning: r, .. } => reasoning.push_str(r),
                         ContentBlock::ToolUse { id, name, input } => {
-                            let mut call = WireToolCall::new(name.clone(), input.clone());
+                            // Null input（上游参数不可还原）在 wire 层折叠成 {}，
+                            // 端点不接受 "arguments": "null"（T-7-1）。
+                            let mut call = WireToolCall::new(
+                                name.clone(),
+                                super::sdk_common::wire_tool_input(input),
+                            );
                             // 0.4.0 rejects an empty explicit id; leave it unset so
                             // the SDK's normalizer assigns a collision-free one.
                             call.id = if id.is_empty() {
@@ -403,13 +408,18 @@ fn build_options(
         options.idle_timeout = Some(policy.idle_timeout);
     }
     let switches = ProviderRequestOptions {
-        // 语义回归修复（mutil-ai 迁移引入）：旧实现仅在 `tool_call_content_null=true`
-        // 且 content 键缺失（文本为空）时补 null，false 时完全不干预。
-        // 这里误配成 `Some(Null/Omit)` 会无条件清空带 tool_calls 的 assistant 消息的
-        // content——模型看不到自己历史轮的可见文本，只能在思考里重建上下文。
-        // SDK 默认序列化本就把空文本写为 "content": null、非空保留，与旧语义等价，
-        // 故恒不干预；`tool_call_content_null` 在 SDK 路径下无对应需求，保留字段仅作兼容。
-        tool_call_content: None,
+        // 空 content 的 assistant tool-call 消息恢复**键缺席**形态（初始契约，
+        // `default_provider_tool_history_is_unchanged` canary）。
+        //
+        // 为什么不是 None（Auto）：mutil-ai 0.6.0 的 openai_chat 适配器把空文本
+        // 序列化成显式 `"content": null`（adapter/openai_chat.rs:560），Auto 即
+        // 「保持适配器默认」——部分严格的 OpenAI 兼容网关不接受 null。
+        // 为什么不是 Null/Empty：会改写形态且无端点要它。
+        // 为什么 Omit 安全：SDK 侧 tripwire（adapter/mod.rs:367-403）保证
+        // **非空** assistant content 在任何模式下都原样保留（3d1eb51 的语义
+        // 回归修复不再可能被破坏）；Omit 只把「空文本」的键摘掉，与迁移前
+        // 自研 wire 的形状逐字节一致。
+        tool_call_content: Some(mutil_ai::ToolCallContentMode::Omit),
         include_stream_usage: streaming.then_some(provider.include_stream_usage),
         do_sample: streaming.then_some(provider.do_sample).flatten(),
         ..Default::default()

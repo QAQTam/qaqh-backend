@@ -134,6 +134,7 @@ impl RuntimeContext {
             timeout,
             cancellation: CancellationToken::from_shared_flag(self.cancellation.arc()),
             progress,
+            exec_progress: None,
             source,
         }
     }

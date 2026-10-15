@@ -72,12 +72,23 @@ fn with_line_summary(mut display: ToolDisplay, summary: Option<String>) -> ToolD
 }
 
 fn first_line(value: &str) -> String {
-    let line = value.lines().find(|line| !line.trim().is_empty());
-    line.map(str::trim)
-        .unwrap_or_default()
-        .chars()
-        .take(160)
-        .collect()
+    // P0-③：错误信封首行是 `[timeis: ...]` 戳，实质消息在后续行。摘要
+    // 跳过戳行，避免「首行渲染」的前端只显示时间戳而看不到真正的错误
+    // （实例：`[DENIED] subagent sandbox denied 'read' ...` 被吞）。
+    // 全文只有戳行时回退到首个非空行，保持旧行为。
+    let mut fallback = "";
+    let line = value.lines().find(|line| {
+        let trimmed = line.trim();
+        if fallback.is_empty() && !trimmed.is_empty() {
+            fallback = trimmed;
+        }
+        !trimmed.is_empty() && !trimmed.starts_with("[timeis:")
+    });
+    let line = line
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or(fallback);
+    line.chars().take(160).collect()
 }
 
 /// todo 系列的面板数据由 dashboard 维护；display 只保留 canonical 摘要行。

@@ -29,6 +29,7 @@
 //! 该流程仍在 preview：端点/参数/scope 全部集中在 [`protocol`]，
 //! 且**不复制** DevKit 的代码与设计资产（其许可为 Noncommercial 且不含商标授权）。
 
+mod account;
 mod error;
 mod global;
 mod host_id;

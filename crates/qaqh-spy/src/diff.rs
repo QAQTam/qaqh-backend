@@ -217,4 +217,20 @@ mod tests {
         let s = lines(0..10);
         assert!(asymmetric_unified_diff(&s, &s, 5, 3).is_empty());
     }
+
+    /// 零上下文（Session 默认）：hunk 只含变更行，位置由 `@@` 行号头承担。
+    #[test]
+    fn zero_context_yields_changes_only_with_line_anchors() {
+        let old = lines(0..30);
+        let mut v: Vec<String> = (0..30).map(|i| format!("line{i}\n")).collect();
+        v[10] = "CHANGED\n".into();
+        let d = asymmetric_unified_diff(&old, &v.join(""), 0, 0);
+
+        // 单行替换：old_disp = hs+1 = 11，各 1 行。
+        assert!(d.starts_with("@@ -11,1 +11,1 @@"), "got: {d}");
+        assert!(d.contains("-line10\n") && d.contains("+CHANGED\n"));
+        // 任何上下文行（' ' 前缀）都不得出现。
+        assert!(!d.contains("\n line"), "零上下文不得有 ' ' 行: {d}");
+        assert_eq!(d.matches('\n').count(), 3, "头 + 2 变更行: {d}");
+    }
 }
