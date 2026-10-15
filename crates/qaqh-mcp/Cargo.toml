@@ -26,10 +26,12 @@ rmcp = { workspace = true, features = [
 # PR-M3-1：自定义 headers 需要直接构造 reqwest client（default_headers）——
 # 版本对齐 rmcp 内部（0.13），避免双 reqwest 实例。
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
-# 进程组/Job 隔离（PLAN §7 结论：rmcp 只开 tokio1，须自引并对齐 9.1.0）。
+# 进程组/Job 隔离（PLAN §7 结论：rmcp 只开 tokio1，须自引并与 rmcp 对齐；
+# 2026-10-15 随 rmcp 3.2.0→3.5.1 一起对齐到 process-wrap 10，否则图上出现
+# 两个 CommandWrap 类型，TokioChildProcess::builder 的 Into  bound 直接不满足）。
 # process-group 仅 Unix 生效；job-object/creation-flags 仅 Windows 生效
 # （windows 为 target-specific optional dep，Linux 上惰性，不参与构建）。
-process-wrap = { version = "9.1", default-features = false, features = [
+process-wrap = { version = "10.0", default-features = false, features = [
     "tokio1",
     "process-group",
     "job-object",
