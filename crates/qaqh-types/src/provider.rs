@@ -216,7 +216,7 @@ pub struct EndpointCompat {
     ///
     /// 开启后（`crates/qaqh-gate`）：不发 `max_output_tokens`、剥离一组被禁字段
     /// （`temperature`/`top_p`/`metadata`/`user`/`prompt_cache_retention` …）、
-    /// 关闭 hosted 工具、不下发 prompt 缓存键，并要求走流式入口。
+    /// 关闭 hosted 工具，并要求走流式入口。`prompt_cache_key` 不在禁用清单里。
     /// 依据：`developers.openai.com/siwc/token-sharing-open-source/preview-limitations`。
     #[serde(default)]
     pub responses_siwc_plan: bool,
