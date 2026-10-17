@@ -1,0 +1,1163 @@
+{
+  "status": "v3.0 target; delivered incrementally from v2.1; not implemented in the again workspace",
+  "schema_version": 1,
+  "date": "2026-10-15",
+  "arrow": "consumer depends on provider",
+  "scope": "all direct local production/build/dev dependencies, including target-conditional paths; external denies are direct only",
+  "crates": {
+    "qaqh-kernel": {
+      "owner": "身份值、版本值与内容标识；无环境状态",
+      "modules": [
+        "ids",
+        "revision",
+        "content",
+        "error"
+      ],
+      "allowed_local_dependencies": [],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri",
+        "tokio"
+      ]
+    },
+    "qaqh-policy": {
+      "owner": "纯权限与沙箱准入规则",
+      "modules": [
+        "permission",
+        "sandbox",
+        "risk",
+        "resources"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri",
+        "tokio"
+      ]
+    },
+    "qaqh-config-api": {
+      "owner": "服务端配置契约；无UI偏好与明文密钥",
+      "modules": [
+        "host",
+        "profile",
+        "session_selection",
+        "integration",
+        "change"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-policy",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri",
+        "tokio"
+      ]
+    },
+    "qaqh-context": {
+      "owner": "模型消息与上下文的纯变换",
+      "modules": [
+        "message",
+        "fold",
+        "compact",
+        "rewind",
+        "token_budget",
+        "items",
+        "provider_projection",
+        "checkpoints"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri",
+        "tokio"
+      ]
+    },
+    "qaqh-session-api": {
+      "owner": "会话命令、事实、投影、存储端口",
+      "modules": [
+        "command",
+        "fact",
+        "interaction",
+        "projection",
+        "recovery",
+        "ports"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-context",
+        "qaqh-config-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri"
+      ]
+    },
+    "qaqh-session-store": {
+      "owner": "会话和目录存储的唯一写入实现",
+      "modules": [
+        "log",
+        "commit",
+        "blob",
+        "catalog",
+        "read",
+        "recovery_writer",
+        "private_blobs"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-session-api",
+        "qaqh-context",
+        "qaqh-config-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-tool-api": {
+      "owner": "工具描述、调用、结果和宿主能力端口",
+      "modules": [
+        "descriptor",
+        "call",
+        "outcome",
+        "effect",
+        "ports",
+        "cancellation",
+        "execution_owner"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-policy"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-provider-api": {
+      "owner": "模型请求、流结果和能力契约",
+      "modules": [
+        "request",
+        "event",
+        "capability",
+        "client",
+        "response",
+        "accounts",
+        "model_catalog"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-context",
+        "qaqh-config-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tokenizers",
+        "rmcp",
+        "async-lsp",
+        "tauri"
+      ]
+    },
+    "qaqh-agent": {
+      "owner": "单会话薄状态机、邮箱、提交屏障、effect调度与恢复",
+      "modules": [
+        "state",
+        "mailbox",
+        "reducer",
+        "commit",
+        "scheduler",
+        "supervisor",
+        "recovery"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-session-api",
+        "qaqh-context",
+        "qaqh-config-api",
+        "qaqh-provider-api",
+        "qaqh-tool-api",
+        "qaqh-policy",
+        "qaqh-agent-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "git2",
+        "tauri"
+      ]
+    },
+    "qaqh-workspace": {
+      "owner": "工作区句柄、路径、文件状态与审计",
+      "modules": [
+        "handle",
+        "paths",
+        "files",
+        "mutation_journal",
+        "exec_audit",
+        "resources"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-policy"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-sandbox": {
+      "owner": "OS隔离装配及能力报告",
+      "modules": [
+        "capability",
+        "launch",
+        "backend"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-policy",
+        "sbx-win"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-tool-executor": {
+      "owner": "工具准入、授权、执行和结果收口",
+      "modules": [
+        "registry",
+        "admission",
+        "authorization",
+        "execute",
+        "progress",
+        "interaction",
+        "recipes",
+        "delegation"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-policy",
+        "qaqh-workspace",
+        "qaqh-sandbox",
+        "qaqh-config-api",
+        "qaqh-terminal",
+        "qaqh-tool-catalog"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-file-tools": {
+      "owner": "文件工具算法",
+      "modules": [
+        "read",
+        "query",
+        "mutate",
+        "patch",
+        "image"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-workspace"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-process-tools": {
+      "owner": "进程工具算法及系统调用",
+      "modules": [
+        "exec",
+        "inspect",
+        "wait",
+        "terminate",
+        "shell"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-workspace",
+        "qaqh-sandbox",
+        "qaqh-policy",
+        "qaqh-terminal"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-skills": {
+      "owner": "技能内容和目录解析",
+      "modules": [
+        "catalog",
+        "parse",
+        "resources",
+        "snapshot",
+        "compatibility"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-builtin-tools": {
+      "owner": "交互、任务、技能和web工具适配",
+      "modules": [
+        "ask",
+        "plan",
+        "todo",
+        "subagent",
+        "skill",
+        "web"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-skills"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-git": {
+      "owner": "Git查询和明确写操作",
+      "modules": [
+        "query",
+        "mutate"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-providers": {
+      "owner": "模型供应商适配",
+      "modules": [
+        "openai",
+        "responses",
+        "anthropic",
+        "gemini",
+        "retry",
+        "stream",
+        "token_counter",
+        "siwc",
+        "dsaccount",
+        "accounts",
+        "model_catalog"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-provider-api",
+        "qaqh-context",
+        "qaqh-config-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-mcp": {
+      "owner": "MCP连接和工具适配",
+      "modules": [
+        "manager",
+        "transport",
+        "protocol",
+        "tools",
+        "resources",
+        "prompts",
+        "continuation",
+        "authorization",
+        "observation",
+        "lifecycle"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-config-api",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-lsp": {
+      "owner": "LSP连接和工具适配",
+      "modules": [
+        "manager",
+        "transport",
+        "protocol",
+        "roots",
+        "documents",
+        "encoding",
+        "edits",
+        "diagnostics",
+        "observation",
+        "lifecycle"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-config-api",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-config": {
+      "owner": "服务端配置版本、合成和凭据句柄",
+      "modules": [
+        "store",
+        "validate",
+        "resolve",
+        "secrets",
+        "changes",
+        "credential_binding",
+        "account_credentials"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-config-api",
+        "qaqh-policy",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-access": {
+      "owner": "身份、设备凭据、范围授权与吊销",
+      "modules": [
+        "principal",
+        "credentials",
+        "grants",
+        "pairing",
+        "revoke",
+        "store"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-protocol": {
+      "owner": "公开wire DTO；与持久fact schema分开",
+      "modules": [
+        "version",
+        "command",
+        "snapshot",
+        "committed",
+        "live",
+        "cursor",
+        "content",
+        "config",
+        "devices",
+        "diagnostics",
+        "terminal",
+        "error",
+        "extensions",
+        "capabilities",
+        "operations",
+        "client_tools",
+        "messages",
+        "provider_accounts",
+        "model_catalog"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-config-api",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri",
+        "tokio"
+      ]
+    },
+    "qaqh-subscriptions": {
+      "owner": "无HTTP的snapshot/replay/live订阅服务",
+      "modules": [
+        "bootstrap",
+        "replay",
+        "live",
+        "cursor",
+        "delivery",
+        "projection"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-session-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tauri"
+      ]
+    },
+    "qaqh-application": {
+      "owner": "跨能力用例；无装配、Router或磁盘格式",
+      "modules": [
+        "sessions",
+        "commands",
+        "settings",
+        "workspace",
+        "interactions",
+        "devices",
+        "titles",
+        "queries",
+        "terminals",
+        "diagnostics",
+        "ports",
+        "extensions",
+        "capabilities",
+        "tool_hosts",
+        "history",
+        "forks",
+        "provider_accounts",
+        "model_catalog"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-session-api",
+        "qaqh-agent",
+        "qaqh-context",
+        "qaqh-config-api",
+        "qaqh-config",
+        "qaqh-access",
+        "qaqh-workspace",
+        "qaqh-skills",
+        "qaqh-git",
+        "qaqh-provider-api",
+        "qaqh-tool-api",
+        "qaqh-subscriptions",
+        "qaqh-terminal",
+        "qaqh-diagnostics",
+        "qaqh-extension-api",
+        "qaqh-extensions",
+        "qaqh-tool-catalog"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tauri"
+      ]
+    },
+    "qaqh-api": {
+      "owner": "HTTP/SSE适配及wire映射",
+      "modules": [
+        "routes",
+        "auth",
+        "command",
+        "query",
+        "stream",
+        "content",
+        "error",
+        "mapping",
+        "tool_hosts_ws"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-protocol",
+        "qaqh-config-api",
+        "qaqh-application",
+        "qaqh-access"
+      ],
+      "forbidden_external_dependencies": [
+        "tauri"
+      ]
+    },
+    "qaqh-memwatch": {
+      "owner": "诊断采集器；不改变业务状态",
+      "modules": [
+        "collector",
+        "snapshot"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-host": {
+      "owner": "数据根、单实例与宿主观测",
+      "modules": [
+        "paths",
+        "lock",
+        "discovery"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-client-local": {
+      "owner": "桌面/TUI专用发现与sidecar启动",
+      "modules": [
+        "discovery",
+        "launcher",
+        "lifecycle"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-sdk",
+        "qaqh-protocol",
+        "qaqh-host",
+        "qaqh-tool-host"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "sbx-nt": {
+      "owner": "Windows NT底层",
+      "modules": [
+        "nt"
+      ],
+      "allowed_local_dependencies": [],
+      "forbidden_external_dependencies": []
+    },
+    "sbx-win": {
+      "owner": "Windows隔离实现",
+      "modules": [
+        "token",
+        "acl",
+        "appcontainer",
+        "redirect",
+        "projfs"
+      ],
+      "allowed_local_dependencies": [
+        "sbx-nt"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "sbx-cli": {
+      "owner": "沙箱诊断程序",
+      "modules": [
+        "main",
+        "acceptance"
+      ],
+      "allowed_local_dependencies": [
+        "sbx-win",
+        "sbx-nt",
+        "qaqh-sandbox",
+        "qaqh-policy",
+        "qaqh-kernel"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-daemon": {
+      "owner": "唯一服务端装配根与进程生命周期",
+      "modules": [
+        "main",
+        "composition",
+        "shutdown",
+        "scopes",
+        "supervision"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-api",
+        "qaqh-application",
+        "qaqh-agent",
+        "qaqh-session-api",
+        "qaqh-session-store",
+        "qaqh-subscriptions",
+        "qaqh-config-api",
+        "qaqh-config",
+        "qaqh-access",
+        "qaqh-provider-api",
+        "qaqh-providers",
+        "qaqh-tool-api",
+        "qaqh-tool-executor",
+        "qaqh-file-tools",
+        "qaqh-process-tools",
+        "qaqh-builtin-tools",
+        "qaqh-workspace",
+        "qaqh-skills",
+        "qaqh-git",
+        "qaqh-mcp",
+        "qaqh-lsp",
+        "qaqh-sandbox",
+        "qaqh-host",
+        "qaqh-memwatch",
+        "qaqh-agent-api",
+        "qaqh-agent-features",
+        "qaqh-terminal",
+        "qaqh-diagnostics",
+        "qaqh-extension-api",
+        "qaqh-extension-formats",
+        "qaqh-extensions",
+        "qaqh-tool-catalog",
+        "qaqh-acp-client",
+        "qaqh-acp-server",
+        "qaqh-client-tools"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-agent-api": {
+      "owner": "薄loop的插件、effect、只读view及观测契约",
+      "modules": [
+        "input",
+        "feature",
+        "effect",
+        "view",
+        "observation"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-session-api",
+        "qaqh-context",
+        "qaqh-config-api",
+        "qaqh-provider-api",
+        "qaqh-tool-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "git2",
+        "tauri",
+        "tokenizers"
+      ]
+    },
+    "qaqh-agent-features": {
+      "owner": "compact、技能、子代理、plan功能；纯reducer和限权jobs",
+      "modules": [
+        "compact",
+        "skills",
+        "subagent",
+        "plan",
+        "jobs"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-agent-api",
+        "qaqh-session-api",
+        "qaqh-context",
+        "qaqh-config-api",
+        "qaqh-provider-api",
+        "qaqh-tool-api",
+        "qaqh-skills",
+        "qaqh-tool-catalog",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "git2",
+        "tauri"
+      ]
+    },
+    "qaqh-terminal": {
+      "owner": "显式实例PTY/ConPTY、进程生命周期、独占输入fence与有界输出",
+      "modules": [
+        "process",
+        "pty",
+        "conpty",
+        "control",
+        "input",
+        "output",
+        "lifecycle",
+        "capability"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-policy",
+        "qaqh-workspace",
+        "qaqh-sandbox",
+        "qaqh-config-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tauri"
+      ]
+    },
+    "qaqh-diagnostics": {
+      "owner": "有界旁路采集、派生索引、窗口查询、保留及健康",
+      "modules": [
+        "collector",
+        "observation",
+        "index",
+        "query",
+        "retention",
+        "health"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-session-api",
+        "qaqh-provider-api",
+        "qaqh-tool-api",
+        "qaqh-agent-api",
+        "qaqh-memwatch"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "tauri"
+      ]
+    },
+    "qaqh-extension-api": {
+      "owner": "扩展来源、计划、安装回执和受限运行端口",
+      "modules": [
+        "identity",
+        "source",
+        "package",
+        "plan",
+        "operation",
+        "binding",
+        "ports",
+        "lifecycle"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-policy"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri",
+        "tokio"
+      ]
+    },
+    "qaqh-extension-formats": {
+      "owner": "公共与vendor包/市场解析；无IO运行能力",
+      "modules": [
+        "agent_plugins",
+        "codex",
+        "claude",
+        "grok",
+        "marketplaces",
+        "report"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri",
+        "tokio"
+      ]
+    },
+    "qaqh-extensions": {
+      "owner": "安装workflow/registry唯一writer、固定依赖及激活",
+      "modules": [
+        "sources",
+        "resolver",
+        "installer",
+        "inventory",
+        "workflow",
+        "activation",
+        "recipes",
+        "recovery",
+        "gc",
+        "runtime_graph"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-extension-api",
+        "qaqh-extension-formats",
+        "qaqh-skills",
+        "qaqh-policy",
+        "qaqh-config-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-tool-catalog": {
+      "owner": "受限能力来源、可见性、别名和不可变快照",
+      "modules": [
+        "sources",
+        "visibility",
+        "alias",
+        "snapshot",
+        "search",
+        "registration"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-extension-api",
+        "qaqh-policy"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "reqwest",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri"
+      ]
+    },
+    "qaqh-acp-client": {
+      "owner": "外部agent委派及受限文件/终端/权限回调",
+      "modules": [
+        "transport",
+        "negotiation",
+        "delegation",
+        "callbacks",
+        "projection",
+        "lifecycle"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-tool-api",
+        "qaqh-config-api",
+        "qaqh-extension-api",
+        "qaqh-policy",
+        "qaqh-workspace",
+        "qaqh-terminal"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-acp-server": {
+      "owner": "编辑器ACP前门；调用application，不创建loop",
+      "modules": [
+        "transport",
+        "negotiation",
+        "sessions",
+        "permissions",
+        "projection",
+        "lifecycle"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-application",
+        "qaqh-protocol",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": []
+    },
+    "qaqh-sdk": {
+      "owner": "多端 Rust SDK；公开协议消费与工具宿主控制端口，无spawn/安装/具体存储",
+      "modules": [
+        "endpoint",
+        "auth",
+        "command",
+        "query",
+        "stream",
+        "reducer",
+        "terminal",
+        "diagnostics",
+        "lifecycle",
+        "live",
+        "content",
+        "tool_host",
+        "platform_ports"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-protocol"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp",
+        "tauri"
+      ]
+    },
+    "qaqh-client-tools": {
+      "owner": "daemon 侧客户端工具注册、固定路由、远端 ToolRunner 与回执对账；无会话writer",
+      "modules": [
+        "registry",
+        "dispatch",
+        "receipts",
+        "reconcile",
+        "cancellation",
+        "lifecycle"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-protocol",
+        "qaqh-tool-api",
+        "qaqh-policy",
+        "qaqh-extension-api"
+      ],
+      "forbidden_external_dependencies": [
+        "tauri",
+        "tokenizers",
+        "git2",
+        "rmcp",
+        "async-lsp"
+      ]
+    },
+    "qaqh-tool-host": {
+      "owner": "可选 Rust 客户端工具宿主：本机权限、执行journal、native适配与任务监督；与UI分开",
+      "modules": [
+        "registry",
+        "permissions",
+        "resources",
+        "journal",
+        "jobs",
+        "native",
+        "runtime_ports",
+        "shutdown"
+      ],
+      "allowed_local_dependencies": [
+        "qaqh-kernel",
+        "qaqh-sdk",
+        "qaqh-protocol",
+        "qaqh-tool-api",
+        "qaqh-policy"
+      ],
+      "forbidden_external_dependencies": [
+        "axum",
+        "tokenizers",
+        "git2",
+        "tauri"
+      ]
+    }
+  },
+  "current_to_target": {
+    "qaqh-types": [
+      "qaqh-kernel",
+      "qaqh-config-api",
+      "qaqh-context",
+      "qaqh-tool-api",
+      "qaqh-host",
+      "qaqh-session-store"
+    ],
+    "qaqh-domain": [
+      "qaqh-session-api",
+      "qaqh-agent",
+      "qaqh-protocol"
+    ],
+    "qaqh-ringing": [
+      "qaqh-protocol"
+    ],
+    "qaqh-runtime": [
+      "qaqh-agent",
+      "qaqh-application",
+      "qaqh-subscriptions",
+      "qaqh-access",
+      "qaqh-api",
+      "qaqh-daemon",
+      "qaqh-agent-api",
+      "qaqh-agent-features",
+      "qaqh-diagnostics"
+    ],
+    "qaqh-session": [
+      "qaqh-session-api",
+      "qaqh-session-store",
+      "qaqh-agent"
+    ],
+    "qaqh-message": [
+      "qaqh-context"
+    ],
+    "qaqh-gate": [
+      "qaqh-provider-api",
+      "qaqh-providers"
+    ],
+    "qaqh-siwc": [
+      "qaqh-provider-api",
+      "qaqh-providers",
+      "qaqh-config",
+      "qaqh-application"
+    ],
+    "qaqh-dsaccount": [
+      "qaqh-provider-api",
+      "qaqh-providers",
+      "qaqh-config",
+      "qaqh-application"
+    ],
+    "qaqh-workspace": [
+      "qaqh-workspace",
+      "qaqh-tool-executor",
+      "qaqh-builtin-tools",
+      "qaqh-tool-catalog"
+    ],
+    "qaqh-permission": [
+      "qaqh-policy",
+      "qaqh-tool-executor",
+      "qaqh-workspace"
+    ],
+    "qaqh-fs-core": [
+      "qaqh-workspace"
+    ],
+    "qaqh-spy": [
+      "qaqh-workspace",
+      "qaqh-builtin-tools"
+    ],
+    "qaqh-subagent": [
+      "qaqh-agent-features",
+      "qaqh-builtin-tools",
+      "qaqh-tool-api"
+    ],
+    "qaqh-title": [
+      "qaqh-application"
+    ],
+    "qaqh-config": [
+      "qaqh-config",
+      "qaqh-extension-formats",
+      "qaqh-extensions"
+    ],
+    "qaqh-config-api": [
+      "qaqh-config-api"
+    ],
+    "qaqh-client": [
+      "qaqh-sdk",
+      "qaqh-client-local"
+    ],
+    "qaqh-file-tools": [
+      "qaqh-file-tools"
+    ],
+    "qaqh-process-tools": [
+      "qaqh-process-tools",
+      "qaqh-terminal"
+    ],
+    "qaqh-policy": [
+      "qaqh-policy"
+    ],
+    "qaqh-sandbox": [
+      "qaqh-sandbox"
+    ],
+    "qaqh-tool-core": [
+      "qaqh-tool-api"
+    ],
+    "qaqh-skills": [
+      "qaqh-skills",
+      "qaqh-agent-features",
+      "qaqh-extension-formats"
+    ],
+    "qaqh-git": [
+      "qaqh-git"
+    ],
+    "qaqh-mcp": [
+      "qaqh-mcp"
+    ],
+    "qaqh-lsp": [
+      "qaqh-lsp"
+    ],
+    "qaqh-memwatch": [
+      "qaqh-memwatch"
+    ],
+    "qaqh-daemon": [
+      "qaqh-daemon"
+    ],
+    "sbx-nt": [
+      "sbx-nt"
+    ],
+    "sbx-win": [
+      "sbx-win"
+    ],
+    "sbx-cli": [
+      "sbx-cli"
+    ]
+  }
+}
