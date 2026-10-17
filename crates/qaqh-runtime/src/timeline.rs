@@ -970,6 +970,25 @@ impl TimelineAppender {
         ))
     }
 
+    /// 流中 usage 采样：只编号入册（内存 journal + SSE 实时流），不触碰任何
+    /// 回合/块状态——端点可能在首个块之前就报 usage，也不能反过来影响
+    /// seal 状态机。落盘与快照由 persistence_policy 判为瞬态。
+    pub fn record_usage_sampled(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        round_num: u32,
+        usage: qaqh_types::UsageInfo,
+    ) -> Result<TimelineEntry, TimelineError> {
+        let timeline = self.timeline_mut(session_id)?;
+        Ok(next_entry(
+            timeline,
+            turn_id.to_string(),
+            Some(round_num),
+            TimelineEvent::UsageSampled { usage },
+        ))
+    }
+
     /// Applies one producer intent. The method is the only place that turns a
     /// producer's ordered intent into a numbered transcript record.
     pub fn apply_intent(
@@ -1064,6 +1083,11 @@ impl TimelineAppender {
                 lines_added,
                 lines_removed,
             ),
+            TimelineIntent::UsageSampled {
+                turn_id,
+                round_num,
+                usage,
+            } => self.record_usage_sampled(session_id, &turn_id, round_num, usage),
             TimelineIntent::BlockSealed {
                 turn_id,
                 round_num,

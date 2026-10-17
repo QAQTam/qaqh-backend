@@ -496,6 +496,16 @@ pub enum TimelineEvent {
         lines_added: u32,
         lines_removed: u32,
     },
+    /// 流式过程中端点回报的 usage 采样（渲染层旁路，只喂 HUD 表盘）。
+    ///
+    /// 与 [`TimelineEvent::ToolEstimated`] 同类：瞬态、不落盘、不改任何块状态。
+    /// 官方 usage 的权威收口仍在 BlockSealed/TurnFinished 事实里；这条只是把
+    /// 端点在流中报的 usage（`StreamEvent::UsageUpdate`，发射方自带 ~1s 节流）
+    /// 实时递给前端，让上下文/缓存表盘不必等块 seal 才同步。字段缺报是常态
+    /// （Anthropic `message_delta` 只带 output），消费方按「有才更新」处理。
+    UsageSampled {
+        usage: qaqh_types::UsageInfo,
+    },
     BlockSealed {
         block_id: String,
     },
@@ -590,6 +600,14 @@ pub enum TimelineIntent {
         block_id: String,
         lines_added: u32,
         lines_removed: u32,
+    },
+    /// 见 [`TimelineEvent::UsageSampled`]：流中 usage 采样，发射方自带节流。
+    /// 不要求块/回合已开——端点可能在首个内容块之前就报 usage
+    /// （`message_start`）。
+    UsageSampled {
+        turn_id: String,
+        round_num: u32,
+        usage: qaqh_types::UsageInfo,
     },
     BlockSealed {
         turn_id: String,

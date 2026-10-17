@@ -722,6 +722,14 @@ pub(crate) fn gate_request(
                 if due {
                     last_usage_emit_at = Some(Instant::now());
                     last_emitted_usage_total = u.total_tokens;
+                    // 同一条节流闸门顺便约束瞬态采样事件：把流中 usage 递给
+                    // 前端表盘，官方收口仍在 Done/BlockSealed 事实里。
+                    ctx.emitter
+                        .emit_timeline(qaqh_domain::TimelineIntent::UsageSampled {
+                            turn_id: turn_id.to_string(),
+                            round_num,
+                            usage: u.clone(),
+                        });
                 }
             }
             qaqh_gate::StreamEvent::Retrying { .. } => {
