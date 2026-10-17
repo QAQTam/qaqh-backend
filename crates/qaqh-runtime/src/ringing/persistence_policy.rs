@@ -14,7 +14,7 @@
 //! | TurnSealed | ✅ timeline 快照 | 回合恢复边界；terminal 优先队列立即落盘（非发布会话线程同步） |
 //! | BlockCheckpoint | ❌ 不触发快照重写 | 增量载荷（`arg`），文本可由 `TextDelta`/块投影重建 |
 //! | ToolUpdated | ✅ timeline 快照 | 覆盖语义，物化进 turns |
-//! | TextDelta / ToolProgress / ToolEstimated | ❌ 不落盘 | 只进内存投影 + SSE 实时流 + 回放尾（有界）；崩溃后由快照 watermark 重基线 |
+//! | TextDelta / ToolProgress / ToolEstimated / UsageSampled | ❌ 不落盘 | 只进内存投影 + SSE 实时流 + 回放尾（有界）；崩溃后由快照 watermark 重基线 |
 //! | 三频道（Ringing v1）Reliable / Replaceable / Ephemeral | ❌ 不再落盘 | v1 广播与事件 journal 持久化已随广播面删除（见 `hub.rs`）；本分类现只覆盖 timeline 事件 |
 //!
 //! # 内存回放尾预算
@@ -140,6 +140,11 @@ mod tests {
                 block_id: "b".into(),
                 lines_added: 12,
                 lines_removed: 3,
+            },
+            // 流中 usage 采样：官方收口在 BlockSealed/TurnFinished 事实里，
+            // 采样落盘只是把每秒一条的表盘刷新写进持久层。
+            TimelineEvent::UsageSampled {
+                usage: Default::default(),
             },
         ];
         for event in &transient {
