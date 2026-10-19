@@ -342,7 +342,7 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                 // re-appends a duplicate envelope (epoch > 0 but watermark 0).
                 agent.align_skill_injection_watermark();
                 // Hot-load latest tool schema (order-stable: new tools appended at end)
-                agent.tool_defs = qaqh_workspace::runtime::all_tools();
+                agent.refresh_tool_defs();
                 // 应用持久化的工具模式（standard/minimal/custom，幂等）。
                 // 在 tool_defs 刷新之后执行：apply_tool_mode 内部再刷一次（带 allowed 过滤）。
                 let tool_mode = agent.session.tool_mode.clone();

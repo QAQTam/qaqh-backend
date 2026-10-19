@@ -15,7 +15,7 @@
 3. `file_state` 偏移链由 4 个工具各自维护（edit / file_mutate / copy_range /
    apply_patch），绕过即漏。
 4. edit 的模型面保留理由（不可被 apply_patch 替代）：str_replace 是跨厂商
-   通用编辑方言；失败反馈回路短（old_str→实际内容 diff 自纠）；单点改动
+   通用编辑方言；失败反馈回路短（old_string→实际内容 diff 自纠）；单点改动
    token 开销小；`replace_all` patch 无法表达。
 
 ## 1. 冻结契约：FileMutationDelta
@@ -51,7 +51,7 @@ pub struct HunkDelta {
 ## 2. edit 侧实现清单
 
 1. delta 构造：唯一命中 → `LineIndex` 直接得 `old_start`；
-   `old_lines = old_str 行数`、`new_lines = new_str 行数`（LF 视图计数）；
+   `old_lines = old_string 行数`、`new_lines = new_string 行数`（LF 视图计数）；
 2. `replace_all`：展开为 N 个 hunk，单事件携带（非重叠语义不变）；
 3. 发 FileMutationDelta；journal 追加与 file_state 偏移链更新
    **改为消费同一 delta**（消灭手工双记账）；
@@ -87,7 +87,7 @@ pub struct HunkDelta {
 
 - edit 的匹配改为调 `seek_sequence`（4 级容差）+ **容差策略可配**：
   edit 默认 tier1（精确）命中即止、歧义即拒（保持现有严格语义）；
-  `old_str` 匹配不到时才走 rstrip/trim 提示「近似命中」进自纠 diff——
+  `old_string` 匹配不到时才走 rstrip/trim 提示「近似命中」进自纠 diff——
   **不静默采纳模糊匹配**；
 - `text_file.rs`（行尾保真抽象）与 `file_shared` 的 LF 视图/写回还原二选一：
   保留 `text_file`，`file_shared::normalize_newlines` 降级为它的调用方；

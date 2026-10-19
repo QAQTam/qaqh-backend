@@ -225,6 +225,15 @@ fn route(
                 r#"{{"code":0,"msg":"","data":{{"biz_code":0,"biz_msg":"","biz_data":{{"id":"user-1","token":"{FAKE_TOKEN}","currency":"CNY","id_profile":{{"name":"测试用户","provider":"WECHAT"}}}}}}}}"#
             ),
         )),
+        // 官方 Search / Fetch：形状取自 `/zh-cn/guides/search`（原样保留字段名）。
+        protocol::WEB_SEARCH_PATH => Some(Reply::json(
+            200,
+            r#"{"results":[{"rerank_score":2.4,"title":"DeepSeek V4 模型发布","url":"https://example.com/deepseek-v4","snippet":"短摘要","summary":"长摘要","content":"网页正文","site_name":"Example News","site_icon":null,"date":"2026-06-01T00:00:00+00:00","authority":3}]}"#,
+        )),
+        protocol::WEB_FETCH_PATH => Some(Reply::json(
+            200,
+            r##"{"title":"Example article","content":"# Example article\n\nArticle content."}"##,
+        )),
         _ => Some(Reply::json(404, r#"{"code":40400,"msg":"no such route"}"#)),
     }
 }
@@ -734,4 +743,72 @@ fn an_expired_attempt_reports_expired_not_signed_in() {
         || manager.sign_in_status()["state"] == "cancelled"
     ));
     assert!(manager.store().load().expect("读").is_none());
+}
+
+/// 官方 Search / Fetch：路径、凭据头、请求体形状都按官方文档钉住。
+///
+/// 这三条是「以官方形式接入而不是自己抓网页」的可验证面：
+/// 1. 打的是 `/v1/tools/search` 与 `/v1/tools/fetch`；
+/// 2. 凭据是裸 `x-dsh-auth-token`，**没有** `Authorization: Bearer`；
+/// 3. 请求体只带调用方真正给过的字段（未设置的可选项不下发）。
+#[test]
+fn web_tools_use_the_official_paths_and_the_account_header() {
+    let platform = FakePlatform::start(ExchangeMode::Ok);
+    let client = crate::client::DsClient::new(platform.config());
+
+    let hits = client
+        .search_web(
+            FAKE_TOKEN,
+            &crate::web_tools::WebSearchRequest::new("DeepSeek V4 模型 发布")
+                .with_count(5)
+                .with_content(true),
+        )
+        .expect("search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].title, "DeepSeek V4 模型发布");
+    assert_eq!(hits[0].authority, 3);
+    assert_eq!(hits[0].content, "网页正文");
+
+    let page = client
+        .fetch_web(FAKE_TOKEN, "https://example.com/article")
+        .expect("fetch");
+    assert_eq!(page.title, "Example article");
+    assert!(page.content.starts_with("# Example article"));
+
+    let requests = platform.requests();
+    let search = requests
+        .iter()
+        .find(|request| request.path() == protocol::WEB_SEARCH_PATH)
+        .expect("官方 Search 路径");
+    assert_eq!(search.request_line.split_whitespace().next(), Some("POST"));
+    assert_eq!(search.header(protocol::AUTH_TOKEN_HEADER), Some(FAKE_TOKEN));
+    assert!(
+        search.header("authorization").is_none(),
+        "账号凭据不得走 Bearer"
+    );
+    assert_eq!(search.json()["query"], "DeepSeek V4 模型 发布");
+    assert_eq!(search.json()["count"], 5);
+    assert_eq!(search.json()["need_content"], true);
+    assert!(
+        search.json().get("ori_question").is_none(),
+        "未设置的可选项不得下发"
+    );
+
+    let fetch = requests
+        .iter()
+        .find(|request| request.path() == protocol::WEB_FETCH_PATH)
+        .expect("官方 Fetch 路径");
+    assert_eq!(fetch.header(protocol::AUTH_TOKEN_HEADER), Some(FAKE_TOKEN));
+    assert_eq!(fetch.json()["url"], "https://example.com/article");
+
+    // 参数区间在**发请求之前**就挡住：假平台只应收到上面两条。
+    let error = client
+        .search_web(FAKE_TOKEN, &crate::web_tools::WebSearchRequest::new("   "))
+        .expect_err("空白 query");
+    assert_eq!(error.code(), DsCode::Protocol);
+    assert_eq!(
+        platform.requests().len(),
+        requests.len(),
+        "校验失败不得发请求"
+    );
 }

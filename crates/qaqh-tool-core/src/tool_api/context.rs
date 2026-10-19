@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use super::official_web::OfficialWebBackend;
 use super::progress::ProgressSink;
 use crate::permission::PermissionLevel;
 pub use qaqh_policy::SandboxSpec;
@@ -128,6 +129,13 @@ pub struct ToolCallContext {
     /// runtime 在执行入口把 exec 进度通道 sender 注入；exec handler 优先
     /// 直用，`progress`（ProgressSink → v1 进度桥）退为兜底。非 exec 工具忽略。
     pub exec_progress: Option<crate::ExecProgressSender>,
+    /// 官方网页工具后端（fetch / search）。
+    ///
+    /// 只有声明了官方工具面的 profile（`EndpointCompat::official_web_tools`）才由
+    /// `qaqh-runtime` **按调用**注入；`None` = 工具层走自实现 HTTP 抓取。
+    /// legacy/ambient 构造点一律 `None`：那里拿不到会话 profile，按 AGENTS-x I10
+    /// 不去读线程局部补这个值。
+    pub official_web: Option<OfficialWebBackend>,
     /// 调用来源。
     pub source: ToolCallSource,
 }
@@ -167,6 +175,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: ToolCallSource::Model,
         };
         assert_eq!(ctx.mode, AgentMode::Code);
@@ -192,6 +201,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: ToolCallSource::Model,
         };
 

@@ -121,6 +121,7 @@ mod tests {
                 "process",
                 "read",
                 "read_image",
+                "search",
                 "skill_activate",
                 "skill_list",
                 "skill_resource",

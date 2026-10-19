@@ -640,6 +640,7 @@ wire = "openai"
 # thinking_mode = "OpenAi"                # OpenAi | QwenEnableThinking | MiniMaxAdaptive
 # cache_field = "PromptCacheHitTokens"    # PromptCacheHitTokens | PromptDetailsCached | UsageCachedTokens | None
 # include_stream_usage = true             # 请求末帧 usage（部分兼容端点不接受）
+# official_web_tools = true               # DeepSeek 账号额度：web_fetch/search 走官方 /v1/tools/*
 # supports_thinking = false
 # thinking_budget_large = true            # Anthropic 大上下文 thinking 预算档（16k-96k）
 # supports_reasoning_effort = false
@@ -705,6 +706,48 @@ fn migrate_profile(
     migrated |= profile.context_limit.take().is_some();
     migrated |= profile.context_window.take().is_some();
     (profile, migrated)
+}
+
+/// DeepSeek 账号额度 → 官方工具面开关的一次性迁移。
+///
+/// 判据：`credential = deepseek_account`，且配置文件里**没有**显式写
+/// `[profiles.<name>.compat] official_web_tools`。命中则补 `true` 并触发一次写回，
+/// 之后这个键就是磁盘上的显式值。
+///
+/// 为什么必须看**原始文档**：`EndpointCompat::official_web_tools` 带
+/// `#[serde(default)]`，反序列化后「键缺失」与「显式 false」都是 `false`，
+/// 类型层分不开；而迁移绝不能覆盖用户显式关掉的开关。
+///
+/// 为什么判据是凭据来源而不是 base_url：账号额度只允许官方 origin（这条约束在
+/// `apply_deepseek_account` 里已强制），按 URL 特判会变成第二真相源（I15）。
+fn migrate_official_web_tools(
+    profiles: &mut HashMap<String, qaqh_types::ProfileConfig>,
+    raw: Option<&toml::Value>,
+) -> bool {
+    let mut changed = false;
+    for (name, profile) in profiles.iter_mut() {
+        if profile.credential != qaqh_types::CredentialSource::DeepseekAccount {
+            continue;
+        }
+        if raw.is_some_and(|doc| compat_key_present(doc, name, "official_web_tools")) {
+            continue;
+        }
+        let compat = profile.compat.get_or_insert_with(Default::default);
+        if !compat.official_web_tools {
+            compat.official_web_tools = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `[profiles.<name>.compat] <key>` 是否在原始文档里显式出现（值不论真假）。
+fn compat_key_present(raw: &toml::Value, profile: &str, key: &str) -> bool {
+    raw.get("profiles")
+        .and_then(|profiles| profiles.get(profile))
+        .and_then(|profile| profile.get("compat"))
+        .and_then(|compat| compat.get(key))
+        .is_some()
 }
 
 impl Default for Config {
@@ -828,6 +871,11 @@ impl Config {
         }
 
         let mut needs_rewrite = false;
+        // 原始文档：迁移需要区分「键缺失」与「显式 false」（见
+        // `migrate_official_web_tools`）。只在加载路径读一次，不参与运行时。
+        let raw_doc: Option<toml::Value> = std::fs::read_to_string(store.path())
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok());
         // 审计 P0-1：API key 不落 config.toml 明文。
         // - 标记 "set" → 从 secrets.toml 解密（失败 = 无 key，绝不回退旧明文）；
         // - 旧明文（升级前配置）→ 迁移入 secrets.toml，config.toml 写回标记；
@@ -880,6 +928,10 @@ impl Config {
                     cfg.profiles.insert(name, profile);
                 }
             }
+            // 一次性迁移：DeepSeek 账号额度的端点默认打开官方工具面
+            // （T0 实测 `/v1/tools/{search,fetch}` 认账号裸头）。
+            // 必须放在 active profile 复制 compat 之前，否则首个回合仍拿旧值。
+            needs_rewrite |= migrate_official_web_tools(&mut cfg.profiles, raw_doc.as_ref());
             if let Some(ref active) = pc.active_profile {
                 cfg.active_profile = active.clone();
                 if let Some(profile) = cfg.profiles.get(active) {
@@ -1111,6 +1163,14 @@ falling back to 1 (read-only)"
                         );
                         *profile = migrated;
                         log::info!("[config] profile {name} 已迁移为 BYOK 记录");
+                    }
+                    // 官方工具面一次性迁移要**落到磁盘**：写回后这个键就是显式值，
+                    // 用户以后改 false 不会被再次覆盖（幂等）。判据用原始文档，
+                    // 所以这里传的还是加载时读到的 `raw_doc`。
+                    if migrate_official_web_tools(profiles, raw_doc.as_ref()) {
+                        log::info!(
+                            "[config] 已为 deepseek_account profile 写入 official_web_tools = true"
+                        );
                     }
                 }
                 // C3 迁移：扁平值先固化进 active/default profile（**无条件覆盖**
@@ -1644,6 +1704,86 @@ mod c3_migration_tests {
             && doc.get("endpoint").is_none()
             && doc.get("reasoning_effort").is_none()
             && doc.get("provider_id").is_none()
+    }
+
+    /// DeepSeek 账号额度：`official_web_tools` 键缺失 → 一次性迁移补 true 并写回磁盘。
+    #[test]
+    fn deepseek_account_profile_gains_official_web_tools_once() {
+        let (dir, store, secrets) = setup(
+            "official-web-migrate",
+            "active_profile = \"default\"
+[profiles.default]
+model = \"deepseek-v4-flash\"
+max_tokens = 8192
+base_url = \"https://api.deepseek.com\"
+wire = \"responses\"
+credential = \"deepseek_account\"
+",
+        );
+
+        let cfg = Config::load_from_paths_with(store, secrets).expect("load");
+        // 内存态：active profile 复制 compat 发生在迁移之后，首个回合就能拿到。
+        assert!(cfg.compat.official_web_tools);
+        assert!(
+            cfg.profiles["default"]
+                .compat
+                .as_ref()
+                .expect("compat materialized")
+                .official_web_tools
+        );
+
+        // 磁盘：迁移结果必须是显式值，下次加载不再依赖猜测。
+        let on_disk = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
+        let doc: toml::Value = toml::from_str(&on_disk).expect("parse written config");
+        assert_eq!(
+            doc.get("profiles")
+                .and_then(|profiles| profiles.get("default"))
+                .and_then(|profile| profile.get("compat"))
+                .and_then(|compat| compat.get("official_web_tools"))
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "迁移必须写回显式值：{on_disk}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 用户显式关掉时迁移不得覆盖——这正是「键是否存在」必须看原始文档的原因。
+    #[test]
+    fn explicit_false_survives_the_official_web_migration() {
+        let (dir, store, secrets) = setup(
+            "official-web-explicit-false",
+            "active_profile = \"default\"
+[profiles.default]
+base_url = \"https://api.deepseek.com\"
+wire = \"responses\"
+credential = \"deepseek_account\"
+
+[profiles.default.compat]
+official_web_tools = false
+",
+        );
+
+        let cfg = Config::load_from_paths_with(store, secrets).expect("load");
+        assert!(!cfg.compat.official_web_tools, "显式 false 必须保留");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 其它凭据来源不受影响：BYOK 的 profile 请求体与工具清单保持原样。
+    #[test]
+    fn api_key_profiles_are_untouched_by_the_official_web_migration() {
+        let (dir, store, secrets) = setup(
+            "official-web-api-key",
+            "active_profile = \"default\"
+[profiles.default]
+base_url = \"https://api.deepseek.com\"
+wire = \"openai\"
+credential = \"api_key\"
+",
+        );
+
+        let cfg = Config::load_from_paths_with(store, secrets).expect("load");
+        assert!(!cfg.compat.official_web_tools);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

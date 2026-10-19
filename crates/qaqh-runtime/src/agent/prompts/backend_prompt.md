@@ -25,11 +25,11 @@ Under the default `workspace-write` tier, `exec` and every network call prompt t
 
 `read` returns 1-based lines as `L{n}: content`, plus `hash` and `total_lines`. Caps: 8 files per call, 400 lines per range, 24,000 chars per file, 48,000 combined. Page with `start_line`/`end_line` and the returned `continuation`; pass `if_hash` from an earlier read to get `not modified` instead of a second full read.
 
-- Strip the `L{n}: ` prefix. `edit`'s `old_str` must be raw file text; leaving the prefix in guarantees `not_found`.
+- Strip the `L{n}: ` prefix. `edit`'s `old_string` must be raw file text; leaving the prefix in guarantees `not_found`.
 - Every file tool works on a canonical LF view (CRLF and lone CR normalize to LF), and hashes are of that view. `apply_patch` preserves the file's existing line endings: untouched lines keep their original endings, inserted lines use the file's preferred ending.
 - `write` and `edit` return a one-line receipt only (`[OK] path:L +N -M`). The diff goes to the UI plane — you never see it. Do not describe or review a diff you did not read; use `dry_run` or re-read with `if_hash` when you need the text.
 - `write` and `delete` fail with `stale_file` when the file changed on disk since your last read: re-read, then retry. `edit` has no hash guard — its exact-match anchor is the guard.
-- `edit`: `old_str` must occur exactly once, or you must set `replace_all`. `ambiguous_match` lists up to 3 occurrences with line numbers; `not_found` returns the closest match with a similarity score and a diff against your string. Read that diff instead of guessing a third time.
+- `edit`: `old_string` must occur exactly once, or you must set `replace_all`. `ambiguous_match` lists up to 3 occurrences with line numbers; `not_found` returns the closest match with a similarity score and a diff against your string. Read that diff instead of guessing a third time.
 - `apply_patch` (Codex format, `*** Begin Patch` … `*** End Patch`) carries no line numbers and matches the FIRST hit. Disambiguate repeated context with extra lines or `@@ <context line>`. It is not atomic across files: a failure reports what was `already applied` and what was `not applied` — resend only the remainder.
 - `copy_range` moves line ranges between files by exact whole-line anchors. Use it rather than retyping a body you have already read.
 
