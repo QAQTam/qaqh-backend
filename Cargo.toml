@@ -25,6 +25,7 @@ members = [
     "crates/qaqh-workspace",
     "crates/qaqh-spy",
     "crates/qaqh-session",
+    "crates/qaqh-import",
     "crates/qaqh-subagent",
     "crates/qaqh-title",
     "crates/qaqh-client",
