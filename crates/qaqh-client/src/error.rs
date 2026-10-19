@@ -41,6 +41,13 @@ pub enum ClientError {
         message: String,
     },
 
+    /// 服务面方法不在 [`crate::service::SERVICE_METHODS`] 白名单内。
+    ///
+    /// 这是**本地拒绝**：一个请求都没发出去。与 `Api`（daemon 报错，带服务端
+    /// `code`）在类型上就分得开——调用方不需要去嗅探错误文案或 HTTP 状态码。
+    #[error("service method not allowed by the client whitelist: {method}")]
+    ServiceMethodNotAllowed { method: String },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -76,6 +83,11 @@ impl ClientError {
             Self::Api { code, .. } => Some(code),
             _ => None,
         }
+    }
+
+    /// 是否被客户端白名单拒掉（请求未发出，不是 daemon 的答复）。
+    pub fn is_method_not_allowed(&self) -> bool {
+        matches!(self, Self::ServiceMethodNotAllowed { .. })
     }
 
     /// 会话尚未物化：canonical 目录 / commit marker 还不存在

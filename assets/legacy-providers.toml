@@ -15,6 +15,7 @@ base_url = "https://api.deepseek.com"
 default_model = ""
 models = []
 models_url = "https://api.deepseek.com"
+official_web_tools = true
 user_id_mode = "Body"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
@@ -46,6 +47,7 @@ models = [
     "deepseek-v4-flash-vision-exp",
 ]
 responses_path = "/responses"
+official_web_tools = true
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
 include_stream_usage = false

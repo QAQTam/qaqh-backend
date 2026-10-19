@@ -73,7 +73,6 @@ mod tests {
             compact_id: compact_id.to_string(),
             summary: "summary".to_string(),
             kept_user_count: 1,
-            head_user_count: 1,
             context_revision: 1,
             error: None,
         }

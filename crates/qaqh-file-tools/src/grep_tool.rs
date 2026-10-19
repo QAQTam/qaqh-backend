@@ -35,11 +35,21 @@ pub struct GrepArgs {
     /// ripgrep regex.
     #[serde(default)]
     pub pattern: String,
-    /// Dirs to search
-    #[serde(default)]
+    /// Dirs to search (`path` / `file` / `dir` are accepted as aliases; a bare
+    /// string means a single dir).
+    #[serde(
+        default,
+        alias = "path",
+        alias = "file",
+        alias = "dir",
+        deserialize_with = "crate::tool_api::lenient::opt_one_or_many_strings"
+    )]
     pub paths: Option<Vec<String>>,
-    /// ripgrep --glob filters.
-    #[serde(default)]
+    /// ripgrep --glob filters (a bare string means a single filter).
+    #[serde(
+        default,
+        deserialize_with = "crate::tool_api::lenient::opt_one_or_many_strings"
+    )]
     pub glob: Option<Vec<String>>,
     /// Default false.
     #[serde(default)]
@@ -486,6 +496,7 @@ mod tests {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         }
     }
@@ -518,6 +529,40 @@ mod tests {
         assert_eq!(output.count, 2);
         assert_eq!(output.matches[0].line, 1);
         assert!(output.matches[0].content.contains("fn "));
+    }
+
+    /// 模型先验里的签名是 `grep(pattern, path)`（Claude 标准 schema），而我们
+    /// 的正式名是 `paths`。别名必须让这类调用**一次成功**，否则每次都要多一轮。
+    #[test]
+    fn claude_style_path_argument_is_accepted() {
+        let (_dir, root) = setup(&[("src/a.rs", "fn alpha() {}\n"), ("b.rs", "fn beta() {}\n")]);
+        let single = run(
+            &root,
+            serde_json::json!({ "pattern": "fn ", "path": "src" }),
+        )
+        .expect("path 别名");
+        assert_eq!(single.count, 1, "裸串 path 应视作单元素 paths");
+        assert!(single.matches[0].path.ends_with("a.rs"));
+
+        let many = run(
+            &root,
+            serde_json::json!({ "pattern": "fn ", "paths": ["src", "b.rs"] }),
+        )
+        .expect("paths 数组");
+        assert_eq!(many.count, 2);
+    }
+
+    /// `glob` 同样吃裸串（`"*.rs"` ≡ `["*.rs"]`）；逗号分隔不展平。
+    #[test]
+    fn bare_glob_string_is_a_single_filter() {
+        let (_dir, root) = setup(&[("a.rs", "target\n"), ("a.md", "target\n")]);
+        let output = run(
+            &root,
+            serde_json::json!({ "pattern": "target", "glob": "*.rs" }),
+        )
+        .expect("glob 裸串");
+        assert_eq!(output.count, 1);
+        assert!(output.matches[0].path.ends_with("a.rs"));
     }
 
     #[test]

@@ -24,6 +24,33 @@
 
 use serde::{Deserialize, Serialize};
 
+/// wire 的**规范拼写**：读模型 `ConfigDto.wire` 输出的就是这四个之一，
+/// 写模型 `ConfigPatch::wire` 也接受它们（旧拼写作为别名一并接受）。
+///
+/// 为什么这份名单在这里而不是复用 `qaqh_types::Wire::parse`：本 crate 的 K1
+/// 不变量是「只依赖 serde」（三端设置页直接编译它）。所以这里是**一份镜像**，
+/// 但它是被闸门盯着的镜像——`qaqh-config` 的
+/// `canonical_wire_mirrors_qaqh_types` 测试逐个拼写与 `Wire::parse` +
+/// `Wire::as_str()` 对拍，任何一边改了名字而另一边没跟，测试先红。
+///
+/// 返回 `None` = 不认识的拼写（写侧据此报 400，而不是静默兜底成 `chat`——
+/// 静默兜底正是「以为在用 A 协议、实际打了 B」那类最难查的问题）。
+pub fn canonical_wire(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "chat" | "openai" | "openai-compatible" | "chat_completions" | "chat/completions" => {
+            Some("chat")
+        }
+        "responses" | "openai-responses" => Some("responses"),
+        "messages" | "anthropic" | "claude" => Some("messages"),
+        "gemini"
+        | "google"
+        | "generatecontent"
+        | "generate_content"
+        | "gemini-generate-content" => Some("gemini"),
+        _ => None,
+    }
+}
+
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
 /// TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见 crate 级兼容策略）。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -33,7 +60,12 @@ pub struct ConfigDto {
     pub model: String,
     /// BYOK 的 endpoint：scheme + host + 可选前缀（不含 wire 自身路径）。
     pub base_url: String,
-    /// 该 endpoint 说的 wire：`openai` | `responses` | `anthropic` | `gemini`。
+    /// 该 endpoint 说的 wire，**规范拼写**：`chat` | `responses` | `messages` | `gemini`
+    /// （= `qaqh_types::Wire::as_str()`，也是写侧 [`canonical_wire`] 的返回值）。
+    ///
+    /// 2026-10 之前这里写的是旧四名 `openai` / `anthropic`，与实际输出不一致：
+    /// 读侧回规范名、写侧只收旧名，于是每个客户端都得自带一层拼写桥。
+    /// 现在写侧也收规范名（旧名作为兼容别名继续接受），读写同一套。
     pub wire: String,
     /// 该 endpoint 的**凭据来源**：`api_key`（BYOK，缺省）| `chatgpt_plan`（本机
     /// ChatGPT 套餐额度）| `deepseek_account`（本机 DeepSeek 账号余额）。
@@ -205,6 +237,9 @@ pub struct ConfigPatch {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// 协议拼写：规范名为 [`canonical_wire`] 的返回值（`chat` / `responses` /
+    /// `messages` / `gemini`）；旧名（`openai` / `anthropic` / `claude` / …）
+    /// 作为兼容别名**同样接受**，落盘时统一折成规范名对应的 [`Wire`]。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wire: Option<String>,
     /// 凭据来源：`api_key` | `chatgpt_plan` | `deepseek_account`。缺失 = 不动（K3）。
@@ -307,11 +342,14 @@ impl ConfigPatch {
         {
             return Err("contextLength 必须大于 0".to_string());
         }
+        // 读写同一套拼写：规范名（`chat` / `messages`）与旧名（`openai` /
+        // `anthropic` / …）都收，判定交给 [`canonical_wire`]（= `Wire::parse`
+        // 的镜像，见那里的闸门说明）。
         if let Some(w) = &self.wire
-            && !matches!(w.as_str(), "openai" | "responses" | "anthropic" | "gemini")
+            && canonical_wire(w).is_none()
         {
             return Err(format!(
-                "wire 仅允许 openai|responses|anthropic|gemini，收到 {w}"
+                "wire 仅允许 chat|responses|messages|gemini（旧拼写 openai|anthropic|claude|openai-compatible 等仍被接受），收到 {w}"
             ));
         }
         if let Some(c) = &self.credential
@@ -394,6 +432,47 @@ mod tests {
         let err = serde_json::from_value::<ConfigDto>(json!({ "model": "m" }))
             .expect_err("缺字段必须失败");
         assert!(err.to_string().contains("missing field"), "{err}");
+    }
+
+    /// R3：写侧接受**规范名**（读模型输出的那一套），旧名继续兼容。
+    ///
+    /// 这条挡的是「客户端各写一层拼写桥」：读回 `chat`、直发 `chat` 就该过；
+    /// 任何壳层都不需要再记「读规范名、写旧名」这件反直觉的事。
+    #[test]
+    fn patch_validation_accepts_canonical_and_legacy_wire_spellings() {
+        for spelling in ["chat", "messages", "responses", "gemini"] {
+            let patch = ConfigPatch {
+                wire: Some(spelling.into()),
+                ..Default::default()
+            };
+            patch
+                .validate()
+                .unwrap_or_else(|e| panic!("规范名 {spelling} 必须被接受：{e}"));
+            assert_eq!(canonical_wire(spelling), Some(spelling), "规范名应映射到自身");
+        }
+        for spelling in [
+            "openai",
+            "openai-compatible",
+            "chat_completions",
+            "anthropic",
+            "claude",
+            "  CHAT ",
+        ] {
+            let patch = ConfigPatch {
+                wire: Some(spelling.into()),
+                ..Default::default()
+            };
+            patch
+                .validate()
+                .unwrap_or_else(|e| panic!("旧拼写 {spelling:?} 必须继续被接受：{e}"));
+        }
+        let err = ConfigPatch {
+            wire: Some("grpc".into()),
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("未知 wire 必须拒");
+        assert!(err.contains("chat|responses|messages|gemini"), "{err}");
     }
 
     /// 完整读模型 fixture：字段形状为**当前** wire 形状（K2 camelCase），必须无损

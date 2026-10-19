@@ -81,89 +81,101 @@ const WRITE_SEEDED: MethodInfo = MethodInfo {
     admin_only: false,
 };
 
+/// 方法表**本体**（单一真源）。
+///
+/// 之所以是「一个可遍历的数组」而不是 `match`：穷举闸必须能**从表反查清单**
+/// （「表里留了一条没人实现的死条目 / 清单里漏了一条」两种漂移才都能被机械发现）。
+/// 2026-10 之前这里是一个 `match`，两段所谓「反向」测试遍历的都是各 crate 的
+/// `methods::ALL`——方向相同，等于空转；`dsaccount.verify` 就是那样漏掉的。
+///
+/// 顺序无语义（[`lookup`] 线性扫描，条目数几十，一次 RPC 一次查找）。
+pub const METHODS: &[(&str, MethodInfo)] = &[
+    // daemon / 会话只读
+    ("daemon.version", READ),
+    ("session.list", READ),
+    ("session.meta", READ_SEEDED),
+    ("session.activity", READ),
+    ("session.dashboard", READ_SEEDED),
+    ("session.get_activity", READ_SEEDED),
+    // 会话级 profile 选择：写 meta.profile 并定向重载该会话（不动全局）。
+    ("session.set_profile", WRITE_SEEDED),
+    // 用户重命名会话标题（方案B）：写 meta.title 并广播 TitleChanged(user)。
+    ("session.rename", WRITE_SEEDED),
+    // workspace
+    ("workspace.get", READ_SEEDED),
+    ("workspace.list", READ),
+    ("workspace.set", WRITE_SEEDED),
+    ("workspace.create", WRITE),
+    ("workspace.rename", WRITE),
+    ("workspace.delete", WRITE),
+    ("workspace.move_session", WRITE_SEEDED),
+    ("workspace.detach", WRITE_SEEDED),
+    // fs
+    ("fs.list", READ),
+    ("fs.read", READ),
+    // config / profile
+    ("config.load", READ),
+    ("config.save", WRITE),
+    ("config.set_permission_level", WRITE),
+    ("profile.apply", WRITE),
+    ("profile.save_current", WRITE),
+    ("profile.delete", WRITE),
+    // Sign in with ChatGPT（套餐用量）。**全部 admin_only**：配对出来的设备
+    // （view/interact）绝不得触发登录 / 切账户 / 登出——那等于让远端设备把
+    // 新账户接进用户机器并改写本机凭据。方法名的单一真源在 qaqh_siwc::methods。
+    ("siwc.status", READ_ADMIN),
+    ("siwc.profiles", READ_ADMIN),
+    ("siwc.models", READ_ADMIN),
+    ("siwc.sign_in.start", WRITE_ADMIN),
+    ("siwc.sign_in.status", READ_ADMIN),
+    ("siwc.sign_in.cancel", WRITE_ADMIN),
+    ("siwc.profile.select", WRITE_ADMIN),
+    ("siwc.sign_out", WRITE_ADMIN),
+    // DeepSeek 账号（账号余额）。与 siwc 同一档待遇：**全部 admin_only**——
+    // 配对设备不得触发登录 / 登出 / 读余额。方法名真源在 qaqh_dsaccount::methods。
+    ("dsaccount.status", READ_ADMIN),
+    ("dsaccount.balance", READ_ADMIN),
+    ("dsaccount.bonuses", READ_ADMIN),
+    ("dsaccount.sign_in.start", WRITE_ADMIN),
+    ("dsaccount.sign_in.status", READ_ADMIN),
+    ("dsaccount.sign_in.cancel", WRITE_ADMIN),
+    ("dsaccount.sign_out", WRITE_ADMIN),
+    ("dsaccount.bonus.ack", WRITE_ADMIN),
+    ("dsaccount.models", READ_ADMIN),
+    // 可能顺手清凭据，所以按写类报错（`action_failed`）而不是只读。
+    ("dsaccount.verify", WRITE_ADMIN),
+    // skills
+    ("skills.list_tools", READ),
+    ("skills.operation", WRITE),
+    ("skills.reload", WRITE),
+    // todo / plan / stats
+    ("todo.status", READ_SEEDED),
+    // todo CLI 路线（daemon HTTP 直访；与 LLM 工具分发表共用 exec 核心）
+    ("todo.list", READ_SEEDED),
+    ("todo.set", WRITE_SEEDED),
+    ("plan.read", READ_SEEDED),
+    // Process-wide memory view is intentionally admin-scope only.
+    ("diagnostics.memory.snapshot", READ_ADMIN),
+    ("diagnostics.memory.start", WRITE_ADMIN),
+    ("diagnostics.memory.stop", WRITE_ADMIN),
+    // git（只读与变更分列）
+    ("git.diff", READ_SEEDED),
+    ("git.branch", READ_SEEDED),
+    ("git.branches", READ_SEEDED),
+    ("git.file_diff", READ_SEEDED),
+    ("git.switch_branch", WRITE),
+    ("git.commit", WRITE),
+    // subagent / tool mode
+    ("subagent.spawn", WRITE),
+    ("session.set_tool_mode", WRITE_SEEDED),
+];
+
 /// 方法表：未列出的名字返回 `None`（HTTP 404）。
 pub fn lookup(method: &str) -> Option<MethodInfo> {
-    match method {
-        // daemon / 会话只读
-        "daemon.version" => Some(READ),
-        "session.list" => Some(READ),
-        "session.meta" => Some(READ_SEEDED),
-        "session.activity" => Some(READ),
-        "session.dashboard" => Some(READ_SEEDED),
-        "session.get_activity" => Some(READ_SEEDED),
-        // 会话级 profile 选择：写 meta.profile 并定向重载该会话（不动全局）。
-        "session.set_profile" => Some(WRITE_SEEDED),
-        // 用户重命名会话标题（方案B）：写 meta.title 并广播 TitleChanged(user)。
-        "session.rename" => Some(WRITE_SEEDED),
-        // workspace
-        "workspace.get" => Some(READ_SEEDED),
-        "workspace.list" => Some(READ),
-        "workspace.set" => Some(WRITE_SEEDED),
-        "workspace.create" => Some(WRITE),
-        "workspace.rename" => Some(WRITE),
-        "workspace.delete" => Some(WRITE),
-        "workspace.move_session" => Some(WRITE_SEEDED),
-        "workspace.detach" => Some(WRITE_SEEDED),
-        // fs
-        "fs.list" => Some(READ),
-        "fs.read" => Some(READ),
-        // config / profile
-        "config.load" => Some(READ),
-        "config.save" => Some(WRITE),
-        "config.set_permission_level" => Some(WRITE),
-        "profile.apply" => Some(WRITE),
-        "profile.save_current" => Some(WRITE),
-        "profile.delete" => Some(WRITE),
-        // Sign in with ChatGPT（套餐用量）。**全部 admin_only**：配对出来的设备
-        // （view/interact）绝不得触发登录 / 切账户 / 登出——那等于让远端设备把
-        // 新账户接进用户机器并改写本机凭据。方法名的单一真源在 qaqh_siwc::methods。
-        "siwc.status" => Some(READ_ADMIN),
-        "siwc.profiles" => Some(READ_ADMIN),
-        "siwc.models" => Some(READ_ADMIN),
-        "siwc.sign_in.start" => Some(WRITE_ADMIN),
-        "siwc.sign_in.status" => Some(READ_ADMIN),
-        "siwc.sign_in.cancel" => Some(WRITE_ADMIN),
-        "siwc.profile.select" => Some(WRITE_ADMIN),
-        "siwc.sign_out" => Some(WRITE_ADMIN),
-        // DeepSeek 账号（账号余额）。与 siwc 同一档待遇：**全部 admin_only**——
-        // 配对设备不得触发登录 / 登出 / 读余额。方法名真源在 qaqh_dsaccount::methods。
-        "dsaccount.status" => Some(READ_ADMIN),
-        "dsaccount.balance" => Some(READ_ADMIN),
-        "dsaccount.bonuses" => Some(READ_ADMIN),
-        "dsaccount.sign_in.start" => Some(WRITE_ADMIN),
-        "dsaccount.sign_in.status" => Some(READ_ADMIN),
-        "dsaccount.sign_in.cancel" => Some(WRITE_ADMIN),
-        "dsaccount.sign_out" => Some(WRITE_ADMIN),
-        "dsaccount.bonus.ack" => Some(WRITE_ADMIN),
-        "dsaccount.models" => Some(READ_ADMIN),
-        // 可能顺手清凭据，所以按写类报错（`action_failed`）而不是只读。
-        "dsaccount.verify" => Some(WRITE_ADMIN),
-        // skills
-        "skills.list_tools" => Some(READ),
-        "skills.operation" => Some(WRITE),
-        "skills.reload" => Some(WRITE),
-        // todo / plan / stats
-        "todo.status" => Some(READ_SEEDED),
-        // todo CLI 路线（daemon HTTP 直访；与 LLM 工具分发表共用 exec 核心）
-        "todo.list" => Some(READ_SEEDED),
-        "todo.set" => Some(WRITE_SEEDED),
-        "plan.read" => Some(READ_SEEDED),
-        // Process-wide memory view is intentionally admin-scope only.
-        "diagnostics.memory.snapshot" => Some(READ_ADMIN),
-        "diagnostics.memory.start" => Some(WRITE_ADMIN),
-        "diagnostics.memory.stop" => Some(WRITE_ADMIN),
-        // git（只读与变更分列）
-        "git.diff" => Some(READ_SEEDED),
-        "git.branch" => Some(READ_SEEDED),
-        "git.branches" => Some(READ_SEEDED),
-        "git.file_diff" => Some(READ_SEEDED),
-        "git.switch_branch" => Some(WRITE),
-        "git.commit" => Some(WRITE),
-        // subagent / tool mode
-        "subagent.spawn" => Some(WRITE),
-        "session.set_tool_mode" => Some(WRITE_SEEDED),
-        _ => None,
-    }
+    METHODS
+        .iter()
+        .find(|(name, _)| *name == method)
+        .map(|(_, info)| *info)
 }
 
 /// 统一错误响应形状（daemon HTTP 层使用），按方法类别区分 code。
@@ -195,6 +207,9 @@ mod tests {
     ///
     /// 这条测试的意义不在覆盖率，而在**越权面**：任何新增的 `siwc.*` 方法
     /// 只要漏了 admin 档，就会被这里挡住（`ALL` 是那份清单的真源）。
+    ///
+    /// **两向都遍历**：`ALL → 表`（漏项）与 `表 → ALL`（死条目）。第二向必须从
+    /// [`METHODS`] 出发——遍历 `ALL` 再查表与正向是同一个方向，等于空转。
     #[test]
     fn siwc_methods_are_admin_only_and_fully_enumerated() {
         for method in qaqh_siwc::methods::ALL {
@@ -204,13 +219,15 @@ mod tests {
                 "{method} 必须 admin_only：配对设备不得改写本机凭据"
             );
         }
-        // 反向：方法表里的 siwc.* 一个都不能多（防止表里留了没有实现的死条目）。
-        let mut listed = Vec::new();
-        for method in qaqh_siwc::methods::ALL {
-            listed.push(*method);
-        }
-        for method in listed {
-            assert!(lookup(method).is_some(), "{method} 应可解析");
+        // 反向（真反向）：表里的 siwc.* 一个都不能多。
+        for (method, info) in METHODS {
+            if method.starts_with("siwc.") {
+                assert!(
+                    qaqh_siwc::methods::ALL.contains(method),
+                    "{method} 在方法表里，却不在 qaqh_siwc::methods::ALL"
+                );
+                assert!(info.admin_only, "{method} 必须 admin_only");
+            }
         }
     }
 
@@ -218,6 +235,9 @@ mod tests {
     ///
     /// 越权面的意义与上面那条相同：账号凭据同样是「本机身份」，配对设备
     /// 不得碰它——尤其 `sign_in.start`（会打开浏览器并把新账号接进本机）。
+    ///
+    /// 这条的**反向**臂是 R5 的验收项：当初 `dsaccount.verify` 在表里、
+    /// 不在 `ALL` 里，而旧的「反向」遍历的仍是 `ALL`，所以从来没红过。
     #[test]
     fn dsaccount_methods_are_admin_only_and_fully_enumerated() {
         assert!(!qaqh_dsaccount::methods::ALL.is_empty());
@@ -228,8 +248,62 @@ mod tests {
                 "{method} 必须 admin_only：配对设备不得触碰本机账号凭据"
             );
         }
-        for method in qaqh_dsaccount::methods::ALL {
-            assert!(lookup(method).is_some(), "{method} 应可解析");
+        // 反向（真反向）：表里的 dsaccount.* 一个都不能多。
+        for (method, info) in METHODS {
+            if method.starts_with("dsaccount.") {
+                assert!(
+                    qaqh_dsaccount::methods::ALL.contains(method),
+                    "{method} 在方法表里，却不在 qaqh_dsaccount::methods::ALL"
+                );
+                assert!(info.admin_only, "{method} 必须 admin_only");
+            }
+        }
+    }
+
+    /// 方法表可遍历之后，重名条目也该被挡住：`lookup` 只命中第一条，
+    /// 多出来的那条等于「写了但永远不生效」——旧 `match` 形态会直接编译失败，
+    /// 换成数组之后必须由测试补上这条闸。
+    #[test]
+    fn method_table_has_no_duplicate_names() {
+        let mut names: Vec<&str> = METHODS.iter().map(|(name, _)| *name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "方法表里有重名条目");
+    }
+
+    /// 客户端服务面白名单（R1）必须与方法表**两向**对齐：
+    /// - 两份 `methods::ALL` ⊆ `qaqh_client::SERVICE_METHODS`（不漏）；
+    /// - 白名单里没有表外的死条目（不虚）。
+    ///
+    /// 这条闸放在 runtime 而不是 client：只有这里同时看得见方法表、
+    /// 两家 `methods` 与客户端白名单。
+    #[test]
+    fn client_service_whitelist_mirrors_account_methods() {
+        let declared: Vec<&str> = qaqh_siwc::methods::ALL
+            .iter()
+            .chain(qaqh_dsaccount::methods::ALL.iter())
+            .copied()
+            .collect();
+        for method in &declared {
+            assert!(
+                qaqh_client::service::is_allowed(method),
+                "{method} 在 methods::ALL 里，但客户端白名单没有放行"
+            );
+            assert!(
+                lookup(method).is_some(),
+                "{method} 在 methods::ALL 里，但 daemon 方法表没有它"
+            );
+        }
+        // 反向：白名单里的每条都得是表里真实存在的 admin 方法。
+        for method in qaqh_client::service::SERVICE_METHODS {
+            let info = lookup(method)
+                .unwrap_or_else(|| panic!("客户端白名单里的 {method} 不在 daemon 方法表"));
+            assert!(info.admin_only, "{method} 应是 admin_only（账号凭据面）");
+            assert!(
+                declared.contains(method),
+                "客户端白名单里的 {method} 不在任何 methods::ALL 里（死条目）"
+            );
         }
     }
 

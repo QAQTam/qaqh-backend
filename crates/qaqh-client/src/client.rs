@@ -477,6 +477,52 @@ impl Client {
         Ok(response.json().await?)
     }
 
+    /// `POST /ringing/v2/service/{method}` — 白名单式服务面直调。
+    ///
+    /// 与 [`Self::query`] / [`Self::action`] 的差别只在**方法名的来源**：那两个
+    /// 走封闭枚举（拼错即编译错误），这条走 [`crate::service::SERVICE_METHODS`]
+    /// 白名单（越界**在本地就拒**：`ClientError::ServiceMethodNotAllowed`，
+    /// 一个请求都不发）。用于 daemon 已经就绪、客户端枚举还没建模的账号面方法
+    /// （`siwc.*` 8 个 + `dsaccount.*` 10 个）。
+    ///
+    /// - **不注入 seed、不要求 `attach`**：登录类方法在零会话时也要能调
+    ///   （`sign_in.start` 就是引导页的第一个动作）。这里只用已协商好的
+    ///   client session 头——daemon 侧 `handle_service` 靠它定位 lease。
+    /// - 失败时优先还原 daemon 的 `{ code, message }` 形状（[`ClientError::Api`]，
+    ///   例如 `unknown_method` / `lease_required` / `action_failed`），
+    ///   解析不出来才退回 [`ClientError::Http`]。
+    ///
+    /// 请求参数与响应形状见 `docs/spec-service-surface-siwc-dsaccount.md`；
+    /// 响应可直接用 [`crate::service_types`] 的 typed DTO 反序列化。
+    pub async fn service_call(&self, method: &str, params: Value) -> Result<Value> {
+        if !crate::service::is_allowed(method) {
+            return Err(ClientError::ServiceMethodNotAllowed {
+                method: method.to_string(),
+            });
+        }
+        let session_id = self.session_id_header().await?;
+        let path = format!("/ringing/v2/service/{method}");
+        let response = self
+            .inner
+            .http
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .header("X-QAQH-Client-Session-Id", session_id)
+            .json(&params)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(crate::service::response_error(
+                status.as_u16(),
+                &path,
+                &body,
+            ));
+        }
+        Ok(response.json().await?)
+    }
+
     /// Attach a session to this client session (`session_resume` on the
     /// control channel — the daemon records the ownership so subsequent
     /// session-scoped commands are accepted).

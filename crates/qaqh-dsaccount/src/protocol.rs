@@ -37,6 +37,13 @@ pub const UNNOTIFIED_BONUSES_PATH: &str = "/api/v0/users/get_unnotified_bonuses"
 /// 确认一笔赠额已展示。
 pub const ACK_BONUS_PATH: &str = "/api/v0/users/ack_bonus_notified";
 
+/// 官方网页搜索（`POST {INFERENCE_ORIGIN}/v1/tools/search`）。
+///
+/// 与推理同 origin、同账号凭据；文档：`/zh-cn/guides/search`。
+pub const WEB_SEARCH_PATH: &str = "/v1/tools/search";
+/// 官方网页抓取（`POST {INFERENCE_ORIGIN}/v1/tools/fetch`），返回 Markdown 正文。
+pub const WEB_FETCH_PATH: &str = "/v1/tools/fetch";
+
 /// 账号凭据头：**无 `Bearer` 前缀**（与 `x-api-key` 是两条不相通的凭据）。
 pub const AUTH_TOKEN_HEADER: &str = "x-dsh-auth-token";
 

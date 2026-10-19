@@ -11,11 +11,21 @@ use super::loop_core::Loop;
 use super::types::*;
 
 impl Loop {
-    pub(super) fn finish_pending_compact(&mut self, status: qaqh_domain::CompactStatus) {
+    /// 压缩在 Loop 侧被取消（会话切换、写入通道断开等）：终态必须带原因。
+    pub(super) fn finish_pending_compact(
+        &mut self,
+        status: qaqh_domain::CompactStatus,
+        reason: Option<&str>,
+    ) {
         self.session.agent.finish_manual_compact();
         let Some(pending) = self.compaction.take() else {
             return;
         };
+        log::info!(
+            "[COMPACT] finish {} (loop-side): status={status:?} reason={}",
+            pending.compact_id,
+            reason.unwrap_or("-")
+        );
         let _scope = self
             .paced_emitter
             .enter_causation(pending.causation.as_deref());
@@ -27,6 +37,7 @@ impl Loop {
                     summary_chars: Some(0),
                     turns_compacted: Some(0),
                     turns_removed: Some(0),
+                    reason: reason.map(str::to_string),
                 },
             ));
         self.dispatch_injections_after_compact();
@@ -82,13 +93,16 @@ impl Loop {
                 // Clear pending state and report error so frontend
                 // doesn't stay stuck at the "compacting" animation.
                 log::error!("[COMPACT] worker thread disconnected without result");
-                self.finish_pending_compact(qaqh_domain::CompactStatus::Failed);
+                self.finish_pending_compact(
+                    qaqh_domain::CompactStatus::Failed,
+                    Some("压缩失败：压缩线程异常退出，未返回摘要。"),
+                );
                 // 失败同时由 OperationFailed 暴露具体原因。
                 self.emit_operation_failed(
                     "compact-worker-crashed",
                     qaqh_domain::ErrorScope::Conversation,
                     "compact_worker_crashed",
-                    "Context compaction failed: worker thread crashed.",
+                    "压缩失败：压缩线程异常退出，未返回摘要。",
                 );
             }
         }
@@ -204,11 +218,11 @@ impl Loop {
         // 压缩会折叠悬空 tool_use，迟到 grant 将执行出孤儿结果。
         if self.session.turn.is_suspended() || self.phase != LoopPhase::Idle {
             return Outcome::Error(
-                "Context compaction is not allowed while a turn is running or suspended.".into(),
+                "上下文压缩暂不可用：当前回合正在运行或等待授权，请等它结束后再发起压缩。".into(),
             );
         }
         if self.compaction.is_running() || self.session.agent.manual_compact_running() {
-            return Outcome::Error("Context compaction is already running.".into());
+            return Outcome::Error("上下文压缩正在进行中，请等待本次压缩结束。".into());
         }
         let compact = {
             let mut ctx = RingContext {
@@ -223,7 +237,43 @@ impl Loop {
             };
             super::engine_compact::build_prompt_and_meta(&mut ctx)
         };
-        if let Some((prompt, kept, head, provider, compact_id)) = compact {
+        let super::engine_compact::CompactPlan {
+            prompt,
+            kept_user_count: kept,
+            provider,
+            compact_id,
+        } = match compact {
+            Ok(plan) => plan,
+            Err(refusal) => {
+                // 未发起：终态 + 中文原因一起发，不再谎报"历史已经够短"。
+                let reason = refusal.reason();
+                log::info!("[COMPACT] refused({}): {reason}", refusal.code());
+                if let Some(cid) = causation.as_deref() {
+                    self.emit_operation_failed(
+                        cid,
+                        qaqh_domain::ErrorScope::Conversation,
+                        refusal.code(),
+                        &reason,
+                    );
+                }
+                self.paced_emitter
+                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                        qaqh_domain::ConversationEvent::CompactFinished {
+                            compact_id: format!(
+                                "compact-skipped-{}",
+                                self.session.agent.session.session_id
+                            ),
+                            status: qaqh_domain::CompactStatus::Skipped,
+                            summary_chars: Some(0),
+                            turns_compacted: Some(0),
+                            turns_removed: Some(0),
+                            reason: Some(reason),
+                        },
+                    ));
+                return Outcome::Handled;
+            }
+        };
+        {
             self.session.agent.begin_manual_compact();
             let context_revision = self.session.agent.msg.context_revision();
             let pending_compact_id = compact_id.clone();
@@ -241,7 +291,6 @@ impl Loop {
                             prompt,
                             provider,
                             kept,
-                            head,
                             context_revision,
                             event_tx,
                             worker_causation,
@@ -253,10 +302,9 @@ impl Loop {
                             compact_id,
                             summary: String::new(),
                             kept_user_count: kept,
-                            head_user_count: head,
                             context_revision,
                             error: Some(format!(
-                                "Compact worker panicked: {}",
+                                "压缩失败：压缩线程崩溃（{}）。",
                                 Self::panic_msg_from_err(error)
                             )),
                         },
@@ -269,6 +317,7 @@ impl Loop {
                 Err(error) => {
                     log::error!("[COMPACT] failed to spawn worker: {error}");
                     self.session.agent.finish_manual_compact();
+                    let reason = format!("压缩失败：无法创建压缩线程（{error}）。");
                     let _scope = self.paced_emitter.enter_causation(causation.as_deref());
                     self.paced_emitter
                         .emit_domain(qaqh_domain::DomainEvent::Control(
@@ -278,7 +327,7 @@ impl Loop {
                                 error: qaqh_domain::DomainError {
                                     error_id: pending_compact_id.clone(),
                                     code: "compact_failed".into(),
-                                    message: "Context compaction could not start.".into(),
+                                    message: reason.clone(),
                                     retryable: true,
                                     dedupe_key: Some("compact_failed".into()),
                                 },
@@ -293,35 +342,11 @@ impl Loop {
                                 summary_chars: Some(0),
                                 turns_compacted: Some(0),
                                 turns_removed: Some(0),
+                                reason: Some(reason),
                             },
                         ));
                 }
             }
-        } else {
-            // L-msgloop③（降级后残余）：领域终态 CompactFinished{Skipped}
-            // 已存在，此处仅补命令级 receipt，让发起 compact 的 command_id
-            // 也能得到 ack（加法兼容，不改 envelope 形状）。
-            if let Some(cid) = causation.as_deref() {
-                self.emit_operation_failed(
-                    cid,
-                    qaqh_domain::ErrorScope::Conversation,
-                    "compact_noop",
-                    "Nothing to compact: history already fits the retention budget",
-                );
-            }
-            self.paced_emitter
-                .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                    qaqh_domain::ConversationEvent::CompactFinished {
-                        compact_id: format!(
-                            "compact-skipped-{}",
-                            self.session.agent.session.session_id
-                        ),
-                        status: qaqh_domain::CompactStatus::Skipped,
-                        summary_chars: Some(0),
-                        turns_compacted: Some(0),
-                        turns_removed: Some(0),
-                    },
-                ));
         }
         Outcome::Handled
     }

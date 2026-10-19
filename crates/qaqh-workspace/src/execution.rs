@@ -71,6 +71,7 @@ pub fn execute_authorized(
         cancellation,
         progress: None,
         exec_progress: None,
+        official_web: None,
         source: ToolCallSource::Model,
     };
     execute_authorized_with_context(call, context, progress_tx)
@@ -781,6 +782,7 @@ mod tests {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         let authorized = match crate::authorization::authorize_call_with_context(
@@ -1027,6 +1029,7 @@ mod tests {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         let authorized = match crate::authorization::authorize_call_with_context(
@@ -1080,6 +1083,7 @@ mod tests {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         assert!(matches!(
@@ -1124,6 +1128,7 @@ mod tests {
             cancellation,
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         let authorized = match crate::authorization::authorize_call_with_context(
