@@ -114,6 +114,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: ToolCallSource::Model,
         }
     }

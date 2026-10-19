@@ -18,7 +18,7 @@ use crate::tool_api::{
 #[serde(deny_unknown_fields)]
 pub struct ReadRequest {
     /// Workspace-relative or absolute.
-    #[serde(default)]
+    #[serde(default, alias = "file_path")]
     pub path: String,
     /// 1-based; omit for whole file.
     #[serde(
@@ -48,7 +48,7 @@ pub struct ReadArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests: Option<Vec<ReadRequest>>,
     /// Path (single-request sugar).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "file_path")]
     pub path: Option<String>,
     /// Start line, 1-based (single-request sugar).
     #[serde(
@@ -450,7 +450,7 @@ fn read_display(args: &Value, output: &str) -> ToolDisplay {
     let paths = if let Some(requests) = args.get("requests").and_then(Value::as_array) {
         let paths = requests
             .iter()
-            .filter_map(|request| request.get("path").and_then(Value::as_str))
+            .filter_map(crate::support::arg_path)
             .filter(|path| !path.trim().is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -460,8 +460,7 @@ fn read_display(args: &Value, output: &str) -> ToolDisplay {
             _ => Some(paths.join(", ")),
         }
     } else {
-        args.get("path")
-            .and_then(Value::as_str)
+        crate::support::arg_path(args)
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .map(str::to_string)
@@ -547,6 +546,7 @@ pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
         exec_progress: None,
+        official_web: None,
         source: crate::tool_api::ToolCallSource::Model,
     };
     crate::tool_api::TypedToolAdapter::new(ReadTool)
@@ -558,6 +558,32 @@ pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude 标准拼写 `file_path` 必须被接受，但**模型面 schema 不得变化**：
+    /// alias 只在接收端生效，多一个属性就能让 `additionalProperties:false` 失真。
+    #[test]
+    fn claude_style_file_path_is_accepted_without_touching_the_schema() {
+        let single: ReadArgs = serde_json::from_value(serde_json::json!({ "file_path": "a.rs" }))
+            .expect("top-level file_path");
+        assert_eq!(single.path.as_deref(), Some("a.rs"));
+
+        let batched: ReadArgs = serde_json::from_value(serde_json::json!({
+            "requests": [{ "file_path": "b.rs", "start_line": 3 }]
+        }))
+        .expect("per-request file_path");
+        assert_eq!(batched.requests.unwrap()[0].path, "b.rs");
+
+        for schema in [
+            crate::tool_api::schema::schema_of::<ReadArgs>(),
+            crate::tool_api::schema::schema_of::<ReadRequest>(),
+        ] {
+            assert!(
+                schema["properties"].get("file_path").is_none(),
+                "alias 不得出现在模型面 schema: {schema}"
+            );
+            assert_eq!(schema["additionalProperties"], false);
+        }
+    }
 
     #[test]
     fn read_directory_is_an_explicit_error() {

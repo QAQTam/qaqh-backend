@@ -209,6 +209,12 @@ impl ToolEngine {
             ctx.agent.config.permission_level,
             ctx.cancel.clone(),
             ctx.agent.config.exec.default_shell.clone(),
+            // UI 直调与模型回合走同一条注入规则，否则同一次点击的 web_fetch
+            // 会掉回自实现（两套行为，用户会以为是网络问题）。
+            crate::agent::official_web::backend_for(
+                ctx.agent.config.credential,
+                &ctx.agent.config.compat,
+            ),
         );
         let tool_context = runtime.tool_call_context(
             id,

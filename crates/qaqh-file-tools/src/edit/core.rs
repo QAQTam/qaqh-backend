@@ -38,7 +38,7 @@ pub(crate) struct Occurrence {
     pub(crate) context: String,
 }
 
-/// 最接近 `old_str` 的文件区域（仅用于失败诊断）。
+/// 最接近 `old_string` 的文件区域（仅用于失败诊断）。
 #[derive(Debug)]
 pub(crate) struct NearestMatch {
     pub(crate) start_line: usize,
@@ -215,22 +215,23 @@ fn ratio(a: &str, b: &str) -> f32 {
     TextDiff::from_chars(a, b).ratio()
 }
 
-/// `NOT_FOUND` 的模型可见正文：错误说明 + 最近似位置 + old_str→实际内容的 unified diff。
+/// `NOT_FOUND` 的模型可见正文：错误说明 + 最近似位置 + old_string→实际内容的 unified diff。
 pub(crate) fn render_not_found(path: &str, old: &str, nearest: Option<&NearestMatch>) -> String {
-    let mut out = format!("[ERROR] edit {path}\n  not_found: old_str was not found in the file.\n");
+    let mut out =
+        format!("[ERROR] edit {path}\n  not_found: old_string was not found in the file.\n");
     if let Some(n) = nearest {
         out.push_str(&format!(
             "  closest match: L{}-L{} (similarity {:.2})\n",
             n.start_line, n.end_line, n.score
         ));
-        out.push_str("  diff (your old_str → actual file content):\n");
+        out.push_str("  diff (your old_string → actual file content):\n");
         let before = truncate_for_diff(old);
         let after = truncate_for_diff(&n.text);
         let diff = TextDiff::from_lines(before.as_ref(), after.as_ref())
             .unified_diff()
             .context_radius(3)
             .header(
-                "old_str",
+                "old_string",
                 &format!("file:L{}-L{}", n.start_line, n.end_line),
             )
             .to_string();
@@ -248,7 +249,7 @@ pub(crate) fn render_not_found(path: &str, old: &str, nearest: Option<&NearestMa
 /// `AMBIGUOUS_MATCH` 的模型可见正文：命中总数 + 前 3 处的位置与上下文。
 pub(crate) fn render_ambiguous(path: &str, total: usize, occurrences: &[Occurrence]) -> String {
     let mut out = format!(
-        "[ERROR] edit {path}\n  AMBIGUOUS_MATCH: old_str matches {total} locations. To replace only one occurrence, extend 'old_str' with surrounding lines so it matches exactly one; to replace all, set replace_all=true.\n"
+        "[ERROR] edit {path}\n  AMBIGUOUS_MATCH: old_string matches {total} locations. To replace only one occurrence, extend 'old_string' with surrounding lines so it matches exactly one; to replace all, set replace_all=true.\n"
     );
     for (i, occ) in occurrences.iter().enumerate() {
         out.push_str(&format!("  occurrence #{} at L{}:\n", i + 1, occ.line));

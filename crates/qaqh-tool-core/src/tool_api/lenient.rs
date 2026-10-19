@@ -48,6 +48,40 @@ where
         })
 }
 
+/// `Option<Vec<String>>`：接受字符串数组、单个字符串（视为单元素数组）或 `null`。
+///
+/// 用法：`#[serde(default, alias = "path", deserialize_with =
+/// "crate::tool_api::lenient::opt_one_or_many_strings")]`。
+///
+/// 这是**无损提升**而非猜测：`array<string>` 的值域里，裸串只可能对应单元素
+/// 数组（`"src"` ≡ `["src"]`）。带分隔符的展平（`"a,b"` → `["a","b"]`）才是
+/// 猜测，故不做——路径里本来就可以有逗号。
+pub fn opt_one_or_many_strings<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Null => Ok(None),
+        Value::String(single) => Ok(Some(vec![single])),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Value::String(text) => Ok(text),
+                other => Err(D::Error::custom(format!(
+                    "invalid type: {} in array, expected string",
+                    describe(&other)
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        other => Err(D::Error::custom(format!(
+            "invalid type: {}, expected string or array<string>",
+            describe(&other)
+        ))),
+    }
+}
+
 /// 错误文案里的实收形态，与 serde 原生 `invalid type: string "x"` 拼写对齐，
 /// 让模型沿用上一次的纠错直觉。
 fn describe(value: &Value) -> String {
@@ -116,5 +150,36 @@ mod tests {
             "{}",
             error
         );
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct ManyArgs {
+        #[serde(default, deserialize_with = "opt_one_or_many_strings")]
+        paths: Option<Vec<String>>,
+    }
+
+    #[test]
+    fn one_or_many_widens_a_bare_string_losslessly() {
+        let single = serde_json::from_value::<ManyArgs>(json!({"paths": "src"})).unwrap();
+        assert_eq!(single.paths, Some(vec!["src".to_owned()]));
+        let many = serde_json::from_value::<ManyArgs>(json!({"paths": ["src", "tests"]})).unwrap();
+        assert_eq!(
+            many.paths,
+            Some(vec!["src".to_owned(), "tests".to_owned()])
+        );
+        let empty = serde_json::from_value::<ManyArgs>(json!({})).unwrap();
+        assert_eq!(empty.paths, None);
+    }
+
+    #[test]
+    fn one_or_many_does_not_split_on_separators() {
+        let parsed = serde_json::from_value::<ManyArgs>(json!({"paths": "src,tests"})).unwrap();
+        assert_eq!(
+            parsed.paths,
+            Some(vec!["src,tests".to_owned()]),
+            "逗号分隔是猜测，不得展平"
+        );
+        let bogus = serde_json::from_value::<ManyArgs>(json!({"paths": [1]})).expect_err("非字符串项");
+        assert!(bogus.to_string().contains("expected string"), "{bogus}");
     }
 }

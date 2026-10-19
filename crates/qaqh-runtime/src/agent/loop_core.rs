@@ -370,7 +370,10 @@ impl Loop {
 
         // Session-agnostic engines：无状态（M3 后无 Engine trait reset）
         self.misc.reset();
-        self.finish_pending_compact(qaqh_domain::CompactStatus::Cancelled);
+        self.finish_pending_compact(
+            qaqh_domain::CompactStatus::Cancelled,
+            Some("压缩已取消：引擎重置（会话已切换或回合被丢弃）。"),
+        );
 
         self.pending.clear();
     }
@@ -443,7 +446,10 @@ impl Loop {
             }
 
             if self.writer_dead.load(Ordering::SeqCst) {
-                self.finish_pending_compact(qaqh_domain::CompactStatus::Cancelled);
+                self.finish_pending_compact(
+                    qaqh_domain::CompactStatus::Cancelled,
+                    Some("压缩已取消：写入通道已断开，进程即将退出。"),
+                );
                 log::error!("[AGENT] writer thread died — exiting");
                 eprintln!("[qaqh AGENT] writer thread died — stdout pipe broken. Exiting.");
                 break;
@@ -476,7 +482,10 @@ impl Loop {
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.finish_pending_compact(qaqh_domain::CompactStatus::Cancelled);
+                    self.finish_pending_compact(
+                        qaqh_domain::CompactStatus::Cancelled,
+                        Some("压缩已取消：命令通道已关闭，进程即将退出。"),
+                    );
                     log::error!("[AGENT] cmd_rx closed — stdin pipe broken. Exiting.");
                     eprintln!("[qaqh AGENT] stdin pipe broken — exiting.");
                     break;

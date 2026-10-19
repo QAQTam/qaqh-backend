@@ -673,6 +673,9 @@ pub enum ConversationDelta {
         turns_compacted: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turns_removed: Option<u32>,
+        /// 终态原因（中文，失败/跳过/取消时给出）。加法字段：旧客户端忽略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 

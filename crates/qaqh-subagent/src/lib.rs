@@ -1843,6 +1843,7 @@ mod tests {
             cancellation: qaqh_tool_core::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: qaqh_tool_core::tool_api::ToolCallSource::Model,
         };
         let error = SpawnSubagentTool
