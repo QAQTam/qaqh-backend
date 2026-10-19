@@ -268,6 +268,14 @@ pub struct ToolResult {
     /// 运行元数据（框架填充，工具实现不写）。
     #[serde(default, skip_serializing_if = "ToolResultMetrics::is_empty")]
     pub metrics: ToolResultMetrics,
+    /// 工具**执行那一刻** API 反馈的上下文占用（"词元钱包"读数）。
+    ///
+    /// 冻结而非每轮重算：`render_xml_envelope` 在每个请求构建时都会重新渲染
+    /// 全部历史工具结果，若这里放动态值，每开一个新回合就会改写整条历史 →
+    /// 前缀缓存全灭。所以它只在落盘那一刻盖一次戳
+    /// （[`Self::stamp_api_context`]，由 `MessageStore` 在唯一落盘口调用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<crate::context_usage::ContextUsage>,
 
     // ── 投影区（私有）──────────────────────────────────────────────
     //
@@ -511,6 +519,7 @@ impl ToolResult {
             error: None,
             metrics: ToolResultMetrics::default(),
             images: Vec::new(),
+            context: None,
         }
     }
 
@@ -548,6 +557,31 @@ impl ToolResult {
             data: data.into(),
         });
         self
+    }
+
+    /// 盖上"执行那一刻 API 反馈的上下文占用"（显式读数，供测试与回放）。
+    pub fn with_api_context(mut self, usage: crate::context_usage::ContextUsage) -> Self {
+        self.context = Some(usage);
+        self
+    }
+
+    /// 盖戳：把本线程最近一次 API 反馈的上下文占用写进结果。
+    ///
+    /// 返回是否真的盖上了。没有可用读数（本会话首个请求、端点未声明窗口）
+    /// 时为 `false` 且**不改动**结果——信封保持字节不变，缓存不吃亏。
+    pub fn stamp_api_context(&mut self) -> bool {
+        match crate::context_usage::current_api_context_usage() {
+            Some(usage) => {
+                self.context = Some(usage);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 本条结果携带的上下文占用读数（未盖戳为 `None`）。
+    pub fn api_context(&self) -> Option<crate::context_usage::ContextUsage> {
+        self.context
     }
 
     pub fn with_error(
@@ -680,6 +714,15 @@ impl ToolResult {
                 out.push_str(" retryable=\"true\"");
             }
         }
+        // 词元钱包读数：让模型"读"自己的上下文占用，而不是靠会话看起来多大去猜。
+        // 放在属性区尾部：既有 `<status …>` 前缀（测试与契约）逐字节不变。
+        if let Some(usage) = self.context {
+            out.push_str(&format!(
+                " context_used=\"{}%\" context_window=\"{}\"",
+                usage.used_pct(),
+                usage.window_tokens
+            ));
+        }
         out.push_str(">\n");
         let mut body = self.model.text.trim_end().to_string();
         if body.is_empty()
@@ -702,6 +745,7 @@ impl ToolResult {
             "text": self.model.text,
             "truncated": self.model.truncated,
             "continuation": self.model.continuation,
+            "context_usage": self.context,
         })
     }
 }
@@ -752,6 +796,70 @@ mod tests {
         assert!(result.model.truncated);
         assert!(result.project_for_model().get("success").is_none());
         result.validate().unwrap();
+    }
+
+    /// 词元钱包读数必须出现在信封属性区，且能被解析回来。
+    #[test]
+    fn envelope_carries_the_api_context_reading() {
+        let usage = crate::context_usage::ContextUsage::new(290_000, 1_000_000).expect("读数");
+        let envelope = ToolResult::ok("body")
+            .with_api_context(usage)
+            .render_xml_envelope();
+        assert!(
+            envelope.starts_with(
+                "<qaqh_tool_result status=\"ok\" context_used=\"29%\" context_window=\"1000000\">"
+            ),
+            "{envelope}"
+        );
+        assert!(
+            envelope.ends_with("\nbody\n</qaqh_tool_result>"),
+            "{envelope}"
+        );
+        // JSON 投影（gate/上下文记账侧）同样携带读数。
+        let projected = ToolResult::ok("body")
+            .with_api_context(usage)
+            .project_for_model();
+        assert_eq!(
+            projected["context_usage"]["used_tokens"],
+            serde_json::json!(290_000)
+        );
+        assert_eq!(
+            projected["context_usage"]["window_tokens"],
+            serde_json::json!(1_000_000)
+        );
+        // 未盖戳的结果投影里该字段为 null（不凭空编一个 0%）。
+        assert!(ToolResult::ok("body").project_for_model()["context_usage"].is_null());
+    }
+
+    /// 没有读数时信封必须与历史逐字节一致——否则每个未盖戳的结果都会
+    /// 悄悄改写一次历史前缀（缓存税）。
+    #[test]
+    fn envelope_is_byte_identical_without_a_context_reading() {
+        assert_eq!(
+            ToolResult::ok("body").render_xml_envelope(),
+            "<qaqh_tool_result status=\"ok\">\nbody\n</qaqh_tool_result>"
+        );
+        assert_eq!(
+            ToolResult::error("boom").render_xml_envelope(),
+            "<qaqh_tool_result status=\"error\" error_code=\"tool_error\">\nboom\n</qaqh_tool_result>"
+        );
+    }
+
+    /// 盖戳取自本线程最近一次 API 反馈；没有读数时不改结果。
+    #[test]
+    fn stamping_reads_the_thread_local_api_feedback() {
+        crate::context_usage::clear_api_context_usage();
+        let mut before = ToolResult::ok("body");
+        assert!(!before.stamp_api_context(), "无读数时不得盖戳");
+        assert!(before.api_context().is_none());
+
+        crate::context_usage::note_api_context_usage(295_000, 1_000_000);
+        let mut after = ToolResult::ok("body");
+        assert!(after.stamp_api_context());
+        let usage = after.api_context().expect("读数");
+        assert_eq!(usage.used_pct(), 30);
+        assert!(after.render_xml_envelope().contains("context_used=\"30%\""));
+        crate::context_usage::clear_api_context_usage();
     }
 
     #[test]

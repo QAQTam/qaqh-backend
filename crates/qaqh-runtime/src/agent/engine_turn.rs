@@ -1549,6 +1549,15 @@ impl TurnEngine {
             }
 
             if let Some(usage) = current_request_usage {
+                // 词元钱包读数：本回合 API 自己回报的输入量记进线程本地，
+                // 随后每个工具结果落盘时盖章（`qaqh_types::context_usage`）。
+                // 这是模型唯一能"读"到的上下文占用口径——此前它没有任何
+                // 测量通道，只能拿"会话看起来很大"去估，并在 responses 端点
+                // 的思考摘要回放下把自估变成"事实"。
+                qaqh_types::context_usage::note_api_context_usage(
+                    usage.prompt_tokens,
+                    ctx.agent.config.context_length,
+                );
                 let accepted = ctx.agent.observe_prepared_request(
                     &request_fingerprint,
                     &request_key,
