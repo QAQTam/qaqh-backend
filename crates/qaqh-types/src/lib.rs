@@ -8,6 +8,7 @@
 
 pub mod api_types;
 pub mod config;
+pub mod context_usage;
 pub mod discovery;
 pub mod image_store;
 pub mod memory;
@@ -34,6 +35,9 @@ pub use config::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
     PersistentSubagentConfig, ProfileConfig,
+};
+pub use context_usage::{
+    ContextUsage, clear_api_context_usage, current_api_context_usage, note_api_context_usage,
 };
 pub use discovery::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 pub use image_store::sha256_hex;

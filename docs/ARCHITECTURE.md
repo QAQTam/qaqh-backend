@@ -1,5 +1,17 @@
 # RC 前架构与 crate 职责基线
 
+导入集成策略（2026-10-20，尚未实施）：[IMP-06 与兼容协议](spec-transcript-import-protocol.md)。
+独立核心已存在，审查见 [review](review-transcript-import-2026-10-20.md)。导入归档采用
+`archives/{archive_id}` 的 canonical log + blobs，与可运行 sessions 隔离；作业暂存、幂等回执为
+作业运行态/控制记录，归档列表、分支、消息与判重索引均从已提交归档重建。
+Ringing v2 仅增加明确能力、service 方法与原始 artifact 流式取回端点，首版不可续聊。
+
+专项设计（2026-10-20，独立核心已实现、集成尚未实施）：[会话记录导入](spec-transcript-import.md) 与
+[ADR](adr/2026-10-20-transcript-import.md)。用户要求独立 `qaqh-import` crate，按 Claude Code、
+Codex、其他来源推进。拟定依赖为宿主 → import → types，宿主 → session → types；
+来源解析归 import，持久共享契约归 types，blob/事实提交和投影归 session，不新增消息权威双写。
+这是独立功能提案，不修改下文 CLEAN 的历史体量与任务范围；协议接入仍以实施时补齐的 ADR 为准。
+
 专项设计：用户于 2026-10-08 授权 [AskUser Form](spec-ask-user-form.md) 及其 [局部 wire 解冻 ADR](adr/2026-10-08-ask-user-form.md)。这是独立功能切片，不扩展 clean 的清理范围；文档定义目标，不表示当前 Rust 已实现新表单链路。
 
 专项设计：用户于 2026-10-09 授权 [沙箱内 exec 分级自动放行与写拒绝重试 ADR](adr/2026-10-09-sandbox-exec-autoapprove.md)。独立功能切片，不解冻 wire（仅 `#[serde(default)]` 可选字段）；同样不表示已实施。
@@ -131,6 +143,7 @@ CLEAN-3 必须补齐实际路径、写入者、崩溃窗口及其他持久文件
 
 | 数据 | 当前事实 | cutover 后职责/恢复来源 |
 |---|---|---|
+| 外部 transcript 导入（设计，未实施） | 当前无该事实或包存储 | 拟由 TranscriptImported + 会话 blob 持久保存原始字节、附件、规范化图及清单；导入索引可重建，捕获/staging 为隐藏作业运行态；详见导入设计 §9 |
 | events.jsonl + commit marker/identity | canonical 事实，生产面未覆盖完整消息 | 会话持久权威；只暴露已提交前缀 |
 | 会话 blobs/ | 已接通（2026-10-08）：`ToolIntent.effective_args_ref`、`ToolFinished.output_ref`、`WorkspaceResourceChanged.summary_ref` 经 `SessionBlobStore` 先落盘再提交 fact；wire 内容端点的 blob 回落（T1.4）未接 | 会话持久权威；fact 引用须先持久化；无 TTL，随会话回收 |
 | messages.jsonl | 当前实际消息归档与恢复输入 | 可删除上下文/归档投影，来源为事实+blob；不能继续直写为另一事实源 |

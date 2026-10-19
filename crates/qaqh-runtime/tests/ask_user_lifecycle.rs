@@ -455,6 +455,26 @@ fn run_case_with_delay(
     ) + Send
     + 'static,
 ) -> Vec<String> {
+    run_case_with_config(scenarios, response_delay, expected_requests, |_| {}, test)
+}
+
+/// 同 `run_case_with_delay`，额外允许在启动 worker 之前改 agent 配置。
+///
+/// 典型用途：把 `context_length` 调小，让本地能一眼算清的百分比落在信封上
+/// （词元钱包读数的端到端断言）。
+fn run_case_with_config(
+    scenarios: Vec<Vec<String>>,
+    response_delay: Duration,
+    expected_requests: usize,
+    configure: impl FnOnce(&mut AgentState),
+    test: impl FnOnce(
+        &mut os_pipe::PipeWriter,
+        &std::sync::mpsc::Receiver<RingingEvent>,
+        Arc<AtomicUsize>,
+        String,
+    ) + Send
+    + 'static,
+) -> Vec<String> {
     SESSION_INIT.call_once(|| {
         // 先钉隔离 data root 再 init（见 common::init_isolated_data_root 文档）。
         common::init_isolated_data_root();
@@ -479,6 +499,7 @@ fn run_case_with_delay(
     agent.config.api_key = "sk-test".into();
     agent.config.model = "test-model".into();
     agent.config.compliance_enabled = false;
+    configure(&mut agent);
 
     let (input_reader, mut input_writer) = os_pipe::pipe().expect("os pipe");
     let (output_reader, output_writer) = os_pipe::pipe().expect("os pipe");
@@ -1154,5 +1175,43 @@ fn stale_undo_does_not_consume_the_active_ask() {
             expect_interaction_resolved(receiver, "undo-identity-ask", AskResolution::Answered);
             collect_through_terminal(receiver);
         },
+    );
+}
+
+/// 词元钱包读数（端到端）：gate 回报的 `usage.prompt_tokens` 必须落到**下一条**
+/// 工具结果的信封上。
+///
+/// 为什么值得一条 e2e：这条链横跨四层——gate 解析 usage → run_lap 记线程本地
+/// → MessageStore 落盘盖戳 → 信封属性。任何一层漏接，模型就又会回到"没有
+/// 任何测量通道，只能靠会话看起来多大去猜预算"的老状态（responses 端点再
+/// 把思考摘要回放一遍，自估就成了"事实"）。
+///
+/// 这里把窗口压到 100 tokens：mock 回报 `prompt_tokens: 10` → 读数 10%，
+/// 分母与百分比都能一眼验算。
+#[test]
+fn tool_results_carry_the_api_context_reading_from_the_gate() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let bodies = run_case_with_config(
+        vec![
+            tool_round(&[("read-1", "read", json!({"path": "input.txt"}))]),
+            final_round("done"),
+        ],
+        Duration::ZERO,
+        2,
+        |agent| agent.config.context_length = 100,
+        |writer, receiver, _request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("read the input file"));
+            collect_through_terminal(receiver);
+        },
+    );
+
+    let second_request: Value = serde_json::from_str(&bodies[1]).expect("second request json");
+    let content = find_tool_result_content(&second_request, "read-1")
+        .expect("second request must carry the read result");
+    assert!(
+        content.starts_with(
+            "<qaqh_tool_result status=\"ok\" context_used=\"10%\" context_window=\"100\">"
+        ),
+        "工具结果信封必须带上 API 反馈的上下文占用，实得：{content}"
     );
 }

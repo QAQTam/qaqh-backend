@@ -2272,6 +2272,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-import"
+version = "2.0.0-RC2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "qaqh-lsp"
 version = "2.0.0-RC2"
 dependencies = [

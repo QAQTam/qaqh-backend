@@ -611,6 +611,15 @@ pub struct DeleteOutput {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// 展示面 unified diff（`删除前 → 空`）。
+    ///
+    /// 与 `write`/`edit`/`apply_patch` 同一个出口：只供 timeline 与前端 diff 抽屉
+    /// 消费，绝不进模型投影。删除的语义就是整份内容被移出，所以这里是全 `-` 行
+    /// （与 git 对删除的表示一致）。此前该槽恒为 `None`，抽屉里对删除只能显示
+    /// 「没有可展示的对比内容」——文件列表有 `+0 −N` 指纹，点进去是空的。
+    #[serde(skip)]
+    #[schemars(skip)]
+    diff: Option<String>,
 }
 
 impl ToolProjection for DeleteOutput {
@@ -628,7 +637,7 @@ impl ToolProjection for DeleteOutput {
             "delete",
             Some(format!("{} · deleted", self.path)),
             &self.content,
-            None,
+            self.diff.clone(),
         )
     }
 }
@@ -715,6 +724,14 @@ impl TypedTool for DeleteTool {
             let _ = std::fs::create_dir_all(parent);
         }
         let journal_before = std::fs::read_to_string(&path).ok();
+        // 展示面 diff：删除 = 整份内容移出，unified 视角就是全 `-` 行。
+        // 盘上有可能是 CRLF，先归一到 LF 再算，否则整段会被渲染成「换行符差异」。
+        // 读不出文本（二进制/权限）就不造假 diff，留空态。
+        let diff = journal_before.as_deref().and_then(|before| {
+            let (lf, _) = normalize_newlines(before);
+            let text = unified_diff(&lf, "", &raw_path);
+            (!text.trim().is_empty()).then(|| text.trim_end().to_string())
+        });
 
         match std::fs::rename(source, &trash_path) {
             Ok(_) => {
@@ -741,6 +758,7 @@ impl TypedTool for DeleteTool {
                         path
                     )),
                     trash_path,
+                    diff: diff.clone(),
                 })
             }
             Err(_error) => {
@@ -788,6 +806,7 @@ impl TypedTool for DeleteTool {
                                 path
                             )),
                             trash_path,
+                            diff,
                         })
                     }
                     Err(error) => Err(mutation_error(
@@ -1224,6 +1243,31 @@ mod tests {
             file_name.starts_with("delete-me.txt."),
             "trash 条目名应带时间戳后缀，实得 {file_name}"
         );
+    }
+
+    /// 展示面契约：删除必须下发 `display.diff`。语义是「整份内容被移出」，
+    /// 所以在 unified 视角里是全 `-` 行（与 `git diff` 对删除的表示一致）。
+    /// 缺这一段，抽屉对删除就只能显示「没有可展示的对比内容」。
+    #[test]
+    fn delete_ships_a_diff_of_the_removed_content() {
+        let _guard = DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.txt");
+        std::fs::write(&path, "keep\r\nbye\r\n").unwrap();
+        let outcome = TypedToolAdapter::new(DeleteTool)
+            .execute(test_ctx(dir.path()), json!({"path": path}))
+            .expect("delete must not return fatal");
+        let diff = outcome
+            .display
+            .diff
+            .clone()
+            .expect("delete 必须下发 display.diff");
+        // CRLF 盘面规整成 LF 再算：删除就是两行 `-`，不该变成换行符差异。
+        assert!(diff.contains("-keep"), "got: {diff}");
+        assert!(diff.contains("-bye"), "got: {diff}");
+        assert!(diff.contains("+0,0"), "删除用 @@ … +0,0 表达: {diff}");
+        assert!(!diff.contains("\r"), "diff 必须是 LF 视图: {diff}");
+        assert!(!diff.contains("diff --git"), "不给 git 头: {diff}");
     }
 
     /// `QAQH_TRASH_DIR` 生效时备份必须完全落在工作区之外——这是"我愿意承担跨卷

@@ -61,6 +61,15 @@ pub struct ApplyPatchOutput {
     #[serde(skip)]
     #[schemars(skip)]
     first_path: Option<String>,
+    /// 展示面 unified diff（逐文件拼接的裸 unified 文本）。
+    ///
+    /// 与 `WriteOutput.diff` / `edit` 的 diff 同一出口：只供 timeline 与前端
+    /// diff 抽屉消费，绝不进入模型投影。此前这里是死 `None`，于是
+    /// `TimelineToolDisplay.diff` 永远缺席——交付卡片「修改结果」与审查抽屉
+    /// 只剩 `lines_added/removed` 指纹，diff 区只能是空态。
+    #[serde(skip)]
+    #[schemars(skip)]
+    diff: Option<String>,
 }
 
 impl ToolProjection for ApplyPatchOutput {
@@ -89,7 +98,7 @@ impl ToolProjection for ApplyPatchOutput {
             "apply_patch",
             Some(summary),
             &self.model_text,
-            None,
+            self.diff.clone(),
         )
         .with_lines(self.insertions as u32, self.deletions as u32)
     }
@@ -152,6 +161,11 @@ impl TypedTool for ApplyPatchTool {
 
         let mut insertions = 0usize;
         let mut deletions = 0usize;
+        // 展示面：把每个 delta 的 unified diff 拼成一段**裸** unified 文本
+        // （`--- `/`+++ `/`@@`，不带 `diff --git` 头——与 `file_shared::unified_diff`
+        // 同源，前端 `parseUnifiedDiff` 正是按这个形状切文件边界）。
+        // 一次补丁可命中多个文件，抽屉按文件过滤要靠这段里的全部文件段。
+        let mut diff_text = String::new();
         for delta in &outcome.deltas {
             match (&delta.old, &delta.new) {
                 (None, Some(new)) => insertions += new.lines().count(),
@@ -162,6 +176,18 @@ impl TypedTool for ApplyPatchTool {
                     deletions += removed as usize;
                 }
                 (None, None) => {}
+            }
+            // 统一 LF 视图再算 diff：盘上 CRLF 文件不该让整段变成「全删全加」。
+            let (before, _) = crate::file_shared::normalize_newlines(
+                delta.old.as_deref().unwrap_or(""),
+            );
+            let (after, _) = crate::file_shared::normalize_newlines(
+                delta.new.as_deref().unwrap_or(""),
+            );
+            let piece = crate::file_shared::unified_diff(&before, &after, &delta.path);
+            if !piece.trim().is_empty() {
+                diff_text.push_str(piece.trim_end());
+                diff_text.push('\n');
             }
             // 账本同步：引擎直接写盘，touched 文件的最新内容登记进 file_state，
             // 否则后续 edit 盲定位防漂移会误报。
@@ -256,6 +282,7 @@ impl TypedTool for ApplyPatchTool {
             pending_id,
             model_text,
             first_path,
+            diff: (!diff_text.trim().is_empty()).then(|| diff_text.trim_end().to_string()),
         })
     }
 }
@@ -758,7 +785,107 @@ mod tests {
         assert_eq!(
             (display.lines_added, display.lines_removed),
             (1, 1),
-            "apply_patch 终态行差必须落到展示投影（无 diff 文本可解析）"
+            "apply_patch 终态行差必须落到展示投影"
+        );
+        assert!(
+            display.diff.as_deref().is_some_and(|diff| diff.contains("+new")),
+            "展示投影必须同时带 diff 文本（前端抽屉的唯一数据源）: {:?}",
+            display.diff
+        );
+    }
+
+    // ── 展示面契约：apply_patch 的 `display.diff` ─────────────────────────────
+    //
+    // 前端 diff 抽屉（`src/diff/*`）不重算 diff，只解析后端下发的 unified 文本；
+    // `lines_added/removed` 只够画文件列表的 `+N −M` 指纹，diff 区需要原文。
+
+    /// 在指定 workspace 里跑一次 apply/dry_run，返回原始 [`crate::ToolResult`]
+    /// （`run_in` 只给 data，读不到展示面的 `diff`）。
+    fn apply_result_in(workspace: &str, patch: &str, dry_run: bool) -> crate::ToolResult {
+        crate::CURRENT_WORKSPACE
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone_from(&workspace.to_string());
+        exec_apply_patch(&serde_json::json!({ "patch": patch, "dry_run": dry_run }))
+    }
+
+    /// 多文件补丁一次给出**全部**文件段：裸 unified（无 `diff --git` 头），
+    /// 前端 `parseUnifiedDiff` 正是按 `--- a/x` / `+++ b/x` + 已收束 hunk 切边界。
+    /// 缺一段的表现就是抽屉里「第一个文件有图、其余文件点了是空态」。
+    #[test]
+    fn display_diff_lists_every_file_of_a_multi_file_patch() {
+        let (_dir, workspace) = repo_with_commit(&[
+            ("a.txt", "line1\nline2\nline3\n"),
+            ("c.txt", "gone\n"),
+        ]);
+        let patch = "\
+*** Begin Patch
+*** Update File: a.txt
+@@
+-line2
++LINE2
+*** Add File: b.txt
++fresh
+*** Delete File: c.txt
+*** End Patch
+";
+        let result = apply_result_in(&workspace, patch, false);
+        assert!(result.is_success(), "{}", result.model_text());
+        let diff = result
+            .diff
+            .clone()
+            .expect("apply_patch 必须下发 display.diff");
+        assert!(
+            !diff.contains("diff --git"),
+            "交付给前端的必须是裸 unified（不带 git 头）: {diff}"
+        );
+        for path in ["a.txt", "b.txt", "c.txt"] {
+            assert!(
+                diff.contains(&format!("--- a/{path}")),
+                "{path} 缺旧侧头: {diff}"
+            );
+            assert!(
+                diff.contains(&format!("+++ b/{path}")),
+                "{path} 缺新侧头: {diff}"
+            );
+        }
+        assert!(diff.contains("+LINE2"), "改动的加行必须在: {diff}");
+        assert!(diff.contains("+fresh"), "新增文件的内容必须在: {diff}");
+        assert!(diff.contains("-gone"), "删除文件的旧行必须在: {diff}");
+        // 新建用 `-0,0`、删除用 `+0,0` 表达（前端据此判 added/deleted 徽标）。
+        assert!(diff.contains("-0,0"), "新增文件必须用 @@ -0,0 表达: {diff}");
+        assert!(diff.contains("+0,0"), "删除文件必须用 @@ +0,0 表达: {diff}");
+        let hunks = diff.lines().filter(|line| line.starts_with("@@ ")).count();
+        assert_eq!(hunks, 3, "每个文件段各一个 hunk: {diff}");
+    }
+
+    /// dry_run 预览也要有 diff：`confirm_apply` 之前用户看的就是这一屏。
+    #[test]
+    fn dry_run_preview_carries_the_diff() {
+        let (dir, workspace) = repo_with_commit(&[("a.txt", "line1\nline2\n")]);
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-line2\n+LINE2\n*** End Patch\n";
+        let result = apply_result_in(&workspace, patch, true);
+        assert!(result.is_success(), "{}", result.model_text());
+        let diff = result.diff.clone().expect("dry_run 也要下发 display.diff");
+        assert!(diff.contains("-line2") && diff.contains("+LINE2"), "got: {diff}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "line1\nline2\n",
+            "预览不落盘"
+        );
+    }
+
+    /// CRLF 文件不许因为换行符差异把整段渲染成「全删全加」。
+    #[test]
+    fn display_diff_compares_on_the_lf_view() {
+        let (_dir, workspace) = repo_with_commit(&[("w.txt", "line1\r\nline2\r\nline3\r\n")]);
+        let patch = "*** Begin Patch\n*** Update File: w.txt\n@@\n-line2\n+LINE2\n*** End Patch\n";
+        let result = apply_result_in(&workspace, patch, false);
+        assert!(result.is_success(), "{}", result.model_text());
+        let diff = result.diff.clone().expect("display.diff");
+        assert!(
+            !diff.contains("-line1") && !diff.contains("+line1"),
+            "未改动的行不该出现在 diff 里: {diff}"
         );
     }
 

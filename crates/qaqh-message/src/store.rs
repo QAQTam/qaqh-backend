@@ -943,9 +943,17 @@ impl MessageStore {
     fn push_tool_canonical_inner(
         &mut self,
         tool_call_id: &str,
-        result: qaqh_types::ToolResult,
+        mut result: qaqh_types::ToolResult,
         images: &[qaqh_types::ToolImage],
     ) -> bool {
+        // 词元钱包读数：这里**是**工具结果进历史（进模型上下文）的唯一落盘口，
+        // 所以盖戳也放在这里——所有路径（执行回填、权限拒绝、取消收尾、UI
+        // 直调）一视同仁，不必在每个调用点重复一遍。
+        //
+        // 为什么在落盘时盖而不是在渲染时算：`render_xml_envelope` 每个请求都会
+        // 重渲染全部历史工具结果，动态值会让整条历史每回合都变一次（前缀缓存
+        // 全灭）。冻结之后就只是一条普通的历史字节。
+        result.stamp_api_context();
         // 工具结果已在工具侧定型（qaqh-workspace::tool_side_fold）：
         // 存储的就是最终形态，message 层不再改写。
         let mut tool_msg = Message::tool_result(tool_call_id, result);
@@ -2106,6 +2114,62 @@ mod tests {
                 _ => None,
             })
             .expect("tool result must be present in gate context")
+    }
+
+    /// 模型侧工具结果信封（gate 投影原样渲染）。
+    fn context_envelope(context: &[Message], id: &str) -> String {
+        context
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    result,
+                    ..
+                } if tool_use_id == id => Some(result.render_xml_envelope()),
+                _ => None,
+            })
+            .expect("tool result must be present in gate context")
+    }
+
+    /// 词元钱包读数：工具结果在**落盘那一刻**盖戳，之后不再是动态值。
+    ///
+    /// 两条语义一起锁住：
+    /// 1. 没有 API 读数时信封与历史逐字节一致（不凭空写 0%）；
+    /// 2. 有新读数后，**只有新落盘的结果**带字段，已落盘的历史不漂移——
+    ///    否则每开一个回合就把整条历史改写一遍，前缀缓存全灭。
+    #[test]
+    fn tool_results_carry_the_api_context_reading_only_when_stamped() {
+        qaqh_types::clear_api_context_usage();
+        let mut store = MessageStore::new_ephemeral("context-stamp");
+        store.push_user("inspect files");
+        store.push_assistant(assistant_with_tools(&[("read-1", "read")]));
+        store.push_tool_result_direct("read-1", "READ_RESULT", true);
+
+        let context = store.build_context_for_gate(&[]);
+        assert_eq!(
+            context_envelope(&context, "read-1"),
+            "<qaqh_tool_result status=\"ok\">\nREAD_RESULT\n</qaqh_tool_result>",
+            "无读数时信封必须与历史逐字节一致"
+        );
+
+        // 模拟 gate 回报：本轮输入 375k / 1M 窗口（四舍五入 → 38%）。
+        qaqh_types::note_api_context_usage(375_000, 1_000_000);
+        store.push_user("run it");
+        store.push_assistant(assistant_with_tools(&[("exec-1", "exec")]));
+        store.push_tool_result_direct("exec-1", "EXEC_RESULT", true);
+
+        let context = store.build_context_for_gate(&[]);
+        assert_eq!(
+            context_envelope(&context, "exec-1"),
+            "<qaqh_tool_result status=\"ok\" context_used=\"38%\" context_window=\"1000000\">\nEXEC_RESULT\n</qaqh_tool_result>"
+        );
+        assert_eq!(
+            context_envelope(&context, "read-1"),
+            "<qaqh_tool_result status=\"ok\">\nREAD_RESULT\n</qaqh_tool_result>",
+            "已落盘的历史结果不得因新读数漂移"
+        );
+        qaqh_types::clear_api_context_usage();
     }
 
     #[test]
