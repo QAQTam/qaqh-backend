@@ -56,6 +56,7 @@ pub mod pkce;
 pub mod protocol;
 pub mod store;
 pub mod util;
+pub mod web_tools;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -71,6 +72,7 @@ pub use manager::{DsAccountManager, FlowState, SignInStart};
 pub use pkce::Pkce;
 pub use protocol::{ClientIdentity, ClientPlatform, Locale, PLATFORM_ORIGIN};
 pub use store::{AccountStore, StoredAccount};
+pub use web_tools::{FetchedPage, WebSearchHit, WebSearchRequest};
 
 /// 服务面方法名（daemon 方法表与 FE 共用的单一真源）。
 pub mod methods {
@@ -92,6 +94,9 @@ pub mod methods {
     pub const ACK_BONUS: &str = "dsaccount.bonus.ack";
     /// 账号额度可用的模型目录（推理 origin 的 `/models`）。
     pub const MODELS: &str = "dsaccount.models";
+    /// 「这把凭据现在还有效吗」：命中 401 / 业务码 `40003` 时会**清本地凭据**，
+    /// 所以是写类（服务面按 `action_failed` 报错）。
+    pub const VERIFY: &str = "dsaccount.verify";
 
     /// 全部方法名（越权矩阵测试按此遍历，新增方法自动纳入覆盖）。
     pub const ALL: &[&str] = &[
@@ -104,5 +109,6 @@ pub mod methods {
         SIGN_OUT,
         ACK_BONUS,
         MODELS,
+        VERIFY,
     ];
 }

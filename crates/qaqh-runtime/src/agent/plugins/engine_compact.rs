@@ -15,7 +15,6 @@ pub(crate) struct CompactMeta {
     pub compact_id: String,
     pub summary: String,
     pub kept_user_count: usize,
-    pub head_user_count: usize,
     pub context_revision: u64,
     pub error: Option<String>,
 }
@@ -77,13 +76,57 @@ previous summary to create an updated checkpoint:\n\
 - If the previous summary has a Thinking Appendix, decide if the new \
   context adds more dead-end paths worth preserving; otherwise drop it.";
 
+/// 一次压缩调用所需的全部参数（[`build_prompt_and_meta`] 的产物）。
+pub(crate) struct CompactPlan {
+    pub prompt: String,
+    pub kept_user_count: usize,
+    pub provider: qaqh_gate::ProviderConfig,
+    pub compact_id: String,
+}
+
+/// 压缩**没有发起**的原因。
+///
+/// 与"压缩失败"分开：这些分支连 LLM 都没调用。每条都带稳定 code（日志与
+/// 埋点聚合用）和中文说明（直接作为终态事件的 `reason`）。旧实现把它们折叠
+/// 成一个 `None`，调用方只能笼统地说"没有可压缩内容"，与真实原因常常不符
+/// （provider 不可用也会被说成"历史已经够短"）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompactRefusal {
+    /// 活跃历史里没有任何可压缩的消息。
+    EmptyHistory,
+    /// 头部只剩上一份摘要，没有新的轮次可折叠。
+    NothingEligible,
+    /// 端点/provider 配置不完整，无法发起压缩请求。
+    ProviderUnavailable(String),
+}
+
+impl CompactRefusal {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::EmptyHistory => "compact_empty_history",
+            Self::NothingEligible => "compact_nothing_eligible",
+            Self::ProviderUnavailable(_) => "compact_provider_unavailable",
+        }
+    }
+
+    /// 面向用户的中文说明（进 `CompactFinished.reason`）。
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            Self::EmptyHistory => "没有可压缩的历史：当前上下文里还没有任何消息。".into(),
+            Self::NothingEligible => "没有可压缩的轮次：历史只剩最近保留区和上一份摘要。".into(),
+            Self::ProviderUnavailable(detail) => {
+                format!("压缩未发起：端点配置不可用（{detail}）。")
+            }
+        }
+    }
+}
+
 /// Step 1: Token-split, serialize, build prompt — fast, synchronous.
-/// Returns (prompt, kept_user_count, head_user_count, provider, compact_id)
-/// needed for the LLM call and apply step. Returns None if no compaction
-/// needed. compact_id 在同一函数内生成，供 CompactStarted/Finished 关联。
-pub(crate) fn build_prompt_and_meta(
-    ctx: &mut RingContext,
-) -> Option<(String, usize, usize, qaqh_gate::ProviderConfig, String)> {
+///
+/// 返回 [`CompactPlan`]；没有可压缩内容或 provider 不可用时返回
+/// [`CompactRefusal`]，调用方必须把它的中文原因写进终态事件。
+/// `compact_id` 在同一函数内生成，与随后发出的 `CompactStarted` 关联。
+pub(crate) fn build_prompt_and_meta(ctx: &mut RingContext) -> Result<CompactPlan, CompactRefusal> {
     const KEEP_TOKENS: usize = 4_000;
     ctx.agent.record_memory_marker("compact.prompt.build.begin");
     let turns_total = ctx.agent.msg.turn_count();
@@ -92,7 +135,7 @@ pub(crate) fn build_prompt_and_meta(
     let all = ctx.agent.msg.build_context_for_gate(&[]);
     let msgs: Vec<&qaqh_types::Message> = all.iter().filter(|m| m.role != "system").collect();
     if msgs.is_empty() {
-        return None;
+        return Err(CompactRefusal::EmptyHistory);
     }
 
     let mut kept_idx = msgs.len();
@@ -119,13 +162,13 @@ pub(crate) fn build_prompt_and_meta(
         }
         // 如果连一条 user 消息都没有（极端情况），放弃本次 compact。
         if kept_idx == msgs.len() {
-            return None;
+            return Err(CompactRefusal::NothingEligible);
         }
     }
 
     let head_msgs = &msgs[..kept_idx];
     if head_msgs.is_empty() {
-        return None;
+        return Err(CompactRefusal::NothingEligible);
     }
 
     let previous_summary = ctx.agent.msg.previous_compact_summary();
@@ -135,12 +178,31 @@ pub(crate) fn build_prompt_and_meta(
     // checkpoint removes no real turn and can repeat every gate lap when
     // fixed system/tool overhead still keeps the prompt above threshold.
     if head_user_count == 0 {
-        log::debug!("[COMPACT] skipped: no new turns are eligible");
-        return None;
+        log::info!("[COMPACT] refused(compact_nothing_eligible): 头部只剩上一份摘要");
+        return Err(CompactRefusal::NothingEligible);
     }
     // G2：keep 必须是"真实 turn 数"而非扁平 user 消息数——注入密集时
     // 扁平计数 ≥ turns.len()，apply_compact 早退（skip==0）却谎报成功。
     let kept_user_count = ctx.agent.msg.count_live_turns_from(msgs[kept_idx].msg_id);
+    // 保留区已经覆盖全部活跃 turn：apply 阶段会整体 no-op，先在这里挡掉，
+    // 不白花一次摘要请求。
+    if kept_user_count >= turns_total {
+        log::info!(
+            "[COMPACT] refused(compact_nothing_eligible): kept={kept_user_count} >= turns={turns_total}"
+        );
+        return Err(CompactRefusal::NothingEligible);
+    }
+
+    // T6: 唯一构造器（turn_lap::gate::provider_for），与主 turn 完全同构；
+    // 历史镜像缺 thinking_budget_large / effort_allowlist / stateful /
+    // stream_usage / muse-spark 专项，均在唯一构造器内补齐。
+    //
+    // 必须在发出 `CompactStarted` **之前**构造：provider 失败意味着本次压缩
+    // 从未开始，提前发开始事件会留下一条永远不终态的"压缩中"卡片。
+    let provider = crate::agent::turn_lap::gate::provider_for(ctx, "compact").map_err(|e| {
+        log::warn!("[COMPACT] refused(compact_provider_unavailable): {e}");
+        CompactRefusal::ProviderUnavailable(e)
+    })?;
 
     let compact_id = format!(
         "compact-{}",
@@ -222,24 +284,17 @@ pub(crate) fn build_prompt_and_meta(
         );
     }
 
-    // T6: 唯一构造器（turn_lap::gate::provider_for），与主 turn 完全同构；
-    // 历史镜像缺 thinking_budget_large / effort_allowlist / stateful /
-    // stream_usage / muse-spark 专项，均在唯一构造器内补齐。
-    let provider = match crate::agent::turn_lap::gate::provider_for(ctx, "compact") {
-        Ok(provider) => provider,
-        Err(e) => {
-            // 压缩可退：本回合不压缩，交由下一次阈值触发。
-            log::warn!("[COMPACT] provider 构造失败，跳过本次压缩：{e}");
-            return None;
-        }
-    };
-    Some((
+    log::info!(
+        "[COMPACT] start {}: turns_total={turns_total} keeping={kept_user_count} head_user={head_user_count} prompt_bytes={}",
+        compact_id,
+        prompt.len()
+    );
+    Ok(CompactPlan {
         prompt,
         kept_user_count,
-        head_user_count,
         provider,
         compact_id,
-    ))
+    })
 }
 
 /// D10 fact 产生侧：把成功的压缩终态写成 canonical `CompactionApplied` fact。
@@ -281,110 +336,173 @@ pub(crate) fn publish_compaction_fact(ctx: &mut RingContext, summary: &str) {
     }
 }
 
-/// Step 2: Apply compact result on the live message store (called from main thread).
-pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
-    if meta.context_revision != ctx.agent.msg.context_revision() {
-        log::warn!(
-            "[COMPACT] rejecting stale result {}: source revision {}, current {}",
-            meta.compact_id,
-            meta.context_revision,
-            ctx.agent.msg.context_revision()
+/// 压缩终态的唯一出口。
+///
+/// 无论成功、跳过、取消还是失败，都从这里发 `CompactFinished` 并打一条
+/// `[COMPACT] finish` 埋点——终态与原因必须成对出现，任何只给 `status` 的
+/// 路径都会让界面显示"已取消"而没人知道为什么。
+struct CompactTerminal {
+    compact_id: String,
+    status: qaqh_domain::CompactStatus,
+    summary_chars: usize,
+    /// 被折叠进摘要的真实 turn 数。
+    folded_turns: usize,
+    reason: Option<String>,
+}
+
+impl CompactTerminal {
+    fn emit(self, ctx: &RingContext) {
+        log::info!(
+            "[COMPACT] finish {}: status={:?} folded_turns={} summary_chars={} turns_after={} reason={}",
+            self.compact_id,
+            self.status,
+            self.folded_turns,
+            self.summary_chars,
+            ctx.agent.msg.turn_count(),
+            self.reason.as_deref().unwrap_or("-")
         );
         ctx.emitter
             .emit_domain(qaqh_domain::DomainEvent::Conversation(
                 qaqh_domain::ConversationEvent::CompactFinished {
-                    compact_id: meta.compact_id.clone(),
-                    status: qaqh_domain::CompactStatus::Cancelled,
-                    summary_chars: Some(0),
-                    turns_compacted: Some(0),
-                    turns_removed: Some(0),
+                    compact_id: self.compact_id,
+                    status: self.status,
+                    summary_chars: Some(self.summary_chars),
+                    turns_compacted: Some(self.folded_turns as u32),
+                    turns_removed: Some(self.folded_turns as u32),
+                    reason: self.reason,
                 },
             ));
+    }
+}
+
+/// 压缩失败的结构化错误（`Control` 频道）。v1 广播面已删，这条只对仍挂着
+/// 老 hub 的宿主有效；面向客户端的原因以 `CompactFinished.reason` 为准。
+fn emit_compact_error(ctx: &RingContext, compact_id: &str, code: &str, message: &str) {
+    log::error!("[COMPACT] {compact_id} {code}: {message}");
+    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
+        qaqh_domain::ControlEvent::OperationFailed {
+            occurrence_id: format!("occ-compact-{compact_id}"),
+            scope: qaqh_domain::ErrorScope::Conversation,
+            error: qaqh_domain::DomainError {
+                error_id: format!("err-compact-{compact_id}"),
+                code: code.to_string(),
+                message: message.to_string(),
+                retryable: true,
+                dedupe_key: Some(code.to_string()),
+            },
+            operation_id: Some(compact_id.to_string()),
+        },
+    ));
+}
+
+/// 压缩应用阶段的 memwatch 埋点（仅 opt-in 采集时生效）。
+fn record_compact_phase(ctx: &RingContext, phase: &str, summary_chars: usize) {
+    let session_id = &ctx.agent.session.session_id;
+    if session_id.is_empty() {
+        return;
+    }
+    qaqh_memwatch::global().record_phase(
+        phase,
+        Some(session_id),
+        Some(ctx.agent.msg.memory_usage_estimate().heap_estimate_bytes),
+        Some(summary_chars as u64),
+        None,
+    );
+}
+
+/// Step 2: Apply compact result on the live message store (called from main thread).
+pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
+    let current_revision = ctx.agent.msg.context_revision();
+    if meta.context_revision != current_revision {
+        // 结果基于旧上下文：应用它会覆盖压缩期间新落盘的内容（用户新消息、
+        // 注入等）。丢弃是对的，但必须说清楚为什么——只报"已取消"会让用户
+        // 以为压缩功能坏了，也无从判断要不要重试。
+        let reason = format!(
+            "压缩期间上下文已更新（revision {} → {}），为避免覆盖新内容已丢弃本次摘要；请重新发起压缩。",
+            meta.context_revision, current_revision
+        );
+        emit_compact_error(ctx, &meta.compact_id, "compact_stale_result", &reason);
+        CompactTerminal {
+            compact_id: meta.compact_id.clone(),
+            status: qaqh_domain::CompactStatus::Cancelled,
+            summary_chars: 0,
+            folded_turns: 0,
+            reason: Some(reason),
+        }
+        .emit(ctx);
         return;
     }
     if let Some(ref err) = meta.error {
-        // Ringing 双发：OperationFailed（compact 失败）
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-            qaqh_domain::ControlEvent::OperationFailed {
-                occurrence_id: format!(
-                    "occ-compact-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0),
-                ),
-                scope: qaqh_domain::ErrorScope::Conversation,
-                error: qaqh_domain::DomainError {
-                    error_id: format!(
-                        "err-compact-{}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0),
-                    ),
-                    code: "compact_failed".into(),
-                    message: err.clone(),
-                    retryable: true,
-                    dedupe_key: Some("compact_failed".into()),
-                },
-                operation_id: None,
-            },
-        ));
-        // Ringing 双发：CompactFinished（失败终态）
-        ctx.emitter
-            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                qaqh_domain::ConversationEvent::CompactFinished {
-                    compact_id: meta.compact_id.clone(),
-                    status: qaqh_domain::CompactStatus::Failed,
-                    summary_chars: Some(0),
-                    turns_compacted: Some(0),
-                    turns_removed: Some(0),
-                },
-            ));
+        let reason = err.clone();
+        emit_compact_error(ctx, &meta.compact_id, "compact_failed", &reason);
+        CompactTerminal {
+            compact_id: meta.compact_id.clone(),
+            status: qaqh_domain::CompactStatus::Failed,
+            summary_chars: 0,
+            folded_turns: 0,
+            reason: Some(reason),
+        }
+        .emit(ctx);
         return;
     }
     let chars = meta.summary.chars().count();
 
-    // Turns to remove from frontend state (= total_turns - kept).
-    let turns_before_apply = ctx.agent.msg.turn_count();
-    let turns_removed = ctx
+    ctx.agent.record_memory_marker("compact.apply.begin");
+    // 压缩前后的有效载荷字节数：一次"压缩"若让上下文变长（摘要比被折叠的
+    // 内容还大），就在这里留痕——旧实现没有任何地方记录这个差值。
+    let payload_before = ctx.agent.msg.memory_usage_estimate().payload_bytes;
+    let effect = ctx
         .agent
         .msg
-        .turns()
-        .len()
-        .saturating_sub(meta.kept_user_count);
-    ctx.agent
-        .msg
         .apply_compact(&meta.summary, meta.kept_user_count);
-    // G2：零压缩（skip==0 早退）如实上报 Cancelled，不再谎报 Completed。
-    let compact_noop = ctx.agent.msg.turn_count() == turns_before_apply;
     ctx.agent
         .msg
         .persist_compaction(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-    if !compact_noop {
-        // D10 fact 产生侧：durable append 先于 CompactFinished 域事件发布。
-        publish_compaction_fact(ctx, &meta.summary);
+
+    if !effect.applied() {
+        // 保留区已覆盖全部历史：此刻写摘要不会压掉任何东西，只会让上下文
+        // 凭空多出一段检查点。如实报"跳过"而不是"取消/失败"。
+        let reason = format!(
+            "没有可折叠的轮次：保留区已覆盖全部历史（保留 {} 个 turn），本次未写入摘要。",
+            meta.kept_user_count.max(1)
+        );
+        CompactTerminal {
+            compact_id: meta.compact_id.clone(),
+            status: qaqh_domain::CompactStatus::Skipped,
+            summary_chars: 0,
+            folded_turns: 0,
+            reason: Some(reason),
+        }
+        .emit(ctx);
+        return;
     }
 
-    // Ringing 双发：CompactFinished（成功/零压缩如实区分终态）
-    ctx.emitter
-        .emit_domain(qaqh_domain::DomainEvent::Conversation(
-            qaqh_domain::ConversationEvent::CompactFinished {
-                compact_id: meta.compact_id.clone(),
-                status: if compact_noop {
-                    qaqh_domain::CompactStatus::Cancelled
-                } else {
-                    qaqh_domain::CompactStatus::Completed
-                },
-                summary_chars: Some(if compact_noop { 0 } else { chars }),
-                turns_compacted: Some(if compact_noop {
-                    0
-                } else {
-                    meta.head_user_count as u32
-                }),
-                turns_removed: Some(turns_removed as u32),
-            },
-        ));
+    // D10 fact 产生侧：durable append 先于 CompactFinished 域事件发布。
+    publish_compaction_fact(ctx, &meta.summary);
+    record_compact_phase(ctx, "compact.apply.end", chars);
+    ctx.agent.record_memory_marker("compact.apply.end");
+
+    let payload_after = ctx.agent.msg.memory_usage_estimate().payload_bytes;
+    log::info!(
+        "[COMPACT] applied {}: folded_turns={} payload_bytes {payload_before} → {payload_after}",
+        meta.compact_id,
+        effect.folded_turns
+    );
+    if payload_after >= payload_before {
+        log::warn!(
+            "[COMPACT] {} did not shrink the context (payload_bytes {payload_before} → {payload_after}): summary_bytes={chars}",
+            meta.compact_id
+        );
+    }
+
+    CompactTerminal {
+        compact_id: meta.compact_id.clone(),
+        status: qaqh_domain::CompactStatus::Completed,
+        summary_chars: chars,
+        folded_turns: effect.folded_turns,
+        reason: None,
+    }
+    .emit(ctx);
 }
 
 /// 长程导航锚点：把压缩后**会丢失**的会话级事实补回摘要输入。
@@ -498,7 +616,6 @@ pub(crate) fn run_compact_worker(
     prompt: String,
     provider: qaqh_gate::ProviderConfig,
     kept_user_count: usize,
-    head_user_count: usize,
     context_revision: u64,
     event_tx: std::sync::mpsc::SyncSender<crate::agent::types::WriterEvent>,
     causation_id: Option<String>,
@@ -552,7 +669,6 @@ pub(crate) fn run_compact_worker(
             compact_id,
             summary,
             kept_user_count,
-            head_user_count,
             context_revision,
             error: None,
         },
@@ -560,17 +676,15 @@ pub(crate) fn run_compact_worker(
             compact_id,
             summary: String::new(),
             kept_user_count,
-            head_user_count,
             context_revision,
-            error: Some("Compact failed: model returned empty response.".into()),
+            error: Some("压缩失败：模型返回了空摘要。".into()),
         },
         Err(e) => CompactMeta {
             compact_id,
             summary: String::new(),
             kept_user_count,
-            head_user_count,
             context_revision,
-            error: Some(format!("{e}")),
+            error: Some(format!("压缩失败：摘要请求未完成（{e}）。")),
         },
     }
 }
@@ -809,5 +923,42 @@ mod tests {
         assert!(anchors.contains("src/lib.rs"), "got: {anchors}");
 
         qaqh_workspace::file_state::clear();
+    }
+
+    /// 压缩"没有发起"的每种原因都必须给出可区分的中文说明。
+    ///
+    /// 客户端把 `CompactFinished.reason` 直接展示给用户；旧实现把所有分支
+    /// 折叠成同一个 `None`，界面只能说"没有可压缩内容"，provider 不可用也
+    /// 被说成"历史已经够短"。
+    #[test]
+    fn compact_refusals_are_specific_chinese_reasons() {
+        let cases = [
+            super::CompactRefusal::EmptyHistory,
+            super::CompactRefusal::NothingEligible,
+            super::CompactRefusal::ProviderUnavailable("缺少 api_key".into()),
+        ];
+        let mut codes = Vec::new();
+        let mut reasons = Vec::new();
+        for case in &cases {
+            let reason = case.reason();
+            assert!(
+                reason.contains("压缩") || reason.contains("没有"),
+                "原因必须说明压缩为何没发生：{reason}"
+            );
+            assert!(
+                reason
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "原因必须是中文：{reason}"
+            );
+            codes.push(case.code().to_string());
+            reasons.push(reason);
+        }
+        codes.sort();
+        codes.dedup();
+        assert_eq!(codes.len(), 3, "每种原因的 code 必须唯一");
+        reasons.sort();
+        reasons.dedup();
+        assert_eq!(reasons.len(), 3, "每种原因的说明必须可区分");
     }
 }

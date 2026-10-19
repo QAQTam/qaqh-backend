@@ -56,6 +56,7 @@ pub mod loop_dispatch_conversation;
 pub mod loop_dispatch_tool;
 pub mod loop_injection;
 pub mod loop_outcome;
+pub mod official_web;
 pub mod paced_emitter;
 pub mod plugins;
 pub mod prompt;

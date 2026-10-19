@@ -20,7 +20,7 @@ pub fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec<String
 
     match action {
         "patch" | "write" | "edit_file" | "edit" | "edit_diff" | "delete" => {
-            collect_paths(args, &mut paths);
+            paths.extend(paths_from_args(args));
         }
         "move" | "copy" => {
             // Both source and dest are affected; dest is the write target
@@ -58,17 +58,42 @@ pub fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec<String
     paths
 }
 
-fn collect_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
-    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-        paths.push(p.to_string());
+/// 路径字段的**单一事实源**。
+///
+/// 同一份模型 args 会被两个消费方各解析一次：调度层判写冲突
+/// （[`resolve_write_conflicts`]）、执行前判授权资源
+/// （`permission::extract_target_paths_in`）。两边口径一旦分叉，语义就会分裂成
+/// "调度器以为不冲突 + 授权器以为没有写目标"。
+///
+/// 历史坑（2026-10-19 实测）：`edit` 的 wire 拼写从 `path` 迁到 Claude 规范的
+/// `file_path`，工具侧只加了 serde rename/alias，这两个消费方还在读旧键，
+/// 于是 `file_write_paths` 返回空 → 同文件双 `edit` 被判无冲突 → 并行执行 →
+/// 后写覆盖先写（丢更新），并伴随 `MoveFileEx` 的 `ERROR_ACCESS_DENIED`。
+/// 新工具改字段名时改这里，不要再各写一份。
+pub fn paths_from_args(args: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    // 单数拼写：canonical 与历史/别名写法。
+    for key in ["path", "file_path", "file"] {
+        if let Some(path) = args.get(key).and_then(|value| value.as_str()) {
+            push_unique(&mut paths, path);
+        }
     }
-    if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
+    // 复数拼写。
+    if let Some(arr) = args.get("paths").and_then(|value| value.as_array()) {
         for value in arr {
             if let Some(path) = value.as_str() {
-                paths.push(path.to_string());
+                push_unique(&mut paths, path);
             }
         }
     }
+    paths
+}
+
+fn push_unique(paths: &mut Vec<String>, path: &str) {
+    if path.is_empty() || paths.iter().any(|existing| existing == path) {
+        return;
+    }
+    paths.push(path.to_string());
 }
 
 /// Detect same-file write conflicts among pending tools and group them
@@ -206,5 +231,81 @@ mod tests {
 
         assert_eq!(groups, vec![vec![0, 1, 3]]);
         assert_eq!(serial_after, HashSet::from([1, 3]));
+    }
+
+    /// 回归（2026-10-19）：`edit` 的 wire 拼写迁到 `file_path` 后，冲突检测只因
+    /// 为读不到 `path` 就把同文件双写判成并行，导致丢更新 + Windows 上
+    /// `MoveFileEx` 撞车报 `ERROR_ACCESS_DENIED`。canonical 拼写必须能成组。
+    #[test]
+    fn edit_file_path_spelling_is_serialized() {
+        let pending = vec![
+            (
+                "edit".to_string(),
+                serde_json::json!({"file_path": "src/lib.rs", "old_string": "a", "new_string": "b"}),
+            ),
+            (
+                "edit".to_string(),
+                serde_json::json!({"file_path": "src/lib.rs", "old_string": "c", "new_string": "d"}),
+            ),
+        ];
+
+        let (groups, serial_after) = resolve_write_conflicts(&pending);
+
+        assert_eq!(groups, vec![vec![0, 1]]);
+        assert_eq!(serial_after, HashSet::from([1]));
+    }
+
+    /// 同一文件、两种拼写混用，仍必须判为冲突（alias 迁移期常见）。
+    #[test]
+    fn mixed_path_spellings_still_conflict() {
+        let pending = vec![
+            (
+                "edit".to_string(),
+                serde_json::json!({"path": "src/lib.rs"}),
+            ),
+            (
+                "edit".to_string(),
+                serde_json::json!({"file_path": "src/lib.rs"}),
+            ),
+        ];
+
+        let (groups, serial_after) = resolve_write_conflicts(&pending);
+
+        assert_eq!(groups, vec![vec![0, 1]]);
+        assert_eq!(serial_after, HashSet::from([1]));
+    }
+
+    /// 不同文件的 canonical 拼写不能因为加了别名兜底而被误并组。
+    #[test]
+    fn distinct_file_path_targets_stay_parallel() {
+        let pending = vec![
+            (
+                "edit".to_string(),
+                serde_json::json!({"file_path": "src/a.rs"}),
+            ),
+            (
+                "edit".to_string(),
+                serde_json::json!({"file_path": "src/b.rs"}),
+            ),
+        ];
+
+        let (groups, serial_after) = resolve_write_conflicts(&pending);
+
+        assert!(groups.is_empty());
+        assert!(serial_after.is_empty());
+    }
+
+    #[test]
+    fn paths_from_args_collects_alias_spellings_without_duplicates() {
+        let args = serde_json::json!({
+            "path": "b.rs",
+            "file_path": "a.rs",
+            "paths": ["c.rs", "b.rs"],
+        });
+
+        assert_eq!(
+            paths_from_args(&args),
+            vec!["b.rs".to_string(), "a.rs".to_string(), "c.rs".to_string()]
+        );
     }
 }

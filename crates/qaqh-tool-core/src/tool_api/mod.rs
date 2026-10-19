@@ -18,6 +18,7 @@
 //! | [`schema`] | 紧凑 schema 生成器（SDK v2：schema 单一事实源 = 类型） |
 //! | [`coerce`] | 模型侧参数的 schema 归一（stringified 数字/数组 → JSON 字面量） |
 //! | [`lenient`] | 类型级 wire 容错（`deserialize_with`）：schema 看不见的字段也吃字符串数字 |
+//! | [`official_web`] | 官方网页工具端口（fetch/search，按调用注入，非全局） |
 //! | [`dynamic`] | [`DynamicToolAdapter`]（MCP/LSP 动态工具 typed 适配器） |
 //! | [`result`] | [`map_tool_result`]（v1 `ToolResult` → [`ToolOutcome`] 映射 + 进度桥） |
 //! | [`boundary`] | 工具 ↔ loop 执行边界（[`ExecuteBatch`] / [`BatchOutcome`]） |
@@ -40,6 +41,7 @@ pub mod dynamic;
 pub mod erased;
 pub mod error;
 pub mod lenient;
+pub mod official_web;
 pub mod output;
 pub mod progress;
 pub mod result;
@@ -59,6 +61,7 @@ pub use display::{
     PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolHeader, ToolMetrics,
     ToolTerminalState,
 };
+pub use official_web::{OfficialHit, OfficialPage, OfficialWebBackend, OfficialWebTools};
 
 pub use dynamic::{DynamicDispatch, DynamicToolAdapter};
 pub use erased::ErasedTool;

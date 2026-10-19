@@ -205,6 +205,7 @@ pub fn mutation_display(
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteArgs {
+    #[serde(alias = "file_path")]
     pub path: String,
     pub content: String,
     /// Append (default false)
@@ -264,7 +265,7 @@ impl ToolProjection for WriteOutput {
             mutation_change_summary(&self.path, self.lines_added, self.lines_removed)
         };
         mutation_display(
-            args.get("path").and_then(Value::as_str),
+            crate::support::arg_path(args),
             &self.path,
             crate::tool_api::PathOp::Write,
             "write",
@@ -598,6 +599,7 @@ impl TypedTool for WriteTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteArgs {
+    #[serde(alias = "file_path")]
     pub path: String,
 }
 
@@ -620,7 +622,7 @@ impl ToolProjection for DeleteOutput {
 
     fn display(&self, args: &Value) -> ToolDisplay {
         mutation_display(
-            args.get("path").and_then(Value::as_str),
+            crate::support::arg_path(args),
             &self.path,
             crate::tool_api::PathOp::Delete,
             "delete",
@@ -861,6 +863,7 @@ pub fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext
         cancellation,
         progress: None,
         exec_progress: None,
+        official_web: None,
         source: ToolCallSource::Model,
     }
 }
@@ -878,6 +881,29 @@ mod tests {
     /// 串行所有涉及 trash 环境变量/落点的用例：`QAQH_TRASH_DIR` 是进程级状态，
     /// 而 cargo 默认多线程跑测试。
     static DELETE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Claude 标准拼写 `file_path`：接收端接受，模型面 schema 不变。
+    #[test]
+    fn claude_style_file_path_is_accepted_without_touching_the_schema() {
+        let write: WriteArgs =
+            serde_json::from_value(serde_json::json!({"file_path": "a.rs", "content": "x"}))
+                .expect("write file_path");
+        assert_eq!(write.path, "a.rs");
+        let delete: DeleteArgs = serde_json::from_value(serde_json::json!({"file_path": "b.rs"}))
+            .expect("delete file_path");
+        assert_eq!(delete.path, "b.rs");
+
+        for schema in [
+            crate::tool_api::schema::schema_of::<WriteArgs>(),
+            crate::tool_api::schema::schema_of::<DeleteArgs>(),
+        ] {
+            assert!(
+                schema["properties"].get("file_path").is_none(),
+                "alias 不得出现在模型面 schema: {schema}"
+            );
+            assert_eq!(schema["additionalProperties"], false);
+        }
+    }
 
     /// 测试隔离：写/删路径都会 `journal::record_change`，而 SMJ 落在
     /// `platform::data_dir()` —— 不设隔离就是往**真实用户数据根**里写测试记录。
@@ -913,6 +939,7 @@ mod tests {
             cancellation: TestCancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: TestToolCallSource::Model,
         }
     }

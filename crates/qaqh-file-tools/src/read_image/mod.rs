@@ -159,7 +159,7 @@ pub struct ReadImageArgs {
     #[serde(default)]
     pub image_index: Option<u64>,
     /// Image file path
-    #[serde(default)]
+    #[serde(default, alias = "file_path")]
     pub path: Option<String>,
 }
 
@@ -199,6 +199,7 @@ impl ToolProjection for ReadImageOutput {
     fn display(&self, args: &Value) -> ToolDisplay {
         let header = args
             .get("path")
+            .or_else(|| args.get("file_path"))
             .and_then(Value::as_str)
             .filter(|path| !path.is_empty())
             .map(|path| ToolHeader::Path {

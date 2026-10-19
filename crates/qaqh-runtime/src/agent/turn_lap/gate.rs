@@ -951,10 +951,17 @@ fn session_affinity_headers(session_id: &str) -> Vec<(String, String)> {
 /// 把「用本机 DeepSeek 账号余额」落到 provider 上。
 ///
 /// 与 [`apply_chatgpt_plan`] 同规矩：三条校验都是**配置错误**，一律拒绝不回退。
-/// 1. wire 必须是 `openai`——账号额度只提供 OpenAI 兼容的 chat completions；
+/// 1. wire 必须是 `openai` 或 `responses`——账号额度只提供 OpenAI 兼容的两个面；
 /// 2. base_url 为空则填官方推理 origin，非空必须是官方 origin
 ///    （否则等于把账号 token 发往用户没预期的端点）；
 /// 3. 必须已登录（`token()` 的失败文案已经区分「没登录」与「本地凭据损坏」）。
+///
+/// 为什么 `responses` 也在值域里：官方文档明确「在对话中间插入工具调用」只有
+/// Anthropic `/messages` 与 Responses 支持，chat completions 不支持；Responses
+/// 另外还提供 `input_tokens_details.cached_tokens`（缓存命中）与服务端
+/// `web_search`。Anthropic 面不开放：账号 token 是裸的 `x-dsh-auth-token`，
+/// 而 `ProviderConfig::auth_header` 只被 openai / responses 两个 adapter 消费
+/// （anthropic adapter 走 `x-api-key`），发不过去。
 ///
 /// 与套餐那条的**唯一形态差异**：账号 token 走 `x-dsh-auth-token` 裸头，不是
 /// `Authorization: Bearer`——这是实测出来的平台契约（见 `qaqh-dsaccount` 文档）。
@@ -962,9 +969,12 @@ fn apply_deepseek_account(
     provider: &mut qaqh_gate::ProviderConfig,
     cfg: &qaqh_config::Config,
 ) -> Result<(), String> {
-    if !matches!(cfg.wire, qaqh_types::Wire::Chat) {
+    if !matches!(
+        cfg.wire,
+        qaqh_types::Wire::Chat | qaqh_types::Wire::Responses
+    ) {
         return Err(format!(
-            "DeepSeek 账号额度只支持 openai（chat completions）协议（当前 profile 是 {:?}）：请在设置里把该 profile 的 wire 改为 openai",
+            "DeepSeek 账号额度只支持 openai（chat completions）或 responses 协议（当前 profile 是 {:?}）：请在设置里把该 profile 的 wire 改为 openai 或 responses",
             cfg.wire
         ));
     }
@@ -1184,15 +1194,26 @@ mod deepseek_account_tests {
         qaqh_gate::ProviderConfig::responses("", "", "test-model", None)
     }
 
-    /// 账号余额只提供 openai（chat completions）：别的 wire 一律拒绝，不回退。
+    /// 账号余额只提供 openai / responses 两个面：Anthropic 面一律拒绝，不回退。
     #[test]
-    fn account_route_rejects_a_non_openai_wire() {
+    fn account_route_rejects_the_anthropic_wire() {
         let err = apply_deepseek_account(&mut provider(), &config(Wire::Messages, ""))
             .expect_err("anthropic wire must be rejected");
-        assert!(err.contains("openai"), "{err}");
-        let err = apply_deepseek_account(&mut provider(), &config(Wire::Responses, ""))
-            .expect_err("responses wire must be rejected");
-        assert!(err.contains("openai"), "{err}");
+        assert!(err.contains("responses"), "{err}");
+    }
+
+    /// Responses 面：wire 校验通过，官方 base 与裸头先落位（登录检查在其后）。
+    /// 这是「对话中间插入工具调用」在账号额度上唯一可用的面。
+    #[test]
+    fn account_route_accepts_the_responses_wire_and_pins_the_bare_header() {
+        let mut p = provider();
+        let err = apply_deepseek_account(&mut p, &config(Wire::Responses, ""))
+            .expect_err("no signed-in account in tests");
+        assert!(err.contains("先登录"), "{err}");
+        assert_eq!(p.base_url, qaqh_dsaccount::protocol::INFERENCE_ORIGIN);
+        let auth = p.auth_header.as_ref().expect("凭据头必须已落位");
+        assert_eq!(auth.header.as_str(), "x-dsh-auth-token");
+        assert_eq!(auth.value_prefix, None, "账号 token 是裸值，不带任何前缀");
     }
 
     /// 换端点不等于转发凭据：非官方 origin 一律拒绝（含 scheme 与子路径差异）。

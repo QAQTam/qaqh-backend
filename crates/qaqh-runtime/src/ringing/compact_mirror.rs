@@ -137,6 +137,7 @@ impl<'a> CompactMirror<'a> {
                 summary_chars,
                 turns_compacted,
                 turns_removed,
+                reason,
             } => {
                 // Tail first, so the card shows the full summary before it
                 // collapses into `已压缩`.
@@ -146,15 +147,19 @@ impl<'a> CompactMirror<'a> {
                 let summary_chars = *summary_chars;
                 let turns_compacted = *turns_compacted;
                 let turns_removed = *turns_removed;
+                let reason = reason.clone();
                 self.publish(session_id, move |hub, dir| {
                     hub.publish_compact_finished(
                         dir,
                         session_id,
-                        &compact_id,
-                        status,
-                        summary_chars,
-                        turns_compacted,
-                        turns_removed,
+                        crate::ringing::v2::CompactFinishedView {
+                            compact_id: &compact_id,
+                            status,
+                            summary_chars,
+                            turns_compacted,
+                            turns_removed,
+                            reason: reason.as_deref(),
+                        },
                     )
                 });
             }

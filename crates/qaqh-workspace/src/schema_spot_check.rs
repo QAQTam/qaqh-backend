@@ -147,14 +147,14 @@ mod schema_spot_check {
             "web_fetch.url missing description"
         );
 
-        // edit：str_replace 三字段契约（path/old_str/new_str 必填），
-        // 不得残留 legacy 字段。
+        // edit：str_replace 三字段契约（file_path/old_string/new_string 必填，
+        // 与 Claude 标准签名一致），不得残留 legacy 字段或旧拼写。
         assert_eq!(
             required_of("edit"),
             vec![
-                "path".to_string(),
-                "old_str".to_string(),
-                "new_str".to_string()
+                "file_path".to_string(),
+                "old_string".to_string(),
+                "new_string".to_string()
             ]
         );
         let edit_params = &by_name("edit").function.parameters;
@@ -170,6 +170,19 @@ mod schema_spot_check {
             assert!(
                 !edit_params.to_string().contains(legacy),
                 "edit schema still carries legacy field {legacy}"
+            );
+        }
+        // 上面是整串 substring 检查，`old_str` 是 `old_string` 的子串、`path` 是
+        // `file_path` 的子串，故别名能否泄漏只能按 key 集合精确判：属性必须恰好
+        // 是这四个 canonical 名（len 相等 + 逐个存在）。
+        let edit_props = edit_params["properties"]
+            .as_object()
+            .expect("edit properties");
+        assert_eq!(edit_props.len(), 4, "edit schema: {edit_params}");
+        for canonical in ["file_path", "old_string", "new_string", "replace_all"] {
+            assert!(
+                edit_props.contains_key(canonical),
+                "edit schema missing canonical field {canonical}: {edit_params}"
             );
         }
 

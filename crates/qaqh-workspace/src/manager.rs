@@ -725,17 +725,10 @@ pub(crate) fn extract_files_affected(_tool_name: &str, args: &serde_json::Value)
         Some(o) => o,
         None => return Vec::new(),
     };
-    let mut files = Vec::new();
-    if let Some(v) = obj.get("path").and_then(|v| v.as_str()) {
-        files.push(v.to_string());
-    }
-    if let Some(arr) = obj.get("paths").and_then(|v| v.as_array()) {
-        for v in arr {
-            if let Some(s) = v.as_str() {
-                files.push(s.to_string());
-            }
-        }
-    }
+    // 路径键的拼写（`path` / `file_path` / `file` / `paths`）与调度冲突检测、
+    // 执行前授权复核共用同一事实源；否则工具换 canonical 拼写后这里会静默
+    // 归因为"没有文件受影响"，审计与 before 指纹快照同时失明。
+    let mut files = crate::conflict::paths_from_args(args);
     for key in ["file_a", "file_b", "dest", "target"] {
         if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
             files.push(v.to_string());
@@ -766,7 +759,12 @@ fn is_path_in_workspace(
     risk: &ToolRisk,
     category: crate::permission::ToolCategory,
 ) -> bool {
-    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+    // 与 `qaqh_permission::conflict::paths_from_args` 同一拼写口径：漏读
+    // `file_path` 会让 containment 检查整段跳过，退化成"无路径即放行"。
+    if let Some(path) = ["path", "file_path", "file"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(|v| v.as_str()))
+    {
         if path.is_empty() || path == "." {
             return true;
         }
@@ -803,7 +801,16 @@ fn audit_args_summary(_tool: &str, args: &serde_json::Value) -> String {
     // Show path-like args first, then command, then truncate to 80 chars
     let mut parts: Vec<String> = Vec::new();
     for key in [
-        "path", "file_a", "file_b", "dest", "target", "command", "pattern", "query", "question",
+        "path",
+        "file_path",
+        "file_a",
+        "file_b",
+        "dest",
+        "target",
+        "command",
+        "pattern",
+        "query",
+        "question",
     ] {
         if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
             let short = if v.len() > 50 {
@@ -1020,6 +1027,7 @@ mod tests {
                     cancellation: crate::tool_api::CancellationToken::new(),
                     progress: None,
                     exec_progress: None,
+                    official_web: None,
                     source: crate::tool_api::ToolCallSource::Model,
                 },
                 serde_json::json!({}),

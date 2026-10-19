@@ -113,6 +113,17 @@ subagent/MCP/LSP 的工具登记不能为了 ToolManager 依赖 workspace。
 迁移后删除过期 path dependency、default feature、shim 和无用第三方依赖。
 避免把生产依赖改成 dev-dependency 后就宣称测试边界也已清理。
 
+**按调用注入的 provider 后端**：有些能力只有特定 provider 的官方端点才提供
+（当前是 DeepSeek 的 `/v1/tools/{search,fetch}`）。形状固定为三层：
+`qaqh-tool-core` 只定义端口（`tool_api::official_web::OfficialWebTools`）并由
+`ToolCallContext::official_web` 携带；`qaqh-runtime` 是**唯一**装配点
+（`agent::official_web::backend_for`，同时看得见 `EndpointCompat` 与
+`qaqh-dsaccount`）；工具实现（`qaqh-workspace/src/web.rs`）只认端口。
+开关来自配置（`EndpointCompat::official_web_tools`），不按 URL/模型名特判；
+legacy/ambient 构造点一律 `None` 并退回自实现，不读进程全局（I10 / I15）。
+模型面工具清单同样按 profile 收窄（`AgentState::refresh_tool_defs`），保证
+未声明官方面的端点请求体不变。
+
 ## 5. 存储权威表
 
 这是现有已核对的核心文件与目标归属；它不是全部数据文件的完整普查。

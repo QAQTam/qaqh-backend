@@ -275,6 +275,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         }
     }

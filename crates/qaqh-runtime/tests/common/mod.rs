@@ -10,6 +10,7 @@ use qaqh_runtime::agent::loop_core::{Loop, LoopChannels, ringing_command_is_inte
 use qaqh_runtime::agent::state::agent::AgentState;
 use qaqh_runtime::agent::types::{WorkerCommand, WriterEvent};
 
+pub mod model_wire_capture;
 mod wire;
 use wire::read_worker_command_frame;
 

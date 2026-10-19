@@ -431,7 +431,8 @@ impl AgentState {
     pub fn init(caller: &str, config: Config) -> Self {
         runtime::init_tools(caller, &agent_tool_registrars(), vec![]);
         let mut agent = Self::new(config);
-        agent.tool_defs = runtime::all_tools(); // all tools, no allowlist
+        // 全量清单，但按该 profile 的执行能力收窄（见 `refresh_tool_defs`）。
+        agent.refresh_tool_defs();
         agent
     }
 
@@ -463,7 +464,7 @@ impl AgentState {
             }
         };
         runtime::set_allowed_tools(allowed);
-        self.tool_defs = runtime::all_tools();
+        self.refresh_tool_defs();
         // 同步内存态会话元数据：daemon 已 persist meta.json，但 worker 内存
         // 若不同步，session 恢复（lifecycle.rs）会用旧值（standard）重新应用，
         // 导致极限/创造模式在恢复后退回全量工具。
@@ -493,6 +494,26 @@ impl AgentState {
                 "standard"
             }
         );
+    }
+
+    /// 重建模型面工具清单，并按「该 profile 到底能不能执行」收窄。
+    ///
+    /// 只有声明了官方工具面的 profile（[`crate::agent::official_web::official_web_enabled`]：
+    /// DeepSeek 账号凭据 × `official_web_tools`）才拿得到 `search` 的执行后端。
+    /// 把注册表里的全量清单原样发出去，其它 profile 会得到一个必然失败的函数，
+    /// 而且 `tools` 数组会与升级前不同——那是一次没人要求的缓存前缀变化（S2）。
+    pub(crate) fn refresh_tool_defs(&mut self) {
+        /// canonical 工具名：官方搜索（`qaqh_workspace::web::SearchTool`）。
+        const SEARCH_TOOL_NAME: &str = "search";
+
+        self.tool_defs = runtime::all_tools();
+        if !crate::agent::official_web::official_web_enabled(
+            self.config.credential,
+            &self.config.compat,
+        ) {
+            self.tool_defs
+                .retain(|def| def.function.name != SEARCH_TOOL_NAME);
+        }
     }
 
     /// 模型面工具名 -> 内部注册 key。exec 独占后旧会话 custom_tools 里的
@@ -1360,6 +1381,49 @@ mod tests {
     }
 
     // ── 工具模式（PLAN-TOOL-MODES.md 4.4）──
+
+    #[test]
+    fn refresh_tool_defs_hides_search_unless_the_profile_can_execute_it() {
+        let _guard = SKILL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        qaqh_workspace::runtime::init_tools(
+            "official-web-exposure-test",
+            &agent_tool_registrars(),
+            vec![],
+        );
+
+        let names = |agent: &AgentState| -> Vec<String> {
+            agent
+                .tool_defs
+                .iter()
+                .map(|def| def.function.name.clone())
+                .collect()
+        };
+
+        // 缺省 profile：`search` 不暴露……
+        let mut agent = AgentState::new(qaqh_config::Config::default());
+        agent.refresh_tool_defs();
+        assert!(!names(&agent).contains(&"search".to_string()));
+        // ……但确实注册在表里（暴露面由本方法收窄，不是在注册时决定）。
+        assert!(
+            qaqh_workspace::runtime::all_tools()
+                .iter()
+                .any(|def| def.function.name == "search"),
+            "search 必须注册，只是默认不暴露"
+        );
+
+        // 官方面开关 + DeepSeek 账号凭据 → 暴露（后端拿得到 token）。
+        agent.config.credential = qaqh_types::CredentialSource::DeepseekAccount;
+        agent.config.compat.official_web_tools = true;
+        agent.refresh_tool_defs();
+        assert!(names(&agent).contains(&"search".to_string()));
+
+        // 只有开关、没有账号凭据 → 不暴露（否则是一个必然失败的函数）。
+        agent.config.credential = qaqh_types::CredentialSource::ApiKey;
+        agent.refresh_tool_defs();
+        assert!(!names(&agent).contains(&"search".to_string()));
+    }
 
     #[test]
     fn apply_tool_mode_filters_and_restores_tool_defs() {

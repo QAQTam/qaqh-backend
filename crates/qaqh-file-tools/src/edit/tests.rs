@@ -4,14 +4,14 @@ use crate::ToolResult;
 use serde_json::json;
 
 fn call(path: &str, old: &str, new: &str) -> ToolResult {
-    exec_edit(&json!({"path": path, "old_str": old, "new_str": new}))
+    exec_edit(&json!({"file_path": path, "old_string": old, "new_string": new}))
 }
 
 fn call_all(path: &str, old: &str, new: &str, replace_all: bool) -> ToolResult {
     exec_edit(&json!({
-        "path": path,
-        "old_str": old,
-        "new_str": new,
+        "file_path": path,
+        "old_string": old,
+        "new_string": new,
         "replace_all": replace_all
     }))
 }
@@ -28,6 +28,38 @@ fn read(path: &str) -> String {
 
 fn code(result: &ToolResult) -> &str {
     result.error.as_ref().map(|e| e.code.as_str()).unwrap_or("")
+}
+
+// ─────────────────────────────────────────────────────────────
+// 模型面命名：canonical 为 Claude 标准拼写（file_path / old_string / new_string）
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn canonical_claude_field_names_are_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_file(&dir, "a.rs", "let x = 1;\n");
+    let out = exec_edit(&json!({
+        "file_path": path,
+        "old_string": "let x = 1;",
+        "new_string": "let x = 2;"
+    }));
+    assert!(out.error.is_none(), "canonical 调用不得失败: {out:?}");
+    assert_eq!(read(&path), "let x = 2;\n");
+}
+
+/// 旧拼写（我们 v1 的 `path`/`old_str`/`new_str`）继续作为收端别名成立：
+/// 历史会话、外部脚本与既有测试不会因为这次改名失效。
+#[test]
+fn legacy_field_names_are_still_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_file(&dir, "a.rs", "let x = 1;\n");
+    let out = exec_edit(&json!({
+        "path": path,
+        "old_str": "let x = 1;",
+        "new_str": "let x = 2;"
+    }));
+    assert!(out.error.is_none(), "旧拼写不得失败: {out:?}");
+    assert_eq!(read(&path), "let x = 2;\n");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -262,7 +294,7 @@ fn exec_not_found_returns_diff_in_model_text() {
     assert_eq!(code(&result), "not_found");
     let text = result.model_text();
     assert!(text.contains("not_found"), "{text}");
-    assert!(text.contains("diff (your old_str"), "{text}");
+    assert!(text.contains("diff (your old_string"), "{text}");
     assert!(text.contains("-let x = 2;"), "{text}");
     assert!(text.contains("+let x = 1;"), "{text}");
     // 文件与账本都不动。
@@ -332,7 +364,7 @@ fn exec_empty_file_is_not_found() {
 
 #[test]
 fn exec_empty_old_str_is_rejected() {
-    let result = exec_edit(&json!({"path": "a.txt", "old_str": "", "new_str": "b"}));
+    let result = exec_edit(&json!({"file_path": "a.txt", "old_string": "", "new_string": "b"}));
     assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("must be non-empty"));
     let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
@@ -341,7 +373,8 @@ fn exec_empty_old_str_is_rejected() {
 
 #[test]
 fn exec_identical_old_and_new_is_rejected() {
-    let result = exec_edit(&json!({"path": "a.txt", "old_str": "a", "new_str": "a"}));
+    let result =
+        exec_edit(&json!({"file_path": "a.txt", "old_string": "a", "new_string": "a"}));
     assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("identical"));
     let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
@@ -386,7 +419,7 @@ fn tool_contract_exposes_str_replace_fields() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(required, vec!["path", "old_str", "new_str"]);
+    assert_eq!(required, vec!["file_path", "old_string", "new_string"]);
     let props = schema["properties"].as_object().unwrap();
     assert_eq!(props.len(), 4, "schema: {schema}");
     assert_eq!(props["replace_all"]["type"], "boolean");

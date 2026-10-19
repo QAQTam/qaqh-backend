@@ -84,8 +84,8 @@ impl Default for LogoutRetry {
 /// 平台客户端。
 #[derive(Debug, Clone)]
 pub struct DsClient {
-    http: Http,
-    config: DsClientConfig,
+    pub(crate) http: Http,
+    pub(crate) config: DsClientConfig,
 }
 
 impl DsClient {
@@ -104,8 +104,13 @@ impl DsClient {
         format!("{}{path}", self.config.platform_origin)
     }
 
+    /// 推理 origin 下的 URL（模型目录、官方 Search / Fetch 都在这条 origin 上）。
+    pub(crate) fn inference_url(&self, path: &str) -> String {
+        format!("{}{path}", self.config.inference_origin)
+    }
+
     /// 账号请求头：五个客户端身份头 + （可选）账号凭据头。
-    fn headers(&self, token: Option<&str>) -> Vec<(&'static str, String)> {
+    pub(crate) fn headers(&self, token: Option<&str>) -> Vec<(&'static str, String)> {
         let mut headers: Vec<(&'static str, String)> = self.config.identity.headers().to_vec();
         if let Some(token) = token {
             headers.push((protocol::AUTH_TOKEN_HEADER, token.to_string()));
@@ -113,14 +118,14 @@ impl DsClient {
         headers
     }
 
-    fn pairs<'a>(headers: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    pub(crate) fn pairs<'a>(headers: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
         headers
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect()
     }
 
-    fn ensure_success(response: &HttpResponse) -> Result<(), DsError> {
+    pub(crate) fn ensure_success(response: &HttpResponse) -> Result<(), DsError> {
         if response.is_success() {
             return Ok(());
         }

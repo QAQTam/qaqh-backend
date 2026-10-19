@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use qaqh_workspace::permission::PermissionLevel;
 use qaqh_workspace::tool_api::{
-    AgentMode, CancellationToken, ProgressSink, SandboxMode, SandboxSpec, ToolCallContext,
-    ToolCallSource,
+    AgentMode, CancellationToken, OfficialWebBackend, ProgressSink, SandboxMode, SandboxSpec,
+    ToolCallContext, ToolCallSource,
 };
 
 use super::types::{CancelToken, RingContext};
@@ -54,6 +54,8 @@ pub struct RuntimeContext {
     mode: AgentMode,
     cancellation: CancelToken,
     exec_default_shell: Option<String>,
+    /// 官方网页工具后端；`None` = 工具层走自实现（见 `agent::official_web`）。
+    official_web: Option<OfficialWebBackend>,
 }
 
 impl RuntimeContext {
@@ -64,6 +66,7 @@ impl RuntimeContext {
         permission_level: u8,
         cancellation: CancelToken,
         exec_default_shell: Option<String>,
+        official_web: Option<OfficialWebBackend>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -76,6 +79,7 @@ impl RuntimeContext {
             },
             cancellation,
             exec_default_shell,
+            official_web,
         }
     }
 
@@ -135,6 +139,7 @@ impl RuntimeContext {
             cancellation: CancellationToken::from_shared_flag(self.cancellation.arc()),
             progress,
             exec_progress: None,
+            official_web: self.official_web.clone(),
             source,
         }
     }
@@ -158,6 +163,11 @@ impl TurnContext {
                 ctx.agent.config.permission_level,
                 ctx.cancel.clone(),
                 ctx.agent.config.exec.default_shell.clone(),
+                // 开关只来自配置：`official_web_tools` × DeepSeek 账号凭据（I15）。
+                super::official_web::backend_for(
+                    ctx.agent.config.credential,
+                    &ctx.agent.config.compat,
+                ),
             ),
             turn_id: turn_id.into(),
             round_num,
@@ -202,8 +212,13 @@ mod tests {
         let _guard = AmbientGuard;
 
         let cancel = CancelToken::new();
-        let runtime =
-            RuntimeContext::from_legacy_ambient("seed-236".to_string(), 3, cancel.clone(), None);
+        let runtime = RuntimeContext::from_legacy_ambient(
+            "seed-236".to_string(),
+            3,
+            cancel.clone(),
+            None,
+            None,
+        );
 
         assert_eq!(runtime.session_id(), "seed-236");
         assert_eq!(runtime.workspace_root(), Path::new("/tmp/qaqh-p2-4a"));
@@ -228,6 +243,7 @@ mod tests {
             "seed-turn".to_string(),
             4,
             CancelToken::new(),
+            None,
             None,
         );
         let turn = TurnContext {
@@ -255,6 +271,7 @@ mod tests {
             2, // workspace-write 档
             cancel.clone(),
             Some("zsh".to_string()),
+            None,
         );
         let tool_ctx = runtime.tool_call_context(
             "call-248",

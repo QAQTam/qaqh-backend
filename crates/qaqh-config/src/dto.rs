@@ -143,13 +143,21 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
             next_wire.as_str()
         ));
     }
-    // DeepSeek 账号余额走 OpenAI 兼容的 chat completions：同样在保存期拦掉。
-    // 官方 base_url 那一半同样不在这里查（权威在 `apply_deepseek_account`）。
+    // DeepSeek 账号余额可走 OpenAI 兼容的两个面：chat completions 与 Responses。
+    //
+    // 为什么 Responses 也在值域里：官方文档明确「在对话中间插入工具调用」只有
+    // Anthropic `/messages` 与 Responses 支持，chat completions 不支持；而
+    // Anthropic 面在本仓的凭据头形态下不可用（`ProviderConfig::auth_header`
+    // 只被 openai / responses 两个 adapter 消费）。值域收口只到这里，官方
+    // base_url 那一半同样不在这里查（权威在 `apply_deepseek_account`）。
     if next_credential == qaqh_types::CredentialSource::DeepseekAccount
-        && next_wire != qaqh_types::Wire::Chat
+        && !matches!(
+            next_wire,
+            qaqh_types::Wire::Chat | qaqh_types::Wire::Responses
+        )
     {
         return Err(format!(
-            "credential=deepseek_account 必须配 chat 协议（wire={}）：账号余额只提供 chat completions",
+            "credential=deepseek_account 必须配 chat 或 responses 协议（wire={}）：账号余额不提供 anthropic 面",
             next_wire.as_str()
         ));
     }
@@ -491,10 +499,14 @@ mod tests {
     }
 
     /// DeepSeek 账号：配错 wire 在保存期就报，且**双向**都拦（与套餐那条同规矩）。
+    ///
+    /// 值域是 chat + responses：官方文档说「对话中间插入工具调用」只有
+    /// Anthropic `/messages` 与 Responses 支持，而 Anthropic 面拿不到账号
+    /// 凭据头的形态，故不开放。
     #[test]
-    fn apply_patch_rejects_account_on_a_non_openai_wire_and_vice_versa() {
+    fn apply_patch_rejects_account_on_the_anthropic_wire_and_vice_versa() {
         let mut cfg = Config {
-            wire: qaqh_types::Wire::Responses,
+            wire: qaqh_types::Wire::Messages,
             ..Default::default()
         };
         let err = apply_patch(
@@ -504,24 +516,26 @@ mod tests {
                 ..Default::default()
             },
         )
-        .expect_err("responses wire + account must be rejected");
-        assert!(err.contains("chat"), "{err}");
+        .expect_err("anthropic wire + account must be rejected");
+        assert!(err.contains("chat 或 responses"), "{err}");
         assert_eq!(
             cfg.credential,
             qaqh_types::CredentialSource::ApiKey,
             "拒绝即不落地"
         );
 
-        // 同一次补丁里把 wire 一起改对即通过。
+        // 同一次补丁里把 wire 一起改到 responses 即通过：Responses 是账号
+        // 额度唯一能拿到「对话中间工具调用」的面。
         apply_patch(
             &mut cfg,
             &ConfigPatch {
-                wire: Some("openai".into()),
+                wire: Some("responses".into()),
                 credential: Some("deepseek_account".into()),
                 ..Default::default()
             },
         )
-        .expect("apply");
+        .expect("responses wire must be accepted for the account credential");
+        assert_eq!(cfg.wire, qaqh_types::Wire::Responses);
         assert_eq!(
             cfg.credential,
             qaqh_types::CredentialSource::DeepseekAccount
@@ -538,11 +552,16 @@ mod tests {
             },
         )
         .expect_err("moving the wire away must be rejected");
-        assert!(err.contains("chat"), "{err}");
+        assert!(err.contains("chat 或 responses"), "{err}");
         assert_eq!(
             cfg.credential,
             qaqh_types::CredentialSource::DeepseekAccount,
             "拒绝即不落地"
+        );
+        assert_eq!(
+            cfg.wire,
+            qaqh_types::Wire::Responses,
+            "拒绝即不落地（wire 也不能半改）"
         );
     }
 
@@ -580,5 +599,87 @@ mod tests {
         };
         assert_eq!(to_dto(&byok).credential, "api_key");
         assert_eq!(to_dto(&plan).credential, "chatgpt_plan");
+    }
+
+    /// R3 验收：`ConfigPatch { wire: Some("chat") }` 被接受且落成 `Wire::Chat`，
+    /// 读模型回显 `"chat"`——读写同一套规范拼写，客户端不再需要桥。
+    #[test]
+    fn canonical_wire_flows_through_patch_and_dto() {
+        let mut cfg = Config::default();
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                wire: Some("chat".into()),
+                ..Default::default()
+            },
+        )
+        .expect("规范名 chat 必须被接受");
+        assert_eq!(cfg.wire, qaqh_types::Wire::Chat);
+        assert_eq!(to_dto(&cfg).wire, "chat", "读回也必须是规范名");
+
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                wire: Some("messages".into()),
+                ..Default::default()
+            },
+        )
+        .expect("规范名 messages 必须被接受");
+        assert_eq!(cfg.wire, qaqh_types::Wire::Messages);
+        assert_eq!(to_dto(&cfg).wire, "messages");
+    }
+
+    /// **R3 镜像闸**：`qaqh_config_api::canonical_wire` 是「只依赖 serde」的
+    /// 拼写镜像（K1），真源是 [`qaqh_types::Wire::parse`]。本测试逐个拼写对拍
+    /// 两边，任何一边改名而另一边没跟就红——镜像可以不共享代码，但不能漂移。
+    ///
+    /// 同时钉住「读出的规范名再写回去必须被接受」这条闭环（round-trip）。
+    #[test]
+    fn canonical_wire_mirrors_qaqh_types() {
+        let spellings = [
+            "chat",
+            "openai",
+            "openai-compatible",
+            "chat_completions",
+            "chat/completions",
+            "responses",
+            "openai-responses",
+            "messages",
+            "anthropic",
+            "claude",
+            "gemini",
+            "google",
+            "generatecontent",
+            "generate_content",
+            "gemini-generate-content",
+            "  CHAT ",
+            " Messages ",
+            "grpc",
+            "",
+            "gpt-5",
+        ];
+        for spelling in spellings {
+            let expected = qaqh_types::Wire::parse(spelling).map(qaqh_types::Wire::as_str);
+            assert_eq!(
+                qaqh_config_api::canonical_wire(spelling),
+                expected,
+                "拼写 {spelling:?} 在镜像与 Wire::parse 之间不一致"
+            );
+        }
+        // 读 → 写闭环：读模型给出的规范名，直接写回去必须落成同一个 Wire。
+        for wire in [
+            qaqh_types::Wire::Chat,
+            qaqh_types::Wire::Responses,
+            qaqh_types::Wire::Messages,
+            qaqh_types::Wire::Gemini,
+        ] {
+            let shown = wire.as_str();
+            assert_eq!(
+                qaqh_types::Wire::parse(shown),
+                Some(wire),
+                "读出的 {shown} 必须能被写侧解析回同一个 Wire"
+            );
+            assert_eq!(qaqh_config_api::canonical_wire(shown), Some(shown));
+        }
     }
 }

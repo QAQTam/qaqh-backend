@@ -33,6 +33,21 @@ const LIVE_CAPACITY: usize = 1024;
 
 pub type V2Envelope = RingingV2EventEnvelope<ProjectionPayload>;
 
+/// 压缩终态的载荷（`ConversationDelta::CompactFinished`）。
+///
+/// 收敛成结构体而不是继续加形参：终态字段已经 6 个，逐条平铺既触发
+/// 参数过多，也让"调用方漏传原因"变成默认合法。
+#[derive(Debug, Clone)]
+pub struct CompactFinishedView<'a> {
+    pub compact_id: &'a str,
+    pub status: CompactStatus,
+    pub summary_chars: Option<usize>,
+    pub turns_compacted: Option<u32>,
+    pub turns_removed: Option<u32>,
+    /// 失败 / 跳过 / 取消的中文原因；成功为 `None`。
+    pub reason: Option<&'a str>,
+}
+
 #[derive(Debug)]
 pub enum V2HubError {
     SessionMissing(String),
@@ -539,12 +554,9 @@ impl V2ProjectionHub {
         &self,
         session_dir: impl AsRef<Path>,
         session_id: &str,
-        compact_id: &str,
-        status: CompactStatus,
-        summary_chars: Option<usize>,
-        turns_compacted: Option<u32>,
-        turns_removed: Option<u32>,
+        view: CompactFinishedView<'_>,
     ) -> Result<(), V2HubError> {
+        let compact_id = view.compact_id;
         self.publish_compact_delta(
             session_dir.as_ref(),
             session_id,
@@ -553,10 +565,11 @@ impl V2ProjectionHub {
             |revision| ConversationDelta::CompactFinished {
                 revision,
                 compact_id: compact_id.to_string(),
-                status,
-                summary_chars,
-                turns_compacted,
-                turns_removed,
+                status: view.status,
+                summary_chars: view.summary_chars,
+                turns_compacted: view.turns_compacted,
+                turns_removed: view.turns_removed,
+                reason: view.reason.map(str::to_string),
             },
         )
     }
@@ -1380,11 +1393,14 @@ mod tests {
         hub.publish_compact_finished(
             dir.path(),
             "seed",
-            "compact-1",
-            CompactStatus::Completed,
-            Some(4),
-            Some(9),
-            Some(6),
+            CompactFinishedView {
+                compact_id: "compact-1",
+                status: CompactStatus::Completed,
+                summary_chars: Some(4),
+                turns_compacted: Some(9),
+                turns_removed: Some(6),
+                reason: None,
+            },
         )
         .expect("finished");
 
@@ -1407,9 +1423,51 @@ mod tests {
         assert_eq!(payloads[1]["data"]["data"]["delta"], "累积摘要");
         assert_eq!(payloads[2]["data"]["kind"], "compact_finished");
         assert_eq!(payloads[2]["data"]["data"]["status"], "completed");
+        // 成功终态不带原因（字段整体省略，旧客户端形状不变）。
+        assert!(
+            payloads[2]["data"]["data"].get("reason").is_none(),
+            "successful compaction carries no reason"
+        );
         // One monotonic revision per publish, carried by both envelope and delta.
         assert_eq!(payloads[0]["data"]["data"]["revision"], 1);
         assert_eq!(payloads[2]["data"]["data"]["revision"], 3);
+    }
+
+    /// 失败/取消的压缩终态必须把中文原因送到客户端：只给 `status` 时界面
+    /// 只能显示"压缩已取消"，用户无从得知为什么，也无从判断能否重试。
+    #[test]
+    fn compact_failure_carries_the_reason_to_the_client() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-1"));
+        let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+
+        hub.publish_compact_finished(
+            dir.path(),
+            "seed",
+            CompactFinishedView {
+                compact_id: "compact-9",
+                status: CompactStatus::Failed,
+                summary_chars: Some(0),
+                turns_compacted: Some(0),
+                turns_removed: Some(0),
+                reason: Some("压缩失败：模型返回了空摘要。"),
+            },
+        )
+        .expect("finished");
+
+        let mut payloads = Vec::new();
+        while let Some(V2StreamItem::Event(envelope)) = subscription.try_next() {
+            payloads.push(serde_json::to_value(&envelope.payload).expect("payload json"));
+        }
+        assert_eq!(payloads.len(), 1);
+        let data = &payloads[0]["data"]["data"];
+        assert_eq!(data["status"], "failed");
+        assert_eq!(data["reason"], "压缩失败：模型返回了空摘要。");
     }
 
     /// Reconnecting mid-compaction recovers the in-flight card from the hub's
@@ -1443,11 +1501,14 @@ mod tests {
         hub.publish_compact_finished(
             dir.path(),
             "seed",
-            "compact-7",
-            CompactStatus::Cancelled,
-            None,
-            None,
-            None,
+            CompactFinishedView {
+                compact_id: "compact-7",
+                status: CompactStatus::Cancelled,
+                summary_chars: None,
+                turns_compacted: None,
+                turns_removed: None,
+                reason: Some("压缩期间上下文已更新，本次摘要已丢弃"),
+            },
         )
         .expect("finished");
         let settled = hub

@@ -115,6 +115,8 @@ struct LegacyEndpoint {
     #[serde(default)]
     include_stream_usage: Option<bool>,
     #[serde(default)]
+    official_web_tools: Option<bool>,
+    #[serde(default)]
     supports_thinking: Option<bool>,
     #[serde(default)]
     thinking_budget_large: Option<bool>,
@@ -172,6 +174,7 @@ impl LegacyEndpoint {
             thinking_mode: self.thinking_mode.clone().unwrap_or(defaults.thinking_mode),
             cache_field: self.cache_field.clone().unwrap_or(defaults.cache_field),
             include_stream_usage: flag(self.include_stream_usage, defaults.include_stream_usage),
+            official_web_tools: flag(self.official_web_tools, defaults.official_web_tools),
             supports_thinking: flag(self.supports_thinking, defaults.supports_thinking),
             thinking_budget_large: flag(self.thinking_budget_large, defaults.thinking_budget_large),
             supports_reasoning_effort: flag(
@@ -285,6 +288,9 @@ mod tests {
         assert_eq!(preset.wire, Wire::Chat);
         assert_eq!(preset.base_url, "https://api.deepseek.com");
         assert!(preset.compat.include_stream_usage);
+        // T0 真机实测：账号裸头在 `/v1/tools/{search,fetch}` 上可用（spec §4 T0 ①②），
+        // 所以迁移表直接打开官方工具面；关掉即回自实现抓取。
+        assert!(preset.compat.official_web_tools);
         assert_eq!(
             preset.compat.cache_field,
             CacheTokenField::PromptCacheHitTokens
@@ -295,12 +301,15 @@ mod tests {
         assert_eq!(responses.wire, Wire::Responses);
         assert_eq!(responses.compat.path, None);
         assert_eq!(responses.compat.responses_effort_max, "max");
+        assert!(responses.compat.official_web_tools);
     }
 
     #[test]
     fn legacy_preset_keeps_request_shape_deviations() {
         // 每一项都是"该 wire 之外的差异"，迁移后必须由 compat 原样表达。
         let qwen = legacy_preset("qwen", "openai").expect("qwen/openai");
+        // 官方面默认关：其它 provider 升级后工具清单与请求体逐字节不变。
+        assert!(!qwen.compat.official_web_tools);
         assert_eq!(
             qwen.compat.thinking_mode,
             ThinkingParamMode::QwenEnableThinking

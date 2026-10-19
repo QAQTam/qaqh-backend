@@ -1,10 +1,11 @@
 //! edit — 精确字符串替换（str_replace 语义）。
 //!
-//! 模型面字段：`path` / `old_str` / `new_str`（+ 可选 `replace_all`）。
+//! 模型面字段：`file_path` / `old_string` / `new_string`（+ 可选 `replace_all`）。
+//! 旧拼写 `path` / `old_str` / `new_str` 仍作为 serde alias 接受。
 //!
-//! - `old_str` 必须精确命中文件中的**唯一**位置：
-//!   - 0 处命中 → `NOT_FOUND`，返回一份「old_str → 文件实际内容」的 diff 供模型自纠；
-//!   - 多处命中 → `AMBIGUOUS_MATCH`，列出各命中位置与上下文，提示扩展 `old_str`；
+//! - `old_string` 必须精确命中文件中的**唯一**位置：
+//!   - 0 处命中 → `NOT_FOUND`，返回一份「old_string → 文件实际内容」的 diff 供模型自纠；
+//!   - 多处命中 → `AMBIGUOUS_MATCH`，列出各命中位置与上下文，提示扩展 `old_string`；
 //!   - 恰好 1 处 → 替换并返回回执 + 编辑点内容锚片段（`L<n>: `，与 read 同源）。
 //!   - 多处命中且 `replace_all=true` → 全部替换（非重叠，`str::replace` 语义）。
 //! - 匹配在 LF 规范视图上做，写回按原文件 CRLF 还原；成功写盘走 `atomic_write`，

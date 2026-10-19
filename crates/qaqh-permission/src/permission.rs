@@ -9,6 +9,8 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
+use crate::conflict::paths_from_args;
+
 // ──────────────────────────────────────
 // Policy vocabulary
 // ──────────────────────────────────────
@@ -66,25 +68,16 @@ pub fn extract_target_paths_in(
     if tool_name == "read"
         && let Some(requests) = args.get("requests").and_then(|value| value.as_array())
     {
-        paths.extend(requests.iter().filter_map(|request| {
-            request
-                .get("path")
-                .and_then(|value| value.as_str())
-                .map(PathBuf::from)
-        }));
+        paths.extend(
+            requests
+                .iter()
+                .flat_map(|request| paths_from_args(request).into_iter().map(PathBuf::from)),
+        );
     }
-    // Direct path argument
-    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-        paths.push(PathBuf::from(p));
-    }
-    // Multiple paths
-    if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
-        for v in arr {
-            if let Some(s) = v.as_str() {
-                paths.push(PathBuf::from(s));
-            }
-        }
-    }
+    // 单数/复数路径参数：拼写别名（`path` / `file_path` / `file` / `paths`）由
+    // `conflict::paths_from_args` 单点收口——授权资源与调度冲突检测必须同口径，
+    // 否则工具改字段名后这里会静默漏掉写目标（`edit` 迁到 `file_path` 即如此）。
+    paths.extend(paths_from_args(args).into_iter().map(PathBuf::from));
     // source / dest pairs (copy, move)
     if let Some(s) = args.get("source").and_then(|v| v.as_str()) {
         paths.push(PathBuf::from(s));

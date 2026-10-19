@@ -3,6 +3,17 @@
 use qaqh_types::ToolResult;
 use qaqh_types::platform::now_utc8;
 
+/// 原始 args 里的文件路径：canonical `path`，兼收 Claude 标准拼写 `file_path`。
+///
+/// 供**读原始 JSON 的投影层**使用（display / code_delta）。typed 反序列化那一侧
+/// 由各 Args 的 `#[serde(alias = "file_path")]` 承担，两处必须同源，否则会出现
+/// 「工具执行成功但 UI 头部的路径是空的」。
+pub fn arg_path(args: &serde_json::Value) -> Option<&str> {
+    args.get("path")
+        .or_else(|| args.get("file_path"))
+        .and_then(serde_json::Value::as_str)
+}
+
 /// Build a JSON success response for tools that only need a status message.
 /// Extra fields can be added via `extra`.
 pub fn json_ok(extra: serde_json::Value) -> String {

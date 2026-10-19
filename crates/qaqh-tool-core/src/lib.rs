@@ -13,13 +13,14 @@ pub mod tool_api;
 pub mod tool_capabilities;
 
 pub use tool_api::{
-    Concurrency, DescriptorError, ErasedTool, FatalToolError, Namespace, OutputBudget, PathOp,
-    ProgressSink, ProgressStream, SandboxMode, SandboxSpec, ToolBody, ToolCallContext,
-    ToolCallSource, ToolCapabilities, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolDisplayFn,
-    ToolDisplayOutcome, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind,
-    ToolExecutionError, ToolExposure, ToolHeader, ToolMeta, ToolMetrics, ToolModelProjection,
-    ToolName, ToolOutcome, ToolOutputValue, ToolProgress, ToolProjection, ToolSource, ToolStatus,
-    ToolTerminalState, TypedTool, TypedToolAdapter, map_tool_result,
+    Concurrency, DescriptorError, ErasedTool, FatalToolError, Namespace, OfficialHit, OfficialPage,
+    OfficialWebBackend, OfficialWebTools, OutputBudget, PathOp, ProgressSink, ProgressStream,
+    SandboxMode, SandboxSpec, ToolBody, ToolCallContext, ToolCallSource, ToolCapabilities,
+    ToolContentBlock, ToolDescriptor, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolError,
+    ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
+    ToolMeta, ToolMetrics, ToolModelProjection, ToolName, ToolOutcome, ToolOutputValue,
+    ToolProgress, ToolProjection, ToolSource, ToolStatus, ToolTerminalState, TypedTool,
+    TypedToolAdapter, map_tool_result,
 };
 pub use tool_capabilities::builtin_capabilities;
 

@@ -18,7 +18,7 @@ pub fn compute(
         .get("action")
         .and_then(|value| value.as_str())
         .unwrap_or(tool_name);
-    let file_path = args.get("path").and_then(|value| value.as_str());
+    let file_path = crate::support::arg_path(args);
 
     // Compute text-based line counts from args (cheap, no git2 pathspec bug).
     // 档位键是 execution.rs 的 resolved tool name：`write` 不是 `file`
@@ -64,14 +64,16 @@ pub fn compute(
             file: file_path.map(String::from),
         }),
         ("edit", _) => {
-            // str_replace：old_str 删除行数、new_str 新增行数。
+            // str_replace：old_string 删除行数、new_string 新增行数（旧拼写同权）。
             let added = args
-                .get("new_str")
+                .get("new_string")
+                .or_else(|| args.get("new_str"))
                 .and_then(|x| x.as_str())
                 .map(|s| s.lines().count())
                 .unwrap_or(0);
             let removed = args
-                .get("old_str")
+                .get("old_string")
+                .or_else(|| args.get("old_str"))
                 .and_then(|x| x.as_str())
                 .map(|s| s.lines().count())
                 .unwrap_or(0);

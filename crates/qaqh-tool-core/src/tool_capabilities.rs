@@ -101,7 +101,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
 
 /// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 23] = [
+const TABLE: [(&str, ToolCapabilities); 24] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
@@ -115,6 +115,9 @@ const TABLE: [(&str, ToolCapabilities); 23] = [
     ("process", EXCLUSIVE),
     ("read", READ_ONLY),
     ("read_image", READ_ONLY),
+    // search：官方 Search 端点（网络，不碰工作区）。与 `tool_search`（检索工具
+    // 目录的元工具）不是一回事。
+    ("search", READ_ONLY_UNBOUND),
     // skill_activate：改写会话内技能激活集（不动工作区文件）。
     ("skill_activate", SESSION_MUTATING),
     ("skill_list", READ_ONLY),
@@ -164,6 +167,7 @@ mod tests {
             unbound,
             vec![
                 "ask",
+                "search",
                 "skill_activate",
                 "todo_list",
                 "todo_update",

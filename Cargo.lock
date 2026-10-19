@@ -2393,6 +2393,7 @@ dependencies = [
  "libc",
  "log",
  "os_pipe",
+ "qaqh-client",
  "qaqh-config",
  "qaqh-config-api",
  "qaqh-domain",

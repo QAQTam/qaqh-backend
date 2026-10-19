@@ -26,6 +26,26 @@ pub fn is_compaction_summary(message: &Message) -> bool {
         })
 }
 
+/// 一次物理压缩的实际效果。
+///
+/// 调用方必须用它判定终态，不能用「turn 数变没变」推断：压实一个旧 turn
+/// 的同时会插入一条摘要 turn，两者相消后 `turn_count()` 不变，但那是一次
+/// 成功的压缩；反之只刷新检查点也可能让上下文凭空多出一段摘要。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionEffect {
+    /// 被折叠进摘要的**真实** turn 数（不含上一份摘要占位）。
+    pub folded_turns: usize,
+    /// 是否写入了新的摘要 turn（false = 上下文一字未动）。
+    pub checkpoint_written: bool,
+}
+
+impl CompactionEffect {
+    /// 压缩是否真的改变了活跃上下文。
+    pub fn applied(self) -> bool {
+        self.checkpoint_written
+    }
+}
+
 // Tool results are finalized exactly once, at storage time — but the shaping
 // itself (truncation / folding) now happens at the TOOL side
 // (`qaqh-workspace::tool_side_fold`) before results reach this store. The
@@ -1773,12 +1793,18 @@ impl MessageStore {
     /// entered the compact summary input, so keeping them would both duplicate
     /// the text and re-position a stale injection at the "latest message"
     /// slot. Only injections in the kept region survive.
-    pub fn apply_compact(&mut self, summary: &str, keep: usize) {
+    ///
+    /// 返回值是这次调用**实际**做了什么（[`CompactionEffect`]）。没有真实
+    /// turn 可折叠时这里是纯 no-op：**不写摘要、不推进 `context_revision`、
+    /// 不消耗 msg_id**。摘要本身是一段要进模型的上下文，若在无可折叠轮次时
+    /// 仍插入，压缩就变成"上下文变长"——这正是「显示已取消却多出一段摘要」
+    /// 的形态。
+    pub fn apply_compact(&mut self, summary: &str, keep: usize) -> CompactionEffect {
         // 防御：确保至少保留 1 个 turn，防止 caller 传入 keep=0 导致清空全部历史。
         let keep = keep.max(1);
         let skip = self.turns.len().saturating_sub(keep);
         if skip == 0 {
-            return;
+            return CompactionEffect::default();
         }
 
         // Remove old compact markers from the legacy front-of-context slot.
@@ -1799,6 +1825,12 @@ impl MessageStore {
             .unwrap_or(0);
         let summary_slot = if prev_compacted > 0 { 1 } else { 0 };
         let skip_real = skip.saturating_sub(summary_slot);
+        // 压缩区里只有上一份摘要占位 → 没有真实 turn 进摘要，新摘要是凭空
+        // 多出来的一段上下文（旧轮次一个没少）。此时什么都不做，让调用方
+        // 如实上报"无可折叠轮次"。
+        if skip_real == 0 {
+            return CompactionEffect::default();
+        }
         let total_real = prev_compacted + skip_real;
         let compact_text = format!("[Compacted {} turns]\n{}", total_real, summary.trim(),);
 
@@ -1830,6 +1862,10 @@ impl MessageStore {
             );
         }
         self.context_revision = self.context_revision.saturating_add(1);
+        CompactionEffect {
+            folded_turns: skip_real,
+            checkpoint_written: true,
+        }
     }
 
     /// Get the text of any previous compaction summary (for incremental update mode).
@@ -3068,6 +3104,47 @@ mod tests {
         // 非数字/零前缀拒绝。
         assert!(!store.truncate_before_turn("abc"));
         assert!(!store.truncate_before_turn("t0"));
+    }
+
+    /// 回归：保留区覆盖全部历史时（压缩区只剩上一份摘要占位），压缩必须
+    /// 什么都不做。
+    ///
+    /// 旧实现照样插入一条新摘要并推进 `context_revision`：真实轮次一个没少，
+    /// 上下文里却多出一段检查点；调用方再按"turn 数变没变"判定终态，就会报
+    /// "压缩已取消"——用户看到的就是"失败却莫名多出一段上下文"。
+    #[test]
+    fn compact_without_foldable_turns_writes_nothing() {
+        let mut store = MessageStore::new_ephemeral("test");
+        for index in 1..=3 {
+            store.push_user(&format!("turn {index}"));
+        }
+        let first = store.apply_compact("first checkpoint body", 1);
+        assert_eq!(first.folded_turns, 2, "首次压缩折叠两轮");
+        assert!(first.applied());
+
+        store.push_user("turn 4");
+        let turns_before = store.turn_count();
+        let revision_before = store.context_revision();
+        // 保留区 = 除第一项（上一份摘要）以外的全部 turn。
+        let second = store.apply_compact("second checkpoint body", turns_before - 1);
+
+        assert_eq!(
+            second.folded_turns, 0,
+            "只剩摘要占位可压，不得计为折叠任何真实 turn"
+        );
+        assert!(!second.applied(), "没有真实 turn 可折叠时不得写入摘要");
+        assert_eq!(store.turn_count(), turns_before, "活跃 turn 数不得变化");
+        assert_eq!(
+            store.context_revision(),
+            revision_before,
+            "no-op 压缩不得推进 context_revision"
+        );
+        let serialized = serde_json::to_string(&store.build_context_for_gate(&[])).unwrap();
+        assert!(serialized.contains("first checkpoint body"));
+        assert!(
+            !serialized.contains("second checkpoint body"),
+            "no-op 压缩不得把新摘要塞进上下文"
+        );
     }
 
     #[test]

@@ -145,6 +145,14 @@ pub struct EndpointCompat {
     /// Chat-Completions-compatible endpoint accepts `stream_options.include_usage`.
     #[serde(default)]
     pub include_stream_usage: bool,
+    /// 该端点是否提供官方 Search / Fetch 工具面（`POST /v1/tools/*`），并由工具层
+    /// （`web_fetch` / `search`）改走官方端点。**默认关**。
+    ///
+    /// 开关只来自配置：工具层不按 URL、模型名或 provider id 特判（AGENTS-x I15）。
+    /// 打开后该 profile 的模型面多一个 canonical `search` 工具；关闭时工具清单
+    /// 与请求体保持与升级前逐字节一致，不会被动让缓存前缀失效。
+    #[serde(default)]
+    pub official_web_tools: bool,
     /// Whether the endpoint accepts a thinking/reasoning toggle. Default: true.
     #[serde(default = "default_true")]
     pub supports_thinking: bool,
@@ -263,6 +271,7 @@ impl Default for EndpointCompat {
             thinking_mode: ThinkingParamMode::default(),
             cache_field: CacheTokenField::default(),
             include_stream_usage: false,
+            official_web_tools: false,
             supports_thinking: true,
             thinking_budget_large: false,
             supports_reasoning_effort: true,

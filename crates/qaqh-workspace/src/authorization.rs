@@ -331,6 +331,7 @@ fn legacy_tool_call_context(
         cancellation,
         progress: None,
         exec_progress: None,
+        official_web: None,
         source: ToolCallSource::Model,
     }
 }

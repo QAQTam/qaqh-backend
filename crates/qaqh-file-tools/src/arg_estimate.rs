@@ -8,7 +8,7 @@
 //! "整段参数喂完后的估算 == 终态 CodeChanged"）：
 //!
 //! - `write` → `content` 的行数；
-//! - `edit` → `new_str` 行数 / `old_str` 行数；
+//! - `edit` → `new_string` 行数 / `old_string` 行数（旧拼写 `new_str`/`old_str` 同权）；
 //! - `apply_patch` → 补丁里的 `+` / `-` 行（上下文行不算），复用
 //!   [`StreamingPatchParser`]，所以计数规则与引擎解析器天然一致。
 //!
@@ -99,7 +99,14 @@ impl LineTally {
 fn targets_for(tool_name: &str) -> Option<&'static [(&'static str, Target)]> {
     match tool_name {
         "write" => Some(&[("content", Target::Added)]),
-        "edit" => Some(&[("new_str", Target::Added), ("old_str", Target::Removed)]),
+        // Claude 拼写（`new_string`/`old_string`）同权：一次调用只会出现一种
+        // 拼写，四项并列不会双计（同一 key 的匹配是逐值 `find`）。
+        "edit" => Some(&[
+            ("new_str", Target::Added),
+            ("new_string", Target::Added),
+            ("old_str", Target::Removed),
+            ("old_string", Target::Removed),
+        ]),
         "apply_patch" => Some(&[("patch", Target::Patch)]),
         // 其余工具（read / grep / exec / …）没有行数概念：不估算，
         // 免得给只读调用画出 +/-。
@@ -293,7 +300,8 @@ mod tests {
     }
 
     const WRITE_ARGS: &str = r#"{"path":"src/a.rs","content":"one\ntwo\nthree\n"}"#;
-    const EDIT_ARGS: &str = r#"{"path":"src/a.rs","old_str":"x\ny","new_str":"X\nY\nZ\n"}"#;
+    const EDIT_ARGS: &str =
+        r#"{"file_path":"src/a.rs","old_string":"x\ny","new_string":"X\nY\nZ\n"}"#;
     const PATCH_ARGS: &str = r#"{"patch":"*** Begin Patch\n*** Update File: a.txt\n@@\n-keep\n+KEEP\n context\n+plus\n*** End Patch\n"}"#;
 
     #[test]

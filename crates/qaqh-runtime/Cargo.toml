@@ -55,6 +55,10 @@ tiny_http = "0.12"
 qaqh-workspace = { path = "../qaqh-workspace", features = ["test-harness"] }
 # PR-M2-2 mcp_env_block：mock server 需 ServerHandler/service 形状。
 rmcp = { workspace = true, features = ["transport-io", "server"] }
+# 仅测试用：服务面白名单闸（`client_service_whitelist_mirrors_account_methods`）
+# 需要同时看见 daemon 方法表、两家的 `methods::ALL` 与客户端白名单。
+# 加 dev-dep 而不是正式依赖：runtime 不该依赖传输层。
+qaqh-client = { path = "../qaqh-client" }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"

@@ -369,6 +369,10 @@ pub enum ConversationEvent {
         turns_compacted: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turns_removed: Option<u32>,
+        /// 终态原因（人类可读中文）。失败 / 跳过 / 取消时必填——只给 `status`
+        /// 会让界面只能显示"压缩已取消"，用户与日志都无从得知为什么。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// 回合被用户取消。
     ConversationCancelled {

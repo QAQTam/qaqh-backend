@@ -28,10 +28,13 @@ use crate::tool_api::{
 #[serde(deny_unknown_fields)]
 pub struct EditArgs {
     /// Target file
+    #[serde(rename = "file_path", alias = "path", alias = "file")]
     pub path: String,
     /// Exact text to replace (must appear exactly once)
+    #[serde(rename = "old_string", alias = "old_str")]
     pub old_str: String,
-    /// Replacement text
+    /// Replacement text (must be different from old_string)
+    #[serde(rename = "new_string", alias = "new_str")]
     pub new_str: String,
     /// Replace every occurrence (default false)
     #[serde(default)]
@@ -66,7 +69,9 @@ impl ToolProjection for EditOutput {
 
     fn display(&self, args: &Value) -> ToolDisplay {
         mutation_display(
-            args.get("path").and_then(Value::as_str),
+            args.get("path")
+                .or_else(|| args.get("file_path"))
+                .and_then(Value::as_str),
             &self.path,
             crate::tool_api::PathOp::Edit,
             "edit",
@@ -91,7 +96,7 @@ impl TypedTool for EditTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "edit",
-            "Replace an exact string in a file; 'old_str' must be unique ('replace_all' for every occurrence). Failures return a diff vs the closest match; success returns a receipt + edited-region snippet.",
+            "Replace an exact string in a file; 'old_string' must be unique ('replace_all' for every occurrence). Failures return a diff vs the closest match; success returns a receipt + edited-region snippet.",
             crate::permission::ToolCategory::Write,
             ToolRisk::Write,
             Duration::from_secs(60),
@@ -113,7 +118,7 @@ impl TypedTool for EditTool {
         if old_arg.is_empty() {
             return Err(mutation_error(
                 "parse_error",
-                "edit: 'old_str' must be non-empty (use write to create a file)",
+                "edit: 'old_string' must be non-empty (use write to create a file)",
                 Some("To create a new file, call write with the full content instead."),
                 json!({}),
             ));
@@ -121,8 +126,10 @@ impl TypedTool for EditTool {
         if old_arg == new_arg {
             return Err(mutation_error(
                 "parse_error",
-                "edit: 'old_str' and 'new_str' are identical",
-                Some("No-op edit rejected: change 'new_str' to something different, or skip the call."),
+                "edit: 'old_string' and 'new_string' are identical",
+                Some(
+                    "No-op edit rejected: change 'new_string' to something different, or skip the call.",
+                ),
                 json!({}),
             ));
         }
@@ -209,7 +216,7 @@ impl TypedTool for EditTool {
                     text,
                     Some(true),
                     Some(&format!(
-                        "Extend 'old_str' with surrounding lines to match exactly one, or set replace_all=true to replace all {total}."
+                        "Extend 'old_string' with surrounding lines to match exactly one, or set replace_all=true to replace all {total}."
                     )),
                     json!({
                         "timeis": crate::now_utc8(),
@@ -342,43 +349,47 @@ fn legacy_parse_error(args: &Value) -> Option<crate::ToolResult> {
     let fail = |code: &str, message: String, hint: &str| {
         crate::ToolResult::error_data(code, message, false, Some(hint.to_string()), json!({}))
     };
-    let Some(raw_path) = args
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-    else {
+    // 与 [`EditArgs`] 的 serde rename/alias 同源：canonical 是 Claude 标准拼写
+    // （`file_path` / `old_string` / `new_string`），旧拼写（`path` / `old_str` /
+    // `new_str`）照样认，否则这条兼容路径会比 typed 入口窄一档。
+    let field = |primary: &str, alias: &str| {
+        args.get(primary)
+            .or_else(|| args.get(alias))
+            .and_then(Value::as_str)
+    };
+    let Some(raw_path) = field("file_path", "path").filter(|path| !path.is_empty()) else {
         return Some(fail(
             "parse_error",
-            "edit: missing 'path'".to_string(),
+            "edit: missing 'file_path'".to_string(),
             "Supply the workspace-relative or absolute file path.",
         ));
     };
-    let Some(old_arg) = args.get("old_str").and_then(Value::as_str) else {
+    let Some(old_arg) = field("old_string", "old_str") else {
         return Some(fail(
             "parse_error",
-            "edit: missing 'old_str'".to_string(),
+            "edit: missing 'old_string'".to_string(),
             "Provide the exact current text to replace; use read to obtain it.",
         ));
     };
-    let Some(new_arg) = args.get("new_str").and_then(Value::as_str) else {
+    let Some(new_arg) = field("new_string", "new_str") else {
         return Some(fail(
             "parse_error",
-            "edit: missing 'new_str'".to_string(),
+            "edit: missing 'new_string'".to_string(),
             "Provide the replacement text.",
         ));
     };
     if old_arg.is_empty() {
         return Some(fail(
             "parse_error",
-            "edit: 'old_str' must be non-empty (use write to create a file)".to_string(),
+            "edit: 'old_string' must be non-empty (use write to create a file)".to_string(),
             "To create a new file, call write with the full content instead.",
         ));
     }
     if old_arg == new_arg {
         return Some(fail(
             "parse_error",
-            "edit: 'old_str' and 'new_str' are identical".to_string(),
-            "No-op edit rejected: change 'new_str' to something different, or skip the call.",
+            "edit: 'old_string' and 'new_string' are identical".to_string(),
+            "No-op edit rejected: change 'new_string' to something different, or skip the call.",
         ));
     }
     let _ = raw_path;

@@ -121,7 +121,7 @@ pub(crate) fn spawn_agent(
     };
     manager.apply_init(allowed_tools, session_id);
     qaqh_workspace::runtime::install_actor_tool_manager(manager);
-    agent.tool_defs = qaqh_workspace::runtime::all_tools();
+    agent.refresh_tool_defs();
 
     match kind {
         ActorKind::Subagent(spec) => {

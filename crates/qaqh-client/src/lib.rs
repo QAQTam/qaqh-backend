@@ -14,6 +14,8 @@ pub mod endpoint;
 pub mod error;
 pub mod projection;
 pub mod remote_path;
+pub mod service;
+pub mod service_types;
 pub mod session;
 mod sse_decoder;
 pub mod timeline;
@@ -42,7 +44,31 @@ pub use qaqh_domain::state::{
 /// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
 /// 否则壳层就只能手解 JSON——那正是本客户端存在的理由要反对的事。
 pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
+/// 公开字段背后的**类型名**：`TimelineBlock.reasoning_kind` 是
+/// `Option<ReasoningKind>`（公开字段，见 `qaqh-domain/src/timeline.rs`），
+/// `ConfigDto.credential` 的取值域由 `CredentialSource` 定义，`ConfigDto.wire`
+/// 与 `ConfigPatch::wire` 的规范拼写由 `Wire` 定义。
+///
+/// 这些类型本来就在 `qaqh-types` 里，只是没经本 crate 出口：壳层于是只能
+/// 「看得见字段、拿不到类型名」——要么 match 时不写类型名，要么为了一行
+/// `ReasoningKind::is_displayable()` 直接 path 依赖 `qaqh-types`。二者都是
+/// 本客户端不该逼出来的选择（零成本、零新代码，只是补出口）。
+pub use qaqh_types::{CredentialSource, ReasoningKind, Wire};
 pub use remote_path::{display_host, display_path, remote_path_from_display};
+pub use service::{SERVICE_METHODS, is_allowed};
+/// `siwc.*` / `dsaccount.*` 服务面响应的 typed DTO（形状见
+/// `docs/spec-service-surface-siwc-dsaccount.md`）。
+///
+/// 壳层拿到 [`Client::service_call`] 的 `Value` 之后，直接
+/// `serde_json::from_value::<SiwcStatus>(value)` 即可——不必再手抄一份
+/// 「结构对齐的本地类型」（那正是桌面端已经付过一次的代价）。
+pub use service_types::{
+    DsAccountBalance, DsAccountBonus, DsAccountFlow, DsAccountModel, DsAccountProfile,
+    DsAccountSignInStart, DsAccountSignInStatus, DsAccountStatus, DsAccountVerify, DsFlowState,
+    DsRevokeOutcome, DsTotalCost, DsWallet, ServiceError, SiwcConnectionState, SiwcFlowState,
+    SiwcModel, SiwcProfile, SiwcProfileState, SiwcProfiles, SiwcSignInStart, SiwcSignInStatus,
+    SiwcSignOutResult, SiwcStatus,
+};
 pub use session::RingingSession;
 pub use timeline::TimelineStream;
 pub use types::{
