@@ -212,11 +212,37 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
             caller_session_id: &parent,
             timeout: Duration::from_millis(50),
             should_cancel: &no_cancel,
+            targets: &[],
         })
         .expect("wait_agent timeout must be stable"),
         WaitAgentOutcome::TimedOut {
             activity_fact_seq: 0
         }
+    );
+
+    // P2：targets 模式按 agent 路径解析目标；子代理尚无终态摘要 → 超时，
+    // 且等待期间不得持有注册表锁（否则 collector 无法写入 outcome）。
+    assert_eq!(
+        host.wait_agent(WaitAgentRequest {
+            caller_session_id: &parent,
+            timeout: Duration::from_millis(50),
+            should_cancel: &no_cancel,
+            targets: &["/root/review_code".to_string()],
+        })
+        .expect("targets wait must not fail"),
+        WaitAgentOutcome::TimedOut {
+            activity_fact_seq: 0
+        }
+    );
+    assert!(
+        host.wait_agent(WaitAgentRequest {
+            caller_session_id: &parent,
+            timeout: Duration::from_millis(50),
+            should_cancel: &no_cancel,
+            targets: &["/root/does_not_exist".to_string()],
+        })
+        .is_err(),
+        "unknown wait target must be rejected"
     );
 
     let waiter_service = service.clone();
@@ -227,6 +253,7 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
             caller_session_id: &waiter_parent,
             timeout: Duration::from_secs(2),
             should_cancel: &no_cancel,
+            targets: &[],
         })
     });
     std::thread::sleep(Duration::from_millis(100));

@@ -12,8 +12,10 @@
 //!    task via the ordinary `ConversationSendMessage` Ringing command.
 //! 3. A background collector thread watches the event stream for
 //!    `TurnCompleted` / `TurnFailed` / `ConversationCancelled` and records the
-//!    final answer into the shared [`ProcessRegistry`] — the existing
-//!    `process check|wait|kill` tools then work unchanged.
+//!    child's terminal outcome through [`SubagentHost::finish_subagent`], i.e.
+//!    on the **agent status plane** (`list_agents`) — not in the exec process
+//!    registry. The child is addressed by `child_session_id` / `agent_path`,
+//!    never by a process id.
 //!
 //! Supports model override (different model/provider per subagent), context
 //! sharing, per-instance naming, and timeout/cancel semantics.
@@ -44,7 +46,7 @@ mod board_tools;
 mod host;
 mod task_tools;
 pub use host::{
-    ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
+    AgentOutcome, ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
     BoardSubscriptionTarget, BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
@@ -88,7 +90,6 @@ pub struct SpawnSubagentArgs {
 pub struct SpawnSubagentOutput {
     timeis: String,
     status: String,
-    process_id: u32,
     session_id: String,
     #[serde(skip)]
     #[schemars(skip)]
@@ -156,7 +157,6 @@ impl ToolProjection for SpawnSubagentOutput {
             parent_session_id: self.parent_session_id.clone(),
             parent_agent_path: self.parent_agent_path.clone(),
             child_agent_path: self.child_agent_path.clone(),
-            process_id: self.process_id,
             spawn_tools: self.spawn_tools.clone(),
             spawn_model: self.spawn_model.clone(),
             spawn_base_url: self.spawn_base_url.clone(),
@@ -410,12 +410,27 @@ pub struct WaitAgentArgs {
     /// Timeout in milliseconds. Defaults to 30000.
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// Agent paths or ids to wait on. Omit to wait on the caller's mailbox.
+    #[serde(default)]
+    targets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WaitAgentOutput {
     message: String,
     timed_out: bool,
+    /// `targets` 模式：目标 agent 的当前状态与终态摘要（结果面）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agents: Vec<WaitAgentTarget>,
+}
+
+/// `wait_agent(targets=...)` 的单个目标快照。
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WaitAgentTarget {
+    pub agent_path: String,
+    pub status: ListedAgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AgentOutcome>,
 }
 
 impl WaitAgentOutput {
@@ -457,7 +472,7 @@ impl TypedTool for WaitAgentTool {
         // descriptor must not kill a valid long wait before it returns.
         ToolMeta::new(
             "wait_agent",
-            "Wait for a mailbox update from another agent. The wait does not return message content; queued communications are merged by the runtime at the next turn boundary.",
+            "Wait for agents to finish. With `targets` (agent paths or ids) the call returns each target's status and terminal outcome (final answer) once every target finished — use this instead of polling. Without `targets` it waits for a mailbox update and returns no message content; queued communications are merged by the runtime at the next turn boundary.",
             qaqh_workspace::permission::ToolCategory::Read,
             ToolRisk::ReadOnly,
             Duration::from_millis(WAIT_AGENT_MAX_TIMEOUT_MS),
@@ -488,11 +503,13 @@ impl TypedTool for WaitAgentTool {
             )
         })?;
         let should_cancel = || ctx.cancellation.is_cancelled();
+        let targets = args.targets.unwrap_or_default();
         match host
             .wait_agent(WaitAgentRequest {
                 caller_session_id: &ctx.session_id,
                 timeout: Duration::from_millis(timeout_ms),
                 should_cancel: &should_cancel,
+                targets: &targets,
             })
             .map_err(|error| {
                 subagent_error(
@@ -501,14 +518,26 @@ impl TypedTool for WaitAgentTool {
                     "Check that the caller has a committed canonical mailbox.",
                 )
             })? {
-            WaitAgentOutcome::Activity { .. } => Ok(WaitAgentOutput {
-                message: "Wait completed. Mailbox activity detected.".to_string(),
-                timed_out: false,
-            }),
-            WaitAgentOutcome::TimedOut { .. } => Ok(WaitAgentOutput {
-                message: "Wait timed out.".to_string(),
-                timed_out: true,
-            }),
+            WaitAgentOutcome::Activity { .. } => {
+                let agents = wait_agent_snapshot(&host, &ctx.session_id, &targets);
+                Ok(WaitAgentOutput {
+                    message: if targets.is_empty() {
+                        "Wait completed. Mailbox activity detected.".to_string()
+                    } else {
+                        format!("Wait completed: {} target(s) finished.", agents.len())
+                    },
+                    timed_out: false,
+                    agents,
+                })
+            }
+            WaitAgentOutcome::TimedOut { .. } => {
+                let agents = wait_agent_snapshot(&host, &ctx.session_id, &targets);
+                Ok(WaitAgentOutput {
+                    message: "Wait timed out.".to_string(),
+                    timed_out: true,
+                    agents,
+                })
+            }
             WaitAgentOutcome::Cancelled => Err(subagent_error(
                 "wait_cancelled",
                 "wait_agent was cancelled",
@@ -516,6 +545,41 @@ impl TypedTool for WaitAgentTool {
             )),
         }
     }
+}
+
+/// `targets` 模式的快照：一次 `list_agents` 读，读失败退化为空快照。
+fn wait_agent_snapshot(
+    host: &Arc<dyn SubagentHost>,
+    caller_session_id: &str,
+    targets: &[String],
+) -> Vec<WaitAgentTarget> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let listed = host
+        .list_agents(caller_session_id, "/root")
+        .unwrap_or_default();
+    wait_targets_from_listing(&listed, targets)
+}
+
+/// 把 `targets` 解析成状态快照（目标可以是 agent_path 或 agent_id）。
+fn wait_targets_from_listing(listed: &[ListedAgent], targets: &[String]) -> Vec<WaitAgentTarget> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    targets
+        .iter()
+        .filter_map(|target| {
+            listed
+                .iter()
+                .find(|agent| agent.agent_path == *target || agent.agent_id == *target)
+                .map(|agent| WaitAgentTarget {
+                    agent_path: agent.agent_path.clone(),
+                    status: agent.status,
+                    outcome: agent.outcome.clone(),
+                })
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -679,7 +743,7 @@ impl TypedTool for SpawnSubagentTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "spawn_subagent",
-            "Spawn an isolated subagent for a focused task. Returns process_id; its final answer is injected as a [SUBAGENT] message when done - do not poll. agent_name = verb+task phrase (e.g. 'explore_task').",
+            "Spawn an isolated subagent for a focused task. Returns the child agent path; its final answer is injected as a [SUBAGENT] message when done - do not poll. Track it with list_agents (outcome carries the final answer) and cancel it with interrupt_agent. agent_name = verb+task phrase (e.g. 'explore_task').",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(180),
@@ -745,54 +809,6 @@ fn build_subagent_task(task_description: &str, context: &str) -> String {
     }
     parts.push(format!("[TASK]\n{}", task_description.trim()));
     parts.join("\n\n")
-}
-
-/// 子代理进程记录统一存放在 daemon actor 进程的本地注册表中。
-enum RegistryRef {
-    Local { id: u32 },
-}
-
-impl RegistryRef {
-    fn id(&self) -> u32 {
-        match self {
-            RegistryRef::Local { id } => *id,
-        }
-    }
-
-    /// 是否已被 `process kill` 标记为 killed。
-    fn killed(&self) -> bool {
-        match self {
-            RegistryRef::Local { id } => {
-                qaqh_workspace::process_registry::ProcessRegistry::get_info(*id)
-                    .and_then(|info| {
-                        info.get("status")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s == "killed")
-                    })
-                    .unwrap_or(false)
-            }
-        }
-    }
-
-    /// 收尾：写入最终作答与退出码。
-    fn finish(&self, answer: &str, exit_code: i32) {
-        match self {
-            RegistryRef::Local { id } => {
-                qaqh_workspace::process_registry::ProcessRegistry::set_answer(
-                    *id,
-                    answer.to_string(),
-                );
-                qaqh_workspace::process_registry::ProcessRegistry::mark_exited(*id, exit_code);
-            }
-        }
-    }
-}
-
-/// 注册子代理进程记录到本地 actor 进程注册表。
-fn register_subagent_process(name: &str) -> RegistryRef {
-    let id = qaqh_workspace::process_registry::ProcessRegistry::register(name);
-    log::info!("[SUBAGENT] '{name}' registered in local registry id={id}");
-    RegistryRef::Local { id }
 }
 
 /// 子代理命令/事件传输抽象（PR-4-2：legacy HTTP/SSE 回连已删除，仅宿主直连）。
@@ -1047,21 +1063,18 @@ fn handle_spawn_subagent(
     let parent_agent_path = spawned.parent_agent_path;
     let child_agent_path = spawned.child_agent_path;
 
-    // ── 2. Register the process record. The runtime starts the collector
-    // only after committing the canonical edge. ──
-    let registry_ref = register_subagent_process(&format!("subagent:{name}"));
-    let registry_id = registry_ref.id();
-
+    // ── 2. Hand the child over to the runtime. The collector starts only after
+    // the canonical spawn edge is committed; the child is addressed by its
+    // canonical ids from here on. ──
     log::info!(
-        "[SUBAGENT] '{name}' actor created (seed={session_id}, path={child_agent_path}, process={registry_id}); awaiting canonical edge"
+        "[SUBAGENT] '{name}' actor created (seed={session_id}, path={child_agent_path}); awaiting canonical edge"
     );
     let content = format!(
-        "Subagent '{name}' spawned at {child_agent_path} (process {registry_id}); the task starts after the canonical spawn edge is committed."
+        "Subagent '{name}' spawned at {child_agent_path}; the task starts after the canonical spawn edge is committed. Track it with list_agents; cancel it with interrupt_agent(target=\"{child_agent_path}\")."
     );
     Ok(SpawnSubagentOutput {
         timeis: qaqh_workspace::now_utc8(),
         status: "ok".to_string(),
-        process_id: registry_id,
         session_id,
         child_session_id,
         name,
@@ -1118,9 +1131,10 @@ fn subagent_error(
 /// Start task delivery and the background result collector.
 ///
 /// The caller must have committed the canonical `SubagentSpawned` edge first.
-/// Process registration is intentionally done by the tool handler before this
-/// function is called, so a failed edge commit can abort without leaking a
-/// running task.
+/// The collector reports the child's terminal outcome through
+/// [`SubagentHost::finish_subagent`] keyed by `child_session_id`, so a failed
+/// edge commit can abort through [`SubagentHost::abort_subagent`] without
+/// leaking a running task.
 pub fn start_subagent_collector(
     host: Arc<dyn SubagentHost>,
     request: StartSubagentRequest<'_>,
@@ -1133,7 +1147,6 @@ pub fn start_subagent_collector(
         timeout_secs,
         parent_session_id,
         parent_call_id,
-        process_id,
         inter_agent,
     } = request;
     let batch_rx = host.subscribe(session_id);
@@ -1170,7 +1183,7 @@ pub fn start_subagent_collector(
         }
     }
 
-    let registry_ref = RegistryRef::Local { id: process_id };
+    let collector_host = host.clone();
     let session_id = session_id.to_string();
     let child_session_id = child_session_id.to_string();
     let name = name.to_string();
@@ -1179,10 +1192,10 @@ pub fn start_subagent_collector(
     std::thread::spawn(move || {
         collect_subagent_result(
             transport,
+            collector_host,
             &session_id,
             &child_session_id,
             &name,
-            registry_ref,
             timeout_secs,
             &parent_session,
             &parent_call_id,
@@ -1209,8 +1222,8 @@ pub fn arm_subagent_collector(
     request: ArmSubagentCollectorRequest<'_>,
 ) -> Result<(), String> {
     let batch_rx = host.subscribe(request.session_id);
+    let collector_host = host.clone();
     let transport = Box::new(HostTransport { host, batch_rx }) as Box<dyn SubagentTransport>;
-    let registry_ref = register_subagent_process(&format!("subagent:{}", request.name));
     let session_id = request.session_id.to_string();
     let child_session_id = request.child_session_id.to_string();
     let name = request.name.to_string();
@@ -1225,10 +1238,10 @@ pub fn arm_subagent_collector(
     std::thread::spawn(move || {
         collect_subagent_result(
             transport,
+            collector_host,
             &session_id,
             &child_session_id,
             &name,
-            registry_ref,
             timeout_secs,
             &parent_session,
             &parent_call_id,
@@ -1239,12 +1252,12 @@ pub fn arm_subagent_collector(
 }
 
 /// Background collector: watches the sub-seed's event stream (process-local,
-/// direct host connection) until a terminal event, a kill request, or the
+/// direct host connection) until a terminal event or the
 /// timeout — mirroring the old stdout-frame collector, but over the Ringing
 /// event plane.
 /// P1-⑥：终态标签不再整段覆盖已收到的部分答案。超时/失败路径会把
 /// `<partial_answer>` 随注入带给父代理；取消路径正文被 T-1-2 压制，但
-/// 注册表（process check）仍可取回部分工作成果。
+/// 状态面（`list_agents` 的 `outcome`）仍可取回部分工作成果。
 fn terminal_answer_with_partial(tag: String, partial: &str) -> String {
     if partial.trim().is_empty() {
         tag
@@ -1256,10 +1269,10 @@ fn terminal_answer_with_partial(tag: String, partial: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 fn collect_subagent_result(
     transport: Box<dyn SubagentTransport>,
+    host: Arc<dyn SubagentHost>,
     session_id: &str,
     child_session_id: &str,
     name: &str,
-    registry_ref: RegistryRef,
     timeout_secs: u64,
     parent_session: &str,
     parent_call_id: &str,
@@ -1296,23 +1309,6 @@ fn collect_subagent_result(
             );
             exit_code = 1;
             terminal = qaqh_domain::SubagentTerminalKind::TimedOut;
-            break;
-        }
-        // Kill requested (process kill {id}) → cancel the sub turn.
-        if registry_ref.killed() {
-            log::info!("[SUBAGENT] '{name}' kill requested via process registry — cancelling");
-            let cancel = RingingCommand::Conversation(
-                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
-            );
-            if let Err(e) = transport.send_command(session_id, cancel) {
-                log::warn!("[SUBAGENT] '{name}' cancel send failed: {e}");
-            }
-            final_answer = terminal_answer_with_partial(
-                format!("[SUBAGENT '{name}' CANCELLED]"),
-                &final_answer,
-            );
-            terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
-            did_cancel = true;
             break;
         }
         match transport.events().recv_timeout(Duration::from_millis(300)) {
@@ -1395,10 +1391,11 @@ fn collect_subagent_result(
 
     let answer_len = final_answer.len();
 
-    // P0-②：先落注册表再注入。注入可能全部被拒（父会话忙碌 / lease 竞争），
-    // 此时 `process check {id}` 是父代理唯一可自助取回结果的通道，必须
-    // 在任何注入尝试之前就绪。
-    registry_ref.finish(&final_answer, exit_code);
+    // P0-②：先落**状态面**再注入。注入可能全部被拒（父会话忙碌 / lease 竞争），
+    // 此时 `list_agents` 是父代理唯一可自助取回结果的通道，必须在任何注入
+    // 尝试之前就绪。结果面挂在 agent 上（child_session_id 为键），不再借用
+    // exec 的进程注册表。
+    host.finish_subagent(child_session_id, &final_answer, exit_code);
 
     // ── 结果回传：注入主代理会话。 ──
     // 主代理 idle 时这条消息触发新回合（模型自动看到子代理结果并继续）；
@@ -1511,7 +1508,7 @@ fn collect_subagent_result(
             // P0-② 兜底：原 purpose（TriggerTurn 在父会话忙碌时被拒）失败后，
             // 改用 QueueOnly 重投——不触发新回合，仅在下一轮 lap 边界合并进
             // 父会话。message_id 不变（幂等去重）；非取消场景在正文末尾追加
-            // 结果指针（process id / 子会话 id），注册表此时已 finish 可查。
+            // 结果指针（子会话 id），状态面此时已 record 可查。
             let mut fallback = inject.clone();
             if let RingingCommand::Conversation(
                 qaqh_domain::ConversationCommand::ConversationSendMessage {
@@ -1524,9 +1521,7 @@ fn collect_subagent_result(
                 *input_purpose = qaqh_domain::ConversationInputPurpose::QueueOnly;
                 if !did_cancel && !text.is_empty() {
                     text.push_str(&format!(
-                        "\n[result-pointer] process {} · child session {}",
-                        registry_ref.id(),
-                        session_id
+                        "\n[result-pointer] child session {child_session_id} · read it with list_agents"
                     ));
                 }
             }
@@ -1555,9 +1550,7 @@ fn collect_subagent_result(
             }
             if !accepted {
                 log::error!(
-                    "[SUBAGENT] '{name}' inject FAILED after {INJECT_ATTEMPTS}+{FALLBACK_ATTEMPTS} attempts; result recoverable via process check {} / child session {}: {:?}",
-                    registry_ref.id(),
-                    session_id,
+                    "[SUBAGENT] '{name}' inject FAILED after {INJECT_ATTEMPTS}+{FALLBACK_ATTEMPTS} attempts; result recoverable via list_agents (child session {child_session_id}): {:?}",
                     last_rejected
                 );
             }
@@ -1784,13 +1777,12 @@ mod tests {
         let output = SpawnSubagentOutput {
             timeis: "UTC+8 2026-09-23 12:00".to_string(),
             status: "ok".to_string(),
-            process_id: 7,
             session_id: "sub-seed".to_string(),
             child_session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
             name: "review_code".to_string(),
             parent_agent_path: "/root".to_string(),
             child_agent_path: "/root/review_code".to_string(),
-            content: "Subagent 'review_code' spawned (process 7)".to_string(),
+            content: "Subagent 'review_code' spawned at /root/review_code".to_string(),
             task_text: "[TASK]\nreview".to_string(),
             timeout_secs: 120,
             parent_session_id: "root-seed".to_string(),
@@ -1805,7 +1797,11 @@ mod tests {
             Some(ToolContentBlock::Text { text }) => text,
             _ => panic!("subagent output must have a text model block"),
         };
-        assert!(model.contains("\"process_id\":7"));
+        assert!(
+            !model.contains("process_id"),
+            "subagent must not expose an exec process handle: {model}"
+        );
+        assert!(model.contains("\"child_agent_path\":\"/root/review_code\""));
         assert!(model.contains("\"session_id\":\"sub-seed\""));
         assert!(model.contains("\"content\":\"Subagent 'review_code' spawned"));
         assert!(
@@ -1815,7 +1811,7 @@ mod tests {
         let display = output.display(&serde_json::json!({}));
         assert_eq!(
             display.summary.as_deref(),
-            Some("Subagent 'review_code' spawned (process 7)")
+            Some("Subagent 'review_code' spawned at /root/review_code")
         );
         match display.body {
             qaqh_tool_core::tool_api::ToolBody::Subagent { name, session_id } => {
@@ -1870,66 +1866,6 @@ mod tests {
         }
     }
 
-    // ── kill 路径回归（PR #57 reviewer 阻断 ③）────────────────────────
-    //
-    // 阻断背景：subagent 的登记路径只 `register` + `mark_exited`，**从不**
-    // `attach_child` → 其进程条目没有 os_pid。`collect_subagent_result`
-    // 每个轮询周期只看 `RegistryRef::killed()`（即 `status == "killed"`）。
-    // 若墓碑 kill 之后状态仍停留在 `exited`，子代理永远收不到 kill 请求。
-
-    /// 墓碑路径：条目已按终态时间驱逐 → `process kill` 命中墓碑 → 状态必须
-    /// 收敛为 `killed`，`RegistryRef::killed()` 必须看到 true。
-    #[test]
-    fn registry_ref_killed_sees_tombstone_kill() {
-        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
-
-        let id = ProcessRegistry::register("subagent-tombstone-kill");
-        let registry_ref = RegistryRef::Local { id };
-
-        // subagent 形态：登记后直接进终态，无 os_pid。
-        ProcessRegistry::mark_exited(id, 0);
-        assert!(!registry_ref.killed(), "终态为 exited 时不得视为被 kill");
-
-        // 把条目熬成墓碑（终态 >600s 后下一次 register 触发惰性驱逐）。
-        ProcessRegistry::age_registration_for_test(id, 3600);
-        let _trigger = ProcessRegistry::register("subagent-tombstone-trigger");
-        let info = ProcessRegistry::get_info(id).expect("条目必须已降级为墓碑");
-        assert_eq!(info["evicted"], true, "前置条件：条目已驱逐: {info}");
-
-        // 墓碑 kill：无 os_pid，故如实报 NoOsPid，但状态仍须收敛为 killed
-        // （id 有效、终态确定，子代理据此停止轮询）。
-        assert_eq!(
-            ProcessRegistry::kill(id),
-            KillOutcome::NoOsPid,
-            "无 os_pid 的墓碑不得谎报清理成功"
-        );
-        let after = ProcessRegistry::get_info(id).expect("墓碑仍可查询");
-        assert_eq!(
-            after["status"], "killed",
-            "墓碑 kill 后状态必须为 killed: {after}"
-        );
-        assert!(
-            registry_ref.killed(),
-            "RegistryRef::killed() 必须覆盖墓碑路径（否则子代理无法感知 kill）"
-        );
-    }
-
-    /// 对照：在册条目的 kill 路径同样被 `RegistryRef::killed()` 看见。
-    #[test]
-    fn registry_ref_killed_sees_in_place_kill() {
-        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
-
-        let id = ProcessRegistry::register("subagent-in-place-kill");
-        let registry_ref = RegistryRef::Local { id };
-        assert!(!registry_ref.killed(), "运行中不得视为被 kill");
-
-        assert_eq!(ProcessRegistry::kill(id), KillOutcome::Killed);
-        assert!(
-            registry_ref.killed(),
-            "在册条目 kill 后 RegistryRef::killed() 必须为 true"
-        );
-    }
-
     // ── T-1-2：取消后不得注入父会话 ──────────────────────────────────────
 
     /// 记录投递命令的 mock 传输：事件流由测试预置（这里只放一条
@@ -1965,6 +1901,8 @@ mod tests {
     struct CollectorTestHost {
         sent: Arc<std::sync::Mutex<Vec<(String, RingingCommand)>>>,
         event_tx: std::sync::Mutex<Option<mpsc::Sender<CollectorBatch>>>,
+        /// `finish_subagent` 记录：(child_session_id, answer, exit_code)。
+        finished: Arc<std::sync::Mutex<Vec<(String, String, i32)>>>,
     }
 
     impl SubagentHost for CollectorTestHost {
@@ -2007,9 +1945,16 @@ mod tests {
             Err("not used".to_string())
         }
 
-        fn rollback_subagent(&self, _session: &str, _child_session_id: &str, _process_id: u32) {}
+        fn rollback_subagent(&self, _session: &str, _child_session_id: &str) {}
 
-        fn abort_subagent(&self, _session: &str, _process_id: u32) {}
+        fn abort_subagent(&self, _session: &str) {}
+
+        fn finish_subagent(&self, child_session_id: &str, answer: &str, exit_code: i32) {
+            self.finished
+                .lock()
+                .expect("test mutex must not be poisoned")
+                .push((child_session_id.to_string(), answer.to_string(), exit_code));
+        }
 
         fn send_ringing(&self, session_id: &str, command: RingingCommand) -> Result<(), String> {
             self.sent
@@ -2069,8 +2014,6 @@ mod tests {
     /// （TurnStart）——「已判定 cancel 的子代理复活」的第二段根因。
     #[test]
     fn cancelled_collector_does_not_inject() {
-        use qaqh_workspace::process_registry::ProcessRegistry;
-
         let child = "sub-cancel-inject-child";
         let parent = "sub-cancel-inject-parent";
         let (tx, rx) = mpsc::channel::<CollectorBatch>();
@@ -2082,20 +2025,32 @@ mod tests {
             batch_rx: rx,
             sent: Arc::clone(&sent),
         });
-        let registry_ref = RegistryRef::Local {
-            id: ProcessRegistry::register("subagent-cancel-no-inject"),
-        };
+        let host = Arc::new(CollectorTestHost::default());
 
         collect_subagent_result(
             transport,
+            host.clone(),
             child,
             "0198f1a0-0000-7000-8000-000000000003",
             "cancelled_task",
-            registry_ref,
             5,
             parent,
             "call_01J00000000000000000000000",
             None,
+        );
+
+        // 取消路径的结果仍落在状态面（正文被 T-1-2 压制为标签）。
+        let finished = host
+            .finished
+            .lock()
+            .expect("test mutex must not be poisoned")
+            .clone();
+        assert_eq!(finished.len(), 1, "collector must report one outcome");
+        assert_eq!(finished[0].0, "0198f1a0-0000-7000-8000-000000000003");
+        assert!(
+            finished[0].1.contains("CANCELLED"),
+            "outcome must carry the cancelled tag, got {:?}",
+            finished[0].1
         );
 
         let sent = sent.lock().expect("test mutex must not be poisoned");
@@ -2139,8 +2094,6 @@ mod tests {
 
     #[test]
     fn completed_collector_delivers_queue_only_inter_agent_result() {
-        use qaqh_workspace::process_registry::ProcessRegistry;
-
         let child = "0198f1a0-0000-7000-8000-000000000004";
         let parent = "sub-complete-parent";
         let (tx, rx) = mpsc::channel::<CollectorBatch>();
@@ -2152,16 +2105,14 @@ mod tests {
             batch_rx: rx,
             sent: Arc::clone(&sent),
         });
-        let registry_ref = RegistryRef::Local {
-            id: ProcessRegistry::register("subagent-complete-queue-only"),
-        };
+        let host = Arc::new(CollectorTestHost::default());
 
         collect_subagent_result(
             transport,
+            host.clone(),
             child,
             child,
             "complete_task",
-            registry_ref,
             5,
             parent,
             "call_01J00000000000000000000001",
@@ -2171,6 +2122,15 @@ mod tests {
                 child_agent_path: "/root/complete_task".to_string(),
             }),
         );
+
+        let finished = host
+            .finished
+            .lock()
+            .expect("test mutex must not be poisoned")
+            .clone();
+        assert_eq!(finished.len(), 1, "collector must report one outcome");
+        assert_eq!(finished[0].0, child, "outcome is keyed by child_session_id");
+        assert_eq!(finished[0].2, 0, "completed child reports exit code 0");
 
         let sent = sent.lock().expect("test mutex must not be poisoned");
         let injected = sent
@@ -2257,5 +2217,53 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn listed_agent(path: &str, id: &str, answer: Option<&str>) -> ListedAgent {
+        ListedAgent {
+            root_session_id: "root-session".to_string(),
+            agent_id: id.to_string(),
+            agent_path: path.to_string(),
+            parent_agent_path: Some("/root".to_string()),
+            nickname: None,
+            role: None,
+            status: ListedAgentStatus::Completed,
+            residency: ListedAgentResidency::Unloaded,
+            created_at_ms: 0,
+            outcome: answer.map(|answer| AgentOutcome {
+                answer: Some(answer.to_string()),
+                exit_code: 0,
+            }),
+        }
+    }
+
+    /// P2：`wait_agent(targets=...)` 的目标既可用路径也可用 id 寻址，
+    /// 且快照带上状态面的终态摘要（替代 `process check`）。
+    #[test]
+    fn wait_targets_resolve_by_path_or_id_and_carry_the_outcome() {
+        let listed = vec![
+            listed_agent("/root/review", "child-a", Some("done")),
+            listed_agent("/root/explore", "child-b", None),
+        ];
+
+        let by_path = wait_targets_from_listing(&listed, &["/root/review".to_string()]);
+        assert_eq!(by_path.len(), 1);
+        assert_eq!(by_path[0].agent_path, "/root/review");
+        assert_eq!(by_path[0].status, ListedAgentStatus::Completed);
+        assert_eq!(
+            by_path[0]
+                .outcome
+                .as_ref()
+                .and_then(|outcome| outcome.answer.as_deref()),
+            Some("done")
+        );
+
+        let by_id = wait_targets_from_listing(
+            &listed,
+            &["child-b".to_string(), "/root/missing".to_string()],
+        );
+        assert_eq!(by_id.len(), 1, "未知目标被忽略");
+        assert_eq!(by_id[0].agent_path, "/root/explore");
+        assert!(by_id[0].outcome.is_none(), "未结束的目标没有终态摘要");
     }
 }

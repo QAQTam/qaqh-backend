@@ -354,7 +354,11 @@ impl SubagentHost for QaqhService {
             caller_session_id,
             timeout,
             should_cancel,
+            targets,
         } = request;
+        if !targets.is_empty() {
+            return self.wait_for_agent_outcomes(caller_session_id, timeout, should_cancel, targets);
+        }
         let (baseline_activity, mut cursor) =
             self.mailbox_activity_after(caller_session_id, None)?;
         let deadline = Instant::now() + timeout;
@@ -482,12 +486,9 @@ impl SubagentHost for QaqhService {
         Ok(())
     }
 
-    fn rollback_subagent(&self, session_id: &str, child_session_id: &str, process_id: u32) {
-        qaqh_workspace::process_registry::ProcessRegistry::set_answer(
-            process_id,
-            "[ABORTED] canonical SubagentSpawned edge was not committed".to_string(),
-        );
-        qaqh_workspace::process_registry::ProcessRegistry::mark_exited(process_id, 1);
+    fn rollback_subagent(&self, session_id: &str, child_session_id: &str) {
+        // 边未成为权威事实：目录注册与结果面一起撤销。子代理从未登记进
+        // 进程注册表，故这里不再有 process_id 可回收。
         match self.registry() {
             Ok(mut registry) => registry.rollback_subagent(session_id, child_session_id),
             Err(error) => {
@@ -499,14 +500,22 @@ impl SubagentHost for QaqhService {
         }
     }
 
-    fn abort_subagent(&self, session_id: &str, process_id: u32) {
-        qaqh_workspace::process_registry::ProcessRegistry::set_answer(
-            process_id,
-            "[ABORTED] subagent closed after canonical spawn edge".to_string(),
-        );
-        qaqh_workspace::process_registry::ProcessRegistry::mark_exited(process_id, 1);
+    fn abort_subagent(&self, session_id: &str) {
         if let Err(error) = self.close(session_id) {
             log::warn!("[SUBAGENT-HOST] abort close failed for {session_id}: {error}");
+        }
+    }
+
+    fn finish_subagent(&self, child_session_id: &str, answer: &str, exit_code: i32) {
+        match self.registry() {
+            Ok(mut registry) => {
+                registry.record_subagent_outcome(child_session_id, answer, exit_code);
+            }
+            Err(error) => {
+                log::warn!(
+                    "[SUBAGENT-HOST] outcome registry unavailable for {child_session_id}: {error}"
+                );
+            }
         }
     }
 
@@ -925,6 +934,62 @@ impl BoardHost for QaqhService {
 }
 
 impl QaqhService {
+    /// Wait until every target agent has a recorded terminal outcome.
+    ///
+    /// This is the `wait_agent(targets=...)` path and the replacement for
+    /// `process wait {id}` on subagents. The completion test is a pure
+    /// in-memory read of the result plane (`subagent_outcomes`) — it never
+    /// reads canonical logs, so a long wait costs no I/O. A target that is not
+    /// a subagent (e.g. the root) simply never satisfies the test and the call
+    /// returns `TimedOut`.
+    fn wait_for_agent_outcomes(
+        &self,
+        caller_session_id: &str,
+        timeout: std::time::Duration,
+        should_cancel: &dyn Fn() -> bool,
+        targets: &[String],
+    ) -> Result<WaitAgentOutcome, String> {
+        let agent_ids = {
+            let mut registry = self.registry()?;
+            let mut ids = Vec::with_capacity(targets.len());
+            for target in targets {
+                ids.push(
+                    registry
+                        .resolve_agent_for_caller(caller_session_id, target)?
+                        .agent_id
+                        .as_str()
+                        .to_string(),
+                );
+            }
+            ids
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            if should_cancel() {
+                return Ok(WaitAgentOutcome::Cancelled);
+            }
+            // 锁必须在 sleep 之前释放：`finish_subagent` 由 collector 线程持锁写入。
+            let all_finished = {
+                let registry = self.registry()?;
+                agent_ids
+                    .iter()
+                    .all(|id| registry.subagent_outcome(id).is_some())
+            };
+            if all_finished {
+                return Ok(WaitAgentOutcome::Activity {
+                    activity_fact_seq: 0,
+                });
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(WaitAgentOutcome::TimedOut {
+                    activity_fact_seq: 0,
+                });
+            }
+            std::thread::sleep(deadline.saturating_duration_since(now).min(Duration::from_millis(25)));
+        }
+    }
+
     fn task_store_for_caller(
         &self,
         caller_session_id: &str,
