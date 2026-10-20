@@ -106,6 +106,28 @@ pub enum CacheTokenField {
     None,
 }
 
+/// 缓存用量口径：端点的 `input_tokens` 是否**已包含**缓存部分。
+///
+/// 真 Anthropic 是 `Exclusive`——`input_tokens` 只算未命中，`cache_read` /
+/// `cache_creation` 是并列的两个桶，总输入 = 三者之和。不少把 OpenAI 口径套到
+/// Anthropic wire 的反代/网关是 `Inclusive`——`input_tokens` 就是整段 prompt，
+/// `cache_read_input_tokens` 只是它的子集。两种口径下"总输入"和"命中率分母"
+/// 差近一倍，按错的读会把缓存前缀算两遍。
+///
+/// `Auto`（缺省）由 gate 按真实响应判定（两次一致才锁定，判不出时取协议契约
+/// 的 `Exclusive`），判定逻辑与阈值见 `qaqh-gate/src/usage_semantics.rs`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheUsageSemantics {
+    /// 按响应自动判定（缺省）。
+    #[default]
+    Auto,
+    /// `input_tokens` 是整段 prompt（含命中），缓存桶是它的子集。
+    Inclusive,
+    /// `input_tokens` 只算未命中，缓存桶与它并列。
+    Exclusive,
+}
+
 /// Per-endpoint retry policy. Absent → gate built-in defaults
 /// (5 attempts / 1s base / 30s cap / 300s idle watchdog), which is also what
 /// the unified transport SDK is configured with.
@@ -141,6 +163,12 @@ pub struct EndpointCompat {
     /// Which usage field carries the cache token count. Default: `PromptCacheHitTokens`.
     #[serde(default)]
     pub cache_field: CacheTokenField,
+    /// Messages wire 的 usage 口径（`input_tokens` 是否含缓存）。默认 `Auto`。
+    ///
+    /// 口径已知的端点直接声明，省掉两轮自动判定；声明后不再观测。只影响
+    /// message 侧 usage 的解读，不改变请求体（缓存命中本身由前缀决定）。
+    #[serde(default)]
+    pub cache_usage_semantics: CacheUsageSemantics,
     /// Request an extra usage chunk before the streaming terminator. Not every
     /// Chat-Completions-compatible endpoint accepts `stream_options.include_usage`.
     #[serde(default)]
@@ -270,6 +298,7 @@ impl Default for EndpointCompat {
             path: None,
             thinking_mode: ThinkingParamMode::default(),
             cache_field: CacheTokenField::default(),
+            cache_usage_semantics: CacheUsageSemantics::default(),
             include_stream_usage: false,
             official_web_tools: false,
             supports_thinking: true,

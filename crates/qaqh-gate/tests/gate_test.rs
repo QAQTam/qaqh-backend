@@ -1603,6 +1603,108 @@ fn anthropic_sse_scenario() -> Vec<mock_server::SseChunk> {
     ]
 }
 
+/// 一段带 usage 的 Anthropic SSE：`input_tokens` / `cache_read_input_tokens`
+/// 由调用方给（反代形态下 `input` 是整段 prompt、`cache_read` 是其子集）。
+fn anthropic_usage_scenario(input_tokens: u32, cache_read: u32) -> Vec<mock_server::SseChunk> {
+    vec![
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_u\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"test-model\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            format!(
+                "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":{input_tokens},\"output_tokens\":4,\"cache_read_input_tokens\":{cache_read}}}}}\n\n"
+            ),
+        ),
+        mock_server::SseChunk::Raw("data: {\"type\":\"message_stop\"}\n\n".into()),
+        mock_server::SseChunk::done(),
+    ]
+}
+
+fn anthropic_usage_from(events: &[StreamEvent]) -> qaqh_types::UsageInfo {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::UsageUpdate(usage) => Some(usage.clone()),
+            StreamEvent::Done { usage, .. } => usage.clone(),
+            _ => None,
+        })
+        .expect("usage emitted")
+}
+
+/// 反代把 OpenAI 口径套到 Anthropic wire：`input_tokens` 已是整段 prompt，
+/// `cache_read_input_tokens` 只是它的子集（qoder-proxy 实测同形：
+/// `input_tokens=6835` 且 `cache_read_input_tokens=6144`）。
+///
+/// 按 exclusive 求和会把缓存前缀算两遍——分母 6 835 + 6 144，命中率被压到
+/// 47.3%；真实命中 89.9%（长会话 99% 时显示恒 ≤ 50%）。声明 inclusive 后分母
+/// 只取 `input_tokens`，命中数不变。
+#[test]
+fn anthropic_inclusive_usage_does_not_double_count_the_cached_prefix() {
+    let mock = MockServer::new(anthropic_usage_scenario(6_835, 6_144));
+    let mut provider = make_anthropic_provider(&mock);
+    provider.cache_usage_semantics = qaqh_types::CacheUsageSemantics::Inclusive;
+
+    let events = collect_events(&provider, vec![Message::user("Hi")], None);
+    let usage = anthropic_usage_from(&events);
+
+    assert_eq!(usage.prompt_tokens, 6_835, "总输入不叠加命中量");
+    assert_eq!(usage.prompt_cache_hit_tokens, 6_144, "命中数两种口径一致");
+    assert_eq!(usage.prompt_cache_miss_tokens, 691);
+    assert_eq!(usage.completion_tokens, 4);
+    assert_eq!(usage.cache_usage_reported, Some(true));
+}
+
+/// 自动判定走完整链路：没有端点声明时，第一轮按协议契约（exclusive）读，
+/// 第二轮拿到一致信号后锁定 inclusive 并纠正分母。作用域是**会话 id**。
+#[test]
+fn anthropic_usage_semantics_auto_latches_on_the_second_agreeing_sample() {
+    fn run(mock: &MockServer, session: &str) -> qaqh_types::UsageInfo {
+        let provider = make_anthropic_provider(mock);
+        let mut events = Vec::new();
+        let result = qaqh_gate::chat_stream(
+            &provider,
+            vec![Message::user("Hi")],
+            None,
+            4096,
+            Some("high".into()),
+            Some(session.to_string()),
+            None,
+            &mut |event| events.push(event),
+        );
+        assert!(result.is_ok(), "chat_stream failed: {result:?}");
+        anthropic_usage_from(&events)
+    }
+
+    let session = "itest-auto-cache-semantics";
+    let first = run(
+        &MockServer::new(anthropic_usage_scenario(6_835, 6_144)),
+        session,
+    );
+    assert_eq!(
+        first.prompt_tokens,
+        6_835 + 6_144,
+        "第一个样本只登记待确认信号，先按协议契约的 exclusive 读"
+    );
+
+    let second = run(
+        &MockServer::new(anthropic_usage_scenario(7_100, 6_600)),
+        session,
+    );
+    assert_eq!(second.prompt_tokens, 7_100, "第二个一致样本锁定 inclusive");
+    assert_eq!(second.prompt_cache_hit_tokens, 6_600);
+    assert_eq!(second.prompt_cache_miss_tokens, 500);
+}
+
 /// Anthropic tool_use 流式场景：`content_block_start` 带 id/name，参数走
 /// `input_json_delta`。与 qoder-proxy / 官方 Messages 端点实测同形。
 fn anthropic_tool_use_scenario() -> Vec<mock_server::SseChunk> {

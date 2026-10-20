@@ -252,6 +252,11 @@ pub(crate) fn run_exec(
     if result.status == "completed" && detect_background_derivation(&shell_command) {
         result.output.push_str(BACKGROUND_DERIVATION_HINT);
     }
+    // P0：把条目归属记到注册表上——`process` 工具按 owner 校验，
+    // 阻止跨会话 kill/write 别人的后台进程。
+    if let Some(proc_id) = result.process_id {
+        crate::process_registry::ProcessRegistry::set_owner(proc_id, &ctx.session_id);
+    }
     Ok(result)
 }
 

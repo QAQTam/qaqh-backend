@@ -866,6 +866,9 @@ pub(crate) fn provider_for(
         }
     };
     provider.send_request_context = compat.send_request_context;
+    // usage 口径与 wire 无关（只有 messages 消费），照 compat 原样落地：
+    // `Auto` 让 gate 按真实响应判定 inclusive/exclusive。
+    provider.cache_usage_semantics = compat.cache_usage_semantics;
     let mut provider = provider
         .with_opencode_headers(&ctx.agent.session.session_id, request_tag)
         .with_retry(compat.retry.clone());

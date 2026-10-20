@@ -20,9 +20,12 @@ fn builtin_sdk_parity_matches_registry_capabilities_and_dynamic_fallback() {
         "builtin registry order and capability table must match exactly"
     );
     // 冻结数随内置工具增减手动推进：22 → 23 是 P3「tool_search 元工具」
-    // （研究文档 §5.1，Deferred 工具的检索入口）的结果，能力表已同步；
+    // （研究文档 §5.1，Deferred 工具的检索入口）；23 → 24 是 37167d7 重新
+    // 引入官方 `search` 工具（`web.rs` 的 `SearchTool`，仅 official-web
+    // profile 暴露；当时同步了 `default_registry_exposes_the_formal_tool_vocabulary`
+    // 的词表，漏了这里的冻结数）。
     // 注册表与能力表的一致性由上方断言保证，此处数字仅防无意增删。
-    assert_eq!(registry.len(), 23, "P3 freezes the 23 builtin tools");
+    assert_eq!(registry.len(), 24, "P3 freezes the 24 builtin tools");
     for definition in &defs {
         assert!(
             !definition.function.description.trim().is_empty(),

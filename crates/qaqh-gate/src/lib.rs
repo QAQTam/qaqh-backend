@@ -21,6 +21,7 @@ pub mod tool_parser;
 mod transport;
 mod types;
 mod usage;
+mod usage_semantics;
 
 pub use anyhow::Error as GateError;
 pub use request_context::RequestContext;

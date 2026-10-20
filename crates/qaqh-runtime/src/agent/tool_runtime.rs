@@ -819,7 +819,6 @@ impl ToolRuntime {
                 parent_session_id,
                 parent_agent_path,
                 child_agent_path,
-                process_id,
                 spawn_tools,
                 spawn_model,
                 spawn_base_url,
@@ -833,7 +832,7 @@ impl ToolRuntime {
             let host = qaqh_subagent::host()
                 .ok_or_else(|| "subagent host unavailable before spawn edge commit".to_string())?;
             if parent_session_id != ctx.agent.session.session_id {
-                host.rollback_subagent(&session_id, &child_session_id, process_id);
+                host.rollback_subagent(&session_id, &child_session_id);
                 return Err(format!(
                     "subagent spawn parent mismatch: effect={parent_session_id}, active={}",
                     ctx.agent.session.session_id
@@ -874,7 +873,7 @@ impl ToolRuntime {
                 if let Err(error) =
                     ledger.append_subagent_spawned(EventId::new(generate_ulid()), payload, now)
                 {
-                    host.rollback_subagent(&session_id, child_session_id.as_str(), process_id);
+                    host.rollback_subagent(&session_id, child_session_id.as_str());
                     return Err(format!("append SubagentSpawned failed: {error}"));
                 }
             }
@@ -887,7 +886,6 @@ impl ToolRuntime {
                 timeout_secs,
                 parent_session_id: &parent_session_id,
                 parent_call_id: parent_call_id.as_str(),
-                process_id,
                 inter_agent: None,
             }) {
                 let finish_error = Self::append_subagent_finished(
@@ -897,7 +895,7 @@ impl ToolRuntime {
                     SubagentTerminalStatus::Failed,
                 )
                 .err();
-                host.abort_subagent(&session_id, process_id);
+                host.abort_subagent(&session_id);
                 return Err(match finish_error {
                     Some(finish_error) => format!(
                         "start subagent {session_id}: {error}; append SubagentFinished failed: {finish_error}"

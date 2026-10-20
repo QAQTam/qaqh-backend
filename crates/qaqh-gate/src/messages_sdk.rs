@@ -28,6 +28,7 @@ use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
 };
 use super::types::{ProviderConfig, StreamEvent, stored_reasoning_kind};
+use super::usage_semantics::{self as semantics, Scope};
 
 /// Same shape as the retired `message_api::build_anthropic_url`; the SDK
 /// adapter appends `/messages` itself, so the result is stripped back into
@@ -369,7 +370,12 @@ fn build_options(
 /// Anthropic 语义：`input_tokens` **不含**缓存读写，全量输入 =
 /// input + cache_read + cache_creation。只取 `input_tokens` 会把上下文用量
 /// 报成零头（BUG-2026-09-16-02）——从 SDK 保留的原生 usage 里重算。
-fn usage_to_info(u: &WireUsage) -> UsageInfo {
+///
+/// 但这条式子只对**真 Anthropic** 成立：不少反代把 OpenAI 口径套到这条 wire 上
+/// （`input_tokens` 已是整段 prompt，`cache_read` 只是它的子集），再按上面的式子
+/// 求和就是把缓存前缀算两遍。`scope` 负责判定该端点属于哪一类（端点声明 →
+/// 环境变量 → 两次一致的自动判定），命中数两种口径下都取 `cache_read` 本身。
+fn usage_to_info(u: &WireUsage, scope: &Scope) -> UsageInfo {
     let raw = u.raw.as_ref();
     let pick = |key: &str| -> Option<u32> {
         raw.and_then(|r| r.get(key))
@@ -388,8 +394,11 @@ fn usage_to_info(u: &WireUsage) -> UsageInfo {
     let completion = pick("output_tokens")
         .or(u.output_tokens.map(|v| v as u32))
         .unwrap_or(0);
-    let pt = uncached.saturating_add(cached).saturating_add(created);
-    // created 不计入 hit，单算写入（miss 侧）。
+    // 分母按端点口径算：exclusive 加回两个缓存桶，inclusive 直接取 input。
+    let resolved = scope.resolve(uncached, created, cached);
+    let (miss, hit) = semantics::split(resolved, uncached, created, cached);
+    let pt = hit.saturating_add(miss);
+    // created 不计入 hit，单算写入（miss 侧；inclusive 下它已经在 input 里）。
     let reported = cached != 0
         || created != 0
         || raw.is_some_and(|r| {
@@ -403,8 +412,8 @@ fn usage_to_info(u: &WireUsage) -> UsageInfo {
             prompt_tokens: pt,
             completion_tokens: completion,
             total_tokens: None,
-            cache_hit_tokens: cached,
-            cache_miss_tokens: uncached.saturating_add(created),
+            cache_hit_tokens: hit,
+            cache_miss_tokens: miss,
             cache_reported: reported,
             reasoning_tokens: u.reasoning_tokens.unwrap_or(0) as u32,
         },
@@ -412,10 +421,12 @@ fn usage_to_info(u: &WireUsage) -> UsageInfo {
     )
 }
 
+#[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
 async fn run_sdk_stream(
     adapter: &mutil_ai::AnthropicMessages,
     request: &ChatRequest,
     options: &RequestOptions,
+    usage_scope: &Scope,
     api_key: &str,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
@@ -426,13 +437,25 @@ async fn run_sdk_stream(
     let watch = CancelWatch::start(cancel);
     let mut options = options.clone();
     options.cancellation = Some(watch.token().clone());
-    consume(adapter, request, &options, api_key, hub, cancel, on_event).await
+    consume(
+        adapter,
+        request,
+        &options,
+        usage_scope,
+        api_key,
+        hub,
+        cancel,
+        on_event,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
 async fn consume(
     adapter: &mutil_ai::AnthropicMessages,
     request: &ChatRequest,
     options: &RequestOptions,
+    usage_scope: &Scope,
     api_key: &str,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
@@ -527,7 +550,7 @@ async fn consume(
             }
             Ok(SdkEvent::ServerToolStatus { .. }) => {}
             Ok(SdkEvent::Usage { usage }) => {
-                let u = usage_to_info(&usage);
+                let u = usage_to_info(&usage, usage_scope);
                 state.usage = Some(u.clone());
                 on_event(StreamEvent::UsageUpdate(u));
             }
@@ -562,7 +585,7 @@ async fn consume(
                 }
                 // 旧实现在收口时兜底一次 usage（同一 UsageUpdate 语义）。
                 if let Some(usage) = response.usage.as_ref() {
-                    let u = usage_to_info(usage);
+                    let u = usage_to_info(usage, usage_scope);
                     state.usage = Some(u);
                 }
                 state.responded = true;
@@ -630,6 +653,7 @@ pub fn chat_stream_messages(
     let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
     let (adapter, hub) = build_adapter(provider, model, &policy);
     let options = build_options(provider, user_id.as_deref(), &policy);
+    let usage_scope = usage_scope(provider, model, user_id.as_deref());
 
     // SDK 负责 HTTP 层重试（429/5xx/transport、Retry-After、Retrying 事件）；
     // 驱动只补它没覆盖的一类：2xx 后空流掐断，整请求重试无损。
@@ -643,6 +667,7 @@ pub fn chat_stream_messages(
                 &adapter,
                 &request,
                 &options,
+                &usage_scope,
                 &provider.api_key,
                 &hub,
                 cancel,
@@ -650,6 +675,17 @@ pub fn chat_stream_messages(
             ))
         },
     )
+}
+
+/// usage 口径判定的作用域键：会话 id 优先（同一端点不同会话互不污染），
+/// 没有会话身份（`chat_sync` 的 compact/title）时退回端点身份。
+fn usage_scope(provider: &ProviderConfig, model: &str, user_id: Option<&str>) -> Scope {
+    let key = user_id
+        .map(str::trim)
+        .filter(|sid| !sid.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}|{model}", provider.base_url.trim().trim_end_matches('/')));
+    Scope::new(provider.cache_usage_semantics, key)
 }
 
 pub fn chat_sync_messages(
@@ -785,12 +821,46 @@ mod tests {
                 "cache_read_input_tokens": 413_000
             })),
         };
-        let info = usage_to_info(&u);
+        let scope = Scope::new(qaqh_types::CacheUsageSemantics::Exclusive, "test-exclusive");
+        let info = usage_to_info(&u, &scope);
         assert_eq!(info.prompt_tokens, 481 + 413_000 + 50);
         assert_eq!(info.prompt_cache_hit_tokens, 413_000);
         assert_eq!(info.prompt_cache_miss_tokens, 481 + 50);
         assert_eq!(info.total_tokens, info.prompt_tokens);
         assert_eq!(info.cache_usage_reported, Some(true));
+    }
+
+    /// inclusive 端点（OpenAI 口径套 Anthropic wire）：`input_tokens` 已是整段
+    /// prompt，`cache_read` 只是子集。按 exclusive 求和会把命中率压成
+    /// `r / (1 + r)`——真实 99% 显示 49.7%，长会话恒 ≤ 50%。
+    #[test]
+    fn inclusive_endpoint_does_not_double_count_the_cached_prefix() {
+        let u = WireUsage {
+            input_tokens: Some(6_835),
+            output_tokens: Some(4),
+            total_tokens: None,
+            cache_read_tokens: Some(6_144),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            raw: Some(serde_json::json!({
+                "input_tokens": 6_835,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 6_144
+            })),
+        };
+        let inclusive = Scope::new(qaqh_types::CacheUsageSemantics::Inclusive, "test-inclusive");
+        let info = usage_to_info(&u, &inclusive);
+        assert_eq!(info.prompt_tokens, 6_835, "总输入不再叠加命中量");
+        assert_eq!(info.prompt_cache_hit_tokens, 6_144, "命中数两种口径一致");
+        assert_eq!(info.prompt_cache_miss_tokens, 691);
+        let rate = f64::from(info.prompt_cache_hit_tokens) / f64::from(info.prompt_tokens);
+        assert!((rate - 0.899).abs() < 0.001, "命中率 {rate}");
+
+        // 同一组数字按 exclusive 读就是双计：分母 12 979 → 47.3%。
+        let exclusive = Scope::new(qaqh_types::CacheUsageSemantics::Exclusive, "test-inclusive");
+        let doubled = usage_to_info(&u, &exclusive);
+        assert_eq!(doubled.prompt_tokens, 6_835 + 6_144);
+        assert_eq!(doubled.prompt_cache_miss_tokens, 6_835);
     }
 
     /// 回归 BUG-2026-09-16-03：内联图 + 兄弟 ImageRef 是同一份字节，只投影一次。
