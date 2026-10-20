@@ -2,7 +2,7 @@
 
 状态：新实现的工程约束；本文不表示 Rust、防御分支或测试已清理。
 下列旧结构与规模取样于 2026-10-10 的 `v2.0.0-beta4`，不是当前产品完整审计或删除名单。
-2026-10-15 校准：从最新产品代码开工，按 [rollout](rollout.md) 随功能发布；先刷新 [preservation](preservation.md)，不能只保留 beta4 测试。
+2026-10-20 校准：当前源码起点 `37167d7`，按 [rollout](rollout.md) 随功能发布；先刷新 [preservation](preservation.md)，不能只保留 beta4 测试。
 架构所有权以 [重构入口](README.md) 和 [依赖矩阵](dependencies.json) 为准。
 消息/恢复见 [messages](messages.md) / [agent](agent.md)，远端执行见 [client-tools](client-tools.md)。
 不新增 bug 账本；实施时直接更新当前责任和退出结果，历史机制由冻结 tag 保留。
@@ -11,12 +11,12 @@
 
 | 当前做法与证据 | 保护的旧前提 | 新线处理 |
 |---|---|---|
-| [manager 读取重复 msgid 时 keep-first](../../crates/qaqh-session/src/manager.rs#L102) | 双写或异常重复，读取自动丢弃重复项 | 正常读取不吞同身份异内容冲突；旧数据修复归离线 importer，新提交端保证身份与幂等 |
-| [图片后补同步 pending 克隆，否则 SaveFull](../../crates/qaqh-message/src/store.rs#L791) | 消息与附件分阶段修改，多份状态不同步 | 输入与附件在明确提交边界收口，后续变更是显式命令；退出全量重写补偿 |
-| [恢复缺工具结果时补“未执行”](../../crates/qaqh-message/src/store.rs#L1614) | 消息配对不足以确认执行结论 | 依据 intent/journal/receipt 对账，缺证据为 Indeterminate，不补造副作用结论 |
-| [panic 后 reset engines/清 cancel/继续接命令](../../crates/qaqh-runtime/src/agent/loop_core.rs#L274) | 共享 engine 状态跨模块恢复 | supervisor 隔离失败范围；恢复依据 committed facts 与收割证据，不假设 reset 即一致 |
-| [workspace 缺失回落 cwd、manager 缺失给空工具集](../../crates/qaqh-workspace/src/runtime.rs#L378) | 全局状态和隐式装配 | 构造注入 WorkspaceHandle/能力来源；必要资源缺失给具名错误 |
-| [必要 canonical ledger 可缺失并返回 Ok](../../crates/qaqh-runtime/src/agent/loop_dispatch_conversation.rs#L78) | 持久/临时/兼容运行路径混合 | 持久 actor 构造时保证 commit port 存在；临时任务显式区分，不在运行期跳过必要事实 |
+| [manager 读取重复 msgid 时 keep-first](../../../crates/qaqh-session/src/manager.rs) | 双写或异常重复，读取自动丢弃重复项 | 正常读取不吞同身份异内容冲突；旧数据修复归离线 importer，新提交端保证身份与幂等 |
+| [图片后补同步 pending 克隆，否则 SaveFull](../../../crates/qaqh-message/src/store.rs) | 消息与附件分阶段修改，多份状态不同步 | 输入与附件在明确提交边界收口，后续变更是显式命令；退出全量重写补偿 |
+| [恢复缺工具结果时补“未执行”](../../../crates/qaqh-message/src/store.rs) | 消息配对不足以确认执行结论 | 依据 intent/journal/receipt 对账，缺证据为 Indeterminate，不补造副作用结论 |
+| [panic 后 reset engines/清 cancel/继续接命令](../../../crates/qaqh-runtime/src/agent/loop_core.rs) | 共享 engine 状态跨模块恢复 | supervisor 隔离失败范围；恢复依据 committed facts 与收割证据，不假设 reset 即一致 |
+| [workspace 缺失回落 cwd、manager 缺失给空工具集](../../../crates/qaqh-workspace/src/runtime.rs) | 全局状态和隐式装配 | 构造注入 WorkspaceHandle/能力来源；必要资源缺失给具名错误 |
+| [必要 canonical ledger 可缺失并返回 Ok](../../../crates/qaqh-runtime/src/agent/loop_dispatch_conversation.rs) | 持久/临时/兼容运行路径混合 | 持久 actor 构造时保证 commit port 存在；临时任务显式区分，不在运行期跳过必要事实 |
 
 这些位置是在确认结构问题，不能据此先删 guard 而继续运行旧前提。
 `catch_unwind`、默认值、clamp、锁中毒处理或去重不是单凭语法即可判定的坏代码。
@@ -42,6 +42,15 @@
 工具模型参数的已知拼写容错属于必要输入边界，不属于可随意删除的内部补偿：保留 schema 归一化与 typed lenient 的双层保护，
 覆盖 union/type-array 的实际形态及字符串整数等已接受输入。容错不得放宽 API 授权、未知字段、范围或副作用准入。
 同样，provider 流中的 tool-call 身份/参数增量归一化与无法执行调用的可见失败必须迁移，不能把丢调用包装成“更薄”。
+
+当前还接受 file_path/path/file、edit 的 old_string/old_str 与 new_string/new_str，以及单字符串提升为单元素字符串数组。
+别名必须在 typed 解析、授权资源提取、同文件冲突排序、审计和展示中同义，不能只加 serde alias。
+同文件双 edit 或混用新旧键仍须串行，独立文件保留并行；路径、schema 与权限范围不能因容错扩大。
+接收端别名不必全部暴露到模型 schema；模型清单按固定快照保持确定性，不通过随意改 schema“修容错”。
+未知/冲突字段仍按边界契约拒绝，不把 `"a,b"` 猜成两个路径。
+配置不靠 apply_profile/reload/child 三份手工字段清单维持一致；完整绑定和 typed snapshot 由 resolver 一次构造。
+当前 credential 缺拷贝、命名 secret 与 Main 继承、CAS 缺失的反例及全链路验收见 [configuration](configuration.md)。
+进程内单写锁与“只发脏字段”都不能证明多资源/多端编辑没有过期覆盖。
 
 | 边界 | 必须保留 |
 |---|---|
@@ -96,11 +105,17 @@ runtime/线程池由 composition root 管理和注入，不再靠模块内全局
 
 两个典型旧机制测试：
 
-- [晚到图片必须产生 SaveFull](../../crates/qaqh-message/src/store.rs#L3277)：新线应验证附件正文正确持久和提交失败不提前确认，退出对全量重写机制的断言。
-- [正常读取重复 msgid 必须 keep-first](../../crates/qaqh-session/src/manager.rs#L2071)：新线验证重复提交幂等、同身份异内容冲突被拒；旧格式修复若保留，归 importer 测试。
+- [晚到图片必须产生 SaveFull](../../../crates/qaqh-message/src/store.rs)：新线应验证附件正文正确持久和提交失败不提前确认，退出对全量重写机制的断言。
+- [正常读取重复 msgid 必须 keep-first](../../../crates/qaqh-session/src/manager.rs)：新线验证重复提交幂等、同身份异内容冲突被拒；旧格式修复若保留，归 importer 测试。
 
 幂等、完整性、恢复本身仍是需要的性质；旧 adapter 或缓存实现换掉时，不能连这些性质也删掉。
 现有测试里同时包含算法与真实持久接缝，不把所有 BUG 注释/回归测试视为无用。
+
+当前迁移还必须保留 [Chat](../../../crates/qaqh-runtime/tests/restart_request_body.rs) 与
+[Responses](../../../crates/qaqh-runtime/tests/restart_request_body_responses.rs) 的真实 HTTP 请求体恢复性质，
+以及 schema/参数别名与写冲突、compact revision/no-op/终态原因、usage 部分字段消费的反例。
+请求体测试不同于内存上下文快照；只对固定配置/能力/序列化版本要求确定恢复，不把它扩成跨升级永不改变请求。
+现有进程隔离/全局装配是待迁移测试设施，不作为新接口；这些测试存在不表示本轮执行通过。
 
 ## 4. 测试取舍
 

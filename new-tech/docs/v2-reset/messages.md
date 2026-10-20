@@ -1,6 +1,6 @@
 # 消息内容单元、撤回与 fork
 
-状态：v2.1 → v3.0 目标契约，尚未在 again 工作树改造 MessageStore、provider adapters 或客户端。
+状态：2026-10-20 校准的 v2.1 → v3.0 目标契约；当前源码的 MessageStore、provider adapters 与客户端尚未迁到这些边界。
 当前产品持续变化，实施前按 [能力保留矩阵](preservation.md) 刷新证据，交付边界见 [rollout](rollout.md)。
 本文件具体化 [agent](agent.md) 的消息路径与 [protocol](protocol.md) 的消息 DTO。
 采用细粒度 transcript item；保留 provider response bundle 的完整语义，不继续以整条 assistant 作为唯一 UI 消息身份。
@@ -83,6 +83,9 @@ reasoning 可以定位、折叠或做展示隐藏，不意味着可以修改供�
 context 的 provider projection 使用 bundle 与工具关联，不能直接遍历 UI items 并拼 role。
 当前运行请求固定完整 ContextSnapshot、config/capability snapshot 及 context_revision。
 新 UI 结构不得破坏完整 provider message 的保真重放。
+上下文等价与缓存前缀稳定分别验收。固定快照内的 system/环境说明、工具 schema/别名映射及顺序应可确定恢复，
+同一配置/序列化版本下由 Chat 与 Responses 的实际 HTTP 请求体捕获验证；跨版本变化明确声明，不永久冻结旧 JSON 编码。
+新 request/attempt 不改变既有逻辑输入，新增用户轮次不重新排序已提交历史；缓存亲和键不充当 execution 幂等键。
 同一 assistant 响应含工具调用时仍保留非空正文；thinking 类别、effort、usage/缓存及工具关联不能在 adapter 迁移中丢失。
 工具 call ID/参数增量遵循 [providers](providers.md)，无法执行的上游调用仍保留可见失败，不伪造可恢复执行。
 
@@ -186,6 +189,18 @@ summary 是新 injection item，携 covered_checkpoint/source refs；展示时�
 必要原始内容被清理或 schema 不支持时，明确 CheckpointUnavailable，不伪造可运行 fork。
 summary/旧 transcript/私有 provider blobs 的 retention 计入 fork pins 与导入/删除操作。
 
+compact 请求固定 source context_revision；结果应用时以该 revision 为前提，不接受旧结果覆盖期间已变化的上下文。
+保留区按实际 turn/checkpoint 计算，不能把注入消息或旧摘要的合成 user 槽位算成真实 turn。
+无新可折叠内容是 no-op：不写新摘要、不消耗 message_id/msg_seq、不改变 context_revision。
+真实折叠量来自 context 变换结果，不能以 turn 数差推断（折叠一个 turn 同时插入摘要时数量可不变）。
+重复压缩避免把旧摘要在历史和 previous-summary 两处重复输入；空摘要明确失败，超大尾部保留合法上下文边界。
+过程进度/最终状态见 protocol；这些产品性质保留，不要求继续使用 `[Compacted N turns]` 文本标签恢复。
+
+旧 QAQH 存储切换与外部 transcript 导入是两个用例。外部源的原始 ID/字节/分支/未知块保留来源身份，
+不能直接当本会话的执行授权或消息去重键；导入物化分配本会话顺序并保留 origin。
+来源解析器提交可验证包，application/session-store 才创建正式会话和引用；默认只读，不因导入成功而提供 runnable fork。
+上下文证据不足时只展示缺失/不支持，不继承源工具副作用、审批、PTY 或凭据；并行功能状态见 preservation。
+
 public message.added 是一个 TranscriptItem，字段含 message_id/msg_seq/role/kind/turn_id?/response_id?/
 call_id?/execution_id?/origin?/status/visibility/ordered parts；message.finalized 不创建新 item。
 message.finalized 携最终 kind/parts 及 call 关联（如适用），允许补全而不替换原 part 身份；
@@ -218,4 +233,4 @@ part 3 慢于 part 4 finalize，展示仍按 opened 顺序；交错 delta 不增
 并行 call 部分完成不能 runnable fork，签名响应不允许任意裁剪；源 session 并发新增不越过 H；
 parent 删除不使 child blob 悬空；摘要含目标之后信息时不用于早期 checkpoint；
 不同 SDK 得到一致 item 顺序、active membership、applied cursor 与 typed boundary errors。
-本轮只定义目标，现有离线 Ringing 检查尚未覆盖上述消息/撤回/fork 状态机。
+本轮只定义目标，未提供这些消息/撤回/fork 状态机的消费向量；结构 audit 不覆盖其行为。

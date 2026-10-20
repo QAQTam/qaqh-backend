@@ -1,9 +1,10 @@
 # ACP：QAQH 被调用与调用其他 agent
 
-状态：目标设计。当前 workspace 未有 ACP 实现；不以模型 provider 接入替代 agent 协议。
+状态：2026-10-20 校准的目标设计。`37167d7` 的当前 workspace 未有 ACP 实现；不以模型 provider 接入替代 agent 协议。
 本能力按 [rollout](rollout.md) 独立验收；保留当前账号型 provider 不代表 ACP 已实现，也不要求先完成 ACP 才发布 v2.1 功能切片。
 首发采用 Agent Client Protocol **v1** 的 JSON-RPC/stdio，具体 SDK/schema 在实现时锁定。
 官方 v2 RFD 另列未来能力，不据此声称 v1 有可靠游标/PTY writer。
+原外部协议研究与链接未在本轮重新联网核验；实现时按锁定版本验证。现有多端和账号能力见 [preservation](preservation.md)，并非 ACP 成功证据。
 
 ## 1. 两个方向和执行主机
 

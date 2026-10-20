@@ -1,6 +1,6 @@
 # 薄 loop、功能插件与执行路径
 
-状态：目标设计。again 工作树未迁移；当前产品 runtime::agent 持续更新，不能当成冻结实现。
+状态：2026-10-20 校准的目标设计。当前 `37167d7` 的 runtime::agent 仍为待迁移实现，不能当成冻结代码或已完成的薄 loop。
 施工遵循 [rollout](rollout.md) 与 [能力保留矩阵](preservation.md)，provider/账号契约见 [providers](providers.md)。
 plugins/ 依赖 AgentState/RingContext，turn_actor 镜像旧 lap，不是这里的边界。
 
@@ -16,6 +16,8 @@ plugins/ 依赖 AgentState/RingContext，turn_actor 镜像旧 lap，不是这里
 不处理 HTTP/provider JSON/具体工具/PTY/诊断文件/secret/UI/标题/存储格式。
 不能 await 等用户或长工具直到堵住邮箱；运行 supervised task，回投 completion。
 邮箱有界，取消用独立受限优先入口，携准确 turn/execution，不读 global current session。
+配置同样按所有者隔离：命名资源/default 的更新不替换会话选择；actor 对 UpdateSelection 做 CAS 并在下一 turn 应用。
+main/compact/title/child 固定完整 binding、凭据引用与用途预算，禁止 child/后台 job 再读全局 Config；详见 [configuration](configuration.md)。
 
 ```mermaid
 flowchart LR
@@ -93,6 +95,13 @@ context 只接受稳定 ContextChange；插件不能改任意模型数组/其他
 required feature 失败先提交明确失败/降级结论，再按策略停止或恢复；optional 明确 skip 并观测，不能吞必要状态。
 panic 转 failed completion，取消子树、收割，不能 reset 全部共享状态假装继续。
 
+compact 的 FeatureJob 固定 source context_revision、输入/配置/能力快照与独立 compact/request identity。
+completion 回邮箱后再次核对 revision；期间新增输入、rewind 或其他上下文变化使旧结果失效，
+返回明确 cancelled/stale 结论，不把摘要应用到新上下文。未发起、skipped、failed、cancelled 与成功分别表达。
+纯 context 变换返回实际 CompactionEffect；无新可折叠 turn 时不写摘要、不分配消息身份、不推进 revision。
+摘要/引用持久并完成 commit 才发布 applied；现行实现的 best-effort canonical append 不能作为新屏障。
+UI 需要的 compact replace 进度、终态原因和真实折叠量随 feature/protocol 迁移，不能只搬摘要算法。
+
 ## 4. 消息：agent → 存储 → UI
 
 模型消息不是 UI timeline。context 定义 role/parts/tool refs/签名/多模态；session-api facts 定义业务变化；protocol 定义展示 DTO。
@@ -110,6 +119,8 @@ subscriptions 唯一映射公共投影，API 不新建 timeline writer。
 
 流中途失败标明正文 incomplete/failed，已有 usage 为 partial；不能把未提交 live 当完整 assistant message 续用。
 恢复 request/attempt 改变，能否续请求由 provider 能力与 facts 决定，不能读 UI 字符串猜。
+逻辑上下文/工具 schema/顺序来自固定快照；稳定缓存亲和身份独立于新 request/attempt。
+同一配置与序列化版本的恢复不随机重建 system 环境说明或重排工具，验收到真实 provider 请求体。
 
 ## 5. 工具：agent → executor → agent → UI
 

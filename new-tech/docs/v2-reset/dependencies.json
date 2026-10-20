@@ -1,7 +1,20 @@
 {
-  "status": "v3.0 target; delivered incrementally from v2.1; not implemented in the again workspace",
+  "status": "v3.0 target; delivered incrementally from v2.1; current backend remains on the pre-migration architecture",
   "schema_version": 1,
-  "date": "2026-10-15",
+  "date": "2026-10-20",
+  "product_baseline_commit": "37167d74b96fdef0700f5ca886475fb59e76d238",
+  "pending_integrations": {
+    "qaqh-import": {
+      "status": "uncommitted parallel product work; not part of the confirmed target graph",
+      "included_in_target_graph": false,
+      "constraints": [
+        "source discovery/capture/normalization belongs to import; no session writer",
+        "shared identities and content contracts belong to kernel/context/session-api, not a restored universal types crate",
+        "application orchestrates; session-store owns official blob/fact/catalog commits",
+        "raw fidelity, message fidelity and runnable context require separate acceptance"
+      ]
+    }
+  },
   "arrow": "consumer depends on provider",
   "scope": "all direct local production/build/dev dependencies, including target-conditional paths; external denies are direct only",
   "crates": {
@@ -54,7 +67,11 @@
         "profile",
         "session_selection",
         "integration",
-        "change"
+        "change",
+        "model_binding",
+        "defaults",
+        "effective",
+        "patch"
       ],
       "allowed_local_dependencies": [
         "qaqh-kernel",
@@ -151,7 +168,8 @@
         "effect",
         "ports",
         "cancellation",
-        "execution_owner"
+        "execution_owner",
+        "official_web"
       ],
       "allowed_local_dependencies": [
         "qaqh-kernel",
@@ -357,13 +375,15 @@
         "siwc",
         "dsaccount",
         "accounts",
-        "model_catalog"
+        "model_catalog",
+        "official_web"
       ],
       "allowed_local_dependencies": [
         "qaqh-kernel",
         "qaqh-provider-api",
         "qaqh-context",
-        "qaqh-config-api"
+        "qaqh-config-api",
+        "qaqh-tool-api"
       ],
       "forbidden_external_dependencies": []
     },
@@ -420,7 +440,13 @@
         "secrets",
         "changes",
         "credential_binding",
-        "account_credentials"
+        "account_credentials",
+        "repository",
+        "profiles",
+        "source_layers",
+        "revisions",
+        "request_snapshot",
+        "migration"
       ],
       "allowed_local_dependencies": [
         "qaqh-kernel",
@@ -1050,7 +1076,8 @@
       "qaqh-daemon",
       "qaqh-agent-api",
       "qaqh-agent-features",
-      "qaqh-diagnostics"
+      "qaqh-diagnostics",
+      "qaqh-providers"
     ],
     "qaqh-session": [
       "qaqh-session-api",

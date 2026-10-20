@@ -1,6 +1,6 @@
 # 工具、扩展生态与公共协议
 
-状态：v2.1 → v3.0 目标契约；当前 daemon 尚无这里的安装服务、ACP adapter 或市场 UI。
+状态：2026-10-20 校准的 v2.1 → v3.0 目标契约；当前 daemon 尚无这里的安装服务、ACP adapter 或市场 UI。
 按 [rollout](rollout.md) 独立交付，当前产品能力以 [preservation](preservation.md) 为准，不因目标生态未完成而阻塞所有功能版本。
 本文件和 [ACP](acp.md) 补充 [agent](agent.md)、[Ringing](protocol.md)。
 不把设计检查通过称为一键安装已经可用。
@@ -14,7 +14,10 @@
 | 工作区代码语义 | LSP 3.17 基线、逐项协商 capability | lsp | 模型对话、市场、直接绕过 workspace 写文件 |
 | 可移植操作知识 | Agent Skills 的 SKILL.md | skills | 自动授予权限、偷偷安装依赖 |
 | 可移植包 | Agent Plugins 1.0.0 | extension-formats / extensions | 动态 Rust ABI、内部 AgentFeature |
-| QAQH 三端 | Ringing major 3 | protocol / client | 包格式、MCP/LSP/ACP 的替代标准 |
+| QAQH 多端 | Ringing major 3 | protocol / sdk | 包格式、MCP/LSP/ACP 的替代标准 |
+
+此表是目标标准选择与原研究记录，本轮未重新联网核验这些外部标准或第三方仓库。
+实际消费端已有 desktop/TUI/Android/Harmony，major 3 迁移与兼容范围按 preservation/rollout 逐端验收。
 
 选择公共标准是为了让用户搬入已有资产、作者复用目录结构和工具定义。
 Ringing 保留可靠 seq、快照、权限交互、诊断、PTY；ACP 作为边缘适配器，不重塑内部 facts。
@@ -32,6 +35,10 @@ MCP/LSP 的 lib.rs 有全局 manager slot；adapter.rs 有按 server 名索引�
 bridge 与 workspace 动态工具投影互相协作，专属 runtime、全局注册成为生命周期障碍。
 LSP 已有连接、工作区 root 和工具调用；重构保留解析/调用算法，移除全局桥和无版本的可变目录。
 进程组清扫算法需要继续平台验证，不能把源码注释当成 kill+wait 验收。
+
+当前 DeepSeek 官方 Search/Fetch 已通过注入端口供普通工具使用，既不是 MCP 安装，也不等同模型 hosted web_search。
+tool-api 持中立端口，providers 持官方协议/凭据适配，builtin-tools/catalog/executor 持暴露、路由与准入，见 [providers](providers.md)。
+不能为了统一市场目录而把账号登录、官方工具鉴权或模型凭据迁入 extension registry；未安装扩展也可有获准的内建能力。
 
 skills 已能读取标准 YAML frontmatter、发现/校验/搜索、按需激活和资源访问。
 `[QAQH_SKILL_V1]` 是当前内部渲染 envelope，不是技能文件必须包含的安装标记。
@@ -321,8 +328,8 @@ allowed-tools 不授予权限；scripts 调用实际 ToolRunner，不能走私�
 ## 11. 公共安装/能力接口
 
 REST 查询与命令仍经 `/api/v3`、typed DTO 和 access；不加 `plugin.<arbitrary method>` catch-all RPC。
-schema 在 [contracts](../../contracts/extensions/install-plan.schema.json)，
-不包含 token、raw env、任意客户端提交可执行 argv。
+下列接口是目标语义；原引用的 install-plan.schema.json 未随文档入库，完整 JSON Schema/错误 union/生成器待安装切片提交。
+schema 交付必须对应下表与实际消费者；禁止把本节或结构 audit 当作已通过形状验证。公共 plan 不包含 token、raw env、任意客户端提交可执行 argv。
 
 | 接口 | 契约 |
 |---|---|
@@ -373,8 +380,8 @@ agent 仍只依赖中立 tool/context/session ports，不依赖任何市场/ACP/
 
 实际切口：config 隐式 external merge → 显式 plan；workspace 动态注册 → tool-catalog source；
 MCP/LSP 全局桥 → 注入 service；skills session manager → agent-features/skills；
-三端增加统一扩展用例，而不是 MCP 设置页里继续加一组配置字段。
-每刀带实际 API/SDK/消费者并删除旧注册路径；本次机器 schema 是实施契约，不是已接入的 facade。
+已声明支持的各端增加统一扩展用例，而不是 MCP 设置页里继续加一组配置字段。
+每刀带实际 API/SDK/消费者并删除旧注册路径；机器 schema 尚缺时先补契约与消费者，不宣称现成 facade 已接入。
 
 ## 13. 发布验收
 
@@ -383,11 +390,11 @@ MCP/LSP 全局桥 → 注入 service；skills session manager → agent-features
 OAuth 场景覆盖 awaiting_user、断网/重启继续、取消/吊销，密码/token 不进公共 plan/日志/facts。
 LSP 覆盖语言识别、装 server、定位/诊断、emoji 编码、过期 edit 拒绝与 journal 写入。
 MCP 覆盖 modern/legacy 协商、输入续轮、同名隔离、list_changed、断连副作用 Indeterminate。
-ACP 两方向见 acp.md；Ringing 三端覆盖安装/交互 feed 的断线/重复/快照。
+ACP 两方向见 acp.md；Ringing 各支持端覆盖安装/交互 feed 的断线/重复/快照。
 安装故障注入覆盖对象持久前后、registry commit 前后、升级依赖失败、并发 CAS 和共享包卸载。
 普通包准备成功、required service 未登录时 UI 必须明确 installed + needs_auth，不能只亮绿色“完成”。
 
-现有 docs/contracts 是目标；真实跨平台/network/UI 验收未完成前不对外宣称全兼容或一键安装。
+本文是目标，完整安装 schema 与消费向量尚待提供；真实跨平台/network/UI 验收未完成前不对外宣称全兼容或一键安装。
 
 ## 资料
 

@@ -1,6 +1,6 @@
 # Ringing：v2.1 → v3.0 目标前后端契约
 
-状态：目标协议，尚未接入 daemon / SDK。产品版本不等于协议版本。
+状态：2026-10-20 校准的目标协议，尚未接入 daemon / major 3 SDK。产品版本不等于协议版本。
 保留 Ringing 名称；新 wire major **3**，`schema = "qaqh.Ringing"`，路由 **`/api/v3`**。
 它在独立验收后替换当前 Ringing v2，不用可选字段掩盖语义变化。上一轮 `/api/v2` / `qaqh.api/2` 提案由本文替代。
 v2.1 发布不以 major 3 一次性落地为前提；内部切片可保持 v2，跨 major 过渡与旧路由退出遵循 [rollout](rollout.md)。
@@ -12,7 +12,7 @@ v2.1 发布不以 major 3 一次性落地为前提；内部切片可保持 v2，
 | 流 | 数据 | 恢复和背压 |
 |---|---|---|
 | session committed | 消息终稿、工具/交互/turn 状态、命令结论 | 持久，至少一次；从 applied cursor 重放 |
-| session live | 模型文本/思考/工具参数增量、运行进度 | 易失，按 stream epoch/seq；缺块替换或重置 |
+| session live | 模型文本/思考/工具参数增量、运行进度、HUD 用量采样 | 易失，按 stream epoch/seq；缺块替换或重置 |
 | diagnostics | 延迟/重试/健康、派生统计 | 独立流、保留窗口、明确 gap；不推进会话 cursor |
 | terminal I/O | PTY 字节、resize、input ACK、输出 offset | 独立双向 WS、有界 buffer；输入不跨重连自动重放 |
 
@@ -23,7 +23,7 @@ HTTP 管命令/查询/内容/票据，SSE 管单向订阅，WS 用于真正双�
 host 扩展安装另有持久 operation feed，复用 committed envelope/快照/applied cursor 规则，
 使用 `(operation_id, operation_log_epoch, operation_seq)` 独立域，不能推进 session durable_seq。
 它归 extensions registry workflow，不新造空 session 或交给 agent writer；下载进度仍可丢。
-详细命令/DTO/状态见 [生态契约](ecosystem.md) 与 `contracts/extensions/`。
+详细命令/DTO/状态见 [生态契约](ecosystem.md)。完整安装 JSON Schema 尚待该切片实现，本仓没有可据以宣称通过的 contracts/extensions 检查。
 ACP v1 是另外的边缘协议，不具备这里的 applied cursor 或 terminal input fence，见 [ACP](acp.md)。
 
 没有全局 seq，每个序号有域、重置条件和持久承诺。timestamp 只展示，不排序。消息单元及撤回/fork 的具体语义见 [messages](messages.md)。
@@ -49,7 +49,7 @@ log_epoch 只在日志身份更换/离线导入切换时改变；server_instance
 | change tag | 必需业务字段 |
 |---|---|
 | command.status | command_id、status；终态携 typed result/error |
-| turn.started | turn_id、input_message_id、config_revision |
+| turn.started | turn_id、input_message_id、selection_revision、config_snapshot_ref |
 | turn.finished | turn_id、terminal、reason? |
 | message.added | message_id、msg_seq、turn_id?、response_id?、role、kind、call_id?/execution_id?、origin?、visibility、ordered parts、status |
 | message.finalized | message_id、kind、status、ordered parts/content_ref、call_id?、closed_stream_ids |
@@ -60,7 +60,7 @@ log_epoch 只在日志身份更换/离线导入切换时改变；server_instance
 | interaction.resolved | interaction_id、revision、outcome、resolving_command_id |
 | terminal.control | terminal_id、execution_id、host_id、state、control_generation、controller_id? |
 | usage.observed | request_id、purpose、usage、source、completeness |
-| session.selection | selection_revision、profile_id、profile_revision、effective_from |
+| session.selection | selection_revision、profile_id、profile_revision、allowed_overrides、state（pending/applied/blocked）、effective_from |
 | context.changed | context_revision、checkpoint_id、typed compact/rewind reason、active membership ref、closed_stream_ids、summary_ref? |
 | feature.changed | feature_id、feature_version、registered typed public state |
 
@@ -76,7 +76,7 @@ succeeded/failed/partial/cancelled/denied/indeterminate，backgrounded 是运行
 ask 为 typed question_id/answer union，terminal_handoff 只能 claim/decline，不把密码当 ask 答案。
 
 command 首期 union：SubmitInput(message parts)、CancelTurn(turn_id)、InvokeTool(typed call)、
-AnswerInteraction(interaction_id/revision/typed answer)、UpdateSelection(selection revision/profile revision)、
+AnswerInteraction(interaction_id/revision/typed answer)、UpdateSelection(selection revision/profile revision/allowed overrides)、
 ClaimTerminal(interaction_id/revision/terminal_id)、ReturnTerminal(terminal_id/control_generation/share selection)、
 CancelExecution(execution_id)、ChangeFeature(typed feature delta)、
 WithdrawInput(message_id/context revision)、RewindSession(checkpoint_id/context revision)、
@@ -140,12 +140,30 @@ live snapshot 来自 subscriptions 有界缓存，携同 epoch/current seq，不
 message.finalized/工具终态覆盖并关闭对应 live；晚到旧帧不得复活终稿。
 模型重试使用新 request_id/live_epoch，禁止拼接不同尝试的增量。
 
+### 3.1 用量采样和压缩进度
+
+当前 v2 的 UsageSampled 对应目标 session live 的 usage.sampled replace payload，按 request_id/purpose 隔离。
+它是产品 HUD 数据，diagnostics=off 时仍可显示；diagnostics 可另行采样，但不能成为 HUD 的唯一来源。
+payload 区分 source/completeness，prompt/output/cache 等字段缺报不等于 0，cache 未报告与零命中分开。
+仅替换本 request 明确给出的字段，不把累计采样相加；不重置 tok/s、流窗口、块状态或 turn 终态。
+采样可在首个内容 item 前到达，以已提交 turn/request 的水位作锚点，不要求伪造一个 message item。
+不为每次采样追加 durable fact；最终 usage.observed 按 request/attempt 业务身份只结算一次，覆盖采样且重连不重复累计。
+
+compact 的过程 payload 是完整当前摘要，mode=replace；现行 CompactProgress.delta 虽名为 delta 也是累计快照，
+迁移 adapter 不能按 append 消费。目标 feature.changed 的 compact 公共状态携 compact_id、phase、
+source context_revision、typed code/展示 reason（如适用）及真实 folded_turns；持久 context.changed 只在实际 applied 后产生。
+未发起/skipped、failed、cancelled/stale 与成功可辨，未知原因不能从 status 猜；旧 wire 缺 reason 时展示通用状态。
+命令未送达是客户端投递失败，不伪造已提交服务端终态；成功后迟到进度不复活旧压缩卡。
+
 ## 4. 命令与幂等
 
 POST /sessions/{id}/commands 为 typed union，公共字段 command_id/type/target/expected_revision?/payload。
 target 精确到 turn/interaction/execution，不用“当前 turn”。无全会话 driver seat。
 普通提交按邮箱排序；满队列/忙状态明确返回 QueueFull/TurnBusy 或受限排队。
 配置按对应资源 revision CAS，交互按 interaction revision CAS，取消绑定 turn_id。
+配置 CRUD、修改新会话默认和修改 SessionSelection 是不同资源命令。会话选择公开 pending/applied/blocked 与生效边界；
+选择命令持久化成功不等于已应用；配置在生效前不可用时投影为 blocked，不重写既有命令回执。
+effective view 显示本会话的模型/额度来源/上下文分母与配置来源，不用全局 ConfigDto 代替；见 [configuration](configuration.md)。
 
 状态 accepted → running → succeeded/failed/cancelled/indeterminate，终态不可变。
 CommandAccepted fact 持久化后才 ACK accepted；完成来自 terminal fact。
@@ -251,7 +269,7 @@ DTO 在 protocol，collector/index 在 diagnostics。scope=host（admin）或 se
 帧含 scope/observation_epoch/observation_seq/observed_at/type/correlation/payload。
 correlation 可带 session/turn/request/execution/span，不携正文/凭据/raw PTY。
 派生查询含 source_cursor/window/sample_count/coverage/source/as_of，未知 rate=null。
-usage live 按 request_id 替换，最终业务 usage 仅提交一次；重连不累加。
+usage live 按第 3.1 节替换；诊断采样不代替最终业务 usage，也不控制产品表盘或持久结算。
 logical call/execution attempt/denied/cancelled/indeterminate 分开，后台启动不算成功。
 
 off/basic/trace 只控制附加采集，off 不关闭 ToolFinished/UsageObserved/安全审计。
@@ -274,7 +292,8 @@ provider-api/tool-api 不依赖 agent-api 或 diagnostics，避免为共享一�
 | POST /sessions/{id}/subscriptions；GET /subscriptions/{id}/events | snapshot + committed/live SSE |
 | GET /snapshots/{id}/pages/{page}；GET /sessions/{id}/live/{stream_id} | pinned snapshot/易失 replace |
 | GET /sessions/{id}/content/{content_id} | 会话授权、range、digest；禁止按 hash 跨会话越权 |
-| GET/PUT /host-config；GET/POST /profiles | 配置资源 CAS，UI 偏好无路由 |
+| GET/PUT /host-config；/profiles 与 /model-bindings 的命名 CRUD/版本查询 | 目标资源族，配置 CAS、不可变版本；精确 DTO/路由随切片锁定，见 configuration.md |
+| GET/PUT /new-session-defaults；GET /sessions/{id}/effective-config | 默认 CAS 只影响新建；会话视图含选择、pending/applied/blocked、非秘密来源；UI 偏好无路由 |
 | /provider-accounts 下的 typed 登录/状态/取消/校验/退出用例；模型目录查询 | 目标资源族；精确 DTO/路由在该切片锁定，不能遗漏现行 siwc/dsaccount 能力，见 providers.md |
 | POST /terminals/{id}/connections；GET /terminals/{id}/io | ticket/受控 WS |
 | GET /diagnostics/status；GET /diagnostics/query；POST /diagnostics/subscriptions | 范围、窗口、SSE ticket |
@@ -293,14 +312,14 @@ DiagnosticsClient 维护观测窗口；TerminalConnection 只管理 WS/字节/�
 桌面/TUI/mobile 渲染同一 DTO，但 capabilities 决定是否支持终端输入，UI tab 激活不授予执行授权。
 Tauri host 转发 replica 已提交状态或整批变更，保留提交边界；renderer 若异步应用则由它 ack，不能抢先推进宿主 cursor。
 
-2026-10-10 通过 CodeGraph 检查同级桌面源码发现：SessionStore.activate 仍 transport.attach；
-connectHost 同时接 timeline 和 projection，applyProjection 只读 stream_key/payload；
-reducer.applyEntry 用 timeline_seq:number，text_delta/tool_progress 做字符串追加；types.Seq=number。
-这些消费路径须一起切换，单改服务器 envelope 会保留多套水位和文本追加规则。
+2026-10-20 按 preservation 固定多端源码基线：Rust client/TUI、桌面 TS reducer、Android Kotlin 和 Harmony ArkTS
+均已有 v2 消费实现；它们不是待创建的空壳。现行桌面的 timeline/projection、number 序号与 attach 语义
+仍须随新 SDK 一起切换，单改服务器 envelope 会保留多套水位和文本追加规则。
 旧宿主 timeline/projection 双订阅、activeSeed、RPC catch-all 和按页面激活 attach 均从新 SDK 路径删除。
-目前没有移动端源码验证，不声称移动端已适配。桌面仓未在本轮改动。
-
-以上桌面差距是 2026-10-10 的取样，不是当前前端完整清单；2026-10-15 的账号、模型、消息渲染与 GenUI 增量见保留矩阵。
+本轮核对移动端的协议源码存在与消费路径，未构建/真机验收，也不声称任何端已适配 major 3。
+账号客户端出口、配置规范名/旧拼写、compact reason 与 usage_sampled 都是迁移输入，不能只迁旧桌面取样。
+Harmony 正式 ArkTS client 与 NAPI smoke 分开，不能据 smoke 推断全部 UI 已经共享 Rust reducer。
+所有支持的端均须运行同一 major 3 消费向量并验证历史/实时一致；具体提交和路径见 preservation。
 
 ### 9.1 GenUI 与 renderer 的保留契约
 
@@ -317,5 +336,6 @@ followUp 只通过现有用户输入与授权链提交选定字段；copy/openLi
 诊断 gap 不影响 committed、双端 claim 单 writer、旧 fence input 不写、ACK 丢失重连不补键；
 human transcript 不进上下文/日志、Return/exit 并发单终态、cancel kill+wait、不支持提权明确拒绝。
 离线契约检查只证明 trace 消费规则，不代替真实 SSE/WS/PTY/平台/三端验收。
-配套离线消费模型与场景在 tools/v2-architecture/protocol_check.py / protocol-vectors.json，
-用于提前检查序号、应用屏障和终端重连语义，落地后应让真实 SDK 跑同一组场景。
+原文引用的 protocol_check.py / protocol-vectors.json 未随设计入库，本轮未伪造恢复。
+major 3 切片必须提供可执行消费向量：批次幂等/gap/reset/applied 屏障、usage 部分字段/最终覆盖、
+compact replace/终态、终端重连不补键；各真实 SDK 执行。现有结构 audit 不验证这些状态机。

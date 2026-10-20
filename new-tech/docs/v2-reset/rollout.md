@@ -1,13 +1,13 @@
 # v2.1 → v3.0 发布与迁移规则
 
-状态：2026-10-15 校准后的施工规则，不表示任何目标功能或版本已交付。
+状态：2026-10-20 校准后的施工规则，不表示任何目标功能或版本已交付。
 本文替代 again 方案中“冻结 main、从 beta4 重写、整条新线一次切换”的交付假设；架构终态仍由各专题及 dependencies.json 定义。
 产品能力依据 [preservation](preservation.md)；本文不是额外 bug/交接/ADR 账本。
 
 ## 1. 三种状态与四个版本号
 
-- **当前产品**：持续开发的 backend + desktop，必须从最新可用提交核对功能和修复，不能把旧 README 当实现证据。
-- **当前设计工作树**：v2.0-again，仍含 alpha10/30-crate 代码；这里只校准文档，不合并产品代码，也不改包版本。
+- **当前产品**：持续开发的 backend + desktop/TUI/Android/Harmony；本轮已提交后端起点 `37167d7`，完整基线见 preservation，不能把旧 README 当实现证据。
+- **当前施工工作树**：从已核验业务提交创建独立分支和 linked worktree；again 仅为历史设计来源，不是必须恢复的 alpha10 起点。业务 checkout 的未提交 import 工作单独登记。
 - **目标**：单一会话 writer、薄 loop、显式实例资源、分离配置/访问控制、可靠消费及模块化执行。
 
 产品 v2.1…v3.0、Ringing wire major 2/3、持久 fact/projection schema、GenUI v0.1/v0.2 分别版本化。
@@ -25,6 +25,8 @@ ACP、市场安装、ClientToolHost、多语言 SDK、终端接管等原目标�
 它们按功能成熟度独立交付；核心重构完成不自动宣称所有扩展目标/所有平台已支持。实际纳入版本的能力必须明确声明并验收。
 
 推荐优先选择不破坏 wire/存储的 provider/账号、工具参数、工作区与配置边界；这不是强制排期。
+配置切片具体按 [configuration](configuration.md) 交付命名资源/凭据、默认、会话选择与所有请求用途，
+不能只在 config-api 新增 profiles 数组就宣称多配置完成；既有 v2 API 仍按明确期限 adapter 退出。
 涉及完整消息、提交屏障、恢复与 SDK 时，按技术依赖扩大切片，不能为了缩小 PR 拆开必须原子成立的不变量。
 
 ## 3. 每个切片的最小施工合同
@@ -47,6 +49,13 @@ ACP、市场安装、ClientToolHost、多语言 SDK、终端接管等原目标�
 内部重构优先不改变现行 Ringing v2。major 3 的语义按 [protocol](protocol.md) 保持独立，不能给 v2 填可选字段假装升级。
 新 major 必须连同 Rust client/SDK、Tauri IPC、TS 类型、renderer/reducer、重连与历史加载一起验收。
 桌面当前通过 path dependency 消费 backend；仅替换后端目录可能回退账号/DTO，必须固定跨仓提交并检查实际依赖路径。
+TUI 的 Rust client/config-api、Android Kotlin 与 Harmony ArkTS 也属于实际消费者；逐端固定提交、协议 major 和功能覆盖。
+不以 Harmony 的 NAPI smoke 或生成 DTO 代替其实际 ArkTS 消费验收，不要求所有现有客户端先改成 Rust FFI。
+
+现行账号服务白名单和 typed DTO 是中间版本的实际出口，不属于任意字符串 catch-all。
+临时路径 owner 为 application/api/sdk 对应切片；范围限现有账号方法，admin 授权和零会话登录保持。
+退出条件是所有声明支持客户端已切换资源化账号用例、错误与版本组合完成验收；最迟随 v3.0 删除旧服务路由。
+规范 wire 名在新读写模型中同义；桌面为旧 daemon 使用的拼写转换随旧版本支持退出，不复制到所有新 SDK。
 
 允许明确期限的 v2/v3 边缘协议并存，但它们只能调用同一业务所有者，不能引入新权威双写；无法无损映射则隔离到不同数据根/显式版本部署。
 未支持的组合具名拒绝，不自动降级已接纳的会话语义；移除旧路由前核对已支持客户端，并记录版本范围与升级方式。
@@ -60,6 +69,8 @@ ACP、市场安装、ClientToolHost、多语言 SDK、终端接管等原目标�
 跨格式迁移：停写/收割执行 → 备份并保留原根 → staging 离线 import → 完整性与引用/上下文保真验证 → 切换数据根/格式身份 → 新端恢复验证。
 resume 需要 provider bundle、工具结果和 required feature 的完整证据；不足时只读 transcript 并具名说明，不能猜测补成功。
 凭据迁移独立于 transcript 导入，登录 token 不写 facts/公共 blob/诊断；不得复制不属于目标端的身份或授权。
+外部来源 transcript 导入是另一个产品切片，可在新 session staging 中执行，不要求停写全部无关会话。
+来源解析归 import，正式提交归 session-store；原始/消息保真和可继续执行分别验收。并行未提交实现见 preservation，不能纳入已发布能力。
 
 回退必须说明最后可回退点：新格式有写入后，不能直接让旧二进制打开新根，也不能静默还原旧备份丢掉新消息。
 只能使用已验证的反向导出，或明确停服保留新根、回旧备份并告知未覆盖数据；外部副作用不因恢复备份而撤销/重放。
@@ -73,5 +84,17 @@ resume 需要 provider bundle、工具结果和 required feature 的完整证据
 - 中间版本：记录 check 的实际缺口，审查本切片的新增/删除依赖，不扩大已迁移域的反向依赖；现有脚本没有切片自动豁免能力。
 - v3.0：全量 check 通过；唯一 writer/无 TLS 全局会话/取消与任务收割/持久恢复/真实 SDK 和平台接缝均有证据，当前产品能力无未说明缺口。
 
-`tools/v2-architecture/baseline.json` 与 engineering.md 的 beta4 样本不覆盖当前业务基线；不可覆盖历史数据来制造完成率。
-本轮只改文档，任何图/离线参考检查都不能证明 Rust、账号远端、SSE/WS/PTY 或桌面交付已经完成。
+结构检查的命令、覆盖范围和失败含义见 [工具说明](../../../tools/v2-architecture/README.md)。
+原 baseline.json 和协议向量未随文档入库；engineering.md 的 beta4 样本不覆盖当前业务，不能伪造历史或用当前量覆盖。
+完整安装 schema 与实际 SDK 消费向量是相应切片的交付物，未实现前不得计入已通过闸门。
+本轮修改文档和只读结构检查，不修改 Rust 产品行为；图/链接检查不能证明账号远端、SSE/WS/PTY 或多端交付完成。
+
+## 7. 独立 worktree 的施工方式
+
+同一仓库优先用 `git worktree add -b codex/<slice> <新目录> <已核验提交>` 创建分支与独立目录。
+linked worktree 共享对象、refs 和 remote，各自持有工作文件、index 与 HEAD；原仓未提交改动不会自动复制。
+目录名带 worktree 不代表 Git 关系：先核对 `git rev-parse --git-common-dir` 和 `git worktree list --porcelain`。
+
+本地提交可直接在同仓其他 worktree merge/cherry-pick，无需 push/pull 搬运；独立 clone 才需要 fetch/remote 等交换提交。
+不为转换已有 clone 而删除、重置或移动其目录；已有脏工作树不强行切分支/合并，先在独立目录提供可审阅 diff。
+跨仓 path dependency 仍指向原路径，新增 backend worktree 不会自动切换桌面/TUI；联合验收使用显式依赖路径和构建配置。

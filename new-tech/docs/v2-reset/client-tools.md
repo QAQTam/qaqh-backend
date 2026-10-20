@@ -1,6 +1,7 @@
 # 客户端工具宿主与多语言 SDK
 
-状态：v2.1 → v3.0 目标契约，尚无远端 ToolRunner、工具宿主或多语言 SDK 实现。
+状态：2026-10-20 校准的 v2.1 → v3.0 目标契约，尚无本契约的远端 ToolRunner、工具宿主或 major 3 SDK 实现。
+当前已有 Rust client/TUI、桌面 TS、Android Kotlin 与 Harmony ArkTS 的 v2 消费路径；它们是迁移输入，不等于目标 SDK 已交付。
 交付与兼容退出遵循 [rollout](rollout.md)；现有桌面/账号/GenUI 能力以 [preservation](preservation.md) 为准，不能因暂不实现远端工具而回退。
 本契约将原先 daemon-only 扩为受控的多执行宿主；会话、loop、事实提交仍有唯一服务器所有者。
 遵循 [protocol](protocol.md) 的持久化和恢复规则、[composition](composition.md) 的代际准入。
@@ -192,9 +193,17 @@ client-owned PTY 将来必须有独立 host/resource namespace、supervisor、�
 qaqh-sdk 是 SDK 产品族和 Rust crate 名，不要求非 Rust UI 经 FFI 才能接入。
 schema/语义/测试向量是契约；Rust serde 不能成为跨端协议唯一规范。
 生成 DTO/校验绑定，手写少量有状态消费核心，让各端运行相同向量；生成代码不包含业务执行逻辑。
+配置管理与会话 effective view 也必须跨端一致：各 composer 绑定 session 的 revision/model/额度/分母，
+不能继续用模块级 config.load/save 表示当前标签页配置；命名 CRUD、pending/applied 与冲突见 [configuration](configuration.md)。
 SDK 发布附 protocol major、schema digest、能力表和兼容测试版本。
-ClientTool 帧的完整 JSON Schema、OpenAPI 以及生成器尚待实现；当前 capability/2 是可检查的描述契约，
-不是已完成整套 SDK 生成链。新增客户端必须跑同一协议消费/恢复向量，不能只生成 DTO 就算适配完成。
+ClientTool 帧的完整 JSON Schema、OpenAPI 以及生成器尚待实现；capability/2 目前只有本文描述，
+其原配套机器 schema 未随本仓入库；不能当已运行的 schema 校验或整套 SDK 生成链。
+新增及迁移客户端必须跑同一协议消费/恢复向量，不能只生成 DTO 就算适配完成。
+
+现有 Rust 账号出口、Kotlin/ArkTS 连接/配对/审批与桌面 reducer 都应通过受限 adapter 渐进迁移。
+不要求原生端先转 Rust FFI；Harmony 的 NAPI smoke 仅是实验，不代替当前 ArkTS client。
+共享向量须覆盖完整批次、部分 usage、compact replace/原因、重复/断线和权限；向量尚待 major 3 切片提供。
+客户端 API 可聚合纯公共契约，但不能借 re-export 旧 types/session 实现永久保留反向依赖。
 
 | 目标 | 模块/端口 | 禁止责任 |
 |---|---|---|
@@ -209,12 +218,12 @@ qaqh-protocol 定义 wire 的 client_tools DTO；qaqh-tool-api 定义 ExecutionT
 daemon 向 executor/catalog 注入 remote runner；api 只映射 WS 和 application ports。
 agent 不依赖 client-tools/tool-host/SDK/WS；仍只收到 effect/outcome。
 扩展安装的实际 artifact owner 按 execution host 区分，registry 的 scope/generation 所有权不变。
-目标增加两包、将 client 改名 sdk，共 46 包；允许边以 dependencies.json 为准。
+当前目标增加两包、将 client 改名 sdk，共 46 包；允许边以 dependencies.json 为准。并行 import 等独立业务按所有权更新图，包数不是上限。
 
 首期交付顺序是共享 schema/SDK 消费核心 → 一个真实 native client tool → 断线/取消/回执故障验收
 → 第二种语言真实客户端复用契约 → 客户端扩展安装及受限 Bun runner。
 第一个工具选用户显式分享文件等有清楚授权与输入边界的能力，避免以任意 shell 验证架构。
-v2 首发承诺明确宿主路由、离线失败、执行去重/对账和 native callbacks；
+本契约首期承诺明确宿主路由、离线失败、执行去重/对账和 native callbacks；
 不把无缝执行迁移、客户端提权终端或全市场脚本跨平台运行列为已经完成的能力。
 
 ## 8. 必须经过真实接缝的验收

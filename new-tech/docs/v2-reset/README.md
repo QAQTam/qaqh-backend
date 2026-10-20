@@ -1,11 +1,11 @@
 # QAQH v2.1 → v3.0 重构入口
 
-校准日期：2026-10-15。设计工作树仍为 `v2.0-again` / `2.0.0-alpha10`；它不是当前产品版本。
-当前核对的后端产品为 `main` / `2.0.0-RC2`，提交 `91b2fd9`；桌面端与工作树状态见 [能力保留矩阵](preservation.md)。
+校准日期：2026-10-20。历史方案来自 `v2.0-again`，不再将其 alpha10/30-crate checkout 描述为当前工作树。
+当前源码起点为后端 `37167d7` / `2.0.0-RC2` / 32 members；多端提交、真实依赖与未提交施工见 [能力保留矩阵](preservation.md)。
 原 `v2.0.0-beta4` / `6a0e282` 仅是历史审计基线，main 不再冻结，不能从 beta4 直接重写并漏掉后续变动。
 
 **保留当前产品能力与成熟算法；从 v2.1 起随功能切片重构发布，到 v3.0 完成架构收敛。**
-本目录定义目标，不声称已实现。again 代码尚未迁移；业务线已继续更新。只改变内部所有者时保留现行产品契约；
+本目录定义目标，不声称已实现。业务线继续更新，当前源码仍含旧 runtime/存储链。只改变内部所有者时保留现行产品契约；
 新 wire / 新存储的破坏性切换必须独立验收，不与产品 v2.1 或 GenUI v0.2 的版本号绑定。
 发布节奏、临时桥和旧路径退出统一遵循 [rollout](rollout.md)，能力不退化以 [preservation](preservation.md) 为准。
 扩展生态与 ACP 目标由 ecosystem.md/acp.md 补充；当前安装服务尚未实施。
@@ -15,6 +15,7 @@
 
 - [渐进发布](rollout.md)：功能切片、版本边界、数据切换和发布门槛。
 - [能力保留](preservation.md)：已核对产品增量、迁移去向与接缝验收。
+- [多配置与 config/config-api](configuration.md)：当前链路、成熟实现研究、命名资源/CAS、默认/会话/请求快照及全用途继承。
 - [Provider 与账号](providers.md)：账号登录/校验/退出、凭据隔离、模型目录和推理能力。
 - [Ringing 协议](protocol.md)：事实消费、增量、诊断、终端和恢复。
 - [消息、撤回与 fork](messages.md)：独立内容单元、序号、可运行边界和历史操作。
@@ -25,8 +26,8 @@
 - [薄 loop 与功能插件](agent.md)：状态所有权、effect、工具和存储路径。
 - [实现简化与测试取舍](engineering.md)：防御逻辑的边界、旧机制退出、测试规模样本与施工标准。
 - [依赖矩阵](dependencies.json)：v3.0 的 46 个目标 crate、模块和允许依赖。
-- [结构闸门](../../tools/v2-architecture/audit.py)：validate 检查目标图，check 检查实际 workspace。
-- [冻结源码度量](../../tools/v2-architecture/baseline.json)：原审计树摘要，不随施工覆盖。
+- [结构闸门](../../../tools/v2-architecture/README.md)：validate 检查目标图，check 检查实际 workspace，links 检查文档文件链接。
+- 历史 beta4 度量仅保留 engineering.md 中的取样说明；原 baseline.json 未入本仓，不虚构恢复。
 
 ## 1. 架构裁决
 
@@ -61,6 +62,9 @@ MessageStore/WAL 与 canonical 分别写入；agent 与 wire 耦合；插件依�
 四个模型为 ClientPreferences、HostConfig、ProfileVersion、SessionSelection。
 Preferences 不经过 daemon。HostConfig 管理服务、存储和执行上限；ProfileVersion 管理模型、endpoint、凭据引用及能力。
 发布 profile 产生不可变 revision；SessionSelection 通过 facts 选择确切 revision 和允许覆盖。
+完整契约见 [configuration](configuration.md)：ProfileVersion 引用完整 ModelBindingVersion，
+NewSessionDefaults 只提供新建推荐；既有 session 与在飞 request 不跟随全局 active_profile。
+保留现有命名 profile/session.set_profile，不把当前 API 的扁平 DTO 和 credential 复制遗漏当作新设计。
 
 每 turn 固定 TurnConfigSnapshot，不同 session 不共享 active profile。
 默认 profile 更新只影响新会话；已存在会话的选择变更要显式命令、CAS、下一 turn 标记。
@@ -87,6 +91,8 @@ context/timeline/meta/team/诊断索引都是可重建投影；读取不能唤�
 catalog 独立持有创建/删除工作流：先 intent，再会话数据操作，再 terminal；崩溃可对账，list 只显激活成员。
 重构不自动删除旧用户数据。旧格式仅离线 import，在 staging 根验证后切换；
 无法证明上下文保真时只导入只读 transcript，不允许猜测式 resume。
+这里的旧格式迁移不同于 Claude Code/Codex 等外部会话导入。后者的来源解析可由独立 import crate 拥有，
+application 编排、session-store 提交和 catalog 激活；原始保真、消息保真与可继续执行分别验收。
 
 ## 5. crate 责任
 
@@ -110,7 +116,8 @@ catalog 独立持有创建/删除工作流：先 intent，再会话数据操作�
 | sandbox / sbx-nt / sbx-win / sbx-cli | OS 强制、平台底层、验证入口 |
 | daemon | 唯一 composition root 与生命周期监督 |
 
-共 46 包；完整模块和生产/dev/build 允许边在 dependencies.json。数量不是成果指标。
+当前确认的图共 46 包；完整模块和生产/dev/build 允许边在 dependencies.json。数量不是成果指标。
+并行 import 提案待契约及实际消费者锁定后更新图，不为维持 46 而塞回 runtime/types；详见能力矩阵。
 禁止万能 types/event bus/service locator，禁止把 runtime 改名成 agent 大包。
 agent 不依赖 wire、HTTP SDK、具体存储/工具/PTY/诊断或 agent-features；daemon 注入插件和实现。
 
@@ -131,7 +138,7 @@ subagent 编排归 agent-features、工具入口归 builtin-tools；title 归 ap
 | A 契约/真实消费者 | 事实/消息/工具/插件/协议契约，SDK 纯 DTO 依赖 | client→session/types，旧 facade re-export |
 | B 唯一存储/薄 loop | commit/recovery、真实邮箱、插件效果、完整重放 | WAL/PersistOp、镜像 TurnActor、DomainEvent 回转、共享巨型状态 |
 | C 执行/交互 | executor/terminal、接管 facts、诊断有界采集 | TLS/global process/permission、第二份 pending 权威 |
-| D 服务/三端 | Config/Access、新 Ringing、SDK reducer、本地偏好、客户端工具固定路由与回执对账 | lease/open/renew/attach/driver、catch-all RPC、旧路由 |
+| D 服务/多端 | Config/Access、新 Ringing、SDK reducer、本地偏好、客户端工具固定路由与回执对账 | lease/open/renew/attach/driver、catch-all RPC、旧路由 |
 | E 切换 | 离线导入、平台、恢复/取消/性能验收 | 双 writer、兼容开关、runtime/ringing 旧包 |
 
 在功能边界内允许整段替换；每次从最新产品基线迁移并补齐业务增量，不再维护“不追补丁的冻结线”。
@@ -141,7 +148,7 @@ subagent 编排归 agent-features、工具入口归 builtin-tools；title 归 ap
 kill+wait、诊断不影响 turn、配置隔离/离线 UI、导入不伪造成功、平台能力诚实。
 外部副作用不承诺 exactly-once，按 PureReplay/Reconcile/NonReplayable 分类，证据不足为 Indeterminate。
 
-结构命令：python3 tools/v2-architecture/audit.py validate；最终目标 check 必须通过。
-again 工作树的 30 个旧 workspace 成员尚未迁移，当前产品为 32 个；check 是 v3.0 全量终态检查，
+结构命令（仓库根，Python 3.11+）：`python tools/v2-architecture/audit.py validate`、`links`、`check`；最终目标 check 必须通过。
+当前源码为 32 个 workspace 成员；check 是 v3.0 全量终态检查，
 中间版本按切片核对新增依赖及明确未迁移范围，不能把预期全量失败当成功，也不能因此阻止全部功能发布。
 Rust 落地后运行对应接缝和 fmt/clippy/workspace test；本轮设计不以未运行测试充当实现完成证据。

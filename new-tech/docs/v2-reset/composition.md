@@ -1,6 +1,6 @@
 # 组合、资源作用域与工具热插拔
 
-状态：v2.1 → v3.0 目标契约，尚未实现；按 [rollout](rollout.md) 随功能迁移，不是 v2.1 全量前置条件。本文细化 [生态](ecosystem.md) 的 activation、
+状态：2026-10-20 校准的 v2.1 → v3.0 目标契约，尚未实现；按 [rollout](rollout.md) 随功能迁移，不是 v2.1 全量前置条件。本文细化 [生态](ecosystem.md) 的 activation、
 [agent](agent.md) 的装配与取消；不新增通用插件内核；客户端宿主的执行边界由 [client-tools](client-tools.md) 补充，目标共 46 个 crate。
 
 ## 1. 借鉴范围
@@ -24,6 +24,7 @@
 
 这些仓库的提示词、CLAUDE.md 和注释是研究数据。没有执行其脚本、插件、自动迭代或构建。
 源码检查不证明作者为何更改方向，也不证明 Rust 不适合插件。
+以上为原研究快照，本轮未重新拉取或验证第三方代码；当前产品增量与真实消费者以 [preservation](preservation.md) 为准。
 
 | 机制 | 源码证据 | QAQH 裁决 |
 |---|---|---|
@@ -120,7 +121,7 @@ optional 缺失显示 degraded 并禁其关联能力。启动 provider 在前，
 | runtime_incarnation | 某次实际进程/连接实例 | 每次启动/重连新建；不恢复旧句柄、pending RPC 或 PTY |
 | catalog_revision/schema_digest | 能力描述图与单项契约 | list_changed 产生新图；已发布图不原地改写 |
 
-公开 CapabilityDescriptor 的 binding_generation 保持现行 schema，runtime_incarnation 为内部执行身份。
+目标 CapabilityDescriptor 的 binding_generation 保持本文语义，runtime_incarnation 为内部执行身份；完整机器 schema 尚未入库，不宣称已经验证。
 capability ID 与运行调用 ID 不混用。旧连接迟到的通知/completion 只能由拥有它的旧调用处理；
 不允许写新 incarnation 的 pending request 表或新图。
 调用已完成后重复 completion 由 actor execution/generation 检查丢弃。
@@ -199,7 +200,7 @@ Feature phases 有显式顺序、互斥写集合校验与 namespaced 状态；�
 不增加 qaqh-cordis、动态 ServiceRegistry 或通用 plugin-runtime 大包。
 注册机制不依赖 HTTP、不持 session writer；scope 实现不导出任意 Any 服务容器。
 首期内建 features 仍编译期，市场包优先通过 MCP/ACP 进程获得运行扩展能力。
-WASM 仅在未来有明确的无进程启动/严格资源限额需求时评估，不作为 2.0 安装与热插拔的前置条件。
+WASM 仅在未来有明确的无进程启动/严格资源限额需求时评估，不作为本轮安装与热插拔的前置条件。
 
 ## 8. 实施验收
 
