@@ -95,6 +95,20 @@ pub enum ListedAgentResidency {
     Unloaded,
 }
 
+/// 子代理终态摘要（**结果面**）。
+///
+/// 与 codex `AgentStatus::Completed(Option<String>)` 同构：最终答复属于
+/// 状态面，由 `list_agents` 直接返回。此前它被寄存在 `ProcessRegistry` 的
+/// `answer` 槽里，逼得 `spawn_subagent` 必须返回一个进程 id、取消多出一条
+/// 无校验路径、reload 还会换 id——结果面缺失派生的一串补丁。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentOutcome {
+    /// 最终答复正文；取消路径为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    pub exit_code: i32,
+}
+
 /// Logical agent metadata returned by `list_agents`.
 ///
 /// This is intentionally independent of runtime handles and session storage:
@@ -114,6 +128,9 @@ pub struct ListedAgent {
     pub status: ListedAgentStatus,
     pub residency: ListedAgentResidency,
     pub created_at_ms: i64,
+    /// 终态摘要；子代理进入终态后出现（`process check` 的替代读法）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AgentOutcome>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +155,6 @@ pub struct StartSubagentRequest<'a> {
     pub timeout_secs: u64,
     pub parent_session_id: &'a str,
     pub parent_call_id: &'a str,
-    pub process_id: u32,
     pub inter_agent: Option<qaqh_domain::InterAgentEnvelope>,
 }
 
@@ -164,6 +180,14 @@ pub struct WaitAgentRequest<'a> {
     /// Cooperative cancellation probe. The host polls this between reads so a
     /// cancelled turn does not remain blocked until the wait deadline.
     pub should_cancel: &'a dyn Fn() -> bool,
+    /// Agent paths or ids to wait on.
+    ///
+    /// Empty keeps the mailbox semantics (wait for the caller's own mailbox
+    /// watermark). Non-empty switches to **outcome** semantics: the wait ends
+    /// once every target has a recorded terminal outcome on the agent status
+    /// plane (`list_agents`). This is the replacement for `process wait {id}`,
+    /// which used to be the only way to wait on a subagent.
+    pub targets: &'a [String],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,11 +550,20 @@ pub trait SubagentHost: Send + Sync {
     /// Roll back a child whose canonical spawn edge could not be committed.
     ///
     /// Unlike [`Self::abort_subagent`], this also removes the logical catalog
-    /// registration because the edge never became authoritative.
-    fn rollback_subagent(&self, session_id: &str, child_session_id: &str, process_id: u32);
+    /// registration because the edge never became authoritative. The child is
+    /// addressed by its canonical `child_session_id` — the same primary key the
+    /// `SubagentSpawned` fact carries — not by an exec process handle.
+    fn rollback_subagent(&self, session_id: &str, child_session_id: &str);
 
     /// Close a child after its canonical spawn edge was committed.
-    fn abort_subagent(&self, session_id: &str, process_id: u32);
+    fn abort_subagent(&self, session_id: &str);
+
+    /// Record the child's terminal outcome on the **result plane**.
+    ///
+    /// The collector calls this exactly once when its loop ends. It replaces the
+    /// old `ProcessRegistry::set_answer` + `mark_exited` pair, so the final
+    /// answer is readable through `list_agents` instead of `process check`.
+    fn finish_subagent(&self, child_session_id: &str, answer: &str, exit_code: i32);
 
     /// 进程内直接向指定 seed 的 actor 命令队列发送一条 Ringing 命令
     /// （等价 HTTP attach + send_command，但进程内无 lease/owns 语义）。

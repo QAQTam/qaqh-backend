@@ -217,6 +217,10 @@ pub struct ProviderConfig {
     pub gemini_path: Option<String>,
     pub thinking_mode: ThinkingParamMode,
     pub cache_field: CacheTokenField,
+    /// Messages wire 的 usage 口径（`input_tokens` 是否含缓存），镜像自
+    /// `EndpointCompat::cache_usage_semantics`。`Auto` = 按真实响应判定
+    /// （见 `usage_semantics`），判不出时取协议契约的 exclusive。
+    pub cache_usage_semantics: qaqh_types::CacheUsageSemantics,
     pub include_stream_usage: bool,
     pub supports_thinking: bool,
     /// 大上下文模型（如 zcode GLM-5.3）的 thinking 预算档位，镜像自
@@ -374,6 +378,7 @@ impl ProviderConfig {
             gemini_path: None,
             thinking_mode,
             cache_field,
+            cache_usage_semantics: qaqh_types::CacheUsageSemantics::default(),
             include_stream_usage: false,
             supports_thinking,
             thinking_budget_large: false,
@@ -414,6 +419,7 @@ impl ProviderConfig {
             gemini_path: None,
             thinking_mode: ThinkingParamMode::OpenAi,
             cache_field: CacheTokenField::default(),
+            cache_usage_semantics: qaqh_types::CacheUsageSemantics::default(),
             include_stream_usage: false,
             supports_thinking: false,
             thinking_budget_large: false,
@@ -459,6 +465,7 @@ impl ProviderConfig {
             gemini_path: None,
             thinking_mode: ThinkingParamMode::OpenAi,
             cache_field: CacheTokenField::default(),
+            cache_usage_semantics: qaqh_types::CacheUsageSemantics::default(),
             include_stream_usage: false,
             supports_thinking: true,
             thinking_budget_large: false,
@@ -498,6 +505,7 @@ impl ProviderConfig {
             gemini_path,
             thinking_mode: ThinkingParamMode::OpenAi,
             cache_field: CacheTokenField::default(),
+            cache_usage_semantics: qaqh_types::CacheUsageSemantics::default(),
             include_stream_usage: false,
             supports_thinking: true,
             thinking_budget_large: false,

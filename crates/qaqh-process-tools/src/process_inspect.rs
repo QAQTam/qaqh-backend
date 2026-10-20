@@ -72,10 +72,10 @@ impl TypedTool for ProcessTool {
         args: ProcessArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
         match args.action.as_str() {
-            "check" => handle_check(&args),
+            "check" => handle_check(ctx, &args),
             "wait" => handle_wait(ctx, &args),
-            "write" => handle_write(&args),
-            "kill" => handle_kill(&args),
+            "write" => handle_write(ctx, &args),
+            "kill" => handle_kill(ctx, &args),
             _ => Err(process_error(
                 "invalid_action",
                 "process.action must be check, wait, write, or kill",
@@ -85,18 +85,36 @@ impl TypedTool for ProcessTool {
     }
 }
 
-fn process_id(args: &ProcessArgs, operation: &str) -> Result<u32, ToolExecutionError> {
-    args.id.ok_or_else(|| {
+fn process_id(
+    args: &ProcessArgs,
+    operation: &str,
+    caller_session_id: &str,
+) -> Result<u32, ToolExecutionError> {
+    let id = args.id.ok_or_else(|| {
         process_error(
             "missing_id",
             format!("{operation}: id required"),
             "Provide the process ID returned by exec.",
         )
-    })
+    })?;
+    // P0：注册表是 daemon 全局的、id 是连号整数。不做归属校验时任何会话都
+    // 能 kill/write 别人 spawn 的后台进程。越权一律回 not_found，避免泄露
+    // 「其它会话存在这个进程」这一事实。
+    if let Some(owner) = ProcessRegistry::owner_of(id)
+        && !caller_session_id.is_empty()
+        && owner != caller_session_id
+    {
+        return Err(process_error(
+            "not_found",
+            format!("{operation}: process {id} not found"),
+            "Process may belong to another session.",
+        ));
+    }
+    Ok(id)
 }
 
-fn handle_check(args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
-    let id = process_id(args, "process.check")?;
+fn handle_check(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
+    let id = process_id(args, "process.check", &ctx.session_id)?;
     let _ = ProcessRegistry::try_wait(id);
     match ProcessRegistry::get_info(id) {
         Some(info) => Ok(process_info_output(id, info)),
@@ -112,7 +130,7 @@ fn handle_wait(
     ctx: &ToolCallContext,
     args: &ProcessArgs,
 ) -> Result<ProcessOutput, ToolExecutionError> {
-    let id = process_id(args, "process.wait")?;
+    let id = process_id(args, "process.wait", &ctx.session_id)?;
     let timeout_secs = args.timeout_secs.unwrap_or(120);
     if !(1..=3600).contains(&timeout_secs) {
         return Err(process_error(
@@ -132,8 +150,8 @@ fn handle_wait(
     }
 }
 
-fn handle_write(args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
-    let id = process_id(args, "process.write")?;
+fn handle_write(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
+    let id = process_id(args, "process.write", &ctx.session_id)?;
     let text = args
         .text
         .as_deref()
@@ -157,8 +175,8 @@ fn handle_write(args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError>
     }
 }
 
-fn handle_kill(args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
-    let id = process_id(args, "process.kill")?;
+fn handle_kill(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
+    let id = process_id(args, "process.kill", &ctx.session_id)?;
     kill_result(id, ProcessRegistry::kill(id))
 }
 
@@ -286,6 +304,67 @@ mod tests {
             display.summary.as_deref(),
             Some("process 7: running"),
             "process summary must be status metadata, not the body's first line"
+        );
+    }
+
+    fn process_args(id: u32) -> ProcessArgs {
+        ProcessArgs {
+            action: "check".to_string(),
+            id: Some(id),
+            timeout_secs: None,
+            text: None,
+        }
+    }
+
+    /// P0 回归：注册表是 daemon 全局的、id 是连号整数。不做归属校验时任何
+    /// 会话都能 kill/write 别人 spawn 的后台进程。
+    #[test]
+    fn process_id_is_scoped_to_the_owning_session() {
+        let owned = ProcessRegistry::register("ownership-owned");
+        ProcessRegistry::set_owner(owned, "session-a");
+        assert_eq!(
+            ProcessRegistry::owner_of(owned).as_deref(),
+            Some("session-a"),
+            "归属必须可读回"
+        );
+
+        assert_eq!(
+            process_id(&process_args(owned), "process.check", "session-a")
+                .expect("owner may address its own process"),
+            owned
+        );
+        assert_eq!(
+            error_code(
+                process_id(&process_args(owned), "process.check", "session-b")
+                    .expect_err("cross-session access must be rejected")
+            ),
+            "not_found",
+            "越权必须按 not_found 回复，不泄露存在性"
+        );
+
+        // 未登记归属的条目（不返回 id 的同步 exec / 测试夹具）保持可用。
+        let unowned = ProcessRegistry::register("ownership-unowned");
+        assert_eq!(ProcessRegistry::owner_of(unowned), None);
+        assert!(
+            process_id(&process_args(unowned), "process.check", "session-b").is_ok(),
+            "未登记归属不得被误判为越权"
+        );
+
+        // 墓碑保留归属：条目驱逐后仍做同样的校验。
+        ProcessRegistry::mark_exited(owned, 0);
+        ProcessRegistry::age_registration_for_test(owned, 3600);
+        let _trigger = ProcessRegistry::register("ownership-trigger-eviction");
+        assert_eq!(
+            ProcessRegistry::owner_of(owned).as_deref(),
+            Some("session-a"),
+            "墓碑必须保留归属"
+        );
+        assert_eq!(
+            error_code(
+                process_id(&process_args(owned), "process.kill", "session-b")
+                    .expect_err("cross-session kill must be rejected on tombstones too")
+            ),
+            "not_found"
         );
     }
 }

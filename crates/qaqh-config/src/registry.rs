@@ -8,7 +8,9 @@
 
 use serde::Deserialize;
 
-use qaqh_types::{CacheTokenField, EndpointCompat, ThinkingParamMode, UserSendMode, Wire};
+use qaqh_types::{
+    CacheTokenField, CacheUsageSemantics, EndpointCompat, ThinkingParamMode, UserSendMode, Wire,
+};
 
 /// `assets/legacy-providers.toml` 的编译期快照。
 const LEGACY_TOML: &str = include_str!("../../../assets/legacy-providers.toml");
@@ -113,6 +115,8 @@ struct LegacyEndpoint {
     #[serde(default)]
     cache_field: Option<CacheTokenField>,
     #[serde(default)]
+    cache_usage_semantics: Option<CacheUsageSemantics>,
+    #[serde(default)]
     include_stream_usage: Option<bool>,
     #[serde(default)]
     official_web_tools: Option<bool>,
@@ -173,6 +177,9 @@ impl LegacyEndpoint {
             path,
             thinking_mode: self.thinking_mode.clone().unwrap_or(defaults.thinking_mode),
             cache_field: self.cache_field.clone().unwrap_or(defaults.cache_field),
+            cache_usage_semantics: self
+                .cache_usage_semantics
+                .unwrap_or(defaults.cache_usage_semantics),
             include_stream_usage: flag(self.include_stream_usage, defaults.include_stream_usage),
             official_web_tools: flag(self.official_web_tools, defaults.official_web_tools),
             supports_thinking: flag(self.supports_thinking, defaults.supports_thinking),

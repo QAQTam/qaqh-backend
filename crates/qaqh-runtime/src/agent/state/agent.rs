@@ -1392,6 +1392,10 @@ mod tests {
             &agent_tool_registrars(),
             vec![],
         );
+        // `init_tools` 是 OnceLock（首个调用生效），而 allowlist 是进程级的：
+        // 其它测试可能已经把 manager 收窄成 minimal 档位。这里显式复位到
+        // 全量，让断言只依赖「注册表内容」而不依赖测试执行顺序。
+        qaqh_workspace::runtime::set_allowed_tools(Vec::new());
 
         let names = |agent: &AgentState| -> Vec<String> {
             agent
@@ -1542,6 +1546,13 @@ mod tests {
             names_before, names_after,
             "unknown mode must not reset toolset"
         );
+
+        // 收尾复位：`apply_tool_mode` 会经 `runtime::set_allowed_tools` 改写
+        // **进程级** manager 的 allowlist（生产里每个 actor 有自己的
+        // thread-local manager，lib 测试共用全局那个）。不复位就会把
+        // minimal:c 的四件套泄漏给后续测试——`refresh_tool_defs_hides_search_*`
+        // 断言 `all_tools()` 含 `search`，正是被这里踩红的。
+        agent.apply_tool_mode("standard", &[]);
     }
 
     /// 验证回传给模型的工具 schema（`agent.tool_defs`，engine_turn.rs L1622
