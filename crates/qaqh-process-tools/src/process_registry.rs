@@ -116,6 +116,10 @@ impl FullCapture {
 pub struct ProcEntry {
     pub id: u32,
     pub name: String,
+    /// P0：条目归属会话。注册表是 daemon 全局的、id 是连号整数，不记归属
+    /// 时任何会话都能 `process kill/write` 别人的后台进程（子代理同理）。
+    /// 空串 = 未登记归属（测试夹具 / 不返回 id 的同步 exec）。
+    owner: Mutex<String>,
     pub status: Arc<Mutex<ProcStatus>>,
     /// 进入终态（Exited/Killed）的时刻，`Running` 期间为 `None`。
     /// 惰性驱逐按此计时（BUG-2026-09-13-23：原实现按 `started` 计时，
@@ -157,6 +161,44 @@ const EVICT_AFTER_TERMINAL: Duration = Duration::from_secs(600);
 /// 别的进程组 id，`killpg` 会误杀活进程组。
 pub const TOMBSTONE_CAPACITY: usize = 256;
 
+/// 同时追踪的进程条目上限（**软上限**）。
+///
+/// 达到上限时先驱逐全部终态条目（不等 [`EVICT_AFTER_TERMINAL`] 门槛）；若剩余
+/// 条目都是存活进程则不拒绝注册——正在运行的进程不能被静默丢弃，只告警。
+/// 真正的内存边界由「终态即驱逐」保证（与 codex `MAX_UNIFIED_EXEC_PROCESSES` 同旨）。
+pub const MAX_TRACKED_PROCESSES: usize = 256;
+
+/// 生产环境随机分配进程 id 的区间。
+///
+/// 单调递增的 id 在 daemon 重启后从 1 重发，旧 transcript 里的 `process_id`
+/// 会静默命中一个无关的新进程（ABA）；同时连号 id 可枚举，而它本身就是
+/// 跨会话 `kill` / 写 stdin 的凭据。随机分配把这两个问题一起消掉。
+/// 与 codex `unified_exec` 一致：生产随机、测试确定性。
+const RANDOM_PROCESS_ID_RANGE: std::ops::Range<u32> = 1_000..100_000;
+
+/// 生产随机；测试或显式开关下确定性递增（便于断言与复现）。
+fn should_use_deterministic_process_ids() -> bool {
+    cfg!(test) || std::env::var_os("QAQH_DETERMINISTIC_PROCESS_IDS").is_some()
+}
+
+/// 无外部依赖的伪随机 id：`RandomState` 每实例随机种子 + 计数器 + 时钟混合。
+fn pseudo_random_process_id() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(counter);
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0),
+    );
+    let span = u64::from(RANDOM_PROCESS_ID_RANGE.end - RANDOM_PROCESS_ID_RANGE.start);
+    (u64::from(RANDOM_PROCESS_ID_RANGE.start) + hasher.finish() % span) as u32
+}
+
 /// 终态条目的墓碑（驱逐时由 os_pid 快照降级而来）。
 ///
 /// 驱逐只释放内存中的输出快照与句柄，`os_pid` 与终态结果留下墓碑：
@@ -166,6 +208,8 @@ pub const TOMBSTONE_CAPACITY: usize = 256;
 pub struct Tombstone {
     pub id: u32,
     pub name: String,
+    /// P0：归属会话随条目降级保留——墓碑仍参与归属校验。
+    pub owner: String,
     /// 驱逐时的终态（`Exited(code)` / `Killed`）；`Running` 不可能被驱逐。
     pub status: ProcStatus,
     pub exit_code: Option<i32>,
@@ -223,6 +267,11 @@ impl ProcessRegistry {
     /// 与 Child 句柄释放，但按 os_pid 清理孤儿的路径与「已结束 vs id 无效」
     /// 的区分能力保留（BUG-2026-09-13-23）。
     fn evict_stale_entries(&mut self, now: Instant) {
+        self.evict_terminal_entries(now, Some(EVICT_AFTER_TERMINAL));
+    }
+
+    /// 驱逐终态条目；`older_than = None` 表示不看年龄、一律驱逐。
+    fn evict_terminal_entries(&mut self, now: Instant, older_than: Option<Duration>) {
         let mut stale: Vec<(u32, Tombstone)> = Vec::new();
         for (id, e) in &self.entries {
             let status = e.status.lock().unwrap_or_else(|er| er.into_inner()).clone();
@@ -240,7 +289,9 @@ impl ProcessRegistry {
                     }
                 }
             };
-            if now.saturating_duration_since(terminal_at) <= EVICT_AFTER_TERMINAL {
+            if let Some(threshold) = older_than
+                && now.saturating_duration_since(terminal_at) <= threshold
+            {
                 continue;
             }
             let exit_code = *e.last_exit_code.lock().unwrap_or_else(|er| er.into_inner());
@@ -249,6 +300,7 @@ impl ProcessRegistry {
                 Tombstone {
                     id: *id,
                     name: e.name.clone(),
+                    owner: e.owner.lock().unwrap_or_else(|er| er.into_inner()).clone(),
                     status,
                     exit_code,
                     os_pid: *e.os_pid.lock().unwrap_or_else(|er| er.into_inner()),
@@ -268,6 +320,46 @@ impl ProcessRegistry {
             );
             self.remember_tombstone(tombstone);
         }
+    }
+
+    /// 软容量上限：先驱逐全部终态条目；剩余都是存活进程时只告警。
+    fn enforce_capacity(&mut self, now: Instant) {
+        if self.entries.len() < MAX_TRACKED_PROCESSES {
+            return;
+        }
+        self.evict_terminal_entries(now, None);
+        if self.entries.len() >= MAX_TRACKED_PROCESSES {
+            log::warn!(
+                "[registry] {} live processes at soft cap {}; keeping them (running processes are never dropped)",
+                self.entries.len(),
+                MAX_TRACKED_PROCESSES
+            );
+        }
+    }
+
+    /// 分配 id：生产随机（避开在册与墓碑），测试确定性递增。
+    fn allocate_id(&mut self) -> u32 {
+        if should_use_deterministic_process_ids() {
+            return self.next_deterministic_id();
+        }
+        for _ in 0..64 {
+            let candidate = pseudo_random_process_id();
+            if !self.entries.contains_key(&candidate) && self.tombstone(candidate).is_none() {
+                return candidate;
+            }
+        }
+        // 极端情况（区间内 64 次都撞上）：回落到单调计数器，保证仍能注册。
+        log::warn!("[registry] random id allocation exhausted retries; falling back to counter");
+        self.next_deterministic_id()
+    }
+
+    fn next_deterministic_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        if self.next_id == u32::MAX {
+            log::error!("[registry] process id space exhausted");
+        }
+        id
     }
 
     /// 记入墓碑并施加容量上限（FIFO 淘汰最旧者）。
@@ -309,16 +401,14 @@ impl ProcessRegistry {
             // 注册时间（`started`）计时——长跑后刚结束的进程其 os_pid 仍有
             // 清理价值，按 started 计时会被立刻驱逐。
             r.evict_stale_entries(std::time::Instant::now());
-            let id = r.next_id;
-            r.next_id = r.next_id.saturating_add(1);
-            if r.next_id == u32::MAX {
-                log::error!("[registry] process id space exhausted");
-            }
+            r.enforce_capacity(std::time::Instant::now());
+            let id = r.allocate_id();
             r.entries.insert(
                 id,
                 ProcEntry {
                     id,
                     name: name.to_string(),
+                    owner: Mutex::new(String::new()),
                     status: Arc::new(Mutex::new(ProcStatus::Running)),
                     full_output: Arc::new(Mutex::new(FullCapture::default())),
                     full_stderr: Arc::new(Mutex::new(FullCapture::default())),
@@ -334,6 +424,35 @@ impl ProcessRegistry {
                 },
             );
             id
+        })
+    }
+
+    /// P0：登记条目归属会话（`process` 工具的跨会话隔离依据）。
+    ///
+    /// 注册表是 daemon 全局单例、id 是连号整数，不记归属时任何会话都能
+    /// `process kill/write` 别人 spawn 的后台进程。空 `session_id` 视为
+    /// 不登记（保留未归属语义，供测试夹具使用）。
+    pub fn set_owner(id: u32, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        Self::with(|r| {
+            if let Some(entry) = r.entries.get(&id) {
+                *entry.owner.lock().unwrap_or_else(|e| e.into_inner()) = session_id.to_string();
+            }
+        });
+    }
+
+    /// 条目归属会话；`None` = id 不存在或未登记归属（旧路径/测试夹具）。
+    pub fn owner_of(id: u32) -> Option<String> {
+        Self::with(|r| {
+            if let Some(entry) = r.entries.get(&id) {
+                let owner = entry.owner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                return (!owner.is_empty()).then_some(owner);
+            }
+            r.tombstone(id)
+                .map(|tombstone| tombstone.owner.clone())
+                .filter(|owner| !owner.is_empty())
         })
     }
 
@@ -870,6 +989,38 @@ impl ProcessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P3：生产 id 走随机区间（重启不会把旧 transcript 的 id 指到新进程上）。
+    #[test]
+    fn pseudo_random_process_ids_stay_in_the_production_range() {
+        let samples: Vec<u32> = (0..8).map(|_| pseudo_random_process_id()).collect();
+        for id in &samples {
+            assert!(
+                RANDOM_PROCESS_ID_RANGE.contains(id),
+                "id {id} 必须落在随机分配区间内"
+            );
+        }
+        assert!(
+            samples.windows(2).any(|pair| pair[0] != pair[1]),
+            "连续采样不应全部相同: {samples:?}"
+        );
+    }
+
+    /// P3：软上限只剪终态条目，低于上限时不做任何驱逐。
+    #[test]
+    fn soft_capacity_is_a_noop_below_the_limit() {
+        assert!(
+            MAX_TRACKED_PROCESSES >= TOMBSTONE_CAPACITY,
+            "条目上限不应低于墓碑上限"
+        );
+        let id = ProcessRegistry::register("capacity-noop");
+        ProcessRegistry::mark_exited(id, 0);
+        ProcessRegistry::with(|r| r.enforce_capacity(std::time::Instant::now()));
+        assert!(
+            ProcessRegistry::get_info(id).is_some(),
+            "低于上限时不得驱逐终态条目"
+        );
+    }
 
     #[test]
     fn captured_full_grows_with_appended_chunks() {

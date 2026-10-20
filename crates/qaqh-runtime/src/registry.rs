@@ -18,7 +18,7 @@ use qaqh_session::session_fact_v2::{
     AgentMetadata, AgentPath, FactPayload, SessionFact, SessionId, SubagentSpawnConfig,
     SubagentTerminalStatus, TeamAgentResidency,
 };
-use qaqh_subagent::{ListedAgent, ListedAgentResidency, ListedAgentStatus};
+use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
 use crate::agent::SubagentSpawnSpec;
 use crate::agent_catalog::AgentCatalog;
@@ -338,6 +338,12 @@ pub struct AgentRegistry {
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
     /// Subagent V2：树深上限。root depth = 0；默认 1（只允许 root -> child）。
+    /// Subagent V2：agent 树最大深度（`/root` 的 depth 为 0）。
+    ///
+    /// 默认 1 = 只允许 `root -> child`；daemon 启动时由
+    /// `config.subagent.max_depth` 覆盖（`service.rs`），改动需重启 daemon。
+    /// 拓扑本身（`AgentPath` 的 parent/child/is_descendant_of）支持任意深度，
+    /// 这个值只是策略闸门。
     max_depth: usize,
     /// Subagent V2：同一 sender-target 的 queued message 上限。0 = unlimited。
     message_in_flight_per_pair: u64,
@@ -348,6 +354,12 @@ pub struct AgentRegistry {
     outbound_attempts: HashMap<String, HashMap<String, u64>>,
     /// Child result collectors currently armed for a running/reloaded turn.
     armed_collectors: HashSet<String>,
+    /// V2 子代理终态摘要（**结果面**）：`child_session_id` → outcome。
+    ///
+    /// 结果不再寄存在 `ProcessRegistry` 的 `answer` 槽：状态面自己承载最终
+    /// 答复，由 `list_agents` 直接返回（与 codex `AgentStatus::Completed`
+    /// 同构）。键是 canonical 主键，reload 不会换 id。
+    subagent_outcomes: HashMap<String, AgentOutcome>,
 }
 
 impl AgentRegistry {
@@ -370,6 +382,7 @@ impl AgentRegistry {
             message_outbound_per_sender: 1024,
             outbound_attempts: HashMap::new(),
             armed_collectors: HashSet::new(),
+            subagent_outcomes: HashMap::new(),
         }
     }
 
@@ -559,9 +572,37 @@ impl AgentRegistry {
                 status,
                 residency,
                 created_at_ms: agent.created_at_ms,
+                outcome: self.subagent_outcomes.get(agent.agent_id.as_str()).cloned(),
             });
         }
         Ok(listed)
+    }
+
+    /// Record a child's terminal outcome on the **result plane**.
+    ///
+    /// Called exactly once by the collector (through
+    /// `SubagentHost::finish_subagent`). This is the replacement for the old
+    /// `ProcessRegistry::set_answer` + `mark_exited` pair: the answer now lives
+    /// with the agent identity instead of the exec process table.
+    pub fn record_subagent_outcome(&mut self, child_session_id: &str, answer: &str, exit_code: i32) {
+        if child_session_id.is_empty() {
+            return;
+        }
+        self.subagent_outcomes.insert(
+            child_session_id.to_string(),
+            AgentOutcome {
+                answer: (!answer.is_empty()).then(|| answer.to_string()),
+                exit_code,
+            },
+        );
+    }
+
+    /// 读取子代理终态摘要；`None` = 尚未结束（或不是子代理）。
+    ///
+    /// 纯内存读，供 `wait_agent(targets=...)` 的完成判定使用——不去读
+    /// canonical 日志，避免每次轮询都做文件 I/O。
+    pub fn subagent_outcome(&self, child_session_id: &str) -> Option<AgentOutcome> {
+        self.subagent_outcomes.get(child_session_id).cloned()
     }
 
     fn agent_residency(&self, agent_id: &str) -> ListedAgentResidency {
@@ -935,7 +976,7 @@ impl AgentRegistry {
             .ok_or_else(|| format!("subagent parent metadata missing for {parent_session_id}"))?;
         if parent.agent_path.depth() >= self.max_depth {
             return Err(format!(
-                "subagent max depth {} reached at parent {} (depth {})",
+                "subagent max depth {} reached at parent {} (depth {}); raise config.subagent.max_depth and restart the daemon to allow deeper nesting",
                 self.max_depth,
                 parent.agent_path,
                 parent.agent_path.depth()
@@ -1011,6 +1052,8 @@ impl AgentRegistry {
     pub fn rollback_subagent(&mut self, session_id: &str, child_session_id: &str) {
         self.agent_catalog.remove(child_session_id);
         self.residency.remove(child_session_id);
+        // 结果面同步回滚：边从未成为权威事实，不得留下终态摘要。
+        self.subagent_outcomes.remove(child_session_id);
         self.close(session_id);
     }
 
@@ -2594,6 +2637,10 @@ mod tests {
         }
         drop(log);
 
+        // 结果面：collector 经 `SubagentHost::finish_subagent` 落到 agent 状态上，
+        // `list_agents` 直接返回，不再需要 `process check`。
+        registry.record_subagent_outcome(child.as_str(), "final answer body", 0);
+
         let listed = registry
             .list_agents_with_state_for_caller(&root, "/root")
             .expect("list agents with state");
@@ -2603,6 +2650,9 @@ mod tests {
             .expect("child listing");
         assert_eq!(child_state.status, ListedAgentStatus::Completed);
         assert_eq!(child_state.residency, ListedAgentResidency::Unloaded);
+        let outcome = child_state.outcome.as_ref().expect("outcome on the status plane");
+        assert_eq!(outcome.answer.as_deref(), Some("final answer body"));
+        assert_eq!(outcome.exit_code, 0);
     }
 
     #[test]
@@ -2703,6 +2753,7 @@ mod tests {
             message_outbound_per_sender: 1024,
             outbound_attempts: HashMap::new(),
             armed_collectors: HashSet::new(),
+            subagent_outcomes: HashMap::new(),
         };
         let connection_id = ConnectionId::new("connection-registry");
 
@@ -2813,6 +2864,7 @@ mod tests {
             message_outbound_per_sender: 1024,
             outbound_attempts: HashMap::new(),
             armed_collectors: HashSet::new(),
+            subagent_outcomes: HashMap::new(),
         };
         registry
             .link_subagent("parent-seed", "child-seed")
