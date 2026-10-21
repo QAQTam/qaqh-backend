@@ -114,6 +114,9 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("fs.list", READ),
     ("fs.read", READ),
     // config / profile
+    (qaqh_config_api::resources::methods::CATALOG, READ_ADMIN),
+    (qaqh_config_api::resources::methods::PROFILE, READ_ADMIN),
+    (qaqh_config_api::resources::methods::HOST, READ_ADMIN),
     ("config.load", READ),
     ("config.save", WRITE),
     ("config.set_permission_level", WRITE),
@@ -202,6 +205,16 @@ pub fn dispatch(service: &QaqhService, method: &str, params: &Value) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_resource_queries_are_admin_only_and_do_not_require_a_session() {
+        for method in qaqh_config_api::resources::methods::ALL {
+            let info = lookup(method).expect("registered config resource query");
+            assert_eq!(info.kind, MethodKind::Read);
+            assert!(info.admin_only);
+            assert!(!info.requires_session);
+        }
+    }
 
     /// 「登录/凭据」类方法一律 admin-only，且方法表与 qaqh-siwc 的清单**逐一对齐**。
     ///

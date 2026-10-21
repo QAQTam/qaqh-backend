@@ -1,5 +1,13 @@
 # RC 前架构与 crate 职责基线
 
+配置资源 CFG-01（2026-10-20）：契约与协议值类型归 `qaqh-config-api`，默认仅依赖 serde；
+新增生产边 `qaqh-types → qaqh-config-api`、`qaqh-client → qaqh-config-api`、`qaqh-daemon → qaqh-config-api`。
+types/provider 为未迁移消费者保留单向类型导出，不保留第二份定义；最迟 v3.0 随 types 退出删除。
+配置资源读由 `qaqh-config::resources::ConfigReader` 显式路径读取现有 config.toml，不解密 secret、迁移、初始化或回落 watch。
+runtime 映射具名查询，daemon 在现行 service 路由执行 admin 准入并映射具名 HTTP 错误；client 提供 typed 方法。
+不新增持久文件、writer、fact 或运行态全局。现行 writer 尚未迁移，不宣称 revision/CAS 或会话 applied 已完成。
+契约、兼容退出与授权见 [配置资源 ADR](adr/2026-10-20-config-resources.md)。
+
 导入集成策略（2026-10-20，尚未实施）：[IMP-06 与兼容协议](spec-transcript-import-protocol.md)。
 独立核心已存在，审查见 [review](review-transcript-import-2026-10-20.md)。导入归档采用
 `archives/{archive_id}` 的 canonical log + blobs，与可运行 sessions 隔离；作业暂存、幂等回执为
@@ -156,7 +164,7 @@ CLEAN-3 必须补齐实际路径、写入者、崩溃窗口及其他持久文件
 | device/lease/driver/命令回执 | 控制面持久/运行状态混合 | daemon 所有；设备登记是独立控制面权威，lease/residency 是运行态；命令业务终态由事实或同步 ack 决定 |
 | team/task/board | session 内已有独立存储与投影 | CLEAN-3 逐项核对写入/事实覆盖，明确导入及重建来源后再删副本 |
 | 文件操作 journal/spy 审计 | 文件 undo/变化记录 | 工作区操作与诊断存储；保留真实 undo 责任，不与 messages.wal 混淆 |
-| config/secrets/data-root marker | 用户配置/密钥与数据根所有权 | 独立配置及 bootstrap 权威；不属于会话消息缓存 |
+| config/secrets/data-root marker | 当前 `config.toml` + `secrets.toml` 是生产配置/密钥权威；`Config::update/save_with`、`profile.save_current`、`daemon mcp_import` 可写，`watch::{authoritative,latest}` 与 mtime poller 提供运行快照/通知；`ConfigReader` 是 CFG-01 显式路径只读投影。CFG2-02 隔离核心已在 `qaqh-config::repository` 实现但未装配 | 唯一发布点为 `<config-root>/configuration/manifest.json`；profiles/host/defaults/receipts 为 manifest 索引的不可变资源，manifest 记录 SHA-256 内容摘要与 requestId 回执 key-id。repository 取得 OS 独占锁、校验 format/schema、文件大小、回执/资源引用不变量；每次命令前校验 manifest 快照和已发布资源摘要，Unix 资源 no-replace 发布，只有 manifest 可达对象提交。secret 与 HMAC fingerprint 必须由受限端口注入，平台密钥不可用时拒写；当前尚无生产端口实现。停服备份/staging 迁移、运行消费者注入、旧写拒绝与回退矩阵尚未实施；该核心不构成生产权威。`cargo test -p qaqh-config -- --test-threads=1` 通过；严格 clippy 仍被依赖链既有 sbx-win/qaqh-types lint 阻断。细节及 G0 批准见 [CFG-02 spec §5.1](spec-config-resources.md#51-cfg2-00-消费者核对与评审输入2026-10-20) |
 
 ## 6. 源码证据与未证实项
 

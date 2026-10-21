@@ -3,6 +3,12 @@
 校准：2026-10-15。现行设计入口：[v2-reset](v2-reset/README.md)；发布规则见 [rollout](v2-reset/rollout.md)。
 **当前产品不再冻结；again 设计工作树不等于当前产品；以下目标不表示已实现。**
 
+## 当前工作树配置切片
+
+CFG-01 从 backend `80ddb3c` / RC2 / 33 members 开工，配置资源只读契约、显式路径 reader、
+admin service 映射及 Rust typed client 见 [现行配置契约](v2-reset/configuration.md)。
+本工作树尚未交付资源写入/CAS、凭据版本、会话 applied/pending 或多端 UI 迁移；下面 again 表格为历史核对对象。
+
 ## 1. 基线与状态
 
 | 对象 | 核对结果 | 使用方式 |

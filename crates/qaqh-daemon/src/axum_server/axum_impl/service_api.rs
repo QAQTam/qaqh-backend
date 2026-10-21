@@ -1,6 +1,7 @@
 //! axum_impl::service_api — see parent module docs.
 
 use super::*;
+use axum::Json;
 
 /// `POST /ringing/v2/service/{method}` — 服务面 RPC（Read/Write 两类，
 /// 方法表见 `qaqh_runtime::ringing::service_methods`）。旧
@@ -76,6 +77,12 @@ pub(crate) async fn handle_service(
     if let Some(rejection) = service_driver_rejection(&state, &client_session_id, method, &params) {
         return rejection;
     }
+    if qaqh_config_api::resources::methods::ALL.contains(&method) {
+        return match state.service.config_query(method, &params) {
+            Ok(value) => Json(value).into_response(),
+            Err(error) => config_query_error_response(error),
+        };
+    }
     match service_methods::dispatch(&state.service, method, &params) {
         Ok(value) => (
             StatusCode::OK,
@@ -90,6 +97,23 @@ pub(crate) async fn handle_service(
         )
             .into_response(),
     }
+}
+
+fn config_query_error_response(error: qaqh_config_api::ConfigQueryError) -> Response {
+    use qaqh_config_api::ConfigQueryError;
+    let status = match error {
+        ConfigQueryError::InvalidRequest => StatusCode::BAD_REQUEST,
+        ConfigQueryError::ProfileNotFound => StatusCode::NOT_FOUND,
+        ConfigQueryError::ConfigurationUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ConfigQueryError::InvalidConfiguration
+        | ConfigQueryError::InvalidDefault
+        | ConfigQueryError::MigrationRequired => StatusCode::CONFLICT,
+    };
+    (
+        status,
+        Json(serde_json::json!({ "code": error.code(), "message": error.to_string() })),
+    )
+        .into_response()
 }
 
 /// Driver admission for session-scoped write RPCs.
@@ -130,3 +154,33 @@ fn service_driver_rejection(
 }
 
 // ---- SSE helpers (P2) ----
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn config_resource_failures_have_actionable_status_and_safe_code() {
+        use qaqh_config_api::ConfigQueryError;
+        for (error, status) in [
+            (ConfigQueryError::InvalidRequest, StatusCode::BAD_REQUEST),
+            (ConfigQueryError::ProfileNotFound, StatusCode::NOT_FOUND),
+            (
+                ConfigQueryError::ConfigurationUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (ConfigQueryError::InvalidConfiguration, StatusCode::CONFLICT),
+            (ConfigQueryError::InvalidDefault, StatusCode::CONFLICT),
+            (ConfigQueryError::MigrationRequired, StatusCode::CONFLICT),
+        ] {
+            let response = config_query_error_response(error);
+            assert_eq!(response.status(), status);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(body["code"], error.code());
+            assert_eq!(body["message"], error.code());
+        }
+    }
+}

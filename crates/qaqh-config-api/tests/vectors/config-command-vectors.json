@@ -1,0 +1,49 @@
+[
+  {
+    "name": "publish-profile-set-and-clear",
+    "type": "publish_profile",
+    "valid": true,
+    "value": {
+      "requestId": "req-01",
+      "profileId": "profile-opaque-01",
+      "expectedRevision": "9007199254740993",
+      "patch": {
+        "model": { "op": "set", "value": "provider-model" },
+        "reasoningEffort": { "op": "clear" }
+      }
+    }
+  },
+  {
+    "name": "publish-profile-null-is-not-clear",
+    "type": "publish_profile",
+    "valid": false,
+    "value": {
+      "requestId": "req-02",
+      "profileId": "profile-opaque-01",
+      "expectedRevision": "1",
+      "patch": { "model": null }
+    }
+  },
+  {
+    "name": "publish-profile-number-revision-is-invalid",
+    "type": "publish_profile",
+    "valid": false,
+    "value": {
+      "requestId": "req-03",
+      "profileId": "profile-opaque-01",
+      "expectedRevision": 1,
+      "patch": {}
+    }
+  },
+  {
+    "name": "publish-profile-unknown-member-is-invalid",
+    "type": "publish_profile",
+    "valid": false,
+    "value": {
+      "requestId": "req-04",
+      "profileId": "profile-opaque-01",
+      "expectedRevision": "1",
+      "patch": { "providerSecret": "must-not-be-ignored" }
+    }
+  }
+]

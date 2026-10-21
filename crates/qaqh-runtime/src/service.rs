@@ -727,6 +727,9 @@ impl QaqhService {
                 |ws| qaqh_workspace::git::file_diff(ws, &pstr2(params, "file_path", "filePath")?),
                 Value::Null,
             ),
+            "config.catalog" | "config.profile" | "config.host" => self
+                .config_query(method, params)
+                .map_err(|error| error.to_string()),
             "config.load" => load_config(),
             "config.save" => {
                 self.save_config(params)?;
@@ -1329,8 +1332,7 @@ impl QaqhService {
     }
 
     fn save_config(&self, params: &Value) -> Result<(), String> {
-        // Never log config.save payloads: they may contain provider credentials.
-        log::info!("[config.save] saving configuration");
+        // Configuration payloads may contain credentials; log only the operation.
         // P1-C2：wire 切换为 Merge Patch 契约（qaqh-config-api）——值域校验在
         // api 层 validate()；逐字段守卫语义集中在 qaqh_config::dto::apply_patch
         // （穷举映射，新增字段未同步会编译失败）。旧 snake/camel 双键 shim 就此退役。

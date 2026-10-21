@@ -5,6 +5,7 @@
 - [发布与迁移规则](v2-reset/rollout.md)：v2.1 起按功能切片发布，v3.0 收敛架构；版本、数据、兼容退出和验收边界。
 - [能力保留矩阵](v2-reset/preservation.md)：当前前后端业务增量、目标所有者及不退化验收；每次施工前刷新。
 - [Provider 与账号](v2-reset/providers.md)：API key、ChatGPT 订阅、DeepSeek 账号、凭据与模型能力的独立边界。
+- [配置契约与当前切片](v2-reset/configuration.md)：profile 目录、详情、主机读模型及后续唯一写入边界。
 
 - [协议](v2-reset/protocol.md)：Ringing wire major 3、可靠消费、诊断、终端。
 - [消息、撤回与 fork](v2-reset/messages.md)：细粒度内容单元、服务器顺序、上下文边界与分支。

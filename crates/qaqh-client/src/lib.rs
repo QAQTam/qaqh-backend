@@ -9,6 +9,7 @@
 //! renderer-facing compatibility protocol.
 
 pub mod client;
+mod config;
 pub mod discovery;
 pub mod endpoint;
 pub mod error;
@@ -30,6 +31,10 @@ pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_d
 pub use endpoint::{ActionRequest, QueryRequest};
 pub use error::{ClientError, Result};
 pub use projection::sanitize_session_list;
+pub use qaqh_config_api::{
+    ConfigCatalog, ConfigProfileRequest, ConfigQueryError, CredentialDeclaration, CredentialSource,
+    HostConfigView, IntegrationSettingsView, ProfileView, Wire,
+};
 /// 领域状态类型（`qaqh_domain::state`）。
 ///
 /// 纯 v2 之后**不再**经 v1 bootstrap 的 `state` 访问器取用：v2 bootstrap 直接返回
@@ -53,7 +58,7 @@ pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
 /// 「看得见字段、拿不到类型名」——要么 match 时不写类型名，要么为了一行
 /// `ReasoningKind::is_displayable()` 直接 path 依赖 `qaqh-types`。二者都是
 /// 本客户端不该逼出来的选择（零成本、零新代码，只是补出口）。
-pub use qaqh_types::{CredentialSource, ReasoningKind, Wire};
+pub use qaqh_types::ReasoningKind;
 pub use remote_path::{display_host, display_path, remote_path_from_display};
 pub use service::{SERVICE_METHODS, is_allowed};
 /// `siwc.*` / `dsaccount.*` 服务面响应的 typed DTO（形状见

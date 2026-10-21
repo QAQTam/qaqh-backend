@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 qaqh-config = { path = "../qaqh-config" }
+qaqh-config-api = { path = "../qaqh-config-api" }
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-mcp = { path = "../qaqh-mcp" }

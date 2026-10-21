@@ -18,6 +18,21 @@ use qaqh_client::{
 };
 
 #[test]
+fn configuration_resource_types_and_methods_are_available_to_native_shells() {
+    let _: Option<qaqh_client::ConfigCatalog> = None;
+    let _: Option<qaqh_client::ProfileView> = None;
+    let _: Option<qaqh_client::HostConfigView> = None;
+    let _: Option<qaqh_client::CredentialDeclaration> = None;
+    let _ = qaqh_client::Client::config_catalog;
+    let _ = qaqh_client::Client::config_profile;
+    let _ = qaqh_client::Client::config_host;
+    assert_eq!(
+        qaqh_client::ConfigQueryError::ProfileNotFound.code(),
+        "profile_not_found"
+    );
+}
+
+#[test]
 fn v2_surface_is_nameable_from_the_client_root() {
     let cursor = ClientV2Cursor::snapshot("log-1", 7);
     let token = ClientV2CursorToken::encode_snapshot(&cursor).expect("cursor token");

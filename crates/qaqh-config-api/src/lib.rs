@@ -5,9 +5,8 @@
 //! - K1 叶子 crate：只依赖 serde，不依赖 runtime/daemon/config 引擎；
 //!   winui / ratatui / web(axum) 三端只依赖本 crate 即可参与配置读写。
 //! - K2 键风格定死 camelCase（`rename_all`），snake/camel 双键 shim 就此终结。
-//! - K3 写语义 = JSON Merge Patch（RFC 7386 风格）：[`ConfigPatch`] 只含
-//!   `Option` 字段，缺失 = 不动；多端并发编辑互不覆盖，且天然免疫
-//!   「未加载字段整包写回」类毒化（2026-08-25 设置页事故 R5）。
+//! - K3 [`ConfigPatch`] 的缺失字段 = 不动；它不是完整 RFC 7386，不能识别
+//!   同字段的过期覆盖，null 与缺失都表示不动。资源写入的 CAS 单独交付。
 //! - K4 fingerprint/字节序属 ringing 传输层，本 crate 零耦合。
 //!
 //! 映射纪律：引擎侧 [`crate`] 与 `qaqh_config::Config` 的互转**不用**
@@ -24,31 +23,35 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod commands;
+pub mod provider;
+pub mod resources;
+
+pub use commands::{
+    ClearCredentialRequest, CommandErrorCode, CommandFailure, CreateProfileRequest,
+    CredentialBindingRef, DeleteProfileRequest, FieldPatch, HostPatch, PersistedReceipt,
+    ProfilePatch, ProfileResource, ProfileVersionRef, PublishProfileRequest, RequestId,
+    Revision, SetCredentialRequest, UpdateDefaultsRequest, UpdateHostRequest,
+};
+
+pub use provider::{
+    CacheTokenField, CacheUsageSemantics, CredentialSource, EndpointCompat, RetrySpec,
+    ThinkingParamMode, UserSendMode, Wire,
+};
+pub use resources::{
+    ConfigCatalog, ConfigProfileRequest, ConfigQueryError, CredentialDeclaration, HostConfigView,
+    IntegrationSettingsView, ProfileView,
+};
+
 /// wire 的**规范拼写**：读模型 `ConfigDto.wire` 输出的就是这四个之一，
 /// 写模型 `ConfigPatch::wire` 也接受它们（旧拼写作为别名一并接受）。
 ///
-/// 为什么这份名单在这里而不是复用 `qaqh_types::Wire::parse`：本 crate 的 K1
-/// 不变量是「只依赖 serde」（三端设置页直接编译它）。所以这里是**一份镜像**，
-/// 但它是被闸门盯着的镜像——`qaqh-config` 的
-/// `canonical_wire_mirrors_qaqh_types` 测试逐个拼写与 `Wire::parse` +
-/// `Wire::as_str()` 对拍，任何一边改了名字而另一边没跟，测试先红。
+/// 与模型请求共用 [`Wire::parse`]，客户端不需要维护另一份拼写表。
 ///
 /// 返回 `None` = 不认识的拼写（写侧据此报 400，而不是静默兜底成 `chat`——
 /// 静默兜底正是「以为在用 A 协议、实际打了 B」那类最难查的问题）。
 pub fn canonical_wire(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "chat" | "openai" | "openai-compatible" | "chat_completions" | "chat/completions" => {
-            Some("chat")
-        }
-        "responses" | "openai-responses" => Some("responses"),
-        "messages" | "anthropic" | "claude" => Some("messages"),
-        "gemini"
-        | "google"
-        | "generatecontent"
-        | "generate_content"
-        | "gemini-generate-content" => Some("gemini"),
-        _ => None,
-    }
+    Wire::parse(value).map(Wire::as_str)
 }
 
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
@@ -448,7 +451,11 @@ mod tests {
             patch
                 .validate()
                 .unwrap_or_else(|e| panic!("规范名 {spelling} 必须被接受：{e}"));
-            assert_eq!(canonical_wire(spelling), Some(spelling), "规范名应映射到自身");
+            assert_eq!(
+                canonical_wire(spelling),
+                Some(spelling),
+                "规范名应映射到自身"
+            );
         }
         for spelling in [
             "openai",
