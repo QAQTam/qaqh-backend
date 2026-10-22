@@ -109,6 +109,18 @@ pub struct PersistentConfig {
     /// LSP 客户端配置（docs/current/architecture.md；全部 Option）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsp: Option<PersistentLspConfig>,
+
+    /// 沙箱执行配置（默认启用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<PersistentSandboxConfig>,
+}
+
+/// Persistence-friendly sandbox defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PersistentSandboxConfig {
+    /// Whether sandbox enforcement is enabled. `None` = enabled (default: true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Persistence-friendly exec defaults.

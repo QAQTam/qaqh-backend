@@ -46,6 +46,9 @@ pub fn execute_authorized(
             std::path::PathBuf::from(workspace)
         }
     };
+    let permission_level = PermissionLevel::from_u8(
+        ambient.as_ref().map(|ctx| ctx.permission_level).unwrap_or(0),
+    );
     let context = ToolCallContext {
         call_id: call.call_id().to_string(),
         session_id: ambient
@@ -57,15 +60,17 @@ pub fn execute_authorized(
             1 => AgentMode::Plan,
             _ => AgentMode::Code,
         },
-        permission_level: PermissionLevel::from_u8(
-            ambient.map(|ctx| ctx.permission_level).unwrap_or(0),
-        ),
+        permission_level,
         sandbox: if crate::authorization::is_subagent_sandbox() {
             SandboxMode::Subagent
         } else {
             SandboxMode::Main
         },
-        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        sandbox_spec: crate::tool_api::SandboxSpec::for_permission(
+            workspace_root,
+            permission_level,
+            true,
+        ),
         exec_default_shell: None,
         timeout: Duration::ZERO,
         cancellation,

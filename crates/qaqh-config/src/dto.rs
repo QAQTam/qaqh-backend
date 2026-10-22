@@ -15,7 +15,8 @@
 
 use crate::config::Config;
 use qaqh_config_api::{
-    ConfigDto, ConfigPatch, ExecDto, LspDto, LspServerDto, McpDto, McpServerDto, SubagentDto,
+    ConfigDto, ConfigPatch, ExecDto, LspDto, LspServerDto, McpDto, McpServerDto, SandboxDto,
+    SubagentDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
@@ -98,6 +99,9 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
         tokenizer_path: cfg.tokenizer_path.clone(),
         exec: ExecDto {
             default_shell: cfg.exec.default_shell.clone(),
+        },
+        sandbox: SandboxDto {
+            enabled: cfg.sandbox.enabled,
         },
         session_idle_unload_secs: cfg.session_idle_unload_secs,
     }
@@ -209,6 +213,11 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     }
     if let Some(v) = patch.session_idle_unload_secs {
         cfg.session_idle_unload_secs = v;
+    }
+    if let Some(sandbox) = &patch.sandbox
+        && let Some(enabled) = sandbox.enabled
+    {
+        cfg.sandbox.enabled = enabled;
     }
     if let Some(sub) = &patch.subagent {
         if let Some(v) = meaningful(&sub.model) {
@@ -377,6 +386,31 @@ mod tests {
         apply_patch(&mut cfg, &auto).expect("apply");
         assert_eq!(cfg.exec.default_shell, None);
         assert_eq!(cfg.session_idle_unload_secs, 0);
+    }
+
+    #[test]
+    fn apply_patch_writes_sandbox() {
+        let mut cfg = Config::default();
+        assert!(cfg.sandbox.enabled);
+        let patch = ConfigPatch {
+            sandbox: Some(qaqh_config_api::SandboxPatch {
+                enabled: Some(false),
+            }),
+            ..Default::default()
+        };
+        apply_patch(&mut cfg, &patch).expect("apply sandbox false");
+        assert!(!cfg.sandbox.enabled);
+        assert!(!to_dto(&cfg).sandbox.enabled);
+
+        let patch_on = ConfigPatch {
+            sandbox: Some(qaqh_config_api::SandboxPatch {
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        apply_patch(&mut cfg, &patch_on).expect("apply sandbox true");
+        assert!(cfg.sandbox.enabled);
+        assert!(to_dto(&cfg).sandbox.enabled);
     }
 
     #[test]
