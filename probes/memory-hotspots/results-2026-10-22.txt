@@ -1,0 +1,66 @@
+Memory hotspot synthetic probe — 2026-10-22
+Source audited: working tree based on 80ddb3c; pre-existing local edits left untouched.
+Final measurements below use the standalone probe compiled FROM CURRENT SOURCE, not the initial prebuilt-rlib exploratory run.
+Build: cargo build --offline -j 1 -p qaqh-runtime --lib => exit 0.
+Probe: TMPDIR=/home/qaqtamsy/qaqh-backend/target cargo run --offline --manifest-path probes/memory-hotspots/Cargo.toml --target-dir target -j 1 -- all => exit 0.
+Tests: TMPDIR=/home/qaqtamsy/qaqh-backend/target cargo test --offline --manifest-path probes/memory-hotspots/Cargo.toml --target-dir target -j 1 -- --test-threads=1 => 10 passed, 0 failed.
+The ten tests are the included production token_calibration module tests, NOT the whole backend suite.
+Metrics: requested live heap bytes counted through a System allocator wrapper; excludes allocator metadata/fragmentation, RSS/page residency, stacks, mappings, subprocess memory. Debug build timings are illustrative only. Fixtures are synthetic; no provider calls, real session bodies, or spawned agents.
+
+Final all-mode output (timings vary):
+--- channels ---
+sizes: WriterEvent=824 WorkerCommand=528 TimelineEntry=792 V2Envelope=560
+one empty worker channel pair: live_delta=15828344 peak_delta=15828344 elapsed_ms=12.584
+after channel drop: live_delta=0 peak_delta=15828344 elapsed_ms=13.685
+--- journal ---
+8MiB incremental checkpoint: live_delta=16777219 peak_delta=25165830 elapsed_ms=19.958
+checkpoint journal_reported_payload=0 (expected actual arg=8388608)
+actual checkpoint replay arg bytes=8388608
+after simulated successful turn offload: live_delta=8392836 peak_delta=25170332 elapsed_ms=31.075
+--- forget ---
+4MiB user timeline: live_delta=8394653 peak_delta=16783266 elapsed_ms=4.333
+after forget_session: live_delta=8394653 peak_delta=16783266 elapsed_ms=4.377
+timeline survives forget=true
+after entire hub drop: live_delta=-860641 peak_delta=16783266 elapsed_ms=6.030
+The negative final delta is expected: baseline includes the hub's pre-existing broadcast allocation, which is freed by dropping the hub.
+--- content ---
+persisted 4MiB content: live_delta=4195551 peak_delta=8391116 elapsed_ms=879.598
+GET content clone held: live_delta=8390018 peak_delta=8391116 elapsed_ms=880.969
+after GET clone drop: live_delta=4195551 peak_delta=8391116 elapsed_ms=880.985
+--- processes ---
+12 completed synthetic exec entries, 1MiB each: live_delta=12639760 peak_delta=13688336 elapsed_ms=12.360
+visible tail bytes=4000
+retained full stdout bytes=1048576
+--- reader ---
+reader open n=256: live_delta=167 peak_delta=3344598 elapsed_ms=36.116
+one-fact range vector capacity=256 fact_size=560
+reader ONE fact range n=256, returned=1: live_delta=147741 peak_delta=3344459 elapsed_ms=48.174
+idle polling OPEN+read_after n=256, returned=0: live_delta=84 peak_delta=3344670 elapsed_ms=50.949
+reader open n=1024: live_delta=167 peak_delta=13376982 elapsed_ms=117.491
+one-fact range vector capacity=1024 fact_size=560
+reader ONE fact range n=1024, returned=1: live_delta=577821 peak_delta=13376843 elapsed_ms=124.468
+idle polling OPEN+read_after n=1024, returned=0: live_delta=84 peak_delta=13377054 elapsed_ms=126.574
+--- v2 ---
+V2 8MiB inline input: cached projections + bootstrap held: live_delta=35704660 peak_delta=35704696 elapsed_ms=517.040
+conversation entries=1024 timeline entries=1024
+V2 after bootstrap drop: live_delta=18151964 peak_delta=35704696 elapsed_ms=517.756
+V2 reported heap lower bound=Some(2328)
+additional writer CanonicalSessionStore for SAME session: live_delta=17552703 peak_delta=25895793 elapsed_ms=1496.131
+V2 subscribe(None) at current cursor: live_delta=81 peak_delta=25895777 elapsed_ms=470.828
+V2 hub drop (subscription still alive): live_delta=598224 peak_delta=44047741 elapsed_ms=2486.325
+--- context ---
+8MiB context: owned request copy: live_delta=8584192 peak_delta=8610816 elapsed_ms=3.244
+production prepared_request_metrics: live_delta=16 peak_delta=25387536 elapsed_ms=1001.722
+metrics serialized bytes=8402440
+after request copy drop: live_delta=16 peak_delta=33971728 elapsed_ms=1005.113
+--- display ---
+4MiB display diff -> ToolResult (source outcome still held): live_delta=8388624 peak_delta=12582928 elapsed_ms=2.952
+model bytes=2 top diff=4194304 display diff=4194304
+deep clone ToolResult for request/history: live_delta=8388612 peak_delta=8388612 elapsed_ms=2.004
+--- persist ---
+sealed offloaded turns=4
+21-byte transient event with 4MiB sealed history: live_delta=326 peak_delta=21040156 elapsed_ms=1500.135
+transient rewrote snapshot=true, snapshot_bytes=4195924, persisted marker=true
+
+Assertions in probe capture observed problematic behavior, not desired post-fix contracts; update/invert them when fixing the relevant defects.
+Limits: no live daemon RSS attribution, no production workload replay, no bridge-thread lifecycle runtime reproduction, no release-time benchmark, no full backend test suite. The reader fixture repeats schema-valid SessionCreated records to isolate reader cost; it is not a realistic conversation. V2 uses 1024 distinct valid 8KiB InputAccepted records to isolate inline-input projection duplication; it does not mean assistant/tool body refs are all inline.

@@ -1288,7 +1288,13 @@ impl QaqhService {
                     .find(|activity| activity.session_id == meta.session_id)
                     .map(|activity| activity.state);
                 let status = self.session_run_status(loaded, fallback, &meta.session_id);
-                let workspace_id = workspaces.workspace_of(&meta.session_id);
+                let mut workspace_id = workspaces.workspace_of(&meta.session_id);
+                // 存量自愈：若该非临时会话带有合法 cwd 且未归属任何工作区，自动纳管归入
+                if workspace_id.is_none() && !meta.ephemeral
+                    && let Some(cwd) = meta.cwd.as_deref()
+                {
+                    workspace_id = workspaces.attach_by_cwd(&meta.session_id, cwd);
+                }
                 qaqh_types::SessionListEntry {
                     meta,
                     status,
