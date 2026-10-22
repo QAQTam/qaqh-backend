@@ -274,10 +274,39 @@ impl WorkspaceStore {
     }
 
     /// 把会话放入 cwd 匹配的 workspace（自动归属；新会话创建时调用）。
-    /// 不匹配返回 None（保持未分组）；已归属其他 workspace 则迁移。
+    /// 若当前尚未注册匹配的工作区，自动以该 cwd 注册新工作区（标题默认为目录名）。
+    /// 只有空或 "." 等无效 cwd 保持未分组（返回 None）；已归属其他 workspace 则迁移。
     pub fn attach_by_cwd(&self, session_id: &str, cwd: &str) -> Option<String> {
+        let trimmed = cwd.trim();
+        if trimmed.is_empty() || trimmed == "." {
+            return None;
+        }
+        let canonical_str = canonical_cwd(Path::new(trimmed));
+
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let target = items.iter().find(|w| cwd_belongs(cwd, &w.path))?.id.clone();
+        let target = if let Some(w) = items.iter().find(|w| cwd_belongs(&canonical_str, &w.path)) {
+            w.id.clone()
+        } else {
+            let title = Path::new(&canonical_str)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| canonical_str.clone());
+            let id = generate_id(&canonical_str);
+            let mut order_guard = self.next_order.lock().unwrap_or_else(|e| e.into_inner());
+            let order = *order_guard;
+            *order_guard = order + 1;
+            let ws = WorkspaceMeta {
+                id: id.clone(),
+                path: canonical_str,
+                title,
+                order,
+                session_ids: Vec::new(),
+            };
+            items.push(ws);
+            id
+        };
+
         for w in items.iter_mut() {
             w.session_ids.retain(|s| s != session_id);
         }
@@ -285,7 +314,9 @@ impl WorkspaceStore {
             .iter_mut()
             .find(|w| w.id == target)
             .expect("target workspace vanished");
-        ws.session_ids.push(session_id.to_string());
+        if !ws.session_ids.iter().any(|s| s == session_id) {
+            ws.session_ids.push(session_id.to_string());
+        }
         let out = ws.id.clone();
         self.save(&items);
         Some(out)
@@ -461,6 +492,29 @@ mod tests {
 
         store.delete(&ws_a.id).expect("delete a");
         assert_eq!(store.list().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attach_by_cwd_auto_creates_workspace_if_missing() {
+        let store = reset_store();
+        let dir = fixture_dir().join("auto_create_ws");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.to_str().expect("path");
+
+        // 未调用 store.create，直接 attach 应自动注册该工作区并纳入 session
+        let ws_id = store.attach_by_cwd("s_auto", path).expect("auto created");
+        assert_eq!(store.workspace_of("s_auto").as_deref(), Some(ws_id.as_str()));
+        let list = store.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, ws_id);
+        assert_eq!(list[0].title, "auto_create_ws");
+        assert!(list[0].session_ids.contains(&"s_auto".to_string()));
+
+        // 无效 cwd 保持返回 None
+        assert_eq!(store.attach_by_cwd("s_empty", ""), None);
+        assert_eq!(store.attach_by_cwd("s_dot", "."), None);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

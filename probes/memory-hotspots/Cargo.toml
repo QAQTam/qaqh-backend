@@ -1,0 +1,21 @@
+[package]
+name = "memory-hotspot-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "memory-hotspot-probe"
+path = "../../crates/qaqh-runtime/examples/memory_hotspot_probe.rs"
+
+[dependencies]
+qaqh-runtime = { path = "../../crates/qaqh-runtime" }
+qaqh-domain = { path = "../../crates/qaqh-domain" }
+qaqh-session = { path = "../../crates/qaqh-session" }
+qaqh-workspace = { path = "../../crates/qaqh-workspace" }
+qaqh-memwatch = { path = "../../crates/qaqh-memwatch" }
+qaqh-message = { path = "../../crates/qaqh-message" }
+qaqh-types = { path = "../../crates/qaqh-types" }
+serde_json = "1"
