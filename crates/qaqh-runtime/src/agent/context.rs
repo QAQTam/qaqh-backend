@@ -56,6 +56,7 @@ pub struct RuntimeContext {
     exec_default_shell: Option<String>,
     /// 官方网页工具后端；`None` = 工具层走自实现（见 `agent::official_web`）。
     official_web: Option<OfficialWebBackend>,
+    sandbox_enabled: bool,
 }
 
 impl RuntimeContext {
@@ -67,6 +68,7 @@ impl RuntimeContext {
         cancellation: CancelToken,
         exec_default_shell: Option<String>,
         official_web: Option<OfficialWebBackend>,
+        sandbox_enabled: bool,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -80,6 +82,7 @@ impl RuntimeContext {
             cancellation,
             exec_default_shell,
             official_web,
+            sandbox_enabled,
         }
     }
 
@@ -123,17 +126,23 @@ impl RuntimeContext {
         progress: Option<ProgressSink>,
         source: ToolCallSource,
     ) -> ToolCallContext {
+        let perm = PermissionLevel::from_u8(self.permission_level);
+        let sandbox_spec = SandboxSpec::for_permission(
+            self.workspace_root.clone(),
+            perm,
+            self.sandbox_enabled,
+        );
         ToolCallContext {
             call_id: call_id.into(),
             session_id: self.session_id.clone(),
             workspace_root: self.workspace_root.clone(),
             mode: self.mode,
-            permission_level: PermissionLevel::from_u8(self.permission_level),
+            permission_level: perm,
             sandbox: match self.sandbox {
                 SandboxKind::Main => SandboxMode::Main,
                 SandboxKind::Subagent => SandboxMode::Subagent,
             },
-            sandbox_spec: SandboxSpec::workspace_write(self.workspace_root.clone()),
+            sandbox_spec,
             exec_default_shell: self.exec_default_shell.clone(),
             timeout,
             cancellation: CancellationToken::from_shared_flag(self.cancellation.arc()),
@@ -168,6 +177,7 @@ impl TurnContext {
                     ctx.agent.config.credential,
                     &ctx.agent.config.compat,
                 ),
+                ctx.agent.config.sandbox.enabled,
             ),
             turn_id: turn_id.into(),
             round_num,
@@ -218,6 +228,7 @@ mod tests {
             cancel.clone(),
             None,
             None,
+            true,
         );
 
         assert_eq!(runtime.session_id(), "seed-236");
@@ -245,6 +256,7 @@ mod tests {
             CancelToken::new(),
             None,
             None,
+            true,
         );
         let turn = TurnContext {
             runtime: runtime.clone(),
@@ -272,6 +284,7 @@ mod tests {
             cancel.clone(),
             Some("zsh".to_string()),
             None,
+            true,
         );
         let tool_ctx = runtime.tool_call_context(
             "call-248",
@@ -293,6 +306,23 @@ mod tests {
         );
         assert_eq!(tool_ctx.timeout, Duration::from_secs(9));
         assert_eq!(tool_ctx.source, ToolCallSource::Model);
+
+        // Test sandbox disabled toggle produces disabled spec
+        let disabled_runtime = RuntimeContext::from_legacy_ambient(
+            "seed-tool".to_string(),
+            2,
+            cancel.clone(),
+            None,
+            None,
+            false,
+        );
+        let disabled_tool_ctx = disabled_runtime.tool_call_context(
+            "call-249",
+            Duration::ZERO,
+            None,
+            ToolCallSource::Model,
+        );
+        assert!(!disabled_tool_ctx.sandbox_spec().enabled);
 
         cancel.set();
         assert!(

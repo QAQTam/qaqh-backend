@@ -104,6 +104,8 @@ pub struct ConfigDto {
     pub tokenizer_path: Option<String>,
     /// exec 工具默认执行配置（热字段；`exec.default_shell` 被 exec 真正消费）。
     pub exec: ExecDto,
+    /// 沙箱执行配置（读模型）。
+    pub sandbox: SandboxDto,
     /// 空闲会话 worker 自动卸载阈值（秒）。0 = 禁用（缺省）；由 daemon 周期任务读取。
     pub session_idle_unload_secs: u64,
 }
@@ -155,6 +157,15 @@ fn default_subagent_message_outbound() -> u64 {
 pub struct ExecDto {
     /// `None` / 空 / "auto" = 平台优先级自动探测。
     pub default_shell: Option<String>,
+}
+
+/// 沙箱执行配置（读模型）。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxDto {
+    /// 沙箱是否启用（默认 true）。关闭后命令在无隔离环境下执行。
+    pub enabled: bool,
 }
 
 /// MCP 客户端配置读模型（docs/current/architecture.md）。
@@ -263,12 +274,13 @@ pub struct ConfigPatch {
     // **不出现在写模型里**：它们不是 daemon 设置，只是桌面壳的本地展示偏好，
     // 仍保留在读模型 [`ConfigDto`] 供其它客户端读取。
     /// 权限档位（1=read-only，2=workspace-write，
-    /// 3=skip-permissions：显式危险 bypass，普通工具全部自动放行）。
+    /// 3=skip-permissions：显式危险 bypass，普通工具全部自动放行；
+    /// 4=sandbox-run：沙箱强制隔离运行，常规命令自动放行）。
     ///
     /// BUG-2026-09-13-15：历史上该字段刻意缺席写模型，只有
     /// `config.set_permission_level` 单写口；但写口校验缺失时非法档位仍能从
     /// `config.save` 的裸 `permissionLevel` 载荷漏进配置。现在并入 patch 并在
-    /// [`Self::validate`] 中做值域校验（非法即拒绝，1..=3 之外不落盘）。
+    /// [`Self::validate`] 中做值域校验（非法即拒绝，1..=4 之外不落盘）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -276,11 +288,23 @@ pub struct ConfigPatch {
     /// exec 工具默认 shell。空串 / "auto" = 平台自动探测。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecPatch>,
+    /// 沙箱执行配置。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxPatch>,
     /// 空闲会话卸载阈值（秒）；0 = 禁用。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_idle_unload_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentPatch>,
+}
+
+/// 沙箱执行配置（写模型），嵌套于 [`ConfigPatch::sandbox`]。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SandboxPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// 子代理配置段（写模型），嵌套于 [`ConfigPatch::subagent`]。
@@ -370,10 +394,10 @@ impl ConfigPatch {
             ));
         }
         if let Some(level) = self.permission_level
-            && !(1..=3).contains(&level)
+            && !(1..=4).contains(&level)
         {
             return Err(format!(
-                "permissionLevel 仅允许 1..=3（1=read-only, 2=workspace-write, 3=skip-permissions），收到 {level}"
+                "permissionLevel 仅允许 1..=4（1=read-only, 2=workspace-write, 3=skip-permissions, 4=sandbox-run），收到 {level}"
             ));
         }
         if let Some(sub) = &self.subagent {
@@ -519,6 +543,7 @@ mod tests {
             "lsp": { "enabled": false, "idleShutdownSecs": 600, "servers": [] },
             "tokenizerPath": null,
             "exec": { "defaultShell": "bash" },
+            "sandbox": { "enabled": true },
             "sessionIdleUnloadSecs": 900
         });
         let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
@@ -531,6 +556,7 @@ mod tests {
         assert_eq!(dto.subagent.timeout_secs, 120);
         assert_eq!(dto.subagent.default_tools, vec!["read".to_string()]);
         assert_eq!(dto.exec.default_shell.as_deref(), Some("bash"));
+        assert!(dto.sandbox.enabled);
         assert_eq!(dto.session_idle_unload_secs, 900);
         assert!(!dto.mcp.enabled && !dto.lsp.enabled);
     }
@@ -628,19 +654,18 @@ mod tests {
             ..Default::default()
         };
         assert!(disabled.validate().is_ok());
-        // permissionLevel 值域 1..=3(BUG-2026-09-13-15:非法档位曾能从
-        // config.save 的裸载荷漏进配置;2026-10-03 三档制)。
+        // permissionLevel 值域 1..=4（1=read-only, 2=workspace-write, 3=skip-permissions, 4=sandbox-run）。
         let bad_level = ConfigPatch {
             permission_level: Some(5),
             ..Default::default()
         };
         assert!(bad_level.validate().is_err(), "档位 5 必须被拒");
-        let legacy_level = ConfigPatch {
-            permission_level: Some(4),
+        let zero_level = ConfigPatch {
+            permission_level: Some(0),
             ..Default::default()
         };
-        assert!(legacy_level.validate().is_err(), "旧四档值 4 必须被拒");
-        for level in 1..=3u64 {
+        assert!(zero_level.validate().is_err(), "档位 0 必须被拒");
+        for level in 1..=4u64 {
             let ok_level = ConfigPatch {
                 permission_level: Some(level),
                 ..Default::default()

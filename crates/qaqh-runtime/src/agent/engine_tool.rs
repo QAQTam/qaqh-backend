@@ -215,6 +215,7 @@ impl ToolEngine {
                 ctx.agent.config.credential,
                 &ctx.agent.config.compat,
             ),
+            ctx.agent.config.sandbox.enabled,
         );
         let tool_context = runtime.tool_call_context(
             id,

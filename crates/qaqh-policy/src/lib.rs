@@ -268,6 +268,32 @@ impl SandboxSpec {
             workspace_root: None,
         }
     }
+
+    /// Compose a sandbox spec based on workspace root, permission level, and sandbox toggle.
+    pub fn for_permission(
+        workspace_root: PathBuf,
+        level: PermissionLevel,
+        sandbox_enabled: bool,
+    ) -> Self {
+        if !sandbox_enabled {
+            return Self::disabled();
+        }
+        let mut spec = Self::workspace_write(workspace_root);
+        if level == PermissionLevel::SkipPermissions {
+            spec.network = NetworkPolicy::Allow;
+        }
+        spec
+    }
+
+    /// Extend writable roots with trusted directories.
+    pub fn with_trusted_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        for root in roots {
+            if !self.writable_roots.contains(&root) {
+                self.writable_roots.push(root);
+            }
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -316,7 +342,29 @@ mod tests {
         let spec = SandboxSpec::workspace_write(root.clone());
         assert_eq!(spec.backend, SandboxBackend::Auto);
         assert_eq!(spec.network, NetworkPolicy::Deny);
-        assert_eq!(spec.writable_roots, vec![root]);
+        assert_eq!(spec.writable_roots, vec![root.clone()]);
         assert_eq!(spec.max_open_files, Some(1024));
+
+        // for_permission: disabled toggle produces disabled spec
+        let disabled_spec = SandboxSpec::for_permission(root.clone(), PermissionLevel::WorkspaceWrite, false);
+        assert!(!disabled_spec.enabled);
+        assert_eq!(disabled_spec.network, NetworkPolicy::Allow);
+        assert!(disabled_spec.writable_roots.is_empty());
+
+        // for_permission: SkipPermissions allows network
+        let skip_spec = SandboxSpec::for_permission(root.clone(), PermissionLevel::SkipPermissions, true);
+        assert!(skip_spec.enabled);
+        assert_eq!(skip_spec.network, NetworkPolicy::Allow);
+        assert_eq!(skip_spec.writable_roots, vec![root.clone()]);
+
+        // for_permission: WorkspaceWrite denies network
+        let write_spec = SandboxSpec::for_permission(root.clone(), PermissionLevel::WorkspaceWrite, true);
+        assert!(write_spec.enabled);
+        assert_eq!(write_spec.network, NetworkPolicy::Deny);
+
+        // with_trusted_roots extends writable roots without duplicating
+        let trusted = PathBuf::from("/tmp/other-repo");
+        let extended = write_spec.with_trusted_roots([trusted.clone(), root.clone()]);
+        assert_eq!(extended.writable_roots, vec![root, trusted]);
     }
 }

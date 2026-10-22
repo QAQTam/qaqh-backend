@@ -325,7 +325,12 @@ fn legacy_tool_call_context(
         } else {
             SandboxMode::Main
         },
-        sandbox_spec: SandboxSpec::workspace_write(workspace_root.to_path_buf()),
+        sandbox_spec: SandboxSpec::for_permission(
+            workspace_root.to_path_buf(),
+            crate::permission::PermissionLevel::from_u8(permission_level),
+            true,
+        )
+        .with_trusted_roots(with_global_trusted(|s| s.set().clone())),
         exec_default_shell: None,
         timeout: Duration::ZERO,
         cancellation,
@@ -540,9 +545,19 @@ pub fn admit_with_context(
                     ))
                 }
             } else {
+                let challenge_spec = if !context.sandbox_spec.enabled {
+                    SandboxSpec::disabled()
+                } else {
+                    SandboxSpec::for_permission(
+                        workspace_root.clone(),
+                        context.permission_level,
+                        true,
+                    )
+                    .with_trusted_roots(trusted_dirs.iter().cloned())
+                };
                 let challenge_context = ToolCallContext {
                     workspace_root: workspace_root.clone(),
-                    sandbox_spec: SandboxSpec::workspace_write(workspace_root.clone()),
+                    sandbox_spec: challenge_spec,
                     ..context.clone()
                 };
                 Admission::ApprovalRequired(PermissionChallenge::new(

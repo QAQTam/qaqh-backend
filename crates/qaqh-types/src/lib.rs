@@ -34,7 +34,7 @@ pub use api_types::UsageInfo;
 pub use config::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
-    PersistentSubagentConfig, ProfileConfig,
+    PersistentSandboxConfig, PersistentSubagentConfig, ProfileConfig,
 };
 pub use context_usage::{
     ContextUsage, clear_api_context_usage, current_api_context_usage, note_api_context_usage,

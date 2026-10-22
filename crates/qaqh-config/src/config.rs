@@ -2,7 +2,7 @@ use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
-    PersistentSubagentConfig,
+    PersistentSandboxConfig, PersistentSubagentConfig,
 };
 use std::collections::HashMap; // still used by profiles
 use std::sync::{Mutex, OnceLock};
@@ -82,6 +82,18 @@ pub struct ExecConfig {
     pub default_shell: Option<String>,
 }
 
+/// 沙箱执行配置。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SandboxConfig {
+    pub enabled: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Runtime agent configuration built from PersistentConfig + registry.
 ///
 /// This is the fully-resolved config used by the agent at runtime. It combines
@@ -149,6 +161,8 @@ pub struct Config {
     pub mcp: McpConfig,
     /// LSP 客户端配置（docs/current/architecture.md；load 时已 fail-fast 校验）。
     pub lsp: LspConfig,
+    /// 沙箱执行配置。
+    pub sandbox: SandboxConfig,
 }
 
 // ── MCP 客户端配置（docs/current/architecture.md）──
@@ -802,6 +816,7 @@ impl Default for Config {
             session_idle_unload_secs: 0,
             mcp: McpConfig::default(),
             lsp: LspConfig::default(),
+            sandbox: SandboxConfig::default(),
         }
     }
 }
@@ -1093,7 +1108,7 @@ impl Config {
                     Ok(t) => cfg.permission_level = t.to_u8(),
                     Err(_) => {
                         log::warn!(
-                            "[config] invalid permission_tier {tier} in config.toml (must be 1-3); \
+                            "[config] invalid permission_tier {tier} in config.toml (must be 1-4); \
 falling back to 1 (read-only)"
                         );
                         cfg.permission_level = 1;
@@ -1125,6 +1140,13 @@ falling back to 1 (read-only)"
             // ── Idle unload（daemon 级会话策略；0 = 禁用）──
             if let Some(v) = pc.session_idle_unload_secs {
                 cfg.session_idle_unload_secs = v;
+            }
+
+            // ── Sandbox ──
+            if let Some(ref sb) = pc.sandbox {
+                if let Some(enabled) = sb.enabled {
+                    cfg.sandbox.enabled = enabled;
+                }
             }
 
             // ── MCP 客户端（fail-fast：非法名/互斥冲突/缺 command 直接 load 失败）──
@@ -1452,6 +1474,9 @@ falling back to 1 (read-only)"
                         })
                         .collect()
                 }),
+            }),
+            sandbox: Some(PersistentSandboxConfig {
+                enabled: Some(self.sandbox.enabled),
             }),
         };
         log::info!(
