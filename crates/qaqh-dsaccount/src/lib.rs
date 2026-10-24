@@ -43,6 +43,9 @@
 
 #![warn(missing_docs)]
 
+/// Credential-free service response DTOs.
+pub mod service;
+
 pub mod account;
 pub mod auth;
 pub mod client;
