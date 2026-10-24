@@ -119,24 +119,8 @@ fn dump_request_log(
     let _ = writeln!(f, "{rec}");
 }
 
-/// How to resume a turn whose stream was cut mid-response by the upstream
-/// (busy-shedding endpoints close the HTTP stream instead of returning an
-/// error code). Mirrors opencode's "restart with words" behaviour: the
-/// partially-streamed assistant content stays in the store, and the next
-/// request re-sends it as history with a nudge to continue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamContinuation {
-    /// Assistant text finished but the stream died inside (or before closing)
-    /// a reasoning chain — drop the trailing reasoning from the request view
-    /// and ask the model to continue.
-    StripTrailingReasoning,
-    /// The assistant text itself was cut off — keep everything and ask the
-    /// model to complete what it was saying.
-    ContinuePartialText,
-}
-
-/// Upper bound on consecutive mid-stream resumes within one turn. Each resume
-/// is a fresh billable request; past this the partial output is accepted as-is.
+/// Upper bound on mid-stream recovery requests within one turn. Exhaustion
+/// fails the turn rather than reporting an unconfirmed response as complete.
 const MAX_STREAM_CONTINUATIONS: u32 = 3;
 
 /// 自动压缩已禁用（2026-10-12）：本地 token 估算与上游 usage 口径存在系统性
@@ -151,9 +135,7 @@ pub struct TurnEngine {
     actor: TurnActor,
     /// If Some, a turn is suspended waiting for permission or ask_user.
     pub(crate) suspended: Option<TurnState>,
-    /// Pending mid-stream resume for the next gate round.
-    pub(crate) continuation: Option<StreamContinuation>,
-    /// Consecutive resumes consumed for the current turn.
+    /// Recovery requests consumed for the current turn.
     pub(crate) continuation_count: u32,
 }
 
@@ -168,7 +150,6 @@ impl TurnEngine {
         Self {
             actor: TurnActor::new(),
             suspended: None,
-            continuation: None,
             continuation_count: 0,
         }
     }
@@ -374,7 +355,9 @@ impl TurnEngine {
         turn_id: &str,
         input_id: &str,
     ) -> Result<(), TurnActorError> {
-        self.actor.begin_input(turn_id, input_id)
+        self.actor.begin_input(turn_id, input_id)?;
+        self.continuation_count = 0;
+        Ok(())
     }
 
     /// Cancel through the canonical ledger when this session is durable.
@@ -1184,35 +1167,6 @@ impl TurnEngine {
         (messages, request_estimate, request_fingerprint, request_key)
     }
 
-    /// Mid-stream resume view transform: shape the next request so the model
-    /// continues where the cut-off left off. Store/timeline are untouched —
-    /// this is a request-time projection only.
-    ///
-    /// - `StripTrailingReasoning`: the text had finished and the stream died
-    ///   in a trailing reasoning chain; reasoning is dropped from the view
-    ///   (reasoning must not be re-sent as user content) and a bare
-    ///   `continue` nudges the model onward.
-    /// - `ContinuePartialText`: the text itself was cut; everything stays and
-    ///   an explicit completion prompt is appended.
-    fn apply_continuation_view(messages: &mut Vec<qaqh_types::Message>, kind: StreamContinuation) {
-        if matches!(kind, StreamContinuation::StripTrailingReasoning)
-            && let Some(last) = messages.last_mut()
-            && last.role == "assistant"
-        {
-            while matches!(
-                last.content.last(),
-                Some(qaqh_types::ContentBlock::Reasoning { .. })
-            ) {
-                last.content.pop();
-            }
-        }
-        let prompt = match kind {
-            StreamContinuation::StripTrailingReasoning => "continue",
-            StreamContinuation::ContinuePartialText => "(继续补全)",
-        };
-        messages.push(qaqh_types::Message::user(prompt));
-    }
-
     /// ChatGPT 套餐直连的 401 恢复（对标 codex `ProviderUnauthorizedRecovery::Recovered`，
     /// codex-rs/model-provider/src/provider.rs:48-53）：Authentication 类失败 →
     /// 强制刷新（旋转式 refresh token：单飞 + 先落盘）→ 重建 provider 整请求
@@ -1248,9 +1202,7 @@ impl TurnEngine {
         if !needs_retry {
             return result;
         }
-        log::warn!(
-            "[TURN] plan route got 401: force-refreshing ChatGPT token and retrying once"
-        );
+        log::warn!("[TURN] plan route got 401: force-refreshing ChatGPT token and retrying once");
         let refreshed = qaqh_siwc::manager()
             .map(|manager| manager.force_refresh(None))
             .is_some_and(|refresh| refresh.is_ok());
@@ -1445,13 +1397,8 @@ impl TurnEngine {
             }
 
             // ── 传输快照 + 估计（auto-compact 预检已随自动压缩禁用移除）──
-            let (mut messages, request_estimate, request_fingerprint, request_key) =
+            let (messages, request_estimate, request_fingerprint, request_key) =
                 Self::prepare_gate_snapshot(ctx);
-            if let Some(kind) = self.continuation {
-                Self::apply_continuation_view(&mut messages, kind);
-                // 续写轮的 token 估计基于变换前快照；user 提示词仅 ~1 token，
-                // 剥离思考链只会减少上下文——偏差方向安全，无需重估。
-            }
 
             let GateRequestResult {
                 content,
@@ -1469,12 +1416,7 @@ impl TurnEngine {
                 stop_reason,
                 last_usage,
             } = Self::gate_request_with_plan_auth_retry(
-                ctx,
-                &provider,
-                messages,
-                &turn_id,
-                round_num,
-                last_usage,
+                ctx, &provider, messages, &turn_id, round_num, last_usage,
             );
 
             if turn_context.runtime().cancellation().is_set() {
@@ -1577,57 +1519,67 @@ impl TurnEngine {
                 round_num
             );
 
-            // ── 上游掐流检测（对齐 opencode 的"带词重启"）──
-            // 繁忙端点可能不发错误码而是直接终止 HTTP 流：此时 Done 仍会
-            // 发出，但 stop_reason 缺失。半截内容已照常落盘（增量早已流出
-            // 给前端），下一轮请求将其作为历史回传并注入续写提示。
-            // Responses 协议已对齐 chat 语义（成功恒 Some("stop")，
-            // 截断/掐流收口 stop_reason=None），摘除 is_responses 排除，
-            // 三协议统一按 stop_reason 缺失识别"不完整回合"并续写。
+            // Persist replayable assistant context before scheduling recovery.
+            // A recovery is a fresh request, not a provider token-cursor resume.
             let incomplete_stream = !had_error && request_error.is_none() && stop_reason.is_none();
             if incomplete_stream {
-                if self.continuation_count >= MAX_STREAM_CONTINUATIONS {
-                    log::warn!(
-                        "[TURN] run_lap turn_id={} round_num={} stream incomplete {}x — giving up, accepting partial output",
-                        turn_id,
-                        round_num,
-                        self.continuation_count
-                    );
-                    self.continuation = None;
-                } else {
-                    let has_text = !content.trim().is_empty();
-                    let has_reasoning = !reasoning.trim().is_empty();
-                    // 正文完成停在思考链 / 只有思考链 → 剥链 + continue；
-                    // 正文本身被掐 → 保留原文 + 补全提示。
-                    self.continuation = Some(if has_text && !has_reasoning {
-                        StreamContinuation::ContinuePartialText
-                    } else {
-                        StreamContinuation::StripTrailingReasoning
-                    });
-                    self.continuation_count += 1;
-                    log::warn!(
-                        "[TURN] run_lap turn_id={} round_num={} stream cut without finish_reason — resuming ({}/{})",
-                        turn_id,
-                        round_num,
-                        self.continuation_count,
-                        MAX_STREAM_CONTINUATIONS
-                    );
-                    // 续写前密封当前流式块，避免下一 lap 以重置的 segment 重开同 ID 导致 timeline 交错
-                    crate::agent::turn_lap::gate::seal_active_stream_block(
+                let partial = super::stream_continuation::partial_message(
+                    &content,
+                    &reasoning,
+                    reasoning_kind,
+                    &tool_calls_raw,
+                    response_output_items,
+                );
+                let failure = match partial {
+                    Ok(message) => {
+                        let receipt = ctx.flow.ingest(
+                            &mut ctx.agent.msg,
+                            qaqh_message::builtin::MODEL,
+                            message,
+                        );
+                        ctx.agent.drain_persist_ops();
+                        if !receipt.stored {
+                            Some("Partial assistant response could not be stored")
+                        } else if self.continuation_count >= MAX_STREAM_CONTINUATIONS {
+                            Some("Stream recovery budget exhausted")
+                        } else {
+                            None
+                        }
+                    }
+                    Err(message) => Some(message),
+                };
+                if let Some(message) = failure {
+                    seal_timeline_terminal_round(
                         ctx,
                         &turn_id,
                         round_num,
-                        &mut active_stream_block,
+                        active_stream_block.as_ref(),
+                        &timeline_tools_open,
+                        qaqh_domain::TimelineTurnState::Failed,
+                        Some(qaqh_domain::TimelineFailure {
+                            code: "stream_recovery_failed".into(),
+                            message: message.into(),
+                        }),
                     );
-                    return Outcome::ContinueTurn {
+                    return Outcome::TurnFailed {
                         turn_id,
-                        round_num,
                         usage: last_usage,
+                        message: message.into(),
                     };
                 }
-            } else if self.continuation.is_some() {
-                // 续写轮正常终止：恢复常规路径。
-                self.continuation = None;
+                self.continuation_count += 1;
+                crate::agent::turn_lap::gate::seal_active_stream_block(
+                    ctx,
+                    &turn_id,
+                    round_num,
+                    &mut active_stream_block,
+                );
+                return Outcome::ContinueTurn {
+                    turn_id,
+                    round_num,
+                    usage: last_usage,
+                };
+            } else {
                 self.continuation_count = 0;
             }
 
@@ -1706,7 +1658,6 @@ impl TurnEngine {
     /// observe `AlreadyTerminal` instead of republishing a terminal.
     pub(crate) fn reset_runtime_state(&mut self) {
         self.suspended = None;
-        self.continuation = None;
         self.continuation_count = 0;
     }
 

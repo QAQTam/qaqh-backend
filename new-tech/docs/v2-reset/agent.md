@@ -4,6 +4,9 @@
 施工遵循 [rollout](rollout.md) 与 [能力保留矩阵](preservation.md)，provider/账号契约见 [providers](providers.md)。
 plugins/ 依赖 AgentState/RingContext，turn_actor 镜像旧 lap，不是这里的边界。
 
+本页定义目标边界；[Agent loop 重塑 spec](agentloop-spec.md) 细化当前产品的分版本施工、端口和验收。
+终态替换旧执行模型，临时适配必须到期删除；建立新接口或移动文件不等于重塑完成。
+
 ## 1. loop 六件事
 
 1. 单会话真实邮箱排序 typed command 与带 request/execution generation 的 completion。

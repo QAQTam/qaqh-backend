@@ -155,16 +155,21 @@ pub(crate) async fn handle_timeline_snapshot(
     // shells, while the response restores full text for this page only.
     // 归档投影出来的回合本身就是全文（`offloaded=false`），此调用对它们是空操作。
     let page = state.hub.rehydrate_timeline_page(&session_id, page);
-    let body = serde_json::json!({
-        "schema": "qaqh.Ringing",
-        "version": 2,
-        "server_epoch": state.hub.epoch(),
-        "session_id": session_id,
-        "snapshot": {"watermark": snapshot.watermark, "turns": page},
-        "has_more": has_more,
-        "total_turns": total_turns,
-        "truncated_before": truncated_before,
-    });
+    // wire 形状由 `qaqh-ringing::TimelinePage` DTO 锁定（此前是 `json!` 拼装，
+    // schema/version 字面量与客户端校验各自维护）。
+    let body = qaqh_ringing::TimelinePage {
+        schema: qaqh_ringing::RINGING_SCHEMA.to_owned(),
+        version: qaqh_ringing::RINGING_V2_VERSION,
+        server_epoch: state.hub.epoch().to_owned(),
+        session_id,
+        snapshot: qaqh_domain::TimelineSnapshot {
+            watermark: snapshot.watermark,
+            turns: page,
+        },
+        has_more,
+        total_turns,
+        truncated_before,
+    };
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],

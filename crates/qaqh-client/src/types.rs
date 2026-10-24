@@ -31,7 +31,7 @@ pub use qaqh_domain::{
 };
 pub use qaqh_ringing::{
     CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommand,
-    RingingCommandAckStatus, RingingCommandState, is_safe_integer,
+    RingingCommandAckStatus, RingingCommandState, TimelinePage, TimelineSseFrame, is_safe_integer,
 };
 pub use qaqh_types::{
     SessionListEntry, SessionMeta, SessionRunStatus, ToolContinuation, ToolError, ToolImage,
@@ -78,65 +78,11 @@ pub enum TimelineStatus {
     },
 }
 
-/// Versioned response from `GET /ringing/v2/sessions/{session_id}/timeline`.
-///
-/// `snapshot` is the authoritative materialized transcript. Pagination
-/// metadata remains outside it because it describes the current HTTP page,
-/// not transcript state.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct TimelinePage {
-    pub schema: String,
-    pub version: u32,
-    pub server_epoch: String,
-    #[serde(rename = "session_id")]
-    pub session_id: String,
-    pub snapshot: TimelineSnapshot,
-    /// 本页之前（游标方向）**仍有可交付的回合**，即在已物化的 timeline 里还能
-    /// 再往前翻一页。
-    ///
-    /// 不变式：`has_more == true ⇒ 本页非空`（BUG-2026-09-13-18——违反它会让
-    /// 按 has_more 驱动的翻页客户端拿到零行却永不终止）。
-    pub has_more: bool,
-    /// 会话持久化的**真实回合总数**，与物化窗口无关。
-    ///
-    /// 与「已交付回合数」的差即未交付的历史；见 [`Self::truncated_before`]。
-    pub total_turns: usize,
-    /// 物化窗口**未覆盖到历史开头**：更早的回合存在（在 daemon 归档里），但
-    /// 本次交付不到，且当前**没有**深翻页接口能取到它们。
-    ///
-    /// T-08：重建路径只物化最近几十轮。此前这种截断对客户端完全不可见——既无
-    /// 提示、也无从知道历史更长。它**不能**用 `has_more` 表达，因为那会让客户端
-    /// 反复请求一个永远拿不到内容的页（见上）。
-    ///
-    /// 无 `#[serde(default)]`：daemon 侧恒发此键（`timeline_api.rs` 的 body 里写死）。
-    /// 原先的 default 是为「旧 daemon 不发此键」加的，2026-09-15 按兼容政策删除
-    /// （§0b）。缺键=形状不对，应当**响亮失败**而不是静默当成未截断。
-    pub truncated_before: bool,
-}
+// `TimelinePage` / `TimelineSseFrame` 已迁入 wire crate（`qaqh-ringing::v2::
+// timeline`，ts 导出与 daemon handler 共用那份 DTO）；本模块经上方 re-export
+// 保留壳层命名，字段与校验语义不变。
 
-impl TimelinePage {
-    pub fn validate_for(&self, session_id: &str) -> Result<(), String> {
-        if self.schema != RINGING_SCHEMA
-            || self.version != RINGING_V2_VERSION
-            || self.session_id != session_id
-            || self.server_epoch.is_empty()
-        {
-            return Err("invalid timeline page".into());
-        }
-        Ok(())
-    }
-}
-
-/// Timeline SSE frame.
-#[derive(Debug, Clone, Deserialize)]
-pub struct TimelineSseFrame {
-    pub schema: String,
-    pub version: u32,
-    pub server_epoch: String,
-    #[serde(rename = "session_id")]
-    pub session_id: String,
-    pub entry: TimelineEntry,
-}
+/// Timeline SSE frame 由 `qaqh_ringing::TimelineSseFrame` 提供（见上）。
 
 /// Parsed SSE frame (a block of `key: value` lines separated by a blank line).
 #[derive(Debug, Clone, Default)]

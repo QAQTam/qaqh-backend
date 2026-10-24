@@ -246,6 +246,10 @@ mod tests {
         assert!(store.load().expect("读").is_none());
     }
 
+    /// at-rest 加密断言只在 Windows 成立：`qaqh-config::secrets` 非 Windows
+    /// 平台是明文 + 0600（keyring 集成前的既定策略），磁盘上**有意**存在
+    /// 明文。keyring 落地后移除本门控。
+    #[cfg(windows)]
     #[test]
     fn round_trip_keeps_the_token_out_of_the_file() {
         let (_dir, store) = store();
@@ -277,6 +281,9 @@ mod tests {
         );
     }
 
+    /// 篡改密文必须报 Storage 错是 DPAPI 解密语义；非 Windows 明文直读，
+    /// 「解不开」无从发生。keyring 落地后移除本门控。
+    #[cfg(windows)]
     #[test]
     fn a_tampered_cipher_is_a_storage_failure_not_a_silent_signed_out() {
         let (_dir, store) = store();

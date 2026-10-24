@@ -155,10 +155,10 @@ pub fn peek_image(session_id: &str, index: usize) -> Option<(String, String)> {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadImageArgs {
-    /// Uploaded image index (0-based)
+    /// Uploaded image index (0-based). Provide exactly one of image_index or path.
     #[serde(default)]
     pub image_index: Option<u64>,
-    /// Image file path
+    /// Image file path. Omit image_index when reading a file; never supply both.
     #[serde(default, alias = "file_path")]
     pub path: Option<String>,
 }
@@ -224,7 +224,7 @@ impl TypedTool for ReadImageTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "read_image",
-            "Load image into visual context (by image_index or file path). Auto downscale if oversized.",
+            "Load image into visual context. Provide exactly one source: path for a file, or image_index for an uploaded image. Do not supply both. Auto downscale if oversized.",
             crate::permission::ToolCategory::Read,
             ToolRisk::ReadOnly,
             Duration::from_secs(30),
@@ -237,6 +237,19 @@ impl TypedTool for ReadImageTool {
         ctx: &ToolCallContext,
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
+        if args.image_index.is_some() == args.path.is_some()
+            || args
+                .path
+                .as_deref()
+                .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err(mutation_error(
+                "invalid_arguments",
+                "read_image: provide exactly one of image_index or a non-empty path; omit or null the unused source. File paths do not have upload indices.",
+                None,
+                json!({}),
+            ));
+        }
         let (raw_bytes, display) = if let Some(index) = args.image_index {
             let index = index as usize;
             let session_id = &ctx.session_id;
@@ -517,6 +530,15 @@ mod tests {
         // effects beyond the enabled probe).
         let result = handle_read_image(serde_json::json!({}));
         assert!(!result.is_success());
+    }
+
+    #[test]
+    fn conflicting_sources_fail_before_registry_lookup() {
+        let result = handle_read_image(json!({"image_index":0,"path":"image.png"}));
+        assert!(!result.is_success());
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(text.contains("exactly one"), "{text}");
+        assert!(!text.contains("not found in session"), "{text}");
     }
 
     #[test]

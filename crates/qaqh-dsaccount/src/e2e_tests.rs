@@ -388,10 +388,14 @@ fn full_sign_in_persists_the_credential_and_keeps_the_uri_verbatim_everywhere() 
     assert_eq!(status["state"], "signed-in", "{status}");
     assert!(status["error"].is_null());
 
-    // 凭据可用，且**没有明文落盘**。
+    // 凭据可用。磁盘加密是 Windows（DPAPI）专属行为（非 Windows 明文 + 0600，
+    // 见 qaqh-config::secrets），磁盘明文断言只在 Windows 编译。
     assert_eq!(manager.token().expect("token"), FAKE_TOKEN);
-    let raw = std::fs::read_to_string(manager.store().path()).expect("读凭据文件");
-    assert!(!raw.contains(FAKE_TOKEN), "凭据文件里出现了明文 token");
+    #[cfg(windows)]
+    {
+        let raw = std::fs::read_to_string(manager.store().path()).expect("读凭据文件");
+        assert!(!raw.contains(FAKE_TOKEN), "凭据文件里出现了明文 token");
+    }
 
     // 投影里没有凭据。
     let projection = manager.status().to_string();

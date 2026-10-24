@@ -12,7 +12,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{AskAnswer, ControlCommand, ToolCommand};
-use qaqh_ringing::RingingCommand;
+use qaqh_ringing::{
+    RingingCommand, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
+    RingingV2InteractionKind, RingingV2PendingApprovals,
+};
 use serde_json::{Value, json};
 
 pub const APPROVAL_TTL: Duration = Duration::from_secs(5 * 60);
@@ -26,11 +29,22 @@ pub enum ApprovalKind {
 }
 
 impl ApprovalKind {
-    pub fn as_str(self) -> &'static str {
+    /// wire 词表见 [`RingingV2DeviceApprovalKind`]（与 admin 面刻意不同形）。
+    fn to_wire(self) -> RingingV2DeviceApprovalKind {
         match self {
-            Self::ToolPermission => "tool_permission",
-            Self::Ask => "ask",
-            Self::Plan => "plan",
+            Self::ToolPermission => RingingV2DeviceApprovalKind::ToolPermission,
+            Self::Ask => RingingV2DeviceApprovalKind::Ask,
+            Self::Plan => RingingV2DeviceApprovalKind::Plan,
+        }
+    }
+
+    /// admin 面的 interaction kind → challenge 种类。permission 不经本映射：
+    /// admin 面的 permission 槽走 tool_call 源 id，单独签发。
+    fn from_interaction(kind: RingingV2InteractionKind) -> Option<Self> {
+        match kind {
+            RingingV2InteractionKind::Ask => Some(Self::Ask),
+            RingingV2InteractionKind::PlanReview => Some(Self::Plan),
+            RingingV2InteractionKind::Permission => None,
         }
     }
 }
@@ -58,13 +72,13 @@ impl ApprovalChallenge {
             .as_secs()
     }
 
-    pub fn view(&self) -> Value {
-        json!({
-            "challenge_id": self.id,
-            "kind": self.kind.as_str(),
-            "expires_in": self.expires_in_secs(),
-            "details": self.details,
-        })
+    pub fn view(&self) -> RingingV2DeviceChallenge {
+        RingingV2DeviceChallenge {
+            challenge_id: self.id.clone(),
+            kind: self.kind.to_wire(),
+            expires_in: self.expires_in_secs(),
+            details: self.details.clone(),
+        }
     }
 }
 
@@ -136,65 +150,49 @@ impl ChallengeStore {
 
     /// daemon `/approvals` 投影 → 不透明 challenge 视图列表。
     ///
-    /// `pending_permission` 的 details 只放行展示字段（`details_unavailable` 不出
-    /// daemon）；`pending_interaction` 的 details 原样（daemon 侧已是投影形状）。
+    /// 输入是 admin 面的 typed 投影（[`RingingV2PendingApprovals`]）；device
+    /// 面只拿不透明 `challenge_id` 与白名单 details，canonical id 不出 daemon。
     pub fn issue_views(
         &self,
         session_id: &str,
-        pending: &Value,
-    ) -> Result<Vec<Value>, &'static str> {
+        pending: &RingingV2PendingApprovals,
+    ) -> Result<Vec<RingingV2DeviceChallenge>, &'static str> {
         let mut views = Vec::new();
 
-        if let Some(tool) = pending
-            .get("pending_permission")
-            .filter(|value| !value.is_null())
-        {
-            let source_id = tool
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .filter(|value| valid_daemon_id(value))
-                .ok_or("invalid_pending_permission")?;
+        if let Some(tool) = &pending.pending_permission {
+            if !valid_daemon_id(&tool.tool_call_id) {
+                return Err("invalid_pending_permission");
+            }
             let details = json!({
-                "tool_name": tool.get("tool_name").cloned().unwrap_or(Value::Null),
-                "action_summary": tool.get("action_summary").cloned().unwrap_or(Value::Null),
-                "reason": tool.get("reason").cloned().unwrap_or(Value::Null),
-                "paths": tool.get("paths").cloned().unwrap_or_else(|| json!([])),
-                "category": tool.get("category").cloned().unwrap_or(Value::Null),
-                "level": tool.get("level").cloned().unwrap_or(Value::Null),
-                "risk": tool.get("risk").cloned().unwrap_or(Value::Null),
-                "consequence": tool.get("consequence").cloned().unwrap_or(Value::Null),
+                "tool_name": tool.tool_name.clone().unwrap_or(Value::Null),
+                "action_summary": tool.action_summary.clone().unwrap_or(Value::Null),
+                "reason": tool.reason.clone().unwrap_or(Value::Null),
+                "paths": tool.paths.clone(),
+                "category": tool.category.clone().unwrap_or(Value::Null),
+                "level": tool.level.clone().unwrap_or(Value::Null),
+                "risk": tool.risk.clone().unwrap_or(Value::Null),
+                "consequence": tool.consequence.clone().unwrap_or(Value::Null),
             });
             let challenge = self
                 .issue(
                     session_id,
                     ApprovalKind::ToolPermission,
-                    source_id.to_string(),
+                    tool.tool_call_id.clone(),
                     details,
                 )
                 .map_err(|_| "approval_limit")?;
             views.push(challenge.view());
         }
 
-        if let Some(interaction) = pending
-            .get("pending_interaction")
-            .filter(|value| !value.is_null())
-        {
-            let source_id = interaction
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|value| valid_daemon_id(value))
+        if let Some(interaction) = &pending.pending_interaction {
+            if !valid_daemon_id(&interaction.id) {
+                return Err("invalid_pending_interaction");
+            }
+            let kind = ApprovalKind::from_interaction(interaction.kind)
                 .ok_or("invalid_pending_interaction")?;
-            let kind = match interaction.get("kind").and_then(Value::as_str) {
-                Some("ask") => ApprovalKind::Ask,
-                Some("plan") => ApprovalKind::Plan,
-                _ => return Err("invalid_pending_interaction"),
-            };
-            let details = interaction
-                .get("details")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let details = interaction.details.clone().unwrap_or_else(|| json!({}));
             let challenge = self
-                .issue(session_id, kind, source_id.to_string(), details)
+                .issue(session_id, kind, interaction.id.clone(), details)
                 .map_err(|_| "approval_limit")?;
             views.push(challenge.view());
         }
@@ -279,6 +277,7 @@ fn random_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qaqh_ringing::{RingingV2PendingInteractionView, RingingV2PendingPermissionView};
     use std::sync::Arc;
 
     fn challenge(kind: ApprovalKind) -> ApprovalChallenge {
@@ -289,6 +288,21 @@ mod tests {
             session_id: "0123abcd".into(),
             details: json!({}),
             issued_at: Instant::now(),
+        }
+    }
+
+    /// device 面的输入是 admin 投影 DTO（与 handler 序列化同一份类型）。
+    fn interaction_pending(
+        id: &str,
+        kind: RingingV2InteractionKind,
+    ) -> RingingV2PendingApprovals {
+        RingingV2PendingApprovals {
+            pending_permission: None,
+            pending_interaction: Some(RingingV2PendingInteractionView {
+                id: id.into(),
+                kind,
+                details: Some(json!({})),
+            }),
         }
     }
 
@@ -340,11 +354,9 @@ mod tests {
     #[test]
     fn consume_is_one_shot_and_scope_checked() {
         let store = ChallengeStore::default();
-        let pending = json!({
-            "pending_interaction": { "id": "int_01ABC", "kind": "plan", "details": {} }
-        });
+        let pending = interaction_pending("int_01ABC", RingingV2InteractionKind::PlanReview);
         let views = store.issue_views("seed1", &pending).unwrap();
-        let id = views[0]["challenge_id"].as_str().unwrap().to_string();
+        let id = views[0].challenge_id.clone();
 
         assert_eq!(
             store.consume(&id, "other-seed").unwrap_err(),
@@ -357,7 +369,7 @@ mod tests {
         );
 
         let views = store.issue_views("seed1", &pending).unwrap();
-        let id = views[0]["challenge_id"].as_str().unwrap().to_string();
+        let id = views[0].challenge_id.clone();
         let consumed = store.consume(&id, "seed1").unwrap();
         assert_eq!(consumed.source_id, "int_01ABC");
         assert_eq!(
@@ -369,36 +381,39 @@ mod tests {
     #[test]
     fn permission_details_are_whitelisted() {
         let store = ChallengeStore::default();
-        let pending = json!({
-            "pending_permission": {
-                "tool_call_id": "call_01ABC",
-                "tool_name": "write_file",
-                "details_unavailable": false,
-            }
-        });
+        let pending = RingingV2PendingApprovals {
+            pending_permission: Some(RingingV2PendingPermissionView {
+                tool_call_id: "call_01ABC".into(),
+                tool_name: Some(json!("write_file")),
+                action_summary: None,
+                reason: None,
+                paths: json!([]),
+                category: None,
+                level: None,
+                risk: None,
+                consequence: None,
+                details_unavailable: false,
+            }),
+            pending_interaction: None,
+        };
         let views = store.issue_views("seed1", &pending).unwrap();
-        let details = &views[0]["details"];
-        assert!(details.get("tool_name").is_some());
-        assert!(details.get("details_unavailable").is_none());
-        assert!(
-            views[0]["challenge_id"]
-                .as_str()
-                .is_some_and(|id| id.len() == 64)
-        );
+        let view = &views[0];
+        assert_eq!(view.kind, RingingV2DeviceApprovalKind::ToolPermission);
+        // 白名单：只放行展示字段，admin 面的 details_unavailable 不出 daemon。
+        assert!(view.details.get("tool_name").is_some());
+        assert!(view.details.get("details_unavailable").is_none());
+        assert_eq!(view.challenge_id.len(), 64);
     }
 
     #[test]
     fn pending_limit_is_enforced() {
         let store = Arc::new(ChallengeStore::default());
         for index in 0..MAX_PENDING_APPROVALS {
-            let pending = json!({
-                "pending_interaction": { "id": format!("int_{index:028}"), "kind": "ask", "details": {} }
-            });
+            let pending =
+                interaction_pending(&format!("int_{index:028}"), RingingV2InteractionKind::Ask);
             assert!(store.issue_views("seed1", &pending).is_ok());
         }
-        let overflow = json!({
-            "pending_interaction": { "id": "int_overflow", "kind": "ask", "details": {} }
-        });
+        let overflow = interaction_pending("int_overflow", RingingV2InteractionKind::Ask);
         assert_eq!(
             store.issue_views("seed1", &overflow).unwrap_err(),
             "approval_limit"

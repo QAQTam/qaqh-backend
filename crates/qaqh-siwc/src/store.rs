@@ -386,6 +386,10 @@ mod tests {
         }
     }
 
+    /// at-rest 加密断言只在 Windows 成立：`qaqh-config::secrets` 非 Windows
+    /// 平台是明文 + 0600（keyring 集成前的既定策略），磁盘上**有意**存在
+    /// 明文。keyring 落地后移除本门控。
+    #[cfg(windows)]
     #[test]
     fn tokens_are_never_plaintext_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");

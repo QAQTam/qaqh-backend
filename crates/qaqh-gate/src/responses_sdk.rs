@@ -30,8 +30,8 @@ use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, adopt_identity,
-    apply_management_headers, empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail,
-    sdk_retry_policy, split_url, tool_result_name,
+    apply_management_headers, empty_stream_retry, insert_header, roomy_response_limits,
+    sdk_error_detail, sdk_retry_policy, split_url, tool_result_name,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, empty_request_noop_done_event,
@@ -663,7 +663,11 @@ fn strip_reasoning_content_for_plan(request: &mut ChatRequest) {
     for msg in &mut request.messages {
         for part in &mut msg.parts {
             if let Part::ProviderItem(item) = part
-                && item.provider_state.data.get("type").and_then(|v| v.as_str())
+                && item
+                    .provider_state
+                    .data
+                    .get("type")
+                    .and_then(|v| v.as_str())
                     == Some("reasoning")
                 && let Some(obj) = item.provider_state.data.as_object_mut()
             {
@@ -788,17 +792,7 @@ fn server_tool_status_name(state: ServerToolState) -> &'static str {
 /// 去重锚点：优先 `call_id`；身份缺席时退回 `name`+参数（不编造 id——
 /// 缺 id 的调用交给 runtime 的可见失败块处理）。
 ///
-/// BUG-2026-10-15（missing-field 假错 + 副作用已落盘）：本函数曾把解析失败
-/// 的流内参数**伪造成 `{}`** 塞进 ToolUse。一旦去重锚点失配（item id 与
-/// call_id 形态别名、或单侧 id 为空而参数又不等），终态里的真调用（完整
-/// 参数 → 正常执行 → 落盘）与这里的幽灵副本（`{}` 参数 → 执行 →
-/// 「invalid arguments: missing field `patch`」）会**同时**进执行面——模型
-/// 看到假错，盘上却已有补丁。修正：
-/// 1. 参数还原失败不再是「空对象」：终态已带同名调用 → 本次流条目只是同一
-///    调用的损坏副本，按重复丢弃；终态没带 → 以 `Null` input 如实收口，
-///    由 runtime 执行界面向模型报告「上游参数流损坏，未执行」。
-/// 2. id 别名场景（双侧 id 非空但不等）补参数语义一致性判重——同调用的
-///    两份上报不得执行两次。
+/// 损坏参数不得伪造为空对象；以终态为准去重，缺终态时保留 Null 供执行面拒绝。
 fn reconcile_streamed_tool_calls(
     blocks: &mut Vec<ContentBlock>,
     streamed: &HashMap<usize, (String, String, String)>,
@@ -1366,6 +1360,17 @@ async fn consume(
                     });
                     return Outcome::Completed;
                 }
+                if !matches!(
+                    e.kind(),
+                    mutil_ai::ErrorKind::Connection | mutil_ai::ErrorKind::Timeout
+                ) {
+                    let (msg, full) = sdk_error_detail("Responses", &e, &provider.api_key);
+                    on_event(StreamEvent::Error {
+                        kind: e.kind(),
+                        message: full,
+                    });
+                    return Outcome::Fatal(anyhow::anyhow!(msg));
+                }
                 interrupted = Some(e.to_string());
                 break;
             }
@@ -1855,7 +1860,11 @@ mod tests {
         for msg in &request.messages {
             for part in &msg.parts {
                 if let Part::ProviderItem(item) = part
-                    && item.provider_state.data.get("type").and_then(|v| v.as_str())
+                    && item
+                        .provider_state
+                        .data
+                        .get("type")
+                        .and_then(|v| v.as_str())
                         == Some("reasoning")
                 {
                     reasoning += 1;
@@ -2206,11 +2215,7 @@ mod tests {
             ),
         );
         reconcile_streamed_tool_calls(&mut blocks, &streamed);
-        assert_eq!(
-            blocks.len(),
-            1,
-            "损坏副本不得入执行面：{blocks:?}"
-        );
+        assert_eq!(blocks.len(), 1, "损坏副本不得入执行面：{blocks:?}");
     }
 
     /// 同上但终态没带调用：以 Null 参数如实收口，交 runtime 执行界面
