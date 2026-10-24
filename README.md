@@ -51,7 +51,18 @@ Tauri 2 桌面壳 + SolidJS 渲染层（原 `webui/`）已于 **2026-10-07** 抽
 crate 的 `derive(TS)` 导出、但生成动作从那边发起。原浏览器 gateway
 (`qaqh-webui-gateway`)已移除，daemon token 不进 webview。
 
-改 `wire` 类型后：去 `../qaqh-desktop-app` 跑 `just ts-export` 并提交那边的生成物。
+改 `wire` 类型后，由后端唯一入口生成 SDK 契约，再由客户端原样导入：
+
+```bash
+cargo run -p qaqh-contract-export -- export --out /tmp/qaqh-sdk-contract
+cargo run -p qaqh-contract-export -- check --against /tmp/qaqh-sdk-contract
+python3 scripts/check-sdk-contract.py
+# 已安装 tsc 时增加 --typescript；干净发布工作树使用 --release。
+```
+
+契约 manifest 记录源码 revision/dirty 和文件摘要；发布验证脚本从 Git 注入真实
+元信息，拒绝脏工作树发布。SDK 安装不需要 Rust 或兄弟仓源码。具体边界见
+[`docs/spec-electron-sdk.md`](docs/spec-electron-sdk.md)。
 
 ## 当前事实源
 

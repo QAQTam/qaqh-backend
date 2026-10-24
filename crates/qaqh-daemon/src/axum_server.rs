@@ -838,6 +838,7 @@ mod axum_tests {
             SessionMetadataChanged, SessionMetadataPatch,
         };
 
+        let state = test_state();
         let sessions_dir = qaqh_types::platform::sessions_dir();
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
@@ -879,7 +880,6 @@ mod axum_tests {
         };
         store.append(&lease, fact, now).unwrap();
 
-        let state = test_state();
         let v2_hub = state.v2_hub.clone();
         let app = build_router(state);
         let open = Request::builder()

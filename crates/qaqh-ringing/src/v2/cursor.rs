@@ -7,6 +7,8 @@ use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
 
 use crate::MAX_SAFE_INTEGER;
 
@@ -15,6 +17,7 @@ pub const END_OF_FACT: u16 = u16::MAX;
 
 /// Logical canonical cursor shared by v2 replay and reset paths.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct CanonicalCursor {
     pub log_id: String,
     pub fact_seq: u64,
@@ -80,6 +83,7 @@ impl CanonicalCursor {
 /// Opaque wire token: `v2.<base64url-no-pad(compact-json)>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct CursorToken(String);
 
 impl CursorToken {

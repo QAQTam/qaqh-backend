@@ -25,6 +25,7 @@ unicode-normalization = "0.1"
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 log = "0.4"
 chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
@@ -38,6 +39,7 @@ tokio = { version = "1", features = ["sync", "time"] }
 
 [features]
 default = ["memory"]
+ts = ["dep:ts-rs", "qaqh-types/ts", "qaqh-domain/ts", "qaqh-siwc/ts", "qaqh-dsaccount/ts"]
 # Kept as a compatibility no-op after removing the experimental vector backend.
 memory = []
 

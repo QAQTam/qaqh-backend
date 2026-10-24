@@ -7,6 +7,8 @@
 use qaqh_domain::RingingChannel;
 use qaqh_domain::state::ControlState;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
 
 use crate::command::RingingCommand;
 use crate::envelope::{RingingCommandAckStatus, RingingCommandState};
@@ -15,6 +17,7 @@ use crate::v2::cursor::{CanonicalCursor, CursorToken};
 use crate::v2::{RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2OpenRequest {
     pub schema: String,
     pub version: u32,
@@ -29,9 +32,23 @@ impl RingingV2OpenRequest {
             client_instance_id: client_instance_id.into(),
         }
     }
+
+    /// Schema/version gate mirroring the daemon open handler's
+    /// `UPGRADE_REQUIRED` rejection; diagnostics-only `client_instance_id`
+    /// must still be non-empty.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema != RINGING_SCHEMA
+            || self.version != RINGING_V2_VERSION
+            || self.client_instance_id.trim().is_empty()
+        {
+            return Err("invalid_open_request");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2Capabilities {
     pub subscribe: bool,
     pub interact: bool,
@@ -57,6 +74,7 @@ pub struct RingingV2Capabilities {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2OpenResponse {
     pub schema: String,
     pub version: u32,
@@ -89,6 +107,7 @@ impl RingingV2OpenResponse {
 
 /// `POST /ringing/v2/pairing/tokens` 请求（Admin）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2PairTokenRequest {
     /// 桌面端决定的授予档位：`"view"` | `"interact"`。
     pub scope_grant: String,
@@ -100,6 +119,7 @@ pub struct RingingV2PairTokenRequest {
 
 /// 配对令牌响应。`tls_fp` 为自签证书 SPKI 的 `sha256:<hex>`，供原生端 pinning。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2PairTokenResponse {
     pub pairing_token: String,
     pub expires_in_ms: u64,
@@ -109,6 +129,7 @@ pub struct RingingV2PairTokenResponse {
 
 /// `POST /ringing/v2/pair` 请求（无 Bearer，消费一次性 `pairing_token`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2PairRequest {
     pub pairing_token: String,
     #[serde(default)]
@@ -119,6 +140,7 @@ pub struct RingingV2PairRequest {
 
 /// 配对成功响应。`device_token` 明文**仅此一次**出现，注册表只存摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2PairResponse {
     pub device_id: String,
     pub device_token: String,
@@ -129,6 +151,7 @@ pub struct RingingV2PairResponse {
 
 /// 设备管理视图（**不含任何 token 材料**）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2DeviceWire {
     pub device_id: String,
     pub name: String,
@@ -139,11 +162,13 @@ pub struct RingingV2DeviceWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2DevicesResponse {
     pub devices: Vec<RingingV2DeviceWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2LeaseRenewResponse {
     pub ok: bool,
     pub lease_ttl_ms: u64,
@@ -152,6 +177,7 @@ pub struct RingingV2LeaseRenewResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2Delivery {
     Reliable,
     Replaceable,
@@ -160,6 +186,7 @@ pub enum RingingV2Delivery {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2StreamKey {
     Channel(RingingChannel),
     Resource { kind: String, id: String },
@@ -168,6 +195,7 @@ pub enum RingingV2StreamKey {
 /// v2 event envelope. `P` is the typed projection payload selected by the
 /// transport/client boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2EventEnvelope<P> {
     pub schema: String,
     pub version: u32,
@@ -272,6 +300,7 @@ impl<P> RingingV2EventEnvelope<P> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2ResetReason {
     CursorExpired,
     LogIdMismatch,
@@ -295,6 +324,7 @@ pub enum RingingV2ResetReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2ResetRequired {
     pub schema: String,
     pub version: u32,
@@ -331,6 +361,7 @@ impl RingingV2ResetRequired {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2InteractionKind {
     Permission,
     Ask,
@@ -342,6 +373,7 @@ pub enum RingingV2InteractionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2PendingInteraction {
     pub interaction_id: String,
     pub call_id: String,
@@ -365,6 +397,7 @@ pub struct RingingV2PendingInteraction {
 /// reason 结构不在此重复建模，按不透明 JSON 透传。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2ContentValue {
     Inline { text: String },
     Ref { content_ref: String },
@@ -374,6 +407,7 @@ pub enum RingingV2ContentValue {
 pub type RingingV2PendingSet = Vec<RingingV2PendingInteraction>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2DriverState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder: Option<String>,
@@ -395,6 +429,7 @@ pub struct RingingV2ControlState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2ChannelSnapshot<S> {
     pub channel: RingingChannel,
     pub state_revision: u64,
@@ -403,6 +438,7 @@ pub struct RingingV2ChannelSnapshot<S> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2Bootstrap<C, V, T> {
     pub schema: String,
     pub version: u32,
@@ -447,6 +483,7 @@ impl<C, V, T> RingingV2Bootstrap<C, V, T> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2CommandEnvelope {
     pub schema: String,
     pub version: u32,
@@ -547,6 +584,7 @@ impl RingingV2CommandEnvelope {
 /// still inside the idempotency TTL — that is, when the caller re-submitted a
 /// `command_id` it may have lost the ACK for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2CommandAck {
     pub command_id: String,
     pub status: RingingCommandAckStatus,
@@ -564,6 +602,7 @@ pub struct RingingV2CommandAck {
 /// Why a v2 submission collided with an already-recorded outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2ExistingResult {
     /// The same `command_id` was submitted again inside the receipt TTL
     /// (typically because the first ACK was lost).
@@ -591,6 +630,7 @@ pub enum RingingV2ExistingResult {
 /// do not degrade to string matching on `code`/`message`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2CommandResult {
     /// ask_user interaction was resolved by the command that owns this receipt.
     AskResolved {
@@ -611,6 +651,7 @@ pub enum RingingV2CommandResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum RingingV2AskOutcome {
     Answered,
     Dismissed,
@@ -619,6 +660,7 @@ pub enum RingingV2AskOutcome {
 /// v2 command status. Superset of [`crate::RingingCommandStatus`] with the
 /// typed terminal payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2CommandStatus {
     pub command_id: String,
     pub state: RingingCommandState,
@@ -632,6 +674,7 @@ pub struct RingingV2CommandStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2DriverClaimResponse {
     pub accepted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -641,6 +684,7 @@ pub struct RingingV2DriverClaimResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2DriverReleaseResponse {
     pub accepted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

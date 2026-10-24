@@ -1,0 +1,25 @@
+[package]
+name = "qaqh-contract-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+qaqh-domain = { path = "../../crates/qaqh-domain" }
+qaqh-ringing = { path = "../../crates/qaqh-ringing", features = ["ts"] }
+qaqh-types = { path = "../../crates/qaqh-types", features = ["ts"] }
+qaqh-runtime = { path = "../../crates/qaqh-runtime", features = ["ts"] }
+qaqh-siwc = { path = "../../crates/qaqh-siwc" }
+qaqh-dsaccount = { path = "../../crates/qaqh-dsaccount" }
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
