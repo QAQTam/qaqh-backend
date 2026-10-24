@@ -25,8 +25,8 @@ use crate::session_fact_v2::{
     InteractionExpired, InteractionId, InteractionRequested, InteractionResolved, MessageId,
     ModelRoundStarted, RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId,
     SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished,
-    TurnInterrupted, TurnId, TurnStarted, WorkspaceResourceChanged,
+    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished, TurnId,
+    TurnInterrupted, TurnStarted, WorkspaceResourceChanged,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

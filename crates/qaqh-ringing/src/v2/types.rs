@@ -406,6 +406,63 @@ pub enum RingingV2ContentValue {
 
 pub type RingingV2PendingSet = Vec<RingingV2PendingInteraction>;
 
+// ── 本地壳层审批投影 / content 上传响应（B02 handler 契约收口）────────────
+//
+// `GET /ringing/v2/sessions/{id}/approvals`（admin 桌面宿主面）与
+// `POST /ringing/v2/content` 的响应此前由 daemon handler `json!` 拼装；
+// 这里提取为一手 DTO，daemon 序列化与 TS 导出共用。device 侧 challenge
+// 视图是另一种形状（opaque challenge），刻意不与 admin 面混用。
+
+/// tool permission 待审批视图（admin 面）。
+///
+/// `tool_name`…`consequence` 是工具请求正文里的动态 JSON 值，契约只承诺
+/// 「键存在、值为 JSON」；正文不可用时这些键为 `null`、`paths` 为 `[]`，
+/// `details_unavailable` 如实标记。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2PendingPermissionView {
+    pub tool_call_id: String,
+    pub tool_name: Option<serde_json::Value>,
+    pub action_summary: Option<serde_json::Value>,
+    pub reason: Option<serde_json::Value>,
+    pub paths: serde_json::Value,
+    pub category: Option<serde_json::Value>,
+    pub level: Option<serde_json::Value>,
+    pub risk: Option<serde_json::Value>,
+    pub consequence: Option<serde_json::Value>,
+    pub details_unavailable: bool,
+}
+
+/// ask / plan 待审批视图（admin 面）；`details` 为正文 JSON，不可用时为
+/// `null`（键仍在）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2PendingInteractionView {
+    pub id: String,
+    pub kind: RingingV2InteractionKind,
+    pub details: Option<serde_json::Value>,
+}
+
+/// `GET /ringing/v2/sessions/{id}/approvals`（admin）响应：两个槽位最多各
+/// 一张待办卡；无待办时键仍在、值为 `null`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2PendingApprovals {
+    pub pending_permission: Option<RingingV2PendingPermissionView>,
+    pub pending_interaction: Option<RingingV2PendingInteractionView>,
+}
+
+/// `POST /ringing/v2/content` 响应。`content_id` 即内容摘要（`sha256:<hex>`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2ContentUploadResponse {
+    pub content_id: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub size: u64,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2DriverState {

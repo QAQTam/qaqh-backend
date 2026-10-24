@@ -504,7 +504,10 @@ mod tests {
 
         // 未调用 store.create，直接 attach 应自动注册该工作区并纳入 session
         let ws_id = store.attach_by_cwd("s_auto", path).expect("auto created");
-        assert_eq!(store.workspace_of("s_auto").as_deref(), Some(ws_id.as_str()));
+        assert_eq!(
+            store.workspace_of("s_auto").as_deref(),
+            Some(ws_id.as_str())
+        );
         let list = store.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, ws_id);

@@ -7,6 +7,7 @@ use super::types::{
     TaskArtifact, TaskCreated, TaskId, TaskState, TeamActor, TeamFact, TeamId, TeamPayload,
 };
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskBoardSnapshot {
     pub team_id: Option<TeamId>,
@@ -76,6 +77,7 @@ pub enum TaskBoardDelta {
     },
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
     pub task_id: TaskId,

@@ -7,12 +7,17 @@ description = "QAQ-Harness session manager — singleton, list/load/save/active"
 
 [features]
 default = []
-# web 端 TS 类型生成（ts-rs 单一真相）：投影 delta 是前端 applyProjection 的词表
-ts = ["dep:ts-rs", "qaqh-domain/ts"]
+# web 端 TS 类型生成（ts-rs 单一真相）：投影 delta 是前端 applyProjection 的词表。
+# client_v2 契约组合引用 qaqh-ringing 的 wire 交互/driver 类型，随本 feature
+# 一并开启其 TS impl（session→ringing 是向下的合法依赖方向，无环）。
+ts = ["dep:ts-rs", "qaqh-domain/ts", "qaqh-ringing/ts"]
 
 [dependencies]
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-message = { path = "../qaqh-message" }
+# 仅为 `client_v2` 契约模块引用 wire 侧 `RingingV2PendingInteraction` /
+# `RingingV2DriverState`；不引入对 runtime/daemon 的任何依赖。
+qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-types = { path = "../qaqh-types" }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 serde = { version = "1", features = ["derive"] }

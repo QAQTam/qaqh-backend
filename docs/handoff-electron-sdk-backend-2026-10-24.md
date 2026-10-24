@@ -27,6 +27,21 @@ cargo run -p qaqh-contract-export -- check --against <contract-dir>
 
 这些类型来自 `qaqh-ringing` 的 feature-gated ts-rs derive。`CanonicalCursor`/`CursorToken` 可被协议类型依赖；SDK UI 仍应把 cursor 当 opaque token 使用。
 
+### B02 具体组合类型（2026-10-24 第二轮）
+
+bootstrap/team/approvals/admin 与 content upload 的 handler 组合响应已从 `json!`/局部 struct 收口为一手 DTO，`index.ts` 提供具体组合的公共类型名：
+
+```ts
+export type ClientV2Bootstrap = RingingV2Bootstrap<ClientV2ControlState, ConversationSnapshot, ClientV2ToolState>;
+export type ClientV2Event = RingingV2EventEnvelope<ProjectionPayload>;
+export type ClientV2Payload = ProjectionPayload;
+```
+
+- 所有权：`qaqh-session/src/client_v2.rs` 定义 `ClientV2ControlState`/`ClientV2ToolState`/`ClientV2TeamResponse`（session→ringing 为合法向下依赖；qaqh-ringing 不反向依赖 session）。daemon bootstrap handler 与 `qaqh-client` 共用这一份定义，daemon 局部镜像已删除。
+- 投影闭包：`ConversationSnapshot`/`TeamSnapshot`/`TaskBoardSnapshot`/`TaskView` 等投影类型补 feature-gated ts derive；事件 payload 用 `ProjectionPayload` 完整闭包（delta 词表随旧桌面导出线已有 derive）。TS 类型文件从 ~55 增至 ~196。
+- approvals admin 面：`RingingV2PendingApprovals`/`RingingV2PendingPermissionView`/`RingingV2PendingInteractionView`（动态字段为 `unknown`/JSON value，键恒在）。device challenge 视图仍是另一种 opaque 形状，刻意不混用（coverage 标 pending）。
+- content upload：`RingingV2ContentUploadResponse`；download 的 bytes/header 映射待 F 线联调（coverage 标 pending）。
+
 Discovery 类型通过 **Node 专用** `node.ts` 导出，不在公共 `index.ts` 中导出：
 
 ```ts
@@ -80,8 +95,12 @@ export interface ServiceMap {
 - `service-fs-list-params.json`、`service-fs-list-result.json`
 - `service-fs-read-params.json`、`service-fs-read-result.json`
 - 账号面 18 项的 `service-{siwc,dsaccount}-*-params/result.json`（由真实账号 DTO 构造，含 `0E-16` 金额原串、kebab-case 流状态、flatten 的模型扩展键）
+- `bootstrap-response.json`（真实 `ClientV2Bootstrap` 组合，含 pending interaction 与 driver 席位，过 `validate()`）
+- `team-response.json`（roster/inbox/task board/message board 三份快照）
+- `approvals-pending.json` + `approvals-empty.json`（admin 面双槽位：空槽键在值为 null）
+- `content-upload-response.json`、`event-envelope-team-delta.json`（ephemeral 事件不携带可靠位置字段——该约束由 envelope `validate()` 强制）
 
-无真实 token、真实用户路径、账号、会话正文（fs fixture 使用 synthetic 路径）。Exporter 产物的 `coverage.json` 当前把以上 22 个 service 能力标为 implemented；`session.bootstrap-watch`、team/approvals/content/timeline handler 组合响应与其余 service methods 为 pending。
+无真实 token、真实用户路径、账号、会话正文（fs fixture 使用 synthetic 路径）。Exporter 产物的 `coverage.json` 当前把以上 22 个 service 能力 + `session.bootstrap-watch`/`session.team`/`approvals.admin`/`content.upload` 标为 implemented；`timeline.snapshot-watch`/`approvals.device`/`content.download`/`daemon.control` 与其余 service methods 为 pending（各带 reason）。
 
 这些是 DTO/wire 往返样本，不是 endpoint 级测试，亦未证明真实 handler/error/权限/lease/driver 行为。
 
@@ -109,16 +128,17 @@ Exporter 对已有目标只允许更新本工具版本 manifest 所有的目录�
 
 ## 4. 已执行验证
 
-本轮（2026-10-24 账号切片）确认通过：
+本轮（2026-10-24 B02 具体组合切片）确认通过：
 
-- `cargo check -p qaqh-runtime --features ts`、`cargo check -p qaqh-daemon`、`cargo check --workspace --all-targets`
-- `cargo test -p qaqh-runtime --lib -- --test-threads=1`：324 项全过（含 service_methods 23 项：合并两份 TYPED_METHODS 的 descriptor↔方法表双向测试 + accounts 参数/判别式/nullable/无凭据断言）
-- `cargo test -p qaqh-contract-export`（6 项）；`cargo fmt --check`（runtime/ringing/siwc/dsaccount/exporter）
-- `cargo run -p qaqh-contract-export -- export --out /tmp/qaqh-contract-accounts` + `check --against` 往返一致
-- `python3 scripts/check-sdk-contract.py --typescript`（严格 tsc 独立消费者：ServiceMap 正/负例已扩到账号方法——缺 `flow_id`、非法 `status` 枚举均为编译错误；`admin_only: true` 元数据可推导）
-- 产物已导入 `../qaqh-sdk/src/protocol/generated` 并在 SDK 仓验证：`pnpm run typecheck`、`pnpm test`（2 项）、`pnpm run build` 全过
+- `cargo check --workspace --all-targets`；`cargo check -p qaqh-session --features ts`
+- `cargo test -p qaqh-session --lib`（67 项，含 client_v2 wire 形状锁）、`cargo test -p qaqh-client --lib`（71 项）、`cargo test -p qaqh-daemon -- --test-threads=1`（90 项，bootstrap/team/approvals/content handler 已走 DTO）、`cargo test -p qaqh-ringing --lib`（19 项）、`cargo test -p qaqh-runtime --lib ringing::`（100 项）
+- `cargo test -p qaqh-contract-export`（6 项）
+- `python3 scripts/check-sdk-contract.py --typescript`（消费者正/负例扩到 bootstrap 组合、approvals 必备键、content upload）
+- 产物已导入 `../qaqh-sdk/src/protocol/generated`（TS 类型文件 ~196 个）并验证 `check --against` 一致、`pnpm run typecheck`/`test`/`build` 全过（SDK 的 coverage 守卫测试已更新到新基线：bootstrap-watch/team/approvals.admin/content.upload implemented，timeline/device/download 显式 pending）
 
-另有既有平台性失败（与本轮改动无关，siwc/dsaccount 依赖图不含本轮改动的任何 crate）：`qaqh-siwc` 2 项、`qaqh-dsaccount` 3 项 at-rest 加密断言在 Linux 必然失败——`qaqh-config::secrets` 非 Windows 平台 `encrypt()` 为恒等（明文 + 0600，TODO keyring），而这些测试断言磁盘无明文 token。修复需 siwc/dsaccount owner 裁决（keyring 集成或 `cfg(windows)` 门控测试），不在本轮擅自处理。
+上一轮（同日账号切片）记录：runtime lib 324 项全过；export→check 往返一致；ServiceMap 22 项。期间 CI 曾因 exporter 引用的 `ReceiptPolicy` 所在 pending_store 改动漏提交而红，已补提交修复。
+
+既有平台性失败（与本轮改动无关）：`qaqh-siwc` 2 项、`qaqh-dsaccount` 3 项 at-rest 加密断言在 Linux 必然失败——`qaqh-config::secrets` 非 Windows 平台 `encrypt()` 为恒等（明文 + 0600，TODO keyring），而这些测试断言磁盘无明文 token。修复需 siwc/dsaccount owner 裁决（keyring 集成或 `cfg(windows)` 门控测试），不在本轮擅自处理。
 
 workspace 中其他 crate 会产生既有 warning（process-tools unused variable、workspace unused mut、client dead code）；本交接不代表全 workspace clippy 或真实 Electron/daemon 联调已通过。
 
@@ -128,8 +148,8 @@ workspace 中其他 crate 会产生既有 warning（process-tools unused variabl
 
 ## 5. 未交付 / F 线不可假定
 
-- 具体 bootstrap projection/event 的 `ControlState`、conversation/tool state 组合类型尚未完成对外契约闭包；当前通用 `RingingV2Bootstrap<C,V,T>` 不能直接当成产品具体类型。
-- timeline、team、admin/device approvals、content upload、handler `json!` 组合响应尚未全部改为实际使用的一手公开 DTO，fixtures 也未覆盖这些 handler。
+- timeline 快照/分页/watch 的 DTO 接线、负例与 handler fixtures 仍未完成（`TimelinePage` 尚在 `qaqh-client` 且无 ts 导出）。
+- device 审批 challenge 视图（opaque 形状）与 content 下载的 bytes/header 契约未收口；远端/TLS 验收延后。
 - 除 `daemon.version`/`session.rename`/`fs.*` 与账号面 18 项外的 `METHODS`（session/workspace/config/profile/todo/plan/git/skills/diagnostics/subagent）暂无 typed `ServiceMap` 声明；禁止用 `any`/调用者自选泛型伪装已覆盖。
 - SDK 的 generated 导入 + pnpm TypeScript 编译/测试已验证；tarball 独立安装、Electron IPC 消费或 daemon/Electron 真实集成测试尚未完成。
 - pairing/device DTO 虽可导出，远端/TLS 验收仍不在当前本地 Electron 发布门槛内。
@@ -138,8 +158,8 @@ workspace 中其他 crate 会产生既有 warning（process-tools unused variabl
 
 ## 6. 下一步
 
-1. F 线：账号面 18 个方法已在 `ServiceMap` 中可用（`client.service("siwc.status", {})` 形态自动获得类型推导）；继续 bootstrap/watch/SSE/timeline 等 F03/F04 切片，B02 到位前用 mock。
+1. F 线：bootstrap/watch/SSE 的真实类型已就位（`ClientV2Bootstrap`/`ClientV2Event`/`ClientV2Payload` 及完整投影闭包），F03/F04 可从 mock 切换到真实生成物；SSE decoder/恢复语义按 spec §5.3 实施。
 2. B 线继续 B03：剩余方法（session.list/meta/activity/dashboard/get_activity/set_profile/set_tool_mode、workspace.*、config.*/profile.*、todo.*/plan.read、git.*、skills.*、diagnostics.memory.*、subagent.spawn）逐方法接 DTO；优先有 Electron 实际调用入口的方法。
-3. B 线继续 B02：实际 projection/bootstrap/event 和 handler 组合响应（team/approvals/content/timeline）DTO、负例与 handler fixtures；完成后 coverage 才能从 pending 改状态。
+3. B 线收尾 B02：timeline DTO/fixtures（`TimelinePage` 提取到契约层）；device challenge 与 content download 契约随 F 线联调定稿。
 4. 裁决 siwc/dsaccount 的 Linux at-rest 测试（见 §4）：keyring 集成或平台门控。
 5. 新 descriptor 加入时，同步更新 Rust descriptor/runtime 双向测试、exporter ServiceMap 生成与 fixtures；ServiceMap 生成已通用化，只需在 `TYPED_METHODS`/accounts `TYPED_METHODS` 加条目并补 fixture。

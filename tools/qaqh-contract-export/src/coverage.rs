@@ -105,6 +105,58 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             vec![],
             vec![],
         ),
+        (
+            "session.bootstrap-watch",
+            "GET",
+            "/ringing/v2/sessions/{session_id}/bootstrap + /events",
+            "view",
+            true,
+            vec![
+                "ClientV2Bootstrap",
+                "ClientV2ControlState",
+                "ClientV2ToolState",
+                "ConversationSnapshot",
+                "ClientV2Payload",
+                "ClientV2Event",
+            ],
+            vec!["bootstrap-response.json", "event-envelope-team-delta.json"],
+        ),
+        (
+            "session.team",
+            "GET",
+            "/ringing/v2/sessions/{session_id}/team",
+            "view",
+            true,
+            vec![
+                "ClientV2TeamResponse",
+                "TeamSnapshot",
+                "TaskBoardSnapshot",
+                "TeamBoardSnapshot",
+            ],
+            vec!["team-response.json"],
+        ),
+        (
+            "approvals.admin",
+            "GET",
+            "/ringing/v2/sessions/{session_id}/approvals",
+            "interact",
+            true,
+            vec![
+                "RingingV2PendingApprovals",
+                "RingingV2PendingPermissionView",
+                "RingingV2PendingInteractionView",
+            ],
+            vec!["approvals-pending.json", "approvals-empty.json"],
+        ),
+        (
+            "content.upload",
+            "POST",
+            "/ringing/v2/content",
+            "interact",
+            true,
+            vec!["RingingV2ContentUploadResponse"],
+            vec!["content-upload-response.json"],
+        ),
     ];
     let mut capabilities: Vec<Value> = routes
         .into_iter()
@@ -131,15 +183,25 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Pending capabilities are explicit until their actual handlers and fixture
     // registry have been wired; the exporter must never infer completion.
-    for id in [
-        "session.bootstrap-watch",
-        "timeline.snapshot-watch",
-        "session.team",
-        "approvals.admin-device",
-        "content.upload-download",
-        "daemon.control",
+    // device 审批是另一种形状（opaque challenge，远端验收延后）；content 下载
+    // 是 bytes/headers 契约，SDK 侧映射待 F 线联调后定稿。
+    for (id, reason) in [
+        ("timeline.snapshot-watch", "timeline DTO/fixtures pending"),
+        (
+            "approvals.device",
+            "opaque challenge view untyped; remote acceptance deferred",
+        ),
+        (
+            "content.download",
+            "bytes/header mapping pending SDK-side contract",
+        ),
+        (
+            "daemon.control",
+            "control endpoints not in first typed slice",
+        ),
     ] {
-        capabilities.push(json!({"id":id,"status":"pending","types":[],"fixtures":[]}));
+        capabilities
+            .push(json!({"id":id,"status":"pending","types":[],"fixtures":[],"reason":reason}));
     }
     let declared: std::collections::BTreeSet<_> =
         typed_descriptors.iter().map(|d| d.method).collect();

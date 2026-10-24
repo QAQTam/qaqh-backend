@@ -7,11 +7,13 @@ use qaqh_ringing::{
     RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
     RingingCommandStatus, RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities,
     RingingV2ChannelSnapshot, RingingV2CommandAck, RingingV2CommandEnvelope,
-    RingingV2CommandResult, RingingV2CommandStatus, RingingV2ContentValue, RingingV2Delivery,
-    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2DriverState,
-    RingingV2EventEnvelope, RingingV2ExistingResult, RingingV2InteractionKind,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
-    RingingV2PendingInteraction, RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
+    RingingV2CommandResult, RingingV2CommandStatus, RingingV2ContentUploadResponse,
+    RingingV2ContentValue, RingingV2Delivery, RingingV2DriverClaimResponse,
+    RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope,
+    RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
+    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
+    RingingV2PendingInteraction, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
+    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -23,6 +25,7 @@ const GENERATOR_VERSION: &str = "qaqh-contract-export/0.1.0";
 mod account_fixtures;
 #[cfg(test)]
 mod artifact_tests;
+mod client_fixtures;
 mod coverage;
 mod validation;
 mod wire_fixtures;
@@ -350,6 +353,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     account_fixtures::write(stage)?;
+    client_fixtures::write(stage)?;
     Ok(())
 }
 
@@ -375,13 +379,16 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     export_all!(
         qaqh_types::DaemonDiscovery,
         RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
-        RingingCommandStatus, RingingV2AskOutcome, RingingV2Bootstrap<(), (), ()>,
-        RingingV2Capabilities, RingingV2ChannelSnapshot<()>, RingingV2CommandAck,
+        RingingCommandStatus, RingingV2AskOutcome,
+        RingingV2Capabilities, RingingV2CommandAck,
         RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
-        RingingV2ContentValue, RingingV2Delivery, RingingV2DriverClaimResponse,
-        RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope<()>,
+        RingingV2ContentUploadResponse, RingingV2ContentValue, RingingV2Delivery,
+        RingingV2DriverClaimResponse,
+        RingingV2DriverReleaseResponse, RingingV2DriverState,
         RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
-        RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingInteraction,
+        RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
+        RingingV2PendingInteraction, RingingV2PendingInteractionView,
+        RingingV2PendingPermissionView,
         RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
         qaqh_ringing::RingingV2PairTokenRequest,
         qaqh_ringing::RingingV2PairTokenResponse,
@@ -389,6 +396,19 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_ringing::RingingV2PairResponse,
         qaqh_ringing::RingingV2DeviceWire,
         qaqh_ringing::RingingV2DevicesResponse,
+        // 泛型容器按当前产品的具体组合导出：bootstrap 的 control/conversation/
+        // tool state 与事件 payload 都是一手契约类型（qaqh-session::client_v2 /
+        // projection / ProjectionPayload），不再以 `()` 占位。
+        RingingV2Bootstrap<
+            qaqh_session::client_v2::ClientV2ControlState,
+            qaqh_session::projection::ConversationSnapshot,
+            qaqh_session::client_v2::ClientV2ToolState,
+        >,
+        RingingV2ChannelSnapshot<qaqh_session::client_v2::ClientV2ControlState>,
+        RingingV2EventEnvelope<qaqh_session::session_fact_v2::ProjectionPayload>,
+        qaqh_session::client_v2::ClientV2ControlState,
+        qaqh_session::client_v2::ClientV2TeamResponse,
+        qaqh_session::client_v2::ClientV2ToolState,
         qaqh_runtime::ringing::pending_store::ReceiptPolicy,
         qaqh_runtime::ringing::service_methods::DaemonVersionParams,
         qaqh_runtime::ringing::service_methods::FsEntry,
@@ -523,6 +543,20 @@ fn write_index(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let module = path.strip_suffix(".ts").ok_or("invalid TS output path")?;
         output.push_str(&format!("export * from \"./types/{module}\";\n"));
     }
+    // 泛型容器的当前产品具体组合（spec §3.2：真实组合的公共类型名）。
+    // `export *` 不把名字引入本模块作用域，别名所需的成员类型必须显式
+    // import；这些名字都来自上方 types/ 导出闭包，生成器保证存在。
+    output.push_str(
+        "import type { ClientV2ControlState } from \"./types/qaqh/ClientV2ControlState\";\n\
+         import type { ClientV2ToolState } from \"./types/qaqh/ClientV2ToolState\";\n\
+         import type { ConversationSnapshot } from \"./types/qaqh/ConversationSnapshot\";\n\
+         import type { ProjectionPayload } from \"./types/qaqh/ProjectionPayload\";\n\
+         import type { RingingV2Bootstrap } from \"./types/qaqh/RingingV2Bootstrap\";\n\
+         import type { RingingV2EventEnvelope } from \"./types/qaqh/RingingV2EventEnvelope\";\n\
+         export type ClientV2Bootstrap = RingingV2Bootstrap<ClientV2ControlState, ConversationSnapshot, ClientV2ToolState>;\n\
+         export type ClientV2Event = RingingV2EventEnvelope<ProjectionPayload>;\n\
+         export type ClientV2Payload = ProjectionPayload;\n",
+    );
     write(stage, "index.ts", &output)?;
     Ok(())
 }

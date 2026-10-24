@@ -12,6 +12,7 @@ use crate::session_fact_v2::{
 
 use super::Projection;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationInputState {
     pub input_id: InputId,
@@ -22,6 +23,7 @@ pub struct ConversationInputState {
     pub actor: ActorRef,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationAssistantBlockState {
     pub turn_id: TurnId,
@@ -32,6 +34,7 @@ pub struct ConversationAssistantBlockState {
     pub usage: Option<qaqh_types::UsageInfo>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationToolResultState {
     pub terminal_status: ToolTerminalStatus,
@@ -41,6 +44,7 @@ pub struct ConversationToolResultState {
     pub reconciled: bool,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationToolCallState {
     pub call_id: ToolCallId,
@@ -51,6 +55,7 @@ pub struct ConversationToolCallState {
     pub result: Option<ConversationToolResultState>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationCompactionState {
     pub checkpoint_id: CheckpointId,
@@ -59,6 +64,7 @@ pub struct ConversationCompactionState {
     pub context_revision: u64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ConversationContextKind {
@@ -68,12 +74,14 @@ pub enum ConversationContextKind {
     Compaction(ConversationCompactionState),
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationContextEntry {
     pub source_fact_seq: u64,
     pub kind: ConversationContextKind,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ConversationTurnOutcome {
@@ -89,6 +97,7 @@ pub enum ConversationTurnOutcome {
     },
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationTurnState {
     pub turn_id: TurnId,
@@ -98,6 +107,7 @@ pub struct ConversationTurnState {
     pub outcome: Option<ConversationTurnOutcome>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationSnapshot {
     pub session_id: Option<SessionId>,

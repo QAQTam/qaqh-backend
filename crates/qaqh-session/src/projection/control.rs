@@ -13,6 +13,7 @@ use crate::session_fact_v2::{
 
 use super::Projection;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlRoundState {
     pub turn_id: TurnId,
@@ -21,6 +22,7 @@ pub struct ControlRoundState {
     pub context_revision: u64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlToolState {
     pub call_id: ToolCallId,
@@ -63,6 +65,7 @@ pub struct ControlInteractionState {
     pub expired_reason: Option<InteractionExpiryReason>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlSubagentState {
     pub child_session_id: SessionId,
@@ -476,10 +479,7 @@ impl ControlProjection {
         self.snapshot.interactions.retain(|state| {
             state.resolution.is_some()
                 || state.expired_reason.is_some()
-                || !matches!(
-                    state.kind,
-                    InteractionKind::Ask | InteractionKind::Plan
-                )
+                || !matches!(state.kind, InteractionKind::Ask | InteractionKind::Plan)
         });
     }
 }
