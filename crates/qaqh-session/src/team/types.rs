@@ -16,6 +16,7 @@ const MAX_TASK_REASON_BYTES: usize = 1024;
 const MAX_ACCEPTANCE_ITEMS: usize = 64;
 const MAX_ACCEPTANCE_ITEM_BYTES: usize = 1024;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TeamId(pub SessionId);
@@ -36,6 +37,7 @@ impl std::fmt::Display for TeamId {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TaskId(pub String);
@@ -76,6 +78,7 @@ impl std::fmt::Display for TaskId {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamActor {
     pub agent_path: AgentPath,
@@ -108,6 +111,7 @@ impl TeamActor {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
@@ -128,6 +132,7 @@ impl TaskState {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskArtifact {
     pub artifact_ref: ContentRef,

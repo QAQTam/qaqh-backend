@@ -9,42 +9,22 @@ use qaqh_ringing::{
     RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2DriverClaimResponse,
     RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2ExistingResult,
     RingingV2InteractionKind, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
-    RingingV2OpenResponse, RingingV2PendingInteraction,
+    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteraction,
+    RingingV2PendingInteractionView, RingingV2PendingPermissionView,
 };
 use qaqh_runtime::ringing::V2StreamItem;
-use qaqh_session::projection::{
-    ControlInteractionState, ControlRoundState, ControlSubagentState, ControlToolState,
-    ConversationSnapshot,
-};
-use qaqh_session::session_fact_v2::{
-    ActivityState, ContentValue, InteractionDecision, InteractionKind, RecoveryOutcome, SessionId,
-    ToolCallId, TurnId,
-};
+use qaqh_session::projection::{ControlInteractionState, ConversationSnapshot};
+use qaqh_session::session_fact_v2::{ContentValue, InteractionDecision, InteractionKind};
 use serde::Serialize;
 
 use super::*;
 
-#[derive(Debug, Clone, Serialize)]
-struct V2ControlState {
-    session_id: Option<SessionId>,
-    activity: ActivityState,
-    current_turn_id: Option<TurnId>,
-    current_call_id: Option<ToolCallId>,
-    round: Option<ControlRoundState>,
-    tools: Vec<ControlToolState>,
-    subagents: Vec<ControlSubagentState>,
-    last_recovery: Option<RecoveryOutcome>,
-    revision: u64,
-    last_fact_seq: u64,
-    interactions: Vec<RingingV2PendingInteraction>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    driver: Option<RingingV2DriverState>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct V2ToolState {
-    tools: Vec<ControlToolState>,
-}
+// bootstrap 的具体 state 组合契约在 qaqh_session::client_v2（与 qaqh-client、
+// TS 契约导出共用同一份定义）；本文件只做 canonical→wire 的映射。
+use qaqh_session::client_v2::{
+    ClientV2ControlState as V2ControlState, ClientV2TeamResponse, ClientV2ToolState as V2ToolState,
+    TEAM_SCHEMA,
+};
 
 /// canonical `ContentValue` → wire 形态（#345）。
 ///
@@ -319,16 +299,14 @@ pub(crate) async fn handle_team_snapshot_v2(
             return api_error_response(StatusCode::BAD_REQUEST, "board_unavailable", &error);
         }
     };
-    json_response(
-        StatusCode::OK,
-        &serde_json::json!({
-            "schema": "qaqh.ringing.team/v1",
-            "session_id": session_id,
-            "team": team,
-            "tasks": tasks,
-            "board": board,
-        }),
-    )
+    let response = ClientV2TeamResponse {
+        schema: TEAM_SCHEMA.to_owned(),
+        session_id,
+        team,
+        tasks,
+        board,
+    };
+    json_response(StatusCode::OK, &response)
 }
 
 /// `GET /ringing/v2/sessions/{seed}/approvals` — 本地壳层审批投影。
@@ -390,40 +368,35 @@ pub(crate) async fn handle_pending_approvals_v2(
                 .filter(pending)
                 .find(|interaction| interaction.kind == InteractionKind::Ask)
         })
-        .map(|interaction| {
-            serde_json::json!({
-                "id": interaction.interaction_id.as_str(),
-                "kind": match interaction.kind {
-                    InteractionKind::Ask => "ask",
-                    InteractionKind::Plan => "plan",
-                    InteractionKind::Permission => "permission",
-                },
-                // 与 permission 的 `details_unavailable` 同语义：正文取不到时
-                // 仍保留可答复的 id/kind，details 降级为 null。
-                "details": interaction_body_value(&state, &interaction.request)
-                    .unwrap_or(serde_json::Value::Null),
-            })
+        .map(|interaction| RingingV2PendingInteractionView {
+            id: interaction.interaction_id.as_str().to_string(),
+            kind: match interaction.kind {
+                InteractionKind::Ask => RingingV2InteractionKind::Ask,
+                InteractionKind::Plan => RingingV2InteractionKind::PlanReview,
+                InteractionKind::Permission => RingingV2InteractionKind::Permission,
+            },
+            // 与 permission 的 `details_unavailable` 同语义：正文取不到时
+            // 仍保留可答复的 id/kind，details 降级为 null。
+            details: interaction_body_value(&state, &interaction.request),
         });
 
-    let pending_json = serde_json::json!({
-        "pending_permission": pending_permission.unwrap_or(serde_json::Value::Null),
-        "pending_interaction": pending_interaction.unwrap_or(serde_json::Value::Null),
-    });
+    // wire 形状（键恒在、空槽为 null）由 `RingingV2PendingApprovals` DTO 锁定；
+    // device 面从这里序列化后派发 opaque challenge（形状刻意不与 admin 混用）。
+    let pending_json = RingingV2PendingApprovals {
+        pending_permission,
+        pending_interaction,
+    };
     // admin（桌面宿主）：维持现状透传 canonical id（宿主已在壳侧做映射）。
     if identity.is_admin() {
         return json_response(StatusCode::OK, &pending_json);
     }
     // device（原生 app，半可信）：canonical id 不出 daemon，改发不透明 challenge。
-    match state.challenges.issue_views(&session_id, &pending_json) {
-        Ok(views) => json_response(
-            StatusCode::OK,
-            &serde_json::json!({ "challenges": views }),
-        ),
-        Err(code) => api_error_response(
-            StatusCode::BAD_GATEWAY,
-            code,
-            "approval projection failed",
-        ),
+    let pending_value = serde_json::to_value(&pending_json).unwrap_or_default();
+    match state.challenges.issue_views(&session_id, &pending_value) {
+        Ok(views) => json_response(StatusCode::OK, &serde_json::json!({ "challenges": views })),
+        Err(code) => {
+            api_error_response(StatusCode::BAD_GATEWAY, code, "approval projection failed")
+        }
     }
 }
 
@@ -477,18 +450,15 @@ pub(crate) async fn handle_approval_respond_v2(
     {
         Ok(command) => command,
         Err(code) => {
-            return api_error_response(
-                StatusCode::BAD_REQUEST,
-                code,
-                "invalid approval decision",
-            );
+            return api_error_response(StatusCode::BAD_REQUEST, code, "invalid approval decision");
         }
     };
     // §9.5 远程 `trust_folder` 默认拒：非 admin 提交的永久扩界降级为单次放行。
     if !identity.is_admin()
-        && let qaqh_ringing::RingingCommand::Tool(
-            qaqh_domain::ToolCommand::ToolPermissionRespond { trust_folder, .. },
-        ) = &mut command
+        && let qaqh_ringing::RingingCommand::Tool(qaqh_domain::ToolCommand::ToolPermissionRespond {
+            trust_folder,
+            ..
+        }) = &mut command
     {
         *trust_folder = false;
     }
@@ -517,21 +487,22 @@ pub(crate) async fn handle_approval_respond_v2(
 fn pending_permission_view(
     state: &AppState,
     interaction: &ControlInteractionState,
-) -> Option<serde_json::Value> {
-    let call_id = interaction.call_id.as_ref()?.as_str().to_string();
+) -> Option<RingingV2PendingPermissionView> {
+    let tool_call_id = interaction.call_id.as_ref()?.as_str().to_string();
     let body = interaction_body_value(state, &interaction.request);
-    Some(serde_json::json!({
-        "tool_call_id": call_id,
-        "tool_name": body.as_ref().and_then(|b| b.get("tool_name")).cloned().unwrap_or(serde_json::Value::Null),
-        "action_summary": body.as_ref().and_then(|b| b.get("action_summary")).cloned().unwrap_or(serde_json::Value::Null),
-        "reason": body.as_ref().and_then(|b| b.get("reason")).cloned().unwrap_or(serde_json::Value::Null),
-        "paths": body.as_ref().and_then(|b| b.get("paths")).cloned().unwrap_or(serde_json::json!([])),
-        "category": body.as_ref().and_then(|b| b.get("category")).cloned().unwrap_or(serde_json::Value::Null),
-        "level": body.as_ref().and_then(|b| b.get("level")).cloned().unwrap_or(serde_json::Value::Null),
-        "risk": body.as_ref().and_then(|b| b.get("risk")).cloned().unwrap_or(serde_json::Value::Null),
-        "consequence": body.as_ref().and_then(|b| b.get("consequence")).cloned().unwrap_or(serde_json::Value::Null),
-        "details_unavailable": body.is_none(),
-    }))
+    let field = |name: &str| body.as_ref().and_then(|b| b.get(name)).cloned();
+    Some(RingingV2PendingPermissionView {
+        tool_call_id,
+        tool_name: field("tool_name"),
+        action_summary: field("action_summary"),
+        reason: field("reason"),
+        paths: field("paths").unwrap_or_else(|| serde_json::json!([])),
+        category: field("category"),
+        level: field("level"),
+        risk: field("risk"),
+        consequence: field("consequence"),
+        details_unavailable: body.is_none(),
+    })
 }
 
 /// 解析 interaction `request` 的正文 JSON（Inline 直接解，Ref 走 content store）。
