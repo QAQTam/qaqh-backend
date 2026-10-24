@@ -69,7 +69,10 @@ fn serve_session_blob(
     }
     let sessions_root = qaqh_types::platform::sessions_dir();
     let Ok(entries) = std::fs::read_dir(&sessions_root) else {
-        log::warn!("[content] blob fallback: sessions dir unreadable: {}", sessions_root.display());
+        log::warn!(
+            "[content] blob fallback: sessions dir unreadable: {}",
+            sessions_root.display()
+        );
         return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
     };
     let listed: Vec<_> = entries.flatten().collect();
@@ -281,17 +284,18 @@ pub(crate) async fn handle_content_upload(
     let content_id = state
         .hub
         .put_content(&session_id, &media_type, content.clone(), false);
-    let resp = serde_json::json!({
-        "content_id": content_id.clone(),
-        "media_type": media_type,
-        "sha256": content_id.clone(),
-        "size": content.len(),
-        "truncated": false,
-    });
+    // `content_id` 即内容摘要；响应形状由 `RingingV2ContentUploadResponse` 锁定。
+    let response = qaqh_ringing::RingingV2ContentUploadResponse {
+        content_id: content_id.clone(),
+        media_type,
+        sha256: content_id,
+        size: content.len() as u64,
+        truncated: false,
+    };
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_vec(&resp).unwrap_or_default(),
+        serde_json::to_vec(&response).unwrap_or_default(),
     )
         .into_response()
 }

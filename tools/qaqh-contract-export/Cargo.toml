@@ -10,6 +10,7 @@ qaqh-domain = { path = "../../crates/qaqh-domain" }
 qaqh-ringing = { path = "../../crates/qaqh-ringing", features = ["ts"] }
 qaqh-types = { path = "../../crates/qaqh-types", features = ["ts"] }
 qaqh-runtime = { path = "../../crates/qaqh-runtime", features = ["ts"] }
+qaqh-session = { path = "../../crates/qaqh-session", features = ["ts"] }
 qaqh-siwc = { path = "../../crates/qaqh-siwc" }
 qaqh-dsaccount = { path = "../../crates/qaqh-dsaccount" }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"] }
