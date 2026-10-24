@@ -9,6 +9,7 @@ use crate::session_fact_v2::{
 
 use super::Projection;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamSnapshot {
     pub root_session_id: Option<SessionId>,

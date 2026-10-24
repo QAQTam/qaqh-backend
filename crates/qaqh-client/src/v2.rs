@@ -133,15 +133,10 @@ pub use qaqh_session::team::TaskBoardSnapshot as ClientV2TaskBoardSnapshot;
 /// 一次拿到三份快照：roster + inbox（`team`）、task board（`tasks`）、
 /// message board（`board`）。Phase 4（roster/inbox）、TEAM-01e（task board）与
 /// BOARD-01d（message board）消费的都是这一个端点，避免壳层各拉一次。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClientV2TeamResponse {
-    pub schema: String,
-    #[serde(rename = "session_id")]
-    pub session_id: String,
-    pub team: ClientV2TeamSnapshot,
-    pub tasks: ClientV2TaskBoardSnapshot,
-    pub board: ClientV2TeamBoardSnapshot,
-}
+///
+/// 所有权在 `qaqh_session::client_v2`（daemon handler 与 TS 契约导出共用）；
+/// 此处保留壳层既有命名。
+pub use qaqh_session::client_v2::ClientV2TeamResponse;
 
 /// Typed v2 SSE envelope.
 pub type ClientV2Event = RingingV2EventEnvelope<ClientV2Payload>;
@@ -149,27 +144,11 @@ pub type ClientV2Event = RingingV2EventEnvelope<ClientV2Payload>;
 /// Alias kept explicit for shells that prefer the full contract name.
 pub type ClientV2EventEnvelope = ClientV2Event;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ClientV2ControlState {
-    pub session_id: Option<qaqh_session::session_fact_v2::SessionId>,
-    pub activity: qaqh_session::session_fact_v2::ActivityState,
-    pub current_turn_id: Option<qaqh_session::session_fact_v2::TurnId>,
-    pub current_call_id: Option<qaqh_session::session_fact_v2::ToolCallId>,
-    pub round: Option<qaqh_session::projection::ControlRoundState>,
-    pub tools: Vec<qaqh_session::projection::ControlToolState>,
-    pub subagents: Vec<qaqh_session::projection::ControlSubagentState>,
-    pub last_recovery: Option<qaqh_session::session_fact_v2::RecoveryOutcome>,
-    pub revision: u64,
-    pub last_fact_seq: u64,
-    pub interactions: Vec<ClientV2PendingInteraction>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub driver: Option<ClientV2DriverState>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ClientV2ToolState {
-    pub tools: Vec<qaqh_session::projection::ControlToolState>,
-}
+/// bootstrap `control.state` / `tool.state` 的具体组合。
+///
+/// 所有权在 `qaqh_session::client_v2`：daemon handler 序列化、客户端反序列化
+/// 与 TS 契约导出共用同一份定义，不再各自维护镜像 struct。
+pub use qaqh_session::client_v2::{ClientV2ControlState, ClientV2ToolState};
 
 pub type ClientV2ConversationState = qaqh_session::projection::ConversationSnapshot;
 

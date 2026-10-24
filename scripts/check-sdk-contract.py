@@ -77,7 +77,7 @@ def main() -> None:
             compiler = shutil.which("tsc")
             if compiler is None:
                 raise SystemExit("TypeScript verification requested but tsc is not installed; no implicit install is performed")
-            (Path(temp) / "consumer.ts").write_text('''import type { RingingV2OpenRequest, RingingV2CommandEnvelope, RingingV2CommandStatus } from "./contract/index";
+            (Path(temp) / "consumer.ts").write_text('''import type { RingingV2OpenRequest, RingingV2CommandEnvelope, RingingV2CommandStatus, ClientV2Bootstrap, ClientV2ControlState, RingingV2PendingApprovals, RingingV2ContentUploadResponse } from "./contract/index";
 import type { ServiceMap } from "./contract/service-map";
 import { serviceMetadata } from "./contract/service-map";
 const open: RingingV2OpenRequest = { schema: "qaqh.Ringing", version: 2, client_instance_id: "synthetic" };
@@ -86,7 +86,11 @@ const kind: "read" = serviceMetadata["daemon.version"].kind;
 const siwcParams: ServiceMap["siwc.sign_in.status"]["params"] = { flow_id: "synthetic" };
 const siwcResult: ServiceMap["siwc.status"]["result"] = { status: "connected", sharing: true, profiles: 1, usageUrl: "https://example.invalid", apiBase: "https://example.invalid/v1" };
 const adminOnly: true = serviceMetadata["dsaccount.verify"].admin_only;
-void [open, params, kind, siwcParams, siwcResult, adminOnly];
+const driver: ClientV2ControlState["driver"] = { holder: null, driver_epoch: 1, can_claim: true };
+const bootstrapDriver: ClientV2Bootstrap["control"]["state"]["driver"] = driver;
+const approvals: RingingV2PendingApprovals = { pending_permission: null, pending_interaction: null };
+const upload: RingingV2ContentUploadResponse["truncated"] = false;
+void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload];
 type Command = RingingV2CommandEnvelope;
 type Status = RingingV2CommandStatus;
 // @ts-expect-error unknown methods must not have a catch-all signature
@@ -97,6 +101,8 @@ const invalid: ServiceMap["fs.read"]["params"] = {path: 1};
 const missingFlow: ServiceMap["siwc.sign_in.status"]["params"] = {};
 // @ts-expect-error account statuses are a closed enum
 const badStatus: ServiceMap["siwc.status"]["result"] = { status: "maybe", sharing: true, profiles: 1, usageUrl: "u", apiBase: "a" };
+// @ts-expect-error approval slots are required keys, not optional
+const badApprovals: RingingV2PendingApprovals = {};
 ''')
             config = {"compilerOptions": {"strict": True, "noEmit": True, "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler", "skipLibCheck": False}, "include": ["contract/**/*.ts", "consumer.ts"]}
             (Path(temp) / "tsconfig.json").write_text(json.dumps(config))
