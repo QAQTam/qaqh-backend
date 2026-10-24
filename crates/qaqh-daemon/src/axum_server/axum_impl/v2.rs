@@ -4,13 +4,14 @@
 //! `open -> bootstrap -> since_cursor subscribe -> replay -> live`.
 
 use qaqh_ringing::{
-    RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommandAckStatus, RingingV2AskOutcome,
-    RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandAck,
-    RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2ExistingResult,
-    RingingV2InteractionKind, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
-    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteraction,
-    RingingV2PendingInteractionView, RingingV2PendingPermissionView,
+    RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommandAckStatus, RingingV2ApprovalRespondRequest,
+    RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot,
+    RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
+    RingingV2DeviceChallenges, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,
+    RingingV2DriverState, RingingV2ExistingResult, RingingV2InteractionKind,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
+    RingingV2PendingPermissionView,
 };
 use qaqh_runtime::ringing::V2StreamItem;
 use qaqh_session::projection::{ControlInteractionState, ConversationSnapshot};
@@ -391,9 +392,13 @@ pub(crate) async fn handle_pending_approvals_v2(
         return json_response(StatusCode::OK, &pending_json);
     }
     // device（原生 app，半可信）：canonical id 不出 daemon，改发不透明 challenge。
-    let pending_value = serde_json::to_value(&pending_json).unwrap_or_default();
-    match state.challenges.issue_views(&session_id, &pending_value) {
-        Ok(views) => json_response(StatusCode::OK, &serde_json::json!({ "challenges": views })),
+    // wire 形状（challenge_id/kind/expires_in/details）由 `RingingV2DeviceChallenges`
+    // DTO 锁定，刻意不与 admin 面混用。
+    match state.challenges.issue_views(&session_id, &pending_json) {
+        Ok(views) => json_response(
+            StatusCode::OK,
+            &RingingV2DeviceChallenges { challenges: views },
+        ),
         Err(code) => {
             api_error_response(StatusCode::BAD_GATEWAY, code, "approval projection failed")
         }
@@ -402,20 +407,12 @@ pub(crate) async fn handle_pending_approvals_v2(
 
 /// `POST /ringing/v2/sessions/{seed}/approvals/respond`（S5）— device 侧审批应答。
 ///
-/// body：`{ "challenge_id": str, "decision": str, "payload": {...} }`。
+/// body：`RingingV2ApprovalRespondRequest`（challenge_id/decision/payload）。
 /// device 身份：一次性消费 challenge（scope = 本会话）→ `command_for` 映射回 canonical
 /// 命令 → 进 `execute_command`（保留「审批应答不受 driver 门控」语义）。
 /// **admin 不使用本端点**——桌面宿主维持 canonical 透传命令通道。
 ///
 /// spec §9 描述了本流程但未定 wire 端点，此为本 spec 的补充设计。
-#[derive(Deserialize)]
-pub(crate) struct ApprovalRespondRequest {
-    challenge_id: String,
-    decision: String,
-    #[serde(default)]
-    payload: serde_json::Value,
-}
-
 pub(crate) async fn handle_approval_respond_v2(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -430,7 +427,7 @@ pub(crate) async fn handle_approval_respond_v2(
         Ok(caller) => caller,
         Err(response) => return response,
     };
-    let request: ApprovalRespondRequest = match serde_json::from_slice(&body) {
+    let request: RingingV2ApprovalRespondRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(error) => {
             return api_error_response(

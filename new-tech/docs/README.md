@@ -13,6 +13,7 @@
 - [客户端工具与 SDK](v2-reset/client-tools.md)：设备工具宿主、固定路由、断线对账和原生多语言接入。
 - [ACP](v2-reset/acp.md)：编辑器接入、外部 agent 委派与终端边界。
 - [agent](v2-reset/agent.md)：薄 loop、功能插件、消息和工具路径。
+- [Agent loop 重塑 spec](v2-reset/agentloop-spec.md)：跨版本施工、MCP/ACP 接入端口、旧执行链退出及最终验收。
 - [实现简化与测试取舍](v2-reset/engineering.md)：边界校验、旧补偿退出、Rust 实现规则与测试保留标准。
 - [依赖矩阵](v2-reset/dependencies.json)：v3.0 目标 crate 及允许边，不是 v2.1 全量开工前置条件。
 - [实现状态](ARCHITECTURE.md)：区分 again 设计工作树、当前产品代码与目标。
