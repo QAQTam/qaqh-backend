@@ -4,7 +4,7 @@
 //! `qaqh-daemon/src/axum_server`) for sharing between the old TCP and axum paths.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qaqh_ringing::{
@@ -16,6 +16,75 @@ use qaqh_session::session_fact_v2::{
     ControlDelta, ConversationDelta, ToolTerminalStatus, TurnTerminal,
 };
 use qaqh_session::session_fact_v2::{ProjectionEvent, ProjectionPayload};
+
+/// Retention metadata for `PendingCommandStore::new()` and persistent stores.
+///
+/// This is a bounded reconciliation cache, not an execution ledger. Missing
+/// receipts mean an unknown outcome, not proof that a command did not execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ReceiptPolicy {
+    pub ttl_secs: u64,
+    pub max_entries: usize,
+    pub owner_scope: ReceiptOwnerScope,
+    pub id_scope: ReceiptIdScope,
+    pub persistence: ReceiptPersistence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum ReceiptOwnerScope {
+    ClientSessionId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum ReceiptIdScope {
+    Store,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum ReceiptPersistence {
+    BestEffort,
+}
+
+/// Uses the same values as the receipt retention and insertion paths.
+pub const RECEIPT_POLICY: ReceiptPolicy = ReceiptPolicy {
+    ttl_secs: 300,
+    max_entries: 4096,
+    owner_scope: ReceiptOwnerScope::ClientSessionId,
+    id_scope: ReceiptIdScope::Store,
+    persistence: ReceiptPersistence::BestEffort,
+};
+
+/// Explicit-path receipt loading never silently treats unreadable data as empty.
+#[derive(Debug)]
+pub enum ReceiptLoadError {
+    Read(std::io::Error),
+    Decode(serde_json::Error),
+}
+
+impl std::fmt::Display for ReceiptLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(error) => write!(f, "cannot read command receipt store: {error}"),
+            Self::Decode(error) => write!(f, "cannot decode command receipt store: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ReceiptLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::Decode(error) => Some(error),
+        }
+    }
+}
 
 /// 已 accepted 命令的幂等表（有界 TTL；accepted 后断线重试不得重复执行）。
 #[derive(Debug, Default)]
@@ -95,7 +164,7 @@ impl PendingCommandStore {
         Self {
             accepted: HashMap::new(),
             by_causation: HashMap::new(),
-            max_entries: 4096,
+            max_entries: RECEIPT_POLICY.max_entries,
             persistence_path: None,
         }
     }
@@ -109,19 +178,35 @@ impl PendingCommandStore {
             persistence_path: Some(path.clone()),
             ..Self::new()
         };
-        store.load(&path);
+        if let Err(error) = store.load(&path) {
+            log::warn!("[ringing] {error}; starting empty");
+        }
         store
     }
 
-    fn load(&mut self, path: &std::path::Path) {
-        let Ok(bytes) = std::fs::read(path) else {
-            return;
+    /// Load the existing receipt cache without consulting process environment.
+    ///
+    /// A missing file starts empty; other read/format errors are reported. Writes
+    /// retain the existing best-effort semantics: successfully recording a
+    /// receipt does not promise durable execution or crash-safe exactly-once.
+    pub fn open_persistent_at(path: impl Into<PathBuf>) -> Result<Self, ReceiptLoadError> {
+        let path = path.into();
+        let mut store = Self {
+            persistence_path: Some(path.clone()),
+            ..Self::new()
         };
-        let Ok(saved) = serde_json::from_slice::<HashMap<String, PersistedCommandReceipt>>(&bytes)
-        else {
-            log::warn!("[ringing] command receipt store is unreadable; starting empty");
-            return;
+        store.load(&path)?;
+        Ok(store)
+    }
+
+    fn load(&mut self, path: &Path) -> Result<(), ReceiptLoadError> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(ReceiptLoadError::Read(error)),
         };
+        let saved = serde_json::from_slice::<HashMap<String, PersistedCommandReceipt>>(&bytes)
+            .map_err(ReceiptLoadError::Decode)?;
         let now_ms = unix_millis();
         for (command_id, receipt) in saved {
             let Some(age) = now_ms.checked_sub(receipt.accepted_at_ms) else {
@@ -148,6 +233,7 @@ impl PendingCommandStore {
         for command_id in ids {
             self.index_causation(&command_id);
         }
+        Ok(())
     }
 
     fn persist(&self) {
@@ -549,7 +635,7 @@ impl HasErrorCode for qaqh_session::session_fact_v2::ToolError {
     }
 }
 
-const RECEIPT_TTL: Duration = Duration::from_secs(300);
+const RECEIPT_TTL: Duration = Duration::from_secs(RECEIPT_POLICY.ttl_secs);
 
 fn unix_millis() -> u64 {
     SystemTime::now()
@@ -565,7 +651,7 @@ mod tests {
 
     use super::*;
 
-    fn control_event(causation: Option<EventId>) -> ProjectionEvent {
+    pub(super) fn control_event(causation: Option<EventId>) -> ProjectionEvent {
         ProjectionEvent {
             event_id: EventId::new(generate_ulid()),
             source_fact_seq: 1,
@@ -711,3 +797,7 @@ mod tests {
         assert!(fourth.is_empty(), "terminal receipts are never stale");
     }
 }
+
+#[cfg(test)]
+#[path = "pending_store/boundary_tests.rs"]
+mod boundary_tests;
