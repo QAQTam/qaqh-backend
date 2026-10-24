@@ -160,10 +160,15 @@ fn registers_a_new_client_and_connects() {
     // 官方端点由后端下发，UI 不硬编码（打开 OAuth 模式时要填进 endpoint）。
     assert_eq!(status["apiBase"], crate::API_BASE);
 
-    // token 明文不在磁盘、不在服务面投影里。
-    let disk = harness.store_text();
-    for banned in ["at-1", "rt-1", "access_token", "refresh_token", "id_token"] {
-        assert!(!disk.contains(banned), "磁盘出现 {banned}: {disk}");
+    // token 明文不在磁盘、不在服务面投影里。磁盘加密是 Windows（DPAPI）专属
+    // 行为（非 Windows 明文 + 0600，见 qaqh-config::secrets），磁盘断言只在
+    // Windows 编译；服务面投影的凭据隔离在所有平台都必须成立。
+    #[cfg(windows)]
+    {
+        let disk = harness.store_text();
+        for banned in ["at-1", "rt-1", "access_token", "refresh_token", "id_token"] {
+            assert!(!disk.contains(banned), "磁盘出现 {banned}: {disk}");
+        }
     }
     let projected = format!(
         "{}{}",

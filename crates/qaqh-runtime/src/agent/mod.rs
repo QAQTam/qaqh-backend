@@ -64,6 +64,7 @@ pub(crate) mod request_context;
 pub(crate) mod resource_publish;
 pub(crate) mod spawn;
 pub mod state;
+mod stream_continuation;
 pub mod tool_recovery;
 pub(crate) mod tool_runtime;
 pub(crate) mod turn_actor;

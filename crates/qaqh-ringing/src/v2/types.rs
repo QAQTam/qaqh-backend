@@ -452,6 +452,54 @@ pub struct RingingV2PendingApprovals {
     pub pending_interaction: Option<RingingV2PendingInteractionView>,
 }
 
+/// device 审批 challenge 的种类。**与 admin 面
+/// [`RingingV2InteractionKind`] 是两套词表**：challenge 侧 `plan` 不带
+/// `_review` 后缀、permission 记作 `tool_permission`——wire 原样保留，
+/// 不与 admin 混用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum RingingV2DeviceApprovalKind {
+    ToolPermission,
+    Ask,
+    Plan,
+}
+
+/// device（原生 app，半可信）视角的一张待审批卡：`challenge_id` 是
+/// **不透明**的一次性 token（canonical id 不出 daemon），`details` 是有界
+/// 展示白名单。与 admin 面的 [`RingingV2PendingApprovals`] 刻意不同形。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2DeviceChallenge {
+    pub challenge_id: String,
+    pub kind: RingingV2DeviceApprovalKind,
+    /// challenge 剩余有效期（秒）；过期后应答会被拒，须重新拉取 pending。
+    pub expires_in: u64,
+    pub details: serde_json::Value,
+}
+
+/// device 身份 `GET .../approvals` 的响应：不透明 challenge 列表。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2DeviceChallenges {
+    pub challenges: Vec<RingingV2DeviceChallenge>,
+}
+
+/// `POST /ringing/v2/sessions/{id}/approvals/respond`（device 侧）请求。
+///
+/// `decision` 是自由字符串：未知 decision 的拒绝语义（`invalid approval
+/// decision`）由 daemon 侧映射负责，不在 DTO 收紧判别——那会把可观察的
+/// 错误码改掉。`payload` 缺省为 `null`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2ApprovalRespondRequest {
+    pub challenge_id: String,
+    pub decision: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+
 /// `POST /ringing/v2/content` 响应。`content_id` 即内容摘要（`sha256:<hex>`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]

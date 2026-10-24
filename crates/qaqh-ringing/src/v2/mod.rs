@@ -5,21 +5,25 @@
 //! event bus and its wire types were removed in hub-fact-bus stages 3.2/3d.
 
 mod cursor;
+mod timeline;
 mod types;
 
 pub use cursor::{CanonicalCursor, CursorError, CursorToken, END_OF_FACT};
+pub use timeline::{TimelinePage, TimelineSseFrame};
 pub use types::{
-    RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot,
-    RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
+    RingingV2ApprovalRespondRequest, RingingV2AskOutcome, RingingV2Bootstrap,
+    RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
     RingingV2ContentUploadResponse, RingingV2ContentValue, RingingV2ControlState,
-    RingingV2Delivery, RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope,
-    RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PairRequest, RingingV2PairResponse,
-    RingingV2PairTokenRequest, RingingV2PairTokenResponse, RingingV2PendingApprovals,
-    RingingV2PendingInteraction, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
-    RingingV2PendingSet, RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
-    events_path, open_path,
+    RingingV2Delivery, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
+    RingingV2DeviceChallenges, RingingV2DeviceWire, RingingV2DevicesResponse,
+    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2DriverState,
+    RingingV2EventEnvelope, RingingV2ExistingResult, RingingV2InteractionKind,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PairRequest,
+    RingingV2PairResponse, RingingV2PairTokenRequest, RingingV2PairTokenResponse,
+    RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
+    RingingV2PendingPermissionView, RingingV2PendingSet, RingingV2ResetReason,
+    RingingV2ResetRequired, RingingV2StreamKey, events_path, open_path,
 };
 
 /// Ringing v2 wire version.
