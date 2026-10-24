@@ -8,7 +8,10 @@
 //! `plan.action` 等命令语义方法）刻意不在表中——会话命令只走三频道
 //! command envelope（开发标准 N5），服务面仅承载非会话 RPC。
 
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+
+pub mod accounts;
 
 use crate::QaqhService;
 
@@ -28,6 +31,191 @@ pub struct MethodInfo {
     pub requires_session: bool,
     /// Process-wide diagnostics expose other sessions and require admin scope.
     pub admin_only: bool,
+}
+
+/// Wire params for the typed service-method slice. Optional TS derive is used
+/// only by the contract exporter; serde stays the runtime authority.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionRenameParams {
+    pub session_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct DaemonVersionParams {}
+
+/// Remote filesystem browsing accepts an optional session scope that narrows
+/// access to that session's workspace; it is not a lease-bound session call.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct FsListParams {
+    pub path: String,
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct FsReadParams {
+    pub path: String,
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub max_bytes: Option<u64>,
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct FsEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct FsReadResult {
+    pub path: String,
+    pub size: u64,
+    pub truncated: bool,
+    pub content: String,
+}
+
+/// A typed descriptor links the method key, the exact wire DTOs and the
+/// authorization metadata. Only methods present here are yet exposed as typed
+/// ServiceMap calls; the remaining legacy RPCs stay explicitly untyped/pending.
+#[derive(Debug, Clone, Copy)]
+pub struct TypedMethodInfo {
+    pub method: &'static str,
+    pub params_type: &'static str,
+    pub result_type: &'static str,
+    pub info: MethodInfo,
+    pub validate_params: fn(&Value) -> Result<(), String>,
+    pub validate_result: fn(&Value) -> Result<(), String>,
+}
+
+fn validate_daemon_version_params(value: &Value) -> Result<(), String> {
+    validate_params::<DaemonVersionParams>(value)
+}
+
+fn validate_string_result(value: &Value) -> Result<(), String> {
+    validate_result::<String>(value)
+}
+
+fn validate_session_rename_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionRenameParams>(value)
+}
+
+fn validate_null_result(value: &Value) -> Result<(), String> {
+    validate_result::<Option<()>>(value)
+}
+
+fn validate_fs_list_params(value: &Value) -> Result<(), String> {
+    validate_params::<FsListParams>(value)
+}
+
+fn validate_fs_read_params(value: &Value) -> Result<(), String> {
+    validate_params::<FsReadParams>(value)
+}
+
+fn validate_fs_list_result(value: &Value) -> Result<(), String> {
+    validate_result::<Vec<FsEntry>>(value)
+}
+
+fn validate_fs_read_result(value: &Value) -> Result<(), String> {
+    validate_result::<FsReadResult>(value)
+}
+
+pub const TYPED_METHODS: &[TypedMethodInfo] = &[
+    TypedMethodInfo {
+        method: "daemon.version",
+        params_type: "DaemonVersionParams",
+        result_type: "string",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_daemon_version_params,
+        validate_result: validate_string_result,
+    },
+    TypedMethodInfo {
+        method: "session.rename",
+        params_type: "SessionRenameParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_rename_params,
+        validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "fs.list",
+        params_type: "FsListParams",
+        result_type: "FsEntry[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_fs_list_params,
+        validate_result: validate_fs_list_result,
+    },
+    TypedMethodInfo {
+        method: "fs.read",
+        params_type: "FsReadParams",
+        result_type: "FsReadResult",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_fs_read_params,
+        validate_result: validate_fs_read_result,
+    },
+];
+
+fn validate_params<T: DeserializeOwned>(params: &Value) -> Result<(), String> {
+    serde_json::from_value::<T>(params.clone())
+        .map(|_| ())
+        .map_err(|error| format!("invalid typed service params: {error}"))
+}
+
+fn validate_result<T: DeserializeOwned>(result: &Value) -> Result<(), String> {
+    serde_json::from_value::<T>(result.clone())
+        .map(|_| ())
+        .map_err(|error| format!("typed service result does not match descriptor: {error}"))
+}
+
+/// Apply the DTO boundary for methods declared in [`TYPED_METHODS`].
+/// Unknown methods return `Ok(None)` for the legacy dispatch path.
+pub fn validate_typed_params(method: &str, params: &Value) -> Result<bool, String> {
+    let Some(descriptor) = TYPED_METHODS
+        .iter()
+        .find(|descriptor| descriptor.method == method)
+    else {
+        return Ok(false);
+    };
+    (descriptor.validate_params)(params)?;
+    Ok(true)
+}
+
+pub fn validate_typed_result(method: &str, result: &Value) -> Result<bool, String> {
+    let Some(descriptor) = TYPED_METHODS
+        .iter()
+        .find(|descriptor| descriptor.method == method)
+    else {
+        return Ok(false);
+    };
+    (descriptor.validate_result)(result)?;
+    Ok(true)
 }
 
 /// 服务面会话参数键。
@@ -195,8 +383,20 @@ pub fn error_response(kind: MethodKind, message: &str) -> Value {
 }
 
 /// 服务分发：方法表校验后的唯一入口。
+///
+/// 账号面（siwc/dsaccount）先走 [`accounts::dispatch`] 的逐方法 DTO 收口
+/// （params 解码 → 调用管理器 → DTO 投影），其余方法经 `service.handle`
+/// 执行并按 [`TYPED_METHODS`] 做边界校验。
 pub fn dispatch(service: &QaqhService, method: &str, params: &Value) -> Result<Value, String> {
-    service.handle(method, params)
+    if let Some(result) = accounts::dispatch(service, method, params) {
+        return result;
+    }
+    let typed = validate_typed_params(method, params)?;
+    let result = service.handle(method, params)?;
+    if typed {
+        validate_typed_result(method, &result)?;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -270,6 +470,113 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "方法表里有重名条目");
+    }
+
+    #[test]
+    fn typed_descriptors_match_runtime_method_metadata() {
+        // 两份 descriptor 清单（本文件与账号面）合起来看：逐条对上方法表，
+        // 且跨清单不得重复声明同一方法。
+        let combined: Vec<&TypedMethodInfo> = TYPED_METHODS
+            .iter()
+            .chain(accounts::TYPED_METHODS.iter())
+            .collect();
+        for descriptor in &combined {
+            let runtime = lookup(descriptor.method).unwrap_or_else(|| {
+                panic!(
+                    "typed descriptor has no runtime method: {}",
+                    descriptor.method
+                )
+            });
+            assert_eq!(
+                runtime, descriptor.info,
+                "metadata mismatch for {}",
+                descriptor.method
+            );
+        }
+        let mut methods: Vec<_> = combined
+            .iter()
+            .map(|descriptor| descriptor.method)
+            .collect();
+        let count = methods.len();
+        methods.sort_unstable();
+        methods.dedup();
+        assert_eq!(methods.len(), count, "typed descriptor method duplicated");
+    }
+
+    #[test]
+    fn typed_method_params_fail_before_runtime_dispatch() {
+        assert!(
+            validate_typed_params(
+                "session.rename",
+                &serde_json::json!({"session_id": "s1", "title": 4})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            validate_typed_params(
+                "session.rename",
+                &serde_json::json!({"session_id": "s1", "title": "new title"})
+            )
+            .expect("valid params"),
+            true
+        );
+        assert_eq!(
+            validate_typed_params("session.list", &serde_json::json!({})).expect("legacy pending"),
+            false
+        );
+        assert!(
+            validate_typed_params(
+                "fs.list",
+                &serde_json::json!({ "path": 3, "scope_session_id": "s1" })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_typed_params(
+                "fs.read",
+                &serde_json::json!({ "path": "/tmp/a", "max_bytes": "large" })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_typed_params(
+                "fs.read",
+                &serde_json::json!({ "path": "/tmp/a", "scope_session_id": "s1" })
+            )
+            .expect("optional max_bytes and scope are accepted")
+        );
+    }
+
+    #[test]
+    fn typed_method_results_match_descriptors() {
+        assert!(
+            validate_typed_result("daemon.version", &serde_json::json!("2.0.0"))
+                .expect("valid result")
+        );
+        assert!(validate_typed_result("daemon.version", &serde_json::json!({})).is_err());
+        assert!(validate_typed_result("session.rename", &Value::Null).expect("null result"));
+        assert!(
+            !validate_typed_result("session.list", &serde_json::json!([]))
+                .expect("legacy method remains outside typed slice")
+        );
+        assert!(validate_typed_result(
+            "fs.list",
+            &serde_json::json!([{ "name": "a", "path": "/a", "is_dir": false, "is_file": true, "size": 1, "modified_ms": null }])
+        )
+        .expect("valid listing"));
+        assert!(validate_typed_result("fs.list", &serde_json::json!([{ "name": "a" }])).is_err());
+        assert!(
+            validate_typed_result(
+                "fs.read",
+                &serde_json::json!({ "path": "/a", "size": 1, "truncated": false, "content": "a" })
+            )
+            .expect("valid read")
+        );
+        assert!(validate_typed_result(
+            "fs.read",
+            &serde_json::json!({ "path": "/a", "size": "1", "truncated": false, "content": "a" })
+        )
+        .is_err());
     }
 
     /// 客户端服务面白名单（R1）必须与方法表**两向**对齐：

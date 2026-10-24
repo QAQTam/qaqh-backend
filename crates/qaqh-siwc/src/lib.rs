@@ -29,6 +29,9 @@
 //! 该流程仍在 preview：端点/参数/scope 全部集中在 [`protocol`]，
 //! 且**不复制** DevKit 的代码与设计资产（其许可为 Noncommercial 且不含商标授权）。
 
+/// Credential-free service response DTOs.
+pub mod service;
+
 mod account;
 mod error;
 mod global;
@@ -52,7 +55,7 @@ pub use error::{SiwcCode, SiwcError, classify_provider_error};
 pub use global::{install_manager, manager};
 pub use host_id::validate_host_id;
 pub use identity::Identity;
-pub use manager::{FlowState, SiwcConfig, SiwcManager, SignInOptions, SignInStart};
+pub use manager::{FlowState, SignInOptions, SignInStart, SiwcConfig, SiwcManager};
 pub use models::ModelInfo;
 pub use protocol::{API_BASE, Discovery, ISSUER, SCOPES, SHARING_SCOPE, USAGE_URL};
 pub use store::ProfileStatus;
