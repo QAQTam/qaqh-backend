@@ -24,6 +24,7 @@ const STORE_VERSION: u32 = 1;
 
 /// 一个登录 profile 的连接状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileStatus {
     /// 有可用凭据（注意 `sharing` 另判：可能「已登录但套餐未授权」）。
@@ -126,9 +127,8 @@ impl StoredProfile {
         let Some(cipher) = &self.credentials else {
             return Ok(None);
         };
-        let plain = qaqh_config::secrets::unprotect(cipher).map_err(|e| {
-            SiwcError::new(SiwcCode::StoreFailure, format!("凭据解密失败: {e}"))
-        })?;
+        let plain = qaqh_config::secrets::unprotect(cipher)
+            .map_err(|e| SiwcError::new(SiwcCode::StoreFailure, format!("凭据解密失败: {e}")))?;
         let text = String::from_utf8(plain)
             .map_err(|_| SiwcError::new(SiwcCode::StoreFailure, "凭据明文非 UTF-8".to_string()))?;
         let set: TokenSet = serde_json::from_str(&text)
@@ -140,10 +140,10 @@ impl StoredProfile {
     pub fn set_token_set(&mut self, set: &TokenSet) -> Result<(), SiwcError> {
         let text = serde_json::to_string(set)
             .map_err(|e| SiwcError::new(SiwcCode::StoreFailure, format!("凭据序列化失败: {e}")))?;
-        self.credentials = Some(
-            qaqh_config::secrets::protect(text.as_bytes())
-                .map_err(|e| SiwcError::new(SiwcCode::StoreFailure, format!("凭据加密失败: {e}")))?,
-        );
+        self.credentials =
+            Some(qaqh_config::secrets::protect(text.as_bytes()).map_err(|e| {
+                SiwcError::new(SiwcCode::StoreFailure, format!("凭据加密失败: {e}"))
+            })?);
         self.saved_at_ms = now_ms();
         Ok(())
     }
@@ -459,7 +459,10 @@ mod tests {
         entry.clear_credentials(ProfileStatus::ReauthRequired);
         assert!(!entry.has_credentials());
         assert!(entry.token_set().expect("read").is_none());
-        assert_eq!(entry.client_id, "oaiapp_test", "注册必须保留以复用 client_id");
+        assert_eq!(
+            entry.client_id, "oaiapp_test",
+            "注册必须保留以复用 client_id"
+        );
         assert_eq!(entry.subject, "sub-1");
         assert!(!entry.sharing());
     }
@@ -496,7 +499,10 @@ mod tests {
         entry.set_token_set(&token_set()).expect("protect");
         let projected = entry.to_public_json().to_string();
         for banned in ["access_token", "refresh_token", "id_token", "credentials"] {
-            assert!(!projected.contains(banned), "投影泄漏 {banned}: {projected}");
+            assert!(
+                !projected.contains(banned),
+                "投影泄漏 {banned}: {projected}"
+            );
         }
         assert!(projected.contains("\"sharing\":true"));
     }

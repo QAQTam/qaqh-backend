@@ -13,7 +13,9 @@
 use serde_json::{Value, json};
 
 /// 机器可读错误码。字符串形态与文档措辞一致，便于日志与跨端对照。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
 pub enum SiwcCode {
     // ── 协议前 / 本地 ──
     /// discovery 拉取失败或校验不通过（issuer/origin 不符）。
@@ -53,22 +55,30 @@ pub enum SiwcCode {
     /// 入参非法（label、端口、profileId 组合等）。
     InvalidConfig,
     /// 传输层失败（网络、5xx）：保凭据、退避重试。
+    #[serde(rename = "transport_error")]
     Transport,
 
     // ── 上游产品状态（`error.code`）──
     /// `subscription_sharing_usage_limit_exceeded`（429）。
+    #[serde(rename = "subscription_sharing_usage_limit_exceeded")]
     UsageLimitExceeded,
     /// `subscription_sharing_user_not_eligible`（403）。
+    #[serde(rename = "subscription_sharing_user_not_eligible")]
     UserNotEligible,
     /// `subscription_sharing_usage_unavailable` / `subscription_sharing_user_unavailable`（503）。
+    #[serde(rename = "subscription_sharing_usage_unavailable")]
     UsageUnavailable,
     /// `subscription_sharing_unsupported_capability`（400）：我方发错字段/工具。
+    #[serde(rename = "subscription_sharing_unsupported_capability")]
     UnsupportedCapability,
     /// `subscription_sharing_route_not_supported`（403）：方法/端点不对。
+    #[serde(rename = "subscription_sharing_route_not_supported")]
     RouteNotSupported,
     /// `subscription_sharing_invalid_user`（401）。
+    #[serde(rename = "subscription_sharing_invalid_user")]
     InvalidUser,
     /// `chatpass_v2_scope_not_authorized` / `chatpass_v2_invalid_authorization_context`（403）。
+    #[serde(rename = "chatpass_v2_scope_not_authorized")]
     ScopeNotAuthorized,
     /// 其它 Responses 层错误（保留原始 code 于 message/request_id）。
     ProviderError,
@@ -271,8 +281,10 @@ mod tests {
             classify_provider_error(429, Some("subscription_sharing_usage_limit_exceeded")),
             SiwcCode::UsageLimitExceeded
         );
-        assert!(classify_provider_error(429, Some("subscription_sharing_usage_limit_exceeded"))
-            .needs_user_action());
+        assert!(
+            classify_provider_error(429, Some("subscription_sharing_usage_limit_exceeded"))
+                .needs_user_action()
+        );
         assert_eq!(
             classify_provider_error(400, Some("subscription_sharing_unsupported_capability")),
             SiwcCode::UnsupportedCapability
