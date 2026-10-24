@@ -1775,8 +1775,6 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "mutil-ai"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afbd2cdbdbd7af3089b90e54950ddefa78d94be2ab942c4cf21c244a688aa5e9"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2140,6 +2138,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-contract-export"
+version = "2.0.0"
+dependencies = [
+ "hex",
+ "qaqh-domain",
+ "qaqh-dsaccount",
+ "qaqh-ringing",
+ "qaqh-runtime",
+ "qaqh-siwc",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ts-rs",
+]
+
+[[package]]
 name = "qaqh-daemon"
 version = "2.0.0"
 dependencies = [
@@ -2195,6 +2211,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ts-rs",
  "ureq",
  "url",
 ]
@@ -2329,6 +2346,7 @@ name = "qaqh-memwatch"
 version = "2.0.0"
 dependencies = [
  "serde",
+ "ts-rs",
 ]
 
 [[package]]
@@ -2433,6 +2451,7 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "tokio",
+ "ts-rs",
  "unicode-normalization",
  "ureq",
  "windows 0.58.0",
@@ -2483,6 +2502,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ts-rs",
  "ureq",
  "url",
 ]

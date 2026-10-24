@@ -34,10 +34,11 @@ members = [
     "crates/sbx-nt",
     "crates/sbx-win",
     "crates/sbx-cli",
+    "tools/qaqh-contract-export",
 ]
 
 [workspace.dependencies]
-mutil-ai = "0.6.1"
+mutil-ai = { version = "0.6.1", path = "../mutil-ai" }
 rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process"] }
 async-lsp = { version = "0.2", default-features = false, features = ["tokio", "omni-trait"] }
 lsp-types = "0.95"

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_PHASE_SAMPLES: usize = 4096;
 const MAX_SESSION_GAUGES: usize = 512;
@@ -18,7 +18,8 @@ const MAX_COMPONENT_GAUGES: usize = 64;
 ///
 /// Derived from the name prefix on update so clients can bucket rows without
 /// re-implementing the naming convention. New groups are additive.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentGroup {
     #[default]
@@ -44,7 +45,8 @@ impl ComponentGroup {
 }
 
 /// Stable lifecycle class for a phase sample, independent of its exact label.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum PhaseKind {
     #[default]
@@ -74,7 +76,8 @@ impl PhaseKind {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct ProcessMemory {
     /// Resident pages currently mapped into the process working set.
     pub resident_bytes: Option<u64>,
@@ -84,11 +87,12 @@ pub struct ProcessMemory {
     pub virtual_bytes: Option<u64>,
     /// Peak resident bytes reported by the OS (not necessarily peak private).
     pub peak_resident_bytes: Option<u64>,
-    pub source: &'static str,
+    pub source: String,
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionMemory {
     pub session_id: String,
     pub resident: bool,
@@ -111,7 +115,8 @@ pub struct SessionMemory {
     pub updated_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct ComponentMemory {
     pub name: String,
     /// Coarse source group, derived from the name prefix on update.
@@ -125,7 +130,8 @@ pub struct ComponentMemory {
     pub updated_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct PhaseSample {
     pub sequence: u64,
     pub at_ms: u64,
@@ -139,7 +145,8 @@ pub struct PhaseSample {
     pub estimate_json_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct MemorySnapshot {
     pub schema_version: u32,
     pub enabled: bool,
@@ -506,7 +513,7 @@ fn capture_process_memory() -> ProcessMemory {
     let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
     if ok == 0 {
         return ProcessMemory {
-            source: "windows.psapi",
+            source: "windows.psapi".into(),
             error: Some(std::io::Error::last_os_error().to_string()),
             ..ProcessMemory::default()
         };
@@ -515,7 +522,7 @@ fn capture_process_memory() -> ProcessMemory {
         resident_bytes: Some(counters.working_set_size as u64),
         private_bytes: Some(counters.private_usage as u64),
         peak_resident_bytes: Some(counters.peak_working_set_size as u64),
-        source: "windows.psapi",
+        source: "windows.psapi".into(),
         ..ProcessMemory::default()
     }
 }
@@ -561,7 +568,7 @@ fn capture_process_memory() -> ProcessMemory {
         private_bytes: private_kib(),
         virtual_bytes: status_kib("VmSize"),
         peak_resident_bytes: status_kib("VmHWM"),
-        source: "linux.procfs",
+        source: "linux.procfs".into(),
         error: None,
     }
 }
@@ -569,7 +576,7 @@ fn capture_process_memory() -> ProcessMemory {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn capture_process_memory() -> ProcessMemory {
     ProcessMemory {
-        source: "unsupported",
+        source: "unsupported".into(),
         error: Some("process memory counters are not implemented for this target".into()),
         ..ProcessMemory::default()
     }

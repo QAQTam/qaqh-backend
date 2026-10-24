@@ -1,0 +1,53 @@
+name: Rust SDK contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: qaqh-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qaqh-backend
+      # Cargo currently uses this sibling path dependency. Pin it explicitly;
+      # uncommitted sibling changes are never silently included in an artifact.
+      - uses: actions/checkout@v4
+        with:
+          repository: qaqtam/mutil-ai
+          ref: e3681f6ae7f310e09b2eef5050c2c08673e46226
+          path: mutil-ai
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install TypeScript consumer compiler
+        run: npm install --global typescript
+      - name: Verify Rust SDK boundaries
+        run: |
+          cargo test -p qaqh-ringing
+          cargo test -p qaqh-runtime --lib ringing::
+          QAQH_DATA_DIR="$RUNNER_TEMP/qaqh-sdk-daemon-tests" QAQH_ALLOW_TEST_DATA_ROOT=1 cargo test -p qaqh-daemon v2_ -- --test-threads=1
+      - name: Verify deterministic artifact and independent strict TypeScript consumer
+        run: python3 scripts/check-sdk-contract.py --typescript --release
+      - name: Export version-locked contract
+        env:
+          QAQH_SOURCE_REVISION: ${{ github.sha }}
+          QAQH_SOURCE_DIRTY: '0'
+        run: |
+          test -z "$(git status --porcelain)"
+          cargo run -p qaqh-contract-export -- export --out "$RUNNER_TEMP/qaqh-sdk-contract" --release
+          cargo run -p qaqh-contract-export -- check --against "$RUNNER_TEMP/qaqh-sdk-contract" --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qaqh-sdk-contract-${{ github.sha }}
+          path: ${{ runner.temp }}/qaqh-sdk-contract
+          if-no-files-found: error
