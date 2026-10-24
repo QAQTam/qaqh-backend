@@ -7,6 +7,10 @@ description = "Bounded release-mode process and runtime memory observability"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
 
 [lints]
 workspace = true

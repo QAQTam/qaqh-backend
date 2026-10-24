@@ -33,10 +33,20 @@ dev:
 # 本仓不再包含、也不构建前端。以下能力随之移交到那边的 justfile：
 #   renderer-build / ts-export / ts-check / place-sidecar / desktop-dev / desktop-build
 #
-# 唯一仍需本仓知道的事：**类型契约是单一真相**。`src/api/qaqh/*.ts`（那边仓里）
-# 由本仓 crates/qaqh-{types,domain,ringing,session,config-api} 上的 `derive(TS)`
-# 导出，靠 `TS_RS_EXPORT_DIR` 收口。因此改了 wire 类型后，去那边跑
-# `just ts-export` 并提交那边的生成物——本仓不持有生成物，也没有漂移闸。
+# 类型契约只由本仓 qaqh-contract-export 生成。客户端导入整个 artifact，
+# 不独立运行 ts-rs、不手修 generated，也不在安装 npm 包时调用 cargo。
+
+# 导出 SDK 权威契约（目录必须由本 exporter 管理或尚不存在）
+sdk-export out:
+    cargo run -p qaqh-contract-export -- export --out {{out}}
+
+# 检测缺失、多余、陈旧产物及契约摘要
+sdk-check against:
+    cargo run -p qaqh-contract-export -- check --against {{against}}
+
+# 在独立临时目录验证单测、确定性、摘要及可选严格 TS 消费
+sdk-verify *args:
+    python3 scripts/check-sdk-contract.py {{args}}
 
 # ── 检查 & 测试 ─────────────────────────────────────
 
