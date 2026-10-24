@@ -5,10 +5,13 @@
 //! `qaqh-types`（daemon 写入、client/TUI/shell 读取均引用本定义）。
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
 
 pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct DaemonDiscovery {
     pub endpoint: String,
     pub token: String,

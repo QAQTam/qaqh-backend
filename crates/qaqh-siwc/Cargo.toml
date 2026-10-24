@@ -21,6 +21,11 @@ url = "2"
 # 不用 tokio（避免「阻塞 tokio worker」与「runtime 内建 runtime」两类事故）。
 ureq = { version = "3", features = ["json"] }
 
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
+
 [dev-dependencies]
 tempfile = "3"
 

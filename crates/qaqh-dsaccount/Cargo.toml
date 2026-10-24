@@ -20,6 +20,11 @@ ureq = { version = "3", features = ["json"] }
 # 回调查询串解析（百分号编码手写是安全 bug 高发区）。
 url = "2"
 
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
+
 [dev-dependencies]
 tempfile = "3"
 
