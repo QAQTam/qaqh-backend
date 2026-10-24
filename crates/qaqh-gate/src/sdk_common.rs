@@ -276,6 +276,8 @@ pub(crate) fn roomy_response_limits() -> ResponseLimits {
     let mut limits = ResponseLimits::default();
     limits.max_body_bytes = 64 * 1024 * 1024;
     limits.max_stream_events = 131_072;
+    limits.max_sse_line_bytes = 16 * 1024 * 1024;
+    limits.max_sse_event_bytes = 32 * 1024 * 1024;
     limits.max_tool_argument_bytes = 4 * 1024 * 1024;
     limits
 }
@@ -359,10 +361,7 @@ fn humanize_usage_limit(body: Option<&str>) -> Option<String> {
     if !is_usage_limit {
         return None;
     }
-    let in_secs = match error
-        .get("resets_in_seconds")
-        .and_then(|v| v.as_i64())
-    {
+    let in_secs = match error.get("resets_in_seconds").and_then(|v| v.as_i64()) {
         Some(secs) => Some(secs),
         None => error
             .get("resets_at")

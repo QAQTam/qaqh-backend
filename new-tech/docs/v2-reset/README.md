@@ -23,6 +23,7 @@
 - [客户端工具与 SDK](client-tools.md)：UI/工具宿主/daemon、离线故障、执行许可和多语言消费。
 - [ACP 双向适配](acp.md)：编辑器接入、跨 agent 委派与执行主机边界。
 - [薄 loop 与功能插件](agent.md)：状态所有权、effect、工具和存储路径。
+- [Agent loop 重塑 spec](agentloop-spec.md)：从当前产品跨版本替换旧执行模型；任务依赖、端口、能力保留和硬性退出条件。
 - [实现简化与测试取舍](engineering.md)：防御逻辑的边界、旧机制退出、测试规模样本与施工标准。
 - [依赖矩阵](dependencies.json)：v3.0 的 46 个目标 crate、模块和允许依赖。
 - [结构闸门](../../tools/v2-architecture/audit.py)：validate 检查目标图，check 检查实际 workspace。

@@ -96,12 +96,8 @@ where
     ) -> Result<ToolOutcome, FatalToolError> {
         let started = Instant::now();
         let raw_args = args.clone();
-        // 先按 schema 归一再反序列化：模型把 3 / true / ["a"] 写成字符串是
-        // 常态而非异常（见 [`super::coerce`]），这里兜不住才轮到报错。
-        let args = match serde_json::from_value::<T::Args>(super::coerce::coerce(
-            &args,
-            &self.cached_input_schema(),
-        )) {
+        // JSON types are part of the tool contract; never repair model values.
+        let args = match serde_json::from_value::<T::Args>(args) {
             Ok(args) => args,
             Err(error) => {
                 return Ok(recoverable_outcome(
@@ -383,16 +379,16 @@ mod tests {
         }
 
         #[test]
-        fn stringified_numbers_arrays_bools_are_accepted() {
+        fn native_numbers_arrays_bools_are_accepted() {
             let adapter = TypedToolAdapter::new(CoercionTool);
             let outcome = adapter
                 .execute(
                     ctx(),
                     serde_json::json!({
                         "text": "hi",
-                        "max": "3",
-                        "globs": "[\"*.rs\"]",
-                        "dry": "true"
+                        "max": 3,
+                        "globs": ["*.rs"],
+                        "dry": true
                     }),
                 )
                 .expect("execute ok");
@@ -402,6 +398,20 @@ mod tests {
                 outcome.error
             );
             assert_eq!(outcome.model.text, "hi|3|[\"*.rs\"]|true");
+        }
+
+        #[test]
+        fn stringified_numbers_arrays_bools_are_rejected() {
+            let adapter = TypedToolAdapter::new(CoercionTool);
+            for (field, value) in [("max", "3"), ("globs", "[\"*.rs\"]"), ("dry", "true")] {
+                let mut args = serde_json::json!({"text":"hi"});
+                args[field] = serde_json::json!(value);
+                let outcome = adapter.execute(ctx(), args).unwrap();
+                assert!(
+                    outcome.error.is_some(),
+                    "stringified {field} must not execute"
+                );
+            }
         }
 
         #[test]

@@ -70,21 +70,21 @@ fn timeline_entry_to_event(
     session_id: &str,
     entry: &qaqh_domain::TimelineEntry,
 ) -> Event {
-    let data = serde_json::json!({
-        "schema": qaqh_ringing::RINGING_SCHEMA,
-        // 必须与客户端校验一致（qaqh-client timeline dispatch 要求
-        // `version == RINGING_V2_VERSION`）：写死 1 曾让每一帧都被判
-        // `protocol violation: invalid timeline SSE frame`，timeline 流
-        // 1s 重连死循环、transcript 永远无法渲染。
-        "version": qaqh_ringing::RINGING_V2_VERSION,
-        "server_epoch": epoch,
-        "session_id": session_id,
-        "entry": entry,
-    });
+    // wire 形状由 `qaqh-ringing::TimelineSseFrame` DTO 锁定。写死 `version: 1`
+    // 曾让每一帧都被判 `protocol violation: invalid timeline SSE frame`，
+    // timeline 流 1s 重连死循环、transcript 永远无法渲染——收口后字段值
+    // 与 `qaqh-client` 校验共用同一常量，这类漂移不再可能。
+    let frame = qaqh_ringing::TimelineSseFrame {
+        schema: qaqh_ringing::RINGING_SCHEMA.to_owned(),
+        version: qaqh_ringing::RINGING_V2_VERSION,
+        server_epoch: epoch.to_owned(),
+        session_id: session_id.to_owned(),
+        entry: entry.clone(),
+    };
     Event::default()
         .id(format!("{}:timeline:{}", epoch, entry.timeline_seq))
         .event("timeline.entry")
-        .json_data(data)
+        .json_data(&frame)
         .unwrap_or_else(|_| Event::default().data("{}"))
 }
 

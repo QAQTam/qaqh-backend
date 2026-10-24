@@ -1508,6 +1508,7 @@ falling back to 1 (read-only)"
         // 不再有"回退到预设 base_url"那一步——它曾把自定义 URL 改回预设并落盘。
         self.compat = profile.compat_or_default();
         self.wire = profile.wire;
+        self.credential = profile.credential;
         self.model = profile.model;
         self.max_tokens = profile.max_tokens;
         self.reasoning_effort = profile.effort.unwrap_or_else(|| "high".into());
@@ -1533,14 +1534,11 @@ falling back to 1 (read-only)"
     pub fn for_session(global: &Self, profile: Option<&str>, own_key: Option<String>) -> Self {
         let effective = profile.unwrap_or(global.active_profile.as_str());
         let mut cfg = global.clone();
-        if cfg.apply_profile(effective).is_none() {
-            // 会话指定的 profile 已被删除：退回全局 active_profile，而不是
-            // 让 agent 继续跑在旧端点上。
-            let fallback = global.active_profile.clone();
-            if fallback != effective {
-                cfg = global.clone();
-                let _ = cfg.apply_profile(&fallback);
-            }
+        // 活跃档的扁平字段可能刚被 config.save 修改，profiles 映射尚未重载。
+        // 跟随全局时直接使用当前快照；仅独立会话档需要展开 profile。
+        // 指定档已删除时保留全局快照，避免重新展开旧的活跃档副本。
+        if effective != global.active_profile {
+            let _ = cfg.apply_profile(effective);
         }
         if let Some(key) = own_key {
             cfg.api_key = key;
@@ -1594,6 +1592,29 @@ mod secret_tests {
             "qaqh-config-secret-test-{}-{n}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn applying_profile_and_session_config_copy_credential_source() {
+        let mut cfg = Config::default();
+        cfg.credential = qaqh_types::CredentialSource::ApiKey;
+        cfg.save_profile("byok", false);
+        cfg.credential = qaqh_types::CredentialSource::ChatgptPlan;
+        cfg.save_profile("oauth", false);
+        cfg.apply_profile("byok").unwrap();
+        assert_eq!(cfg.credential, qaqh_types::CredentialSource::ApiKey);
+        let session = Config::for_session(&cfg, Some("oauth"), None);
+        assert_eq!(session.credential, qaqh_types::CredentialSource::ChatgptPlan);
+        cfg.apply_profile("oauth").unwrap();
+        assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
+        // 模拟 config.save 已更新扁平凭据、尚未重载 profiles 的快照。
+        cfg.credential = qaqh_types::CredentialSource::DeepseekAccount;
+        for profile in [None, Some("oauth"), Some("deleted")] {
+            assert_eq!(
+                Config::for_session(&cfg, profile, None).credential,
+                qaqh_types::CredentialSource::DeepseekAccount
+            );
+        }
     }
 
     #[test]

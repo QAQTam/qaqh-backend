@@ -15,6 +15,8 @@
 
 当前产品仍为 daemon HTTP/SSE → runtime agent/ToolRuntime → session canonical + message archive，
 客户端仍消费 Ringing v2 lease/driver；不是 major 3、唯一会话存储或新薄 loop 已完成。
+2026-10-23 新增 [Agent loop 重塑 spec](v2-reset/agentloop-spec.md)，以当前代码核对施工起点；
+它规定跨版本替换和最终退出条件，不表示已有实现迁移或覆盖本表的历史取样。
 业务线已新增 ChatGPT 订阅 / DeepSeek 账号、模型与推理能力、工具参数容错、调用身份与失败展示、工作区审计等增量。
 具体已核对能力、源码与验收去向以 [能力保留矩阵](v2-reset/preservation.md) 为准，不能只迁移 beta4。
 

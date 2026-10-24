@@ -5,15 +5,17 @@ use std::path::{Path, PathBuf};
 use qaqh_domain::ControlCommand;
 use qaqh_ringing::{
     RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
-    RingingCommandStatus, RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities,
-    RingingV2ChannelSnapshot, RingingV2CommandAck, RingingV2CommandEnvelope,
-    RingingV2CommandResult, RingingV2CommandStatus, RingingV2ContentUploadResponse,
-    RingingV2ContentValue, RingingV2Delivery, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope,
-    RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
-    RingingV2PendingInteraction, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
-    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
+    RingingCommandStatus, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
+    RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
+    RingingV2ContentUploadResponse, RingingV2ContentValue, RingingV2Delivery,
+    RingingV2DeviceApprovalKind, RingingV2DeviceChallenge, RingingV2DeviceChallenges,
+    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2DriverState,
+    RingingV2EventEnvelope, RingingV2ExistingResult, RingingV2InteractionKind,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
+    RingingV2PendingPermissionView, RingingV2ResetReason, RingingV2ResetRequired,
+    RingingV2StreamKey, TimelinePage, TimelineSseFrame,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -231,7 +233,8 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
-        DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult, SessionRenameParams,
+        DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult, SessionListParams,
+        SessionMetaParams, SessionRenameParams,
     };
     let open_request = RingingV2OpenRequest::new("fixture-client");
     write_fixture(stage, "open-request.json", &open_request)?;
@@ -352,16 +355,58 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             content: "Synthetic fixture content.".to_owned(),
         },
     )?;
+    write_fixture(
+        stage,
+        "service-session-list-params.json",
+        &SessionListParams {},
+    )?;
+    write_fixture(
+        stage,
+        "service-session-list-result.json",
+        &vec![session_list_entry_fixture()],
+    )?;
+    write_fixture(
+        stage,
+        "service-session-meta-params.json",
+        &SessionMetaParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    // 单条形状与 session.list 条目同形（前端契约 G2）；null 结果（meta 缺失）
+    // 无独立 fixture——TS 侧由 `SessionListEntry | null` 类型表达。
+    write_fixture(
+        stage,
+        "service-session-meta-result.json",
+        &session_list_entry_fixture(),
+    )?;
     account_fixtures::write(stage)?;
     client_fixtures::write(stage)?;
     Ok(())
 }
 
+/// `session.list` / `session.meta` 条目样本（前端契约 G2 的统一形状）。
+/// 全合成字段，无真实会话元数据。
+fn session_list_entry_fixture() -> qaqh_types::SessionListEntry {
+    let mut meta = qaqh_types::SessionMeta::default();
+    meta.session_id = "0199a0f0-0000-7000-8000-000000000001".into();
+    meta.created_at = 1_759_000_000_000;
+    meta.updated_at = 1_759_000_060_000;
+    meta.model = "synthetic-model".into();
+    meta.message_count = 3;
+    meta.turn_count = 1;
+    meta.title = Some("synthetic session".into());
+    meta.cwd = Some("/synthetic/workspace".into());
+    qaqh_types::SessionListEntry {
+        meta,
+        status: qaqh_types::SessionRunStatus::Idle,
+        workspace_id: None,
+    }
+}
+
 fn write_fixture<T>(stage: &Path, name: &str, value: &T) -> Result<(), Box<dyn std::error::Error>>
 where
     T: Serialize + DeserializeOwned,
-{
-    let serialized = serde_json::to_vec_pretty(value)?;
+{    let serialized = serde_json::to_vec_pretty(value)?;
     let parsed: T = serde_json::from_slice(&serialized)?;
     let round_trip = serde_json::to_vec_pretty(&parsed)?;
     if serialized != round_trip {
@@ -390,6 +435,9 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         RingingV2PendingInteraction, RingingV2PendingInteractionView,
         RingingV2PendingPermissionView,
         RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
+        RingingV2ApprovalRespondRequest, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
+        RingingV2DeviceChallenges,
+        TimelinePage, TimelineSseFrame,
         qaqh_ringing::RingingV2PairTokenRequest,
         qaqh_ringing::RingingV2PairTokenResponse,
         qaqh_ringing::RingingV2PairRequest,
@@ -415,7 +463,15 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::FsListParams,
         qaqh_runtime::ringing::service_methods::FsReadParams,
         qaqh_runtime::ringing::service_methods::FsReadResult,
+        qaqh_runtime::ringing::service_methods::SessionListParams,
+        qaqh_runtime::ringing::service_methods::SessionMetaParams,
         qaqh_runtime::ringing::service_methods::SessionRenameParams,
+        qaqh_types::SessionListEntry,
+        qaqh_types::SessionMeta,
+        qaqh_types::SessionRunStatus,
+        qaqh_types::SkillSessionEntry,
+        qaqh_types::SkillSessionEntryState,
+        qaqh_types::SkillSessionStateV2,
     );
     qaqh_runtime::ringing::service_methods::accounts::export_types(config)?;
     Ok(())
@@ -462,16 +518,19 @@ fn write_service_map(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Map a descriptor type reference (`X`, `X[]`) to a TS type name, registering
-/// the DTO import. Anything that is not a plain DTO name is a descriptor bug;
-/// primitives are handled by the caller before reaching here.
+/// Map a descriptor type reference (`X`, `X[]`, `X?` nullable) to a TS type
+/// name, registering the DTO import. Anything that is not a plain DTO name is
+/// a descriptor bug; primitives are handled by the caller before reaching here.
 fn dto_reference(
     type_name: &str,
     imports: &mut std::collections::BTreeSet<String>,
 ) -> Result<String, String> {
-    let (base, array) = match type_name.strip_suffix("[]") {
+    let (base, suffix) = match type_name.strip_suffix("[]") {
         Some(base) => (base, "[]"),
-        None => (type_name, ""),
+        None => match type_name.strip_suffix('?') {
+            Some(base) => (base, " | null"),
+            None => (type_name, ""),
+        },
     };
     let valid = !base.is_empty()
         && base
@@ -485,7 +544,7 @@ fn dto_reference(
         ));
     }
     imports.insert(base.to_owned());
-    Ok(format!("{base}{array}"))
+    Ok(format!("{base}{suffix}"))
 }
 
 fn write_manifest(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {

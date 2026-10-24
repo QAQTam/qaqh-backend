@@ -86,6 +86,19 @@ pub struct FsReadResult {
     pub content: String,
 }
 
+/// `session.list` 无参数；params 恒为 `{}`。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionListParams {}
+
+/// `session.meta` 定位单条会话；meta 不存在时 result 为 `null`（键不缺、
+/// 整个结果就是 null）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionMetaParams {
+    pub session_id: String,
+}
+
 /// A typed descriptor links the method key, the exact wire DTOs and the
 /// authorization metadata. Only methods present here are yet exposed as typed
 /// ServiceMap calls; the remaining legacy RPCs stay explicitly untyped/pending.
@@ -129,6 +142,22 @@ fn validate_fs_list_result(value: &Value) -> Result<(), String> {
 
 fn validate_fs_read_result(value: &Value) -> Result<(), String> {
     validate_result::<FsReadResult>(value)
+}
+
+fn validate_session_list_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionListParams>(value)
+}
+
+fn validate_session_meta_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionMetaParams>(value)
+}
+
+fn validate_session_list_result(value: &Value) -> Result<(), String> {
+    validate_result::<Vec<qaqh_types::SessionListEntry>>(value)
+}
+
+fn validate_session_meta_result(value: &Value) -> Result<(), String> {
+    validate_result::<Option<qaqh_types::SessionListEntry>>(value)
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -179,6 +208,33 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_fs_read_params,
         validate_result: validate_fs_read_result,
+    },
+    TypedMethodInfo {
+        method: "session.list",
+        params_type: "SessionListParams",
+        // 条目即前端契约 G2 的 SessionListEntry（SessionMeta flatten + 运行期字段）。
+        result_type: "SessionListEntry[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_session_list_params,
+        validate_result: validate_session_list_result,
+    },
+    TypedMethodInfo {
+        method: "session.meta",
+        params_type: "SessionMetaParams",
+        // meta 缺失时整个 result 是 null（不是缺键）——`?` 后缀由 exporter
+        // 映射为 `SessionListEntry | null`。
+        result_type: "SessionListEntry?",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_meta_params,
+        validate_result: validate_session_meta_result,
     },
 ];
 
@@ -521,8 +577,16 @@ mod tests {
             true
         );
         assert_eq!(
-            validate_typed_params("session.list", &serde_json::json!({})).expect("legacy pending"),
-            false
+            validate_typed_params("session.list", &serde_json::json!({})).expect("typed"),
+            true
+        );
+        assert!(
+            validate_typed_params("session.meta", &serde_json::json!({"session_id": "s1"}))
+                .expect("typed")
+        );
+        assert!(
+            validate_typed_params("session.meta", &serde_json::json!({})).is_err(),
+            "session.meta 必须带 session_id"
         );
         assert!(
             validate_typed_params(
@@ -556,8 +620,19 @@ mod tests {
         assert!(validate_typed_result("daemon.version", &serde_json::json!({})).is_err());
         assert!(validate_typed_result("session.rename", &Value::Null).expect("null result"));
         assert!(
-            !validate_typed_result("session.list", &serde_json::json!([]))
-                .expect("legacy method remains outside typed slice")
+            validate_typed_result("session.list", &serde_json::json!([])).expect("typed result")
+        );
+        assert!(
+            validate_typed_result("session.list", &serde_json::json!([{}])).is_err(),
+            "空对象不是 SessionListEntry（G2 形状必须响亮失败）"
+        );
+        assert!(
+            validate_typed_result("session.meta", &Value::Null)
+                .expect("meta 缺失 → null 是合法结果")
+        );
+        assert!(
+            validate_typed_result("session.meta", &serde_json::json!([])).is_err(),
+            "数组不是 session.meta 的结果形状"
         );
         assert!(validate_typed_result(
             "fs.list",

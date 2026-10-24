@@ -8,6 +8,7 @@ use ts_rs::TS;
 /// agent's context window.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum SkillSessionEntryState {
     /// Skill is loaded and active in the current session.
     Active,
@@ -18,6 +19,7 @@ pub enum SkillSessionEntryState {
 
 /// Runtime tracking for one skill in a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SkillSessionEntry {
     /// Skill name matching SKILL.md metadata.
     pub name: String,
@@ -34,6 +36,7 @@ pub struct SkillSessionEntry {
 /// Version 2 adds `context_epoch` and `operation_revision` for tracking
 /// skill activation/deactivation across context compaction cycles.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SkillSessionStateV2 {
     /// Schema version (always 2).
     pub version: u8,
@@ -61,6 +64,7 @@ impl Default for SkillSessionStateV2 {
 ///
 /// Fields marked `#[serde(skip)]` are runtime-only and not persisted to meta.json.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionMeta {
     // ── Persisted fields ──
     #[serde(rename = "session_id")]
@@ -281,6 +285,7 @@ pub enum SessionRunStatus {
 /// **加法式**：`session.list` 回包仍是同一个 JSON 对象（[`SessionMeta`] 的键经
 /// `flatten` 平铺，外加 `status` / `workspace_id`），wire 未变。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionListEntry {
     /// 持久化元数据。`flatten` 让它在 wire 上与下面两个运行期字段**同层**
     /// （历史形状如此，不能改成嵌套）。
