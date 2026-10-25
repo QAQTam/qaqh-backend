@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: qaqtam/mutil-ai
-          ref: e3681f6ae7f310e09b2eef5050c2c08673e46226
+          ref: ba263b9d69860d98806bf97f47727b53eadf78db
           path: mutil-ai
       - uses: dtolnay/rust-toolchain@stable
         with:
