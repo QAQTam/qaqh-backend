@@ -17,6 +17,7 @@ pub const TOOL_MODEL_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ToolStatus {
     Ok,
     Error,

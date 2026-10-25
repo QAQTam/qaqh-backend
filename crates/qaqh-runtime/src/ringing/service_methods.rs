@@ -99,6 +99,56 @@ pub struct SessionMetaParams {
     pub session_id: String,
 }
 
+/// `session.activity` 无参数；params 恒为 `{}`。结果条目是
+/// `qaqh_domain::SessionActivity`（daemon `/activity` 观测端点同款形状）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionActivityParams {}
+
+/// `session.get_activity` 定位单条会话，返回该会话的工具执行记录
+/// （`SessionToolActivity[]`，最近优先）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionGetActivityParams {
+    pub session_id: String,
+}
+
+/// `session.get_activity` 的单条工具执行记录。`args` 是调用参数的
+/// JSON 字符串（原样保留模型侧形状，不二次结构化）；`time` 为触发消息
+/// 的 `msg_id` 字符串化，无 id 时为空串。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionToolActivity {
+    pub tool_name: String,
+    pub summary: String,
+    pub status: qaqh_types::ToolStatus,
+    pub time: String,
+    pub args: String,
+}
+
+/// `session.set_profile` 只改单会话的 profile 选择：`name` 空串 = 清除
+/// 选择、回到跟随全局 `active_profile`；非空必须是已配置的 profile 名。
+/// 语义校验（名字是否存在）在 handler，DTO 只钉 wire 形状。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionSetProfileParams {
+    pub session_id: String,
+    pub name: String,
+}
+
+/// `session.set_tool_mode` 的工具模式预设：`tool_mode` ∈
+/// standard|minimal|custom（handler 校验取值）；`custom` 必须携带至少
+/// 一个 `custom_tools` 条目，其余模式省略该键。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionSetToolModeParams {
+    pub session_id: String,
+    pub tool_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub custom_tools: Option<Vec<String>>,
+}
+
 /// A typed descriptor links the method key, the exact wire DTOs and the
 /// authorization metadata. Only methods present here are yet exposed as typed
 /// ServiceMap calls; the remaining legacy RPCs stay explicitly untyped/pending.
@@ -158,6 +208,30 @@ fn validate_session_list_result(value: &Value) -> Result<(), String> {
 
 fn validate_session_meta_result(value: &Value) -> Result<(), String> {
     validate_result::<Option<qaqh_types::SessionListEntry>>(value)
+}
+
+fn validate_session_activity_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionActivityParams>(value)
+}
+
+fn validate_session_activity_result(value: &Value) -> Result<(), String> {
+    validate_result::<Vec<qaqh_domain::SessionActivity>>(value)
+}
+
+fn validate_session_get_activity_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionGetActivityParams>(value)
+}
+
+fn validate_session_get_activity_result(value: &Value) -> Result<(), String> {
+    validate_result::<Vec<SessionToolActivity>>(value)
+}
+
+fn validate_session_set_profile_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionSetProfileParams>(value)
+}
+
+fn validate_session_set_tool_mode_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionSetToolModeParams>(value)
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -235,6 +309,56 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_session_meta_params,
         validate_result: validate_session_meta_result,
+    },
+    TypedMethodInfo {
+        method: "session.activity",
+        params_type: "SessionActivityParams",
+        // 条目为 qaqh_domain::SessionActivity：与 daemon /activity 观测端点
+        // 同一个序列化载体，无 per-method 镜像。
+        result_type: "SessionActivity[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_session_activity_params,
+        validate_result: validate_session_activity_result,
+    },
+    TypedMethodInfo {
+        method: "session.get_activity",
+        params_type: "SessionGetActivityParams",
+        result_type: "SessionToolActivity[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_get_activity_params,
+        validate_result: validate_session_get_activity_result,
+    },
+    TypedMethodInfo {
+        method: "session.set_profile",
+        params_type: "SessionSetProfileParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_set_profile_params,
+        validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "session.set_tool_mode",
+        params_type: "SessionSetToolModeParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_set_tool_mode_params,
+        validate_result: validate_null_result,
     },
 ];
 
@@ -589,6 +713,49 @@ mod tests {
             "session.meta 必须带 session_id"
         );
         assert!(
+            validate_typed_params("session.activity", &serde_json::json!({}))
+                .expect("activity takes no params")
+        );
+        assert!(
+            validate_typed_params("session.get_activity", &serde_json::json!({})).is_err(),
+            "session.get_activity 必须带 session_id"
+        );
+        // set_profile 的空 name 是合法 wire（清除选择）；语义在 handler。
+        assert!(
+            validate_typed_params(
+                "session.set_profile",
+                &serde_json::json!({"session_id": "s1", "name": ""})
+            )
+            .expect("empty name clears the selection")
+        );
+        assert!(
+            validate_typed_params(
+                "session.set_tool_mode",
+                &serde_json::json!({
+                    "session_id": "s1",
+                    "tool_mode": "custom",
+                    "custom_tools": ["fs_read"]
+                })
+            )
+            .expect("custom mode with tools")
+        );
+        assert!(
+            validate_typed_params(
+                "session.set_tool_mode",
+                &serde_json::json!({"session_id": "s1", "tool_mode": "custom", "custom_tools": "fs_read"})
+            )
+            .is_err(),
+            "custom_tools 必须是字符串数组"
+        );
+        assert!(
+            validate_typed_params(
+                "session.set_tool_mode",
+                &serde_json::json!({"session_id": "s1"})
+            )
+            .is_err(),
+            "tool_mode 必填"
+        );
+        assert!(
             validate_typed_params(
                 "fs.list",
                 &serde_json::json!({ "path": 3, "scope_session_id": "s1" })
@@ -633,6 +800,61 @@ mod tests {
         assert!(
             validate_typed_result("session.meta", &serde_json::json!([])).is_err(),
             "数组不是 session.meta 的结果形状"
+        );
+        assert!(
+            validate_typed_result(
+                "session.activity",
+                &serde_json::json!([{
+                    "session_id": "s1",
+                    "state": "working",
+                    "turn_id": "t1",
+                    "seq": 3,
+                    "updated_at": 1759000000000u64
+                }])
+            )
+            .expect("valid activity entry")
+        );
+        assert!(
+            validate_typed_result(
+                "session.activity",
+                &serde_json::json!([{
+                    "session_id": "s1",
+                    "state": "hibernating",
+                    "seq": 1,
+                    "updated_at": 1u64
+                }])
+            )
+            .is_err(),
+            "state 是闭集枚举（snake_case 六态）"
+        );
+        assert!(
+            validate_typed_result(
+                "session.get_activity",
+                &serde_json::json!([{
+                    "tool_name": "fs_read",
+                    "summary": "read file",
+                    "status": "ok",
+                    "time": "42",
+                    "args": "{\"path\":\"/a\"}"
+                }])
+            )
+            .expect("valid tool activity")
+        );
+        assert!(
+            validate_typed_result(
+                "session.get_activity",
+                &serde_json::json!([{"tool_name": "fs_read", "status": "done"}])
+            )
+            .is_err(),
+            "summary/time/args 必填，status 是闭集枚举"
+        );
+        assert!(
+            validate_typed_result("session.set_profile", &Value::Null)
+                .expect("write result is null")
+        );
+        assert!(
+            validate_typed_result("session.set_tool_mode", &Value::Null)
+                .expect("write result is null")
         );
         assert!(validate_typed_result(
             "fs.list",

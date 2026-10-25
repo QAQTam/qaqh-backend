@@ -101,8 +101,9 @@ pub enum ActivityState {
 /// 会话活动快照：`session.activity` 方法与 daemon `/activity` 观测端点的
 /// 直接序列化载体（原 proto 同名类型，PR-3-2 迁入 domain 后删除）。
 /// JSON 形状由 runtime 侧 shape 快照测试逐字段冻结，不得漂移；
-/// 刻意不加 ts-rs 导出（维持零前端曝光现状，bindings 数不变）。
+/// ts 导出供 SDK 契约（B03 typed service 切片）消费。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionActivity {
     /// Session identifier.
     #[serde(rename = "session_id")]
@@ -110,7 +111,9 @@ pub struct SessionActivity {
     /// Current lifecycle state.
     pub state: ActivityState,
     /// Active turn ID, if a turn is in progress or suspended.
+    /// Wire omits the key entirely when a turn is not active.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub turn_id: Option<String>,
     /// Monotonic event sequence number for this session.
     pub seq: u64,
