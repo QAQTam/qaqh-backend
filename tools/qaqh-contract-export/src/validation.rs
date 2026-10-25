@@ -88,5 +88,25 @@ pub(super) fn validate(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if public_index.contains("DaemonDiscovery") {
         return Err("host credential DTO must only be exported from node.ts".into());
     }
+    // coverage.json 声明的 fixture 必须真实存在于产物里：声明与文件集的
+    // 漂移（如命名替换不一致）会让消费者按图索骥落空，却没有任何门禁红。
+    let coverage: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("coverage.json"))?)?;
+    let empty: Vec<serde_json::Value> = Vec::new();
+    for capability in coverage["capabilities"].as_array().unwrap_or(&empty) {
+        let id = capability["id"].as_str().unwrap_or_default();
+        for fixture in capability["fixtures"].as_array().unwrap_or(&empty) {
+            let Some(name) = fixture.as_str() else {
+                continue;
+            };
+            let relative = format!("fixtures/{name}");
+            if !all.contains(&relative) {
+                return Err(format!(
+                    "coverage capability {id} declares missing fixture: {relative}"
+                )
+                .into());
+            }
+        }
+    }
     Ok(())
 }
