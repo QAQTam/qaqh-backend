@@ -95,7 +95,10 @@ const activityEntry: ServiceMap["session.activity"]["result"][number] = { sessio
 const activityNoTurn: ServiceMap["session.activity"]["result"][number] = { session_id: "synthetic", state: "idle", seq: 1, updated_at: 1 };
 const setToolMode: ServiceMap["session.set_tool_mode"]["params"] = { session_id: "synthetic", tool_mode: "custom", custom_tools: ["fs_read"] };
 const setProfile: ServiceMap["session.set_profile"]["params"] = { session_id: "synthetic", name: "" };
-void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload, activityParams, activityEntry, activityNoTurn, setToolMode, setProfile];
+const workspaceEntry: ServiceMap["workspace.list"]["result"][number] = { id: "ws-1", path: "/synthetic/workspace", title: "workspace", order: 0, session_ids: ["0199a0f0-0000-7000-8000-000000000001"], missing_dir: false };
+const workspaceCreate: ServiceMap["workspace.create"]["result"] = { id: "ws-1", path: "/synthetic/workspace", title: "workspace", order: 0, session_ids: [] };
+const workspaceUnbound: ServiceMap["workspace.get"]["result"] = "";
+void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload, activityParams, activityEntry, activityNoTurn, setToolMode, setProfile, workspaceEntry, workspaceCreate, workspaceUnbound];
 type Command = RingingV2CommandEnvelope;
 type Status = RingingV2CommandStatus;
 // @ts-expect-error unknown methods must not have a catch-all signature
@@ -114,6 +117,10 @@ const badActivityState: ServiceMap["session.activity"]["result"] = [{ session_id
 const badTools: ServiceMap["session.set_tool_mode"]["params"] = { session_id: "s", tool_mode: "custom", custom_tools: [1] };
 // @ts-expect-error session.get_activity requires session_id
 const missingSession: ServiceMap["session.get_activity"]["params"] = {};
+// @ts-expect-error workspace list entries must carry missing_dir
+const badWorkspaceEntry: ServiceMap["workspace.list"]["result"] = [{ id: "ws-1", path: "/s", title: "t", order: 0, session_ids: [] }];
+// @ts-expect-error workspace.move_session requires workspace_id
+const missingWorkspace: ServiceMap["workspace.move_session"]["params"] = { session_id: "s" };
 ''')
             config = {"compilerOptions": {"strict": True, "noEmit": True, "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler", "skipLibCheck": False}, "include": ["contract/**/*.ts", "consumer.ts"]}
             (Path(temp) / "tsconfig.json").write_text(json.dumps(config))
