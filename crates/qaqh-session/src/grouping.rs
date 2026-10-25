@@ -77,13 +77,44 @@ pub fn repair_legacy_backslash_cwd(cwd: &str) -> String {
 }
 
 /// 一个工作区：稳定 id + canonical path + 标题 + 会话账户（手动有序）。
+/// `workspace.create`/`workspace.rename` 服务面的直接序列化载体；
+/// ts 导出供 SDK 契约（B03 typed service 切片）消费。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct WorkspaceMeta {
     pub id: String,
     pub path: String,
     pub title: String,
     pub order: u32,
     pub session_ids: Vec<String>,
+}
+
+/// `workspace.list` 的条目：注册表 meta + 路径存活标记（目录被外部删除后
+/// 前端要能区分「工作区损坏」与「正常」）。与 `WorkspaceMeta` 是两个 wire
+/// 形状——list 恒带 `missing_dir` 键，create/rename 不带。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceEntry {
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub order: u32,
+    pub session_ids: Vec<String>,
+    pub missing_dir: bool,
+}
+
+impl WorkspaceMeta {
+    /// 加上路径存活标记，投影为 `workspace.list` 的条目形状。
+    pub fn entry(&self, missing_dir: bool) -> WorkspaceEntry {
+        WorkspaceEntry {
+            id: self.id.clone(),
+            path: self.path.clone(),
+            title: self.title.clone(),
+            order: self.order,
+            session_ids: self.session_ids.clone(),
+            missing_dir,
+        }
+    }
 }
 
 static INSTANCE: OnceLock<WorkspaceStore> = OnceLock::new();
@@ -179,6 +210,15 @@ impl WorkspaceStore {
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         items.sort_by_key(|w| w.order);
         items.clone()
+    }
+
+    /// `workspace.list` 服务面的条目视图：meta + `missing_dir`（目录已不
+    /// 存在时 true）。这是该 wire 形状的唯一权威，handler 不再手拼。
+    pub fn list_entries(&self) -> Vec<WorkspaceEntry> {
+        self.list()
+            .into_iter()
+            .map(|meta| meta.entry(!self.path_status(&meta.path)))
+            .collect()
     }
 
     /// 某会话当前归属的 workspace id（无 = 未分组）。
