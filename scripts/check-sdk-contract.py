@@ -90,7 +90,12 @@ const driver: ClientV2ControlState["driver"] = { holder: null, driver_epoch: 1, 
 const bootstrapDriver: ClientV2Bootstrap["control"]["state"]["driver"] = driver;
 const approvals: RingingV2PendingApprovals = { pending_permission: null, pending_interaction: null };
 const upload: RingingV2ContentUploadResponse["truncated"] = false;
-void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload];
+const activityParams: ServiceMap["session.activity"]["params"] = {};
+const activityEntry: ServiceMap["session.activity"]["result"][number] = { session_id: "synthetic", state: "working", turn_id: "turn-1", seq: 1, updated_at: 1 };
+const activityNoTurn: ServiceMap["session.activity"]["result"][number] = { session_id: "synthetic", state: "idle", seq: 1, updated_at: 1 };
+const setToolMode: ServiceMap["session.set_tool_mode"]["params"] = { session_id: "synthetic", tool_mode: "custom", custom_tools: ["fs_read"] };
+const setProfile: ServiceMap["session.set_profile"]["params"] = { session_id: "synthetic", name: "" };
+void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload, activityParams, activityEntry, activityNoTurn, setToolMode, setProfile];
 type Command = RingingV2CommandEnvelope;
 type Status = RingingV2CommandStatus;
 // @ts-expect-error unknown methods must not have a catch-all signature
@@ -103,6 +108,12 @@ const missingFlow: ServiceMap["siwc.sign_in.status"]["params"] = {};
 const badStatus: ServiceMap["siwc.status"]["result"] = { status: "maybe", sharing: true, profiles: 1, usageUrl: "u", apiBase: "a" };
 // @ts-expect-error approval slots are required keys, not optional
 const badApprovals: RingingV2PendingApprovals = {};
+// @ts-expect-error activity state is a closed enum
+const badActivityState: ServiceMap["session.activity"]["result"] = [{ session_id: "s", state: "paused", seq: 1, updated_at: 1 }];
+// @ts-expect-error custom_tools entries must be strings
+const badTools: ServiceMap["session.set_tool_mode"]["params"] = { session_id: "s", tool_mode: "custom", custom_tools: [1] };
+// @ts-expect-error session.get_activity requires session_id
+const missingSession: ServiceMap["session.get_activity"]["params"] = {};
 ''')
             config = {"compilerOptions": {"strict": True, "noEmit": True, "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler", "skipLibCheck": False}, "include": ["contract/**/*.ts", "consumer.ts"]}
             (Path(temp) / "tsconfig.json").write_text(json.dumps(config))

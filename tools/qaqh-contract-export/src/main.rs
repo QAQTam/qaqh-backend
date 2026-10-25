@@ -233,8 +233,10 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
-        DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult, SessionListParams,
-        SessionMetaParams, SessionRenameParams,
+        DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult,
+        SessionActivityParams, SessionGetActivityParams, SessionListParams, SessionMetaParams,
+        SessionRenameParams, SessionSetProfileParams, SessionSetToolModeParams,
+        SessionToolActivity,
     };
     let open_request = RingingV2OpenRequest::new("fixture-client");
     write_fixture(stage, "open-request.json", &open_request)?;
@@ -379,6 +381,67 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "service-session-meta-result.json",
         &session_list_entry_fixture(),
     )?;
+    write_fixture(
+        stage,
+        "service-session-activity-params.json",
+        &SessionActivityParams {},
+    )?;
+    write_fixture(
+        stage,
+        "service-session-activity-result.json",
+        &vec![qaqh_domain::SessionActivity {
+            session_id: "session-fixture".to_owned(),
+            state: qaqh_domain::ActivityState::Working,
+            turn_id: Some("turn-fixture-1".to_owned()),
+            seq: 3,
+            updated_at: 1_759_000_060_000,
+        }],
+    )?;
+    write_fixture(
+        stage,
+        "service-session-get-activity-params.json",
+        &SessionGetActivityParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-get-activity-result.json",
+        &vec![SessionToolActivity {
+            tool_name: "fs_read".to_owned(),
+            summary: "read synthetic file".to_owned(),
+            status: qaqh_types::ToolStatus::Ok,
+            time: "42".to_owned(),
+            args: "{\"path\":\"/synthetic/workspace/README.md\"}".to_owned(),
+        }],
+    )?;
+    write_fixture(
+        stage,
+        "service-session-set-profile-params.json",
+        &SessionSetProfileParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            name: "synthetic-profile".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-set-profile-result.json",
+        &Option::<()>::None,
+    )?;
+    write_fixture(
+        stage,
+        "service-session-set-tool-mode-params.json",
+        &SessionSetToolModeParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            tool_mode: "custom".to_owned(),
+            custom_tools: Some(vec!["fs_read".to_owned()]),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-set-tool-mode-result.json",
+        &Option::<()>::None,
+    )?;
     account_fixtures::write(stage)?;
     client_fixtures::write(stage)?;
     Ok(())
@@ -463,9 +526,15 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::FsListParams,
         qaqh_runtime::ringing::service_methods::FsReadParams,
         qaqh_runtime::ringing::service_methods::FsReadResult,
+        qaqh_runtime::ringing::service_methods::SessionActivityParams,
+        qaqh_runtime::ringing::service_methods::SessionGetActivityParams,
         qaqh_runtime::ringing::service_methods::SessionListParams,
         qaqh_runtime::ringing::service_methods::SessionMetaParams,
         qaqh_runtime::ringing::service_methods::SessionRenameParams,
+        qaqh_runtime::ringing::service_methods::SessionSetProfileParams,
+        qaqh_runtime::ringing::service_methods::SessionSetToolModeParams,
+        qaqh_runtime::ringing::service_methods::SessionToolActivity,
+        qaqh_domain::SessionActivity,
         qaqh_types::SessionListEntry,
         qaqh_types::SessionMeta,
         qaqh_types::SessionRunStatus,
