@@ -83,7 +83,7 @@ pub struct TimelineSseFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_domain::{TimelineRound, TimelineTurn};
+    use qaqh_domain::{TimelineRound, TimelineTurn, TimelineTurnState};
 
     /// wire 形状锁：schema/version/键名/分页元数据一个都不能漂。
     /// daemon handler 与本测试共享同一份 DTO；前端消费同一 JSON 形状。
