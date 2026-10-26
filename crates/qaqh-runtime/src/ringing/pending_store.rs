@@ -35,7 +35,11 @@ pub struct ReceiptPolicy {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum ReceiptOwnerScope {
-    ClientSessionId,
+    /// §5（2026-10-23 审查）：回执 owner 是**稳定身份键**（device 身份为
+    /// `device_id`，admin 为 open 时自报的 instance id），不是临时
+    /// `client_session_id`。换连接（重开 lease）后同一 command_id 仍可对账，
+    /// 重复提交返回原回执；不同身份冒用同一 command_id 仍被指纹守卫拒绝。
+    IdentityInstanceKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -56,7 +60,7 @@ pub enum ReceiptPersistence {
 pub const RECEIPT_POLICY: ReceiptPolicy = ReceiptPolicy {
     ttl_secs: 300,
     max_entries: 4096,
-    owner_scope: ReceiptOwnerScope::ClientSessionId,
+    owner_scope: ReceiptOwnerScope::IdentityInstanceKey,
     id_scope: ReceiptIdScope::Store,
     persistence: ReceiptPersistence::BestEffort,
 };
@@ -285,6 +289,8 @@ impl PendingCommandStore {
         self.record_fingerprint_owned(command_id, fingerprint, None)
     }
 
+    /// `owner` 是稳定身份键（`RECEIPT_POLICY.owner_scope`）；参数名保留
+    /// `client_session_id` 以兼容持久化字段，语义已按 §5 收紧为身份键。
     #[allow(clippy::result_unit_err)] // 空错误类型为既有信号量语义
     pub fn record_fingerprint_for_session(
         &mut self,
