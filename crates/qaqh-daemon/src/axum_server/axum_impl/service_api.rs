@@ -73,9 +73,6 @@ pub(crate) async fn handle_service(
         }
     }
     let method = name.trim_matches('/');
-    if let Some(rejection) = service_driver_rejection(&state, &client_session_id, method, &params) {
-        return rejection;
-    }
     match service_methods::dispatch(&state.service, method, &params) {
         Ok(value) => (
             StatusCode::OK,
@@ -90,43 +87,6 @@ pub(crate) async fn handle_service(
         )
             .into_response(),
     }
-}
-
-/// Driver admission for session-scoped write RPCs.
-///
-/// Service methods are outside the three-channel command envelope, so the
-/// same driver rule must be enforced here: a live holder owns session-scoped
-/// workspace/session mutations; an unclaimed seat stays permissive.
-fn service_driver_rejection(
-    state: &AppState,
-    client_session_id: &str,
-    method: &str,
-    params: &serde_json::Value,
-) -> Option<Response> {
-    if !matches!(
-        method,
-        "workspace.set" | "workspace.move_session" | "workspace.detach" | "session.set_tool_mode"
-    ) {
-        return None;
-    }
-    let session_id = service_methods::session_param_value(params)?;
-    let driver = v2::canonical_driver_state(state, session_id)?;
-    let holder = driver.holder?;
-    if !v2::holder_is_live(state, &holder) || holder == client_session_id {
-        return None;
-    }
-    Some(
-        (
-            StatusCode::FORBIDDEN,
-            [(header::CONTENT_TYPE, "application/json")],
-            serde_json::to_vec(&serde_json::json!({
-                "code": "not_driver",
-                "message": "another client holds the driver seat",
-            }))
-            .unwrap_or_default(),
-        )
-            .into_response(),
-    )
 }
 
 // ---- SSE helpers (P2) ----

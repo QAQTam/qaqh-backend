@@ -1,13 +1,11 @@
 //! 设备注册表（移动端 M0，spec-daemon-auth-devices §5）。
 //!
-//! 持久化于 `<data_dir>/ringing-devices.json`，与 [`RingingDriverWatch`] 同范式：
+//! 持久化于 `<data_dir>/ringing-devices.json`：
 //! JSON、`.json.tmp` + rename 原子写、损坏即空启动。
 //!
 //! **只存 `device_token` 的 SHA256 摘要，绝不含明文**——token 明文仅在 `/pair`
 //! 响应中出现一次，丢失即重新扫码。daemon 重启不得失效 device_token（与 admin
 //! token 每次轮换的行为显式区分）。
-//!
-//! [`RingingDriverWatch`]: crate::ringing::driver_watch::RingingDriverWatch
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

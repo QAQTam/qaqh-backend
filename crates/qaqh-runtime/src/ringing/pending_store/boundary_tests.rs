@@ -46,7 +46,7 @@ fn receipt_policy_is_machine_readable_and_matches_store_defaults() {
         serde_json::json!({
             "ttl_secs": 300,
             "max_entries": 4096,
-            "owner_scope": "client_session_id",
+            "owner_scope": "identity_instance_key",
             "id_scope": "store",
             "persistence": "best_effort"
         })
@@ -187,7 +187,7 @@ fn lost_ack_status_and_replay_preserve_each_known_outcome() {
 }
 
 #[test]
-fn lease_replacement_cannot_reconcile_or_take_over_receipts() {
+fn receipts_reconcile_across_reopen_for_same_identity_but_not_other_identities() {
     let mut store = PendingCommandStore::new();
     assert!(reserve(&mut store));
     store.mark_terminal(
@@ -196,18 +196,29 @@ fn lease_replacement_cannot_reconcile_or_take_over_receipts() {
         Some("event".into()),
         None,
     );
+    // §3/§5：owner 是稳定身份键，同一设备的连接（含重开后的新 cs）并存且
+    // 都能对账；不同设备的身份冒用同一 command_id 仍被指纹守卫拒绝。
     let mut leases = super::super::lease_store::RingingLeaseStore::new();
-    leases.open(OWNER.into(), "same-client-instance".into());
-    leases.open("lease-reopened".into(), "same-client-instance".into());
-    assert!(!leases.is_active_session(OWNER));
-    assert!(leases.is_active_session("lease-reopened"));
-    assert_unknown(&store, COMMAND, "lease-reopened");
+    leases.open("cs-1".into(), OWNER.into());
+    leases.open("cs-2".into(), OWNER.into());
+    assert!(leases.is_active_session("cs-1"), "同身份多连接并存（§3）");
+    assert!(leases.is_active_session("cs-2"));
+    // 同身份重复提交（同 command_id + 同指纹 + 同 owner）→ 原回执（非错误）。
+    assert_eq!(
+        store
+            .record_fingerprint_for_session(COMMAND, FINGERPRINT, OWNER)
+            .expect("same identity reconciles"),
+        false,
+        "duplicate replay returns the stored receipt"
+    );
+    // 他设备身份冒用 → mismatch。
     assert!(
         store
-            .record_fingerprint_for_session(COMMAND, FINGERPRINT, "lease-reopened")
+            .record_fingerprint_for_session(COMMAND, FINGERPRINT, "device-2")
             .is_err()
     );
-    // Storage retention does not grant the old lease HTTP authorization.
+    assert_unknown(&store, COMMAND, "device-2");
+    // Storage retention does not grant a foreign identity authorization.
     assert!(store.v2_status_for_session(COMMAND, OWNER).is_some());
 }
 
