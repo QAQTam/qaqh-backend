@@ -20,7 +20,7 @@ use super::{
     generate_ulid,
 };
 use crate::session_fact_v2::{
-    AssistantBlockSealed, CheckpointId, CompactionApplied, ContentRef, DriverChanged, EventId,
+    AssistantBlockSealed, CheckpointId, CompactionApplied, ContentRef, EventId,
     ExecutionId, FactPayload, FactSchema, InputAccepted, InputId, InterAgentCommunication,
     InteractionExpired, InteractionId, InteractionRequested, InteractionResolved, MessageId,
     ModelRoundStarted, RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId,
@@ -173,33 +173,6 @@ pub enum ToolLedgerError {
     BlobWrite(String),
 }
 
-/// Outcome of a canonical driver-seat claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DriverClaimOutcome {
-    /// Seat was free (or its recorded holder was reported stale by the caller).
-    Claimed { driver_epoch: u64 },
-    /// The caller already holds the seat; no fact is written.
-    AlreadyHeld { driver_epoch: u64 },
-    /// Another holder owns the seat.
-    Busy { holder: String, driver_epoch: u64 },
-}
-
-/// Outcome of a canonical driver-seat release.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DriverReleaseOutcome {
-    Released {
-        driver_epoch: u64,
-    },
-    NotDriver {
-        holder: Option<String>,
-        driver_epoch: u64,
-    },
-    /// `expected_epoch` CAS failed: the seat moved on, so the release is a no-op.
-    StaleEpoch {
-        driver_epoch: u64,
-    },
-}
-
 impl Drop for ToolLedger {
     /// Release the exclusive writer fence when the ledger owner goes away.
     ///
@@ -268,9 +241,6 @@ pub struct ToolLedger {
     /// Last published revision per workspace resource, rebuilt from committed
     /// facts on open so new facts keep revisions monotonic.
     workspace_resource_revisions: HashMap<(ResourceKind, ResourceId), u64>,
-    /// Canonical driver seat, rebuilt from `DriverChanged` facts on open.
-    driver_holder: Option<String>,
-    driver_epoch: u64,
 }
 
 impl ToolLedger {
@@ -307,13 +277,7 @@ impl ToolLedger {
         let mut input_accepteds = HashMap::new();
         let mut inter_agent_communications = HashMap::new();
         let mut workspace_resource_revisions = HashMap::new();
-        let mut driver_holder = None;
-        let mut driver_epoch = 0;
         for fact in reader.read_all()? {
-            if let FactPayload::DriverChanged(payload) = &fact.payload {
-                driver_holder = payload.holder.clone();
-                driver_epoch = payload.driver_epoch;
-            }
             index_fact(
                 &mut entries,
                 &mut interaction_requests,
@@ -344,106 +308,12 @@ impl ToolLedger {
             inter_agent_communications,
             blobs,
             workspace_resource_revisions,
-            driver_holder,
-            driver_epoch,
         })
     }
 
     /// Share the actor's in-flight command scope with this ledger.
     pub fn bind_causation(&mut self, causation: FactCausation) {
         self.causation = causation;
-    }
-
-    /// Current canonical driver seat (`holder`, `driver_epoch`).
-    pub fn driver_state(&self) -> (Option<String>, u64) {
-        (self.driver_holder.clone(), self.driver_epoch)
-    }
-
-    /// Claim the driver seat. `stale_holder` lets the caller (the daemon, which
-    /// owns lease liveness) take over a seat whose holder's lease has expired.
-    pub fn claim_driver(
-        &mut self,
-        holder: &str,
-        stale_holder: Option<&str>,
-        event_id: EventId,
-        causation_id: Option<EventId>,
-        now_ms: i64,
-    ) -> Result<DriverClaimOutcome, ToolLedgerError> {
-        if let Some(current) = self.driver_holder.clone() {
-            if current == holder {
-                return Ok(DriverClaimOutcome::AlreadyHeld {
-                    driver_epoch: self.driver_epoch,
-                });
-            }
-            if stale_holder != Some(current.as_str()) {
-                return Ok(DriverClaimOutcome::Busy {
-                    holder: current,
-                    driver_epoch: self.driver_epoch,
-                });
-            }
-        }
-        let driver_epoch = self.driver_epoch.saturating_add(1);
-        self.append_driver_changed(
-            Some(holder.to_string()),
-            driver_epoch,
-            event_id,
-            causation_id,
-            now_ms,
-        )?;
-        Ok(DriverClaimOutcome::Claimed { driver_epoch })
-    }
-
-    /// Release the driver seat. Only the recorded holder may release, and an
-    /// optional `expected_epoch` CAS makes a delayed reclaim a no-op when the
-    /// seat has since been re-claimed.
-    pub fn release_driver(
-        &mut self,
-        holder: &str,
-        expected_epoch: Option<u64>,
-        event_id: EventId,
-        causation_id: Option<EventId>,
-        now_ms: i64,
-    ) -> Result<DriverReleaseOutcome, ToolLedgerError> {
-        if self.driver_holder.as_deref() != Some(holder) {
-            return Ok(DriverReleaseOutcome::NotDriver {
-                holder: self.driver_holder.clone(),
-                driver_epoch: self.driver_epoch,
-            });
-        }
-        if expected_epoch.is_some_and(|expected| expected != self.driver_epoch) {
-            return Ok(DriverReleaseOutcome::StaleEpoch {
-                driver_epoch: self.driver_epoch,
-            });
-        }
-        let driver_epoch = self.driver_epoch.saturating_add(1);
-        self.append_driver_changed(None, driver_epoch, event_id, causation_id, now_ms)?;
-        Ok(DriverReleaseOutcome::Released { driver_epoch })
-    }
-
-    fn append_driver_changed(
-        &mut self,
-        holder: Option<String>,
-        driver_epoch: u64,
-        event_id: EventId,
-        causation_id: Option<EventId>,
-        now_ms: i64,
-    ) -> Result<SessionFact, ToolLedgerError> {
-        let mut fact = self.envelope(
-            event_id,
-            now_ms,
-            FactPayload::DriverChanged(DriverChanged {
-                holder: holder.clone(),
-                driver_epoch,
-                changed_at_ms: now_ms,
-            }),
-        );
-        if let Some(causation_id) = causation_id {
-            fact.causation_id = Some(causation_id);
-        }
-        let outcome = self.append_and_publish(fact, now_ms)?;
-        self.driver_holder = holder;
-        self.driver_epoch = driver_epoch;
-        Ok(outcome.fact)
     }
 
     fn append_and_publish(
