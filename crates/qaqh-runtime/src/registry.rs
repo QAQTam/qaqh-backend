@@ -2881,6 +2881,8 @@ mod tests {
             .send_ringing("parent-seed", &cancel)
             .expect("cancel parent");
 
+        // 「取消当前回合」（turn_id: None）保留入队即置位的抢占语义（§7 修正后
+        // 仅显式 turn_id 的取消不再预置）；token tree 把父 token 传播到子代理。
         assert!(parent_cancel.is_set());
         assert!(
             child_cancel.is_set(),
@@ -2901,6 +2903,72 @@ mod tests {
         ));
         qaqh_workspace::remove_session_cancel("parent-seed");
         qaqh_workspace::remove_session_cancel("child-seed");
+    }
+
+    #[test]
+    fn targeted_cancel_does_not_preset_the_cancel_token() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            directory.path().join("sessions"),
+            directory.path().join(".active_session"),
+        ));
+        let cancel_token = crate::agent::types::CancelToken::new();
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(4);
+        let instance = AgentInstance {
+            session_id: "seed-a".into(),
+            transport: AgentTransport::InProcess {
+                cmd_tx,
+                cancel: cancel_token.clone(),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        };
+        let mut registry = AgentRegistry {
+            instances: HashMap::from([("seed-a".into(), instance)]),
+            activity: SessionActivityTracker::default(),
+            sessions,
+            hub: None,
+            shutting_down: false,
+            last_spawn: HashMap::new(),
+            supervisor: SubagentSupervisor::default(),
+            agent_catalog: AgentCatalog::default(),
+            residency: HashMap::new(),
+            v2_hub: None,
+            quota_ledgers: HashMap::new(),
+            quota_limits: QuotaLimits::unlimited(),
+            max_depth: 1,
+            message_in_flight_per_pair: 16,
+            message_outbound_per_sender: 1024,
+            outbound_attempts: HashMap::new(),
+            armed_collectors: HashSet::new(),
+            subagent_outcomes: HashMap::new(),
+        };
+        // §7：显式 turn_id 的取消必须先经 actor 目标校验——入队不得预置取消
+        // 标记，滞留/错目标的旧请求在入队瞬间不得中止在途工具。
+        let targeted = qaqh_ringing::RingingWorkerCommandEnvelope::new(
+            "seed-a",
+            "cancel-targeted",
+            qaqh_ringing::RingingCommand::Conversation(
+                qaqh_domain::ConversationCommand::ConversationCancel {
+                    turn_id: Some("turn-stale".into()),
+                },
+            ),
+        );
+        registry
+            .send_ringing("seed-a", &targeted)
+            .expect("targeted cancel delivered");
+        assert!(
+            !cancel_token.is_set(),
+            "targeted cancel must not preset the token before actor-side validation"
+        );
+        assert!(
+            cmd_rx.try_recv().is_ok(),
+            "targeted cancel command must still be delivered to the actor"
+        );
+        qaqh_workspace::remove_session_cancel("seed-a");
     }
 
     #[test]
