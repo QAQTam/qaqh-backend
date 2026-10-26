@@ -250,8 +250,8 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "receipt_policy": qaqh_runtime::ringing::pending_store::RECEIPT_POLICY,
         "semantics": {
             "replay_window": "receipts are retained for receipt_policy.ttl_secs and at most receipt_policy.max_entries; expiry or eviction means the outcome is unknown, not failed",
-            "owner_scope": "status/replay/existing queries and receipts are scoped to the owning client_session_id lease; a re-opened lease cannot reconcile or take over receipts from its predecessor",
-            "fingerprint_guard": "reserving the same command_id with a different payload fingerprint or owner is rejected instead of treated as a replay; the daemon fingerprint covers channel, session, expected_revision, driver_epoch and command",
+            "owner_scope": "status/replay/existing queries and receipts are scoped to the stable identity key (device_id for paired devices, the admin self-reported instance id); a re-opened connection keeps reconciling its identity's receipts, while a foreign identity is rejected by the fingerprint guard",
+            "fingerprint_guard": "reserving the same command_id with a different payload fingerprint or owner is rejected instead of treated as a replay; the daemon fingerprint covers channel, session, expected_revision and command",
             "concurrency": "exactly one concurrent reservation wins per command_id; duplicate concurrent submissions replay the stored receipt",
             "outcome_unknown": "a missing receipt, TTL expiry, eviction or foreign lease yields no receipt — SDK must report outcome unknown and must not auto-resend side-effecting commands",
             "persistence": "best_effort: the receipt store is reloaded at startup; an unreadable or undecodable store is a loud load error, never silently treated as empty"
