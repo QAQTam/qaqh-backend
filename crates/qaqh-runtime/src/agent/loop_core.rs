@@ -66,6 +66,11 @@ use crate::agent::state::agent::AgentState;
 use qaqh_session::session_fact_v2::{ActorKind, ActorRef};
 
 pub fn ringing_command_is_interrupt(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> bool {
+    // §7（2026-10-23 审查）：只有「取消当前回合」（turn_id: None）保留入队即
+    // 预置取消的抢占语义——回合运行中命令在 lap 边界才被 actor 看到，没有
+    // 预置就没有回合中取消。显式 turn_id 的取消目标必须先经 actor 校验，
+    // 滞留/错目标的旧请求在入队瞬间不得中止在途工具。会话生命周期命令
+    // （resume/shutdown/create）无目标可校验，维持入队即中断。
     matches!(
         &env.command,
         qaqh_ringing::RingingCommand::Control(
@@ -73,7 +78,7 @@ pub fn ringing_command_is_interrupt(env: &qaqh_ringing::RingingWorkerCommandEnve
                 | qaqh_domain::ControlCommand::SessionShutdown
                 | qaqh_domain::ControlCommand::SessionCreate { .. }
         ) | qaqh_ringing::RingingCommand::Conversation(
-            qaqh_domain::ConversationCommand::ConversationCancel { .. }
+            qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
         )
     )
 }

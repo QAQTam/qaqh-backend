@@ -355,26 +355,23 @@ impl Loop {
                 }
                 // images 已是 domain ImageBlock（Ringing 命令直接携带）。
                 // as_system=true 已在上方走注入通道；这里只处理用户输入。
-                // H1：挂起 turn 被新用户输入取代——显式中止并分离旧悬空
-                // 状态（镜像 undo_conflict 守卫），否则迟到 grant 会在新
-                // turn 中间恢复旧 turn（幽灵 lap + 错位 backfill）。
+                // §6（2026-10-23 审查）：挂起回合（审批/ask/plan 未决）不再被
+                // 普通用户输入隐式取代——旧路径在此 abort_suspended，开放多写
+                // 后 A 端待审批的回合会被 B 端的发送打断，且命令本身没有声明
+                // 「替换这个 turn」。现改为显式 turn_busy 拒绝：先应答/关闭该
+                // 交互，或显式取消该回合后再发送；v3 邮箱式排队落地后再把拒绝
+                // 升级为延迟受理。
                 if self.session.turn.is_suspended() {
-                    let mut abort_ctx = RingContext {
-                        agent: &mut self.session.agent,
-                        emitter: &self.paced_emitter,
-                        cancel: &self.cancel,
-                        phase: &mut self.phase,
-                        pending: &mut self.pending,
-                        writer_dead: &self.writer_dead,
-                        stats: &mut self.session.stats,
-                        flow: &mut self.flow,
-                    };
-                    if let Some(stale_turn_id) = self.session.turn.abort_suspended(&mut abort_ctx) {
-                        log::warn!(
-                            "[INPUT] suspended turn {stale_turn_id} superseded by newer user input"
-                        );
-                        self.session.agent.msg.remove_last_step_if_incomplete();
-                    }
+                    self.emit_operation_failed(
+                        command_id,
+                        qaqh_domain::ErrorScope::Conversation,
+                        "turn_busy",
+                        &format!(
+                            "turn {} is awaiting an interaction; resolve, dismiss or cancel it before sending",
+                            self.session.turn.suspended_turn_id().unwrap_or("<unknown>"),
+                        ),
+                    );
+                    return;
                 }
                 if let Err(error) = self.record_input_accepted(
                     session_id,
@@ -415,6 +412,21 @@ impl Loop {
                 self.apply_outcome(outcome);
             }
             ConversationCommand::ConversationCancel { turn_id } => {
+                // §7：目标校验先于任何副作用。显式 turn_id 与 actor 视角的当前
+                // 回合（运行或挂起）不符时直接拒绝——滞留的旧取消请求不得影响
+                // 其它客户端刚开始的回合；registry 也不再在入队前预置取消标记。
+                if let Some(target) = turn_id.as_deref()
+                    && let Some(current) = self.session.turn.current_turn_id()
+                    && current != target
+                {
+                    self.emit_operation_failed(
+                        command_id,
+                        qaqh_domain::ErrorScope::Conversation,
+                        "cancel_target_mismatch",
+                        &format!("turn {target} is not the active turn (current: {current})"),
+                    );
+                    return;
+                }
                 self.cancel.set();
                 // T1（BUG-2026-10-15）：全局 set_cancel(true) 是已废弃的 C2 残留——
                 // 本调用发生在 actor 线程，ACTOR_SESSION 已设，set_cancel 只写
