@@ -37,16 +37,12 @@ pub(crate) fn command_fingerprint(
     channel: qaqh_domain::RingingChannel,
     session_id: Option<&str>,
     expected_revision: Option<u64>,
-    driver_epoch: Option<u64>,
     command: &qaqh_ringing::RingingCommand,
 ) -> String {
     let payload = serde_json::to_string(&serde_json::json!({
         "channel": channel,
         "seed": session_id,
         "expected_revision": expected_revision,
-        // v2-only CAS input: the same command_id submitted against a different
-        // driver epoch is a different payload and must not replay the old ACK.
-        "driver_epoch": driver_epoch,
         "command": command,
     }))
     .unwrap_or_default();
@@ -218,15 +214,23 @@ pub(crate) async fn execute_command(
         envelope.channel,
         envelope.session_id.as_deref(),
         envelope.expected_revision,
-        envelope.driver_epoch,
         &envelope.command,
     );
+    // §5：回执 owner 是稳定身份键（device_id / admin 自报 instance id），
+    // 不是临时 client_session_id——换连接后同一 command_id 仍可对账、重复
+    // 提交返回原回执；不同设备冒用同一 command_id 仍被指纹守卫拒绝。
+    let owner_key = state
+        .leases
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .instance_for_session(&session_id)
+        .unwrap_or_else(|| session_id.clone());
     let duplicate_check = {
         let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
         match pending.record_fingerprint_for_session(
             &envelope.command_id,
             &fingerprint,
-            &session_id,
+            &owner_key,
         ) {
             Ok(v) => Ok(!v),
             Err(()) => Err(()),
@@ -668,35 +672,4 @@ pub(crate) async fn execute_command(
         .unwrap_or_else(|e| e.into_inner())
         .mark_running(&envelope.command_id);
     (StatusCode::OK, accept_ack(envelope.command_id, None))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use qaqh_domain::{ControlCommand, RingingChannel};
-
-    #[test]
-    fn v2_driver_epoch_is_part_of_the_command_fingerprint() {
-        let command = qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume {
-            session_id: "seed-1".into(),
-        });
-        let epoch_one = command_fingerprint(
-            RingingChannel::Control,
-            Some("seed-1"),
-            Some(7),
-            Some(1),
-            &command,
-        );
-        let epoch_two = command_fingerprint(
-            RingingChannel::Control,
-            Some("seed-1"),
-            Some(7),
-            Some(2),
-            &command,
-        );
-        assert_ne!(
-            epoch_one, epoch_two,
-            "same command_id against a new driver epoch is a different payload"
-        );
-    }
 }

@@ -10,8 +10,8 @@ use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_ringing::{
     CursorToken, RingingV2Bootstrap, RingingV2Capabilities, RingingV2CommandAck,
-    RingingV2CommandEnvelope, RingingV2CommandStatus, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2EventEnvelope, RingingV2LeaseRenewResponse,
+    RingingV2CommandEnvelope, RingingV2CommandStatus, RingingV2EventEnvelope,
+    RingingV2LeaseRenewResponse,
     RingingV2OpenRequest, RingingV2OpenResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -469,41 +469,6 @@ impl Client {
         Ok(response.json().await?)
     }
 
-    /// `POST /ringing/v2/sessions/{seed}/driver/claim`.
-    pub async fn claim_driver(&self, session_id: &str) -> Result<RingingV2DriverClaimResponse> {
-        let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/driver/claim");
-        let response = self
-            .inner
-            .http
-            .post(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(api_error(response, &path).await);
-        }
-        Ok(response.json().await?)
-    }
-
-    /// `POST /ringing/v2/sessions/{seed}/driver/release`.
-    pub async fn release_driver(&self, session_id: &str) -> Result<RingingV2DriverReleaseResponse> {
-        let state = self.require_v2_session().await?;
-        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/driver/release");
-        let response = self
-            .inner
-            .http
-            .post(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(api_error(response, &path).await);
-        }
-        Ok(response.json().await?)
-    }
 
     /// `GET /ringing/v2/sessions/{seed}/team`。
     ///
@@ -762,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn interaction_and_driver_contracts_are_nameable() {
+    fn interaction_contracts_are_nameable() {
         let pending = ClientV2PendingInteraction {
             interaction_id: "i1".into(),
             call_id: "c1".into(),
@@ -773,17 +738,11 @@ mod tests {
             }),
         };
         let set: ClientV2PendingSet = vec![pending];
-        let driver = ClientV2DriverState {
-            holder: None,
-            driver_epoch: 0,
-            can_claim: true,
-        };
         assert_eq!(set.len(), 1);
         assert_eq!(
             serde_json::to_value(ClientV2InteractionKind::PlanReview).expect("json"),
             serde_json::json!("plan")
         );
-        assert!(driver.can_claim);
     }
 
     // ── 字节层探活（KeepAlive）回归 ─────────────────────────────────────

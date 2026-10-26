@@ -5,7 +5,6 @@ mod axum_impl;
 #[cfg(test)]
 mod authz_matrix_tests;
 
-pub(crate) use axum_impl::reclaim_dead_driver_seats;
 pub(crate) use axum_impl::challenge::ChallengeStore;
 pub(crate) use axum_impl::pairing::PairingTable;
 pub(crate) use axum_impl::test_hooks::TestHooks;
@@ -92,9 +91,6 @@ mod sse_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
-        let driver_watch = std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_runtime::ringing::RingingDriverWatch::new(),
-        ));
         let (shutdown, _) = tokio::sync::watch::channel(false);
         // 与 `axum_tests::test_state` 同源：SessionManager 是进程级单例
         // （`init` 用 `OnceLock::set`，重复调用会 panic）——测试二进制的多个
@@ -105,7 +101,6 @@ mod sse_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("lag-epoch")),
             leases,
-            driver_watch,
             pending,
             service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
                 .clone(),
@@ -420,9 +415,6 @@ mod axum_tests {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(
             qaqh_runtime::ringing::PendingCommandStore::new(),
         ));
-        let driver_watch = std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_runtime::ringing::RingingDriverWatch::new(),
-        ));
         let service = TEST_SERVICE
             .get_or_init(|| {
                 super::init_session_manager();
@@ -439,7 +431,6 @@ mod axum_tests {
             hub,
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("test-epoch")),
             leases,
-            driver_watch,
             pending,
             service,
             admin_token: String::from("test-token"),
@@ -1007,7 +998,6 @@ mod axum_tests {
             envelope.channel,
             envelope.session_id.as_deref(),
             envelope.expected_revision,
-            envelope.driver_epoch,
             &envelope.command,
         );
         let expected = RingingV2CommandResult::AskResolved {
@@ -1016,13 +1006,11 @@ mod axum_tests {
         };
         {
             let mut pending = pending.lock().unwrap();
+            // §5：回执 owner 是稳定身份键（admin 为自报 instance id "ci-v2"），
+            // daemon 查询也按身份键——换连接后原 command_id 仍可对账。
             assert!(
                 pending
-                    .record_fingerprint_for_session(
-                        "cmd-replay",
-                        &fingerprint,
-                        &open.client_session_id
-                    )
+                    .record_fingerprint_for_session("cmd-replay", &fingerprint, "ci-v2")
                     .expect("record")
             );
             pending.mark_terminal_with_result(
@@ -1330,27 +1318,6 @@ mod axum_tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    async fn post_driver(
-        app: axum::Router,
-        session_id: &str,
-        action: &str,
-        client_session_id: &str,
-    ) -> serde_json::Value {
-        let request = Request::builder()
-            .method("POST")
-            .uri(format!("/ringing/v2/sessions/{session_id}/driver/{action}"))
-            .header("authorization", "Bearer test-token")
-            .header("x-qaqh-client-session-id", client_session_id)
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .unwrap();
-        serde_json::from_slice(&body).unwrap()
-    }
-
     async fn post_v2_service(
         app: axum::Router,
         session_id: &str,
@@ -1397,86 +1364,6 @@ mod axum_tests {
             .unwrap();
         let ack = serde_json::from_slice(&body).unwrap();
         (status, ack)
-    }
-
-    /// Seed a canonical session carrying a `DriverChanged` fact.
-    fn session_canonical_driver_session(
-        holder: Option<&str>,
-        driver_epoch: u64,
-    ) -> (tempfile::TempDir, String) {
-        use qaqh_session::canonical::{
-            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
-        };
-        use qaqh_session::session_fact_v2::{
-            DriverChanged, EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
-        };
-
-        let sessions_dir = qaqh_types::platform::sessions_dir();
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let session_id = dir
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
-        let now = 1_789_830_000_000;
-        let mut store = CanonicalSessionStore::open(
-            dir.path(),
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-        )
-        .unwrap();
-        let lease = store
-            .acquire_writer(WriterId::new("driver-seed"), now, 600_000)
-            .unwrap();
-        let fact = |ts_ms: i64, payload: FactPayload| SessionFact {
-            schema: FactSchema::v2(),
-            session_id: identity.session_id.clone(),
-            log_id: identity.log_id.clone(),
-            fact_seq: 0,
-            event_id: EventId::new(generate_ulid()),
-            ts_ms,
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload,
-        };
-        store
-            .append(
-                &lease,
-                fact(
-                    now,
-                    FactPayload::SessionCreated(SessionCreated {
-                        created_at_ms: now,
-                        cwd: "/tmp".into(),
-                        model: "test".into(),
-                        parent_session_id: None,
-                        schema_caps: Vec::new(),
-                    }),
-                ),
-                now,
-            )
-            .unwrap();
-        if driver_epoch > 0 {
-            store
-                .append(
-                    &lease,
-                    fact(
-                        now + 1,
-                        FactPayload::DriverChanged(DriverChanged {
-                            holder: holder.map(str::to_string),
-                            driver_epoch,
-                            changed_at_ms: now + 1,
-                        }),
-                    ),
-                    now + 1,
-                )
-                .unwrap();
-        }
-        (dir, session_id)
     }
 
     /// Seed a canonical session carrying a *resolved* interaction of `kind`
@@ -1679,147 +1566,6 @@ mod axum_tests {
         }
     }
 
-    #[tokio::test]
-    async fn v2_driver_gate_rejects_non_driver_and_stale_epoch() {
-        use qaqh_domain::ConversationCommand;
-        use qaqh_ringing::{RingingCommand, RingingV2CommandEnvelope};
-
-        let app = build_router(test_state());
-        let a = open_v2_session(app.clone(), "ci-a").await;
-        let b = open_v2_session(app.clone(), "ci-b").await;
-        // Canonical seat held by `a`, whose lease is live.
-        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 1);
-
-        let gated = |command_id: &str, client_session_id: &str| {
-            RingingV2CommandEnvelope::new(
-                command_id,
-                "ci-v2",
-                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
-                    turn_id: None,
-                }),
-            )
-            .with_client_session_id(client_session_id)
-            .with_session_id(session_id.clone())
-        };
-
-        let (_, rejected) = post_v2_command(
-            app.clone(),
-            &b.client_session_id,
-            &gated("cmd-b-cancel", &b.client_session_id),
-        )
-        .await;
-        assert_eq!(rejected.code.as_deref(), Some("not_driver"));
-
-        let (_, stale) = post_v2_command(
-            app.clone(),
-            &a.client_session_id,
-            &gated("cmd-a-stale", &a.client_session_id).with_driver_epoch(0),
-        )
-        .await;
-        assert_eq!(stale.code.as_deref(), Some("stale_driver_epoch"));
-
-        let (_, current) = post_v2_command(
-            app,
-            &a.client_session_id,
-            &gated("cmd-a-current", &a.client_session_id).with_driver_epoch(1),
-        )
-        .await;
-        assert_ne!(current.code.as_deref(), Some("not_driver"));
-        assert_ne!(current.code.as_deref(), Some("stale_driver_epoch"));
-    }
-
-    #[tokio::test]
-    async fn v2_service_workspace_write_is_driver_gated() {
-        let state = test_state();
-        let app = build_router(state.clone());
-        let a = open_v2_session(app.clone(), "ci-a").await;
-        let b = open_v2_session(app.clone(), "ci-b").await;
-        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 1);
-        {
-            let mut leases = state.leases.lock().unwrap();
-            leases.attach_session(&a.client_session_id, &session_id);
-            leases.attach_session(&b.client_session_id, &session_id);
-        }
-        let params = serde_json::json!({"session_id": session_id, "path": "/tmp/workspace"});
-
-        let (status, rejected) =
-            post_v2_service(app.clone(), &b.client_session_id, "workspace.set", &params).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(rejected["code"], "not_driver");
-
-        let (status, allowed) =
-            post_v2_service(app, &a.client_session_id, "workspace.set", &params).await;
-        assert_ne!(
-            status,
-            StatusCode::FORBIDDEN,
-            "the canonical driver must pass the service gate: {allowed}"
-        );
-    }
-
-    #[tokio::test]
-    async fn v2_driver_busy_claim_is_rejected_before_dispatch() {
-        let app = build_router(test_state());
-        let a = open_v2_session(app.clone(), "ci-a").await;
-        let b = open_v2_session(app.clone(), "ci-b").await;
-        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 1);
-
-        let busy = post_driver(app.clone(), &session_id, "claim", &b.client_session_id).await;
-        assert_eq!(busy["accepted"], false);
-        assert_eq!(busy["reason"], "driver_busy");
-        assert_eq!(busy["holder"], a.client_session_id);
-        assert_eq!(busy["driver_epoch"], 1);
-
-        let already = post_driver(app.clone(), &session_id, "claim", &a.client_session_id).await;
-        assert_eq!(already["accepted"], true);
-        assert_eq!(already["reason"], "already_holder");
-        assert_eq!(already["driver_epoch"], 1);
-
-        let not_driver = post_driver(app, &session_id, "release", &b.client_session_id).await;
-        assert_eq!(not_driver["accepted"], false);
-        assert_eq!(not_driver["reason"], "not_driver");
-    }
-
-    #[tokio::test]
-    async fn v2_bootstrap_reports_canonical_driver_state() {
-        let app = build_router(test_state());
-        let a = open_v2_session(app.clone(), "ci-a").await;
-        let b = open_v2_session(app.clone(), "ci-b").await;
-        let (_dir, session_id) = session_canonical_driver_session(Some(&a.client_session_id), 3);
-
-        let bootstrap = |client_session_id: String| {
-            let app = app.clone();
-            let session_id = session_id.clone();
-            async move {
-                let request = Request::builder()
-                    .uri(format!("/ringing/v2/sessions/{session_id}/bootstrap"))
-                    .header("authorization", "Bearer test-token")
-                    .header("x-qaqh-client-session-id", client_session_id)
-                    .body(Body::empty())
-                    .unwrap();
-                let response = app.oneshot(request).await.unwrap();
-                assert_eq!(response.status(), StatusCode::OK);
-                let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
-                    .await
-                    .unwrap();
-                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                value["control"]["state"]["driver"].clone()
-            }
-        };
-
-        let holder_view = bootstrap(a.client_session_id.clone()).await;
-        assert_eq!(holder_view["holder"], a.client_session_id);
-        assert_eq!(holder_view["driver_epoch"], 3);
-        assert_eq!(holder_view["can_claim"], false);
-
-        let other_view = bootstrap(b.client_session_id).await;
-        assert_eq!(other_view["holder"], a.client_session_id);
-        assert_eq!(other_view["can_claim"], true);
-    }
-
-    /// V2-C7: a session whose canonical log has no commit yet cannot mint a
-    /// snapshot cursor; the route must surface the documented
-    /// `snapshot_missing` reason (409) instead of a generic 500.
-    #[tokio::test]
     async fn v2_bootstrap_reports_snapshot_missing_for_uncommitted_session() {
         use qaqh_session::canonical::CanonicalSessionIdentity;
 
@@ -1851,135 +1597,6 @@ mod axum_tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["code"], "snapshot_missing");
-    }
-
-    /// V2-D3: a driver handover is a *reliable* control event, not just a
-    /// bootstrap field. A client that reconnects with a pre-handover cursor
-    /// must replay the `DriverChanged` fact.
-    #[tokio::test]
-    async fn v2_driver_handover_emits_reliable_control_event() {
-        use qaqh_session::canonical::{
-            CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
-        };
-        use qaqh_session::session_fact_v2::{
-            DriverChanged, EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
-        };
-
-        let state = test_state();
-        let v2_hub = state.v2_hub.clone();
-        let app = build_router(state);
-        let a = open_v2_session(app.clone(), "ci-a").await;
-
-        let sessions_dir = qaqh_types::platform::sessions_dir();
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let dir = tempfile::tempdir_in(&sessions_dir).unwrap();
-        let session_id = dir
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
-        let now = 1_789_830_000_000;
-        let mut store = CanonicalSessionStore::open(
-            dir.path(),
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-        )
-        .unwrap();
-        let lease = store
-            .acquire_writer(WriterId::new("v2-handover-test"), now, 600_000)
-            .unwrap();
-        let fact = |ts_ms: i64, payload: FactPayload| SessionFact {
-            schema: FactSchema::v2(),
-            session_id: identity.session_id.clone(),
-            log_id: identity.log_id.clone(),
-            fact_seq: 0,
-            event_id: EventId::new(generate_ulid()),
-            ts_ms,
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload,
-        };
-        store
-            .append(
-                &lease,
-                fact(
-                    now,
-                    FactPayload::SessionCreated(SessionCreated {
-                        created_at_ms: now,
-                        cwd: "/tmp".into(),
-                        model: "test".into(),
-                        parent_session_id: None,
-                        schema_caps: Vec::new(),
-                    }),
-                ),
-                now,
-            )
-            .unwrap();
-
-        // Snapshot cursor taken *before* the handover.
-        let bootstrap = Request::builder()
-            .uri(format!("/ringing/v2/sessions/{session_id}/bootstrap"))
-            .header("authorization", "Bearer test-token")
-            .header("x-qaqh-client-session-id", a.client_session_id.clone())
-            .body(Body::empty())
-            .unwrap();
-        let response = app.clone().oneshot(bootstrap).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
-            .await
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(value["control"]["state"]["driver"]["holder"].is_null());
-        assert_eq!(value["control"]["state"]["driver"]["driver_epoch"], 0);
-        let cursor = value["snapshot_cursor"].as_str().unwrap().to_string();
-
-        // `a` takes the seat: canonical DriverChanged + projection publish.
-        let changed = store
-            .append(
-                &lease,
-                fact(
-                    now + 1,
-                    FactPayload::DriverChanged(DriverChanged {
-                        holder: Some(a.client_session_id.clone()),
-                        driver_epoch: 1,
-                        changed_at_ms: now + 1,
-                    }),
-                ),
-                now + 1,
-            )
-            .unwrap();
-        qaqh_session::projection::ProjectionSink::publish(
-            v2_hub.as_ref(),
-            dir.path(),
-            &changed.fact,
-            &changed.events,
-        );
-
-        // Reconnect from the pre-handover cursor: the reliable event must be
-        // replayed on the control channel.
-        let request = Request::builder()
-            .uri(format!(
-                "/ringing/v2/sessions/{session_id}/events?since_cursor={cursor}"
-            ))
-            .header("authorization", "Bearer test-token")
-            .header("x-qaqh-client-session-id", a.client_session_id.clone())
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        use futures_util::StreamExt as _;
-        let mut stream = response.into_body().into_data_stream();
-        let chunk = stream.next().await.unwrap().unwrap();
-        let text = String::from_utf8_lossy(&chunk);
-        assert!(text.contains("event: ringing.event"), "{text}");
-        assert!(text.contains("\"delivery\":\"reliable\""), "{text}");
-        assert!(text.contains("\"kind\":\"driver_changed\""), "{text}");
-        assert!(text.contains("\"fact_seq\":2"), "{text}");
-        assert!(text.contains("\"driver_epoch\":1"), "{text}");
     }
 
     /// V2-R1..R3: a pending interaction survives a reconnect as a stable
@@ -2557,9 +2174,6 @@ mod command_entry_tests {
             hub: std::sync::Arc::new(qaqh_runtime::RingingHub::new("entry-epoch")),
             v2_hub: std::sync::Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new("entry-epoch")),
             leases,
-            driver_watch: std::sync::Arc::new(std::sync::Mutex::new(
-                qaqh_runtime::ringing::RingingDriverWatch::new(),
-            )),
             pending: std::sync::Arc::new(std::sync::Mutex::new(
                 qaqh_runtime::ringing::PendingCommandStore::new(),
             )),

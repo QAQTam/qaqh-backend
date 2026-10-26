@@ -51,8 +51,8 @@ pub use replay_window::{
 };
 pub use store::{AppendOutcome, CanonicalSessionStore};
 pub use tool_ledger::{
-    DriverClaimOutcome, DriverReleaseOutcome, FactCausation, ToolLedger, ToolLedgerEntry,
-    ToolLedgerError, ToolReconciliationEvidence, ToolRecoveryDisposition,
+    FactCausation, ToolLedger, ToolLedgerEntry, ToolLedgerError, ToolReconciliationEvidence,
+    ToolRecoveryDisposition,
 };
 pub use types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,
