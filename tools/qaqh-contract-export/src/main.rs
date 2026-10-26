@@ -5,17 +5,17 @@ use std::path::{Path, PathBuf};
 use qaqh_domain::ControlCommand;
 use qaqh_ringing::{
     RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
-    RingingCommandStatus, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
-    RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandAck,
-    RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
-    RingingV2ContentUploadResponse, RingingV2ContentValue, RingingV2Delivery,
-    RingingV2DeviceApprovalKind, RingingV2DeviceChallenge, RingingV2DeviceChallenges,
-    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2DriverState,
-    RingingV2EventEnvelope, RingingV2ExistingResult, RingingV2InteractionKind,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
-    RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
-    RingingV2PendingPermissionView, RingingV2ResetReason, RingingV2ResetRequired,
-    RingingV2StreamKey, TimelinePage, TimelineSseFrame,
+    RingingCommandStatus, RingingV2ApprovalRespondRequest, RingingV2AskOutcome, RingingV2Bootstrap,
+    RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandAck, RingingV2CommandEnvelope,
+    RingingV2CommandResult, RingingV2CommandStatus, RingingV2ContentUploadResponse,
+    RingingV2ContentValue, RingingV2Delivery, RingingV2DeviceApprovalKind,
+    RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DriverClaimResponse,
+    RingingV2DriverReleaseResponse, RingingV2DriverState, RingingV2EventEnvelope,
+    RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
+    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
+    RingingV2PendingInteraction, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
+    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey, TimelinePage,
+    TimelineSseFrame,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -236,7 +236,9 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult,
         SessionActivityParams, SessionGetActivityParams, SessionListParams, SessionMetaParams,
         SessionRenameParams, SessionSetProfileParams, SessionSetToolModeParams,
-        SessionToolActivity,
+        SessionToolActivity, WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceDetachParams,
+        WorkspaceGetParams, WorkspaceListParams, WorkspaceMoveSessionParams, WorkspaceRenameParams,
+        WorkspaceSetParams,
     };
     let open_request = RingingV2OpenRequest::new("fixture-client");
     write_fixture(stage, "open-request.json", &open_request)?;
@@ -399,14 +401,14 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixture(
         stage,
-        "service-session-get-activity-params.json",
+        "service-session-get_activity-params.json",
         &SessionGetActivityParams {
             session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
         },
     )?;
     write_fixture(
         stage,
-        "service-session-get-activity-result.json",
+        "service-session-get_activity-result.json",
         &vec![SessionToolActivity {
             tool_name: "fs_read".to_owned(),
             summary: "read synthetic file".to_owned(),
@@ -417,7 +419,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixture(
         stage,
-        "service-session-set-profile-params.json",
+        "service-session-set_profile-params.json",
         &SessionSetProfileParams {
             session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
             name: "synthetic-profile".to_owned(),
@@ -425,12 +427,12 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixture(
         stage,
-        "service-session-set-profile-result.json",
+        "service-session-set_profile-result.json",
         &Option::<()>::None,
     )?;
     write_fixture(
         stage,
-        "service-session-set-tool-mode-params.json",
+        "service-session-set_tool_mode-params.json",
         &SessionSetToolModeParams {
             session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
             tool_mode: "custom".to_owned(),
@@ -439,7 +441,105 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixture(
         stage,
-        "service-session-set-tool-mode-result.json",
+        "service-session-set_tool_mode-result.json",
+        &Option::<()>::None,
+    )?;
+    let workspace_session_id = "0199a0f0-0000-7000-8000-000000000001".to_owned();
+    write_fixture(
+        stage,
+        "service-workspace-get-params.json",
+        &WorkspaceGetParams {
+            session_id: workspace_session_id.clone(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-get-result.json",
+        &"/synthetic/workspace".to_owned(),
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-list-params.json",
+        &WorkspaceListParams {},
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-list-result.json",
+        &vec![workspace_entry_fixture()],
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-set-params.json",
+        &WorkspaceSetParams {
+            session_id: workspace_session_id.clone(),
+            path: "/synthetic/workspace".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-set-result.json",
+        &Option::<()>::None,
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-create-params.json",
+        &WorkspaceCreateParams {
+            path: "/synthetic/workspace".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-create-result.json",
+        &workspace_meta_fixture(),
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-rename-params.json",
+        &WorkspaceRenameParams {
+            id: "ws-fixture-1".to_owned(),
+            title: "synthetic workspace".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-rename-result.json",
+        &workspace_meta_fixture(),
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-delete-params.json",
+        &WorkspaceDeleteParams {
+            id: "ws-fixture-1".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-delete-result.json",
+        &Option::<()>::None,
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-move_session-params.json",
+        &WorkspaceMoveSessionParams {
+            session_id: workspace_session_id.clone(),
+            workspace_id: "ws-fixture-1".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-move_session-result.json",
+        &Option::<()>::None,
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-detach-params.json",
+        &WorkspaceDetachParams {
+            session_id: workspace_session_id,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-workspace-detach-result.json",
         &Option::<()>::None,
     )?;
     account_fixtures::write(stage)?;
@@ -466,10 +566,28 @@ fn session_list_entry_fixture() -> qaqh_types::SessionListEntry {
     }
 }
 
+/// `workspace.list` 条目样本（meta + `missing_dir`）；全合成字段。
+fn workspace_entry_fixture() -> qaqh_session::WorkspaceEntry {
+    workspace_meta_fixture().entry(false)
+}
+
+/// `workspace.create`/`workspace.rename` 结果样本（裸 `WorkspaceMeta`，
+/// 无 `missing_dir` 键）。
+fn workspace_meta_fixture() -> qaqh_session::WorkspaceMeta {
+    qaqh_session::WorkspaceMeta {
+        id: "ws-fixture-1".to_owned(),
+        path: "/synthetic/workspace".to_owned(),
+        title: "synthetic workspace".to_owned(),
+        order: 0,
+        session_ids: vec!["0199a0f0-0000-7000-8000-000000000001".to_owned()],
+    }
+}
+
 fn write_fixture<T>(stage: &Path, name: &str, value: &T) -> Result<(), Box<dyn std::error::Error>>
 where
     T: Serialize + DeserializeOwned,
-{    let serialized = serde_json::to_vec_pretty(value)?;
+{
+    let serialized = serde_json::to_vec_pretty(value)?;
     let parsed: T = serde_json::from_slice(&serialized)?;
     let round_trip = serde_json::to_vec_pretty(&parsed)?;
     if serialized != round_trip {
@@ -534,7 +652,17 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::SessionSetProfileParams,
         qaqh_runtime::ringing::service_methods::SessionSetToolModeParams,
         qaqh_runtime::ringing::service_methods::SessionToolActivity,
+        qaqh_runtime::ringing::service_methods::WorkspaceCreateParams,
+        qaqh_runtime::ringing::service_methods::WorkspaceDeleteParams,
+        qaqh_runtime::ringing::service_methods::WorkspaceDetachParams,
+        qaqh_runtime::ringing::service_methods::WorkspaceGetParams,
+        qaqh_runtime::ringing::service_methods::WorkspaceListParams,
+        qaqh_runtime::ringing::service_methods::WorkspaceMoveSessionParams,
+        qaqh_runtime::ringing::service_methods::WorkspaceRenameParams,
+        qaqh_runtime::ringing::service_methods::WorkspaceSetParams,
         qaqh_domain::SessionActivity,
+        qaqh_session::WorkspaceEntry,
+        qaqh_session::WorkspaceMeta,
         qaqh_types::SessionListEntry,
         qaqh_types::SessionMeta,
         qaqh_types::SessionRunStatus,
