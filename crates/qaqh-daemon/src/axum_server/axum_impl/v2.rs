@@ -645,7 +645,7 @@ pub(crate) async fn handle_command_v2(
 ) -> Response {
     // scope 按命令分级，在 `execute_command` 内裁决（`SessionAttach` 仅需 view），
     // 故此处不设路由级 scope 门。
-    let mut envelope: RingingV2CommandEnvelope = match serde_json::from_slice(&body) {
+    let envelope: RingingV2CommandEnvelope = match serde_json::from_slice(&body) {
         Ok(envelope) => envelope,
         Err(error) => {
             return api_error_response(
