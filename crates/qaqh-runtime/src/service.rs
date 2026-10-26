@@ -468,22 +468,9 @@ impl QaqhService {
             }
             // ── UI 工作区注册表（组织语义，与运行环境 workspace 解耦）──
             "workspace.list" => {
-                let ws = qaqh_session::WorkspaceStore::global();
-                let items: Vec<Value> = ws
-                    .list()
-                    .into_iter()
-                    .map(|w| {
-                        json!({
-                            "id": w.id,
-                            "path": w.path,
-                            "title": w.title,
-                            "order": w.order,
-                            "session_ids": w.session_ids,
-                            "missing_dir": !ws.path_status(&w.path),
-                        })
-                    })
-                    .collect();
-                Ok(Value::Array(items))
+                // 一手 DTO：条目形状由 WorkspaceStore::list_entries 唯一定义。
+                let entries = qaqh_session::WorkspaceStore::global().list_entries();
+                serde_json::to_value(entries).map_err(err)
             }
             // 远端文件浏览（临时跨端模式）：路径一律是 daemon 侧绝对路径，
             // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
