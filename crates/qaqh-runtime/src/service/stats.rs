@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::io::BufRead;
 
 use super::common::err;
+use crate::ringing::service_methods::SessionToolActivity;
 
 pub(crate) fn dashboard(session_id: &str) -> Result<Value, String> {
     let dir = qaqh_types::platform::sessions_dir().join(session_id);
@@ -61,6 +62,8 @@ pub(crate) fn activity(
             }
         }
     }
+    // 一手 DTO（service_methods::SessionToolActivity）：`session.get_activity`
+    // 的结果形状由该类型 + TYPED_METHODS 边界校验共同钉住，此处不再手拼 json。
     let mut result = Vec::new();
     for message in &messages {
         if message.role == "tool" {
@@ -70,14 +73,20 @@ pub(crate) fn activity(
                     result: tool_result,
                 } = block
                 {
-                    let (name, args) = tools.get(tool_use_id).cloned().unwrap_or_default();
-                    result.push(json!({"tool_name":name,"summary":tool_result.summary(),"status":serde_json::to_value(tool_result.status).unwrap_or_default(),"time":message.msg_id.map(|v|v.to_string()).unwrap_or_default(),"args":args}));
+                    let (tool_name, args) = tools.get(tool_use_id).cloned().unwrap_or_default();
+                    result.push(SessionToolActivity {
+                        tool_name,
+                        summary: tool_result.summary().to_owned(),
+                        status: tool_result.status,
+                        time: message.msg_id.map(|v| v.to_string()).unwrap_or_default(),
+                        args,
+                    });
                 }
             }
         }
     }
     result.reverse();
-    Ok(Value::Array(result))
+    serde_json::to_value(result).map_err(err)
 }
 
 pub(crate) fn load_config() -> Result<Value, String> {
