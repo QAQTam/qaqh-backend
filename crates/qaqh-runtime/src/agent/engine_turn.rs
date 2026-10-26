@@ -167,6 +167,16 @@ impl TurnEngine {
         self.suspended.as_ref().map(|state| state.turn_id.as_str())
     }
 
+    /// Wire turn id of the turn the actor considers current (running or
+    /// suspended); `None` when idle/terminal. Cancel target validation reads
+    /// this BEFORE any side effect (2026-10-23 审查 §7).
+    pub(crate) fn current_turn_id(&self) -> Option<&str> {
+        match self.actor.state() {
+            qaqh_session::actor::TurnCoreState::Active { turn_id, .. } => Some(turn_id.as_str()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn observe_outcome(
         &mut self,
         agent: &mut AgentState,
