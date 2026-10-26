@@ -149,6 +149,66 @@ pub struct SessionSetToolModeParams {
     pub custom_tools: Option<Vec<String>>,
 }
 
+/// `workspace.get` 定位单条会话；result 为其工作区 cwd（未绑定为空串）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceGetParams {
+    pub session_id: String,
+}
+
+/// `workspace.list` 无参数；params 恒为 `{}`。结果条目为
+/// `qaqh_session::WorkspaceEntry`（meta + `missing_dir`）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceListParams {}
+
+/// `workspace.set` 绑定会话工作区（写 meta.cwd 并定向重载）；空 path 在
+/// handler 被拒绝。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceSetParams {
+    pub session_id: String,
+    pub path: String,
+}
+
+/// `workspace.create` 注册目录为工作区；目录必须存在（handler canonicalize
+/// 并查重，重复注册幂等返回既有条目）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceCreateParams {
+    pub path: String,
+}
+
+/// `workspace.rename` 只改标题（重复允许）；`id` 必须已注册。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceRenameParams {
+    pub id: String,
+    pub title: String,
+}
+
+/// `workspace.delete` 注销工作区（会话目录与磁盘不动）；`id` 必须已注册。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceDeleteParams {
+    pub id: String,
+}
+
+/// `workspace.move_session` 把会话划入工作区（单归属：先从原工作区摘除）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceMoveSessionParams {
+    pub session_id: String,
+    pub workspace_id: String,
+}
+
+/// `workspace.detach` 把会话从其所属工作区摘除（未归属时幂等成功）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct WorkspaceDetachParams {
+    pub session_id: String,
+}
+
 /// A typed descriptor links the method key, the exact wire DTOs and the
 /// authorization metadata. Only methods present here are yet exposed as typed
 /// ServiceMap calls; the remaining legacy RPCs stay explicitly untyped/pending.
@@ -232,6 +292,46 @@ fn validate_session_set_profile_params(value: &Value) -> Result<(), String> {
 
 fn validate_session_set_tool_mode_params(value: &Value) -> Result<(), String> {
     validate_params::<SessionSetToolModeParams>(value)
+}
+
+fn validate_workspace_get_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceGetParams>(value)
+}
+
+fn validate_workspace_list_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceListParams>(value)
+}
+
+fn validate_workspace_list_result(value: &Value) -> Result<(), String> {
+    validate_result::<Vec<qaqh_session::WorkspaceEntry>>(value)
+}
+
+fn validate_workspace_meta_result(value: &Value) -> Result<(), String> {
+    validate_result::<qaqh_session::WorkspaceMeta>(value)
+}
+
+fn validate_workspace_set_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceSetParams>(value)
+}
+
+fn validate_workspace_create_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceCreateParams>(value)
+}
+
+fn validate_workspace_rename_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceRenameParams>(value)
+}
+
+fn validate_workspace_delete_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceDeleteParams>(value)
+}
+
+fn validate_workspace_move_session_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceMoveSessionParams>(value)
+}
+
+fn validate_workspace_detach_params(value: &Value) -> Result<(), String> {
+    validate_params::<WorkspaceDetachParams>(value)
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -358,6 +458,105 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_session_set_tool_mode_params,
+        validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.get",
+        params_type: "WorkspaceGetParams",
+        // 未绑定工作区的会话返回空串（不是 null）。
+        result_type: "string",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_get_params,
+        validate_result: validate_string_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.list",
+        params_type: "WorkspaceListParams",
+        // 条目为 WorkspaceStore::list_entries 的一手视图（meta + missing_dir）。
+        result_type: "WorkspaceEntry[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_list_params,
+        validate_result: validate_workspace_list_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.set",
+        params_type: "WorkspaceSetParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_set_params,
+        validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.create",
+        params_type: "WorkspaceCreateParams",
+        // 重复注册幂等返回既有条目；形状同 WorkspaceMeta（无 missing_dir）。
+        result_type: "WorkspaceMeta",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_create_params,
+        validate_result: validate_workspace_meta_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.rename",
+        params_type: "WorkspaceRenameParams",
+        result_type: "WorkspaceMeta",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_rename_params,
+        validate_result: validate_workspace_meta_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.delete",
+        params_type: "WorkspaceDeleteParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_delete_params,
+        validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.move_session",
+        params_type: "WorkspaceMoveSessionParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_move_session_params,
+        validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "workspace.detach",
+        params_type: "WorkspaceDetachParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_workspace_detach_params,
         validate_result: validate_null_result,
     },
 ];
@@ -756,6 +955,34 @@ mod tests {
             "tool_mode 必填"
         );
         assert!(
+            validate_typed_params("workspace.list", &serde_json::json!({}))
+                .expect("list takes no params")
+        );
+        assert!(
+            validate_typed_params("workspace.get", &serde_json::json!({})).is_err(),
+            "workspace.get 必须带 session_id"
+        );
+        assert!(
+            validate_typed_params("workspace.create", &serde_json::json!({"path": "/tmp"}))
+                .expect("create takes a path")
+        );
+        assert!(
+            validate_typed_params("workspace.create", &serde_json::json!({})).is_err(),
+            "workspace.create 必须带 path"
+        );
+        assert!(
+            validate_typed_params("workspace.rename", &serde_json::json!({"id": "ws-1"})).is_err(),
+            "workspace.rename 必须带 title"
+        );
+        assert!(
+            validate_typed_params(
+                "workspace.move_session",
+                &serde_json::json!({"session_id": "s1"})
+            )
+            .is_err(),
+            "workspace.move_session 必须带 workspace_id"
+        );
+        assert!(
             validate_typed_params(
                 "fs.list",
                 &serde_json::json!({ "path": 3, "scope_session_id": "s1" })
@@ -855,6 +1082,51 @@ mod tests {
         assert!(
             validate_typed_result("session.set_tool_mode", &Value::Null)
                 .expect("write result is null")
+        );
+        assert!(
+            validate_typed_result(
+                "workspace.list",
+                &serde_json::json!([{
+                    "id": "ws-1",
+                    "path": "/synthetic/workspace",
+                    "title": "workspace",
+                    "order": 0,
+                    "session_ids": ["0199a0f0-0000-7000-8000-000000000001"],
+                    "missing_dir": false
+                }])
+            )
+            .expect("valid workspace entry")
+        );
+        assert!(
+            validate_typed_result(
+                "workspace.list",
+                &serde_json::json!([{
+                    "id": "ws-1",
+                    "path": "/synthetic/workspace",
+                    "title": "workspace",
+                    "order": 0,
+                    "session_ids": []
+                }])
+            )
+            .is_err(),
+            "missing_dir 是 list 条目的必备键（与 create/rename 形状区分）"
+        );
+        assert!(
+            validate_typed_result(
+                "workspace.create",
+                &serde_json::json!({
+                    "id": "ws-1",
+                    "path": "/synthetic/workspace",
+                    "title": "workspace",
+                    "order": 0,
+                    "session_ids": []
+                })
+            )
+            .expect("create returns a bare WorkspaceMeta")
+        );
+        assert!(
+            validate_typed_result("workspace.get", &serde_json::json!(""))
+                .expect("unbound workspace is an empty string, not null")
         );
         assert!(validate_typed_result(
             "fs.list",
@@ -1021,6 +1293,40 @@ mod tests {
         let entries: Vec<qaqh_types::SessionListEntry> =
             serde_json::from_value(wire.clone()).expect("G2：条目必须能被权威类型解析");
         assert_eq!(entries.len(), wire.as_array().unwrap().len());
+        for (typed, raw) in entries.iter().zip(wire.as_array().unwrap()) {
+            assert_eq!(
+                &serde_json::to_value(typed).expect("serialize"),
+                raw,
+                "类型化往返改了 wire 形状"
+            );
+        }
+    }
+
+    /// 产出边界：`workspace.list` 的条目必须能被 `WorkspaceEntry` 吃下且
+    /// 往返逐键相同；目录存活标记真实参与计算（存在 → `missing_dir=false`）。
+    /// `workspace.create` 的结果同时被 descriptor 校验为裸 `WorkspaceMeta`。
+    #[test]
+    fn workspace_list_entries_are_typed_at_the_boundary() {
+        let dir = tempfile::tempdir().expect("workspace dir");
+        let created = dispatch(
+            service(),
+            "workspace.create",
+            &serde_json::json!({"path": dir.path().to_string_lossy()}),
+        )
+        .expect("create workspace");
+        let wire = dispatch(service(), "workspace.list", &serde_json::json!({})).expect("list");
+        let entries: Vec<qaqh_session::WorkspaceEntry> =
+            serde_json::from_value(wire.clone()).expect("条目必须能被权威类型解析");
+        assert_eq!(entries.len(), wire.as_array().unwrap().len());
+        assert_eq!(
+            entries[0].id,
+            created["id"].as_str().expect("created id"),
+            "新建工作区应按 order 出现在列表首位"
+        );
+        assert!(
+            !entries[0].missing_dir,
+            "目录存在时 missing_dir 必须为 false"
+        );
         for (typed, raw) in entries.iter().zip(wire.as_array().unwrap()) {
             assert_eq!(
                 &serde_json::to_value(typed).expect("serialize"),
