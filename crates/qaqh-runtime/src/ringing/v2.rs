@@ -17,7 +17,7 @@ use qaqh_session::canonical::{
     EVENTS_FILE, generate_ulid,
 };
 use qaqh_session::projection::{
-    ControlDriverState, ControlInteractionState, ConversationTurnOutcome, Projection,
+    ControlInteractionState, ConversationTurnOutcome, Projection,
     ProjectionSet, ProjectionSetSnapshot, ProjectionSink, projection_events_for_fact,
     projection_replaceable_events_for_fact, replaceable_identity,
 };
@@ -264,25 +264,6 @@ impl V2ProjectionHub {
             .lock()
             .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
         Ok(state.projections.control.snapshot().interactions)
-    }
-
-    /// Canonical driver seat for a seed (`None` = no `DriverChanged` fact yet).
-    ///
-    /// Same cost profile as [`Self::control_interactions`]: control projection
-    /// only, served from the hub's in-memory session after the first load.
-    pub fn driver_state(
-        &self,
-        session_dir: impl AsRef<Path>,
-        session_id: &str,
-    ) -> Result<Option<ControlDriverState>, V2HubError> {
-        let session_dir = session_dir.as_ref();
-        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
-        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
-        let state = session
-            .state
-            .lock()
-            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
-        Ok(state.projections.control.snapshot().driver)
     }
 
     /// 统一运行状态（`SessionRunStatus`，2026-10-06 归一裁决）——**只对已加载

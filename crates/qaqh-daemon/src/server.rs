@@ -290,11 +290,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     qaqh_subagent::install_task_host(Arc::new(service.clone()));
     qaqh_subagent::install_board_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingLeaseStore::new()));
-    // Persisted so a restart still reclaims seats whose holder lease expired
-    // while the daemon was down.
-    let driver_watch = Arc::new(Mutex::new(
-        qaqh_runtime::ringing::RingingDriverWatch::new_persistent(),
-    ));
     let (shutdown, _) = watch::channel(false);
     // L1 durability: the daemon previously had NO OS signal handling — Ctrl+C
     // or a terminal close killed the process without running the graceful
@@ -309,7 +304,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         hub: hub.clone(),
         v2_hub: v2_hub.clone(),
         leases: ringing_leases.clone(),
-        driver_watch: driver_watch.clone(),
         pending: pending_commands.clone(),
         service: service.clone(),
         admin_token: token.clone(),
@@ -373,7 +367,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     {
         let service = service.clone();
         let pending_commands = pending_commands.clone();
-        let app_state = app_state.clone();
         let mut shutdown_rx = shutdown.subscribe();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
@@ -388,9 +381,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
                                 std::time::Duration::from_secs(30),
                                 std::time::Duration::from_secs(60),
                             );
-                        // Driver seat reclamation: a holder whose lease expired
-                        // must not keep the seat (spec §9.3 自动移交).
-                        crate::axum_server::reclaim_dead_driver_seats(&app_state);
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {

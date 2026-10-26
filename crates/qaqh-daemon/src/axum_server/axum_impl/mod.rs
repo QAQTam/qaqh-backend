@@ -68,9 +68,8 @@ pub(crate) use sse::parse_timeline_cursor;
 pub(crate) use timeline_api::handle_timeline_snapshot;
 pub(crate) use v2::{
     handle_approval_respond_v2, handle_bootstrap_v2, handle_command_status_v2, handle_command_v2,
-    handle_driver_claim_v2, handle_driver_release_v2, handle_events_v2, handle_open_v2,
-    handle_pending_approvals_v2, handle_renew_v2, handle_team_snapshot_v2,
-    reclaim_dead_driver_seats,
+    handle_events_v2, handle_open_v2, handle_pending_approvals_v2, handle_renew_v2,
+    handle_team_snapshot_v2,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -94,12 +93,6 @@ pub struct AppState {
     pub hub: Arc<RingingHub>,
     pub v2_hub: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
     pub leases: Arc<Mutex<RingingLeaseStore>>,
-    /// Seeds worth scanning for an expired driver seat.
-    ///
-    /// This is a persistent scan list, not seat state: the canonical
-    /// `DriverChanged` fact remains the single source of truth. Entries are
-    /// added when a seat is observed and dropped once the seat is vacant.
-    pub driver_watch: Arc<Mutex<qaqh_runtime::ringing::RingingDriverWatch>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
     /// 本地 admin 凭证：桌面壳 / daemon-CLI / TUI / 探针专用，全权。
@@ -179,14 +172,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/ringing/v2/commands/{id}",
             post(handle_command_v2).get(handle_command_status_v2),
-        )
-        .route(
-            "/ringing/v2/sessions/{session_id}/driver/claim",
-            post(handle_driver_claim_v2),
-        )
-        .route(
-            "/ringing/v2/sessions/{session_id}/driver/release",
-            post(handle_driver_release_v2),
         )
         .route(
             "/ringing/v2/sessions/{session_id}/approvals",
