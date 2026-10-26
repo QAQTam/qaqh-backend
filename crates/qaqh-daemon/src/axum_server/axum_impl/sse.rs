@@ -111,7 +111,9 @@ fn should_deliver_timeline_live(
     replayed: &HashSet<u64>,
     leases: &Arc<Mutex<RingingLeaseStore>>,
 ) -> bool {
-    // 1) 逐事件归属复查（吊销后立即截断）
+    // 1) 逐事件 presence + 归属复查（吊销/过期/脱属任一即截断）。
+    // §2/§4：归属挂在身份名下，不随单条连接过期/重开失效——失效只来自
+    // 显式 detach（seed 级吊销）或 revoke_device（设备吊销）。
     if live.session_id != session_id
         || !leases
             .lock()
@@ -352,10 +354,11 @@ mod tests {
         );
     }
 
-    /// BUG-2026-09-13-10 回归：重新协商后旧 cs 失去归属（僵尸身份），
-    /// 旧连接必须被截断；新 cs 未 attach 前同样不投递。
+    /// §2/§3/§4 回归：同身份重开连接（新窗口/重连）不截断旧连接，新连接凭
+    /// 身份归属立即投递（无需重放 attach）；seed 级吊销（detach，session
+    /// close/delete 路径）仍立即截断该身份下全部连接。
     #[test]
-    fn timeline_live_is_truncated_after_renegotiation() {
+    fn timeline_live_follows_identity_ownership() {
         let leases = store_with_session();
         let after = 0;
         let replayed = HashSet::new();
@@ -369,10 +372,10 @@ mod tests {
             &leases
         ));
 
-        // 重新协商：同 instance 换新 cs → 旧 cs 归属被清除。
+        // 同身份第二连接：旧连接不被截断，归属共享。
         leases.lock().unwrap().open("cs-2".into(), "ci-1".into());
         assert!(
-            !should_deliver_timeline_live(
+            should_deliver_timeline_live(
                 &live("seed-a", 2),
                 "cs-1",
                 "seed-a",
@@ -380,10 +383,10 @@ mod tests {
                 &replayed,
                 &leases
             ),
-            "重新协商后旧 cs 必须被截断（僵尸身份）"
+            "同身份新连接不得截断旧连接（§3）"
         );
         assert!(
-            !should_deliver_timeline_live(
+            should_deliver_timeline_live(
                 &live("seed-a", 3),
                 "cs-2",
                 "seed-a",
@@ -391,16 +394,33 @@ mod tests {
                 &replayed,
                 &leases
             ),
-            "新 cs 未 attach 不投递"
+            "新连接凭身份归属立即投递，无需重放 attach（§2/§4）"
         );
-        leases.lock().unwrap().attach_session("cs-2", "seed-a");
-        assert!(should_deliver_timeline_live(
-            &live("seed-a", 4),
-            "cs-2",
-            "seed-a",
-            after,
-            &replayed,
-            &leases
-        ));
+
+        // seed 级吊销（session close/delete → detach）：身份级归属摘除，
+        // 该身份全部连接立即截断。
+        leases.lock().unwrap().detach_session("cs-2", "seed-a");
+        assert!(
+            !should_deliver_timeline_live(
+                &live("seed-a", 4),
+                "cs-1",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
+            "detach 后旧连接必须被截断"
+        );
+        assert!(
+            !should_deliver_timeline_live(
+                &live("seed-a", 5),
+                "cs-2",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
+            "detach 后新连接同样截断"
+        );
     }
 }
