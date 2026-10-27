@@ -846,7 +846,12 @@ mod tests {
         let _test_guard = setup_test_manager();
         let definitions = crate::runtime::all_tools();
         // v2：skills 聚合工具拆为三件套；聚合名与 validate 不在模型面。
-        let skill_names = ["skill_activate", "skill_list", "skill_resource"];
+        let skill_names = [
+            "skill_activate",
+            "skill_list",
+            "skill_release",
+            "skill_resource",
+        ];
         for name in skill_names {
             assert_eq!(
                 definitions
@@ -951,6 +956,21 @@ mod tests {
         );
         assert!(list.success);
         assert!(list.content.contains("typed-skill"));
+
+        let release = execute_with_context(
+            "skill_release",
+            r#"{"name":"typed-skill"}"#,
+            "skill-release-1",
+            None,
+            &crate::runtime::ToolCtx::admitted("test_session"),
+        );
+        assert!(release.success);
+        assert!(matches!(
+            release.skill_effects.first(),
+            Some(crate::ToolEffect::Skill(
+                qaqh_skills::SkillEffect::Release { .. }
+            ))
+        ));
 
         // v2：字段校验由 typed Args（deny_unknown_fields + 必填）承担，
         // 缺 name 在反序列化层映射为 invalid_arguments。

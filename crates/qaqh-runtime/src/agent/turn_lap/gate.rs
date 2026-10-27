@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 static GLOBAL_TIMELINE_SEGMENT: AtomicU32 = AtomicU32::new(0);
 
 use qaqh_types::UsageInfo;
-use qaqh_workspace::model_tool_plan::{PatchInput, ToolLayout, ToolPlanProfile};
+use qaqh_workspace::model_tool_plan::{
+    CustomDeclarationStyle, PatchInput, ToolLayout, ToolPlanProfile,
+};
 
 use crate::agent::types::{Emitter, LoopPhase, Outcome, RingContext};
 
@@ -67,6 +69,36 @@ impl ArgLineSlot {
             self.pending.clear();
         }
         let estimate = estimator.estimate();
+        let total = estimate.lines_added.saturating_add(estimate.lines_removed);
+        let ripe = self
+            .last_emit_at
+            .is_none_or(|at| at.elapsed() >= ESTIMATE_INTERVAL);
+        if total == self.last_total || !ripe {
+            return None;
+        }
+        self.last_total = total;
+        self.last_emit_at = Some(Instant::now());
+        Some(estimate)
+    }
+}
+
+/// Raw custom patch progress state. Unlike [`ArgLineSlot`], the input is
+/// already patch text, so it feeds [`RawPatchLineEstimator`] directly and
+/// never parses it as JSON.
+#[derive(Default)]
+struct RawPatchSlot {
+    estimator: qaqh_workspace::arg_estimate::RawPatchLineEstimator,
+    last_total: u32,
+    last_emit_at: Option<Instant>,
+}
+
+impl RawPatchSlot {
+    fn push(&mut self, delta: &str) -> Option<qaqh_workspace::arg_estimate::ArgLineEstimate> {
+        if delta.is_empty() {
+            return None;
+        }
+        self.estimator.push_fragment(delta);
+        let estimate = self.estimator.estimate();
         let total = estimate.lines_added.saturating_add(estimate.lines_removed);
         let ripe = self
             .last_emit_at
@@ -411,37 +443,65 @@ pub(crate) fn ensure_stream_block(
 
 // ── 主 gate lap：chat_stream + 流式事件聚合 ──
 
-/// Map explicit compat flags to an immutable native tool-plan profile.
+/// Map the credential/compat pair to an immutable native tool-plan profile.
 ///
-/// Default profiles keep the legacy function declaration and return `None`.
-/// A native profile is explicit config: Responses wire + `codex_custom` input.
+/// OAuth routes always map to native: DeepSeek is flat + text + minimal
+/// declaration, SIWC is functions namespace + Codex Lark. BYOK keeps the
+/// legacy function declaration unless `codex_custom` is explicitly selected.
 fn native_tool_plan_profile(
     compat: &qaqh_types::EndpointCompat,
     provider_kind: qaqh_gate::ProviderKind,
     model: &str,
+    credential: qaqh_types::CredentialSource,
 ) -> Result<Option<ToolPlanProfile>, String> {
-    if compat.apply_patch_input_format != qaqh_types::ApplyPatchInputFormat::CodexCustom {
+    let oauth = matches!(
+        credential,
+        qaqh_types::CredentialSource::DeepseekAccount | qaqh_types::CredentialSource::ChatgptPlan
+    );
+    // OAuth routes are native-only: there is no Chat fallback and no
+    // function_json fallback in the default surface. BYOK keeps the explicit
+    // opt-in gate.
+    if !oauth && compat.apply_patch_input_format != qaqh_types::ApplyPatchInputFormat::CodexCustom {
         return Ok(None);
     }
     if !matches!(provider_kind, qaqh_gate::ProviderKind::Responses) {
         return Err("native apply_patch requires Responses wire".to_string());
     }
-    let layout = match compat.responses_tool_layout {
-        qaqh_types::ResponsesToolLayout::Flat => ToolLayout::Flat,
-        qaqh_types::ResponsesToolLayout::FunctionsNamespace => ToolLayout::Namespace {
-            name: "functions".into(),
-            description: "Workspace tools".into(),
-        },
-    };
-    let format = match compat.apply_patch_custom_grammar {
-        qaqh_types::ApplyPatchCustomGrammar::None => {
-            qaqh_workspace::model_tool_plan::CustomFormat::Text
-        }
-        qaqh_types::ApplyPatchCustomGrammar::CodexLark => {
+    let (layout, format) = match credential {
+        qaqh_types::CredentialSource::DeepseekAccount => (
+            ToolLayout::Flat,
+            qaqh_workspace::model_tool_plan::CustomFormat::Text,
+        ),
+        qaqh_types::CredentialSource::ChatgptPlan => (
+            ToolLayout::Namespace {
+                name: "functions".into(),
+                description: "Workspace tools".into(),
+            },
             qaqh_workspace::model_tool_plan::CustomFormat::Grammar {
                 syntax: "lark".into(),
                 definition: qaqh_workspace::model_tool_plan::CODEX_APPLY_PATCH_LARK.into(),
-            }
+            },
+        ),
+        qaqh_types::CredentialSource::ApiKey => {
+            let layout = match compat.responses_tool_layout {
+                qaqh_types::ResponsesToolLayout::Flat => ToolLayout::Flat,
+                qaqh_types::ResponsesToolLayout::FunctionsNamespace => ToolLayout::Namespace {
+                    name: "functions".into(),
+                    description: "Workspace tools".into(),
+                },
+            };
+            let format = match compat.apply_patch_custom_grammar {
+                qaqh_types::ApplyPatchCustomGrammar::None => {
+                    qaqh_workspace::model_tool_plan::CustomFormat::Text
+                }
+                qaqh_types::ApplyPatchCustomGrammar::CodexLark => {
+                    qaqh_workspace::model_tool_plan::CustomFormat::Grammar {
+                        syntax: "lark".into(),
+                        definition: qaqh_workspace::model_tool_plan::CODEX_APPLY_PATCH_LARK.into(),
+                    }
+                }
+            };
+            (layout, format)
         }
     };
     Ok(Some(ToolPlanProfile {
@@ -449,21 +509,44 @@ fn native_tool_plan_profile(
         profile: format!("{provider_kind:?}:{model}"),
         layout,
         patch_input: PatchInput::Custom(format),
+        custom_declaration: if credential == qaqh_types::CredentialSource::DeepseekAccount {
+            CustomDeclarationStyle::Minimal
+        } else {
+            CustomDeclarationStyle::Full
+        },
         function_aliases: HashMap::new(),
     }))
 }
 
-/// Build the opt-in native plan from the actor's already-filtered tools.
-/// A missing `confirm_apply` or unavailable preview is a hard error; the
-/// allowlist is never widened.
+/// Build the native plan from the actor's already-filtered tools.
+///
+/// OAuth routes expose the custom `apply_patch` as their only native write
+/// surface: `confirm_apply` / `apply_patch_preview` are filtered out so the
+/// model sees the same direct-apply contract as Codex. BYOK keeps the legacy
+/// preview/confirm pair when selected.
+fn native_selected_tool_names(defs: &[qaqh_types::ToolDef], hide_preview: bool) -> Vec<String> {
+    defs.iter()
+        .filter(|def| {
+            !(hide_preview
+                && matches!(
+                    def.function.name.as_str(),
+                    "confirm_apply" | "apply_patch_preview"
+                ))
+        })
+        .map(|def| def.function.name.clone())
+        .collect()
+}
+
 fn native_tool_plan(
     ctx: &RingContext,
     provider: &qaqh_gate::ProviderConfig,
 ) -> Result<Option<qaqh_workspace::model_tool_plan::WorkspaceToolPlan>, String> {
+    let credential = ctx.agent.config.credential;
     let Some(mut profile) = native_tool_plan_profile(
         &ctx.agent.config.compat,
         provider.kind.clone(),
         &provider.model,
+        credential,
     )?
     else {
         return Ok(None);
@@ -502,12 +585,11 @@ fn native_tool_plan(
             .function_aliases
             .insert("search".to_string(), alias.clone());
     }
-    let selected: Vec<String> = ctx
-        .agent
-        .tool_defs
-        .iter()
-        .map(|def| def.function.name.clone())
-        .collect();
+    let oauth = matches!(
+        credential,
+        qaqh_types::CredentialSource::DeepseekAccount | qaqh_types::CredentialSource::ChatgptPlan
+    );
+    let selected = native_selected_tool_names(&ctx.agent.tool_defs, oauth);
     let plan = qaqh_workspace::runtime::build_model_tool_plan(&profile, &selected).map(Some)?;
     if let Some(plan) = &plan {
         log::info!(
@@ -555,6 +637,8 @@ pub(crate) fn gate_request(
     let mut timeline_tools_open = HashSet::new();
     // A4：写工具参数的行数估算（key = tool_call_id，为空时退到 provider 帧序）。
     let mut arg_line_slots: HashMap<String, ArgLineSlot> = HashMap::new();
+    // Native custom apply_patch: raw text deltas, never JSON.
+    let mut raw_patch_slots: HashMap<String, RawPatchSlot> = HashMap::new();
     let mut had_error = false;
     // 已收到 Done（内容完整流式输出）标记：gate 尾部错误不再否定完成。
     let mut done_seen = false;
@@ -820,6 +904,76 @@ pub(crate) fn gate_request(
                         });
                 }
             }
+            qaqh_gate::StreamEvent::NativeToolProgress {
+                call_id,
+                name,
+                delta,
+                ..
+            } => {
+                // A native custom call has no JSON arguments. Open the same
+                // canonical tool block on the first raw delta, then feed the
+                // parser incrementally so the UI can show +N/-M before the
+                // model finishes the patch. Never treat this as executable.
+                let Some(call_id) = call_id.filter(|id| !id.is_empty()) else {
+                    log::debug!(
+                        "[TURN] native custom progress without call_id; terminal item carries the full input"
+                    );
+                    return;
+                };
+                let name = name
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "apply_patch".to_string());
+                let block_id = format!("tool:{call_id}");
+                if timeline_tools_open.insert(call_id.clone()) {
+                    emit_final_block_checkpoint(
+                        ctx.emitter,
+                        turn_id,
+                        round_num,
+                        &active_stream_block,
+                        &stream_block_id,
+                        &stream_block_text,
+                    );
+                    seal_active_stream_block(ctx, turn_id, round_num, &mut active_stream_block);
+                    reset_stream_block_checkpoint(&mut stream_block_id, &mut stream_block_text);
+                    ctx.emitter
+                        .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
+                            turn_id: turn_id.to_string(),
+                            round_num,
+                            block_id: block_id.clone(),
+                            kind: qaqh_domain::TimelineBlockKind::Tool,
+                            reasoning_kind: None,
+                            tool: Some(qaqh_domain::TimelineTool {
+                                exit_code: None,
+                                completed_at_ms: None,
+                                tool_call_id: call_id.clone(),
+                                name,
+                                state: qaqh_domain::TimelineToolState::Prepared,
+                                summary: None,
+                                args_json: None,
+                                output: None,
+                                diff: None,
+                                progress: String::new(),
+                                progress_truncated: false,
+                                progress_stream: None,
+                                progress_bytes_total: 0,
+                                display: None,
+                                failure: None,
+                                permission: None,
+                            }),
+                        });
+                }
+                let slot = raw_patch_slots.entry(call_id).or_default();
+                if let Some(estimate) = slot.push(&delta) {
+                    ctx.emitter
+                        .emit_timeline(qaqh_domain::TimelineIntent::ToolEstimated {
+                            turn_id: turn_id.to_string(),
+                            round_num,
+                            block_id,
+                            lines_added: estimate.lines_added,
+                            lines_removed: estimate.lines_removed,
+                        });
+                }
+            }
             qaqh_gate::StreamEvent::WebSearchStatus(_) => {
                 // provider 侧搜索状态只服务已退役的 v1 双发；UI 的搜索进度走 timeline 与
                 // canonical fact 面，这里不再另发一条领域事件。
@@ -842,9 +996,22 @@ pub(crate) fn gate_request(
                         });
                 }
             }
-            qaqh_gate::StreamEvent::Retrying { .. } => {
-                // 重试提示曾按 v1 ProviderRetrying 双发；重试可见性走日志与 timeline，
-                // 不再另发领域事件。
+            qaqh_gate::StreamEvent::Retrying {
+                attempt,
+                max_retries,
+                delay_secs,
+                error,
+            } => {
+                // 瞬态 timeline 事件：客户端据此显示退避重试状态，不落快照。
+                ctx.emitter
+                    .emit_timeline(qaqh_domain::TimelineIntent::ProviderRetrying {
+                        turn_id: turn_id.to_string(),
+                        round_num,
+                        attempt,
+                        max_retries,
+                        delay_secs,
+                        error,
+                    });
             }
             qaqh_gate::StreamEvent::Error { kind, message } => {
                 log::error!(
@@ -1087,12 +1254,12 @@ fn session_affinity_headers(session_id: &str) -> Vec<(String, String)> {
 /// 把「用本机 DeepSeek 账号余额」落到 provider 上。
 ///
 /// 与 [`apply_chatgpt_plan`] 同规矩：三条校验都是**配置错误**，一律拒绝不回退。
-/// 1. wire 必须是 `openai` 或 `responses`——账号额度只提供 OpenAI 兼容的两个面；
+/// 1. wire 必须是 `responses`——OAuth 路由只维护 Responses 面；
 /// 2. base_url 为空则填官方推理 origin，非空必须是官方 origin
 ///    （否则等于把账号 token 发往用户没预期的端点）；
 /// 3. 必须已登录（`token()` 的失败文案已经区分「没登录」与「本地凭据损坏」）。
 ///
-/// 为什么 `responses` 也在值域里：官方文档明确「在对话中间插入工具调用」只有
+/// 为什么只保留 Responses：官方文档明确「在对话中间插入工具调用」只有
 /// Anthropic `/messages` 与 Responses 支持，chat completions 不支持；Responses
 /// 另外还提供 `input_tokens_details.cached_tokens`（缓存命中）与服务端
 /// `web_search`。Anthropic 面不开放：账号 token 是裸的 `x-dsh-auth-token`，
@@ -1105,12 +1272,9 @@ fn apply_deepseek_account(
     provider: &mut qaqh_gate::ProviderConfig,
     cfg: &qaqh_config::Config,
 ) -> Result<(), String> {
-    if !matches!(
-        cfg.wire,
-        qaqh_types::Wire::Chat | qaqh_types::Wire::Responses
-    ) {
+    if cfg.wire != qaqh_types::Wire::Responses {
         return Err(format!(
-            "DeepSeek 账号额度只支持 openai（chat completions）或 responses 协议（当前 profile 是 {:?}）：请在设置里把该 profile 的 wire 改为 openai 或 responses",
+            "DeepSeek 账号额度只支持 responses 协议（当前 profile 是 {:?}）：OAuth 路由不再维护 chat/anthropic 面，请在设置里改为 responses",
             cfg.wire
         ));
     }
@@ -1141,7 +1305,7 @@ fn apply_deepseek_account(
 
 #[cfg(test)]
 mod arg_line_slot_tests {
-    use super::{ArgLineSlot, ESTIMATE_INTERVAL};
+    use super::{ArgLineSlot, ESTIMATE_INTERVAL, RawPatchSlot};
     use std::time::Duration;
 
     fn slot() -> ArgLineSlot {
@@ -1158,6 +1322,25 @@ mod arg_line_slot_tests {
     const ARGS_HEAD: &str = r#"{"path":"a.txt","content":""#;
     fn args_line(line: usize) -> String {
         format!("line{line}\\n")
+    }
+
+    #[test]
+    fn raw_patch_slot_parses_deltas_not_json() {
+        let mut slot = RawPatchSlot::default();
+        assert!(
+            slot.push("*** Begin Patch\n*** Add File: a.txt\n")
+                .is_none(),
+            "header alone has no +/- lines"
+        );
+        let first = slot
+            .push("+one\n+two\n")
+            .expect("two added lines must surface");
+        assert_eq!((first.lines_added, first.lines_removed), (2, 0));
+        std::thread::sleep(ESTIMATE_INTERVAL + Duration::from_millis(5));
+        let later = slot
+            .push("+three\n")
+            .expect("a later delta must advance the count");
+        assert_eq!((later.lines_added, later.lines_removed), (3, 0));
     }
 
     #[test]
@@ -1330,12 +1513,20 @@ mod deepseek_account_tests {
         qaqh_gate::ProviderConfig::responses("", "", "test-model", None)
     }
 
-    /// 账号余额只提供 openai / responses 两个面：Anthropic 面一律拒绝，不回退。
+    /// OAuth 只维护 Responses：Chat / Anthropic 面一律拒绝，不回退。
     #[test]
     fn account_route_rejects_the_anthropic_wire() {
         let err = apply_deepseek_account(&mut provider(), &config(Wire::Messages, ""))
             .expect_err("anthropic wire must be rejected");
         assert!(err.contains("responses"), "{err}");
+    }
+
+    /// OAuth 不再维护 Chat：即使 base_url 是官方端点也必须在 wire 校验处拒绝。
+    #[test]
+    fn account_route_rejects_the_chat_wire() {
+        let err = apply_deepseek_account(&mut provider(), &config(Wire::Chat, ""))
+            .expect_err("chat wire must be rejected");
+        assert!(err.contains("只支持 responses"), "{err}");
     }
 
     /// Responses 面：wire 校验通过，官方 base 与裸头先落位（登录检查在其后）。
@@ -1360,7 +1551,7 @@ mod deepseek_account_tests {
             "http://api.deepseek.com",
             "https://api.deepseek.com/v1",
         ] {
-            let err = apply_deepseek_account(&mut provider(), &config(Wire::Chat, base))
+            let err = apply_deepseek_account(&mut provider(), &config(Wire::Responses, base))
                 .expect_err("foreign endpoint must be rejected");
             assert!(err.contains("官方端点"), "{base} → {err}");
         }
@@ -1371,7 +1562,7 @@ mod deepseek_account_tests {
     #[test]
     fn account_route_requires_a_signed_in_local_account_and_pins_the_bare_header() {
         let mut p = provider();
-        let err = apply_deepseek_account(&mut p, &config(Wire::Chat, ""))
+        let err = apply_deepseek_account(&mut p, &config(Wire::Responses, ""))
             .expect_err("no signed-in account in tests");
         assert!(err.contains("先登录"), "{err}");
         assert_eq!(p.base_url, qaqh_dsaccount::protocol::INFERENCE_ORIGIN);
@@ -1515,11 +1706,14 @@ mod chatgpt_plan_tests {
 
 #[cfg(test)]
 mod native_tool_plan_tests {
-    use super::native_tool_plan_profile;
+    use super::{native_selected_tool_names, native_tool_plan_profile};
     use qaqh_types::{
-        ApplyPatchCustomGrammar, ApplyPatchInputFormat, EndpointCompat, ResponsesToolLayout,
+        ApplyPatchCustomGrammar, ApplyPatchInputFormat, CredentialSource, EndpointCompat,
+        ResponsesToolLayout,
     };
-    use qaqh_workspace::model_tool_plan::{CustomFormat, PatchInput, ToolLayout};
+    use qaqh_workspace::model_tool_plan::{
+        CustomDeclarationStyle, CustomFormat, PatchInput, ToolLayout,
+    };
 
     #[test]
     fn default_profile_keeps_the_legacy_function_shape() {
@@ -1527,6 +1721,7 @@ mod native_tool_plan_tests {
             &EndpointCompat::default(),
             qaqh_gate::ProviderKind::Responses,
             "m",
+            CredentialSource::ApiKey,
         )
         .expect("default");
         assert!(profile.is_none());
@@ -1540,9 +1735,14 @@ mod native_tool_plan_tests {
             apply_patch_custom_grammar: ApplyPatchCustomGrammar::CodexLark,
             ..EndpointCompat::default()
         };
-        let profile = native_tool_plan_profile(&compat, qaqh_gate::ProviderKind::Responses, "m")
-            .expect("native")
-            .expect("profile");
+        let profile = native_tool_plan_profile(
+            &compat,
+            qaqh_gate::ProviderKind::Responses,
+            "m",
+            CredentialSource::ApiKey,
+        )
+        .expect("native")
+        .expect("profile");
         assert!(matches!(
             profile.layout,
             ToolLayout::Namespace { ref name, .. } if name == "functions"
@@ -1552,8 +1752,111 @@ mod native_tool_plan_tests {
             PatchInput::Custom(CustomFormat::Grammar { ref syntax, .. }) if syntax == "lark"
         ));
 
-        let err = native_tool_plan_profile(&compat, qaqh_gate::ProviderKind::Chat, "m")
-            .expect_err("chat must be rejected");
+        let err = native_tool_plan_profile(
+            &compat,
+            qaqh_gate::ProviderKind::Chat,
+            "m",
+            CredentialSource::ApiKey,
+        )
+        .expect_err("chat must be rejected");
         assert!(err.contains("Responses"));
+    }
+
+    #[test]
+    fn oauth_profiles_force_native_surface() {
+        let default = EndpointCompat::default();
+        let deepseek = native_tool_plan_profile(
+            &default,
+            qaqh_gate::ProviderKind::Responses,
+            "m",
+            CredentialSource::DeepseekAccount,
+        )
+        .expect("deepseek")
+        .expect("native profile");
+        assert!(matches!(deepseek.layout, ToolLayout::Flat));
+        assert!(matches!(
+            deepseek.patch_input,
+            PatchInput::Custom(CustomFormat::Text)
+        ));
+        assert_eq!(
+            deepseek.custom_declaration,
+            CustomDeclarationStyle::Minimal,
+            "DeepSeek gets the documented type/name-only custom shape"
+        );
+
+        let siwc = native_tool_plan_profile(
+            &default,
+            qaqh_gate::ProviderKind::Responses,
+            "m",
+            CredentialSource::ChatgptPlan,
+        )
+        .expect("siwc")
+        .expect("native profile");
+        assert!(matches!(
+            siwc.layout,
+            ToolLayout::Namespace { ref name, .. } if name == "functions"
+        ));
+        assert!(matches!(
+            siwc.patch_input,
+            PatchInput::Custom(CustomFormat::Grammar { ref syntax, .. }) if syntax == "lark"
+        ));
+        assert_eq!(
+            siwc.custom_declaration,
+            CustomDeclarationStyle::Full,
+            "SIWC keeps the Codex description + grammar"
+        );
+
+        let byok = native_tool_plan_profile(
+            &default,
+            qaqh_gate::ProviderKind::Responses,
+            "m",
+            CredentialSource::ApiKey,
+        )
+        .expect("byok");
+        assert!(byok.is_none(), "BYOK must keep the explicit opt-in gate");
+
+        let err = native_tool_plan_profile(
+            &default,
+            qaqh_gate::ProviderKind::Chat,
+            "m",
+            CredentialSource::ChatgptPlan,
+        )
+        .expect_err("OAuth must be Responses-only");
+        assert!(err.contains("Responses"));
+    }
+
+    #[test]
+    fn oauth_selection_hides_preview_tools() {
+        fn def(name: &str) -> qaqh_types::ToolDef {
+            qaqh_types::ToolDef {
+                call_type: "function".into(),
+                function: qaqh_types::ToolFunction {
+                    name: name.into(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            }
+        }
+        let defs = vec![
+            def("apply_patch"),
+            def("confirm_apply"),
+            def("apply_patch_preview"),
+            def("read"),
+        ];
+        assert_eq!(
+            native_selected_tool_names(&defs, true),
+            vec!["apply_patch", "read"],
+            "OAuth must expose the custom apply_patch without the preview pair"
+        );
+        assert_eq!(
+            native_selected_tool_names(&defs, false),
+            vec![
+                "apply_patch",
+                "confirm_apply",
+                "apply_patch_preview",
+                "read"
+            ],
+            "BYOK keeps the explicit preview/confirm selection"
+        );
     }
 }

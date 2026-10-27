@@ -46,6 +46,7 @@ struct RuntimeEntry {
 #[derive(Debug, Clone)]
 enum UiTransition {
     Request { name: String, source: String },
+    Release { name: String },
 }
 
 #[derive(Debug)]
@@ -127,6 +128,7 @@ impl SkillContextManager {
     pub fn apply_tool_effect(&mut self, effect: SkillEffect) -> Result<(), String> {
         match effect {
             SkillEffect::Activate(activation) => self.activate(activation, "model"),
+            SkillEffect::Release { name } => self.release(&name).map(|_| ()),
         }?;
         self.refresh_frozen_envelope();
         Ok(())
@@ -184,6 +186,34 @@ impl SkillContextManager {
         self.request_now(name, source)
     }
 
+    /// Release an active skill. Idempotent: releasing a name that is not active
+    /// is a successful no-op.
+    pub fn release(&mut self, name: &str) -> Result<bool, String> {
+        let was_active = self
+            .entries
+            .get(name)
+            .is_some_and(|entry| entry.state == SkillRuntimeState::Active);
+        if !was_active {
+            return Ok(false);
+        }
+        self.entries.remove(name);
+        self.context_epoch = self.context_epoch.saturating_add(1);
+        self.operation_revision = self.operation_revision.saturating_add(1);
+        self.notices.push(format!("{name} 已释放"));
+        self.refresh_frozen_envelope();
+        Ok(true)
+    }
+
+    pub fn queue_release(&mut self, name: &str) -> Result<(), String> {
+        if self.frozen.is_some() {
+            self.queued_ui.push_back(UiTransition::Release {
+                name: name.to_string(),
+            });
+            return Ok(());
+        }
+        self.release(name).map(|_| ())
+    }
+
     pub fn apply_ui_operation(
         &mut self,
         operation_id: &str,
@@ -202,6 +232,7 @@ impl SkillContextManager {
         } else {
             match action {
                 "request" | "activate" => self.queue_request(name, "user"),
+                "release" => self.queue_release(name),
                 _ => Err(format!("skill_invalid_action: '{action}'")),
             }
         };
@@ -234,6 +265,36 @@ impl SkillContextManager {
         self.entries
             .values()
             .any(|entry| entry.state == SkillRuntimeState::Active && entry.activation.is_some())
+    }
+
+    /// Activate the small host-required skill set at session creation.
+    /// Missing required skills are ignored so a user can remove the bundled
+    /// pack without making session creation fail.
+    pub fn bootstrap_required(&mut self) -> Result<Vec<String>, String> {
+        const REQUIRED: &[&str] = &["qaqh-core"];
+        let mut activated = Vec::new();
+        for name in REQUIRED {
+            if self
+                .entries
+                .get(*name)
+                .is_some_and(|entry| entry.state == SkillRuntimeState::Active)
+            {
+                continue;
+            }
+            if !self
+                .catalog
+                .catalog
+                .skills
+                .iter()
+                .any(|skill| skill.name == *name)
+            {
+                continue;
+            }
+            let activation = self.load_named(name)?;
+            self.activate(activation, "bundled")?;
+            activated.push((*name).to_string());
+        }
+        Ok(activated)
     }
 
     pub fn operation_revision(&self) -> u64 {
@@ -486,6 +547,7 @@ impl SkillContextManager {
         while let Some(transition) = self.queued_ui.pop_front() {
             let result = match transition {
                 UiTransition::Request { name, source } => self.request_now(&name, &source),
+                UiTransition::Release { name } => self.release(&name).map(|_| ()),
             };
             if let Err(error) = result {
                 self.notices.push(error);
@@ -561,7 +623,8 @@ impl SkillContextManager {
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
         (!requested.is_empty()).then(|| format!(
-            "<requested_skills>\nRequested (not verified as user intent): {}. Call the fixed `skills` tool with action=`activate` and the exact name.\n</requested_skills>",
+            "<requested_skills>\nRequested (not verified as user intent): {}. Call `{}` with the exact name.\n</requested_skills>",
+            crate::SKILL_ACTIVATE_TOOL,
             requested.join(", ")
         ))
     }
@@ -842,5 +905,71 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("skill_operation_stale"))
         );
+    }
+
+    #[test]
+    fn release_removes_active_skill_and_emits_empty_envelope() {
+        let (_temp, mut manager) = manager();
+        manager.begin_user_turn("use $alpha");
+        let activation = manager.load_named("alpha").unwrap();
+        manager
+            .apply_tool_effect(SkillEffect::Activate(activation))
+            .unwrap();
+        assert!(manager.has_active());
+        assert!(
+            manager
+                .turn_snapshot()
+                .unwrap()
+                .envelope
+                .contains("ALPHA_BODY")
+        );
+
+        let before = manager.context_epoch();
+        let released = manager.release("alpha").unwrap();
+        assert!(released);
+        assert!(!manager.has_active());
+        assert!(manager.context_epoch() > before);
+        let envelope = &manager.turn_snapshot().unwrap().envelope;
+        assert!(envelope.contains("<active_skills />"));
+        assert!(!envelope.contains("ALPHA_BODY"));
+
+        // Idempotent release must not bump the epoch again.
+        let epoch = manager.context_epoch();
+        assert!(!manager.release("alpha").unwrap());
+        assert_eq!(manager.context_epoch(), epoch);
+    }
+
+    #[test]
+    fn ui_release_is_queued_at_turn_boundary() {
+        let (_temp, mut manager) = manager();
+        manager.begin_user_turn("use $alpha");
+        let activation = manager.load_named("alpha").unwrap();
+        manager
+            .apply_tool_effect(SkillEffect::Activate(activation))
+            .unwrap();
+        let revision = manager.operation_revision();
+        let (ok, _, _) = manager.apply_ui_operation("op-release", revision, "release", "alpha");
+        assert!(ok);
+        // The turn is frozen; the release waits for the next boundary.
+        assert!(manager.has_active());
+        manager.complete_user_turn();
+        manager.begin_user_turn("continue");
+        assert!(!manager.has_active());
+    }
+
+    #[test]
+    fn required_core_bootstraps_from_installed_pack() {
+        let home = tempfile::tempdir().unwrap();
+        crate::install::ensure_bundled_skills(home.path()).unwrap();
+        let mut manager = SkillContextManager::new(home.path(), 100_000);
+        let activated = manager.bootstrap_required().unwrap();
+        assert_eq!(activated, vec!["qaqh-core"]);
+        assert!(manager.has_active());
+        let envelope = manager.snapshot_for_context().envelope;
+        assert!(envelope.contains("qaqh-core"));
+        assert!(envelope.contains("QAQH Core"));
+        assert!(manager.session_state().entries.iter().any(|entry| {
+            entry.name == "qaqh-core" && entry.source == "bundled"
+        }));
     }
 }

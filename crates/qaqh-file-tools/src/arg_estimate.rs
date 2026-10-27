@@ -10,7 +10,8 @@
 //! - `write` → `content` 的行数；
 //! - `edit` → `new_string` 行数 / `old_string` 行数（旧拼写 `new_str`/`old_str` 同权）；
 //! - `apply_patch` → 补丁里的 `+` / `-` 行（上下文行不算），复用
-//!   [`StreamingPatchParser`]，所以计数规则与引擎解析器天然一致。
+//!   [`StreamingPatchParser`]，所以计数规则与引擎解析器天然一致。当前未完成
+//!   行只要已经有 `+` / `-` 前缀就计入预览，不必等 `\n` 提交。
 //!
 //! 它因此**不等于**"实际改动行数"：`replace_all` 会成倍、命中失败会归零、
 //! 展示层 diff 又是另一个口径。终态一到，权威值立刻接管。
@@ -25,7 +26,9 @@ pub struct ArgLineEstimate {
 }
 
 /// Read-only raw custom patch progress. This is deliberately separate from
-/// `ArgLineEstimator`: custom text must never be interpreted as JSON. Parse
+/// `ArgLineEstimator`: custom text must never be interpreted as JSON. The
+/// current incomplete line is included as soon as it has a `+` / `-` prefix,
+/// without waiting for `\n`; that preview never commits parser state. Parse
 /// errors freeze the last estimate; progress is not proof of completion and
 /// cannot authorize or execute a call.
 #[derive(Debug, Default)]
@@ -45,7 +48,7 @@ impl RawPatchLineEstimator {
             self.frozen = true;
             return;
         }
-        let stats = self.parser.stats();
+        let stats = self.parser.stats_including_pending_line();
         self.estimate = ArgLineEstimate {
             lines_added: u32::try_from(stats.lines_added).unwrap_or(u32::MAX),
             lines_removed: u32::try_from(stats.lines_removed).unwrap_or(u32::MAX),
@@ -307,7 +310,7 @@ impl ArgLineEstimator {
             self.patch_frozen = true;
             return;
         }
-        let stats = self.patch.stats();
+        let stats = self.patch.stats_including_pending_line();
         self.patch_added = stats.lines_added as u32;
         self.patch_removed = stats.lines_removed as u32;
     }
@@ -368,6 +371,59 @@ mod tests {
         raw.push_fragment("invalid line\n");
         raw.push_fragment("+two\n*** End Patch\n");
         assert_eq!(raw.estimate(), before);
+    }
+
+    #[test]
+    fn raw_patch_counts_partial_line_before_newline() {
+        let mut raw = RawPatchLineEstimator::default();
+        raw.push_fragment("*** Begin Patch\n*** Add File: a.txt\n+one");
+        assert_eq!(
+            raw.estimate(),
+            ArgLineEstimate {
+                lines_added: 1,
+                lines_removed: 0
+            },
+            "the + prefix must advance before the newline"
+        );
+        raw.push_fragment("\n+two");
+        assert_eq!(raw.estimate().lines_added, 2);
+        raw.push_fragment("\n*** End Patch\n");
+        assert_eq!(
+            raw.estimate().lines_added,
+            2,
+            "committing the pending line must not double-count it"
+        );
+    }
+
+    #[test]
+    fn json_patch_counts_partial_line_before_newline() {
+        let mut est = ArgLineEstimator::for_tool("apply_patch").expect("apply_patch");
+        est.push_fragment(r#"{"patch":"*** Begin Patch\n*** Add File: a.txt\n+one"#);
+        assert_eq!(est.estimate().lines_added, 1);
+        est.push_fragment(r#"\n+two"#);
+        assert_eq!(est.estimate().lines_added, 2);
+    }
+
+    #[test]
+    fn edit_counts_partial_line_before_newline() {
+        let mut est = ArgLineEstimator::for_tool("edit").expect("edit");
+        est.push_fragment(r#"{"old_string":"x","new_string":"one"#);
+        assert_eq!(
+            est.estimate(),
+            ArgLineEstimate {
+                lines_added: 1,
+                lines_removed: 1
+            },
+            "edit already counts the current partial line"
+        );
+        est.push_fragment(r#"\ntwo"#);
+        assert_eq!(
+            est.estimate(),
+            ArgLineEstimate {
+                lines_added: 2,
+                lines_removed: 1
+            }
+        );
     }
 
     #[test]

@@ -989,6 +989,42 @@ impl TimelineAppender {
         ))
     }
 
+    /// 上游模型请求进入退避重试：只编号入册（内存 journal + SSE 实时流），
+    /// 不触碰任何回合/块状态，也不进快照。重试可能发生在首个块之前，因此
+    /// 不能像工具估算那样要求 round/block 已存在。
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_provider_retrying(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        round_num: u32,
+        attempt: u32,
+        max_retries: u32,
+        delay_secs: u64,
+        error: String,
+    ) -> Result<TimelineEntry, TimelineError> {
+        let timeline = self.timeline_mut(session_id)?;
+        // The provider's retry reason is display-facing: strip control
+        // characters and cap it so a large/echoed body cannot bloat the
+        // transient journal entry.
+        let error: String = error
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(200)
+            .collect();
+        Ok(next_entry(
+            timeline,
+            turn_id.to_string(),
+            Some(round_num),
+            TimelineEvent::ProviderRetrying {
+                attempt,
+                max_retries,
+                delay_secs,
+                error,
+            },
+        ))
+    }
+
     /// Applies one producer intent. The method is the only place that turns a
     /// producer's ordered intent into a numbered transcript record.
     pub fn apply_intent(
@@ -1088,6 +1124,22 @@ impl TimelineAppender {
                 round_num,
                 usage,
             } => self.record_usage_sampled(session_id, &turn_id, round_num, usage),
+            TimelineIntent::ProviderRetrying {
+                turn_id,
+                round_num,
+                attempt,
+                max_retries,
+                delay_secs,
+                error,
+            } => self.record_provider_retrying(
+                session_id,
+                &turn_id,
+                round_num,
+                attempt,
+                max_retries,
+                delay_secs,
+                error,
+            ),
             TimelineIntent::BlockSealed {
                 turn_id,
                 round_num,
@@ -1381,6 +1433,7 @@ fn journal_entry_payload_bytes(event: &TimelineEvent) -> u64 {
                 + tool.progress.len()) as u64
         }
         TimelineEvent::ToolProgress { chunk, .. } => chunk.len() as u64,
+        TimelineEvent::ProviderRetrying { error, .. } => error.len() as u64,
         _ => 0,
     }
 }
@@ -1747,6 +1800,47 @@ mod tests {
         let tool = snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
         assert_eq!(tool.progress_stream.as_deref(), Some("stdout"));
         assert_eq!(tool.progress_bytes_total, 12_600);
+    }
+
+    #[test]
+    fn provider_retrying_is_transient_and_does_not_mutate_turns() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        let before = appender.snapshot("s").unwrap();
+
+        let entry = appender
+            .apply_intent(
+                "s",
+                TimelineIntent::ProviderRetrying {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    attempt: 2,
+                    max_retries: 5,
+                    delay_secs: 4,
+                    error: "429 Too Many Requests".into(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            entry.event,
+            TimelineEvent::ProviderRetrying {
+                attempt: 2,
+                max_retries: 5,
+                delay_secs: 4,
+                ..
+            }
+        ));
+
+        let after = appender.snapshot("s").unwrap();
+        assert_eq!(
+            after.turns, before.turns,
+            "retry status must not mutate turns"
+        );
+        assert_eq!(
+            after.watermark,
+            before.watermark + 1,
+            "transient entry still consumes one timeline_seq"
+        );
     }
 
     /// 估算条目是瞬态旁路：发得出、每条占一个 seq，但**不碰**块的任何字段；
