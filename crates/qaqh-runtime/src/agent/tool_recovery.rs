@@ -2,8 +2,8 @@
 //!
 //! `MessageStore::from_messages` repairs an assistant `tool_use` without a
 //! persisted `tool_result` with a synthetic `[RESTORE]` placeholder. The
-//! placeholder defaults to "not executed", which is only correct when no
-//! durable execution intent exists.
+//! placeholder conservatively reports an unknown outcome until canonical or
+//! legacy execution evidence can refine it.
 //!
 //! P3 makes `ToolIntent` the execution-start fact and `ToolFinished` the
 //! terminal fact. This module reads the committed canonical ledger and refines
@@ -48,6 +48,11 @@ impl CanonicalToolState {
 
     fn restore_note(&self, fallback_name: &str) -> String {
         let name = self.name.as_deref().unwrap_or(fallback_name);
+        if !self.started() && self.terminal == Some(ToolTerminalStatus::Cancelled) {
+            return format!(
+                "[RESTORE] Tool \"{name}\" was cancelled before execution; it was not executed."
+            );
+        }
         match self.terminal {
             Some(status) => format!(
                 "[RESTORE] Tool \"{name}\" has canonical terminal {} before the session was \
@@ -234,7 +239,7 @@ pub fn reconcile_store_in(session_dir: &Path, store: &mut qaqh_message::MessageS
     for (wire_call_id, declared_name) in store.synthetic_repair_entries() {
         let canonical_call_id = crate::agent::tool_runtime::canonical_call_id(&wire_call_id);
         let (note, from_legacy) = if let Some(state) = canonical.get(&canonical_call_id) {
-            if !state.started() {
+            if !state.started() && state.terminal != Some(ToolTerminalStatus::Cancelled) {
                 continue;
             }
             (state.restore_note(&declared_name), false)

@@ -59,6 +59,7 @@ pub mod registration;
 pub mod probe;
 
 pub mod manager;
+pub mod model_tool_plan;
 /// Permission engine: tool categories, levels, trusted folders.
 pub use qaqh_permission::permission;
 

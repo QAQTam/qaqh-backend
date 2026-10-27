@@ -74,6 +74,7 @@ pub struct ToolManager {
     pub(crate) builtins: BTreeMap<String, RegisteredTool>,
 
     allowed: Option<Vec<String>>,
+    global_allowed: Option<Vec<String>>,
     /// PR-M2-2：set_allowed 的原始输入（未过 known 过滤）——动态层重建后
     /// 重应用用（观察项 ①：MCP refresh 换名后 custom 名单仍生效）。
     allowed_raw: Option<Vec<String>>,
@@ -245,6 +246,7 @@ impl ToolManager {
         Self {
             builtins: BTreeMap::new(),
             allowed: None,
+            global_allowed: None,
             allowed_raw: None,
             dynamic: BTreeMap::new(),
             inflight_tasks: BTreeMap::new(),
@@ -350,6 +352,7 @@ impl ToolManager {
             source: dynamic_source(&name),
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
+            native_patch: None,
         };
         self.dynamic_dispatches.insert(name.clone(), tool.dispatch);
         let adapter = DynamicToolAdapter::new(descriptor.clone(), tool.dispatch);
@@ -434,6 +437,21 @@ impl ToolManager {
         crate::set_current_session(session_id);
     }
 
+    /// Independent global ceiling; Some(empty) means no tools, never all.
+    pub fn set_global_allowed(&mut self, tools: Option<Vec<String>>) {
+        self.global_allowed = tools;
+    }
+
+    fn is_allowed(&self, name: &str) -> bool {
+        self.allowed
+            .as_ref()
+            .is_none_or(|v| v.iter().any(|n| n == name))
+            && self
+                .global_allowed
+                .as_ref()
+                .is_none_or(|v| v.iter().any(|n| n == name))
+    }
+
     pub fn all_defs(&self) -> Vec<qaqh_types::ToolDef> {
         // P3-3：exposure 策略化——只有 Direct（或被 tool_search 提升回的
         // Deferred）进入模型面；Hidden/Internal 永不出现。
@@ -449,14 +467,17 @@ impl ToolManager {
     }
 
     pub fn filtered_defs(&self) -> Vec<qaqh_types::ToolDef> {
-        match &self.allowed {
-            Some(allowed) => self
-                .all_defs()
-                .into_iter()
-                .filter(|d| allowed.contains(&d.function.name))
-                .collect(),
-            None => self.all_defs(),
-        }
+        self.all_defs()
+            .into_iter()
+            .filter(|d| self.is_allowed(&d.function.name))
+            .collect()
+    }
+
+    /// Do not let the legacy all-unknown allowlist fallback widen a native plan.
+    pub(crate) fn model_plan_has_invalid_allowlist(&self) -> bool {
+        self.allowed_raw.as_ref().is_some_and(|raw| {
+            !raw.is_empty() && self.allowed.is_none()
+        })
     }
 
     // ── Three-phase execution for parallel tool support ──
@@ -499,13 +520,9 @@ impl ToolManager {
         timeout_secs: Option<u64>,
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<PreparedCall, ToolExecReport> {
-        if let Some(ref allowed) = self.allowed
-            && !allowed.contains(&name.to_string())
-        {
+        if !self.is_allowed(name) {
             let msg = format!(
-                "[ERROR] Tool '{}' is not in the allowed list for this subagent. Allowed tools: [{}]",
-                name,
-                allowed.join(", ")
+                "[ERROR] Tool '{}' is not permitted by the tool allowlist.", name
             );
             return Err(ToolExecReport {
                 success: false,
@@ -903,6 +920,26 @@ mod tests {
     }
 
     // ── set_allowed（4.1：工具模式运行时切换入口）──
+
+    #[test]
+    fn global_allowlist_is_a_fail_closed_ceiling() {
+        let mut mgr = ToolManager::new();
+        mgr.register_probe(probe("exec"));
+        mgr.register_probe(probe("read"));
+        mgr.set_global_allowed(Some(vec!["read".into(), "unknown".into()]));
+        assert_eq!(names(&mgr), vec!["read"]);
+        assert!(mgr.search_tools("exec", 10).is_empty());
+        assert!(mgr.prepare_req("c1".into(), "exec", serde_json::json!({}), std::path::Path::new("."), None).is_err());
+        mgr.set_allowed(vec!["exec".into()]);
+        assert!(names(&mgr).is_empty());
+        mgr.set_allowed(vec![]);
+        mgr.set_global_allowed(Some(vec!["unknown".into()]));
+        assert!(names(&mgr).is_empty());
+        mgr.set_global_allowed(Some(vec![]));
+        assert!(names(&mgr).is_empty());
+        mgr.set_global_allowed(None);
+        assert_eq!(names(&mgr), vec!["exec", "read"]);
+    }
 
     #[test]
     fn set_allowed_restricts_and_restores() {
@@ -1312,6 +1349,7 @@ pub(crate) fn tool_search_descriptor() -> ToolDescriptor {
         // 能力声明单源：capability 表（READ_ONLY 档），不是 ToolCapabilities::default。
         capabilities: crate::tool_capabilities::builtin_capabilities(TOOL_SEARCH_NAME)
             .expect("tool_search is on the capability table"),
+        native_patch: None,
     }
 }
 
@@ -1449,11 +1487,12 @@ impl ToolManager {
         }
         let max_results = max_results.max(1);
         let mut scored: Vec<(i64, SearchHit)> = Vec::new();
-        let mut push = |scored: &mut Vec<(i64, SearchHit)>,
+        let push = |scored: &mut Vec<(i64, SearchHit)>,
                         name: &str,
                         description: &str,
                         exposure: ToolExposure| {
-            if matches!(exposure, ToolExposure::Hidden | ToolExposure::Internal)
+            if !self.is_allowed(name)
+                || matches!(exposure, ToolExposure::Hidden | ToolExposure::Internal)
                 || name == TOOL_SEARCH_NAME
             {
                 return;
@@ -1632,6 +1671,7 @@ impl ToolManager {
                 source: ToolSource::Mcp,
                 output_budget: OutputBudget::default(),
                 capabilities: ToolCapabilities::default(),
+                native_patch: None,
             };
             let name = descriptor.name.as_str().to_owned();
             self.dynamic.insert(

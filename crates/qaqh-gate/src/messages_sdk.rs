@@ -495,6 +495,9 @@ async fn consume(
         };
         hub.drain(&mut *on_event);
         match next {
+            Ok(SdkEvent::NativeToolProgress { .. } | SdkEvent::NativeToolCompleted { .. }) => {
+                return Outcome::Fatal(anyhow::anyhow!("native tool events are unsupported on Messages"));
+            }
             Ok(SdkEvent::Start { .. }) => {}
             Ok(SdkEvent::TextDelta { text }) => {
                 if !text.is_empty() {

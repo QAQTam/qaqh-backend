@@ -1774,7 +1774,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mutil-ai"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2270,6 +2270,7 @@ dependencies = [
  "futures",
  "log",
  "mutil-ai",
+ "qaqh-tool-core",
  "qaqh-types",
  "reqwest",
  "serde",
@@ -2566,12 +2567,14 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "log",
+ "qaqh-permission",
  "qaqh-policy",
  "qaqh-skills",
  "qaqh-types",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

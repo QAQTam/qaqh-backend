@@ -156,6 +156,15 @@ pub struct OutputBudget {
     pub exec_max_output_tokens: Option<u32>,
 }
 
+/// Optional model-facing representation of the existing patch executor.
+/// This is registration metadata, not a separately executable tool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativePatchRepresentation {
+    pub custom_description: String,
+    pub preview_description: String,
+    pub preview_parameters: serde_json::Value,
+}
+
 /// 工具描述符：模型面 / 权限 / 编排 / 预算的单一描述源
 /// （base spec §5.1 + 09-19 补充稿 §3）。
 #[derive(Debug, Clone)]
@@ -184,6 +193,8 @@ pub struct ToolDescriptor {
     pub output_budget: OutputBudget,
     /// 编排能力声明（09-19 补充稿 §3）。
     pub capabilities: ToolCapabilities,
+    /// Optional custom/preview representations for a profile that supports them.
+    pub native_patch: Option<NativePatchRepresentation>,
 }
 
 /// 工具元数据（SDK v2）：typed 工具作者声明的部分——schema 不在其中，
@@ -211,6 +222,7 @@ pub struct ToolMeta {
     pub output_budget: OutputBudget,
     /// 编排能力声明（09-19 补充稿 §3）。
     pub capabilities: ToolCapabilities,
+    pub native_patch: Option<NativePatchRepresentation>,
 }
 
 impl ToolMeta {
@@ -233,6 +245,7 @@ impl ToolMeta {
             source: ToolSource::Builtin,
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
+            native_patch: None,
         }
     }
 
@@ -247,6 +260,12 @@ impl ToolMeta {
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: ToolCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    #[must_use]
+    pub fn with_native_patch(mut self, representation: NativePatchRepresentation) -> Self {
+        self.native_patch = Some(representation);
         self
     }
 
@@ -273,6 +292,7 @@ impl From<ToolMeta> for ToolDescriptor {
             source: meta.source,
             output_budget: meta.output_budget,
             capabilities: meta.capabilities,
+            native_patch: meta.native_patch,
         }
     }
 }
@@ -301,6 +321,15 @@ impl ToolDescriptor {
         if self.default_timeout.is_zero() && !self.capabilities.interactive {
             return Err(DescriptorError::ZeroTimeout);
         }
+        if let Some(native) = &self.native_patch
+            && (self.name.as_str() != "apply_patch"
+                || self.source != ToolSource::Builtin
+                || native.custom_description.trim().is_empty()
+                || native.preview_description.trim().is_empty()
+                || !native.preview_parameters.is_object())
+        {
+            return Err(DescriptorError::InvalidNativePatch);
+        }
         Ok(())
     }
 }
@@ -308,6 +337,8 @@ impl ToolDescriptor {
 /// 描述符构造/校验错误（不 panic）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DescriptorError {
+    /// Native patch representations must belong to the builtin executor.
+    InvalidNativePatch,
     /// 名称非法（构造期）。
     InvalidName {
         /// 具体原因（静态文案）。
@@ -327,6 +358,7 @@ pub enum DescriptorError {
 impl fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidNativePatch => f.write_str("invalid native patch representation"),
             Self::InvalidName { reason } => write!(f, "非法工具名: {reason}"),
             Self::EmptyDescription => f.write_str("工具描述不得为空"),
             Self::SchemaNotObject { field } => write!(f, "{field} 必须是 JSON Schema object"),
@@ -405,6 +437,7 @@ mod tests {
             source: ToolSource::Builtin,
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
+            native_patch: None,
         }
     }
 
@@ -440,5 +473,20 @@ mod tests {
         let mut d = descriptor();
         d.default_timeout = Duration::ZERO;
         assert_eq!(d.validate(), Err(DescriptorError::ZeroTimeout));
+    }
+
+    #[test]
+    fn native_patch_representation_rejects_unrelated_or_dynamic_tools() {
+        let mut d = descriptor();
+        d.native_patch = Some(NativePatchRepresentation {
+            custom_description: "raw patch".into(),
+            preview_description: "preview".into(),
+            preview_parameters: serde_json::json!({"type":"object"}),
+        });
+        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativePatch));
+        d.name = ToolName::new("apply_patch").expect("valid");
+        assert_eq!(d.validate(), Ok(()));
+        d.source = ToolSource::Mcp;
+        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativePatch));
     }
 }

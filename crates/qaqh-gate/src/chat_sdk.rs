@@ -627,6 +627,9 @@ async fn consume(
         };
         hub.drain(&mut *on_event);
         match next {
+            Ok(SdkEvent::NativeToolProgress { .. } | SdkEvent::NativeToolCompleted { .. }) => {
+                return Outcome::Fatal(anyhow::anyhow!("native tool events are unsupported on Chat"));
+            }
             Ok(SdkEvent::Start { .. }) => {}
             Ok(SdkEvent::TextDelta { text }) => {
                 // inline <think> 切分：正文里夹带的思考标签不进 content。

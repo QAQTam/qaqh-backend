@@ -157,6 +157,8 @@ pub struct Config {
     /// daemon 周期任务消费；运行时 Config 承载该值以保证 save 往返不丢
     /// 用户手写配置（save_with 从运行时 Config 全量重构 PersistentConfig）。
     pub session_idle_unload_secs: u64,
+    pub tool_allowlist_enabled: bool,
+    pub tool_allowlist: Vec<String>,
     /// MCP 客户端配置（docs/current/architecture.md；load 时已 fail-fast 校验）。
     pub mcp: McpConfig,
     /// LSP 客户端配置（docs/current/architecture.md；load 时已 fail-fast 校验）。
@@ -669,6 +671,9 @@ wire = "openai"
 # responses_web_search = false
 # responses_effort_max = "xhigh"          # reasoning.effort 上限（超出即钳制）
 # responses_search_function_alias = "web_search"
+# apply_patch_input_format = "codex_custom" # function_json（缺省）| codex_custom
+# responses_tool_layout = "functions_namespace" # flat（缺省）| functions_namespace
+# apply_patch_custom_grammar = "codex_lark"    # none（缺省）| codex_lark
 # [profiles.default.compat.retry]         # 不写 = 统一传输层缺省（5 次 / 1s / 30s / 空闲 300s）
 # max_retries = 8
 # idle_timeout_secs = 600
@@ -814,6 +819,8 @@ impl Default for Config {
             tokenizer_path: None,
             auto_compact_threshold: 0.75,
             session_idle_unload_secs: 0,
+            tool_allowlist_enabled: false,
+            tool_allowlist: Vec::new(),
             mcp: McpConfig::default(),
             lsp: LspConfig::default(),
             sandbox: SandboxConfig::default(),
@@ -1141,6 +1148,8 @@ falling back to 1 (read-only)"
             if let Some(v) = pc.session_idle_unload_secs {
                 cfg.session_idle_unload_secs = v;
             }
+            cfg.tool_allowlist_enabled = pc.tool_allowlist_enabled.unwrap_or(false);
+            cfg.tool_allowlist = pc.tool_allowlist.clone().unwrap_or_default();
 
             // ── Sandbox ──
             if let Some(ref sb) = pc.sandbox {
@@ -1416,6 +1425,8 @@ falling back to 1 (read-only)"
             auto_compact_threshold: Some(self.auto_compact_threshold),
             session_idle_unload_secs: (self.session_idle_unload_secs > 0)
                 .then_some(self.session_idle_unload_secs),
+            tool_allowlist_enabled: Some(self.tool_allowlist_enabled),
+            tool_allowlist: Some(self.tool_allowlist.clone()),
             mcp: Some(PersistentMcpConfig {
                 enabled: Some(self.mcp.enabled),
                 import_external: Some(self.mcp.import_external),
@@ -1604,7 +1615,10 @@ mod secret_tests {
         cfg.apply_profile("byok").unwrap();
         assert_eq!(cfg.credential, qaqh_types::CredentialSource::ApiKey);
         let session = Config::for_session(&cfg, Some("oauth"), None);
-        assert_eq!(session.credential, qaqh_types::CredentialSource::ChatgptPlan);
+        assert_eq!(
+            session.credential,
+            qaqh_types::CredentialSource::ChatgptPlan
+        );
         cfg.apply_profile("oauth").unwrap();
         assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
         // 模拟 config.save 已更新扁平凭据、尚未重载 profiles 的快照。
@@ -1832,6 +1846,62 @@ credential = \"api_key\"
         let cfg = Config::load_from_paths_with(store, secrets).expect("load");
         assert!(!cfg.compat.official_web_tools);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tool_allowlist_persists_empty_and_nonempty() {
+        let (dir, store, secrets) = setup("tool-allowlist", "");
+        let mut cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).unwrap();
+        cfg.tool_allowlist_enabled = true;
+        cfg.tool_allowlist = vec!["read".into()];
+        cfg.save_with(&store, &secrets).unwrap();
+        let mut cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).unwrap();
+        assert!(cfg.tool_allowlist_enabled);
+        assert_eq!(cfg.tool_allowlist, vec!["read"]);
+        cfg.tool_allowlist.clear();
+        cfg.save_with(&store, &secrets).unwrap();
+        let cfg = Config::load_from_paths_with(store, secrets).unwrap();
+        assert!(cfg.tool_allowlist_enabled);
+        assert!(cfg.tool_allowlist.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn native_tool_compat_fields_load_and_roundtrip() {
+        let (dir, store, secrets) = setup(
+            "native-tool-compat",
+            "active_profile = \"default\"\n\
+[profiles.default]\n\
+model = \"m\"\n\
+max_tokens = 8192\n\
+context_length = 128000\n\
+base_url = \"https://api.deepseek.com\"\n\
+wire = \"responses\"\n\
+[profiles.default.compat]\n\
+apply_patch_input_format = \"codex_custom\"\n\
+responses_tool_layout = \"functions_namespace\"\n\
+apply_patch_custom_grammar = \"codex_lark\"\n",
+        );
+        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        assert_eq!(
+            cfg.compat.apply_patch_input_format,
+            qaqh_types::ApplyPatchInputFormat::CodexCustom
+        );
+        assert_eq!(
+            cfg.compat.responses_tool_layout,
+            qaqh_types::ResponsesToolLayout::FunctionsNamespace
+        );
+        assert_eq!(
+            cfg.compat.apply_patch_custom_grammar,
+            qaqh_types::ApplyPatchCustomGrammar::CodexLark
+        );
+        cfg.save_with(&store, &secrets).expect("save");
+        let reloaded = Config::load_from_paths_with(store, secrets).expect("reload");
+        assert_eq!(
+            reloaded.compat.apply_patch_input_format,
+            qaqh_types::ApplyPatchInputFormat::CodexCustom
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "endpoint_verified": false,
+  "cases": [
+    {
+      "id": "flat_function",
+      "layout": "flat",
+      "request": {
+        "tools": [
+          {
+            "type": "function",
+            "name": "apply_patch",
+            "description": "Apply a Codex-format patch using patch and dry_run JSON fields.",
+            "parameters": {
+              "type": "object",
+              "properties": {"patch": {"type": "string"}, "dry_run": {"type": "boolean"}},
+              "required": ["patch"],
+              "additionalProperties": false
+            },
+            "strict": false
+          }
+        ]
+      },
+      "response": {
+        "id": "resp_flat_function",
+        "status": "completed",
+        "output": [
+          {
+            "type": "function_call",
+            "id": "fc_legacy_patch",
+            "call_id": "call_legacy_patch",
+            "name": "apply_patch",
+            "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File: codex-probe/示例.txt\\n+你好 \\\"Codex\\\" \\\\ path\\n+\\n*** End Patch\\n\",\"dry_run\":false}",
+            "status": "completed"
+          }
+        ]
+      },
+      "canonical": [
+        {
+          "call_id": "call_legacy_patch",
+          "internal_tool_key": "apply_patch",
+          "args": {"patch": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "dry_run": false}
+        }
+      ],
+      "next_input": [
+        {
+          "type": "function_call",
+          "id": "fc_legacy_patch",
+          "call_id": "call_legacy_patch",
+          "name": "apply_patch",
+          "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File: codex-probe/示例.txt\\n+你好 \\\"Codex\\\" \\\\ path\\n+\\n*** End Patch\\n\",\"dry_run\":false}",
+          "status": "completed"
+        },
+        {"type": "function_call_output", "call_id": "call_legacy_patch", "output": "[OK] synthetic fixture; no execution performed"}
+      ]
+    },
+    {
+      "id": "flat_custom_mixed",
+      "layout": "flat",
+      "request": {
+        "tools": [
+          {"type": "custom", "name": "apply_patch", "description": "Send raw Codex patch text, not JSON."},
+          {
+            "type": "function",
+            "name": "read",
+            "description": "Read a fixture source file.",
+            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": false},
+            "strict": false
+          }
+        ]
+      },
+      "response": {
+        "id": "resp_flat_custom",
+        "status": "completed",
+        "output": [
+          {
+            "type": "custom_tool_call",
+            "id": "ctc_flat_patch",
+            "call_id": "call_flat_patch",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n",
+            "status": "completed"
+          },
+          {"type": "function_call", "id": "fc_flat_read", "call_id": "call_flat_read", "name": "read", "arguments": "{\"path\":\"codex-probe/source.txt\"}", "status": "completed"}
+        ]
+      },
+      "canonical": [
+        {"call_id": "call_flat_patch", "internal_tool_key": "apply_patch", "args": {"patch": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "dry_run": false}},
+        {"call_id": "call_flat_read", "internal_tool_key": "read", "args": {"path": "codex-probe/source.txt"}}
+      ],
+      "next_input": [
+        {"type": "custom_tool_call", "id": "ctc_flat_patch", "call_id": "call_flat_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "status": "completed"},
+        {"type": "function_call", "id": "fc_flat_read", "call_id": "call_flat_read", "name": "read", "arguments": "{\"path\":\"codex-probe/source.txt\"}", "status": "completed"},
+        {"type": "custom_tool_call_output", "call_id": "call_flat_patch", "output": "[ERROR] synthetic permission rejection; no execution performed"},
+        {"type": "function_call_output", "call_id": "call_flat_read", "output": "synthetic source"}
+      ],
+      "custom_events": [
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "custom_tool_call", "id": "ctc_flat_patch", "call_id": "call_flat_patch", "name": "apply_patch", "input": "", "status": "in_progress"}},
+        {"type": "response.custom_tool_call_input.delta", "output_index": 0, "item_id": "ctc_flat_patch", "delta": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n"},
+        {"type": "response.custom_tool_call_input.delta", "output_index": 0, "item_id": "ctc_flat_patch", "delta": "+你好 \"Codex\" \\ path\n+\n*** End Patch\n"},
+        {"type": "response.custom_tool_call_input.done", "output_index": 0, "item_id": "ctc_flat_patch", "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n"},
+        {"type": "response.output_item.done", "output_index": 0, "item": {"type": "custom_tool_call", "id": "ctc_flat_patch", "call_id": "call_flat_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "status": "completed"}}
+      ]
+    },
+    {
+      "id": "namespace_function",
+      "layout": "functions_namespace",
+      "request": {
+        "store": false,
+        "stream": true,
+        "tools": [
+          {"type": "namespace", "name": "functions", "description": "Workspace tools", "tools": [
+            {"type": "function", "name": "apply_patch", "description": "Apply a Codex-format patch using JSON.", "parameters": {"type": "object", "properties": {"patch": {"type": "string"}, "dry_run": {"type": "boolean"}}, "required": ["patch"], "additionalProperties": false}, "strict": false}
+          ]}
+        ]
+      },
+      "response": {
+        "id": "resp_namespace_function",
+        "status": "completed",
+        "output": [
+          {"type": "function_call", "id": "fc_namespace_patch", "call_id": "call_namespace_function", "namespace": "functions", "name": "apply_patch", "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File: codex-probe/示例.txt\\n+你好 \\\"Codex\\\" \\\\ path\\n+\\n*** End Patch\\n\",\"dry_run\":false}", "status": "completed"}
+        ]
+      },
+      "canonical": [
+        {"call_id": "call_namespace_function", "internal_tool_key": "apply_patch", "args": {"patch": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "dry_run": false}}
+      ],
+      "next_input": [
+        {"type": "function_call", "id": "fc_namespace_patch", "call_id": "call_namespace_function", "namespace": "functions", "name": "apply_patch", "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File: codex-probe/示例.txt\\n+你好 \\\"Codex\\\" \\\\ path\\n+\\n*** End Patch\\n\",\"dry_run\":false}", "status": "completed"},
+        {"type": "function_call_output", "call_id": "call_namespace_function", "output": "[OK] synthetic fixture; no execution performed"}
+      ]
+    },
+    {
+      "id": "namespace_custom_mixed",
+      "layout": "functions_namespace",
+      "request": {
+        "store": false,
+        "stream": true,
+        "tools": [
+          {"type": "namespace", "name": "functions", "description": "Workspace tools", "tools": [
+            {"type": "custom", "name": "apply_patch", "description": "Send raw patch text. Layout-only fixture, not a production grammar profile.", "format": {"type": "text"}},
+            {"type": "function", "name": "read", "description": "Read a fixture source file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": false}, "strict": false}
+          ]}
+        ]
+      },
+      "response": {
+        "id": "resp_namespace_custom",
+        "status": "completed",
+        "output": [
+          {"type": "custom_tool_call", "id": "ctc_namespace_patch", "call_id": "call_namespace_custom", "namespace": "functions", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "status": "completed"},
+          {"type": "function_call", "id": "fc_namespace_read", "call_id": "call_namespace_read", "namespace": "functions", "name": "read", "arguments": "{\"path\":\"codex-probe/source.txt\"}", "status": "completed"}
+        ]
+      },
+      "canonical": [
+        {"call_id": "call_namespace_custom", "internal_tool_key": "apply_patch", "args": {"patch": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "dry_run": false}},
+        {"call_id": "call_namespace_read", "internal_tool_key": "read", "args": {"path": "codex-probe/source.txt"}}
+      ],
+      "next_input": [
+        {"type": "custom_tool_call", "id": "ctc_namespace_patch", "call_id": "call_namespace_custom", "namespace": "functions", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "status": "completed"},
+        {"type": "function_call", "id": "fc_namespace_read", "call_id": "call_namespace_read", "namespace": "functions", "name": "read", "arguments": "{\"path\":\"codex-probe/source.txt\"}", "status": "completed"},
+        {"type": "custom_tool_call_output", "call_id": "call_namespace_custom", "output": "[OK] synthetic fixture; no execution performed"},
+        {"type": "function_call_output", "call_id": "call_namespace_read", "output": "synthetic source"}
+      ],
+      "custom_events": [
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "custom_tool_call", "id": "ctc_namespace_patch", "call_id": "call_namespace_custom", "namespace": "functions", "name": "apply_patch", "input": "", "status": "in_progress"}},
+        {"type": "response.custom_tool_call_input.delta", "output_index": 0, "item_id": "ctc_namespace_patch", "delta": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n"},
+        {"type": "response.custom_tool_call_input.delta", "output_index": 0, "item_id": "ctc_namespace_patch", "delta": "+你好 \"Codex\" \\ path\n+\n*** End Patch\n"},
+        {"type": "response.custom_tool_call_input.done", "output_index": 0, "item_id": "ctc_namespace_patch", "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n"},
+        {"type": "response.output_item.done", "output_index": 0, "item": {"type": "custom_tool_call", "id": "ctc_namespace_patch", "call_id": "call_namespace_custom", "namespace": "functions", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: codex-probe/示例.txt\n+你好 \"Codex\" \\ path\n+\n*** End Patch\n", "status": "completed"}}
+      ]
+    }
+  ]
+}

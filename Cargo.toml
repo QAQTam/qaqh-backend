@@ -38,7 +38,7 @@ members = [
 ]
 
 [workspace.dependencies]
-mutil-ai = { version = "0.6.1", path = "../mutil-ai" }
+mutil-ai = { version = "0.7.0", path = "../mutil-ai" }
 rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process"] }
 async-lsp = { version = "0.2", default-features = false, features = ["tokio", "omni-trait"] }
 lsp-types = "0.95"

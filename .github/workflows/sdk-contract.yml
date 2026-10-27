@@ -18,10 +18,12 @@ jobs:
           path: qaqh-backend
       # Cargo currently uses this sibling path dependency. Pin it explicitly;
       # uncommitted sibling changes are never silently included in an artifact.
+      # Keep this revision in lockstep with the workspace `mutil-ai = "0.7.0"`
+      # dependency: 9b33d95 is the v0.7.0 release commit.
       - uses: actions/checkout@v4
         with:
           repository: qaqtam/mutil-ai
-          ref: ba263b9d69860d98806bf97f47727b53eadf78db
+          ref: 9b33d95379a9e69907c8f55381d05a560b458c27
           path: mutil-ai
       - uses: dtolnay/rust-toolchain@stable
         with:

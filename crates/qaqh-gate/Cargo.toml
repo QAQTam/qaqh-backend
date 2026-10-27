@@ -7,6 +7,7 @@ description = "QAQ-Harness LLM API gateway — HTTP streaming, message conversio
 
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
+qaqh-tool-core = { path = "../qaqh-tool-core" }
 mutil-ai = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

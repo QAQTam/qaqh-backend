@@ -104,6 +104,8 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
             enabled: cfg.sandbox.enabled,
         },
         session_idle_unload_secs: cfg.session_idle_unload_secs,
+        tool_allowlist_enabled: cfg.tool_allowlist_enabled,
+        tool_allowlist: cfg.tool_allowlist.clone(),
     }
 }
 
@@ -121,10 +123,6 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     // 未必有回滚。判据用「补丁应用后的形状」——补丁给了就用补丁的，没给就用现值，
     // 这样「两边任一被改动」都查得到：只查「本次补丁带没带 credential」会漏掉
     // 「已有 plan 的用户把 wire 改走」那一半。
-    let next_wire = match meaningful(&patch.wire) {
-        Some(v) => qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?,
-        None => cfg.wire,
-    };
     let next_credential = match patch.credential.as_deref() {
         // 值域已由 validate() 收口；这里只解析，**不给未知值兜底**——静默改回
         // ApiKey 正是「用户以为在用套餐、实际打自己的 key」那类最难查的问题。
@@ -133,6 +131,15 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         Some("deepseek_account") => qaqh_types::CredentialSource::DeepseekAccount,
         Some(other) => return Err(format!("无法识别的 credential: {other}")),
         None => cfg.credential,
+    };
+    // 初次切到 DeepSeek 账号且未指定 wire 时，把通用默认 Chat 换成
+    // Responses；显式选择及已有账号配置不受影响。
+    let next_wire = match meaningful(&patch.wire) {
+        Some(v) => qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?,
+        None if next_credential == qaqh_types::CredentialSource::DeepseekAccount
+            && cfg.credential != qaqh_types::CredentialSource::DeepseekAccount
+            && cfg.wire == qaqh_types::Wire::Chat => qaqh_types::Wire::Responses,
+        None => cfg.wire,
     };
     // 套餐直连只提供 Responses API：保存期就拦掉，别等到第一回合请求才报。
     //
@@ -174,10 +181,7 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     if let Some(v) = meaningful(&patch.base_url) {
         cfg.base_url = v;
     }
-    if let Some(v) = meaningful(&patch.wire) {
-        // validate() 已把值域限制在四个 wire 内；解析失败只可能是绕过校验的调用。
-        cfg.wire = qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?;
-    }
+    cfg.wire = next_wire;
     if patch.credential.is_some() {
         // 解析与一致性判定已在上方（赋值之前）完成，这里只落地。
         cfg.credential = next_credential;
@@ -213,6 +217,12 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     }
     if let Some(v) = patch.session_idle_unload_secs {
         cfg.session_idle_unload_secs = v;
+    }
+    if let Some(v) = patch.tool_allowlist_enabled {
+        cfg.tool_allowlist_enabled = v;
+    }
+    if let Some(v) = &patch.tool_allowlist {
+        cfg.tool_allowlist = v.clone();
     }
     if let Some(sandbox) = &patch.sandbox
         && let Some(enabled) = sandbox.enabled
@@ -313,6 +323,21 @@ mod tests {
         let empty = to_dto(&Config::default());
         assert_eq!(empty.api_key, "");
         assert!(!empty.subagent.api_key_set);
+    }
+
+    #[test]
+    fn tool_allowlist_patch_and_projection() {
+        let mut cfg = Config::default();
+        let patch: ConfigPatch = serde_json::from_value(serde_json::json!({
+            "toolAllowlistEnabled": true, "toolAllowlist": ["read"]
+        })).unwrap();
+        apply_patch(&mut cfg, &patch).unwrap();
+        let dto = to_dto(&cfg);
+        assert!(dto.tool_allowlist_enabled);
+        assert_eq!(dto.tool_allowlist, vec!["read"]);
+        apply_patch(&mut cfg, &serde_json::from_value(serde_json::json!({"toolAllowlist": []})).unwrap()).unwrap();
+        assert!(cfg.tool_allowlist_enabled);
+        assert!(cfg.tool_allowlist.is_empty());
     }
 
     #[test]
@@ -530,6 +555,38 @@ mod tests {
         )
         .expect("apply");
         assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
+    }
+
+    #[test]
+    fn deepseek_account_defaults_to_responses_without_overriding_explicit_wire() {
+        use qaqh_types::{CredentialSource, Wire};
+
+        let mut cfg = Config::default();
+        apply_patch(&mut cfg, &ConfigPatch {
+            credential: Some("deepseek_account".into()),
+            ..Default::default()
+        }).expect("select account");
+        assert_eq!(cfg.wire, Wire::Responses);
+        assert_eq!(cfg.credential, CredentialSource::DeepseekAccount);
+        assert_eq!(to_dto(&cfg).wire, "responses");
+
+        apply_patch(&mut cfg, &ConfigPatch {
+            wire: Some("chat".into()),
+            ..Default::default()
+        }).expect("explicit chat");
+        apply_patch(&mut cfg, &ConfigPatch {
+            credential: Some("deepseek_account".into()),
+            ..Default::default()
+        }).expect("existing account unchanged");
+        assert_eq!(cfg.wire, Wire::Chat);
+
+        let mut explicit = Config::default();
+        apply_patch(&mut explicit, &ConfigPatch {
+            credential: Some("deepseek_account".into()),
+            wire: Some("chat".into()),
+            ..Default::default()
+        }).expect("account with explicit chat");
+        assert_eq!(explicit.wire, Wire::Chat);
     }
 
     /// DeepSeek 账号：配错 wire 在保存期就报，且**双向**都拦（与套餐那条同规矩）。

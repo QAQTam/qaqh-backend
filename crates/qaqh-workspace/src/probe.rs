@@ -43,6 +43,7 @@ impl ErasedTool for ProbeTool {
             source: ToolSource::Builtin,
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
+            native_patch: None,
         }
     }
 

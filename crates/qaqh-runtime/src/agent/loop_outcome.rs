@@ -511,6 +511,23 @@ impl Loop {
                 self.phase = LoopPhase::Idle;
             }
             Outcome::TurnAborted { turn_id, usage } => {
+                {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        flow: &mut self.flow,
+                    };
+                    super::turn_lap::backfill::record_turn_finished(
+                        &mut ctx, &turn_id,
+                        qaqh_session::session_fact_v2::TurnTerminal::Cancelled,
+                        usage.clone(), None,
+                    );
+                }
                 self.session.agent.skills.abort_user_turn();
                 self.session.flush();
                 self.reset_all_engines_preserving_turn_terminal();
@@ -526,9 +543,26 @@ impl Loop {
             }
             Outcome::TurnFailed {
                 turn_id,
-                usage: _,
+                usage,
                 message,
             } => {
+                {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        flow: &mut self.flow,
+                    };
+                    super::turn_lap::backfill::record_turn_finished(
+                        &mut ctx, &turn_id,
+                        qaqh_session::session_fact_v2::TurnTerminal::Failed,
+                        usage, Some("turn_failed"),
+                    );
+                }
                 self.session.agent.skills.abort_user_turn();
                 self.session.flush();
                 self.paced_emitter

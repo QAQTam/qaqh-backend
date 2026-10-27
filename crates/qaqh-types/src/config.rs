@@ -68,6 +68,11 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_idle_unload_secs: Option<u64>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_allowlist_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_allowlist: Option<Vec<String>>,
+
     // ── Subagent defaults ──
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<PersistentSubagentConfig>,

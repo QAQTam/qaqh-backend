@@ -19,5 +19,9 @@ serde_json = "1"
 anyhow = "1"
 log = "0.4"
 
+[dev-dependencies]
+qaqh-permission = { path = "../qaqh-permission" }
+tempfile = "3"
+
 [lints]
 workspace = true

@@ -405,6 +405,98 @@ mod tests {
     }
 
     #[test]
+    fn patch_confirm_revalidates_changed_file_and_consumes_pending_once() {
+        use crate::tool_api::ErasedTool;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "old\n").expect("write fixture");
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
+        let mut ctx = crate::file_mutate::ambient_tool_context(
+            "patch-preview-revalidate",
+            std::time::Duration::from_secs(60),
+        );
+        ctx.workspace_root = dir.path().to_path_buf();
+        let dry = TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool)
+            .execute(
+                ctx.clone(),
+                serde_json::json!({"patch": patch, "dry_run": true}),
+            )
+            .expect("dry-run adapter")
+            .to_tool_result();
+        assert!(dry.is_success(), "dry-run: {dry:?}");
+        let id = dry.data["pending_id"].as_str().expect("pending id");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
+        std::fs::write(&path, "changed externally\n").expect("external change");
+        let args = serde_json::json!({"pending_id": id, "action": "apply"});
+        let first = TypedToolAdapter::new(ConfirmApplyTool)
+            .execute(ctx.clone(), args.clone())
+            .expect("confirm adapter")
+            .to_tool_result();
+        assert!(
+            !first.is_success(),
+            "stale patch must not succeed: {first:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "changed externally\n"
+        );
+        let second = TypedToolAdapter::new(ConfirmApplyTool)
+            .execute(ctx, args)
+            .expect("second confirm adapter")
+            .to_tool_result();
+        assert!(!second.is_success());
+        assert_eq!(
+            second.error.as_ref().map(|e| e.code.as_str()),
+            Some("pending_not_found_or_expired")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "changed externally\n"
+        );
+    }
+
+    #[test]
+    fn patch_preview_discard_is_one_shot_and_never_writes() {
+        use crate::tool_api::ErasedTool;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "old\n").expect("write fixture");
+        let mut ctx = crate::file_mutate::ambient_tool_context(
+            "preview-discard",
+            std::time::Duration::from_secs(60),
+        );
+        ctx.workspace_root = dir.path().to_path_buf();
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
+        let preview = TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool)
+            .execute(
+                ctx.clone(),
+                serde_json::json!({"patch": patch, "dry_run": true}),
+            )
+            .expect("preview adapter")
+            .to_tool_result();
+        assert!(preview.is_success());
+        let id = preview.data["pending_id"].as_str().expect("pending id");
+        let discarded = TypedToolAdapter::new(ConfirmApplyTool)
+            .execute(
+                ctx.clone(),
+                serde_json::json!({"pending_id": id, "action":"discard"}),
+            )
+            .expect("discard adapter")
+            .to_tool_result();
+        assert!(discarded.is_success());
+        let replay = TypedToolAdapter::new(ConfirmApplyTool)
+            .execute(ctx, serde_json::json!({"pending_id": id, "action":"apply"}))
+            .expect("replay adapter")
+            .to_tool_result();
+        assert!(!replay.is_success());
+        assert_eq!(
+            replay.error.as_ref().map(|e| e.code.as_str()),
+            Some("pending_not_found_or_expired")
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "old\n");
+    }
+
+    #[test]
     fn missing_pending_id_is_error() {
         let out = run_confirm("", "apply");
         assert_eq!(out["code"], "missing_pending_id");

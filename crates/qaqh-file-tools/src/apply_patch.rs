@@ -37,6 +37,15 @@ pub struct ApplyPatchArgs {
     pub dry_run: bool,
 }
 
+/// Model-facing preview schema. It is mapped to the existing apply_patch
+/// executor before admission; it is not a separately registered executor.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyPatchPreviewArgs {
+    /// Codex patch text to preflight without writing files.
+    pub patch: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApplyPatchOutput {
     pub timeis: String,
@@ -118,6 +127,11 @@ impl TypedTool for ApplyPatchTool {
             ToolRisk::Write,
             Duration::from_secs(60),
         )
+        .with_native_patch(crate::tool_api::NativePatchRepresentation {
+            custom_description: "Apply a Codex-format patch. Send raw patch text directly, not JSON. Matching takes the FIRST hit; disambiguate repeated context with extra lines or '@@ <context line>'. Partial multi-file application is possible; do not blindly resend the whole patch. Use apply_patch_preview for preflight.".into(),
+            preview_description: "Preview a Codex-format patch without writing. Send a JSON object with patch text; returns a pending_id for confirm_apply. Matching takes the FIRST hit; disambiguate repeated context. Confirm revalidates against current files.".into(),
+            preview_parameters: crate::tool_api::schema::schema_of::<ApplyPatchPreviewArgs>(),
+        })
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -178,12 +192,10 @@ impl TypedTool for ApplyPatchTool {
                 (None, None) => {}
             }
             // 统一 LF 视图再算 diff：盘上 CRLF 文件不该让整段变成「全删全加」。
-            let (before, _) = crate::file_shared::normalize_newlines(
-                delta.old.as_deref().unwrap_or(""),
-            );
-            let (after, _) = crate::file_shared::normalize_newlines(
-                delta.new.as_deref().unwrap_or(""),
-            );
+            let (before, _) =
+                crate::file_shared::normalize_newlines(delta.old.as_deref().unwrap_or(""));
+            let (after, _) =
+                crate::file_shared::normalize_newlines(delta.new.as_deref().unwrap_or(""));
             let piece = crate::file_shared::unified_diff(&before, &after, &delta.path);
             if !piece.trim().is_empty() {
                 diff_text.push_str(piece.trim_end());
@@ -788,7 +800,10 @@ mod tests {
             "apply_patch 终态行差必须落到展示投影"
         );
         assert!(
-            display.diff.as_deref().is_some_and(|diff| diff.contains("+new")),
+            display
+                .diff
+                .as_deref()
+                .is_some_and(|diff| diff.contains("+new")),
             "展示投影必须同时带 diff 文本（前端抽屉的唯一数据源）: {:?}",
             display.diff
         );
@@ -814,10 +829,8 @@ mod tests {
     /// 缺一段的表现就是抽屉里「第一个文件有图、其余文件点了是空态」。
     #[test]
     fn display_diff_lists_every_file_of_a_multi_file_patch() {
-        let (_dir, workspace) = repo_with_commit(&[
-            ("a.txt", "line1\nline2\nline3\n"),
-            ("c.txt", "gone\n"),
-        ]);
+        let (_dir, workspace) =
+            repo_with_commit(&[("a.txt", "line1\nline2\nline3\n"), ("c.txt", "gone\n")]);
         let patch = "\
 *** Begin Patch
 *** Update File: a.txt
@@ -867,7 +880,10 @@ mod tests {
         let result = apply_result_in(&workspace, patch, true);
         assert!(result.is_success(), "{}", result.model_text());
         let diff = result.diff.clone().expect("dry_run 也要下发 display.diff");
-        assert!(diff.contains("-line2") && diff.contains("+LINE2"), "got: {diff}");
+        assert!(
+            diff.contains("-line2") && diff.contains("+LINE2"),
+            "got: {diff}"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "line1\nline2\n",

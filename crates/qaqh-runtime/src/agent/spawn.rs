@@ -120,6 +120,7 @@ pub(crate) fn spawn_agent(
         ActorKind::Session { .. } => Vec::new(),
     };
     manager.apply_init(allowed_tools, session_id);
+    manager.set_global_allowed(agent.config.tool_allowlist_enabled.then(|| agent.config.tool_allowlist.clone()));
     qaqh_workspace::runtime::install_actor_tool_manager(manager);
     agent.refresh_tool_defs();
 
