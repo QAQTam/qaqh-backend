@@ -12,7 +12,7 @@ pub const DATA_ROOT_MARKER: &str = ".qaqh-data-root.json";
 /// `ua_version_tracks_package_version` 强制保持一致。
 macro_rules! qaqh_ua_version {
     () => {
-        "2.0.0"
+        "2.0.20261028"
     };
 }
 
