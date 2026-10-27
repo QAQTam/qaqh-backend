@@ -233,6 +233,28 @@ fn open_ledger(dir: &std::path::Path) -> ToolLedger {
 }
 
 #[test]
+fn turn_terminal_dedup_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ledger = open_ledger(dir.path());
+    let tid = turn_id(72);
+    ledger.append_turn_started(event_id(90), TurnStarted {
+        turn_id: tid.clone(), input_id: input_id(72), mode: TurnMode::Normal, recovery_ref: None,
+    }, NOW_MS + 1).unwrap();
+    let first = ledger.append_turn_finished(event_id(91), TurnFinished {
+        turn_id: tid.clone(), terminal: TurnTerminal::Completed, usage: None, error: None,
+        finished_at_ms: NOW_MS + 2,
+    }, NOW_MS + 2).unwrap();
+    drop(ledger);
+    let mut ledger = open_ledger(dir.path());
+    let repeated = ledger.append_turn_finished(event_id(92), TurnFinished {
+        turn_id: tid, terminal: TurnTerminal::Cancelled, usage: None, error: None,
+        finished_at_ms: NOW_MS + 3,
+    }, NOW_MS + 3).unwrap();
+    assert_eq!(repeated.fact_seq, first.fact_seq);
+    assert!(matches!(repeated.payload, FactPayload::TurnFinished(ref end) if end.terminal == TurnTerminal::Completed));
+}
+
+#[test]
 fn turn_lifecycle_appends_flow_through_and_rebuild() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut ledger = open_ledger(temp.path());
@@ -303,6 +325,13 @@ fn turn_lifecycle_appends_flow_through_and_rebuild() {
         )
         .expect("append turn finished");
     assert_eq!(finished.fact_seq, started.fact_seq + 3);
+
+    let duplicate = ledger.append_turn_finished(event_id(86), TurnFinished {
+        turn_id: tid.clone(), terminal: TurnTerminal::Cancelled, usage: None,
+        error: None, finished_at_ms: NOW_MS + 86,
+    }, NOW_MS + 86).expect("preserve first terminal");
+    assert_eq!(duplicate.fact_seq, finished.fact_seq);
+    assert!(matches!(duplicate.payload, FactPayload::TurnFinished(ref end) if end.terminal == TurnTerminal::Completed));
 
     // Interrupted facts carry the previous fact sequence and a recovery ref.
     ledger

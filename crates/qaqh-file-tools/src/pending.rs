@@ -85,4 +85,16 @@ mod tests {
         take(&id).unwrap();
         assert!(take(&id).is_none());
     }
+
+    #[test]
+    fn expired_pending_is_removed_without_replay() {
+        let id = store("apply_patch", &serde_json::json!({"patch": "fixture"}));
+        {
+            let mut map = PENDING.write().unwrap_or_else(|e| e.into_inner());
+            let pending = map.get_mut(&id).expect("pending exists");
+            pending.created_at = Instant::now() - TTL - Duration::from_secs(1);
+        }
+        assert!(take(&id).is_none());
+        assert!(take(&id).is_none());
+    }
 }

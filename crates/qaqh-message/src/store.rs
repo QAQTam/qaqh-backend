@@ -1641,7 +1641,7 @@ impl MessageStore {
                 }
                 for (id, name) in missing_ids {
                     let note = format!(
-                        "[RESTORE] Tool \"{name}\" had no result when session was saved — not executed.\n[HINT] Do NOT retry."
+                        "[RESTORE] Tool \"{name}\" had no result when session was saved — execution outcome unknown; side effects may have occurred.\n[HINT] Do NOT retry automatically; verify workspace and execution records first."
                     );
                     step.tool_results.push(Message::tool(&id, &note, false));
                     repairs.push(format!("injected [RESTORE] for orphan tool_use {}", id));
@@ -3249,6 +3249,26 @@ mod tests {
         store.ensure_next_turn_seq(31);
 
         assert_eq!(store.allocate_turn_id(), "t31");
+    }
+
+    #[test]
+    fn orphaned_patch_restore_reports_unknown_side_effects_without_reexecution() {
+        let messages = vec![
+            Message::user("apply patch"),
+            assistant_with_tools(&[("call_patch", "apply_patch")]),
+        ];
+        let (store, repairs) = MessageStore::from_messages("test", &messages, 0);
+        assert_eq!(repairs.len(), 1);
+        let context = store.build_context_for_gate(&[]);
+        let note = context_result(&context, "call_patch");
+        assert!(note.contains("outcome unknown"), "{note}");
+        assert!(note.contains("side effects may have occurred"), "{note}");
+        assert!(note.contains("Do NOT retry automatically"), "{note}");
+        assert!(!note.contains("not executed"), "{note}");
+        let (restored_again, repairs_again) = MessageStore::from_messages("test", &context, 0);
+        assert!(repairs_again.is_empty(), "{repairs_again:?}");
+        let replayed = restored_again.build_context_for_gate(&[]);
+        assert_eq!(context_result(&replayed, "call_patch"), note);
     }
 
     #[test]

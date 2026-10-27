@@ -236,6 +236,7 @@ pub struct ToolLedger {
     subagent_finished: HashMap<SessionId, SessionFact>,
     input_accepteds: HashMap<InputId, SessionFact>,
     inter_agent_communications: HashMap<MessageId, SessionFact>,
+    turn_terminals: HashMap<TurnId, SessionFact>,
     /// Persistent body store backing every `ContentRef` this ledger writes.
     blobs: SessionBlobStore,
     /// Last published revision per workspace resource, rebuilt from committed
@@ -276,8 +277,15 @@ impl ToolLedger {
         let mut subagent_finished = HashMap::new();
         let mut input_accepteds = HashMap::new();
         let mut inter_agent_communications = HashMap::new();
+        let mut turn_terminals = HashMap::new();
         let mut workspace_resource_revisions = HashMap::new();
         for fact in reader.read_all()? {
+            match &fact.payload {
+                FactPayload::TurnStarted(start) => { turn_terminals.remove(&start.turn_id); }
+                FactPayload::TurnFinished(end) => { turn_terminals.insert(end.turn_id.clone(), fact.clone()); }
+                FactPayload::TurnInterrupted(end) => { turn_terminals.insert(end.turn_id.clone(), fact.clone()); }
+                _ => {}
+            }
             index_fact(
                 &mut entries,
                 &mut interaction_requests,
@@ -306,6 +314,7 @@ impl ToolLedger {
             subagent_finished,
             input_accepteds,
             inter_agent_communications,
+            turn_terminals,
             blobs,
             workspace_resource_revisions,
         })
@@ -1034,8 +1043,8 @@ impl ToolLedger {
     // working/idle/error、tok/s、context% 全部依赖它们。此前生产侧从未写过
     // 这五类 fact（2026-10-12 生产 events.jsonl 实证：回合生命周期计数恒为
     // 0），会话加载后的运行状态只能停留在 idle。追加方法保持无状态：每个
-    // 生命周期转换至多追加一次；崩溃后的中断由恢复路径写
-    // `SessionRecovered`/`TurnInterrupted` 收敛，无需按 id 幂等。
+    // 每次 turn start 开启一个生命周期；终态按 turn id 保留首次提交的结果，
+    // 防止取消与完成竞争、或恢复重试覆盖已有 outcome。
 
     /// Durably append a turn start.
     pub fn append_turn_started(
@@ -1046,8 +1055,9 @@ impl ToolLedger {
     ) -> Result<SessionFact, ToolLedgerError> {
         let turn_id = payload.turn_id.clone();
         let mut fact = self.envelope(event_id, now_ms, FactPayload::TurnStarted(payload));
-        fact.turn_id = Some(turn_id);
+        fact.turn_id = Some(turn_id.clone());
         let outcome = self.append_and_publish(fact, now_ms)?;
+        self.turn_terminals.remove(&turn_id);
         Ok(outcome.fact)
     }
 
@@ -1090,9 +1100,13 @@ impl ToolLedger {
         now_ms: i64,
     ) -> Result<SessionFact, ToolLedgerError> {
         let turn_id = payload.turn_id.clone();
+        if let Some(existing) = self.turn_terminals.get(&turn_id) {
+            return Ok(existing.clone());
+        }
         let mut fact = self.envelope(event_id, now_ms, FactPayload::TurnFinished(payload));
-        fact.turn_id = Some(turn_id);
+        fact.turn_id = Some(turn_id.clone());
         let outcome = self.append_and_publish(fact, now_ms)?;
+        self.turn_terminals.insert(turn_id, outcome.fact.clone());
         Ok(outcome.fact)
     }
 
@@ -1104,9 +1118,13 @@ impl ToolLedger {
         now_ms: i64,
     ) -> Result<SessionFact, ToolLedgerError> {
         let turn_id = payload.turn_id.clone();
+        if let Some(existing) = self.turn_terminals.get(&turn_id) {
+            return Ok(existing.clone());
+        }
         let mut fact = self.envelope(event_id, now_ms, FactPayload::TurnInterrupted(payload));
-        fact.turn_id = Some(turn_id);
+        fact.turn_id = Some(turn_id.clone());
         let outcome = self.append_and_publish(fact, now_ms)?;
+        self.turn_terminals.insert(turn_id, outcome.fact.clone());
         Ok(outcome.fact)
     }
 

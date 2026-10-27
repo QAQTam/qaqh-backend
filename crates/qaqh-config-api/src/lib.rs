@@ -108,6 +108,10 @@ pub struct ConfigDto {
     pub sandbox: SandboxDto,
     /// 空闲会话 worker 自动卸载阈值（秒）。0 = 禁用（缺省）；由 daemon 周期任务读取。
     pub session_idle_unload_secs: u64,
+    /// Global ceiling on model-visible and executable tools.
+    pub tool_allowlist_enabled: bool,
+    /// Exact registered names; when enabled, an empty list disables all tools.
+    pub tool_allowlist: Vec<String>,
 }
 
 /// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。
@@ -255,6 +259,8 @@ pub struct ConfigPatch {
     pub wire: Option<String>,
     /// 凭据来源：`api_key` | `chatgpt_plan` | `deepseek_account`。缺失 = 不动（K3）。
     ///
+    /// 从其他凭据切换到 DeepSeek 账号时，若省略 wire 且当前为 chat，默认改为
+    /// responses；显式 wire 与已有账号的后续更新不受影响。
     /// 值域在 [`ConfigPatch::validate`] 收口；这里刻意**不**给「未知值退化成
     /// api_key」的兜底——静默改变额度来源比报错难查得多。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,6 +300,10 @@ pub struct ConfigPatch {
     /// 空闲会话卸载阈值（秒）；0 = 禁用。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_idle_unload_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_allowlist_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_allowlist: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentPatch>,
 }
