@@ -1414,7 +1414,23 @@ async fn consume(
                     entry.2 = arguments_so_far;
                 }
             }
-            Ok(SdkEvent::NativeToolProgress { .. }) => {}
+            Ok(SdkEvent::NativeToolProgress {
+                index,
+                item_id,
+                call_id,
+                name,
+                delta,
+                input_so_far,
+            }) => {
+                on_event(StreamEvent::NativeToolProgress {
+                    index,
+                    item_id,
+                    call_id,
+                    name,
+                    delta,
+                    input_so_far,
+                });
+            }
             Ok(SdkEvent::NativeToolCompleted { index, call }) => {
                 native_calls.insert(index, call);
             }

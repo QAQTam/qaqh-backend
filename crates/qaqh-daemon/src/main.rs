@@ -62,6 +62,7 @@ fn main() {
             // 且强制显式 `--token`（明文 HTTP 上 Bearer token 可被嗅探）。
             qaqh_runtime::cache_system_path();
             qaqh_runtime::detect_os_info();
+            install_bundled_skills();
             let capabilities = qaqh_sandbox::configure_from_current_exe();
             log::info!("sandbox capabilities: {capabilities:?}");
             let config = match server::ServerNetworkConfig::parse(&args[1..]) {
@@ -89,6 +90,7 @@ fn main() {
             qaqh_runtime::cache_system_path();
             qaqh_runtime::detect_shell();
             qaqh_runtime::detect_os_info();
+            install_bundled_skills();
             let capabilities = qaqh_sandbox::configure_from_current_exe();
             log::info!("sandbox capabilities: {capabilities:?}");
             // spy 快照 GC（启动即收）：Session::open 的 GC 挂在第一个写路径批上，
@@ -111,6 +113,19 @@ fn main() {
             );
             std::process::exit(2);
         }
+    }
+}
+
+fn install_bundled_skills() {
+    match qaqh_skills::install::ensure_bundled_skills_default() {
+        Ok(report) => log::info!(
+            "[SKILLS] bundled pack ready: changed={} installed={:?} skipped={:?} warnings={:?}",
+            report.changed,
+            report.installed,
+            report.skipped,
+            report.warnings
+        ),
+        Err(error) => log::warn!("[SKILLS] bundled pack installation failed: {error}"),
     }
 }
 

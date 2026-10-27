@@ -585,6 +585,17 @@ pub enum StreamEvent {
         /// 于是它的「片段」就是整段。
         args_chunk: String,
     },
+    /// Raw custom-tool input progress. `delta` is the exact fragment carried by
+    /// this frame; `input_so_far` is the accumulated snapshot. Consumers must
+    /// not treat either as a completed/executable call.
+    NativeToolProgress {
+        index: usize,
+        item_id: Option<String>,
+        call_id: Option<String>,
+        name: Option<String>,
+        delta: String,
+        input_so_far: String,
+    },
     /// Server-side web search progress (Responses API built-in tool).
     /// Payload is one of "in_progress" | "searching" | "completed".
     WebSearchStatus(String),

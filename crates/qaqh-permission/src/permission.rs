@@ -463,7 +463,7 @@ fn within_own_data_root(candidate: &Path) -> bool {
 /// Whether `path` lies inside a skill discovery root (audit 2026-10-01 H2).
 ///
 /// Files under these roots are discovered every turn and injected into model
-/// context as authoritative instructions (`skills(action=activate)`), and the
+/// context as authoritative instructions (`skill_activate`), and the
 /// files persist in the repo across sessions. A write there is an instruction
 /// injection, so it never rides the Level-3 in-workspace auto-approve.
 /// Containment is lexical (roots may not exist yet — the attack writes *new*

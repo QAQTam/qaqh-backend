@@ -49,6 +49,7 @@ fn native_custom_stream_roundtrip_over_http() {
     let provider = qaqh_gate::ProviderConfig::responses(&server.base_url(), "key", "model", None);
     let descriptions = HashMap::from([("functions".to_string(), "workspace".to_string())]);
     let mut done = None;
+    let mut native_progress = None;
     qaqh_gate::chat_stream_responses_with_plan(
         &provider,
         vec![Message::user("patch")],
@@ -58,13 +59,29 @@ fn native_custom_stream_roundtrip_over_http() {
         None,
         None,
         None,
-        &mut |event| {
-            if let qaqh_gate::StreamEvent::Done { raw_message, .. } = event {
-                done = Some(raw_message);
-            }
+        &mut |event| match event {
+            qaqh_gate::StreamEvent::Done { raw_message, .. } => done = Some(raw_message),
+            qaqh_gate::StreamEvent::NativeToolProgress {
+                call_id,
+                name,
+                delta,
+                input_so_far,
+                ..
+            } => native_progress = Some((call_id, name, delta, input_so_far)),
+            _ => {}
         },
     )
     .expect("stream");
+    assert_eq!(
+        native_progress,
+        Some((
+            Some("call_1".into()),
+            Some("apply_patch".into()),
+            "*** Begin Patch\n*** End Patch".into(),
+            "*** Begin Patch\n*** End Patch".into(),
+        )),
+        "custom delta must reach the gate with canonical identity"
+    );
     let message = done.expect("done");
     assert!(message.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { id, input, .. } if id == "call_1" && input["patch"] == "*** Begin Patch\n*** End Patch")));
     let request = server.last_request_json().expect("request");
@@ -103,6 +120,69 @@ fn native_custom_stream_roundtrip_over_http() {
         input
             .iter()
             .any(|v| v["type"] == "custom_tool_call_output" && v["call_id"] == "call_1")
+    );
+}
+
+#[test]
+fn deepseek_minimal_custom_declaration_is_type_name_only() {
+    use common::mock_server::{MockServer, SseChunk};
+    use qaqh_tool_core::model_tool_plan::{
+        CustomFormat, InputAdapter, ModelToolAddress, ModelToolDeclaration, ModelToolEntry,
+        ModelToolKind, ModelToolPlan,
+    };
+    use qaqh_types::Message;
+    use std::collections::HashMap;
+
+    let server = MockServer::new(vec![SseChunk::Data(json!({
+        "type":"response.completed",
+        "response":{"id":"resp_min","status":"completed","output":[]}
+    }))]);
+    let plan = ModelToolPlan::new(
+        "1",
+        "deepseek-minimal",
+        vec![ModelToolEntry {
+            address: ModelToolAddress {
+                kind: ModelToolKind::Custom,
+                namespace: None,
+                name: "apply_patch".into(),
+            },
+            declaration: ModelToolDeclaration::Custom {
+                description: String::new(),
+                format: CustomFormat::Text,
+            },
+            internal_tool_key: "apply_patch".into(),
+            adapter: InputAdapter::ApplyPatchCustom,
+        }],
+    )
+    .expect("minimal plan");
+    let provider = qaqh_gate::ProviderConfig::responses(&server.base_url(), "key", "model", None);
+    qaqh_gate::chat_stream_responses_with_plan(
+        &provider,
+        vec![Message::user("patch")],
+        &plan,
+        &HashMap::new(),
+        0,
+        None,
+        None,
+        None,
+        &mut |_| {},
+    )
+    .expect("stream");
+    let request = server.last_request_json().expect("request");
+    assert_eq!(
+        request["tools"][0],
+        json!({"type":"custom", "name":"apply_patch"}),
+        "DeepSeek must receive exactly the documented custom shape"
+    );
+    assert_eq!(
+        request["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter(|tool| tool["type"] == "custom")
+            .count(),
+        1,
+        "OAuth must expose exactly one custom tool"
     );
 }
 

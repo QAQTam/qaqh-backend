@@ -96,6 +96,27 @@ impl StreamingPatchParser {
         self.state.stats.clone()
     }
 
+    /// Committed stats plus the current incomplete line when it already carries
+    /// an add/remove prefix. This is a UI preview only: it does not mutate the
+    /// parser, does not complete the line, and never authorizes execution.
+    ///
+    /// `push_delta` commits a line only on `\n`. Without this preview a model
+    /// streaming `+new line` would leave the counter at the previous value
+    /// until the newline arrives.
+    pub fn stats_including_pending_line(&self) -> PatchStats {
+        let mut stats = self.state.stats.clone();
+        let pending = self.line_buffer.as_str();
+        let (added, removed) = match self.state.mode {
+            StreamingParserMode::AddFile if pending.starts_with('+') => (1, 0),
+            StreamingParserMode::UpdateFile { .. } if pending.starts_with('+') => (1, 0),
+            StreamingParserMode::UpdateFile { .. } if pending.starts_with('-') => (0, 1),
+            _ => (0, 0),
+        };
+        stats.lines_added += added;
+        stats.lines_removed += removed;
+        stats
+    }
+
     /// 记录一个 hunk 头的路径归属（`single_path` 只在全程同一文件时保留）。
     fn note_hunk_path(&mut self, path: &Path) {
         if self.state.multi_path_seen {
@@ -488,6 +509,28 @@ mod tests {
         }
         parser.finish().expect("patch must end with End Patch");
         parser.stats()
+    }
+
+    #[test]
+    fn pending_line_preview_counts_prefix_without_mutating_committed_stats() {
+        let mut parser = StreamingPatchParser::default();
+        parser
+            .push_delta("*** Begin Patch\n*** Add File: a.txt\n+one")
+            .expect("valid prefix");
+        assert_eq!(parser.stats().lines_added, 0, "line is not committed yet");
+        assert_eq!(
+            parser.stats_including_pending_line().lines_added,
+            1,
+            "the + prefix is visible immediately"
+        );
+        assert_eq!(
+            parser.stats().lines_added,
+            0,
+            "preview must not mutate parser state"
+        );
+        parser.push_delta("\n").expect("finish line");
+        assert_eq!(parser.stats().lines_added, 1);
+        assert_eq!(parser.stats_including_pending_line().lines_added, 1);
     }
 
     /// 计数与喂入粒度无关：这是「LLM 还在输出时就报行数」的正确性前提。

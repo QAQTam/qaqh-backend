@@ -8,6 +8,8 @@ license.workspace = true
 qaqh-types = { path = "../qaqh-types", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "1.1"
+serde_json = "1"
+include_dir = "0.7"
 
 [features]
 

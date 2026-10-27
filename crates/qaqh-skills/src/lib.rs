@@ -1,8 +1,8 @@
 //! Agent Skill runtime: discovery, parsing, catalog rendering, and activation.
 //!
 //! The catalog exposes only metadata; the body is read only on
-//! `skills(action=activate)`. An explicit mention merely records a request
-//! annotation and does not read the body.
+//! `skill_activate`. An explicit mention merely records a request annotation
+//! and does not read the body.
 //!
 //! ## Key concepts
 //!
@@ -11,18 +11,29 @@
 //! - **Catalog**: lightweight metadata index for browsing without loading bodies
 //! - **Scope**: each skill belongs to either `Project` or `User` scope
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub mod runtime;
 pub mod session_state;
+pub mod install;
 pub use runtime::{SkillContextManager, SkillRuntimeInfo, SkillRuntimeState, SkillTurnSnapshot};
 pub use session_state::{SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2};
 
 /// Magic marker that identifies a SKILL.md file as an active skill definition.
 pub const ACTIVATION_MARKER: &str = "[QAQH_SKILL_V1]";
+/// Marker placed at the start of the persisted skill catalog system message.
+pub const SKILL_CATALOG_MARKER: &str = "[QAQH_SKILL_CATALOG_V3]";
+/// Model-facing skill tool names. Keep catalog text and runtime annotations in
+/// lockstep with the registered tools.
+pub const SKILL_ACTIVATE_TOOL: &str = "skill_activate";
+pub const SKILL_LIST_TOOL: &str = "skill_list";
+pub const SKILL_RESOURCE_TOOL: &str = "skill_resource";
+pub const SKILL_RELEASE_TOOL: &str = "skill_release";
+/// Manifest written next to the bundled skills in `~/.agents/skills`.
+pub const BUNDLED_MANIFEST_FILENAME: &str = ".qaqh-bundled.json";
 /// Maximum skill body size in bytes (512 KB). Larger files are rejected.
 pub const MAX_SKILL_BYTES: u64 = 512 * 1024;
 const MAX_SCAN_DEPTH: usize = 6;
@@ -46,11 +57,38 @@ pub enum SkillScope {
     User,
 }
 
+/// Ownership of a discovered skill. Scope describes where it was found;
+/// origin describes who owns it. The bundled pack is installed into the
+/// shared user root `~/.agents/skills` and is therefore `User` scope with
+/// `Bundled` origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillOrigin {
+    Project,
+    User,
+    Bundled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillPolicy {
+    /// Advisory only. Activation still requires an explicit request or a
+    /// required-skill bootstrap.
+    pub allow_implicit_invocation: bool,
+}
+
+impl Default for SkillPolicy {
+    fn default() -> Self {
+        Self {
+            allow_implicit_invocation: true,
+        }
+    }
+}
+
 /// Lightweight metadata from a SKILL.md file for catalog listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillMetadata {
     pub name: String,
     pub description: String,
+    pub short_description: Option<String>,
     pub license: Option<String>,
     pub compatibility: Option<String>,
     pub metadata: BTreeMap<String, String>,
@@ -59,6 +97,8 @@ pub struct SkillMetadata {
     pub allowed_tools: Vec<String>,
     pub path: PathBuf,
     pub scope: SkillScope,
+    pub origin: SkillOrigin,
+    pub policy: SkillPolicy,
 }
 
 /// Skill diagnostic severity level.
@@ -83,6 +123,50 @@ pub struct SkillDiagnostic {
 pub struct SkillCatalog {
     pub skills: Vec<SkillMetadata>,
     pub diagnostics: Vec<SkillDiagnostic>,
+}
+
+/// Manifest installed next to the bundled skills in `~/.agents/skills`.
+///
+/// The manifest is the source of truth for which `qaqh-*` directories QAQH
+/// owns. A user-created `qaqh-custom` directory is deliberately not claimed.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BundledManifest {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub fingerprint: String,
+    #[serde(default)]
+    pub managed: Vec<String>,
+    #[serde(default)]
+    pub skipped: Vec<String>,
+}
+
+impl BundledManifest {
+    pub fn load(home: &Path) -> Self {
+        let path = bundled_manifest_path(home);
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn is_managed(&self, directory_name: &str) -> bool {
+        is_safe_managed_name(directory_name)
+            && self.managed.iter().any(|name| name == directory_name)
+    }
+}
+
+pub(crate) fn is_safe_managed_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+}
+
+pub fn bundled_manifest_path(home: &Path) -> PathBuf {
+    home.join(".agents/skills").join(BUNDLED_MANIFEST_FILENAME)
 }
 
 impl SkillCatalog {
@@ -178,7 +262,29 @@ struct ParsedMetadata {
 /// 优先级固定为：项目 `.qaqh` > `.agents` > `skills`，随后是用户
 /// `.qaqh` > `.agents`。同名 skill 只保留优先级最高者。
 pub fn discover(workspace: &Path) -> SkillCatalog {
-    discover_roots(&discovery_roots(workspace))
+    let home = home_dir();
+    let manifest = home
+        .as_deref()
+        .map(BundledManifest::load)
+        .unwrap_or_default();
+    let bundled_root = home.as_deref().map(|home| home.join(".agents/skills"));
+    discover_roots_with_manifest(
+        &discovery_roots_with_home(workspace, home.as_deref()),
+        &manifest,
+        bundled_root.as_deref(),
+    )
+}
+
+/// Test/host hook that discovers with an explicit home directory. Production
+/// uses [`discover`], which reads the real user home.
+pub fn discover_with_home(workspace: &Path, home: &Path) -> SkillCatalog {
+    let manifest = BundledManifest::load(home);
+    let bundled_root = home.join(".agents/skills");
+    discover_roots_with_manifest(
+        &discovery_roots_with_home(workspace, Some(home)),
+        &manifest,
+        Some(&bundled_root),
+    )
 }
 
 /// All skill discovery roots for `workspace` (project roots first, then user
@@ -193,20 +299,36 @@ pub fn skill_roots(workspace: &Path) -> Vec<PathBuf> {
 }
 
 fn discovery_roots(workspace: &Path) -> Vec<(PathBuf, SkillScope)> {
+    discovery_roots_with_home(workspace, home_dir().as_deref())
+}
+
+fn discovery_roots_with_home(
+    workspace: &Path,
+    home: Option<&Path>,
+) -> Vec<(PathBuf, SkillScope)> {
     let workspace = absolutize(workspace);
     let mut roots = vec![
         (workspace.join(".qaqh/skills"), SkillScope::Project),
         (workspace.join(".agents/skills"), SkillScope::Project),
         (workspace.join("skills"), SkillScope::Project),
     ];
-    if let Some(home) = home_dir() {
+    if let Some(home) = home {
         roots.push((home.join(".qaqh/skills"), SkillScope::User));
         roots.push((home.join(".agents/skills"), SkillScope::User));
     }
     roots
 }
 
+#[cfg(test)]
 fn discover_roots(roots: &[(PathBuf, SkillScope)]) -> SkillCatalog {
+    discover_roots_with_manifest(roots, &BundledManifest::default(), None)
+}
+
+fn discover_roots_with_manifest(
+    roots: &[(PathBuf, SkillScope)],
+    manifest: &BundledManifest,
+    bundled_root: Option<&Path>,
+) -> SkillCatalog {
     let mut catalog = SkillCatalog::default();
     let mut seen_names: HashMap<String, PathBuf> = HashMap::new();
     let mut scanned_dirs = 0usize;
@@ -215,6 +337,8 @@ fn discover_roots(roots: &[(PathBuf, SkillScope)]) -> SkillCatalog {
         scan_root(
             root,
             *scope,
+            manifest,
+            bundled_root,
             &mut catalog,
             &mut seen_names,
             &mut scanned_dirs,
@@ -229,6 +353,8 @@ fn discover_roots(roots: &[(PathBuf, SkillScope)]) -> SkillCatalog {
 fn scan_root(
     root: &Path,
     scope: SkillScope,
+    manifest: &BundledManifest,
+    bundled_root: Option<&Path>,
     catalog: &mut SkillCatalog,
     seen_names: &mut HashMap<String, PathBuf>,
     scanned_dirs: &mut usize,
@@ -270,7 +396,17 @@ fn scan_root(
 
             let skill_path = path.join("SKILL.md");
             if skill_path.is_file() {
-                match parse_metadata(&skill_path, scope) {
+                let origin = match scope {
+                    SkillScope::Project => SkillOrigin::Project,
+                    SkillScope::User
+                        if bundled_root.is_some_and(|bundled| bundled == root)
+                            && manifest.is_managed(&name) =>
+                    {
+                        SkillOrigin::Bundled
+                    }
+                    SkillScope::User => SkillOrigin::User,
+                };
+                match parse_metadata(&skill_path, scope, origin) {
                     Ok(parsed) => {
                         let skill = parsed.metadata;
                         for message in parsed.warnings {
@@ -313,12 +449,33 @@ fn should_skip_dir(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "node_modules" | "target" | ".git")
 }
 
-fn parse_metadata(path: &Path, scope: SkillScope) -> Result<ParsedMetadata, String> {
+/// Normalize model-visible metadata to one line. This prevents a crafted
+/// `name`/description from injecting extra catalog or envelope lines.
+fn sanitize_single_line(raw: &str) -> String {
+    raw.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_metadata(
+    path: &Path,
+    scope: SkillScope,
+    origin: SkillOrigin,
+) -> Result<ParsedMetadata, String> {
     let raw = read_bounded(path)?;
     let (frontmatter, _) = split_skill_file(&raw)?;
     let parsed = parse_frontmatter(frontmatter)?;
-    let name = parsed.name.trim().to_string();
-    let description = parsed.description.trim().to_string();
+    let name = sanitize_single_line(&parsed.name);
+    let description = sanitize_single_line(&parsed.description);
     if description.is_empty() {
         return Err("missing skill description".into());
     }
@@ -341,6 +498,11 @@ fn parse_metadata(path: &Path, scope: SkillScope) -> Result<ParsedMetadata, Stri
         metadata: SkillMetadata {
             name,
             description,
+            short_description: parsed
+                .metadata
+                .get("short-description")
+                .map(|value| sanitize_single_line(value))
+                .filter(|value| !value.is_empty()),
             license: parsed
                 .license
                 .map(|value| value.trim().to_string())
@@ -358,6 +520,8 @@ fn parse_metadata(path: &Path, scope: SkillScope) -> Result<ParsedMetadata, Stri
                 .collect(),
             path: absolutize(path),
             scope,
+            origin,
+            policy: SkillPolicy::default(),
         },
         warnings,
     })
@@ -456,7 +620,7 @@ pub fn load_named(workspace: &Path, name: &str) -> Result<SkillActivation, Strin
 /// Compatibility parsing remains available during discovery, but every
 /// standards violation is returned as an error here.
 pub fn validate_file(path: &Path) -> Vec<SkillDiagnostic> {
-    match parse_metadata(path, SkillScope::Project) {
+    match parse_metadata(path, SkillScope::Project, SkillOrigin::Project) {
         Ok(parsed) => parsed
             .warnings
             .into_iter()
@@ -560,7 +724,7 @@ pub fn managed_skill_for_path(workspace: &Path, candidate: &Path) -> Option<Stri
         loop {
             let skill_file = directory.join("SKILL.md");
             if skill_file.is_file() {
-                return parse_metadata(&skill_file, SkillScope::Project)
+                return parse_metadata(&skill_file, SkillScope::Project, SkillOrigin::User)
                     .map(|parsed| parsed.metadata.name)
                     .ok()
                     .or_else(|| directory.file_name()?.to_str().map(str::to_string));
@@ -617,16 +781,38 @@ pub fn render_catalog(catalog: &SkillCatalog) -> String {
     if catalog.skills.is_empty() {
         return String::new();
     }
-    let mut output = String::from(
-        "Skills use progressive disclosure. Match a task against name and description only; do not infer the body. For an implicit match or a user-requested skill, call `skills` with action=`activate` and the exact name before acting — the full instructions are returned in the tool result. Load bundled files on demand with action=`resource`, the same name, and a manifest-relative path; generic read/search cannot access managed skill files. Use `list` for catalog diagnostics and `validate` for portability checks.\n\n<available_skills>\n",
+    let mut output = format!(
+        "{SKILL_CATALOG_MARKER}\n\
+         Skills use progressive disclosure. The catalog lists names and descriptions only; do not infer a body from them. \
+         To use a skill, call `{SKILL_ACTIVATE_TOOL}` with the exact name; the full instructions arrive in the trailing \
+         skill context envelope. Use `{SKILL_LIST_TOOL}` for diagnostics and `{SKILL_RESOURCE_TOOL}` for bundled files. \
+         Never call a tool that is not in the current tool list.\n\n<available_skills>\n"
     );
+    let mut skills = catalog.skills.iter().collect::<Vec<_>>();
+    skills.sort_by(|a, b| {
+        let rank = |scope: SkillScope| match scope {
+            SkillScope::Project => 0,
+            SkillScope::User => 1,
+        };
+        rank(a.scope)
+            .cmp(&rank(b.scope))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     let mut omitted = 0usize;
-    for skill in &catalog.skills {
-        let description: String = skill.description.chars().take(600).collect();
+    for skill in skills {
+        let description_source = skill
+            .short_description
+            .as_deref()
+            .unwrap_or(skill.description.as_str());
+        let description: String = sanitize_single_line(description_source)
+            .chars()
+            .take(600)
+            .collect();
         let line = format!(
             "- {}: {}\n",
             skill.name,
-            description.replace(['\r', '\n'], " "),
+            description,
         );
         if output.chars().count() + line.chars().count() > MAX_CATALOG_CHARS {
             omitted += 1;
@@ -766,7 +952,7 @@ mod tests {
             "[SkILLS]\n---\nname: qaqh-debug\ndescription: Debug failures.\n---\n\n# Full body",
         );
         // Legacy [SKILLS] prefix is no longer accepted — the skill must be skipped.
-        assert!(parse_metadata(&path, SkillScope::Project).is_err());
+        assert!(parse_metadata(&path, SkillScope::Project, SkillOrigin::Project).is_err());
     }
 
     #[test]
@@ -777,7 +963,10 @@ mod tests {
             "windows",
             "---\r\nname: windows\r\ndescription: Windows lines.\r\n---\r\n\r\nFull body",
         );
-        let metadata = parse_metadata(&path, SkillScope::Project).unwrap().metadata;
+        let metadata =
+            parse_metadata(&path, SkillScope::Project, SkillOrigin::Project)
+                .unwrap()
+                .metadata;
         assert_eq!(load(&metadata).unwrap().body, "Full body");
     }
 
@@ -816,7 +1005,10 @@ mod tests {
         );
         fs::create_dir_all(path.parent().unwrap().join("references")).unwrap();
         fs::write(path.parent().unwrap().join("references/info.md"), "info").unwrap();
-        let metadata = parse_metadata(&path, SkillScope::Project).unwrap().metadata;
+        let metadata =
+            parse_metadata(&path, SkillScope::Project, SkillOrigin::Project)
+                .unwrap()
+                .metadata;
         let activation = load(&metadata).unwrap();
         let rendered = render_activation(&activation);
         assert!(rendered.matches("instruction\n").count() >= 350);
@@ -832,18 +1024,54 @@ mod tests {
             skills: vec![SkillMetadata {
                 name: "review-code".into(),
                 description: "Review code.".into(),
+                short_description: None,
                 license: None,
                 compatibility: None,
                 metadata: BTreeMap::new(),
                 allowed_tools: Vec::new(),
                 path: PathBuf::from("review/SKILL.md"),
                 scope: SkillScope::Project,
+                origin: SkillOrigin::Project,
+                policy: SkillPolicy::default(),
             }],
             diagnostics: Vec::new(),
         };
         let found = explicit_mentions("use $review-code and $missing then $review-code", &catalog);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "review-code");
+    }
+
+    #[test]
+    fn catalog_prefers_short_description_and_names_real_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        write_skill(
+            &temp.path().join("skills"),
+            "short-catalog",
+            "---\nname: short-catalog\ndescription: This is the long description that should not win.\nmetadata:\n  short-description: Short catalog line\n---\n\nBody",
+        );
+        let catalog = discover_roots(&[(temp.path().join("skills"), SkillScope::Project)]);
+        let rendered = render_catalog(&catalog);
+        assert!(rendered.starts_with(SKILL_CATALOG_MARKER));
+        assert!(rendered.contains("Short catalog line"));
+        assert!(!rendered.contains("long description that should not win"));
+        assert!(rendered.contains(SKILL_ACTIVATE_TOOL));
+        assert!(rendered.contains(SKILL_LIST_TOOL));
+        assert!(rendered.contains(SKILL_RESOURCE_TOOL));
+        assert!(!rendered.contains("action=activate"));
+        assert!(!rendered.contains("`skills`"));
+    }
+
+    #[test]
+    fn metadata_is_sanitized_to_one_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_skill(
+            temp.path(),
+            "multiline",
+            "---\nname: multiline\ndescription: \"line one\\nline two\"\n---\n\nBody",
+        );
+        let metadata =
+            parse_metadata(&path, SkillScope::Project, SkillOrigin::Project).unwrap();
+        assert_eq!(metadata.metadata.description, "line one line two");
     }
 
     #[test]
@@ -854,7 +1082,7 @@ mod tests {
             "portable",
             "---\nname: portable\ndescription: Use when testing portable skills.\nlicense: MIT\ncompatibility: Requires git.\nmetadata:\n  author: qaqh\n  version: \"1\"\nallowed-tools: read exec\n---\n\nBody",
         );
-        let parsed = parse_metadata(&path, SkillScope::Project).unwrap();
+        let parsed = parse_metadata(&path, SkillScope::Project, SkillOrigin::Project).unwrap();
         assert!(parsed.warnings.is_empty());
         assert_eq!(parsed.metadata.license.as_deref(), Some("MIT"));
         assert_eq!(
@@ -877,7 +1105,7 @@ mod tests {
             "actual-dir",
             "---\nname: Bad_Name\ndescription: Compatibility discovery still loads this.\n---\n\nBody",
         );
-        let parsed = parse_metadata(&path, SkillScope::Project).unwrap();
+        let parsed = parse_metadata(&path, SkillScope::Project, SkillOrigin::Project).unwrap();
         assert_eq!(parsed.metadata.name, "Bad_Name");
         let diagnostics = validate_file(&path);
         assert!(
@@ -906,7 +1134,7 @@ mod tests {
             "---\nname: fallback\ndescription: [invalid yaml\n---\n\nBody",
         );
         // Invalid YAML is no longer accepted via compatibility parser.
-        assert!(parse_metadata(&path, SkillScope::Project).is_err());
+        assert!(parse_metadata(&path, SkillScope::Project, SkillOrigin::Project).is_err());
     }
 
     #[test]
@@ -989,12 +1217,15 @@ mod tests {
             metadata: SkillMetadata {
                 name: "alpha".into(),
                 description: String::new(),
+                short_description: None,
                 license: None,
                 compatibility: None,
                 metadata: BTreeMap::new(),
                 allowed_tools: Vec::new(),
                 path: PathBuf::new(),
                 scope: SkillScope::Project,
+                origin: SkillOrigin::Project,
+                policy: SkillPolicy::default(),
             },
             body: String::new(),
             resources: Vec::new(),
@@ -1028,6 +1259,14 @@ impl SkillCatalogSnapshot {
         let mut fingerprint_input = rendered.clone();
         for skill in &catalog.skills {
             fingerprint_input.push_str(&skill.path.to_string_lossy());
+            fingerprint_input.push_str(&format!(
+                ":origin={:?}:scope={:?}",
+                skill.origin, skill.scope
+            ));
+            if let Some(short) = &skill.short_description {
+                fingerprint_input.push_str(":short=");
+                fingerprint_input.push_str(short);
+            }
             if let Ok(metadata) = fs::metadata(&skill.path) {
                 fingerprint_input.push_str(&format!(":{}", metadata.len()));
                 if let Ok(modified) = metadata.modified()
@@ -1048,7 +1287,7 @@ impl SkillCatalogSnapshot {
 
 /// A skill context operation requested by the agent.
 ///
-/// Generated by the `skills` tool and applied by the message loop to
+/// Generated by the `skill_*` tools and applied by the message loop to
 /// update the agent's context window with activated skills. Re-activating
 /// the same skill replaces its body; the active set is not monotonic—entry
 /// removal under budget pressure or on reload failure can shrink it.
@@ -1056,6 +1295,8 @@ impl SkillCatalogSnapshot {
 pub enum SkillEffect {
     /// Activate a skill; its full body is delivered in the tool result.
     Activate(SkillActivation),
+    /// Release an active skill and supersede the old envelope.
+    Release { name: String },
 }
 
 /// Describes how a skill body changed between two versions.
