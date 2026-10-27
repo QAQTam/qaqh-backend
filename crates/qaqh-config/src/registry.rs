@@ -229,6 +229,11 @@ impl LegacyEndpoint {
             // 旧平铺迁移表里没有这一项（plan usage 是 BYOK 之后新增的能力）：
             // 与 `send_request_context` 同处理，取缺省而不是编造一个开关。
             responses_siwc_plan: defaults.responses_siwc_plan,
+            // Native client tools are new BYOK capabilities; legacy presets
+            // never opt in implicitly.
+            apply_patch_input_format: defaults.apply_patch_input_format,
+            responses_tool_layout: defaults.responses_tool_layout,
+            apply_patch_custom_grammar: defaults.apply_patch_custom_grammar,
             retry: self.retry.clone(),
         }
     }

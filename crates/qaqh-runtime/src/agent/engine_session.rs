@@ -157,6 +157,12 @@ impl SessionEngine {
         // 会让设置页改完对已开会话不生效。
         agent.config.compliance_enabled = cfg.compliance_enabled;
         agent.config.subagent = cfg.subagent;
+        agent.config.tool_allowlist_enabled = cfg.tool_allowlist_enabled;
+        agent.config.tool_allowlist = cfg.tool_allowlist;
+        qaqh_workspace::runtime::set_global_allowed_tools(
+            agent.config.tool_allowlist_enabled.then(|| agent.config.tool_allowlist.clone()),
+        );
+        agent.refresh_tool_defs();
     }
 }
 
@@ -182,6 +188,8 @@ mod tests {
             context_length: 2_000_000,
             auto_compact_threshold: 0.95,
             permission_level: 3,
+            tool_allowlist_enabled: true,
+            tool_allowlist: vec!["read".into()],
             exec: qaqh_config::config::ExecConfig {
                 default_shell: Some("zsh".into()),
             },
@@ -228,6 +236,8 @@ mod tests {
         // R1 主角：阈值必须随 reload 同步到运行中会话。
         assert!((agent.config.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(agent.config.permission_level, 3);
+        assert!(agent.config.tool_allowlist_enabled);
+        assert_eq!(agent.config.tool_allowlist, vec!["read"]);
         assert_eq!(agent.config.exec.default_shell.as_deref(), Some("zsh"));
         // compliance_enabled 按回合读；subagent.* 在 spawn 时读——漏同步会让
         // 设置页改完对已开会话不生效。

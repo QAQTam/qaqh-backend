@@ -23,6 +23,10 @@ use mutil_ai::{
     ToolCall as WireToolCall, ToolResult as WireToolResult, ToolSpec, TransportConfig,
     Usage as WireUsage,
 };
+use qaqh_tool_core::model_tool_plan::{
+    CustomFormat, ModelToolDeclaration, ModelToolKind, ModelToolPlan, NativeToolCall as PlanCall,
+    NativeToolCompletion as PlanCompletion, NativeToolPayload as PlanPayload,
+};
 use reqwest::header::HeaderValue;
 
 use crate::usage;
@@ -267,9 +271,7 @@ fn provider_state_item(item: serde_json::Value) -> Part {
 fn replay_item(mut item: serde_json::Value) -> serde_json::Value {
     if let Some(obj) = item.as_object_mut() {
         let it = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if (it == "reasoning" || it == "web_search_call")
-            && !obj.contains_key("summary")
-        {
+        if (it == "reasoning" || it == "web_search_call") && !obj.contains_key("summary") {
             obj.insert("summary".into(), serde_json::json!([]));
         }
         // id 卫生（对标 codex `prepare_response_items_for_request`，
@@ -393,7 +395,11 @@ pub(crate) fn project_responses_messages(
                     if is_reasoning && !compat.echo_reasoning_content {
                         continue;
                     }
-                    parts.push(provider_state_item(replay_item((*item).clone())));
+                    if let Some(call) = native_call_from_item(item) {
+                        parts.push(Part::NativeToolCall(call));
+                    } else {
+                        parts.push(provider_state_item(replay_item((*item).clone())));
+                    }
                 }
                 // 2) 派生 reasoning（无回放 item 且开关开启时合成旧形态）。
                 if compat.echo_reasoning_content && !has_response_type("reasoning") {
@@ -427,8 +433,10 @@ pub(crate) fn project_responses_messages(
                 for b in &msg.content {
                     if let ContentBlock::ToolUse { id, name, input } = b {
                         let already = raw_items.iter().any(|item| {
-                            item_type(item) == "function_call"
-                                && item.get("call_id").and_then(|v| v.as_str()) == Some(id.as_str())
+                            matches!(
+                                item_type(item).as_str(),
+                                "function_call" | "custom_tool_call"
+                            ) && item.get("call_id").and_then(|v| v.as_str()) == Some(id.as_str())
                         });
                         if already {
                             continue;
@@ -525,6 +533,53 @@ pub(crate) fn project_responses_messages(
         }
     }
     out
+}
+
+fn native_call_from_item(item: &serde_json::Value) -> Option<mutil_ai::NativeToolCall> {
+    if item
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status != "completed")
+    {
+        return None;
+    }
+    let typ = item.get("type")?.as_str()?;
+    let (kind, payload) = match typ {
+        "custom_tool_call" => (
+            mutil_ai::NativeToolKind::Custom,
+            mutil_ai::NativeToolPayload::RawText(item.get("input")?.as_str()?.to_owned()),
+        ),
+        "function_call"
+            if item.get("namespace").is_some()
+                || item.get("qaqh_native_call").and_then(|v| v.as_bool()) == Some(true) =>
+        {
+            (
+                mutil_ai::NativeToolKind::Function,
+                mutil_ai::NativeToolPayload::JsonArguments(
+                    item.get("arguments")?.as_str()?.to_owned(),
+                ),
+            )
+        }
+        _ => return None,
+    };
+    let call = mutil_ai::NativeToolCall {
+        kind,
+        payload,
+        namespace: item
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        name: item.get("name")?.as_str()?.to_owned(),
+        call_id: item.get("call_id")?.as_str()?.to_owned(),
+        item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_owned),
+        completion: mutil_ai::NativeToolCompletion::Completed,
+        provider_state: Some(mutil_ai::ProviderState::new(
+            mutil_ai::ProviderStateFormat::OpenAiResponses,
+            item.clone(),
+        )),
+    };
+    call.validate_completed().ok()?;
+    Some(call)
 }
 
 fn response_media_parts(_img_idx: &mut usize, mime_type: &str, data: &str) -> Vec<Part> {
@@ -742,6 +797,132 @@ fn build_request(
     // 收口放在最后：上面任何分支（含将来新增的）塞进来的被禁字段都在这被摘掉。
     apply_siwc_plan(provider, &mut request);
     request
+}
+
+fn plan_declarations(
+    plan: &ModelToolPlan,
+    descriptions: &HashMap<String, String>,
+) -> anyhow::Result<Vec<mutil_ai::ToolDeclaration>> {
+    use mutil_ai::{CustomToolFormat, ScopedToolDeclaration as Scoped, ToolDeclaration};
+    let mut declarations = Vec::new();
+    for entry in plan.entries() {
+        let name = entry.address.name.clone();
+        let tool = match &entry.declaration {
+            ModelToolDeclaration::Function {
+                description,
+                parameters,
+                strict,
+            } => Scoped::Function {
+                tool: ToolSpec::new(name, description.clone(), parameters.clone()).strict(*strict),
+            },
+            ModelToolDeclaration::Custom {
+                description,
+                format,
+            } => Scoped::Custom {
+                name,
+                description: description.clone(),
+                format: match format {
+                    CustomFormat::Text => CustomToolFormat::Text,
+                    CustomFormat::Grammar { syntax, definition } => CustomToolFormat::Grammar {
+                        syntax: syntax.clone(),
+                        definition: definition.clone(),
+                    },
+                },
+            },
+        };
+        if let Some(namespace) = &entry.address.namespace {
+            if let Some(ToolDeclaration::Namespace { tools, .. }) = declarations
+                .iter_mut()
+                .find(|d| matches!(d, ToolDeclaration::Namespace { name, .. } if name == namespace))
+            {
+                tools.push(tool);
+            } else {
+                let description = descriptions
+                    .get(namespace)
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("missing namespace description: {namespace}"))?;
+                declarations.push(ToolDeclaration::Namespace {
+                    name: namespace.clone(),
+                    description: description.clone(),
+                    tools: vec![tool],
+                });
+            }
+        } else {
+            declarations.push(ToolDeclaration::Tool { tool });
+        }
+    }
+    mutil_ai::validate_tool_declarations(&declarations)?;
+    Ok(declarations)
+}
+
+fn adapt_native(
+    call: &mutil_ai::NativeToolCall,
+    plan: Option<&ModelToolPlan>,
+) -> anyhow::Result<Vec<ContentBlock>> {
+    call.validate_completed()?;
+    let plan =
+        plan.ok_or_else(|| anyhow::anyhow!("native tool call requires an explicit tool plan"))?;
+    let payload = match &call.payload {
+        mutil_ai::NativeToolPayload::RawText(text) => PlanPayload::RawText(text.clone()),
+        mutil_ai::NativeToolPayload::JsonArguments(text) => {
+            PlanPayload::JsonArguments(serde_json::from_str(text)?)
+        }
+    };
+    let adapted = plan.adapt(PlanCall {
+        address: qaqh_tool_core::model_tool_plan::ModelToolAddress {
+            kind: match call.kind {
+                mutil_ai::NativeToolKind::Function => ModelToolKind::Function,
+                mutil_ai::NativeToolKind::Custom => ModelToolKind::Custom,
+            },
+            namespace: call.namespace.clone(),
+            name: call.name.clone(),
+        },
+        call_id: call.call_id.clone(),
+        item_id: call.item_id.clone(),
+        payload,
+        completion: PlanCompletion::Completed,
+        provider_state: call.provider_state.as_ref().map(|s| s.data.clone()),
+    })?;
+    let mut item = call
+        .provider_state
+        .as_ref()
+        .map(|state| state.data.clone())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    item["type"] = match call.kind {
+        mutil_ai::NativeToolKind::Function => "function_call",
+        mutil_ai::NativeToolKind::Custom => "custom_tool_call",
+    }
+    .into();
+    item["name"] = call.name.clone().into();
+    item["call_id"] = call.call_id.clone().into();
+    item["status"] = "completed".into();
+    if let Some(object) = item.as_object_mut() {
+        object.remove("input");
+        object.remove("arguments");
+        object.remove("qaqh_native_call");
+    }
+    if call.kind == mutil_ai::NativeToolKind::Function && call.namespace.is_none() {
+        item["qaqh_native_call"] = true.into();
+    }
+    if let Some(id) = &call.item_id {
+        item["id"] = id.clone().into();
+    }
+    if let Some(ns) = &call.namespace {
+        item["namespace"] = ns.clone().into();
+    }
+    match &call.payload {
+        mutil_ai::NativeToolPayload::RawText(text) => item["input"] = text.clone().into(),
+        mutil_ai::NativeToolPayload::JsonArguments(text) => item["arguments"] = text.clone().into(),
+    }
+    Ok(vec![
+        ContentBlock::ToolUse {
+            id: adapted.canonical.call_id,
+            name: adapted.canonical.internal_tool_key,
+            input: adapted.canonical.args,
+        },
+        ContentBlock::ResponseOutputItem { item },
+    ])
 }
 
 /// Responses usage：`input_tokens`/`output_tokens` +
@@ -1120,6 +1301,7 @@ async fn consume(
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
+    plan: Option<&ModelToolPlan>,
 ) -> Outcome {
     let compat = provider.responses_compat.clone();
     let mut stream = match adapter.stream_with(request, options).await {
@@ -1142,6 +1324,7 @@ async fn consume(
 
     let mut resp = Resps::default();
     let mut interrupted: Option<String> = None;
+    let mut native_calls = HashMap::new();
 
     loop {
         if is_cancelled(cancel) {
@@ -1187,7 +1370,13 @@ async fn consume(
                     adopt_identity(&mut entry.0, id.as_deref());
                     let canonical = name
                         .as_deref()
-                        .map(|n| canonical_function_name(n, &compat))
+                        .map(|n| {
+                            if plan.is_some() {
+                                n.to_string()
+                            } else {
+                                canonical_function_name(n, &compat)
+                            }
+                        })
                         .unwrap_or_default();
                     adopt_identity(&mut entry.1, Some(canonical.as_str()));
                 }
@@ -1207,7 +1396,13 @@ async fn consume(
                 adopt_identity(&mut entry.0, id.as_deref());
                 let canonical = name
                     .as_deref()
-                    .map(|n| canonical_function_name(n, &compat))
+                    .map(|n| {
+                        if plan.is_some() {
+                            n.to_string()
+                        } else {
+                            canonical_function_name(n, &compat)
+                        }
+                    })
                     .unwrap_or_default();
                 adopt_identity(&mut entry.1, Some(canonical.as_str()));
                 // 字节水位守卫（与 messages_sdk 同款不变量）：累计快照只增不回退。
@@ -1218,6 +1413,10 @@ async fn consume(
                 if arguments_so_far.len() > entry.2.len() {
                     entry.2 = arguments_so_far;
                 }
+            }
+            Ok(SdkEvent::NativeToolProgress { .. }) => {}
+            Ok(SdkEvent::NativeToolCompleted { index, call }) => {
+                native_calls.insert(index, call);
             }
             Ok(SdkEvent::ServerToolStatus { state, .. }) => {
                 on_event(StreamEvent::WebSearchStatus(
@@ -1255,6 +1454,11 @@ async fn consume(
                 response,
                 finish_reason,
             }) => {
+                if plan.is_some() && response.raw.is_array() {
+                    return Outcome::Fatal(anyhow::anyhow!(
+                        "native tool plan stream lacks a terminal response"
+                    ));
+                }
                 // 旧契约的收口帧：每个 function call 在 item 完成时一次给全量
                 // 参数（delta 只进缓冲不发帧）。先快照再遍历，避免借用冲突。
                 let frames: Vec<(usize, String, String, String)> = response
@@ -1294,9 +1498,78 @@ async fn consume(
                 {
                     resp.usage = Some(usage_to_info_responses(usage));
                 }
-                let mut blocks = response_message_to_blocks(&response.message, &compat);
+                let mut mapping_compat = compat.clone();
+                if plan.is_some() {
+                    mapping_compat.search_function_alias = None;
+                }
+                let mut blocks = response_message_to_blocks(&response.message, &mapping_compat);
                 // 终态没带回来的调用按流补（见 `reconcile_streamed_tool_calls`）。
-                reconcile_streamed_tool_calls(&mut blocks, &resp.tools);
+                let native_ids: std::collections::HashSet<&str> = response
+                    .message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        Part::NativeToolCall(call) => Some(call.call_id.as_str()),
+                        _ => None,
+                    })
+                    .chain(native_calls.values().map(|call| call.call_id.as_str()))
+                    .collect();
+                let ordinary_streamed = resp
+                    .tools
+                    .iter()
+                    .filter(|(_, (id, _, _))| !native_ids.contains(id.as_str()))
+                    .map(|(index, value)| (*index, value.clone()))
+                    .collect();
+                reconcile_streamed_tool_calls(&mut blocks, &ordinary_streamed);
+                if plan.is_some() {
+                    // Re-admit every function through the frozen plan, including legacy flat calls.
+                    let mut admitted = Vec::new();
+                    for block in blocks {
+                        if let ContentBlock::ToolUse { id, name, input } = block {
+                            let native = mutil_ai::NativeToolCall {
+                                kind: mutil_ai::NativeToolKind::Function,
+                                namespace: None,
+                                name,
+                                call_id: id,
+                                item_id: None,
+                                payload: mutil_ai::NativeToolPayload::JsonArguments(
+                                    input.to_string(),
+                                ),
+                                completion: mutil_ai::NativeToolCompletion::Completed,
+                                provider_state: None,
+                            };
+                            match adapt_native(&native, plan) {
+                                Ok(v) => admitted.extend(v),
+                                Err(e) => return Outcome::Fatal(e),
+                            }
+                        } else {
+                            admitted.push(block);
+                        }
+                    }
+                    blocks = admitted;
+                }
+                for part in &response.message.parts {
+                    if let Part::NativeToolCall(call) = part {
+                        if !native_calls
+                            .values()
+                            .any(|known| known.call_id == call.call_id)
+                        {
+                            native_calls.insert(usize::MAX - native_calls.len(), call.clone());
+                        }
+                    }
+                }
+                let mut calls: Vec<_> = native_calls.into_iter().collect();
+                calls.sort_by_key(|(index, _)| *index);
+                let mut seen = std::collections::HashSet::new();
+                for (_, call) in calls {
+                    if !seen.insert(call.call_id.clone()) {
+                        continue;
+                    }
+                    match adapt_native(&call, plan) {
+                        Ok(v) => blocks.extend(v),
+                        Err(e) => return Outcome::Fatal(e),
+                    }
+                }
                 on_event(StreamEvent::Done {
                     raw_message: Message {
                         msg_id: None,
@@ -1318,6 +1591,11 @@ async fn consume(
                 if let SdkError::ProviderStream(raw) = &e
                     && let Some(term) = interpret_provider_stream(raw)
                 {
+                    if plan.is_some() {
+                        return Outcome::Fatal(anyhow::anyhow!(
+                            "native tool plan response terminated incompletely"
+                        ));
+                    }
                     if term.is_failed {
                         // 带内失败原文交给 SDK 分类（response.failed 的 error.code /
                         // 文案），不再由 gate 自己认字。
@@ -1378,6 +1656,9 @@ async fn consume(
     }
 
     if resp.had_output() {
+        if plan.is_some() {
+            return Outcome::Fatal(anyhow::anyhow!("native tool plan stream interrupted"));
+        }
         let why = interrupted.unwrap_or_else(|| "upstream closed stream mid-content".to_string());
         log::warn!("Responses SSE interrupted mid-stream, keeping partial output: {why}");
         resp.partial_done(on_event);
@@ -1397,11 +1678,15 @@ async fn run_sdk_stream(
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
+    plan: Option<&ModelToolPlan>,
 ) -> Outcome {
     let watch = CancelWatch::start(cancel);
     let mut options = options.clone();
     options.cancellation = Some(watch.token().clone());
-    consume(adapter, request, &options, provider, hub, cancel, on_event).await
+    consume(
+        adapter, request, &options, provider, hub, cancel, on_event, plan,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
@@ -1438,7 +1723,51 @@ pub fn chat_stream_responses(
         on_event,
         |traced| {
             block_on(run_sdk_stream(
-                &adapter, &request, &options, provider, &hub, cancel, traced,
+                &adapter, &request, &options, provider, &hub, cancel, traced, None,
+            ))
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chat_stream_responses_plan(
+    provider: &ProviderConfig,
+    messages: Vec<Message>,
+    plan: &ModelToolPlan,
+    descriptions: &HashMap<String, String>,
+    max_tokens: u32,
+    effort: Option<String>,
+    user_id: Option<String>,
+    cancel: Option<&Arc<AtomicBool>>,
+    on_event: &mut dyn FnMut(StreamEvent),
+) -> anyhow::Result<()> {
+    let declarations = plan_declarations(plan, descriptions)?;
+    let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
+    let projected = project_responses_messages(&messages, &provider.responses_compat);
+    if projected.iter().all(|m| m.role == Role::System) {
+        on_event(empty_request_noop_done_event());
+        return Ok(());
+    }
+    let mut request = build_request(provider, projected, None, max_tokens, effort, user_id, true);
+    request.tool_declarations = declarations;
+    let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
+    let (adapter, hub) = build_adapter(provider, &provider.model, &policy);
+    let options = build_options(provider, &policy);
+    empty_stream_retry(
+        &policy,
+        "upstream closed stream before any content",
+        cancel,
+        on_event,
+        |traced| {
+            block_on(run_sdk_stream(
+                &adapter,
+                &request,
+                &options,
+                provider,
+                &hub,
+                cancel,
+                traced,
+                Some(plan),
             ))
         },
     )
@@ -1524,6 +1853,58 @@ fn collect_plan_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_plan_declaration_admission_and_replay() {
+        use qaqh_tool_core::model_tool_plan::{InputAdapter, ModelToolAddress, ModelToolEntry};
+        let plan = ModelToolPlan::new(
+            "1",
+            "test",
+            vec![ModelToolEntry {
+                address: ModelToolAddress {
+                    kind: ModelToolKind::Custom,
+                    namespace: Some("functions".into()),
+                    name: "apply_patch".into(),
+                },
+                declaration: ModelToolDeclaration::Custom {
+                    description: "patch".into(),
+                    format: CustomFormat::Text,
+                },
+                internal_tool_key: "apply_patch".into(),
+                adapter: InputAdapter::ApplyPatchCustom,
+            }],
+        )
+        .expect("plan");
+        assert!(plan_declarations(&plan, &HashMap::new()).is_err());
+        let declarations = plan_declarations(
+            &plan,
+            &HashMap::from([("functions".into(), "workspace".into())]),
+        )
+        .expect("declarations");
+        assert!(
+            matches!(&declarations[0], mutil_ai::ToolDeclaration::Namespace { name, tools, .. } if name == "functions" && matches!(&tools[0], mutil_ai::ScopedToolDeclaration::Custom { .. }))
+        );
+        let item = serde_json::json!({"type":"custom_tool_call", "name":"apply_patch", "namespace":"functions", "id":"ctc_1", "call_id":"call_1", "input":"你好\n*** End Patch", "status":"completed"});
+        let call = native_call_from_item(&item).expect("native call");
+        assert!(adapt_native(&call, None).is_err());
+        let mut other = call.clone();
+        other.namespace = Some("untrusted".into());
+        assert!(adapt_native(&other, Some(&plan)).is_err());
+        let blocks = adapt_native(&call, Some(&plan)).expect("admit");
+        assert!(
+            matches!(&blocks[0], ContentBlock::ToolUse { id, input, .. } if id == "call_1" && input["patch"] == "你好\n*** End Patch" && input["dry_run"] == false)
+        );
+        let messages = vec![
+            qa_msg("assistant", blocks),
+            Message::tool_result("call_1", qaqh_types::ToolResult::ok("done")),
+        ];
+        let projected = project_responses_messages(&messages, &ResponsesCompat::default());
+        assert!(matches!(&projected[0].parts[0], Part::NativeToolCall(c) if c == &call));
+        assert_eq!(projected[0].parts.len(), 1);
+        assert!(
+            matches!(&projected[1].parts[0], Part::ToolResult(result) if result.call_id.as_deref() == Some("call_1"))
+        );
+    }
 
     fn provider() -> ProviderConfig {
         ProviderConfig::responses(
@@ -2036,7 +2417,10 @@ mod tests {
             })
             .collect();
         assert_eq!(items.len(), 2);
-        assert!(items[0].get("id").is_none(), "无前缀 id 必须摘除: {items:?}");
+        assert!(
+            items[0].get("id").is_none(),
+            "无前缀 id 必须摘除: {items:?}"
+        );
         assert_eq!(items[1]["id"], "rs_abc", "合法前缀 id 原样保留");
     }
 

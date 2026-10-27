@@ -226,6 +226,10 @@ pub fn set_allowed_tools(tools: Vec<String>) {
     with_manager(|manager| manager.set_allowed(tools));
 }
 
+pub fn set_global_allowed_tools(tools: Option<Vec<String>>) {
+    with_manager(|manager| manager.set_global_allowed(tools));
+}
+
 /// Snapshot of the legacy per-actor tool runtime state on the actor thread.
 ///
 /// Production tool workers now carry [`ToolExecutionScope`], which binds an
@@ -388,6 +392,19 @@ pub(crate) fn active_workspace_root() -> PathBuf {
 
 pub fn all_tools() -> Vec<ToolDef> {
     with_manager(|manager| manager.filtered_defs()).unwrap_or_default()
+}
+
+/// Build an immutable native tool plan from the actor's current ToolManager.
+///
+/// The caller must pass the already filtered canonical names. This function
+/// never widens the allowlist; a missing manager is an explicit error.
+pub fn build_model_tool_plan(
+    profile: &crate::model_tool_plan::ToolPlanProfile,
+    selected_names: &[String],
+) -> Result<crate::model_tool_plan::WorkspaceToolPlan, String> {
+    with_manager(|manager| manager.build_model_tool_plan(profile, selected_names))
+        .ok_or_else(|| "tool manager unavailable".to_string())?
+        .map_err(|error| error.to_string())
 }
 
 /// 回合边界 MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义）。

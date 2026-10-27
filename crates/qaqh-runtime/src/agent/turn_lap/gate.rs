@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 static GLOBAL_TIMELINE_SEGMENT: AtomicU32 = AtomicU32::new(0);
 
 use qaqh_types::UsageInfo;
+use qaqh_workspace::model_tool_plan::{PatchInput, ToolLayout, ToolPlanProfile};
 
 use crate::agent::types::{Emitter, LoopPhase, Outcome, RingContext};
 
@@ -410,6 +411,115 @@ pub(crate) fn ensure_stream_block(
 
 // ── 主 gate lap：chat_stream + 流式事件聚合 ──
 
+/// Map explicit compat flags to an immutable native tool-plan profile.
+///
+/// Default profiles keep the legacy function declaration and return `None`.
+/// A native profile is explicit config: Responses wire + `codex_custom` input.
+fn native_tool_plan_profile(
+    compat: &qaqh_types::EndpointCompat,
+    provider_kind: qaqh_gate::ProviderKind,
+    model: &str,
+) -> Result<Option<ToolPlanProfile>, String> {
+    if compat.apply_patch_input_format != qaqh_types::ApplyPatchInputFormat::CodexCustom {
+        return Ok(None);
+    }
+    if !matches!(provider_kind, qaqh_gate::ProviderKind::Responses) {
+        return Err("native apply_patch requires Responses wire".to_string());
+    }
+    let layout = match compat.responses_tool_layout {
+        qaqh_types::ResponsesToolLayout::Flat => ToolLayout::Flat,
+        qaqh_types::ResponsesToolLayout::FunctionsNamespace => ToolLayout::Namespace {
+            name: "functions".into(),
+            description: "Workspace tools".into(),
+        },
+    };
+    let format = match compat.apply_patch_custom_grammar {
+        qaqh_types::ApplyPatchCustomGrammar::None => {
+            qaqh_workspace::model_tool_plan::CustomFormat::Text
+        }
+        qaqh_types::ApplyPatchCustomGrammar::CodexLark => {
+            qaqh_workspace::model_tool_plan::CustomFormat::Grammar {
+                syntax: "lark".into(),
+                definition: qaqh_workspace::model_tool_plan::CODEX_APPLY_PATCH_LARK.into(),
+            }
+        }
+    };
+    Ok(Some(ToolPlanProfile {
+        version: "native-apply-patch-v1".into(),
+        profile: format!("{provider_kind:?}:{model}"),
+        layout,
+        patch_input: PatchInput::Custom(format),
+        function_aliases: HashMap::new(),
+    }))
+}
+
+/// Build the opt-in native plan from the actor's already-filtered tools.
+/// A missing `confirm_apply` or unavailable preview is a hard error; the
+/// allowlist is never widened.
+fn native_tool_plan(
+    ctx: &RingContext,
+    provider: &qaqh_gate::ProviderConfig,
+) -> Result<Option<qaqh_workspace::model_tool_plan::WorkspaceToolPlan>, String> {
+    let Some(mut profile) = native_tool_plan_profile(
+        &ctx.agent.config.compat,
+        provider.kind.clone(),
+        &provider.model,
+    )?
+    else {
+        return Ok(None);
+    };
+    if ctx.agent.config.credential == qaqh_types::CredentialSource::DeepseekAccount {
+        if !matches!(profile.layout, ToolLayout::Flat) {
+            return Err("DeepSeek native apply_patch requires flat tool layout".to_string());
+        }
+        if !matches!(
+            profile.patch_input,
+            PatchInput::Custom(qaqh_workspace::model_tool_plan::CustomFormat::Text)
+        ) {
+            return Err(
+                "DeepSeek native apply_patch currently supports text format only".to_string(),
+            );
+        }
+    }
+    if provider.responses_compat.siwc_plan
+        && !matches!(
+            profile.layout,
+            qaqh_workspace::model_tool_plan::ToolLayout::Namespace { .. }
+        )
+    {
+        return Err(
+            "SIWC native tools require responses_tool_layout = functions_namespace".to_string(),
+        );
+    }
+    if let Some(alias) = &provider.responses_compat.search_function_alias
+        && ctx
+            .agent
+            .tool_defs
+            .iter()
+            .any(|def| def.function.name == "search")
+    {
+        profile
+            .function_aliases
+            .insert("search".to_string(), alias.clone());
+    }
+    let selected: Vec<String> = ctx
+        .agent
+        .tool_defs
+        .iter()
+        .map(|def| def.function.name.clone())
+        .collect();
+    let plan = qaqh_workspace::runtime::build_model_tool_plan(&profile, &selected).map(Some)?;
+    if let Some(plan) = &plan {
+        log::info!(
+            "[TURN] native tool plan built: profile={} layout={:?} entries={}",
+            plan.profile(),
+            plan.layout(),
+            plan.entries().len()
+        );
+    }
+    Ok(plan)
+}
+
 /// Run one gate lap: stream one model request and aggregate streamed
 /// state into a [`GateRequestResult`] (knife-7 S2; extracted from run_lap).
 ///
@@ -469,18 +579,18 @@ pub(crate) fn gate_request(
     } else {
         Ok(None)
     };
-    let result = request_context.and_then(|request_context| {
-        let mut provider = provider.clone();
-        provider.request_context = request_context;
-        qaqh_gate::chat_stream(
-        &provider,
-        messages,
-        tools,
-        ctx.agent.config.max_tokens,
-        Some(ctx.agent.config.reasoning_effort.clone()),
-        Some(ctx.agent.session.session_id.clone()),
-        Some(&cancel_arc),
-        &mut |event| match event {
+    let native_plan = native_tool_plan(ctx, provider);
+    let namespace_descriptions =
+        HashMap::from([("functions".to_string(), "Workspace tools".to_string())]);
+    let result = match native_plan {
+        Err(error) => Err(qaqh_gate::GateError::msg(error)),
+        Ok(native_plan) => request_context.and_then(|request_context| {
+            let mut provider = provider.clone();
+            provider.request_context = request_context;
+            let max_tokens = ctx.agent.config.max_tokens;
+            let effort = Some(ctx.agent.config.reasoning_effort.clone());
+            let user_id = Some(ctx.agent.session.session_id.clone());
+            let mut on_event = |event| match event {
             qaqh_gate::StreamEvent::ContentDelta(d) => {
                 if ctx.cancel.is_set() {
                     return;
@@ -743,9 +853,32 @@ pub(crate) fn gate_request(
                 gate_error = Some(GateError { kind, message });
                 had_error = true;
             }
-        },
-    )
-    });
+        };
+            match native_plan.as_ref() {
+                Some(plan) => qaqh_gate::chat_stream_responses_with_plan(
+                    &provider,
+                    messages,
+                    &**plan,
+                    &namespace_descriptions,
+                    max_tokens,
+                    effort.clone(),
+                    user_id.clone(),
+                    Some(&cancel_arc),
+                    &mut on_event,
+                ),
+                None => qaqh_gate::chat_stream(
+                    &provider,
+                    messages,
+                    tools,
+                    max_tokens,
+                    effort,
+                    user_id,
+                    Some(&cancel_arc),
+                    &mut on_event,
+                ),
+            }
+        }),
+    };
     ctx.agent.record_memory_marker("gate.request.end");
     // A1 收口：流结束、deltas 冻结后，为仍开着的块补最终 checkpoint。
     // 覆盖此后全部 seal 点（parse 尾封 / cancel / 失败终态 / 续写封口）——
@@ -1377,5 +1510,50 @@ mod chatgpt_plan_tests {
         p.api_key = "sk-byok".to_string();
         assert_eq!(p.api_key, untouched.api_key);
         assert_eq!(p.base_url, untouched.base_url);
+    }
+}
+
+#[cfg(test)]
+mod native_tool_plan_tests {
+    use super::native_tool_plan_profile;
+    use qaqh_types::{
+        ApplyPatchCustomGrammar, ApplyPatchInputFormat, EndpointCompat, ResponsesToolLayout,
+    };
+    use qaqh_workspace::model_tool_plan::{CustomFormat, PatchInput, ToolLayout};
+
+    #[test]
+    fn default_profile_keeps_the_legacy_function_shape() {
+        let profile = native_tool_plan_profile(
+            &EndpointCompat::default(),
+            qaqh_gate::ProviderKind::Responses,
+            "m",
+        )
+        .expect("default");
+        assert!(profile.is_none());
+    }
+
+    #[test]
+    fn native_profile_maps_layout_grammar_and_wire() {
+        let compat = EndpointCompat {
+            apply_patch_input_format: ApplyPatchInputFormat::CodexCustom,
+            responses_tool_layout: ResponsesToolLayout::FunctionsNamespace,
+            apply_patch_custom_grammar: ApplyPatchCustomGrammar::CodexLark,
+            ..EndpointCompat::default()
+        };
+        let profile = native_tool_plan_profile(&compat, qaqh_gate::ProviderKind::Responses, "m")
+            .expect("native")
+            .expect("profile");
+        assert!(matches!(
+            profile.layout,
+            ToolLayout::Namespace { ref name, .. } if name == "functions"
+        ));
+        assert!(matches!(
+            profile.patch_input,
+            PatchInput::Custom(CustomFormat::Grammar { ref syntax, .. }) if syntax == "lark"
+        ));
+
+        let err = native_tool_plan_profile(&compat, qaqh_gate::ProviderKind::Chat, "m")
+            .expect_err("chat must be rejected");
+        assert!(err.contains("Responses"));
     }
 }

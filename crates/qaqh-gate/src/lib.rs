@@ -27,10 +27,31 @@ pub use anyhow::Error as GateError;
 pub use request_context::RequestContext;
 pub use transport::RetryPolicy;
 pub use types::{ErrorKind, ProviderConfig, ProviderKind, ResponsesCompat, StreamEvent};
+pub use qaqh_tool_core::model_tool_plan::ModelToolPlan;
 
 use qaqh_types::{Message, ToolDef};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+
+/// Stream Responses with an explicitly authorized, immutable native tool plan.
+/// Namespace descriptions must be provided for every namespace in the plan.
+/// Native declarations are supported only on the Responses wire; Chat,
+/// Anthropic Messages and Gemini still reject them (`unsupported_tool_representation`).
+#[allow(clippy::too_many_arguments)]
+pub fn chat_stream_responses_with_plan(
+    provider: &ProviderConfig,
+    messages: Vec<Message>,
+    plan: &ModelToolPlan,
+    namespace_descriptions: &std::collections::HashMap<String, String>,
+    max_tokens: u32,
+    effort: Option<String>,
+    user_id: Option<String>,
+    cancel: Option<&Arc<AtomicBool>>,
+    on_event: &mut dyn FnMut(StreamEvent),
+) -> anyhow::Result<()> {
+    anyhow::ensure!(matches!(provider.kind, ProviderKind::Responses), "native tool plans require Responses");
+    responses_sdk::chat_stream_responses_plan(provider, messages, plan, namespace_descriptions, max_tokens, effort, user_id, cancel, on_event)
+}
 
 /// Send a chat completion request with SSE streaming.
 ///

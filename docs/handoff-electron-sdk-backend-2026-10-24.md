@@ -15,7 +15,7 @@
 | CI 修复 | `992c862` | 补提交 exporter 依赖的 `pending_store` 收据元数据（`ReceiptPolicy`/`RECEIPT_POLICY`/`open_persistent_at` + boundary tests）——曾因漏提交导致 CI 红 |
 | **B02 具体组合** | `b7532cc` | **见 §2**：bootstrap/team/approvals.admin/content.upload handler 收口为一手 DTO，投影闭包 ts 导出，`ClientV2*` 具体组合别名 |
 | timeline/device/download 收口 + `session.list`/`session.meta` | `17bf7c4` | `TimelineSseFrame` 与 timeline wire 锁测试；approvals.device/content.download 契约钉入 coverage（wire_notes）；B04 幂等结论机器可读（`command_idempotency`）；session.list/meta typed descriptor。**该提交遗漏两处依赖**：mutil-ai pin 未同步（CI 红）与 timeline 测试漏 import（见下两行修复） |
-| CI 修复 | 本 PR | workflow mutil-ai pin → `ba263b9`（`max_sse_line_bytes`/`max_sse_event_bytes` 只在该版存在）；timeline 测试补 `TimelineTurnState` import |
+| CI 修复 | 本 PR | workflow mutil-ai pin → `ba263b9`（`max_sse_line_bytes`/`max_sse_event_bytes` 只在该版存在）；timeline 测试补 `TimelineTurnState` import。**历史记录：2026-10-27 已升级到 mutil-ai 0.7.0（`9b33d95379a9e69907c8f55381d05a560b458c27`），见 `.github/workflows/sdk-contract.yml`。** |
 | **B03 会话面** | `0c3bd48`（PR #14） | `session.activity`/`session.get_activity`/`session.set_profile`/`session.set_tool_mode` typed descriptor；`SessionActivity` 首次 ts 导出（turn_id 为 `?: string`，wire 缺键一致）；`stats::activity` 收口为一手 `SessionToolActivity` |
 | **B03 工作区面** | 本 PR | workspace 组 8 项（get/list/set/create/rename/delete/move_session/detach）typed descriptor；`qaqh_session::WorkspaceMeta` ts 导出 + 新 `WorkspaceEntry`（list 恒带 `missing_dir`，create/rename 不带）；`WorkspaceStore::list_entries()` 成为 list wire 形状唯一权威；exporter 新增「coverage 声明的 fixture 必须存在」校验（修复 #14 引入的下划线 fixture 命名漂移：`set_tool_mode`/`get_activity`） |
 

@@ -54,8 +54,8 @@ pub use context::{
     AgentMode, CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
 };
 pub use descriptor::{
-    DescriptorError, Namespace, OutputBudget, ToolDescriptor, ToolExposure, ToolMeta, ToolName,
-    ToolSource,
+    DescriptorError, Namespace, NativePatchRepresentation, OutputBudget, ToolDescriptor,
+    ToolExposure, ToolMeta, ToolName, ToolSource,
 };
 pub use display::{
     PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolHeader, ToolMetrics,
