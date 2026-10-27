@@ -124,6 +124,7 @@ mod tests {
                 "search",
                 "skill_activate",
                 "skill_list",
+                "skill_release",
                 "skill_resource",
                 "spy",
                 "todo_list",

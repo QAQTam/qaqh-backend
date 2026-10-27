@@ -76,6 +76,16 @@ fn describe(ev: &StreamEvent) -> String {
         } => {
             format!("ToolCallProgress index={index} id={id:?} name={name:?} args={args_chunk:?}")
         }
+        StreamEvent::NativeToolProgress {
+            index,
+            call_id,
+            name,
+            delta,
+            ..
+        } => format!(
+            "NativeToolProgress index={index} call_id={call_id:?} name={name:?} delta_len={}",
+            delta.len()
+        ),
         StreamEvent::WebSearchStatus(s) => format!("WebSearchStatus {s}"),
         StreamEvent::UsageUpdate(u) => format!(
             "UsageUpdate prompt={} completion={}",

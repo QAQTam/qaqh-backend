@@ -65,7 +65,7 @@ ToolPlan = immutable declarations + address mappings + profile snapshot + versio
 | `responses_tool_layout` | `flat` / `functions_namespace` | `flat` |
 | `apply_patch_custom_grammar` | `none` / `codex_lark` | `none` |
 
-三者独立；grammar 仅在 custom 下合法，namespace 仅用于 Responses。路由硬约束高于普通缺省：SIWC 不能因回滚输入格式而变成 flat；DeepSeek 原生范围仅 apply_patch，flat text，grammar 另验。具体字段落地时同时更新 DTO/schema/导出与测试。
+三者独立；grammar 仅在 custom 下合法，namespace 仅用于 Responses。路由硬约束高于普通缺省：SIWC 不能因回滚输入格式而变成 flat；DeepSeek 原生范围仅 apply_patch，flat text + `type/name`-only declaration，grammar 另验。具体字段落地时同时更新 DTO/schema/导出与测试。
 
 存储选择：保留 canonical ToolUse，新增可选、带 `version:1` 的原生调用元数据，承载 kind/namespace/name/call_id/item_id/raw payload/completion；缺元数据的旧记录仅按旧 function 解释。`ResponseOutputItem` 可保留 provider 扩展，但不是第二份可执行调用，也不能作为 SDK pending 的替代品。最终字段位置在 T07 根据存储/压缩全链路核对后确定，不提前改旧会话 schema。
 

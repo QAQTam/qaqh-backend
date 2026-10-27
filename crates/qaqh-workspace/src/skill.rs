@@ -1,9 +1,9 @@
 //! Agent Skill 工具（SDK v2 三件套）。
 //!
 //! 原 `skills` 聚合工具（action + oneOf 判别）拆为 `skill_activate` /
-//! `skill_list` / `skill_resource` 三个单职责工具；`validate` 动作自模型面
-//! 退役（`qaqh_skills::validate_file` 保留为宿主侧诊断入口）。skill activation
-//! 经 typed effect 传输，不从工具文本反解。
+//! `skill_list` / `skill_resource` / `skill_release` 四个单职责工具；
+//! `validate` 动作自模型面退役（`qaqh_skills::validate_file` 保留为宿主侧
+//! 诊断入口）。skill activation/release 经 typed effect 传输，不从工具文本反解。
 
 #![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
 
@@ -43,11 +43,21 @@ pub struct SkillResourceArgs {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// Release an active skill by exact catalog name.
+pub struct SkillReleaseArgs {
+    /// Skill name (exact match from the current skill catalog).
+    pub name: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SkillListEntry {
     name: String,
     description: String,
+    short_description: Option<String>,
     scope: &'static str,
+    origin: &'static str,
     source: PathBuf,
 }
 
@@ -75,6 +85,18 @@ pub struct SkillActivateOutput {
 pub struct SkillListOutput {
     skills: Vec<SkillListEntry>,
     diagnostics: Vec<SkillDiagnosticEntry>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+/// Release result; the new empty/updated envelope arrives through the trailing
+/// skill context message.
+pub struct SkillReleaseOutput {
+    status: &'static str,
+    skill: String,
+    content: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    released: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -146,6 +168,34 @@ impl ToolProjection for SkillResourceOutput {
             ToolBody::Text { text, truncated },
         )
         .with_summary(format!("resource · {name}/{path}"))
+    }
+}
+
+impl ToolProjection for SkillReleaseOutput {
+    fn model_blocks(&self) -> Vec<ToolContentBlock> {
+        vec![ToolContentBlock::Text {
+            text: serde_json::to_string(self).unwrap_or_default(),
+        }]
+    }
+
+    fn display(&self, _args: &serde_json::Value) -> ToolDisplay {
+        ToolDisplay::new(
+            ToolHeader::Other {
+                label: "skills release".into(),
+            },
+            ToolBody::None,
+        )
+        .with_summary(self.content.clone())
+    }
+
+    fn effects(&self) -> Vec<ToolEffect> {
+        if self.released {
+            vec![ToolEffect::Skill(qaqh_skills::SkillEffect::Release {
+                name: self.skill.clone(),
+            })]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -224,6 +274,31 @@ impl TypedTool for SkillResourceTool {
     }
 }
 
+pub struct SkillReleaseTool;
+
+impl TypedTool for SkillReleaseTool {
+    type Args = SkillReleaseArgs;
+    type Output = SkillReleaseOutput;
+
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::new(
+            qaqh_skills::SKILL_RELEASE_TOOL,
+            "Release an active skill. The runtime emits a new authoritative empty/updated skill context envelope.",
+            crate::permission::ToolCategory::Read,
+            ToolRisk::ReadOnly,
+            Duration::from_secs(15),
+        )
+    }
+
+    fn run(
+        &self,
+        _ctx: &ToolCallContext,
+        args: SkillReleaseArgs,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        release_skill(&args.name)
+    }
+}
+
 fn activate_skill(
     ctx: &ToolCallContext,
     name: &str,
@@ -260,9 +335,15 @@ fn list_skills(ctx: &ToolCallContext) -> Result<SkillListOutput, ToolExecutionEr
         .map(|skill| SkillListEntry {
             name: skill.name.clone(),
             description: skill.description.clone(),
+            short_description: skill.short_description.clone(),
             scope: match skill.scope {
                 qaqh_skills::SkillScope::Project => "project",
                 qaqh_skills::SkillScope::User => "user",
+            },
+            origin: match skill.origin {
+                qaqh_skills::SkillOrigin::Project => "project",
+                qaqh_skills::SkillOrigin::User => "user",
+                qaqh_skills::SkillOrigin::Bundled => "bundled",
             },
             source: skill.path.clone(),
         })
@@ -315,6 +396,28 @@ fn read_resource(
     Ok(SkillResourceOutput(resource.content))
 }
 
+fn release_skill(name: &str) -> Result<SkillReleaseOutput, ToolExecutionError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(recoverable(
+            legacy_error(
+                ToolErrorKind::InvalidArguments,
+                "missing_argument",
+                "skill release requires a name",
+            )
+            .with_hint("Use an exact name from the current skill catalog."),
+        ));
+    }
+    Ok(SkillReleaseOutput {
+        status: "ok",
+        skill: name.to_string(),
+        content: format!(
+            "[OK] skill '{name}' released. The next skill context envelope supersedes older instructions."
+        ),
+        released: true,
+    })
+}
+
 fn recoverable(error: ToolError) -> ToolExecutionError {
     ToolExecutionError::Recoverable(error)
 }
@@ -332,4 +435,5 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_typed(SkillActivateTool);
     mgr.register_typed(SkillListTool);
     mgr.register_typed(SkillResourceTool);
+    mgr.register_typed(SkillReleaseTool);
 }

@@ -193,6 +193,10 @@ pub struct AgentState {
     /// system message. The envelope is injected once per change (Codex-style
     /// world-state diff), not on every request build.
     last_injected_epoch: u64,
+    /// Whether the last injected envelope had at least one active skill. This
+    /// lets a release-to-empty still emit an authoritative `<active_skills />`
+    /// message instead of leaving the previous instructions in force.
+    last_injected_had_active: bool,
     /// PR-M2-2：最近一次物化的 MCP 资源清单文本（变化才注入；None = 尚未
     /// 注入过。内容直接对比而非 hash——清单文本 ≤ 数 KB，比对开销可忽略）。
     last_mcp_env_block: Option<String>,
@@ -245,6 +249,7 @@ impl AgentState {
             last_api_context: None,
             manual_compact_running: false,
             last_injected_epoch: 0,
+            last_injected_had_active: false,
             last_mcp_env_block: None,
             session_manager: SessionManager::try_global(),
             tool_ledger: None,
@@ -550,6 +555,26 @@ impl AgentState {
     /// watermark 0 and re-appends a duplicate envelope.
     pub fn align_skill_injection_watermark(&mut self) {
         self.last_injected_epoch = self.skills.context_epoch();
+        self.last_injected_had_active = self.skills.has_active();
+    }
+
+    /// Bootstrap required skills during session creation and materialize their
+    /// envelope immediately. Resume deliberately does not call this: a user
+    /// who released `qaqh-core` should not get it silently re-activated.
+    pub fn bootstrap_skills(&mut self) {
+        match self.skills.bootstrap_required() {
+            Ok(activated) if !activated.is_empty() => {
+                let envelope = self.skills.snapshot_for_context().envelope;
+                if !envelope.is_empty() {
+                    self.msg
+                        .push_trailing_system(qaqh_types::Message::developer(&envelope));
+                    self.last_injected_epoch = self.skills.context_epoch();
+                    self.last_injected_had_active = true;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("cannot bootstrap required skills: {error}"),
+        }
     }
 
     /// Freeze annotations for the session so the first user message keeps an
@@ -792,7 +817,8 @@ impl AgentState {
             return;
         }
         self.last_injected_epoch = epoch;
-        if !self.skills.has_active() {
+        let active = self.skills.has_active();
+        if !active && !self.last_injected_had_active {
             return;
         }
         let envelope = self.skills.snapshot_for_context().envelope.clone();
@@ -807,6 +833,7 @@ impl AgentState {
                 receipt.stored
             );
         }
+        self.last_injected_had_active = active;
     }
 
     /// MCP 资源清单注入（PR-M2-2，设计 §5.4.2）：回合边界由 run_lap 调用。
@@ -862,6 +889,11 @@ impl AgentState {
                 scope: match s.scope {
                     qaqh_skills::SkillScope::Project => "project".to_string(),
                     qaqh_skills::SkillScope::User => "user".to_string(),
+                },
+                origin: match s.origin {
+                    qaqh_skills::SkillOrigin::Project => "project".to_string(),
+                    qaqh_skills::SkillOrigin::User => "user".to_string(),
+                    qaqh_skills::SkillOrigin::Bundled => "bundled".to_string(),
                 },
                 source: s
                     .path
@@ -1364,9 +1396,10 @@ mod tests {
         assert!(before[0].content.iter().any(
             |block| matches!(block, qaqh_types::ContentBlock::Text { text } if text == "stable base")
         ));
-        // The skill catalog is NOT injected anymore: the model discovers it
-        // via a mandatory first `skills list` tool call. The base system
-        // prompt is the only fixed prefix.
+        // This test seeds the store manually and intentionally omits the
+        // creation-time catalog helper. Production create_session paths push
+        // the catalog after the base prompt; the base prompt alone must remain
+        // a stable prefix for this manual fixture.
 
         let after = agent.build_context();
         assert!(after[0].content.iter().any(
@@ -1378,6 +1411,77 @@ mod tests {
             serde_json::to_value(agent.build_context()).unwrap()
         );
         qaqh_workspace::set_workspace(".");
+    }
+
+    #[test]
+    fn releasing_last_skill_injects_empty_envelope() {
+        let _guard = SKILL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join(".agents/skills/release-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: release-skill\ndescription: Release test.\n---\n\nRELEASE_BODY",
+        )
+        .unwrap();
+        let mut agent = AgentState::new(qaqh_config::Config::default());
+        agent.msg = qaqh_message::MessageStore::new_ephemeral("test");
+        agent
+            .msg
+            .push_system(qaqh_types::Message::system("base"));
+        agent.skills = qaqh_skills::SkillContextManager::new(temp.path(), 100_000);
+        agent.skills.begin_user_turn("use $release-skill");
+        let activation = qaqh_skills::load_named(temp.path(), "release-skill").unwrap();
+        agent
+            .skills
+            .apply_tool_effect(qaqh_skills::SkillEffect::Activate(activation))
+            .unwrap();
+
+        let mut flow = qaqh_message::ContextFlow::new();
+        flow.register(qaqh_message::builtin::skills_source());
+        agent.sync_skill_injection(&mut flow);
+        assert_eq!(agent.msg.trailing_messages().len(), 1);
+        assert!(
+            agent.msg.trailing_messages()[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, qaqh_types::ContentBlock::Text { text } if text.contains("RELEASE_BODY")))
+        );
+
+        agent.skills.release("release-skill").unwrap();
+        agent.sync_skill_injection(&mut flow);
+        assert_eq!(agent.msg.trailing_messages().len(), 2);
+        assert!(agent.msg.trailing_messages()[1].content.iter().any(|block| {
+            matches!(block, qaqh_types::ContentBlock::Text { text } if text.contains("<active_skills />"))
+        }));
+    }
+
+    #[test]
+    fn session_bootstrap_activates_installed_core_and_injects_it_once() {
+        let _guard = SKILL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        qaqh_skills::install::ensure_bundled_skills(home.path()).unwrap();
+        let mut agent = AgentState::new(qaqh_config::Config::default());
+        agent.msg = qaqh_message::MessageStore::new_ephemeral("test");
+        agent
+            .msg
+            .push_system(qaqh_types::Message::system("base"));
+        agent.skills = qaqh_skills::SkillContextManager::new(home.path(), 100_000);
+
+        agent.bootstrap_skills();
+        assert_eq!(agent.msg.trailing_messages().len(), 1);
+        assert!(agent.msg.trailing_messages()[0].content.iter().any(|block| {
+            matches!(block, qaqh_types::ContentBlock::Text { text } if text.contains("qaqh-core"))
+        }));
+        assert_eq!(agent.last_injected_epoch, agent.skills.context_epoch());
+
+        // A second call must not inject a duplicate envelope.
+        agent.bootstrap_skills();
+        assert_eq!(agent.msg.trailing_messages().len(), 1);
     }
 
     // ── 工具模式（PLAN-TOOL-MODES.md 4.4）──

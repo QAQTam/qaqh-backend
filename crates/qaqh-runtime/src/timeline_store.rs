@@ -434,6 +434,7 @@ fn event_kind(event: &TimelineEvent) -> &'static str {
         TimelineEvent::ToolProgress { .. } => "tool_progress",
         TimelineEvent::ToolEstimated { .. } => "tool_estimated",
         TimelineEvent::UsageSampled { .. } => "usage_sampled",
+        TimelineEvent::ProviderRetrying { .. } => "provider_retrying",
         TimelineEvent::RoundSealed { .. } => "round_sealed",
     }
 }

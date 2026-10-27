@@ -183,6 +183,7 @@ impl Loop {
                             name: s.name.clone(),
                             description: s.description.clone(),
                             scope: s.scope.clone(),
+                            origin: s.origin.clone(),
                             source: s.source.clone(),
                         })
                         .collect(),
