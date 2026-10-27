@@ -306,15 +306,15 @@ T01 拟定字段分别为 `apply_patch_input_format`、`responses_tool_layout`�
 
 | 路径 | 输入 | 布局 | grammar | 准入 |
 | --- | --- | --- | --- | --- |
-| DeepSeek 账号 + Responses | custom | flat | 先 text；Lark 单独验证 | R12 探针后启用 |
-| DeepSeek 账号 + Chat | function | 原 Chat 结构 | 无 | 不注入 Responses 格式 |
+| DeepSeek 账号（OAuth） | custom（仅 type/name） | flat | 先 text；Lark 单独验证 | R12 探针后启用 |
 | SIWC GPT + Responses | custom | functions namespace | 经探针验证的 Codex Lark | R12 探针后启用 |
 | 其他 Responses/BYOK | 保持原模式 | 保持原模式 | 不推断 | 显式声明能力 |
 
 - 由显式 provider/profile 能力与路由约束选择，不按模型名称包含某字符串猜测。
 - SIWC 即使回滚为 function 输入，也必须保持路由要求的 namespace；回滚不是恢复不合法平铺请求。
-- DeepSeek 从 Chat 迁移到 Responses 必须是显式配置变化，不在工具失败后自动迁移。
-- DeepSeek custom 范围只开放 apply_patch；namespace 与 grammar 约束效果没有探针前不宣称支持。
+- DeepSeek 账号（OAuth）只维护 Responses；Chat 仅保留给 BYOK，不在工具失败后自动切换 wire。
+- OAuth 模型工具面只把 `apply_patch` 作为 custom；`confirm_apply` / `apply_patch_preview` 不进入 selected，直接 apply。
+- DeepSeek custom 范围只开放 apply_patch；声明按官方文档只发 `type/name`，不发 description/format；namespace 与 grammar 约束效果没有探针前不宣称支持。
 - 登录刷新、授权 scope、账号余额、凭据头与 origin 守卫维持既有契约；无额外“启用 freeform 的 OAuth scope”。
 - SIWC 保留 `store:false`、`stream:true`、完整 input 历史、instructions/developer、禁字段清理和现有 reasoning 回放清理；不得通过本期功能打开 Responses Lite。
 

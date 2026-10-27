@@ -506,6 +506,15 @@ pub enum TimelineEvent {
     UsageSampled {
         usage: qaqh_types::UsageInfo,
     },
+    /// 上游模型请求进入退避重试。瞬态状态：不落快照、不改任何块/回合状态，
+    /// 只经内存 journal + SSE 递给客户端，用于显示"第 N/M 次重试，delay 秒后继续"。
+    ProviderRetrying {
+        attempt: u32,
+        max_retries: u32,
+        delay_secs: u64,
+        /// 已截断/去控制字符的上游错误摘要；客户端只展示，不做分支判断。
+        error: String,
+    },
     BlockSealed {
         block_id: String,
     },
@@ -608,6 +617,14 @@ pub enum TimelineIntent {
         turn_id: String,
         round_num: u32,
         usage: qaqh_types::UsageInfo,
+    },
+    ProviderRetrying {
+        turn_id: String,
+        round_num: u32,
+        attempt: u32,
+        max_retries: u32,
+        delay_secs: u64,
+        error: String,
     },
     BlockSealed {
         turn_id: String,

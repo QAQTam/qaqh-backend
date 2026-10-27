@@ -101,7 +101,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
 
 /// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 24] = [
+const TABLE: [(&str, ToolCapabilities); 25] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
@@ -121,6 +121,7 @@ const TABLE: [(&str, ToolCapabilities); 24] = [
     // skill_activate：改写会话内技能激活集（不动工作区文件）。
     ("skill_activate", SESSION_MUTATING),
     ("skill_list", READ_ONLY),
+    ("skill_release", SESSION_MUTATING),
     ("skill_resource", READ_ONLY),
     // spy：journal/cat 只读，undo/restore 改写工作区。串行已足够（单次
     // undo/restore 都是短操作，不进 EXCLUSIVE 的 process/rewrite 封闭集）。
@@ -169,6 +170,7 @@ mod tests {
                 "ask",
                 "search",
                 "skill_activate",
+                "skill_release",
                 "todo_list",
                 "todo_update",
                 "todo_write",

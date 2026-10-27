@@ -272,14 +272,11 @@ fn validate_entry(entry: &ModelToolEntry) -> Result<(), ToolPlanError> {
             },
             ModelToolKind::Function,
         ) if !description.trim().is_empty() && parameters.is_object() => {}
-        (
-            ModelToolDeclaration::Custom {
-                description,
-                format,
-            },
-            ModelToolKind::Custom,
-        ) if !description.trim().is_empty()
-            && match format {
+        // A custom text tool may intentionally omit its description: DeepSeek
+        // documents the whole declaration as `{"type":"custom","name":
+        // "apply_patch"}`. Grammar declarations still need both fields.
+        (ModelToolDeclaration::Custom { format, .. }, ModelToolKind::Custom)
+            if match format {
                 CustomFormat::Text => true,
                 CustomFormat::Grammar { syntax, definition } => {
                     !syntax.trim().is_empty() && !definition.trim().is_empty()

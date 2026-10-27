@@ -109,7 +109,12 @@ pub(crate) fn spawn_agent(
         ActorKind::Subagent(spec) => {
             let mut tools = spec.tools.clone();
             // Skill 三件套默认可见（激活/列表/资源读取）。
-            for tool in ["skill_activate", "skill_list", "skill_resource"] {
+            for tool in [
+                "skill_activate",
+                "skill_list",
+                "skill_release",
+                "skill_resource",
+            ] {
                 if !tools.iter().any(|existing| existing == tool) {
                     tools.push(tool.to_string());
                 }

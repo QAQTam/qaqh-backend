@@ -128,7 +128,7 @@ impl TypedTool for ApplyPatchTool {
             Duration::from_secs(60),
         )
         .with_native_patch(crate::tool_api::NativePatchRepresentation {
-            custom_description: "Apply a Codex-format patch. Send raw patch text directly, not JSON. Matching takes the FIRST hit; disambiguate repeated context with extra lines or '@@ <context line>'. Partial multi-file application is possible; do not blindly resend the whole patch. Use apply_patch_preview for preflight.".into(),
+            custom_description: "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON. Matching takes the FIRST hit; disambiguate repeated context with extra lines or '@@ <context line>'. Partial multi-file application is possible; do not blindly resend the whole patch.".into(),
             preview_description: "Preview a Codex-format patch without writing. Send a JSON object with patch text; returns a pending_id for confirm_apply. Matching takes the FIRST hit; disambiguate repeated context. Confirm revalidates against current files.".into(),
             preview_parameters: crate::tool_api::schema::schema_of::<ApplyPatchPreviewArgs>(),
         })
@@ -260,13 +260,26 @@ impl TypedTool for ApplyPatchTool {
             format!(
                 "[DRY RUN] apply_patch — patch parses: {files} file(s), +{insertions} -{deletions}; engine pre-checked every hunk against current file contents (a real apply may still differ)\n"
             )
-        } else if overwritten.is_empty() {
-            format!("[OK] apply_patch — applied: {files} file(s), +{insertions} -{deletions}\n")
         } else {
-            format!(
-                "[OK] apply_patch — applied: {files} file(s), +{insertions} -{deletions}; OVERWROTE existing: {} (previous contents recorded for rollback)\n",
-                overwritten.join(", ")
-            )
+            // Codex-compatible model-facing receipt. The structured fields below
+            // remain the UI/statistics source; this text is what the model sees.
+            let mut text = String::from("Success. Updated the following files:\n");
+            for path in &outcome.affected.added {
+                text.push_str(&format!("A {path}\n"));
+            }
+            for path in &outcome.affected.modified {
+                text.push_str(&format!("M {path}\n"));
+            }
+            for path in &outcome.affected.deleted {
+                text.push_str(&format!("D {path}\n"));
+            }
+            if !overwritten.is_empty() {
+                text.push_str(&format!(
+                    "OVERWROTE existing: {} (previous contents recorded for rollback)\n",
+                    overwritten.join(", ")
+                ));
+            }
+            text
         };
         let pending_id = if dry_run {
             let pending_id = crate::pending::store("apply_patch", &json!({"patch": patch}));
@@ -767,6 +780,25 @@ mod tests {
         assert!(
             desc.contains("@@ <context line>"),
             "description must tell the model to anchor with @@: {desc}"
+        );
+    }
+
+    #[test]
+    fn success_receipt_matches_codex_shape() {
+        let (_dir, workspace) = repo_with_commit(&[]);
+        let patch = "*** Begin Patch\n*** Add File: codex-receipt.txt\n+hello\n*** End Patch\n";
+        crate::CURRENT_WORKSPACE
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone_from(&workspace);
+        let result = exec_apply_patch(&serde_json::json!({"patch": patch}));
+        assert!(result.is_success(), "{}", result.model_text());
+        assert!(
+            result
+                .model_text()
+                .starts_with("Success. Updated the following files:\nA codex-receipt.txt\n"),
+            "model-facing receipt must match Codex: {}",
+            result.model_text()
         );
     }
 

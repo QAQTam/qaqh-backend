@@ -330,7 +330,8 @@ pub enum CredentialSource {
     ChatgptPlan,
     /// 用本机 DeepSeek 账号额度：每回合向 `qaqh-dsaccount` 管理器取账号 token，
     /// 以 **`x-dsh-auth-token` 裸头**（无 `Bearer` 前缀）发往官方推理端点
-    /// （只支持 `openai` wire + `https://api.deepseek.com`）。
+    /// （只支持 `responses` wire + `https://api.deepseek.com`；OAuth 路由不再维护
+    /// Chat）。
     ///
     /// 与 [`CredentialSource::ChatgptPlan`] 是两条**互不回退**的路：没登录就报错，
     /// 绝不退回用 API key——那会让用户在不知情的情况下花自己的钱。

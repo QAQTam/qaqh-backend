@@ -32,6 +32,18 @@ pub enum PatchInput {
     Custom(CustomFormat),
 }
 
+/// How much metadata the custom `apply_patch` declaration carries.
+///
+/// DeepSeek documents the custom tool as exactly
+/// `{"type":"custom","name":"apply_patch"}`; other providers (SIWC/BYOK) use
+/// the Codex description/grammar. The raw-text adapter is identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CustomDeclarationStyle {
+    #[default]
+    Full,
+    Minimal,
+}
+
 /// Explicit profile snapshot; no provider/model names are inferred here.
 #[derive(Debug, Clone)]
 pub struct ToolPlanProfile {
@@ -39,6 +51,9 @@ pub struct ToolPlanProfile {
     pub profile: String,
     pub layout: ToolLayout,
     pub patch_input: PatchInput,
+    /// Whether to emit the Codex description/grammar or the minimal
+    /// `{"type":"custom","name":"apply_patch"}` shape.
+    pub custom_declaration: CustomDeclarationStyle,
     /// Explicit, reversible wire aliases for otherwise ordinary functions.
     pub function_aliases: HashMap<String, String>,
 }
@@ -73,7 +88,6 @@ pub enum BuildToolPlanError {
     DuplicateSelectedTool(String),
     InvalidAlias(String),
     UnsupportedRepresentation(String),
-    PreviewConfirmationUnavailable,
     Plan(ToolPlanError),
 }
 
@@ -87,9 +101,6 @@ impl fmt::Display for BuildToolPlanError {
             Self::InvalidAlias(name) => write!(f, "invalid function alias for {name}"),
             Self::UnsupportedRepresentation(name) => {
                 write!(f, "native representation unavailable: {name}")
-            }
-            Self::PreviewConfirmationUnavailable => {
-                f.write_str("native patch preview requires confirm_apply in the selected tools")
             }
             Self::Plan(error) => write!(f, "{error}"),
         }
@@ -157,12 +168,10 @@ impl ToolManager {
             if let Some(native) = &descriptor.native_patch
                 && let PatchInput::Custom(format) = &profile.patch_input
             {
-                if !seen.contains("confirm_apply") {
-                    return Err(BuildToolPlanError::PreviewConfirmationUnavailable);
-                }
                 if profile.function_aliases.contains_key(name) {
                     return Err(BuildToolPlanError::InvalidAlias(name.clone()));
                 }
+                let minimal = profile.custom_declaration == CustomDeclarationStyle::Minimal;
                 entries.push(ModelToolEntry {
                     address: ModelToolAddress {
                         kind: ModelToolKind::Custom,
@@ -170,26 +179,40 @@ impl ToolManager {
                         name: name.clone(),
                     },
                     declaration: ModelToolDeclaration::Custom {
-                        description: native.custom_description.clone(),
-                        format: format.clone(),
+                        description: if minimal {
+                            String::new()
+                        } else {
+                            native.custom_description.clone()
+                        },
+                        format: if minimal {
+                            CustomFormat::Text
+                        } else {
+                            format.clone()
+                        },
                     },
                     internal_tool_key: name.clone(),
                     adapter: InputAdapter::ApplyPatchCustom,
                 });
-                entries.push(ModelToolEntry {
-                    address: ModelToolAddress {
-                        kind: ModelToolKind::Function,
-                        namespace: namespace.clone(),
-                        name: "apply_patch_preview".into(),
-                    },
-                    declaration: ModelToolDeclaration::Function {
-                        description: native.preview_description.clone(),
-                        parameters: native.preview_parameters.clone(),
-                        strict: false,
-                    },
-                    internal_tool_key: name.clone(),
-                    adapter: InputAdapter::ApplyPatchPreview,
-                });
+                // Preview is a QAQH extension, not part of Codex's direct-apply
+                // contract. Expose it only when confirm_apply is actually in the
+                // filtered set; otherwise a pending_id would have no way to be
+                // confirmed. Direct apply remains available either way.
+                if seen.contains("confirm_apply") {
+                    entries.push(ModelToolEntry {
+                        address: ModelToolAddress {
+                            kind: ModelToolKind::Function,
+                            namespace: namespace.clone(),
+                            name: "apply_patch_preview".into(),
+                        },
+                        declaration: ModelToolDeclaration::Function {
+                            description: native.preview_description.clone(),
+                            parameters: native.preview_parameters.clone(),
+                            strict: false,
+                        },
+                        internal_tool_key: name.clone(),
+                        adapter: InputAdapter::ApplyPatchPreview,
+                    });
+                }
             } else {
                 // A registration named apply_patch must explicitly declare its
                 // native capability; never treat a dynamic substitute as builtin.
@@ -238,6 +261,7 @@ mod tests {
             profile: "test".into(),
             layout,
             patch_input,
+            custom_declaration: CustomDeclarationStyle::Full,
             function_aliases: HashMap::new(),
         }
     }
@@ -411,17 +435,55 @@ mod tests {
     }
 
     #[test]
-    fn patch_requires_visible_confirm_without_expanding_allowlist() {
+    fn minimal_custom_declaration_uses_only_type_and_name_shape() {
+        let mut p = native_profile();
+        p.custom_declaration = CustomDeclarationStyle::Minimal;
+        let plan = manager()
+            .build_model_tool_plan(&p, &names(&["apply_patch"]))
+            .expect("plan");
+        let entry = plan
+            .entries()
+            .iter()
+            .find(|entry| entry.address.name == "apply_patch")
+            .expect("apply_patch entry");
+        assert!(matches!(
+            &entry.declaration,
+            ModelToolDeclaration::Custom {
+                description,
+                format
+            } if description.is_empty() && matches!(format, CustomFormat::Text)
+        ));
+    }
+
+    #[test]
+    fn patch_preview_is_optional_and_never_widens_the_allowlist() {
         let mut mgr = manager();
         mgr.set_allowed(names(&["apply_patch"]));
-        assert!(matches!(
-            mgr.build_model_tool_plan(&native_profile(), &names(&["apply_patch"])),
-            Err(BuildToolPlanError::PreviewConfirmationUnavailable)
-        ));
+        let plan = mgr
+            .build_model_tool_plan(&native_profile(), &names(&["apply_patch"]))
+            .expect("direct apply works without confirm_apply");
+        assert_eq!(plan.entries().len(), 1);
+        assert_eq!(plan.entries()[0].address.kind, ModelToolKind::Custom);
+        assert!(
+            plan.entries()
+                .iter()
+                .all(|entry| entry.address.name != "apply_patch_preview")
+        );
+
         assert!(matches!(
             mgr.build_model_tool_plan(&native_profile(), &names(&["apply_patch", "confirm_apply"])),
             Err(BuildToolPlanError::UnknownSelectedTool(_))
         ));
+
+        mgr.set_allowed(names(&["apply_patch", "confirm_apply"]));
+        let plan = mgr
+            .build_model_tool_plan(&native_profile(), &names(&["apply_patch", "confirm_apply"]))
+            .expect("preview appears when confirm_apply is visible");
+        assert!(
+            plan.entries()
+                .iter()
+                .any(|entry| entry.address.name == "apply_patch_preview")
+        );
     }
 
     #[test]

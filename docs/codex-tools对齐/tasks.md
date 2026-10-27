@@ -177,8 +177,8 @@ T02—T04 属 SDK 阶段；T05—T10 属 QAQ opt-in 阶段；T11—T12 才决定
 入口：EndpointCompat、DTO、registry、provider_for、ResponsesCompat、SDK 请求策略。
 
 - [x] 落地输入格式、工具布局、grammar 三个独立能力，缺省兼容旧 profile。
-- [ ] DeepSeek Responses 原生预置：flat apply_patch custom，其他工具 function。
-- [ ] DeepSeek Chat 保持 function；wire 迁移显式进行，不在失败后自动切换。
+- [ ] DeepSeek Responses 原生预置：flat apply_patch custom，其他工具 function；OAuth 过滤 preview/confirm。
+- [ ] DeepSeek OAuth 只保留 Responses；Chat 仅 BYOK 保留，不在失败后自动切换。
 - [ ] SIWC 本地 function/custom 进入 namespace；不误开 Lite/additional_tools/hosted tool_search。
 - [ ] SIWC 原生 grammar 使用完整验证资源；模型能力必须来自明确配置/验证记录。
 - [ ] 保留账号 token 刷新、凭据头、origin 守卫与不回退 API key 的纪律。

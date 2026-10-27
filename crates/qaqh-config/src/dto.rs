@@ -133,12 +133,15 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         None => cfg.credential,
     };
     // 初次切到 DeepSeek 账号且未指定 wire 时，把通用默认 Chat 换成
-    // Responses；显式选择及已有账号配置不受影响。
+    // Responses；OAuth 路由只维护 Responses，显式 Chat 会在下面被拒绝。
     let next_wire = match meaningful(&patch.wire) {
         Some(v) => qaqh_types::Wire::parse(&v).ok_or_else(|| format!("无法识别的 wire: {v}"))?,
         None if next_credential == qaqh_types::CredentialSource::DeepseekAccount
             && cfg.credential != qaqh_types::CredentialSource::DeepseekAccount
-            && cfg.wire == qaqh_types::Wire::Chat => qaqh_types::Wire::Responses,
+            && cfg.wire == qaqh_types::Wire::Chat =>
+        {
+            qaqh_types::Wire::Responses
+        }
         None => cfg.wire,
     };
     // 套餐直连只提供 Responses API：保存期就拦掉，别等到第一回合请求才报。
@@ -154,21 +157,16 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
             next_wire.as_str()
         ));
     }
-    // DeepSeek 账号余额可走 OpenAI 兼容的两个面：chat completions 与 Responses。
+    // DeepSeek 账号只维护 Responses：OAuth 路由不再保留 Chat 分支。
     //
-    // 为什么 Responses 也在值域里：官方文档明确「在对话中间插入工具调用」只有
-    // Anthropic `/messages` 与 Responses 支持，chat completions 不支持；而
-    // Anthropic 面在本仓的凭据头形态下不可用（`ProviderConfig::auth_header`
-    // 只被 openai / responses 两个 adapter 消费）。值域收口只到这里，官方
-    // base_url 那一半同样不在这里查（权威在 `apply_deepseek_account`）。
+    // Responses 也是官方明确支持「在对话中间插入工具调用」的 OpenAI 兼容面；
+    // Anthropic 面在本仓的账号凭据头形态下不可用。base_url 的权威校验仍在
+    // `apply_deepseek_account`，这里只收口 wire 值域。
     if next_credential == qaqh_types::CredentialSource::DeepseekAccount
-        && !matches!(
-            next_wire,
-            qaqh_types::Wire::Chat | qaqh_types::Wire::Responses
-        )
+        && next_wire != qaqh_types::Wire::Responses
     {
         return Err(format!(
-            "credential=deepseek_account 必须配 chat 或 responses 协议（wire={}）：账号余额不提供 anthropic 面",
+            "credential=deepseek_account 只支持 responses 协议（wire={}）：OAuth 路由不再维护 chat/anthropic 面",
             next_wire.as_str()
         ));
     }
@@ -330,12 +328,17 @@ mod tests {
         let mut cfg = Config::default();
         let patch: ConfigPatch = serde_json::from_value(serde_json::json!({
             "toolAllowlistEnabled": true, "toolAllowlist": ["read"]
-        })).unwrap();
+        }))
+        .unwrap();
         apply_patch(&mut cfg, &patch).unwrap();
         let dto = to_dto(&cfg);
         assert!(dto.tool_allowlist_enabled);
         assert_eq!(dto.tool_allowlist, vec!["read"]);
-        apply_patch(&mut cfg, &serde_json::from_value(serde_json::json!({"toolAllowlist": []})).unwrap()).unwrap();
+        apply_patch(
+            &mut cfg,
+            &serde_json::from_value(serde_json::json!({"toolAllowlist": []})).unwrap(),
+        )
+        .unwrap();
         assert!(cfg.tool_allowlist_enabled);
         assert!(cfg.tool_allowlist.is_empty());
     }
@@ -558,42 +561,56 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_account_defaults_to_responses_without_overriding_explicit_wire() {
+    fn deepseek_account_defaults_to_responses_and_rejects_chat() {
         use qaqh_types::{CredentialSource, Wire};
 
         let mut cfg = Config::default();
-        apply_patch(&mut cfg, &ConfigPatch {
-            credential: Some("deepseek_account".into()),
-            ..Default::default()
-        }).expect("select account");
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                credential: Some("deepseek_account".into()),
+                ..Default::default()
+            },
+        )
+        .expect("select account");
         assert_eq!(cfg.wire, Wire::Responses);
         assert_eq!(cfg.credential, CredentialSource::DeepseekAccount);
         assert_eq!(to_dto(&cfg).wire, "responses");
 
-        apply_patch(&mut cfg, &ConfigPatch {
-            wire: Some("chat".into()),
-            ..Default::default()
-        }).expect("explicit chat");
-        apply_patch(&mut cfg, &ConfigPatch {
-            credential: Some("deepseek_account".into()),
-            ..Default::default()
-        }).expect("existing account unchanged");
-        assert_eq!(cfg.wire, Wire::Chat);
+        let err = apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                wire: Some("chat".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("OAuth must reject chat");
+        assert!(err.contains("只支持 responses"), "{err}");
+        assert_eq!(cfg.wire, Wire::Responses, "拒绝即不落地");
 
         let mut explicit = Config::default();
-        apply_patch(&mut explicit, &ConfigPatch {
-            credential: Some("deepseek_account".into()),
-            wire: Some("chat".into()),
-            ..Default::default()
-        }).expect("account with explicit chat");
-        assert_eq!(explicit.wire, Wire::Chat);
+        let err = apply_patch(
+            &mut explicit,
+            &ConfigPatch {
+                credential: Some("deepseek_account".into()),
+                wire: Some("chat".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("account with explicit chat must be rejected");
+        assert!(err.contains("只支持 responses"), "{err}");
+        assert_eq!(
+            explicit.credential,
+            CredentialSource::ApiKey,
+            "拒绝即不落地"
+        );
+        assert_eq!(explicit.wire, Wire::Chat, "拒绝即不落地");
     }
 
     /// DeepSeek 账号：配错 wire 在保存期就报，且**双向**都拦（与套餐那条同规矩）。
     ///
-    /// 值域是 chat + responses：官方文档说「对话中间插入工具调用」只有
-    /// Anthropic `/messages` 与 Responses 支持，而 Anthropic 面拿不到账号
-    /// 凭据头的形态，故不开放。
+    /// 值域只有 responses：OAuth 路由不再维护 Chat；Anthropic 面拿不到账号
+    /// 凭据头的形态，故也不开放。
     #[test]
     fn apply_patch_rejects_account_on_the_anthropic_wire_and_vice_versa() {
         let mut cfg = Config {
@@ -608,7 +625,7 @@ mod tests {
             },
         )
         .expect_err("anthropic wire + account must be rejected");
-        assert!(err.contains("chat 或 responses"), "{err}");
+        assert!(err.contains("只支持 responses"), "{err}");
         assert_eq!(
             cfg.credential,
             qaqh_types::CredentialSource::ApiKey,
@@ -643,7 +660,7 @@ mod tests {
             },
         )
         .expect_err("moving the wire away must be rejected");
-        assert!(err.contains("chat 或 responses"), "{err}");
+        assert!(err.contains("只支持 responses"), "{err}");
         assert_eq!(
             cfg.credential,
             qaqh_types::CredentialSource::DeepseekAccount,

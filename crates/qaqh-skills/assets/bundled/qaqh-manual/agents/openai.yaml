@@ -1,0 +1,6 @@
+interface:
+  display_name: "QAQH Manual"
+  short_description: "Full QAQH operation and tool manual"
+  default_prompt: "Use $qaqh-manual to load the QAQH operating manual."
+policy:
+  allow_implicit_invocation: true

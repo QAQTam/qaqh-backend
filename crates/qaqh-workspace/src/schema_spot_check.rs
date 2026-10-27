@@ -209,7 +209,12 @@ mod schema_spot_check {
         );
 
         // skills 三件套已上线，聚合名/validate 退役。
-        for name in ["skill_activate", "skill_list", "skill_resource"] {
+        for name in [
+            "skill_activate",
+            "skill_list",
+            "skill_release",
+            "skill_resource",
+        ] {
             let _ = by_name(name);
         }
         assert!(

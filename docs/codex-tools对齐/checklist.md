@@ -111,9 +111,9 @@
 ## C08 — provider 与 OAuth 契约（T08）
 
 - [ ] C08.01 输入格式、布局、grammar 独立配置，旧配置缺省兼容且 schema/DTO/导出一致。
-- [ ] C08.02 DeepSeek Responses：flat apply_patch custom，其他工具为 function。
+- [ ] C08.02 DeepSeek Responses：flat apply_patch custom，其他工具为 function；OAuth 不暴露 preview/confirm。
 - [ ] C08.03 DeepSeek 不发送未验证 namespace；其他 custom 名称不在允许范围内。
-- [ ] C08.04 DeepSeek Chat 保留原 function；不会在失败后自动切 Responses。
+- [ ] C08.04 DeepSeek OAuth 拒绝 Chat；BYOK Chat 保留原 function，不会在失败后自动切 Responses。
 - [ ] C08.05 DeepSeek 账号仍用官方 origin 和 x-dsh-auth-token 裸头，未改为 Bearer/API key。
 - [ ] C08.06 SIWC function/custom 都按本地工具布局进入 namespace，身份映射可逆。
 - [ ] C08.07 SIWC grammar 为完整资源；没有因启 namespace 开启 Lite/additional_tools/tool_search。

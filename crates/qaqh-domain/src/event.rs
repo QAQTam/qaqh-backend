@@ -258,6 +258,9 @@ pub struct SkillInfo {
     pub description: String,
     /// "project" | "user"
     pub scope: String,
+    /// "project" | "user" | "bundled"
+    #[serde(default)]
+    pub origin: String,
     /// 相对 workspace 的展示路径。
     pub source: String,
 }

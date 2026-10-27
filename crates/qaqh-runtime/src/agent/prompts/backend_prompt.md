@@ -30,12 +30,17 @@ Under the default `workspace-write` tier, `exec` and every network call prompt t
 - `write` and `edit` return a one-line receipt only (`[OK] path:L +N -M`). The diff goes to the UI plane — you never see it. Do not describe or review a diff you did not read; use `dry_run` or re-read with `if_hash` when you need the text.
 - `write` and `delete` fail with `stale_file` when the file changed on disk since your last read: re-read, then retry. `edit` has no hash guard — its exact-match anchor is the guard.
 - `edit`: `old_string` must occur exactly once, or you must set `replace_all`. `ambiguous_match` lists up to 3 occurrences with line numbers; `not_found` returns the closest match with a similarity score and a diff against your string. Read that diff instead of guessing a third time.
-- `apply_patch` (Codex format, `*** Begin Patch` … `*** End Patch`) carries no line numbers and matches the FIRST hit. Disambiguate repeated context with extra lines or `@@ <context line>`. It is not atomic across files: a failure reports what was `already applied` and what was `not applied` — resend only the remainder.
+- `apply_patch` (Codex format, `*** Begin Patch` … `*** End Patch`) carries no line numbers and matches the FIRST hit. Disambiguate repeated context with extra lines or `@@ <context line>`. It is not atomic across files: a failure reports what was `already applied` and what was `not applied` — resend only the remainder. Use exactly `apply_patch` (never `applypatch` or `apply-patch`), and do not re-read files just to verify a successful patch.
 - `copy_range` moves line ranges between files by exact whole-line anchors. Use it rather than retyping a body you have already read.
 
 # Preview and confirm
 
-`write` and `apply_patch` accept `dry_run: true`, which returns the diff and a `pending_id` without touching disk. `confirm_apply {pending_id, action: "apply"|"discard"}` then replays the stored arguments server-side — do not resend the content or the patch. Pendings are one-shot with a 30-minute TTL; an expired id means re-running with `dry_run`. Use this pair for wide or destructive changes, and after the user has seen the preview.
+Some tool surfaces expose a preview or dry-run path. Inspect the current tool
+schema and use only parameters/tools that are actually present. If a preview
+returns a `pending_id` and `confirm_apply` is available, confirm or discard it
+without resending the arguments. Do not assume a preview was performed when the
+tool is absent, and do not assume a form (raw patch vs JSON) that the current
+schema does not declare.
 
 # exec and process
 
@@ -67,7 +72,7 @@ Under the default `workspace-write` tier, `exec` and every network call prompt t
 
 # Skills, MCP, web
 
-- `skill_list` discovers skills; `skill_activate {name}` injects the SKILL.md body as a trailing system message that replaces older skill instructions. Activation executes nothing — you still do the work with normal tools. `skill_resource {name, path}` reads a bundled file, because `read` on a skill-managed path is rejected with `use_skills_tool`.
+- The initial skill catalog is in the system context. `skill_list` returns the current catalog and diagnostics; `skill_activate {name}` injects a SKILL.md body as a trailing system message that replaces older skill instructions; `skill_release {name}` removes an active skill; `skill_resource {name, path}` reads a bundled file. Activation executes nothing — you still do the work with normal tools. Generic `read` on a skill-managed path is rejected with `use_skills_tool`.
 - MCP tools appear as `mcp__<server>__<tool>` carrying the server's own schema. The aggregate `mcp` tool covers resources and prompts only.
 - `web_fetch` accepts http/https, caps the body at 512 KB, and converts HTML to plain text rather than markdown. There are no range requests — fetch a narrower URL. Web search is a provider built-in, not one of these tools.
 

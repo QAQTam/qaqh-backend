@@ -376,6 +376,7 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                 let workspace = qaqh_workspace::current_workspace();
                 agent.skills.set_workspace(std::path::Path::new(&workspace));
                 agent.skills.restore(&agent.session.skills.clone());
+                ensure_resumed_skill_catalog(agent);
                 // P0 cache fix: reuse the persisted frozen [Environment]
                 // annotation so the resumed context is byte-identical to the
                 // pre-restart prefix (new <today> date / empty file_state
@@ -467,6 +468,8 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
     agent.msg.push_system(qaqh_types::Message::system(
         &crate::agent::prompt::system_prompt_for_mode(&agent.session.tool_mode),
     ));
+    push_initial_skill_catalog(agent);
+    agent.bootstrap_skills();
     agent
         .msg
         .flush_meta(&agent.config.model, &agent.config.reasoning_effort);
@@ -512,6 +515,8 @@ pub fn create_session(agent: &mut AgentState) {
     agent.msg.push_system(qaqh_types::Message::system(
         &crate::agent::prompt::system_prompt_for_mode(&agent.session.tool_mode),
     ));
+    push_initial_skill_catalog(agent);
+    agent.bootstrap_skills();
     agent
         .msg
         .flush_meta(&agent.config.model, &agent.config.reasoning_effort);
@@ -553,6 +558,8 @@ pub fn create_session_with_session(agent: &mut AgentState) {
     agent.msg.push_system(qaqh_types::Message::system(
         &crate::agent::prompt::system_prompt_for_mode(&agent.session.tool_mode),
     ));
+    push_initial_skill_catalog(agent);
+    agent.bootstrap_skills();
     agent
         .msg
         .flush_meta(&agent.config.model, &agent.config.reasoning_effort);
@@ -560,6 +567,48 @@ pub fn create_session_with_session(agent: &mut AgentState) {
         "qaqh-agent: new session with preset seed {}",
         agent.session.session_id
     );
+}
+
+/// Persist the initial skill catalog immediately after the base system prompt.
+///
+/// This is creation-only: `MessageStore::push_system` is deliberately allowed
+/// only while history is empty. A resumed session must use the trailing path.
+fn push_initial_skill_catalog(agent: &mut AgentState) {
+    let catalog = agent.skills.initial_catalog_text();
+    if catalog.is_empty() {
+        return;
+    }
+    agent
+        .msg
+        .push_system(qaqh_types::Message::system(catalog));
+}
+
+/// Legacy sessions (created before catalog persistence) have no catalog
+/// system message. Add one at the trailing position, accepting a one-time
+/// prefix-cache miss; never front-insert into existing history.
+fn ensure_resumed_skill_catalog(agent: &mut AgentState) {
+    let catalog = agent.skills.initial_catalog_text();
+    if catalog.is_empty() || has_skill_catalog(&agent.msg) {
+        return;
+    }
+    agent
+        .msg
+        .push_trailing_system(qaqh_types::Message::system(catalog));
+}
+
+fn has_skill_catalog(store: &qaqh_message::MessageStore) -> bool {
+    store
+        .system_messages()
+        .iter()
+        .chain(store.trailing_messages().iter())
+        .any(|message| {
+        message.content.iter().any(|block| match block {
+            qaqh_types::ContentBlock::Text { text } => {
+                text.starts_with(qaqh_skills::SKILL_CATALOG_MARKER)
+            }
+            _ => false,
+        })
+        })
 }
 
 #[cfg(test)]
@@ -836,5 +885,71 @@ mod tests {
             side_effect_class: SideEffectClass::ReadOnly,
             intent_at_ms: now,
         }
+    }
+
+    #[test]
+    fn creation_persists_skill_catalog_after_base_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join(".agents/skills/catalog-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: catalog-skill\ndescription: catalog test skill\n---\n\nBODY",
+        )
+        .unwrap();
+        let mut agent = AgentState::new(qaqh_config::Config::default());
+        agent.msg = qaqh_message::MessageStore::new_ephemeral("test");
+        agent.skills = qaqh_skills::SkillContextManager::new(temp.path(), 100_000);
+        agent
+            .msg
+            .push_system(qaqh_types::Message::system("base prompt"));
+        push_initial_skill_catalog(&mut agent);
+
+        let system = agent.msg.system_messages();
+        assert_eq!(system.len(), 2);
+        assert!(system[1].content.iter().any(|block| match block {
+            qaqh_types::ContentBlock::Text { text } => {
+                text.starts_with(qaqh_skills::SKILL_CATALOG_MARKER)
+                    && text.contains("catalog-skill")
+            }
+            _ => false,
+        }));
+
+        // Creation-only helper is idempotent through MessageStore's exact-text
+        // deduplication; it must not append a second catalog.
+        push_initial_skill_catalog(&mut agent);
+        assert_eq!(agent.msg.system_messages().len(), 2);
+    }
+
+    #[test]
+    fn resumed_session_without_catalog_gets_one_trailing_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join(".agents/skills/resume-catalog-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: resume-catalog-skill\ndescription: resume catalog test\n---\n\nBODY",
+        )
+        .unwrap();
+        let mut agent = AgentState::new(qaqh_config::Config::default());
+        agent.msg = qaqh_message::MessageStore::new_ephemeral("test");
+        agent.skills = qaqh_skills::SkillContextManager::new(temp.path(), 100_000);
+        agent
+            .msg
+            .push_system(qaqh_types::Message::system("base prompt"));
+        agent.msg.push_user("hello");
+
+        ensure_resumed_skill_catalog(&mut agent);
+        assert_eq!(agent.msg.trailing_messages().len(), 1);
+        assert!(agent.msg.trailing_messages()[0].content.iter().any(|block| match block {
+            qaqh_types::ContentBlock::Text { text } => {
+                text.starts_with(qaqh_skills::SKILL_CATALOG_MARKER)
+                    && text.contains("resume-catalog-skill")
+            }
+            _ => false,
+        }));
+
+        ensure_resumed_skill_catalog(&mut agent);
+        assert_eq!(agent.msg.trailing_messages().len(), 1);
     }
 }
