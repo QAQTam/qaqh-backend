@@ -7,7 +7,7 @@ facts、Ringing v2 单流、工具执行、权限/沙箱、compact 和 provider 
 - License MIT OR Apache-2.0（`LICENSE-MIT` + `LICENSE-APACHE`，下游可任选）
 - 状态：beta / RC 前架构清理
 - 当前架构基线：[ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- 当前代码基线：`2.0.0`
+- 当前代码基线：`2.0.20261028`
 
 RC 前架构清理在 `clean` 分支推进，唯一派工单是
 [架构收敛施工单 §10](docs/spec-architecture-convergence.md#10-clean-rc-前砍刀与-crate-减负)。
