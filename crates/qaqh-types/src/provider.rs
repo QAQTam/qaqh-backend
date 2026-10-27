@@ -147,6 +147,40 @@ pub struct RetrySpec {
     pub idle_timeout_secs: u64,
 }
 
+/// Model-facing `apply_patch` representation. Default keeps the legacy JSON
+/// function so an old profile never changes wire shape implicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPatchInputFormat {
+    /// Legacy `apply_patch({patch, dry_run})` JSON function.
+    #[default]
+    FunctionJson,
+    /// Codex-compatible raw custom tool input.
+    CodexCustom,
+}
+
+/// Where Responses tool declarations are placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesToolLayout {
+    /// Top-level function/custom declarations.
+    #[default]
+    Flat,
+    /// One `functions` namespace containing all client tools.
+    FunctionsNamespace,
+}
+
+/// Grammar attached to the native `apply_patch` custom declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPatchCustomGrammar {
+    /// Unconstrained raw text.
+    #[default]
+    None,
+    /// Vendored Codex Lark grammar.
+    CodexLark,
+}
+
 /// Optional statements about one BYOK endpoint's request shape.
 ///
 /// Every field's default matches the protocol's own semantics, so an endpoint
@@ -257,6 +291,17 @@ pub struct EndpointCompat {
     #[serde(default)]
     pub responses_siwc_plan: bool,
 
+    // ── Native client tools (opt-in) ──
+    /// `apply_patch` model-facing input. Default: legacy JSON function.
+    #[serde(default)]
+    pub apply_patch_input_format: ApplyPatchInputFormat,
+    /// Responses declaration layout. Default: flat.
+    #[serde(default)]
+    pub responses_tool_layout: ResponsesToolLayout,
+    /// Grammar for the native custom declaration. Default: none.
+    #[serde(default)]
+    pub apply_patch_custom_grammar: ApplyPatchCustomGrammar,
+
     /// Per-endpoint retry policy override. `None` = transport defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetrySpec>,
@@ -319,6 +364,9 @@ impl Default for EndpointCompat {
             responses_search_function_alias: None,
             responses_echo_reasoning_content: true,
             responses_siwc_plan: false,
+            apply_patch_input_format: ApplyPatchInputFormat::FunctionJson,
+            responses_tool_layout: ResponsesToolLayout::Flat,
+            apply_patch_custom_grammar: ApplyPatchCustomGrammar::None,
             retry: None,
         }
     }

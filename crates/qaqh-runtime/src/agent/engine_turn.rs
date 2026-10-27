@@ -418,6 +418,26 @@ impl TurnEngine {
                 unix_ms(),
             )
             .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+        if matches!(before, qaqh_session::actor::TurnCoreState::Active { .. }
+            | qaqh_session::actor::TurnCoreState::Terminal {
+                terminal: qaqh_session::session_fact_v2::TurnTerminal::Cancelled, ..
+            })
+        {
+            let now = unix_ms();
+            ledger.ensure_lease(now, tool_ledger_lease_ms())
+                .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+            ledger.append_turn_finished(
+                EventId::new(generate_ulid()),
+                qaqh_session::session_fact_v2::TurnFinished {
+                    turn_id: ledger_turn,
+                    terminal: qaqh_session::session_fact_v2::TurnTerminal::Cancelled,
+                    usage: None,
+                    error: None,
+                    finished_at_ms: now,
+                },
+                now,
+            ).map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+        }
         Ok(match before {
             qaqh_session::actor::TurnCoreState::Active { .. } => TurnCancellation::Interrupted {
                 reason: qaqh_session::session_fact_v2::InterruptReason::CancelBeforeSeal,

@@ -24,6 +24,39 @@ pub struct ArgLineEstimate {
     pub lines_removed: u32,
 }
 
+/// Read-only raw custom patch progress. This is deliberately separate from
+/// `ArgLineEstimator`: custom text must never be interpreted as JSON. Parse
+/// errors freeze the last estimate; progress is not proof of completion and
+/// cannot authorize or execute a call.
+#[derive(Debug, Default)]
+pub struct RawPatchLineEstimator {
+    parser: StreamingPatchParser,
+    estimate: ArgLineEstimate,
+    frozen: bool,
+}
+
+impl RawPatchLineEstimator {
+    /// Feed only newly received UTF-8 text fragments, never full snapshots.
+    pub fn push_fragment(&mut self, fragment: &str) {
+        if self.frozen {
+            return;
+        }
+        if self.parser.push_delta(fragment).is_err() {
+            self.frozen = true;
+            return;
+        }
+        let stats = self.parser.stats();
+        self.estimate = ArgLineEstimate {
+            lines_added: u32::try_from(stats.lines_added).unwrap_or(u32::MAX),
+            lines_removed: u32::try_from(stats.lines_removed).unwrap_or(u32::MAX),
+        };
+    }
+
+    pub fn estimate(&self) -> ArgLineEstimate {
+        self.estimate
+    }
+}
+
 /// 一个参数键对行数的作用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
@@ -303,6 +336,39 @@ mod tests {
     const EDIT_ARGS: &str =
         r#"{"file_path":"src/a.rs","old_string":"x\ny","new_string":"X\nY\nZ\n"}"#;
     const PATCH_ARGS: &str = r#"{"patch":"*** Begin Patch\n*** Update File: a.txt\n@@\n-keep\n+KEEP\n context\n+plus\n*** End Patch\n"}"#;
+
+    #[test]
+    fn raw_patch_progress_matches_json_estimate_for_unicode_and_fragment_boundaries() {
+        let patch = "*** Begin Patch\n*** Update File: 示例.txt\n@@\n-旧 \"x\"\\路径\n+新 \"y\"\\路径\n context\n+额外\n*** End Patch\n";
+        let args = serde_json::json!({"patch": patch}).to_string();
+        let expected = estimate("apply_patch", &args);
+        assert_eq!(
+            expected,
+            ArgLineEstimate {
+                lines_added: 2,
+                lines_removed: 1
+            }
+        );
+        let chars: Vec<char> = patch.chars().collect();
+        for size in [1, 2, 7, 31, usize::MAX] {
+            let mut raw = RawPatchLineEstimator::default();
+            for chunk in chars.chunks(size) {
+                raw.push_fragment(&chunk.iter().collect::<String>());
+            }
+            assert_eq!(raw.estimate(), expected, "chunk size {size}");
+        }
+    }
+
+    #[test]
+    fn raw_patch_progress_freezes_on_invalid_input_without_claiming_completion() {
+        let mut raw = RawPatchLineEstimator::default();
+        raw.push_fragment("*** Begin Patch\n*** Add File: a.txt\n+one\n");
+        let before = raw.estimate();
+        assert_eq!(before.lines_added, 1);
+        raw.push_fragment("invalid line\n");
+        raw.push_fragment("+two\n*** End Patch\n");
+        assert_eq!(raw.estimate(), before);
+    }
 
     #[test]
     fn write_counts_content_lines() {
