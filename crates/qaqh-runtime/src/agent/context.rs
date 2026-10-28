@@ -127,11 +127,8 @@ impl RuntimeContext {
         source: ToolCallSource,
     ) -> ToolCallContext {
         let perm = PermissionLevel::from_u8(self.permission_level);
-        let sandbox_spec = SandboxSpec::for_permission(
-            self.workspace_root.clone(),
-            perm,
-            self.sandbox_enabled,
-        );
+        let sandbox_spec =
+            SandboxSpec::for_permission(self.workspace_root.clone(), perm, self.sandbox_enabled);
         ToolCallContext {
             call_id: call_id.into(),
             session_id: self.session_id.clone(),

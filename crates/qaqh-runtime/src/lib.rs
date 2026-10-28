@@ -15,6 +15,8 @@ pub mod timeline;
 mod timeline_store;
 
 pub use activity::SessionActivityTracker;
+#[doc(hidden)]
+pub use host_impl::MAILBOX_ACTIVITY_PARSE_COUNT;
 pub use registry::{AgentRegistry, cache_system_path, detect_os_info, detect_shell};
 pub use ringing::hub::RingingHub;
 pub use service::QaqhService;

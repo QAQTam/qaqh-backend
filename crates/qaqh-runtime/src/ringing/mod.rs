@@ -9,6 +9,7 @@ pub mod content_store;
 pub mod device_registry;
 pub mod hub;
 pub mod lease_store;
+pub(crate) mod operation_failure;
 pub mod orphan_seal;
 pub mod pending_store;
 pub mod persistence_policy;
@@ -23,6 +24,7 @@ pub(crate) use compact_mirror::CompactMirror;
 pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
 pub use device_registry::{DeviceRecord, DeviceRegistry, Scope};
 pub use lease_store::RingingLeaseStore;
+pub(crate) use operation_failure::publish_operation_failure;
 pub use pending_store::{ExistingCommandReceipt, PendingCommandStore};
 pub use v2::{
     V2BootstrapSnapshot, V2Envelope, V2HubError, V2ProjectionHub, V2StreamItem, V2Subscription,

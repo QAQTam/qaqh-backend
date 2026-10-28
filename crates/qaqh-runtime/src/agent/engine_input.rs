@@ -36,9 +36,7 @@ fn record_turn_started(ctx: &mut RingContext, turn_id: &str, input_id: &str) {
         mode: TurnMode::Normal,
         recovery_ref: None,
     };
-    if let Err(error) =
-        ledger.append_turn_started(EventId::new(generate_ulid()), payload, now)
-    {
+    if let Err(error) = ledger.append_turn_started(EventId::new(generate_ulid()), payload, now) {
         log::warn!("[INPUT] failed to append turn_started: {error}");
     }
 }

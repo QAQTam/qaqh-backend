@@ -85,6 +85,21 @@ impl ClientError {
         }
     }
 
+    /// 服务端已无法从 journal 补齐本客户端 cursor 之后的帧，必须重取快照
+    /// 把 cursor 重基线到 watermark（B1.3 遗留契约）。
+    ///
+    /// `TimelineGap` 是客户端 seq 连续性自检的结果；`StreamTerminated(code
+    /// == "journal_gap")` 是 daemon 对「空回放 + watermark 落后」的显式
+    /// reset。两者同语义：不做快照重基线的话，客户端会带着旧 cursor 重连，
+    /// 再次命中同一个 gap（journal_gap 甚至会无限循环）。
+    pub fn needs_gap_recovery(&self) -> bool {
+        match self {
+            Self::TimelineGap { .. } => true,
+            Self::StreamTerminated { code, .. } => code == "journal_gap",
+            _ => false,
+        }
+    }
+
     /// 是否被客户端白名单拒掉（请求未发出，不是 daemon 的答复）。
     pub fn is_method_not_allowed(&self) -> bool {
         matches!(self, Self::ServiceMethodNotAllowed { .. })
@@ -136,5 +151,22 @@ mod tests {
                 code: "lagged".into()
             })
         );
+    }
+
+    #[test]
+    fn only_journal_gap_termination_requires_snapshot_rebaseline() {
+        // 客户端自检的 seq 断层 → 重基线。
+        assert!(
+            ClientError::TimelineGap {
+                expected: 4,
+                received: 9
+            }
+            .needs_gap_recovery()
+        );
+        // daemon 显式 journal_gap reset → 重基线。
+        assert!(ClientError::stream_terminated(r#"{"code":"journal_gap"}"#).needs_gap_recovery());
+        // lagged / transport 等仍走 journal replay 重连，不重基线。
+        assert!(!ClientError::stream_terminated(r#"{"code":"lagged"}"#).needs_gap_recovery());
+        assert!(!ClientError::Transport("idle".into()).needs_gap_recovery());
     }
 }

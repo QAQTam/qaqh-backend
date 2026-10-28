@@ -126,6 +126,22 @@ fn should_deliver_timeline_live(
     !(live.entry.timeline_seq <= after || replayed.contains(&live.entry.timeline_seq))
 }
 
+/// 「watermark 落后 + 空回放」reset 判据（B1.3 遗留契约）。
+///
+/// journal 字节预算可以把超大单事件整体驱逐（`enforce_journal_budget`），
+/// 此后 `timeline_replay_since` 返回空窗口：带旧 cursor 重连的客户端拿不到
+/// 任何补帧，也无法从流上自证 gap——若被驱逐事件是最后一条，客户端将永远
+/// 停在旧 cursor 静默空转。此判据为真时入口必须下发
+/// `ringing.stream_terminated { code: "journal_gap" }`，客户端按
+/// StreamTerminated 语义重取快照把 cursor 重基线到 watermark。
+///
+/// 回放非空但起点已越过 `after + 1` 的「窗口内缺帧」**不在此判据内**：
+/// 那条路径由客户端 `cursor + 1` 连续性检查兜底（gap 注入测试
+/// `QAQH_TEST_TIMELINE_GAP` 明确依赖"流不关、客户端自检"的既有契约）。
+fn timeline_replay_lost_coverage(after: u64, watermark: u64, replay_len: usize) -> bool {
+    replay_len == 0 && after < watermark
+}
+
 pub(crate) async fn handle_timeline_events(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -166,6 +182,14 @@ pub(crate) async fn handle_timeline_events(
     let after = parse_timeline_cursor(last_event_id, &state.epoch);
     let rx = state.hub.subscribe_timeline();
     let replay = state.hub.timeline_replay_since(&session_id, after);
+    let journal_gap_lost = {
+        let watermark = state
+            .hub
+            .timeline_snapshot(&session_id)
+            .map(|snapshot| snapshot.watermark)
+            .unwrap_or(0);
+        timeline_replay_lost_coverage(after, watermark, replay.len())
+    };
     let replayed: HashSet<u64> = replay.iter().map(|e| e.timeline_seq).collect();
     let epoch = state.epoch.clone();
     let leases = state.leases.clone();
@@ -176,6 +200,21 @@ pub(crate) async fn handle_timeline_events(
     let (tx, rx_stream) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
         let mut gap_remaining = usize::from(inject_timeline_gap);
+        // B1.3 遗留契约：journal 已整体驱逐、补不了帧时，必须显式 reset，
+        // 而不是让客户端静默空转（见 `timeline_replay_lost_coverage`）。
+        if journal_gap_lost {
+            let ev = Event::default().event("ringing.stream_terminated").data(
+                serde_json::json!({
+                    "code": "journal_gap",
+                    "session_id": session_clone.as_str(),
+                    "cursor": after,
+                    "message": "journal no longer covers the client cursor (oversized event evicted); re-baseline from snapshot",
+                })
+                .to_string(),
+            );
+            let _ = tx.send(Ok(ev)).await;
+            return;
+        }
         for entry in replay {
             // Gap injection drops exactly one deliverable entry and keeps
             // streaming: the client's cursor stays at `after`, so the next
@@ -422,5 +461,24 @@ mod tests {
             ),
             "detach 后新连接同样截断"
         );
+    }
+
+    /// B1.3 遗留契约回归：journal 被超大单事件整体驱逐后，带旧 cursor 重连
+    /// 命中「空回放 + watermark 落后」→ 必须判定为失覆盖（下发
+    /// `journal_gap` reset）；其余形态（cursor 仍被覆盖、空闲、非空窗口）
+    /// 一律不触发，避免干扰 gap 注入与正常回放。
+    #[test]
+    fn journal_eviction_marks_stale_cursor_as_lost_coverage() {
+        // 巨型事件驱逐整个 journal：cursor=1 落后于 watermark=2，回放空。
+        assert!(timeline_replay_lost_coverage(1, 2, 0));
+        // cursor 已被快照 watermark 覆盖（recover_gap 重基线后再连）：空闲正常。
+        assert!(!timeline_replay_lost_coverage(2, 2, 0));
+        // 全新会话（无任何事件）。
+        assert!(!timeline_replay_lost_coverage(0, 0, 0));
+        // 回放非空：cursor+1 连续性由客户端自检，服务端不越权 reset。
+        assert!(!timeline_replay_lost_coverage(1, 2, 1));
+        assert!(!timeline_replay_lost_coverage(0, 8, 3));
+        // cursor 反超 watermark（同 epoch 下不应出现）：保守不判 gap。
+        assert!(!timeline_replay_lost_coverage(5, 2, 0));
     }
 }

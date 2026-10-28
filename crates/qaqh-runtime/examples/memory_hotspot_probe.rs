@@ -116,9 +116,122 @@ fn channels() {
     let b = start();
     let c = qaqh_runtime::agent::loop_core::LoopChannels::new();
     report("one empty worker channel pair", b);
+    // B1.1（暂缓）：空通道对固定税 ~15.8MB（4096×WriterEvent + 16384×WorkerCommand
+    // ×824/528B）。缩容被 registry 阻塞 send / worker 回调锁环阻塞，见
+    // docs/plan-memory-hotspots-remediation-2026-10-22.md §B1.1 决策记录。
+    println!(
+        "B1.1 baseline (blocked): channel fixed tax = {} bytes",
+        LIVE.load(Relaxed).saturating_sub(b.0)
+    );
     drop(c);
     report("after channel drop", b);
 }
+#[cfg(test)]
+mod channel_regressions {
+    use qaqh_runtime::agent::loop_core::LoopChannels;
+    use qaqh_runtime::agent::types::WriterEvent;
+    use std::sync::mpsc::{self, TrySendError};
+    use std::time::Duration;
+
+    fn event(n: usize) -> WriterEvent {
+        WriterEvent::TitleChanged {
+            session_id: "synthetic".into(),
+            title: n.to_string(),
+        }
+    }
+
+    #[test]
+    #[ignore = "B1.1: target capacity blocked on registry shutdown/backpressure safety"]
+    fn burst_is_bounded_and_reader_disconnect_releases_sender() {
+        let channels = LoopChannels::new();
+        let mut count = 0;
+        loop {
+            match channels.event_tx.try_send(event(count)) {
+                Ok(()) => count += 1,
+                Err(TrySendError::Full(_)) => break,
+                Err(TrySendError::Disconnected(_)) => panic!("reader disappeared"),
+            }
+        }
+        assert_eq!(count, 1024);
+        let tx = channels.event_tx.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            done_tx.send(tx.send(event(count)).is_err()).unwrap();
+        });
+        drop(channels.event_rx);
+        assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn burst_preserves_order_under_backpressure() {
+        let channels = LoopChannels::new();
+        let tx = channels.event_tx;
+        let sender = std::thread::spawn(move || {
+            for n in 0..2048 {
+                tx.send(event(n)).unwrap();
+            }
+        });
+        for n in 0..2048 {
+            match channels
+                .event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+            {
+                WriterEvent::TitleChanged { title, .. } => assert_eq!(title, n.to_string()),
+                _ => panic!("unexpected event"),
+            }
+        }
+        sender.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod journal_regressions {
+    use super::{MIB, gauge, open};
+    use qaqh_domain::{TimelineBlockKind, TimelineTool};
+    use qaqh_runtime::TimelineAppender;
+
+    #[test]
+    fn journal_counts_checkpoint_argument_and_nested_tool_display() {
+        let mut appender = TimelineAppender::new();
+        open(&mut appender);
+        appender
+            .checkpoint_block("s", "t1", 0, "b", "x".repeat(MIB))
+            .unwrap();
+        let after_checkpoint = gauge(
+            &appender.memory_components(),
+            "ringing.timeline.replay_journal",
+        );
+        assert!(after_checkpoint >= MIB as u64);
+        let tool: TimelineTool = serde_json::from_value(serde_json::json!({
+            "tool_call_id":"c", "name":"edit", "state":"running",
+            "args_json":"a".repeat(MIB),
+            "display":{"body":{"kind":"diff","unified":"d".repeat(MIB),"files":["f"]}}
+        }))
+        .unwrap();
+        appender
+            .open_block(
+                "s",
+                "t1",
+                0,
+                "tool",
+                TimelineBlockKind::Tool,
+                Some(tool.clone()),
+            )
+            .unwrap();
+        appender.replace_tool("s", "t1", 0, "tool", tool).unwrap();
+        let total = gauge(
+            &appender.memory_components(),
+            "ringing.timeline.replay_journal",
+        );
+        assert!(
+            total >= after_checkpoint + 4 * MIB as u64,
+            "nested tool bodies must be counted for both entries: {total}"
+        );
+    }
+}
+
 fn journal() {
     let mut a = qaqh_runtime::TimelineAppender::new();
     open(&mut a);
@@ -143,7 +256,7 @@ fn journal() {
         .sum();
     println!("actual checkpoint replay arg bytes={args}");
     assert_eq!(args, 8 * MIB);
-    assert_eq!(gauge(&rows, "ringing.timeline.replay_journal"), 0);
+    assert!(gauge(&rows, "ringing.timeline.replay_journal") >= 8 * MIB as u64);
     drop(replay);
     a.seal_block("s", "t1", 0, "b").unwrap();
     a.seal_round("s", "t1", 0, true).unwrap();
@@ -181,6 +294,7 @@ fn content() {
     let b = start();
     let id = s.put("s", "text/plain", vec![b'a'; 4 * MIB], false);
     report("persisted 4MiB content", b);
+    assert_eq!(gauge(&s.memory_components(), "ringing.content_store.loaded_bodies"), 0);
     let body = s.get("s", &id).unwrap();
     report("GET content clone held", b);
     drop(body);
@@ -261,6 +375,8 @@ fn reader() {
             tail.capacity(),
             std::mem::size_of::<qaqh_session::session_fact_v2::SessionFact>()
         );
+        assert_eq!(tail.len(), 1);
+        assert!(tail.capacity() <= 4);
         report(
             &format!("reader ONE fact range n={n}, returned={}", tail.len()),
             b,
@@ -351,6 +467,7 @@ fn v2() {
         .subscribe(root.path(), id.session_id.as_str(), None)
         .unwrap();
     report("V2 subscribe(None) at current cursor", b2);
+    assert!(PEAK.load(Relaxed).saturating_sub(b2.0) < MIB, "zero-replay subscription must not rebuild historical projections");
     drop(h);
     report("V2 hub drop (subscription still alive)", b);
 }
@@ -523,13 +640,27 @@ fn persist() {
     report("21-byte transient event with 4MiB sealed history", b);
     let metadata = std::fs::metadata(&path).unwrap();
     let rewritten = metadata.modified().unwrap() != before;
-    let disk = std::fs::read_to_string(path).unwrap();
+    let disk = std::fs::read_to_string(&path).unwrap();
     println!(
         "transient rewrote snapshot={rewritten}, snapshot_bytes={}, persisted marker={}",
         metadata.len(),
         disk.contains("transient-only-marker")
     );
-    assert!(rewritten && disk.contains("transient-only-marker"));
+    // B1.4 契约：瞬态事件不触发旧史全量重写（热路径零持久化）。
+    assert!(!rewritten && !disk.contains("transient-only-marker"),
+        "transient-only event must not rewrite the snapshot on the hot path");
+    // 显式同步边界仍 fail-closed：flush 排空瞬态集合后必须完整落盘。
+    hub.flush_timeline_persistence();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let flushed = metadata.modified().unwrap() != before;
+    let disk = std::fs::read_to_string(&path).unwrap();
+    println!(
+        "after flush rewrote snapshot={flushed}, snapshot_bytes={}, persisted marker={}",
+        metadata.len(),
+        disk.contains("transient-only-marker")
+    );
+    assert!(flushed && disk.contains("transient-only-marker"),
+        "explicit flush boundary must persist the transient tail");
 }
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "all".into());

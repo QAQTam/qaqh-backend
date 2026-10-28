@@ -7,12 +7,11 @@ use serde::{Deserialize, Serialize};
 pub const DATA_ROOT_MARKER: &str = ".qaqh-data-root.json";
 
 /// 对外产品版本号（User-Agent 使用）：不带 rc/预发布后缀。
-/// 跟随 cargo 包版本（`CARGO_PKG_VERSION`，如 `2.0.0-beta.2`）去掉预发布后缀后的
-/// 正式部分——UA 里暴露的是面向服务的稳定版本标识，二者由测试
-/// `ua_version_tracks_package_version` 强制保持一致。
+/// 由 `just` 通过 `QAQH_BUILD_VERSION` 注入；直接 cargo build 时退回
+/// `CARGO_PKG_VERSION`。UA 里暴露的是面向服务的稳定版本标识，测试强制一致。
 macro_rules! qaqh_ua_version {
     () => {
-        "2.0.20261028"
+        env!("QAQH_BUILD_VERSION")
     };
 }
 
@@ -519,11 +518,11 @@ mod data_root_tests {
     }
 
     #[test]
-    fn ua_version_tracks_package_version() {
-        let package_version = env!("CARGO_PKG_VERSION");
-        let release_version = package_version
+    fn ua_version_tracks_build_version() {
+        let build_version = env!("QAQH_BUILD_VERSION");
+        let release_version = build_version
             .split_once('-')
-            .map_or(package_version, |(version, _)| version);
+            .map_or(build_version, |(version, _)| version);
         assert_eq!(qaqh_ua_version!(), release_version);
     }
 

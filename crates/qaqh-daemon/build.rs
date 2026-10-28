@@ -2,6 +2,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=QAQH_BUILD_ID");
+    println!("cargo:rerun-if-env-changed=QAQH_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=QAQH_CHANNEL");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");
@@ -20,6 +21,12 @@ fn main() {
             env!("CARGO_PKG_VERSION").to_string()
         });
     println!("cargo:rustc-env=QAQH_BUILD_ID={build_id}");
+
+    let build_version = std::env::var("QAQH_BUILD_VERSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    println!("cargo:rustc-env=QAQH_BUILD_VERSION={build_version}");
 }
 
 /// Embed the product icon (and basic file metadata) into Windows executables.

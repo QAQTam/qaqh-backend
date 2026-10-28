@@ -77,7 +77,6 @@ impl RingingHub {
         changed
     }
 
-
     /// 优雅关闭收尾：对所有已知 timeline seed 执行孤儿收尾（timeline）。
     /// 正常路径下 worker 已优雅退出并自行 seal（terminal intent 同步落盘），
     /// 此处兜底 worker 超时被杀 / 未收尾的场景——退出时不留孤儿，安装器

@@ -52,6 +52,27 @@ pub struct CollectorBatch {
     pub events: Vec<CollectorEvent>,
 }
 
+/// Receiver plus a cancellation hook for the producer-side bridge.
+/// Dropping it stops the bridge even if no further events arrive.
+pub struct CollectorSubscription {
+    receiver: std::sync::mpsc::Receiver<CollectorBatch>,
+    stop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl CollectorSubscription {
+    pub fn new(receiver: std::sync::mpsc::Receiver<CollectorBatch>, stop: impl FnOnce() + Send + 'static) -> Self {
+        Self { receiver, stop: Some(Box::new(stop)) }
+    }
+
+    pub fn receiver(&self) -> &std::sync::mpsc::Receiver<CollectorBatch> { &self.receiver }
+}
+
+impl Drop for CollectorSubscription {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() { stop(); }
+    }
+}
+
 /// Result of creating an in-process subagent actor.
 ///
 /// The actor is not yet running its task. The caller must durably record the
@@ -571,7 +592,7 @@ pub trait SubagentHost: Send + Sync {
 
     /// 订阅某 seed 的实时事件批次流（等价 SSE 单条连接；宿主内部按 seed
     /// 过滤后以 `CollectorBatch` 聚合）。返回 std mpsc receiver，供 std 线程消费。
-    fn subscribe(&self, session_id: &str) -> std::sync::mpsc::Receiver<CollectorBatch>;
+    fn subscribe(&self, session_id: &str) -> CollectorSubscription;
 
     /// 进程内读取外置大内容（等价 HTTP `download_content`）。
     fn download_content(&self, session_id: &str, reference: &ContentRef)
