@@ -186,7 +186,7 @@ pub(crate) async fn handle_pair(State(state): State<AppState>, body: Bytes) -> R
             device_id,
             device_token,
             scope: scope_str(grant.scope).to_string(),
-            daemon_version: env!("CARGO_PKG_VERSION").into(),
+            daemon_version: env!("QAQH_BUILD_VERSION").into(),
             protocol_version: RINGING_V2_VERSION,
         },
     )

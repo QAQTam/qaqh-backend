@@ -137,7 +137,7 @@ impl TimelineStream {
                     // reconnect resumes from a covered position. Without this,
                     // Last-Event-ID never advances and the client reconnects
                     // into the same gap forever (mirrors TS `onGap`).
-                    if matches!(err, ClientError::TimelineGap { .. }) {
+                    if err.needs_gap_recovery() {
                         match self.recover_gap().await {
                             Ok(()) => log::info!(
                                 "[qaqh-client] timeline {} gap recovered at cursor {}",
