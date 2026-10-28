@@ -157,8 +157,8 @@ pub(crate) fn maybe_emit_block_checkpoint(
     turn_id: &str,
     round_num: u32,
     block_id: &str,
-    kind: qaqh_domain::RoundDeltaKind,
-    round_text: &str,
+    _kind: qaqh_domain::RoundDeltaKind,
+    _round_text: &str,
     block_text: &str,
     tokens_since_checkpoint: &mut u32,
     last_checkpoint_at: &mut Instant,
@@ -171,15 +171,6 @@ pub(crate) fn maybe_emit_block_checkpoint(
     }
     *tokens_since_checkpoint = 0;
     *last_checkpoint_at = Instant::now();
-    emitter.emit_domain(qaqh_domain::DomainEvent::Conversation(
-        qaqh_domain::ConversationEvent::BlockCheckpoint {
-            turn_id: turn_id.to_string(),
-            round_num,
-            kind,
-            text: round_text.to_string(),
-            char_count: round_text.chars().count() as u32,
-        },
-    ));
     emitter.emit_timeline(qaqh_domain::TimelineIntent::BlockCheckpoint {
         turn_id: turn_id.to_string(),
         round_num,
@@ -698,16 +689,7 @@ pub(crate) fn gate_request(
                         block_id: block_id.clone(),
                         delta: d.clone(),
                     });
-                ctx.emitter
-                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                        qaqh_domain::ConversationEvent::RoundDelta {
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            kind: qaqh_domain::RoundDeltaKind::Answering,
-                            delta: d.clone(),
-                        },
-                    ));
-                // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
+                // Timeline checkpoint carries only the current block's text.
                 emit_stream_block_checkpoint(
                     ctx.emitter,
                     turn_id,
@@ -750,16 +732,7 @@ pub(crate) fn gate_request(
                         block_id: block_id.clone(),
                         delta: text.clone(),
                     });
-                ctx.emitter
-                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                        qaqh_domain::ConversationEvent::RoundDelta {
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            kind: qaqh_domain::RoundDeltaKind::Thinking,
-                            delta: text.clone(),
-                        },
-                    ));
-                // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
+                // Timeline checkpoint carries only the current block's text.
                 emit_stream_block_checkpoint(
                     ctx.emitter,
                     turn_id,

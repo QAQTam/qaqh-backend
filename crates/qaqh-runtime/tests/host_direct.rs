@@ -32,33 +32,47 @@ use qaqh_subagent::{
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Shared per-process test environment: unique temp root, `QAQH_DATA_DIR`,
+/// workspace registry and `SessionManager`. `WorkspaceStore`/`SessionManager`
+/// are process-wide singletons that panic on re-init, so every test in this
+/// binary must go through this memoized helper instead of setting up its own.
+fn shared_test_env() -> std::path::PathBuf {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-host-direct-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).expect("test setup must not fail");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).expect("test setup must not fail");
+        unsafe {
+            std::env::set_var("QAQH_DATA_DIR", &data);
+        }
+        qaqh_workspace::set_workspace(&ws.to_string_lossy());
+        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+        root
+    })
+    .clone()
+}
+
 #[test]
 fn qaqh_service_host_spawn_subscribe_send_close() {
     let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
-    let root = std::env::temp_dir().join(format!(
-        "qaqh-host-direct-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let root = shared_test_env();
     let data = root.join("data");
-    std::fs::create_dir_all(&data).expect("test setup must not fail");
-    let ws = root.join("ws");
-    std::fs::create_dir_all(&ws).expect("test setup must not fail");
-    unsafe {
-        std::env::set_var("QAQH_DATA_DIR", &data);
-    }
-    qaqh_workspace::set_workspace(&ws.to_string_lossy());
 
     // ── 阶段 1：未 attach hub，宿主能力优雅降级（不 panic / 不阻塞）。──
-    qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
     let service = QaqhService::init(qaqh_session::SessionManager::global());
     let host: &dyn SubagentHost = &service;
     let nohub_rx = host.subscribe("no-hub-seed");
     assert!(
-        nohub_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        nohub_rx.receiver().recv_timeout(Duration::from_millis(200)).is_err(),
         "subscribe without hub must not block forever"
     );
 
@@ -363,6 +377,14 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
 
     let v2 = Arc::new(V2ProjectionHub::new("qaqh-host-direct-test"));
     service.attach_v2_projection(v2.clone());
+    // No events after subscribing: every drop must synchronously stop its
+    // bridge, rather than waiting for a future send to observe disconnection.
+    for _ in 0..100 {
+        let subscription = host.subscribe(&sub_seed);
+        assert_eq!(v2.subscriber_count_for_test(&sub_canonical.session_id), 1);
+        drop(subscription);
+        assert_eq!(v2.subscriber_count_for_test(&sub_canonical.session_id), 0);
+    }
     let rx = host.subscribe(&sub_seed);
     let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
     let fact = SessionFact {
@@ -392,6 +414,7 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let batch = loop {
         let batch = rx
+            .receiver()
             .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             .expect("subscribe must deliver the seed's event batch");
         if batch
@@ -1168,4 +1191,47 @@ fn steer_and_interject_are_canonical_safe_point_deliveries() {
 
     host.close(&child).expect("close child");
     host.close(&parent).expect("close parent");
+}
+
+/// B2.3 收尾回归：无 targets 的 `wait_agent` 空等必须只解析一次 canonical
+/// 日志（baseline）。修复前空等按 25ms 节拍重开 reader 重验整个已提交前缀
+/// （600ms ≈ 25 次解析，断言为红）；修复后等待 commit 通知，恰 1 次。
+#[test]
+fn wait_agent_empty_wait_parses_canonical_log_once() {
+    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _root = shared_test_env();
+
+    let service = QaqhService::init(qaqh_session::SessionManager::global());
+    let identity = qaqh_session::SessionManager::global()
+        .allocate_session(None)
+        .expect("allocate idle canonical session");
+    let caller = identity.session_id.as_str().to_string();
+
+    let no_cancel = || false;
+    let before = qaqh_runtime::MAILBOX_ACTIVITY_PARSE_COUNT
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let outcome = service
+        .wait_agent(WaitAgentRequest {
+            caller_session_id: &caller,
+            timeout: Duration::from_millis(600),
+            should_cancel: &no_cancel,
+            targets: &[],
+        })
+        .expect("empty wait must not fail");
+    let after = qaqh_runtime::MAILBOX_ACTIVITY_PARSE_COUNT
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    assert_eq!(
+        outcome,
+        WaitAgentOutcome::TimedOut {
+            activity_fact_seq: 0
+        },
+        "an idle canonical session must time out with no activity"
+    );
+    assert_eq!(
+        after - before,
+        1,
+        "empty wait_agent must parse the mailbox exactly once (baseline); \
+         per-tick polling re-validates the committed prefix every 25ms"
+    );
 }

@@ -6,7 +6,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -14,15 +14,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    reader::scan_committed_facts,
+    reader::CommittedFactReader,
     types::{
         AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, UPGRADE_FENCE_SCHEMA, UpgradeFence,
         UpgradeState, WRITER_FENCE_SCHEMA, WriterFence, WriterId, WriterLease,
     },
 };
-use crate::session_fact_v2::{
-    EventId, FactPayload, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError,
-};
+use crate::session_fact_v2::{FactPayload, MAX_SAFE_FACT_SEQ, SessionFact, ValidationError};
 
 pub const EVENTS_FILE: &str = "events.jsonl";
 pub const EVENTS_LOCK_FILE: &str = "events.lock";
@@ -97,14 +95,6 @@ enum LogState {
     CommitRecoveryRequired(String),
     ReadOnlyUpgradeRequired(String),
     Tombstone,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CommittedPrefix {
-    fact_seq: u64,
-    offset: u64,
-    last_event_id: Option<EventId>,
-    contains_tombstone: bool,
 }
 
 /// One session's canonical log. The struct does not hold the OS lock between
@@ -451,7 +441,21 @@ impl CanonicalLog {
             self.state = LogState::CommitRecoveryRequired(message.clone());
             return Err(CanonicalError::CommitRecoveryRequired(message));
         }
+        // Keep the sparse prefix index (B2.1 phase2) in lockstep with the
+        // durable append; a no-op when no validated index is rooted here.
+        super::offset_index::advance_append(
+            &self.session_dir,
+            &self.session_id,
+            &self.log_id,
+            &next_commit,
+            &encoded,
+            &fact.event_id,
+        );
         self.commit = next_commit;
+        // Durable marker advanced: wake waiters blocked on commit
+        // notifications (B2.3). The critical section is a counter bump plus
+        // notify_all, safe under the canonical writer lock.
+        super::notify::notify_commit(&self.session_dir);
         if is_tombstone {
             self.state = LogState::Tombstone;
         }
@@ -624,48 +628,22 @@ impl CanonicalLog {
     }
 
     fn validate_committed_prefix(&self) -> Result<bool, CanonicalError> {
-        let committed_offset = self.commit.committed_offset;
-        let file = File::open(self.events_path())?;
-        let mut bytes = Vec::new();
-        file.take(committed_offset).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != committed_offset {
+        let mut contains_tombstone = false;
+        let reader = CommittedFactReader::open_with_visitor(
+            &self.session_dir,
+            self.session_id.clone(),
+            self.log_id.clone(),
+            |fact| {
+                contains_tombstone |= matches!(fact.payload, FactPayload::SessionDeleted(_));
+                Ok(())
+            },
+        )?;
+        if reader.committed() != &self.commit {
             return Err(CanonicalError::CommitRecoveryRequired(
-                "events.jsonl changed while validating committed prefix".into(),
+                "commit marker changed while validating prefix".into(),
             ));
         }
-        let prefix = self.scan_complete_facts(&bytes)?;
-        if prefix.fact_seq != self.commit.committed_fact_seq
-            || prefix.offset != self.commit.committed_offset
-            || prefix.last_event_id != self.commit.last_barrier_event_id
-        {
-            return Err(CanonicalError::CommitRecoveryRequired(format!(
-                "commit marker does not match committed prefix: marker=({}, {}, {:?}), prefix=({}, {}, {:?})",
-                self.commit.committed_fact_seq,
-                self.commit.committed_offset,
-                self.commit.last_barrier_event_id,
-                prefix.fact_seq,
-                prefix.offset,
-                prefix.last_event_id
-            )));
-        }
-        Ok(prefix.contains_tombstone)
-    }
-
-    fn scan_complete_facts(&self, bytes: &[u8]) -> Result<CommittedPrefix, CanonicalError> {
-        let mut last_event_id = None;
-        let mut contains_tombstone = false;
-        let fact_seq = scan_committed_facts(bytes, &self.session_id, &self.log_id, |fact| {
-            last_event_id = Some(fact.event_id.clone());
-            contains_tombstone |= matches!(fact.payload, FactPayload::SessionDeleted(_));
-            Ok(())
-        })?;
-
-        Ok(CommittedPrefix {
-            fact_seq,
-            offset: bytes.len() as u64,
-            last_event_id,
-            contains_tombstone,
-        })
+        Ok(contains_tombstone)
     }
 
     fn lock_exclusive(&self) -> Result<File, CanonicalError> {

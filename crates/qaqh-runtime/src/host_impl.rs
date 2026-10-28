@@ -9,10 +9,12 @@
 //! 不再建立 HTTP/SSE 连接。事件订阅直接走 hub 进程内 broadcast。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use qaqh_ringing::RingingWorkerCommandEnvelope;
+use qaqh_session::canonical::notify;
 use qaqh_session::canonical::{
     CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE, generate_ulid,
 };
@@ -35,16 +37,24 @@ use qaqh_subagent::{
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
     BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest, CollectorBatch,
-    CollectorEvent, ContentRef, InterruptAgentRequest, InterruptedAgent, ListedAgent,
-    ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage,
-    SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost, TaskBoardArtifact,
-    TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest, TaskCloseAction,
-    TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction, TaskUpdateRequest,
-    WaitAgentOutcome, WaitAgentRequest,
+    CollectorEvent, CollectorSubscription, ContentRef, InterruptAgentRequest, InterruptedAgent,
+    ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
+    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
+    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
+    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
+    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
 };
 
 use super::QaqhService;
 use crate::ringing::V2StreamItem;
+
+/// Observability counter: number of `mailbox_activity_after` invocations.
+///
+/// Each invocation re-opens the canonical reader and re-validates the
+/// committed prefix, so this doubles as an "idle wait I/O" probe. Used by
+/// the B2.3 regression (empty `wait_agent` must parse exactly once) and
+/// for diagnostics; not part of any wire contract.
+pub static MAILBOX_ACTIVITY_PARSE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 impl QaqhService {
     /// Read mailbox activity strictly after `after_fact_seq`.
@@ -58,6 +68,7 @@ impl QaqhService {
         session_id: &str,
         after_fact_seq: Option<u64>,
     ) -> Result<(u64, u64), String> {
+        MAILBOX_ACTIVITY_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
         let session_dir = self
             .sessions
             .session_dir_for_id(session_id)?
@@ -357,24 +368,47 @@ impl SubagentHost for QaqhService {
             targets,
         } = request;
         if !targets.is_empty() {
-            return self.wait_for_agent_outcomes(caller_session_id, timeout, should_cancel, targets);
+            return self.wait_for_agent_outcomes(
+                caller_session_id,
+                timeout,
+                should_cancel,
+                targets,
+            );
         }
         let (baseline_activity, mut cursor) =
             self.mailbox_activity_after(caller_session_id, None)?;
+        let wait_dir = self
+            .sessions
+            .session_dir_for_id(caller_session_id)?
+            .ok_or_else(|| {
+                format!("mailbox session {caller_session_id} has no canonical directory")
+            })?;
+        // Block on durable-commit notifications instead of re-opening and
+        // re-validating the canonical log every 25ms (B2.3). The generation
+        // captured *after* the baseline read closes the lost-wakeup race: a
+        // commit racing the baseline is either already reflected in `cursor`
+        // or bumps the generation past `observed`, so the first loop
+        // iteration re-checks immediately.
+        let mut observed = notify::commit_generation(&wait_dir);
         let deadline = Instant::now() + timeout;
         loop {
             if should_cancel() {
                 return Ok(WaitAgentOutcome::Cancelled);
             }
-            let now = Instant::now();
-            if now >= deadline {
+            if Instant::now() >= deadline {
                 return Ok(WaitAgentOutcome::TimedOut {
                     activity_fact_seq: baseline_activity,
                 });
             }
-            let remaining = deadline.saturating_duration_since(now);
-            std::thread::sleep(remaining.min(Duration::from_millis(25)));
-
+            // `false` means no commit notification arrived before the
+            // deadline: return without re-parsing (the acceptance contract is
+            // zero I/O for an empty wait).
+            if !notify::wait_for_commit_change(&wait_dir, observed, deadline) {
+                return Ok(WaitAgentOutcome::TimedOut {
+                    activity_fact_seq: baseline_activity,
+                });
+            }
+            observed = notify::commit_generation(&wait_dir);
             let (activity_fact_seq, committed_fact_seq) =
                 self.mailbox_activity_after(caller_session_id, Some(cursor))?;
             cursor = committed_fact_seq;
@@ -529,17 +563,17 @@ impl SubagentHost for QaqhService {
         self.registry()?.send_ringing(session_id, &env)
     }
 
-    fn subscribe(&self, session_id: &str) -> mpsc::Receiver<CollectorBatch> {
+    fn subscribe(&self, session_id: &str) -> CollectorSubscription {
         let (tx, rx) = mpsc::channel::<CollectorBatch>();
         let Some(v2) = self.v2_hub.get().cloned() else {
             log::error!("[SUBAGENT-HOST] subscribe {session_id}: v2 projection hub not attached");
-            return rx;
+            return CollectorSubscription::new(rx, || {});
         };
         let session_dir = match self.sessions.session_dir_for_id(session_id).ok().flatten() {
             Some(dir) => dir,
             None => {
                 log::error!("[SUBAGENT-HOST] subscribe {session_id}: session dir not found");
-                return rx;
+                return CollectorSubscription::new(rx, || {});
             }
         };
         // since_cursor = None → 只收 live 事件，与 v1 桥接的订阅时机语义一致。
@@ -547,17 +581,21 @@ impl SubagentHost for QaqhService {
             Ok(sub) => sub,
             Err(error) => {
                 log::error!("[SUBAGENT-HOST] subscribe {session_id}: v2 subscribe failed: {error}");
-                return rx;
+                return CollectorSubscription::new(rx, || {});
             }
         };
-        std::thread::Builder::new()
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let bridge = std::thread::Builder::new()
             .name(format!("qaqh-subagent-sub-{session_id}"))
             .spawn(move || {
                 // hub-fact-bus spec 阶段 2.2：v2 单流桥接。广播 Receiver 是
                 // Send，用 try_recv 轮询（无 block_on 依赖），聚合到 std mpsc。
                 loop {
-                    match sub.try_next() {
-                        Some(V2StreamItem::Event(envelope)) => {
+                    if stop_rx.try_recv().is_ok() {
+                        break;
+                    }
+                    match sub.try_next_status() {
+                        Ok(Some(V2StreamItem::Event(envelope))) => {
                             if let Some(event) = collector_event_from_projection(&envelope.payload)
                             {
                                 let batch = CollectorBatch {
@@ -571,13 +609,21 @@ impl SubagentHost for QaqhService {
                         }
                         // Lagged/流终止：与 v1 桥接一致直接退出（收集器有
                         // 超时与 Disconnected 兜底）。
-                        Some(V2StreamItem::Reset(_)) => break,
-                        None => std::thread::sleep(Duration::from_millis(20)),
+                        Ok(Some(V2StreamItem::Reset(_))) | Err(()) => break,
+                        Ok(None) => match stop_rx.recv_timeout(Duration::from_millis(20)) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        },
                     }
                 }
             })
             .ok();
-        rx
+        CollectorSubscription::new(rx, move || {
+            let _ = stop_tx.send(());
+            if let Some(bridge) = bridge {
+                let _ = bridge.join();
+            }
+        })
     }
 
     fn download_content(
@@ -585,25 +631,43 @@ impl SubagentHost for QaqhService {
         session_id: &str,
         reference: &ContentRef,
     ) -> Result<Vec<u8>, String> {
-        let hub = self
-            .hub
-            .get()
-            .ok_or_else(|| "Ringing hub not attached".to_string())?;
-        let entry = hub
-            .get_content(session_id, &reference.content_id)
-            .ok_or_else(|| format!("content {} not found", reference.content_id))?;
+        let canonical_ref = canonical_content_ref(&reference.content_id)?;
+        let expected = reference
+            .sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&reference.sha256);
+        let bytes = if let Some(entry) = self.hub.get().and_then(|hub| {
+            let id = reference
+                .content_id
+                .strip_prefix("sha256:")
+                .unwrap_or(&reference.content_id);
+            hub.get_content(session_id, id)
+        }) {
+            entry.bytes
+        } else {
+            let session_dir = self
+                .sessions
+                .session_dir_for_id(session_id)?
+                .ok_or_else(|| format!("content session {session_id} not found"))?;
+            let store = qaqh_session::canonical::SessionBlobStore::open(session_dir)
+                .map_err(|error| format!("open canonical blob store: {error}"))?;
+            store
+                .get(&canonical_ref)
+                .map_err(|error| format!("content {} not found: {error}", reference.content_id))?
+        };
         let digest = {
             use sha2::Digest;
-            let hash = sha2::Sha256::digest(&entry.bytes);
+            let hash = sha2::Sha256::digest(&bytes);
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
         };
-        if !digest.eq_ignore_ascii_case(&reference.sha256) {
+        let content_hash = canonical_ref.hash().as_str().trim_start_matches("sha256:");
+        if !digest.eq_ignore_ascii_case(expected) || !digest.eq_ignore_ascii_case(content_hash) {
             return Err(format!(
                 "content digest mismatch for {}: expected {}, received {digest}",
                 reference.content_id, reference.sha256
             ));
         }
-        Ok(entry.bytes)
+        Ok(bytes)
     }
 
     fn close(&self, session_id: &str) -> Result<(), String> {
@@ -971,9 +1035,7 @@ impl QaqhService {
             // 锁必须在 sleep 之前释放：`finish_subagent` 由 collector 线程持锁写入。
             let all_finished = {
                 let registry = self.registry()?;
-                agent_ids
-                    .iter()
-                    .all(|id| registry.subagent_outcome(id).is_some())
+                agent_ids.iter().all(|id| registry.has_subagent_outcome(id))
             };
             if all_finished {
                 return Ok(WaitAgentOutcome::Activity {
@@ -986,7 +1048,11 @@ impl QaqhService {
                     activity_fact_seq: 0,
                 });
             }
-            std::thread::sleep(deadline.saturating_duration_since(now).min(Duration::from_millis(25)));
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(now)
+                    .min(Duration::from_millis(25)),
+            );
         }
     }
 

@@ -24,7 +24,6 @@ pub(crate) trait LifecyclePort {
         session_id: &str,
     ) -> bool;
     fn reload_config(&self, agent: &mut AgentState, cancel: &CancelToken);
-
 }
 
 /// Default in-process lifecycle port. It delegates to the existing runtime
@@ -74,7 +73,6 @@ impl LifecyclePort for RuntimeLifecyclePort {
     fn reload_config(&self, agent: &mut AgentState, cancel: &CancelToken) {
         self.session.reload_config(agent, cancel);
     }
-
 }
 
 #[cfg(test)]

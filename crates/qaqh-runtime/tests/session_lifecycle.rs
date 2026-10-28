@@ -6,7 +6,7 @@
 //!
 //! * create_session_emits_session_state — pure session creation
 //! * send_message_triggers_turn_lifecycle — full frontend simulation:
-//!   create session → send text → verify TurnStarted / RoundDelta / terminal
+//!   create session → send text → verify TurnStarted / timeline text / terminal
 //! * ringing_send_is_not_dropped_during_a_session_switch
 
 mod common;
@@ -230,17 +230,24 @@ fn expect(
 
 /// 事件收集线程：解析 Ringing worker 事件帧并转发。
 fn spawn_event_reader(oread: os_pipe::PipeReader) -> std::sync::mpsc::Receiver<RingingEvent> {
+    spawn_event_reader_with_timeline(oread).0
+}
+
+fn spawn_event_reader_with_timeline(
+    oread: os_pipe::PipeReader,
+) -> (std::sync::mpsc::Receiver<RingingEvent>, std::sync::mpsc::Receiver<qaqh_domain::TimelineIntent>) {
     let (tx, rx) = std::sync::mpsc::channel::<RingingEvent>();
+    let (timeline_tx, timeline_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(oread).lines().map_while(Result::ok) {
-            if let Ok(env) = serde_json::from_str::<RingingWorkerEventEnvelope>(&line)
-                && tx.send(env.event).is_err()
-            {
-                break;
+            if let Ok(env) = serde_json::from_str::<RingingWorkerEventEnvelope>(&line) {
+                if tx.send(env.event).is_err() { break; }
+            } else if let Ok(env) = serde_json::from_str::<qaqh_ringing::RingingTimelineIntentEnvelope>(&line) {
+                let _ = timeline_tx.send(env.intent);
             }
         }
     });
-    rx
+    (rx, timeline_rx)
 }
 
 // ── tests ──────────────────────────────────────────────────────────────
@@ -315,7 +322,7 @@ fn send_message_triggers_turn_lifecycle() {
     let (ir, mut iw) = os_pipe::pipe().expect("os pipe");
     let (oread, owrite) = os_pipe::pipe().expect("os pipe");
     let mut lp = common::spawn_pipe_loop(agent, BufReader::new(ir), owrite);
-    let rx = spawn_event_reader(oread);
+    let (rx, timeline_rx) = spawn_event_reader_with_timeline(oread);
 
     let drv = thread::spawn(move || {
         // Step 1: create session
@@ -345,15 +352,15 @@ fn send_message_triggers_turn_lifecycle() {
                 RingingEvent::Conversation(ConversationEvent::TurnStarted { .. })
             )
         });
-        expect(&rx, Duration::from_secs(15), |e| {
-            matches!(
-                e,
-                RingingEvent::Conversation(ConversationEvent::RoundDelta {
-                    kind: qaqh_domain::RoundDeltaKind::Answering,
-                    ..
-                })
-            )
-        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let intent = timeline_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("timeline text must arrive");
+            if let qaqh_domain::TimelineIntent::TextDelta { delta, .. } = intent {
+                assert_eq!(delta, "Hello from QAQ-Harness");
+                break;
+            }
+        }
         expect(&rx, Duration::from_secs(15), |e| {
             matches!(
                 e,

@@ -398,6 +398,63 @@ impl Loop {
     // Outcome handler — the Ring's decision point
     // ═══════════════════════════════════════════════════
 
+    /// 回合以「意外错误」收尾时补写终态事实与领域终态事件。
+    ///
+    /// BUG-2026-10-28：`Outcome::Error` 与 actor 迁移被拒两条路径此前只把
+    /// `phase` 拨回 Idle，从不落 `TurnFinished` 事实。canonical control 投影
+    /// 因此永远停在 `running`：前端重启后 bootstrap / `session.list` 仍报
+    /// working（`projected_run_status` 直接读 activity），甚至没有可取消的
+    /// 活跃回合。这里按 `Failed` 收口（形状与 `Outcome::TurnFailed` 一致），
+    /// 让投影、activity 追踪与命令收据同时收敛。
+    fn settle_unfinished_turn(&mut self, code: &str, message: &str) {
+        // 只在「回合确实在跑」时收口。Idle 期到达的错误（滞留的权限应答、
+        // 压缩占用等）不能把另一个正在进行的回合误判成失败。
+        if self.phase == LoopPhase::Idle {
+            return;
+        }
+        let Some(turn_id) = self.session.turn.current_turn_id().map(str::to_string) else {
+            return;
+        };
+        {
+            let mut ctx = RingContext {
+                agent: &mut self.session.agent,
+                emitter: &self.paced_emitter,
+                cancel: &self.cancel,
+                phase: &mut self.phase,
+                pending: &mut self.pending,
+                writer_dead: &self.writer_dead,
+                stats: &mut self.session.stats,
+                flow: &mut self.flow,
+            };
+            super::turn_lap::backfill::record_turn_finished(
+                &mut ctx,
+                &turn_id,
+                qaqh_session::session_fact_v2::TurnTerminal::Failed,
+                None,
+                Some(code),
+            );
+        }
+        log::warn!("[TURN] settling unfinished turn {turn_id} as failed ({code}): {message}");
+        self.paced_emitter
+            .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                qaqh_domain::ConversationEvent::TurnFailed {
+                    turn_id,
+                    error: qaqh_domain::DomainError {
+                        error_id: format!("turn-settled-{code}"),
+                        code: code.to_string(),
+                        message: message.to_string(),
+                        retryable: false,
+                        dedupe_key: None,
+                    },
+                },
+            ));
+        // 终态已落盘，actor 不能继续停在 Active：否则下一次输入会被
+        // `TurnAlreadyActive` 拒绝（旧症状「无法重发」）。只重置回合自身状态，
+        // 不碰 compact / pending 中断队列。
+        self.session.turn.reset();
+        self.session.tool.clear_pending();
+    }
+
     /// Apply the outcome returned by an engine.
     ///
     /// This is the central decision point of the Ringing V1 architecture.
@@ -421,6 +478,8 @@ impl Loop {
                 "turn_actor_transition",
                 &message,
             );
+            // 迁移被拒时 actor 状态可能仍是 Active：不补终态就永久悬空。
+            self.settle_unfinished_turn("turn_actor_transition", &message);
             self.reset_all_engines();
             self.phase = LoopPhase::Idle;
             return;
@@ -524,9 +583,11 @@ impl Loop {
                         flow: &mut self.flow,
                     };
                     super::turn_lap::backfill::record_turn_finished(
-                        &mut ctx, &turn_id,
+                        &mut ctx,
+                        &turn_id,
                         qaqh_session::session_fact_v2::TurnTerminal::Cancelled,
-                        usage.clone(), None,
+                        usage.clone(),
+                        None,
                     );
                 }
                 self.session.agent.skills.abort_user_turn();
@@ -559,9 +620,11 @@ impl Loop {
                         flow: &mut self.flow,
                     };
                     super::turn_lap::backfill::record_turn_finished(
-                        &mut ctx, &turn_id,
+                        &mut ctx,
+                        &turn_id,
                         qaqh_session::session_fact_v2::TurnTerminal::Failed,
-                        usage, Some("turn_failed"),
+                        usage,
+                        Some("turn_failed"),
                     );
                 }
                 self.session.agent.skills.abort_user_turn();
@@ -634,6 +697,8 @@ impl Loop {
             }
             Outcome::Handled => {}
             Outcome::Error(msg) => {
+                // 先补终态事实，再报错：否则回合在 canonical 日志里永远悬空。
+                self.settle_unfinished_turn("outcome_error", &msg);
                 self.paced_emitter
                     .emit_domain(qaqh_domain::DomainEvent::Control(
                         qaqh_domain::ControlEvent::OperationFailed {

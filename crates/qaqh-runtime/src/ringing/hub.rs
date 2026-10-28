@@ -36,6 +36,12 @@ pub(super) struct TimelinePersistence {
     pub(super) wake: mpsc::Sender<()>,
     /// 结构事件（BlockSealed/RoundSealed/BlockCheckpoint…）→ 1s 合并窗口。
     pub(super) pending_sessions: Arc<Mutex<HashSet<String>>>,
+    /// 瞬态事件（TextDelta/ToolProgress/ToolEstimated/UsageSampled/
+    /// ProviderRetrying）→ **不唤醒**持久化 worker，只在显式同步边界
+    /// （flush_timeline_persistence / Drop / 优雅关闭）排空落盘。
+    /// B1.4：流式 delta 不再触发旧史全量快照重写；未落盘的瞬态文本在
+    /// 硬崩溃时由 timeline_rebuild 从 messages 归档重建（接受毫秒~秒级窗口）。
+    pub(super) transient_sessions: Arc<Mutex<HashSet<String>>>,
     /// 回合边界（TurnSealed）→ 优先排空，且立即唤醒 worker。
     ///
     /// 与 `pending_seeds` 由**同一个 worker 线程**处理、terminal 每轮先 drain，

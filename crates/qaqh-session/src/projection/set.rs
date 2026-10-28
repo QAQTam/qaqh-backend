@@ -171,7 +171,10 @@ impl ProjectionSetDelta {
             ProjectionPayload::MetaDelta(_) => Some(ProjectionSlot::Meta),
             ProjectionPayload::MailboxDelta(_) => Some(ProjectionSlot::Mailbox),
             ProjectionPayload::TeamDelta(_) => Some(ProjectionSlot::Team),
-            ProjectionPayload::AuditRef(_) | ProjectionPayload::Unknown(_) => None,
+            // `OperationFailed` 是运行期通知而非 fact 投影，不归属任何 slot。
+            ProjectionPayload::AuditRef(_)
+            | ProjectionPayload::Unknown(_)
+            | ProjectionPayload::OperationFailed(_) => None,
         }
     }
 }

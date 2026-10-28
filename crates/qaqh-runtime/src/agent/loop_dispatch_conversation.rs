@@ -12,9 +12,9 @@ use qaqh_domain::{
 };
 use qaqh_session::canonical::{generate_ulid, ulid_from_text};
 use qaqh_session::session_fact_v2::{
-    ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, InputAccepted, InputId,
-    InputKind, InputPurpose, InterAgentCommunication, InterAgentContent, InterAgentDelivery,
-    MessageId, SessionId, SubagentFinished, SubagentTerminalStatus, ToolCallId,
+    ActorKind, ActorRef, AgentPath, ContentRef, EventId, InputAccepted, InputId, InputKind,
+    InputPurpose, InterAgentCommunication, InterAgentContent, InterAgentDelivery, MessageId,
+    SessionId, SubagentFinished, SubagentTerminalStatus, ToolCallId,
 };
 
 impl Loop {
@@ -63,6 +63,17 @@ impl Loop {
         actor: ActorRef,
         client_request_id: Option<String>,
     ) -> Result<(), String> {
+        // Ensure the canonical identity exists before resolving its durable blob
+        // directory. Ephemeral actors have no canonical fact to externalize.
+        if self
+            .session
+            .agent
+            .tool_ledger_mut()
+            .map_err(|error| format!("canonical ledger unavailable for input: {error}"))?
+            .is_none()
+        {
+            return Ok(());
+        }
         // Canonical inline content is capped at 8 KiB. Larger payloads are
         // externalized to the durable content store and referenced by
         // content_ref; never skip the canonical fact or fabricate a dangling
@@ -117,13 +128,23 @@ impl Loop {
         session_id: &str,
         text: &str,
     ) -> Result<ContentRef, String> {
-        let hub = self.hub.as_ref().ok_or_else(|| {
-            "content store unavailable; cannot externalize oversized canonical content".to_string()
+        let manager = self.session.agent.session_manager_handle().ok_or_else(|| {
+            "session manager unavailable; cannot externalize oversized canonical content"
+                .to_string()
         })?;
-        let content_id = hub.put_content(session_id, "text/plain", text.as_bytes().to_vec(), false);
-        Ok(ContentRef::new(ContentHash::new(format!(
-            "sha256:{content_id}"
-        ))))
+        let session_dir = manager
+            .session_dir_for_id(session_id)?
+            .ok_or_else(|| format!("canonical session {session_id} has no directory"))?;
+        let store = qaqh_session::canonical::SessionBlobStore::open(session_dir)
+            .map_err(|error| format!("open canonical blob store: {error}"))?;
+        let reference = store
+            .put(text.as_bytes())
+            .map_err(|error| format!("persist canonical content: {error}"))?;
+        // Wire cache is optional; its TTL is unrelated to the durable blob.
+        if let Some(hub) = &self.hub {
+            hub.put_content(session_id, "text/plain", text.as_bytes().to_vec(), false);
+        }
+        Ok(reference)
     }
 
     fn record_inter_agent_communication(
@@ -137,6 +158,15 @@ impl Loop {
                 "broadcast is disabled: inter-agent messages must have exactly one recipient"
                     .to_string(),
             );
+        }
+        if self
+            .session
+            .agent
+            .tool_ledger_mut()
+            .map_err(|error| format!("canonical ledger unavailable for communication: {error}"))?
+            .is_none()
+        {
+            return Ok(());
         }
         let content = if text.len() > 8 * 1024 {
             InterAgentContent::ContentRef {

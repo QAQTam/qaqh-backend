@@ -68,6 +68,9 @@ model = "<套餐模型>"
 - `custom_tool_call_input.delta` 能驱动同一套 raw patch 估算。
 - `custom_tool_call_output` 回传后，namespace 内的 custom/function 身份不丢失。
 - 重启恢复后，namespace 与 custom/function 的 kind 不互换。
+- Responses 返回调用可省略默认 `functions` namespace；入站适配只在冻结计划中
+  存在同 kind、同 name 的 `functions` 声明且没有精确 flat 声明时补齐默认地址。
+  历史仍保留端点原始表示；显式未知 namespace、错误 kind、未知工具名继续拒绝。
 
 ## 3. 本地回归
 

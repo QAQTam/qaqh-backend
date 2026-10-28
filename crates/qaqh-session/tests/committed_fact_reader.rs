@@ -122,6 +122,22 @@ fn reads_all_closed_range_and_after_cursor() {
 }
 
 #[test]
+fn one_fact_range_does_not_retain_full_history_capacity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _log = open_log(temp.path());
+    let facts: Vec<_> = (1..=1024).map(fact).collect();
+    write_facts_and_marker(temp.path(), &facts);
+    let reader = open_reader(temp.path()).expect("open reader");
+    let page = reader.read_range(1000, 1000).expect("range");
+    assert_eq!(seqs(&page), vec![1000]);
+    assert!(
+        page.capacity() <= 4,
+        "one-fact page retained capacity {}",
+        page.capacity()
+    );
+}
+
+#[test]
 fn reader_ignores_uncommitted_suffix_without_mutating_it() {
     let temp = tempfile::tempdir().expect("tempdir");
     append_facts(temp.path(), 2);
@@ -293,4 +309,120 @@ fn short_torn_and_invalid_committed_prefixes_fail_closed() {
         open_reader(invalid.path()),
         Err(CanonicalError::CommitRecoveryRequired(_))
     ));
+}
+
+/// B2.1 phase2 回归（先红后绿）：同一进程内第二次 open 不得重新解析已提交
+/// 前缀。修复前每次 open 都从 seq 1 全量解析（600 fact → 两次各 ≥600 次
+/// 解析，第二个断言为红）；修复后首次 open 建立稀疏 offset 索引（含前缀
+/// digest），warm open 只流式校验 digest + 解析新增尾部 → 恰好零解析。
+#[test]
+fn warm_open_skips_reparsing_indexed_prefix() {
+    use std::sync::atomic::Ordering;
+
+    let counter = |ordering| qaqh_session::canonical::COMMITTED_FACT_PARSE_COUNT.load(ordering);
+    let temp = tempfile::tempdir().expect("tempdir");
+    append_facts(temp.path(), 600);
+
+    let before = counter(Ordering::Relaxed);
+    open_reader(temp.path()).expect("first open validates the whole prefix");
+    let after_first = counter(Ordering::Relaxed);
+    assert!(
+        after_first - before >= 600,
+        "precondition: cold open parses every committed fact, got {}",
+        after_first - before
+    );
+
+    open_reader(temp.path()).expect("warm open");
+    assert_eq!(
+        counter(Ordering::Relaxed) - after_first,
+        0,
+        "warm open must not re-parse the indexed committed prefix"
+    );
+}
+
+/// 追加大量 fact 时按期续租（`append_facts` 的 1s 租约撑不过长序列）。
+fn append_facts_long(dir: &std::path::Path, count: u64) {
+    let mut log = open_log(dir);
+    let mut lease = log
+        .acquire_writer(WriterId::new("reader-contract-writer"), NOW_MS, LEASE_MS)
+        .expect("acquire writer");
+    for ordinal in 1..=count {
+        if ordinal % 128 == 0 {
+            lease = log
+                .renew_writer(&lease, NOW_MS + ordinal as i64, LEASE_MS)
+                .expect("renew writer lease");
+        }
+        log.append(&lease, fact(ordinal), NOW_MS + ordinal as i64)
+            .expect("append fact");
+    }
+}
+
+/// 把已提交前缀中第 `fact_seq` 条 fact 的行内一个字节按位翻转（同长度、
+/// 未必仍可解析——无论解析是否通过，digest 校验都必须拦截）。
+fn corrupt_fact_line(dir: &std::path::Path, fact_seq: u64) {
+    let path = dir.join(EVENTS_FILE);
+    let mut bytes = fs::read(&path).expect("read events");
+    let needle = format!("\"fact_seq\":{fact_seq}");
+    let pos = bytes
+        .windows(needle.len())
+        .position(|window| window == needle.as_bytes())
+        .unwrap_or_else(|| panic!("locate fact-{fact_seq} line"));
+    // 翻转该行内一个非结构位置的比特：向后再跳过一个引号内的字节。
+    let flip_at = pos + needle.len() + 8;
+    bytes[flip_at] ^= 0x01;
+    fs::write(&path, &bytes).expect("write corrupted events");
+}
+
+/// B2.1 phase2 fail-closed 回归：warm 索引命中后，前缀内任意同长度字节篡改
+/// （marker 与文件长度都不变）必须被前缀 digest 校验拒绝——索引加速不能
+/// 跳过校验（plan §3）。
+#[test]
+fn indexed_prefix_corruption_fails_closed_on_warm_open() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    append_facts(temp.path(), 8);
+    corrupt_fact_line(temp.path(), 3);
+
+    assert!(
+        matches!(
+            open_reader(temp.path()),
+            Err(CanonicalError::CommitRecoveryRequired(_))
+        ),
+        "warm open must reject an in-place prefix modification"
+    );
+}
+
+/// 同上，但走 seek 路径：同一个 reader 实例（marker 快照不变）对被跳过
+/// 前缀的 digest 校验同样 fail-closed。
+#[test]
+fn indexed_prefix_corruption_fails_closed_on_range_read() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    append_facts_long(temp.path(), 700);
+    let reader = open_reader(temp.path()).expect("cold open promotes the prefix index");
+
+    corrupt_fact_line(temp.path(), 5);
+    assert!(
+        reader.read_range(600, 700).is_err(),
+        "seek-based range read must verify the skipped prefix digest"
+    );
+}
+
+/// Seek 正确性：warm 索引下跨 checkpoint 的 range/after 读与全量读等价。
+#[test]
+fn seek_based_reads_match_full_scan_after_checkpoints() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    append_facts_long(temp.path(), 700);
+
+    let reader = open_reader(temp.path()).expect("open reader");
+    let expected_tail: Vec<u64> = (601..=700).collect();
+    assert_eq!(
+        seqs(&reader.read_after(600).expect("read after checkpoint")),
+        expected_tail,
+        "seek-based read_after must return exactly the requested tail"
+    );
+    assert_eq!(
+        seqs(&reader.read_range(601, 700).expect("read range")),
+        expected_tail
+    );
+    // 全量读不受 seek 状态影响。
+    assert_eq!(reader.read_all().expect("read all").len(), 700);
 }
