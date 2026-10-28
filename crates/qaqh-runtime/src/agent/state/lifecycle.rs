@@ -54,47 +54,103 @@ fn recover_canonical_tool_ledger(session_id: &str) -> Result<(), String> {
     recover_canonical_tool_ledger_in(&session_dir, session_id)
 }
 
-/// On resume, repair an abandoned turn only after acquiring the canonical writer
-/// fence. Pending interactions and unfinished tools must remain recoverable and
-/// are deliberately not converted into a terminal turn here.
+/// On resume, repair an abandoned turn after acquiring the canonical writer fence.
+///
+/// BUG-2026-10-28：早先这里用「有未决工具/交互就不收口」做守卫，结果崩溃、
+/// 子代理失败或用户 stop 之后留下悬空回合的会话，其 canonical control 投影
+/// 永远停在 `running`——前端重启后 bootstrap / `session.list` 仍报 working，
+/// 即使该回合已经不可能再推进。worker 重启时 `suspended` 只活在内存里（没有
+/// 从日志恢复的路径），未决交互本来就无法再被应答；工具侧的副作用由先行的
+/// `recover_canonical_tool_ledger` 负责对账。因此悬空回合一律收敛为终态，
+/// 未决交互随终态事实被投影丢弃。
 fn recover_orphan_turn(session_dir: &std::path::Path) -> Result<(), String> {
-    use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader, ToolLedger, WriterId, generate_ulid};
-    use qaqh_session::session_fact_v2::{EventId, FactPayload, TurnError, TurnFinished, TurnTerminal};
+    use qaqh_session::canonical::{
+        CanonicalSessionIdentity, CommittedFactReader, ToolLedger, WriterId, generate_ulid,
+    };
+    use qaqh_session::session_fact_v2::{
+        EventId, FactPayload, TurnError, TurnFinished, TurnTerminal,
+    };
     use std::collections::HashSet;
 
-    if !session_dir.join(qaqh_session::canonical::CANONICAL_IDENTITY_FILE).exists() {
+    if !session_dir
+        .join(qaqh_session::canonical::CANONICAL_IDENTITY_FILE)
+        .exists()
+    {
         return Ok(());
     }
-    let identity = CanonicalSessionIdentity::open_or_create(session_dir).map_err(|e| e.to_string())?;
+    let identity =
+        CanonicalSessionIdentity::open_or_create(session_dir).map_err(|e| e.to_string())?;
     let now = super::agent::unix_ms();
-    let mut ledger = ToolLedger::open(session_dir, identity.session_id.clone(), identity.log_id.clone(),
-        WriterId::new(format!("orphan-recovery-{}", std::process::id())), now,
-        super::agent::tool_ledger_lease_ms()).map_err(|e| e.to_string())?;
+    let mut ledger = ToolLedger::open(
+        session_dir,
+        identity.session_id.clone(),
+        identity.log_id.clone(),
+        WriterId::new(format!("orphan-recovery-{}", std::process::id())),
+        now,
+        super::agent::tool_ledger_lease_ms(),
+    )
+    .map_err(|e| e.to_string())?;
     let facts = CommittedFactReader::open(session_dir, identity.session_id, identity.log_id)
-        .map_err(|e| e.to_string())?.read_all().map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .read_all()
+        .map_err(|e| e.to_string())?;
     let mut active = None;
     let mut tools = HashSet::new();
     let mut interactions = HashSet::new();
     for fact in &facts {
         match &fact.payload {
             FactPayload::TurnStarted(start) => active = Some(start.turn_id.clone()),
-            FactPayload::TurnFinished(end) if active.as_ref() == Some(&end.turn_id) => active = None,
-            FactPayload::TurnInterrupted(end) if active.as_ref() == Some(&end.turn_id) => active = None,
-            FactPayload::ToolIntent(intent) => { tools.insert(intent.call_id.clone()); }
-            FactPayload::ToolFinished(end) => { tools.remove(&end.call_id); }
-            FactPayload::InteractionRequested(request) => { interactions.insert(request.interaction_id.clone()); }
-            FactPayload::InteractionResolved(end) => { interactions.remove(&end.interaction_id); }
-            FactPayload::InteractionExpired(end) => { interactions.remove(&end.interaction_id); }
+            FactPayload::TurnFinished(end) if active.as_ref() == Some(&end.turn_id) => {
+                active = None
+            }
+            FactPayload::TurnInterrupted(end) if active.as_ref() == Some(&end.turn_id) => {
+                active = None
+            }
+            FactPayload::ToolIntent(intent) => {
+                tools.insert(intent.call_id.clone());
+            }
+            FactPayload::ToolFinished(end) => {
+                tools.remove(&end.call_id);
+            }
+            FactPayload::InteractionRequested(request) => {
+                interactions.insert(request.interaction_id.clone());
+            }
+            FactPayload::InteractionResolved(end) => {
+                interactions.remove(&end.interaction_id);
+            }
+            FactPayload::InteractionExpired(end) => {
+                interactions.remove(&end.interaction_id);
+            }
             _ => {}
         }
     }
-    if let Some(turn_id) = active.filter(|_| tools.is_empty() && interactions.is_empty()) {
-        ledger.append_turn_finished(EventId::new(generate_ulid()), TurnFinished {
-            turn_id, terminal: TurnTerminal::Failed, usage: None,
-            error: Some(TurnError { code: "orphaned_turn_recovery".into(),
-                message: "The previous turn ended without a durable terminal outcome.".into(),
-                retryable: false, details_ref: None }), finished_at_ms: now,
-        }, now).map_err(|e| e.to_string())?;
+    if let Some(turn_id) = active {
+        if !tools.is_empty() || !interactions.is_empty() {
+            log::warn!(
+                "[recovery] settling dangling turn {turn_id} with {} open tool intent(s) and {} open interaction(s)",
+                tools.len(),
+                interactions.len()
+            );
+        }
+        ledger
+            .append_turn_finished(
+                EventId::new(generate_ulid()),
+                TurnFinished {
+                    turn_id,
+                    terminal: TurnTerminal::Failed,
+                    usage: None,
+                    error: Some(TurnError {
+                        code: "orphaned_turn_recovery".into(),
+                        message: "The previous turn ended without a durable terminal outcome."
+                            .into(),
+                        retryable: false,
+                        details_ref: None,
+                    }),
+                    finished_at_ms: now,
+                },
+                now,
+            )
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -400,9 +456,13 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                         agent.session.session_id
                     );
                 }
-                let session_dir = qaqh_types::platform::sessions_dir().join(&agent.session.session_id);
+                let session_dir =
+                    qaqh_types::platform::sessions_dir().join(&agent.session.session_id);
                 if let Err(error) = recover_orphan_turn(&session_dir) {
-                    log::warn!("[recovery] orphan turn recovery skipped for {}: {error}", agent.session.session_id);
+                    log::warn!(
+                        "[recovery] orphan turn recovery skipped for {}: {error}",
+                        agent.session.session_id
+                    );
                 }
                 log::info!(
                     "qaqh-agent: restored session {} ({} msgs, {} tokens used)",
@@ -578,9 +638,7 @@ fn push_initial_skill_catalog(agent: &mut AgentState) {
     if catalog.is_empty() {
         return;
     }
-    agent
-        .msg
-        .push_system(qaqh_types::Message::system(catalog));
+    agent.msg.push_system(qaqh_types::Message::system(catalog));
 }
 
 /// Legacy sessions (created before catalog persistence) have no catalog
@@ -602,12 +660,12 @@ fn has_skill_catalog(store: &qaqh_message::MessageStore) -> bool {
         .iter()
         .chain(store.trailing_messages().iter())
         .any(|message| {
-        message.content.iter().any(|block| match block {
-            qaqh_types::ContentBlock::Text { text } => {
-                text.starts_with(qaqh_skills::SKILL_CATALOG_MARKER)
-            }
-            _ => false,
-        })
+            message.content.iter().any(|block| match block {
+                qaqh_types::ContentBlock::Text { text } => {
+                    text.starts_with(qaqh_skills::SKILL_CATALOG_MARKER)
+                }
+                _ => false,
+            })
         })
 }
 
@@ -636,25 +694,134 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
         let now = super::super::agent::unix_ms();
-        let mut ledger = ToolLedger::open(dir.path(), identity.session_id.clone(), identity.log_id.clone(),
-            WriterId::new("test-live"), now, 30_000).unwrap();
+        let mut ledger = ToolLedger::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            WriterId::new("test-live"),
+            now,
+            30_000,
+        )
+        .unwrap();
         let turn = TurnId::new(format!("turn_{}", generate_ulid()));
-        ledger.append_turn_started(EventId::new(generate_ulid()), TurnStarted {
-            turn_id: turn.clone(), input_id: InputId::new(format!("input_{}", generate_ulid())),
-            mode: TurnMode::Normal, recovery_ref: None,
-        }, now).unwrap();
-        assert!(recover_orphan_turn(dir.path()).is_err(), "live writer must not be stolen");
+        ledger
+            .append_turn_started(
+                EventId::new(generate_ulid()),
+                TurnStarted {
+                    turn_id: turn.clone(),
+                    input_id: InputId::new(format!("input_{}", generate_ulid())),
+                    mode: TurnMode::Normal,
+                    recovery_ref: None,
+                },
+                now,
+            )
+            .unwrap();
+        assert!(
+            recover_orphan_turn(dir.path()).is_err(),
+            "live writer must not be stolen"
+        );
         drop(ledger);
         recover_orphan_turn(dir.path()).unwrap();
         recover_orphan_turn(dir.path()).unwrap();
         let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
-            .unwrap().read_all().unwrap();
-        let ends: Vec<_> = facts.iter().filter_map(|f| match &f.payload {
-            FactPayload::TurnFinished(end) => Some(end), _ => None,
-        }).collect();
+            .unwrap()
+            .read_all()
+            .unwrap();
+        let ends: Vec<_> = facts
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FactPayload::TurnFinished(end) => Some(end),
+                _ => None,
+            })
+            .collect();
         assert_eq!(ends.len(), 1);
         assert_eq!(ends[0].turn_id, turn);
-        assert_eq!(ends[0].terminal, qaqh_session::session_fact_v2::TurnTerminal::Failed);
+        assert_eq!(
+            ends[0].terminal,
+            qaqh_session::session_fact_v2::TurnTerminal::Failed
+        );
+    }
+
+    /// BUG-2026-10-28 回归：悬空回合即便带着未决工具/交互，也必须在 worker
+    /// 重启时收敛为终态——否则 canonical control 投影永远 `running`，前端
+    /// 重启后把早已中断的会话继续显示成 working。
+    #[test]
+    fn orphan_turn_with_open_intent_is_still_settled() {
+        use qaqh_session::session_fact_v2::{InputId, TurnId, TurnMode, TurnStarted};
+        let dir = tempfile::tempdir().unwrap();
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).unwrap();
+        let now = super::super::agent::unix_ms();
+        let mut ledger = ToolLedger::open(
+            dir.path(),
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            WriterId::new("test-open-intent"),
+            now,
+            30_000,
+        )
+        .unwrap();
+        let turn = TurnId::new(format!("turn_{}", generate_ulid()));
+        ledger
+            .append_turn_started(
+                EventId::new(generate_ulid()),
+                TurnStarted {
+                    turn_id: turn.clone(),
+                    input_id: InputId::new(format!("input_{}", generate_ulid())),
+                    mode: TurnMode::Normal,
+                    recovery_ref: None,
+                },
+                now,
+            )
+            .unwrap();
+        ledger
+            .append_intent(
+                EventId::new(generate_ulid()),
+                None,
+                ToolIntent {
+                    call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
+                    execution_id: ExecutionId::new(format!("exec_{}", generate_ulid())),
+                    idempotency_key: None,
+                    replay_capability: ToolReplayCapability::NoReplay,
+                    policy_decision: PolicyDecisionRef {
+                        outcome: ToolIntentPolicyOutcome::Allow,
+                        rule_id: "test".into(),
+                        decided_at_ms: now,
+                        reason_ref: None,
+                    },
+                    effective_args_ref: None,
+                    effective_args_hash: None,
+                    sandbox_spec_hash: sha256_content_hash(b"sandbox"),
+                    side_effect_class: SideEffectClass::ReadOnly,
+                    intent_at_ms: now,
+                },
+                now,
+            )
+            .unwrap();
+        drop(ledger);
+
+        recover_orphan_turn(dir.path()).expect("dangling turn must be settled");
+
+        let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
+            .unwrap()
+            .read_all()
+            .unwrap();
+        let ends: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match &fact.payload {
+                FactPayload::TurnFinished(end) => Some(end),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends.len(),
+            1,
+            "open tool intent must not block the terminal"
+        );
+        assert_eq!(ends[0].turn_id, turn);
+        assert_eq!(
+            ends[0].terminal,
+            qaqh_session::session_fact_v2::TurnTerminal::Failed
+        );
     }
 
     #[test]
@@ -941,13 +1108,18 @@ mod tests {
 
         ensure_resumed_skill_catalog(&mut agent);
         assert_eq!(agent.msg.trailing_messages().len(), 1);
-        assert!(agent.msg.trailing_messages()[0].content.iter().any(|block| match block {
-            qaqh_types::ContentBlock::Text { text } => {
-                text.starts_with(qaqh_skills::SKILL_CATALOG_MARKER)
-                    && text.contains("resume-catalog-skill")
-            }
-            _ => false,
-        }));
+        assert!(
+            agent.msg.trailing_messages()[0]
+                .content
+                .iter()
+                .any(|block| match block {
+                    qaqh_types::ContentBlock::Text { text } => {
+                        text.starts_with(qaqh_skills::SKILL_CATALOG_MARKER)
+                            && text.contains("resume-catalog-skill")
+                    }
+                    _ => false,
+                })
+        );
 
         ensure_resumed_skill_catalog(&mut agent);
         assert_eq!(agent.msg.trailing_messages().len(), 1);

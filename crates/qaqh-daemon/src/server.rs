@@ -242,7 +242,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         pid: std::process::id(),
         server_epoch: epoch.clone(),
         protocol_version: CONTROL_PROTOCOL_VERSION,
-        daemon_version: env!("CARGO_PKG_VERSION").into(),
+        daemon_version: env!("QAQH_BUILD_VERSION").into(),
         build_id: env!("QAQH_BUILD_ID").into(),
         channel: daemon_channel(),
         executable: std::env::current_exe()

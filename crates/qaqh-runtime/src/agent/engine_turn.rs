@@ -418,25 +418,31 @@ impl TurnEngine {
                 unix_ms(),
             )
             .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
-        if matches!(before, qaqh_session::actor::TurnCoreState::Active { .. }
-            | qaqh_session::actor::TurnCoreState::Terminal {
-                terminal: qaqh_session::session_fact_v2::TurnTerminal::Cancelled, ..
-            })
-        {
-            let now = unix_ms();
-            ledger.ensure_lease(now, tool_ledger_lease_ms())
-                .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
-            ledger.append_turn_finished(
-                EventId::new(generate_ulid()),
-                qaqh_session::session_fact_v2::TurnFinished {
-                    turn_id: ledger_turn,
+        if matches!(
+            before,
+            qaqh_session::actor::TurnCoreState::Active { .. }
+                | qaqh_session::actor::TurnCoreState::Terminal {
                     terminal: qaqh_session::session_fact_v2::TurnTerminal::Cancelled,
-                    usage: None,
-                    error: None,
-                    finished_at_ms: now,
-                },
-                now,
-            ).map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+                    ..
+                }
+        ) {
+            let now = unix_ms();
+            ledger
+                .ensure_lease(now, tool_ledger_lease_ms())
+                .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
+            ledger
+                .append_turn_finished(
+                    EventId::new(generate_ulid()),
+                    qaqh_session::session_fact_v2::TurnFinished {
+                        turn_id: ledger_turn,
+                        terminal: qaqh_session::session_fact_v2::TurnTerminal::Cancelled,
+                        usage: None,
+                        error: None,
+                        finished_at_ms: now,
+                    },
+                    now,
+                )
+                .map_err(|error| TurnActorError::ToolLedger(error.to_string()))?;
         }
         Ok(match before {
             qaqh_session::actor::TurnCoreState::Active { .. } => TurnCancellation::Interrupted {
@@ -1187,13 +1193,12 @@ impl TurnEngine {
             ctx.agent.msg.trailing_messages().len(),
             &messages,
         );
-        let request_estimate = ctx
-            .agent
-            .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
         let request_fingerprint = ctx.agent.token_calibration_fingerprint();
-        let request_key = ctx
-            .agent
-            .prepared_request_key(&messages, Some(&ctx.agent.tool_defs));
+        let (request_estimate, request_key) = ctx.agent.estimate_prepared_request_with_key(
+            &messages,
+            Some(&ctx.agent.tool_defs),
+            &request_fingerprint,
+        );
         (messages, request_estimate, request_fingerprint, request_key)
     }
 
@@ -1797,13 +1802,9 @@ mod tests {
             &mut last_checkpoint_at,
         );
 
-        assert_eq!(
-            emitter.conversation.into_inner(),
-            vec![
-                (kind, first_round),
-                (kind, second_round),
-                (kind, final_round),
-            ]
+        assert!(
+            emitter.conversation.into_inner().is_empty(),
+            "compatibility checkpoints must not duplicate the round body"
         );
 
         assert_eq!(

@@ -130,6 +130,7 @@ pub(crate) fn repair_commit_marker_unlocked(
                 ..marker
             };
             write_json_atomic(&session_dir.join(EVENTS_COMMIT_FILE), &repaired)?;
+            super::notify::notify_commit(session_dir);
             if poison_present {
                 remove_file_and_sync_parent(&session_dir.join(EVENTS_POISON_FILE))?;
             }
@@ -169,6 +170,7 @@ pub(crate) fn repair_commit_marker_unlocked(
         commit_generation: 0,
     };
     write_json_atomic(&session_dir.join(EVENTS_COMMIT_FILE), &marker)?;
+    super::notify::notify_commit(session_dir);
     Ok(CommitRepairOutcome {
         commit: marker,
         previous_commit_generation: None,

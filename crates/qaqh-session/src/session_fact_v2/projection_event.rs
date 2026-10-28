@@ -295,6 +295,60 @@ impl ProjectionEvent {
     }
 }
 
+/// 命令业务失败通知（**非 fact**，ephemeral 投递）。
+///
+/// Ringing 的 ack 只代表「命令进了 worker 队列」，业务终态必须另走一路。
+/// v1 时代这件事由领域事件 `ControlEvent::OperationFailed` 承担；hub-fact-bus
+/// 阶段 3d 删掉 v1 广播面之后它没有任何 v2 出口，客户端永远看不到
+/// `cancel_target_mismatch` / `turn_busy` 这类拒绝（命令收据只能靠 TTL 过期）。
+///
+/// canonical log 的磁盘格式已冻结（spec §6），不为它新增 fact，因此这里把它
+/// 定成**一次性在线通知**：`Delivery::Ephemeral`、不落盘、不重放、不占可替换槽。
+/// 语义上这是「通知」而不是「状态」——重连后补弹一个过期失败只会误导用户。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct OperationFailure {
+    /// 本次失败实例；门面路径与 `operation_id` 同源（都是 causation command id），
+    /// 客户端可据此与命令收据对账。
+    pub occurrence_id: String,
+    /// 失败归属的命令域。
+    pub scope: OperationScope,
+    pub error: OperationError,
+    /// 关联业务操作 id（通常是发起命令的 `command_id`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// worker 侧失败时刻（Unix ms）。客户端只用于排序/去重，不是时钟权威。
+    pub failed_at_ms: i64,
+}
+
+/// `OperationFailure.scope` 的词表（与 `qaqh_domain::ErrorScope` 一一对应）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum OperationScope {
+    Control,
+    Conversation,
+    Tool,
+    System,
+}
+
+/// 失败详情。字段与 `qaqh_domain::DomainError` 同构，脱敏责任在产生侧
+/// （禁止携带 API key / provider 原始响应）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct OperationError {
+    /// 唯一错误实例 id，用于 toast 去重与日志关联。
+    pub error_id: String,
+    /// 稳定错误码（如 `cancel_target_mismatch`）。
+    pub code: String,
+    /// 人类可读消息（脱敏）。
+    pub message: String,
+    pub retryable: bool,
+    /// 去重键：同键错误客户端只应提示一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -308,13 +362,15 @@ pub enum ProjectionPayload {
     TeamDelta(TeamDelta),
     AuditRef(AuditRef),
     Unknown(UnknownProjection),
+    /// 命令业务失败（ephemeral，control 频道）。见 [`OperationFailure`]。
+    OperationFailed(OperationFailure),
 }
 
 impl ProjectionPayload {
     /// Projection revision carried by every reducer-facing delta.
     pub fn revision(&self) -> Option<u64> {
         match self {
-            Self::AuditRef(_) | Self::Unknown(_) => None,
+            Self::AuditRef(_) | Self::Unknown(_) | Self::OperationFailed(_) => None,
             _ => serde_json::to_value(self)
                 .ok()?
                 .get("data")?
@@ -333,7 +389,7 @@ impl ProjectionPayload {
             Self::MetaDelta(_) => Some(ProjectionSlot::Meta),
             Self::MailboxDelta(_) => Some(ProjectionSlot::Mailbox),
             Self::TeamDelta(_) => Some(ProjectionSlot::Team),
-            Self::AuditRef(_) | Self::Unknown(_) => None,
+            Self::AuditRef(_) | Self::Unknown(_) | Self::OperationFailed(_) => None,
         }
     }
 }

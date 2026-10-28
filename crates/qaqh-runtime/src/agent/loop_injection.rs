@@ -352,6 +352,49 @@ impl Loop {
                     };
                     let _ = self.inject(injection);
                 }
+                // ── 取消命令：lap 边界就地抢占 ────────────────────────
+                // BUG-2026-10-28：§7 之后带显式 turn_id 的取消不再在 registry
+                // 入队时预置取消标记（避免滞留请求误杀新回合），改由 actor 校验。
+                // 但 actor 的常规派发只在回合结束后的 `drain_pending` 发生，而
+                // cancel 的唯一目的就是结束回合——纯延后派发构成死锁：长回合
+                // （工具自循环/子代理未收尾）里停止按钮永远不生效，命令收据也
+                // 永远停在 Running。
+                //
+                // lap 边界是 actor 自己持锁执行的，`current_turn_id()` 在这里
+                // 可信：目标匹配（或未指定目标）时就地置位取消 token 与会话
+                // 取消表，让 gate 流式与在途工具在下一个轮询点中止；命令本体
+                // 仍入 deferred 队列，由 idle 派发完成 ConversationCancelled
+                // 镜像与收据收尾（幂等，回合已终态时只补 legacy 镜像）。
+                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
+                    turn_id,
+                }) => {
+                    if cancel_target_matches(
+                        turn_id.as_deref(),
+                        self.session.turn.current_turn_id(),
+                    ) {
+                        self.cancel.set();
+                        let session_id = self.session.agent.session.session_id.clone();
+                        if !session_id.is_empty() {
+                            qaqh_workspace::set_session_cancel(&session_id, true);
+                        }
+                        log::info!(
+                            "[CANCEL] lap-boundary preempt for {:?} (command {})",
+                            turn_id,
+                            env.command_id
+                        );
+                    } else {
+                        log::warn!(
+                            "[CANCEL] target {:?} is not the active turn {:?}; deferring for canonical rejection",
+                            turn_id,
+                            self.session.turn.current_turn_id()
+                        );
+                    }
+                    self.deferred_ringing
+                        .push_back(super::types::WorkerCommand {
+                            frame: env,
+                            causation: cmd.causation,
+                        });
+                }
                 // ── 其它命令（用户消息/非注入）：绝不丢弃 ────────────────
                 // daemon 侧已 ACK（accepted），静默丢弃会让调用方永久悬挂。
                 // 放入 deferred_ringing，主循环 idle 时按 FIFO 派发（复用
@@ -368,6 +411,18 @@ impl Loop {
     }
 
     // ═══════════════════════════════════════════════════
+}
+
+/// lap 边界取消的目标判定：`None` = 取消当前回合（对活跃回合恒匹配）；
+/// `Some(target)` 只在 actor 视角存在活跃回合且 id 相等时匹配——滞留的旧取消
+/// 不得中止别的回合（§7 的核心诉求），但匹配的取消必须立即生效而不是等回合
+/// 自己结束。
+pub(crate) fn cancel_target_matches(turn_id: Option<&str>, current: Option<&str>) -> bool {
+    match (turn_id, current) {
+        (None, _) => true,
+        (Some(target), Some(current)) => target == current,
+        (Some(_), None) => false,
+    }
 }
 
 pub(super) fn injection_priority(
@@ -586,5 +641,118 @@ mod tests {
         assert!(!lp.cancel.is_set(), "会话切换必须复位取消 token");
         qaqh_workspace::remove_session_cancel(SESSION);
         qaqh_workspace::runtime::clear_context();
+    }
+
+    /// BUG-2026-10-28 回归：显式 `turn_id` 的取消必须在 lap 边界就地抢占。
+    ///
+    /// 之前该命令整条落进 `deferred_ringing`，只有回合结束后的 `drain_pending`
+    /// 才派发——「取消」等「回合自己结束」，长回合里停止按钮永远无效。
+    mod cancel_preempts_at_lap_boundary {
+        use super::*;
+        use crate::agent::types::WorkerCommand;
+
+        const CANCEL_SESSION: &str = "t14-cancel-preempt";
+
+        fn loop_with_commands() -> (
+            Loop,
+            std::sync::mpsc::SyncSender<WorkerCommand>,
+            std::sync::mpsc::Receiver<WriterEvent>,
+        ) {
+            let channels = LoopChannels::new();
+            let (cmd_tx, event_rx) = (channels.cmd_tx, channels.event_rx);
+            let mut agent =
+                crate::agent::state::agent::AgentState::new(qaqh_config::Config::default());
+            agent.ephemeral = true;
+            agent.session_manager = None;
+            agent.session.session_id = CANCEL_SESSION.to_string();
+            let lp = Loop::from_channels(
+                agent,
+                channels.cmd_rx,
+                channels.event_tx,
+                CancelToken::new(),
+                channels.writer_dead,
+                Arc::new(crate::agent::liveness::WorkerLiveness::new()),
+                None,
+            );
+            (lp, cmd_tx, event_rx)
+        }
+
+        fn cancel_command(turn_id: Option<&str>) -> WorkerCommand {
+            WorkerCommand {
+                frame: qaqh_ringing::RingingWorkerCommandEnvelope::new(
+                    CANCEL_SESSION,
+                    "cmd-targeted-cancel",
+                    qaqh_ringing::RingingCommand::Conversation(
+                        qaqh_domain::ConversationCommand::ConversationCancel {
+                            turn_id: turn_id.map(str::to_string),
+                        },
+                    ),
+                ),
+                causation: None,
+            }
+        }
+
+        #[test]
+        fn matching_target_sets_the_cancel_token_immediately() {
+            let (mut lp, cmd_tx, _event_rx) = loop_with_commands();
+            lp.session
+                .turn
+                .begin_input("t-active", "input-1")
+                .expect("start active turn");
+            assert_eq!(lp.session.turn.current_turn_id(), Some("t-active"));
+            cmd_tx
+                .send(cancel_command(Some("t-active")))
+                .expect("queue cancel");
+
+            lp.drain_pending_injections();
+
+            assert!(
+                lp.cancel.is_set(),
+                "匹配目标的取消必须在 lap 边界置位取消 token（否则回合结束前永远无效）"
+            );
+            assert_eq!(
+                lp.deferred_ringing.len(),
+                1,
+                "命令本体仍需入 deferred 队列，由 idle 派发补齐 ConversationCancelled 镜像"
+            );
+            qaqh_workspace::remove_session_cancel(CANCEL_SESSION);
+        }
+
+        #[test]
+        fn stale_target_does_not_preempt_but_stays_delivered() {
+            let (mut lp, cmd_tx, _event_rx) = loop_with_commands();
+            lp.session
+                .turn
+                .begin_input("t-active", "input-1")
+                .expect("start active turn");
+            cmd_tx
+                .send(cancel_command(Some("t-stale")))
+                .expect("queue cancel");
+
+            lp.drain_pending_injections();
+
+            assert!(
+                !lp.cancel.is_set(),
+                "滞留的旧取消不得中止当前回合（§7 零副作用）"
+            );
+            assert_eq!(
+                lp.deferred_ringing.len(),
+                1,
+                "命令必须原样保留，由 actor 派发给出 cancel_target_mismatch"
+            );
+            qaqh_workspace::remove_session_cancel(CANCEL_SESSION);
+        }
+
+        #[test]
+        fn untargeted_cancel_matches_even_without_an_active_turn() {
+            assert!(cancel_target_matches(None, None));
+            assert!(cancel_target_matches(None, Some("t1")));
+            assert!(cancel_target_matches(Some("t1"), Some("t1")));
+            assert!(!cancel_target_matches(Some("t1"), Some("t2")));
+            assert!(
+                !cancel_target_matches(Some("t1"), None),
+                "无活跃回合时显式目标取消交给 actor 判定（Idle/AlreadyTerminal）"
+            );
+        }
     }
 }

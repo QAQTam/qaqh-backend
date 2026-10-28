@@ -17,15 +17,15 @@ use qaqh_session::canonical::{
     EVENTS_FILE, generate_ulid,
 };
 use qaqh_session::projection::{
-    ControlInteractionState, ConversationTurnOutcome, Projection,
-    ProjectionSet, ProjectionSetSnapshot, ProjectionSink, projection_events_for_fact,
+    ControlInteractionState, ConversationTurnOutcome, Projection, ProjectionSet,
+    ProjectionSetSnapshot, ProjectionSink, projection_events_for_fact,
     projection_replaceable_events_for_fact, replaceable_identity,
 };
 use qaqh_session::session_fact_v2::{
     ActivityState as FactActivityState, CompactStatus, ConversationDelta, Delivery, EventId,
-    InteractionKind, InterruptReason, LogId, MetaDelta, ProjectionEvent, ProjectionPayload,
-    SessionFact, SessionId, StreamKey, TeamAgentResidency, TeamBoardSnapshot, TeamDelta,
-    TeamTaskSnapshot, TitleSource, TurnTerminal,
+    InteractionKind, InterruptReason, LogId, MetaDelta, OperationFailure, ProjectionEvent,
+    ProjectionPayload, SessionFact, SessionId, StreamKey, TeamAgentResidency, TeamBoardSnapshot,
+    TeamDelta, TeamTaskSnapshot, TitleSource, TurnTerminal,
 };
 use tokio::sync::broadcast;
 
@@ -155,6 +155,23 @@ impl V2ProjectionHub {
 
     pub fn server_epoch(&self) -> &str {
         &self.epoch
+    }
+
+    /// Synthetic lifecycle test hook; does not expose subscriber contents.
+    #[doc(hidden)]
+    pub fn subscriber_count_for_test(&self, session_id: &SessionId) -> usize {
+        self.sessions
+            .read()
+            .ok()
+            .and_then(|sessions| sessions.get(session_id).cloned())
+            .and_then(|session| {
+                session
+                    .state
+                    .lock()
+                    .ok()
+                    .map(|state| state.live_tx.receiver_count())
+            })
+            .unwrap_or(0)
     }
 
     pub fn memory_components(&self) -> Vec<qaqh_memwatch::ComponentMemory> {
@@ -555,6 +572,43 @@ impl V2ProjectionHub {
         )
     }
 
+    /// 转发一条「命令业务失败」通知（ephemeral，control 频道）。
+    ///
+    /// 和压缩三态的关键差异：失败是**一次性通知**而不是状态，所以刻意不进
+    /// `replaceables`——重连后补弹一个早已失效的失败只会误导用户。canonical
+    /// log 不为它新增 fact（spec §6 冻结磁盘格式），因此这就是它唯一的出口：
+    /// 在线订阅者收到即用，掉线即丢。
+    pub fn publish_operation_failed(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        failure: OperationFailure,
+    ) -> Result<(), V2HubError> {
+        let session_dir = session_dir.as_ref();
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
+        let state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        let event = ProjectionEvent {
+            event_id: EventId::new(generate_ulid()),
+            source_fact_seq: state.last_fact_seq.max(1),
+            source_event_id: EventId::new(generate_ulid()),
+            causation_id: None,
+            ts_ms: Some(failure.failed_at_ms),
+            stream_key: StreamKey::Channel(qaqh_domain::RingingChannel::Control),
+            delivery: Delivery::Ephemeral,
+            projection_slot: None,
+            projection_index: None,
+            payload: ProjectionPayload::OperationFailed(failure),
+        };
+        if let Some(envelope) = event_to_envelope(&self.epoch, session_id, &event) {
+            let _ = state.live_tx.send(envelope);
+        }
+        Ok(())
+    }
+
     /// Shared shape for the three transient compaction deltas: same
     /// double-tagged payload as the fact-derived conversation deltas, published
     /// straight to live subscribers plus a per-`compact_id` current-value slot.
@@ -667,7 +721,9 @@ impl V2ProjectionHub {
             None => (state.last_fact_seq, None),
         };
 
-        let mut replay = if initial_reset.is_some() {
+        let mut replay = if initial_reset.is_some() || since_fact_seq == state.last_fact_seq {
+            // The receiver is registered while holding the same state lock as
+            // publication; at the current watermark there is nothing to replay.
             VecDeque::new()
         } else {
             replay_after(
@@ -794,17 +850,22 @@ impl V2Subscription {
     /// 供进程内桥接线程轮询（hub-fact-bus spec 阶段 2.2），语义与
     /// [`Self::next`] 的 async 路径一致：Lagged 上报 Reset，Closed 静默终止。
     pub fn try_next(&mut self) -> Option<V2StreamItem> {
+        self.try_next_status().ok().flatten()
+    }
+
+    /// Distinguish an idle subscription from a permanently closed publisher.
+    pub fn try_next_status(&mut self) -> Result<Option<V2StreamItem>, ()> {
         if let Some(reset) = self.initial_reset.take() {
-            return Some(V2StreamItem::Reset(reset));
+            return Ok(Some(V2StreamItem::Reset(reset)));
         }
         if let Some(event) = self.replay.pop_front() {
-            return Some(V2StreamItem::Event(Box::new(event)));
+            return Ok(Some(V2StreamItem::Event(Box::new(event))));
         }
         match self.live_rx.try_recv() {
-            Ok(event) => Some(V2StreamItem::Event(Box::new(event))),
-            Err(broadcast::error::TryRecvError::Empty) => None,
+            Ok(event) => Ok(Some(V2StreamItem::Event(Box::new(event)))),
+            Err(broadcast::error::TryRecvError::Empty) => Ok(None),
             Err(broadcast::error::TryRecvError::Lagged(_)) => {
-                Some(V2StreamItem::Reset(RingingV2ResetRequired {
+                Ok(Some(V2StreamItem::Reset(RingingV2ResetRequired {
                     schema: qaqh_ringing::RINGING_SCHEMA.into(),
                     version: qaqh_ringing::RINGING_V2_VERSION,
                     server_epoch: self.server_epoch.clone(),
@@ -812,9 +873,9 @@ impl V2Subscription {
                     log_id: Some(self.log_id.as_str().to_string()),
                     snapshot_cursor: None,
                     reason: RingingV2ResetReason::ReplayOverflow,
-                }))
+                })))
             }
-            Err(broadcast::error::TryRecvError::Closed) => None,
+            Err(broadcast::error::TryRecvError::Closed) => Err(()),
         }
     }
 
@@ -1281,6 +1342,58 @@ mod tests {
                     }
                 }
                 other => panic!("expected task delta, got {other:?}"),
+            }
+        }
+    }
+
+    /// BUG-2026-10-28：命令业务失败必须有 v2 出口。断言三件事——载荷能到
+    /// 在线订阅者、投递方式是 ephemeral（不重放、不占槽）、频道是 control。
+    #[tokio::test]
+    async fn operation_failure_reaches_live_subscribers_ephemerally() {
+        use qaqh_session::session_fact_v2::{OperationError, OperationScope};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        let _ = append_two_facts(dir.path(), &identity);
+        let hub = Arc::new(V2ProjectionHub::new("epoch-operation-failed"));
+        let bootstrap = hub.bootstrap(dir.path(), "seed").expect("bootstrap");
+        let mut subscription = hub
+            .subscribe(dir.path(), "seed", Some(&bootstrap.snapshot_cursor))
+            .expect("subscribe");
+        hub.publish_operation_failed(
+            dir.path(),
+            "seed",
+            OperationFailure {
+                occurrence_id: "cmd-1".into(),
+                scope: OperationScope::Conversation,
+                error: OperationError {
+                    error_id: "cmd-1".into(),
+                    code: "cancel_target_mismatch".into(),
+                    message: "turn t9 is not the active turn".into(),
+                    retryable: false,
+                    dedupe_key: Some("cmd-1".into()),
+                },
+                operation_id: Some("cmd-1".into()),
+                failed_at_ms: 1_700,
+            },
+        )
+        .expect("publish operation failure");
+
+        loop {
+            match subscription.next().await {
+                V2StreamItem::Event(envelope) => {
+                    if let ProjectionPayload::OperationFailed(failure) = &envelope.payload {
+                        assert_eq!(failure.error.code, "cancel_target_mismatch");
+                        assert_eq!(failure.scope, OperationScope::Conversation);
+                        assert_eq!(envelope.delivery, RingingV2Delivery::Ephemeral);
+                        assert_eq!(
+                            envelope.stream_key,
+                            RingingV2StreamKey::Channel(qaqh_domain::RingingChannel::Control)
+                        );
+                        break;
+                    }
+                }
+                other => panic!("expected operation failure event, got {other:?}"),
             }
         }
     }

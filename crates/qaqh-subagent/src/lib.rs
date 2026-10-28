@@ -50,7 +50,7 @@ pub use host::{
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
     BoardSubscriptionTarget, BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
-    CollectorBatch, CollectorEvent, ContentRef, InterruptAgentRequest, InterruptedAgent,
+    CollectorBatch, CollectorEvent, CollectorSubscription, ContentRef, InterruptAgentRequest, InterruptedAgent,
     ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
     SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
     TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
@@ -827,7 +827,7 @@ trait SubagentTransport: Send {
 /// 宿主直连传输：直接调用进程内宿主（ActorRegistry + RingingHub）。
 struct HostTransport {
     host: Arc<dyn SubagentHost>,
-    batch_rx: mpsc::Receiver<CollectorBatch>,
+    batch_rx: CollectorSubscription,
 }
 
 impl SubagentTransport for HostTransport {
@@ -854,7 +854,7 @@ impl SubagentTransport for HostTransport {
     }
 
     fn events(&self) -> &mpsc::Receiver<CollectorBatch> {
-        &self.batch_rx
+        self.batch_rx.receiver()
     }
 }
 
@@ -1964,13 +1964,13 @@ mod tests {
             Ok(())
         }
 
-        fn subscribe(&self, _session: &str) -> mpsc::Receiver<CollectorBatch> {
+        fn subscribe(&self, _session: &str) -> CollectorSubscription {
             let (tx, rx) = mpsc::channel();
             *self
                 .event_tx
                 .lock()
                 .expect("test mutex must not be poisoned") = Some(tx);
-            rx
+            CollectorSubscription::new(rx, || {})
         }
 
         fn download_content(

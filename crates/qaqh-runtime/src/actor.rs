@@ -67,7 +67,9 @@ fn publish_worker_event(
 ) {
     match event {
         crate::agent::types::WriterEvent::Timeline(env) => {
-            let Some(hub) = hub else { return; };
+            let Some(hub) = hub else {
+                return;
+            };
             if let Err(error) = hub.publish_timeline(&env.session_id, env.intent) {
                 log::error!("[timeline] rejected intent for {}: {error}", env.session_id);
             }
@@ -76,7 +78,13 @@ fn publish_worker_event(
             let domain: qaqh_domain::DomainEvent = env.event.into();
             // 先做 v2 镜像：压缩三态只存在于域事件里，v1 的 `hub` 缺失时也不能丢。
             compact.observe(&env.session_id, &domain);
-            let Some(hub) = hub else { return; };
+            // 命令业务失败（OperationFailed）同样只活在域事件里。v1 广播面删除
+            // 后它是客户端唯一能知道「命令被拒/执行失败」的通道，必须由 v2
+            // 接管，且不能跟着 v1 的 `hub` 缺失一起丢。
+            crate::ringing::publish_operation_failure(v2_hub, sessions, &env.session_id, &domain);
+            let Some(hub) = hub else {
+                return;
+            };
             // #345：交互正文（ask/plan）在发布前入 content store 并 pin——canonical
             // fact 里只有 ref，正文走展示面旁路。
             crate::registry::stash_interaction_body(hub, &env.session_id, &domain);
@@ -92,11 +100,16 @@ fn publish_worker_event(
             }
         }
         crate::agent::types::WriterEvent::TitleChanged { session_id, title } => {
-            let Some(v2_hub) = v2_hub else { return; };
+            let Some(v2_hub) = v2_hub else {
+                return;
+            };
             let session_dir = sessions.session_path_dir(&session_id);
-            if let Err(error) =
-                v2_hub.publish_title_changed(&session_dir, &session_id, title, qaqh_session::session_fact_v2::TitleSource::Auto)
-            {
+            if let Err(error) = v2_hub.publish_title_changed(
+                &session_dir,
+                &session_id,
+                title,
+                qaqh_session::session_fact_v2::TitleSource::Auto,
+            ) {
                 log::warn!("[title] v2 publish failed for {session_id}: {error}");
             }
         }

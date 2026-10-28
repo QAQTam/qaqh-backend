@@ -184,13 +184,25 @@ impl TimelineStore {
         }
         let path = self.path_for(session_id);
         let tmp = path.with_extension("json.tmp");
-        let body = serde_json::to_vec(&PersistedTimeline {
-            session_id: session_id.to_string(),
-            snapshot: snapshot.clone(),
-            journal,
-        })
+        #[derive(Serialize)]
+        struct BorrowedTimeline<'a> {
+            session_id: &'a str,
+            snapshot: &'a TimelineSnapshot,
+            journal: &'a [TimelineEntry],
+        }
+        let file = std::fs::File::create(&tmp)?;
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(
+            &mut writer,
+            &BorrowedTimeline {
+                session_id,
+                snapshot,
+                journal: &journal,
+            },
+        )
         .map_err(io_error)?;
-        std::fs::write(&tmp, body)?;
+        writer.flush()?;
+        drop(writer);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }

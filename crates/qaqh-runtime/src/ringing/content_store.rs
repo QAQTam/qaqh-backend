@@ -365,7 +365,7 @@ impl ContentStore {
         let content_id = sha256_hex(&bytes);
         let size_bytes = bytes.len();
         let now = Instant::now();
-        let snapshot = {
+        {
             let entry = self
                 .entries
                 .entry(content_id.clone())
@@ -400,9 +400,17 @@ impl ContentStore {
             if !entry.pinned {
                 entry.expires_at = now + DEFAULT_CONTENT_TTL;
             }
-            entry.clone()
-        };
-        self.persist_entry(&snapshot);
+        }
+        // Only discard the resident body after both body and metadata writes
+        // succeed; a failed cache write retains the in-memory copy.
+        let persisted = self
+            .entries
+            .get(&content_id)
+            .is_some_and(|entry| self.persist_entry(entry));
+        if persisted && let Some(entry) = self.entries.get_mut(&content_id) {
+            entry.bytes = Vec::new();
+            entry.bytes_loaded = false;
+        }
     }
 
     fn get_internal(&mut self, content_id: &str) -> Option<ContentEntry> {
@@ -417,6 +425,14 @@ impl ContentStore {
         if !self.ensure_loaded(content_id) {
             self.remove_entry(content_id);
             return None;
+        }
+        if self.root.is_some() {
+            let entry = self.entries.get_mut(content_id)?;
+            let bytes = std::mem::take(&mut entry.bytes);
+            let mut result = entry.clone();
+            result.bytes = bytes;
+            entry.bytes_loaded = false;
+            return Some(result);
         }
         self.entries.get(content_id).cloned()
     }
@@ -555,9 +571,9 @@ impl ContentStore {
         }
     }
 
-    fn persist_entry(&self, entry: &ContentEntry) {
+    fn persist_entry(&self, entry: &ContentEntry) -> bool {
         let Some(root) = &self.root else {
-            return;
+            return false;
         };
         let meta = ContentMeta {
             content_id: entry.content_id.clone(),
@@ -578,7 +594,7 @@ impl ContentStore {
                     "[content] metadata serialize failed for {}: {error}",
                     entry.content_id
                 );
-                return;
+                return false;
             }
         };
         if entry.bytes_loaded
@@ -591,7 +607,7 @@ impl ContentStore {
                 "[content] body persist failed for {}: {error}",
                 entry.content_id
             );
-            return;
+            return false;
         }
         if let Err(error) = write_atomic(
             &root.join(format!("{}.json", entry.content_id)),
@@ -601,7 +617,9 @@ impl ContentStore {
                 "[content] metadata persist failed for {}: {error}",
                 entry.content_id
             );
+            return false;
         }
+        true
     }
 
     fn delete_files(&self, content_id: &str) {

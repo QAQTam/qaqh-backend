@@ -142,6 +142,9 @@ mod tests {
             event_rx.try_recv(),
             Ok(WriterEvent::TitleChanged { title, .. }) if title == "修复标题生成链路"
         ));
-        assert!(event_rx.try_recv().is_err(), "frozen title emits no second event");
+        assert!(
+            event_rx.try_recv().is_err(),
+            "frozen title emits no second event"
+        );
     }
 }

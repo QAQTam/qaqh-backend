@@ -584,7 +584,12 @@ impl AgentRegistry {
     /// `SubagentHost::finish_subagent`). This is the replacement for the old
     /// `ProcessRegistry::set_answer` + `mark_exited` pair: the answer now lives
     /// with the agent identity instead of the exec process table.
-    pub fn record_subagent_outcome(&mut self, child_session_id: &str, answer: &str, exit_code: i32) {
+    pub fn record_subagent_outcome(
+        &mut self,
+        child_session_id: &str,
+        answer: &str,
+        exit_code: i32,
+    ) {
         if child_session_id.is_empty() {
             return;
         }
@@ -603,6 +608,10 @@ impl AgentRegistry {
     /// canonical 日志，避免每次轮询都做文件 I/O。
     pub fn subagent_outcome(&self, child_session_id: &str) -> Option<AgentOutcome> {
         self.subagent_outcomes.get(child_session_id).cloned()
+    }
+
+    pub(crate) fn has_subagent_outcome(&self, child_session_id: &str) -> bool {
+        self.subagent_outcomes.contains_key(child_session_id)
     }
 
     fn agent_residency(&self, agent_id: &str) -> ListedAgentResidency {
@@ -2650,7 +2659,10 @@ mod tests {
             .expect("child listing");
         assert_eq!(child_state.status, ListedAgentStatus::Completed);
         assert_eq!(child_state.residency, ListedAgentResidency::Unloaded);
-        let outcome = child_state.outcome.as_ref().expect("outcome on the status plane");
+        let outcome = child_state
+            .outcome
+            .as_ref()
+            .expect("outcome on the status plane");
         assert_eq!(outcome.answer.as_deref(), Some("final answer body"));
         assert_eq!(outcome.exit_code, 0);
     }

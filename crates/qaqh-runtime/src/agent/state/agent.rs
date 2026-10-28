@@ -7,9 +7,9 @@ use qaqh_session::canonical::{
 };
 use qaqh_types::SessionMeta;
 
-use super::token_calibration::{
-    RequestTokenEstimate, SessionTokenCalibrator, prepared_request_metrics,
-};
+#[cfg(test)]
+use super::token_calibration::prepared_request_metrics;
+use super::token_calibration::{RequestTokenEstimate, SessionTokenCalibrator};
 use qaqh_skills::SkillContextManager;
 use qaqh_workspace::registration::ToolRegistrar;
 use qaqh_workspace::runtime;
@@ -360,18 +360,32 @@ impl AgentState {
         )
     }
 
+    pub(crate) fn estimate_prepared_request_with_key(
+        &self,
+        messages: &[qaqh_types::Message],
+        tools: Option<&[qaqh_types::ToolDef]>,
+        fingerprint: &str,
+    ) -> (RequestTokenEstimate, String) {
+        self.token_calibration.estimate_prepared(
+            fingerprint,
+            messages,
+            tools,
+            Some(&self.session.session_id),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn estimate_prepared_request(
         &self,
         messages: &[qaqh_types::Message],
         tools: Option<&[qaqh_types::ToolDef]>,
     ) -> RequestTokenEstimate {
-        let (raw_tokens, request_key, _) =
-            prepared_request_metrics(messages, tools, Some(&self.session.session_id));
-        self.token_calibration.estimate(
+        self.estimate_prepared_request_with_key(
+            messages,
+            tools,
             &self.token_calibration_fingerprint(),
-            &request_key,
-            raw_tokens,
         )
+        .0
     }
 
     pub(crate) fn manual_compact_running(&self) -> bool {
@@ -389,14 +403,6 @@ impl AgentState {
     pub(crate) fn reset_compaction_coordination(&mut self) {
         self.manual_compact_running = false;
         self.last_api_context = None;
-    }
-
-    pub(crate) fn prepared_request_key(
-        &self,
-        messages: &[qaqh_types::Message],
-        tools: Option<&[qaqh_types::ToolDef]>,
-    ) -> String {
-        prepared_request_metrics(messages, tools, None).1
     }
 
     pub(crate) fn observe_prepared_request(
@@ -1428,9 +1434,7 @@ mod tests {
         .unwrap();
         let mut agent = AgentState::new(qaqh_config::Config::default());
         agent.msg = qaqh_message::MessageStore::new_ephemeral("test");
-        agent
-            .msg
-            .push_system(qaqh_types::Message::system("base"));
+        agent.msg.push_system(qaqh_types::Message::system("base"));
         agent.skills = qaqh_skills::SkillContextManager::new(temp.path(), 100_000);
         agent.skills.begin_user_turn("use $release-skill");
         let activation = qaqh_skills::load_named(temp.path(), "release-skill").unwrap();
@@ -1467,9 +1471,7 @@ mod tests {
         qaqh_skills::install::ensure_bundled_skills(home.path()).unwrap();
         let mut agent = AgentState::new(qaqh_config::Config::default());
         agent.msg = qaqh_message::MessageStore::new_ephemeral("test");
-        agent
-            .msg
-            .push_system(qaqh_types::Message::system("base"));
+        agent.msg.push_system(qaqh_types::Message::system("base"));
         agent.skills = qaqh_skills::SkillContextManager::new(home.path(), 100_000);
 
         agent.bootstrap_skills();

@@ -256,6 +256,20 @@ fn accepted_input_is_persisted_as_a_canonical_fact() {
         .as_ref()
         .expect("oversized InputAccepted carries content_ref");
     assert_eq!(input_ref, communication_ref);
+    let blobs = qaqh_session::canonical::SessionBlobStore::open(&session_dir).expect("blob store");
+    assert_eq!(blobs.get(input_ref).expect("durable canonical input"), oversized_inter_agent.as_bytes());
+    drop(blobs);
+    hub.forget_session(&session_id);
+    assert!(hub.get_content_any(communication_store_id).is_none(), "wire cache was evicted");
+    let service = qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global());
+    let host: &dyn qaqh_subagent::SubagentHost = &service;
+    let reference = qaqh_types::ContentRef {
+        content_id: input_ref.hash().as_str().to_string(), media_type: "text/plain".into(),
+        sha256: input_ref.hash().as_str().to_string(), truncated: false,
+    };
+    assert_eq!(host.download_content(&session_id, &reference).expect("host durable fallback"), oversized_inter_agent.as_bytes());
+    let reopened = qaqh_session::canonical::SessionBlobStore::open(&session_dir).expect("reopen blobs");
+    assert_eq!(reopened.get(communication_ref).expect("durable communication"), oversized_inter_agent.as_bytes());
     assert_eq!(inter_agent.actor.kind, ActorKind::Subagent);
     assert_eq!(inter_agent.actor.id, "/root");
 

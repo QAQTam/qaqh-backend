@@ -3,7 +3,6 @@
 //! 由 daemon 在 Agent worker 存在前消费（冷附接直接返回 canonical transcript，
 //! 不依赖后续 live 事件）。
 
-
 // ── Persisted-history UI projection (moved verbatim from the former msgloop crate's util, PR-1-4) ──
 
 /// Build the same UI turn projection directly from persisted messages.

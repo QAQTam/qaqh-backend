@@ -448,7 +448,7 @@ impl QaqhService {
     pub fn handle(&self, method: &str, params: &Value) -> Result<Value, String> {
         let session_id = || session_param(params);
         match method {
-            "daemon.version" => Ok(json!(env!("CARGO_PKG_VERSION"))),
+            "daemon.version" => Ok(json!(env!("QAQH_BUILD_VERSION"))),
             "diagnostics.memory.start" => {
                 let monitor = qaqh_memwatch::global();
                 monitor.start();

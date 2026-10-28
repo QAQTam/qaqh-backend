@@ -868,15 +868,30 @@ fn adapt_native(
             PlanPayload::JsonArguments(serde_json::from_str(text)?)
         }
     };
-    let adapted = plan.adapt(PlanCall {
-        address: qaqh_tool_core::model_tool_plan::ModelToolAddress {
-            kind: match call.kind {
-                mutil_ai::NativeToolKind::Function => ModelToolKind::Function,
-                mutil_ai::NativeToolKind::Custom => ModelToolKind::Custom,
-            },
-            namespace: call.namespace.clone(),
-            name: call.name.clone(),
+    let mut address = qaqh_tool_core::model_tool_plan::ModelToolAddress {
+        kind: match call.kind {
+            mutil_ai::NativeToolKind::Function => ModelToolKind::Function,
+            mutil_ai::NativeToolKind::Custom => ModelToolKind::Custom,
         },
+        namespace: call.namespace.clone(),
+        name: call.name.clone(),
+    };
+    // Responses may omit the default `functions` namespace for both function
+    // and custom calls (Codex's ToolName::with_default_namespace). Resolve only
+    // that default against the frozen declarations; an exact flat declaration
+    // wins, and explicit/other namespaces are never guessed. Keep `call` intact
+    // so history and replay retain the provider's original representation.
+    if address.namespace.is_none() && !plan.entries().iter().any(|e| e.address == address) {
+        let default_address = qaqh_tool_core::model_tool_plan::ModelToolAddress {
+            namespace: Some("functions".into()),
+            ..address.clone()
+        };
+        if plan.entries().iter().any(|e| e.address == default_address) {
+            address = default_address;
+        }
+    }
+    let adapted = plan.adapt(PlanCall {
+        address,
         call_id: call.call_id.clone(),
         item_id: call.item_id.clone(),
         payload,
@@ -1920,6 +1935,82 @@ mod tests {
         assert!(
             matches!(&projected[1].parts[0], Part::ToolResult(result) if result.call_id.as_deref() == Some("call_1"))
         );
+    }
+
+    #[test]
+    fn default_namespace_resolution_stays_within_declared_addresses() {
+        use qaqh_tool_core::model_tool_plan::{InputAdapter, ModelToolAddress, ModelToolEntry};
+        let entry = |namespace: Option<&str>, internal: &str| ModelToolEntry {
+            address: ModelToolAddress {
+                kind: ModelToolKind::Function,
+                namespace: namespace.map(str::to_owned),
+                name: "read_file".into(),
+            },
+            declaration: ModelToolDeclaration::Function {
+                description: "read".into(),
+                parameters: serde_json::json!({"type":"object"}),
+                strict: false,
+            },
+            internal_tool_key: internal.into(),
+            adapter: InputAdapter::FunctionJson,
+        };
+        let plan =
+            ModelToolPlan::new("1", "test", vec![entry(Some("functions"), "read")]).expect("plan");
+        let call = mutil_ai::NativeToolCall {
+            kind: mutil_ai::NativeToolKind::Function,
+            namespace: None,
+            name: "read_file".into(),
+            call_id: "call_read".into(),
+            item_id: None,
+            payload: mutil_ai::NativeToolPayload::JsonArguments("{}".into()),
+            completion: mutil_ai::NativeToolCompletion::Completed,
+            provider_state: None,
+        };
+        let blocks = adapt_native(&call, Some(&plan)).expect("default namespace alias");
+        assert!(matches!(&blocks[0], ContentBlock::ToolUse { name, .. } if name == "read"));
+        let mut unknown = call.clone();
+        unknown.name = "read".into();
+        assert_eq!(
+            adapt_native(&unknown, Some(&plan)).unwrap_err().to_string(),
+            "unknown_tool_address"
+        );
+        let mut wrong_kind = call.clone();
+        wrong_kind.kind = mutil_ai::NativeToolKind::Custom;
+        wrong_kind.payload = mutil_ai::NativeToolPayload::RawText("{}".into());
+        assert_eq!(
+            adapt_native(&wrong_kind, Some(&plan))
+                .unwrap_err()
+                .to_string(),
+            "unknown_tool_address"
+        );
+        let mut wrong_namespace = call.clone();
+        wrong_namespace.namespace = Some("untrusted".into());
+        assert_eq!(
+            adapt_native(&wrong_namespace, Some(&plan))
+                .unwrap_err()
+                .to_string(),
+            "unknown_tool_address"
+        );
+        let other_plan = ModelToolPlan::new("1", "test", vec![entry(Some("other"), "read")])
+            .expect("other namespace plan");
+        assert_eq!(
+            adapt_native(&call, Some(&other_plan))
+                .unwrap_err()
+                .to_string(),
+            "unknown_tool_address"
+        );
+
+        let mixed_plan = ModelToolPlan::new(
+            "1",
+            "test",
+            vec![
+                entry(Some("functions"), "namespaced_read"),
+                entry(None, "flat_read"),
+            ],
+        )
+        .expect("mixed plan");
+        let blocks = adapt_native(&call, Some(&mixed_plan)).expect("exact flat address wins");
+        assert!(matches!(&blocks[0], ContentBlock::ToolUse { name, .. } if name == "flat_read"));
     }
 
     fn provider() -> ProviderConfig {

@@ -50,6 +50,7 @@ impl RingingHub {
         let (wake, rx) = mpsc::channel::<()>();
         let pending_sessions = Arc::new(Mutex::new(HashSet::<String>::new()));
         let terminal_sessions = Arc::new(Mutex::new(HashSet::<String>::new()));
+        let transient_sessions = Arc::new(Mutex::new(HashSet::<String>::new()));
         let pending_for_worker = Arc::clone(&pending_sessions);
         let terminal_for_worker = Arc::clone(&terminal_sessions);
         let timeline = Arc::clone(&self.timeline);
@@ -158,6 +159,7 @@ impl RingingHub {
             .unwrap_or_else(|e| e.into_inner()) = Some(TimelinePersistence {
             wake,
             pending_sessions,
+            transient_sessions,
             terminal_sessions,
             join: Some(join),
         });
@@ -179,6 +181,23 @@ impl RingingHub {
         if should_wake {
             let _ = persistence.wake.send(());
         }
+    }
+
+    /// 瞬态事件入队：**不唤醒** worker。只在显式同步边界
+    /// （`flush_timeline_persistence` / Drop / 优雅关闭）排空落盘。
+    pub(super) fn request_transient_timeline_persistence(&self, session_id: &str) {
+        let persistence = self
+            .timeline_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(persistence) = persistence.as_ref() else {
+            return;
+        };
+        persistence
+            .transient_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string());
     }
 
     /// 回合边界（TurnSealed）入队：写进 terminal 集合并**立即唤醒** worker。
@@ -463,8 +482,18 @@ impl RingingHub {
         };
         if is_turn_sealed {
             self.request_timeline_terminal_persistence(session_id);
-        } else {
+        } else if super::persistence_policy::is_snapshot_persisted(&entry.event)
+            || matches!(
+                entry.event,
+                qaqh_domain::TimelineEvent::BlockCheckpoint { .. }
+            )
+        {
+            // 结构事件与 BlockCheckpoint（流式文本的周期性落盘合并点）走
+            // 既有 1s 软窗口；逐 token 的 TextDelta / 进度 chunk 不再触发
+            // 全量快照重写（B1.4）。
             self.request_timeline_persistence(session_id);
+        } else {
+            self.request_transient_timeline_persistence(session_id);
         }
         let _ = self.timeline_live.send(TimelineLiveEntry {
             session_id: session_id.to_string(),
@@ -486,6 +515,11 @@ impl RingingHub {
         {
             persistence
                 .pending_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(session_id);
+            persistence
+                .transient_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(session_id);
@@ -656,6 +690,17 @@ impl RingingHub {
                     .collect();
                 for session_id in persistence
                     .pending_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drain()
+                {
+                    if !sessions.contains(&session_id) {
+                        sessions.push(session_id);
+                    }
+                }
+                // 显式同步边界是瞬态事件的唯一落盘通道（B1.4：热路径不重写）。
+                for session_id in persistence
+                    .transient_sessions
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .drain()

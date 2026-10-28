@@ -7,6 +7,152 @@ use serde_json::{Value, json};
 mod common;
 
 #[test]
+fn default_namespace_calls_without_namespace_roundtrip_over_http() {
+    use common::mock_server::{MockServer, SseChunk};
+    use qaqh_tool_core::model_tool_plan::{
+        CustomFormat, InputAdapter, ModelToolAddress, ModelToolDeclaration, ModelToolEntry,
+        ModelToolKind, ModelToolPlan,
+    };
+    use qaqh_types::{ContentBlock, Message, ToolResult};
+    use std::collections::HashMap;
+
+    for kind in [ModelToolKind::Function, ModelToolKind::Custom] {
+        let (name, item, declaration, adapter, expected) = match kind {
+            ModelToolKind::Function => (
+                "read",
+                json!({"type":"function_call", "id":"fc_1", "call_id":"call_1",
+                    "name":"read", "arguments":"{\"path\":\"a.txt\"}", "status":"completed"}),
+                ModelToolDeclaration::Function {
+                    description: "read file".into(),
+                    parameters: json!({"type":"object", "properties":{"path":{"type":"string"}}}),
+                    strict: false,
+                },
+                InputAdapter::FunctionJson,
+                json!({"path":"a.txt"}),
+            ),
+            ModelToolKind::Custom => (
+                "apply_patch",
+                json!({"type":"custom_tool_call", "id":"ctc_1", "call_id":"call_1",
+                    "name":"apply_patch", "input":"*** Begin Patch\n*** End Patch", "status":"completed"}),
+                ModelToolDeclaration::Custom {
+                    description: "patch".into(),
+                    format: CustomFormat::Text,
+                },
+                InputAdapter::ApplyPatchCustom,
+                json!({"patch":"*** Begin Patch\n*** End Patch", "dry_run":false}),
+            ),
+        };
+        let server = MockServer::new(vec![
+            SseChunk::Data(
+                json!({"type":"response.output_item.done", "output_index":0, "item":item}),
+            ),
+            SseChunk::Data(json!({"type":"response.completed",
+                "response":{"id":"resp_1", "status":"completed", "output":[item]}})),
+        ]);
+        let plan = ModelToolPlan::new(
+            "1",
+            "siwc",
+            vec![ModelToolEntry {
+                address: ModelToolAddress {
+                    kind,
+                    namespace: Some("functions".into()),
+                    name: name.into(),
+                },
+                declaration,
+                internal_tool_key: name.into(),
+                adapter,
+            }],
+        )
+        .expect("plan");
+        let descriptions = HashMap::from([("functions".into(), "workspace".into())]);
+        let mut provider =
+            qaqh_gate::ProviderConfig::responses(&server.base_url(), "key", "model", None);
+        provider.responses_compat.siwc_plan = true;
+        let mut done = None;
+        qaqh_gate::chat_stream_responses_with_plan(
+            &provider,
+            vec![Message::user("use tool")],
+            &plan,
+            &descriptions,
+            0,
+            None,
+            None,
+            None,
+            &mut |event| {
+                if let qaqh_gate::StreamEvent::Done { raw_message, .. } = event {
+                    done = Some(raw_message);
+                }
+            },
+        )
+        .expect("default namespace call must be admitted");
+        let message = done.expect("done");
+        assert_eq!(
+            message
+                .content
+                .iter()
+                .filter(|block| matches!(block,
+                    ContentBlock::ToolUse { id, name: tool, input }
+                        if id == "call_1" && tool == name && input == &expected
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            message.content.iter().any(|block| matches!(block,
+                ContentBlock::ResponseOutputItem { item: raw }
+                    if raw["name"] == name && raw.get("namespace").is_none()
+            )),
+            "retain the provider's original namespace representation"
+        );
+        let request = server.last_request_json().expect("request");
+        assert_eq!(request["tools"][0]["type"], "namespace");
+        assert_eq!(request["tools"][0]["name"], "functions");
+
+        let replay_server = MockServer::new(vec![SseChunk::Data(json!({
+            "type":"response.completed", "response":{"id":"resp_2", "status":"completed", "output":[]}
+        }))]);
+        provider.base_url = replay_server.base_url();
+        qaqh_gate::chat_stream_responses_with_plan(
+            &provider,
+            vec![
+                Message::user("use tool"),
+                message,
+                Message::tool_result("call_1", ToolResult::ok("done")),
+            ],
+            &plan,
+            &descriptions,
+            0,
+            None,
+            None,
+            None,
+            &mut |_| {},
+        )
+        .expect("replay");
+        let replay = replay_server.last_request_json().expect("replay request");
+        let input = replay["input"].as_array().expect("input");
+        let calls: Vec<_> = input
+            .iter()
+            .filter(|value| value["type"] == item["type"])
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["call_id"], "call_1");
+        assert!(calls[0].get("namespace").is_none());
+        let output_type = if kind == ModelToolKind::Custom {
+            "custom_tool_call_output"
+        } else {
+            "function_call_output"
+        };
+        assert_eq!(
+            input
+                .iter()
+                .filter(|value| value["type"] == output_type && value["call_id"] == "call_1")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn native_custom_stream_roundtrip_over_http() {
     use common::mock_server::{MockServer, SseChunk};
     use qaqh_tool_core::model_tool_plan::{

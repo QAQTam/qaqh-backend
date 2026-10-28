@@ -7,6 +7,8 @@ mod blobs;
 mod clock;
 mod identity;
 mod log;
+pub mod notify;
+mod offset_index;
 mod reader;
 mod recovery;
 mod recovery_executor;
@@ -29,6 +31,8 @@ pub use log::{
     CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
     EVENTS_POISON_FILE, UPGRADE_FENCE_FILE, WRITER_FENCE_FILE,
 };
+#[doc(hidden)]
+pub use reader::COMMITTED_FACT_PARSE_COUNT;
 pub use reader::CommittedFactReader;
 pub use recovery::{
     RECOVERY_INTENT_FILE, RECOVERY_INTENT_SCHEMA, RecoveryBatchKey, RecoveryIntent,

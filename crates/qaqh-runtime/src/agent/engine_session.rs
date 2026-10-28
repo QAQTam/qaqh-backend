@@ -160,7 +160,10 @@ impl SessionEngine {
         agent.config.tool_allowlist_enabled = cfg.tool_allowlist_enabled;
         agent.config.tool_allowlist = cfg.tool_allowlist;
         qaqh_workspace::runtime::set_global_allowed_tools(
-            agent.config.tool_allowlist_enabled.then(|| agent.config.tool_allowlist.clone()),
+            agent
+                .config
+                .tool_allowlist_enabled
+                .then(|| agent.config.tool_allowlist.clone()),
         );
         agent.refresh_tool_defs();
     }

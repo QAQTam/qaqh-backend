@@ -151,6 +151,35 @@ pub(crate) struct SessionTokenCalibrator {
 }
 
 impl SessionTokenCalibrator {
+    pub(crate) fn estimate_prepared(
+        &self,
+        fingerprint: &str,
+        messages: &[Message],
+        tools: Option<&[ToolDef]>,
+        session_id: Option<&str>,
+    ) -> (RequestTokenEstimate, String) {
+        self.estimate_prepared_with(
+            fingerprint,
+            messages,
+            tools,
+            session_id,
+            prepared_request_metrics,
+        )
+    }
+
+    fn estimate_prepared_with(
+        &self,
+        fingerprint: &str,
+        messages: &[Message],
+        tools: Option<&[ToolDef]>,
+        session_id: Option<&str>,
+        metrics: impl FnOnce(&[Message], Option<&[ToolDef]>, Option<&str>) -> (u64, String, u64),
+    ) -> (RequestTokenEstimate, String) {
+        let (raw_tokens, request_key, _) = metrics(messages, tools, session_id);
+        let estimate = self.estimate(fingerprint, &request_key, raw_tokens);
+        (estimate, request_key)
+    }
+
     pub fn estimate(
         &self,
         fingerprint: &str,
@@ -369,6 +398,30 @@ mod tests {
 
         let changed = calibrator.estimate("provider", "different-shape", 1_000);
         assert_eq!(changed.api_context_tokens, None);
+    }
+
+    #[test]
+    fn prepared_estimate_reuses_one_metrics_call_and_preserves_key() {
+        let messages = vec![Message::user("hello"), image_message(8192)];
+        let calibrator = SessionTokenCalibrator::default();
+        let (_, old_key, _) = prepared_request_metrics(&messages, None, None);
+        let mut calls = 0;
+        let (estimate, key) = calibrator.estimate_prepared_with(
+            "provider",
+            &messages,
+            None,
+            Some("synthetic"),
+            |messages, tools, session| {
+                calls += 1;
+                prepared_request_metrics(messages, tools, session)
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(key, old_key);
+        assert_eq!(
+            estimate.raw_tokens,
+            prepared_request_metrics(&messages, None, None).0
+        );
     }
 
     #[test]

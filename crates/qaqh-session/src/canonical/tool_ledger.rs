@@ -20,13 +20,13 @@ use super::{
     generate_ulid,
 };
 use crate::session_fact_v2::{
-    AssistantBlockSealed, CheckpointId, CompactionApplied, ContentRef, EventId,
-    ExecutionId, FactPayload, FactSchema, InputAccepted, InputId, InterAgentCommunication,
-    InteractionExpired, InteractionId, InteractionRequested, InteractionResolved, MessageId,
-    ModelRoundStarted, RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId,
-    SessionRecovered, SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished,
-    ToolIntent, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished, TurnId,
-    TurnInterrupted, TurnStarted, WorkspaceResourceChanged,
+    AssistantBlockSealed, CheckpointId, CompactionApplied, ContentRef, EventId, ExecutionId,
+    FactPayload, FactSchema, InputAccepted, InputId, InterAgentCommunication, InteractionExpired,
+    InteractionId, InteractionRequested, InteractionResolved, MessageId, ModelRoundStarted,
+    RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId, SessionRecovered,
+    SubagentFinished, SubagentSpawned, ToolCallId, ToolError, ToolFinished, ToolIntent,
+    ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished, TurnId, TurnInterrupted,
+    TurnStarted, WorkspaceResourceChanged,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -281,9 +281,15 @@ impl ToolLedger {
         let mut workspace_resource_revisions = HashMap::new();
         for fact in reader.read_all()? {
             match &fact.payload {
-                FactPayload::TurnStarted(start) => { turn_terminals.remove(&start.turn_id); }
-                FactPayload::TurnFinished(end) => { turn_terminals.insert(end.turn_id.clone(), fact.clone()); }
-                FactPayload::TurnInterrupted(end) => { turn_terminals.insert(end.turn_id.clone(), fact.clone()); }
+                FactPayload::TurnStarted(start) => {
+                    turn_terminals.remove(&start.turn_id);
+                }
+                FactPayload::TurnFinished(end) => {
+                    turn_terminals.insert(end.turn_id.clone(), fact.clone());
+                }
+                FactPayload::TurnInterrupted(end) => {
+                    turn_terminals.insert(end.turn_id.clone(), fact.clone());
+                }
                 _ => {}
             }
             index_fact(

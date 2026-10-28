@@ -50,8 +50,7 @@ const CANCELLED_TOOL_RESULT: &str = "[CANCELLED] Tool was not executed (user int
 /// T2（BUG-2026-10-15）：宽限期内未观察取消、被 detach 的孤儿 worker 的
 /// 收尾文案（进入模型上下文的 tool_result）。与 `CANCELLED_TOOL_RESULT`
 /// 区分开：孤儿线程真实执行过，副作用可能已落地。
-pub(crate) const CANCELLED_ORPHAN_TOOL_RESULT: &str =
-    "[CANCELLED] Tool did not observe cancellation; orphaned worker detached (side effects may still land).";
+pub(crate) const CANCELLED_ORPHAN_TOOL_RESULT: &str = "[CANCELLED] Tool did not observe cancellation; orphaned worker detached (side effects may still land).";
 
 /// 取消收割宽限期：cancel 置位后给在途工具的最后一跳窗口。
 const CANCEL_HARVEST_GRACE: Duration = Duration::from_secs(5);

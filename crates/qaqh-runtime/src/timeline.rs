@@ -1420,21 +1420,97 @@ fn next_entry(
     entry
 }
 
-/// journal 条目的 payload 字节数（内存预算估算；结构事件为 0）。
+/// Owned event payload estimate, excluding inline journal slots. Counts string
+/// lengths and vector storage; it is not allocator accounting or RSS.
 fn journal_entry_payload_bytes(event: &TimelineEvent) -> u64 {
-    match event {
-        TimelineEvent::TextDelta { delta, .. } => delta.len() as u64,
-        TimelineEvent::BlockCheckpoint { text, .. } => text.len() as u64,
-        TimelineEvent::ToolUpdated { tool, .. } => {
-            let optional_bytes = |value: &Option<String>| value.as_ref().map_or(0, String::len);
-            (optional_bytes(&tool.summary)
-                + optional_bytes(&tool.output)
-                + optional_bytes(&tool.diff)
-                + tool.progress.len()) as u64
+    fn s(value: &str) -> u64 {
+        value.len() as u64
+    }
+    fn opt(value: &Option<String>) -> u64 {
+        value.as_deref().map_or(0, s)
+    }
+    fn failure(value: &Option<qaqh_domain::TimelineFailure>) -> u64 {
+        value.as_ref().map_or(0, |f| s(&f.code) + s(&f.message))
+    }
+    fn tool(t: &TimelineTool) -> u64 {
+        let mut n = s(&t.tool_call_id)
+            + s(&t.name)
+            + opt(&t.summary)
+            + opt(&t.args_json)
+            + opt(&t.output)
+            + opt(&t.diff)
+            + s(&t.progress)
+            + opt(&t.progress_stream)
+            + failure(&t.failure);
+        if let Some(p) = &t.permission {
+            n += s(&p.reason)
+                + s(&p.category)
+                + s(&p.level_name)
+                + s(&p.risk)
+                + s(&p.consequence)
+                + (p.paths.len() * std::mem::size_of::<String>()) as u64
+                + p.paths.iter().map(|v| s(v)).sum::<u64>();
         }
-        TimelineEvent::ToolProgress { chunk, .. } => chunk.len() as u64,
-        TimelineEvent::ProviderRetrying { error, .. } => error.len() as u64,
-        _ => 0,
+        if let Some(d) = &t.display {
+            n += opt(&d.summary) + opt(&d.diff);
+            if let Some(header) = &d.header {
+                n += match header {
+                    TimelineToolHeader::Path { path, .. } => s(path),
+                    TimelineToolHeader::Shell { command } => s(command),
+                    TimelineToolHeader::Query { query, scope } => s(query) + opt(scope),
+                    TimelineToolHeader::Other { label } => s(label),
+                    TimelineToolHeader::Unknown => 0,
+                };
+            }
+            if let Some(body) = &d.body {
+                n += match body {
+                    TimelineToolBody::None | TimelineToolBody::Unknown => 0,
+                    TimelineToolBody::Text { text, .. } => s(text),
+                    TimelineToolBody::Diff { unified, files } => {
+                        s(unified)
+                            + (files.len() * std::mem::size_of::<String>()) as u64
+                            + files.iter().map(|v| s(v)).sum::<u64>()
+                    }
+                    TimelineToolBody::Shell { output, .. } => s(output),
+                    TimelineToolBody::Streams { stdout, stderr, .. } => s(stdout) + s(stderr),
+                    TimelineToolBody::Subagent { name, session_id } => s(name) + s(session_id),
+                };
+            }
+            if let Some(metrics) = &d.metrics {
+                n += opt(&metrics.effective_tool_name);
+            }
+        }
+        n
+    }
+    match event {
+        TimelineEvent::TurnOpened { user_text } => s(user_text),
+        TimelineEvent::BlockOpened { block } => {
+            s(&block.block_id) + s(&block.text) + block.tool.as_ref().map_or(0, tool)
+        }
+        TimelineEvent::TextDelta {
+            block_id, delta, ..
+        } => s(block_id) + s(delta),
+        TimelineEvent::BlockCheckpoint {
+            block_id,
+            arg,
+            text,
+        } => s(block_id) + opt(arg) + s(text),
+        TimelineEvent::ToolUpdated {
+            block_id,
+            tool: value,
+        } => s(block_id) + tool(value),
+        TimelineEvent::ToolProgress {
+            block_id,
+            chunk,
+            stream,
+            ..
+        } => s(block_id) + s(chunk) + opt(stream),
+        TimelineEvent::ToolEstimated { block_id, .. } | TimelineEvent::BlockSealed { block_id } => {
+            s(block_id)
+        }
+        TimelineEvent::ProviderRetrying { error, .. } => s(error),
+        TimelineEvent::TurnSealed { failure: value, .. } => failure(value),
+        TimelineEvent::RoundSealed { .. } | TimelineEvent::UsageSampled { .. } => 0,
     }
 }
 
@@ -2564,6 +2640,82 @@ mod tests {
     }
 
     #[test]
+    fn oversized_single_event_evicts_whole_journal_and_uncovers_stale_cursor() {
+        // B1.3 遗留契约的原语形态：单条 payload 自身超过 journal 字节预算时，
+        // `enforce_journal_budget` 会把它连同全部更早条目一起头部驱逐——回放
+        // 窗口变空，而 watermark 已推进。带旧 cursor 重连的客户端拿到
+        // 「空回放 + watermark 落后」，必须由 daemon 判据
+        // `timeline_replay_lost_coverage`（daemon sse）下发 reset 信号，
+        // 否则若该事件是最后一条，客户端永远停在旧 cursor。
+        crate::ringing::persistence_policy::set_journal_byte_limit_for_test(512 * 1024);
+        let mut appender = TimelineAppender::new();
+        let first = appender
+            .open_turn("huge", "t1", "covered baseline")
+            .unwrap();
+        let cursor = first.timeline_seq;
+        appender
+            .open_block("huge", "t1", 0, "r", TimelineBlockKind::Reasoning, None)
+            .unwrap();
+        // 单条 600 KB delta：自身 payload > 512 KB 测试字节界。
+        appender
+            .append_text("huge", "t1", 0, "r", 0, "x".repeat(600 * 1024))
+            .unwrap();
+
+        // 巨型事件已在 turn 快照内物化（内容不丢），但回放窗口整体蒸发。
+        let snapshot = appender.snapshot("huge").unwrap();
+        assert!(
+            snapshot.watermark > cursor,
+            "watermark must have advanced past the client cursor, got {}",
+            snapshot.watermark
+        );
+        assert!(
+            appender.replay_since("huge", cursor).is_empty(),
+            "replay window must be empty for a cursor at the last covered seq"
+        );
+    }
+
+    #[test]
+    fn journal_budget_evicts_nested_tool_display_and_argument_prefix() {
+        crate::ringing::persistence_policy::set_journal_byte_limit_for_test(512 * 1024);
+        let limit = crate::ringing::persistence_policy::journal_byte_limit() as usize;
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("budget", "t", "hello").unwrap();
+        let mut value = tool();
+        value.args_json = Some("a".repeat(limit / 4));
+        value.display = Some(TimelineToolDisplay {
+            summary: None,
+            diff: Some("d".repeat(limit / 4)),
+            lines_added: 0,
+            lines_removed: 0,
+            header: None,
+            body: None,
+            metrics: None,
+            outcome: None,
+        });
+        appender
+            .open_block(
+                "budget",
+                "t",
+                0,
+                "tool",
+                TimelineBlockKind::Tool,
+                Some(value.clone()),
+            )
+            .unwrap();
+        appender
+            .replace_tool("budget", "t", 0, "tool", value)
+            .unwrap();
+        let state = appender.sessions.get("budget").unwrap();
+        assert!(state.journal_bytes <= limit as u64);
+        assert_eq!(state.journal.len(), 1);
+        assert!(matches!(
+            state.journal.front().unwrap().event,
+            TimelineEvent::ToolUpdated { .. }
+        ));
+        assert!(state.journal_bytes >= (limit / 2) as u64);
+    }
+
+    #[test]
     fn restore_rebuilds_journal_byte_budget() {
         // restore 后字节预算必须与 journal 实际 payload 一致。
         let mut appender = TimelineAppender::new();
@@ -2592,15 +2744,21 @@ mod tests {
 
         let mut restored = TimelineAppender::new();
         restored.restore("s".into(), snapshot, journal);
-        let expected = "payload-123".len()
-            + "progress".len()
-            + "summary".len()
-            + "output".len()
-            + "diff".len()
-            + "progress".len();
-        assert!(expected > 0);
         let session_id = restored.sessions.get("s").unwrap();
-        assert_eq!(session_id.journal_bytes, expected as u64);
+        let expected: u64 = session_id
+            .journal
+            .iter()
+            .map(|entry| journal_entry_payload_bytes(&entry.event))
+            .sum();
+        assert!(
+            expected
+                >= ("payload-123".len()
+                    + "progress".len() * 2
+                    + "summary".len()
+                    + "output".len()
+                    + "diff".len()) as u64
+        );
+        assert_eq!(session_id.journal_bytes, expected);
     }
 
     /// 8192 条上限之上的摊还成本必须与上限之内同阶（O(1)），且驱逐只丢最老前缀。
@@ -2621,9 +2779,9 @@ mod tests {
         const WINDOW: u64 = 2048;
         const BUDGET_RATIO: f64 = 2.5;
 
-        // 单条 payload 64 B：~0.5 MB 总量，远离 256 MB 字节上限，
-        // 保证越界驱逐**只**由条数上限触发（否则测的不是这条路径）。
-        let chunk = "x".repeat(64);
+        // Keep payload (including block ids) below the 512 KiB override used by
+        // the byte-budget test even when the entire test suite runs together.
+        let chunk = "x".repeat(32);
         let mut appender = TimelineAppender::new();
         appender
             .open_turn("perf", "t1", "high frequency deltas")
