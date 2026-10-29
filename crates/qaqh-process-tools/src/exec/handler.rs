@@ -46,6 +46,9 @@ pub struct ExecArgs {
     /// Background after N secs; returns process_id.
     #[serde(default)]
     pub background_after_secs: Option<u64>,
+    /// True allocates a PTY (merged stdout/stderr, live terminal semantics with ANSI); false or omitted uses plain pipes.
+    #[serde(default)]
+    pub tty: Option<bool>,
     /// 100-50000; default 10000.
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
@@ -233,6 +236,47 @@ pub(crate) fn run_exec(
         .filter(|pairs: &Vec<(String, String)>| !pairs.is_empty());
     let cancel = ctx.cancellation.shared_flag();
     let sandbox = ctx.sandbox_spec();
+    let tty = args.tty.unwrap_or(false);
+
+    // ── tty=true：PTY 后端（codex unified_exec oneshot 范式，unix 专属）──
+    if tty {
+        #[cfg(not(unix))]
+        {
+            let _ = tty;
+            return Err(exec_error(
+                "tty_unsupported",
+                "tty=true (PTY) is not supported on this platform yet",
+                Some("Omit tty to run with plain pipes."),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            if background_after_secs.is_some() {
+                return Err(exec_error(
+                    "tty_background_unsupported",
+                    "background_after_secs is not supported with tty=true yet",
+                    Some(
+                        "PTY sessions are one-shot for now: timeout/cancel terminates the process group. Omit background_after_secs or use tty=false.",
+                    ),
+                ));
+            }
+            let result = super::pty_exec::pty_exec(
+                &argv,
+                env.as_deref(),
+                cwd.as_deref(),
+                max_output_tokens,
+                timeout_secs,
+                Some(cancel.as_ref()),
+                progress_tx,
+                &ctx.call_id,
+                Some(sandbox),
+            );
+            if let Some(proc_id) = result.process_id {
+                crate::process_registry::ProcessRegistry::set_owner(proc_id, &ctx.session_id);
+            }
+            return Ok(result);
+        }
+    }
 
     let mut result = direct_exec_sandboxed(
         &argv,

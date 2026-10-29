@@ -14,11 +14,9 @@ pub(crate) mod typed;
 pub use actions::{todo_list_for, todo_set_for, todo_set_value_for};
 pub use model::{TodoItem, TodoMode, TodoStatus, TodoStore};
 pub use split::register;
-#[cfg(test)]
-pub(crate) use split::reject_fields;
 pub use store::{
-    load_todo, load_todo_for, save_todo, todo_cancel_json, todo_cancel_value, todo_status_json,
-    todo_status_value,
+    load_todo, load_todo_for, save_todo, todo_cancel_json, todo_cancel_value, todo_meta_snapshot,
+    todo_status_json, todo_status_value,
 };
 pub use typed::todo_list_value_for;
 

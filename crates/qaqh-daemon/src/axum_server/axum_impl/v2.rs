@@ -298,9 +298,9 @@ pub(crate) async fn handle_team_snapshot_v2(
 
 /// `GET /ringing/v2/sessions/{seed}/approvals` — 本地壳层审批投影。
 ///
-/// 消费方是桌面壳宿主（`qaqh-webui-app` 经 `qaqh-client::pending_approvals`）:
-/// 宿主把这里的 canonical id 映射为不透明 challenge 再交给渲染层（防御纵深,
-/// 见 plan-webui-tauri D3 决策）。webui 浏览器网关已随 Tauri 化移除。
+/// 消费方是桌面壳宿主（`qaqh-electron` 经 `qaqh-client::pending_approvals`）:
+/// 宿主把这里的 canonical id 映射为不透明 challenge 再交给渲染层（防御纵深）。
+/// webui 浏览器网关已移除。
 ///
 /// 纯 v2：pending 集合来自 canonical control 投影（只取未 resolved / 未 expired 的
 /// 条目），正文来自 canonical content ref（`request`）。形状保持稳定：
@@ -1027,4 +1027,56 @@ pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         serde_json::to_vec(value).unwrap_or_default(),
     )
         .into_response()
+}
+
+// ── exec 会话生命周期（前端后台进程面板）───────────────────────────────
+//
+// codex 没有这一层：它的哲学是「长驻 = 存活 session + write_stdin 轮询」，
+// 全在模型侧。qaqh 的 backgrounded 移交（background_after_secs）需要给
+// 前端一个**用户可直接操作**的面：列出在册进程 + 主动 kill。数据源是
+// ProcessRegistry（owner 校验、墓碑、终态收敛都在那一层做过了）；
+// 鉴权面沿用 v2 lease（Bearer 中间件已在上层解析身份）。
+// 注：当前不做跨 lease 的 owner 过滤（本 daemon 单用户模型）——若未来
+// 多租户接入，先在 list/kill 加 owner 断言再放行。
+
+/// `GET /ringing/v2/exec-sessions` — 在册进程全量快照（含后台移交的
+/// exec 与 PTY 会话；条目终态驱逐后消失，墓碑只服务按 id 对账）。
+pub(crate) async fn handle_exec_sessions_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if require_v2_lease(&state, &headers).is_none() {
+        return lease_required_v2();
+    }
+    let sessions = qaqh_process_tools::process_registry::ProcessRegistry::list_sessions();
+    json_response(StatusCode::OK, &serde_json::json!({ "sessions": sessions }))
+}
+
+/// `POST /ringing/v2/exec-sessions/{id}/kill` — 用户主动终止。
+/// 语义与 `process kill` 完全一致（整组 SIGKILL / taskkill /T，墓碑路径
+/// 按 os_pid 尽力清残留），回复如实区分「已清理」与「无可清理」。
+pub(crate) async fn handle_exec_session_kill(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<u32>,
+) -> Response {
+    if require_v2_lease(&state, &headers).is_none() {
+        return lease_required_v2();
+    }
+    use qaqh_process_tools::process_registry::KillOutcome;
+    match qaqh_process_tools::process_registry::ProcessRegistry::kill(session_id) {
+        KillOutcome::Killed | KillOutcome::TombstoneCleaned => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "id": session_id, "killed": true }),
+        ),
+        KillOutcome::NoOsPid => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "id": session_id, "killed": false, "reason": "no_os_pid" }),
+        ),
+        KillOutcome::NotFound => api_error_response(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            &format!("exec session {session_id} not found"),
+        ),
+    }
 }

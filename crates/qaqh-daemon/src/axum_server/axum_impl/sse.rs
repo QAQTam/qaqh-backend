@@ -4,9 +4,19 @@ use super::test_hooks::SseTerminate;
 use super::*;
 
 pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
+    parse_timeline_cursor_detailed(cursor, epoch).0
+}
+
+/// 解析结果连同 cursor 的来源：epoch 是否匹配当前 daemon。
+///
+/// `false`（空 cursor 除外）意味着旧 epoch 的位置被静默折叠成 0——这通常
+/// 发生在 daemon 重启后客户端带着持久化 cursor 重连。此时「空回放 +
+/// watermark 落前」不是 journal 被驱逐，而是正常的重基线契约，终止帧的
+/// `cause` 应据此区分，避免前端把重启恢复误读成数据丢失。
+pub(crate) fn parse_timeline_cursor_detailed(cursor: &str, epoch: &str) -> (u64, bool) {
     if cursor.is_empty() {
         // 首次连接：没有 cursor 就是从头开始，这是正常路径，不告警。
-        return 0;
+        return (0, true);
     }
     let mut parts = cursor.split(':');
     let e = parts.next().unwrap_or_default();
@@ -14,7 +24,7 @@ pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
     let seq = parts.next().and_then(|v| v.parse::<u64>().ok());
     let shape_ok = e == epoch && kind == "timeline" && parts.next().is_none();
     match (shape_ok, seq) {
-        (true, Some(seq)) => seq,
+        (true, Some(seq)) => (seq, true),
         _ => {
             // 两类都落到这里，且都属于「静默全量重放」，所以都要告警：
             // 1) 形状不符 —— channel SSE 写的是 `{epoch}:{channel}:{seq}`，epoch 轮换
@@ -24,7 +34,7 @@ pub(crate) fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
             log::warn!(
                 "[sse] timeline Last-Event-ID {cursor:?} is not a usable `{{epoch}}:timeline:{{seq}}` cursor for epoch {epoch:?}; replaying from 0"
             );
-            0
+            (0, false)
         }
     }
 }
@@ -135,11 +145,30 @@ fn should_deliver_timeline_live(
 /// `ringing.stream_terminated { code: "journal_gap" }`，客户端按
 /// StreamTerminated 语义重取快照把 cursor 重基线到 watermark。
 ///
+/// 注意该判据在 **daemon 重启** 后同样为真（磁盘 journal 只保留活跃 turn
+/// 的尾部，已 seal 回合被 `prune_sealed_timeline_journal` 裁掉；客户端旧
+/// epoch cursor 又被折叠成 0）——这是设计内的重基线路径而非数据丢失，
+/// 终止帧的 `cause` 字段据此区分 `stale_epoch` 与 `journal_evicted`。
+///
 /// 回放非空但起点已越过 `after + 1` 的「窗口内缺帧」**不在此判据内**：
 /// 那条路径由客户端 `cursor + 1` 连续性检查兜底（gap 注入测试
 /// `QAQH_TEST_TIMELINE_GAP` 明确依赖"流不关、客户端自检"的既有契约）。
-fn timeline_replay_lost_coverage(after: u64, watermark: u64, replay_len: usize) -> bool {
-    replay_len == 0 && after < watermark
+///
+/// BUG-2026-10-29-A：判据只对**确实携带 cursor** 的连接生效（`has_cursor`，
+/// 即 `Last-Event-ID` 非空）。空 cursor 是「从 live 开始」——没有可丢失的
+/// 位置；journal 裁空 + watermark 落后是重启后空闲会话的常态而非失覆盖。
+/// 对这种连接下发 journal_gap 会让「丢弃本来就没有的 cursor → 原样重连」
+/// 闭环成 1 秒重连死循环（TS SDK 每次 open 都把退避归零）。历史由 attach
+/// 的 timelinePage 首页 + projection bootstrap 覆盖，live 帧与上层按
+/// `timeline_seq` 幂等去重不受影响。带旧 cursor 的连接仍一次性 reset，
+/// 客户端清 cursor 后的下一次无 cursor 连接走 live 路径，重基线契约闭环。
+fn timeline_replay_lost_coverage(
+    has_cursor: bool,
+    after: u64,
+    watermark: u64,
+    replay_len: usize,
+) -> bool {
+    has_cursor && replay_len == 0 && after < watermark
 }
 
 pub(crate) async fn handle_timeline_events(
@@ -179,17 +208,23 @@ pub(crate) async fn handle_timeline_events(
         .or_else(|| query.get("last_event_id").map(|s| s.as_str()))
         .or_else(|| query.get("last-event-id").map(|s| s.as_str()))
         .unwrap_or("");
-    let after = parse_timeline_cursor(last_event_id, &state.epoch);
+    let (after, cursor_epoch_matched) =
+        parse_timeline_cursor_detailed(last_event_id, &state.epoch);
     let rx = state.hub.subscribe_timeline();
     let replay = state.hub.timeline_replay_since(&session_id, after);
-    let journal_gap_lost = {
-        let watermark = state
-            .hub
-            .timeline_snapshot(&session_id)
-            .map(|snapshot| snapshot.watermark)
-            .unwrap_or(0);
-        timeline_replay_lost_coverage(after, watermark, replay.len())
-    };
+    let watermark = state
+        .hub
+        .timeline_snapshot(&session_id)
+        .map(|snapshot| snapshot.watermark)
+        .unwrap_or(0);
+    let journal_gap_lost = timeline_replay_lost_coverage(
+        // BUG-2026-10-29-A：无 cursor（首次连接 / 客户端重基线后重连）不判
+        // 失覆盖——否则空闲历史会话每次建流都被 journal_gap 打断。
+        !last_event_id.is_empty(),
+        after,
+        watermark,
+        replay.len(),
+    );
     let replayed: HashSet<u64> = replay.iter().map(|e| e.timeline_seq).collect();
     let epoch = state.epoch.clone();
     let leases = state.leases.clone();
@@ -203,12 +238,31 @@ pub(crate) async fn handle_timeline_events(
         // B1.3 遗留契约：journal 已整体驱逐、补不了帧时，必须显式 reset，
         // 而不是让客户端静默空转（见 `timeline_replay_lost_coverage`）。
         if journal_gap_lost {
+            // 成因区分：旧 epoch cursor 被折叠成 0（daemon 重启后的正常
+            // 重基线路径）vs 同 epoch 内 journal 确实被驱逐（超大单事件 /
+            // 条数上限头部驱逐）。code 保持 `journal_gap` 不变以兼容既有
+            // 客户端的 `needs_gap_recovery` 判定；`cause` 与 `message` 让
+            // 前端能如实区分「重启恢复」与「窗口蒸发」，避免把重启恢复
+            // 误读成数据丢失并阻塞后续交互。
+            let (cause, message) = if cursor_epoch_matched {
+                (
+                    "journal_evicted",
+                    "journal no longer covers the client cursor (entries evicted); re-baseline from snapshot",
+                )
+            } else {
+                (
+                    "stale_epoch",
+                    "client cursor belongs to a previous daemon epoch and cannot be replayed; re-baseline from snapshot (expected after daemon restart, content is intact)",
+                )
+            };
             let ev = Event::default().event("ringing.stream_terminated").data(
                 serde_json::json!({
                     "code": "journal_gap",
+                    "cause": cause,
                     "session_id": session_clone.as_str(),
                     "cursor": after,
-                    "message": "journal no longer covers the client cursor (oversized event evicted); re-baseline from snapshot",
+                    "watermark": watermark,
+                    "message": message,
                 })
                 .to_string(),
             );
@@ -470,15 +524,27 @@ mod tests {
     #[test]
     fn journal_eviction_marks_stale_cursor_as_lost_coverage() {
         // 巨型事件驱逐整个 journal：cursor=1 落后于 watermark=2，回放空。
-        assert!(timeline_replay_lost_coverage(1, 2, 0));
+        assert!(timeline_replay_lost_coverage(true, 1, 2, 0));
         // cursor 已被快照 watermark 覆盖（recover_gap 重基线后再连）：空闲正常。
-        assert!(!timeline_replay_lost_coverage(2, 2, 0));
+        assert!(!timeline_replay_lost_coverage(true, 2, 2, 0));
         // 全新会话（无任何事件）。
-        assert!(!timeline_replay_lost_coverage(0, 0, 0));
+        assert!(!timeline_replay_lost_coverage(true, 0, 0, 0));
         // 回放非空：cursor+1 连续性由客户端自检，服务端不越权 reset。
-        assert!(!timeline_replay_lost_coverage(1, 2, 1));
-        assert!(!timeline_replay_lost_coverage(0, 8, 3));
+        assert!(!timeline_replay_lost_coverage(true, 1, 2, 1));
+        assert!(!timeline_replay_lost_coverage(true, 0, 8, 3));
         // cursor 反超 watermark（同 epoch 下不应出现）：保守不判 gap。
-        assert!(!timeline_replay_lost_coverage(5, 2, 0));
+        assert!(!timeline_replay_lost_coverage(true, 5, 2, 0));
+    }
+
+    /// BUG-2026-10-29-A 回归：无 cursor 连接（首次 attach / SDK 清 cursor
+    /// 重基线后的重连）对「journal 裁空 + watermark 落后」的空闲会话必须
+    /// 正常 live——18a89dc 的判据曾把这条路径打成 1 秒 journal_gap 重连
+    /// 死循环（daemon 重启后空闲历史会话必现）。
+    #[test]
+    fn fresh_connection_without_cursor_is_not_lost_coverage() {
+        // daemon 重启后的空闲历史会话：journal 裁空、watermark 巨大。
+        assert!(!timeline_replay_lost_coverage(false, 0, 114_685, 0));
+        // 无 cursor 但回放非空（活跃 turn 尾部）同样正常。
+        assert!(!timeline_replay_lost_coverage(false, 0, 8, 3));
     }
 }

@@ -467,6 +467,20 @@ impl ProcessRegistry {
         });
     }
 
+    /// 登记一个 PTY 会话：无 `std::process::Child` 句柄可托管，但
+    /// **os_pid（会话 leader）与 stdin writer 必须入册**——前者让现有
+    /// kill 路径的 `killpg` 直接覆盖 PTY 会话组（session leader ⇒
+    /// PID == PGID，等价 kill_session_group），后者为后续 write_stdin
+    /// 铺路（`pty_writer` 字段即为此预留）。
+    pub fn attach_pty_session(id: u32, os_pid: u32, writer: Box<dyn std::io::Write + Send>) {
+        Self::with(|r| {
+            if let Some(entry) = r.entries.get(&id) {
+                *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(os_pid);
+                *entry.pty_writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer);
+            }
+        });
+    }
+
     /// 非阻塞查询子进程是否退出；已退出返回 exit code 并释放句柄、更新状态。
     /// 子进程句柄唯一持有在注册表（attach_child 移入），direct_exec 的
     /// poll 循环经此查询，避免 Child 双重持有。
@@ -665,70 +679,87 @@ impl ProcessRegistry {
         });
     }
 
+    /// 面向前端后台进程面板的全量快照（在册条目，按 id 升序；驱逐条目
+    /// 不在列表——墓碑只服务按 id 对账，不进列表）。
+    pub fn list_sessions() -> Vec<serde_json::Value> {
+        Self::with(|r| {
+            let mut ids: Vec<u32> = r.entries.keys().copied().collect();
+            ids.sort_unstable();
+            ids.into_iter()
+                .filter_map(|id| Self::info_locked(r, id))
+                .collect()
+        })
+    }
+
     /// Get info for a process as JSON.
     ///
     /// 已驱逐（墓碑）条目不返回 `None`：以 `"evicted": true` + 驱逐前的终态/
     /// exit code 作答，使 `process check` 能区分「已结束」与「id 无效」
     /// （BUG-2026-09-13-23）。
     pub fn get_info(id: u32) -> Option<serde_json::Value> {
-        Self::with(|r| {
-            let Some(entry) = r.entries.get(&id) else {
-                let tombstone = r.tombstone(id)?;
-                return Some(Self::tombstone_info(tombstone));
-            };
-            let status = entry
-                .status
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let output = entry
-                .output
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let stderr = entry
-                .stderr
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let answer = entry
-                .answer
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let elapsed = entry.started_at.elapsed().as_secs();
+        Self::with(|r| Self::info_locked(r, id))
+    }
 
-            let mut info = match status {
-                ProcStatus::Exited(c) => serde_json::json!({
-                    "id": id, "name": entry.name, "status": "exited",
-                    "exit_code": c, "elapsed_secs": elapsed,
-                    "output": output, "stderr": stderr,
-                }),
-                ProcStatus::Killed => serde_json::json!({
-                    "id": id, "name": entry.name, "status": "killed",
-                    "elapsed_secs": elapsed,
-                    "exit_code": *entry.last_exit_code.lock().unwrap_or_else(|e| e.into_inner()),
-                    "output": output, "stderr": stderr,
-                }),
-                ProcStatus::Running => serde_json::json!({
-                    "id": id, "name": entry.name, "status": "running",
-                    "elapsed_secs": elapsed,
-                    "output_tail": if output.len() > 500 {
-                        format!("...({} total)\n{}", output.len(), char_safe_tail(&output, 500))
-                    } else { output.clone() },
-                    "stderr_tail": if stderr.len() > 300 {
-                        format!("...(stderr {} total)\n{}", stderr.len(), char_safe_tail(&stderr, 300))
-                    } else { stderr.clone() },
-                    "output_size": output.len(),
-                }),
-            };
-            if let Some(ans) = answer
-                && let serde_json::Value::Object(ref mut map) = info
-            {
-                map.insert("answer".to_string(), serde_json::json!(ans));
-            }
-            Some(info)
-        })
+    /// `get_info` 的锁内实现。独立出来是因为全局注册表锁**不可重入**：
+    /// `list_sessions` 必须在一次 `with` 内批量取信息，嵌套 `with` 即死锁
+    /// （本轮 list 面板开发时实测）。
+    fn info_locked(r: &ProcessRegistry, id: u32) -> Option<serde_json::Value> {
+        let Some(entry) = r.entries.get(&id) else {
+            let tombstone = r.tombstone(id)?;
+            return Some(Self::tombstone_info(tombstone));
+        };
+        let status = entry
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let output = entry
+            .output
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let stderr = entry
+            .stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let answer = entry
+            .answer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let elapsed = entry.started_at.elapsed().as_secs();
+
+        let mut info = match status {
+            ProcStatus::Exited(c) => serde_json::json!({
+                "id": id, "name": entry.name, "status": "exited",
+                "exit_code": c, "elapsed_secs": elapsed,
+                "output": output, "stderr": stderr,
+            }),
+            ProcStatus::Killed => serde_json::json!({
+                "id": id, "name": entry.name, "status": "killed",
+                "elapsed_secs": elapsed,
+                "exit_code": *entry.last_exit_code.lock().unwrap_or_else(|e| e.into_inner()),
+                "output": output, "stderr": stderr,
+            }),
+            ProcStatus::Running => serde_json::json!({
+                "id": id, "name": entry.name, "status": "running",
+                "elapsed_secs": elapsed,
+                "output_tail": if output.len() > 500 {
+                    format!("...({} total)\n{}", output.len(), char_safe_tail(&output, 500))
+                } else { output.clone() },
+                "stderr_tail": if stderr.len() > 300 {
+                    format!("...(stderr {} total)\n{}", stderr.len(), char_safe_tail(&stderr, 300))
+                } else { stderr.clone() },
+                "output_size": output.len(),
+            }),
+        };
+        if let Some(ans) = answer
+            && let serde_json::Value::Object(ref mut map) = info
+        {
+            map.insert("answer".to_string(), serde_json::json!(ans));
+        }
+        Some(info)
     }
 
     /// 墓碑的对外视图（与 `get_info` 的字段形状保持一致，另加 `evicted`）。

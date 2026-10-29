@@ -21,6 +21,8 @@ sbx-win = { path = "../sbx-win" }
 
 [dev-dependencies]
 tempfile = "3"
+libc = "0.2"
+qaqh-pty = { path = "../qaqh-pty" }
 
 [lints]
 workspace = true

@@ -127,11 +127,19 @@ impl TypedTool for ApplyPatchTool {
             ToolRisk::Write,
             Duration::from_secs(60),
         )
-        .with_native_patch(crate::tool_api::NativePatchRepresentation {
-            custom_description: "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON. Matching takes the FIRST hit; disambiguate repeated context with extra lines or '@@ <context line>'. Partial multi-file application is possible; do not blindly resend the whole patch.".into(),
-            preview_description: "Preview a Codex-format patch without writing. Send a JSON object with patch text; returns a pending_id for confirm_apply. Matching takes the FIRST hit; disambiguate repeated context. Confirm revalidates against current files.".into(),
-            preview_parameters: crate::tool_api::schema::schema_of::<ApplyPatchPreviewArgs>(),
-        })
+        .with_native_text(
+            crate::tool_api::NativeTextRepresentation::text_tool(
+                "patch",
+                json!({"dry_run": false}),
+                "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON. Matching takes the FIRST hit; disambiguate repeated context with extra lines or '@@ <context line>'. Partial multi-file application is possible; do not blindly resend the whole patch.",
+                true,
+                false,
+            )
+            .with_preview(
+                "Preview a Codex-format patch without writing. Send a JSON object with patch text; returns a pending_id for confirm_apply. Matching takes the FIRST hit; disambiguate repeated context. Confirm revalidates against current files.",
+                crate::tool_api::schema::schema_of::<ApplyPatchPreviewArgs>(),
+            ),
+        )
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.

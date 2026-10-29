@@ -42,7 +42,8 @@ pub(crate) fn read_store_for(session_id: &str) -> Result<TodoStore, String> {
             current_id: None,
             auto_turns: 0,
             max_auto_turns: 24,
-            next_id: 0,
+            archived: false,
+            cleared_notified: false,
         });
     }
     let content = std::fs::read_to_string(&path).map_err(|e| format!("read todo.json: {e}"))?;
@@ -190,7 +191,8 @@ pub(crate) fn read_store() -> Result<TodoStore, String> {
             current_id: None,
             auto_turns: 0,
             max_auto_turns: 24,
-            next_id: 0,
+            archived: false,
+            cleared_notified: false,
         });
     }
     let content = std::fs::read_to_string(&path).map_err(|e| format!("read todo.json: {e}"))?;
@@ -258,4 +260,73 @@ pub(crate) fn normalize_current_id(store: &mut TodoStore) {
     } else {
         store.current_id = None;
     }
+}
+
+/// 维护归档位：全部条目进入终态（completed/cancelled）→ `archived=true`；
+/// 存在活跃条目（或空列表）→ `false`。write 重建 / update 翻转后调用。
+/// 允许并行 in_progress：归档判定只看"是否还有非终态条目"，不限制数量。
+pub(crate) fn refresh_archive_flag(store: &mut TodoStore) {
+    store.archived = !store.items.is_empty()
+        && store
+            .items
+            .iter()
+            .all(|item| matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled));
+}
+
+/// 工具结果 meta 快照（状态机收口，runtime 每次非 todo 工具调用时求值）。
+///
+/// - 无列表 / 已归档 → `None`（零 token，不注入）；
+/// - 全部终态 → 置归档位并回一次 `[todos] all done`（"下一次工具请求时
+///   置空"），之后归档位挡住后续注入；
+/// - 有活跃条目 → 单行紧凑式 `{done}/{total} done · now: <title>`，只有
+///   正在工作的条目；完整列表由 todo_write/todo_update 自身的 output 携带。
+///
+/// **快照即冻结**：调用方把返回值写进 tool_result 后不得再改——历史
+/// append-only 是 KV cache 前缀命中的前提。
+pub fn todo_meta_snapshot(session_id: &str) -> Option<String> {
+    let _guard = TODO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if session_id.is_empty() {
+        return None;
+    }
+    let mut store = read_store_for(session_id).ok()?;
+    if store.items.is_empty() {
+        return None;
+    }
+    // 归档后的 cleared 提示：只发一次（"下一次工具请求时置空"），随后静默。
+    if store.archived {
+        if store.cleared_notified {
+            return None;
+        }
+        store.cleared_notified = true;
+        let _ = write_store_for(session_id, &store);
+        return Some("[todos] all tasks done — list cleared.".to_string());
+    }
+    // 防御：write/update 都会维护 archived，这里兜底直接写路径未覆盖的情形。
+    let total = store.items.len();
+    let done = store
+        .items
+        .iter()
+        .filter(|item| matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled))
+        .count();
+    if done == total {
+        store.archived = true;
+        let _ = write_store_for(session_id, &store);
+        return Some("[todos] all tasks done — list cleared.".to_string());
+    }
+    // 并行工作：取第一个 in_progress；无则取第一个 pending（提示下一步）。
+    let current = store
+        .items
+        .iter()
+        .find(|item| item.status == TodoStatus::InProgress)
+        .or_else(|| {
+            store
+                .items
+                .iter()
+                .find(|item| item.status == TodoStatus::Pending)
+        })?;
+    Some(format!(
+        "[todos] {done}/{total} done · now: {} ({})",
+        current.title,
+        status_name(&current.status)
+    ))
 }

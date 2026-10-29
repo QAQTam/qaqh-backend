@@ -48,14 +48,64 @@ pub enum ModelToolDeclaration {
 }
 
 /// Explicit, validated conversion into the existing execution contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InputAdapter {
     /// An object-valued JSON function call, preserved without parameter repair.
     FunctionJson,
-    /// Raw apply_patch input becomes the canonical apply operation.
-    ApplyPatchCustom,
+    /// A function argument or native custom payload containing text, mapped to
+    /// one canonical string field and optional fixed canonical arguments.
+    TextInput(TextInputAdapter),
     /// The distinct JSON preview tool becomes canonical apply_patch dry-run.
     ApplyPatchPreview,
+}
+
+/// Source shape for a text-bearing model tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextPayloadSource {
+    /// Extract one string property from a JSON function argument object.
+    FunctionField { field: String },
+    /// Use the provider's raw custom-tool input verbatim.
+    CustomRaw,
+}
+
+/// Reusable input adapter for function-string and custom-raw representations.
+///
+/// Both representations become the same canonical object before authorization,
+/// resource extraction, conflict grouping, or execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextInputAdapter {
+    pub source: TextPayloadSource,
+    pub canonical_field: String,
+    pub canonical_defaults: Value,
+}
+
+impl TextInputAdapter {
+    pub fn function_field(
+        wire_field: impl Into<String>,
+        canonical_field: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: TextPayloadSource::FunctionField {
+                field: wire_field.into(),
+            },
+            canonical_field: canonical_field.into(),
+            canonical_defaults: json!({}),
+        }
+    }
+
+    pub fn custom_raw(canonical_field: impl Into<String>) -> Self {
+        Self {
+            source: TextPayloadSource::CustomRaw,
+            canonical_field: canonical_field.into(),
+            canonical_defaults: json!({}),
+        }
+    }
+
+    #[must_use]
+    pub fn with_defaults(mut self, defaults: Value) -> Self {
+        self.canonical_defaults = defaults;
+        self
+    }
 }
 
 /// A single registry-derived entry, validated and frozen by [`ModelToolPlan`].
@@ -219,15 +269,13 @@ impl ModelToolPlan {
             .get(&native.address)
             .and_then(|index| self.entries.get(*index))
             .ok_or(ToolPlanError::UnknownToolAddress)?;
-        let args = match (entry.adapter, &native.payload) {
+        let args = match (&entry.adapter, &native.payload) {
             (InputAdapter::FunctionJson, NativeToolPayload::JsonArguments(value))
                 if value.is_object() =>
             {
                 value.clone()
             }
-            (InputAdapter::ApplyPatchCustom, NativeToolPayload::RawText(patch)) => {
-                json!({"patch": patch, "dry_run": false})
-            }
+            (InputAdapter::TextInput(adapter), payload) => adapt_text_input(payload, adapter)?,
             (InputAdapter::ApplyPatchPreview, NativeToolPayload::JsonArguments(value)) => {
                 let object = value.as_object().ok_or(ToolPlanError::InvalidPayload)?;
                 if object.len() != 1 {
@@ -250,6 +298,50 @@ impl ModelToolPlan {
             native,
         })
     }
+}
+
+/// Convert a supported text payload to a canonical JSON object.
+///
+/// Function payloads must contain exactly the declared string field. Custom
+/// payloads are used byte-for-byte as supplied. No JSON or natural-language
+/// repair is attempted.
+pub fn adapt_text_input(
+    payload: &NativeToolPayload,
+    adapter: &TextInputAdapter,
+) -> Result<Value, ToolPlanError> {
+    let text = match (&adapter.source, payload) {
+        (
+            TextPayloadSource::FunctionField { field },
+            NativeToolPayload::JsonArguments(value),
+        ) => {
+            let object = value.as_object().ok_or(ToolPlanError::InvalidPayload)?;
+            if object.len() != 1 {
+                return Err(ToolPlanError::InvalidPayload);
+            }
+            object
+                .get(field)
+                .and_then(Value::as_str)
+                .ok_or(ToolPlanError::InvalidPayload)?
+        }
+        (TextPayloadSource::CustomRaw, NativeToolPayload::RawText(text)) => text.as_str(),
+        _ => return Err(ToolPlanError::InvalidPayload),
+    };
+
+    let mut canonical = adapter
+        .canonical_defaults
+        .as_object()
+        .cloned()
+        .ok_or(ToolPlanError::InvalidAdapter)?;
+    if adapter.canonical_field.trim().is_empty()
+        || canonical.contains_key(&adapter.canonical_field)
+    {
+        return Err(ToolPlanError::InvalidAdapter);
+    }
+    canonical.insert(
+        adapter.canonical_field.clone(),
+        Value::String(text.to_owned()),
+    );
+    Ok(Value::Object(canonical))
 }
 
 fn validate_entry(entry: &ModelToolEntry) -> Result<(), ToolPlanError> {
@@ -284,10 +376,36 @@ fn validate_entry(entry: &ModelToolEntry) -> Result<(), ToolPlanError> {
             } => {}
         _ => return Err(ToolPlanError::InvalidDeclaration),
     }
-    match (entry.adapter, address.kind) {
+    match (&entry.adapter, address.kind) {
         (InputAdapter::FunctionJson, ModelToolKind::Function) => Ok(()),
-        (InputAdapter::ApplyPatchCustom, ModelToolKind::Custom)
-            if address.name == "apply_patch" && entry.internal_tool_key == "apply_patch" =>
+        (
+            InputAdapter::TextInput(TextInputAdapter {
+                source: TextPayloadSource::FunctionField { field },
+                canonical_field,
+                canonical_defaults,
+            }),
+            ModelToolKind::Function,
+        ) if !field.trim().is_empty()
+            && !canonical_field.trim().is_empty()
+            && canonical_defaults.is_object()
+            && canonical_defaults
+                .get(canonical_field)
+                .is_none() =>
+        {
+            Ok(())
+        }
+        (
+            InputAdapter::TextInput(TextInputAdapter {
+                source: TextPayloadSource::CustomRaw,
+                canonical_field,
+                canonical_defaults,
+            }),
+            ModelToolKind::Custom,
+        ) if !canonical_field.trim().is_empty()
+            && canonical_defaults.is_object()
+            && canonical_defaults.get(canonical_field).is_none()
+            && (canonical_field != "patch" || entry.internal_tool_key == "apply_patch")
+            && (entry.internal_tool_key != "apply_patch" || address.name.contains("patch")) =>
         {
             Ok(())
         }
@@ -355,7 +473,7 @@ mod tests {
             Some("functions"),
             "apply_patch",
             "apply_patch",
-            InputAdapter::ApplyPatchCustom,
+            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
         );
         let preview = entry(
             ModelToolKind::Function,
@@ -396,7 +514,7 @@ mod tests {
             Some("functions"),
             "apply_patch",
             "apply_patch",
-            InputAdapter::ApplyPatchCustom,
+            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
         );
         let function = entry(
             ModelToolKind::Function,
@@ -433,7 +551,7 @@ mod tests {
             None,
             "apply_patch",
             "apply_patch",
-            InputAdapter::ApplyPatchCustom,
+            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
         );
         let preview = entry(
             ModelToolKind::Function,
@@ -494,7 +612,7 @@ mod tests {
             None,
             "apply_patch",
             "delete",
-            InputAdapter::ApplyPatchCustom,
+            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
         );
         assert_eq!(
             ModelToolPlan::new("v1", "p", vec![custom.clone()]).unwrap_err(),
@@ -547,6 +665,95 @@ mod tests {
     }
 
     #[test]
+    fn function_text_field_adapts_to_same_canonical_shape_as_custom_text() {
+        let custom = entry(
+            ModelToolKind::Custom,
+            None,
+            "patch_text",
+            "apply_patch",
+            InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch")
+                    .with_defaults(json!({"dry_run": false})),
+            ),
+        );
+        let function = entry(
+            ModelToolKind::Function,
+            None,
+            "patch_text",
+            "apply_patch",
+            InputAdapter::TextInput(
+                TextInputAdapter::function_field("input", "patch")
+                    .with_defaults(json!({"dry_run": false})),
+            ),
+        );
+        let custom_plan = ModelToolPlan::new("v1", "custom", vec![custom.clone()]).unwrap();
+        let function_plan = ModelToolPlan::new("v1", "function", vec![function.clone()]).unwrap();
+        let custom_call = custom_plan
+            .adapt(native(
+                &custom,
+                NativeToolPayload::RawText(PATCH.to_owned()),
+            ))
+            .unwrap();
+        let function_call = function_plan
+            .adapt(native(
+                &function,
+                NativeToolPayload::JsonArguments(json!({"input": PATCH})),
+            ))
+            .unwrap();
+        assert_eq!(custom_call.canonical.args, function_call.canonical.args);
+        assert_eq!(
+            custom_call.canonical.args,
+            json!({"patch": PATCH, "dry_run": false})
+        );
+    }
+
+    #[test]
+    fn function_text_field_ask_adapter_produces_canonical_input_for_ask_parser() {
+        let ask = entry(
+            ModelToolKind::Function,
+            None,
+            "ask",
+            "ask",
+            InputAdapter::TextInput(TextInputAdapter::function_field("input", "input")),
+        );
+        let plan = ModelToolPlan::new("v1", "ask", vec![ask.clone()]).unwrap();
+        let adapted = plan
+            .adapt(native(
+                &ask,
+                NativeToolPayload::JsonArguments(json!({
+                    "input": "ASK v1\nQuestion: Continue?"
+                })),
+            ))
+            .unwrap();
+        assert_eq!(
+            adapted.canonical.args,
+            json!({"input": "ASK v1\nQuestion: Continue?"})
+        );
+    }
+
+    #[test]
+    fn text_adapters_reject_extra_fields_and_mismatched_payload_kinds() {
+        let function = entry(
+            ModelToolKind::Function,
+            None,
+            "text",
+            "ask",
+            InputAdapter::TextInput(TextInputAdapter::function_field("input", "input")),
+        );
+        let plan = ModelToolPlan::new("v1", "p", vec![function.clone()]).unwrap();
+        for payload in [
+            NativeToolPayload::JsonArguments(json!({"input": "ASK v1", "extra": true})),
+            NativeToolPayload::JsonArguments(json!({"input": 1})),
+            NativeToolPayload::RawText("ASK v1".into()),
+        ] {
+            assert_eq!(
+                plan.adapt(native(&function, payload)).unwrap_err(),
+                ToolPlanError::InvalidPayload
+            );
+        }
+    }
+
+    #[test]
     fn canonical_patch_views_have_identical_permission_and_conflict_targets() {
         use qaqh_permission::conflict::{file_write_paths, resolve_write_conflicts};
         use qaqh_permission::permission::{
@@ -563,7 +770,7 @@ mod tests {
             None,
             "apply_patch",
             "apply_patch",
-            InputAdapter::ApplyPatchCustom,
+            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
         );
         let preview = entry(
             ModelToolKind::Function,
@@ -655,7 +862,7 @@ mod tests {
             None,
             "apply_patch",
             "apply_patch",
-            InputAdapter::ApplyPatchCustom,
+            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
         );
         let plan = ModelToolPlan::new("v1", "p", vec![custom.clone()]).expect("plan");
         let call = plan

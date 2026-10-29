@@ -2,6 +2,6 @@
   "name": "qaqh-harness-monorepo",
   "private": true,
   "version": "2.0.20261028",
-  "description": "QAQ-Harness backend monorepo — cross-platform Rust daemon, agent loop and Ringing V1 SDK (Windows desktop layer lives in qaqh-winui-app)"
+  "description": "QAQ-Harness backend monorepo — cross-platform Rust daemon, agent loop and Ringing V2 SDK (desktop client lives in qaqh-electron)"
 }
 
