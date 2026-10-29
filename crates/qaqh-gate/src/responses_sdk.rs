@@ -389,14 +389,29 @@ pub(crate) fn project_responses_messages(
                 let has_response_type =
                     |expected: &str| raw_items.iter().any(|item| item_type(item) == expected);
                 let mut parts: Vec<Part> = Vec::new();
-                // 1) 回放 provider 原生 items（顺序保持原样）。
+                // 调用项**必须**排在整条 message 的最后：DeepSeek OAuth 的
+                // Responses 端点要求每个 `function_call` 后面紧跟它的
+                // `function_call_output`，中间不许夹任何 item。历史里的
+                // assistant 消息是 [text, tool_use…, 回放的 function_call…]，
+                // 若按原顺序回放，正文（一个 `{"role":"assistant"}` item）就会
+                // 落在 call 与下一轮 tool 消息之间——端点随即报
+                // `No tool output found for tool call call_xx`（线上实测，
+                // 结果明明在 input 里且 call_id 逐字相同）。所以正文/思考等
+                // 非调用项先出，调用项统一收在尾部。见 `calls`。
+                let mut calls: Vec<Part> = Vec::new();
+                // 1) 回放 provider 原生 items（非调用项保持原样）。
                 for item in &raw_items {
-                    let is_reasoning = item_type(item) == "reasoning";
+                    let kind = item_type(item);
+                    let is_reasoning = kind == "reasoning";
                     if is_reasoning && !compat.echo_reasoning_content {
                         continue;
                     }
                     if let Some(call) = native_call_from_item(item) {
-                        parts.push(Part::NativeToolCall(call));
+                        calls.push(Part::NativeToolCall(call));
+                    } else if is_replayed_call_item(&kind) {
+                        // 原样回放的 provider 调用（无 namespace 的 function_call /
+                        // custom_tool_call）同样是"调用"，不得早于正文出现。
+                        calls.push(provider_state_item(replay_item((*item).clone())));
                     } else {
                         parts.push(provider_state_item(replay_item((*item).clone())));
                     }
@@ -454,7 +469,7 @@ pub(crate) fn project_responses_messages(
                         } else {
                             Some(id.clone())
                         };
-                        parts.push(Part::ToolCall(call));
+                        calls.push(Part::ToolCall(call));
                     }
                 }
                 // 5) 派生 web_search_call 回放（未被覆盖的 id）。
@@ -477,12 +492,14 @@ pub(crate) fn project_responses_messages(
                         }
                     }
                 }
-                if !parts.is_empty() {
+                if !parts.is_empty() || !calls.is_empty() {
+                    parts.extend(calls);
                     out.push(WireMessage::new(Role::Assistant, parts));
                 }
             }
             "tool" => {
                 let mut run: Vec<Part> = Vec::new();
+                let mut attachments: Vec<WireMessage> = Vec::new();
                 for b in &msg.content {
                     match b {
                         ContentBlock::ToolResult {
@@ -506,7 +523,7 @@ pub(crate) fn project_responses_messages(
                         // Responses 协议不要求 assistant(tool_calls) 后必须连续
                         // tool item，原位发出即可（与退役前一致）。
                         ContentBlock::Image { mime_type, data } => {
-                            out.push(WireMessage::new(
+                            attachments.push(WireMessage::new(
                                 Role::User,
                                 response_media_parts(&mut img_idx, mime_type, data),
                             ));
@@ -514,7 +531,7 @@ pub(crate) fn project_responses_messages(
                         ContentBlock::ImageRef {
                             sha256, mime_type, ..
                         } => match qaqh_types::image_store::load_image_b64(sha256, mime_type) {
-                            Ok(data) => out.push(WireMessage::new(
+                            Ok(data) => attachments.push(WireMessage::new(
                                 Role::User,
                                 response_media_parts(&mut img_idx, mime_type, &data),
                             )),
@@ -528,11 +545,27 @@ pub(crate) fn project_responses_messages(
                 if !run.is_empty() {
                     out.push(WireMessage::new(Role::Tool, run));
                 }
+                // Native Responses calls must be paired with their tool output
+                // before any following user input. In particular, read_image
+                // stores its image on the tool message; emitting that attachment
+                // while iterating would put a user item between the call and its
+                // result, which OpenAI rejects as a missing native tool result.
+                out.extend(attachments);
             }
             _ => {}
         }
     }
     out
+}
+
+/// 回放 item 里属于「模型调用、等客户端输出」的两类。
+///
+/// 它们必须排在 assistant message 的最后（见
+/// `project_responses_messages` 的 `calls` 分组）：DeepSeek OAuth 的 Responses
+/// 端点在 `function_call` 与其 output 之间出现任何其他 item 就报
+/// `No tool output found for tool call …`。
+fn is_replayed_call_item(kind: &str) -> bool {
+    matches!(kind, "function_call" | "custom_tool_call")
 }
 
 fn native_call_from_item(item: &serde_json::Value) -> Option<mutil_ai::NativeToolCall> {
@@ -2031,6 +2064,81 @@ mod tests {
         }
     }
 
+    /// DeepSeek OAuth 实测：`function_call` 与其 `function_call_output` 之间
+    /// 只要夹进一个 item（哪怕只是同一轮的 assistant 正文），端点就报
+    /// `No tool output found for tool call call_xx`——历史里结果与 call_id
+    /// 都逐字俱全。回归锚点：assistant 消息投影后**正文在前、调用在后**，
+    /// 且正文不会落在未应答的调用之后。
+    #[test]
+    fn assistant_text_never_sits_between_a_call_and_its_output() {
+        let p = provider();
+        let call = |id: &str| ContentBlock::ResponseOutputItem {
+            item: serde_json::json!({
+                "type": "function_call", "call_id": id, "name": "read",
+                "arguments": "{\"path\":\"a.md\"}", "status": "completed",
+            }),
+        };
+        let history = vec![
+            Message::user("read both"),
+            qa_msg(
+                "assistant",
+                vec![
+                    ContentBlock::text("我先读这两份文档。"),
+                    ContentBlock::ToolUse {
+                        id: "call_a".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "a.md"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_b".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "b.md"}),
+                    },
+                    call("call_a"),
+                    call("call_b"),
+                ],
+            ),
+            qa_msg(
+                "tool",
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_a".into(),
+                    result: qaqh_types::ToolResult::ok("a"),
+                }],
+            ),
+            qa_msg(
+                "tool",
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_b".into(),
+                    result: qaqh_types::ToolResult::ok("b"),
+                }],
+            ),
+        ];
+        let projected = project_responses_messages(&history, &p.responses_compat);
+        let assistant = &projected[1].parts;
+        let text_at = assistant
+            .iter()
+            .position(|part| matches!(part, Part::Text { text, .. } if text == "我先读这两份文档。"))
+            .expect("正文必须保留");
+        let first_call = assistant
+            .iter()
+            .position(|part| {
+                matches!(part, Part::ProviderItem(item)
+                    if item.provider_state.data.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+            })
+            .expect("回放的 function_call 必须保留");
+        assert!(
+            text_at < first_call,
+            "正文必须排在调用之前，否则会插在 call 与 output 之间：{:?}",
+            assistant
+        );
+        assert_eq!(
+            assistant.len(),
+            3,
+            "正文 + 两条回放调用，派生调用不得重复：{:?}",
+            assistant
+        );
+    }
+
     #[test]
     fn responses_url_and_split() {
         assert_eq!(
@@ -2107,6 +2215,67 @@ mod tests {
             "call_id 已被回放覆盖的派生 ToolUse 不再合成（防双份）"
         );
         assert_eq!(calls[0].id.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn native_read_image_tool_result_precedes_its_image_attachment() {
+        let compat = provider().responses_compat;
+        let messages = vec![
+            Message::user("inspect this image"),
+            qa_msg(
+                "assistant",
+                vec![
+                    ContentBlock::ResponseOutputItem {
+                        item: serde_json::json!({
+                            "type": "custom_tool_call",
+                            "id": "ctc_read_image",
+                            "call_id": "call_read_image",
+                            "name": "read_image",
+                            "input": "{\"image_index\":0}",
+                            "status": "completed"
+                        }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_read_image".into(),
+                        name: "read_image".into(),
+                        input: serde_json::json!({"image_index": 0}),
+                    },
+                ],
+            ),
+            qa_msg(
+                "tool",
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_read_image".into(),
+                        result: qaqh_types::ToolResult::ok("Image read successfully."),
+                    },
+                    ContentBlock::Image {
+                        mime_type: "image/png".into(),
+                        data: "aGVsbG8=".into(),
+                    },
+                ],
+            ),
+        ];
+
+        let projected = project_responses_messages(&messages, &compat);
+        assert_eq!(
+            projected.iter().map(|message| message.role.clone()).collect::<Vec<_>>(),
+            vec![Role::User, Role::Assistant, Role::Tool, Role::User]
+        );
+        assert!(matches!(
+            &projected[1].parts[0],
+            Part::NativeToolCall(call) if call.call_id == "call_read_image"
+        ));
+        assert!(matches!(
+            &projected[2].parts[0],
+            Part::ToolResult(result) if result.call_id.as_deref() == Some("call_read_image")
+        ));
+        assert!(
+            projected[3]
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::Image { .. }))
+        );
     }
 
     #[test]
