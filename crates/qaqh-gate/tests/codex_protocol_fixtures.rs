@@ -11,7 +11,7 @@ fn default_namespace_calls_without_namespace_roundtrip_over_http() {
     use common::mock_server::{MockServer, SseChunk};
     use qaqh_tool_core::model_tool_plan::{
         CustomFormat, InputAdapter, ModelToolAddress, ModelToolDeclaration, ModelToolEntry,
-        ModelToolKind, ModelToolPlan,
+        ModelToolKind, ModelToolPlan, TextInputAdapter,
     };
     use qaqh_types::{ContentBlock, Message, ToolResult};
     use std::collections::HashMap;
@@ -38,7 +38,10 @@ fn default_namespace_calls_without_namespace_roundtrip_over_http() {
                     description: "patch".into(),
                     format: CustomFormat::Text,
                 },
-                InputAdapter::ApplyPatchCustom,
+                InputAdapter::TextInput(
+                    TextInputAdapter::custom_raw("patch")
+                        .with_defaults(json!({"dry_run": false})),
+                ),
                 json!({"patch":"*** Begin Patch\n*** End Patch", "dry_run":false}),
             ),
         };
@@ -157,7 +160,7 @@ fn native_custom_stream_roundtrip_over_http() {
     use common::mock_server::{MockServer, SseChunk};
     use qaqh_tool_core::model_tool_plan::{
         CustomFormat, InputAdapter, ModelToolAddress, ModelToolDeclaration, ModelToolEntry,
-        ModelToolKind, ModelToolPlan,
+        ModelToolKind, ModelToolPlan, TextInputAdapter,
     };
     use qaqh_types::{ContentBlock, Message, ToolResult};
     use std::collections::HashMap;
@@ -188,7 +191,10 @@ fn native_custom_stream_roundtrip_over_http() {
                 format: CustomFormat::Text,
             },
             internal_tool_key: "apply_patch".into(),
-            adapter: InputAdapter::ApplyPatchCustom,
+            adapter: InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch")
+                    .with_defaults(json!({"dry_run": false})),
+            ),
         }],
     )
     .expect("plan");
@@ -274,7 +280,7 @@ fn deepseek_minimal_custom_declaration_is_type_name_only() {
     use common::mock_server::{MockServer, SseChunk};
     use qaqh_tool_core::model_tool_plan::{
         CustomFormat, InputAdapter, ModelToolAddress, ModelToolDeclaration, ModelToolEntry,
-        ModelToolKind, ModelToolPlan,
+        ModelToolKind, ModelToolPlan, TextInputAdapter,
     };
     use qaqh_types::Message;
     use std::collections::HashMap;
@@ -297,7 +303,10 @@ fn deepseek_minimal_custom_declaration_is_type_name_only() {
                 format: CustomFormat::Text,
             },
             internal_tool_key: "apply_patch".into(),
-            adapter: InputAdapter::ApplyPatchCustom,
+            adapter: InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch")
+                    .with_defaults(json!({"dry_run": false})),
+            ),
         }],
     )
     .expect("minimal plan");
@@ -517,7 +526,7 @@ fn flat_custom_declaration_is_sent_and_decoded() {
     use common::mock_server::{MockServer, SseChunk};
     use qaqh_tool_core::model_tool_plan::{
         CustomFormat, InputAdapter, ModelToolAddress, ModelToolDeclaration, ModelToolEntry,
-        ModelToolKind, ModelToolPlan,
+        ModelToolKind, ModelToolPlan, TextInputAdapter,
     };
     use qaqh_types::{ContentBlock, Message};
     use std::collections::HashMap;
@@ -559,7 +568,10 @@ fn flat_custom_declaration_is_sent_and_decoded() {
                 format: CustomFormat::Text,
             },
             internal_tool_key: "apply_patch".into(),
-            adapter: InputAdapter::ApplyPatchCustom,
+            adapter: InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch")
+                    .with_defaults(json!({"dry_run": false})),
+            ),
         }],
     )
     .expect("plan");

@@ -1305,6 +1305,99 @@ fn responses_stream_without_terminal_event_keeps_partial_output_with_stop_reason
 }
 
 #[test]
+fn responses_tool_progress_precedes_later_output_and_never_replays_arguments() {
+    use mock_server::SseChunk;
+    let chunks = [
+        "{\"file_path\":\"large.txt\",\"content\":\"第一行\\n",
+        "第二行\\n",
+        "第三行\"}",
+    ];
+    let args = chunks.concat();
+    let item = json!({
+        "type": "function_call", "id": "fc_write", "call_id": "call_write",
+        "name": "write", "arguments": args, "status": "completed"
+    });
+    let mut scenario = vec![SseChunk::Data(json!({
+        "type":"response.output_item.added", "output_index":0,
+        "item":{"type":"function_call", "id":"fc_write", "call_id":"call_write",
+            "name":"write", "arguments":"", "status":"in_progress"}
+    }))];
+    for (index, chunk) in chunks.iter().enumerate() {
+        scenario.push(SseChunk::Data(json!({
+            "type":"response.function_call_arguments.delta", "output_index":0,
+            "item_id":"fc_write", "delta":chunk
+        })));
+        // Sentinels prove callback ordering rather than merely checking the
+        // final event list contains a tool call.
+        scenario.push(SseChunk::Data(json!({
+            "type":"response.output_text.delta", "output_index":1,
+            "item_id":"msg_1", "content_index":0, "delta":format!("marker-{index}")
+        })));
+    }
+    scenario.extend([
+        SseChunk::Data(json!({"type":"response.output_item.done", "output_index":0, "item":item})),
+        SseChunk::Data(json!({"type":"response.completed", "response":{
+            "id":"resp_write", "status":"completed", "output":[item]
+        }})),
+    ]);
+    let mock = MockServer::new(scenario);
+    let events = collect_events(&make_responses_provider(&mock), vec![Message::user("write")], None);
+    let mut received = String::new();
+    let mut markers = 0;
+    let mut opened = false;
+    for event in &events {
+        match event {
+            StreamEvent::ToolCallProgress { id, name, args_chunk, .. } => {
+                assert_eq!(id, "call_write", "item id must not become the timeline key");
+                assert_eq!(name, "write");
+                opened = true;
+                received.push_str(args_chunk);
+            }
+            StreamEvent::ContentDelta(text) if text.starts_with("marker-") => {
+                assert!(opened, "tool card must open before later model output");
+                assert_eq!(received, chunks[..=markers].concat());
+                markers += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(markers, chunks.len());
+    assert_eq!(received, args, "cumulative/Done frames must not duplicate deltas");
+}
+
+#[test]
+fn responses_added_without_argument_deltas_still_delivers_terminal_arguments() {
+    use mock_server::SseChunk;
+    let item = json!({
+        "type":"function_call", "id":"fc_no_delta", "call_id":"call_no_delta",
+        "name":"write", "arguments":"{\"path\":\"a.txt\",\"content\":\"hello\"}",
+        "status":"completed"
+    });
+    let mock = MockServer::new(vec![
+        SseChunk::Data(json!({
+            "type":"response.output_item.added", "output_index":2,
+            "item":{"type":"function_call", "id":"fc_no_delta", "call_id":"call_no_delta",
+                "name":"write", "arguments":"", "status":"in_progress"}
+        })),
+        SseChunk::Data(json!({"type":"response.output_item.done","output_index":2,"item":item})),
+        SseChunk::Data(json!({"type":"response.completed","response":{
+            "id":"resp_no_delta","status":"completed","output":[item]
+        }})),
+    ]);
+    let events = collect_events(&make_responses_provider(&mock), vec![Message::user("write")], None);
+    let args: String = events.iter().filter_map(|e| match e {
+        StreamEvent::ToolCallProgress { id, args_chunk, .. } if id == "call_no_delta" => {
+            Some(args_chunk.as_str())
+        }
+        _ => None,
+    }).collect();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&args).expect("terminal arguments"),
+        json!({"path":"a.txt", "content":"hello"})
+    );
+}
+
+#[test]
 fn responses_chat_stream_with_tool_calls() {
     let scenario = vec![
         mock_server::SseChunk::Raw(
