@@ -206,6 +206,10 @@ pub struct ProviderConfig {
     /// `build_options` 统一下发；多账号/工作区按 id_token claim 路由。
     /// 空 = 不发。对标 codex `model-provider/src/auth.rs:105-111`。
     pub chatgpt_account_headers: Vec<(String, String)>,
+    /// DeepSeek OAuth 账号面请求头（`x-deepseek-harness-session-id` / `x-deepseek-harness-user-id`）。
+    /// 由账号类凭据来源（DeepseekAccount）每回合构建 provider 时注入，
+    /// 按会话严格隔离并统一下发；专用于官方网关会话粘性路由与 KV Cache 缓存命中。
+    pub deepseek_account_headers: Vec<(String, String)>,
     pub model: String,
     pub user_id_mode: Option<qaqh_types::UserSendMode>,
 
@@ -370,6 +374,7 @@ impl ProviderConfig {
             api_key: api_key.to_string(),
             auth_header: None,
             chatgpt_account_headers: Vec::new(),
+            deepseek_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode,
             chat_path,
@@ -411,6 +416,7 @@ impl ProviderConfig {
             api_key: api_key.to_string(),
             auth_header: None,
             chatgpt_account_headers: Vec::new(),
+            deepseek_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,
@@ -457,6 +463,7 @@ impl ProviderConfig {
             api_key: api_key.to_string(),
             auth_header: None,
             chatgpt_account_headers: Vec::new(),
+            deepseek_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,
@@ -497,6 +504,7 @@ impl ProviderConfig {
             api_key: api_key.to_string(),
             auth_header: None,
             chatgpt_account_headers: Vec::new(),
+            deepseek_account_headers: Vec::new(),
             model: model.to_string(),
             user_id_mode: None,
             chat_path: None,
@@ -581,8 +589,8 @@ pub enum StreamEvent {
         name: String,
         /// 本帧**新增**的参数片段（delta）。逐帧携带累计串会让每帧都
         /// `.clone()` 一次缓冲，代价 O(n²)（58 KB 参数约 2493 帧）。
-        /// 三适配器里只有 Responses 不是增量——它在 `output_item.done` 一帧给完整参数，
-        /// 于是它的「片段」就是整段。
+        /// 身份已确定的起始帧可以为空，用于立即打开工具卡片。
+        /// 只提供终态的端点以完整参数作为唯一片段。
         args_chunk: String,
     },
     /// Raw custom-tool input progress. `delta` is the exact fragment carried by

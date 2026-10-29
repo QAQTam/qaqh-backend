@@ -696,6 +696,11 @@ fn build_options(provider: &ProviderConfig, policy: &GateRetryPolicy) -> Request
     for (name, value) in &provider.chatgpt_account_headers {
         insert_header(&mut options, name, value);
     }
+    // DeepSeek OAuth 账号面头（DeepseekAccount 凭据来源注入）：会话粘性路由与
+    // 缓存亲和头（x-deepseek-harness-session-id / x-deepseek-harness-user-id）。
+    for (name, value) in &provider.deepseek_account_headers {
+        insert_header(&mut options, name, value);
+    }
     options
 }
 
@@ -1035,7 +1040,7 @@ fn reconcile_streamed_tool_calls(
         if name.is_empty() {
             continue;
         }
-        let parsed: Option<serde_json::Value> = serde_json::from_str(&args).ok();
+        let parsed: Option<serde_json::Value> = mutil_ai::lenient::parse(&args);
         let input = match parsed {
             // `null` / 非对象同样视为「参数不可还原」——不伪造。
             Some(v) if v.is_object() => v,
@@ -1145,7 +1150,9 @@ fn interpret_provider_stream(raw: &str) -> Option<IncompleteTerminal> {
                     let input = item
                         .get("arguments")
                         .and_then(|v| v.as_str())
-                        .and_then(|a| serde_json::from_str(a).ok())
+                        // 0.7.1 宽松 JSON 修复：模型经 compat 网关吐出的参数
+                        // 可能是 relaxed JSON（glob 值丢引号等），修复失败再落 Null。
+                        .and_then(mutil_ai::lenient::parse)
                         .unwrap_or(serde_json::Value::Null);
                     if !id.is_empty() && !name.is_empty() {
                         blocks.push(ContentBlock::ToolUse { id, name, input });
@@ -1299,10 +1306,35 @@ struct Resps {
     /// 思考类别（**首帧可展示类别胜出**，规则同 `sdk_common::StreamState`）。
     reasoning_kind: Option<qaqh_types::ReasoningKind>,
     tools: HashMap<usize, (String, String, String)>,
+    /// Display-only byte watermark. Never use item ids as tool call ids and
+    /// never replay a cumulative snapshot as another argument delta.
+    tool_progress: HashMap<usize, usize>,
     usage: Option<UsageInfo>,
 }
 
 impl Resps {
+    fn emit_tool_progress(&mut self, index: usize, on_event: &mut dyn FnMut(StreamEvent)) {
+        let Some((id, name, args)) = self.tools.get(&index) else {
+            return;
+        };
+        if id.is_empty() || name.is_empty() {
+            return;
+        }
+        let previous = self.tool_progress.get(&index).copied();
+        let sent = previous.unwrap_or(0);
+        if previous.is_some() && args.len() <= sent {
+            return;
+        }
+        // An empty first frame opens the card before a long write starts.
+        on_event(StreamEvent::ToolCallProgress {
+            index,
+            id: id.clone(),
+            name: name.clone(),
+            args_chunk: args.get(sent..).unwrap_or_default().to_string(),
+        });
+        self.tool_progress.insert(index, args.len());
+    }
+
     fn had_output(&self) -> bool {
         !self.text.is_empty() || !self.reasoning.is_empty() || !self.tools.is_empty()
     }
@@ -1429,6 +1461,7 @@ async fn consume(
                     adopt_identity(&mut entry.1, Some(canonical.as_str()));
                 }
                 entry.2.push_str(&arguments_delta);
+                resp.emit_tool_progress(index, on_event);
             }
             Ok(SdkEvent::ToolCallProgress {
                 index,
@@ -1461,6 +1494,7 @@ async fn consume(
                 if arguments_so_far.len() > entry.2.len() {
                     entry.2 = arguments_so_far;
                 }
+                resp.emit_tool_progress(index, on_event);
             }
             Ok(SdkEvent::NativeToolProgress {
                 index,
@@ -1523,8 +1557,8 @@ async fn consume(
                         "native tool plan stream lacks a terminal response"
                     ));
                 }
-                // 旧契约的收口帧：每个 function call 在 item 完成时一次给全量
-                // 参数（delta 只进缓冲不发帧）。先快照再遍历，避免借用冲突。
+                // Terminal-only providers still need a card. Streamed calls
+                // already emitted their arguments; never feed them twice.
                 let frames: Vec<(usize, String, String, String)> = response
                     .message
                     .parts
@@ -1541,6 +1575,26 @@ async fn consume(
                     })
                     .collect();
                 for (index, id, name, args_chunk) in frames {
+                    if let Some((slot, (_, _, streamed_args))) = resp
+                        .tools
+                        .iter()
+                        .find(|(_, (known_id, _, _))| known_id == &id)
+                    {
+                        if let Some(sent) = resp.tool_progress.get(slot) {
+                            // Some gateways send added + done, without any
+                            // argument delta. The empty opening frame isn't
+                            // proof that arguments have already been delivered.
+                            if *sent == 0 && streamed_args.is_empty() {
+                                on_event(StreamEvent::ToolCallProgress {
+                                    index: *slot,
+                                    id,
+                                    name,
+                                    args_chunk,
+                                });
+                            }
+                            continue;
+                        }
+                    }
                     on_event(StreamEvent::ToolCallProgress {
                         index,
                         id,
@@ -1919,8 +1973,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tool_progress_waits_for_call_identity_and_sends_only_new_bytes() {
+        let mut state = Resps::default();
+        let mut events = Vec::new();
+        state.tools.insert(4, (String::new(), String::new(), "你好".into()));
+        state.emit_tool_progress(4, &mut |e| events.push(e));
+        assert!(events.is_empty(), "no fabricated/item-id tool keys");
+        let entry = state.tools.get_mut(&4).expect("slot");
+        entry.0 = "call_edit".into();
+        entry.1 = "edit".into();
+        state.emit_tool_progress(4, &mut |e| events.push(e));
+        state.emit_tool_progress(4, &mut |e| events.push(e));
+        state.tools.get_mut(&4).expect("slot").2.push_str("世界");
+        state.emit_tool_progress(4, &mut |e| events.push(e));
+        let chunks: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ToolCallProgress { id, args_chunk, .. } => {
+                assert_eq!(id, "call_edit");
+                Some(args_chunk.as_str())
+            }
+            _ => None,
+        }).collect();
+        assert_eq!(chunks, ["你好", "世界"]);
+    }
+
+    #[test]
     fn native_plan_declaration_admission_and_replay() {
-        use qaqh_tool_core::model_tool_plan::{InputAdapter, ModelToolAddress, ModelToolEntry};
+        use qaqh_tool_core::model_tool_plan::{InputAdapter, ModelToolAddress, ModelToolEntry, TextInputAdapter};
         let plan = ModelToolPlan::new(
             "1",
             "test",
@@ -1935,7 +2013,10 @@ mod tests {
                     format: CustomFormat::Text,
                 },
                 internal_tool_key: "apply_patch".into(),
-                adapter: InputAdapter::ApplyPatchCustom,
+                adapter: InputAdapter::TextInput(
+                    TextInputAdapter::custom_raw("patch")
+                        .with_defaults(serde_json::json!({"dry_run": false})),
+                ),
             }],
         )
         .expect("plan");
@@ -2658,6 +2739,33 @@ mod tests {
                 "{name} 必须出现在出站请求头里"
             );
         }
+    }
+
+    /// DeepSeek OAuth 账号头（x-deepseek-harness-session-id / x-deepseek-harness-user-id）
+    /// 严格按 session 颗粒度注入，经 `build_options` 统一下发到请求头中，为官方网关提供会话粘性路由。
+    #[test]
+    fn deepseek_account_headers_flow_into_request_options() {
+        let mut p = provider();
+        p.deepseek_account_headers = vec![
+            ("x-deepseek-harness-session-id".to_string(), "0198f1a0-session-uuid".to_string()),
+            ("x-deepseek-harness-user-id".to_string(), "user-dsh-001".to_string()),
+        ];
+        let opts = build_options(&p, &GateRetryPolicy::default());
+        assert_eq!(
+            opts.headers
+                .get("x-deepseek-harness-session-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("0198f1a0-session-uuid")
+        );
+        assert_eq!(
+            opts.headers
+                .get("x-deepseek-harness-user-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("user-dsh-001")
+        );
+        let opts_default = build_options(&provider(), &GateRetryPolicy::default());
+        assert!(opts_default.headers.get("x-deepseek-harness-session-id").is_none());
+        assert!(opts_default.headers.get("x-deepseek-harness-user-id").is_none());
     }
 
     /// 回放 item id 卫生（对标 codex `ResponseItemId::is_prefixed`）：
