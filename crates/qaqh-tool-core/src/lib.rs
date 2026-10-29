@@ -14,8 +14,9 @@ pub mod tool_api;
 pub mod tool_capabilities;
 
 pub use tool_api::{
-    Concurrency, DescriptorError, ErasedTool, FatalToolError, Namespace, OfficialHit, OfficialPage,
-    OfficialWebBackend, OfficialWebTools, OutputBudget, PathOp, ProgressSink, ProgressStream,
+    Concurrency, DescriptorError, ErasedTool, FatalToolError, Namespace, NativeTextRepresentation,
+    OfficialHit, OfficialPage, OfficialWebBackend, OfficialWebTools,
+    OutputBudget, PathOp, ProgressSink, ProgressStream,
     SandboxMode, SandboxSpec, ToolBody, ToolCallContext, ToolCallSource, ToolCapabilities,
     ToolContentBlock, ToolDescriptor, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolError,
     ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,

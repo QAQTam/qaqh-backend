@@ -1,332 +1,212 @@
-//! todo::parse — ID 分配与参数解析（alloc_id/expand_ids/parse_write_items）。
-
-use serde_json::Value;
+//! todo::parse — 纯文本清单解析（apply_patch 范式：title 即身份，无 ID 分配）。
+//!
+//! todo_write 接收一段**完整清单文本**，逐行解析为 TodoItem。行格式：
+//!
+//! ```text
+//! - [ ] 标题 | 描述
+//! - [~] 标题 | 描述
+//! - [x] 标题 | 描述 | 证据
+//! [-] 已取消的标题
+//! ```
+//!
+//! 标记：`[ ]` pending / `[~]` in_progress / `[x]` completed / `[-]` cancelled。
+//! `| 描述` 与 `| 证据` 可省略（证据要占位：`[x] 标题 | | 已验证`）。
+//! **title 即身份**：重复标题拒绝；模型改名 = 删除旧条目 + 新建。
+//! `TodoItem.id` 恒等于 title（GoalEngine / 前端 dashboard 的 id 匹配零改动）。
 
 use crate::json_err_string;
 
-use super::model::{TodoStatus, TodoStore};
+use super::model::{TodoItem, TodoStatus, TodoStore};
 
-// ═══════════════════════════════════════════════════════
-// ID generation
-// ═══════════════════════════════════════════════════════
+/// 单次覆写的条目上限（与旧 items 形态一致）。
+pub(crate) const MAX_LIST_ITEMS: usize = 20;
 
-/// 高水位分配器：持久化的 `next_id` 是"下一个待分配号"。分配前取
-/// max(持久值, 现存最大号+1)：旧文件（next_id=0）自动迁移到手改文件/
-/// 高水位落后的场景也不会发出重复 ID。
-pub(crate) fn alloc_id(store: &mut TodoStore) -> String {
-    let max_existing = store
-        .items
-        .iter()
-        .filter_map(|item| item.id.strip_prefix('T')?.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0);
-    if store.next_id < max_existing + 1 {
-        store.next_id = max_existing + 1;
-    }
-    let id = format!("T{}", store.next_id);
-    store.next_id += 1;
-    id
-}
-
-pub(crate) fn parse_todo_id(value: Option<&Value>) -> Option<String> {
-    match value? {
-        Value::String(id) => {
-            let id = id.trim();
-            match id.strip_prefix('T') {
-                // "T<n>" 形式原样接受（'T' 为 ASCII，strip_prefix 等价 [1..]）。
-                Some(rest) if rest.parse::<u32>().is_ok() => Some(id.to_string()),
-                _ => id.parse::<u32>().ok().map(|number| format!("T{number}")),
-            }
-        }
-        Value::Number(number) => number.as_u64().map(|number| format!("T{number}")),
+fn status_of_marker(marker: &str) -> Option<TodoStatus> {
+    match marker {
+        " " => Some(TodoStatus::Pending),
+        "~" => Some(TodoStatus::InProgress),
+        "x" | "X" => Some(TodoStatus::Completed),
+        "-" => Some(TodoStatus::Cancelled),
         _ => None,
     }
 }
 
-/// 展开 ID 表达式为具体 ID 列表：支持逗号分隔 + 数字范围（`T1-T3` 含端点）。
-/// 每段可接受 `T1` / `1` / `T1-T3` / `T1-3`；空段忽略；无有效 ID 报错。
-pub(crate) fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
-    let mut out: Vec<String> = Vec::new();
-    for segment in expr.split(',') {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        if let Some((start, end)) = segment.split_once('-') {
-            let start =
-                parse_todo_id(Some(&Value::String(start.trim().to_string()))).ok_or_else(|| {
-                    json_err_string(
-                        "invalid_input",
-                        format!("invalid id range '{segment}'"),
-                        "Use T<n> or a numeric range like T1-T3.",
-                    )
-                })?;
-            let end =
-                parse_todo_id(Some(&Value::String(end.trim().to_string()))).ok_or_else(|| {
-                    json_err_string(
-                        "invalid_input",
-                        format!("invalid id range '{segment}'"),
-                        "Use T<n> or a numeric range like T1-T3.",
-                    )
-                })?;
-            let (start_n, end_n) = (todo_id_number(&start), todo_id_number(&end));
-            let (Some(start_n), Some(end_n)) = (start_n, end_n) else {
-                return Err(json_err_string(
-                    "invalid_input",
-                    format!("invalid id range '{segment}'"),
-                    "Range endpoints must be T<number>.",
-                ));
-            };
-            if start_n > end_n {
-                return Err(json_err_string(
-                    "invalid_input",
-                    format!("id range '{segment}' has start > end"),
-                    "Use ascending ranges like T1-T3.",
-                ));
-            }
-            // W1：展开封顶——创建侧有 MAX_CREATE_ITEMS=20，展开侧原本无界，
-            // T1-T4000000000 会 OOM/卡死 agent loop。
-            const MAX_RANGE_EXPAND: u32 = 1000;
-            if end_n - start_n >= MAX_RANGE_EXPAND {
-                return Err(json_err_string(
-                    "invalid_input",
-                    format!("id range '{segment}' expands to more than {MAX_RANGE_EXPAND} ids"),
-                    "Narrow the range, e.g. T1-T20.",
-                ));
-            }
-            for n in start_n..=end_n {
-                out.push(format!("T{n}"));
-            }
-        } else {
-            let id = parse_todo_id(Some(&Value::String(segment.to_string()))).ok_or_else(|| {
-                json_err_string(
-                    "invalid_input",
-                    format!("invalid id '{segment}'"),
-                    "Use T<n> or a numeric range like T1-T3.",
-                )
-            })?;
-            out.push(id);
-        }
+fn status_name(status: &TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::Pending => "[ ]",
+        TodoStatus::InProgress => "[~]",
+        TodoStatus::Completed => "[x]",
+        TodoStatus::Cancelled => "[-]",
     }
-    if out.is_empty() {
-        return Err(json_err_string(
+}
+
+/// 把一行清单文本解析为 TodoItem。`id` 恒等于 title（身份即标题）。
+fn parse_line(line: &str, line_no: usize) -> Result<TodoItem, String> {
+    let invalid = |reason: String| {
+        Err(json_err_string(
             "invalid_input",
-            "no valid ids in expression",
-            "Provide at least one id, e.g. T1 or T1-T3.",
+            format!("todo list line {line_no}: {reason}"),
+            "Expected `- [ ]|~|x|- title [| description [| evidence]]`.",
+        ))
+    };
+    // 弹头 `- ` 仅在**后随空白**时剥离——`[-]` 取消标记自身以 `-` 开头，
+    // 不能当作弹头吃掉。
+    let body = line.trim_start();
+    let body = match body.strip_prefix("- ") {
+        Some(rest) => rest.trim_start(),
+        None => body,
+    };
+    // `[ ]` 的空格标记会被 trim 吃掉——按 `[`/`]` 原样截取，不做 trim。
+    let inner = match body.strip_prefix('[') {
+        Some(inner) => inner,
+        None => return invalid("missing status marker `[ ]`".into()),
+    };
+    let (marker, rest) = match inner.split_once(']') {
+        Some((marker, rest)) => (marker, rest),
+        None => return invalid("missing status marker `]`".into()),
+    };
+    let Some(status) = status_of_marker(marker) else {
+        return invalid(format!(
+            "unknown status marker `[{marker}]` (use [ ] [~] [x] [-])"
         ));
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return invalid("title is required".into());
     }
-    Ok(out)
-}
-
-/// 提取 `T<n>` 中的数字部分。
-pub(crate) fn todo_id_number(id: &str) -> Option<u32> {
-    id.strip_prefix('T').and_then(|digits| digits.parse().ok())
-}
-
-/// A single model-authored task description before its permanent ID is assigned.
-/// 仅剩 HTTP/CLI service 面（`exec_todo_create`）与测试使用；模型工具
-/// `todo_write` 走 [`ParsedWriteItem`]（全量覆写，status 必填）。
-#[derive(Debug, Clone)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct NewTodo {
-    pub(crate) title: String,
-    pub(crate) description: String,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, String> {
-    let title = value
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if title.is_empty() || title.chars().count() > 100 {
-        return Err(json_err_string(
-            "invalid_input",
-            format!("{label}.title must be 1-100 chars"),
-            "Use a short imperative title, e.g. 'Add login API'.",
-        ));
+    let mut fields = rest.split('|');
+    let title = fields.next().unwrap_or_default().trim().to_string();
+    if title.is_empty() {
+        return invalid("title is required".into());
     }
-    let description = value
-        .get("description")
-        .and_then(Value::as_str)
+    if title.chars().count() > 100 {
+        return invalid("title max 100 chars".into());
+    }
+    let description = fields
+        .next()
+        .map(str::trim)
         .unwrap_or_default()
-        .trim()
         .to_string();
     if description.chars().count() > 200 {
-        return Err(json_err_string(
-            "invalid_input",
-            format!("{label}.description max 200 chars"),
-            "",
-        ));
+        return invalid("description max 200 chars".into());
     }
-    Ok(NewTodo { title, description })
-}
-
-/// One fully-specified item of a full-replace `todo_write` call (v4).
-/// `id: None` = assign a fresh `T<n>`; `Some(id)` = re-reference an existing ID.
-///
-/// `title: None` = 沿用同 `id` 既有条目的标题（仅对**已存在**的 id 成立；
-/// 新建条目必须给标题，否则报错）。这是为了压掉实测里最高频的一类失败：
-/// 模型只想翻转状态却漏写标题，整次覆写被拒。
-#[derive(Debug, Clone)]
-pub(crate) struct ParsedWriteItem {
-    pub(crate) id: Option<String>,
-    pub(crate) title: Option<String>,
-    pub(crate) description: String,
-    pub(crate) status: TodoStatus,
-    pub(crate) evidence: Option<String>,
-}
-
-/// One mutation can carry at most this many items. Keeping a rewrite in one
-/// transaction prevents parallel tool calls from racing the T{n} allocator.
-pub(crate) const MAX_WRITE_ITEMS: usize = 20;
-
-fn parse_status_field(value: Option<&Value>, label: &str) -> Result<TodoStatus, String> {
-    let raw = value
-        .and_then(Value::as_str)
+    let evidence = fields
+        .next()
         .map(str::trim)
-        .unwrap_or_default();
-    super::actions::parse_status(raw).ok_or_else(|| {
-        json_err_string(
-            "invalid_input",
-            format!("{label}.status must be one of pending|in_progress|completed|cancelled"),
-            "Status is required on every item (full-replace semantics).",
-        )
+        .filter(|evidence| !evidence.is_empty())
+        .map(str::to_string);
+    if fields.next().is_some() {
+        return invalid("too many `|` fields (title | description | evidence)".into());
+    }
+    Ok(TodoItem {
+        id: title.clone(),
+        title,
+        description,
+        status,
+        evidence,
     })
 }
 
-pub(crate) fn parse_write_items(args: &Value) -> Result<Vec<ParsedWriteItem>, String> {
-    let items = args.get("items").and_then(Value::as_array).ok_or_else(|| {
-        json_err_string(
-            "invalid_input",
-            "todo_write requires items",
-            "Provide the full list: [{title, status, id?, description?, evidence?}].",
-        )
-    })?;
-    if items.len() > MAX_WRITE_ITEMS {
+/// 解析完整清单文本。空文本（或全空白）= 空清单（合法：清空重建）。
+/// 重复标题拒绝（title 即身份，重名会让 update/snapshot 的匹配歧义）。
+pub(crate) fn parse_todo_text(text: &str) -> Result<Vec<TodoItem>, String> {
+    let mut items = Vec::new();
+    for (offset, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let item = parse_line(line, offset + 1)?;
+        if items.iter().any(|existing: &TodoItem| existing.title == item.title) {
+            return Err(json_err_string(
+                "invalid_input",
+                format!(
+                    "todo list line {}: duplicate title `{}`",
+                    offset + 1,
+                    item.title
+                ),
+                "Titles are identities — each title may appear at most once.",
+            ));
+        }
+        items.push(item);
+    }
+    if items.len() > MAX_LIST_ITEMS {
         return Err(json_err_string(
             "invalid_input",
-            format!("items max {MAX_WRITE_ITEMS} entries per call"),
+            format!("todo list max {MAX_LIST_ITEMS} entries per call"),
             "Reduce the plan to its essential steps.",
         ));
     }
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let label = format!("items[{index}]");
-            // title 可选：给了就必须是 1-100 字符；省略/空白留给执行层去
-            // 既有条目里继承（见 `todo_write_for_typed`）。
-            let title = item
-                .get("title")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|title| !title.is_empty())
-                .map(str::to_string);
-            if title
-                .as_deref()
-                .is_some_and(|title| title.chars().count() > 100)
-            {
-                return Err(json_err_string(
-                    "invalid_input",
-                    format!("{label}.title must be 1-100 chars"),
-                    "Use a short imperative title, e.g. 'Add login API'.",
-                ));
-            }
-            let description = item
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if description.chars().count() > 200 {
-                return Err(json_err_string(
-                    "invalid_input",
-                    format!("{label}.description max 200 chars"),
-                    "",
-                ));
-            }
-            let status = parse_status_field(item.get("status"), &label)?;
-            let evidence = item
-                .get("evidence")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            let id = parse_todo_id(item.get("id"));
-            Ok(ParsedWriteItem {
-                id,
-                title,
-                description,
-                status,
-                evidence,
-            })
-        })
-        .collect()
+    Ok(items)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, String> {
-    let before_raw = args.get("before_id");
-    let after_raw = args.get("after_id");
-    let before = parse_todo_id(before_raw);
-    let after = parse_todo_id(after_raw);
-    if before_raw.is_some() && before.is_none() {
-        return Err(json_err_string(
-            "invalid_input",
-            "invalid before_id",
-            "Use an assigned ID such as T1.",
-        ));
+/// 把 store 渲染回清单文本（receipt / 快照复用同一格式——写读对称）。
+pub(crate) fn render_todo_text(store: &TodoStore) -> String {
+    store
+        .items
+        .iter()
+        .map(|item| {
+            let mut line = format!(
+                "- {} {}",
+                status_name(&item.status),
+                item.title
+            );
+            if !item.description.is_empty() || item.evidence.is_some() {
+                line.push_str(&format!(" | {}", item.description));
+            }
+            if let Some(evidence) = &item.evidence {
+                line.push_str(&format!(" | {evidence}"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_all_four_markers_with_optional_fields() {
+        let items = parse_todo_text(
+            "- [ ] a | desc a\n- [~] b\n- [x] c | | verified\n[-] d | gone",
+        )
+        .unwrap();
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].status, TodoStatus::Pending);
+        assert_eq!(items[0].description, "desc a");
+        assert_eq!(items[1].status, TodoStatus::InProgress);
+        assert_eq!(items[2].status, TodoStatus::Completed);
+        assert_eq!(items[2].evidence.as_deref(), Some("verified"));
+        assert_eq!(items[2].description, "");
+        assert_eq!(items[3].status, TodoStatus::Cancelled);
+        // id 恒等于 title（GoalEngine / dashboard 的身份契约）。
+        assert_eq!(items[0].id, "a");
     }
-    if after_raw.is_some() && after.is_none() {
-        return Err(json_err_string(
-            "invalid_input",
-            "invalid after_id",
-            "Use an assigned ID such as T1.",
-        ));
+
+    #[test]
+    fn duplicate_titles_are_rejected() {
+        let error = parse_todo_text("- [ ] same\n- [x] same").unwrap_err();
+        assert!(error.contains("duplicate title"), "{error}");
     }
-    if before.is_some() && after.is_some() {
-        return Err(json_err_string(
-            "invalid_input",
-            "use only one of before_id or after_id",
-            "",
-        ));
+
+    #[test]
+    fn empty_text_is_an_empty_list() {
+        assert!(parse_todo_text("").unwrap().is_empty());
+        assert!(parse_todo_text("  \n \n").unwrap().is_empty());
     }
-    if before.is_none() && after.is_none() {
-        return Err(json_err_string(
-            "invalid_input",
-            "insert requires before_id or after_id",
-            "Use action=create to append tasks at the end.",
-        ));
+
+    #[test]
+    fn render_roundtrips_through_parse() {
+        let mut store = TodoStore::default();
+        store.items = parse_todo_text("- [~] working | note\n- [x] done | | ok").unwrap();
+        let rendered = render_todo_text(&store);
+        let reparsed = parse_todo_text(&rendered).unwrap();
+        assert_eq!(reparsed.len(), 2);
+        assert_eq!(reparsed[0].title, "working");
+        assert_eq!(reparsed[0].status, TodoStatus::InProgress);
+        assert_eq!(reparsed[0].description, "note");
+        assert_eq!(reparsed[1].evidence.as_deref(), Some("ok"));
     }
-    if let Some(id) = before {
-        return store
-            .items
-            .iter()
-            .position(|item| item.id == id)
-            .ok_or_else(|| {
-                json_err_string(
-                    "not_found",
-                    format!("todo {id} not found"),
-                    "Use todo(action=\"list\") to inspect IDs.",
-                )
-            });
-    }
-    if let Some(id) = after {
-        return store
-            .items
-            .iter()
-            .position(|item| item.id == id)
-            .map(|index| index + 1)
-            .ok_or_else(|| {
-                json_err_string(
-                    "not_found",
-                    format!("todo {id} not found"),
-                    "Use todo(action=\"list\") to inspect IDs.",
-                )
-            });
-    }
-    unreachable!("insert anchor presence was validated above")
 }

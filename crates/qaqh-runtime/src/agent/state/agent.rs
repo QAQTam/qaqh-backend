@@ -58,8 +58,9 @@ pub use qaqh_types::tool_mode::{MINIMAL_TOOLS, MINIMAL_TOOLS_B, MINIMAL_TOOLS_C}
 ///
 /// 新增工具包只需在这里登记一次；`init` / `init_subagent` / 测试都从这
 /// 一个数组取注册器，不再各自手写列表。
-pub fn agent_tool_registrars() -> [ToolRegistrar; 1] {
-    [qaqh_subagent::register]
+/// 子代理及 task/board 协作工具暂时停用，不注册到模型工具面或 tool_search。
+pub fn agent_tool_registrars() -> [ToolRegistrar; 0] {
+    []
 }
 
 /// Hash snapshot of the cache-key-relevant prefix components.
@@ -218,6 +219,10 @@ pub struct AgentState {
     /// Loop bookkeeping queue (PR-1-5 / B6): title / context-stats / mode /
     /// usage / skills writes, drained by [`Self::drain_persist_ops`].
     pub pending_meta_ops: Vec<MetaOp>,
+    /// Display notification dedup for the current session/turn/lap. Kept across
+    /// permission/ask suspension, bounded to one lap, never persisted.
+    pub(crate) completed_tool_notifications:
+        Option<(String, String, u32, std::collections::HashSet<String>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -257,6 +262,7 @@ impl AgentState {
             tool_ledger_session: None,
             fact_causation: FactCausation::new(),
             pending_meta_ops: Vec::new(),
+            completed_tool_notifications: None,
         };
         agent
     }

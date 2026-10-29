@@ -15,8 +15,8 @@
 
 use crate::config::Config;
 use qaqh_config_api::{
-    ConfigDto, ConfigPatch, ExecDto, LspDto, LspServerDto, McpDto, McpServerDto, SandboxDto,
-    SubagentDto,
+    ConfigDto, ConfigPatch, ExecDto, LspDto, LspServerDto, McpDto, McpServerDto, ProfileSummaryDto,
+    SandboxDto, SubagentDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
@@ -39,6 +39,26 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
         notifications_enabled: cfg.notifications_enabled.unwrap_or(true),
         active_profile: cfg.active_profile.clone(),
         profiles: cfg.profiles.keys().cloned().collect(),
+        profiles_detail: cfg
+            .profiles
+            .iter()
+            .map(|(name, p)| {
+                (
+                    name.clone(),
+                    ProfileSummaryDto {
+                        name: name.clone(),
+                        model: p.model.clone(),
+                        base_url: p.base_url.clone(),
+                        wire: p.wire.as_str().to_string(),
+                        effort: p.effort.clone(),
+                        context_length: u64::from(p.context_length),
+                        max_tokens: u64::from(p.max_tokens),
+                        api_key_set: p.api_key.is_some(),
+                        credential: credential_wire(p.credential).to_string(),
+                    },
+                )
+            })
+            .collect(),
         compliance_enabled: cfg.compliance_enabled,
         subagent: SubagentDto {
             model: cfg.subagent.model.clone(),

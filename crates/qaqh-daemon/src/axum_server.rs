@@ -2004,7 +2004,7 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// 普通 daemon Router 不挂载浏览器控制面（浏览器网关已随 Tauri 化移除）。
+    /// 普通 daemon Router 不挂载浏览器控制面（由外部桌面客户端如 qaqh-electron 托管）。
     #[tokio::test]
     async fn webui_routes_are_not_mounted() {
         let app = build_router(test_state());

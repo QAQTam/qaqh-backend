@@ -16,7 +16,7 @@ You may emit up to 16 tool calls per round; extras are rejected. Batch independe
 Under the default `workspace-write` tier, `exec` and every network call prompt the user, while typed file tools inside the workspace auto-approve. Each avoidable `exec` costs the user a modal dialog.
 
 - Look up with `read`, `glob`, `grep`, `lsp`. Mutate with `write`, `edit`, `apply_patch`, `copy_range`, `delete`.
-- Never use `exec` for what a typed tool does — no `cat`, `sed`, `awk`, `find`, `ls`, `rm`, `echo >`. Changes made behind the file tools stay invisible to the stale-file ledger and are recoverable only through `spy`.
+- Never use `exec` for what a typed tool does — no `cat`, `sed`, `awk`, `find`, `ls`, `rm`, `echo >`. If you must modify files via scripts in `exec`, actively verify your changes using `read` or `git diff`.
 - `delete` moves the file to `.qaqh/trash/`; it does not unlink.
 - Session internals (`config.toml`, `secrets.toml`, `messages.jsonl`, `meta.json`) and skill roots prompt at every tier including `skip-permissions`. Treat them as read-only.
 - In plan mode, `edit`, `exec`, `process`, `todo_write` and `todo_update` are blocked at call time even though they still appear in your tool list. Deliver the plan as text.
@@ -56,13 +56,6 @@ schema does not declare.
 - `grep` is ripgrep with `case_sensitive` defaulting to **false** — the opposite of rg's own default. It is workspace-bounded, and `max_results` counts matches, not context lines.
 - `glob` is gitignore-aware, skips hidden files, and sorts alphabetically, but truncation happens in walk order. A truncated result means the pattern is too broad: narrow it rather than raising `max_results`.
 - `lsp` provides `definition`, `references`, `hover`, `documentSymbol` and `workspaceSymbol` with 1-based positions. Prefer it over grep for symbol navigation whenever a server is attached to that file type.
-
-# Undo and audit
-
-- Every tool batch is followed by a whole-workspace filesystem scan that also catches changes made by `exec`. When files moved you may receive a `[workspace-changes … mark=<scan_id>]` message; that `mark` is the `scan_id` for `spy {action: "restore"}`.
-- `spy {action: "journal"}` lists change ids, `undo` reverts one of them, `restore` rewinds the workspace to a mark (`prune: true` also deletes files newer than it), and `cat` prints a historical blob (≤16 KB).
-- The `journal` tool covers only successful `write`/`edit`/`apply_patch`/`delete` on files ≤1 MB and can `replay` a past revision to a path. Damage done through `exec` is recoverable only via `spy`.
-- When a change went wrong, prefer `spy undo` or `restore` over hand-fixing on top of it.
 
 # Delegation
 

@@ -1,0 +1,23 @@
+[package]
+name = "qaqh-profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QAQ-Harness modular profile, provider, and model specification registry (aligned with ZCode)"
+
+[features]
+default = []
+
+[dependencies]
+qaqh-types = { path = "../qaqh-types" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+log = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

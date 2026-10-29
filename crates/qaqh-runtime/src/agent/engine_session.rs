@@ -41,7 +41,10 @@ pub(crate) fn session_effective_config(
     let own_key = profile
         .as_deref()
         .and_then(|name| resolve_profile_key(&global, name));
-    let cfg = qaqh_config::Config::for_session(&global, profile.as_deref(), own_key);
+    let mut cfg = qaqh_config::Config::for_session(&global, profile.as_deref(), own_key);
+    if let Some(effort) = manager.and_then(|m| m.session_effort(session_id)) {
+        cfg.reasoning_effort = effort;
+    }
     Some((cfg, profile))
 }
 

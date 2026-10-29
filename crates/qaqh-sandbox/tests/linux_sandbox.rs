@@ -30,8 +30,12 @@ fn spec(workspace: &std::path::Path) -> SandboxSpec {
         enabled: true,
         backend: SandboxBackend::LinuxLandlockSeccomp,
         writable_roots: vec![workspace.to_path_buf()],
+        writable_files: Vec::new(),
+        deny_write_paths: Vec::new(),
         network: NetworkPolicy::Deny,
         max_open_files: Some(1024),
+        redirect: false,
+        workspace_root: None,
     }
 }
 
@@ -113,8 +117,12 @@ fn bubblewrap_workspace_write_denies_outside_write() {
         enabled: true,
         backend: SandboxBackend::LinuxBubblewrap,
         writable_roots: vec![workspace.clone()],
+        writable_files: Vec::new(),
+        deny_write_paths: Vec::new(),
         network: NetworkPolicy::Deny,
         max_open_files: Some(1024),
+        redirect: false,
+        workspace_root: None,
     };
     let argv = vec![
         "sh".into(),

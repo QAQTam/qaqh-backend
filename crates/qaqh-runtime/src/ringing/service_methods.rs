@@ -136,6 +136,36 @@ pub struct SessionSetProfileParams {
     pub name: String,
 }
 
+/// `session.set_effort` 只改单会话的思考强度：`effort` 空串 = 清除选择。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionSetEffortParams {
+    pub session_id: String,
+    pub effort: String,
+}
+
+/// `session.create` 原子创建新会话（直接返回 session_id）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionCreateParams {
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub mode: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionCreateResult {
+    pub session_id: String,
+}
+
 /// `session.set_tool_mode` 的工具模式预设：`tool_mode` ∈
 /// standard|minimal|custom（handler 校验取值）；`custom` 必须携带至少
 /// 一个 `custom_tools` 条目，其余模式省略该键。
@@ -288,6 +318,18 @@ fn validate_session_get_activity_result(value: &Value) -> Result<(), String> {
 
 fn validate_session_set_profile_params(value: &Value) -> Result<(), String> {
     validate_params::<SessionSetProfileParams>(value)
+}
+
+fn validate_session_set_effort_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionSetEffortParams>(value)
+}
+
+fn validate_session_create_params(value: &Value) -> Result<(), String> {
+    validate_params::<SessionCreateParams>(value)
+}
+
+fn validate_session_create_result(value: &Value) -> Result<(), String> {
+    validate_result::<SessionCreateResult>(value)
 }
 
 fn validate_session_set_tool_mode_params(value: &Value) -> Result<(), String> {
@@ -447,6 +489,30 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_session_set_profile_params,
         validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "session.set_effort",
+        params_type: "SessionSetEffortParams",
+        result_type: "null",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_set_effort_params,
+        validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "session.create",
+        params_type: "SessionCreateParams",
+        result_type: "SessionCreateResult",
+        info: MethodInfo {
+            kind: MethodKind::Write,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_session_create_params,
+        validate_result: validate_session_create_result,
     },
     TypedMethodInfo {
         method: "session.set_tool_mode",
@@ -666,6 +732,8 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("session.get_activity", READ_SEEDED),
     // 会话级 profile 选择：写 meta.profile 并定向重载该会话（不动全局）。
     ("session.set_profile", WRITE_SEEDED),
+    ("session.set_effort", WRITE_SEEDED),
+    ("session.create", WRITE),
     // 用户重命名会话标题（方案B）：写 meta.title 并广播 TitleChanged(user)。
     ("session.rename", WRITE_SEEDED),
     // workspace
@@ -687,6 +755,12 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("profile.apply", WRITE),
     ("profile.save_current", WRITE),
     ("profile.delete", WRITE),
+    ("profile.create", WRITE),
+    ("profile.update", WRITE),
+    ("profile.set_default", WRITE),
+    ("profile.list", READ),
+    ("provider.upsert", WRITE),
+    ("provider.delete", WRITE),
     // Sign in with ChatGPT（套餐用量）。**全部 admin_only**：配对出来的设备
     // （view/interact）绝不得触发登录 / 切账户 / 登出——那等于让远端设备把
     // 新账户接进用户机器并改写本机凭据。方法名的单一真源在 qaqh_siwc::methods。

@@ -16,7 +16,7 @@ a parameter, or a capability that is not present in the current session.
 1. Inspect the tool's schema. Use only parameters that exist.
 2. Prefer the typed file tools for file operations:
    `read`, `glob`, `grep`, `write`, `edit`, `apply_patch`, `copy_range`,
-   `delete`, `journal`, and `spy`.
+   and `delete`.
 3. Use `exec` for commands, processes, and tools that are not represented by a
    typed tool. Do not use `exec` to bypass a typed file tool's safety checks.
 4. If a tool is missing, adapt to the current surface. Never call a preview,
@@ -54,5 +54,4 @@ The detailed patch rules live in `qaqh-apply-patch`.
 - Use the narrowest tool and path that solves the task.
 - Do not expose secrets, session internals, or unrelated user data.
 - Verify before claiming success. If verification is impossible, say so.
-- When a tool result reports a workspace change mark, use `spy` deliberately;
-  do not rewrite unrelated files.
+- If you execute scripts via `exec` that modify files, actively verify your changes.

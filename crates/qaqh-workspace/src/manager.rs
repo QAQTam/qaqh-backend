@@ -352,7 +352,7 @@ impl ToolManager {
             source: dynamic_source(&name),
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
-            native_patch: None,
+            native_text: None,
         };
         self.dynamic_dispatches.insert(name.clone(), tool.dispatch);
         let adapter = DynamicToolAdapter::new(descriptor.clone(), tool.dispatch);
@@ -1349,7 +1349,7 @@ pub(crate) fn tool_search_descriptor() -> ToolDescriptor {
         // 能力声明单源：capability 表（READ_ONLY 档），不是 ToolCapabilities::default。
         capabilities: crate::tool_capabilities::builtin_capabilities(TOOL_SEARCH_NAME)
             .expect("tool_search is on the capability table"),
-        native_patch: None,
+        native_text: None,
     }
 }
 
@@ -1671,7 +1671,7 @@ impl ToolManager {
                 source: ToolSource::Mcp,
                 output_budget: OutputBudget::default(),
                 capabilities: ToolCapabilities::default(),
-                native_patch: None,
+                native_text: None,
             };
             let name = descriptor.name.as_str().to_owned();
             self.dynamic.insert(

@@ -19,11 +19,12 @@ anyhow = "1"
 log = "0.4"
 regex = "1"
 
+[target.'cfg(unix)'.dependencies]
+qaqh-pty = { path = "../qaqh-pty" }
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 sbx-win = { path = "../sbx-win" }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [lints]
 workspace = true

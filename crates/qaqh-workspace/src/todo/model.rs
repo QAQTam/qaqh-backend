@@ -12,6 +12,8 @@ pub(crate) static TODO_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
+    /// 身份 = 标题（纯文本范式）。保留字段以兼容 GoalEngine / 前端
+    /// dashboard 的 id 匹配；赋值恒等于 `title`。
     pub id: String,
     pub title: String,
     pub description: String,
@@ -55,11 +57,16 @@ pub struct TodoStore {
     pub auto_turns: u32,
     #[serde(default = "default_max_auto")]
     pub max_auto_turns: u32,
-    /// 高水位：下一个待分配的 T<n> 号。持久化以取代 max+1 推导——
-    /// 旧文件无此字段（default 0）时首次分配自动迁移；未来引入
-    /// 删除/归档后已用号也不会被复用（IDs stable 契约）。
+    /// 列表归档位：全部条目进入终态（completed/cancelled）后置位。
+    /// 归档后下一次非 todo 工具调用回**一次** cleared 提示（由
+    /// `cleared_notified` 保证只发一次），随后注入静默直至重建。
+    /// 旧 todo.json 的 `next_id` 字段：serde 忽略未知字段，无需保留。
     #[serde(default)]
-    pub next_id: u32,
+    pub archived: bool,
+    /// cleared 提示已随某个 tool_result 发出（append-only 契约：提示只发
+    /// 一次，之后的快照返回 None）。
+    #[serde(default)]
+    pub cleared_notified: bool,
 }
 
 fn default_max_auto() -> u32 {

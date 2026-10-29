@@ -156,13 +156,55 @@ pub struct OutputBudget {
     pub exec_max_output_tokens: Option<u32>,
 }
 
-/// Optional model-facing representation of the existing patch executor.
-/// This is registration metadata, not a separately executable tool.
+/// Optional model-facing text representation of an existing executor.
+/// This is registration metadata, not a separately executable tool. Native
+/// custom text and function string-field adapters map into the same canonical
+/// arguments before authorization and dispatch.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NativePatchRepresentation {
+pub struct NativeTextRepresentation {
+    /// Canonical executor input field populated from the text payload.
+    pub canonical_field: String,
+    /// Canonical fixed values inserted alongside the text field.
+    pub canonical_defaults: serde_json::Value,
     pub custom_description: String,
-    pub preview_description: String,
-    pub preview_parameters: serde_json::Value,
+    /// Whether Responses custom raw-text calls may represent this tool.
+    pub custom_text: bool,
+    /// Whether function calls should use a string `input` field instead of the
+    /// typed argument schema.
+    pub function_text_field: bool,
+    /// Optional preview projection into the same executor.
+    pub preview_description: Option<String>,
+    pub preview_parameters: Option<serde_json::Value>,
+}
+
+impl NativeTextRepresentation {
+    pub fn text_tool(
+        canonical_field: impl Into<String>,
+        canonical_defaults: serde_json::Value,
+        custom_description: impl Into<String>,
+        custom_text: bool,
+        function_text_field: bool,
+    ) -> Self {
+        Self {
+            canonical_field: canonical_field.into(),
+            canonical_defaults,
+            custom_description: custom_description.into(),
+            custom_text,
+            function_text_field,
+            preview_description: None,
+            preview_parameters: None,
+        }
+    }
+
+    pub fn with_preview(
+        mut self,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        self.preview_description = Some(description.into());
+        self.preview_parameters = Some(parameters);
+        self
+    }
 }
 
 /// 工具描述符：模型面 / 权限 / 编排 / 预算的单一描述源
@@ -194,7 +236,7 @@ pub struct ToolDescriptor {
     /// 编排能力声明（09-19 补充稿 §3）。
     pub capabilities: ToolCapabilities,
     /// Optional custom/preview representations for a profile that supports them.
-    pub native_patch: Option<NativePatchRepresentation>,
+    pub native_text: Option<NativeTextRepresentation>,
 }
 
 /// 工具元数据（SDK v2）：typed 工具作者声明的部分——schema 不在其中，
@@ -222,7 +264,7 @@ pub struct ToolMeta {
     pub output_budget: OutputBudget,
     /// 编排能力声明（09-19 补充稿 §3）。
     pub capabilities: ToolCapabilities,
-    pub native_patch: Option<NativePatchRepresentation>,
+    pub native_text: Option<NativeTextRepresentation>,
 }
 
 impl ToolMeta {
@@ -245,7 +287,7 @@ impl ToolMeta {
             source: ToolSource::Builtin,
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
-            native_patch: None,
+            native_text: None,
         }
     }
 
@@ -264,8 +306,8 @@ impl ToolMeta {
     }
 
     #[must_use]
-    pub fn with_native_patch(mut self, representation: NativePatchRepresentation) -> Self {
-        self.native_patch = Some(representation);
+    pub fn with_native_text(mut self, representation: NativeTextRepresentation) -> Self {
+        self.native_text = Some(representation);
         self
     }
 
@@ -292,7 +334,7 @@ impl From<ToolMeta> for ToolDescriptor {
             source: meta.source,
             output_budget: meta.output_budget,
             capabilities: meta.capabilities,
-            native_patch: meta.native_patch,
+            native_text: meta.native_text,
         }
     }
 }
@@ -321,14 +363,18 @@ impl ToolDescriptor {
         if self.default_timeout.is_zero() && !self.capabilities.interactive {
             return Err(DescriptorError::ZeroTimeout);
         }
-        if let Some(native) = &self.native_patch
-            && (self.name.as_str() != "apply_patch"
-                || self.source != ToolSource::Builtin
+        if let Some(native) = &self.native_text
+            && (self.source != ToolSource::Builtin
                 || native.custom_description.trim().is_empty()
-                || native.preview_description.trim().is_empty()
-                || !native.preview_parameters.is_object())
+                || native.canonical_field.trim().is_empty()
+                || !native.canonical_defaults.is_object()
+                || (!native.custom_text && !native.function_text_field)
+                || native.canonical_defaults.get(&native.canonical_field).is_some()
+                || native.preview_description.as_ref().is_some_and(|text| text.trim().is_empty())
+                || native.preview_parameters.as_ref().is_some_and(|schema| !schema.is_object())
+                || native.preview_description.is_some() != native.preview_parameters.is_some())
         {
-            return Err(DescriptorError::InvalidNativePatch);
+            return Err(DescriptorError::InvalidNativeTextRepresentation);
         }
         Ok(())
     }
@@ -338,7 +384,7 @@ impl ToolDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DescriptorError {
     /// Native patch representations must belong to the builtin executor.
-    InvalidNativePatch,
+    InvalidNativeTextRepresentation,
     /// 名称非法（构造期）。
     InvalidName {
         /// 具体原因（静态文案）。
@@ -358,7 +404,7 @@ pub enum DescriptorError {
 impl fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidNativePatch => f.write_str("invalid native patch representation"),
+            Self::InvalidNativeTextRepresentation => f.write_str("invalid native patch representation"),
             Self::InvalidName { reason } => write!(f, "非法工具名: {reason}"),
             Self::EmptyDescription => f.write_str("工具描述不得为空"),
             Self::SchemaNotObject { field } => write!(f, "{field} 必须是 JSON Schema object"),
@@ -437,7 +483,7 @@ mod tests {
             source: ToolSource::Builtin,
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
-            native_patch: None,
+            native_text: None,
         }
     }
 
@@ -476,17 +522,30 @@ mod tests {
     }
 
     #[test]
-    fn native_patch_representation_rejects_unrelated_or_dynamic_tools() {
+    fn native_text_representation_rejects_unrelated_or_dynamic_tools() {
         let mut d = descriptor();
-        d.native_patch = Some(NativePatchRepresentation {
-            custom_description: "raw patch".into(),
-            preview_description: "preview".into(),
-            preview_parameters: serde_json::json!({"type":"object"}),
-        });
-        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativePatch));
-        d.name = ToolName::new("apply_patch").expect("valid");
+        d.native_text = Some(NativeTextRepresentation::text_tool(
+            "input",
+            serde_json::json!({}),
+            "raw text",
+            true,
+            false,
+        ));
         assert_eq!(d.validate(), Ok(()));
         d.source = ToolSource::Mcp;
-        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativePatch));
+        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativeTextRepresentation));
+    }
+
+    #[test]
+    fn native_text_representation_rejects_conflicting_or_incomplete_metadata() {
+        let mut d = descriptor();
+        d.native_text = Some(NativeTextRepresentation::text_tool(
+            "input",
+            serde_json::json!({"input": "already"}),
+            "raw text",
+            true,
+            false,
+        ));
+        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativeTextRepresentation));
     }
 }

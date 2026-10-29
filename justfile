@@ -4,9 +4,9 @@
 # 项目结构:
 #   crates/          Rust 后端 (17 crates)
 #
-# 说明：Windows 桌面层（WinUI3 壳 / installer / updater）已拆分为独立仓库
-# F:\qaqh-winui-app；本仓库只保留跨平台后端核心与公共 SDK。
-# 前端打包用 ../qaqh-winui-app/justfile。
+# 说明：跨平台桌面客户端为同级仓库 qaqh-electron（Linux 及多端第一公民）；
+# 本仓库只保留跨平台后端核心与公共 SDK。
+# 前端构建与打包由 ../qaqh-electron 负责。
 
 set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
 
@@ -28,13 +28,9 @@ dev:
 
 # ── 桌面客户端（已拆仓）────────────────────────────
 #
-# Tauri 2 壳 + SolidJS 渲染层（原 `webui/`）已于 2026-10-07 抽成独立仓
-# **qaqh-desktop-app**（同级目录 `../qaqh-desktop-app`，含完整 git 历史）。
-# 本仓不再包含、也不构建前端。以下能力随之移交到那边的 justfile：
-#   renderer-build / ts-export / ts-check / place-sidecar / desktop-dev / desktop-build
-#
-# 类型契约只由本仓 qaqh-contract-export 生成。客户端导入整个 artifact，
-# 不独立运行 ts-rs、不手修 generated，也不在安装 npm 包时调用 cargo。
+# 跨平台桌面客户端已统一收敛至第一公民仓库 **qaqh-electron**（同级目录 `../qaqh-electron`）。
+# 本仓专注于跨平台后端守护进程（daemon），不再包含前端构建。
+# 类型契约由本仓 qaqh-contract-export 统一生成并向 qaqh-sdk / qaqh-electron 导出。
 
 # 导出 SDK 权威契约（目录必须由本 exporter 管理或尚不存在）
 sdk-export out:

@@ -22,9 +22,10 @@
 //!
 //! ## Registration
 //!
-//! Call `qaqh_subagent::register(&mut tool_manager)` during agent
-//! initialization (the subagent worker itself does this via
-//! `AgentState::init_subagent`) to register the `spawn_subagent` tool.
+//! Production agents currently register none of this crate's tools while
+//! subagent creation/control and task/board collaboration are suspended.
+//! `register` retains the full tool set for explicit consumers and tests;
+//! it is not the production agent registrar during this suspension.
 
 #![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
 
@@ -776,6 +777,12 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(WaitAgentTool);
     mgr.register_display("interrupt_agent", project_interrupt_agent_display);
     mgr.register_typed(InterruptAgentTool);
+    register_collaboration_tools(mgr);
+}
+
+/// Register task/board tools without exposing subagent creation or control.
+/// Explicit opt-in only; production agents currently suspend these tools too.
+pub fn register_collaboration_tools(mgr: &mut ToolManager) {
     mgr.register_typed(task_tools::TaskCreateTool);
     mgr.register_typed(task_tools::TaskClaimTool);
     mgr.register_typed(task_tools::TaskUpdateTool);

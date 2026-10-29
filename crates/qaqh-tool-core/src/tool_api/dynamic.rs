@@ -97,7 +97,7 @@ mod tests {
             source: ToolSource::Mcp,
             output_budget: OutputBudget::default(),
             capabilities: ToolCapabilities::default(),
-            native_patch: None,
+            native_text: None,
         }
     }
 

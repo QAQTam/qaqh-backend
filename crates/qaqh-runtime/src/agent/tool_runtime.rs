@@ -10,7 +10,7 @@
 
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex, mpsc::Receiver},
+    sync::mpsc::Receiver,
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -182,7 +182,7 @@ impl ToolRuntime {
             let actor_ref = actor.as_deref_mut();
             let (progress_rx, runs) = Self::spawn_batch(ctx, actor_ref, origin, batch, turn_id);
             let cancelled = ctx.cancel.is_set();
-            let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
+            let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num, true);
 
             // BUG-2026-09-13-08：取消不再丢弃已执行结果。
             //
@@ -198,32 +198,21 @@ impl ToolRuntime {
                         let result = *result;
                         exec_attributed.extend(result.attributed_paths.iter().cloned());
                         backfill_executed_result(
-                            ctx,
-                            &call_id,
-                            &tool_name,
-                            result.result,
-                            result.code_delta,
+                            ctx, &call_id, &tool_name, result.result, result.code_delta,
                         );
-                        ordered_skill_effects.push((call_id.clone(), result.skill_effects));
+                        ordered_skill_effects.push((call_id, result.skill_effects));
                     }
                     ToolRunOutcome::Panicked => ctx.agent.msg.push_tool_result_direct(
-                        &call_id,
-                        "[ERROR] tool thread panicked",
-                        false,
+                        &call_id, "[ERROR] tool thread panicked", false,
                     ),
                     ToolRunOutcome::CancelledOrphan => ctx.agent.msg.push_tool_result_direct(
-                        &call_id,
-                        CANCELLED_ORPHAN_TOOL_RESULT,
-                        false,
+                        &call_id, CANCELLED_ORPHAN_TOOL_RESULT, false,
                     ),
                     ToolRunOutcome::LedgerFailed(message) => {
                         ctx.agent.msg.push_tool_result_canonical(
                             &call_id,
                             &qaqh_types::ToolResult::error_with(
-                                "ledger_write_failed",
-                                message,
-                                false,
-                                None,
+                                "ledger_write_failed", message, false, None,
                             ),
                             &[],
                         );
@@ -269,39 +258,28 @@ impl ToolRuntime {
             let actor = actor.as_deref_mut();
             let (progress_rx, runs) =
                 Self::spawn_batch(ctx, actor, origin, vec![(admitted, mode)], turn_id);
-            let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num);
+            let results = Self::collect(ctx, tool, progress_rx, runs, turn_id, round_num, true);
             for result in results {
                 match result.outcome {
                     ToolRunOutcome::Completed(result) => {
                         let result = *result;
                         exec_attributed.extend(result.attributed_paths.iter().cloned());
                         backfill_executed_result(
-                            ctx,
-                            &call_id,
-                            &tool_name,
-                            result.result,
-                            result.code_delta,
+                            ctx, &call_id, &tool_name, result.result, result.code_delta,
                         );
                         ordered_skill_effects.push((call_id.clone(), result.skill_effects));
                     }
                     ToolRunOutcome::Panicked => ctx.agent.msg.push_tool_result_direct(
-                        &call_id,
-                        "[ERROR] tool thread panicked",
-                        false,
+                        &call_id, "[ERROR] tool thread panicked", false,
                     ),
                     ToolRunOutcome::CancelledOrphan => ctx.agent.msg.push_tool_result_direct(
-                        &call_id,
-                        CANCELLED_ORPHAN_TOOL_RESULT,
-                        false,
+                        &call_id, CANCELLED_ORPHAN_TOOL_RESULT, false,
                     ),
                     ToolRunOutcome::LedgerFailed(message) => {
                         ctx.agent.msg.push_tool_result_canonical(
                             &call_id,
                             &qaqh_types::ToolResult::error_with(
-                                "ledger_write_failed",
-                                message,
-                                false,
-                                None,
+                                "ledger_write_failed", message, false, None,
                             ),
                             &[],
                         );
@@ -785,7 +763,7 @@ impl ToolRuntime {
         let run = runs
             .pop()
             .expect("single tool runtime run must produce one worker");
-        Self::collect(ctx, tool, progress_rx, vec![run], turn_id, round_num)
+        Self::collect(ctx, tool, progress_rx, vec![run], turn_id, round_num, false)
             .into_iter()
             .next()
             .expect("single tool runtime run must produce one result")
@@ -938,68 +916,61 @@ impl ToolRuntime {
         Ok(())
     }
 
-    /// 排空本批进度并 join 所有 worker，保持调用方传入的顺序。
+    /// Harvest ready workers without waiting for slower siblings. Results are
+    /// ledger-committed/published on completion, but returned in original model
+    /// order for history backfill and deterministic skill effects.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn collect(
         ctx: &mut RingContext,
-        tool: &ToolEngine,
+        _tool: &ToolEngine,
         progress_rx: Receiver<ExecProgressEvent>,
         runs: Vec<ToolRun>,
         turn_id: &str,
         round_num: u32,
+        model_batch: bool,
     ) -> Vec<ToolRunResult> {
-        // T2（BUG-2026-10-15）：取消收割。cancel 可能在 spawn 之后、collect
-        // 中途由 reader 线程置位（「工具先卡死、用户后停」正是本次事故的主
-        // 场景），所以完成谓词必须每 tick 重查取消：置位即广播 per-call 取消
-        // 位并布防宽限截止；到期仍不返回的 worker detach 为孤儿并合成
-        // CancelledOrphan，保证 collect 必然返回、turn 必然收口。
         let cancel = ctx.cancel.clone();
-        let harvest: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-        {
-            let cancel = cancel.clone();
-            let harvest = Arc::clone(&harvest);
-            let runs_ref = &runs;
-            let progress_done = move || {
-                if runs_ref.iter().all(|run| run.handle.is_finished()) {
-                    return true;
-                }
-                if cancel.is_set() {
-                    let mut slot = harvest.lock().unwrap_or_else(|e| e.into_inner());
-                    if slot.is_none() {
-                        // 广播一次 per-call 取消位：exec/wait 等按标志轮询的
-                        // 工具随即自行中止；仍有检查点的工具继续跑完。
-                        qaqh_workspace::runtime::cancel_current_tool();
-                        *slot = Some(Instant::now() + CANCEL_HARVEST_GRACE);
+        let mut deadline = None;
+        let mut pending: Vec<_> = runs.into_iter().map(Some).collect();
+        let mut results: Vec<Option<ToolRunResult>> =
+            (0..pending.len()).map(|_| None).collect();
+        let mut remaining = pending.len();
+        let mut progress_connected = true;
+        while remaining > 0 {
+            // Bounded drain prevents noisy/background stdout from starving
+            // completion notifications or cancellation checks.
+            for _ in 0..256 {
+                match progress_rx.try_recv() {
+                    Ok(event) => {
+                        if !results.iter().flatten().any(|r| r.call_id == event.tool_call_id) {
+                            ToolEngine::emit_progress_tail(ctx, turn_id, round_num, &event);
+                        }
                     }
-                    if let Some(deadline) = *slot
-                        && Instant::now() >= deadline
-                    {
-                        return true;
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        progress_connected = false;
+                        break;
                     }
                 }
-                false
-            };
-            tool.drain_progress_external(ctx, progress_rx, turn_id, round_num, progress_done);
-        }
-
-        // drain 期间谓词可能从未走到取消分支（信道立即断开等）：补一次布防，
-        // 保证下方 join 阶段不会退化回无限期阻塞。
-        if cancel.is_set() {
-            let mut slot = harvest.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() {
-                qaqh_workspace::runtime::cancel_current_tool();
-                *slot = Some(Instant::now() + CANCEL_HARVEST_GRACE);
             }
-        }
-        let deadline = *harvest.lock().unwrap_or_else(|e| e.into_inner());
-
-        runs.into_iter()
-            .map(|run| {
+            if cancel.is_set() && deadline.is_none() {
+                qaqh_workspace::runtime::cancel_current_tool();
+                deadline = Some(Instant::now() + CANCEL_HARVEST_GRACE);
+            }
+            for index in 0..pending.len() {
+                let ready = pending[index].as_ref().is_some_and(|run| {
+                    run.handle.is_finished()
+                        || deadline.is_some_and(|at| Instant::now() >= at)
+                });
+                if !ready {
+                    continue;
+                }
                 let ToolRun {
                     call_id,
                     tool_name,
                     handle,
                     ledger,
-                } = run;
+                } = pending[index].take().expect("ready worker");
                 let outcome = Self::harvest_handle(handle, deadline, &call_id)
                     .unwrap_or(ToolRunOutcome::CancelledOrphan);
                 let mut outcome = outcome;
@@ -1012,19 +983,59 @@ impl ToolRuntime {
                     && let Err(error) =
                         Self::append_finished(ctx, &call_id, &ledger_run, &outcome, turn_id)
                 {
-                    return ToolRunResult {
-                        call_id,
-                        tool_name,
-                        outcome: ToolRunOutcome::LedgerFailed(error.to_string()),
-                    };
+                    outcome = ToolRunOutcome::LedgerFailed(error.to_string());
                 }
-                ToolRunResult {
+                let result = ToolRunResult {
                     call_id,
                     tool_name,
                     outcome,
+                };
+                if model_batch {
+                    Self::emit_completed_run(ctx, &result, turn_id, round_num);
                 }
-            })
-            .collect()
+                results[index] = Some(result);
+                remaining -= 1;
+            }
+            if remaining == 0 {
+                break;
+            }
+            if progress_connected {
+                match progress_rx.recv_timeout(HARVEST_POLL) {
+                    Ok(event) => {
+                        if !results.iter().flatten().any(|r| r.call_id == event.tool_call_id) {
+                            ToolEngine::emit_progress_tail(ctx, turn_id, round_num, &event);
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        progress_connected = false;
+                    }
+                }
+            } else {
+                std::thread::sleep(HARVEST_POLL);
+            }
+        }
+        results.into_iter().flatten().collect()
+    }
+
+    fn emit_completed_run(
+        ctx: &mut RingContext,
+        run: &ToolRunResult,
+        turn_id: &str,
+        round_num: u32,
+    ) {
+        let result = match &run.outcome {
+            ToolRunOutcome::Completed(result) => result.result.clone(),
+            ToolRunOutcome::Panicked =>
+                qaqh_types::ToolResult::error("[ERROR] tool thread panicked"),
+            ToolRunOutcome::CancelledOrphan =>
+                qaqh_types::ToolResult::cancelled(CANCELLED_ORPHAN_TOOL_RESULT),
+            ToolRunOutcome::LedgerFailed(message) =>
+                qaqh_types::ToolResult::error_with("ledger_write_failed", message, false, None),
+        };
+        crate::agent::turn_lap::backfill::emit_completed_tool(
+            ctx, turn_id, round_num, &run.call_id, &run.tool_name, &result,
+        );
     }
 
     /// join 一个 worker。`deadline` 为收割截止（`Some` 仅在取消已置位时出现）：
@@ -1337,9 +1348,23 @@ fn backfill_executed_result(
     ctx: &mut RingContext,
     call_id: &str,
     tool_name: &str,
-    canonical_result: qaqh_types::ToolResult,
+    mut canonical_result: qaqh_types::ToolResult,
     code_delta: Option<qaqh_domain::CodeDeltaRecord>,
 ) {
+    // todo 状态快照（append-only）：非 todo 工具的 result **组装时**求值一次
+    // 并随 result 冻结进历史——绝不回写已入册的消息（transcript 不可变 =
+    // KV cache 前缀命中的前提）。write/update 自身的 output.items 已携带
+    // 全量列表，跳过；其余工具只注入单行紧凑状态（或全 done 时的一次性
+    // "list cleared"）。并行批次内各 result 各带自己时刻的快照，最后一条
+    // 自然最新——无需"挂最新"特判。
+    if !matches!(tool_name, "todo_write" | "todo_update")
+        && !canonical_result.model_truncated()
+        && let Some(meta) =
+            qaqh_workspace::todo::todo_meta_snapshot(&ctx.agent.session.session_id)
+    {
+        let text = format!("{}\n{meta}", canonical_result.model_text());
+        canonical_result.rewrite_text(text);
+    }
     ctx.agent
         .msg
         .push_tool_result_canonical(call_id, &canonical_result, &canonical_result.images);
@@ -1432,6 +1457,123 @@ mod harvest_tests {
             skill_effects: Vec::new(),
             attributed_paths: Vec::new(),
         }
+    }
+
+    #[test]
+    fn collect_publishes_fast_result_before_slow_worker_and_round_deduplicates() {
+        use crate::agent::types::{
+            CancelToken, Emitter, LoopPhase, PendingState, StatsCollector,
+        };
+        use std::sync::{Mutex, atomic::AtomicBool, mpsc};
+
+        struct CompletionEmitter {
+            release_slow: Mutex<Option<mpsc::Sender<()>>>,
+            domains: Mutex<Vec<qaqh_domain::DomainEvent>>,
+            timeline: Mutex<Vec<qaqh_domain::TimelineIntent>>,
+        }
+        impl Emitter for CompletionEmitter {
+            fn emit_domain(&self, event: qaqh_domain::DomainEvent) {
+                if matches!(&event, qaqh_domain::DomainEvent::Tool(
+                    qaqh_domain::ToolEvent::ToolFinished { tool_call_id, .. }
+                ) if tool_call_id == "fast") {
+                    if let Some(tx) = self.release_slow.lock().expect("release").take() {
+                        let _ = tx.send(());
+                    }
+                }
+                self.domains.lock().expect("domains").push(event);
+            }
+            fn emit_timeline(&self, intent: qaqh_domain::TimelineIntent) {
+                self.timeline.lock().expect("timeline").push(intent);
+            }
+        }
+
+        let (release, wait) = mpsc::channel();
+        let emitter = CompletionEmitter {
+            release_slow: Mutex::new(Some(release)),
+            domains: Mutex::new(Vec::new()),
+            timeline: Mutex::new(Vec::new()),
+        };
+        // Slow comes first in model order. It can only complete normally if
+        // the second worker's completion is published while collect is running.
+        let slow = std::thread::spawn(move || {
+            let released = wait.recv_timeout(Duration::from_secs(3)).is_ok();
+            exec_result(if released { "released by fast notification" } else { "timed out" })
+        });
+        let fast = std::thread::spawn(|| {
+            let mut output = exec_result("fast result");
+            output.result.diff = Some("--- a\n+++ a\n-old\n+new\n".into());
+            output
+        });
+        let runs = vec![
+            ToolRun { call_id: "slow".into(), tool_name: "read".into(), handle: slow, ledger: None },
+            ToolRun { call_id: "fast".into(), tool_name: "edit".into(), handle: fast, ledger: None },
+        ];
+        let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config::default());
+        agent.ephemeral = true;
+        agent.session.session_id = "collect-completion-test".into();
+        agent.msg.push_user("test");
+        agent.msg.push_assistant(qaqh_types::Message {
+            msg_id: None, role: "assistant".into(), name: None,
+            content: vec![
+                qaqh_types::ContentBlock::ToolUse {
+                    id: "slow".into(), name: "read".into(), input: serde_json::json!({}),
+                },
+                qaqh_types::ContentBlock::ToolUse {
+                    id: "fast".into(), name: "edit".into(), input: serde_json::json!({}),
+                },
+            ],
+        });
+        let cancel = CancelToken::new();
+        let mut phase = LoopPhase::ToolsRunning;
+        let mut pending = PendingState::default();
+        let writer_dead = std::sync::Arc::new(AtomicBool::new(false));
+        let mut stats = StatsCollector::new();
+        let mut flow = qaqh_message::ContextFlow::new();
+        let mut ctx = RingContext {
+            agent: &mut agent, emitter: &emitter, cancel: &cancel,
+            phase: &mut phase, pending: &mut pending, writer_dead: &writer_dead,
+            stats: &mut stats, flow: &mut flow,
+        };
+        // Keep a sender alive: completion must not wait for channel disconnect.
+        let (_progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
+        let results = ToolRuntime::collect(
+            &mut ctx, &ToolEngine::new(), progress_rx, runs, "turn", 1, true,
+        );
+        assert_eq!(results[0].call_id, "slow", "return order stays deterministic");
+        assert!(matches!(&results[0].outcome, ToolRunOutcome::Completed(r)
+            if r.content == "released by fast notification"),
+            "fast notification must release slow before collect completes");
+        // History is deliberately separate from display completion order.
+        for run in &results {
+            if let ToolRunOutcome::Completed(result) = &run.outcome {
+                backfill_executed_result(
+                    &mut ctx, &run.call_id, &run.tool_name,
+                    result.result.clone(), result.code_delta.clone(),
+                );
+            }
+        }
+        let history = ctx.agent.msg.last_step_tool_results();
+        assert_eq!(history.iter().map(|r| r.tool_call_id.as_str()).collect::<Vec<_>>(),
+            ["slow", "fast"]);
+        crate::agent::turn_lap::backfill::emit_completed_tool_round(&mut ctx, "turn", 1);
+        let domains = emitter.domains.lock().expect("domains");
+        let finished: Vec<_> = domains.iter().filter_map(|e| match e {
+            qaqh_domain::DomainEvent::Tool(qaqh_domain::ToolEvent::ToolFinished {
+                tool_call_id, ..
+            }) => Some(tool_call_id.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(finished, ["fast", "slow"], "round must not send duplicate completions");
+        let timeline = emitter.timeline.lock().expect("timeline");
+        let fast_updates: Vec<_> = timeline.iter().filter_map(|e| match e {
+            qaqh_domain::TimelineIntent::ToolUpdated { tool, .. }
+                if tool.tool_call_id == "fast" => Some(tool),
+            _ => None,
+        }).collect();
+        assert_eq!(fast_updates.len(), 1);
+        assert_eq!(fast_updates[0].diff.as_deref(), Some("--- a\n+++ a\n-old\n+new\n"));
+        assert_eq!(timeline.iter().filter(|e| matches!(e,
+            qaqh_domain::TimelineIntent::BlockSealed { .. })).count(), 2);
     }
 
     #[test]

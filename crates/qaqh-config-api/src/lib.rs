@@ -22,6 +22,7 @@
 //! **注意** [`ConfigPatch`] / [`SubagentPatch`] 的 struct 级 `default` **不在此列**：
 //! 那是 K3 合并补丁的语义（字段缺失 = 不动），不是兼容。
 
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// wire 的**规范拼写**：读模型 `ConfigDto.wire` 输出的就是这四个之一，
@@ -92,6 +93,9 @@ pub struct ConfigDto {
     pub active_profile: String,
     /// profile 名列表（管理 UI 用；不含敏感字段）。
     pub profiles: Vec<String>,
+    /// profile 详细元数据（管理与切换 UI 用；不含敏感密钥）。
+    #[serde(default)]
+    pub profiles_detail: HashMap<String, ProfileSummaryDto>,
     pub compliance_enabled: bool,
     pub subagent: SubagentDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
@@ -112,6 +116,22 @@ pub struct ConfigDto {
     pub tool_allowlist_enabled: bool,
     /// Exact registered names; when enabled, an empty list disables all tools.
     pub tool_allowlist: Vec<String>,
+}
+
+/// 单个 Profile 摘要读模型（非敏感元数据）。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSummaryDto {
+    pub name: String,
+    pub model: String,
+    pub base_url: String,
+    pub wire: String,
+    pub effort: Option<String>,
+    pub context_length: u64,
+    pub max_tokens: u64,
+    pub api_key_set: bool,
+    pub credential: String,
 }
 
 /// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。

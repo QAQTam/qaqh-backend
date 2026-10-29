@@ -49,7 +49,11 @@ fn init_file_logging() {
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some(qaqh_sandbox::HELPER_SUBCOMMAND) {
+    // helper 子命令（stdin 协议与 PTY 模式共用 helper_main 的 argv 分发）。
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some(qaqh_sandbox::HELPER_SUBCOMMAND) | Some(qaqh_sandbox::HELPER_PTY_SUBCOMMAND)
+    ) {
         std::process::exit(qaqh_sandbox::helper_main());
     }
     init_file_logging();

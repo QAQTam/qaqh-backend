@@ -618,12 +618,7 @@ fn batch_ask_waits_for_every_answer_and_writes_one_exact_result() {
             tool_round(&[(
                 "ask-batch",
                 "ask",
-                json!({
-                    "questions": [
-                        {"id":"q1", "question":"First?", "options":["A","B"], "allow_custom":false},
-                        {"id":"q2", "question":"Second?", "options":["C","D"], "allow_custom":false}
-                    ]
-                }),
+                json!({"input": "ASK v1\nQuestion: First?\nOptions:\n- A\n- B\nAllow custom: no\n\nQuestion: Second?\nOptions:\n- C\n- D\nAllow custom: no"}),
             )]),
             final_round("finished"),
         ],
@@ -682,6 +677,94 @@ fn batch_ask_waits_for_every_answer_and_writes_one_exact_result() {
 }
 
 #[test]
+fn malformed_ask_is_returned_to_model_for_retry_without_user_interaction() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let bodies = run_case(
+        vec![
+            tool_round(&[(
+                "bad-ask",
+                "ask",
+                json!({"input":"Question: Missing version header"}),
+            )]),
+            tool_round(&[(
+                "good-ask",
+                "ask",
+                json!({"input":"ASK v1\nQuestion: Continue?\nOptions:\n- yes\nAllow custom: no"}),
+            )]),
+            final_round("finished"),
+        ],
+        3,
+        |writer, receiver, request_count, session_id| {
+            send_cmd(writer, &session_id, cmd_user_input("ask me"));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut interactions = Vec::new();
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let event = receiver
+                    .recv_timeout(remaining)
+                    .expect("corrected ask interaction should be requested");
+                match &event {
+                    RingingEvent::Control(ControlEvent::InteractionRequested {
+                        interaction_id,
+                        ..
+                    }) => {
+                        interactions.push(interaction_id.clone());
+                        assert_eq!(
+                            interaction_id, "good-ask",
+                            "malformed ask must not be shown to the user"
+                        );
+                        break;
+                    }
+                    RingingEvent::Conversation(
+                        ConversationEvent::TurnCompleted { .. }
+                        | ConversationEvent::TurnFailed { .. },
+                    ) => panic!("turn ended before corrected ask: {event:?}"),
+                    _ => {}
+                }
+            }
+            assert_eq!(interactions, vec!["good-ask"]);
+            assert_eq!(request_count.load(Ordering::SeqCst), 2);
+            send_cmd(
+                writer,
+                &session_id,
+                cmd_ask_respond("good-ask", &[("q1", "yes")]),
+            );
+            expect_interaction_resolved(receiver, "good-ask", AskResolution::Answered);
+            collect_through_terminal(receiver);
+        },
+    );
+
+    let retry_request: Value = serde_json::from_str(&bodies[1]).expect("retry request");
+    let error = find_tool_result_content(&retry_request, "bad-ask")
+        .expect("malformed call result must be returned to the model");
+    assert!(error.contains("ASK_FORMAT_ERROR"), "{error}");
+    assert!(error.contains("retryable"), "{error}");
+}
+
+#[test]
+fn ask_text_function_and_custom_payloads_normalize_to_same_arguments() {
+    let function_args = qaqh_tool_core::model_tool_plan::adapt_text_input(
+        &qaqh_tool_core::model_tool_plan::NativeToolPayload::JsonArguments(
+            json!({"input":"ASK v1\nQuestion: Continue?"}),
+        ),
+        &qaqh_tool_core::model_tool_plan::TextInputAdapter::function_field("input", "input"),
+    )
+    .expect("function text adaptation");
+    let custom_args = qaqh_tool_core::model_tool_plan::adapt_text_input(
+        &qaqh_tool_core::model_tool_plan::NativeToolPayload::RawText(
+            "ASK v1\nQuestion: Continue?".into(),
+        ),
+        &qaqh_tool_core::model_tool_plan::TextInputAdapter::custom_raw("input"),
+    )
+    .expect("custom text adaptation");
+    assert_eq!(function_args, custom_args);
+    assert_eq!(
+        qaqh_workspace::ask_user::normalize_ask_user(&function_args).unwrap(),
+        qaqh_workspace::ask_user::normalize_ask_user(&custom_args).unwrap()
+    );
+}
+
+#[test]
 fn multiple_ask_calls_are_presented_sequentially_before_one_resume() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let bodies = run_case(
@@ -690,12 +773,12 @@ fn multiple_ask_calls_are_presented_sequentially_before_one_resume() {
                 (
                     "ask-1",
                     "ask",
-                    json!({"question":"First?", "options":["A"], "allow_custom":false}),
+                    json!({"input":"ASK v1\nQuestion: First?\nOptions:\n- A\nAllow custom: no"}),
                 ),
                 (
                     "ask-2",
                     "ask",
-                    json!({"question":"Second?", "options":["B"], "allow_custom":false}),
+                    json!({"input":"ASK v1\nQuestion: Second?\nOptions:\n- B\nAllow custom: no"}),
                 ),
             ]),
             final_round("finished"),
@@ -744,7 +827,7 @@ fn invalid_or_stale_responses_do_not_consume_the_active_ask() {
             tool_round(&[(
                 "active-ask",
                 "ask",
-                json!({"question":"Pick A", "options":["A"], "allow_custom":false}),
+                json!({"input":"ASK v1\nQuestion: Pick A\nOptions:\n- A\nAllow custom: no"}),
             )]),
             final_round("finished"),
         ],
@@ -784,7 +867,7 @@ fn duplicate_ask_resolution_is_rejected_after_terminal_without_modal_replay() {
             tool_round(&[(
                 "duplicate-ask",
                 "ask",
-                json!({"question":"Pick A", "options":["A"], "allow_custom":false}),
+                json!({"input":"ASK v1\nQuestion: Pick A\nOptions:\n- A\nAllow custom: no"}),
             )]),
             final_round("finished"),
         ],
@@ -834,7 +917,7 @@ fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
             tool_round(&[(
                 "dismiss-ask",
                 "ask",
-                json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
+                json!({"input":"ASK v1\nQuestion: Continue?\nOptions:\n- yes\nAllow custom: no"}),
             )]),
             final_round("fresh turn finished"),
         ],
@@ -880,7 +963,7 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
                 (
                     "ask-after-read",
                     "ask",
-                    json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
+                    json!({"input":"ASK v1\nQuestion: Continue?\nOptions:\n- yes\nAllow custom: no"}),
                 ),
             ]),
             final_round("finished"),
@@ -926,7 +1009,7 @@ fn every_permission_resolves_before_the_queued_ask_is_presented() {
                 (
                     "ask-after-two-reads",
                     "ask",
-                    json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
+                    json!({"input":"ASK v1\nQuestion: Continue?\nOptions:\n- yes\nAllow custom: no"}),
                 ),
             ]),
             final_round("finished"),
@@ -971,7 +1054,7 @@ fn cancel_aborts_one_suspended_turn_and_invalidates_its_ask_id() {
         vec![tool_round(&[(
             "cancel-ask",
             "ask",
-            json!({"question":"Wait?", "options":["yes"], "allow_custom":false}),
+            json!({"input":"ASK v1\nQuestion: Wait?\nOptions:\n- yes\nAllow custom: no"}),
         )])],
         1,
         |writer, receiver, request_count, session_id| {
@@ -1009,7 +1092,7 @@ fn new_session_invalidates_the_suspended_ask() {
             tool_round(&[(
                 "new-session-ask",
                 "ask",
-                json!({"question":"Switch?", "options":["yes"], "allow_custom":false}),
+                json!({"input":"ASK v1\nQuestion: Switch?\nOptions:\n- yes\nAllow custom: no"}),
             )]),
             final_round("stale answer was consumed"),
         ],
@@ -1050,7 +1133,7 @@ fn resume_session_invalidates_the_suspended_ask() {
             tool_round(&[(
                 "resume-session-ask",
                 "ask",
-                json!({"question":"Resume?", "options":["yes"], "allow_custom":false}),
+                json!({"input":"ASK v1\nQuestion: Resume?\nOptions:\n- yes\nAllow custom: no"}),
             )]),
             final_round("stale answer was consumed"),
         ],
@@ -1090,7 +1173,7 @@ fn undo_invalidates_the_suspended_ask() {
         vec![tool_round(&[(
             "undo-ask",
             "ask",
-            json!({"question":"Undo?", "options":["yes"], "allow_custom":false}),
+            json!({"input":"ASK v1\nQuestion: Undo?\nOptions:\n- yes\nAllow custom: no"}),
         )])],
         1,
         |writer, receiver, request_count, session_id| {
@@ -1151,7 +1234,7 @@ fn stale_undo_does_not_consume_the_active_ask() {
             tool_round(&[(
                 "undo-identity-ask",
                 "ask",
-                json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
+                json!({"input":"ASK v1\nQuestion: Continue?\nOptions:\n- yes\nAllow custom: no"}),
             )]),
             final_round("finished"),
         ],

@@ -67,6 +67,27 @@ pub(crate) fn run_helper() -> Result<(), SandboxError> {
     let mut input = Vec::new();
     std::io::stdin().read_to_end(&mut input)?;
     let request: SandboxRequest = serde_json::from_slice(&input)?;
+    validate_request(&request)?;
+    apply_request(&request)?;
+    redirect_stdin_to_dev_null()?;
+    exec_target(&request.argv)
+}
+
+/// PTY 模式 helper：payload 从文件读取（stdin 是 PTY 终端本身，协议无法
+/// 走 stdin），应用 Landlock/seccomp 后 `execvp` 目标，**不**重定向 stdin。
+///
+/// payload 文件在读取后立即删除——即使后续 landlock/seccomp 失败，策略
+/// 面也不会残留在磁盘上。
+pub(crate) fn run_helper_pty(payload_path: &str) -> Result<(), SandboxError> {
+    let input = std::fs::read(payload_path)?;
+    let _ = std::fs::remove_file(payload_path);
+    let request: SandboxRequest = serde_json::from_slice(&input)?;
+    validate_request(&request)?;
+    apply_request(&request)?;
+    exec_target(&request.argv)
+}
+
+fn validate_request(request: &SandboxRequest) -> Result<(), SandboxError> {
     if request.argv.is_empty() {
         return Err(SandboxError::Unsupported("empty target argv".into()));
     }
@@ -75,12 +96,14 @@ pub(crate) fn run_helper() -> Result<(), SandboxError> {
             "helper invoked with disabled sandbox spec".into(),
         ));
     }
+    Ok(())
+}
 
-    set_resource_limits(&request)?;
-    apply_landlock(&request)?;
-    apply_seccomp(&request)?;
-    redirect_stdin_to_dev_null()?;
-    exec_target(&request.argv)
+/// rlimits + Landlock + seccomp 的统一应用序（stdin/PTY 两条入口共享）。
+fn apply_request(request: &SandboxRequest) -> Result<(), SandboxError> {
+    set_resource_limits(request)?;
+    apply_landlock(request)?;
+    apply_seccomp(request)
 }
 
 fn set_resource_limits(request: &SandboxRequest) -> Result<(), SandboxError> {

@@ -24,6 +24,7 @@ qaqh-gate = { path = "../qaqh-gate" }
 unicode-normalization = "0.1"
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-types = { path = "../qaqh-types" }
+qaqh-profile = { path = "../qaqh-profile" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 log = "0.4"
@@ -61,6 +62,9 @@ rmcp = { workspace = true, features = ["transport-io", "server"] }
 # 需要同时看见 daemon 方法表、两家的 `methods::ALL` 与客户端白名单。
 # 加 dev-dep 而不是正式依赖：runtime 不该依赖传输层。
 qaqh-client = { path = "../qaqh-client" }
+# 仅测试用：`ask_user_lifecycle` 直接驱动 `model_tool_plan` 的输入适配器
+# 断言 plan 冻结后的参数形状；runtime 本体不依赖 tool-core。
+qaqh-tool-core = { path = "../qaqh-tool-core" }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"

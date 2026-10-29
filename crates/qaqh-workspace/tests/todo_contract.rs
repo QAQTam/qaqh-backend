@@ -1,5 +1,7 @@
+use serde_json::json;
+
 #[test]
-fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
+fn public_schema_exposes_todo_write_update_with_no_legacy_names() {
     let manager = qaqh_workspace::registration::build_tool_manager(&[]);
     let definitions = manager.all_defs();
     let names: Vec<&str> = definitions
@@ -7,16 +9,11 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
         .map(|definition| definition.function.name.as_str())
         .collect();
 
-    // Todo v4（全量覆写形态）：todo_write / todo_update / todo_list 三件套。
-    let todo_tools = ["todo_write", "todo_update", "todo_list"];
-    for expected in todo_tools {
-        assert!(
-            names.contains(&expected),
-            "missing {expected} in public schema"
-        );
-    }
-    // todo_* 前缀下不允许存在三件套之外的残留（W1 的 todo_create /
-    // todo_insert / todo_set 已随聚合与再拆分退役）。
+    // 文本范式（本版本）：模型工具面收敛为 todo_write / todo_update 双工具。
+    // 完整列表由 write 的全量文本覆写 + output.items 快照携带；
+    // 只读 todo_list 从模型面退役（`todo_list_for` 保留给 HTTP service）。
+    assert!(names.contains(&"todo_write"), "missing todo_write");
+    assert!(names.contains(&"todo_update"), "missing todo_update");
     let todo_prefixed: Vec<_> = names
         .iter()
         .filter(|name| name.starts_with("todo_"))
@@ -24,17 +21,15 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
         .collect();
     assert_eq!(
         todo_prefixed.len(),
-        3,
-        "exactly the three v4 todo tools must be exposed, got {todo_prefixed:?}"
+        2,
+        "exactly the two text-format todo tools must be exposed, got {todo_prefixed:?}"
     );
-    // 旧聚合工具 todo 与更早的别名 task 都不得再暴露。
+    // 旧聚合工具 todo / task 别名 / 只读 todo_list 都不得再暴露。
+    assert!(!names.contains(&"todo"));
+    assert!(!names.contains(&"task"));
     assert!(
-        !names.contains(&"todo"),
-        "aggregated todo tool must not be exposed (v3 splits it)"
-    );
-    assert!(
-        !names.contains(&"task"),
-        "removed task alias must not be exposed"
+        !names.contains(&"todo_list"),
+        "todo_list must not be exposed to the model (retired from the tool face)"
     );
     for definition in &definitions {
         if !definition.function.name.starts_with("todo_") {
@@ -53,43 +48,30 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
             .expect("todo definition")
     };
     let write = find("todo_write");
-    assert_eq!(write.function.parameters["required"], json!(["items"]));
+    assert_eq!(write.function.parameters["required"], json!(["list"]));
     assert_eq!(
         write.function.parameters["additionalProperties"],
         json!(false)
     );
     assert_eq!(
-        write.function.parameters["properties"]["items"]["maxItems"],
-        json!(20)
+        write.function.parameters["properties"]["list"]["type"],
+        json!("string"),
+        "todo_write takes one plain-text block (apply_patch-style), not an items array"
     );
-    // v4：条目内 status 必填（写即状态——in_progress 显式告知载体）；
-    // id/evidence/description 可选（QAQ 增强字段保留）。
-    // title 自 2026-10-04 起也降为可选：带既有 id 时省略 = 沿用原标题，
-    // 压掉实测最高频的「只想翻状态却漏抄标题」整次失败。
-    let write_item = &write.function.parameters["properties"]["items"]["items"];
-    assert_eq!(write_item["required"], json!(["status"]));
-    assert!(write_item["properties"]["title"].is_object());
-    assert_eq!(
-        write_item["properties"]["status"]["enum"],
-        json!(["pending", "in_progress", "completed", "cancelled"])
-    );
-    assert!(write_item["properties"]["id"].is_object());
-    assert!(write_item["properties"]["evidence"].is_object());
-    // v4：explanation 顶层可选（中改计划的理由，对齐 Codex update_plan）。
-    assert!(
-        write.function.parameters["properties"]["explanation"].is_object(),
-        "todo_write.explanation missing"
-    );
-    // v4 回归守卫：工具描述必须声明全量覆写语义（防 append 语义回潮）。
+    // 全量覆写语义守卫：描述必须声明 full-replace（防 append 语义回潮）。
     assert!(
         write.function.description.contains("full-replace"),
         "todo_write description must advertise full-replace semantics"
+    );
+    assert!(
+        write.function.description.contains("Titles are identities"),
+        "todo_write description must document title-as-identity"
     );
 
     let update = find("todo_update");
     assert_eq!(
         update.function.parameters["required"],
-        json!(["id", "status"])
+        json!(["title", "status"])
     );
     assert_eq!(
         update.function.parameters["properties"]["status"]["enum"],
@@ -99,27 +81,11 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
         update.function.parameters["additionalProperties"],
         json!(false)
     );
-
-    let list = find("todo_list");
-    assert_eq!(
-        list.function.parameters["additionalProperties"],
-        json!(false)
-    );
-    // v2 类型生成：Option<enum>（serde default）的 schema 是扁平
-    // enum + "null" 成员，type 为 [string, null]。
-    assert_eq!(
-        list.function.parameters["properties"]["status"]["enum"],
-        json!([
-            "pending",
-            "in_progress",
-            "completed",
-            "cancelled",
-            serde_json::Value::Null
-        ])
+    assert!(
+        update.function.parameters["properties"]["id"].is_null(),
+        "title-as-identity: todo_update must not take an id"
     );
 }
-
-use serde_json::json;
 
 #[test]
 fn manual_status_transitions_round_trip_to_the_frontend_contract() {
@@ -138,12 +104,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     // This integration test binary owns an isolated process home.
     // `qaqh_types::platform::data_dir()` 的优先级是
     // `QAQH_DATA_DIR` > `%USERPROFILE%`(win) / `$XDG_CONFIG_HOME` / `$HOME`(unix)，
-    // 所以三个变量都必须钉住：
-    // - 不钉 `HOME`/`USERPROFILE`：会读进真实用户 home 的历史 todo；
-    // - 不钉 `QAQH_DATA_DIR`：外层（CI/验收脚本）若复用了同一数据目录，
-    //   上一次运行留下的 `sessions/todo-contract/todo.json` 会让本次
-    //   `todo_write` 拿不到 `T1`（`NOT_FOUND: no matching todos: T1`）——
-    //   即「跑两遍就假红」（N-6）。
+    // 三个变量都必须钉住——否则真实 home 的历史 todo 会造成"跑两遍就假红"。
     unsafe {
         std::env::set_var("USERPROFILE", &temp_home);
         std::env::set_var("HOME", &temp_home);
@@ -151,8 +112,8 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     }
     qaqh_workspace::runtime::init_tools("todo-contract", &[], vec![]);
     qaqh_workspace::runtime::set_context("todo-contract", 1);
-    // PR-3-2：显式上下文。刻意用最严档 read-only：todo_* 是会话内
-    // 状态工具，permission 层对其豁免（永不弹确认），本测试同时验证这一点。
+    // 显式上下文。刻意用最严档 read-only：todo_* 是会话内状态工具，
+    // permission 层对其豁免（永不弹确认），本测试同时验证这一点。
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: "todo-contract".into(),
         permission_level: 1,
@@ -160,22 +121,22 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         workspace_root: None,
     };
 
+    // write：全量文本覆写（apply_patch 范式，一行一条）。
     let create = qaqh_workspace::execution::execute_with_context(
         "todo_write",
-        &serde_json::json!({"items": [
-            {"title": "Working", "description": "item 0", "status": "pending"},
-            {"title": "Done", "description": "item 1", "status": "pending"},
-            {"title": "Cancelled", "description": "item 2", "status": "pending"},
-            {"title": "Waiting", "description": "item 3", "status": "pending"}
-        ]})
-        .to_string(),
+        serde_json::json!({"list": "- [ ] Working | item 0\n- [ ] Done | item 1\n- [ ] Cancelled | item 2\n- [ ] Waiting | item 3"})
+            .to_string()
+            .as_str(),
         "todo-create",
         None,
         &ctx,
     );
     assert!(create.success, "create failed: {}", create.content);
     assert_eq!(create.result.data["total"], 4);
-    assert_eq!(create.result.data["assigned"].as_array().unwrap().len(), 4);
+    assert_eq!(create.result.data["in_progress"], 0);
+    assert_eq!(create.result.data["items"].as_array().unwrap().len(), 4);
+    // id = title（身份即标题，GoalEngine / dashboard 契约）。
+    assert_eq!(create.result.data["items"][0]["id"], "Working");
     let create_display = qaqh_workspace::runtime::project_tool_display_from_result(
         "todo_write",
         &serde_json::json!({}),
@@ -184,12 +145,13 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     .expect("typed todo_write display");
     assert_eq!(
         create_display.summary.as_deref(),
-        Some("Plan updated: 4 item(s) (4 new).")
+        Some("Plan updated: 4 item(s), 0 in progress.")
     );
 
+    // update：按 title 精确翻转（无 ID）。
     let working = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        r#"{"id":"T1","status":"in_progress"}"#,
+        r#"{"title":"Working","status":"in_progress"}"#,
         "todo-working",
         None,
         &ctx,
@@ -208,12 +170,12 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         )
         .and_then(|display| display.summary)
         .as_deref(),
-        Some("Todo T1 is now in_progress.")
+        Some("Todo `Working` is now in_progress.")
     );
 
     let completed = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        r#"{"id":"T2","status":"completed","evidence":"verified"}"#,
+        r#"{"title":"Done","status":"completed","evidence":"verified"}"#,
         "todo-completed",
         None,
         &ctx,
@@ -226,7 +188,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     let cancelled = qaqh_workspace::execution::execute_with_context(
         "todo_update",
-        r#"{"id":"T3","status":"cancelled"}"#,
+        r#"{"title":"Cancelled","status":"cancelled"}"#,
         "todo-cancelled",
         None,
         &ctx,
@@ -237,44 +199,21 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         cancelled.content
     );
 
-    let list = qaqh_workspace::execution::execute_with_context(
-        "todo_list",
-        r#"{}"#,
-        "todo-list",
-        None,
-        &ctx,
-    );
-    assert!(list.success, "list failed: {}", list.content);
-    let list_json: serde_json::Value =
-        serde_json::from_str(&list.content).expect("structured list response");
-    assert_eq!(list_json["counts"]["in_progress"], 1);
-    assert_eq!(list_json["counts"]["completed"], 1);
-    assert_eq!(list_json["counts"]["cancelled"], 1);
-    assert_eq!(list_json["counts"]["pending"], 1);
-    assert_eq!(list_json["items"][0]["id"], "T1");
-    assert_eq!(list_json["items"][1]["status"], "completed");
-    assert_eq!(list_json["items"][1]["evidence"], "verified");
-    assert_eq!(list_json["items"][3]["status"], "pending");
-    assert_eq!(list.result.data["counts"]["total"], 4);
-    assert_eq!(
-        qaqh_workspace::runtime::project_tool_display_from_result(
-            "todo_list",
-            &serde_json::json!({}),
-            &list.result,
-        )
-        .and_then(|display| display.summary)
-        .as_deref(),
-        Some("4 task(s) · 1 in progress")
-    );
+    // update 的 output.items 是全量快照：四个终态分布必须与文本覆写一致。
+    let items = completed.result.data["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0]["status"], "in_progress");
+    assert_eq!(items[1]["status"], "completed");
+    assert_eq!(items[1]["evidence"], "verified");
 
     let status: serde_json::Value = serde_json::from_str(
         &qaqh_workspace::todo::todo_status_json("todo-contract").expect("status JSON"),
     )
     .expect("parse status JSON");
     assert_eq!(status["mode"], "manual");
-    assert_eq!(status["current_id"], "T1");
+    // current 收敛到第一个 in_progress；id == title。
+    assert_eq!(status["current_id"], "Working");
     assert_eq!(status["current_title"], "Working");
-    assert_eq!(status["pending"], 1);
     assert_eq!(status["pending"], 1);
     assert_eq!(status["in_progress"], 1);
     assert_eq!(status["completed"], 1);
@@ -282,7 +221,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["total"], 4);
     assert_eq!(status["items"][2]["status"], "cancelled");
 
-    // Verify that the todo.json format is clean (no legacy Goal-enforced normalization).
+    // todo.json 格式干净（无 legacy Goal 强制归一化）。
     let store = qaqh_workspace::todo::load_todo().expect("load todo");
     assert_eq!(store.mode, qaqh_workspace::todo::TodoMode::Manual);
 

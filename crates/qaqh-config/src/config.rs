@@ -969,6 +969,21 @@ impl Config {
                     cfg.credential = profile.credential;
                 }
             }
+            // ── 独立 profiles.toml 支持与平滑迁移 ──
+            let profile_store = qaqh_types::ProfileStore::new(store.path().with_file_name("profiles.toml"));
+            if let Some(loaded_profiles) = profile_store.load() {
+                for (name, profile) in loaded_profiles.profiles {
+                    cfg.profiles.insert(name, profile);
+                }
+            } else if !cfg.profiles.is_empty() {
+                let _ = profile_store.save(&qaqh_types::PersistentProfiles {
+                    profiles: cfg.profiles.clone(),
+                });
+                log::info!(
+                    "[config] 已将旧配置中的 profiles 独立迁移至 {}",
+                    profile_store.path().display()
+                );
+            }
             if let Some(k) = pc.api_key
                 && !k.is_empty()
             {
@@ -1348,6 +1363,10 @@ falling back to 1 (read-only)"
                 context_window: None,
             },
         );
+        let profile_store = qaqh_types::ProfileStore::new(store.path().with_file_name("profiles.toml"));
+        let _ = profile_store.save(&qaqh_types::PersistentProfiles {
+            profiles: profiles.clone(),
+        });
         let pc = PersistentConfig {
             api_key: if self.api_key.is_empty() {
                 None

@@ -42,14 +42,10 @@ qaqh-client      Ringing v2 共享传输(TUI / 桌面壳)
 
 ## 桌面客户端(已拆仓)
 
-Tauri 2 桌面壳 + SolidJS 渲染层（原 `webui/`）已于 **2026-10-07** 抽成独立仓
-**`qaqh-desktop-app`**（同级目录 `../qaqh-desktop-app`，含完整 git 历史）。
-本仓不再包含前端、也不构建它。
+跨平台桌面客户端已统一收敛至第一公民仓库 **`qaqh-electron`**（同级目录 `../qaqh-electron`，提供 Linux 及各端统一体验）。
+本仓专注于跨平台后端守护进程（daemon），不再包含前端代码。
 
-该仓经 path 依赖吃本仓的 `qaqh-client` / `qaqh-types`，并以 sidecar 托管 daemon
-（daemon 的权威构建仍在本仓）；渲染层的类型契约 `src/api/qaqh/*.ts` 由本仓
-crate 的 `derive(TS)` 导出、但生成动作从那边发起。原浏览器 gateway
-(`qaqh-webui-gateway`)已移除，daemon token 不进 webview。
+该客户端通过 `qaqh-sdk` / `qaqh-client` 连接 daemon，渲染层所需的 TypeScript 类型契约由本仓 `qaqh-contract-export` 权威导出。原内置浏览器 gateway 已完全移除，daemon token 不进 webview。
 
 改 `wire` 类型后，由后端唯一入口生成 SDK 契约，再由客户端原样导入：
 

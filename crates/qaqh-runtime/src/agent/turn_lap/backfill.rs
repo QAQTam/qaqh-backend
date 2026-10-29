@@ -96,10 +96,63 @@ fn occurrence_id() -> String {
 
 // ── emit_completed_tool_round (moved verbatim from engine_turn.rs) ──
 
-/// Emit timeline + domain events for one completed tool round.
+/// Publish one ledger-committed tool result immediately, at most once per lap.
+/// Round backfill uses the same path for denied/interaction-only calls.
+/// Model history may still be waiting for ordered backfill; notification
+/// order must not be coupled to that history ordering.
+pub(crate) fn emit_completed_tool(
+    ctx: &mut RingContext,
+    turn_id: &str,
+    round_num: u32,
+    tc_id: &str,
+    name: &str,
+    result: &qaqh_types::ToolResult,
+) {
+    let session_id = &ctx.agent.session.session_id;
+    let scope = &mut ctx.agent.completed_tool_notifications;
+    if !scope.as_ref().is_some_and(|(session, turn, round, _)| {
+        session == session_id && turn == turn_id && *round == round_num
+    }) {
+        *scope = Some((
+            session_id.clone(),
+            turn_id.to_string(),
+            round_num,
+            std::collections::HashSet::new(),
+        ));
+    }
+    if !scope
+        .as_mut()
+        .expect("notification scope")
+        .3
+        .insert(tc_id.to_string())
+    {
+        return;
+    }
+    let args = ctx
+        .agent
+        .msg
+        .tool_call_args(tc_id)
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+    ToolEngine::emit_timeline_tool_result(ctx, turn_id, round_num, tc_id, name, &args, result);
+    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
+        qaqh_domain::ToolEvent::ToolFinished {
+            tool_call_id: tc_id.to_string(),
+            turn_id: turn_id.to_string(),
+            round_num,
+            result: result.clone(),
+        },
+    ));
+    ctx.emitter.emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
+        turn_id: turn_id.to_string(),
+        round_num,
+        block_id: format!("tool:{tc_id}"),
+    });
+}
+
+/// Finish the round; only publish results not already sent on worker completion.
 ///
-/// Moved here verbatim from `TurnEngine::emit_completed_tool_round`, which now
-/// delegates back to this implementation. Shared by
+/// `TurnEngine::emit_completed_tool_round` delegates here. Shared by
 /// `handle_tools_done` (run_lap fast path) and by the suspend/resume
 /// handlers that remain in `engine_turn.rs` (`handle_*`).
 pub(crate) fn emit_completed_tool_round(
@@ -114,35 +167,7 @@ pub(crate) fn emit_completed_tool_round(
             tool_name: name,
             result,
         } = step_result;
-        let args = ctx
-            .agent
-            .msg
-            .tool_call_args(tc_id)
-            .map(|a| a.to_string())
-            .unwrap_or_default();
-        ToolEngine::emit_timeline_tool_result(ctx, turn_id, round_num, tc_id, name, &args, result);
-        // Ringing 终态：ToolFinished（legacy 汇总 ToolResults 退役后的替代——
-        // 批量执行路径每个工具单独发终态，与 UI 主动调用路径一致）。载荷即
-        // 归档的 canonical ToolResult（含五态 status），不再按 success 布尔
-        // 伪造 ok/error。发射时机在 round 交互全部裁决之后（ask/plan/
-        // permission 收口处），保证事件顺序为"裁决先、终态后"。
-        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-            qaqh_domain::ToolEvent::ToolFinished {
-                tool_call_id: tc_id.clone(),
-                turn_id: turn_id.to_string(),
-                round_num,
-                result: result.clone(),
-            },
-        ));
-    }
-
-    for qaqh_message::StepToolResult { tool_call_id, .. } in &results {
-        ctx.emitter
-            .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
-                turn_id: turn_id.to_string(),
-                round_num,
-                block_id: format!("tool:{tool_call_id}"),
-            });
+        emit_completed_tool(ctx, turn_id, round_num, tc_id, name, result);
     }
     ctx.emitter
         .emit_timeline(qaqh_domain::TimelineIntent::RoundSealed {

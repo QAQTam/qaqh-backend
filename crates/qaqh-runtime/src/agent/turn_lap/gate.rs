@@ -1151,7 +1151,7 @@ pub(crate) fn provider_for(
         apply_chatgpt_plan(&mut provider, cfg, &ctx.agent.session.session_id)?;
     }
     if cfg.credential == qaqh_types::CredentialSource::DeepseekAccount {
-        apply_deepseek_account(&mut provider, cfg)?;
+        apply_deepseek_account(&mut provider, cfg, &ctx.agent.session.session_id)?;
     }
     Ok(provider)
 }
@@ -1244,6 +1244,7 @@ fn session_affinity_headers(session_id: &str) -> Vec<(String, String)> {
 fn apply_deepseek_account(
     provider: &mut qaqh_gate::ProviderConfig,
     cfg: &qaqh_config::Config,
+    session_id: &str,
 ) -> Result<(), String> {
     if cfg.wire != qaqh_types::Wire::Responses {
         return Err(format!(
@@ -1273,7 +1274,36 @@ fn apply_deepseek_account(
         .token()
         .map_err(|error| error.message().to_string())?;
     provider.api_key = token;
+
+    // 会话粘性与前缀缓存亲和（严格按 session 颗粒度回传，杜绝跨会话串频导致 KV Cache 命中错乱）：
+    // 官方扩展规范对齐 dpsk-harness（docs/deepseek-llm-api-wire-extensions.zh.md）：
+    // 1. `x-deepseek-harness-session-id`: 必须为当前独立 session 的精确 ID，
+    //    供官方推理网关执行 Session Affinity 调度，将同一会话多轮请求打到同一推理节点以保持 KV Cache 热态；
+    // 2. `x-deepseek-harness-user-id`: 租户/用户级稳定 ID，优先读取当前登录账号的真实 platform user_id。
+    let uid = manager.current_user_id();
+    provider.deepseek_account_headers =
+        deepseek_session_affinity_headers(session_id, uid.as_deref());
+
     Ok(())
+}
+
+/// DeepSeek OAuth 会话亲和头（严格隔离 session 颗粒度，严防串频）。
+fn deepseek_session_affinity_headers(
+    session_id: &str,
+    user_id: Option<&str>,
+) -> Vec<(String, String)> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Vec::new();
+    }
+    let mut headers = vec![(
+        "x-deepseek-harness-session-id".to_string(),
+        session_id.to_string(),
+    )];
+    if let Some(uid) = user_id.map(str::trim).filter(|s| !s.is_empty()) {
+        headers.push(("x-deepseek-harness-user-id".to_string(), uid.to_string()));
+    }
+    headers
 }
 
 #[cfg(test)]
@@ -1489,7 +1519,7 @@ mod deepseek_account_tests {
     /// OAuth 只维护 Responses：Chat / Anthropic 面一律拒绝，不回退。
     #[test]
     fn account_route_rejects_the_anthropic_wire() {
-        let err = apply_deepseek_account(&mut provider(), &config(Wire::Messages, ""))
+        let err = apply_deepseek_account(&mut provider(), &config(Wire::Messages, ""), "session-1")
             .expect_err("anthropic wire must be rejected");
         assert!(err.contains("responses"), "{err}");
     }
@@ -1497,7 +1527,7 @@ mod deepseek_account_tests {
     /// OAuth 不再维护 Chat：即使 base_url 是官方端点也必须在 wire 校验处拒绝。
     #[test]
     fn account_route_rejects_the_chat_wire() {
-        let err = apply_deepseek_account(&mut provider(), &config(Wire::Chat, ""))
+        let err = apply_deepseek_account(&mut provider(), &config(Wire::Chat, ""), "session-1")
             .expect_err("chat wire must be rejected");
         assert!(err.contains("只支持 responses"), "{err}");
     }
@@ -1507,7 +1537,7 @@ mod deepseek_account_tests {
     #[test]
     fn account_route_accepts_the_responses_wire_and_pins_the_bare_header() {
         let mut p = provider();
-        let err = apply_deepseek_account(&mut p, &config(Wire::Responses, ""))
+        let err = apply_deepseek_account(&mut p, &config(Wire::Responses, ""), "session-1")
             .expect_err("no signed-in account in tests");
         assert!(err.contains("先登录"), "{err}");
         assert_eq!(p.base_url, qaqh_dsaccount::protocol::INFERENCE_ORIGIN);
@@ -1524,7 +1554,7 @@ mod deepseek_account_tests {
             "http://api.deepseek.com",
             "https://api.deepseek.com/v1",
         ] {
-            let err = apply_deepseek_account(&mut provider(), &config(Wire::Responses, base))
+            let err = apply_deepseek_account(&mut provider(), &config(Wire::Responses, base), "session-1")
                 .expect_err("foreign endpoint must be rejected");
             assert!(err.contains("官方端点"), "{base} → {err}");
         }
@@ -1535,7 +1565,7 @@ mod deepseek_account_tests {
     #[test]
     fn account_route_requires_a_signed_in_local_account_and_pins_the_bare_header() {
         let mut p = provider();
-        let err = apply_deepseek_account(&mut p, &config(Wire::Responses, ""))
+        let err = apply_deepseek_account(&mut p, &config(Wire::Responses, ""), "session-1")
             .expect_err("no signed-in account in tests");
         assert!(err.contains("先登录"), "{err}");
         assert_eq!(p.base_url, qaqh_dsaccount::protocol::INFERENCE_ORIGIN);
@@ -1557,6 +1587,31 @@ mod deepseek_account_tests {
         assert!(p.auth_header.is_none());
         assert!(format!("{:?}", p.auth_style()).contains("Bearer"));
         assert!(p.with_auth_header("not a header name", None).is_err());
+    }
+
+    /// 亲和头必须严格按 session 颗粒度构造，保证不同会话互不影响、绝不串频。
+    #[test]
+    fn session_affinity_headers_strictly_isolated_by_session_id() {
+        let headers1 = deepseek_session_affinity_headers("session-alpha", Some("user-001"));
+        assert_eq!(
+            headers1,
+            vec![
+                ("x-deepseek-harness-session-id".to_string(), "session-alpha".to_string()),
+                ("x-deepseek-harness-user-id".to_string(), "user-001".to_string()),
+            ]
+        );
+
+        let headers2 = deepseek_session_affinity_headers("session-beta", None);
+        assert_eq!(
+            headers2,
+            vec![
+                ("x-deepseek-harness-session-id".to_string(), "session-beta".to_string()),
+            ]
+        );
+
+        // 空会话 id 坚决不注入任何亲和头，避免向网关传递空字符串造成路由污染
+        let headers_empty = deepseek_session_affinity_headers("   ", Some("user-001"));
+        assert!(headers_empty.is_empty());
     }
 }
 

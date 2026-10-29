@@ -336,6 +336,7 @@ mod tests {
         for expected in [
             "qaqh-core",
             "qaqh-apply-patch",
+            "qaqh-ask",
             "qaqh-tools",
             "qaqh-exec",
             "qaqh-mcp",

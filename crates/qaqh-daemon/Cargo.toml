@@ -14,6 +14,7 @@ qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-runtime = { path = "../qaqh-runtime" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
+qaqh-process-tools = { path = "../qaqh-process-tools" }
 qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-spy = { path = "../qaqh-spy" }

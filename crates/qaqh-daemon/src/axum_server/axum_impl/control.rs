@@ -1,8 +1,8 @@
 //! Daemon control and small read-only status endpoints.
 //!
 //! Browser WebUI hosting is intentionally absent from this module. The
-//! browser-facing gateway was removed with the Tauri migration; there is no
-//! `qaqh-daemon webui` subcommand.
+//! browser-facing gateway was removed; first-class desktop experience is provided
+//! by `qaqh-electron`. There is no `qaqh-daemon webui` subcommand.
 
 use super::*;
 
