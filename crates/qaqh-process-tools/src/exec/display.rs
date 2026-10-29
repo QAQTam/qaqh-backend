@@ -266,6 +266,8 @@ mod tests {
             timed_out: false,
             cancelled: false,
             process_id: None,
+            output_omitted_bytes: 0,
+            protocol_dropped_bytes: 0,
         };
         let display = view.display(&args);
 
@@ -356,6 +358,8 @@ mod tests {
             timed_out: false,
             cancelled: false,
             process_id: None,
+            output_omitted_bytes: 0,
+            protocol_dropped_bytes: 0,
         };
         let error = view.error().expect("failed exec carries error");
         assert_eq!(error.code.as_str(), "execution");
@@ -390,6 +394,8 @@ mod tests {
             timed_out: false,
             cancelled: false,
             process_id: None,
+            output_omitted_bytes: 0,
+            protocol_dropped_bytes: 0,
         };
         let blocks = view.model_blocks();
         assert_eq!(blocks.len(), 1);

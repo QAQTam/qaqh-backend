@@ -18,9 +18,8 @@ use crate::tool_api::{
     ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
-use super::actions::{parse_edit_field, parse_status};
 use super::model::{TODO_LOCK, TodoItem, TodoStatus};
-use super::parse::{alloc_id, expand_todo_ids, parse_todo_id, parse_write_items};
+use super::parse::{parse_todo_text, render_todo_text};
 use super::store::{
     count_status, normalize_current_id, read_store_for, status_name, write_store_for,
 };
@@ -71,6 +70,17 @@ impl From<&TodoStatus> for TodoStatusView {
     }
 }
 
+impl From<TodoStatusView> for TodoStatus {
+    fn from(view: TodoStatusView) -> Self {
+        match view {
+            TodoStatusView::Pending => Self::Pending,
+            TodoStatusView::InProgress => Self::InProgress,
+            TodoStatusView::Completed => Self::Completed,
+            TodoStatusView::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TodoItemView {
     pub id: String,
@@ -92,44 +102,25 @@ impl From<&TodoItem> for TodoItemView {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-/// One task entry of the full-replace list.
-pub struct TodoWriteItemArgs {
-    /// Existing T<n>; omit for a new item.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<Value>,
-    /// Task title (1-100 chars); omit when `id` references an existing task.
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// pending | in_progress | completed | cancelled.
-    pub status: TodoStatusView,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Replace the whole task list (full-replace). Each item needs status; keep every
-/// prior item you want to keep; exactly one in_progress.
+/// Replace the whole task list with one plain-text block (one line per todo).
+/// Line format: `- [ ]|~|x|- title [| description [| evidence]]` —
+/// markers: `[ ]` pending, `[~]` in_progress (parallel allowed), `[x]` done,
+/// `[-]` cancelled. Titles are identities: duplicates rejected; renames are
+/// delete + create.
 pub struct TodoWriteArgs {
-
-    #[schemars(length(max = 20))]
-    pub items: Vec<TodoWriteItemArgs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// Optional one-liner on why the plan changed.
-    pub explanation: Option<String>,
+    /// The full todo list, plain text. Empty string clears the list.
+    pub list: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Set one task's status (one task per call — loop for batches).
+/// Set one task's status by its exact title (loop for batches).
 pub struct TodoUpdateArgs {
-    /// Target ID (e.g. T1).
-    pub id: Value,
+    /// Exact title of the target task.
+    pub title: String,
     /// pending | in_progress | completed | cancelled.
     pub status: TodoStatusView,
     /// Required when completed.
@@ -146,28 +137,23 @@ pub struct TodoListOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TodoWriteOutput {
-    pub replaced: usize,
     pub total: usize,
-    pub assigned: Vec<String>,
-    pub current_id: Option<String>,
+    pub in_progress: usize,
     pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct TodoUpdated {
-    pub id: String,
-    pub status: TodoStatusView,
+    /// 解析后的清单视图（模型据此校验 roundtrip；文本范式下模型刚写过
+    /// 全量，receipt 只需紧凑核对面）。
+    #[serde(default)]
+    pub items: Vec<TodoItemView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TodoUpdateOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<TodoItemView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated: Option<Vec<TodoUpdated>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_found: Option<Vec<String>>,
     pub message: String,
+    /// 全量快照：update 后回传完整列表状态（模型据此取下一步）。
+    #[serde(default)]
+    pub items: Vec<TodoItemView>,
 }
 
 impl TodoListOutput {
@@ -307,100 +293,38 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
     let _guard = TODO_LOCK
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
+    let args: TodoWriteArgs = serde_json::from_value(args.clone()).map_err(|error| {
+        crate::json_err_string(
+            "invalid_input",
+            format!("invalid todo_write args: {error}"),
+            "Provide the full list as plain text in `list`.",
+        )
+    })?;
     let mut store = read_store_for(session_id)?;
-    let incoming = parse_write_items(args)?;
-
-    // ID 解析三态：显式引用**已存在**的 id → 原样保留；缺省 → next_id 高水位
-    // 新分配；显式引用**未知** id → 按新建处理（分配新号）并把 remap 写进回执。
-    //
-    // 未知 id 早先是硬错误（"防模型幻觉产生孤儿号"），但实测这是最高频的失败：
-    // 模型把「想新建」写成「引用一个不存在的号」，整次覆写被拒、计划原地踏步。
-    // 现在降级为可恢复的 remap——孤儿号的风险由「一律新分配」消掉，模型从回执
-    // 的 assigned 列表（及 message 里列出的 remap 记录）就能拿到真实 ID。同一次覆写内重复引用仍然拒绝
-    // （那是模型自己前后矛盾，静默去重只会掩盖问题）。
-    let mut next_items: Vec<TodoItem> = Vec::with_capacity(incoming.len());
-    let mut assigned: Vec<String> = Vec::new();
-    let mut remapped: Vec<String> = Vec::new();
-    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (index, parsed) in incoming.into_iter().enumerate() {
-        let known = parsed
-            .id
-            .as_ref()
-            .is_some_and(|id| store.items.iter().any(|item| item.id == *id));
-        let id = match parsed.id {
-            Some(id) => {
-                if !seen_ids.insert(id.clone()) {
-                    return Err(crate::json_err_string(
-                        "invalid_input",
-                        format!("items[{index}] duplicates id {id}"),
-                        "Each id may appear at most once per write.",
-                    ));
-                }
-                if known {
-                    id
-                } else {
-                    let fresh = alloc_id(&mut store);
-                    remapped.push(format!("{id}->{fresh}"));
-                    assigned.push(fresh.clone());
-                    fresh
-                }
-            }
-            None => {
-                let id = alloc_id(&mut store);
-                assigned.push(id.clone());
-                id
-            }
-        };
-        // 标题继承只对**既有**条目成立：新条目没标题就是没标题，不能凭空捏造。
-        let title = match parsed.title {
-            Some(title) => title,
-            None => store
-                .items
-                .iter()
-                .find(|item| item.id == id)
-                .map(|item| item.title.clone())
-                .ok_or_else(|| {
-                    crate::json_err_string(
-                        "invalid_input",
-                        format!("items[{index}].title is required for new items"),
-                        "Send a title for new tasks; omit it only when re-referencing an existing id.",
-                    )
-                })?,
-        };
-        next_items.push(TodoItem {
-            id,
-            title,
-            description: parsed.description,
-            status: parsed.status,
-            evidence: parsed.evidence,
-        });
-    }
-
     let replaced = store.items.len();
-    store.items = next_items;
+    store.items = parse_todo_text(&args.list)?;
+    // 重建即解除归档与 cleared 通知位；随后按新列表状态重新判定归档位。
+    store.archived = false;
+    store.cleared_notified = false;
+    super::store::refresh_archive_flag(&mut store);
     normalize_current_id(&mut store);
     write_store_for(session_id, &store)?;
 
-    let current_id = store
-        .items
-        .iter()
-        .find(|item| item.status == TodoStatus::InProgress)
-        .map(|item| item.id.clone());
-    let remap_note = if remapped.is_empty() {
-        String::new()
+    let in_progress = count_status(&store, TodoStatus::InProgress);
+    let rebuild_note = if replaced > 0 {
+        format!(" Replaced {replaced} previous item(s).")
     } else {
-        format!(" Unknown ids reassigned: {}.", remapped.join(", "))
+        String::new()
     };
     Ok(TodoWriteOutput {
-        replaced,
         total: store.items.len(),
-        assigned: assigned.clone(),
-        current_id,
+        in_progress,
         message: format!(
-            "Plan updated: {} item(s) ({} new).{remap_note}",
+            "Plan updated: {} item(s), {} in progress.{rebuild_note}",
             store.items.len(),
-            assigned.len()
+            in_progress
         ),
+        items: store.items.iter().map(TodoItemView::from).collect(),
     })
 }
 
@@ -412,223 +336,49 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
     let _guard = TODO_LOCK
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
+    let args: TodoUpdateArgs = serde_json::from_value(args.clone()).map_err(|error| {
+        crate::json_err_string(
+            "invalid_input",
+            format!("invalid todo_update args: {error}"),
+            "Use {\"title\", \"status\", \"evidence?\"}.",
+        )
+    })?;
     let mut store = read_store_for(session_id)?;
-
-    /// 一次变更（支持单条 / ids 批量 / updates 并行三种来源）。
-    /// status 为 None 表示纯编辑（title/description/evidence）。
-    struct PendingSet {
-        id: String,
-        status: Option<TodoStatus>,
-        evidence: Option<String>,
-        title: Option<String>,
-        description: Option<String>,
-    }
-
-    let pending: Vec<PendingSet> = if let Some(updates) =
-        args.get("updates").and_then(Value::as_array)
-    {
-        if updates.is_empty() {
-            return Err(crate::json_err_string(
-                "invalid_input",
-                "updates must not be empty",
-                "Provide at least one {id, status} entry.",
-            ));
-        }
-        let mut list = Vec::new();
-        for update in updates {
-            let id = parse_todo_id(update.get("id")).ok_or_else(|| {
-                crate::json_err_string(
-                    "invalid_input",
-                    "updates[].id missing or invalid",
-                    "Provide the assigned ID, e.g. T1.",
-                )
-            })?;
-            let requested = update
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            // 纯编辑（title/description）时 status 可省略；提供则必须合法。
-            let status = if requested.is_empty() {
-                None
-            } else {
-                Some(parse_status(requested).ok_or_else(|| {
-                    crate::json_err_string(
-                        "invalid_input",
-                        format!("unknown status: {requested}"),
-                        "Use pending, in_progress, completed, or cancelled.",
-                    )
-                })?)
-            };
-            let evidence = update
-                .get("evidence")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            let title = parse_edit_field(update.get("title"), "updates[].title", 100, false)?;
-            let description = parse_edit_field(
-                update.get("description"),
-                "updates[].description",
-                200,
-                true,
-            )?;
-            if status.is_none() && title.is_none() && description.is_none() && evidence.is_none() {
-                return Err(crate::json_err_string(
-                    "invalid_input",
-                    format!("updates[] entry for {id} changes nothing"),
-                    "Provide status, evidence, title, or description.",
-                ));
-            }
-            list.push(PendingSet {
-                id,
-                status,
-                evidence,
-                title,
-                description,
-            });
-        }
-        list
-    } else if let Some(ids) = args.get("ids") {
-        let requested = args
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let status = parse_status(requested).ok_or_else(|| {
-            crate::json_err_string(
-                "invalid_input",
-                format!("unknown status: {requested}"),
-                "Use pending, in_progress, completed, or cancelled.",
-            )
-        })?;
-        let mut list = Vec::new();
-        for expr in ids.as_array().ok_or_else(|| {
-            crate::json_err_string(
-                "invalid_input",
-                "ids must be an array of strings",
-                "Use ids: [\"T1\", \"T1-T3\"]",
-            )
-        })? {
-            let expr = expr.as_str().ok_or_else(|| {
-                crate::json_err_string(
-                    "invalid_input",
-                    "ids entries must be strings",
-                    "Use ids: [\"T1\", \"T1-T3\"]",
-                )
-            })?;
-            for id in expand_todo_ids(expr)? {
-                list.push(PendingSet {
-                    id,
-                    status: Some(status.clone()),
-                    evidence: None,
-                    title: None,
-                    description: None,
-                });
-            }
-        }
-        list
-    } else {
-        let id = parse_todo_id(args.get("id")).ok_or_else(|| {
-            crate::json_err_string(
-                "invalid_input",
-                "missing or invalid id",
-                "Provide the assigned ID, e.g. T1.",
-            )
-        })?;
-        let requested = args
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let status = parse_status(requested).ok_or_else(|| {
-            crate::json_err_string(
-                "invalid_input",
-                format!("unknown status: {requested}"),
-                "Use pending, in_progress, completed, or cancelled.",
-            )
-        })?;
-        let evidence = args
-            .get("evidence")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        if args.get("evidence").is_some() && evidence.is_none() {
-            return Err(crate::json_err_string(
-                "invalid_input",
-                "evidence must be a non-empty string when provided",
-                "Omit evidence unless there is a concrete result summary.",
-            ));
-        }
-        vec![PendingSet {
-            id,
-            status: Some(status),
-            evidence,
-            title: None,
-            description: None,
-        }]
-    };
-
-    // 宽松应用：未知 ID 记入 not_found，不中断其余更新。
-    let mut updated: Vec<TodoUpdated> = Vec::new();
-    let mut not_found: Vec<String> = Vec::new();
-    let mut last_updated_idx: Option<usize> = None;
-    for pending in &pending {
-        if let Some(idx) = store.items.iter().position(|item| item.id == pending.id) {
-            if let Some(status) = &pending.status {
-                store.items[idx].status = status.clone();
-            }
-            if pending.evidence.is_some() {
-                store.items[idx].evidence = pending.evidence.clone();
-            }
-            if let Some(title) = &pending.title {
-                store.items[idx].title = title.clone();
-            }
-            if let Some(description) = &pending.description {
-                store.items[idx].description = description.clone();
-            }
-            updated.push(TodoUpdated {
-                id: pending.id.clone(),
-                status: TodoStatusView::from(&store.items[idx].status),
-            });
-            last_updated_idx = Some(idx);
-        } else {
-            not_found.push(pending.id.clone());
-        }
-    }
-
-    if updated.is_empty() {
+    let title = args.title.trim();
+    if title.is_empty() {
         return Err(crate::json_err_string(
-            "not_found",
-            format!("no matching todos: {}", not_found.join(", ")),
-            "Use todo(action=\"list\") to inspect IDs.",
+            "invalid_input",
+            "title is required",
+            "Titles are identities — use the exact title from the list.",
         ));
     }
-
+    let Some(index) = store.items.iter().position(|item| item.title == title) else {
+        let available = render_todo_text(&store);
+        return Err(crate::json_err_string(
+            "not_found",
+            format!("no todo titled `{title}`"),
+            &format!("Exact titles only. Current list:\n{available}"),
+        ));
+    };
+    store.items[index].status = TodoStatus::from(args.status);
+    if let Some(evidence) = args
+        .evidence
+        .as_deref()
+        .map(str::trim)
+        .filter(|evidence| !evidence.is_empty())
+    {
+        store.items[index].evidence = Some(evidence.to_string());
+    }
     normalize_current_id(&mut store);
+    super::store::refresh_archive_flag(&mut store);
     write_store_for(session_id, &store)?;
 
-    if pending.len() == 1 && updated.len() == 1 {
-        // 单条路径保持兼容返回（V1 客户端/前端依赖 item + message）。
-        let item = TodoItemView::from(&store.items[last_updated_idx.expect("single update")]);
-        let id = &pending[0].id;
-        let message = match &pending[0].status {
-            Some(status) => format!("Todo {id} is now {}.", status_name(status)),
-            None => format!("Todo {id} updated."),
-        };
-        Ok(TodoUpdateOutput {
-            item: Some(item),
-            updated: None,
-            not_found: None,
-            message,
-        })
-    } else {
-        let updated_count = updated.len();
-        Ok(TodoUpdateOutput {
-            item: None,
-            updated: Some(updated),
-            not_found: Some(not_found),
-            message: format!("Updated {updated_count} todo(s)."),
-        })
-    }
+    let status_name = status_name(&store.items[index].status);
+    Ok(TodoUpdateOutput {
+        item: Some(TodoItemView::from(&store.items[index])),
+        message: format!("Todo `{title}` is now {status_name}."),
+        items: store.items.iter().map(TodoItemView::from).collect(),
+    })
 }
 
 /// service 面直接返回 canonical Value，避免 `parse_json_string`。
@@ -698,7 +448,7 @@ impl TypedTool for TodoWriteTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "todo_write",
-            "Replace the whole task list (full-replace). Each item needs status; keep ids to preserve items; exactly one in_progress. `title` may be omitted when `id` references an existing task.",
+            "Replace the whole task list (full-replace) with one plain-text block. One line per todo: `- [ ]|~|x|- title [| description [| evidence]]` (markers: [ ] pending, [~] in_progress — parallel allowed, [x] completed, [-] cancelled). Titles are identities: duplicates rejected, renames are delete+create. Empty list clears the plan.",
             ToolCategory::Write,
             ToolRisk::Write,
             Duration::from_secs(15),
@@ -741,28 +491,5 @@ impl TypedTool for TodoUpdateTool {
     }
 }
 
-pub struct TodoListTool;
-
-impl TypedTool for TodoListTool {
-    type Args = TodoListArgs;
-    type Output = TodoListOutput;
-
-    fn meta(&self) -> ToolMeta {
-        ToolMeta::new(
-            "todo_list",
-            "List session tasks; optional status filter. Read-only (allowed in plan mode).",
-            ToolCategory::Read,
-            ToolRisk::ReadOnly,
-            Duration::from_secs(15),
-        )
-    }
-
-    fn run(
-        &self,
-        ctx: &crate::tool_api::ToolCallContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, ToolExecutionError> {
-        let args = to_args_value(&args)?;
-        todo_list_for_typed(&ctx.session_id, &args).map_err(recoverable)
-    }
-}
+// `TodoListTool` 已从模型工具面退役（双工具收敛）：只读列表由
+// `todo_list_for` / `todo_list_value_for` 继续服务 HTTP service 与 CLI。

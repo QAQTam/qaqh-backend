@@ -10,7 +10,9 @@
 pub mod direct;
 pub mod display;
 pub mod handler;
+pub mod head_tail;
 pub mod pipe;
+pub mod pty_exec;
 pub mod redirect_guard;
 pub mod register;
 pub mod shell;

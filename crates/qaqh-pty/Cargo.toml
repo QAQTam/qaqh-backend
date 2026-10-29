@@ -1,0 +1,19 @@
+[package]
+name = "qaqh-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PTY/pipe session backends for unified exec (codex-paradigm port, Linux-first)"
+
+[dependencies]
+
+[target.'cfg(unix)'.dependencies]
+portable-pty = "0.9"
+anyhow = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

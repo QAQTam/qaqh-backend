@@ -9,8 +9,9 @@ use std::fmt;
 
 use qaqh_tool_core::model_tool_plan::{
     InputAdapter, ModelToolAddress, ModelToolDeclaration, ModelToolEntry, ModelToolKind,
-    ModelToolPlan, ToolPlanError,
+    ModelToolPlan, TextInputAdapter, ToolPlanError,
 };
+use serde_json::json;
 
 pub use qaqh_tool_core::model_tool_plan::CustomFormat;
 
@@ -165,39 +166,74 @@ impl ToolManager {
             let descriptor = self
                 .lookup(name)
                 .ok_or_else(|| BuildToolPlanError::UnknownSelectedTool(name.clone()))?;
-            if let Some(native) = &descriptor.native_patch
-                && let PatchInput::Custom(format) = &profile.patch_input
+            if let Some(native) = &descriptor.native_text
+                && (native.function_text_field
+                    || (native.custom_text
+                        && matches!(profile.patch_input, PatchInput::Custom(_))))
             {
                 if profile.function_aliases.contains_key(name) {
                     return Err(BuildToolPlanError::InvalidAlias(name.clone()));
                 }
-                let minimal = profile.custom_declaration == CustomDeclarationStyle::Minimal;
-                entries.push(ModelToolEntry {
-                    address: ModelToolAddress {
-                        kind: ModelToolKind::Custom,
-                        namespace: namespace.clone(),
-                        name: name.clone(),
-                    },
-                    declaration: ModelToolDeclaration::Custom {
-                        description: if minimal {
-                            String::new()
-                        } else {
-                            native.custom_description.clone()
+                if native.custom_text
+                    && let PatchInput::Custom(format) = &profile.patch_input
+                {
+                    let minimal = profile.custom_declaration == CustomDeclarationStyle::Minimal;
+                    entries.push(ModelToolEntry {
+                        address: ModelToolAddress {
+                            kind: ModelToolKind::Custom,
+                            namespace: namespace.clone(),
+                            name: name.clone(),
                         },
-                        format: if minimal {
-                            CustomFormat::Text
-                        } else {
-                            format.clone()
+                        declaration: ModelToolDeclaration::Custom {
+                            description: if minimal {
+                                String::new()
+                            } else {
+                                native.custom_description.clone()
+                            },
+                            format: if minimal {
+                                CustomFormat::Text
+                            } else {
+                                format.clone()
+                            },
                         },
-                    },
-                    internal_tool_key: name.clone(),
-                    adapter: InputAdapter::ApplyPatchCustom,
-                });
-                // Preview is a QAQH extension, not part of Codex's direct-apply
-                // contract. Expose it only when confirm_apply is actually in the
-                // filtered set; otherwise a pending_id would have no way to be
-                // confirmed. Direct apply remains available either way.
-                if seen.contains("confirm_apply") {
+                        internal_tool_key: name.clone(),
+                        adapter: InputAdapter::TextInput(
+                            TextInputAdapter::custom_raw(native.canonical_field.clone())
+                                .with_defaults(native.canonical_defaults.clone()),
+                        ),
+                    });
+                } else {
+                    let function_schema = json!({
+                        "type": "object",
+                        "properties": {
+                            "input": {"type": "string"},
+                        },
+                        "required": ["input"],
+                        "additionalProperties": false,
+                    });
+                    entries.push(ModelToolEntry {
+                        address: ModelToolAddress {
+                            kind: ModelToolKind::Function,
+                            namespace: namespace.clone(),
+                            name: name.clone(),
+                        },
+                        declaration: ModelToolDeclaration::Function {
+                            description: native.custom_description.clone(),
+                            parameters: function_schema,
+                            strict: false,
+                        },
+                        internal_tool_key: name.clone(),
+                        adapter: InputAdapter::TextInput(
+                            TextInputAdapter::function_field("input", native.canonical_field.clone())
+                                .with_defaults(native.canonical_defaults.clone()),
+                        ),
+                    });
+                }
+                if native.custom_text && let (Some(description), Some(parameters)) = (
+                    native.preview_description.as_ref(),
+                    native.preview_parameters.as_ref(),
+                ) && seen.contains("confirm_apply")
+                {
                     entries.push(ModelToolEntry {
                         address: ModelToolAddress {
                             kind: ModelToolKind::Function,
@@ -205,8 +241,8 @@ impl ToolManager {
                             name: "apply_patch_preview".into(),
                         },
                         declaration: ModelToolDeclaration::Function {
-                            description: native.preview_description.clone(),
-                            parameters: native.preview_parameters.clone(),
+                            description: description.clone(),
+                            parameters: parameters.clone(),
                             strict: false,
                         },
                         internal_tool_key: name.clone(),
@@ -295,10 +331,10 @@ mod tests {
         let plan = mgr
             .build_model_tool_plan(
                 &native_profile(),
-                &names(&["read", "apply_patch", "confirm_apply"]),
+                &names(&["read", "apply_patch", "confirm_apply", "ask"]),
             )
             .expect("plan");
-        assert_eq!(plan.entries().len(), 4);
+        assert_eq!(plan.entries().len(), 5);
         assert_eq!(mgr.filtered_defs().len(), original.len());
         let patch = plan
             .entries()
@@ -315,12 +351,30 @@ mod tests {
         assert_eq!(patch.address.kind, ModelToolKind::Custom);
         assert_eq!(patch.address.namespace.as_deref(), Some("functions"));
         assert_eq!(patch.internal_tool_key, "apply_patch");
+        let InputAdapter::TextInput(patch_input) = &patch.adapter else {
+            panic!("custom apply_patch must use the reusable text adapter");
+        };
+        assert_eq!(patch_input.canonical_field, "patch");
+        assert_eq!(patch_input.canonical_defaults, json!({"dry_run": false}));
         let preview = plan
             .entries()
             .iter()
             .find(|e| e.address.name == "apply_patch_preview")
             .expect("preview");
         assert_eq!(preview.address.kind, ModelToolKind::Function);
+        let ask = plan.entries().iter().find(|e| e.address.name == "ask").expect("ask text function");
+        assert_eq!(ask.address.kind, ModelToolKind::Function);
+        assert_eq!(ask.internal_tool_key, "ask");
+        let InputAdapter::TextInput(ask_input) = &ask.adapter else {
+            panic!("ask function must use text input adapter");
+        };
+        assert_eq!(ask_input.canonical_field, "input");
+        assert_eq!(ask_input.canonical_defaults, json!({}));
+        let ModelToolDeclaration::Function { parameters, .. } = &ask.declaration else {
+            panic!("ask must be declared as a function");
+        };
+        assert_eq!(parameters["required"], json!(["input"]));
+        assert_eq!(parameters["properties"]["input"]["type"], "string");
         assert_eq!(preview.adapter, InputAdapter::ApplyPatchPreview);
         let ModelToolDeclaration::Function { parameters, .. } = &preview.declaration else {
             panic!("preview must be function")
@@ -368,12 +422,33 @@ mod tests {
     }
 
     #[test]
+    fn ask_is_a_function_text_tool_in_native_profile_while_patch_remains_custom() {
+        let profile = native_profile();
+        let plan = manager()
+            .build_model_tool_plan(
+                &profile,
+                &names(&["ask", "apply_patch", "confirm_apply"]),
+            )
+            .expect("plan");
+        let ask = plan.entries().iter().find(|entry| entry.address.name == "ask").unwrap();
+        let patch = plan
+            .entries()
+            .iter()
+            .find(|entry| entry.address.name == "apply_patch")
+            .unwrap();
+        assert_eq!(ask.address.kind, ModelToolKind::Function);
+        assert!(matches!(&ask.adapter, InputAdapter::TextInput(_)));
+        assert_eq!(patch.address.kind, ModelToolKind::Custom);
+        assert!(matches!(&patch.adapter, InputAdapter::TextInput(_)));
+    }
+
+    #[test]
     fn flat_custom_keeps_functions_flat_and_function_alias_reversible() {
         let mgr = manager();
         let mut p = profile(ToolLayout::Flat, PatchInput::Custom(CustomFormat::Text));
         p.function_aliases.insert("read".into(), "read_file".into());
         let plan = mgr
-            .build_model_tool_plan(&p, &names(&["read", "apply_patch", "confirm_apply"]))
+            .build_model_tool_plan(&p, &names(&["read", "apply_patch", "confirm_apply", "ask"]))
             .expect("plan");
         assert!(
             plan.entries()
@@ -405,6 +480,10 @@ mod tests {
                 .count(),
             1
         );
+        let ask = plan.entries().iter().find(|entry| entry.address.name == "ask").expect("ask");
+        assert_eq!(ask.address.kind, ModelToolKind::Function);
+        assert_eq!(ask.internal_tool_key, "ask");
+        assert!(matches!(&ask.adapter, InputAdapter::TextInput(_)));
     }
 
     #[test]

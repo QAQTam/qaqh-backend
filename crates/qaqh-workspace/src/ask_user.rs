@@ -2,13 +2,19 @@ use std::collections::HashSet;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::ToolRisk;
 use crate::tool_api::{
     ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolExecutionError, ToolHeader,
     ToolMeta, ToolProjection, TypedTool,
 };
+
+pub const ASK_MAX_INPUT_BYTES: usize = 16 * 1024;
+pub const ASK_MAX_QUESTIONS: usize = 10;
+pub const ASK_MAX_OPTIONS_PER_QUESTION: usize = 10;
+pub const ASK_MAX_QUESTION_CHARS: usize = 1_000;
+pub const ASK_MAX_OPTION_CHARS: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -37,139 +43,151 @@ pub struct AskUserError {
     pub message: String,
 }
 
-/// 报错回显实际收到的 JSON 类型，调用方一次即可改对参数形态。
-fn json_kind(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+/// Parse the strict freeform `ASK v1` grammar; malformed prose is never
+/// guessed at or repaired.
+pub fn parse_ask_input(input: &str) -> Result<NormalizedAsk, AskUserError> {
+    let invalid = |line: usize, reason: String| AskUserError {
+        code: "ask_format_invalid",
+        message: format!("line {line}: {reason}"),
+    };
+    if input.len() > ASK_MAX_INPUT_BYTES {
+        return Err(AskUserError {
+            code: "ask_input_too_large",
+            message: format!("input exceeds {ASK_MAX_INPUT_BYTES} bytes"),
+        });
     }
-}
+    let mut lines = input.lines().enumerate();
+    let Some((header_line, header)) = lines.next() else {
+        return Err(invalid(1, "expected `ASK v1` header".into()));
+    };
+    if header.trim() != "ASK v1" {
+        return Err(invalid(header_line + 1, "expected `ASK v1` header".into()));
+    }
 
-pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
-    let raw_questions = match args.get("questions") {
-        Some(Value::Array(questions)) => questions.clone(),
-        Some(_) => {
-            let kind = json_kind(args.get("questions").expect("checked above"));
+    let mut questions = Vec::new();
+    let mut question: Option<String> = None;
+    let mut options = Vec::new();
+    let mut options_seen = false;
+    let mut allow_custom = true;
+    let mut allow_custom_seen = false;
+    let mut unique_options = HashSet::new();
+
+    let finish = |questions: &mut Vec<NormalizedAskQuestion>,
+                  question: &mut Option<String>,
+                  options: &mut Vec<String>,
+                  options_seen: &mut bool,
+                  allow_custom: &mut bool,
+                  allow_custom_seen: &mut bool,
+                  unique_options: &mut HashSet<String>,
+                  line: usize|
+     -> Result<(), AskUserError> {
+        let Some(question) = question.take() else {
+            return Ok(());
+        };
+        if *options_seen && options.is_empty() {
+            return Err(invalid(line, "`Options:` requires at least one option".into()));
+        }
+        if options.is_empty() && !*allow_custom {
+            return Err(invalid(
+                line,
+                "`Allow custom: no` requires at least one option".into(),
+            ));
+        }
+        questions.push(NormalizedAskQuestion {
+            id: format!("q{}", questions.len() + 1),
+            question,
+            options: std::mem::take(options),
+            allow_custom: *allow_custom,
+        });
+        *options_seen = false;
+        *allow_custom = true;
+        *allow_custom_seen = false;
+        unique_options.clear();
+        if questions.len() > ASK_MAX_QUESTIONS {
             return Err(AskUserError {
-                code: "invalid_questions",
-                message: format!("questions must be an array (got {kind})"),
+                code: "ask_too_many_questions",
+                message: format!("maximum is {ASK_MAX_QUESTIONS} questions"),
             });
         }
-        None => vec![json!({
-            "id": "q1",
-            "question": args.get("question").and_then(Value::as_str).unwrap_or(""),
-            "options": args.get("options").cloned().unwrap_or_else(|| json!([])),
-            "allow_custom": args.get("allow_custom").and_then(Value::as_bool).unwrap_or(true),
-        })],
+        Ok(())
     };
 
-    if raw_questions.is_empty() {
-        return Err(AskUserError {
-            code: "empty_questions",
-            message: "at least one question is required".into(),
-        });
+    for (line_index, raw) in lines {
+        let line_number = line_index + 1;
+        let line = raw.trim();
+        if line.is_empty() {
+            finish(
+                &mut questions, &mut question, &mut options, &mut options_seen,
+                &mut allow_custom, &mut allow_custom_seen, &mut unique_options, line_number,
+            )?;
+            continue;
+        }
+        if let Some(text) = line.strip_prefix("Question: ") {
+            if question.is_some() {
+                return Err(invalid(line_number, "separate question blocks with a blank line".into()));
+            }
+            let text = text.trim();
+            if text.is_empty() {
+                return Err(invalid(line_number, "question text is required".into()));
+            }
+            if text.chars().count() > ASK_MAX_QUESTION_CHARS {
+                return Err(invalid(line_number, format!("question exceeds {ASK_MAX_QUESTION_CHARS} characters")));
+            }
+            question = Some(text.to_owned());
+            continue;
+        }
+        if question.is_none() {
+            return Err(invalid(line_number, "expected `Question: ...`".into()));
+        }
+        if line == "Options:" {
+            if options_seen || allow_custom_seen {
+                return Err(invalid(line_number, "`Options:` must appear once before `Allow custom:`".into()));
+            }
+            options_seen = true;
+            continue;
+        }
+        if let Some(text) = line.strip_prefix("- ") {
+            if !options_seen || allow_custom_seen {
+                return Err(invalid(line_number, "options must follow `Options:` and precede `Allow custom:`".into()));
+            }
+            let text = text.trim();
+            if text.is_empty() {
+                return Err(invalid(line_number, "option text is required".into()));
+            }
+            if text.chars().count() > ASK_MAX_OPTION_CHARS {
+                return Err(invalid(line_number, format!("option exceeds {ASK_MAX_OPTION_CHARS} characters")));
+            }
+            if !unique_options.insert(text.to_owned()) {
+                return Err(invalid(line_number, format!("duplicate option `{text}`")));
+            }
+            options.push(text.to_owned());
+            if options.len() > ASK_MAX_OPTIONS_PER_QUESTION {
+                return Err(invalid(line_number, format!("maximum is {ASK_MAX_OPTIONS_PER_QUESTION} options")));
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("Allow custom: ") {
+            if allow_custom_seen {
+                return Err(invalid(line_number, "`Allow custom:` may appear once".into()));
+            }
+            allow_custom = match value {
+                "yes" => true,
+                "no" => false,
+                _ => return Err(invalid(line_number, "expected exactly `Allow custom: yes` or `Allow custom: no`".into())),
+            };
+            allow_custom_seen = true;
+            continue;
+        }
+        return Err(invalid(line_number, "unknown line; use `Question:`, `Options:`, `- option`, or `Allow custom:`".into()));
     }
-
-    let mut ids = HashSet::new();
-    let mut questions = Vec::with_capacity(raw_questions.len());
-    for (index, raw) in raw_questions.iter().enumerate() {
-        let question = raw
-            .get("question")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if question.trim().is_empty() {
-            return Err(AskUserError {
-                code: "missing_question",
-                message: format!("questions[{index}].question is required"),
-            });
-        }
-
-        let id = match raw.get("id") {
-            None => format!("q{}", index + 1),
-            Some(Value::String(id)) if !id.trim().is_empty() => id.clone(),
-            Some(_) => {
-                return Err(AskUserError {
-                    code: "invalid_question_id",
-                    message: format!("questions[{index}].id must be a non-empty string"),
-                });
-            }
-        };
-        if !ids.insert(id.clone()) {
-            return Err(AskUserError {
-                code: "duplicate_question_id",
-                message: format!("duplicate question id: {id}"),
-            });
-        }
-
-        let options = match raw.get("options") {
-            None => Vec::new(),
-            Some(Value::Array(values)) => {
-                let mut options = Vec::with_capacity(values.len());
-                for (option_index, value) in values.iter().enumerate() {
-                    let Some(option) = value.as_str() else {
-                        return Err(AskUserError {
-                            code: "invalid_option",
-                            message: format!(
-                                "question {id} option {option_index} must be a non-empty string"
-                            ),
-                        });
-                    };
-                    let option = option.trim();
-                    if option.is_empty() {
-                        return Err(AskUserError {
-                            code: "invalid_option",
-                            message: format!(
-                                "question {id} option {option_index} must be a non-empty string"
-                            ),
-                        });
-                    }
-                    options.push(option.to_string());
-                }
-                options
-            }
-            Some(_) => {
-                let kind = json_kind(raw.get("options").expect("checked above"));
-                return Err(AskUserError {
-                    code: "invalid_options",
-                    message: format!("question {id} options must be an array (got {kind})"),
-                });
-            }
-        };
-        let mut unique_options = HashSet::new();
-        if options
-            .iter()
-            .any(|option| !unique_options.insert(option.clone()))
-        {
-            return Err(AskUserError {
-                code: "duplicate_option",
-                message: format!("question {id} contains duplicate options"),
-            });
-        }
-
-        let allow_custom = raw
-            .get("allow_custom")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        if options.is_empty() && !allow_custom {
-            return Err(AskUserError {
-                code: "unanswerable_question",
-                message: format!("question {id} has no options and disallows custom answers"),
-            });
-        }
-
-        questions.push(NormalizedAskQuestion {
-            id,
-            question,
-            options,
-            allow_custom,
-        });
+    let final_line = input.lines().count().max(1) + 1;
+    finish(
+        &mut questions, &mut question, &mut options, &mut options_seen,
+        &mut allow_custom, &mut allow_custom_seen, &mut unique_options, final_line,
+    )?;
+    if questions.is_empty() {
+        return Err(invalid(final_line, "at least one question is required".into()));
     }
-
     let mode = if questions.len() == 1 {
         NormalizedAskMode::Single
     } else {
@@ -178,40 +196,35 @@ pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
     Ok(NormalizedAsk { mode, questions })
 }
 
+/// Extract the model function's single text field before parsing.
+pub fn normalize_ask_user(args: &Value) -> Result<NormalizedAsk, AskUserError> {
+    let Some(object) = args.as_object() else {
+        return Err(AskUserError {
+            code: "ask_input_missing",
+            message: "expected an object with one string field `input`".into(),
+        });
+    };
+    if object.len() != 1 {
+        return Err(AskUserError {
+            code: "ask_input_fields_invalid",
+            message: "expected exactly one field: `input`".into(),
+        });
+    }
+    let Some(input) = object.get("input").and_then(Value::as_str) else {
+        return Err(AskUserError {
+            code: "ask_input_missing",
+            message: "`input` must be an `ASK v1` string".into(),
+        });
+    };
+    parse_ask_input(input)
+}
+
 /// Ask user questions (Ringing interaction).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AskArgs {
-    /// Questions: 每项 {id?, question, options?: string[], allow_custom?}
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub questions: Option<Vec<AskQuestionArgs>>,
-    /// Single question text (deprecated, use questions)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub question: Option<String>,
-    /// Choices (deprecated, use questions[].options): array of strings
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<String>>,
-    /// Allow custom answers (deprecated, use questions[].allow_custom)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_custom: Option<bool>,
-}
-
-/// 单个问题参数。typed 形态让生成的 schema 自带类型约束，
-/// 调用方在 wire 层就看到 `options: string[]`，弱类型误传被前置拒绝。
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AskQuestionArgs {
-    /// 问题文本（不可为空白）。
-    pub question: String,
-    /// 稳定 id；缺省自动生成 q1..qn。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// 选项列表（字符串数组；去空白后不可为空项、不可重复）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<String>>,
-    /// 是否允许自由作答（默认 true）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_custom: Option<bool>,
+    /// Complete `ASK v1` document. Load the `qaqh-ask` skill for its grammar.
+    pub input: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -252,6 +265,17 @@ impl ToolProjection for AskOutput {
 
 pub struct AskTool;
 
+pub fn ask_model_input_representation(
+) -> crate::tool_api::NativeTextRepresentation {
+    crate::tool_api::NativeTextRepresentation::text_tool(
+        "input",
+        serde_json::json!({}),
+        "Ask the user using one complete `ASK v1` document. Each question starts with `Question: `. Separate question blocks with a blank line. Optional `Options:` is followed by `- option` lines; optional `Allow custom: yes|no` follows. Omission means yes. Load the `qaqh-ask` skill for limits and examples. Invalid format is returned to the model for retry and never shown to the user.",
+        false,
+        true,
+    )
+}
+
 impl TypedTool for AskTool {
     type Args = AskArgs;
     type Output = AskOutput;
@@ -259,11 +283,12 @@ impl TypedTool for AskTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "ask",
-            "Ask user questions (Ringing interaction).",
+            "Ask the user using a complete `ASK v1` text document in `input`. Malformed documents are never shown to the user; the model receives a retryable format error. Load `qaqh-ask` for the grammar.",
             crate::permission::ToolCategory::Read,
             ToolRisk::ReadOnly,
             std::time::Duration::ZERO,
         )
+        .with_native_text(ask_model_input_representation())
     }
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -272,18 +297,14 @@ impl TypedTool for AskTool {
         _ctx: &ToolCallContext,
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
-        // Typed Args 的反序列化失败已由边界报 InvalidArguments；
-        // 这里经 Serialize 回到 normalize 层做语义校验（空选项/重复等）。
-        let raw = serde_json::to_value(&args).expect("AskArgs 必可序列化回 normalize 输入");
-        let ask = normalize_ask_user(&raw).map_err(|error| {
-            crate::file_mutate::mutation_error(
-                error.code,
-                format!("ask: {}", error.message),
-                Some(
-                    "Pass `questions` as an array of {id?, question, options?: [string], \
-                     allow_custom?} objects; `options` must be an array of non-empty strings.",
-                ),
-                json!({}),
+        let ask = parse_ask_input(&args.input).map_err(|error| {
+            ToolExecutionError::Recoverable(
+                crate::tool_api::ToolError::invalid_arguments(format!(
+                    "ASK_FORMAT_ERROR: {}",
+                    error.message
+                ))
+                .with_retryable(true)
+                .with_hint("This ask was not shown to the user. Re-output the complete `ASK v1` document; do not ask the user to fix the format."),
             )
         })?;
         Ok(AskOutput {
@@ -316,6 +337,9 @@ pub(super) fn exec_ask_user(args: &Value) -> crate::ToolResult {
 mod tests {
     use super::*;
 
+    const SINGLE: &str = "ASK v1\nQuestion: Choose A or B?\nOptions:\n- A\n- B\nAllow custom: no";
+    const BATCH: &str = "ASK v1\nQuestion: Which architecture?\nOptions:\n- A\n- B\nAllow custom: no\n\nQuestion: What constraints matter?";
+
     #[test]
     fn typed_ask_registration_and_display_are_same_source() {
         let mut manager = crate::ToolManager::new();
@@ -325,8 +349,7 @@ mod tests {
             "ask must be on the typed execution surface"
         );
         let result = exec_ask_user(&serde_json::json!({
-            "question": "Choose?",
-            "options": ["A", "B"],
+            "input": "ASK v1\nQuestion: Choose?\nOptions:\n- A\n- B\nAllow custom: no"
         }));
         assert!(result.is_success());
         let display = result.display().expect("typed display");
@@ -335,262 +358,72 @@ mod tests {
     }
 
     #[test]
-    fn old_format_single_question() {
-        let args = serde_json::json!({
-            "question": "Choose A or B?",
-            "options": ["A", "B"],
-            "allow_custom": false
-        });
-        let result = exec_ask_user(&args);
-        // Parse the JSON output
-        let value: serde_json::Value =
-            serde_json::from_str(result.model_text()).expect("valid JSON");
-        assert_eq!(value["status"], "ok");
-        assert!(value.get("user_query").is_none());
-        assert_eq!(value["mode"], "single");
-        assert_eq!(value["questions"][0]["id"], "q1");
-        assert_eq!(value["questions"][0]["question"], "Choose A or B?");
+    fn ask_v1_single_question_parses_into_existing_interaction_shape() {
+        let ask = parse_ask_input(SINGLE).expect("ask document");
+        assert_eq!(ask.mode, NormalizedAskMode::Single);
         assert_eq!(
-            value["questions"][0]["options"].as_array().unwrap().len(),
-            2
+            ask.questions,
+            vec![NormalizedAskQuestion {
+                id: "q1".into(),
+                question: "Choose A or B?".into(),
+                options: vec!["A".into(), "B".into()],
+                allow_custom: false,
+            }]
         );
-        assert_eq!(value["questions"][0]["allow_custom"], false);
     }
 
     #[test]
-    fn new_format_batch_questions() {
-        let args = serde_json::json!({
-            "questions": [
-                { "id": "arch", "question": "Which architecture?", "options": ["A", "B", "C"] },
-                { "id": "strat", "question": "Strategy?", "allow_custom": true }
-            ]
-        });
-        let result = exec_ask_user(&args);
-        let value: serde_json::Value =
-            serde_json::from_str(result.model_text()).expect("valid JSON");
-        assert_eq!(value["status"], "ok");
-        assert!(value.get("user_query").is_none());
-        assert_eq!(value["mode"], "batch");
-        assert_eq!(value["questions"].as_array().unwrap().len(), 2);
-        assert_eq!(value["questions"][1]["id"], "strat");
-        assert_eq!(value["questions"][1]["allow_custom"], true);
-    }
-
-    #[test]
-    fn auto_id_generation() {
-        let args = serde_json::json!({
-            "questions": [
-                { "question": "Q1?" },
-                { "question": "Q2?" },
-                { "question": "Q3?" }
-            ]
-        });
-        let result = exec_ask_user(&args);
-        let value: serde_json::Value =
-            serde_json::from_str(result.model_text()).expect("valid JSON");
-        let qs = value["questions"].as_array().unwrap();
-        assert_eq!(qs[0]["id"], "q1");
-        assert_eq!(qs[1]["id"], "q2");
-        assert_eq!(qs[2]["id"], "q3");
-    }
-
-    #[test]
-    fn empty_questions_error() {
-        let args = serde_json::json!({ "questions": [] });
-        let result = exec_ask_user(&args);
-        let err = result.error.as_ref().expect("structured error");
-        assert_eq!(err.code, "empty_questions");
-    }
-
-    #[test]
-    fn missing_question_in_array_error() {
-        // typed 边界层（AskQuestionArgs.question 必填）会提前拒绝该形态；
-        // 结构化 missing_question 语义由 normalize 层保留（不经 typed 入口时）。
-        let error = normalize_ask_user(&serde_json::json!({
-            "questions": [
-                { "id": "q1", "question": "Valid?" },
-                { "id": "q2" }
-            ]
-        }))
-        .unwrap_err();
-        assert_eq!(error.code, "missing_question");
-    }
-
-    #[test]
-    fn typed_boundary_rejects_questionless_entry() {
-        let result = exec_ask_user(&serde_json::json!({
-            "questions": [{ "id": "q2" }]
-        }));
-        let err = result.error.as_ref().expect("structured error");
-        assert_eq!(err.code, "invalid_arguments");
-    }
-
-    #[test]
-    fn old_format_no_options() {
-        let args = serde_json::json!({ "question": "What do you think?" });
-        let result = exec_ask_user(&args);
-        let value: serde_json::Value =
-            serde_json::from_str(result.model_text()).expect("valid JSON");
-        assert_eq!(value["status"], "ok");
-        let q = &value["questions"][0];
-        assert_eq!(q["question"], "What do you think?");
-        assert!(q["options"].as_array().unwrap().is_empty());
-        assert_eq!(q["allow_custom"], true);
-    }
-
-    #[test]
-    fn multi_question_input_derives_batch_without_mode() {
-        let ask = normalize_ask_user(&serde_json::json!({
-            "questions": [
-                {
-                    "id": "arch",
-                    "question": "Architecture?",
-                    "options": ["A", "B"],
-                    "allow_custom": false
-                },
-                { "question": "Strategy?", "allow_custom": true }
-            ]
-        }))
-        .unwrap();
-
+    fn ask_v1_batch_generates_stable_ids_and_defaults_custom_to_yes() {
+        let ask = parse_ask_input(BATCH).expect("ask document");
         assert_eq!(ask.mode, NormalizedAskMode::Batch);
-        assert_eq!(ask.questions[0].id, "arch");
+        assert_eq!(ask.questions.len(), 2);
+        assert_eq!(ask.questions[0].id, "q1");
         assert_eq!(ask.questions[1].id, "q2");
+        assert!(!ask.questions[0].allow_custom);
+        assert!(ask.questions[1].allow_custom);
     }
 
     #[test]
-    fn duplicate_question_ids_are_rejected() {
-        let error = normalize_ask_user(&serde_json::json!({
-            "questions": [
-                { "id": "same", "question": "First?", "allow_custom": true },
-                { "id": "same", "question": "Second?", "allow_custom": true }
-            ]
-        }))
-        .unwrap_err();
-
-        assert_eq!(error.code, "duplicate_question_id");
+    fn ask_function_accepts_only_one_string_input_field() {
+        let normalized = normalize_ask_user(&serde_json::json!({"input": SINGLE})).unwrap();
+        assert_eq!(normalized, parse_ask_input(SINGLE).unwrap());
+        assert_eq!(
+            normalize_ask_user(&serde_json::json!({"input": SINGLE, "extra": true}))
+                .unwrap_err()
+                .code,
+            "ask_input_fields_invalid"
+        );
     }
 
     #[test]
-    fn duplicate_options_are_rejected() {
-        let error = normalize_ask_user(&serde_json::json!({
-            "question": "Pick one",
-            "options": ["A", "A"],
-            "allow_custom": false
-        }))
-        .unwrap_err();
-
-        assert_eq!(error.code, "duplicate_option");
+    fn malformed_format_is_retryable_and_does_not_become_an_interaction() {
+        let result = exec_ask_user(&serde_json::json!({"input": "Question: no header"}));
+        let error = result.error.as_ref().expect("format error");
+        assert_eq!(error.code, "invalid_arguments");
+        assert!(error.retryable);
+        assert!(error.message.contains("ASK_FORMAT_ERROR"));
+        assert!(error.hint.as_deref().unwrap_or_default().contains("not shown"));
     }
 
     #[test]
-    fn unanswerable_question_is_rejected() {
-        let error = normalize_ask_user(&serde_json::json!({
-            "question": "Blocked",
-            "options": [],
-            "allow_custom": false
-        }))
-        .unwrap_err();
-
-        assert_eq!(error.code, "unanswerable_question");
-    }
-
-    #[test]
-    fn blank_option_is_rejected_before_presenting_the_prompt() {
-        let error = normalize_ask_user(&serde_json::json!({
-            "question": "Blocked",
-            "options": ["   "],
-            "allow_custom": false
-        }))
-        .unwrap_err();
-
-        assert_eq!(error.code, "invalid_option");
-    }
-
-    #[test]
-    fn explicit_blank_question_id_is_rejected() {
-        let error = normalize_ask_user(&serde_json::json!({
-            "questions": [
-                { "id": "  ", "question": "Question?", "allow_custom": true }
-            ]
-        }))
-        .unwrap_err();
-
-        assert_eq!(error.code, "invalid_question_id");
-    }
-
-    #[test]
-    fn invalid_options_error_reports_received_type() {
-        let error = normalize_ask_user(&serde_json::json!({
-            "question": "Pick",
-            "options": "A,B"
-        }))
-        .unwrap_err();
-
-        assert_eq!(error.code, "invalid_options");
-        assert!(error.message.contains("got string"), "{}", error.message);
-    }
-
-    #[test]
-    fn invalid_questions_error_reports_received_type() {
-        let error = normalize_ask_user(&serde_json::json!({
-            "questions": "What?"
-        }))
-        .unwrap_err();
-
-        assert_eq!(error.code, "invalid_questions");
-        assert!(error.message.contains("got string"), "{}", error.message);
-    }
-
-    fn type_allows(schema_type: &serde_json::Value, kind: &str) -> bool {
-        match schema_type {
-            serde_json::Value::String(s) => s == kind,
-            serde_json::Value::Array(items) => {
-                items.iter().any(|item| item.as_str() == Some(kind))
-            }
-            _ => false,
+    fn malformed_documents_fail_closed() {
+        for (text, expected) in [
+            ("", "ask_format_invalid"),
+            ("ASK v2\nQuestion: Q?", "ask_format_invalid"),
+            ("ASK v1\nQuestion: Q?\nOptions:", "ask_format_invalid"),
+            ("ASK v1\nQuestion: Q?\nAllow custom: no", "ask_format_invalid"),
+            ("ASK v1\nQuestion: Q?\nOptions:\n- A\n- A", "ask_format_invalid"),
+            ("ASK v1\nQuestion: Q?\nUnknown: value", "ask_format_invalid"),
+            ("ASK v1\nQuestion: Q?\nQuestion: Q2?", "ask_format_invalid"),
+        ] {
+            assert_eq!(parse_ask_input(text).unwrap_err().code, expected, "{text:?}");
         }
     }
 
     #[test]
-    fn published_schema_types_options_as_string_array() {
+    fn function_schema_is_one_required_string() {
         let schema = crate::tool_api::schema::schema_of::<AskArgs>();
-
-        // 顶层 deprecated options 必须带数组类型约束，而不是 any。
-        let options = &schema["properties"]["options"];
-        assert!(
-            type_allows(&options["type"], "array"),
-            "options schema type: {}",
-            options["type"]
-        );
-        assert_eq!(options["items"]["type"], "string");
-
-        // questions[].options / questions[].question 同样收紧。
-        let question = &schema["properties"]["questions"]["items"];
-        assert!(
-            type_allows(&question["properties"]["question"]["type"], "string"),
-            "question schema type: {}",
-            question["properties"]["question"]["type"]
-        );
-        let q_options = &question["properties"]["options"];
-        assert!(
-            type_allows(&q_options["type"], "array"),
-            "questions[].options schema type: {}",
-            q_options["type"]
-        );
-        assert_eq!(q_options["items"]["type"], "string");
-        assert_eq!(question["required"][0], "question");
-    }
-
-    #[test]
-    fn typed_boundary_rejects_non_array_options() {
-        // 弱类型误传在 Deserialize 层被前置拒绝，而不是走到语义校验。
-        let result = exec_ask_user(&serde_json::json!({
-            "question": "Pick",
-            "options": "A,B"
-        }));
-
-        let err = result.error.as_ref().expect("structured error");
-        assert_eq!(err.code, "invalid_arguments");
+        assert_eq!(schema["required"], serde_json::json!(["input"]));
+        assert_eq!(schema["properties"]["input"]["type"], "string");
     }
 }

@@ -193,19 +193,17 @@ mod schema_spot_check {
             "write missing edit guidance: {write_desc}"
         );
 
-        // Todo v4（全量覆写形态）：items 上限 20（P1 迁移曾丢失，靠
-        // todo_contract 集成测试兜住后补回）；条目内 status 必填。
+        // Todo 文本范式（apply_patch 形态）：write 只收 `list` 纯文本块，
+        // 条目身份 = title（重复拒绝）；全量覆写语义在 parse 层强制。
         let tw = params("todo_write");
-        assert!(tw["items"].is_object(), "todo_write.items missing");
         assert!(
-            tw["items"]["maxItems"].is_number(),
-            "todo_write.items.maxItems missing: {tw}"
+            tw["list"].is_object() && tw["list"]["type"] == "string",
+            "todo_write.list (string) missing: {tw}"
         );
-        let tw_item = &tw["items"]["items"];
-        assert_eq!(
-            tw_item["required"].as_array().map(|r| r.len()),
-            Some(1),
-            "todo_write items[] must require exactly status"
+        let tu = params("todo_update");
+        assert!(
+            tu["title"].is_object() && tu["status"].is_object(),
+            "todo_update title/status missing: {tu}"
         );
 
         // skills 三件套已上线，聚合名/validate 退役。
@@ -276,7 +274,7 @@ mod tool_capabilities_cross_check {
             .collect();
         assert_eq!(
             exclusive,
-            vec!["exec", "journal", "process"],
+            vec!["exec", "process"],
             "独占档变更必须显式审查（spec §3.4）"
         );
         for name in exclusive {

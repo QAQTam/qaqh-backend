@@ -740,6 +740,120 @@ impl QaqhService {
                 log::info!("[config] permission level set to {level}");
                 Ok(json!({ "permission_level": level }))
             }
+            "profile.list" => {
+                let path = qaqh_profile::default_profiles_path();
+                let store = qaqh_profile::ProfilesStore::load_or_create(&path)
+                    .map_err(|e| format!("failed to load profiles: {e}"))?;
+                Ok(serde_json::to_value(store.document())
+                    .map_err(|e| format!("failed to serialize profiles: {e}"))?)
+            }
+            "profile.set_default" => {
+                let id = params.get("id").or_else(|| params.get("name"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "missing 'id' or 'name' parameter".to_string())?;
+                let path = qaqh_profile::default_profiles_path();
+                let mut store = qaqh_profile::ProfilesStore::load_or_create(&path)
+                    .map_err(|e| format!("failed to load profiles: {e}"))?;
+                store.set_default_profile(id)
+                    .map_err(|e| format!("failed to set default profile: {e}"))?;
+                self.update_config_and_reload(|cfg| {
+                    let _ = cfg.apply_profile(id);
+                    Ok(())
+                })?;
+                Ok(Value::Null)
+            }
+            "profile.create" => {
+                let name = pstr(params, "name")?;
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or(&name).trim().to_string();
+                let model = pstr(params, "model")?;
+                let path = qaqh_profile::default_profiles_path();
+                let mut store = qaqh_profile::ProfilesStore::load_or_create(&path)
+                    .map_err(|e| format!("failed to load profiles: {e}"))?;
+
+                let provider_id = if let Some(p) = params.get("provider").and_then(|v| v.as_str()) {
+                    p.to_string()
+                } else if let Some(base_url) = params.get("baseUrl").or_else(|| params.get("base_url")).and_then(|v| v.as_str()) {
+                    let pid = format!("provider-{}", &id);
+                    let wire_str = params.get("wire").and_then(|v| v.as_str()).unwrap_or("chat");
+                    let wire = qaqh_types::Wire::parse(wire_str).unwrap_or_default();
+                    let prov = qaqh_profile::ProviderDef {
+                        name: format!("{} 服务商", name),
+                        base_url: base_url.to_string(),
+                        wire,
+                        credential: qaqh_types::CredentialSource::ApiKey,
+                        api_key: None,
+                        headers: std::collections::BTreeMap::new(),
+                        compat: None,
+                        models: std::collections::BTreeMap::new(),
+                    };
+                    store.upsert_provider(pid.clone(), prov)
+                        .map_err(|e| format!("failed to create provider: {e}"))?;
+                    pid
+                } else {
+                    store.document().default_profile.clone()
+                };
+
+                let reasoning_effort = params.get("reasoningEffort")
+                    .or_else(|| params.get("reasoning_effort"))
+                    .or_else(|| params.get("effort"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let context_length = params.get("contextLength")
+                    .or_else(|| params.get("context_length"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let max_tokens = params.get("maxTokens")
+                    .or_else(|| params.get("max_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+
+                let profile_def = qaqh_profile::ProfileDef {
+                    name: name.clone(),
+                    provider: provider_id.clone(),
+                    model: model.clone(),
+                    reasoning_effort,
+                    context_length,
+                    max_tokens,
+                };
+
+                if let Some(key) = params.get("apiKey").or_else(|| params.get("api_key")).and_then(|v| v.as_str()) {
+                    let trimmed_key = key.trim();
+                    if !trimmed_key.is_empty() {
+                        let secrets = qaqh_config::secrets::SecretStore::default_location();
+                        secrets.set_profile_key(&id, trimmed_key)
+                            .map_err(|e| format!("failed to store api key: {e}"))?;
+                    }
+                }
+
+                store.create_profile(id.clone(), profile_def)
+                    .map_err(|e| format!("failed to create profile: {e}"))?;
+
+                let base_url = params.get("baseUrl").or_else(|| params.get("base_url")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let wire_str = params.get("wire").and_then(|v| v.as_str()).unwrap_or("chat");
+                let wire = qaqh_types::Wire::parse(wire_str).unwrap_or_default();
+                let has_key = params.get("apiKey").or_else(|| params.get("api_key")).and_then(|v| v.as_str()).is_some_and(|k| !k.trim().is_empty());
+
+                self.update_config_and_reload(|cfg| {
+                    cfg.profiles.insert(id.clone(), qaqh_types::ProfileConfig {
+                        model,
+                        max_tokens: max_tokens.unwrap_or(8192),
+                        effort: params.get("reasoningEffort").or_else(|| params.get("effort")).and_then(|v| v.as_str()).map(ToString::to_string),
+                        context_length: context_length.unwrap_or(128000),
+                        base_url,
+                        wire,
+                        compat: None,
+                        credential: qaqh_types::CredentialSource::ApiKey,
+                        api_key: has_key.then(|| qaqh_config::secrets::CONFIG_MARKER.to_owned()),
+                        preset_endpoint: None,
+                        context_limit: None,
+                        context_window: None,
+                    });
+                    Ok(())
+                })?;
+
+                log::info!("[profile] successfully created profile '{id}' without polluting global active config");
+                Ok(Value::Null)
+            }
             "profile.apply" => {
                 let name = pstr(params, "name")?;
                 self.update_config_and_reload(|cfg| {
@@ -816,6 +930,68 @@ impl QaqhService {
                     RingingCommand::Control(ControlCommand::AgentReloadConfig),
                 )?;
                 Ok(Value::Null)
+            }
+            // 只改本会话的 effort（思考强度），不碰全局配置。
+            // 落 meta.json 后定向重载该会话（AgentReloadConfig）。
+            "session.set_effort" => {
+                let session_id = session_id()?;
+                let effort = pstr(params, "effort")?;
+                if effort.is_empty() {
+                    self.sessions.persist_effort(&session_id, None);
+                } else {
+                    self.sessions.persist_effort(&session_id, Some(effort.as_str()));
+                }
+                self.send_ringing_cmd(
+                    session_id,
+                    RingingCommand::Control(ControlCommand::AgentReloadConfig),
+                )?;
+                Ok(Value::Null)
+            }
+            // 原子创建新会话（直接分配并返回 session_id，可选绑定 cwd/profile/effort/title）
+            "session.create" => {
+                let cwd = params
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let identity = self
+                    .sessions
+                    .allocate_session(cwd.as_deref())
+                    .map_err(|error| format!("session.create: allocate session failed: {error}"))?;
+                let session_id = identity.session_id.as_str().to_string();
+                self.sessions.clear_active();
+
+                if let Some(profile) = params.get("profile").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    self.sessions.persist_profile(&session_id, Some(profile));
+                }
+                if let Some(effort) = params.get("effort").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    self.sessions.persist_effort(&session_id, Some(effort));
+                }
+                if let Some(title) = params.get("title").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    self.sessions.update_title(&session_id, title);
+                }
+
+                let canonical_cwd = self
+                    .sessions
+                    .workspace_cwd(&session_id)
+                    .filter(|cwd| !cwd.is_empty() && cwd != ".")
+                    .unwrap_or_else(|| {
+                        qaqh_types::platform::default_session_workspace_dir(&session_id)
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                let model = qaqh_config::Config::load()
+                    .map(|config| config.model)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                if let Err(error) =
+                    materialize_canonical_session(&session_id, &canonical_cwd, &model)
+                {
+                    let _ = self.sessions.delete(&session_id);
+                    return Err(format!(
+                        "session.create: canonical materialization failed: {error}"
+                    ));
+                }
+                self.registry()?.spawn_new(&session_id)?;
+                Ok(json!({ "session_id": session_id }))
             }
             // 用户重命名会话标题（方案B）：落 meta.title 并以 TitleSource::User
             // 广播 TitleChanged —— 客户端经 v2 Meta SSE 即时回灌，session.list

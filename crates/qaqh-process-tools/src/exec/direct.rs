@@ -88,7 +88,7 @@ fn direct_exec_inner(
     progress_tx: Option<ExecProgressSender>,
     tool_call_id: &str,
     sandbox: Option<&qaqh_sandbox::SandboxSpec>,
-    command_text: &str,
+    #[cfg_attr(not(windows), allow(unused_variables))] command_text: &str,
 ) -> ExecOutput {
     let start_time = std::time::Instant::now();
     let display_name = if argv.len() > 1 {
@@ -143,6 +143,8 @@ fn direct_exec_inner(
                     timed_out: false,
                     cancelled: false,
                     process_id: None,
+                    output_omitted_bytes: 0,
+                    protocol_dropped_bytes: 0,
                 };
             }
         },
@@ -200,6 +202,8 @@ fn direct_exec_inner(
                 timed_out: false,
                 cancelled: false,
                 process_id: None,
+                output_omitted_bytes: 0,
+                protocol_dropped_bytes: 0,
             };
         }
     };
@@ -223,6 +227,8 @@ fn direct_exec_inner(
                 timed_out: false,
                 cancelled: false,
                 process_id: None,
+                output_omitted_bytes: 0,
+                protocol_dropped_bytes: 0,
             };
         }
     }
@@ -379,6 +385,8 @@ fn direct_exec_inner(
             timed_out: true,
             cancelled: false,
             process_id: Some(proc_id),
+            output_omitted_bytes: 0,
+            protocol_dropped_bytes: 0,
         };
     }
 
@@ -484,6 +492,8 @@ fn direct_exec_inner(
         timed_out,
         cancelled,
         process_id: Some(proc_id),
+        output_omitted_bytes: 0,
+        protocol_dropped_bytes: 0,
     }
 }
 
@@ -573,6 +583,14 @@ pub struct ExecOutput {
     /// 超时移交后台时的注册表进程 id（由 process 的 action 使用）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) process_id: Option<u32>,
+    /// 捕获侧省略字节：HeadTailBuffer 中段丢弃（0 = 完整捕获）。
+    /// codex `output_omitted_bytes` 同义——模型据此知道看到的是头尾拼合。
+    #[serde(default)]
+    pub(crate) output_omitted_bytes: u64,
+    /// 协议侧丢弃字节：progress 通道满被丢的实时流字节（tool result 的
+    /// 权威捕获不受影响；0 = 实时流无损）。
+    #[serde(default)]
+    pub(crate) protocol_dropped_bytes: u64,
 }
 
 impl ExecOutput {

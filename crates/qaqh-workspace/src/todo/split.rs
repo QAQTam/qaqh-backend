@@ -23,7 +23,20 @@ use super::actions::{exec_todo_set, exec_todo_write};
 pub(crate) fn tool_result(result: Result<String, String>) -> ToolResult {
     match result {
         Ok(content) => ToolResult::ok(content),
-        Err(content) => ToolResult::error(content),
+        Err(content) => {
+            // 旧 Err(String) 通道：内容通常是 json_err_string 信封
+            // ({code,message,hint})。解包还原真实错误码（not_found /
+            // invalid_input）——否则模型只看到泛型 tool_error，无法自愈。
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(value) if value.get("code").is_some() && value.get("message").is_some() => {
+                    let code = value["code"].as_str().unwrap_or("tool_error").to_string();
+                    let message = value["message"].as_str().unwrap_or(&content).to_string();
+                    let hint = value["hint"].as_str().map(str::to_string);
+                    ToolResult::error_with(code, message, false, hint)
+                }
+                _ => ToolResult::error(content),
+            }
+        }
     }
 }
 
@@ -47,20 +60,23 @@ pub(crate) fn reject_fields(args: &Value, fields: &[&str], tool: &str) -> Result
 }
 
 pub fn handle_write(args: &Value) -> ToolResult {
-    // items-only：顶层便利字段（单条形态）与定位插入残留一律拒绝。
-    // 条目内的 id/status/evidence/description 是 v4 全量覆写的合法字段。
+    // 只认 `list`（纯文本全量覆写）：旧 items 形态、顶层便利字段、定位
+    // 插入与 action 词表一律拒绝。
     let result = reject_fields(
         args,
         &[
+            "items",
             "id",
             "status",
             "evidence",
-            "after_id",
-            "before_id",
-            "ids",
-            "updates",
             "title",
             "description",
+            "ids",
+            "updates",
+            "after_id",
+            "before_id",
+            "action",
+            "explanation",
         ],
         "todo_write",
     )
@@ -69,19 +85,18 @@ pub fn handle_write(args: &Value) -> ToolResult {
 }
 
 pub fn handle_update(args: &Value) -> ToolResult {
-    // 单一形态：{id, status, evidence?} 一次一条；批量/updates 已移除——
-    // 多任务循环调用。底层 exec_todo_set 的 ids/updates 分支保留
-    // （HTTP service 面 / CLI 直访不受工具形态约束）。
+    // 单一形态：{title, status, evidence?} 按 title 精确翻转一次一条；
+    // 旧 id/ids/updates 形态拒绝（title 即身份）。
     let result = reject_fields(
         args,
         &[
+            "id",
             "ids",
             "updates",
-            "title",
-            "description",
             "items",
             "after_id",
             "before_id",
+            "action",
         ],
         "todo_update",
     )
@@ -118,12 +133,13 @@ pub fn handle_list(args: &Value) -> ToolResult {
 // ═══════════════════════════════════════════════════════
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    // Display 仍保留 fallback 注册；typed 执行路径优先使用 ToolResult.data
-    // 中的 canonical payload，旧 projector 只服务历史/legacy 回放。
+    // 本版本起模型工具面收敛为 todo_write / todo_update 双工具：完整列表
+    // 由 write/update 自身的 output.items 携带（全量快照），只读 list 从
+    // 模型面退役（`todo_list_for` 保留给 HTTP service / CLI 直访）。
+    // Display 的 fallback 注册保留——历史 transcript 回放仍需渲染旧调用。
     mgr.register_display("todo_write", crate::display::project_todo_write);
     mgr.register_display("todo_update", crate::display::project_todo_update);
     mgr.register_display("todo_list", crate::display::project_todo_list);
     mgr.register_typed(super::typed::TodoWriteTool);
     mgr.register_typed(super::typed::TodoUpdateTool);
-    mgr.register_typed(super::typed::TodoListTool);
 }
