@@ -30,7 +30,7 @@ use qaqh_types::{CacheTokenField, ContentBlock, Message, ThinkingParamMode, Tool
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, StreamState, apply_management_headers,
-    empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
+    empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
     tool_names_by_id, tool_result_name, uuid_simple,
 };
 use super::transport::{
@@ -426,6 +426,9 @@ fn build_options(
     };
     options.provider_request = switches;
     apply_management_headers(provider, None, &mut options, false);
+    for (name, value) in &provider.deepseek_account_headers {
+        insert_header(&mut options, name, value);
+    }
     options
 }
 
