@@ -41,6 +41,11 @@ pub use qaqh_policy::{NetworkPolicy, SandboxSpec};
 /// Hidden subcommand used when the daemon binary acts as its own helper.
 pub const HELPER_SUBCOMMAND: &str = "__qaqh-sandbox-exec";
 
+/// PTY 模式子命令：policy 从**文件**读取（stdin 协议与 PTY 冲突——PTY 的
+/// stdin 是终端本身，且 exec 后必须保留给目标进程），应用 Landlock/seccomp
+/// 后 `execvp` 目标，**不**重定向 stdin。
+pub const HELPER_PTY_SUBCOMMAND: &str = "__qaqh-sandbox-exec-pty";
+
 /// Absolute path to the helper executable. When absent, callers use the
 /// unsandboxed process path and rely on platform capability reporting.
 pub const HELPER_ENV: &str = "QAQH_SANDBOX_EXEC";
@@ -278,6 +283,160 @@ pub fn wrap_command(
     }
 }
 
+/// PTY 会话的沙箱启动结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtySandboxLaunch {
+    /// Backend actually selected after capability resolution.
+    pub backend: SandboxBackend,
+    /// 交给 PTY spawn 的最终 argv（可能被改写为 helper/bwrap 前缀）。
+    pub argv: Vec<String>,
+    /// Landlock/seccomp helper 模式的请求 payload 文件路径。helper 读取后
+    /// 自删；若 PTY spawn 失败，由调用方负责清理残留。
+    pub payload_path: Option<PathBuf>,
+}
+
+static PTY_PAYLOAD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn write_pty_payload(request: &SandboxRequest) -> Result<PathBuf, String> {
+    let payload = serde_json::to_vec(request)
+        .map_err(|error| format!("serialize sandbox request: {error}"))?;
+    let seq = PTY_PAYLOAD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "qaqh-sandbox-pty-{}-{seq}.json",
+        std::process::id()
+    ));
+    // 0600：payload 含 writable_roots 等策略面，仅同用户可读。
+    std::fs::write(&path, &payload).map_err(|error| format!("write sandbox payload: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
+
+/// 为 PTY 会话准备沙箱启动面（`wrap_command` 的 PTY 对偶）。
+///
+/// 与 [`wrap_command`] 的差异：helper 的 policy 走**文件**而非 stdin
+/// （PTY 的 stdin 是终端本身，且必须保留给目标进程）；bubblewrap 以纯
+/// argv 重建（无 `&mut Command` 可改写）。
+///
+/// 非 Linux 平台沿用 H1 约定：降级放行但大声告警。
+pub fn prepare_pty_launch(
+    argv: &[String],
+    cwd: Option<&str>,
+    spec: &SandboxSpec,
+) -> Result<PtySandboxLaunch, String> {
+    if argv.is_empty() {
+        return Err("pty sandbox target argv is empty".into());
+    }
+    if !spec.enabled {
+        return Ok(PtySandboxLaunch {
+            backend: SandboxBackend::None,
+            argv: argv.to_vec(),
+            payload_path: None,
+        });
+    }
+    if !cfg!(target_os = "linux") {
+        warn_spec_unenforced(spec);
+        return Ok(PtySandboxLaunch {
+            backend: SandboxBackend::None,
+            argv: argv.to_vec(),
+            payload_path: None,
+        });
+    }
+
+    let capabilities = SandboxCapabilities::detect();
+    let resolved_spec = canonicalize_spec(spec)?;
+    let backend = resolve_backend(spec.backend, &capabilities)?;
+    if backend == SandboxBackend::ProcessHardening {
+        warn_spec_unenforced(spec);
+    }
+    log::debug!(
+        target: "qaqh_sandbox",
+        "{}",
+        serde_json::json!({
+            "event": "sandbox_pty_backend_selected",
+            "requested": spec.backend,
+            "resolved": backend,
+            "network": spec.network,
+            "writable_roots": resolved_spec.writable_roots,
+        })
+    );
+
+    match backend {
+        SandboxBackend::LinuxLandlockSeccomp => {
+            let Some(helper) = std::env::var_os(HELPER_ENV) else {
+                if spec.backend == SandboxBackend::Auto {
+                    return Ok(PtySandboxLaunch {
+                        backend: SandboxBackend::None,
+                        argv: argv.to_vec(),
+                        payload_path: None,
+                    });
+                }
+                return Err("Landlock/seccomp helper is not configured".into());
+            };
+            if helper.is_empty() {
+                return Err("Landlock/seccomp helper path is empty".into());
+            }
+            let request = SandboxRequest {
+                spec: resolved_spec,
+                argv: argv.to_vec(),
+            };
+            let payload_path = write_pty_payload(&request)?;
+            Ok(PtySandboxLaunch {
+                backend,
+                argv: vec![
+                    helper.to_string_lossy().into_owned(),
+                    HELPER_PTY_SUBCOMMAND.to_string(),
+                    payload_path.to_string_lossy().into_owned(),
+                ],
+                payload_path: Some(payload_path),
+            })
+        }
+        SandboxBackend::LinuxBubblewrap => {
+            let mut bwrap_argv: Vec<String> = vec![
+                "bwrap".into(),
+                "--die-with-parent".into(),
+                "--unshare-all".into(),
+            ];
+            if spec.network == NetworkPolicy::Allow {
+                bwrap_argv.push("--share-net".into());
+            }
+            bwrap_argv.extend(["--ro-bind".into(), "/".into(), "/".into()]);
+            for root in &resolved_spec.writable_roots {
+                let root = root.to_string_lossy().into_owned();
+                bwrap_argv.extend(["--bind".into(), root.clone(), root]);
+            }
+            bwrap_argv.extend(["--dev".into(), "/dev".into(), "--proc".into(), "/proc".into()]);
+            if let Some(cwd) = cwd {
+                bwrap_argv.extend(["--chdir".into(), cwd.to_string()]);
+            }
+            bwrap_argv.push("--".into());
+            bwrap_argv.extend(argv.iter().cloned());
+            Ok(PtySandboxLaunch {
+                backend,
+                argv: bwrap_argv,
+                payload_path: None,
+            })
+        }
+        SandboxBackend::ProcessHardening | SandboxBackend::None => Ok(PtySandboxLaunch {
+            backend,
+            argv: argv.to_vec(),
+            payload_path: None,
+        }),
+        SandboxBackend::WindowsToken | SandboxBackend::WindowsRedirect => {
+            warn_spec_unenforced(spec);
+            Ok(PtySandboxLaunch {
+                backend: SandboxBackend::None,
+                argv: argv.to_vec(),
+                payload_path: None,
+            })
+        }
+        SandboxBackend::Auto => unreachable!("resolve_backend removes Auto"),
+    }
+}
+
 /// 审计 H1：无强制后端时的降级证据。进程级只告警一次，避免长会话刷屏；
 /// 每次审批面仍可通过 [`filesystem_and_network_isolation_enforced`] 实时取口径。
 fn warn_spec_unenforced(spec: &SandboxSpec) {
@@ -501,6 +660,22 @@ pub fn redact_text(text: &str, secrets: &[String]) -> String {
 pub fn helper_main() -> i32 {
     #[cfg(target_os = "linux")]
     {
+        let mut args = std::env::args().skip(1);
+        if args.next().as_deref() == Some(HELPER_PTY_SUBCOMMAND) {
+            return match args.next() {
+                Some(payload_path) => match linux::run_helper_pty(&payload_path) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        eprintln!("qaqh-sandbox: {error}");
+                        1
+                    }
+                },
+                None => {
+                    eprintln!("qaqh-sandbox: {HELPER_PTY_SUBCOMMAND} requires a payload path");
+                    1
+                }
+            };
+        }
         match linux::run_helper() {
             Ok(()) => 0,
             Err(error) => {

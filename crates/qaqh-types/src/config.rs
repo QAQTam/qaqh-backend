@@ -425,3 +425,75 @@ impl ConfigStore {
         serde_json::to_value(&tv).ok()
     }
 }
+
+// ── ProfileStore: independent model presets store with atomic writes ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistentProfiles {
+    #[serde(default)]
+    pub profiles: HashMap<String, ProfileConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileStore {
+    path: PathBuf,
+}
+
+impl ProfileStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn default_location() -> Self {
+        Self::new(crate::platform::profiles_path())
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
+    pub fn load(&self) -> Option<PersistentProfiles> {
+        let data = std::fs::read_to_string(&self.path).ok()?;
+        toml::from_str(&data).ok()
+    }
+
+    pub fn save(&self, profiles: &PersistentProfiles) -> bool {
+        match toml::to_string_pretty(profiles) {
+            Ok(content) => self.write_content(&content),
+            Err(e) => {
+                eprintln!("ProfileStore: serialization failed: {e}");
+                false
+            }
+        }
+    }
+
+    pub fn write_content(&self, content: &str) -> bool {
+        let tmp = self.path.with_extension("toml.tmp");
+        if let Some(parent) = self.path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "ProfileStore: create_dir_all({}) failed: {e}",
+                parent.display()
+            );
+            return false;
+        }
+        if let Err(e) = std::fs::write(&tmp, content) {
+            eprintln!("ProfileStore: write({}) failed: {e}", tmp.display());
+            return false;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+            eprintln!(
+                "ProfileStore: rename({} -> {}) failed: {e}",
+                tmp.display(),
+                self.path.display()
+            );
+            return false;
+        }
+        true
+    }
+}

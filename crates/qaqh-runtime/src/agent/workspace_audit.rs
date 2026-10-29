@@ -122,12 +122,9 @@ impl BatchAudit {
             .unwrap_or(DEFAULT_DRIFT_GAP_MILLIS)
     }
 
-    /// 灰度/排障开关：`QAQH_SPY_DISABLED=1` 时整条链路退化为无操作。
+    /// 灰度/排障开关：已拔除，默认为 true（QAQH_SPY_DISABLED 恒真）。
     fn disabled() -> bool {
-        matches!(
-            std::env::var("QAQH_SPY_DISABLED").as_deref(),
-            Ok("1") | Ok("true")
-        )
+        true
     }
 
     /// 排障/回归对比开关：`QAQH_SPY_ALWAYS_SCAN=1` 恢复"每批无条件两扫"的旧行为，

@@ -220,6 +220,11 @@ impl DsAccountManager {
         account.token_for(&self.inner.config.inference_origin)
     }
 
+    /// 获取已登录账号的平台用户 ID（未登录时返回 `None`）。
+    pub fn current_user_id(&self) -> Option<String> {
+        self.inner.store.load().ok().flatten().map(|account| account.user_id)
+    }
+
     /// 登录态投影（前端轮询这个方法）。
     pub fn sign_in_status(&self) -> Value {
         let flow = self.lock();

@@ -15,7 +15,7 @@ fn main() {
         .or_else(git_commit)
         .unwrap_or_else(|| {
             println!(
-                "cargo:warning=QAQH_BUILD_ID fell back to CARGO_PKG_VERSION ({}) because the git commit could not be resolved; packaged daemon will fail the desktop identity check unless the manifest uses the same value",
+                "cargo:warning=QAQH_BUILD_ID fell back to CARGO_PKG_VERSION ({}) because the git commit could not be resolved; packaged daemon will fail the client (qaqh-electron) identity check unless the manifest uses the same value",
                 env!("CARGO_PKG_VERSION")
             );
             env!("CARGO_PKG_VERSION").to_string()

@@ -635,6 +635,21 @@ impl SessionManager {
         });
     }
 
+    pub fn session_effort(&self, session_id: &str) -> Option<String> {
+        self.load_meta(session_id)?
+            .effort
+            .filter(|eff| !eff.is_empty())
+    }
+
+    /// 写入会话思考强度 effort（不重写 messages）。
+    pub fn persist_effort(&self, session_id: &str, effort: Option<&str>) {
+        self.with_meta_locked(session_id, false, |dir, meta| {
+            meta.effort = effort.filter(|eff| !eff.is_empty()).map(str::to_owned);
+            meta.updated_at = Self::now_epoch();
+            let _ = store::write_meta(dir, meta);
+        });
+    }
+
     /// Persist tool mode (standard/minimal/custom) to meta.json without
     /// rewriting messages — survives agent restart (PLAN-TOOL-MODES.md 4.3).
     ///

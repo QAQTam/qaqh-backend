@@ -543,15 +543,15 @@ impl ToolEngine {
                                     })
                                     .collect(),
                             }),
-                            Err(error) => ctx.agent.msg.push_tool_result_direct(
+                            Err(error) => ctx.agent.msg.push_tool_result_canonical(
                                 auth.call_id(),
-                                &serde_json::json!({
-                                    "status": "error",
-                                    "code": error.code,
-                                    "message": error.message,
-                                })
-                                .to_string(),
-                                false,
+                                &qaqh_types::ToolResult::error_with(
+                                    error.code,
+                                    format!("ASK_FORMAT_ERROR: {}", error.message),
+                                    true,
+                                    Some("The ask was not shown to the user. Re-output the complete ASK v1 document; do not ask the user to fix its format.".into()),
+                                ),
+                                &[],
                             ),
                         }
                     } else {
@@ -944,7 +944,7 @@ impl ToolEngine {
     /// Progress chunks are forwarded as they arrive. The transcript writer
     /// owns the bounded tail and records truncation in `TimelineTool`; this
     /// layer must not claim replace semantics that the wire protocol lacks.
-    fn emit_progress_tail(
+    pub(crate) fn emit_progress_tail(
         ctx: &mut RingContext,
         turn_id: &str,
         round_num: u32,

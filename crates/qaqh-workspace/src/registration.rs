@@ -4,9 +4,9 @@
 
 use super::ToolManager;
 use super::exec;
-use super::journal;
+// use super::journal;
 use super::read_image;
-use super::spy_tool;
+// use super::spy_tool;
 use super::web;
 
 use super::apply_patch;
@@ -72,10 +72,8 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // ── 图像读取（主模型视觉输入）──
     read_image::register(&mut mgr);
 
-    journal::register(&mut mgr);
-
-    // ── 工作区变更审计（qaqh-spy 恢复闭环：journal/undo/restore/cat）──
-    spy_tool::register(&mut mgr);
+    // journal::register(&mut mgr); (retired from model tool surface)
+    // spy_tool::register(&mut mgr); (retired from model tool surface)
 
     // ── 进程巡查 ──
     process_inspect::register(&mut mgr);
@@ -117,7 +115,6 @@ mod tests {
                 "exec",
                 "glob",
                 "grep",
-                "journal",
                 "process",
                 "read",
                 "read_image",
@@ -126,8 +123,6 @@ mod tests {
                 "skill_list",
                 "skill_release",
                 "skill_resource",
-                "spy",
-                "todo_list",
                 "todo_update",
                 "todo_write",
                 "tool_search",

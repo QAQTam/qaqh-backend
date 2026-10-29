@@ -199,6 +199,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ringing/v2/pair", post(pairing::handle_pair))
         .route("/ringing/v2/devices", get(pairing::handle_devices))
         .route(
+            "/ringing/v2/exec-sessions",
+            get(v2::handle_exec_sessions_list),
+        )
+        .route(
+            "/ringing/v2/exec-sessions/{id}/kill",
+            post(v2::handle_exec_session_kill),
+        )
+        .route(
             "/ringing/v2/devices/{device_id}/revoke",
             post(pairing::handle_device_revoke),
         )

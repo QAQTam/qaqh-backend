@@ -304,6 +304,11 @@ pub fn config_path() -> PathBuf {
     data_dir().join("config.toml")
 }
 
+/// qaqh profiles file path (independent model presets store).
+pub fn profiles_path() -> PathBuf {
+    data_dir().join("profiles.toml")
+}
+
 /// qaqh daemon discovery file path.
 pub fn daemon_discovery_path() -> PathBuf {
     data_dir().join("daemon.json")

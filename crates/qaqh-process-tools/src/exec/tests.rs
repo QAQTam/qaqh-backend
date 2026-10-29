@@ -1269,18 +1269,32 @@ fn backgrounded_status_refreshes_when_child_exits_while_grandchild_holds_pipe() 
 // ── exec 通用入口（方案 A 独占：shell 参数选壳）──
 
 fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
+    // 单测进程没有注入 workspace 上下文：current_workspace() 为空串会把
+    // 空 writable_root 一路传进沙箱 canonicalize（存量 4 失败的根因）。
+    // 兜底到测试进程 cwd，等价"测试工作区=crate 目录"。
+    let workspace = {
+        let current = crate::current_workspace();
+        if current.trim().is_empty() {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            current
+        }
+    };
     TestCall {
         ctx: crate::tool_api::ToolCallContext {
             call_id: "exec-test".into(),
             session_id: crate::current_session().unwrap_or_default(),
             workspace_root: crate::permission::resolve_target_path(std::path::PathBuf::from(
-                crate::current_workspace(),
+                &workspace,
             )),
             mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
-                crate::current_workspace(),
+                workspace,
             )),
             exec_default_shell: None,
             timeout: std::time::Duration::from_secs(30),
@@ -1326,6 +1340,8 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
         timed_out: false,
         cancelled: false,
         process_id: None,
+            output_omitted_bytes: 0,
+            protocol_dropped_bytes: 0,
     };
     assert_eq!(success.status(), crate::ToolStatus::Ok);
     assert!(success.error().is_none());
@@ -1341,6 +1357,8 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
         timed_out: false,
         cancelled: false,
         process_id: None,
+            output_omitted_bytes: 0,
+            protocol_dropped_bytes: 0,
     };
     assert_eq!(failed.status(), crate::ToolStatus::Error);
     assert_eq!(
@@ -1581,5 +1599,244 @@ fn probe_exec_schema_shell_only_for_diagnosis() {
     println!(
         "shell prop: {}",
         serde_json::to_string_pretty(&exec.function.parameters["properties"]["shell"]).unwrap()
+    );
+}
+
+// ── tty=true：PTY 后端（pty_exec，unix 专属）────────────────────────────
+
+#[cfg(unix)]
+fn pty_args(value: serde_json::Value) -> super::handler::ExecArgs {
+    serde_json::from_value(value).expect("exec args")
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_exec_returns_output_and_exit_code() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({"command": "echo pty-tty-ok", "tty": true})),
+        None,
+        None,
+    )
+    .expect("tty exec");
+    assert_eq!(output.exit_code, Some(0), "output: {}", output.output);
+    assert!(output.stdout.contains("pty-tty-ok"), "stdout: {:?}", output.stdout);
+    assert!(output.stderr.is_empty(), "PTY 合流后 stderr 恒空: {:?}", output.stderr);
+    assert!(!output.truncated);
+    assert!(!output.timed_out);
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_exec_merges_stderr_into_terminal_stream() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({
+            "command": "echo pty-err-line >&2",
+            "tty": true
+        })),
+        None,
+        None,
+    )
+    .expect("tty exec");
+    assert!(
+        output.stdout.contains("pty-err-line"),
+        "stderr 必须合流进终端流: {:?}",
+        output.stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_exec_allocates_a_real_terminal() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({
+            "command": "test -t 0 && test -t 1 && echo PTY-ISATTY",
+            "tty": true
+        })),
+        None,
+        None,
+    )
+    .expect("tty exec");
+    assert_eq!(output.exit_code, Some(0), "output: {}", output.output);
+    assert!(
+        output.stdout.contains("PTY-ISATTY"),
+        "stdin/stdout 必须是终端: {:?}",
+        output.stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_exec_timeout_kills_the_process_group() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let start = std::time::Instant::now();
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({
+            "command": "sleep 30",
+            "tty": true,
+            "timeout_secs": 1
+        })),
+        None,
+        None,
+    )
+    .expect("tty exec");
+    let elapsed = start.elapsed();
+    assert!(output.timed_out, "oneshot 语义：超时必须标记 timed_out");
+    assert_eq!(output.exit_code, None, "SIGKILL 组杀 → code None");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "超时必须及时终止（实际 {elapsed:?}）"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_exec_rejects_background_after_secs() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let error = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({
+            "command": "echo x",
+            "tty": true,
+            "background_after_secs": 1
+        })),
+        None,
+        None,
+    )
+    .expect_err("tty + background_after_secs 必须报参数错");
+    match error {
+        ToolExecutionError::Recoverable(error) => {
+            assert_eq!(error.code.as_str(), "tty_background_unsupported");
+        }
+        ToolExecutionError::Fatal(error) => {
+            panic!("unexpected fatal: {}", error.message)
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_exec_streams_raw_ansi_to_progress_but_strips_it_for_the_model() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let (tx, rx) = crate::bounded_exec_progress_channel();
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({
+            "command": "printf '\\033[31mPTY-RED\\033[0m\\n'",
+            "tty": true
+        })),
+        None,
+        Some(tx),
+    )
+    .expect("tty exec");
+    let chunks: Vec<_> = rx.try_iter().collect();
+    // 前端：progress 通道拿到原样 ANSI（实时终端流可渲染）。
+    assert!(
+        chunks
+            .iter()
+            .any(|event: &ExecProgressEvent| event.chunk.contains("\x1b[31m")),
+        "progress 必须携带原始 ANSI: {:?}",
+        chunks.iter().map(|event| &event.chunk).collect::<Vec<_>>()
+    );
+    // 模型：tool result 的 meta 头与实际输出一致（剥掉控制序列噪声）。
+    assert!(
+        output.output.contains("PTY-RED") && !output.output.contains('\x1b'),
+        "模型侧必须剥 ANSI: {:?}",
+        output.output
+    );
+    assert!(
+        output.stdout.contains("PTY-RED") && !output.stdout.contains('\x1b'),
+        "display 面同样剥 ANSI: {:?}",
+        output.stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_flood_reports_omitted_bytes_instead_of_silent_truncation() {
+    if !shell_available(Shell::Bash) || std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+        == false
+    {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({
+            "command": "python3 -c \"import sys; sys.stdout.write('y'*2097152)\"",
+            "tty": true,
+            "timeout_secs": 60
+        })),
+        None,
+        None,
+    )
+    .expect("tty flood exec");
+    // 2 MiB > 1 MiB 捕获顶：中段省略必须如实记账（codex omitted_bytes 语义），
+    // 而不是静默丢；观测总字节不受缓冲影响。
+    assert!(
+        output.output_omitted_bytes > 0,
+        "洪峰必须触发 omitted 记账: {}",
+        output.output_omitted_bytes
+    );
+    assert!(output.output.contains('y'), "头/尾样本必须保留");
+    assert!(output.truncated, "头部拼合输出应带 truncated 提示");
+}
+
+#[cfg(unix)]
+#[test]
+fn tty_exec_collects_bounded_when_grandchild_holds_pty_slave() {
+    if !shell_available(Shell::Bash) {
+        return;
+    }
+    let ctx = shell_test_context(None);
+    let start = std::time::Instant::now();
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({
+            "command": "sleep 10 & echo PTY-GRANDCHILD-OK",
+            "tty": true,
+            "timeout_secs": 30
+        })),
+        None,
+        None,
+    )
+    .expect("tty grandchild holding slave exec");
+    let elapsed = start.elapsed();
+    assert!(
+        output.stdout.contains("PTY-GRANDCHILD-OK"),
+        "stdout must contain output: {:?}",
+        output.stdout
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "collect must not hang waiting for grandchild-held slave EOF, took {elapsed:?}"
     );
 }
