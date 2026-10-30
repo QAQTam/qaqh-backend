@@ -274,6 +274,12 @@ impl ToolProjection for WriteOutput {
             self.diff.clone(),
         )
         .with_lines(self.lines_added, self.lines_removed)
+        .with_files(vec![crate::tool_api::ToolDisplayFile {
+            path: self.path.clone(),
+            op: if self.created { "add" } else { "update" }.to_string(),
+            lines_added: Some(self.lines_added),
+            lines_removed: Some(self.lines_removed),
+        }])
     }
 }
 
@@ -630,7 +636,10 @@ impl ToolProjection for DeleteOutput {
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
-        mutation_display(
+        // 删除的行数就是被删正文的行数；溢出（>u32::MAX 行）时留空，
+        // 不用 `u32::MAX` 冒充一个具体的数。
+        let removed = u32::try_from(self.content.lines().count()).ok();
+        let display = mutation_display(
             crate::support::arg_path(args),
             &self.path,
             crate::tool_api::PathOp::Delete,
@@ -639,6 +648,16 @@ impl ToolProjection for DeleteOutput {
             &self.content,
             self.diff.clone(),
         )
+        .with_files(vec![crate::tool_api::ToolDisplayFile {
+            path: self.path.clone(),
+            op: "delete".to_string(),
+            lines_added: Some(0),
+            lines_removed: removed,
+        }]);
+        match removed {
+            Some(removed) => display.with_lines(0, removed),
+            None => display,
+        }
     }
 }
 

@@ -88,7 +88,7 @@ impl ToolProjection for ApplyPatchOutput {
         }]
     }
 
-    fn display(&self, _args: &Value) -> ToolDisplay {
+    fn display(&self, args: &Value) -> ToolDisplay {
         let summary = match self.first_path.as_deref() {
             Some(path) if !path.is_empty() => crate::file_mutate::mutation_change_summary(
                 path,
@@ -110,7 +110,33 @@ impl ToolProjection for ApplyPatchOutput {
             self.diff.clone(),
         )
         .with_lines(self.insertions as u32, self.deletions as u32)
+        .with_files(
+            args.get("patch")
+                .and_then(Value::as_str)
+                .map(patch_display_files)
+                .unwrap_or_default(),
+        )
     }
+}
+
+/// 逐文件行差：直接取解析器的权威计数。
+///
+/// 补丁文本解析失败（或没有 `patch` 参数）时返回空表 = 「不知道」，
+/// 绝不按文件名或工具名去猜 added/modified。
+fn patch_display_files(patch: &str) -> Vec<crate::tool_api::ToolDisplayFile> {
+    let Ok(stats) = crate::apply_patch_engine::patch_stats(patch) else {
+        return Vec::new();
+    };
+    stats
+        .files
+        .into_iter()
+        .map(|file| crate::tool_api::ToolDisplayFile {
+            path: file.path.to_string_lossy().into_owned(),
+            op: file.op.as_str().to_string(),
+            lines_added: u32::try_from(file.lines_added).ok(),
+            lines_removed: u32::try_from(file.lines_removed).ok(),
+        })
+        .collect()
 }
 
 pub struct ApplyPatchTool;
@@ -836,7 +862,7 @@ mod tests {
         assert_eq!(display_text, result.model_text());
         assert_eq!(
             (display.lines_added, display.lines_removed),
-            (1, 1),
+            (Some(1), Some(1)),
             "apply_patch 终态行差必须落到展示投影"
         );
         assert!(
