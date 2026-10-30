@@ -3,7 +3,7 @@
 
 use super::*;
 
-use crate::error::{QaqhError, QaqhResult};
+use crate::error::QaqhResult;
 
 impl AgentRegistry {
     /// Bounded-cardinality logical memory gauges for the daemon diagnostic API.

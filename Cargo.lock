@@ -2165,6 +2165,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "qaqh-agent-runtime"
+version = "2.0.20261028"
+dependencies = [
+ "log",
+ "qaqh-agentloop-core",
+ "qaqh-config",
+ "qaqh-domain",
+ "qaqh-gate",
+ "qaqh-mcp",
+ "qaqh-memwatch",
+ "qaqh-message",
+ "qaqh-ringing",
+ "qaqh-session",
+ "qaqh-skills",
+ "qaqh-subagent",
+ "qaqh-types",
+ "qaqh-workspace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "qaqh-agentloop-core"
 version = "2.0.20261028"
 dependencies = [
@@ -2259,7 +2284,6 @@ dependencies = [
  "qaqh-session",
  "qaqh-siwc",
  "qaqh-skills",
- "qaqh-spy",
  "qaqh-subagent",
  "qaqh-types",
  "rand 0.10.3",
@@ -2320,28 +2344,12 @@ dependencies = [
  "image",
  "log",
  "qaqh-domain",
- "qaqh-fs-core",
  "qaqh-permission",
  "qaqh-skills",
  "qaqh-tool-core",
  "qaqh-types",
  "qaqh-workspace",
  "schemars",
- "serde",
- "serde_json",
- "sha2",
- "similar",
- "tempfile",
-]
-
-[[package]]
-name = "qaqh-fs-core"
-version = "2.0.20261028"
-dependencies = [
- "hex",
- "log",
- "qaqh-permission",
- "qaqh-types",
  "serde",
  "serde_json",
  "sha2",
@@ -2366,28 +2374,6 @@ dependencies = [
  "tiny_http",
  "tokio",
  "unicode-normalization",
-]
-
-[[package]]
-name = "qaqh-git"
-version = "2.0.20261028"
-dependencies = [
- "git2",
- "log",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "qaqh-import"
-version = "2.0.20261028"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2541,13 +2527,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-ringing-runtime"
+version = "2.0.20261028"
+dependencies = [
+ "log",
+ "qaqh-domain",
+ "qaqh-memwatch",
+ "qaqh-message",
+ "qaqh-ringing",
+ "qaqh-session",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ts-rs",
+]
+
+[[package]]
 name = "qaqh-runtime"
 version = "2.0.20261028"
 dependencies = [
- "chrono",
  "libc",
  "log",
  "os_pipe",
+ "qaqh-agent-runtime",
  "qaqh-agentloop-core",
  "qaqh-client",
  "qaqh-config",
@@ -2559,16 +2563,12 @@ dependencies = [
  "qaqh-mcp",
  "qaqh-memwatch",
  "qaqh-message",
- "qaqh-policy",
  "qaqh-profile",
  "qaqh-ringing",
- "qaqh-sandbox",
+ "qaqh-ringing-runtime",
  "qaqh-session",
  "qaqh-siwc",
- "qaqh-skills",
- "qaqh-spy",
  "qaqh-subagent",
- "qaqh-title",
  "qaqh-tool-core",
  "qaqh-types",
  "qaqh-workspace",
@@ -2581,8 +2581,6 @@ dependencies = [
  "tiny_http",
  "tokio",
  "ts-rs",
- "unicode-normalization",
- "ureq",
  "windows 0.58.0",
 ]
 
@@ -2651,21 +2649,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qaqh-spy"
-version = "2.0.20261028"
-dependencies = [
- "anyhow",
- "chrono",
- "hex",
- "ignore",
- "qaqh-types",
- "serde",
- "serde_json",
- "sha2",
- "similar",
-]
-
-[[package]]
 name = "qaqh-subagent"
 version = "2.0.20261028"
 dependencies = [
@@ -2678,17 +2661,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "qaqh-title"
-version = "2.0.20261028"
-dependencies = [
- "log",
- "qaqh-gate",
- "qaqh-message",
- "qaqh-session",
- "qaqh-types",
 ]
 
 [[package]]
@@ -2725,7 +2697,6 @@ version = "2.0.20261028"
 dependencies = [
  "anyhow",
  "chrono",
- "git2",
  "globset",
  "grep-regex",
  "grep-searcher",
@@ -2738,14 +2709,11 @@ dependencies = [
  "qaqh-domain",
  "qaqh-dsaccount",
  "qaqh-file-tools",
- "qaqh-fs-core",
- "qaqh-git",
  "qaqh-permission",
  "qaqh-policy",
  "qaqh-process-tools",
  "qaqh-sandbox",
  "qaqh-skills",
- "qaqh-spy",
  "qaqh-tool-core",
  "qaqh-types",
  "regex",
