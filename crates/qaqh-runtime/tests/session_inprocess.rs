@@ -75,6 +75,7 @@ fn session_spawns_inprocess_and_receives_created_event() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -115,15 +116,29 @@ fn session_spawns_inprocess_and_receives_created_event() {
     assert!(!registry.is_running(&session_id));
 }
 
+/// registry 已按领域拆成 `src/registry/*.rs`：取**包含 marker 的那一个**模块文件。
+fn registry_source_with(marker: &str) -> String {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let dir = format!("{root}/src/registry");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("read qaqh-runtime registry dir")
+        .map(|entry| entry.expect("registry dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| std::fs::read_to_string(path).expect("read registry source"))
+        .find(|text| text.contains(marker))
+        .unwrap_or_else(|| panic!("no registry module contains `{marker}`"))
+}
+
 #[test]
 fn session_spawn_has_no_process_spawn_in_source() {
-    let root = env!("CARGO_MANIFEST_DIR");
-    let source = std::fs::read_to_string(format!("{root}/src/registry.rs"))
-        .expect("read qaqh-runtime registry.rs");
+    let source = registry_source_with("fn spawn_with(");
     let body = source
         .lines()
         .skip_while(|line| !line.contains("fn spawn_with("))
-        .take_while(|line| !line.contains("/// 发送 Ringing worker 命令帧"))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -154,6 +169,7 @@ fn cross_session_cancel_does_not_leak() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -232,6 +248,7 @@ fn idle_unload_then_respawn_preserves_history() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -324,6 +341,7 @@ fn close_session_cleans_per_session_resident_state() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -384,6 +402,7 @@ fn session_new_never_reuses_an_existing_session_directory() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }

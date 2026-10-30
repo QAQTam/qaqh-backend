@@ -687,7 +687,7 @@ impl ToolManager {
                         }
                     }
                 }
-                "exec" | "git_commit" | "git_add" => {
+                "exec" => {
                     // These mutate the workspace but don't have a single 'path' argument
                 }
                 _ => {}

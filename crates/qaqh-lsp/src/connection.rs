@@ -476,7 +476,7 @@ impl ServerConnection {
             .take();
         #[cfg(unix)]
         if let Some(pgid) = pid {
-            // SAFETY：pgid 来自本连接 spawn 的独立进程组，不含 daemon 自身。
+            // SAFETY: pgid 来自本连接 spawn 的独立进程组，不含 daemon 自身。
             unsafe {
                 libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
             }

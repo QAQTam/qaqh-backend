@@ -14,7 +14,7 @@
 //! handler 通过 [`host`] 探测。宿主不可用（非 daemon 进程 / 单元测试）即
 //! spawn 失败——legacy HTTP/SSE 回连降级路径已随 PR-4-2 删除。
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use qaqh_ringing::RingingCommand;
@@ -603,21 +603,20 @@ pub trait SubagentHost: Send + Sync {
 }
 
 /// 进程级宿主安装位。多个 actor 并发调用 `host()` 读取；daemon 只安装一次。
-static HOST: OnceLock<Mutex<Option<Arc<dyn SubagentHost>>>> = OnceLock::new();
+///
+/// 只读语义：安装后**不可替换**，因此不需要 `Mutex<Option<…>>`——此前那把锁
+/// 只是为了让"首次安装生效、重复安装忽略"这条规则成立，而 `OnceLock::set`
+/// 本身就表达了这个规则。锁消失后，读取路径是一段无锁的 `Arc` 克隆。
+static HOST: OnceLock<Arc<dyn SubagentHost>> = OnceLock::new();
 
 /// 安装进程内宿主。重复安装被忽略（保留首次）。
 pub fn install_host(host: Arc<dyn SubagentHost>) {
-    let slot = HOST.get_or_init(|| Mutex::new(None));
-    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
-        *guard = Some(host);
+    if HOST.set(host).is_ok() {
         log::info!("[SUBAGENT] in-process subagent host installed");
     }
 }
 
 /// 读取已安装的宿主；未安装返回 `None`（调用方即报错——legacy HTTP/SSE 降级已随 PR-4-2 删除）。
 pub fn host() -> Option<Arc<dyn SubagentHost>> {
-    let slot = HOST.get()?;
-    let guard = slot.lock().ok()?;
-    guard.clone()
+    HOST.get().cloned()
 }

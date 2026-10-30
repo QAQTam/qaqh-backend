@@ -438,7 +438,10 @@ mod tests {
         );
 
         match previous {
+            // SAFETY: 集成测试单用途进程；本用例独占该环境变量（并发用例
+            // 各自使用独立的数据目录名，且此处只恢复本用例保存的旧值）。
             Some(v) => unsafe { std::env::set_var("QAQH_DATA_DIR", v) },
+            // SAFETY: 同上：恢复「原本未设置」的状态。
             None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
         }
         let _ = std::fs::remove_dir_all(&dir);

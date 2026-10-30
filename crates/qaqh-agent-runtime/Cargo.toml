@@ -1,0 +1,32 @@
+[package]
+name = "qaqh-agent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-session agent runtime: state machine, engines, provider/tool jobs (split out of qaqh-runtime)"
+
+[dependencies]
+qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
+qaqh-config = { path = "../qaqh-config" }
+qaqh-domain = { path = "../qaqh-domain" }
+qaqh-gate = { path = "../qaqh-gate" }
+qaqh-mcp = { path = "../qaqh-mcp" }
+qaqh-memwatch = { path = "../qaqh-memwatch" }
+qaqh-message = { path = "../qaqh-message" }
+qaqh-ringing = { path = "../qaqh-ringing" }
+qaqh-session = { path = "../qaqh-session" }
+qaqh-skills = { path = "../qaqh-skills" }
+qaqh-subagent = { path = "../qaqh-subagent" }
+qaqh-types = { path = "../qaqh-types" }
+qaqh-workspace = { path = "../qaqh-workspace" }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

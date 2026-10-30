@@ -212,7 +212,10 @@ default_tools = ["file", "exec"]
     write_config(&root, USER_CONFIG);
     let err = qaqh_config::Config::update(|_| Err("reject mutation".to_string()))
         .expect_err("mutation error must propagate");
-    assert_eq!(err, "reject mutation");
+    // 错误现在是类型化的：mutator 的 String 拒绝经 `ConfigError::Invalid` 收口，
+    // 文案不变，但调用方可以按变体分支。
+    assert!(err.is_invalid(), "unexpected variant: {err:?}");
+    assert_eq!(err.to_string(), "reject mutation");
     let unchanged = qaqh_config::Config::load().expect("reload ok");
     assert_eq!(unchanged.max_tokens, 324000, "failed update must not write");
 }

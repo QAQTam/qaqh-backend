@@ -166,13 +166,39 @@ impl BatchJournal {
         session_id: SessionId,
         log_id: LogId,
     ) -> Result<Self, CanonicalError> {
+        Self::open_with(session_dir, session_id, log_id, true)
+    }
+
+    /// Open the committed prefix **without** the single-writer lock.
+    ///
+    /// A view never truncates, repairs or syncs the journal: it only exposes the
+    /// prefix the marker already acknowledges, so it can run while the owning
+    /// write handle is alive. Use it for projection/replay/read-model paths.
+    pub fn open_view(
+        session_dir: impl AsRef<Path>,
+        session_id: SessionId,
+        log_id: LogId,
+    ) -> Result<Self, CanonicalError> {
+        Self::open_with(session_dir, session_id, log_id, false)
+    }
+
+    fn open_with(
+        session_dir: impl AsRef<Path>,
+        session_id: SessionId,
+        log_id: LogId,
+        writable: bool,
+    ) -> Result<Self, CanonicalError> {
         let dir = session_dir.as_ref().join(DIRECTORY);
         if fs::read(session_dir.as_ref().join(FORMAT_FILE))? != FORMAT.as_bytes() {
             return Err(CanonicalError::CommitRecoveryRequired(
                 "batch storage format mismatch".into(),
             ));
         }
-        let lock = lock(&dir)?;
+        let lock = if writable {
+            lock(&dir)?
+        } else {
+            OpenOptions::new().read(true).open(dir.join(LOCK))?
+        };
         let marker: Marker = serde_json::from_slice(&fs::read(dir.join(MARKER))?)?;
         if marker.format != FORMAT || marker.session_id != session_id || marker.log_id != log_id {
             return Err(CanonicalError::CommitRecoveryRequired(
@@ -294,15 +320,18 @@ impl BatchJournal {
             ));
         }
         // Only the verified marker is authoritative; never promote a complete tail.
-        if length != marker.offset {
-            file.set_len(marker.offset)?;
+        // A read-only view must not repair: it just ignores bytes past the marker.
+        if writable {
+            if length != marker.offset {
+                file.set_len(marker.offset)?;
+            }
+            // Reconcile a possibly observed rename whose directory sync failed:
+            // the visible marker is not a durable acknowledgment until both it
+            // and its directory have been synchronized successfully.
+            file.sync_all()?;
+            File::open(dir.join(MARKER))?.sync_all()?;
+            sync_dir(&dir)?;
         }
-        // Reconcile a possibly observed rename whose directory sync failed:
-        // the visible marker is not a durable acknowledgment until both it
-        // and its directory have been synchronized successfully.
-        file.sync_all()?;
-        File::open(dir.join(MARKER))?.sync_all()?;
-        sync_dir(&dir)?;
         Ok(Self {
             dir,
             session_id,
@@ -635,6 +664,40 @@ impl BatchJournal {
 pub enum BatchReadError<E> {
     Storage(CanonicalError),
     Visitor(E),
+}
+
+/// True when `session_dir` is owned by the isolated batch journal.
+pub fn is_batch_root(session_dir: &Path) -> bool {
+    session_dir.join(FORMAT_FILE).exists()
+}
+
+/// Read the committed prefix of a batch-journal session without taking the
+/// writer lock. This is the read-side counterpart of [`BatchJournal::open`]
+/// for projection, replay and agent-graph rebuilds.
+pub fn read_committed_facts(
+    session_dir: impl AsRef<Path>,
+    session_id: SessionId,
+    log_id: LogId,
+) -> Result<Vec<SessionFact>, CanonicalError> {
+    let session_dir = session_dir.as_ref();
+    if !is_batch_root(session_dir) {
+        return Err(CanonicalError::CommitRecoveryRequired(format!(
+            "{} is not a batch journal root",
+            session_dir.display()
+        )));
+    }
+    let journal = BatchJournal::open_view(session_dir, session_id, log_id)?;
+    let mut facts = Vec::new();
+    journal
+        .visit_committed(|batch| {
+            facts.extend_from_slice(batch);
+            Ok::<(), CanonicalError>(())
+        })
+        .map_err(|error| match error {
+            BatchReadError::Storage(error) => error,
+            BatchReadError::Visitor(error) => error,
+        })?;
+    Ok(facts)
 }
 
 fn lock(dir: &Path) -> Result<File, CanonicalError> {

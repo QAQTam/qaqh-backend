@@ -6,34 +6,27 @@ license.workspace = true
 description = "GUI-independent QAQ-Harness daemon application runtime"
 
 [dependencies]
+qaqh-agent-runtime = { path = "../qaqh-agent-runtime" }
+qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
 qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-config-api = { path = "../qaqh-config-api" }
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-lsp = { path = "../qaqh-lsp" }
-qaqh-message = { path = "../qaqh-message" }
-qaqh-policy = { path = "../qaqh-policy" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-subagent = { path = "../qaqh-subagent" }
-qaqh-title = { path = "../qaqh-title" }
-qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-workspace = { path = "../qaqh-workspace" }
-qaqh-spy = { path = "../qaqh-spy" }
-qaqh-gate = { path = "../qaqh-gate" }
-unicode-normalization = "0.1"
-qaqh-skills = { path = "../qaqh-skills" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-profile = { path = "../qaqh-profile" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
+sha2 = "0.11"
+thiserror = "2"
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 log = "0.4"
-chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
-ureq = { version = "3", features = ["json"] }
 # Sign in with ChatGPT（套餐用量）：服务面 `siwc.*` 的全部实现。
 qaqh-siwc = { path = "../qaqh-siwc" }
 qaqh-dsaccount = { path = "../qaqh-dsaccount" }
@@ -41,7 +34,7 @@ tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 
 [features]
 default = ["memory"]
-ts = ["dep:ts-rs", "qaqh-types/ts", "qaqh-domain/ts", "qaqh-siwc/ts", "qaqh-dsaccount/ts"]
+ts = ["dep:ts-rs", "qaqh-types/ts", "qaqh-domain/ts", "qaqh-ringing-runtime/ts", "qaqh-siwc/ts", "qaqh-dsaccount/ts"]
 # Kept as a compatibility no-op after removing the experimental vector backend.
 memory = []
 
@@ -65,7 +58,11 @@ rmcp = { workspace = true, features = ["transport-io", "server"] }
 qaqh-client = { path = "../qaqh-client" }
 # 仅测试用：`ask_user_lifecycle` 直接驱动 `model_tool_plan` 的输入适配器
 # 断言 plan 冻结后的参数形状；runtime 本体不依赖 tool-core。
-qaqh-tool-core = { path = "../qaqh-tool-core" }
+# 需要 `native-tool-plan`：该子系统默认不编译（生产未接线），测试要直接驱动它。
+qaqh-tool-core = { path = "../qaqh-tool-core", features = ["native-tool-plan"] }
+# 集成测试里构造 mock 模型流与消息断言；core 本体不直接使用。
+qaqh-gate = { path = "../qaqh-gate" }
+qaqh-message = { path = "../qaqh-message" }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"

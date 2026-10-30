@@ -1615,6 +1615,7 @@ fn tool_result_image_ref_is_lowered_to_data_uri() {
     // A-2 L0：消息里只带 ImageRef 索引；gate 构建请求时读盘物化为 data URI。
     let tmp = std::env::temp_dir().join(format!("qaqh-gate-img-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
+    // SAFETY: 集成测试进程单用途；该变量只被本用例读取，进程退出即失效。
     unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
 
     let b64 = "aGVsbG8gcXNxai1pbWFnZQ==";
@@ -1658,6 +1659,7 @@ fn tool_result_image_ref_is_lowered_to_data_uri() {
         "ImageRef must be materialized to a data URI on the wire"
     );
 
+    // SAFETY: 同上方 set_var：本用例独占进程环境，恢复旧值后无并发读者。
     unsafe { std::env::remove_var("QAQH_DATA_DIR") };
     let _ = std::fs::remove_dir_all(&tmp);
 }

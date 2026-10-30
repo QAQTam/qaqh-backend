@@ -1,8 +1,12 @@
 [package]
 name = "qaqh-import"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# 本 crate 当前**未接线**（全仓 0 调用者），已从根 `[workspace] members` 移入
+# `exclude`：不再参与 `cargo check --workspace`。因此这里写死 workspace 的
+# version/edition/license（不能再用 `.workspace = true`，exclude 后没有 workspace
+# 可继承）。接线时：改回三处 `.workspace = true`，并把本 crate 移回 members。
+version = "2.0.20261028"
+edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Loss-preserving external transcript capture and normalization"
 
 [dependencies]
@@ -15,5 +19,4 @@ tempfile = "3"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
-[lints]
-workspace = true
+# [lints] workspace = true —— exclude 后无法继承，接线时恢复。

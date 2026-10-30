@@ -18,16 +18,15 @@ pub struct ToolExecResult {
     pub meta: crate::ToolExecMeta,
     pub code_delta: Option<qaqh_domain::CodeDeltaRecord>,
     pub skill_effects: Vec<crate::ToolEffect>,
-    /// exec 调用级归因（CLEAN-3/T9）：`exec_audit` 双扫测得、已记入 SMJ
-    /// （tool=exec）并刷新 file_state 的路径账本键。批级审计据此去重。
-    /// 非 exec 工具恒为空。
-    pub attributed_paths: Vec<String>,
 }
 
 /// Consume an authorization proof and dispatch the bound handler.
 ///
-/// Legacy adapter: reconstruct an explicit context from the current ambient
-/// state, preserving the pre-P2-4d entry point for CLI/tests/older callers.
+/// **测试专用**：从当前线程的 ambient 状态重建显式上下文，复刻 P2-4d 之前的入口
+/// 形态。生产路径（`qaqh-agent-runtime` 的 tool job）走
+/// [`execute_authorized_with_context`]；`execute_with_context` 也不再经这里往返
+/// （2026-10-31）。保留它只为让本文件的单元测试继续覆盖 admission → 执行的完整链路。
+#[cfg(test)]
 #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项（闭包返回大 Err）
 pub fn execute_authorized(
     call: AuthorizedToolCall,
@@ -233,7 +232,6 @@ pub fn execute_authorized_with_context(
                 meta: report.meta,
                 code_delta: None,
                 skill_effects: Vec::new(),
-                attributed_paths: Vec::new(),
             };
         }
         None => {
@@ -339,9 +337,6 @@ pub fn execute_authorized_with_context(
         }
     }
 
-    let exec_audit = (category == crate::permission::ToolCategory::Exec)
-        .then(|| crate::exec_audit::begin(&context.workspace_root, &call_id, &session_id))
-        .flatten();
     let (mut tool_result, skill_effects) = {
         match prepared.executor.clone().execute(exec_ctx, args.clone()) {
             Ok(outcome) => {
@@ -362,10 +357,6 @@ pub fn execute_authorized_with_context(
             }
         }
     };
-    // CLEAN-3（T9）：exec 是归因盲区——权限面只取 cwd、journal 无调用方，
-    // 脚本改了什么只有事后扫描知道。在真实执行点前后双扫，把净变更精确
-    // 归因到本 call_id（SMJ tool=exec + file_state 账本刷新）。
-    let attributed_paths = exec_audit.map(|a| a.finish()).unwrap_or_default();
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
     crate::tool_side_fold::apply(&name, &mut tool_result);
@@ -442,7 +433,6 @@ pub fn execute_authorized_with_context(
                 meta: report.meta,
                 code_delta,
                 skill_effects,
-                attributed_paths,
             };
             if let Err(e) = crate::audit::append_audit(&audit_entry) {
                 log::error!("audit: append failed for {name}: {e}");
@@ -558,7 +548,56 @@ pub fn execute_with_context(
         &workspace_root,
         &HashSet::new(),
     ) {
-        Admission::Authorized(authorized) => execute_authorized(authorized, progress_tx),
+        Admission::Authorized(authorized) => {
+            // 显式上下文的收口：直接把它落成 `ToolCallContext`，不再经
+            // `execute_authorized`（ambient 适配器）把 `install_tool_ctx` 刚写进
+            // 线程局部的值再读回来。那条往返不但白跑一次，还让两个入口在
+            // 「workspace / mode / cancel 由谁决定」上分叉。
+            let permission_level = PermissionLevel::from_u8(ctx.permission_level);
+            let cancellation = CancellationToken::new();
+            if crate::is_cancel() {
+                cancellation.cancel();
+            }
+            // 与旧 ambient 适配器逐字等价：进程级工作区为空/`"."` 时回落到
+            // 授权凭证自带的 root，否则用 `admit` 那一侧解析出的 root。
+            let context_workspace = {
+                let workspace = crate::current_workspace();
+                if workspace.is_empty() || workspace == "." {
+                    authorized.workspace_root().to_path_buf()
+                } else {
+                    workspace_root.clone()
+                }
+            };
+            let context = ToolCallContext {
+                call_id: authorized.call_id().to_string(),
+                session_id: ctx.session_id.clone(),
+                workspace_root: context_workspace.clone(),
+                mode: if ctx.mode == 1 {
+                    AgentMode::Plan
+                } else {
+                    AgentMode::Code
+                },
+                permission_level,
+                sandbox: if crate::authorization::is_subagent_sandbox() {
+                    SandboxMode::Subagent
+                } else {
+                    SandboxMode::Main
+                },
+                sandbox_spec: crate::tool_api::SandboxSpec::for_permission(
+                    context_workspace,
+                    permission_level,
+                    true,
+                ),
+                exec_default_shell: None,
+                timeout: Duration::ZERO,
+                cancellation,
+                progress: None,
+                exec_progress: None,
+                official_web: None,
+                source: ToolCallSource::Model,
+            };
+            execute_authorized_with_context(authorized, context, progress_tx)
+        }
         Admission::ApprovalRequired(challenge) => {
             let error = crate::ToolError::PermissionDenied {
                 reason: challenge.reason().to_string(),
@@ -649,7 +688,6 @@ fn failure(name: &str, error: crate::ToolError) -> ToolExecResult {
         },
         code_delta: None,
         skill_effects: Vec::new(),
-        attributed_paths: Vec::new(),
     }
 }
 

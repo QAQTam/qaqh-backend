@@ -12,13 +12,13 @@ members = [
     "crates/qaqh-siwc",
     "crates/qaqh-dsaccount",
     "crates/qaqh-memwatch",
+    "crates/qaqh-agent-runtime",
+    "crates/qaqh-ringing-runtime",
     "crates/qaqh-runtime",
     "crates/qaqh-agentloop-core",
     "crates/qaqh-ringing",
     "crates/qaqh-ringing-contract",
     "crates/qaqh-daemon",
-    "crates/qaqh-fs-core",
-    "crates/qaqh-git",
     "crates/qaqh-permission",
     "crates/qaqh-file-tools",
     "crates/qaqh-process-tools",
@@ -27,11 +27,8 @@ members = [
     "crates/qaqh-sandbox",
     "crates/qaqh-tool-core",
     "crates/qaqh-workspace",
-    "crates/qaqh-spy",
     "crates/qaqh-session",
-    "crates/qaqh-import",
     "crates/qaqh-subagent",
-    "crates/qaqh-title",
     "crates/qaqh-client",
     "crates/qaqh-mcp",
     "crates/qaqh-lsp",
@@ -40,6 +37,10 @@ members = [
     "crates/sbx-cli",
     "tools/qaqh-contract-export",
 ]
+
+# 未接线 crate：功能源码保留，但不参与构建。
+# qaqh-import = 外部 transcript 导入（全仓 0 调用者）；接线时移回 members。
+exclude = ["crates/qaqh-import"]
 
 [workspace.dependencies]
 mutil-ai = { version = "0.7.0", path = "../mutil-ai" }
@@ -61,3 +62,5 @@ codegen-units = 1
 [workspace.lints.clippy]
 unwrap_used = "deny"
 string_slice = "deny"
+# 每个 unsafe 块必须给出 SAFETY 依据（见 docs/adr 与各 crate 的 SAFETY 注释）。
+undocumented_unsafe_blocks = "deny"

@@ -2,7 +2,7 @@
 # 用法: just [recipe]
 #
 # 项目结构:
-#   crates/          Rust 后端 (17 crates)
+#   crates/          Rust 后端 (35 crates；crates/qaqh-import 未接线，已 exclude)
 #
 # 说明：跨平台桌面客户端为同级仓库 qaqh-electron（Linux 及多端第一公民）；
 # 本仓库只保留跨平台后端核心与公共 SDK。

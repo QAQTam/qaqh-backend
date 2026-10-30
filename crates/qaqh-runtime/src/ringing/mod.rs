@@ -1,32 +1,14 @@
-//! Ringing daemon 运行时（Projection/队列 层）。
+//! Ringing 服务面（方法表 + wire DTO + `dispatch`）。
 //!
-//! - `projection`：持久化消息 → UI turn 投影
-//! - `hub`：daemon 侧 Ringing 运行时聚合入口 `RingingHub`
+//! 传输 / 投影 / 队列层已于 2026-10-30 外移到 `qaqh-ringing-runtime`
+//! （`v2`、`content_store`、`pending_store`、`lease_store`、`hub`、`projection`、
+//! `device_registry`、`compact_mirror`、`operation_failure`、`attachment`、
+//! `agent_graph`）。这里 `pub use` 它，保持
+//! `crate::ringing::V2ProjectionHub`、`qaqh_runtime::ringing::*` 等既有路径不变。
+//!
+//! 留在本模块的只有需要 `QaqhService` 的那一层：方法表（`METHODS` /
+//! `TYPED_METHODS`）、逐方法 DTO、以及 `dispatch`。
 
-pub mod attachment;
-pub(crate) mod compact_mirror;
-pub mod content_store;
-pub mod device_registry;
-pub mod hub;
-pub mod lease_store;
-pub(crate) mod operation_failure;
-pub mod pending_store;
-pub mod projection;
+pub use qaqh_ringing_runtime::*;
+
 pub mod service_methods;
-pub mod v2;
-
-pub use attachment::hydrate_attachment_previews;
-pub(crate) use compact_mirror::CompactMirror;
-pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
-pub use device_registry::{DeviceRecord, DeviceRegistry, Scope};
-pub use lease_store::RingingLeaseStore;
-pub(crate) use operation_failure::publish_operation_failure;
-pub use pending_store::{ExistingCommandReceipt, PendingCommandStore};
-pub use v2::{
-    V2BootstrapSnapshot, V2Envelope, V2HubError, V2ProjectionHub, V2StreamItem, V2Subscription,
-};
-
-// PR-2-3 模块规则 1（R-4）：ringing/ 的对外消费面收敛为上方 re-export
-// 白名单；`ringing/` 之外的模块禁止深路径引用（如 `ringing::content_store::*`），
-// 需要新条目时先在此登记再使用。评审检查单：ringing/ 之外 `crate::ringing::`
-// 命中必须全为白名单路径；`crates/qaqh-runtime/src/agent/` 内命中必须为 0。

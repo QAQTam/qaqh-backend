@@ -65,23 +65,6 @@ pub enum QueryRequest {
     PlanRead {
         session_id: String,
     },
-    /// Git working tree 状态（daemon `git.diff`）。
-    GitDiff {
-        session_id: String,
-    },
-    /// 当前 Git 分支（daemon `git.branch`）。
-    GitBranch {
-        session_id: String,
-    },
-    /// Git 分支列表（daemon `git.branches`）。
-    GitBranches {
-        session_id: String,
-    },
-    /// 单文件 Git diff（daemon `git.file_diff`）。
-    GitFileDiff {
-        session_id: String,
-        file_path: String,
-    },
 }
 
 impl QueryRequest {
@@ -110,18 +93,6 @@ impl QueryRequest {
                 ("session.meta", json!({ "session_id": session_id }))
             }
             Self::PlanRead { session_id } => ("plan.read", json!({ "session_id": session_id })),
-            Self::GitDiff { session_id } => ("git.diff", json!({ "session_id": session_id })),
-            Self::GitBranch { session_id } => ("git.branch", json!({ "session_id": session_id })),
-            Self::GitBranches { session_id } => {
-                ("git.branches", json!({ "session_id": session_id }))
-            }
-            Self::GitFileDiff {
-                session_id,
-                file_path,
-            } => (
-                "git.file_diff",
-                json!({ "session_id": session_id, "file_path": file_path }),
-            ),
         }
     }
 }
@@ -211,17 +182,6 @@ pub enum ActionRequest {
         /// boundary against the *parent's* workspace.
         workspace: Option<String>,
     },
-    /// 切换 Git 分支（daemon `git.switch_branch`）。
-    GitSwitchBranch {
-        session_id: String,
-        branch: String,
-        stash: bool,
-    },
-    /// 提交当前 Git working tree（daemon `git.commit`）。
-    GitCommit {
-        session_id: String,
-        message: String,
-    },
 }
 
 impl ActionRequest {
@@ -310,21 +270,6 @@ impl ActionRequest {
                 }
                 ("subagent.spawn", params)
             }
-            Self::GitSwitchBranch {
-                session_id,
-                branch,
-                stash,
-            } => (
-                "git.switch_branch",
-                json!({ "session_id": session_id, "branch": branch, "stash": stash }),
-            ),
-            Self::GitCommit {
-                session_id,
-                message,
-            } => (
-                "git.commit",
-                json!({ "session_id": session_id, "message": message }),
-            ),
         }
     }
 }
@@ -356,32 +301,6 @@ mod tests {
         .into_parts();
         assert_eq!(name, "workspace.set");
         assert_eq!(params["session_id"], "s1");
-    }
-
-    #[test]
-    fn git_write_variants_are_actions() {
-        let (name, params) = ActionRequest::GitSwitchBranch {
-            session_id: "s".into(),
-            branch: "main".into(),
-            stash: true,
-        }
-        .into_parts();
-        assert_eq!(name, "git.switch_branch");
-        assert_eq!(
-            params,
-            json!({ "session_id": "s", "branch": "main", "stash": true })
-        );
-
-        let (name, params) = ActionRequest::GitCommit {
-            session_id: "s".into(),
-            message: "checkpoint".into(),
-        }
-        .into_parts();
-        assert_eq!(name, "git.commit");
-        assert_eq!(
-            params,
-            json!({ "session_id": "s", "message": "checkpoint" })
-        );
     }
 
     #[test]
@@ -428,19 +347,6 @@ mod tests {
             QueryRequest::PlanRead {
                 session_id: "s".into(),
             },
-            QueryRequest::GitDiff {
-                session_id: "s".into(),
-            },
-            QueryRequest::GitBranch {
-                session_id: "s".into(),
-            },
-            QueryRequest::GitBranches {
-                session_id: "s".into(),
-            },
-            QueryRequest::GitFileDiff {
-                session_id: "s".into(),
-                file_path: "f".into(),
-            },
         ];
         for request in requests {
             let (name, params) = request.into_parts();
@@ -471,15 +377,6 @@ mod tests {
                 tool_mode: "minimal".into(),
                 custom_tools: vec![],
             },
-            ActionRequest::GitSwitchBranch {
-                session_id: "s".into(),
-                branch: "main".into(),
-                stash: false,
-            },
-            ActionRequest::GitCommit {
-                session_id: "s".into(),
-                message: "m".into(),
-            },
         ];
         for action in actions {
             let (name, params) = action.into_parts();
@@ -506,45 +403,10 @@ mod tests {
                 },
                 "plan.read",
             ),
-            (
-                QueryRequest::GitDiff {
-                    session_id: "s".into(),
-                },
-                "git.diff",
-            ),
-            (
-                QueryRequest::GitBranch {
-                    session_id: "s".into(),
-                },
-                "git.branch",
-            ),
-            (
-                QueryRequest::GitBranches {
-                    session_id: "s".into(),
-                },
-                "git.branches",
-            ),
-            (
-                QueryRequest::GitFileDiff {
-                    session_id: "s".into(),
-                    file_path: "src/lib.rs".into(),
-                },
-                "git.file_diff",
-            ),
         ] {
             assert_eq!(request.into_parts().0, expected_name);
         }
 
-        let (name, params) = QueryRequest::GitFileDiff {
-            session_id: "s".into(),
-            file_path: "src/lib.rs".into(),
-        }
-        .into_parts();
-        assert_eq!(name, "git.file_diff");
-        assert_eq!(
-            params,
-            json!({ "session_id": "s", "file_path": "src/lib.rs" })
-        );
     }
 
     /// **变体清单 + 穷举闸（G3）**：Rust 的枚举无法被迭代，清单只能手写。
@@ -582,19 +444,6 @@ mod tests {
             QueryRequest::PlanRead {
                 session_id: "s".into(),
             },
-            QueryRequest::GitDiff {
-                session_id: "s".into(),
-            },
-            QueryRequest::GitBranch {
-                session_id: "s".into(),
-            },
-            QueryRequest::GitBranches {
-                session_id: "s".into(),
-            },
-            QueryRequest::GitFileDiff {
-                session_id: "s".into(),
-                file_path: "src/lib.rs".into(),
-            },
         ];
         // 穷举闸：上面的清单必须覆盖全部变体，否则这里编译失败。
         for q in &all {
@@ -609,11 +458,7 @@ mod tests {
                 | QueryRequest::SessionDashboard { .. }
                 | QueryRequest::TodoStatus { .. }
                 | QueryRequest::SessionMeta { .. }
-                | QueryRequest::PlanRead { .. }
-                | QueryRequest::GitDiff { .. }
-                | QueryRequest::GitBranch { .. }
-                | QueryRequest::GitBranches { .. }
-                | QueryRequest::GitFileDiff { .. } => {}
+                | QueryRequest::PlanRead { .. } => {}
             }
         }
         all
@@ -670,15 +515,6 @@ mod tests {
                 max_tokens: None,
                 workspace: None,
             },
-            ActionRequest::GitSwitchBranch {
-                session_id: "s".into(),
-                branch: "main".into(),
-                stash: false,
-            },
-            ActionRequest::GitCommit {
-                session_id: "s".into(),
-                message: "checkpoint".into(),
-            },
         ];
         // 穷举闸：见 all_query_requests。
         for a in &all {
@@ -698,9 +534,7 @@ mod tests {
                 | ActionRequest::WorkspaceMoveSession { .. }
                 | ActionRequest::WorkspaceDetach { .. }
                 | ActionRequest::SessionSetToolMode { .. }
-                | ActionRequest::SubagentSpawn { .. }
-                | ActionRequest::GitSwitchBranch { .. }
-                | ActionRequest::GitCommit { .. } => {}
+                | ActionRequest::SubagentSpawn { .. } => {}
             }
         }
         all
@@ -746,12 +580,15 @@ mod tests {
             assert_route_shape(name);
             assert!(seen.insert(name), "重复的 {kind} 路由: {name}");
         }
-        // 两个枚举**合计** 33 条路由。条数写死是刻意的：它与上面两份清单一起
+        // 两个枚举**合计** 27 条路由。条数写死是刻意的：它与上面两份清单一起
         // 构成「新增/删除方法必须显式过一次」的检查点。
         // 34 → 35：新增 `session.set_profile`（会话级 profile 选择，走既有
         // catch-all `POST /ringing/v2/service/{method}`，无新路由类型）。
         // 35 → 33：退役 `plan.context_stats` 与 `stats.token_usage`——前者的
         // 估算口径已被每轮 usage 真值取代，后者的 token_stats.jsonl 日报无消费者。
-        assert_eq!(seen.len(), 33, "服务面路由总数变了——确认是新增而非改错");
+        // 33 → 27：删除 `git.*` 六个方法（diff/branch/branches/file_diff/
+        // switch_branch/commit）——桌面端从未接线该面板，见
+        // `qaqh-runtime/src/service/handlers/workspace.rs` 模块注释。
+        assert_eq!(seen.len(), 27, "服务面路由总数变了——确认是新增而非改错");
     }
 }

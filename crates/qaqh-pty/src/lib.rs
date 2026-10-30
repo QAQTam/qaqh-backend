@@ -356,6 +356,8 @@ pub fn spawn_pipe(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
             return Err(err);
         }
         std::thread::spawn(move || {
+            // SAFETY: `write_dup` 是本线程独有的 dup 写端，未包装给任何其它所有权；
+            // 交给 `File` 独占接管，线程结束时 drop 即关闭。
             let mut writer = unsafe { std::fs::File::from_raw_fd(write_dup) };
             let mut reader = source;
             let _ = std::io::copy(&mut reader, &mut writer);
@@ -366,6 +368,8 @@ pub fn spawn_pipe(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     // SAFETY: 归还我们独有且尚未包装的 fd，立即关闭。
     unsafe { libc::close(write_fd) };
 
+    // SAFETY: `read_fd` 由 `pipe2` 创建后尚未包装，本函数持有唯一所有权；
+    // 交给 `File` 接管，随 `SpawnedSession` drop 关闭。
     let reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
     let writer = child
         .stdin

@@ -6,7 +6,6 @@ use super::ToolManager;
 use super::exec;
 // use super::journal;
 use super::read_image;
-// use super::spy_tool;
 use super::web;
 
 use super::apply_patch;
@@ -73,7 +72,6 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     read_image::register(&mut mgr);
 
     // journal::register(&mut mgr); (retired from model tool surface)
-    // spy_tool::register(&mut mgr); (retired from model tool surface)
 
     // ── 进程巡查 ──
     process_inspect::register(&mut mgr);

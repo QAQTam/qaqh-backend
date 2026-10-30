@@ -570,11 +570,11 @@ pub(crate) fn empty_stream_retry(
             return Err(anyhow::anyhow!("cancelled by user"));
         }
         let mut trace = SseTrace::from_env();
-        let callback = on_event as *mut dyn FnMut(StreamEvent);
-        // SAFETY: trace wrapper borrows callback for duration of this fn
         let mut traced = |event: StreamEvent| {
             trace.record(&event);
-            unsafe { (*callback)(event) };
+            // 直接用 `&mut` 借用回调：闭包只在本次尝试内活着，
+            // 由 `run_attempt` 同步调用，不需要（也不再需要）裸指针。
+            on_event(event)
         };
         match run_attempt(&mut traced) {
             Outcome::Completed => return Ok(()),
