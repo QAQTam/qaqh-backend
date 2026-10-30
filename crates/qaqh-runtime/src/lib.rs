@@ -13,6 +13,7 @@ pub mod subagent_recovery;
 mod subagent_supervisor;
 pub(crate) mod test_hooks;
 pub mod tool_job;
+mod session_meta;
 mod support;
 
 pub use activity::SessionActivityTracker;

@@ -1,8 +1,7 @@
-//! SessionManager — session metadata, index and directory ownership.
+//! SessionManager — session directories, listing index and locks.
 //!
 //! Stores each session as:
 //!   {sessions_dir}/{seed}/
-//!     meta.json       — SessionMeta (atomic replace-write)
 //!
 //! A central `index.jsonl` enables fast listing. Message bytes are **not** this
 //! module's business any more: the committed facts in the batch journal are the
@@ -128,10 +127,6 @@ impl SessionManager {
     /// Delete a session: removes the session directory and its index entry.
     pub fn delete(&self, session_id: &str) -> Result<(), String> {
         let dir = self.session_path_dir(session_id);
-        // 水位缓存按**目录路径**键控（不依赖目录是否存在），所以失效必须
-        // 先于删除、且不因目录查询失败而跳过——否则同 seed 重建会读到旧
-        // 水位，把新会话的低 msg_id 首批全部误判为已归档。
-        store::invalidate_watermark(&dir);
         let dir = self
             .session_dir(session_id)
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
@@ -199,37 +194,24 @@ impl SessionManager {
     /// 旧 `workspace.txt` 惰性迁移（原子写 meta + 删 txt，两进程竞争幂等）。
     /// 宿主（agent loop / service）经注入句柄调用后把值注入 workspace。
     pub fn workspace_cwd(&self, session_id: &str) -> Option<String> {
-        let meta = self.load_meta(session_id)?;
-        if let Some(cwd) = meta.cwd.as_deref().filter(|c| !c.is_empty()) {
-            // 存量修复：历史版本在非 Windows 上写入的 `\` 形态（事故
-            // 692d1605 meta.json 反斜杠 cwd，2026-09-06 排查项）。
-            return Some(crate::grouping::repair_legacy_backslash_cwd(cwd));
-        }
-        // 惰性迁移：旧 workspace.txt → meta.cwd
-        let txt_path = qaqh_types::platform::sessions_dir()
-            .join(session_id)
-            .join("workspace.txt");
-        let legacy = std::fs::read_to_string(&txt_path).ok()?;
-        let legacy = legacy.trim().to_string();
-        if legacy.is_empty() {
+        // Journal first; the index entry covers the window between allocation
+        // and the first committed fact (creation order: dir -> index -> journal).
+        let cwd = self
+            .load_meta(session_id)
+            .and_then(|meta| meta.cwd)
+            .or_else(|| {
+                store::read_index(&self.sessions_dir)
+                    .into_iter()
+                    .find(|meta| meta.session_id == session_id)
+                    .and_then(|meta| meta.cwd)
+            })?;
+        if cwd.is_empty() {
             return None;
         }
-        let canonical = crate::grouping::canonical_cwd(std::path::Path::new(&legacy));
-        self.set_cwd(session_id, &canonical, true);
-        let _ = std::fs::remove_file(&txt_path);
-        Some(canonical)
+        Some(crate::grouping::repair_legacy_backslash_cwd(&cwd))
     }
 
-    /// Persist agent mode to meta.json without rewriting messages.
-    /// Called when the user switches PLAN/CODE mode so it survives agent restart.
-    pub fn persist_mode(&self, session_id: &str, mode: u8) {
-        self.with_meta_locked(session_id, false, |dir, meta| {
-            meta.mode = mode;
-            let _ = store::write_meta(dir, meta);
-        });
-    }
-
-    /// 会话选定的 BYOK profile 名（meta.json）。`None`/空 = 跟随全局
+    /// 会话选定的 BYOK profile 名（journal 里的 `profile`）。`None`/空 = 跟随全局
     /// `active_profile`。宿主（agent loop / service）经注入句柄调用。
     pub fn session_profile(&self, session_id: &str) -> Option<String> {
         self.load_meta(session_id)?
@@ -237,150 +219,10 @@ impl SessionManager {
             .filter(|name| !name.is_empty())
     }
 
-    /// 写入会话 profile（不重写 messages）。已加载的 agent 需要另行触发重载
-    /// （`AgentReloadConfig`）才会生效。
-    pub fn persist_profile(&self, session_id: &str, profile: Option<&str>) {
-        self.with_meta_locked(session_id, false, |dir, meta| {
-            meta.profile = profile.filter(|name| !name.is_empty()).map(str::to_owned);
-            let _ = store::write_meta(dir, meta);
-        });
-    }
-
     pub fn session_effort(&self, session_id: &str) -> Option<String> {
         self.load_meta(session_id)?
             .effort
             .filter(|eff| !eff.is_empty())
-    }
-
-    /// 写入会话思考强度 effort（不重写 messages）。
-    pub fn persist_effort(&self, session_id: &str, effort: Option<&str>) {
-        self.with_meta_locked(session_id, false, |dir, meta| {
-            meta.effort = effort.filter(|eff| !eff.is_empty()).map(str::to_owned);
-            meta.updated_at = Self::now_epoch();
-            let _ = store::write_meta(dir, meta);
-        });
-    }
-
-    /// Persist tool mode (standard/minimal/custom) to meta.json without
-    /// rewriting messages — survives agent restart (PLAN-TOOL-MODES.md 4.3).
-    ///
-    /// 锁死检查点（CK-PERSIST）：写盘/索引失败不再静默吞掉，而是向上返回，
-    /// 让 `session.set_tool_mode` action 返回 400 —— 前端据此回滚乐观值，
-    /// 避免「UI 显示极简、meta.json 其实没写进去，重启后回到标准」。
-    /// 空串统一规范化为 "standard"（旧会话零迁移语义显式落盘）。
-    pub fn persist_tool_mode(
-        &self,
-        session_id: &str,
-        tool_mode: &str,
-        custom_tools: &[String],
-    ) -> Result<(), String> {
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            let normalized = if tool_mode.is_empty() {
-                "standard"
-            } else {
-                tool_mode
-            };
-            meta.tool_mode = normalized.to_string();
-            meta.custom_tools = custom_tools.to_vec();
-            meta.updated_at = Self::now_epoch();
-            store::write_meta(dir, meta)?;
-            store::upsert_index(&self.sessions_dir, meta);
-            log::info!(
-                "[TOOL MODE] persisted {normalized} for {session_id} ({} custom tools)",
-                custom_tools.len()
-            );
-            Ok(())
-        })
-    }
-
-    pub fn persist_skills(&self, session_id: &str, skills: qaqh_types::SkillSessionStateV2) {
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            let now = Self::now_epoch();
-            meta.session_id = session_id.to_string();
-            if meta.created_at == 0 {
-                meta.created_at = now;
-            }
-            meta.updated_at = now;
-            meta.skills = skills;
-            let _ = store::write_meta(dir, meta);
-            store::upsert_index(&self.sessions_dir, meta);
-        });
-    }
-
-    /// Persist the frozen [Environment] annotation (P0 cache fix). Written
-    /// once per session by the agent loop, replayed into `AgentState` on
-    /// resume so the first user message keeps its byte-identical prefix.
-    pub fn persist_frozen_annotation(&self, session_id: &str, annotation: &str) {
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            let now = Self::now_epoch();
-            meta.session_id = session_id.to_string();
-            if meta.created_at == 0 {
-                meta.created_at = now;
-            }
-            meta.updated_at = now;
-            meta.frozen_annotation = Some(annotation.to_string());
-            let _ = store::write_meta(dir, meta);
-            store::upsert_index(&self.sessions_dir, meta);
-        });
-    }
-
-    /// 设置会话归档标记（标签 × 归档 / 左侧列表恢复）。
-    /// 仅改 meta.json（atomic replace-write），不触碰消息文件与 registry
-    /// 实例——实例启停由调用方（daemon 拦截层）负责。
-    pub fn set_archived(&self, session_id: &str, archived: bool) {
-        self.with_meta_locked(session_id, false, |dir, meta| {
-            if meta.session_id.is_empty() {
-                meta.session_id = session_id.to_string();
-            }
-            meta.archived = archived;
-            meta.updated_at = Self::now_epoch();
-            let _ = store::write_meta(dir, meta);
-            store::upsert_index(&self.sessions_dir, meta);
-        });
-    }
-
-    /// 设置会话运行环境工作目录（`workspace.set` / 子代理继承）。
-    /// 统一数据源：`SessionMeta.cwd`——旧的 `sessions/{seed}/workspace.txt`
-    /// 已退役（读取侧惰性迁移，见 [`Self::workspace_cwd`]）。
-    /// 仅改 meta.json（atomic replace-write）；`index` 控制是否同步会话索引
-    /// （子代理 ephemeral，不进列表）。
-    pub fn set_cwd(&self, session_id: &str, cwd: &str, index: bool) {
-        // 空 cwd 双保险：canonical_cwd("") = "" 会清掉已有工作区（前端重启后
-        // 回空 cwd 的 bug 通道）；空串直接忽略，永不破坏现有归属。
-        if cwd.trim().is_empty() {
-            return;
-        }
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            if meta.session_id.is_empty() {
-                meta.session_id = session_id.to_string();
-            }
-            meta.cwd = Some(crate::grouping::canonical_cwd(std::path::Path::new(cwd)));
-            // 非索引会话（子代理继承 workspace 等临时场景）= 临时会话：关闭时
-            // 整个目录删除（用完即走）；正规会话（index=true）恒为 false。
-            meta.ephemeral = !index;
-            meta.updated_at = Self::now_epoch();
-            let _ = store::write_meta(dir, meta);
-            if index {
-                store::upsert_index(&self.sessions_dir, meta);
-            }
-            // 组织工作区自动归属（与 persist_new_session_with_cwd:404 同逻辑）：
-            // 顶部 `workspace.set` 选目录后，左侧 `session.list.workspace_id` 需
-            // 立即反映分组，否则左侧恒显未分组（两套工作区不通根因）。
-            // `index=false` 为子代理临时会话，不进组织归属。
-            if index && let Some(cwd) = meta.cwd.as_deref() {
-                crate::grouping::WorkspaceStore::global().attach_by_cwd(session_id, cwd);
-            }
-        });
-    }
-
-    /// 该 seed 是否为临时会话（子代理）：meta 存在且标记 ephemeral。
-    /// 目录缺失（已清理）视为非临时，避免误触发删除路径。
-    pub fn is_ephemeral(&self, session_id: &str) -> bool {
-        self.session_dir(session_id).is_some()
-            && self
-                .load_meta(session_id)
-                .map(|m| m.ephemeral)
-                .unwrap_or(false)
     }
 
     /// Mark a session's cleanup policy without adding it to the session index.
@@ -399,7 +241,7 @@ impl SessionManager {
         });
     }
 
-    /// Synchronously create a new session directory and initial meta.json
+    /// Synchronously create a new session directory and its index entry
     /// on disk, so that the session exists before the agent process starts.
     /// This prevents the race where the frontend receives a seed from
     /// `session.new` but the session directory isn't created until the
@@ -574,38 +416,6 @@ impl SessionManager {
         });
     }
 
-    pub fn persist_usage(
-        &self,
-        session_id: &str,
-        totals: qaqh_types::UsageInfo,
-        requests: u32,
-        cache_reported_requests: u32,
-    ) {
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            meta.session_id = session_id.to_string();
-            meta.updated_at = Self::now_epoch();
-            meta.usage_totals = totals;
-            meta.usage_requests = requests;
-            meta.cache_reported_requests = cache_reported_requests;
-            let _ = store::write_meta(dir, meta);
-            store::upsert_index(&self.sessions_dir, meta);
-        });
-    }
-
-    /// Persist a new title into `meta.json` and refresh the index.
-    pub fn update_title(&self, session_id: &str, title: &str) {
-        self.with_meta_locked(session_id, false, |dir, meta| {
-            meta.session_id = session_id.to_string();
-            meta.title = Some(title.to_string());
-            meta.updated_at = Self::now_epoch();
-            if let Err(e) = store::write_meta(dir, meta) {
-                log::error!("SessionManager: update_title write_meta failed: {e}");
-                return;
-            }
-            store::upsert_index(&self.sessions_dir, meta);
-        });
-    }
-
     /// Currently active session id, if any.
     pub fn active_session(&self) -> Option<String> {
         std::fs::read_to_string(&self.active_path)
@@ -681,7 +491,7 @@ impl SessionManager {
             .as_secs()
     }
 
-    /// Load-modify scaffolding for the meta.json critical section (Phase 3-3).
+    /// Load-modify scaffolding for the per-session critical section.
     ///
     /// Takes the per-seed lock, resolves the session dir (creating it when
     /// `create_dir`), loads (or defaults) the meta, then runs `f` with the
@@ -1036,70 +846,6 @@ mod session_collision_tests {
             CanonicalSessionIdentity::open(manager.session_path_dir(session_id))
                 .expect("read child identity"),
             identity
-        );
-
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    /// 回归（BUG-2026-09-13-24）：分配新会话时**已占用的会话目录逐字节不变**
-    /// —— 旧实现（无碰撞检查 + 无条件覆盖）会把新会话写进既有目录。
-    #[test]
-    fn allocation_preserves_an_occupied_sentinel_session() {
-        let (root, manager) = manager();
-
-        let sentinel = "c0ffee01";
-        manager.persist_new_session(sentinel);
-        let sentinel_dir = manager.session_path_dir(sentinel);
-        store::write_meta(
-            &sentinel_dir,
-            &SessionMeta {
-                session_id: sentinel.into(),
-                created_at: 4242,
-                cwd: Some("D:/sentinel-project".into()),
-                ..Default::default()
-            },
-        )
-        .expect("sentinel meta");
-        std::fs::write(sentinel_dir.join("messages.jsonl"), "sentinel\n").expect("sentinel msgs");
-        let meta_before = std::fs::read_to_string(sentinel_dir.join("meta.json")).expect("meta");
-        let msgs_before =
-            std::fs::read_to_string(sentinel_dir.join("messages.jsonl")).expect("msgs");
-
-        // canonical 分配必须给出一个与 sentinel 不同的全新会话，且不得
-        // 触碰既有目录。
-        let identity = manager
-            .allocate_session(Some("D:/new-project"))
-            .expect("allocate session");
-        let chosen = identity.session_id.as_str().to_string();
-
-        assert_ne!(
-            chosen, sentinel,
-            "allocator must not reuse an occupied session id"
-        );
-        // Windows 上 cwd 经 PathBuf 规范化后是反斜杠（D:\new-project）；
-        // 语义相同即通过，分隔符差异不属于本测试的关注点。
-        assert_eq!(
-            manager
-                .load_meta(&chosen)
-                .expect("new meta")
-                .cwd
-                .as_deref()
-                .map(std::path::Path::new)
-                .map(|p| p == std::path::Path::new("D:/new-project")),
-            Some(true),
-            "the allocated session must own its own cwd"
-        );
-
-        // sentinel 会话逐字节未变。
-        assert_eq!(
-            std::fs::read_to_string(sentinel_dir.join("meta.json")).expect("meta"),
-            meta_before,
-            "a colliding candidate must never overwrite the existing session meta"
-        );
-        assert_eq!(
-            std::fs::read_to_string(sentinel_dir.join("messages.jsonl")).expect("msgs"),
-            msgs_before,
-            "a colliding candidate must never touch the existing session messages"
         );
 
         std::fs::remove_dir_all(root).expect("remove test directory");
