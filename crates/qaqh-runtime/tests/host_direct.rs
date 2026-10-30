@@ -32,6 +32,15 @@ use qaqh_subagent::{
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// 获取测试锁，容忍中毒：中毒只说明**别的**用例 panic 过，不代表本用例的
+/// 前置条件不成立（与 `session_inprocess` 同一口径；旧写法 `.expect()`
+/// 让一个用例 panic 连锁弄红同文件其余全部用例）。
+fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Shared per-process test environment: unique temp root, `QAQH_DATA_DIR`,
 /// workspace registry and `SessionManager`. `WorkspaceStore`/`SessionManager`
 /// are process-wide singletons that panic on re-init, so every test in this
@@ -64,7 +73,7 @@ fn shared_test_env() -> std::path::PathBuf {
 
 #[test]
 fn qaqh_service_host_spawn_subscribe_send_close() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _test_lock = test_guard();
     let root = shared_test_env();
     let data = root.join("data");
 
@@ -458,7 +467,7 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
 
 #[test]
 fn delivery_reloads_unloaded_child_through_loaded_parent() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _test_lock = test_guard();
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-reload-test-{}-{}",
         std::process::id(),
@@ -726,7 +735,7 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
 
 #[test]
 fn broadcast_targets_and_outbound_quota_are_rejected() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _test_lock = test_guard();
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-quota-test-{}-{}",
         std::process::id(),
@@ -812,7 +821,7 @@ fn broadcast_targets_and_outbound_quota_are_rejected() {
 
 #[test]
 fn task_board_host_round_trips_task_lifecycle() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _test_lock = test_guard();
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-task-board-test-{}-{}",
         std::process::id(),
@@ -923,7 +932,7 @@ fn task_board_host_round_trips_task_lifecycle() {
 
 #[test]
 fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _test_lock = test_guard();
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-board-test-{}-{}",
         std::process::id(),
@@ -1047,7 +1056,7 @@ fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
 
 #[test]
 fn steer_and_interject_are_canonical_safe_point_deliveries() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _test_lock = test_guard();
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-steer-test-{}-{}",
         std::process::id(),
@@ -1204,7 +1213,7 @@ fn steer_and_interject_are_canonical_safe_point_deliveries() {
 /// （600ms ≈ 25 次解析，断言为红）；修复后等待 commit 通知，恰 1 次。
 #[test]
 fn wait_agent_empty_wait_parses_canonical_log_once() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+    let _test_lock = test_guard();
     let _root = shared_test_env();
 
     let service = QaqhService::init(qaqh_session::SessionManager::global());
