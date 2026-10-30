@@ -7,6 +7,8 @@
 //!
 //! 需非提权环境(CreateAppContainerProfile 写 HKCU,免提权)。
 
+#![cfg(windows)]
+
 use sbx_win::{
     acl,
     appcontainer,

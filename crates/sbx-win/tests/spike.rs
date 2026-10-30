@@ -3,6 +3,8 @@
 //! 通过 = cap-SID 锚点成立;`add_ace` 权限错误 = 回退 Low-IL Plan B。
 //! 需在非提权环境运行(CI windows-latest 默认满足)。
 
+#![cfg(windows)]
+
 #[test]
 fn spike_restricted_token_end_to_end() {
     let base = std::env::temp_dir().join(format!(

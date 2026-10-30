@@ -1,9 +1,10 @@
 //! canonical/blobs — per-session persistent CAS blob store.
 //!
 //! Bodies referenced by facts live here: content-addressed by sha256, no TTL,
-//! reclaimed only with the session itself. Writes go tmp → fsync → rename so a
-//! fact appended after a successful `put` can always resolve the body it
-//! references (I2/I5). This is the persistent store proper; `ContentStore`
+//! reclaimed only with the session itself. Writes go tmp → fsync → link so a
+//! body is published only after file fsync. Directory durability is platform
+//! dependent, so callers cannot infer a cross-platform commit barrier from
+//! `put` alone. This is the persistent store proper; `ContentStore`
 //! remains a wire-transport cache and facts must never point at it.
 
 use std::{
@@ -34,10 +35,22 @@ impl SessionBlobStore {
         Ok(Self { dir })
     }
 
-    fn path_for(&self, hash: &ContentHash) -> PathBuf {
-        // The hash is `sha256:<64 hex>`; strip the scheme for the file name so
-        // every path component stays a plain hex string.
-        self.dir.join(hash.as_str().trim_start_matches("sha256:"))
+    fn path_for(&self, hash: &ContentHash) -> io::Result<PathBuf> {
+        let name = hash
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid blob hash"))?;
+        if name.len() != 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid blob hash",
+            ));
+        }
+        Ok(self.dir.join(name))
     }
 
     /// Store `bytes` and return a `ContentRef` that resolves through this
@@ -45,24 +58,37 @@ impl SessionBlobStore {
     /// idempotent.
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentRef> {
         let hash = sha256_content_hash(bytes);
-        let final_path = self.path_for(&hash);
-        if final_path.exists() {
+        let final_path = self.path_for(&hash)?;
+        if self.verify_existing(&hash, bytes)? {
             return Ok(ContentRef::new(hash));
         }
-        let tmp_path = self.dir.join(format!(
-            ".tmp-{}-{}",
-            std::process::id(),
-            hash.as_str().trim_start_matches("sha256:")
-        ));
-        {
+        let tmp_path = self.dir.join(format!(".tmp-{}", uuid::Uuid::now_v7()));
+        let write_result = (|| {
             use std::io::Write;
-            let mut file = fs::File::create(&tmp_path)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
             file.write_all(bytes)?;
-            file.sync_all()?;
+            file.sync_all()
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
         }
-        fs::rename(&tmp_path, &final_path)?;
+        // Never overwrite an existing content-addressed object: a corrupt or
+        // conflicting object must fail closed rather than being silently healed.
+        if let Err(error) = fs::hard_link(&tmp_path, &final_path) {
+            let existing = self.verify_existing(&hash, bytes);
+            let _ = fs::remove_file(&tmp_path);
+            if !existing? {
+                return Err(error);
+            }
+        } else {
+            fs::remove_file(&tmp_path)?;
+        }
         // Best-effort directory durability; not every platform allows opening
-        // a directory handle, and a lost rename on crash is recoverable by
+        // a directory handle, and a lost link on crash is recoverable by
         // re-putting the same bytes.
         if let Ok(dir_handle) = fs::File::open(&self.dir) {
             let _ = dir_handle.sync_all();
@@ -70,13 +96,80 @@ impl SessionBlobStore {
         Ok(ContentRef::new(hash))
     }
 
+    /// Stronger Unix-only preparation barrier for facts about to be committed.
+    /// Other platforms must implement a proven directory durability primitive
+    /// before this method can acknowledge successful preparation.
+    pub fn put_durable(&self, bytes: &[u8]) -> io::Result<ContentRef> {
+        #[cfg(not(unix))]
+        {
+            let _ = bytes;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable blob publication is unsupported on this platform",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let reference = self.put(bytes)?;
+            fs::File::open(self.path_for(reference.hash())?)?.sync_all()?;
+            fs::File::open(&self.dir)?.sync_all()?;
+            let parent = self.dir.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "blob directory has no parent")
+            })?;
+            fs::File::open(parent)?.sync_all()?;
+            Ok(reference)
+        }
+    }
+
+    fn verify_existing(&self, hash: &ContentHash, expected: &[u8]) -> io::Result<bool> {
+        match fs::read(self.path_for(hash)?) {
+            Ok(existing) if existing == expected => Ok(true),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "existing blob hash mismatch",
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Resolve a `ContentRef` produced by this store.
     pub fn get(&self, content_ref: &ContentRef) -> io::Result<Vec<u8>> {
-        fs::read(self.path_for(content_ref.hash()))
+        let bytes = fs::read(self.path_for(content_ref.hash())?)?;
+        if sha256_content_hash(&bytes) != *content_ref.hash() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "blob hash mismatch",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Resolve a blob without accepting an unbounded body into memory.
+    pub fn get_bounded(&self, content_ref: &ContentRef, max_bytes: usize) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+
+        let file = fs::File::open(self.path_for(content_ref.hash())?)?;
+        if file.metadata()?.len() > max_bytes as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "blob exceeds byte budget",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take((max_bytes as u64).saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes || sha256_content_hash(&bytes) != *content_ref.hash() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "blob exceeds budget or hash mismatch",
+            ));
+        }
+        Ok(bytes)
     }
 
     pub fn contains(&self, content_ref: &ContentRef) -> bool {
-        self.path_for(content_ref.hash()).exists()
+        self.get(content_ref).is_ok()
     }
 }
 

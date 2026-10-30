@@ -574,7 +574,9 @@ mod tests {
             "tokenizerPath": null,
             "exec": { "defaultShell": "bash" },
             "sandbox": { "enabled": true },
-            "sessionIdleUnloadSecs": 900
+            "sessionIdleUnloadSecs": 900,
+            "toolAllowlistEnabled": false,
+            "toolAllowlist": []
         });
         let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
         assert_eq!(dto.context_length, 1_000_000);

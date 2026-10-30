@@ -42,37 +42,17 @@
 
 pub(crate) mod compaction_port;
 pub mod context;
-pub mod engine_input;
 pub mod engine_session;
 pub mod engine_title;
-pub mod engine_tool;
-pub mod engine_turn;
-pub mod injection;
 pub(crate) mod lifecycle_port;
 pub mod liveness;
-pub mod loop_core;
-pub mod loop_dispatch_control;
-pub mod loop_dispatch_conversation;
-pub mod loop_dispatch_tool;
-pub mod loop_injection;
-pub mod loop_outcome;
-pub mod official_web;
-pub mod paced_emitter;
 pub mod plugins;
 pub mod prompt;
 pub(crate) mod request_context;
 pub(crate) mod resource_publish;
-pub(crate) mod spawn;
 pub mod state;
 mod stream_continuation;
 pub mod tool_recovery;
-pub(crate) mod tool_runtime;
-pub(crate) mod turn_actor;
-pub(crate) mod turn_lap;
-
-/// 回归测试入口：批执行/取消收割路径（BUG-2026-09-13-08 回归）。
-/// 生产代码只经 `turn_lap` 内部调用，这里仅重导出最小面。
-pub mod turn_lap_test_api;
 pub mod types;
 pub mod util;
 pub mod workspace_audit;
@@ -82,4 +62,3 @@ pub mod workspace_audit;
 // paths resolving without touching their call sites.
 pub use plugins::engine_compact;
 pub(crate) use plugins::{dashboard, engine_misc};
-pub(crate) use spawn::{ActorKind, SubagentSpawnSpec, spawn_agent};

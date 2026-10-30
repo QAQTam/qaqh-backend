@@ -5,9 +5,6 @@
 
 use std::sync::OnceLock;
 
-const DEFAULT_PROMPT: &str = include_str!("prompts/backend_prompt.md");
-const OS_ENV_TEMPLATE: &str = include_str!("prompts/os_env.md");
-
 /// Cached OS info string. Set at startup.
 pub static OS_INFO: OnceLock<String> = OnceLock::new();
 
@@ -20,7 +17,7 @@ static SHELLS_INFO: OnceLock<String> = OnceLock::new();
 
 /// Full system prompt from embedded backend_prompt.md (identity + rules only).
 pub fn full_system_prompt() -> String {
-    DEFAULT_PROMPT.to_string()
+    qaqh_message::prompt::system_identity().to_string()
 }
 
 /// Full system prompt with runtime environment injected from os_env.md.
@@ -46,11 +43,11 @@ pub fn full_system_prompt_with_env(os_info: &str) -> String {
     } else {
         os_info
     };
-    let env_block = OS_ENV_TEMPLATE
-        .replace("{{OS}}", os)
-        .replace("{{SHELLS}}", shells)
-        .replace("{{TOOLS}}", tools);
-    format!("{}\n\n{}", DEFAULT_PROMPT, env_block)
+    qaqh_message::prompt::render_system_prompt(qaqh_message::prompt::EnvironmentSnapshot {
+        os,
+        shells,
+        toolchains: tools,
+    })
 }
 
 /// 按工具模式选择系统提示。minimal:dsh 已下线，一切模式（含已废弃名）

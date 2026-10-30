@@ -67,6 +67,7 @@ fn unrelated_round_started(ordinal: u64) -> SessionFact {
                 "sha256:7777777777777777777777777777777777777777777777777777777777777777",
             ),
             context_revision: 0,
+            identity: None,
         }),
     );
     fact.turn_id = Some(turn_id);

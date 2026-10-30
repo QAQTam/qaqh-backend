@@ -17,16 +17,16 @@ fn payload_lines() -> Vec<&'static str> {
 }
 
 fn expected_slots(kind: &str) -> &'static [ProjectionSlot] {
-    use ProjectionSlot::{Control, Conversation, Mailbox, Meta, Resources, Team, Timeline};
+    use ProjectionSlot::{Control, Conversation, Mailbox, Meta, Resources, Team};
     match kind {
         "session_created" => &[Control, Meta, Team],
-        "input_accepted" => &[Conversation, Timeline, Mailbox, Team],
+        "input_accepted" => &[Conversation, Mailbox, Team],
         "turn_started" => &[Conversation, Control, Team],
         "model_round_started" => &[Control],
-        "assistant_block_sealed" => &[Conversation, Timeline],
-        "tool_call_declared" => &[Conversation, Timeline],
+        "assistant_block_sealed" => &[Conversation],
+        "tool_call_declared" => &[Conversation],
         "tool_intent" => &[Control],
-        "tool_finished" => &[Conversation, Timeline],
+        "tool_finished" => &[Conversation],
         "interaction_requested" => &[Control],
         "interaction_resolved" => &[Control],
         "interaction_expired" => &[Control],
@@ -75,7 +75,6 @@ fn all_payload_fixtures_have_the_frozen_slot_mapping() {
 #[test]
 fn projection_slot_indices_are_the_frozen_repr_values() {
     assert_eq!(ProjectionSlot::Conversation.as_u16(), 0);
-    assert_eq!(ProjectionSlot::Timeline.as_u16(), 1);
     assert_eq!(ProjectionSlot::Control.as_u16(), 2);
     assert_eq!(ProjectionSlot::Resources.as_u16(), 3);
     assert_eq!(ProjectionSlot::Meta.as_u16(), 4);

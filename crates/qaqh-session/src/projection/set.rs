@@ -7,8 +7,7 @@ use crate::session_fact_v2::{ProjectionPayload, ProjectionSlot, SessionFact, pro
 use super::{
     ControlProjection, ControlSnapshot, ConversationProjection, ConversationSnapshot,
     MailboxProjection, MailboxSnapshot, Projection, ResourceProjection, ResourceSnapshot,
-    SessionMetaProjection, SessionMetaSnapshot, TeamProjection, TeamSnapshot, TimelineProjection,
-    TimelineSnapshot,
+    SessionMetaProjection, SessionMetaSnapshot, TeamProjection, TeamSnapshot,
 };
 
 /// A reliable projection delta paired with its frozen static slot.
@@ -22,7 +21,6 @@ pub struct ProjectionSetDelta {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionSetSnapshot {
     pub conversation: ConversationSnapshot,
-    pub timeline: TimelineSnapshot,
     pub control: ControlSnapshot,
     pub resources: ResourceSnapshot,
     pub meta: SessionMetaSnapshot,
@@ -36,7 +34,6 @@ pub struct ProjectionSetSnapshot {
 #[derive(Debug, Default)]
 pub struct ProjectionSet {
     pub conversation: ConversationProjection,
-    pub timeline: TimelineProjection,
     pub control: ControlProjection,
     pub resources: ResourceProjection,
     pub meta: SessionMetaProjection,
@@ -60,14 +57,6 @@ impl ProjectionSet {
                 allowed_slots,
                 ProjectionSlot::Conversation,
                 ProjectionPayload::ConversationDelta(delta),
-            );
-        }
-        if let Some(delta) = self.timeline.apply(fact) {
-            push_allowed(
-                &mut deltas,
-                allowed_slots,
-                ProjectionSlot::Timeline,
-                ProjectionPayload::TimelineDelta(delta),
             );
         }
         if let Some(delta) = self.control.apply(fact) {
@@ -117,7 +106,6 @@ impl ProjectionSet {
     pub fn snapshot(&self) -> ProjectionSetSnapshot {
         ProjectionSetSnapshot {
             conversation: self.conversation.snapshot(),
-            timeline: self.timeline.snapshot(),
             control: self.control.snapshot(),
             resources: self.resources.snapshot(),
             meta: self.meta.snapshot(),
@@ -129,7 +117,6 @@ impl ProjectionSet {
     pub fn last_fact_seq(&self) -> u64 {
         [
             self.conversation.last_fact_seq(),
-            self.timeline.last_fact_seq(),
             self.control.last_fact_seq(),
             self.resources.last_fact_seq(),
             self.meta.last_fact_seq(),
@@ -165,7 +152,6 @@ impl ProjectionSetDelta {
     pub fn payload_slot(&self) -> Option<ProjectionSlot> {
         match &self.payload {
             ProjectionPayload::ConversationDelta(_) => Some(ProjectionSlot::Conversation),
-            ProjectionPayload::TimelineDelta(_) => Some(ProjectionSlot::Timeline),
             ProjectionPayload::ControlDelta(_) => Some(ProjectionSlot::Control),
             ProjectionPayload::ResourceDelta(_) => Some(ProjectionSlot::Resources),
             ProjectionPayload::MetaDelta(_) => Some(ProjectionSlot::Meta),

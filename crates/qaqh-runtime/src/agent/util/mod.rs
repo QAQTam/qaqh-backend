@@ -9,5 +9,6 @@ mod format;
 
 pub(crate) use datetime::{chrono_local_date, chrono_local_datetime, epoch_to_date};
 pub(crate) use format::{
-    build_assistant_message, emit_round_complete_via_emitter, parse_tool_calls_from_response,
+    canonical_call_id, canonical_interaction_id, canonical_turn_id, emit_round_complete_via_emitter,
+    interaction_id_matches, permission_id_matches,
 };

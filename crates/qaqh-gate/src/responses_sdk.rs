@@ -1621,6 +1621,26 @@ async fn consume(
                     mapping_compat.search_function_alias = None;
                 }
                 let mut blocks = response_message_to_blocks(&response.message, &mapping_compat);
+                if let Some(output) = response
+                    .raw
+                    .get("output")
+                    .or_else(|| response.raw.get("response").and_then(|r| r.get("output")))
+                    .and_then(|o| o.as_array())
+                {
+                    for item in output {
+                        let has_encrypted = item.get("encrypted_content").is_some();
+                        let it_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if !has_encrypted && matches!(it_type, "function_call" | "custom_tool_call" | "message") {
+                            continue;
+                        }
+                        let already = blocks.iter().any(|b| {
+                            matches!(b, ContentBlock::ResponseOutputItem { item: existing } if existing == item)
+                        });
+                        if !already {
+                            blocks.push(ContentBlock::ResponseOutputItem { item: item.clone() });
+                        }
+                    }
+                }
                 // 终态没带回来的调用按流补（见 `reconcile_streamed_tool_calls`）。
                 let native_ids: std::collections::HashSet<&str> = response
                     .message

@@ -35,14 +35,21 @@ pub fn maybe_start_title(ctx: &mut RingContext) {
     let _ = apply_fallback_title(ctx, &session_id, first_user);
 
     // ── ② 异步：LLM 总结覆盖（失败/超时保持截断版）──
-    let provider = match super::turn_lap::gate::provider_for(ctx, "title") {
-        Ok(provider) => provider,
-        Err(e) => {
-            // 标题总结是尽力而为：构造失败就保留截断标题，不打断会话（也不吞掉原因）。
-            log::warn!("[TITLE] provider 构造失败，保留截断标题：{e}");
-            return;
-        }
-    };
+    let provider = qaqh_gate::ProviderConfig::chat(
+        if ctx.agent.config.base_url.is_empty() {
+            "https://api.openai.com/v1"
+        } else {
+            &ctx.agent.config.base_url
+        },
+        &ctx.agent.config.api_key,
+        &ctx.agent.config.model,
+        None,
+        None,
+        qaqh_types::ThinkingParamMode::OpenAi,
+        qaqh_types::CacheTokenField::PromptCacheHitTokens,
+        true,
+        None,
+    );
     let event_tx = ctx.emitter.event_tx();
     let user_msg = first_user.to_string();
     // 后台线程拿注入句柄写盘（&'static 可跨线程；不入 dispatch 线程的
@@ -104,6 +111,13 @@ fn apply_fallback_title(
 mod tests {
     use super::*;
 
+    struct TestEmitter(std::sync::mpsc::SyncSender<crate::agent::types::WriterEvent>);
+    impl crate::agent::types::Emitter for TestEmitter {
+        fn event_tx(&self) -> Option<std::sync::mpsc::SyncSender<crate::agent::types::WriterEvent>> {
+            Some(self.0.clone())
+        }
+    }
+
     #[test]
     fn fallback_title_is_applied_once_and_frozen() {
         let mut agent = crate::agent::state::agent::AgentState::new(qaqh_config::Config::default());
@@ -111,11 +125,7 @@ mod tests {
         agent.msg.push_user("## 修复标题生成链路");
         let writer_dead = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (event_tx, event_rx) = std::sync::mpsc::sync_channel(8);
-        let emitter = crate::agent::paced_emitter::PacedEmitter::new(
-            "seed-title",
-            event_tx,
-            writer_dead.clone(),
-        );
+        let emitter = TestEmitter(event_tx);
         let cancel = crate::agent::types::CancelToken::new();
         let mut phase = crate::agent::types::LoopPhase::Idle;
         let mut pending = crate::agent::types::PendingState::default();

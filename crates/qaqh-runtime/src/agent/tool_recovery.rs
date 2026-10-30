@@ -237,7 +237,7 @@ pub fn reconcile_store_in(session_dir: &Path, store: &mut qaqh_message::MessageS
     let mut keep_legacy = Vec::new();
     let mut amended = 0usize;
     for (wire_call_id, declared_name) in store.synthetic_repair_entries() {
-        let canonical_call_id = crate::agent::tool_runtime::canonical_call_id(&wire_call_id);
+        let canonical_call_id = crate::agent::util::canonical_call_id(&wire_call_id);
         let (note, from_legacy) = if let Some(state) = canonical.get(&canonical_call_id) {
             if !state.started() && state.terminal != Some(ToolTerminalStatus::Cancelled) {
                 continue;
@@ -319,7 +319,7 @@ mod tests {
             60_000,
         )
         .expect("open canonical ledger");
-        let call_id = crate::agent::tool_runtime::canonical_call_id("wire-call");
+        let call_id = crate::agent::util::canonical_call_id("wire-call");
         let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
         let intent = ToolIntent {
             call_id: call_id.clone(),
@@ -436,7 +436,7 @@ mod tests {
             60_000,
         )
         .expect("open canonical ledger");
-        let call_id = crate::agent::tool_runtime::canonical_call_id("wire-call");
+        let call_id = crate::agent::util::canonical_call_id("wire-call");
         ledger
             .append_finished(
                 EventId::new(generate_ulid()),

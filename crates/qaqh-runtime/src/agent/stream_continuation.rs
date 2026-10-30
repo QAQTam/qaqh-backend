@@ -23,7 +23,7 @@ pub(super) fn partial_message(
     if content.is_empty() && items.is_empty() {
         return Err("Stream ended without replayable assistant content");
     }
-    let mut message = super::util::build_assistant_message(content, reasoning, reasoning_kind, &[]);
+    let mut message = qaqh_message::assistant::build_assistant_message(content, reasoning, reasoning_kind, &[]);
     message.content.extend(items);
     Ok(message)
 }
@@ -33,14 +33,6 @@ mod tests {
     use super::*;
     use qaqh_message::{ContextFlow, MessageStore, builtin};
     use serde_json::json;
-
-    #[test]
-    fn new_input_resets_exhausted_stream_recovery_budget() {
-        let mut engine = super::super::engine_turn::TurnEngine::new();
-        engine.continuation_count = 3;
-        engine.begin_input("t1", "input1").unwrap();
-        assert_eq!(engine.continuation_count, 0);
-    }
 
     #[test]
     fn partial_answer_survives_context_rebuild_without_synthetic_user_input() {

@@ -431,12 +431,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         lan_serve.abort();
     }
     service.shutdown();
-    // 退出前主动收尾孤儿（stop 协议已在 handler 做过；此处兜底其他退出
-    // 路径，如生命周期接管/信号退出。幂等：已 seal 的 turn 跳过）。
-    hub.seal_all_orphans();
-    // F2: timeline 持久化是异步合并 checkpoint；退出前同步落盘全部 pending
-    // seed，缩小子进程被杀时 transcript 尾部的丢失窗口。
-    hub.flush_timeline_persistence();
     let _ = std::fs::remove_file(qaqh_types::platform::daemon_discovery_path());
     let _ = std::fs::remove_file(qaqh_types::platform::daemon_lock_path());
     Ok(())

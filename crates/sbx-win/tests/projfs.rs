@@ -3,6 +3,8 @@
 //! 无 ProjFS 环境(Client-ProjFS 未启用)自动跳过,不算失败。
 //! 手动跑:cargo test -p sbx-win --test projfs -- --nocapture
 
+#![cfg(windows)]
+
 use sbx_win::projfs::{self, Change, MergePolicy, View};
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -1,5 +1,7 @@
 //! 加固验证:幂等无堆积、ACE 撤销、Job 杀树(含孙进程)、8.3 短名绕过免疫。
 
+#![cfg(windows)]
+
 use sbx_win::{acl, desktop, events, policy::AceOp, policy::AceTarget, policy::Precreate, policy::AceMode, sid, spawn, token};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;

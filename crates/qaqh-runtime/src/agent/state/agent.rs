@@ -159,10 +159,9 @@ pub struct AgentState {
     pub turn_count: u32,
     /// If true, skip all disk persistence (subagent disposable mode).
     pub ephemeral: bool,
-    /// Timeline turn-count floor injected by the daemon on session resume.
-    /// Replaces the `QAQH_TIMELINE_TURN_COUNT` process-environment bridge so
+    /// Sealed turn-count floor injected by the daemon on session resume, so
     /// concurrent in-process actors each carry their own value.
-    pub timeline_turn_count: u64,
+    pub sealed_turn_floor: u64,
     pub skills: SkillContextManager,
     /// Frozen [Environment] annotation. Generated once on the FIRST
     /// build_context() of the session and reused forever — never reset per
@@ -245,7 +244,7 @@ impl AgentState {
             tool_defs: Vec::new(),
             turn_count: 0,
             ephemeral: false,
-            timeline_turn_count: 0,
+            sealed_turn_floor: 0,
             skills: SkillContextManager::new(Path::new("."), effective_input_tokens),
             frozen_annotation: None,
             prev_prefix: PrefixShape::default(),
@@ -515,7 +514,7 @@ impl AgentState {
 
     /// 重建模型面工具清单，并按「该 profile 到底能不能执行」收窄。
     ///
-    /// 只有声明了官方工具面的 profile（[`crate::agent::official_web::official_web_enabled`]：
+    /// 只有声明了官方工具面的 profile（[`qaqh_workspace::official_web::official_web_enabled`]：
     /// DeepSeek 账号凭据 × `official_web_tools`）才拿得到 `search` 的执行后端。
     /// 把注册表里的全量清单原样发出去，其它 profile 会得到一个必然失败的函数，
     /// 而且 `tools` 数组会与升级前不同——那是一次没人要求的缓存前缀变化（S2）。
@@ -524,7 +523,7 @@ impl AgentState {
         const SEARCH_TOOL_NAME: &str = "search";
 
         self.tool_defs = runtime::all_tools();
-        if !crate::agent::official_web::official_web_enabled(
+        if !qaqh_workspace::official_web::official_web_enabled(
             self.config.credential,
             &self.config.compat,
         ) {

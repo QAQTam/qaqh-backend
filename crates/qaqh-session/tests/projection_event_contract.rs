@@ -13,8 +13,6 @@ const GOLDEN_CONTROL: &str = r#"{"event_id":"01J00000000000000000000011","source
 
 const GOLDEN_INPUT: &str = r#"{"event_id":"01J00000000000000000000012","source_fact_seq":2,"source_event_id":"01J00000000000000000000002","stream_key":{"kind":"channel","data":"conversation"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":2,"projection_index":0}}},"projection_slot":"conversation","projection_index":0,"payload":{"kind":"conversation_delta","data":{"kind":"input_accepted","data":{"revision":1,"input_id":"input_01J00000000000000000000000","input_kind":"user_text","input_purpose":"trigger_turn","content":{"kind":"inline","data":{"text":"hello"}},"attachments":[],"actor":{"kind":"user","id":"local"}}}}}"#;
 
-const GOLDEN_TOOL_FINISHED: &str = r#"{"event_id":"01J00000000000000000000013","source_fact_seq":5,"source_event_id":"01J00000000000000000000005","stream_key":{"kind":"channel","data":"tool"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":5,"projection_index":1}}},"projection_slot":"timeline","projection_index":1,"payload":{"kind":"timeline_delta","data":{"kind":"tool_result","data":{"revision":3,"call_id":"call_01J00000000000000000000000","terminal_status":"indeterminate","output":null,"error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false}}}}}"#;
-
 fn cursor(fact_seq: u64, projection_index: u16) -> ReliableCursor {
     ReliableCursor {
         log_id: qaqh_session::session_fact_v2::LogId::new("0198f1a0-0000-7000-8000-000000000002"),
@@ -178,7 +176,7 @@ fn projection_event_constructors_populate_and_validate_source_identity() {
 
 #[test]
 fn projection_event_golden_examples_roundtrip_and_validate() {
-    for golden in [GOLDEN_CONTROL, GOLDEN_INPUT, GOLDEN_TOOL_FINISHED] {
+    for golden in [GOLDEN_CONTROL, GOLDEN_INPUT] {
         let event: ProjectionEvent =
             serde_json::from_str(golden).expect("deserialize golden projection event");
         event.validate().expect("golden event must validate");

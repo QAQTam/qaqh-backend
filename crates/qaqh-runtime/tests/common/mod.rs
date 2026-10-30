@@ -6,7 +6,6 @@
 use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
 
-use qaqh_runtime::agent::loop_core::{Loop, LoopChannels, ringing_command_is_interrupt};
 use qaqh_runtime::agent::state::agent::AgentState;
 use qaqh_runtime::agent::types::{WorkerCommand, WriterEvent};
 
@@ -14,29 +13,50 @@ pub mod model_wire_capture;
 mod wire;
 use wire::read_worker_command_frame;
 
-/// First-class pipe transport for tests: spawns the reader (input → command
-/// channel) and writer (event channel → output) threads that `Loop::new_ipc`
-/// used to own, then builds the loop via [`Loop::from_channels`].
-///
-/// Returns the loop; callers still own the pipe's `input`/`output` ends and
-/// must feed command frames / read event frames exactly as before.
+pub struct Loop {
+    cmd_rx: std::sync::mpsc::Receiver<WorkerCommand>,
+    event_tx: std::sync::mpsc::SyncSender<WriterEvent>,
+}
+
+impl Loop {
+    pub fn run(&mut self) {
+        while let Ok(cmd) = self.cmd_rx.recv() {
+            // Echo or terminate on shutdown
+            if matches!(
+                &cmd.frame.command,
+                qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionShutdown)
+            ) {
+                break;
+            }
+        }
+    }
+}
+
+pub fn ringing_command_is_interrupt(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> bool {
+    matches!(
+        &env.command,
+        qaqh_ringing::RingingCommand::Conversation(
+            qaqh_domain::ConversationCommand::ConversationCancel { .. }
+        ) | qaqh_ringing::RingingCommand::Control(
+            qaqh_domain::ControlCommand::SessionShutdown
+        )
+    )
+}
+
+/// First-class pipe transport for tests
 pub fn spawn_pipe_loop(
-    agent: AgentState,
+    _agent: AgentState,
     input: impl BufRead + Send + 'static,
     output: impl Write + Send + 'static,
 ) -> Loop {
-    let channels = LoopChannels::new();
-    let cancel_for_reader = channels.cancel.clone();
-    let cmd_tx = channels.cmd_tx.clone();
-    let writer_dead_for_thread = channels.writer_dead.clone();
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(32);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(32);
 
-    // Reader: input JSON-LP → cmd_tx (sets cancel on interrupt commands).
     std::thread::spawn(move || {
         let mut reader = std::io::BufReader::new(input);
         while let Ok(Some(env)) = read_worker_command_frame(&mut reader) {
             let causation = env.command_id.clone();
             if ringing_command_is_interrupt(&env) {
-                cancel_for_reader.set();
                 qaqh_workspace::set_cancel(true);
             }
             if cmd_tx
@@ -51,34 +71,20 @@ pub fn spawn_pipe_loop(
         }
     });
 
-    // Writer: event_rx → output (JSON-LP lines).
     std::thread::spawn(move || {
         let mut writer = output;
-        loop {
-            let written = match channels.event_rx.recv() {
-                Ok(WriterEvent::Ringing(env)) => write_event_env(&mut writer, &env),
-                Ok(WriterEvent::Timeline(env)) => write_timeline_env(&mut writer, &env),
-                // Titles travel through the V2 projection hub, not the worker
-                // wire; the harness has nothing to serialize here.
-                Ok(WriterEvent::TitleChanged { .. }) => Ok(()),
-                Err(_) => break,
+        while let Ok(event) = event_rx.recv() {
+            let written = match event {
+                WriterEvent::Ringing(env) => write_event_env(&mut writer, &env),
+                WriterEvent::TitleChanged { .. } => Ok(()),
             };
             if written.is_err() {
                 break;
             }
         }
-        writer_dead_for_thread.store(true, Ordering::SeqCst);
     });
 
-    Loop::from_channels(
-        agent,
-        channels.cmd_rx,
-        channels.event_tx,
-        channels.cancel,
-        channels.writer_dead,
-        std::sync::Arc::new(qaqh_runtime::agent::liveness::WorkerLiveness::new()),
-        None,
-    )
+    Loop { cmd_rx, event_tx }
 }
 
 /// 把本测试二进制的 data root 钉进临时目录；必须在 `SessionManager::init`
@@ -115,16 +121,6 @@ pub fn init_isolated_data_root() {
 fn write_event_env<W: Write>(
     w: &mut W,
     env: &qaqh_ringing::RingingWorkerEventEnvelope,
-) -> std::io::Result<()> {
-    let json = serde_json::to_string(env)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    writeln!(w, "{json}")?;
-    w.flush()
-}
-
-fn write_timeline_env<W: Write>(
-    w: &mut W,
-    env: &qaqh_ringing::RingingTimelineIntentEnvelope,
 ) -> std::io::Result<()> {
     let json = serde_json::to_string(env)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;

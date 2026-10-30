@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 // 再导出的完整性是**有意的**：壳层只认 `qaqh-client` 一个入口，不该越过它去直接
 // 依赖 `qaqh-domain`/`qaqh-ringing`/`qaqh-types`。缺一个名字，壳层就只能再抄一份
-// 镜像——而抄镜像正是漂移的来源（TUI 曾照抄 2419 行协议镜像，实测已漂移出四处
-// 缺陷：两个 timeline 反序列化缺口、config 的两处字段缺失）。
+// 镜像——而抄镜像正是漂移的来源（TUI 曾照抄 2419 行协议镜像，实测已漂移出
+// config 的两处字段缺失）。
 //
 // 少数类型带 `Domain` 前缀：它们与 `qaqh-client` 自身的类型**同名而语义不同**。
 // 最典型的是 `SessionState`——`qaqh-client::SessionState` 是协商出来的租约状态，
@@ -23,15 +23,11 @@ pub use qaqh_domain::{
     DashboardTask, DomainError, ErrorScope, ImageBlock, NoticeLevel, PermissionCategory,
     PermissionRisk, PlanReviewItem, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
     SessionActivity, SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus,
-    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
-    TimelineFailure, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineTool,
-    TimelineToolBody, TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics,
-    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand,
-    ToolEvent,
+    ToolCommand, ToolEvent,
 };
 pub use qaqh_ringing::{
-    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommand,
-    RingingCommandAckStatus, RingingCommandState, TimelinePage, TimelineSseFrame, is_safe_integer,
+    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, RingingCommand,
+    RingingCommandAckStatus, RingingCommandState, is_safe_integer,
 };
 pub use qaqh_types::{
     SessionListEntry, SessionMeta, SessionRunStatus, ToolContinuation, ToolError, ToolImage,
@@ -49,40 +45,6 @@ pub enum ReconnectReason {
     /// 服务端以其他稳定 code 终止流；未知 code 原样保留。
     StreamTerminated { code: String },
 }
-
-/// Per-session timeline connection state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum TimelineStatus {
-    Connecting {
-        #[serde(rename = "session_id")]
-        session_id: String,
-    },
-    Open {
-        #[serde(rename = "session_id")]
-        session_id: String,
-        server_epoch: String,
-        cursor: u64,
-    },
-    Reconnecting {
-        #[serde(rename = "session_id")]
-        session_id: String,
-        retry_ms: u64,
-        cursor: u64,
-        reason: Option<ReconnectReason>,
-    },
-    Closed {
-        #[serde(rename = "session_id")]
-        session_id: String,
-        reason: String,
-    },
-}
-
-// `TimelinePage` / `TimelineSseFrame` 已迁入 wire crate（`qaqh-ringing::v2::
-// timeline`，ts 导出与 daemon handler 共用那份 DTO）；本模块经上方 re-export
-// 保留壳层命名，字段与校验语义不变。
-
-/// Timeline SSE frame 由 `qaqh_ringing::TimelineSseFrame` 提供（见上）。
 
 /// Parsed SSE frame (a block of `key: value` lines separated by a blank line).
 #[derive(Debug, Clone, Default)]
@@ -109,25 +71,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timeline_page_validates_version_and_session() {
-        let page = TimelinePage {
-            schema: RINGING_SCHEMA.into(),
-            version: RINGING_V2_VERSION,
-            server_epoch: "epoch-1".into(),
-            session_id: "seed-1".into(),
-            snapshot: TimelineSnapshot {
-                watermark: 0,
-                turns: vec![],
-            },
-            has_more: false,
-            total_turns: 0,
-            truncated_before: false,
-        };
-        page.validate_for("seed-1").expect("valid page");
-        assert!(page.validate_for("seed-2").is_err());
-    }
-
-    #[test]
     fn reconnect_reason_serializes_without_losing_server_detail() {
         assert_eq!(
             serde_json::to_value(ReconnectReason::Lagged { skipped: 7 }).expect("serialize lagged"),
@@ -139,26 +82,6 @@ mod tests {
             })
             .expect("serialize terminated"),
             serde_json::json!({"kind": "stream_terminated", "code": "protocol_version"})
-        );
-    }
-
-    #[test]
-    fn reconnecting_status_keeps_none_and_structured_reasons_distinct() {
-        let lagged = TimelineStatus::Reconnecting {
-            session_id: "seed-1".into(),
-            retry_ms: 2_000,
-            cursor: 9,
-            reason: Some(ReconnectReason::Lagged { skipped: 3 }),
-        };
-        assert_eq!(
-            serde_json::to_value(&lagged).expect("serialize lagged reconnect"),
-            serde_json::json!({
-                "status": "reconnecting",
-                "session_id": "seed-1",
-                "retry_ms": 2_000,
-                "cursor": 9,
-                "reason": {"kind": "lagged", "skipped": 3}
-            })
         );
     }
 }

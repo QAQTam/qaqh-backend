@@ -24,12 +24,6 @@ pub enum ClientError {
     #[error("protocol violation: {0}")]
     Protocol(String),
 
-    /// Timeline SSE journal no longer covers the client cursor. The stream
-    /// recovers by re-fetching the authoritative snapshot and advancing the
-    /// cursor to its watermark (mirrors TS `TimelineGapError`).
-    #[error("timeline SSE gap: expected seq {expected}, received {received}")]
-    TimelineGap { expected: u64, received: u64 },
-
     #[error("HTTP {status}: {path}")]
     Http { status: u16, path: String },
 
@@ -59,6 +53,7 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    #[cfg(test)]
     pub(crate) fn stream_terminated(data: &str) -> Self {
         #[derive(Deserialize)]
         struct TerminatedPayload {
@@ -85,16 +80,14 @@ impl ClientError {
         }
     }
 
-    /// 服务端已无法从 journal 补齐本客户端 cursor 之后的帧，必须重取快照
-    /// 把 cursor 重基线到 watermark（B1.3 遗留契约）。
+    /// 服务端已无法补齐本客户端 cursor 之后的帧，必须重新 bootstrap
+    /// 把 cursor 重基线（B1.3 遗留契约）。
     ///
-    /// `TimelineGap` 是客户端 seq 连续性自检的结果；`StreamTerminated(code
-    /// == "journal_gap")` 是 daemon 对「空回放 + watermark 落后」的显式
-    /// reset。两者同语义：不做快照重基线的话，客户端会带着旧 cursor 重连，
-    /// 再次命中同一个 gap（journal_gap 甚至会无限循环）。
+    /// `StreamTerminated(code == "journal_gap")` 是 daemon 对「空回放 +
+    /// watermark 落后」的显式 reset：不做重基线的话，客户端会带着旧 cursor
+    /// 重连，再次命中同一个 gap（甚至无限循环）。
     pub fn needs_gap_recovery(&self) -> bool {
         match self {
-            Self::TimelineGap { .. } => true,
             Self::StreamTerminated { code, .. } => code == "journal_gap",
             _ => false,
         }
@@ -155,14 +148,6 @@ mod tests {
 
     #[test]
     fn only_journal_gap_termination_requires_snapshot_rebaseline() {
-        // 客户端自检的 seq 断层 → 重基线。
-        assert!(
-            ClientError::TimelineGap {
-                expected: 4,
-                received: 9
-            }
-            .needs_gap_recovery()
-        );
         // daemon 显式 journal_gap reset → 重基线。
         assert!(ClientError::stream_terminated(r#"{"code":"journal_gap"}"#).needs_gap_recovery());
         // lagged / transport 等仍走 journal replay 重连，不重基线。
