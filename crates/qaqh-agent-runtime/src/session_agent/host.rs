@@ -169,7 +169,7 @@ impl AgentHost {
             mailbox: mailbox_handle,
         };
 
-        let task = tokio::spawn(async move {
+        let driver = async move {
             match driver::run(mailbox, agent).await {
                 Ok(_) => Ok(()),
                 Err(failure) => {
@@ -190,10 +190,32 @@ impl AgentHost {
                     Err(failure.error)
                 }
             }
-        });
+        };
+        // 生产路径（daemon）总在 tokio 上下文里；CLI 与集成测试可能在纯同步
+        // 上下文中调用 registry，此时 `tokio::spawn` 会 panic（no reactor）。
+        let task = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.spawn(driver),
+            Err(_) => driver_runtime().spawn(driver),
+        };
 
         Ok((handle, task))
     }
+}
+
+/// 无 reactor 上下文时的兜底执行器。
+///
+/// 只在同步调用方（CLI、集成测试）触发；按需创建一次并常驻进程——这些调用点
+/// 本来就需要一个后台执行器，只是没人替它们建运行时。
+fn driver_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("qaqh-session-driver")
+            .build()
+            .expect("build session driver runtime")
+    })
 }
 
 /// Enough shape of a failed driver to keep the recovery material observable.
