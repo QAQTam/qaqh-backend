@@ -2156,6 +2156,62 @@ mod tests {
         )
     }
 
+    /// 临时诊断（timeline 火化后排查 DeepSeek 400）：读真实 session 归档，
+    /// 走与生产一致的 project → build_request 路径，验证 tool call/output 配对
+    /// 并 dump 请求 JSON 到 /tmp。
+    #[test]
+    fn diag_replay_real_session_pairing() {
+        let path = std::env::var("QAQH_DIAG_SESSION").unwrap_or_else(|_| {
+            "/home/qaqtamsy/.config/qaqh/sessions/01a188e3-6d1b-7119-b2bb-a82d485416a0/messages.jsonl".into()
+        });
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            eprintln!("skip: session file missing: {path}");
+            return;
+        };
+        let messages: Vec<Message> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("parse archived message"))
+            .collect();
+        let p = provider();
+        let projected = project_responses_messages(&messages, &p.responses_compat);
+        let mut call_ids: Vec<String> = Vec::new();
+        let mut output_ids: Vec<String> = Vec::new();
+        for (idx, msg) in projected.iter().enumerate() {
+            for part in &msg.parts {
+                match part {
+                    Part::NativeToolCall(c) => call_ids.push(format!("#{idx} native:{}", c.call_id)),
+                    Part::ToolCall(c) => call_ids.push(format!(
+                        "#{idx} derived:{}",
+                        c.id.clone().unwrap_or_default()
+                    )),
+                    Part::ToolResult(r) => output_ids.push(format!(
+                        "#{idx} {}",
+                        r.call_id.clone().unwrap_or_else(|| "<none>".into())
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        eprintln!("calls:   {call_ids:?}");
+        eprintln!("outputs: {output_ids:?}");
+        let request = build_request(&p, projected, None, 0, None, None, true);
+        let json = serde_json::to_string(&request).expect("serialize request");
+        std::fs::write("/tmp/qaqh_diag_request.json", json).expect("write dump");
+        // 配对断言：每个 call_id 都必须有对应 output
+        let call_set: std::collections::HashSet<String> = call_ids
+            .iter()
+            .map(|s| s.split(':').next_back().unwrap_or("").to_string())
+            .collect();
+        let out_set: std::collections::HashSet<String> = output_ids.iter().cloned().collect();
+        for call in &call_set {
+            assert!(
+                out_set.iter().any(|o| o.split(' ').next_back() == Some(call)),
+                "orphan call without output: {call}"
+            );
+        }
+    }
+
     fn qa_msg(role: &str, content: Vec<ContentBlock>) -> Message {
         Message {
             msg_id: None,

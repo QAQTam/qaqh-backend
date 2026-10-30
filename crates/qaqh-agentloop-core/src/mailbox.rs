@@ -29,8 +29,11 @@ impl LaneBudget {
     };
     pub const COMPLETIONS: Self = Self {
         items: 32,
-        bytes: 256 * 1024,
-        max_frame_bytes: 64 * 1024,
+        // A completed provider response carries the whole assistant message
+        // and its opaque replay items; the previous 64 KiB frame ceiling made
+        // large answers undeliverable even though their reservation succeeded.
+        bytes: 8 * 1024 * 1024,
+        max_frame_bytes: 4 * 1024 * 1024,
     };
 
     fn valid(self) -> bool {

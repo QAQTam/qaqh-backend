@@ -820,11 +820,12 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
 }
 
 /// 统一错误响应形状（daemon HTTP 层使用），按方法类别区分 code。
-pub fn error_response(kind: MethodKind, message: &str) -> Value {
-    // 白名单/边界拒绝（`fs.read`/`fs.list` 的 `FORBIDDEN:` 前缀）单独成码：
-    // 调用方必须能把「出白名单」与「查询本身失败（IO / 未知）」区分开
-    // （T-2-1 验收：拒绝返回 FORBIDDEN，而非伪装成 IO_ERROR）。
-    let code = if message.starts_with("FORBIDDEN") {
+///
+/// 拒绝/越权由 [`QaqhError::is_forbidden`] 判定——此前是
+/// `message.starts_with("FORBIDDEN")` 的字符串嗅探，语义与文案耦合。
+/// 其余错误码保持既有契约（`query_failed` / `action_failed`）。
+pub fn error_response(kind: MethodKind, error: &crate::error::QaqhError) -> Value {
+    let code = if error.is_forbidden() {
         "forbidden"
     } else {
         match kind {
@@ -832,7 +833,7 @@ pub fn error_response(kind: MethodKind, message: &str) -> Value {
             MethodKind::Write => "action_failed",
         }
     };
-    serde_json::json!({ "code": code, "message": message })
+    serde_json::json!({ "code": code, "message": error.to_string() })
 }
 
 /// 服务分发：方法表校验后的唯一入口。
@@ -840,14 +841,18 @@ pub fn error_response(kind: MethodKind, message: &str) -> Value {
 /// 账号面（siwc/dsaccount）先走 [`accounts::dispatch`] 的逐方法 DTO 收口
 /// （params 解码 → 调用管理器 → DTO 投影），其余方法经 `service.handle`
 /// 执行并按 [`TYPED_METHODS`] 做边界校验。
-pub fn dispatch(service: &QaqhService, method: &str, params: &Value) -> Result<Value, String> {
+pub fn dispatch(
+    service: &QaqhService,
+    method: &str,
+    params: &Value,
+) -> crate::error::QaqhResult<Value> {
     if let Some(result) = accounts::dispatch(service, method, params) {
-        return result;
+        return result.map_err(crate::error::QaqhError::message);
     }
-    let typed = validate_typed_params(method, params)?;
+    let typed = validate_typed_params(method, params).map_err(crate::error::QaqhError::message)?;
     let result = service.handle(method, params)?;
     if typed {
-        validate_typed_result(method, &result)?;
+        validate_typed_result(method, &result).map_err(crate::error::QaqhError::message)?;
     }
     Ok(result)
 }
@@ -1438,24 +1443,24 @@ mod tests {
     #[test]
     fn error_response_shape_differs_by_kind() {
         assert_eq!(
-            error_response(MethodKind::Read, "x")["code"],
+            error_response(MethodKind::Read, &crate::error::QaqhError::invalid("x"))["code"],
             serde_json::json!("query_failed")
         );
         assert_eq!(
-            error_response(MethodKind::Write, "x")["code"],
+            error_response(MethodKind::Write, &crate::error::QaqhError::invalid("x"))["code"],
             serde_json::json!("action_failed")
         );
     }
 
     /// T-2-1：白名单拒绝必须成 `forbidden` 码，而不是伪装成 `query_failed`
-    /// （与 IO 失败不可区分）。
+    /// （与 IO 失败不可区分）。判定依据是错误**变体**，不是文案前缀。
     #[test]
-    fn forbidden_prefix_maps_to_forbidden_code() {
+    fn forbidden_error_maps_to_forbidden_code() {
+        let forbidden = crate::error::QaqhError::Forbidden {
+            message: "fs.read /etc/passwd: path is outside the allowed roots".to_string(),
+        };
         for kind in [MethodKind::Read, MethodKind::Write] {
-            let value = error_response(
-                kind,
-                "FORBIDDEN: fs.read /etc/passwd: path is outside the allowed roots",
-            );
+            let value = error_response(kind, &forbidden);
             assert_eq!(value["code"], serde_json::json!("forbidden"));
             assert!(
                 value["message"]

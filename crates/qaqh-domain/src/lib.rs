@@ -15,6 +15,8 @@
 //!   依赖方向固定为：`domain ← wire ← transport`。
 //! - 领域类型不携带任何传输语义（无 SSE/WebSocket/HTTP/pipe 概念）。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod channel;
 pub mod command;
 pub mod event;

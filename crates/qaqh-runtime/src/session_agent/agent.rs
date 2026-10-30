@@ -1,55 +1,57 @@
 //! Single-owner SessionAgent implementation (RLC-3.1).
+//!
+//! One owner folds the committed prefix into its phase, commits every
+//! transition through [`SessionCommit`], and dispatches effects through a
+//! supervisor. Display facts (`AssistantBlockSealed`) are produced for every
+//! model attempt so the projection has a transcript source.
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use qaqh_agentloop_core::{
     DispatchEvidence, EffectIdentity,
     driver::{InputHandler, Step},
-    mailbox::MailboxHandle,
+    mailbox::{CompletionReservation, MailboxHandle},
     supervisor::{DispatchTicket, Supervisor, TaskOutcome},
 };
 use qaqh_session::{
-    canonical::sha256_content_hash,
+    canonical::{BatchReceipt, causation_for_command, generate_ulid, sha256_content_hash},
     session_commit::{CommittedExecution, SessionCommit},
     session_fact_v2::{
-        ActorKind, ActorRef, ContentRef, EventId, ExecutionId, FactPayload,
-        FactSchema, InputAccepted, InputId, InputKind, InputPurpose, InteractionDecision,
-        InteractionId, InteractionKind, InteractionRequested, InteractionResolved, InterruptReason,
-        PolicyDecisionRef, RecoveryId, RecoveryRef, SessionFact, SideEffectClass, ToolCallId,
-        ToolError, ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics,
-        ToolReplayCapability, ToolTerminalStatus, TurnFinished, TurnId, TurnInterrupted,
-        TurnMode, TurnStarted, TurnTerminal, ProviderFinish,
+        ActorKind, ActorRef, ContentRef, ContextMessageCommitted, ContextMessageOrigin, EventId,
+        ExecutionId, FactPayload, FactSchema, InputAccepted, InputId, InputKind, InputPurpose,
+        InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind,
+        InteractionRequested, InteractionResolved, InterruptReason, PolicyDecisionRef,
+        ProviderFinish, RecoveryAction, RecoveryId, RecoveryOutcome, RecoveryRef, SessionFact,
+        SessionRecovered, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
+        ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished,
+        TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal,
     },
 };
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
 use crate::{
-    provider_job::{
-        ProviderRequestSpec, build_model_round_started,
-        prepare_response_commit_facts, run_verified,
-    },
+    activity::SessionActivityTracker,
+    provider_job::{ProviderOutcome, ProviderRequestSpec, build_model_round_started, prepare_response_commit_facts, run_verified},
     tool_job::{
-        ToolOutcome, ToolPort, ToolRequest, WorkspaceToolPort,
+        ToolAdmission, ToolApprovalGrant, ToolOutcome, ToolRequest, WorkspaceToolPort, run as run_tool,
     },
 };
 
 use super::types::{
-    ActivePhase, AgentCommand, AgentCompletion, AgentControl, AgentOutcome, SessionAgentError,
-    SessionPhase,
+    ActivePhase, AgentCommand, AgentCompletion, AgentControl, AgentOutcome, QueuedUserInput,
+    SessionAgentError, SessionPhase,
 };
 
-static EVENT_ORDINAL_GENERATOR: AtomicU64 = AtomicU64::new(100);
-
-fn next_event_id() -> EventId {
-    let ord = EVENT_ORDINAL_GENERATOR.fetch_add(1, Ordering::Relaxed);
-    EventId::new(format!("01J{ord:023}"))
-}
+/// Bounded in-owner input queue. Durable acceptance is the committed
+/// `InputAccepted` fact, not this queue.
+const MAX_QUEUED_INPUTS: usize = 32;
+/// Completion capacity reserved before a provider dispatch. Oversized results
+/// stay owned by the supervisor instead of being silently dropped.
+const PROVIDER_COMPLETION_BYTES: u32 = 1024 * 1024;
+const TOOL_COMPLETION_BYTES: u32 = 256 * 1024;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -67,6 +69,69 @@ fn text_message(role: &str, text: &str) -> qaqh_types::Message {
     }
 }
 
+fn tool_result_message(call_id: &str, text: &str, ok: bool) -> qaqh_types::Message {
+    qaqh_types::Message {
+        msg_id: None,
+        role: "tool".into(),
+        name: None,
+        content: vec![qaqh_types::ContentBlock::ToolResult {
+            tool_use_id: call_id.to_string(),
+            result: if ok {
+                qaqh_types::ToolResult::ok(text)
+            } else {
+                qaqh_types::ToolResult::error(text)
+            },
+        }],
+    }
+}
+
+fn recovery_ref(seed: &str) -> RecoveryRef {
+    RecoveryRef {
+        recovery_id: RecoveryId::new(format!("recovery_{}", generate_ulid())),
+        recovery_event_id: EventId::new(generate_ulid()),
+        recovery_input_fingerprint: sha256_content_hash(seed.as_bytes()),
+    }
+}
+
+/// Optional daemon-side activity tap. Absent in unit tests.
+#[derive(Clone)]
+pub struct ActivityTap {
+    pub tracker: SessionActivityTracker,
+    pub generation: u64,
+}
+
+impl ActivityTap {
+    fn observe(&self, session_id: &str, event: serde_json::Value) {
+        self.tracker.observe(session_id, self.generation, &event);
+    }
+}
+
+/// A tool that has been declared and intended, but whose result is still owed.
+struct ActiveTool {
+    identity: EffectIdentity,
+    execution_id: ExecutionId,
+}
+
+/// A tool waiting for a user permission decision.
+struct PendingPermission {
+    interaction_id: InteractionId,
+    execution_id: ExecutionId,
+    args_hash: String,
+    tool_name: String,
+    args: Vec<u8>,
+}
+
+enum PendingInteraction {
+    Ask {
+        call_id: ToolCallId,
+        interaction_id: InteractionId,
+        execution_id: ExecutionId,
+    },
+    Permission {
+        call_id: ToolCallId,
+    },
+}
+
 pub struct SessionAgent {
     pub(crate) session_id: String,
     pub(crate) incarnation: u64,
@@ -80,23 +145,34 @@ pub struct SessionAgent {
     pub(crate) mailbox_handle: MailboxHandle<AgentCommand, AgentControl, AgentCompletion>,
     pub(crate) provider_spec: ProviderRequestSpec,
     pub(crate) tool_port: Arc<WorkspaceToolPort>,
+    pub(crate) activity: Option<ActivityTap>,
     pub(crate) active_provider_identity: Option<EffectIdentity>,
-    pub(crate) active_tool_identities: HashMap<ToolCallId, (EffectIdentity, ExecutionId)>,
-    pub(crate) pending_ask_id: Option<(ToolCallId, InteractionId, ExecutionId)>,
-    pub(crate) queued_inputs: VecDeque<(InputId, String, Vec<ContentRef>, Option<String>)>,
+    pub(crate) active_tool_identities: HashMap<ToolCallId, ActiveTool>,
+    pub(crate) pending_permissions: HashMap<ToolCallId, PendingPermission>,
+    pub(crate) pending_interaction: Option<PendingInteraction>,
+    pub(crate) queued_inputs: VecDeque<QueuedUserInput>,
+    /// Causation of the command currently being processed.
+    pub(crate) causation: Option<EventId>,
+    system_prompt_seeded: bool,
 }
 
 impl SessionAgent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: String,
         incarnation: u64,
-        commit: SessionCommit,
+        mut commit: SessionCommit,
         supervisor: Arc<Mutex<Supervisor<AgentOutcome, CommittedExecution>>>,
         mailbox_handle: MailboxHandle<AgentCommand, AgentControl, AgentCompletion>,
         provider_spec: ProviderRequestSpec,
         tool_port: Arc<WorkspaceToolPort>,
+        activity: Option<ActivityTap>,
     ) -> Self {
-        Self {
+        let mut queued_inputs = VecDeque::new();
+        if let Err(error) = recover_open_work(&mut commit, &mut queued_inputs) {
+            log::error!("[session-agent] recovery failed for {session_id}: {error}");
+        }
+        let mut agent = Self {
             session_id,
             incarnation,
             phase: SessionPhase::Ready,
@@ -109,11 +185,26 @@ impl SessionAgent {
             mailbox_handle,
             provider_spec,
             tool_port,
+            activity,
             active_provider_identity: None,
             active_tool_identities: HashMap::new(),
-            pending_ask_id: None,
-            queued_inputs: VecDeque::new(),
+            pending_permissions: HashMap::new(),
+            pending_interaction: None,
+            queued_inputs,
+            causation: None,
+            system_prompt_seeded: false,
+        };
+        // Resume inputs that were durably accepted but never started.
+        if agent.phase == SessionPhase::Ready
+            && let Err(error) = agent.start_next_turn()
+        {
+            log::error!(
+                "[session-agent] failed to resume queued input for {}: {error}",
+                agent.session_id
+            );
+            agent.phase = SessionPhase::Blocked(error.to_string());
         }
+        agent
     }
 
     pub fn phase(&self) -> &SessionPhase {
@@ -128,195 +219,870 @@ impl SessionAgent {
         self.incarnation
     }
 
-    pub(crate) fn dispatch_task<F, Fut>(
+    pub fn set_provider_spec(&mut self, spec: ProviderRequestSpec) {
+        self.provider_spec = spec;
+    }
+
+    fn observe(&self, event: serde_json::Value) {
+        if let Some(tap) = &self.activity {
+            tap.observe(&self.session_id, event);
+        }
+    }
+
+    fn fact(
+        &self,
+        event_id: EventId,
+        payload: FactPayload,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+        interaction_id: Option<InteractionId>,
+    ) -> SessionFact {
+        SessionFact {
+            schema: FactSchema::v2(),
+            session_id: self.commit.session_id().clone(),
+            log_id: self.commit.log_id().clone(),
+            fact_seq: 0,
+            event_id,
+            ts_ms: now_ms(),
+            causation_id: self.causation.clone(),
+            turn_id,
+            call_id,
+            interaction_id,
+            payload,
+        }
+    }
+
+    fn commit_batch(
+        &mut self,
+        batch_id: &str,
+        facts: Vec<SessionFact>,
+    ) -> Result<BatchReceipt, SessionAgentError> {
+        let head = self.commit.head()?;
+        Ok(self.commit.commit(batch_id, head, facts)?)
+    }
+
+    /// Reserve completion capacity *before* an intent is committed, so a full
+    /// lane can never strand already-durable work.
+    fn reserve_completion(
+        &self,
+        bytes: u32,
+    ) -> Result<CompletionReservation<AgentCompletion>, SessionAgentError> {
+        self.mailbox_handle
+            .try_reserve_completion(bytes)
+            .map_err(SessionAgentError::Mailbox)
+    }
+
+    fn dispatch_task<F, Fut>(
         &mut self,
         ticket: DispatchTicket,
+        reservation: CompletionReservation<AgentCompletion>,
         make: F,
     ) -> Result<(), SessionAgentError>
     where
         F: FnOnce(CommittedExecution, watch::Receiver<bool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = AgentOutcome> + Send + 'static,
     {
-        let reservation = self
-            .mailbox_handle
-            .try_reserve_completion(60_000)
-            .map_err(SessionAgentError::Mailbox)?;
         let identity = ticket.identity().clone();
         let sup_lock = Arc::clone(&self.supervisor);
-        let mut sup = sup_lock
-            .try_lock()
-            .map_err(|_| SessionAgentError::Internal("supervisor lock contention".into()))?;
-
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        sup.start(ticket, reservation, move |execution, cancel_rx| async move {
-            let res = make(execution, cancel_rx).await;
-            let _ = done_tx.send(());
-            res
-        })
-        .map_err(SessionAgentError::Supervisor)?;
+        {
+            let mut sup = sup_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sup.start(ticket, reservation, move |execution, cancel_rx| async move {
+                make(execution, cancel_rx).await
+            })
+            .map_err(SessionAgentError::Supervisor)?;
+        }
 
         let sup_clone = Arc::clone(&self.supervisor);
         let ident_clone = identity;
         tokio::spawn(async move {
-            let _ = done_rx.await;
-            let mut sup = sup_clone.lock().await;
-            if let Ok(_comp) = sup.collect(&ident_clone).await {
-                let _ = sup.deliver(&ident_clone);
+            loop {
+                {
+                    let mut sup = sup_clone
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if sup.is_finished(&ident_clone) {
+                        // `collect` completes on the first poll once the handle
+                        // is finished, so it is polled outside async hold.
+                        match poll_once(sup.collect(&ident_clone)) {
+                            Some(Ok(_completion)) => {
+                                let _ = sup.deliver(&ident_clone);
+                            }
+                            Some(Err(error)) => log::warn!(
+                                "[session-agent] completion collection failed for {}: {error:?}",
+                                ident_clone.effect_id
+                            ),
+                            None => {}
+                        }
+                        return;
+                    }
+                }
+                // The task is still running; never block the actor on it.
+                tokio::task::yield_now().await;
             }
         });
-
         Ok(())
     }
 
-    fn start_turn(
-        &mut self,
-        input_id: InputId,
-        text: String,
-        attachments: Vec<ContentRef>,
-        client_request_id: Option<String>,
-    ) -> Result<(), SessionAgentError> {
-        let turn_event_id = next_event_id();
-        let turn_id = TurnId::new(format!("turn_{}", turn_event_id.as_str()));
-        self.active_turn = Some(turn_id.clone());
-        self.active_input = Some(input_id.clone());
-        self.current_round = 1;
-        self.current_attempt = 1;
 
-        let input_fact = SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.commit.session_id().clone(),
-            log_id: self.commit.log_id().clone(),
-            fact_seq: 0,
-            event_id: next_event_id(),
-            ts_ms: now_ms(),
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::InputAccepted(InputAccepted {
-                input_id: input_id.clone(),
+    fn ensure_system_prompt(&mut self) -> Result<(), SessionAgentError> {
+        if self.system_prompt_seeded {
+            return Ok(());
+        }
+        self.system_prompt_seeded = true;
+        if !self.commit.request_messages()?.is_empty() {
+            return Ok(());
+        }
+        let prompt = crate::session_agent::prompt::system_prompt(&self.provider_spec);
+        let message = text_message("system", &prompt);
+        let bytes =
+            serde_json::to_vec(&message).map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+        let message_ref = self.commit.put_blob(&bytes)?;
+        let fact = self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::ContextMessageCommitted(ContextMessageCommitted {
+                message_ref,
+                origin: ContextMessageOrigin::FrozenPrefix,
+            }),
+            None,
+            None,
+            None,
+        );
+        self.commit_batch(
+            &format!("batch-prefix-{}", self.commit.head()? + 1),
+            vec![fact],
+        )?;
+        Ok(())
+    }
+
+    fn accept_input(&mut self, input: &QueuedUserInput) -> Result<(), SessionAgentError> {
+        let fact = self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::InputAccepted(InputAccepted {
+                input_id: input.input_id.clone(),
                 input_kind: InputKind::UserText,
                 input_purpose: InputPurpose::TriggerTurn,
                 content_ref: None,
-                inline_text: Some(text.clone()),
-                attachments,
+                inline_text: Some(truncate_text(&input.text, 8 * 1024)),
+                attachments: input.attachments.clone(),
                 actor: ActorRef {
                     kind: ActorKind::User,
                     id: "user".into(),
                     display_name: None,
                 },
-                client_request_id,
+                client_request_id: input.client_request_id.clone(),
             }),
-        };
+            None,
+            None,
+            None,
+        );
+        self.commit_batch(
+            &format!("batch-input-{}", input.input_id.as_str()),
+            vec![fact],
+        )?;
+        Ok(())
+    }
 
-        let turn_started_fact = SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.commit.session_id().clone(),
-            log_id: self.commit.log_id().clone(),
-            fact_seq: 0,
-            event_id: turn_event_id,
-            ts_ms: now_ms(),
-            causation_id: None,
-            turn_id: Some(turn_id.clone()),
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::TurnStarted(TurnStarted {
+    fn push_input(&mut self, input: QueuedUserInput) -> Result<(), SessionAgentError> {
+        if self.queued_inputs.len() >= MAX_QUEUED_INPUTS {
+            return Err(SessionAgentError::Internal(
+                "input queue is full; retry after the current turn settles".into(),
+            ));
+        }
+        let mut input = input;
+        if !input.accepted {
+            self.accept_input(&input)?;
+            input.accepted = true;
+        }
+        self.queued_inputs.push_back(input);
+        Ok(())
+    }
+
+    fn start_next_turn(&mut self) -> Result<(), SessionAgentError> {
+        if self.phase != SessionPhase::Ready {
+            return Ok(());
+        }
+        let Some(mut input) = self.queued_inputs.pop_front() else {
+            return Ok(());
+        };
+        if !input.accepted {
+            self.accept_input(&input)?;
+            input.accepted = true;
+        }
+        self.begin_turn(input)
+    }
+
+    fn begin_turn(&mut self, input: QueuedUserInput) -> Result<(), SessionAgentError> {
+        self.ensure_system_prompt()?;
+        let turn_id = TurnId::new(format!("turn_{}", generate_ulid()));
+        self.active_turn = Some(turn_id.clone());
+        self.active_input = Some(input.input_id.clone());
+        self.current_round = 1;
+        self.current_attempt = 1;
+
+        let started = self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
-                input_id,
+                input_id: input.input_id.clone(),
                 mode: TurnMode::Normal,
                 recovery_ref: None,
             }),
-        };
+            Some(turn_id.clone()),
+            None,
+            None,
+        );
 
-        let user_msg = text_message("user", &text);
+        let user_msg = text_message("user", &input.text);
         let msg_bytes = serde_json::to_vec(&user_msg)
             .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
         let message_ref = self.commit.put_blob(&msg_bytes)?;
+        let context_fact = self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::ContextMessageCommitted(ContextMessageCommitted {
+                message_ref,
+                origin: ContextMessageOrigin::Input,
+            }),
+            Some(turn_id.clone()),
+            None,
+            None,
+        );
 
-        let context_fact = SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.commit.session_id().clone(),
-            log_id: self.commit.log_id().clone(),
-            fact_seq: 0,
-            event_id: next_event_id(),
-            ts_ms: now_ms(),
-            causation_id: None,
-            turn_id: Some(turn_id.clone()),
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::ContextMessageCommitted(
-                qaqh_session::session_fact_v2::ContextMessageCommitted {
-                    message_ref,
-                    origin: qaqh_session::session_fact_v2::ContextMessageOrigin::Input,
-                },
-            ),
+        self.phase = SessionPhase::Active(ActivePhase::PreparingContext);
+        self.commit_batch(
+            &format!("batch-{}-start", turn_id.as_str()),
+            vec![started, context_fact],
+        )?;
+        self.observe(serde_json::json!({
+            "type": "turn_start",
+            "turn_id": turn_id.as_str(),
+        }));
+        self.start_round(1)
+    }
+
+    fn start_round(&mut self, round: u32) -> Result<(), SessionAgentError> {
+        let Some(turn_id) = self.active_turn.clone() else {
+            return Err(SessionAgentError::Internal(
+                "model round without an active turn".into(),
+            ));
         };
-
-        let head = self.commit.head()?;
-        let prep_batch = format!("batch-turn-prep-{}", turn_id.as_str());
-        let prep_facts = vec![input_fact, turn_started_fact, context_fact];
-        self.commit.commit(&prep_batch, head, prep_facts)?;
-
-        let head2 = self.commit.head()?;
-        let round_started_payload = build_model_round_started(
+        self.current_round = round;
+        self.current_attempt = 1;
+        let payload = build_model_round_started(
             &self.commit,
             turn_id.clone(),
-            1,
-            1,
+            round,
+            self.current_attempt,
             &self.provider_spec,
         )?;
+        let round_event_id = EventId::new(generate_ulid());
+        let fact = self.fact(
+            round_event_id.clone(),
+            FactPayload::ModelRoundStarted(payload),
+            Some(turn_id.clone()),
+            None,
+            None,
+        );
 
-        let round_event_id = next_event_id();
-        let round_started_fact = SessionFact {
-            schema: FactSchema::v2(),
-            session_id: self.commit.session_id().clone(),
-            log_id: self.commit.log_id().clone(),
-            fact_seq: 0,
-            event_id: round_event_id.clone(),
-            ts_ms: now_ms(),
-            causation_id: None,
-            turn_id: Some(turn_id.clone()),
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::ModelRoundStarted(round_started_payload),
-        };
-
-        let batch_id = format!("batch-turn-{}-r1", turn_id.as_str());
-        let (_receipt, capability) = self.commit.commit_with_effect(
-            &batch_id,
-            head2,
-            vec![round_started_fact],
+        let reservation = self.reserve_completion(PROVIDER_COMPLETION_BYTES)?;
+        let head = self.commit.head()?;
+        let (_, capability) = self.commit.commit_with_effect(
+            &format!("batch-{}-r{}", turn_id.as_str(), round),
+            head,
+            vec![fact],
             round_event_id.as_str(),
         )?;
-
-        let cap = capability.ok_or_else(|| {
+        let capability = capability.ok_or_else(|| {
             SessionAgentError::Internal("expected capability for ModelRoundStarted".into())
         })?;
-        let identity = cap.identity().clone();
+        let identity = capability.identity().clone();
         self.active_provider_identity = Some(identity.clone());
 
         let ticket = {
             let mut sup = self
                 .supervisor
-                .try_lock()
-                .map_err(|_| SessionAgentError::Internal("supervisor lock contention".into()))?;
-            sup.authorize(identity, cap)
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sup.authorize(identity, capability)
                 .map_err(SessionAgentError::Supervisor)?
         };
 
         let spec = self.provider_spec.clone();
-        self.dispatch_task(ticket, move |execution, cancel_rx| async move {
-            let outcome = run_verified(spec, execution, cancel_rx).await;
-            AgentOutcome::Provider(outcome)
+        self.dispatch_task(ticket, reservation, move |execution, cancel_rx| async move {
+            AgentOutcome::Provider(run_verified(spec, execution, cancel_rx).await)
         })?;
-
         self.phase = SessionPhase::Active(ActivePhase::AwaitingProvider {
-            round: 1,
-            attempt: 1,
+            round,
+            attempt: self.current_attempt,
         });
-
         Ok(())
     }
+
+    fn next_round(&mut self) -> Result<(), SessionAgentError> {
+        if self.active_turn.is_none() {
+            return Ok(());
+        }
+        if !self.active_tool_identities.is_empty() || self.pending_interaction.is_some() {
+            return Ok(());
+        }
+        let round = self.current_round.saturating_add(1);
+        self.start_round(round)
+    }
+
+    fn finish_turn(&mut self, terminal: TurnTerminal, usage: Option<qaqh_types::UsageInfo>) {
+        self.active_turn = None;
+        self.active_input = None;
+        self.active_provider_identity = None;
+        self.active_tool_identities.clear();
+        self.pending_permissions.clear();
+        self.pending_interaction = None;
+        self.observe(match terminal {
+            TurnTerminal::Cancelled => serde_json::json!({ "type": "cancelled" }),
+            TurnTerminal::Failed => serde_json::json!({ "type": "failed" }),
+            TurnTerminal::Completed => serde_json::json!({ "type": "turn_end" }),
+        });
+        let _ = usage;
+        self.phase = SessionPhase::Ready;
+        if let Err(error) = self.start_next_turn() {
+            log::error!(
+                "[session-agent] failed to start queued turn for {}: {error}",
+                self.session_id
+            );
+            self.phase = SessionPhase::Blocked(error.to_string());
+        }
+    }
+
+    fn interrupt_turn(
+        &mut self,
+        reason: InterruptReason,
+        usage: Option<qaqh_types::UsageInfo>,
+    ) -> Result<(), SessionAgentError> {
+        let Some(turn_id) = self.active_turn.clone() else {
+            return Ok(());
+        };
+        let head = self.commit.head()?;
+        // Every open obligation must be settled in the same batch: the
+        // business reducer refuses a turn terminal with unsettled work.
+        let mut facts = Vec::new();
+        if let Some(interaction) = self.pending_interaction.take() {
+            let interaction_id = match &interaction {
+                PendingInteraction::Ask {
+                    interaction_id, ..
+                } => interaction_id.clone(),
+                PendingInteraction::Permission { call_id } => self
+                    .pending_permissions
+                    .remove(call_id)
+                    .map(|pending| pending.interaction_id)
+                    .ok_or_else(|| {
+                        SessionAgentError::Internal(
+                            "permission interaction lost before interruption".into(),
+                        )
+                    })?,
+            };
+            facts.push(self.fact(
+                EventId::new(generate_ulid()),
+                FactPayload::InteractionExpired(qaqh_session::session_fact_v2::InteractionExpired {
+                    interaction_id: interaction_id.clone(),
+                    reason: InteractionExpiryReason::TurnCancelled,
+                    recovery_ref: None,
+                    expired_at_ms: now_ms(),
+                }),
+                Some(turn_id.clone()),
+                None,
+                Some(interaction_id),
+            ));
+        }
+        let open_tools: Vec<(ToolCallId, ExecutionId)> = self
+            .active_tool_identities
+            .iter()
+            .map(|(call_id, tool)| (call_id.clone(), tool.execution_id.clone()))
+            .collect();
+        for (call_id, execution_id) in open_tools {
+            facts.push(self.tool_finished_fact(
+                &turn_id,
+                &call_id,
+                Some(execution_id),
+                ToolTerminalStatus::Indeterminate,
+                Vec::new(),
+                Some(ToolError {
+                    code: "tool_interrupted".into(),
+                    message: "turn interrupted before the tool result was observed".into(),
+                    retryable: true,
+                    details_ref: None,
+                }),
+                false,
+            )?);
+        }
+        facts.push(self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::TurnInterrupted(TurnInterrupted {
+                turn_id: turn_id.clone(),
+                reason,
+                last_fact_seq: head,
+                recovery_ref: recovery_ref(reason_name(reason)),
+            }),
+            Some(turn_id.clone()),
+            None,
+            None,
+        ));
+        self.commit_batch(&format!("batch-{}-interrupt", turn_id.as_str()), facts)?;
+        let terminal = match reason {
+            InterruptReason::CancelBeforeSeal => TurnTerminal::Cancelled,
+            _ => TurnTerminal::Failed,
+        };
+        self.finish_turn(terminal, usage);
+        Ok(())
+    }
+
+    fn tool_finished_fact(
+        &self,
+        turn_id: &TurnId,
+        call_id: &ToolCallId,
+        execution_id: Option<ExecutionId>,
+        status: ToolTerminalStatus,
+        output: Vec<u8>,
+        error: Option<ToolError>,
+        backgrounded: bool,
+    ) -> Result<SessionFact, SessionAgentError> {
+        let output_ref = Some(self.commit.put_blob(&output)?);
+        let finished_at_ms = now_ms();
+        Ok(self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::ToolFinished(ToolFinished {
+                call_id: call_id.clone(),
+                execution_id,
+                terminal_status: status,
+                output_ref,
+                error,
+                metrics: ToolMetrics {
+                    started_at_ms: finished_at_ms.saturating_sub(1),
+                    finished_at_ms,
+                    retry_count: 0,
+                    output_bytes: output.len() as u64,
+                    progress_bytes_total: output.len() as u64,
+                },
+                reconciled: false,
+                evidence_ref: None,
+                evidence_fact_seq: None,
+                evidence_event_id: None,
+                recovery_ref: None,
+                finished_at_ms,
+            }),
+            Some(turn_id.clone()),
+            Some(call_id.clone()),
+            None,
+        )
+        .with_backgrounded(backgrounded))
+    }
+
+    fn tool_result_context_fact(
+        &self,
+        turn_id: &TurnId,
+        call_id: &ToolCallId,
+        text: &str,
+        ok: bool,
+    ) -> Result<SessionFact, SessionAgentError> {
+        let message = tool_result_message(call_id.as_str(), text, ok);
+        let bytes = serde_json::to_vec(&message)
+            .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+        let message_ref = self.commit.put_blob(&bytes)?;
+        Ok(self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::ContextMessageCommitted(ContextMessageCommitted {
+                message_ref,
+                origin: ContextMessageOrigin::ToolResult,
+            }),
+            Some(turn_id.clone()),
+            Some(call_id.clone()),
+            None,
+        ))
+    }
+
+    fn deny_tool(
+        &mut self,
+        turn_id: &TurnId,
+        call_id: &ToolCallId,
+        reason: &str,
+    ) -> Result<(), SessionAgentError> {
+        let finished = self.tool_finished_fact(
+            turn_id,
+            call_id,
+            None,
+            ToolTerminalStatus::Denied,
+            Vec::new(),
+            Some(ToolError {
+                code: "tool_denied".into(),
+                message: truncate_text(reason, 512),
+                retryable: false,
+                details_ref: None,
+            }),
+            false,
+        )?;
+        let context = self.tool_result_context_fact(turn_id, call_id, reason, false)?;
+        self.commit_batch(
+            &format!("batch-{}-deny-{}", turn_id.as_str(), call_id.as_str()),
+            vec![finished, context],
+        )?;
+        Ok(())
+    }
+
+    fn request_permission(
+        &mut self,
+        turn_id: &TurnId,
+        call_id: &ToolCallId,
+        execution_id: &ExecutionId,
+        tool_name: &str,
+        args: &[u8],
+        reason: &str,
+    ) -> Result<(), SessionAgentError> {
+        let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+        let request = serde_json::json!({
+            "tool": tool_name,
+            "reason": reason,
+        });
+        let request_bytes = serde_json::to_vec(&request)
+            .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+        let request_ref = self.commit.put_blob(&request_bytes)?;
+        let fact = self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::InteractionRequested(InteractionRequested {
+                interaction_id: interaction_id.clone(),
+                call_id: Some(call_id.clone()),
+                turn_id: turn_id.clone(),
+                kind: InteractionKind::Permission,
+                request_ref,
+                expires_at_ms: None,
+                requested_at_ms: now_ms(),
+            }),
+            Some(turn_id.clone()),
+            Some(call_id.clone()),
+            Some(interaction_id.clone()),
+        );
+        self.commit_batch(
+            &format!("batch-perm-{}", interaction_id.as_str()),
+            vec![fact],
+        )?;
+        self.pending_permissions.insert(
+            call_id.clone(),
+            PendingPermission {
+                interaction_id,
+                execution_id: execution_id.clone(),
+                args_hash: WorkspaceToolPort::args_hash(args),
+                tool_name: tool_name.to_string(),
+                args: args.to_vec(),
+            },
+        );
+        self.pending_interaction = Some(PendingInteraction::Permission {
+            call_id: call_id.clone(),
+        });
+        self.phase = SessionPhase::Active(ActivePhase::AwaitingUser {
+            interaction_id: InteractionId::new("permission"),
+        });
+        self.observe(serde_json::json!({ "type": "permission_request" }));
+        Ok(())
+    }
+
+    fn dispatch_tool(
+        &mut self,
+        turn_id: &TurnId,
+        call_id: &ToolCallId,
+        tool_name: &str,
+        args: &[u8],
+        execution_id: &ExecutionId,
+    ) -> Result<(), SessionAgentError> {
+        let args_ref = self.commit.put_blob(args)?;
+        let args_hash = sha256_content_hash(args);
+        let intent_event_id = EventId::new(generate_ulid());
+        let intent = self.fact(
+            intent_event_id.clone(),
+            FactPayload::ToolIntent(ToolIntent {
+                call_id: call_id.clone(),
+                execution_id: execution_id.clone(),
+                idempotency_key: None,
+                replay_capability: ToolReplayCapability::NoReplay,
+                policy_decision: PolicyDecisionRef {
+                    outcome: ToolIntentPolicyOutcome::Allow,
+                    rule_id: "policy.evaluated".into(),
+                    decided_at_ms: now_ms(),
+                    reason_ref: None,
+                },
+                effective_args_ref: Some(args_ref),
+                effective_args_hash: Some(args_hash),
+                sandbox_spec_hash: sha256_content_hash(b"sandbox_spec"),
+                side_effect_class: SideEffectClass::WorkspaceWrite,
+                intent_at_ms: now_ms(),
+            }),
+            Some(turn_id.clone()),
+            Some(call_id.clone()),
+            None,
+        );
+
+        let reservation = self.reserve_completion(TOOL_COMPLETION_BYTES)?;
+        let head = self.commit.head()?;
+        let (_, capability) = self.commit.commit_with_effect(
+            &format!("batch-{}-intent-{}", turn_id.as_str(), call_id.as_str()),
+            head,
+            vec![intent],
+            intent_event_id.as_str(),
+        )?;
+        let capability = capability.ok_or_else(|| {
+            SessionAgentError::Internal("expected capability for ToolIntent".into())
+        })?;
+        let identity = capability.identity().clone();
+        self.active_tool_identities.insert(
+            call_id.clone(),
+            ActiveTool {
+                identity: identity.clone(),
+                execution_id: execution_id.clone(),
+            },
+        );
+        let ticket = {
+            let mut sup = self
+                .supervisor
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sup.authorize(identity, capability)
+                .map_err(SessionAgentError::Supervisor)?
+        };
+        let port = Arc::clone(&self.tool_port);
+        let name = tool_name.to_string();
+        self.dispatch_task(ticket, reservation, move |execution, cancel_rx| async move {
+            AgentOutcome::Tool(run_tool(port, name, execution, cancel_rx).await)
+        })?;
+        Ok(())
+    }
+
+    fn declaration_request(&self, call_id: &ToolCallId, name: &str, args: &[u8]) -> ToolRequest {
+        ToolRequest {
+            execution_id: format!("exec_{}", generate_ulid()),
+            call_id: call_id.as_str().to_string(),
+            tool_name: name.to_string(),
+            side_effect_class: SideEffectClass::WorkspaceWrite,
+            replay: ToolReplayCapability::NoReplay,
+            args: args.to_vec(),
+        }
+    }
+}
+
+/// Small helper so the backgrounded flag is visible at the fact construction
+/// site even though the schema keeps it in `terminal_status`.
+trait FactBackgrounded {
+    fn with_backgrounded(self, backgrounded: bool) -> Self;
+}
+
+impl FactBackgrounded for SessionFact {
+    fn with_backgrounded(mut self, backgrounded: bool) -> Self {
+        if backgrounded && let FactPayload::ToolFinished(payload) = &mut self.payload {
+            payload.terminal_status = ToolTerminalStatus::Backgrounded;
+        }
+        self
+    }
+}
+
+/// Poll a future exactly once without an async context.
+fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let waker = std::task::Waker::noop();
+    let mut context = std::task::Context::from_waker(waker);
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(value) => Some(value),
+        std::task::Poll::Pending => None,
+    }
+}
+
+fn truncate_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+fn reason_name(reason: InterruptReason) -> &'static str {
+    match reason {
+        InterruptReason::Crash => "interrupt_crash",
+        InterruptReason::Restart => "interrupt_restart",
+        InterruptReason::CancelBeforeSeal => "interrupt_cancel",
+        InterruptReason::UnknownFact => "interrupt_unknown_fact",
+    }
+}
+
+/// Settle every obligation left open by a previous incarnation, then rebuild
+/// the durable input queue. Runs once, before the owner accepts any command.
+fn recover_open_work(
+    commit: &mut SessionCommit,
+    queued: &mut VecDeque<QueuedUserInput>,
+) -> Result<(), SessionAgentError> {
+    let obligations = commit.obligations()?;
+    if obligations.has_open_work() {
+        let head = commit.head()?;
+        let mut facts = Vec::new();
+        let mut actions = Vec::new();
+        for interaction in &obligations.unsettled_interactions {
+            facts.push(SessionFact {
+                schema: FactSchema::v2(),
+                session_id: commit.session_id().clone(),
+                log_id: commit.log_id().clone(),
+                fact_seq: 0,
+                event_id: EventId::new(generate_ulid()),
+                ts_ms: now_ms(),
+                causation_id: None,
+                turn_id: Some(interaction.turn_id.clone()),
+                call_id: interaction.call_id.clone(),
+                interaction_id: Some(interaction.interaction_id.clone()),
+                payload: FactPayload::InteractionExpired(
+                    qaqh_session::session_fact_v2::InteractionExpired {
+                        interaction_id: interaction.interaction_id.clone(),
+                        reason: InteractionExpiryReason::RestartPolicy,
+                        recovery_ref: None,
+                        expired_at_ms: now_ms(),
+                    },
+                ),
+            });
+            actions.push(RecoveryAction::InteractionExpired {
+                interaction_id: interaction.interaction_id.clone(),
+                reason: InteractionExpiryReason::RestartPolicy,
+            });
+        }
+        for tool in &obligations.unsettled_tools {
+            let status = if tool.execution_id.is_some() {
+                ToolTerminalStatus::Indeterminate
+            } else {
+                ToolTerminalStatus::Cancelled
+            };
+            facts.push(SessionFact {
+                schema: FactSchema::v2(),
+                session_id: commit.session_id().clone(),
+                log_id: commit.log_id().clone(),
+                fact_seq: 0,
+                event_id: EventId::new(generate_ulid()),
+                ts_ms: now_ms(),
+                causation_id: None,
+                turn_id: Some(tool.turn_id.clone()),
+                call_id: Some(tool.call_id.clone()),
+                interaction_id: None,
+                payload: FactPayload::ToolFinished(ToolFinished {
+                    call_id: tool.call_id.clone(),
+                    execution_id: tool.execution_id.clone(),
+                    terminal_status: status,
+                    output_ref: None,
+                    error: Some(ToolError {
+                        code: "tool_indeterminate".into(),
+                        message: "previous incarnation ended before the tool settled".into(),
+                        retryable: true,
+                        details_ref: None,
+                    }),
+                    metrics: ToolMetrics {
+                        started_at_ms: now_ms().saturating_sub(1),
+                        finished_at_ms: now_ms(),
+                        retry_count: 0,
+                        output_bytes: 0,
+                        progress_bytes_total: 0,
+                    },
+                    reconciled: true,
+                    evidence_ref: None,
+                    evidence_fact_seq: None,
+                    evidence_event_id: None,
+                    recovery_ref: None,
+                    finished_at_ms: now_ms(),
+                }),
+            });
+        }
+        if let Some(turn_id) = &obligations.active_turn {
+            facts.push(SessionFact {
+                schema: FactSchema::v2(),
+                session_id: commit.session_id().clone(),
+                log_id: commit.log_id().clone(),
+                fact_seq: 0,
+                event_id: EventId::new(generate_ulid()),
+                ts_ms: now_ms(),
+                causation_id: None,
+                turn_id: Some(turn_id.clone()),
+                call_id: None,
+                interaction_id: None,
+                payload: FactPayload::TurnInterrupted(TurnInterrupted {
+                    turn_id: turn_id.clone(),
+                    reason: InterruptReason::Restart,
+                    last_fact_seq: head,
+                    recovery_ref: recovery_ref("recovery_restart"),
+                }),
+            });
+            actions.push(RecoveryAction::TurnInterrupted {
+                turn_id: turn_id.clone(),
+                last_fact_seq: head,
+            });
+            facts.push(SessionFact {
+                schema: FactSchema::v2(),
+                session_id: commit.session_id().clone(),
+                log_id: commit.log_id().clone(),
+                fact_seq: 0,
+                event_id: EventId::new(generate_ulid()),
+                ts_ms: now_ms(),
+                causation_id: None,
+                turn_id: None,
+                call_id: None,
+                interaction_id: None,
+                payload: FactPayload::SessionRecovered(SessionRecovered {
+                    recovery_id: RecoveryId::new(format!("recovery_{}", generate_ulid())),
+                    recovery_event_id: EventId::new(generate_ulid()),
+                    recovery_input_fingerprint: sha256_content_hash(b"agent_restart"),
+                    outcome: RecoveryOutcome::Writable,
+                    last_good_fact_seq: head,
+                    torn_tail: false,
+                    torn_bytes: None,
+                    actions,
+                    recovered_at_ms: now_ms(),
+                }),
+            });
+        }
+        if !facts.is_empty() {
+            let batch = match &obligations.active_turn {
+                Some(turn_id) => format!("batch-{}-recovered", turn_id.as_str()),
+                None => format!("batch-recovered-{}", generate_ulid()),
+            };
+            commit.commit(&batch, head, facts)?;
+        }
+        log::warn!(
+            "[session-agent] recovered {} from open obligations",
+            commit.session_id().as_str()
+        );
+    }
+
+    // Re-enqueue accepted-but-unstarted inputs with their committed text.
+    let pending = commit.obligations()?.pending_inputs;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let mut texts: HashMap<String, (String, Vec<ContentRef>, Option<String>)> = HashMap::new();
+    for fact in commit.committed_facts()? {
+        if let FactPayload::InputAccepted(input) = &fact.payload {
+            texts.insert(
+                input.input_id.as_str().to_string(),
+                (
+                    input.inline_text.clone().unwrap_or_default(),
+                    input.attachments.clone(),
+                    input.client_request_id.clone(),
+                ),
+            );
+        }
+    }
+    for input_id in pending {
+        let (text, attachments, client_request_id) = texts
+            .remove(input_id.as_str())
+            .unwrap_or_else(|| (String::new(), Vec::new(), None));
+        queued.push_back(QueuedUserInput {
+            input_id,
+            text,
+            attachments,
+            client_request_id,
+            accepted: true,
+        });
+    }
+    Ok(())
 }
 
 impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent {
@@ -330,21 +1096,24 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                 attachments,
                 client_request_id,
             } => {
-                if self.phase != SessionPhase::Ready {
-                    self.queued_inputs.push_back((
-                        input_id.clone(),
-                        text.clone(),
-                        attachments.clone(),
-                        client_request_id.clone(),
-                    ));
-                    return Ok(Step::Continue);
+                self.causation = client_request_id
+                    .as_deref()
+                    .and_then(causation_for_command);
+                let input = QueuedUserInput {
+                    input_id: input_id.clone(),
+                    text: text.clone(),
+                    attachments: attachments.clone(),
+                    client_request_id: client_request_id.clone(),
+                    accepted: false,
+                };
+                if self.phase == SessionPhase::Ready && self.queued_inputs.is_empty() {
+                    let mut input = input;
+                    self.accept_input(&input)?;
+                    input.accepted = true;
+                    self.begin_turn(input)?;
+                } else {
+                    self.push_input(input)?;
                 }
-                self.start_turn(
-                    input_id.clone(),
-                    text.clone(),
-                    attachments.clone(),
-                    client_request_id.clone(),
-                )?;
                 Ok(Step::Continue)
             }
             AgentCommand::QueueInput {
@@ -353,12 +1122,17 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                 attachments,
                 client_request_id,
             } => {
-                self.queued_inputs.push_back((
-                    input_id.clone(),
-                    text.clone(),
-                    attachments.clone(),
-                    client_request_id.clone(),
-                ));
+                self.causation = client_request_id
+                    .as_deref()
+                    .and_then(causation_for_command);
+                self.push_input(QueuedUserInput {
+                    input_id: input_id.clone(),
+                    text: text.clone(),
+                    attachments: attachments.clone(),
+                    client_request_id: client_request_id.clone(),
+                    accepted: false,
+                })?;
+                self.start_next_turn()?;
                 Ok(Step::Continue)
             }
         }
@@ -368,749 +1142,571 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
         match control {
             AgentControl::Shutdown => {
                 self.phase = SessionPhase::Closing;
+                // Never exit with open obligations: the next owner would have
+                // to reconcile a turn nobody can prove finished.
+                if self.active_turn.is_some() {
+                    let _ = self.interrupt_turn(InterruptReason::CancelBeforeSeal, None);
+                }
                 Ok(Step::Stop)
             }
             AgentControl::CancelTurn { turn_id, reason } => {
-                if let Some(turn) = &self.active_turn {
-                    if turn_id.as_ref().is_none_or(|t| t == turn) {
-                        if let Some(ident) = self.active_provider_identity.take() {
-                            let mut sup = self.supervisor.try_lock().map_err(|_| {
-                                SessionAgentError::Internal("supervisor contention".into())
-                            })?;
-                            let _ = sup.request_cancel(&ident);
-                        }
-                        for (_, (ident, _)) in self.active_tool_identities.drain() {
-                            let mut sup = self.supervisor.try_lock().map_err(|_| {
-                                SessionAgentError::Internal("supervisor contention".into())
-                            })?;
-                            let _ = sup.request_cancel(&ident);
-                        }
-
-                        let head = self.commit.head()?;
-                        let cancel_fact = SessionFact {
-                            schema: FactSchema::v2(),
-                            session_id: self.commit.session_id().clone(),
-                            log_id: self.commit.log_id().clone(),
-                            fact_seq: 0,
-                            event_id: next_event_id(),
-                            ts_ms: now_ms(),
-                            causation_id: None,
-                            turn_id: Some(turn.clone()),
-                            call_id: None,
-                            interaction_id: None,
-                            payload: FactPayload::TurnInterrupted(TurnInterrupted {
-                                turn_id: turn.clone(),
-                                reason: InterruptReason::CancelBeforeSeal,
-                                last_fact_seq: head,
-                                recovery_ref: RecoveryRef {
-                                    recovery_id: RecoveryId::new(format!(
-                                        "recovery_{}",
-                                        next_event_id().as_str()
-                                    )),
-                                    recovery_event_id: next_event_id(),
-                                    recovery_input_fingerprint: sha256_content_hash(
-                                        reason.as_bytes(),
-                                    ),
-                                },
-                            }),
-                        };
-                        let batch_id = format!("batch-cancel-{}", turn.as_str());
-                        self.commit.commit(&batch_id, head, vec![cancel_fact])?;
-                        self.active_turn = None;
-                        self.active_input = None;
-                        self.phase = SessionPhase::Ready;
+                self.causation = None;
+                let matches_turn = self
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn_id.as_ref().is_none_or(|want| want == turn));
+                if !matches_turn {
+                    return Ok(Step::Continue);
+                }
+                let identities: Vec<EffectIdentity> = self
+                    .active_provider_identity
+                    .iter()
+                    .cloned()
+                    .chain(
+                        self.active_tool_identities
+                            .values()
+                            .map(|tool| tool.identity.clone()),
+                    )
+                    .collect();
+                {
+                    let mut sup = self
+                        .supervisor
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for identity in identities {
+                        let _ = sup.request_cancel(&identity);
                     }
                 }
+                self.active_provider_identity = None;
+                self.interrupt_turn(InterruptReason::CancelBeforeSeal, None)?;
+                log::info!(
+                    "[session-agent] cancelled turn for {} ({reason})",
+                    self.session_id
+                );
                 Ok(Step::Continue)
             }
             AgentControl::ResolveInteraction {
                 interaction_id,
                 answers,
             } => {
-                if let Some((tool_call_id, expected_interaction_id, exec_id)) = self.pending_ask_id.take() {
-                    if expected_interaction_id == *interaction_id {
-                        let turn = self.active_turn.as_ref().ok_or_else(|| {
-                            SessionAgentError::Internal("active turn missing for interaction".into())
-                        })?;
-                        let head = self.commit.head()?;
-
-                        let ans_json = serde_json::to_vec(answers)
-                            .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
-                        let ans_ref = self.commit.put_blob(&ans_json)?;
-
-                        let resolved_fact = SessionFact {
-                            schema: FactSchema::v2(),
-                            session_id: self.commit.session_id().clone(),
-                            log_id: self.commit.log_id().clone(),
-                            fact_seq: 0,
-                            event_id: next_event_id(),
-                            ts_ms: now_ms(),
-                            causation_id: None,
-                            turn_id: Some(turn.clone()),
-                            call_id: Some(tool_call_id.clone()),
-                            interaction_id: Some(interaction_id.clone()),
-                            payload: FactPayload::InteractionResolved(InteractionResolved {
-                                interaction_id: interaction_id.clone(),
-                                decision_ref: ans_ref.clone(),
-                                decision: Some(InteractionDecision::Answered),
-                                resolved_by: ActorRef {
-                                    kind: ActorKind::User,
-                                    id: "user".into(),
-                                    display_name: None,
-                                },
-                                resolution_seq: 1,
-                                resolved_at_ms: now_ms(),
-                            }),
-                        };
-
-                        let finished_fact = SessionFact {
-                            schema: FactSchema::v2(),
-                            session_id: self.commit.session_id().clone(),
-                            log_id: self.commit.log_id().clone(),
-                            fact_seq: 0,
-                            event_id: next_event_id(),
-                            ts_ms: now_ms(),
-                            causation_id: None,
-                            turn_id: Some(turn.clone()),
-                            call_id: Some(tool_call_id.clone()),
-                            interaction_id: None,
-                            payload: FactPayload::ToolFinished(ToolFinished {
-                                call_id: tool_call_id.clone(),
-                                execution_id: Some(exec_id),
-                                terminal_status: ToolTerminalStatus::Succeeded,
-                                output_ref: Some(ans_ref),
-                                error: None,
-                                metrics: ToolMetrics {
-                                    started_at_ms: now_ms() - 10,
-                                    finished_at_ms: now_ms(),
-                                    retry_count: 0,
-                                    output_bytes: ans_json.len() as u64,
-                                    progress_bytes_total: ans_json.len() as u64,
-                                },
-                                reconciled: false,
-                                evidence_ref: None,
-                                evidence_fact_seq: None,
-                                evidence_event_id: None,
-                                recovery_ref: None,
-                                finished_at_ms: now_ms(),
-                            }),
-                        };
-
-                        let tool_msg = qaqh_types::Message {
-                            msg_id: None,
-                            role: "tool".into(),
-                            name: None,
-                            content: vec![qaqh_types::ContentBlock::ToolResult {
-                                tool_use_id: tool_call_id.as_str().to_string(),
-                                result: qaqh_types::ToolResult::ok(String::from_utf8_lossy(&ans_json)),
-                            }],
-                        };
-                        let tool_msg_bytes = serde_json::to_vec(&tool_msg)
-                            .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
-                        let tool_msg_ref = self.commit.put_blob(&tool_msg_bytes)?;
-                        let tool_ctx_fact = SessionFact {
-                            schema: FactSchema::v2(),
-                            session_id: self.commit.session_id().clone(),
-                            log_id: self.commit.log_id().clone(),
-                            fact_seq: 0,
-                            event_id: next_event_id(),
-                            ts_ms: now_ms(),
-                            causation_id: None,
-                            turn_id: Some(turn.clone()),
-                            call_id: Some(tool_call_id.clone()),
-                            interaction_id: None,
-                            payload: FactPayload::ContextMessageCommitted(
-                                qaqh_session::session_fact_v2::ContextMessageCommitted {
-                                    message_ref: tool_msg_ref,
-                                    origin: qaqh_session::session_fact_v2::ContextMessageOrigin::ToolResult,
-                                },
-                            ),
-                        };
-
-                        let batch_id = format!("batch-resolve-{}", interaction_id.as_str());
-                        self.commit.commit(
-                            &batch_id,
-                            head,
-                            vec![resolved_fact, finished_fact, tool_ctx_fact],
-                        )?;
-
-                        // Advance round
-                        self.current_round += 1;
-                        self.current_attempt = 1;
-                        let r_payload = build_model_round_started(
-                            &self.commit,
-                            turn.clone(),
-                            self.current_round,
-                            self.current_attempt,
-                            &self.provider_spec,
-                        )?;
-                        let round_event_id = next_event_id();
-                        let r_fact = SessionFact {
-                            schema: FactSchema::v2(),
-                            session_id: self.commit.session_id().clone(),
-                            log_id: self.commit.log_id().clone(),
-                            fact_seq: 0,
-                            event_id: round_event_id.clone(),
-                            ts_ms: now_ms(),
-                            causation_id: None,
-                            turn_id: Some(turn.clone()),
-                            call_id: None,
-                            interaction_id: None,
-                            payload: FactPayload::ModelRoundStarted(r_payload),
-                        };
-                        let head2 = self.commit.head()?;
-                        let r_batch = format!("batch-r{}-next", self.current_round);
-                        let (_, cap) = self.commit.commit_with_effect(
-                            &r_batch,
-                            head2,
-                            vec![r_fact],
-                            round_event_id.as_str(),
-                        )?;
-                        let cap = cap.ok_or_else(|| {
-                            SessionAgentError::Internal("expected capability for round".into())
-                        })?;
-                        let identity = cap.identity().clone();
-                        self.active_provider_identity = Some(identity.clone());
-                        let ticket = {
-                            let mut sup = self.supervisor.try_lock().map_err(|_| {
-                                SessionAgentError::Internal("supervisor lock contention".into())
-                            })?;
-                            sup.authorize(identity, cap)
-                                .map_err(SessionAgentError::Supervisor)?
-                        };
-                        let spec = self.provider_spec.clone();
-                        self.dispatch_task(ticket, move |exec, cancel_rx| async move {
-                            let out = run_verified(spec, exec, cancel_rx).await;
-                            AgentOutcome::Provider(out)
-                        })?;
-                        self.phase = SessionPhase::Active(ActivePhase::AwaitingProvider {
-                            round: self.current_round,
-                            attempt: self.current_attempt,
-                        });
-                    }
-                }
-                Ok(Step::Continue)
-            }
-            AgentControl::ToolPermissionRespond { .. } => Ok(Step::Continue),
-        }
-    }
-
-    fn completion(&mut self, completion: &Arc<AgentCompletion>) -> Result<Step, Self::Error> {
-        let identity = &completion.identity;
-        {
-            let mut sup = self
-                .supervisor
-                .try_lock()
-                .map_err(|_| SessionAgentError::Internal("supervisor lock contention".into()))?;
-            sup.acknowledge(identity, completion)
-                .map_err(SessionAgentError::Supervisor)?;
-        }
-
-        match &completion.outcome {
-            TaskOutcome::JoinFailed(err) => {
-                if let Some(turn) = self.active_turn.clone() {
-                    let head = self.commit.head()?;
-                    let fact = SessionFact {
-                        schema: FactSchema::v2(),
-                        session_id: self.commit.session_id().clone(),
-                        log_id: self.commit.log_id().clone(),
-                        fact_seq: 0,
-                        event_id: next_event_id(),
-                        ts_ms: now_ms(),
-                        causation_id: None,
-                        turn_id: Some(turn.clone()),
-                        call_id: None,
-                        interaction_id: None,
-                        payload: FactPayload::TurnInterrupted(TurnInterrupted {
-                            turn_id: turn.clone(),
-                            reason: InterruptReason::Crash,
-                            last_fact_seq: head,
-                            recovery_ref: RecoveryRef {
-                                recovery_id: RecoveryId::new(format!(
-                                    "recovery_{}",
-                                    next_event_id().as_str()
-                                )),
-                                recovery_event_id: next_event_id(),
-                                recovery_input_fingerprint: sha256_content_hash(err.as_bytes()),
-                            },
-                        }),
-                    };
-                    self.commit.commit(
-                        &format!("batch-interrupted-{}", turn.as_str()),
-                        head,
-                        vec![fact],
-                    )?;
-                    self.active_turn = None;
-                    self.active_input = None;
-                    self.phase = SessionPhase::Ready;
-                }
-            }
-            TaskOutcome::Returned(AgentOutcome::Provider(outcome)) => {
-                let Some(turn) = self.active_turn.clone() else {
-                    // Turn was already cancelled or interrupted: discard late completion gracefully.
+                let Some(PendingInteraction::Ask {
+                    call_id,
+                    interaction_id: expected,
+                    execution_id,
+                }) = self.pending_interaction.take()
+                else {
                     return Ok(Step::Continue);
                 };
-                let head = self.commit.head()?;
+                if &expected != interaction_id {
+                    // Stale answer for a different request: keep waiting.
+                    self.pending_interaction = Some(PendingInteraction::Ask {
+                        call_id,
+                        interaction_id: expected,
+                        execution_id,
+                    });
+                    return Ok(Step::Continue);
+                }
+                let Some(turn_id) = self.active_turn.clone() else {
+                    return Ok(Step::Continue);
+                };
+                let answers_json = serde_json::to_vec(answers)
+                    .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+                let decision_ref = self.commit.put_blob(&answers_json)?;
+                let resolved = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::InteractionResolved(InteractionResolved {
+                        interaction_id: interaction_id.clone(),
+                        decision_ref,
+                        decision: Some(InteractionDecision::Answered),
+                        resolved_by: ActorRef {
+                            kind: ActorKind::User,
+                            id: "user".into(),
+                            display_name: None,
+                        },
+                        resolution_seq: 1,
+                        resolved_at_ms: now_ms(),
+                    }),
+                    Some(turn_id.clone()),
+                    Some(call_id.clone()),
+                    Some(interaction_id.clone()),
+                );
+                let finished = self.tool_finished_fact(
+                    &turn_id,
+                    &call_id,
+                    Some(execution_id),
+                    ToolTerminalStatus::Succeeded,
+                    answers_json.clone(),
+                    None,
+                    false,
+                )?;
+                let context = self.tool_result_context_fact(
+                    &turn_id,
+                    &call_id,
+                    &String::from_utf8_lossy(&answers_json),
+                    true,
+                )?;
+                self.commit_batch(
+                    &format!("batch-{}-ask-res-{}", turn_id.as_str(), call_id.as_str()),
+                    vec![resolved, finished, context],
+                )?;
+                self.observe(serde_json::json!({ "type": "ask_resolved" }));
+                self.phase = SessionPhase::Active(ActivePhase::AwaitingProvider {
+                    round: self.current_round,
+                    attempt: self.current_attempt,
+                });
+                self.next_round()?;
+                Ok(Step::Continue)
+            }
+            AgentControl::ToolPermissionRespond {
+                tool_call_id,
+                approved,
+                trust_folder,
+            } => {
+                let Some(pending) = self.pending_permissions.remove(tool_call_id) else {
+                    return Ok(Step::Continue);
+                };
+                let Some(PendingInteraction::Permission { call_id }) =
+                    self.pending_interaction.take()
+                else {
+                    return Ok(Step::Continue);
+                };
+                if &call_id != tool_call_id {
+                    return Ok(Step::Continue);
+                }
+                let Some(turn_id) = self.active_turn.clone() else {
+                    return Ok(Step::Continue);
+                };
+                let workspace_root = self.tool_port.workspace_root();
+                if *trust_folder {
+                    self.tool_port.trust_dir(workspace_root.clone());
+                }
+                let decision = if *approved {
+                    InteractionDecision::Approved
+                } else {
+                    InteractionDecision::Rejected
+                };
+                let decision_bytes = serde_json::to_vec(&serde_json::json!({
+                    "approved": approved,
+                    "trust_folder": trust_folder,
+                }))
+                .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+                let decision_ref = self.commit.put_blob(&decision_bytes)?;
+                let resolved = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::InteractionResolved(InteractionResolved {
+                        interaction_id: pending.interaction_id.clone(),
+                        decision_ref,
+                        decision: Some(decision),
+                        resolved_by: ActorRef {
+                            kind: ActorKind::User,
+                            id: "user".into(),
+                            display_name: None,
+                        },
+                        resolution_seq: 1,
+                        resolved_at_ms: now_ms(),
+                    }),
+                    Some(turn_id.clone()),
+                    Some(tool_call_id.clone()),
+                    Some(pending.interaction_id.clone()),
+                );
+                self.commit_batch(
+                    &format!("batch-{}-perm-{}", turn_id.as_str(), pending.interaction_id.as_str()),
+                    vec![resolved],
+                )?;
 
-                if outcome.finish == Some(ProviderFinish::Stop) {
-                    let facts = prepare_response_commit_facts(
-                        &self.commit,
-                        &turn,
-                        self.current_round,
-                        self.current_attempt,
-                        outcome,
-                        next_event_id(),
-                        |_| next_event_id(),
-                        now_ms(),
-                    )?;
-                    let finish_fact = SessionFact {
-                        schema: FactSchema::v2(),
-                        session_id: self.commit.session_id().clone(),
-                        log_id: self.commit.log_id().clone(),
-                        fact_seq: 0,
-                        event_id: next_event_id(),
-                        ts_ms: now_ms(),
-                        causation_id: None,
-                        turn_id: Some(turn.clone()),
-                        call_id: None,
-                        interaction_id: None,
-                        payload: FactPayload::TurnFinished(TurnFinished {
-                            turn_id: turn.clone(),
-                            terminal: TurnTerminal::Completed,
-                            usage: outcome.usage.clone(),
-                            error: None,
-                            finished_at_ms: now_ms(),
-                        }),
-                    };
-                    let mut all_facts = facts;
-                    all_facts.push(finish_fact);
-
-                    let batch_id = format!("batch-finish-{}-r{}", turn.as_str(), self.current_round);
-                    self.commit.commit(&batch_id, head, all_facts)?;
-
-                    self.active_turn = None;
-                    self.active_input = None;
-                    self.active_provider_identity = None;
-
-                    // Drain queued input if available
-                    if let Some((next_in, text, attachments, req_id)) = self.queued_inputs.pop_front()
-                    {
-                        self.start_turn(next_in, text, attachments, req_id)?;
-                    } else {
-                        self.phase = SessionPhase::Ready;
+                if *approved {
+                    self.tool_port
+                        .grant_approval(ToolApprovalGrant {
+                            interaction_id: pending.interaction_id.as_str().to_string(),
+                            call_id: tool_call_id.as_str().to_string(),
+                            execution_id: pending.execution_id.as_str().to_string(),
+                            args_hash: pending.args_hash.clone(),
+                            workspace_root,
+                        });
+                    if let Err(error) = self.dispatch_tool(
+                        &turn_id,
+                        tool_call_id,
+                        &pending.tool_name,
+                        &pending.args,
+                        &pending.execution_id,
+                    ) {
+                        // A refused dispatch must still settle the call.
+                        self.deny_tool(
+                            &turn_id,
+                            tool_call_id,
+                            &format!("tool dispatch failed: {error}"),
+                        )?;
+                        self.next_round()?;
+                        return Ok(Step::Continue);
                     }
-                } else if outcome.finish == Some(ProviderFinish::ToolUse) {
-                    let response_facts = prepare_response_commit_facts(
-                        &self.commit,
-                        &turn,
-                        self.current_round,
-                        self.current_attempt,
-                        outcome,
-                        next_event_id(),
-                        |_| next_event_id(),
-                        now_ms(),
-                    )?;
-
-                    let batch_id = format!("batch-tools-declared-{}-r{}", turn.as_str(), self.current_round);
-                    self.commit.commit(&batch_id, head, response_facts)?;
-
-                    if let Some(msg) = &outcome.message {
-                        for block in &msg.content {
-                            if let qaqh_types::ContentBlock::ToolUse { id, name, input } = block {
-                                let call_id = ToolCallId::new(id.clone());
-                                if name == "ask" {
-                                    let ask_interaction_id =
-                                        InteractionId::new(format!("int_{}", next_event_id().as_str()));
-                                    let exec_id = ExecutionId::new(format!("exec_{}", next_event_id().as_str()));
-                                    self.pending_ask_id =
-                                        Some((call_id.clone(), ask_interaction_id.clone(), exec_id.clone()));
-
-                                    let head2 = self.commit.head()?;
-                                    let req_blob = self.commit.put_blob(b"ask-question")?;
-                                    let tool_intent_fact = SessionFact {
-                                        schema: FactSchema::v2(),
-                                        session_id: self.commit.session_id().clone(),
-                                        log_id: self.commit.log_id().clone(),
-                                        fact_seq: 0,
-                                        event_id: next_event_id(),
-                                        ts_ms: now_ms(),
-                                        causation_id: None,
-                                        turn_id: Some(turn.clone()),
-                                        call_id: Some(call_id.clone()),
-                                        interaction_id: None,
-                                        payload: FactPayload::ToolIntent(ToolIntent {
-                                            call_id: call_id.clone(),
-                                            execution_id: exec_id.clone(),
-                                            idempotency_key: None,
-                                            replay_capability: ToolReplayCapability::NoReplay,
-                                            policy_decision: PolicyDecisionRef {
-                                                outcome: ToolIntentPolicyOutcome::Allow,
-                                                rule_id: "ask.allow".into(),
-                                                decided_at_ms: now_ms(),
-                                                reason_ref: None,
-                                            },
-                                            effective_args_ref: Some(req_blob.clone()),
-                                            effective_args_hash: Some(sha256_content_hash(b"ask-question")),
-                                            sandbox_spec_hash: sha256_content_hash(b"sandbox_spec"),
-                                            side_effect_class: SideEffectClass::WorkspaceWrite,
-                                            intent_at_ms: now_ms(),
-                                        }),
-                                    };
-                                    let ask_req_fact = SessionFact {
-                                        schema: FactSchema::v2(),
-                                        session_id: self.commit.session_id().clone(),
-                                        log_id: self.commit.log_id().clone(),
-                                        fact_seq: 0,
-                                        event_id: next_event_id(),
-                                        ts_ms: now_ms(),
-                                        causation_id: None,
-                                        turn_id: Some(turn.clone()),
-                                        call_id: Some(call_id.clone()),
-                                        interaction_id: Some(ask_interaction_id.clone()),
-                                        payload: FactPayload::InteractionRequested(
-                                            InteractionRequested {
-                                                interaction_id: ask_interaction_id.clone(),
-                                                call_id: Some(call_id.clone()),
-                                                turn_id: turn.clone(),
-                                                kind: InteractionKind::Ask,
-                                                request_ref: req_blob,
-                                                expires_at_ms: None,
-                                                requested_at_ms: now_ms(),
-                                            },
-                                        ),
-                                    };
-                                    self.commit.commit(
-                                        &format!("batch-ask-req-{}", ask_interaction_id.as_str()),
-                                        head2,
-                                        vec![tool_intent_fact, ask_req_fact],
-                                    )?;
-                                    self.phase = SessionPhase::Active(ActivePhase::AwaitingUser {
-                                        interaction_id: ask_interaction_id,
-                                    });
-                                    return Ok(Step::Continue);
-                                } else {
-                                    let args_bytes = serde_json::to_vec(input)
-                                        .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
-                                    let args_ref = self.commit.put_blob(&args_bytes)?;
-                                    let args_hash = sha256_content_hash(&args_bytes);
-                                    let tool_intent_event_id = next_event_id();
-                                    let exec_id = ExecutionId::new(format!("exec_{}", next_event_id().as_str()));
-                                    let tool_intent_fact = SessionFact {
-                                        schema: FactSchema::v2(),
-                                        session_id: self.commit.session_id().clone(),
-                                        log_id: self.commit.log_id().clone(),
-                                        fact_seq: 0,
-                                        event_id: tool_intent_event_id.clone(),
-                                        ts_ms: now_ms(),
-                                        causation_id: None,
-                                        turn_id: Some(turn.clone()),
-                                        call_id: Some(call_id.clone()),
-                                        interaction_id: None,
-                                        payload: FactPayload::ToolIntent(ToolIntent {
-                                            call_id: call_id.clone(),
-                                            execution_id: exec_id.clone(),
-                                            idempotency_key: None,
-                                            replay_capability: ToolReplayCapability::NoReplay,
-                                            policy_decision: PolicyDecisionRef {
-                                                outcome: ToolIntentPolicyOutcome::Allow,
-                                                rule_id: "auto".into(),
-                                                decided_at_ms: now_ms(),
-                                                reason_ref: None,
-                                            },
-                                            effective_args_ref: Some(args_ref),
-                                            effective_args_hash: Some(args_hash),
-                                            sandbox_spec_hash: sha256_content_hash(b"sandbox_spec"),
-                                            side_effect_class: SideEffectClass::WorkspaceWrite,
-                                            intent_at_ms: now_ms(),
-                                        }),
-                                    };
-
-                                    let head_tool = self.commit.head()?;
-                                    let batch_tool = format!("batch-intent-{}", call_id.as_str());
-                                    let (_, capability) = self.commit.commit_with_effect(
-                                        &batch_tool,
-                                        head_tool,
-                                        vec![tool_intent_fact],
-                                        tool_intent_event_id.as_str(),
-                                    )?;
-
-                                    let cap = capability.ok_or_else(|| {
-                                        SessionAgentError::Internal(
-                                            "expected capability for ToolIntent".into(),
-                                        )
-                                    })?;
-                                    let tool_identity = cap.identity().clone();
-                                    self.active_tool_identities
-                                        .insert(call_id.clone(), (tool_identity.clone(), exec_id.clone()));
-
-                                    let ticket = {
-                                        let mut sup = self.supervisor.try_lock().map_err(|_| {
-                                            SessionAgentError::Internal(
-                                                "supervisor lock contention".into(),
-                                            )
-                                        })?;
-                                        sup.authorize(tool_identity, cap)
-                                            .map_err(SessionAgentError::Supervisor)?
-                                    };
-
-                                    let port = Arc::clone(&self.tool_port);
-                                    let t_name = name.clone();
-                                    let t_call_id = call_id.as_str().to_string();
-                                    self.dispatch_task(ticket, move |execution, mut cancel_rx| async move {
-                                        let parts = execution.into_parts().expect("parts");
-                                        let args = parts.tool_args.unwrap_or_default();
-                                        let req = ToolRequest {
-                                            execution_id: format!("exec_{t_call_id}"),
-                                            call_id: t_call_id,
-                                            tool_name: t_name,
-                                            side_effect_class: SideEffectClass::WorkspaceWrite,
-                                            replay: ToolReplayCapability::NoReplay,
-                                            args,
-                                        };
-                                        let cancel_flag = Arc::new(AtomicBool::new(false));
-                                        let cancel_watch = Arc::clone(&cancel_flag);
-                                        tokio::spawn(async move {
-                                            let _ = cancel_rx.changed().await;
-                                            cancel_watch.store(true, Ordering::Release);
-                                        });
-                                        let out = port.execute(&req, &cancel_flag);
-                                        match out {
-                                            Ok(out) => AgentOutcome::Tool(ToolOutcome {
-                                                evidence: DispatchEvidence::StartedTerminal,
-                                                terminal: Some(ToolTerminalStatus::Succeeded),
-                                                output: out.output,
-                                                error: None,
-                                            }),
-                                            Err(err) => AgentOutcome::Tool(ToolOutcome {
-                                                evidence: DispatchEvidence::NotStarted,
-                                                terminal: Some(ToolTerminalStatus::Failed),
-                                                output: vec![],
-                                                error: Some(format!("{err:?}")),
-                                            }),
-                                        }
-                                    })?;
-                                }
-                            }
-                        }
-                    }
-
                     self.phase = SessionPhase::Active(ActivePhase::AwaitingTools {
                         active_calls: self.active_tool_identities.keys().cloned().collect(),
                     });
                 } else {
-                    // Damaged turn / incomplete response
-                    let response_facts = prepare_response_commit_facts(
-                        &self.commit,
-                        &turn,
-                        self.current_round,
-                        self.current_attempt,
-                        outcome,
-                        next_event_id(),
-                        |_| next_event_id(),
-                        now_ms(),
-                    )?;
-                    let interrupt_fact = SessionFact {
-                        schema: FactSchema::v2(),
-                        session_id: self.commit.session_id().clone(),
-                        log_id: self.commit.log_id().clone(),
-                        fact_seq: 0,
-                        event_id: next_event_id(),
-                        ts_ms: now_ms(),
-                        causation_id: None,
-                        turn_id: Some(turn.clone()),
-                        call_id: None,
-                        interaction_id: None,
-                        payload: FactPayload::TurnInterrupted(TurnInterrupted {
-                            turn_id: turn.clone(),
-                            reason: InterruptReason::Crash,
-                            last_fact_seq: head,
-                            recovery_ref: RecoveryRef {
-                                recovery_id: RecoveryId::new(format!(
-                                    "recovery_{}",
-                                    next_event_id().as_str()
-                                )),
-                                recovery_event_id: next_event_id(),
-                                recovery_input_fingerprint: sha256_content_hash(
-                                    b"provider-incomplete",
-                                ),
-                            },
-                        }),
-                    };
-                    let mut facts = response_facts;
-                    facts.push(interrupt_fact);
-                    self.commit.commit(
-                        &format!("batch-damaged-{}", turn.as_str()),
-                        head,
-                        facts,
-                    )?;
-                    self.active_turn = None;
-                    self.active_input = None;
-                    self.phase = SessionPhase::Ready;
+                    self.deny_tool(&turn_id, tool_call_id, "permission denied by user")?;
+                    self.next_round()?;
+                }
+                Ok(Step::Continue)
+            }
+            AgentControl::ReloadProvider { spec } => {
+                self.provider_spec = (**spec).clone();
+                Ok(Step::Continue)
+            }
+        }
+    }
+
+    fn completion(&mut self, completion: &Arc<AgentCompletion>) -> Result<Step, Self::Error> {
+        // Settlement first: acknowledgement releases the retained evidence, so
+        // it may only happen after the business commit succeeded.
+        let result = self.settle_completion(completion);
+        match &result {
+            Ok(()) => {
+                let mut sup = self
+                    .supervisor
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Err(error) = sup.acknowledge(&completion.identity, completion) {
+                    log::warn!(
+                        "[session-agent] acknowledge failed for {}: {error:?}",
+                        completion.identity.effect_id
+                    );
                 }
             }
+            Err(error) => log::error!(
+                "[session-agent] settlement failed for {}: {error}",
+                completion.identity.effect_id
+            ),
+        }
+        result.map(|()| Step::Continue)
+    }
+}
+
+impl SessionAgent {
+    fn settle_completion(&mut self, completion: &Arc<AgentCompletion>) -> Result<(), SessionAgentError> {
+        let identity = &completion.identity;
+        match &completion.outcome {
+            TaskOutcome::JoinFailed(err) => {
+                log::error!(
+                    "[session-agent] task {identity:?} joined with failure: {err}"
+                );
+                self.interrupt_turn(InterruptReason::Crash, None)
+            }
+            TaskOutcome::Returned(AgentOutcome::Provider(outcome)) => {
+                self.settle_provider(identity, outcome)
+            }
             TaskOutcome::Returned(AgentOutcome::Tool(outcome)) => {
-                let Some(turn) = self.active_turn.clone() else {
-                    return Ok(Step::Continue);
-                };
-                let head = self.commit.head()?;
+                self.settle_tool(identity, outcome)
+            }
+        }
+    }
 
-                let (call_id, exec_id) = self
-                    .active_tool_identities
-                    .iter()
-                    .find(|(_, (ident, _))| ident.effect_id == identity.effect_id)
-                    .map(|(cid, (_, eid))| (cid.clone(), eid.clone()))
-                    .ok_or_else(|| {
-                        SessionAgentError::Internal(format!(
-                            "unrecognized tool completion effect_id: {}",
-                            identity.effect_id
-                        ))
-                    })?;
+    fn settle_provider(
+        &mut self,
+        identity: &EffectIdentity,
+        outcome: &ProviderOutcome,
+    ) -> Result<(), SessionAgentError> {
+        let Some(turn_id) = self.active_turn.clone() else {
+            log::warn!(
+                "[session-agent] late provider completion for {} ignored",
+                identity.effect_id
+            );
+            return Ok(());
+        };
+        if self
+            .active_provider_identity
+            .as_ref()
+            .is_some_and(|active| active.effect_id != identity.effect_id)
+        {
+            log::warn!(
+                "[session-agent] provider completion {} does not match the active attempt; ignored",
+                identity.effect_id
+            );
+            return Ok(());
+        }
+        self.active_provider_identity = None;
 
-                let out_ref = self.commit.put_blob(&outcome.output)?;
+        if outcome.evidence == DispatchEvidence::NotStarted {
+            // Nothing reached the wire; the round never produced a response.
+            let cancelled = outcome
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("cancelled"));
+            return self.interrupt_turn(
+                if cancelled {
+                    InterruptReason::CancelBeforeSeal
+                } else {
+                    InterruptReason::Crash
+                },
+                None,
+            );
+        }
 
-                let finished_fact = SessionFact {
-                    schema: FactSchema::v2(),
-                    session_id: self.commit.session_id().clone(),
-                    log_id: self.commit.log_id().clone(),
-                    fact_seq: 0,
-                    event_id: next_event_id(),
-                    ts_ms: now_ms(),
-                    causation_id: None,
-                    turn_id: Some(turn.clone()),
-                    call_id: Some(call_id.clone()),
-                    interaction_id: None,
-                    payload: FactPayload::ToolFinished(ToolFinished {
-                        call_id: call_id.clone(),
-                        execution_id: Some(exec_id),
-                        terminal_status: if outcome.error.is_none() {
-                            ToolTerminalStatus::Succeeded
-                        } else {
-                            ToolTerminalStatus::Failed
-                        },
-                        output_ref: Some(out_ref),
-                        error: outcome.error.as_ref().map(|msg| ToolError {
-                            code: "tool_error".into(),
-                            message: msg.clone(),
-                            retryable: false,
-                            details_ref: None,
-                        }),
-                        metrics: ToolMetrics {
-                            started_at_ms: now_ms() - 10,
-                            finished_at_ms: now_ms(),
-                            retry_count: 0,
-                            output_bytes: outcome.output.len() as u64,
-                            progress_bytes_total: outcome.output.len() as u64,
-                        },
-                        reconciled: false,
-                        evidence_ref: None,
-                        evidence_fact_seq: None,
-                        evidence_event_id: None,
-                        recovery_ref: None,
+        let model = self.provider_spec.provider.model.clone();
+        let mut facts = prepare_response_commit_facts(
+            &self.commit,
+            &turn_id,
+            self.current_round,
+            self.current_attempt,
+            &model,
+            outcome,
+            EventId::new(generate_ulid()),
+            |_| EventId::new(generate_ulid()),
+            |_| EventId::new(generate_ulid()),
+            now_ms(),
+        )?;
+        for fact in &mut facts {
+            fact.causation_id = self.causation.clone();
+        }
+
+        match outcome.finish {
+            Some(ProviderFinish::Stop) => {
+                facts.push(self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::TurnFinished(TurnFinished {
+                        turn_id: turn_id.clone(),
+                        terminal: TurnTerminal::Completed,
+                        usage: outcome.usage.clone(),
+                        error: None,
                         finished_at_ms: now_ms(),
                     }),
-                };
-
-                let tool_res_text = String::from_utf8_lossy(&outcome.output).to_string();
-                let tool_msg = qaqh_types::Message {
-                    msg_id: None,
-                    role: "tool".into(),
-                    name: None,
-                    content: vec![qaqh_types::ContentBlock::ToolResult {
-                        tool_use_id: call_id.as_str().to_string(),
-                        result: if outcome.error.is_none() {
-                            qaqh_types::ToolResult::ok(tool_res_text)
-                        } else {
-                            qaqh_types::ToolResult::error(tool_res_text)
-                        },
-                    }],
-                };
-                let tool_msg_bytes = serde_json::to_vec(&tool_msg)
-                    .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
-                let tool_msg_ref = self.commit.put_blob(&tool_msg_bytes)?;
-
-                let tool_ctx_fact = SessionFact {
-                    schema: FactSchema::v2(),
-                    session_id: self.commit.session_id().clone(),
-                    log_id: self.commit.log_id().clone(),
-                    fact_seq: 0,
-                    event_id: next_event_id(),
-                    ts_ms: now_ms(),
-                    causation_id: None,
-                    turn_id: Some(turn.clone()),
-                    call_id: Some(call_id.clone()),
-                    interaction_id: None,
-                    payload: FactPayload::ContextMessageCommitted(
-                        qaqh_session::session_fact_v2::ContextMessageCommitted {
-                            message_ref: tool_msg_ref,
-                            origin: qaqh_session::session_fact_v2::ContextMessageOrigin::ToolResult,
-                        },
+                    Some(turn_id.clone()),
+                    None,
+                    None,
+                ));
+                self.commit_batch(
+                    &format!(
+                        "batch-{}-r{}-finish",
+                        turn_id.as_str(),
+                        self.current_round
                     ),
-                };
+                    facts,
+                )?;
+                self.finish_turn(TurnTerminal::Completed, outcome.usage.clone());
+                Ok(())
+            }
+            Some(ProviderFinish::ToolUse) => {
+                self.commit_batch(
+                    &format!(
+                        "batch-{}-r{}-declared",
+                        turn_id.as_str(),
+                        self.current_round
+                    ),
+                    facts,
+                )?;
+                self.start_declared_tools(&turn_id, outcome)
+            }
+            _ => {
+                facts.push(self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::TurnInterrupted(TurnInterrupted {
+                        turn_id: turn_id.clone(),
+                        reason: InterruptReason::Crash,
+                        last_fact_seq: self.commit.head()?,
+                        recovery_ref: recovery_ref("provider_incomplete"),
+                    }),
+                    Some(turn_id.clone()),
+                    None,
+                    None,
+                ));
+                self.commit_batch(
+                    &format!(
+                        "batch-{}-r{}-damaged",
+                        turn_id.as_str(),
+                        self.current_round
+                    ),
+                    facts,
+                )?;
+                self.finish_turn(TurnTerminal::Failed, outcome.usage.clone());
+                Ok(())
+            }
+        }
+    }
 
-                let batch_id = format!("batch-tool-fin-{}", call_id.as_str());
-                self.commit.commit(&batch_id, head, vec![finished_fact, tool_ctx_fact])?;
+    fn start_declared_tools(
+        &mut self,
+        turn_id: &TurnId,
+        outcome: &ProviderOutcome,
+    ) -> Result<(), SessionAgentError> {
+        let Some(message) = &outcome.message else {
+            return self.interrupt_turn(InterruptReason::Crash, None);
+        };
+        for block in &message.content {
+            let qaqh_types::ContentBlock::ToolUse { id, name, input } = block else {
+                continue;
+            };
+            let call_id = crate::provider_job::canonical_tool_call_id(id);
+            let args = serde_json::to_vec(input)
+                .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
 
-                self.active_tool_identities.remove(&call_id);
+            if name == "ask" {
+                let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+                let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
+                let request_ref = self.commit.put_blob(b"ask-question")?;
+                let args_ref = self.commit.put_blob(&args)?;
+                let intent = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::ToolIntent(ToolIntent {
+                        call_id: call_id.clone(),
+                        execution_id: execution_id.clone(),
+                        idempotency_key: None,
+                        replay_capability: ToolReplayCapability::NoReplay,
+                        policy_decision: PolicyDecisionRef {
+                            outcome: ToolIntentPolicyOutcome::Allow,
+                            rule_id: "ask.allow".into(),
+                            decided_at_ms: now_ms(),
+                            reason_ref: None,
+                        },
+                        effective_args_ref: Some(args_ref),
+                        effective_args_hash: Some(sha256_content_hash(&args)),
+                        sandbox_spec_hash: sha256_content_hash(b"sandbox_spec"),
+                        side_effect_class: SideEffectClass::ReadOnly,
+                        intent_at_ms: now_ms(),
+                    }),
+                    Some(turn_id.clone()),
+                    Some(call_id.clone()),
+                    None,
+                );
+                let requested = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::InteractionRequested(InteractionRequested {
+                        interaction_id: interaction_id.clone(),
+                        call_id: Some(call_id.clone()),
+                        turn_id: turn_id.clone(),
+                        kind: InteractionKind::Ask,
+                        request_ref,
+                        expires_at_ms: None,
+                        requested_at_ms: now_ms(),
+                    }),
+                    Some(turn_id.clone()),
+                    Some(call_id.clone()),
+                    Some(interaction_id.clone()),
+                );
+                self.commit_batch(
+                    &format!("batch-{}-ask-req-{}", turn_id.as_str(), call_id.as_str()),
+                    vec![intent, requested],
+                )?;
+                self.pending_interaction = Some(PendingInteraction::Ask {
+                    call_id,
+                    interaction_id: interaction_id.clone(),
+                    execution_id,
+                });
+                self.phase = SessionPhase::Active(ActivePhase::AwaitingUser { interaction_id });
+                self.observe(serde_json::json!({ "type": "ask_user" }));
+                return Ok(());
+            }
 
-                if self.active_tool_identities.is_empty() {
-                    // Advance to next round
-                    self.current_round += 1;
-                    self.current_attempt = 1;
-                    let round_payload = build_model_round_started(
-                        &self.commit,
-                        turn.clone(),
-                        self.current_round,
-                        self.current_attempt,
-                        &self.provider_spec,
+            let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
+            let request = self.declaration_request(&call_id, name, &args);
+            match self.tool_port.precheck(&request) {
+                ToolAdmission::Authorized => {
+                    self.dispatch_tool(turn_id, &call_id, name, &args, &execution_id)?;
+                }
+                ToolAdmission::Denied(reason) => {
+                    self.deny_tool(turn_id, &call_id, &reason)?;
+                }
+                ToolAdmission::ApprovalRequired { reason } => {
+                    self.request_permission(
+                        turn_id,
+                        &call_id,
+                        &execution_id,
+                        name,
+                        &args,
+                        &reason,
                     )?;
-                    let round_event_id = next_event_id();
-                    let round_fact = SessionFact {
-                        schema: FactSchema::v2(),
-                        session_id: self.commit.session_id().clone(),
-                        log_id: self.commit.log_id().clone(),
-                        fact_seq: 0,
-                        event_id: round_event_id.clone(),
-                        ts_ms: now_ms(),
-                        causation_id: None,
-                        turn_id: Some(turn.clone()),
-                        call_id: None,
-                        interaction_id: None,
-                        payload: FactPayload::ModelRoundStarted(round_payload),
-                    };
-
-                    let head2 = self.commit.head()?;
-                    let batch_r = format!("batch-r{}-next", self.current_round);
-                    let (_, cap) = self.commit.commit_with_effect(
-                        &batch_r,
-                        head2,
-                        vec![round_fact],
-                        round_event_id.as_str(),
-                    )?;
-                    let cap = cap.ok_or_else(|| {
-                        SessionAgentError::Internal("expected capability for next round".into())
-                    })?;
-                    let ident = cap.identity().clone();
-                    self.active_provider_identity = Some(ident.clone());
-                    let ticket = {
-                        let mut sup = self.supervisor.try_lock().map_err(|_| {
-                            SessionAgentError::Internal("supervisor lock contention".into())
-                        })?;
-                        sup.authorize(ident, cap)
-                            .map_err(SessionAgentError::Supervisor)?
-                    };
-                    let spec = self.provider_spec.clone();
-                    self.dispatch_task(ticket, move |exec, cancel_rx| async move {
-                        let out = run_verified(spec, exec, cancel_rx).await;
-                        AgentOutcome::Provider(out)
-                    })?;
-                    self.phase = SessionPhase::Active(ActivePhase::AwaitingProvider {
-                        round: self.current_round,
-                        attempt: self.current_attempt,
-                    });
+                    return Ok(());
                 }
             }
         }
 
-        Ok(Step::Continue)
+        if self.active_tool_identities.is_empty() && self.pending_interaction.is_none() {
+            self.next_round()?;
+        } else if !self.active_tool_identities.is_empty() {
+            self.phase = SessionPhase::Active(ActivePhase::AwaitingTools {
+                active_calls: self.active_tool_identities.keys().cloned().collect(),
+            });
+        }
+        Ok(())
+    }
+
+    fn settle_tool(
+        &mut self,
+        identity: &EffectIdentity,
+        outcome: &ToolOutcome,
+    ) -> Result<(), SessionAgentError> {
+        let Some(turn_id) = self.active_turn.clone() else {
+            log::warn!(
+                "[session-agent] late tool completion {} ignored",
+                identity.effect_id
+            );
+            return Ok(());
+        };
+        let Some((call_id, tool)) = self
+            .active_tool_identities
+            .iter()
+            .find(|(_, tool)| tool.identity.effect_id == identity.effect_id)
+            .map(|(call_id, tool)| (call_id.clone(), tool.execution_id.clone()))
+        else {
+            // Cancellation and recovery settle these; a late completion must
+            // not abort the whole actor.
+            log::warn!(
+                "[session-agent] unrecognized tool completion {} ignored",
+                identity.effect_id
+            );
+            return Ok(());
+        };
+
+        let status = match (outcome.evidence, outcome.terminal) {
+            (DispatchEvidence::StartedUnknown, None) => ToolTerminalStatus::Indeterminate,
+            (_, Some(status)) => status,
+            (DispatchEvidence::NotStarted, None) => ToolTerminalStatus::Failed,
+            _ => ToolTerminalStatus::Failed,
+        };
+        let error = outcome.error.as_ref().map(|message| ToolError {
+            code: match status {
+                ToolTerminalStatus::Denied => "tool_denied",
+                ToolTerminalStatus::Indeterminate => "tool_indeterminate",
+                ToolTerminalStatus::Backgrounded => "tool_backgrounded",
+                _ => "tool_error",
+            }
+            .into(),
+            message: truncate_text(message, 512),
+            retryable: matches!(
+                status,
+                ToolTerminalStatus::Indeterminate | ToolTerminalStatus::Failed
+            ),
+            details_ref: None,
+        });
+        let finished = self.tool_finished_fact(
+            &turn_id,
+            &call_id,
+            Some(tool),
+            status,
+            outcome.output.clone(),
+            error,
+            outcome.backgrounded,
+        )?;
+        let text = if outcome.output.is_empty() {
+            outcome.error.clone().unwrap_or_default()
+        } else {
+            String::from_utf8_lossy(&outcome.output).to_string()
+        };
+        let ok = !matches!(
+            status,
+            ToolTerminalStatus::Failed
+                | ToolTerminalStatus::Denied
+                | ToolTerminalStatus::Indeterminate
+                | ToolTerminalStatus::Cancelled
+                | ToolTerminalStatus::TimedOut
+        );
+        let context = self.tool_result_context_fact(&turn_id, &call_id, &text, ok)?;
+        self.commit_batch(
+            &format!("batch-{}-tool-{}", turn_id.as_str(), call_id.as_str()),
+            vec![finished, context],
+        )?;
+        self.active_tool_identities.remove(&call_id);
+        if self.active_tool_identities.is_empty() && self.pending_interaction.is_none() {
+            self.next_round()?;
+        }
+        Ok(())
     }
 }

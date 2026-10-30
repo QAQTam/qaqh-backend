@@ -15,6 +15,8 @@
 //! 未从 codespy 迁入的部分：独立 CLI（clap）、`watch` 常驻兜底、`procmon` 命令归因
 //! ——前两者属 M2+ 路线图，后者 M3 搁置；`qaqh-workspace` 只需库 API。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod diff;
 pub mod report;
 pub mod scan;
