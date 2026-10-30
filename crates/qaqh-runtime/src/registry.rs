@@ -835,22 +835,12 @@ impl AgentRegistry {
         if !session_dir.exists() {
             return Ok(None);
         }
-        // This is a read-only recovery hint. Do not create the identity
-        // sidecar here: a session directory can legitimately exist before the
-        // canonical baseline has been materialized.
-        if !session_dir.join(CANONICAL_IDENTITY_FILE).exists() {
+        // `persist_new_session` creates a metadata-only directory before the
+        // first fact is committed. That is still a root session, just empty.
+        if !qaqh_session::canonical::has_committed_facts(&session_dir) {
             return Ok(None);
         }
-        let has_events = session_dir.join(EVENTS_FILE).exists();
-        let has_commit = session_dir.join(EVENTS_COMMIT_FILE).exists();
-        let batch_root = qaqh_session::canonical::is_batch_root(&session_dir);
-        if !has_events && !has_commit && !batch_root {
-            // `persist_new_session` creates a metadata-only directory before
-            // the first canonical fact. That is still a root session.
-
-            return Ok(None);
-        }
-        let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
+        let identity = qaqh_session::canonical::open_session_identity(&session_dir)
             .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
         let facts = crate::agent_graph::read_session_facts(
             &session_dir,
