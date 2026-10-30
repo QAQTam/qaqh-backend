@@ -13,8 +13,7 @@ use qaqh_ringing::{
     RingingV2ResetRequired, RingingV2StreamKey,
 };
 use qaqh_session::canonical::{
-    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, EVENTS_COMMIT_FILE,
-    EVENTS_FILE, generate_ulid,
+    CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE, EVENTS_FILE, generate_ulid,
 };
 use qaqh_session::projection::{
     ControlInteractionState, ConversationTurnOutcome, Projection, ProjectionSet,
@@ -926,14 +925,10 @@ fn resolve_identity(
     {
         return Err(V2HubError::SessionMissing(session_id.to_string()));
     }
-    // A batch-journal root already owns its identity: never mint a second one
-    // from a missing sidecar, or the read model would split from the writer.
-    let identity = if batch_root {
-        CanonicalSessionIdentity::open(session_dir)
-    } else {
-        CanonicalSessionIdentity::open_or_create(session_dir)
-    }
-    .map_err(|error| V2HubError::Canonical(error.to_string()))?;
+    // One owner for format dispatch: batch roots never mint a second identity
+    // from a missing sidecar, legacy directories may create it.
+    let identity = qaqh_session::canonical::open_session_identity(session_dir)
+        .map_err(|error| V2HubError::Canonical(error.to_string()))?;
     // A session can exist (identity minted) before its first canonical commit.
     // There is no snapshot cursor to hand out yet, so surface the documented
     // `snapshot_missing` reason rather than a generic canonical error.

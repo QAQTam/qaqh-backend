@@ -5,35 +5,24 @@
 //! aborts the load; callers must not fall back to an in-memory guess.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::Path;
 
 use qaqh_session::SessionManager;
-use qaqh_session::canonical::{CanonicalError, CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::canonical::{CanonicalSessionIdentity, open_session_identity};
 use qaqh_session::projection::AgentGraphStore;
-use qaqh_session::session_fact_v2::{FactPayload, LogId, SessionFact, SessionId};
+use qaqh_session::session_fact_v2::{FactPayload, SessionFact, SessionId};
 
 /// Read one session's committed facts from whichever store owns it.
 ///
-/// Batch-journal sessions take the lock-free view; legacy directories keep the
-/// committed-fact reader. Callers must never guess the format from file probes
-/// of their own.
-pub(crate) fn read_session_facts(
-    session_dir: &Path,
-    session_id: SessionId,
-    log_id: LogId,
-) -> Result<Vec<SessionFact>, CanonicalError> {
-    if qaqh_session::canonical::is_batch_root(session_dir) {
-        return qaqh_session::canonical::read_committed_facts(session_dir, session_id, log_id);
-    }
-    CommittedFactReader::open(session_dir, session_id, log_id)?.read_all()
-}
+/// The dispatch now lives in `qaqh_session::canonical`; this alias exists only
+/// so existing call sites in this crate keep one name.
+pub(crate) use qaqh_session::canonical::read_session_facts;
 
 pub(crate) fn load_agent_graph(
     sessions: &SessionManager,
     root_session: &str,
 ) -> Result<AgentGraphStore, String> {
     let root_dir = sessions.session_path_dir(root_session);
-    let root_identity = CanonicalSessionIdentity::open(&root_dir)
+    let root_identity = open_session_identity(&root_dir)
         .map_err(|error| format!("open root canonical identity for {root_session}: {error}"))?;
     let root_id = root_identity.session_id;
     let mut graph = AgentGraphStore::new(root_id.clone());
