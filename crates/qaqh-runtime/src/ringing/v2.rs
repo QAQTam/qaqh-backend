@@ -107,6 +107,8 @@ struct V2SessionState {
     runtime_residency: HashMap<SessionId, TeamAgentResidency>,
     replaceables: BTreeMap<String, ProjectionEvent>,
     title_revision: u64,
+    /// 配置变更广播的单调 revision（daemon 全局，按会话各记一份）。
+    config_revision: u64,
     live_tx: broadcast::Sender<V2Envelope>,
     /// Monotonic revision for ephemeral task board deltas.
     task_revision: u64,
@@ -495,6 +497,53 @@ impl V2ProjectionHub {
             let _ = state.live_tx.send(envelope);
         }
         Ok(())
+    }
+
+    /// 配置写后广播：给**每个驻留会话**发一条可替换的信号事件
+    /// （`MetaDelta::ConfigChanged`），客户端收到后重拉 `config.load`。
+    ///
+    /// 为什么按会话广播：v2 只有按会话的流，而配置是 daemon 全局的；
+    /// 每个会话都受同一份配置约束，所以「本会话的配置变了」对每个会话都成立。
+    /// 未驻留的会话不在这里补，它们在下次 `subscribe` 时照常走 `config.load`。
+    /// 只发信号不发内容：配置 DTO 由 `config.load` 独占定义，避免两份真相漂移。
+    pub fn publish_config_changed(&self) -> Result<usize, V2HubError> {
+        let sessions: Vec<(SessionId, Arc<V2Session>)> = self
+            .sessions
+            .read()
+            .map_err(|_| V2HubError::Canonical("v2 hub lock poisoned".into()))?
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        let mut published = 0usize;
+        for (session_id, session) in sessions {
+            let mut state = session
+                .state
+                .lock()
+                .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+            state.config_revision = state.config_revision.saturating_add(1);
+            let revision = state.config_revision;
+            let event_id = EventId::new(generate_ulid());
+            let event = ProjectionEvent {
+                event_id: event_id.clone(),
+                source_fact_seq: state.last_fact_seq.max(1),
+                source_event_id: event_id,
+                causation_id: None,
+                ts_ms: None,
+                stream_key: StreamKey::Channel(qaqh_domain::RingingChannel::Control),
+                delivery: Delivery::Replaceable { revision },
+                projection_slot: None,
+                projection_index: None,
+                payload: ProjectionPayload::MetaDelta(MetaDelta::ConfigChanged { revision }),
+            };
+            state
+                .replaceables
+                .insert("meta:config".into(), event.clone());
+            if let Some(envelope) = event_to_envelope(&self.epoch, session_id.as_str(), &event) {
+                let _ = state.live_tx.send(envelope);
+            }
+            published += 1;
+        }
+        Ok(published)
     }
 
     /// Publish a manual/auto context compaction start on the v2 Conversation
@@ -959,6 +1008,7 @@ fn load_session_state(
     Ok(V2SessionState {
         last_fact_seq,
         title_revision: projections.meta.snapshot().revision,
+        config_revision: 0,
         projections,
         runtime_residency: HashMap::new(),
         replaceables,

@@ -95,6 +95,7 @@ fn interaction_requested() -> InteractionRequested {
         turn_id: TurnId::new("turn_01J00000000000000000000050"),
         kind: InteractionKind::Permission,
         request_ref: content_ref(5),
+        choices: Vec::new(),
         expires_at_ms: None,
         requested_at_ms: NOW_MS + 39,
     }

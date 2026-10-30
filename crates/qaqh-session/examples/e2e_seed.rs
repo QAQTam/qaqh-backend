@@ -116,6 +116,7 @@ fn main() {
                             turn_id: turn_id.clone(),
                             kind,
                             request_ref: ContentRef::new(sha256_content_hash(b"e2e-request")),
+                            choices: Vec::new(),
                             expires_at_ms: None,
                             requested_at_ms: base,
                         }),
