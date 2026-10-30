@@ -1,6 +1,7 @@
-//! `qaqh-agent-runtime` — 单会话 agent 的运行时（状态机 / 引擎 / 任务与配额）。
+//! `qaqh-agent-runtime` — 单会话 agent 的运行时（薄驱动 / 任务 / 配额）。
 //!
-//! 2026-10-30 从 `qaqh-runtime` 拆出。拆出时该簇对 core **零回指**：
+//! 2026-10-30 从 `qaqh-runtime` 拆出；同日二轮清扫删除了旧 Loop 状态机
+//! （`AgentState` 及会话生命周期、工具结果对账、引擎协议类型）。
 //!
 //! ```text
 //! agent/        → （无内部依赖）
@@ -10,13 +11,13 @@
 //! activity      → （无）
 //! ```
 //!
-//! 对外暴露给 `qaqh-runtime` 的只有：`AgentState` / `CancelToken` /
-//! `WorkerLiveness` / `session_effective_config` / `canonical_interaction_id` /
-//! `Assembly`（provider 装配）/ `WorkspaceToolPort` / `QuotaSnapshot` / `SessionAgent`。
+//! 对外暴露给 `qaqh-runtime` 的只有：`CancelToken` / `WorkerLiveness` /
+//! `session_effective_config` / `canonical_interaction_id` / `Assembly`
+//! （provider 装配）/ `WorkspaceToolPort` / `QuotaSnapshot` / `SessionAgent`。
 //!
 //! ## 布局
 //!
-//! - `agent/`：`AgentState`、会话生命周期、系统提示词、工具恢复
+//! - `agent/`：会话有效配置、系统提示词、worker 存活、取消令牌、canonical id
 //! - `session_agent/`：驱动循环（`SessionAgent` / `AgentHandle` / `AgentHost`）
 //! - `provider_job` / `tool_job`：模型请求与工具执行的作业封装
 //! - `quota_ledger` / `activity`：配额账本与活动追踪

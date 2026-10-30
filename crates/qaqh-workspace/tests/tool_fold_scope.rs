@@ -3,7 +3,7 @@
 //! # 背景
 //!
 //! `tool_side_fold` 的当前策略原先是**进程级** `static`，而它的唯一写方
-//! `AgentState::apply_tool_mode`（`qaqh-runtime/src/agent/state/agent.rs`）是
+//! （旧 Loop 的 `AgentState::apply_tool_mode`，已随状态机于 2026-10-30 删除）是
 //! **按会话**执行的——每个会话一个 actor 线程。于是会话 A 切到 minimal 系列
 //! （联动 `NoFoldPolicy`）时，同进程内会话 B 的 `exec` 输出也会跟着不再截断。
 //!

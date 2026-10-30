@@ -316,7 +316,7 @@ impl AgentRegistry {
                 .map_err(|e| format!("canonical identity for subagent {session_id}: {e}"))?;
 
         let (mut agent_config, _session_profile) =
-            crate::agent::engine_session::session_effective_config(
+            crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
                 session_id,
             )
@@ -356,7 +356,7 @@ impl AgentRegistry {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
         let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
-            &crate::agent::state::agent::agent_tool_registrars(),
+            &[],
         );
         tool_manager.apply_init(spec.tools.clone(), session_id);
         let tool_defs = crate::session_agent::assembly::tool_defs(&tool_manager);
@@ -436,7 +436,7 @@ impl AgentRegistry {
                 .map_err(|e| format!("canonical identity for {session_id}: {e}"))?;
 
         let (agent_config, _session_profile) =
-            crate::agent::engine_session::session_effective_config(
+            crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
                 session_id,
             )
@@ -467,7 +467,7 @@ impl AgentRegistry {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
         let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
-            &crate::agent::state::agent::agent_tool_registrars(),
+            &[],
         );
         let allowed_tools = if agent_config.tool_allowlist_enabled {
             agent_config.tool_allowlist.clone()
