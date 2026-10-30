@@ -233,20 +233,6 @@ impl AgentRegistry {
             if let Some(hub) = self.hub.as_ref() {
                 hub.mark_worker_dead(&child);
             }
-            let command_id = format!(
-                "parent-cancel-{:x}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            );
-            let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-                child.clone(),
-                command_id.clone(),
-                qaqh_ringing::RingingCommand::Conversation(
-                    qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
-                ),
-            );
             let delivered = match self.instances.get(&child) {
                 Some(AgentInstance {
                     transport: AgentTransport::ThinAgent { handle, .. },

@@ -26,7 +26,6 @@
 //!   `SSE stream ended`（与旧实现一致）；
 //! - 流首 UTF-8 BOM 剥离一次（BUG-2026-09-13-17，中间层注入场景）。
 
-use crate::error::Result as ClientResult;
 use crate::types::SseFrame;
 
 /// UTF-8 BOM（U+FEFF）字节序列。

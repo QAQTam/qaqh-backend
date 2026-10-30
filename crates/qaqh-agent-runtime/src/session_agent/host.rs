@@ -34,6 +34,21 @@ pub struct AgentHandle {
 }
 
 impl AgentHandle {
+    /// 测试 / 诊断用：用已有的 mailbox 句柄装配一个 handle。
+    ///
+    /// 生产路径只有 [`AgentHost::spawn_with_activity`]；跨 crate 的 registry 测试
+    /// 需要构造一个只做命令路由的假实例，mailbox 字段本身保持私有。
+    #[doc(hidden)]
+    pub fn from_mailbox(
+        session_id: String,
+        mailbox: MailboxHandle<AgentCommand, AgentControl, AgentCompletion>,
+    ) -> Self {
+        Self {
+            session_id,
+            mailbox,
+        }
+    }
+
     /// Submit a user message into the normal command lane.
     pub fn submit_user_input(
         &self,

@@ -304,7 +304,9 @@ impl AgentRegistry {
     /// P2-7 test/ops view for one root ledger.
     #[doc(hidden)]
     pub fn quota_snapshot(&mut self, root: &str) -> QaqhResult<crate::quota_ledger::QuotaSnapshot> {
-        self.quota_ledger_mut(root)?.snapshot()
+        self.quota_ledger_mut(root)?
+            .snapshot()
+            .map_err(QaqhError::from)
     }
 
     pub(super) fn quota_ledger_mut(&mut self, root: &str) -> QaqhResult<&mut QuotaLedger> {

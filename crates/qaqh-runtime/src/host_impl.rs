@@ -425,17 +425,14 @@ impl SubagentHost for QaqhService {
     ) -> Result<InterruptedAgent, String> {
         let mut registry = self.registry()?;
         let caller = registry
-            .list_agents_for_caller(request.caller_session_id, "/root")
-            .and_then(|agents| {
-                agents
-                    .into_iter()
-                    .find(|agent| agent.agent_id.as_str() == request.caller_session_id)
-                    .ok_or_else(|| {
-                        format!(
-                            "caller agent metadata missing for {}",
-                            request.caller_session_id
-                        )
-                    })
+            .list_agents_for_caller(request.caller_session_id, "/root")?
+            .into_iter()
+            .find(|agent| agent.agent_id.as_str() == request.caller_session_id)
+            .ok_or_else(|| {
+                format!(
+                    "caller agent metadata missing for {}",
+                    request.caller_session_id
+                )
             })?;
         let target =
             registry.resolve_agent_for_caller(request.caller_session_id, request.target)?;
