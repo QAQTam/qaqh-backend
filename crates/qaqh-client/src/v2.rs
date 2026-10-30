@@ -1,5 +1,4 @@
 //! Ringing v2 typed client surface.
-//!
 //! The transport methods are additive to the v1 client. They use the same
 //! discovery credentials, but negotiate and carry a separate v2 lease so v1
 //! and v2 identities never alias during the compatibility window.
@@ -32,10 +31,8 @@ pub use qaqh_session::session_fact_v2 as fact;
 pub use qaqh_session::team as team;
 
 /// Typed control delta (#323 缺口 1).
-///
 /// 壳层必须能 `match fact::ControlDelta::InteractionRequested { .. }` —— match
 /// 枚举变体**必须写出枚举名**，所以只导出 `fact::ProjectionPayload` 不够。
-///
 /// 命名注意：这里的 `kind` 字段是 [`fact::InteractionKind`]（wire 值
 /// `ask` / `plan` / `permission`），与 bootstrap 的
 /// [`ringing_v2::RingingV2PendingInteraction`]`.kind`（[`ringing_v2::RingingV2InteractionKind`]，wire 值
@@ -45,7 +42,6 @@ pub use qaqh_session::team as team;
 /// `fact::ControlDelta::SubagentFinished.status`。
 
 /// 压缩瞬态终态（`ConversationDelta::CompactFinished.status`）。
-///
 /// 与 `qaqh_client::types::CompactStatus`（域事件面）wire 值一致，但这是 v2 契约
 /// 自己的类型；壳层 match delta 变体时用它。
 /// 会话删除原因（`MetaDelta::Deleted.reason`）。
@@ -66,7 +62,6 @@ pub use qaqh_session::team as team;
 /// （**SSE control delta** 面，canonical 类型）。
 
 /// `ringing_v2::RingingV2PendingInteraction.request` 的载荷（**bootstrap** 面）。
-///
 /// 与 [`fact::ContentValue`] 的 JSON 形态一致（`kind` / `data` 判别式），但
 /// bootstrap 走 wire 层类型（`qaqh-ringing` 不依赖 session crate），所以是两个
 /// 类型；两侧 serde 形态由 daemon 的映射函数保持一致。
@@ -78,11 +73,9 @@ pub use qaqh_session::team as team;
 /// `InteractionExpired.reason`。
 
 /// **Team projection**：TUI/WinUI 的 roster / inbox 唯一权威投影。
-///
-/// 出处：`docs/current/architecture.md` —— `TeamSnapshot/TeamDelta` 是
+///  —— `TeamSnapshot/TeamDelta` 是
 /// TUI/WinUI 的唯一 roster/inbox 投影。壳层**不得**再从 `spawn_subagent`
 /// 工具卡 JSON 推导 agent 身份。
-///
 /// 快照来自 `GET /ringing/v2/sessions/{seed}/team`（[`Client::team_v2`]），
 /// 之后的增量来自 per-seed 单流的 [`fact::ProjectionPayload::TeamDelta`]。
 /// inbox 消息的投递语义（queue / trigger / interrupt / steer / interject）。
@@ -96,11 +89,9 @@ pub use qaqh_session::team as team;
 /// task board 快照（`/team` 的 `tasks` 字段）。
 
 /// `GET /ringing/v2/sessions/{seed}/team` 的 typed 响应。
-///
 /// 一次拿到三份快照：roster + inbox（`team`）、task board（`tasks`）、
 /// message board（`board`）。Phase 4（roster/inbox）、TEAM-01e（task board）与
 /// BOARD-01d（message board）消费的都是这一个端点，避免壳层各拉一次。
-///
 /// 所有权在 `qaqh_ringing_contract`（daemon handler 与 TS 契约导出共用）；
 /// 此处保留壳层既有命名。
 pub use qaqh_ringing_contract::ClientV2TeamResponse;
@@ -112,7 +103,6 @@ pub type ClientV2Event = RingingV2EventEnvelope<fact::ProjectionPayload>;
 pub type ClientV2EventEnvelope = ClientV2Event;
 
 /// bootstrap `control.state` / `tool.state` 的具体组合。
-///
 /// 所有权在 `qaqh_ringing_contract`：daemon handler 序列化、客户端反序列化
 /// 与 TS 契约导出共用同一份定义，不再各自维护镜像 struct。
 pub use qaqh_ringing_contract::{ClientV2ControlState, ClientV2ToolState};
@@ -165,7 +155,6 @@ pub enum ClientV2SubscriptionEvent {
     Event(Box<ClientV2Event>),
     Reset(ringing_v2::RingingV2ResetRequired),
     /// 字节到达但凑不出完整帧（daemon 的 keepalive 注释行 / 跨 chunk 半帧）。
-    ///
     /// 把「到达」本身呈现给调用方，v2 流的空闲计时器才能在**字节层**复位：
     /// 会话安静期里 daemon 的 15s keepalive 是唯一字节来源，只按事件复位
     /// 会让健康流每 45s 被误判 `v2 SSE idle timeout` 重连（真机实测 11 次，
@@ -306,7 +295,6 @@ impl Client {
     }
 
     /// `GET /ringing/v2/sessions/{seed}/approvals` — 本地壳层审批投影。
-    ///
     /// 返回 daemon 的原始 JSON(`{ "pending_permission": …|null,
     /// "pending_interaction": …|null }`),id 为 canonical 形态(`call_<ULID>` /
     /// `int_<ULID>`)。壳层(桌面宿主)自行做不透明 challenge 映射;返回裸
@@ -330,7 +318,6 @@ impl Client {
     }
 
     /// Open the typed v2 per-seed SSE subscription.
-    ///
     /// 2026-09-24 冻结修订（硬切）：**每 seed 一条流**，不再按 channel 分订阅。
     /// 事件带 `stream_key`，调用方自行 demux。旧的三条 `subscribe_v2(seed,
     /// channel, …)` 形态已删除；调用方必须在 `open` 响应里断言
@@ -436,7 +423,6 @@ impl Client {
 
 
     /// `GET /ringing/v2/sessions/{seed}/team`。
-    ///
     /// Team projection 快照：roster（以 `AgentPath` 为主）+ inbox + task board +
     /// message board。deltas 在 per-seed 单流上以
     /// [`fact::ProjectionPayload::TeamDelta`] 到达；壳层应当 **先拉一次快照、再应用
@@ -548,7 +534,6 @@ mod tests {
     use qaqh_ringing::RingingV2Delivery;
 
     /// Team projection 的 wire 形状必须和 daemon `/team` 端点逐字对齐。
-    ///
     /// 这条测试是 TUI/WinUI Phase 4（roster / inbox）的**契约锁**：壳层不能直接
     /// 依赖 `qaqh-session`（静态门禁 G1），只能经 `qaqh-client` 拿类型，所以
     /// 这里少一个字段/改一个键名，前端就会在编译期或运行期直接断。

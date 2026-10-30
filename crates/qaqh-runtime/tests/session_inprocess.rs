@@ -11,7 +11,6 @@ use qaqh_runtime::{AgentRegistry, QaqhService, RingingHub};
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// SessionManager 是全局单例：同测试进程只 init 一次，两个用例共享。
-///
 /// ⚠ 返回值是**本进程单例实际采用的 data_dir**（`Once` 的胜者）。`TEST_LOCK`
 /// 只保证用例不并发，**保证不了初始化顺序**：谁先跑到 `init_manager`，单例就
 /// 认谁的 data_dir。因此每个用例必须拿返回值与自己的 tempdir 比对，不能假定
@@ -20,11 +19,9 @@ static INIT: Once = Once::new();
 static MANAGER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 /// 本测试进程内**唯一**的 SessionManager 初始化入口。
-///
 /// 把「读 `QAQH_DATA_DIR`」与「init 单例」收进同一个 `call_once` 闭包，保证
 /// 二者是**同一对**：先读到的值立刻用于 init，中间不会被别的用例改掉。返回
 /// 单例实际采用的 data_dir。
-///
 /// 由于单例只能 init 一次，后续用例会拿到**别人**的 data_dir；调用方必须用
 /// 返回的路径而不是自己的 `data` 变量（见 `init_manager_for_this_test`）。
 fn init_manager() -> std::path::PathBuf {
@@ -41,7 +38,6 @@ fn init_manager() -> std::path::PathBuf {
 }
 
 /// 断言单例的 data_dir 就是本用例的 `data`，否则说明另一个用例先 init 了。
-///
 /// 返回 `true` 表示本用例持有单例；`false` 表示单例已被别人占用 —— 此时
 /// **必须跳过**任何依赖「单例属于我」的断言，而不是让断言去读别人的目录
 /// （旧行为：sentinel 落进别人的 data_dir → 断言必然翻车 → 中毒 TEST_LOCK →
@@ -214,7 +210,7 @@ fn cross_session_cancel_does_not_leak() {
     registry.shutdown_all();
 }
 
-/// E: idle 卸载 → 重生 → 会话历史连续（docs/current/architecture.md）。
+/// E: idle 卸载 → 重生 → 会话历史连续。
 /// 卸载走 registry.close 优雅路径；重生走 spawn_new 的 resume 语义
 /// （load_for_resume + message WAL 重放 + canonical tool recovery）。
 #[test]
@@ -361,7 +357,6 @@ fn close_session_cleans_per_session_resident_state() {
 
 /// BUG-2026-09-13-24 端到端回归：`session.new` 分配的会话绝不能撞进
 /// 已有会话目录（旧实现 = 无碰撞检查 + 无条件覆盖 meta → 静默写穿）。
-///
 /// 在**真实 spawn 路径上**做可验证的断言：
 ///   1. 连续多次 `session.new` 得到的会话 id 互不相同、且各自目录独立；
 ///   2. 每个新会话的 meta 与 workspace 归属都属于它自己（没有任何一次

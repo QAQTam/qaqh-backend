@@ -1,7 +1,5 @@
-//! per-server 连接生命周期（设计 `docs/current/architecture.md`）。
-//!
+//! per-server 连接生命周期。
 //! 状态机（语义以设计 §5.1 表格为权威；handover 草图与其冲突处以设计为准）：
-//!
 //! ```text
 //! Disconnected --ensure_connected--> Connected
 //! Disconnected(冷却期) --ensure_connected--> Err(ConnectFailed)   // 不重启
@@ -10,7 +8,6 @@
 //! Connected --inflight==0 连续 idle_shutdown_secs--> Disconnected // watchdog 回收
 //! 任意状态 --shutting_down 闸--> 拒绝 lazy connect/重连/idle 重启（Shutdown）
 //! ```
-//!
 //! 锁模型（关键正确性决策，替代 handover 草图的 AtomicU64+Mutex 分离）：
 //! - `state: StdMutex<ConnState>`——inflight / idle_since / cooling_until /
 //!   service 句柄同锁。理由：[`CallGuard::drop`] 是同步上下文，必须用 std 锁；
@@ -19,7 +16,6 @@
 //! - service 本体包 `Arc<tokio::sync::Mutex<RunningService>>`——RPC/关闭可跨
 //!   await，但先从 state 中 clone/take 句柄再锁，避免 std 锁跨 await。
 //! - watchdog 持 `Weak<ServerConnection>`——不阻止连接释放，无 Arc 环。
-//!
 //! crash 冷却语义（与 handover 草图"下次调用走冷却后重启"的差异）：
 //! 设计 §5.1「崩溃恢复：下一次调用触发单次重启；重启失败保持报错，冷却期内
 //! 不再尝试」→ 本实现 crash 本身**不**设冷却，重启失败才设。防止 crash-loop
@@ -43,7 +39,6 @@ use qaqh_config::config::McpServerConfig;
 
 /// T-8-1 / O-4 硬上限（与 `qaqh-config::config::map_mcp_config` 的
 /// `max_concurrent_calls ∈ 1..=16` 校验同值）。
-///
 /// 配置校验已是第一道闸；`begin_call` 再夹一层，兜住绕过校验的构造路径
 /// （旧版持久化 DTO、程序化装配的 `McpServerConfig`），保证运行时生效值
 /// 永远 ≤16。
@@ -163,7 +158,6 @@ struct ConnState {
 }
 
 /// 单个 MCP server 的连接（lazy connect / 冷却 / idle 回收 / 崩溃标记）。
-///
 /// 由 [`crate::manager::McpManager`] 创建并持有；调用方（M1-5 桥接）流程：
 /// `manager.get_or_connect(server)` → [`ServerConnection::begin_call`] → RPC。
 pub struct ServerConnection {
@@ -277,7 +271,6 @@ impl ServerConnection {
     }
 
     /// lazy connect（幂等；已连接直接返回）。
-    ///
     /// 超时 → `mcp_connect_timeout`；失败 → `mcp_connect_failed`；两者都进入
     /// 重连冷却（设计 §5.1）。冷却期内调用直接报错不重启。并发调用串行化，
     /// 后到者看到已连接结果即返回。
@@ -415,7 +408,6 @@ impl ServerConnection {
 
     /// 连接后拉取 `resources/list` + `resources/templates/list` 快照入缓存
     /// （PR-M2-1；幂等，仅成功路径调用）。
-    ///
     /// 与 [`Self::refresh_tools_cache`] 同款失败降级：拉不到只影响聚合工具
     /// 的可见清单（提示未连接/无清单），不影响连接与工具调用路径。不置脏
     /// ——投影批次是工具维度；资源清单由 M2-2 的注入块在回合边界直接读快照。
@@ -512,7 +504,6 @@ impl ServerConnection {
 
     /// P2-3：代理 `prompts/get`（name + arguments → 渲染结果）。仅在已连接
     /// 时可用；server 不支持 → method-not-found 错误上抛。
-    ///
     /// 与 [`Self::call_tool`] / [`Self::read_resource`] 同款保障（#39 盲区
     /// 复扫对齐）：`begin_call` 占 inflight（防 idle 回收竞态）、`timeout`
     /// 硬顶释放 service 锁、断连 → [`Self::handle_crash`] +
@@ -622,7 +613,6 @@ impl ServerConnection {
     }
 
     /// 组杀兜底清扫（Unix；见 adapter.rs 头注的 rmcp graceful 漏杀缺口）。
-    ///
     /// close/crash 后组内可能仍有 server 自行 spawn 的后代——向整组发
     /// SIGKILL（组已空则 ESRCH 无害）。一次性取走 pgid，防重复清扫。
     /// pgid 为 adapter spawn 的独立进程组（`ProcessGroup::leader`），不含
@@ -721,7 +711,6 @@ impl ServerConnection {
     }
 
     /// 开启一次调用：占用 inflight（防 idle 回收），返回 RAII 守卫。
-    ///
     /// 未连接时返回 `mcp_connect_failed`——调用方应先走
     /// [`Self::ensure_connected`]（M1-5 桥接的固定次序）。
     pub fn begin_call(self: &Arc<Self>) -> Result<CallGuard, McpError> {
@@ -764,7 +753,6 @@ impl ServerConnection {
     }
 
     /// 连通性探针：`tools/list` 自动翻页取全部工具名。
-    ///
     /// 设计 §5.1 的 connect 验收动作；M1-4 在此基础上加缓存与白名单过滤。
     /// transport 断连 → 标记崩溃并返回 `mcp_server_crashed`（当前调用不重试）。
     pub async fn probe_tools(self: &Arc<Self>) -> Result<Vec<String>, McpError> {
@@ -816,7 +804,6 @@ impl ServerConnection {
     }
 
     /// 工具调用 RPC（`tools/call` 透传；超时/错误码映射在桥接层完成）。
-    ///
     /// - `timeout` 由桥接层按 ctx 超时链传入；此处 `tokio::time::timeout`
     ///   硬顶释放 service 锁——超时后连接保持健康（TransportClosed 才算
     ///   crash），server 侧可能仍在执行（§7 hint）。
@@ -873,7 +860,6 @@ impl ServerConnection {
     }
 
     /// 读取单个资源（PR-M2-1；`resources/read` RPC 透传，内容不缓存）。
-    ///
     /// 与 [`Self::call_tool`] 同款保障：`begin_call` 占 inflight（防 idle
     /// 回收竞态）、超时硬顶释放 service 锁、断连 → crash 标记 +
     /// `mcp_server_crashed`。读取失败（server 报错，如 uri 不存在）→
@@ -927,7 +913,6 @@ impl ServerConnection {
 
     /// best-effort 发送 `notifications/cancelled`（设计 §5.4：命中 cancel 时
     /// 调用；发送失败仅 debug 日志，不回传给调用方）。
-    ///
     /// `request_id` 置 `None`：rmcp 在 `call_tool` 内部生成请求 id，调用方
     /// 拿不到——取消语义退化为“通知 server 放弃最近一次可取消的工作”，
     /// 结果本来就已被桥接层丢弃（丢弃即契约，不依赖 server 遵从）。
@@ -985,7 +970,6 @@ impl ServerConnection {
     }
 
     /// 优雅关闭单连接（幂等；`manager.shutdown_all` / Drop 网络使用）。
-    ///
     /// 次序（设计 §5.1 退出清理）：abort watchdog → cancel service（含
     /// transport close → 子进程 graceful shutdown → 组杀兜底）。
     pub async fn shutdown(&self) {

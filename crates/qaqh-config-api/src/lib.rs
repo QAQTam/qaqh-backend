@@ -1,7 +1,5 @@
 //! QAQ-Harness 配置契约层（wire DTO）。
-//!
-//! 前后端共享的**唯一真相**（当前架构见 docs/current/architecture.md；K1-K4 约束）：
-//!
+//! 前后端共享的**唯一真相**：
 //! - K1 叶子 crate：只依赖 serde，不依赖 runtime/daemon/config 引擎；
 //!   winui / ratatui / web(axum) 三端只依赖本 crate 即可参与配置读写。
 //! - K2 键风格定死 camelCase（`rename_all`），snake/camel 双键 shim 就此终结。
@@ -9,16 +7,12 @@
 //!   `Option` 字段，缺失 = 不动；多端并发编辑互不覆盖，且天然免疫
 //!   「未加载字段整包写回」类毒化（2026-08-25 设置页事故 R5）。
 //! - K4 fingerprint/字节序属 ringing 传输层，本 crate 零耦合。
-//!
 //! 映射纪律：引擎侧 [`crate`] 与 `qaqh_config::Config` 的互转**不用**
 //! `..Default::default()` 兜底——穷举字面量让"新增字段未同步映射"变成编译错误。
-//!
 //! 兼容策略（2026-09-15 改）：**不做向前兼容**。读路径的 snake_case `alias`、读模型
 //! 的 struct 级 `#[serde(default)]` 均已删除——前后端共进退，不存在「另一个版本的
 //! 对方」。删 `default` 不只是减重：留着它会让「旧形状」**静默**变成「一份全默认的
 //! 配置」（实测：未知键被忽略 + 缺字段走 default ⇒ 解析成功但值全错），比失败更糟。
-//! 详见 `docs/current/architecture.md`。
-//!
 //! **注意** [`ConfigPatch`] / [`SubagentPatch`] 的 struct 级 `default` **不在此列**：
 //! 那是 K3 合并补丁的语义（字段缺失 = 不动），不是兼容。
 
@@ -27,29 +21,21 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
-/// wire 的**规范拼写**：读模型 `ConfigDto.wire` 输出的就是这四个之一，
-/// 写模型 `ConfigPatch::wire` 也接受它们（旧拼写作为别名一并接受）。
-///
+/// wire 的**唯一拼写**：这四个之一，别的一律拒绝。
 /// 为什么这份名单在这里而不是复用 `qaqh_types::Wire::parse`：本 crate 的 K1
 /// 不变量是「只依赖 serde」（三端设置页直接编译它）。所以这里是**一份镜像**，
 /// 但它是被闸门盯着的镜像——`qaqh-config` 的
 /// `canonical_wire_mirrors_qaqh_types` 测试逐个拼写与 `Wire::parse` +
 /// `Wire::as_str()` 对拍，任何一边改了名字而另一边没跟，测试先红。
-///
-/// 返回 `None` = 不认识的拼写（写侧据此报 400，而不是静默兜底成 `chat`——
-/// 静默兜底正是「以为在用 A 协议、实际打了 B」那类最难查的问题）。
+/// 2026-10 硬切：`openai` / `anthropic` / `claude` / `google` 等旧别名已删除；
+/// 未知拼写返回 `None`，写侧据此报 400（静默兜底正是「以为在用 A 协议、实际
+/// 打了 B」那类最难查的问题）。
 pub fn canonical_wire(value: &str) -> Option<&'static str> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "chat" | "openai" | "openai-compatible" | "chat_completions" | "chat/completions" => {
-            Some("chat")
-        }
-        "responses" | "openai-responses" => Some("responses"),
-        "messages" | "anthropic" | "claude" => Some("messages"),
-        "gemini"
-        | "google"
-        | "generatecontent"
-        | "generate_content"
-        | "gemini-generate-content" => Some("gemini"),
+        "chat" => Some("chat"),
+        "responses" => Some("responses"),
+        "messages" => Some("messages"),
+        "gemini" => Some("gemini"),
         _ => None,
     }
 }
@@ -65,14 +51,12 @@ pub struct ConfigDto {
     pub base_url: String,
     /// 该 endpoint 说的 wire，**规范拼写**：`chat` | `responses` | `messages` | `gemini`
     /// （= `qaqh_types::Wire::as_str()`，也是写侧 [`canonical_wire`] 的返回值）。
-    ///
     /// 2026-10 之前这里写的是旧四名 `openai` / `anthropic`，与实际输出不一致：
     /// 读侧回规范名、写侧只收旧名，于是每个客户端都得自带一层拼写桥。
     /// 现在写侧也收规范名（旧名作为兼容别名继续接受），读写同一套。
     pub wire: String,
     /// 该 endpoint 的**凭据来源**：`api_key`（BYOK，缺省）| `chatgpt_plan`（本机
     /// ChatGPT 套餐额度）| `deepseek_account`（本机 DeepSeek 账号余额）。
-    ///
     /// 显式声明而不是从「apiKey 是否为空」推导——隐式推导会把一个配置错误变成
     /// 「静默用了别的额度」。`chatgpt_plan` 只与 `responses` wire + 官方 base_url
     /// 配套；请求期的权威判定在 `qaqh-runtime` 的 `provider_for`。
@@ -194,7 +178,7 @@ pub struct SandboxDto {
     pub enabled: bool,
 }
 
-/// MCP 客户端配置读模型（docs/current/architecture.md）。
+/// MCP 客户端配置读模型。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,7 +212,7 @@ pub struct McpServerDto {
     pub cwd: String,
 }
 
-/// LSP 客户端配置读模型（docs/current/architecture.md）。
+/// LSP 客户端配置读模型。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,11 +240,9 @@ pub struct LspServerDto {
 
 /// 写模型：JSON Merge Patch（K3）。反序列化时缺失即 None = 不动；
 /// 序列化时跳过 None，保证 wire 上永不出现 `"field": null`。
-///
 /// 刻意**不含**：profiles 名录（服务端派生）、active_profile（切换走
 /// `profile.apply`）、api_key_set（服务端派生）。BYOK 后没有 provider 目录可下发。
 /// `permissionLevel` 在 patch 中受 1..=3 值域校验（BUG-2026-09-13-15；三档制 2026-10-03）。
-///
 /// 特例语义冻结：`apiKey`/`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
 /// 保持现值（显式删除须专用接口）；其余字符串字段 Some(空串) = 显式置空。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -280,7 +262,6 @@ pub struct ConfigPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wire: Option<String>,
     /// 凭据来源：`api_key` | `chatgpt_plan` | `deepseek_account`。缺失 = 不动（K3）。
-    ///
     /// 从其他凭据切换到 DeepSeek 账号时，若省略 wire 且当前为 chat，默认改为
     /// responses；显式 wire 与已有账号的后续更新不受影响。
     /// 值域在 [`ConfigPatch::validate`] 收口；这里刻意**不**给「未知值退化成
@@ -304,7 +285,6 @@ pub struct ConfigPatch {
     /// 权限档位（1=read-only，2=workspace-write，
     /// 3=skip-permissions：显式危险 bypass，普通工具全部自动放行；
     /// 4=sandbox-run：沙箱强制隔离运行，常规命令自动放行）。
-    ///
     /// BUG-2026-09-13-15：历史上该字段刻意缺席写模型，只有
     /// `config.set_permission_level` 单写口；但写口校验缺失时非法档位仍能从
     /// `config.save` 的裸 `permissionLevel` 载荷漏进配置。现在并入 patch 并在
@@ -491,7 +471,6 @@ mod tests {
     }
 
     /// R3：写侧接受**规范名**（读模型输出的那一套），旧名继续兼容。
-    ///
     /// 这条挡的是「客户端各写一层拼写桥」：读回 `chat`、直发 `chat` 就该过；
     /// 任何壳层都不需要再记「读规范名、写旧名」这件反直觉的事。
     #[test]
@@ -506,22 +485,31 @@ mod tests {
                 .unwrap_or_else(|e| panic!("规范名 {spelling} 必须被接受：{e}"));
             assert_eq!(canonical_wire(spelling), Some(spelling), "规范名应映射到自身");
         }
+        // 2026-10 硬切：旧拼写一律拒绝，不再充当别名。
         for spelling in [
             "openai",
             "openai-compatible",
             "chat_completions",
             "anthropic",
             "claude",
-            "  CHAT ",
+            "google",
         ] {
             let patch = ConfigPatch {
                 wire: Some(spelling.into()),
                 ..Default::default()
             };
-            patch
-                .validate()
-                .unwrap_or_else(|e| panic!("旧拼写 {spelling:?} 必须继续被接受：{e}"));
+            assert!(
+                patch.validate().is_err(),
+                "旧拼写 {spelling:?} 必须被拒绝，而不是静默映射到别的协议"
+            );
         }
+        // 大小写与首尾空白仍归一化（不是兼容，是输入卫生）。
+        ConfigPatch {
+            wire: Some("  CHAT ".into()),
+            ..Default::default()
+        }
+        .validate()
+        .expect("canonical spelling with padding must pass");
         let err = ConfigPatch {
             wire: Some("grpc".into()),
             ..Default::default()
@@ -534,11 +522,9 @@ mod tests {
     /// 完整读模型 fixture：字段形状为**当前** wire 形状（K2 camelCase），必须无损
     /// 解析进 `ConfigDto`。注意 `permissionLevel: 4` 是旧四档值——读模型不做值域
     /// 校验故照单解析，仅写路径 `ConfigPatch::validate` 拒 `4`（值域 1..=3）。
-    ///
     /// 历史：本 fixture 原为 2026-08-25 对运行中 daemon 的实拍（snake_case），
     /// 靠 `alias` 与 struct 级 `#[serde(default)]` 才解析得动。按兼容政策
     /// （spec §0b）这两样都已删除，故 fixture 改写为当前契约形状。
-    ///
     /// **顺手补了 `mcp`/`lsp`**：原先它俩根本不在 fixture 里，靠 struct 级 default
     /// 顶成缺省——也就是说这条测试此前**没有真的在验「完整形状」**。补上后它才
     /// 名副其实：字段缺一个就红。

@@ -61,20 +61,16 @@ impl Wire {
         }
     }
 
-    /// Parse a wire name. Legacy protocol spellings are accepted so migrated
-    /// configurations keep resolving (`"openai-compatible"` → [`Wire::Chat`]).
+    /// Parse a wire name. Only the canonical spellings exist: the legacy
+    /// protocol aliases (`openai`, `anthropic`, `claude`, `google`, …) were
+    /// removed in the 2026-10 hard cut, so a stale configuration fails loudly
+    /// instead of silently resolving to a different protocol surface.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "openai" | "openai-compatible" | "chat" | "chat_completions" | "chat/completions" => {
-                Some(Self::Chat)
-            }
-            "responses" | "openai-responses" => Some(Self::Responses),
-            "anthropic" | "messages" | "claude" => Some(Self::Messages),
-            "gemini"
-            | "google"
-            | "generatecontent"
-            | "generate_content"
-            | "gemini-generate-content" => Some(Self::Gemini),
+            "chat" => Some(Self::Chat),
+            "responses" => Some(Self::Responses),
+            "messages" => Some(Self::Messages),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }

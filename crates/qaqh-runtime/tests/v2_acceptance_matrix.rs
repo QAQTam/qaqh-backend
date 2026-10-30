@@ -1,11 +1,8 @@
 //! P0-6 Ringing v2 acceptance fixture matrix.
-//!
 //! Drives the real [`V2ProjectionHub`] against seeded canonical facts and
-//! asserts the frozen rows of `docs/current/decisions.md`
+//! asserts the frozen rows of 
 //! §13 that are reachable today.
-//!
 //! Rows covered here:
-//!
 //! | row   | scenario                                   |
 //! |-------|--------------------------------------------|
 //! | V2-C1 | snapshot + subscribe (no gap, no dup)      |
@@ -16,11 +13,9 @@
 //! | V2-C6 | cursor expired / unknown fact reset        |
 //! | V2-C7 | snapshot missing                           |
 //! | —     | live `replay_overflow` reset               |
-//!
 //! Rows covered elsewhere: V2-R1..R4 and V2-D1..D3 live in the daemon route
 //! tests (`crates/qaqh-daemon/src/axum_server.rs`), which own lease, admission
 //! and HTTP concerns.
-//!
 //! Known gaps (see the P0-6 handoff): the v1 cursor mapping (V2-V1) has no
 //! production producer yet, so it is asserted at the wire level only.
 
@@ -428,7 +423,6 @@ fn v2_c7_snapshot_missing_is_reported() {
 
 /// 单流修订（2026-09-24）：**一条** SSE 上收齐 control / conversation / tool
 /// 三类 `stream_key`，且 `(fact_seq, projection_index)` 全局严格递增。
-///
 /// 这是取代 per-channel 订阅的核心断言：客户端不再需要跨流归并。
 #[tokio::test]
 async fn single_stream_carries_all_channels_in_global_order() {

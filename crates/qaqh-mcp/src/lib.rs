@@ -1,22 +1,15 @@
 //! qaqh-mcp：QAQ-Harness 的 MCP 客户端支持。
-//!
-//! 设计文档：`docs/current/architecture.md`。
-//! 实施计划：`docs/current/status.md`。
-//!
+//! 实施计划：。
 //! ## M1-2（PR-M1-2）已落地
-//!
 //! - [`manager::McpManager`]：daemon 级生命周期容器（lazy connect / 冷却 /
 //!   `shutting_down` 闸 / RAII）；全局槽位 [`manager_slot`] +
 //!   [`install_manager`]（OnceLock 模式，归属 QaqhService 装配，设计 §10-6）。
 //! - [`connection::ServerConnection`]：per-server 连接状态机
 //!   （`inflight==0` idle 回收、crash 标记、5s 重连冷却）。
 //! - [`adapter`]（crate 内部）：rmcp/process-wrap 隔离 + 进程组组装。
-//!
 //! M1-3（secrets 插值）/ M1-4（工具投影与动态注册）/ M1-5（桥接与调用路径）
 //! 陆续接入；本 crate 不反向依赖 runtime/msgloop（设计 §4 依赖方向）。
-//!
 //! ## SDK 隔离边界
-//!
 //! 设计 §4 要求"SDK 类型不出 crate"。[`bridge`] 是模型面/ToolResult 的隔离
 //! 收口层（CallToolResult/ServiceError 不出 [`bridge`] 与 [`adapter`]）；
 //! [`connection::ConnectFactory`] 等内部管线类型仍暴露 rmcp 的
@@ -43,7 +36,6 @@ pub use bridge::{
 /// `run_lap`）——会话从未跑过回合时 `mcp__*` 工具不在 dynamic 词汇表，
 /// 授权报 Unknown tool。生产入口（engine_tool `handle_ui_tool_call`）在
 /// mcp 前缀工具上先调本函数同步 apply 一次。
-///
 /// 幂等：`take_projection_batch` 消费即清脏，重复调用返回 false 无副作用。
 pub fn sync_projection_now() -> bool {
     match take_projection_batch() {
@@ -84,7 +76,7 @@ pub mod bridge_for_tests {
 }
 
 /// M0 起保留的 crate 用途标识。
-pub const CRATE_PURPOSE: &str = "QAQ-Harness MCP client support — see docs/current/architecture.md";
+pub const CRATE_PURPOSE: &str = "QAQ-Harness MCP client support";
 
 use std::sync::{Arc, OnceLock, RwLock};
 
