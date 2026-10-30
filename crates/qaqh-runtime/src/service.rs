@@ -822,11 +822,12 @@ pub(crate) fn materialize_canonical_session_in(
     let session_id = identity.session_id.clone();
     let log_id = identity.log_id.clone();
     let budget = crate::session_agent::assembly::default_context_budget();
-    let mut store = if session_dir.join("storage-format").exists() {
-        SessionCommit::open(session_dir, session_id.clone(), log_id.clone(), budget)
-    } else {
-        SessionCommit::create(session_dir, session_id.clone(), log_id.clone(), budget)
-    }
+    let mut store = SessionCommit::open_or_create(
+        session_dir,
+        session_id.clone(),
+        log_id.clone(),
+        budget,
+    )
     .map_err(|error| error.to_string())?;
     // Opening verifies business transitions, including SessionCreated at seq 1.
     if store.head().map_err(|error| error.to_string())? > 0 {
