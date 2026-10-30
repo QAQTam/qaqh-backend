@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 pub mod field {
     /// 文件路径。
     pub const PATH: &str = "path";
+    /// [`PATH`] 的合法别名（Claude 标准拼写 `file_path`，`edit` 的 wire 名）。
+    ///
+    /// **投影层与 typed 反序列化必须同源**：`display` 拿到的是原始 args，
+    /// 只认 `path` 会导致「工具执行成功但 UI 头部路径为空」，客户端只好
+    /// 自己按 `file_path`/`file`/`filename` 逐个猜。新增别名时两边一起改。
+    pub const PATH_ALIASES: &[&str] = &[PATH, "file_path"];
     /// 分页偏移。
     pub const OFFSET: &str = "offset";
     /// 分页上限。

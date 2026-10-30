@@ -84,6 +84,12 @@ impl ToolProjection for EditOutput {
             self.diff.clone(),
         )
         .with_lines(self.lines_added, self.lines_removed)
+        .with_files(vec![crate::tool_api::ToolDisplayFile {
+            path: self.path.clone(),
+            op: "update".to_string(),
+            lines_added: Some(self.lines_added),
+            lines_removed: Some(self.lines_removed),
+        }])
     }
 }
 
