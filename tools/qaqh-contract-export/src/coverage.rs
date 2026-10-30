@@ -116,7 +116,7 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 "ClientV2ControlState",
                 "ClientV2ToolState",
                 "ConversationSnapshot",
-                "ClientV2Payload",
+                "fact::ProjectionPayload",
                 "ClientV2Event",
             ],
             vec!["bootstrap-response.json", "event-envelope-team-delta.json"],
