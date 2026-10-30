@@ -697,8 +697,8 @@ impl SessionManager {
     }
 
     /// Persist the frozen [Environment] annotation (P0 cache fix). Written
-    /// once per session by the agent loop, replayed into `AgentState` on
-    /// resume so the first user message keeps its byte-identical prefix.
+    /// once per session and replayed into the session agent on resume so the
+    /// first user message keeps its byte-identical prefix.
     pub fn persist_frozen_annotation(&self, session_id: &str, annotation: &str) {
         self.with_meta_locked(session_id, true, |dir, meta| {
             let now = Self::now_epoch();
