@@ -23,10 +23,10 @@ fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
     qaqh_workspace::runtime::init_tools(session_id, &[], vec![]);
     qaqh_workspace::runtime::set_context(session_id, 1);
 
+    // `todo_write` 的入参是纯文本块（`list`），不是结构化数组：解析与状态词表
+    // 都在工具域，客户端只消费结构化输出。
     let args = json!({
-        "items": [
-            {"title": "Typed output", "description": "one source", "status": "in_progress"}
-        ]
+        "list": "- [~] Typed output | one source"
     });
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: session_id.into(),

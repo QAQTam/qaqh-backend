@@ -1198,6 +1198,10 @@ mod w3_w7_tests {
     /// `canonicalize("/")` 在 Windows 得到 `C:\`（当前盘），会让 `/` 这样的
     /// 分隔符垃圾条目逃过 `trimmed_key` 的 fail-open 守卫 → 全盘 AutoApprove。
     #[test]
+    #[cfg_attr(
+        not(target_os = "windows"),
+        ignore = "root-only trust entries are Windows path semantics (\\)"
+    )]
     fn root_only_trust_entry_is_not_resolved_to_current_drive_root() {
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
