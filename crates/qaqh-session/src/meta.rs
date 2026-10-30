@@ -76,6 +76,11 @@ pub fn read(session_dir: impl AsRef<Path>) -> Option<SessionMeta> {
     if snapshot.created_at_ms > 0 {
         meta.created_at = (snapshot.created_at_ms as u64) / 1000;
     }
+    meta.updated_at = facts
+        .last()
+        .map(|fact| (fact.ts_ms.max(0) as u64) / 1000)
+        .unwrap_or(meta.created_at);
+    meta.turn_count = projections.conversation.snapshot().turns.len();
     if let Some(usage) = &snapshot.usage {
         meta.usage_totals = usage.totals.clone();
         meta.usage_requests = usage.requests;
@@ -119,10 +124,27 @@ fn commit_one(
         interaction_id: None,
         payload,
     };
+    let session_dir = commit.session_dir().to_path_buf();
     commit
         .commit(&format!("{batch_prefix}-{}", head + 1), head, vec![fact])
         .map_err(|error| error.to_string())?;
+    drop(commit);
+    refresh_index(&session_dir);
     Ok(())
+}
+
+/// Rebuild this session's `index.jsonl` entry from the journal.
+///
+/// `index.jsonl` is a listing cache, not a truth: `SessionManager::list` reads
+/// it, so every metadata write (actor or direct) has to refresh it or the
+/// session list shows stale titles/archives.
+pub fn refresh_index(session_dir: &Path) {
+    let Some(parent) = session_dir.parent() else {
+        return;
+    };
+    if let Some(meta) = read(session_dir) {
+        crate::store::upsert_index(parent, &meta);
+    }
 }
 
 /// Commit a metadata patch. See the module docs for the writer-lock caveat.
