@@ -388,76 +388,35 @@ pub fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
 
 // `PermissionDecision` is re-exported above from `qaqh-policy`.
 
-/// Whether `path` points at the agent's own persistent state (history /
-/// credentials under the platform data dir). Blocked from normal `read`
-/// access even under SkipPermissions to prevent exfiltration of prior turns.
+/// 模型不得读写的**自身管理面**（自我提权 / 凭据外泄路径）。
 ///
-/// 也是远端 `fs.read`/`fs.list` 的单一事实源（T-2-1）：白名单放行的数据根下，
-/// 这些敏感路径必须单独拦掉。
+/// 会话数据（`sessions/**`）自 2026-10 起**不再保护**：转录不再以可直读的
+/// 明文件存在，产品也决定不为「模型读自己的历史」弹审批。要恢复那层保护，
+/// 先得有新的存储布局事实（见 `qaqh_session::canonical::read_session_facts`）。
 ///
-/// 判定对象始终是**本产品数据根**子树：权威路径（`sessions/**`、`config.toml`）
-/// 按组件级包含比较，数据根内其余文件（`token_stats.jsonl`、`secrets.toml` …）
-/// 才走文件名名单。数据根之外同名的目录/文件（第三方产品的 `…\sessions\…log`、
-/// 仓库里的 `meta.json`）不在此列——否则只读工具会被无端弹审批。
-pub fn is_sensitive_session_path(path: &Path) -> bool {
-    // Block the agent from reading its own persistent history / credentials.
-    // These live under the platform data dir (e.g. ~/.config/qaqh/sessions/…/messages.jsonl,
-    // meta.json, token_stats.jsonl, secrets.toml) and are outside any workspace.
-    // Under SkipPermissions they'd otherwise auto-approve, allowing the model to exfiltrate
-    // prior turns via a normal `read` tool call and then replay that content
-    // into the gateway (messages.jsonl → gateway leak).
-    //
-    // 平台会话目录本身及其全部后代：字符串名单靠 `"/sessions/"` 判定会漏掉
-    // 目录本身（无尾分隔符），且数据根可被 `QAQH_DATA_DIR` 重定向到任意名字
-    // ——所以这里按平台权威路径做组件级包含判定（T-2-1 让 `fs.list` 拦下
-    // `sessions/` 目录本身）。
-    let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
-    let sessions_dir = qaqh_types::platform::sessions_dir();
-    if sessions_dir.is_absolute() {
-        let sessions_norm = normalize_lexically(&resolve_target_path(sessions_dir));
-        if path_within_dir(&candidate, &sessions_norm) {
-            return true;
-        }
-    }
-    // 审计 M4：用户目录 config.toml 也在敏感名单内。skip-permissions 下模型
-    // 可经普通 write 工具重写它固化 `permission_tier = 3` 或改 `base_url`
-    // （后续 LLM 请求连同 api_key 导向攻击者端点），且 mtime 轮询热加载
-    // **免重启生效**。
-    // 配置只从平台数据根读取，按权威路径做组件级判定，不靠宽泛子串。
-    let config_file = qaqh_types::platform::config_path();
-    if config_file.is_absolute() {
-        let config_norm = normalize_lexically(&resolve_target_path(config_file));
-        if path_within_dir(&candidate, &config_norm) {
-            return true;
-        }
-    }
-    if !within_own_data_root(&candidate) {
-        return false;
-    }
-    let s = candidate.to_string_lossy().to_ascii_lowercase();
-    s.contains("messages.jsonl")
-        || s.contains("meta.json")
-        || s.contains("token_stats.jsonl")
-        || s.contains("secrets.toml")
-        || s.contains("/sessions/")
-        || s.contains("\\sessions\\")
-        || s.contains(".qaqh/sessions")
-}
-
-/// 名单尾巴的定界谓词：只有落在**本产品数据根**子树内的路径才允许参与文件名
-/// 子串判定（2026-10-08 修，见 [`is_sensitive_session_path`]）。
+/// 这里只剩与「模型能不能改自己的权限和出口」直接相关的文件：
+/// - `config.toml` / `profiles.toml`：skip-permissions 下可固化
+///   `permission_tier = 3` 或改 `base_url`，把后续请求连同 api_key 导向
+///   攻击者端点（配置热加载免重启生效）；
+/// - `secrets.toml` / `daemon.json`：凭据与 daemon 访问令牌。
 ///
-/// 数据根不可定界（`HOME`/`USERPROFILE` 皆缺，`data_dir()` 非绝对）时返回
-/// `true`，保持旧的保守姿态——宁多弹一次审批，也不在无法判定归属时放行。
-fn within_own_data_root(candidate: &Path) -> bool {
+/// 判定按**本产品数据根**做组件级比较，不外溢到同名路径：第三方产品的
+/// `…\sessions\…` 日志目录、仓库里的 `meta.json` 都不受牵连。
+pub fn is_self_administration_path(path: &Path) -> bool {
     let data_dir = qaqh_types::platform::data_dir();
     if !data_dir.is_absolute() {
-        return true;
+        return false;
     }
-    path_within_dir(
-        candidate,
-        &normalize_lexically(&resolve_target_path(data_dir)),
-    )
+    let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
+    [
+        qaqh_types::platform::config_path(),
+        qaqh_types::platform::profiles_path(),
+        data_dir.join("secrets.toml"),
+        qaqh_types::platform::daemon_discovery_path(),
+    ]
+    .into_iter()
+    .map(|protected| normalize_lexically(&resolve_target_path(protected)))
+    .any(|protected| path_within_dir(&candidate, &protected))
 }
 
 /// Whether `path` lies inside a skill discovery root (audit 2026-10-01 H2).
@@ -511,23 +470,23 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
-    // Sensitive session files are never auto-approved, even under SkipPermissions.
-    // The paths are outside the workspace already, but SkipPermissions would otherwise
-    // bypass the outside-workspace check. Treat them as High risk and force a
-    // dialog so the user sees "read messages.jsonl" before it happens.
+    // daemon 自身管理面（config/profiles/secrets/daemon.json）永不自批：
+    // skip-permissions 下模型可改写 `permission_tier` 或 `base_url`，
+    // 把后续请求连同 api_key 导向别的端点。会话数据不再保护（见
+    // `is_self_administration_path` 的说明）。
     let paths = extract_target_paths_in(tool_name, args, workspace_root);
-    if paths.iter().any(|p| is_sensitive_session_path(p)) {
+    if paths.iter().any(|p| is_self_administration_path(p)) {
         let risk = PermissionRisk::High;
         return PermissionDecision::AskUser {
             reason: format!(
-                "Sensitive session file access requires confirmation: '{}'",
+                "Daemon self-configuration access requires confirmation: '{}'",
                 tool_name
             ),
             paths,
             category: ToolCategory::Read,
             risk,
             consequence:
-                "May expose prior conversation history or credentials to the model/gateway."
+                "May let the model rewrite its own permission tier / endpoint or read credentials."
                     .to_string(),
         };
     }
@@ -923,180 +882,56 @@ mod tests {
         );
     }
 
+    /// 自身管理面永不自批；会话数据不再保护（2026-10 决定）。
     #[test]
-    fn sensitive_session_files_require_approval_even_at_skip_permissions() {
-        // messages.jsonl / meta.json live outside any workspace but under
-        // SkipPermissions they'd otherwise auto-approve. This must be forced to
-        // AskUser to avoid
-        // the model silently reading prior turns and feeding them into the gateway.
-        //
-        // 路径取自权威数据根（`QAQH_DATA_DIR` 或 `~/.qaqh`），不用手抄的
-        // `/home/test/.config/qaqh/…` 字面量——那只能命中文件名启发式，
-        // 换机器/换数据根就与真实判定脱钩。
-        let sessions = qaqh_types::platform::sessions_dir();
+    fn self_administration_files_require_approval_but_session_data_does_not() {
         let data = qaqh_types::platform::data_dir();
-        if !sessions.is_absolute() || !data.is_absolute() {
-            return; // 数据根不可定界：权威判定无法构造
+        if !data.is_absolute() {
+            return; // 数据根不可定界：组件级判定无法构造
         }
-        let ws = std::env::temp_dir().join("qaqh-ws-sensitive");
+        let ws = std::env::temp_dir().join("qaqh-ws-admin");
         for path in [
-            sessions.join("abc").join("messages.jsonl"),
-            sessions.join("abc").join("meta.json"),
-            data.join("token_stats.jsonl"),
+            qaqh_types::platform::config_path(),
+            qaqh_types::platform::profiles_path(),
             data.join("secrets.toml"),
+            qaqh_types::platform::daemon_discovery_path(),
         ] {
+            assert!(
+                is_self_administration_path(&path),
+                "{path:?} is daemon self-configuration"
+            );
             let decision = needs_permission(
                 PermissionLevel::SkipPermissions,
                 "read",
-                &serde_json::json!({"path": path.display().to_string()}),
+                &serde_json::json!({ "path": path.display().to_string() }),
                 &ws,
                 &HashSet::new(),
                 ToolCategory::Read,
             );
             assert!(
                 matches!(decision, PermissionDecision::AskUser { .. }),
-                "sensitive path {path:?} must require approval even under SkipPermissions, got {decision:?}"
+                "self-config path {path:?} must require approval even under SkipPermissions, got {decision:?}"
             );
         }
-        // Normal workspace file under SkipPermissions still auto-approves.
-        let normal = needs_permission(
-            PermissionLevel::SkipPermissions,
-            "read",
-            &serde_json::json!({"path": ws.join("src/main.rs")}),
-            &ws,
-            &HashSet::new(),
-            ToolCategory::Read,
-        );
-        assert!(matches!(normal, PermissionDecision::AutoApprove));
-    }
 
-    #[test]
-    fn foreign_sessions_dir_is_not_own_session_history() {
-        // 回归 2026-10-08：文件名子串名单曾对**任意**路径生效，第三方产品里名为
-        // `…\qodercli\sessions\<id>.log` 的日志目录、以及仓库里任何 `meta.json`，
-        // 都被判成自家会话历史 → grep 在 skip-permissions 下仍弹审批
-        // （`~/.qaqh/audit.csv` 实证 3 例 user_approved）。名单尾巴现已限定在
-        // 数据根子树内，工作区外的普通读取在任何档位都放行。
-        let sessions = qaqh_types::platform::sessions_dir();
-        if !sessions.is_absolute() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().join("ws");
-        std::fs::create_dir_all(ws.join("src")).unwrap();
-        let ws = std::fs::canonicalize(&ws).unwrap();
-        let foreign = dir
-            .path()
-            .join("Roaming")
-            .join("qodercli")
-            .join("sessions")
-            .join("08fce531-de22.log");
-        std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
-        std::fs::write(&foreign, "x").unwrap();
-        for path in [foreign, ws.join("src").join("meta.json")] {
-            assert!(
-                !is_sensitive_session_path(&path),
-                "{path:?} is outside the data root and must not be treated as session history"
-            );
-            for level in [
-                PermissionLevel::ReadOnly,
-                PermissionLevel::WorkspaceWrite,
-                PermissionLevel::SkipPermissions,
-            ] {
-                let decision = needs_permission(
-                    level,
-                    "grep",
-                    &serde_json::json!({"paths": [path.display().to_string()]}),
-                    &ws,
-                    &HashSet::new(),
-                    ToolCategory::Read,
-                );
-                assert!(
-                    matches!(decision, PermissionDecision::AutoApprove),
-                    "grep at L{} must not ask for {path:?}, got {decision:?}",
-                    level.to_u8()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn skill_directory_writes_require_approval_at_every_level() {
-        // 审计 H2：skill 发现根下的文件 = 权威指令注入面。默认档 L3 的工作区
-        // 内写自动放行对它们不适用，L4 也不得静默——文件落盘即跨会话持久。
-        let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().join("ws");
-        std::fs::create_dir_all(&ws).unwrap();
-        let ws = std::fs::canonicalize(&ws).unwrap();
-        let skill_file = ws.join(".qaqh/skills/helper/SKILL.md");
-        for level in [
-            PermissionLevel::ReadOnly,
-            PermissionLevel::WorkspaceWrite,
-            PermissionLevel::SkipPermissions,
+        // 会话数据不保护：模型读自己的历史不再弹审批。
+        for path in [
+            qaqh_types::platform::sessions_dir().join("abc").join("meta.json"),
+            data.join("token_stats.jsonl"),
         ] {
-            let decision = needs_permission(
-                level,
-                "write",
-                &serde_json::json!({ "path": skill_file.display().to_string() }),
-                &ws,
-                &HashSet::new(),
-                ToolCategory::Write,
-            );
             assert!(
-                matches!(decision, PermissionDecision::AskUser { .. }),
-                "skill write at L{} must ask, got {decision:?}",
-                level.to_u8()
+                !is_self_administration_path(&path),
+                "{path:?} must not be treated as self-configuration"
             );
         }
-        // 旧式 `skills/` 根与不存在的深层目录（新建文件场景）同样命中。
-        let fresh = ws.join("skills/new/helper/SKILL.md");
-        let decision = needs_permission(
-            PermissionLevel::WorkspaceWrite,
-            "apply_patch",
-            &serde_json::json!({ "patch": format!("*** Add File: {}\n+hi", fresh.display()) }),
-            &ws,
-            &HashSet::new(),
-            ToolCategory::Write,
-        );
-        assert!(
-            matches!(decision, PermissionDecision::AskUser { .. }),
-            "new skill file in a not-yet-existing root must ask, got {decision:?}"
-        );
-        // 工作区普通文件不受影响（L3 仍自动放行）。
-        let normal = needs_permission(
-            PermissionLevel::WorkspaceWrite,
-            "write",
-            &serde_json::json!({ "path": ws.join("src/main.rs").display().to_string() }),
-            &ws,
-            &HashSet::new(),
-            ToolCategory::Write,
-        );
-        assert!(
-            matches!(normal, PermissionDecision::AutoApprove),
-            "ordinary workspace write must stay auto-approved, got {normal:?}"
-        );
-    }
 
-    #[test]
-    fn user_config_toml_is_sensitive_but_lookalikes_are_not() {
-        // 审计 M4：平台数据根下的 config.toml 在任何档位都要弹审批
-        // （L4 下可固化提权 + 改 base_url 劫持 LLM 流量，且热加载免重启生效）。
-        let config = qaqh_types::platform::config_path();
-        if !config.is_absolute() {
-            // 测试环境重定向了数据根且非绝对路径：组件级判定无法构造，跳过。
-            return;
-        }
-        assert!(
-            is_sensitive_session_path(&config),
-            "user-dir config.toml must be sensitive"
-        );
         // 组件级判定不外溢：别处的同名/含名文件不受牵连。
         for path in [
             std::path::Path::new("C:/elsewhere/config.toml"),
             std::path::Path::new("/opt/project/myconfig.toml"),
         ] {
             assert!(
-                !is_sensitive_session_path(path),
+                !is_self_administration_path(path),
                 "{path:?} must not be sensitive"
             );
         }
