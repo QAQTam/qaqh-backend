@@ -76,6 +76,7 @@ fn session_turn_1(agent: &mut AgentState) {
 
 /// 一个"生命周期"：等价于 daemon 重启后 resume 指定会话。
 fn resume_agent(root: &PathBuf, ws: &str, session_id: &str) -> AgentState {
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复该变量，无并发读者。
     unsafe { std::env::set_var("QAQH_DATA_DIR", root) };
     let mut agent = AgentState::init("restart-prefix-cache-test", Config::default());
     agent.ephemeral = false; // 必须走真实磁盘持久化
@@ -91,6 +92,7 @@ fn resume_agent(root: &PathBuf, ws: &str, session_id: &str) -> AgentState {
 /// 注意：`init_session(_, None)` 直接返回 false（见 lifecycle.rs），
 /// 创建会话必须走 `create_session`。
 fn create_agent(root: &PathBuf, ws: &str) -> AgentState {
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复该变量，无并发读者。
     unsafe { std::env::set_var("QAQH_DATA_DIR", root) };
     let mut agent = AgentState::init("restart-prefix-cache-test", Config::default());
     agent.ephemeral = false;
@@ -107,6 +109,7 @@ fn create_agent(root: &PathBuf, ws: &str) -> AgentState {
 fn prefix_cache_consistency_across_restarts() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = temp_root();
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复该变量，无并发读者。
     unsafe { std::env::set_var("QAQH_DATA_DIR", &root) };
     // 单例只允许 init 一次（同进程语义 = 一个 daemon 生命周期）。
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());

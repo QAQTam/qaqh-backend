@@ -57,6 +57,7 @@ axum = { version = "0.8" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time"] }
 
 [lints.clippy]
+undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 string_slice = "deny"
 
@@ -64,3 +65,4 @@ string_slice = "deny"
 # 子进程，孙进程漏杀——见 orphan_reap.rs 用例注释）；仅 Unix。
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+

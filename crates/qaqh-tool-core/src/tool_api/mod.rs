@@ -21,7 +21,6 @@
 //! | [`official_web`] | 官方网页工具端口（fetch/search，按调用注入，非全局） |
 //! | [`dynamic`] | [`DynamicToolAdapter`]（MCP/LSP 动态工具 typed 适配器） |
 //! | [`result`] | [`map_tool_result`]（v1 `ToolResult` → [`ToolOutcome`] 映射 + 进度桥） |
-//! | [`boundary`] | 工具 ↔ loop 执行边界（[`ExecuteBatch`] / [`BatchOutcome`]） |
 //! | [`args`] | canonical 字段名 + 共享参数类型 |
 //!
 //! ## 兼容性
@@ -30,6 +29,9 @@
 //!   `crate::tool_api::ToolDisplay` 等路径经 re-export 保持不变。
 //! - 展示结构以 09-18 展示契约为唯一事实源；wire 映射由
 //!   `qaqh-runtime::timeline::wire_display` 唯一负责（契约 §3.1/§3.4）。
+//! - 原宿主侧 `boundary`（`ExecuteBatch` / `BatchOutcome` / `PendingInteraction`）
+//!   2026-10-30 删除：从未接线生产路径，loop ↔ runtime 的实际边界在
+//!   `qaqh-agent-runtime` 内部。
 
 pub mod args;
 pub mod capabilities;

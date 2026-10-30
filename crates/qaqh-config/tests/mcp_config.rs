@@ -11,7 +11,7 @@ use qaqh_config::config::{McpConfig, McpTransportKind};
 use qaqh_config::{Config, secrets::SecretStore};
 use qaqh_types::{ConfigStore, PersistentConfig, PersistentMcpConfig, PersistentMcpServerConfig};
 
-fn load_toml(tag: &str, content: &str) -> Result<Config, String> {
+fn load_toml(tag: &str, content: &str) -> qaqh_config::ConfigResult<Config> {
     load_toml_with_secrets(tag, content, &[])
 }
 
@@ -21,7 +21,7 @@ fn load_toml_with_secrets(
     tag: &str,
     content: &str,
     named: &[(&str, &str)],
-) -> Result<Config, String> {
+) -> qaqh_config::ConfigResult<Config> {
     let dir = std::env::temp_dir().join(format!("qaqh-mcp-cfg-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -141,14 +141,14 @@ max_concurrent_calls = 2
 fn rejects_illegal_server_name() {
     let err = load_toml("badname", "[mcp.servers.Context7]\ncommand = \"npx\"\n")
         .expect_err("大写字母应被拒绝");
-    assert!(err.contains("非法字符"), "实际错误: {err}");
+    assert!(err.to_string().contains("非法字符"), "实际错误: {err}");
 }
 
 #[test]
 fn rejects_missing_transport() {
     let err = load_toml("notransport", "[mcp.servers.x1]\nargs = [\"-y\"]\n")
         .expect_err("缺 command 且缺 url 应被拒绝");
-    assert!(err.contains("缺少 transport"), "实际错误: {err}");
+    assert!(err.to_string().contains("缺少 transport"), "实际错误: {err}");
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn rejects_conflicting_command_and_url() {
         "[mcp.servers.x1]\ncommand = \"npx\"\nurl = \"https://mcp.example.com\"\n",
     )
     .expect_err("command 与 url 同时出现应被拒绝");
-    assert!(err.contains("互斥"), "实际错误: {err}");
+    assert!(err.to_string().contains("互斥"), "实际错误: {err}");
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn rejects_bad_url_scheme() {
         "[mcp.servers.x1]\nurl = \"ftp://mcp.example.com\"\n",
     )
     .expect_err("非 http(s) url 应被拒绝");
-    assert!(err.contains("http:// 或 https://"), "实际错误: {err}");
+    assert!(err.to_string().contains("http:// 或 https://"), "实际错误: {err}");
 }
 
 #[test]
@@ -178,7 +178,7 @@ fn rejects_timeout_out_of_range() {
         "[mcp.servers.x1]\ncommand = \"npx\"\ndefault_timeout_secs = 0\n",
     )
     .expect_err("timeout=0 应被拒绝");
-    assert!(err.contains("1..=3600"), "实际错误: {err}");
+    assert!(err.to_string().contains("1..=3600"), "实际错误: {err}");
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn rejects_concurrency_out_of_range() {
         "[mcp.servers.x1]\ncommand = \"npx\"\nmax_concurrent_calls = 64\n",
     )
     .expect_err("并发 64 应被拒绝（新上限 16）");
-    assert!(err.contains("1..=16"), "实际错误: {err}");
+    assert!(err.to_string().contains("1..=16"), "实际错误: {err}");
 }
 
 /// T-8-1 验收：单 server 并发上限收紧到 `1..=16`（安全审查 P1-1 / O-4）。
@@ -211,7 +211,7 @@ fn mcp_concurrency_ceiling_16() {
         "[mcp.servers.x1]\ncommand = \"npx\"\nmax_concurrent_calls = 17\n",
     )
     .expect_err("并发 17 必须被拒绝（上限 16）");
-    assert!(err.contains("1..=16"), "实际错误: {err}");
+    assert!(err.to_string().contains("1..=16"), "实际错误: {err}");
 }
 
 // ── 持久层往返（serde 层，不经过运行时映射）──

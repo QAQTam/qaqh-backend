@@ -350,6 +350,7 @@ fn spawn_detached_sleep_group() -> Option<SleepGroup> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut pgid = -1;
     while std::time::Instant::now() < deadline {
+        // SAFETY: `getpgid` 无内存访问；pid 来自本测试 spawn 的子进程。
         pgid = unsafe { libc::getpgid(pid as i32) };
         if pgid > 0 && pgid as u32 == pid {
             break;
@@ -382,6 +383,7 @@ struct SleepGroup {
 impl SleepGroup {
     fn is_alive(&self) -> bool {
         // kill(pid, 0) == 0 → 进程仍存在；EPERM 亦说明存在（非本测试场景）。
+        // SAFETY: 信号 0 只做存在性探测，无内存访问；pid 由本测试持有。
         unsafe { libc::kill(self.pid as i32, 0) == 0 }
     }
 

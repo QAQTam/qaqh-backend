@@ -5,6 +5,8 @@
 //! 2. 存储隔离：写入单独的 `profiles.toml`，创建预设零全局副作用；
 //! 3. 权威解析：会话可自由绑定 Profile，未指定时纯净回退到全局默认预设。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod model;
 pub mod resolver;
 pub mod store;

@@ -20,7 +20,10 @@ mod tool_ledger;
 mod types;
 
 pub use blobs::{BLOBS_DIR, SessionBlobStore, stable_workspace_resource_id};
-pub use batch::{BatchCommitError, BatchFaultPoint, BatchJournal, BatchReadError, BatchReceipt};
+pub use batch::{
+    BatchCommitError, BatchFaultPoint, BatchJournal, BatchReadError, BatchReceipt, is_batch_root,
+    read_committed_facts,
+};
 pub use clock::{
     CONTENT_CLOCK_FILE, CONTENT_CLOCK_SCHEMA, CONTENT_DIR, ContentClock, ContentClockRecord,
 };

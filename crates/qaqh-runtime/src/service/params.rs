@@ -1,46 +1,16 @@
-//! service::params — handle 参数提取小函数（snake/camel 双键 + tool_mode 校验）。
-
-use serde_json::Value;
-
-/// 会话键提取统一走服务面契约模块，避免 daemon 与 runtime 各自实现回退。
-/// 写端发 `session_id`，读端只认 `session_id`（legacy `seed` 已随 Phase E 退场）。
-pub(crate) use crate::ringing::service_methods::{scope_session_param_value, session_param};
-
-pub(crate) fn value2<'a>(params: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
-    params.get(snake).or_else(|| params.get(camel))
-}
-pub(crate) fn pstr(params: &Value, key: &str) -> Result<String, String> {
-    params
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| format!("missing string parameter: {key}"))
-}
-pub(crate) fn pstr2(params: &Value, snake: &str, camel: &str) -> Result<String, String> {
-    value2(params, snake, camel)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| format!("missing string parameter: {snake}"))
-}
-pub(crate) fn pbool(params: &Value, key: &str) -> bool {
-    params.get(key).and_then(Value::as_bool).unwrap_or(false)
-}
-pub(crate) fn pstrings(params: &Value, key: &str) -> Vec<String> {
-    params
-        .get(key)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect()
-}
+//! service::params — 会话参数与工具模式的取值/校验规则。
+//!
+//! 服务面的 params 一律由 [`crate::service::command`] 的强类型 DTO 解码，
+//! 这里只保留**跨领域共享的规则**（工具模式白名单、可选的模式预置）。
 
 /// 可选工具模式预置：缺省 = None（保持旧行为）；显式空串 = None（未指定，
 /// 交由 SessionMeta.tool_mode 默认 standard 完成零迁移）。
 /// 供 create 路径（session.new）在 spawn 前落盘使用。
-pub(crate) fn optional_tool_mode(params: &Value) -> Result<Option<(String, Vec<String>)>, String> {
-    let Some(tool_mode) = params.get("tool_mode").and_then(Value::as_str) else {
+pub(crate) fn optional_tool_mode(
+    tool_mode: Option<&str>,
+    custom_tools: &[String],
+) -> Result<Option<(String, Vec<String>)>, String> {
+    let Some(tool_mode) = tool_mode else {
         return Ok(None);
     };
     // 显式空串 = 未指定（与 SessionMeta.tool_mode 的空串零迁移语义一致）。
@@ -48,11 +18,10 @@ pub(crate) fn optional_tool_mode(params: &Value) -> Result<Option<(String, Vec<S
         return Ok(None);
     }
     validate_tool_mode(tool_mode)?;
-    let custom_tools = pstrings(params, "custom_tools");
     if tool_mode == "custom" && custom_tools.is_empty() {
         return Err("custom tool mode requires at least one tool in custom_tools".to_string());
     }
-    Ok(Some((tool_mode.to_string(), custom_tools)))
+    Ok(Some((tool_mode.to_string(), custom_tools.to_vec())))
 }
 
 /// 工具模式白名单校验（session.new 预置与 session.set_tool_mode 共用）。

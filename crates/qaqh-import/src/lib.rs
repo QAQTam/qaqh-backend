@@ -5,6 +5,8 @@
 //! runtime, daemon, or provider dependency; callers decide when a verified
 //! package becomes a product session.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 mod adapters;
 mod capture;
 mod discover;

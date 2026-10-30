@@ -8,6 +8,7 @@ fn isolate_data_root() -> tempfile::TempDir {
     let temp_home = tempfile::tempdir().expect("temp home");
     let temp_data = temp_home.path().join(".qaqh");
     std::fs::create_dir_all(&temp_data).expect("create data root");
+    // SAFETY: 测试二进制独占进程环境；本函数只在启动阶段设置一次隔离数据根。
     unsafe {
         std::env::set_var("USERPROFILE", temp_home.path());
         std::env::set_var("HOME", temp_home.path());

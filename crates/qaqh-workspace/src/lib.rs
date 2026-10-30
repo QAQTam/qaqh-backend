@@ -2,6 +2,8 @@
 //!
 //! Submodules register handlers via `pub fn register(mgr: &mut ToolManager)`.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub use qaqh_file_tools::confirm_apply;
 pub use qaqh_file_tools::copy_range;
 pub use qaqh_permission::conflict;
@@ -20,26 +22,23 @@ pub mod compact_anchors;
 pub use qaqh_file_tools::code_delta;
 pub use qaqh_file_tools::edit;
 pub mod execution;
-pub mod exec_audit;
 pub use qaqh_file_tools::file_glob;
 pub use qaqh_file_tools::file_mutate;
 pub use qaqh_file_tools::file_query;
-pub use qaqh_fs_core::file_cache;
-pub use qaqh_fs_core::file_shared;
-pub use qaqh_fs_core::file_state;
-// Git 面板 API 已拆至 qaqh-git（P2 拆分）；以 crate 别名 re-export，
-// `qaqh_workspace::git::*` 路径不变。
-pub use qaqh_git as git;
+// FS 核心层（原独立 crate `qaqh-fs-core`，2026-10-31 并入 file-tools）。
+pub use qaqh_file_tools::file_cache;
+pub use qaqh_file_tools::file_shared;
+pub use qaqh_file_tools::file_state;
 // P2(d) 拆分：文件/进程工具组 crate。`qaqh_workspace::X` 旧路径全部经
 // re-export 保持不变；门面留守 manager/runtime/registration/execution/
 // authorization/audit/tool_side_fold/display/probe + todo/ask_user/skill/
-// spy_tool/web/dashboard。
+// dashboard。
 pub use qaqh_file_tools::read_image;
 pub use qaqh_file_tools::support::{json_err, json_err_string, json_ok};
 pub mod runtime;
 mod safety;
 pub mod skill;
-// SDK 主体已拆至 qaqh-tool-core；tool_api 为 shim（re-export + boundary），
+// SDK 主体已拆至 qaqh-tool-core；tool_api 为纯 re-export shim，
 // tool_capabilities 直接 re-export（能力迁移表随 SDK 下沉）。
 pub mod tool_api;
 pub use qaqh_tool_core::tool_capabilities;
@@ -60,7 +59,6 @@ pub mod registration;
 pub mod probe;
 
 pub mod manager;
-pub mod model_tool_plan;
 pub mod official_web;
 /// Permission engine: tool categories, levels, trusted folders.
 pub use qaqh_permission::permission;
@@ -68,7 +66,6 @@ pub use qaqh_permission::permission;
 pub mod audit;
 
 pub use qaqh_file_tools::journal;
-pub mod spy_tool;
 // 壳探测引导：daemon 启动期调用一次（与 cache_system_path/detect_os_info 同批），
 // 把「探测到的壳」钉进进程状态，保证 exec 的可用性探测与实际派生同源。
 pub use exec::{bootstrap as bootstrap_exec_shell, register_shell as register_exec_shell};
