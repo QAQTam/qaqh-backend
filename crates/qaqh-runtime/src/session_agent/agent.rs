@@ -25,7 +25,7 @@ use qaqh_session::{
         InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind,
         InteractionRequested, InteractionResolved, InterruptReason, PolicyDecisionRef,
         ProviderFinish, RecoveryAction, RecoveryId, RecoveryOutcome, RecoveryRef, SessionFact,
-        SessionRecovered, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
+        MetadataSource, SessionMetadataChanged, SessionRecovered, SessionTitleChanged, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
         ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished,
         TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal,
     },
@@ -1133,6 +1133,42 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                     accepted: false,
                 })?;
                 self.start_next_turn()?;
+                Ok(Step::Continue)
+            }
+            AgentCommand::SetMetadata { patch } => {
+                let fact = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::SessionMetadataChanged(SessionMetadataChanged {
+                        patch: patch.clone(),
+                        source: MetadataSource::User,
+                        changed_at_ms: now_ms(),
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+                self.commit_batch(
+                    &format!("batch-meta-{}", self.commit.head()? + 1),
+                    vec![fact],
+                )?;
+                Ok(Step::Continue)
+            }
+            AgentCommand::SetTitle { title, source } => {
+                let fact = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::SessionTitleChanged(SessionTitleChanged {
+                        title: truncate_text(title, 4 * 1024),
+                        source: *source,
+                        changed_at_ms: now_ms(),
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+                self.commit_batch(
+                    &format!("batch-title-{}", self.commit.head()? + 1),
+                    vec![fact],
+                )?;
                 Ok(Step::Continue)
             }
         }

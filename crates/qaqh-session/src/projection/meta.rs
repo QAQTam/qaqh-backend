@@ -20,6 +20,17 @@ pub struct SessionMetaSnapshot {
     pub archived: bool,
     pub search_visibility: Option<SearchVisibility>,
     pub title: Option<String>,
+    /// Session preferences that used to live in `meta.json`.
+    pub profile: Option<String>,
+    pub effort: Option<String>,
+    pub mode: u8,
+    pub tool_mode: String,
+    pub custom_tools: Vec<String>,
+    pub skills: qaqh_types::SkillSessionStateV2,
+    pub frozen_annotation: Option<String>,
+    pub ephemeral: bool,
+    pub usage: Option<crate::session_fact_v2::UsageTotals>,
+    pub created_at_ms: i64,
     pub deleted: Option<SessionDeletedFact>,
     pub context_revision: Option<u64>,
     pub last_recovery: Option<RecoveryOutcome>,
@@ -113,6 +124,7 @@ impl SessionMetaProjection {
         self.snapshot.model = Some(payload.model.clone());
         self.snapshot.parent_session_id = payload.parent_session_id.clone();
         self.snapshot.schema_caps = payload.schema_caps.clone();
+        self.snapshot.created_at_ms = payload.created_at_ms;
         self.snapshot.archived = false;
         self.snapshot.search_visibility = None;
         self.snapshot.title = None;
@@ -139,6 +151,33 @@ impl SessionMetaProjection {
         }
         if let Some(schema_caps) = &patch.schema_caps {
             self.snapshot.schema_caps = schema_caps.clone();
+        }
+        if let Some(profile) = &patch.profile {
+            self.snapshot.profile = (!profile.is_empty()).then(|| profile.clone());
+        }
+        if let Some(effort) = &patch.effort {
+            self.snapshot.effort = (!effort.is_empty()).then(|| effort.clone());
+        }
+        if let Some(mode) = patch.mode {
+            self.snapshot.mode = mode;
+        }
+        if let Some(tool_mode) = &patch.tool_mode {
+            self.snapshot.tool_mode = tool_mode.clone();
+        }
+        if let Some(custom_tools) = &patch.custom_tools {
+            self.snapshot.custom_tools = custom_tools.clone();
+        }
+        if let Some(skills) = &patch.skills {
+            self.snapshot.skills = skills.clone();
+        }
+        if let Some(annotation) = &patch.frozen_annotation {
+            self.snapshot.frozen_annotation = Some(annotation.clone());
+        }
+        if let Some(ephemeral) = patch.ephemeral {
+            self.snapshot.ephemeral = ephemeral;
+        }
+        if let Some(usage) = &patch.usage {
+            self.snapshot.usage = Some(usage.clone());
         }
     }
 

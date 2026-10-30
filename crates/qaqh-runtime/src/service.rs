@@ -262,7 +262,10 @@ impl QaqhService {
         qaqh_workspace::remove_session_cancel(session_id);
         // 临时会话（子代理）用完即走：关闭后删除会话目录，磁盘零残留。
         // 目录已不存在（重复 close / 已被清理）时静默跳过，保持幂等。
-        if self.sessions.is_ephemeral(session_id) {
+        if self
+            .session_meta(session_id)
+            .is_some_and(|meta| meta.ephemeral)
+        {
             match self.sessions.delete(session_id) {
                 Ok(()) => {
                     log::info!("[session] ephemeral session {session_id} cleaned up (auto-unload)")
@@ -422,14 +425,26 @@ impl QaqhService {
         causation_id: Option<&str>,
     ) -> Result<(), String> {
         self.close_session(session_id, causation_id)?;
-        self.sessions.set_archived(session_id, true);
+        let _ = self.write_meta(
+            session_id,
+            qaqh_session::session_fact_v2::SessionMetadataPatch {
+                archived: Some(true),
+                ..Default::default()
+            },
+        );
         Ok(())
     }
 
     /// 恢复归档会话：meta `archived=false` + 重新拉起实例（resume 语义，
     /// 对齐 `session.resume` 查询——get_or_spawn + active seed 更新）。
     pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {
-        self.sessions.set_archived(session_id, false);
+        let _ = self.write_meta(
+            session_id,
+            qaqh_session::session_fact_v2::SessionMetadataPatch {
+                archived: Some(false),
+                ..Default::default()
+            },
+        );
         self.registry()?.get_or_spawn(session_id)
     }
 
@@ -496,6 +511,32 @@ impl QaqhService {
             )
         });
         (has_active_work, activities)
+    }
+
+    /// Write a session metadata patch (actor first, journal fallback).
+    pub(crate) fn write_meta(
+        &self,
+        session_id: &str,
+        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
+    ) -> Result<(), String> {
+        let registry = self.registry()?;
+        crate::session_meta::patch(Some(&registry), session_id, patch)
+    }
+
+    /// Write a session title (actor first, journal fallback).
+    pub(crate) fn write_title(
+        &self,
+        session_id: &str,
+        title: &str,
+        source: qaqh_session::session_fact_v2::TitleSource,
+    ) -> Result<(), String> {
+        let registry = self.registry()?;
+        crate::session_meta::set_title(Some(&registry), session_id, title, source)
+    }
+
+    /// Session metadata read from committed facts.
+    pub(crate) fn session_meta(&self, session_id: &str) -> Option<qaqh_types::SessionMeta> {
+        crate::session_meta::read(session_id)
     }
 
     pub(crate) fn registry(&self) -> Result<std::sync::MutexGuard<'_, AgentRegistry>, String> {

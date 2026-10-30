@@ -11,6 +11,7 @@ mod commit_state;
 pub mod session_commit;
 pub mod grouping;
 pub mod manager;
+pub mod meta;
 pub mod projection;
 pub mod session_fact_v2;
 pub mod store;
