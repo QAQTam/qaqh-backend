@@ -18,7 +18,7 @@ use qaqh_config::config::{LspConfig, LspServerConfig};
 use qaqh_config::{Config, secrets::SecretStore};
 use qaqh_types::{ConfigStore, PersistentConfig, PersistentLspConfig, PersistentLspServerConfig};
 
-fn load_toml(tag: &str, content: &str) -> Result<Config, String> {
+fn load_toml(tag: &str, content: &str) -> qaqh_config::ConfigResult<Config> {
     load_toml_with_secrets(tag, content, &[])
 }
 
@@ -26,7 +26,7 @@ fn load_toml_with_secrets(
     tag: &str,
     content: &str,
     named: &[(&str, &str)],
-) -> Result<Config, String> {
+) -> qaqh_config::ConfigResult<Config> {
     let dir = std::env::temp_dir().join(format!("qaqh-lsp-cfg-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -108,14 +108,14 @@ extensions = ["py"]
 fn rejects_illegal_server_name() {
     let err = load_toml("badname", "[lsp.servers.Rust]\ncommand = \"ra\"\n")
         .expect_err("大写字母应被拒绝");
-    assert!(err.contains("非法字符"), "实际错误: {err}");
+    assert!(err.to_string().contains("非法字符"), "实际错误: {err}");
 }
 
 #[test]
 fn rejects_missing_command() {
     let err = load_toml("nocommand", "[lsp.servers.rust]\nextensions = [\"rs\"]\n")
         .expect_err("缺 command 应被拒绝");
-    assert!(err.contains("command"), "实际错误: {err}");
+    assert!(err.to_string().contains("command"), "实际错误: {err}");
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn rejects_empty_extension() {
         "[lsp.servers.rust]\ncommand = \"ra\"\nextensions = [\".\"]\n",
     )
     .expect_err("空扩展名应被拒绝");
-    assert!(err.contains("extensions"), "实际错误: {err}");
+    assert!(err.to_string().contains("extensions"), "实际错误: {err}");
 }
 
 #[test]
@@ -135,13 +135,13 @@ fn rejects_timeout_out_of_range() {
         "[lsp.servers.rust]\ncommand = \"ra\"\nstartup_timeout_secs = 0\n",
     )
     .expect_err("startup=0 应被拒绝");
-    assert!(err.contains("1..=600"), "实际错误: {err}");
+    assert!(err.to_string().contains("1..=600"), "实际错误: {err}");
     let err = load_toml(
         "badtimeout2",
         "[lsp.servers.rust]\ncommand = \"ra\"\ndefault_timeout_secs = 3601\n",
     )
     .expect_err("timeout 越界应被拒绝");
-    assert!(err.contains("1..=3600"), "实际错误: {err}");
+    assert!(err.to_string().contains("1..=3600"), "实际错误: {err}");
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn rejects_unregistered_secret_ref() {
         "[lsp.servers.rust]\ncommand = \"ra\"\nenv = { K = \"${secret:nope}\" }\n",
     )
     .expect_err("未注册 secret 应 fail-fast");
-    assert!(err.contains("nope"), "实际错误: {err}");
+    assert!(err.to_string().contains("nope"), "实际错误: {err}");
 }
 
 // ── 持久层往返 ──

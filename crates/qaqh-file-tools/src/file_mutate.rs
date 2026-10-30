@@ -129,17 +129,17 @@ pub fn resolve_mutation_path(ctx: &ToolCallContext, raw_path: &str) -> String {
 
 /// 回收站根目录。默认 `<workspace>/.qaqh/trash/`。
 ///
-/// 为什么不默认搬到 `data_dir()` 下——尽管"备份放在工作区之外"才是一贯原则
-/// （见 `qaqh-spy/src/store.rs::default_dir`）：`delete` 的快路径是 **rename**，
+/// 为什么不默认搬到 `data_dir()` 下——尽管"备份放在工作区之外"才是一贯原则：
+/// `delete` 的快路径是 **rename**，
 /// 而跨卷 rename 必然失败（`EXDEV`）。家目录与工程分处不同卷是常见部署
 /// （Windows 上 `C:\Users` + `D:\project`；macOS 外接盘），默认搬出去会让**每一次**
 /// 删除退化成整份复制（文件），或者干脆拒绝（目录，见下方 `cross_device_dir` 分支）
 /// ——那比"备份留在工作区里"糟得多。
 ///
-/// 留在工作区里之所以安全，是因为 PR-B1 已经把 `.qaqh` 纳入 spy 的 `exclude_dirs`，
-/// 并把目录名匹配从全等改成「全等或 `{name}.` 前缀」：`target.1791993394` 这类
-/// 带时间戳的 trash 副本不会再被当成工作区净变更快照/上报（曾一次报出 9337 个
-/// 变更、单条注入 ≈1.2–3.5 MB）。
+/// 留在工作区里之所以安全：`delete` 的逆操作就是 `.qaqh/trash/` 里的副本，它属于
+/// 工具自己的落盘物，`grep`/`glob` 默认忽略 `.qaqh`。历史背景：PR-B1 曾把
+/// `.qaqh` 加进工作区变更扫描的 `exclude_dirs`（那次扫描一次报出 9337 个变更、
+/// 单条注入 ≈1.2–3.5 MB）；该扫描器（`qaqh-spy`）已于 2026-10-31 整体移除。
 ///
 /// `QAQH_TRASH_DIR` 可覆盖：给"就是想把备份放到别处/别盘"的用法（自己承担跨卷
 /// 复制代价），也给测试隔离。
@@ -1231,8 +1231,6 @@ mod tests {
         );
         // 默认落点仍在工作区内：那是 rename 快路径的前提（跨卷 rename 会 EXDEV，
         // 默认搬出去 = 每次删除都退化成整份复制 / 目录直接拒删）。
-        // 它不再污染变更审计，靠 PR-B1 的 `.qaqh` 排除 + `{name}.` 前缀匹配保证，
-        // 那两层由 qaqh-spy 的 trashed_directory_copy_is_excluded 钉住。
         // 名字带时间戳后缀，同名连续删除不得互相覆盖。
         let file_name = Path::new(trash_path)
             .file_name()
@@ -1286,6 +1284,7 @@ mod tests {
             .execute(test_ctx(dir.path()), json!({ "path": path }))
             .expect("delete must not return fatal")
             .to_tool_result();
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::remove_var("QAQH_TRASH_DIR") };
 
         assert!(result.is_success(), "{}", result.model_text());

@@ -641,10 +641,12 @@ impl ServerConnection {
         };
         let reason = reason.to_owned();
         bridge::runtime_handle().spawn(async move {
-            // SAFETY：killpg 为纯信号系统调用；pgid 是本 daemon spawn 的
+            // SAFETY: killpg 为纯信号系统调用；pgid 是本 daemon spawn 的
             // 独立进程组（不含自身组），目标进程均以 daemon 用户运行。
             let probe = unsafe { libc::killpg(pgid as libc::pid_t, 0) };
             if probe == 0 {
+                // SAFETY: 同上——纯信号系统调用，pgid 是本 daemon spawn 的
+                // 独立进程组（不含自身组），目标进程均以 daemon 用户运行。
                 let killed = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
                 if killed == 0 {
                     log::info!("[mcp] group sweep ({reason}): killpg({pgid}, SIGKILL) sent");

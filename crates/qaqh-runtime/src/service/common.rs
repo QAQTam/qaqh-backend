@@ -7,7 +7,7 @@ pub(crate) fn err(error: impl std::fmt::Display) -> String {
 pub(crate) fn release_freed_heap_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        // SAFETY：malloc_trim 只归还空闲堆内存，不触碰存活分配；glibc 文档
+        // SAFETY: malloc_trim 只归还空闲堆内存，不触碰存活分配；glibc 文档
         // 保证线程安全。返回 1 表示确实归还了内存（0 = 无可归还）。
         let returned = unsafe { libc::malloc_trim(0) };
         if returned == 1 {

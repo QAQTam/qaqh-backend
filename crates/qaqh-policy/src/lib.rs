@@ -4,6 +4,8 @@
 //! platform detection. It owns the stable decision types and the canonical
 //! [`SandboxSpec`] that mechanism crates consume.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

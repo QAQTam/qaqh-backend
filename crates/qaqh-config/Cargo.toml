@@ -9,6 +9,7 @@ description = "QAQ-Harness configuration: provider registry, config load/save"
 default = []
 
 [dependencies]
+thiserror = "2"
 qaqh-policy = { path = "../qaqh-policy" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-config-api = { path = "../qaqh-config-api" }

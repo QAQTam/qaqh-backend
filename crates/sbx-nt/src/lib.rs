@@ -5,6 +5,8 @@
 //! 卷形态识别为未解析,调用方按 deny(PathUnresolved) 处置(spec §4.2 规则 1)。
 //! 卷符号映射(QueryDosDeviceW)待 hook 平面接入时补齐。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,9 +45,10 @@ pub fn normalize(input: &str) -> Result<String, NormalizeError> {
     // 正斜杠折反斜杠 + 连续分隔符折叠(UNC 前缀的 `\\` 保留)
     let mut folded = String::with_capacity(s.len());
     let mut body = s.as_str();
-    if body.starts_with("\\\\") {
+    // 用 `strip_prefix` 取剩余切片：不手写下标（string_slice 已 deny）。
+    if let Some(rest) = body.strip_prefix("\\\\") {
         folded.push_str("\\\\");
-        body = &body[2..];
+        body = rest;
     }
     let mut prev_sep = body.is_empty();
     for ch in body.chars() {

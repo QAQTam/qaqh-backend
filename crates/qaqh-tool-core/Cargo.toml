@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "QAQ-Harness Tool SDK core: typed tool contract, descriptor, projection, schema (P2 crate split from qaqh-workspace)"
 
+[features]
+# 原生工具计划（Codex custom / namespace tool）。**默认关**：生产路径不使用它，
+# 只有 `qaqh-gate` 的 `native-tool-plan` 转发与相关协议 fixture 测试会打开。
+native-tool-plan = []
+
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
 # ToolCategory/PermissionLevel/PermissionDecision 的单一事实源（workspace 经

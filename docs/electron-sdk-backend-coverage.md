@@ -47,7 +47,7 @@
 | skills | `skills.list_tools`, `skills.operation`, `skills.reload` | Read/Write；生命周期类 skills.activate 不在 service 表 | pending DTO |
 | todo/plan | `todo.status`, `todo.list`, `todo.set`, `plan.read` | todo.* 需要 session；todo.set Write | pending DTO |
 | diagnostics | `diagnostics.memory.snapshot`, `diagnostics.memory.start`, `diagnostics.memory.stop` | 全部 admin-only | pending DTO；SDK admin 子面单独放行 |
-| git | `git.diff`, `git.branch`, `git.branches`, `git.file_diff`, `git.switch_branch`, `git.commit` | 查询项 requires_session；变更项不要求 `requires_session` | pending DTO；确认参数归属/副作用语义 |
+| ~~git~~ | ~~`git.diff`, `git.branch`, `git.branches`, `git.file_diff`, `git.switch_branch`, `git.commit`~~ | **2026-10-31 全量删除**：唯一消费者是 `qaqh-client` 的 `Endpoint` 变体，桌面端从未接线该面板。删除范围：client 变体与方法名映射、`WorkspaceCommand::Git*`、方法表 6 条、`qaqh-workspace/src/git.rs`（251 行 git2 包装）、`fs_git::git` 助手 | 无需 DTO |
 | subagent | `subagent.spawn` | Write | pending DTO；不要据此替代现有 control/conversation 命令语义 |
 
 会话生命周期方法不得从 service 表补入；命令定义在 `crates/qaqh-domain/src/command.rs:46-170,243-301,307-329`。已确认命令按频道包括 control（create/resume/attach/close/archive/unarchive/delete/shutdown/config reload/tool mode/ask/plan/driver/skills/resource changed）、conversation（send/cancel/undo/compact/load more/set mode）、tool（invoke/permission respond）。B02 必须导出真实 command 及传递 DTO 闭包，不应在 SDK 复制。

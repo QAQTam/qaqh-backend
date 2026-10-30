@@ -11,6 +11,8 @@
 //! - **Catalog**: lightweight metadata index for browsing without loading bodies
 //! - **Scope**: each skill belongs to either `Project` or `User` scope
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;

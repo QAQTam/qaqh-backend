@@ -1,3 +1,4 @@
+use crate::error::{ConfigError, ConfigResult};
 use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
@@ -842,14 +843,14 @@ impl Config {
     }
 
     /// Load config from disk (TOML primary store).
-    pub fn load() -> Result<Self, String> {
+    pub fn load() -> ConfigResult<Self> {
         let _guard = Self::config_io_lock()
             .lock()
-            .map_err(|_| "config lock poisoned".to_string())?;
+            .map_err(|_| ConfigError::LockPoisoned)?;
         Self::load_unlocked()
     }
 
-    fn load_unlocked() -> Result<Self, String> {
+    fn load_unlocked() -> ConfigResult<Self> {
         let store = ConfigStore::default_location();
         Self::load_from_paths_with(store, SecretStore::default_location())
     }
@@ -860,13 +861,13 @@ impl Config {
     /// locked transaction. If `mutate` returns `Err`, nothing is written and
     /// the error is propagated. Daemon actions must mutate config exclusively
     /// through this method instead of `load()` + direct field writes + `save()`.
-    pub fn update<F>(mutate: F) -> Result<Self, String>
+    pub fn update<F>(mutate: F) -> ConfigResult<Self>
     where
         F: FnOnce(&mut Self) -> Result<(), String>,
     {
         let _guard = Self::config_io_lock()
             .lock()
-            .map_err(|_| "config lock poisoned".to_string())?;
+            .map_err(|_| ConfigError::LockPoisoned)?;
         let mut config = Self::load_unlocked()?;
         mutate(&mut config)?;
         config.save_unlocked()?;
@@ -877,7 +878,7 @@ impl Config {
 
     /// 从显式路径加载（公开给集成测试与多实例/数据根重定向场景；
     /// 生产路径走 [`Config::load`] 的全局 platform 路径）。
-    pub fn load_from_paths_with(store: ConfigStore, secrets: SecretStore) -> Result<Self, String> {
+    pub fn load_from_paths_with(store: ConfigStore, secrets: SecretStore) -> ConfigResult<Self> {
         let mut cfg = Self::default();
 
         let mut pc = store.load();
@@ -1301,14 +1302,14 @@ falling back to 1 (read-only)"
         Ok(cfg)
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn save(&self) -> ConfigResult<()> {
         let _guard = Self::config_io_lock()
             .lock()
-            .map_err(|_| "config lock poisoned".to_string())?;
+            .map_err(|_| ConfigError::LockPoisoned)?;
         self.save_unlocked()
     }
 
-    fn save_unlocked(&self) -> Result<(), String> {
+    fn save_unlocked(&self) -> ConfigResult<()> {
         self.save_with(
             &ConfigStore::default_location(),
             &SecretStore::default_location(),
@@ -1317,7 +1318,7 @@ falling back to 1 (read-only)"
 
     /// 显式路径版 save（与 [`Self::load_from_paths_with`] 对称；集成测试与
     /// 多实例/数据根重定向场景使用）。
-    pub fn save_with(&self, store: &ConfigStore, secrets: &SecretStore) -> Result<(), String> {
+    pub fn save_with(&self, store: &ConfigStore, secrets: &SecretStore) -> ConfigResult<()> {
         // 审计 P0-1：凭据先入 secret store；失败则中止保存（config.toml 永不
         // 出现明文）。cfg.api_key 为空时删除对应 secret 槽位——2026-08 起
         // config.save 不再把空串当"删除"（空串/掩码 = 保持现值，防前端误发空
@@ -1514,10 +1515,10 @@ falling back to 1 (read-only)"
             qaqh_types::platform::config_path().display()
         );
         if !store.save(&pc) {
-            return Err(format!(
+            return Err(ConfigError::invalid(format!(
                 "Failed to save config to {}",
                 qaqh_types::platform::config_path().display()
-            ));
+            )));
         }
 
         Ok(())

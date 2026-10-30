@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 mod common;
 
+#[cfg(feature = "native-tool-plan")]
 #[test]
 fn default_namespace_calls_without_namespace_roundtrip_over_http() {
     use common::mock_server::{MockServer, SseChunk};
@@ -155,6 +156,7 @@ fn default_namespace_calls_without_namespace_roundtrip_over_http() {
     }
 }
 
+#[cfg(feature = "native-tool-plan")]
 #[test]
 fn native_custom_stream_roundtrip_over_http() {
     use common::mock_server::{MockServer, SseChunk};
@@ -275,6 +277,7 @@ fn native_custom_stream_roundtrip_over_http() {
     );
 }
 
+#[cfg(feature = "native-tool-plan")]
 #[test]
 fn deepseek_minimal_custom_declaration_is_type_name_only() {
     use common::mock_server::{MockServer, SseChunk};
@@ -521,6 +524,7 @@ fn codex_fixture_custom_deltas_and_snapshots_describe_the_same_input() {
     assert_eq!(checked, 2);
 }
 
+#[cfg(feature = "native-tool-plan")]
 #[test]
 fn flat_custom_declaration_is_sent_and_decoded() {
     use common::mock_server::{MockServer, SseChunk};

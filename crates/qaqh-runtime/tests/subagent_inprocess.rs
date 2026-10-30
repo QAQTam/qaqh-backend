@@ -36,6 +36,8 @@ fn init_env(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: QAQH_DATA_DIR 是进程级状态，本集成测试二进制在 TEST_LOCK 下串行
+    // 改写全局环境，此前无并发读者。
     unsafe {
         // QAQH_DATA_DIR is process-wide; this integration-test binary holds
         // TEST_LOCK around all global state mutations.
@@ -148,9 +150,21 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
 
 #[test]
 fn spawn_subagent_does_not_go_through_process_spawn() {
+    // registry 已按领域拆成 `src/registry/*.rs`（spawn / lifecycle / messaging /
+    // queries）：这里把整个目录按文件名排序后拼接，断言仍锚定在源码文本上。
     let root = env!("CARGO_MANIFEST_DIR");
-    let source = std::fs::read_to_string(format!("{root}/src/registry.rs"))
-        .expect("read qaqh-runtime registry.rs");
+    let dir = format!("{root}/src/registry");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("read qaqh-runtime registry dir")
+        .map(|entry| entry.expect("registry dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    files.sort();
+    let source = files
+        .iter()
+        .map(|path| std::fs::read_to_string(path).expect("read registry source"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let body = source
         .lines()
         .skip_while(|line| !line.contains("pub fn spawn_subagent("))
@@ -172,7 +186,6 @@ fn spawn_subagent_does_not_go_through_process_spawn() {
         "spawn_subagent must delegate to the in-process actor path: {body}"
     );
 }
-
 
 /// T-1-4 回归：父会话收到 `ConversationCancel` 时，取消必须传播到它派生的
 /// 子 seed（子 actor 收到 `ConversationCancel` 并发布 `ConversationCancelled`）。

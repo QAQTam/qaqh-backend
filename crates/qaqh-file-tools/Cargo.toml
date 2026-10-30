@@ -8,7 +8,6 @@ description = "QAQ-Harness file tool group: mutate/query/glob/grep/edit/apply_pa
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
 qaqh-permission = { path = "../qaqh-permission" }
-qaqh-fs-core = { path = "../qaqh-fs-core" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-domain = { path = "../qaqh-domain" }
@@ -29,6 +28,10 @@ log = "0.4"
 
 [lints]
 workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# atomic_write 的 MoveFileExW 原子替换路径（随 file_shared 并入）。
+windows = { version = "0.58", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"

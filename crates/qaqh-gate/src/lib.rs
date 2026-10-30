@@ -9,6 +9,8 @@
 //! boundaries.  The clippy `string_slice` lint is allowed at the crate
 //! level (see Cargo.toml).
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 mod messages_sdk;
 mod gemini_sdk;
 mod chat_sdk;
@@ -28,6 +30,7 @@ pub use anyhow::Error as GateError;
 pub use request_context::RequestContext;
 pub use transport::RetryPolicy;
 pub use types::{ErrorKind, ProviderConfig, ProviderKind, ResponsesCompat, StreamEvent};
+#[cfg(feature = "native-tool-plan")]
 pub use qaqh_tool_core::model_tool_plan::ModelToolPlan;
 
 use qaqh_types::{Message, ToolDef};
@@ -38,6 +41,10 @@ use std::sync::atomic::AtomicBool;
 /// Namespace descriptions must be provided for every namespace in the plan.
 /// Native declarations are supported only on the Responses wire; Chat,
 /// Anthropic Messages and Gemini still reject them (`unsupported_tool_representation`).
+///
+/// feature `native-tool-plan` 关闭时（默认）本入口不编译：生产路径走
+/// [`chat_stream`]，它不下发原生工具声明。
+#[cfg(feature = "native-tool-plan")]
 #[allow(clippy::too_many_arguments)]
 pub fn chat_stream_responses_with_plan(
     provider: &ProviderConfig,

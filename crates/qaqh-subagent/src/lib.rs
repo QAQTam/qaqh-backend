@@ -27,6 +27,8 @@
 //! `register` retains the full tool set for explicit consumers and tests;
 //! it is not the production agent registrar during this suspension.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 #![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
 
 use std::sync::Arc;

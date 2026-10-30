@@ -1,0 +1,31 @@
+[package]
+name = "qaqh-ringing-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ringing daemon transport/projection/queue layer (split out of qaqh-runtime)"
+
+[dependencies]
+qaqh-domain = { path = "../qaqh-domain" }
+qaqh-memwatch = { path = "../qaqh-memwatch" }
+qaqh-message = { path = "../qaqh-message" }
+qaqh-ringing = { path = "../qaqh-ringing" }
+qaqh-session = { path = "../qaqh-session" }
+qaqh-types = { path = "../qaqh-types" }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
+
+[features]
+default = []
+# `pending_store` 的 DTO 带 `#[cfg_attr(feature = "ts", derive(ts_rs::TS))]`；
+# core 的 `ts` feature 会转发到这里。
+ts = ["dep:ts-rs", "qaqh-types/ts"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

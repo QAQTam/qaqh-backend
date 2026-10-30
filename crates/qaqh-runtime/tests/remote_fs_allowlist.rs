@@ -28,6 +28,7 @@ fn service() -> &'static qaqh_runtime::QaqhService {
     SERVICE.get_or_init(|| {
         let root = std::env::temp_dir().join(format!("qaqh-fs-allowlist-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("mkdir data root");
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe {
             std::env::set_var("QAQH_DATA_DIR", root.join("data"));
         }
@@ -43,15 +44,15 @@ fn service() -> &'static qaqh_runtime::QaqhService {
     })
 }
 
-fn read(path: &str) -> Result<serde_json::Value, String> {
+fn read(path: &str) -> qaqh_runtime::QaqhResult<serde_json::Value> {
     service().handle("fs.read", &json!({ "path": path }))
 }
 
-fn list(path: &str) -> Result<serde_json::Value, String> {
+fn list(path: &str) -> qaqh_runtime::QaqhResult<serde_json::Value> {
     service().handle("fs.list", &json!({ "path": path }))
 }
 
-fn read_scoped(path: &str, session_id: &str) -> Result<serde_json::Value, String> {
+fn read_scoped(path: &str, session_id: &str) -> qaqh_runtime::QaqhResult<serde_json::Value> {
     service().handle(
         "fs.read",
         &json!({ "path": path, "scope_session_id": session_id }),
@@ -67,11 +68,11 @@ fn fs_read_rejects_meta_json() {
         .join("meta.json");
     let error = read(meta.to_str().expect("utf8 meta")).expect_err("meta.json must be rejected");
     assert!(
-        error.starts_with("FORBIDDEN"),
+        error.is_forbidden(),
         "expected a FORBIDDEN rejection, got: {error}"
     );
     assert!(
-        !error.contains("No such file") && !error.contains("os error"),
+        !error.to_string().contains("No such file") && !error.to_string().contains("os error"),
         "rejection must not surface as an IO failure: {error}"
     );
 }
@@ -83,7 +84,7 @@ fn fs_list_rejects_sessions_dir() {
     let error =
         list(sessions.to_str().expect("utf8 sessions")).expect_err("sessions dir must be rejected");
     assert!(
-        error.starts_with("FORBIDDEN"),
+        error.is_forbidden(),
         "expected a FORBIDDEN rejection, got: {error}"
     );
 }
@@ -111,14 +112,14 @@ fn fs_read_rejects_dotdot_escape() {
     let escaped = workspace().join("..").join("etc").join("passwd");
     let error =
         read(escaped.to_str().expect("utf8 escape")).expect_err("dotdot escape must be rejected");
-    assert!(error.starts_with("FORBIDDEN"), "{error}");
+    assert!(error.is_forbidden(), "{error}");
 }
 
 /// 任意绝对路径（非允许根）必须被拒。
 #[test]
 fn fs_read_rejects_arbitrary_absolute_path() {
     let error = read("/etc/hostname").expect_err("/etc/hostname must be rejected");
-    assert!(error.starts_with("FORBIDDEN"), "{error}");
+    assert!(error.is_forbidden(), "{error}");
 }
 
 /// WebUI 网关注入 `scope_session_id` 后，读取必须同时落在该会话的 cwd 内。
@@ -149,5 +150,5 @@ fn fs_read_scope_rejects_other_session_workspace() {
 
     let error = read_scoped(other_file.to_str().expect("utf8 other file"), SEED)
         .expect_err("cross-seed workspace read must be rejected");
-    assert!(error.starts_with("FORBIDDEN"), "{error}");
+    assert!(error.is_forbidden(), "{error}");
 }
