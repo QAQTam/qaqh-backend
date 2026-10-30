@@ -20,7 +20,7 @@ pub mod command;
 pub mod event;
 pub mod interaction_body;
 pub mod state;
-pub mod timeline;
+pub mod turn;
 
 pub use channel::RingingChannel;
 pub use command::{
@@ -36,10 +36,6 @@ pub use event::{
     SessionActivity, SessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus, ToolEvent,
     ToolResult,
 };
-pub use timeline::{
-    FileSnapshotInfo, RoundBlock, RoundData, TimelineBlock, TimelineBlockKind, TimelineBlockState,
-    TimelineEntry, TimelineEvent, TimelineFailure, TimelineIntent, TimelinePathOp, TimelineRound,
-    TimelineSnapshot, TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader,
-    TimelineToolMetrics, TimelineToolPermission, TimelineToolState, TimelineTurn,
-    TimelineTurnState, ToolCallDef, ToolResultDef, TurnData, tool_failure_of,
+pub use turn::{
+    FileSnapshotInfo, RoundBlock, RoundData, ToolCallDef, ToolResultDef, TurnData,
 };

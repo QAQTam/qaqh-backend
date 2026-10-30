@@ -7,9 +7,13 @@
 //! `push_user` / `push_system` / `push_system_input` always return `false`, and
 //! the `push_tool_result_direct*` variants return `()`.
 
+pub mod assistant;
+pub mod compaction;
+pub mod compact_prompt;
 pub mod context_flow;
 pub mod effect;
 pub mod legacy_writer;
+pub mod prompt;
 pub mod store;
 pub mod wal;
 

@@ -16,6 +16,7 @@ pub use qaqh_file_tools::apply_patch_engine;
 
 pub use qaqh_file_tools::arg_estimate;
 pub mod authorization;
+pub mod compact_anchors;
 pub use qaqh_file_tools::code_delta;
 pub use qaqh_file_tools::edit;
 pub mod execution;
@@ -60,6 +61,7 @@ pub mod probe;
 
 pub mod manager;
 pub mod model_tool_plan;
+pub mod official_web;
 /// Permission engine: tool categories, levels, trusted folders.
 pub use qaqh_permission::permission;
 

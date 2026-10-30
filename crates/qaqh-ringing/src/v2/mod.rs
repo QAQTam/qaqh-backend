@@ -5,11 +5,9 @@
 //! event bus and its wire types were removed in hub-fact-bus stages 3.2/3d.
 
 mod cursor;
-mod timeline;
 mod types;
 
 pub use cursor::{CanonicalCursor, CursorError, CursorToken, END_OF_FACT};
-pub use timeline::{TimelinePage, TimelineSseFrame};
 pub use types::{
     RingingV2ApprovalRespondRequest, RingingV2AskOutcome, RingingV2Bootstrap,
     RingingV2Capabilities, RingingV2ChannelSnapshot, RingingV2CommandAck,

@@ -53,7 +53,6 @@ pub struct RingingV2Capabilities {
     pub subscribe: bool,
     pub interact: bool,
     pub drive: bool,
-    pub timeline: bool,
     pub service: bool,
     pub content: bool,
     /// 单流订阅能力（2026-09-24 冻结修订，tag
@@ -1078,7 +1077,6 @@ mod tests {
             "subscribe": true,
             "interact": true,
             "drive": true,
-            "timeline": true,
             "service": true,
             "content": true
         });
@@ -1093,7 +1091,6 @@ mod tests {
             "subscribe": true,
             "interact": true,
             "drive": true,
-            "timeline": true,
             "service": true,
             "content": true,
             "single_stream": true

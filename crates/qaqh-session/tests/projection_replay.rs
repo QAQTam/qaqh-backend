@@ -95,7 +95,7 @@ fn all_projection_set_deltas_become_valid_stable_events() {
         }
     }
 
-    assert_eq!(total_events, 38);
+    assert_eq!(total_events, 34);
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn replaceable_events_cover_current_state_only() {
         projection_replaceable_events_for_fact(&input, &input_deltas)
             .expect("input replaceable events")
             .is_empty(),
-        "conversation/timeline history stays reliable-only"
+        "conversation history stays reliable-only"
     );
 }
 
@@ -140,29 +140,33 @@ fn stream_keys_follow_the_frozen_fact_slot_table() {
         projection_stream_key(&tool_finished, ProjectionSlot::Conversation),
         StreamKey::Channel(RingingChannel::Conversation)
     );
-    assert_eq!(
-        projection_stream_key(&tool_finished, ProjectionSlot::Timeline),
-        StreamKey::Channel(RingingChannel::Tool)
-    );
 
-    let input = input_fact();
+    let tool_intent = payload_facts()
+        .into_iter()
+        .find(|fact| matches!(&fact.payload, FactPayload::ToolIntent(_)))
+        .expect("tool_intent fixture");
     assert_eq!(
-        projection_stream_key(&input, ProjectionSlot::Timeline),
-        StreamKey::Channel(RingingChannel::Conversation)
+        projection_stream_key(&tool_intent, ProjectionSlot::Control),
+        StreamKey::Channel(RingingChannel::Tool)
     );
 }
 
 #[test]
 fn reliable_replay_sorts_filters_and_deduplicates_by_full_cursor() {
-    let fact = input_fact();
+    let input = input_fact();
+    let tool_finished = tool_finished_fact();
     let mut set = ProjectionSet::default();
-    let deltas = set.apply(&fact);
-    let mut events = projection_events_for_fact(&fact, &deltas).expect("build events");
+    let mut events = Vec::new();
+    for fact in [&input, &tool_finished] {
+        let deltas = set.apply(fact);
+        events.extend(projection_events_for_fact(fact, &deltas).expect("build events"));
+    }
+    assert_eq!(events.len(), 2);
     events.reverse();
-    events.push(events[1].clone());
+    events.push(events[0].clone());
 
     let window = ReplayWindow {
-        log_id: fact.log_id.clone(),
+        log_id: input.log_id.clone(),
         earliest_available_fact_seq: 1,
         snapshot_cursor: None,
     };
@@ -174,14 +178,15 @@ fn reliable_replay_sorts_filters_and_deduplicates_by_full_cursor() {
     assert_eq!(all.len(), 2);
     assert_eq!(
         all.iter()
-            .map(|event| event.projection_index.expect("projection index"))
+            .map(|event| event.source_fact_seq)
             .collect::<Vec<_>>(),
-        vec![0, 1]
+        vec![input.fact_seq, tool_finished.fact_seq],
+        "events must be sorted by (fact_seq, projection_index)"
     );
 
     let since = cursor(
-        fact.log_id.clone(),
-        fact.fact_seq,
+        input.log_id.clone(),
+        input.fact_seq,
         ProjectionSlot::Conversation.as_u16(),
     );
     let tail = replay_reliable(events, Some(&since), &window).expect("replay tail");
@@ -189,10 +194,7 @@ fn reliable_replay_sorts_filters_and_deduplicates_by_full_cursor() {
         panic!("expected delivered tail");
     };
     assert_eq!(tail.len(), 1);
-    assert_eq!(
-        tail[0].projection_index,
-        Some(ProjectionSlot::Timeline.as_u16())
-    );
+    assert_eq!(tail[0].source_fact_seq, tool_finished.fact_seq);
 }
 
 #[test]

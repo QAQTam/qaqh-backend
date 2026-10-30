@@ -17,11 +17,7 @@ use crate::discovery::{DaemonDiscovery, DiscoveryExt, read_discovery};
 use crate::endpoint::{ActionRequest, QueryRequest};
 use crate::error::{ClientError, Result};
 use crate::session::RingingSession;
-use crate::timeline::TimelineStream;
-use crate::types::{
-    CommandOptions, ContentRef, RingingCommand, RingingCommandAckStatus, TimelineEntry,
-    TimelinePage, TimelineStatus,
-};
+use crate::types::{CommandOptions, ContentRef, RingingCommand, RingingCommandAckStatus};
 use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
 use qaqh_ringing::v2::{
@@ -57,11 +53,6 @@ pub struct ClientHandlers {
     /// v2 单流状态迁移（每 seed 一条）。
     pub on_v2_status:
         std::sync::Arc<dyn Fn(String, crate::v2_stream::V2StreamStatus) + Send + Sync>,
-    /// Per-session timeline entry (seed, entry).
-    pub on_timeline_entry: std::sync::Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
-    pub on_timeline_status: std::sync::Arc<dyn Fn(TimelineStatus) + Send + Sync>,
-    /// Fresh timeline snapshot pushed on gap recovery.
-    pub on_timeline_snapshot: std::sync::Arc<dyn Fn(TimelinePage) + Send + Sync>,
     /// **存活信号：从 socket 收到了字节**（每次读到一个 chunk 调一次）。
     ///
     /// 与其它回调的区别是它**不针对内容**——包括被解码器丢掉的 SSE 注释行
@@ -108,9 +99,6 @@ impl Default for ClientHandlers {
             on_v2_event: std::sync::Arc::new(|_, _| {}),
             on_v2_reset: std::sync::Arc::new(|_, _| {}),
             on_v2_status: std::sync::Arc::new(|_, _| {}),
-            on_timeline_entry: std::sync::Arc::new(|_, _| {}),
-            on_timeline_status: std::sync::Arc::new(|_| {}),
-            on_timeline_snapshot: std::sync::Arc::new(|_| {}),
             on_liveness: std::sync::Arc::new(|| {}),
         }
     }
@@ -185,26 +173,13 @@ pub(crate) struct ClientInner {
     handlers: ClientHandlers,
     stop_tx: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// Active per-session timeline streams, keyed by seed (activated on demand).
-    ///
-    /// Keyed rather than single-slot: shells that keep more than one session
-    /// live at once (multiple tabs, subagent sessions) need several concurrent
-    /// timeline streams. A single slot would silently stop another session's
-    /// stream mid-turn.
-    timeline: Mutex<HashMap<String, TimelineHandle>>,
-    /// Active per-seed canonical v2 event streams (started with the timeline,
-    /// stopped on `deactivate_timeline`).
+    /// Active per-seed canonical v2 event streams (started on demand via
+    /// `activate_stream`, stopped on `deactivate_stream` / client close).
     v2_streams: Mutex<HashMap<String, V2StreamHandle>>,
     /// Seeds this client has attached (BUG-2026-09-12-10): replayed after a
     /// lease re-negotiation so seed-scoped reads do not 401 with the new
     /// client_session_id.
     attached_sessions: Mutex<HashSet<String>>,
-}
-
-/// Bookkeeping for the currently activated timeline stream.
-struct TimelineHandle {
-    stop_tx: watch::Sender<bool>,
-    status: watch::Sender<Option<TimelineStatus>>,
 }
 
 /// Bookkeeping for the currently activated v2 single stream.
@@ -293,7 +268,6 @@ impl Client {
                 handlers: options.handlers.clone(),
                 stop_tx,
                 tasks,
-                timeline: Mutex::new(HashMap::new()),
                 v2_streams: Mutex::new(HashMap::new()),
                 attached_sessions: Mutex::new(HashSet::new()),
             }),
@@ -309,7 +283,7 @@ impl Client {
 
         // BUG-2026-09-12-10：租约重新协商（renewal 失败 → open() 换新 lease）后，
         // daemon 侧 seed 归属随旧 client_session_id 一并消失且不迁移——必须为
-        // 「已 attach 的 seed」重放 attach，否则 timeline/bootstrap/service 等
+        // 「已 attach 的 seed」重放 attach，否则 bootstrap/service 等
         // seed 域读路径会持续 401 lease_required（「切会话被拒」的主因之一）。
         let replay = {
             let client = client.clone();
@@ -345,8 +319,8 @@ impl Client {
         client.push_task(replay).await;
 
         // 2026-09-24 硬切：v1 的三条全局 `events/{channel}` 流已删除。投影事件改由
-        // 每 seed 一条的 canonical v2 单流承载，随 `activate_timeline` 起、随
-        // `deactivate_timeline` 停（见 [`Self::activate_timeline`]）。
+        // 每 seed 一条的 canonical v2 单流承载，随 `activate_stream` 起、随
+        // `deactivate_stream` 停（见 [`Self::activate_stream`]）。
 
         Ok(client)
     }
@@ -547,151 +521,21 @@ impl Client {
         Ok(ack)
     }
 
-    /// 拉取 timeline 快照页（服务端默认尾部窗口，见 daemon
-    /// `TIMELINE_PAGE_LIMIT`）。`before_index` = **排他**游标（返回全局序号小于
-    /// 它的那一页，即该 index **之前**（更早）的页），`None` = 最新一页；
-    /// `limit` 覆盖默认页大小。响应含分页元数据 `has_more` / `total_turns`。
-    /// 与 [`Self::activate_timeline`] 不同：纯读，**不重建** timeline SSE 流。
-    ///
-    /// 取下一页的游标是**本页最旧那个回合**的 `TimelineTurn::turn_index`。
-    ///
-    /// 原先是 `before_turn`（turn_id）作游标，已按 spec §0b 的兼容政策**替换**
-    /// （BUG-2026-09-15-05）：turn_id 由 worker 计数器生成、会复用，归档投影侧的 id
-    /// 又只是消息池内下标——两者都当不了稳定游标。
-    pub async fn fetch_timeline_page(
-        &self,
-        session_id: &str,
-        before_index: Option<u64>,
-        limit: Option<u32>,
-    ) -> Result<TimelinePage> {
-        self.get_timeline_page(session_id, before_index, limit)
-            .await
-    }
-
-    /// GET `/ringing/v2/sessions/{seed}/timeline` + typed protocol validation.
-    async fn get_timeline_page(
-        &self,
-        session_id: &str,
-        before_index: Option<u64>,
-        limit: Option<u32>,
-    ) -> Result<TimelinePage> {
-        if session_id.is_empty() {
-            return Err(ClientError::Negotiation("seed is required".into()));
-        }
-        let state = self
-            .inner
-            .session
-            .state()
-            .await
-            .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let path = format!("/ringing/v2/sessions/{session_id}/timeline");
-        let mut request = self
-            .inner
-            .http
-            .get(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", &state.client_session_id);
-        if let Some(before_index) = before_index {
-            request = request.query(&[("before_index", before_index)]);
-        }
-        if let Some(limit) = limit {
-            request = request.query(&[("limit", limit)]);
-        }
-        let response = request.send().await?;
-        if !response.status().is_success() {
-            return Err(ClientError::Http {
-                status: response.status().as_u16(),
-                path,
-            });
-        }
-        let page: TimelinePage = response.json().await?;
-        page.validate_for(session_id)
-            .map_err(ClientError::Protocol)?;
-        Ok(page)
-    }
-
-    /// Activate the native timeline for one session (mirrors Electron
-    /// `ringingManager.activateTimeline`): fetch the authoritative snapshot
-    /// (tail page), replace that seed's previous timeline stream with a new one
-    /// seeded at the snapshot watermark, and return the snapshot. The seed
-    /// must have been attached first (`backend.attach` / `session_resume`),
+    /// Activate the canonical v2 single stream for one session. The seed must
+    /// have been attached first (`backend.attach` / `session_resume`),
     /// otherwise the daemon rejects the request with 401.
     ///
     /// Streams are **keyed by seed**, so activating one session never disturbs
     /// another's. Shells that keep several sessions live at once (tabs,
     /// subagent sessions, nested subagents) can therefore hold as many
-    /// concurrent timelines as they track; a shell that shows one transcript at
+    /// concurrent streams as they track; a shell that shows one transcript at
     /// a time simply calls this for the newly focused seed and
-    /// [`Self::deactivate_timeline`] for the one it left.
-    pub async fn activate_timeline(&self, session_id: &str) -> Result<TimelinePage> {
-        self.activate_timeline_with(session_id, None).await
-    }
-
-    /// [`Self::activate_timeline`] with an explicit tail-page size. A shell that
-    /// renders one page of its own chosen size (e.g. the Tauri webui) passes it
-    /// here so the pushed snapshot already is the page it wanted, instead of
-    /// taking the default page and re-fetching a second one.
-    pub async fn activate_timeline_with(
-        &self,
-        session_id: &str,
-        limit: Option<u32>,
-    ) -> Result<TimelinePage> {
-        let page = self.get_timeline_page(session_id, None, limit).await?;
-        let watermark = page.snapshot.watermark;
-
-        // Replace this seed's previous stream only.
-        let mut guard = self.inner.timeline.lock().await;
-        if let Some(prev) = guard.remove(session_id) {
-            let _ = prev.stop_tx.send(true);
-            let _ = prev.status.send_replace(Some(TimelineStatus::Closed {
-                session_id: session_id.to_string(),
-                reason: "re-activated".into(),
-            }));
-        }
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let (status_tx, _status_rx) = watch::channel(None);
-        let session_owned = session_id.to_string();
-        let mut stream = TimelineStream::new(
-            session_owned.clone(),
-            self.inner.http.clone(),
-            self.inner.session.clone(),
-            self.inner.handlers.on_timeline_entry.clone(),
-            self.inner.handlers.on_timeline_status.clone(),
-            self.inner.handlers.on_timeline_snapshot.clone(),
-            self.inner.handlers.on_liveness.clone(),
-            watermark,
-            Some(status_tx.clone()),
-        );
-        let task_status_tx = status_tx.clone();
-        let session_stop = self.inner.stop_tx.subscribe();
-        let task = tokio::spawn(async move {
-            stream.run(stop_rx, session_stop).await;
-            let _ = task_status_tx.send_replace(Some(TimelineStatus::Closed {
-                session_id: session_owned,
-                reason: "stream ended".into(),
-            }));
-        });
-        self.push_task(task).await;
-        guard.insert(
-            session_id.to_string(),
-            TimelineHandle {
-                stop_tx,
-                status: status_tx,
-            },
-        );
-        drop(guard);
-
-        // Mirror Electron: the activate response is both returned to the
-        // caller and pushed as a snapshot event so listeners rebuild the
-        // transcript immediately.
-        (self.inner.handlers.on_timeline_snapshot)(page.clone());
-        // 同一时刻起 canonical v2 单流：投影事件（control/conversation/meta/…）
-        // 只从它来，v1 三频道流已删除。
+    /// [`Self::deactivate_stream`] for the one it left.
+    pub async fn activate_stream(&self, session_id: &str) {
         self.start_v2_stream(session_id).await;
-        Ok(page)
     }
 
-    /// 启动（或替换）一条 seed 的 canonical v2 单流。`activate_timeline` 调用。
+    /// 启动（或替换）一条 seed 的 canonical v2 单流。`activate_stream` 调用。
     async fn start_v2_stream(&self, session_id: &str) {
         let mut guard = self.inner.v2_streams.lock().await;
         if let Some(prev) = guard.remove(session_id) {
@@ -713,33 +557,17 @@ impl Client {
         guard.insert(session_id.to_string(), V2StreamHandle { stop_tx });
     }
 
-    /// Stop the timeline stream for one seed (no-op when not active). The other
-    /// seeds' streams are untouched.
-    pub async fn deactivate_timeline(&self, session_id: &str) {
-        let handle = self.inner.timeline.lock().await.remove(session_id);
-        if let Some(handle) = handle {
-            let _ = handle.stop_tx.send(true);
-            let _ = handle.status.send_replace(Some(TimelineStatus::Closed {
-                session_id: session_id.to_string(),
-                reason: "deactivated".into(),
-            }));
-        }
+    /// Stop the v2 single stream for one seed (no-op when not active). The
+    /// other seeds' streams are untouched.
+    pub async fn deactivate_stream(&self, session_id: &str) {
         if let Some(handle) = self.inner.v2_streams.lock().await.remove(session_id) {
             let _ = handle.stop_tx.send(true);
         }
     }
 
-    /// Timeline connection status for one seed (`None` when never activated).
-    pub async fn timeline_status_for(&self, session_id: &str) -> Option<TimelineStatus> {
-        let guard = self.inner.timeline.lock().await;
-        guard
-            .get(session_id)
-            .and_then(|h| h.status.borrow().clone())
-    }
-
-    /// Seeds with an active timeline stream, in unspecified order.
-    pub async fn active_timelines(&self) -> Vec<String> {
-        self.inner.timeline.lock().await.keys().cloned().collect()
+    /// Seeds with an active v2 single stream, in unspecified order.
+    pub async fn active_streams(&self) -> Vec<String> {
+        self.inner.v2_streams.lock().await.keys().cloned().collect()
     }
 
     /// Current client session id for request headers.

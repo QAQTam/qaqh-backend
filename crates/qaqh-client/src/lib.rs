@@ -1,8 +1,8 @@
 //! QAQ-Harness Ringing v2 daemon client (HTTP/SSE).
 //!
 //! Shared transport for the TUI and desktop shells: discovery, lease
-//! negotiation/renewal, the v2 single-stream event feed and the per-session
-//! timeline stream, plus commands, queries, bootstrap and graceful stop.
+//! negotiation/renewal, the v2 single-stream event feed, plus commands,
+//! queries, bootstrap and graceful stop.
 //!
 //! The public API uses the canonical `qaqh-domain` and `qaqh-ringing`
 //! contracts. HTTP/SSE JSON is decoded at this boundary and never becomes a
@@ -18,7 +18,6 @@ pub mod service;
 pub mod service_types;
 pub mod session;
 mod sse_decoder;
-pub mod timeline;
 pub mod types;
 pub mod v2;
 pub mod v2_stream;
@@ -34,7 +33,7 @@ pub use projection::sanitize_session_list;
 ///
 /// 纯 v2 之后**不再**经 v1 bootstrap 的 `state` 访问器取用：v2 bootstrap 直接返回
 /// typed 三频道快照（[`ClientV2Bootstrap`]）。这里保留导出只因为 v1 领域投影仍在
-/// runtime 内部（orphan_seal / timeline）使用，壳层不应再依赖。
+/// runtime 内部使用，壳层不应再依赖。
 pub use qaqh_domain::state::{
     ControlState, ConversationState, InteractionKind, LastFailure, LastRound, PendingInteraction,
     RunningTool, ToolState,
@@ -44,10 +43,9 @@ pub use qaqh_domain::state::{
 /// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
 /// 否则壳层就只能手解 JSON——那正是本客户端存在的理由要反对的事。
 pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
-/// 公开字段背后的**类型名**：`TimelineBlock.reasoning_kind` 是
-/// `Option<ReasoningKind>`（公开字段，见 `qaqh-domain/src/timeline.rs`），
-/// `ConfigDto.credential` 的取值域由 `CredentialSource` 定义，`ConfigDto.wire`
-/// 与 `ConfigPatch::wire` 的规范拼写由 `Wire` 定义。
+/// 公开字段背后的**类型名**：`ConfigDto.credential` 的取值域由
+/// `CredentialSource` 定义，`ConfigDto.wire` 与 `ConfigPatch::wire` 的规范拼写
+/// 由 `Wire` 定义。
 ///
 /// 这些类型本来就在 `qaqh-types` 里，只是没经本 crate 出口：壳层于是只能
 /// 「看得见字段、拿不到类型名」——要么 match 时不写类型名，要么为了一行
@@ -70,7 +68,6 @@ pub use service_types::{
     SiwcSignOutResult, SiwcStatus,
 };
 pub use session::RingingSession;
-pub use timeline::TimelineStream;
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
     CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
@@ -80,10 +77,7 @@ pub use types::{
     PermissionRisk, PlanReviewItem, ProviderToolState, RINGING_SCHEMA, ReconnectReason,
     RingingCommand, RingingCommandAckStatus, RingingCommandState, RoundDeltaKind, SessionActivity,
     SessionListEntry, SessionMeta, SessionRunStatus, SkillInfo, SkillRuntimeInfo, SkillsStatus,
-    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
-    TimelineFailure, TimelinePage, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineStatus,
-    TimelineTool, TimelineToolBody, TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics,
-    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, ToolCommand,
+    ToolCommand,
     ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult, ToolStatus,
     UsageInfo, is_safe_integer,
 };

@@ -228,9 +228,9 @@ Unknown      → fence 该 session 新派发，用原 batch_id 对账
 - blob 准备必须检查完整性、hash、scope 与平台耐久边界；不把当前 best-effort directory sync 当成已证明的跨平台强保证。未被 committed prefix 引用的准备 blob 可按安全水位回收，不能误删恢复/未决结算引用。
 - 存储不健康时拒绝新业务成功 ACK；安全停止允许独立继续，恢复后补真实停止证据，不谎称已有持久终态。
 
-### 5.2 最小事实集合与版本裁决
+### 5.2 最小事实集合与存储格式
 
-**内部存储升级与公开 Ringing 版本分开。** 本次采用一个显式新内部格式 `qaqh.session-fact/v3` 及其版本化 commit metadata，以容纳批次、response bundle、回执/功能恢复信息；不在旧 v2 enum 上无限堆 Option。该内部 v3 **不代表 Ringing major 3**。在线只支持新格式；旧 session-fact/v2 通过离线 importer 转换。
+**完善 Ringing v2，不以本次重构叠加协议版本号。** 事实和 commit metadata 须表达批次、response bundle、回执及功能恢复信息，优先完善现有命名与结构，不在现有 enum 上无限堆 Option。若持久格式确实无法兼容，须明确区分格式标识、拒绝误读并提供离线转换；不把内部格式变化包装成公开协议升级。在线路径只以满足本节合同的事实为权威，旧消息存储如需保留仅供离线导入。
 
 保留 InputAccepted / TurnStarted / ModelRoundStarted / AssistantBlockSealed / ToolCallDeclared / ToolIntent / ToolFinished / InteractionRequested-Resolved-Expired / TurnFinished 等清楚的业务词汇，不另造一套并行 turn engine 终态。新增内容只服务下面缺口：
 

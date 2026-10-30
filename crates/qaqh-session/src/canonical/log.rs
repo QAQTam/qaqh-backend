@@ -117,6 +117,11 @@ impl CanonicalLog {
     ) -> Result<Self, CanonicalError> {
         let session_dir = session_dir.as_ref().to_path_buf();
         fs::create_dir_all(&session_dir)?;
+        if session_dir.join("storage-format").exists() {
+            return Err(CanonicalError::NotWritable(
+                "session uses an unsupported canonical storage format".into(),
+            ));
+        }
         let mut log = Self {
             session_dir,
             session_id,

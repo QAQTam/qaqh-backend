@@ -3,10 +3,10 @@
 //! 2026-09-24 硬切：v1 的三条 `/ringing/v1/events/{channel}` 全局流被
 //! `/ringing/v2/sessions/{seed}/events` **每 seed 一条**取代。本模块是客户端侧的
 //! 常驻读循环：连接 / 解码 / cursor 推进 / reset / 退避重连，语义对齐
-//! [`crate::timeline::TimelineStream`] 与 [`crate::v2::ClientV2Subscription`]。
+//! [`crate::v2::ClientV2Subscription`]。
 //!
 //! 与 v1 通道流的差异：
-//! - **按 seed 起流**（`activate_timeline` 时启动、`deactivate_timeline` 时停止），
+//! - **按 seed 起流**（`activate_stream` 时启动、`deactivate_stream` 时停止），
 //!   不再是三条全局流；
 //! - cursor 是 canonical `CursorToken`（`since_cursor` 查询参数），不是
 //!   `Last-Event-ID`；只有 reliable 事件推进 cursor；
@@ -212,8 +212,8 @@ impl V2Stream {
                         Some(ClientV2SubscriptionEvent::KeepAlive) => {
                             // 字节到了 = daemon 活着。keepalive 注释行/半帧不产出
                             // 事件，但它们正是安静期里唯一的字节来源——字节层
-                            // 探活与 timeline.rs 的 BUG-2026-09-12-10 对齐，否则
-                            // 健康流每 45s 被误判 idle timeout 重连一次。
+                            // 探活（原 timeline 流的 BUG-2026-09-12-10 教训），
+                            // 否则健康流每 45s 被误判 idle timeout 重连一次。
                             (self.handlers.on_liveness)();
                         }
                         Some(ClientV2SubscriptionEvent::Reset(reset)) => {

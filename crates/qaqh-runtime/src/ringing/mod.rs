@@ -10,13 +10,9 @@ pub mod device_registry;
 pub mod hub;
 pub mod lease_store;
 pub(crate) mod operation_failure;
-pub mod orphan_seal;
 pub mod pending_store;
-pub mod persistence_policy;
 pub mod projection;
 pub mod service_methods;
-pub mod timeline_hub;
-pub(crate) mod timeline_rebuild;
 pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;

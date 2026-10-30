@@ -134,9 +134,9 @@ pub use qaqh_session::team::TaskBoardSnapshot as ClientV2TaskBoardSnapshot;
 /// message board（`board`）。Phase 4（roster/inbox）、TEAM-01e（task board）与
 /// BOARD-01d（message board）消费的都是这一个端点，避免壳层各拉一次。
 ///
-/// 所有权在 `qaqh_session::client_v2`（daemon handler 与 TS 契约导出共用）；
+/// 所有权在 `qaqh_ringing_contract`（daemon handler 与 TS 契约导出共用）；
 /// 此处保留壳层既有命名。
-pub use qaqh_session::client_v2::ClientV2TeamResponse;
+pub use qaqh_ringing_contract::ClientV2TeamResponse;
 
 /// Typed v2 SSE envelope.
 pub type ClientV2Event = RingingV2EventEnvelope<ClientV2Payload>;
@@ -146,9 +146,9 @@ pub type ClientV2EventEnvelope = ClientV2Event;
 
 /// bootstrap `control.state` / `tool.state` 的具体组合。
 ///
-/// 所有权在 `qaqh_session::client_v2`：daemon handler 序列化、客户端反序列化
+/// 所有权在 `qaqh_ringing_contract`：daemon handler 序列化、客户端反序列化
 /// 与 TS 契约导出共用同一份定义，不再各自维护镜像 struct。
-pub use qaqh_session::client_v2::{ClientV2ControlState, ClientV2ToolState};
+pub use qaqh_ringing_contract::{ClientV2ControlState, ClientV2ToolState};
 
 pub type ClientV2ConversationState = qaqh_session::projection::ConversationSnapshot;
 
@@ -204,8 +204,8 @@ pub enum ClientV2SubscriptionEvent {
     /// 把「到达」本身呈现给调用方，v2 流的空闲计时器才能在**字节层**复位：
     /// 会话安静期里 daemon 的 15s keepalive 是唯一字节来源，只按事件复位
     /// 会让健康流每 45s 被误判 `v2 SSE idle timeout` 重连（真机实测 11 次，
-    /// 每次还触发 app 层全量 re-bootstrap）。对齐 timeline.rs 的
-    /// BUG-2026-09-12-10 字节层探活。
+    /// 每次还触发 app 层全量 re-bootstrap）。字节层探活
+    /// （原 timeline 流的 BUG-2026-09-12-10 教训）。
     KeepAlive,
 }
 

@@ -20,9 +20,9 @@ use serde::Serialize;
 
 use super::*;
 
-// bootstrap 的具体 state 组合契约在 qaqh_session::client_v2（与 qaqh-client、
+// bootstrap 的具体 state 组合契约在 qaqh_ringing_contract（与 qaqh-client、
 // TS 契约导出共用同一份定义）；本文件只做 canonical→wire 的映射。
-use qaqh_session::client_v2::{
+use qaqh_ringing_contract::{
     ClientV2ControlState as V2ControlState, ClientV2TeamResponse, ClientV2ToolState as V2ToolState,
     TEAM_SCHEMA,
 };
@@ -103,7 +103,6 @@ pub(crate) async fn handle_open_v2(
             interact: true,
             // 席位机制已移除；字段保留至 v3 wire 清理。
             drive: false,
-            timeline: true,
             service: true,
             content: true,
             single_stream: true,

@@ -2165,6 +2165,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "qaqh-agentloop-core"
+version = "2.0.20261028"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "qaqh-client"
 version = "2.0.20261028"
 dependencies = [
@@ -2173,6 +2180,7 @@ dependencies = [
  "log",
  "qaqh-domain",
  "qaqh-ringing",
+ "qaqh-ringing-contract",
  "qaqh-session",
  "qaqh-types",
  "reqwest",
@@ -2220,6 +2228,7 @@ dependencies = [
  "qaqh-domain",
  "qaqh-dsaccount",
  "qaqh-ringing",
+ "qaqh-ringing-contract",
  "qaqh-runtime",
  "qaqh-session",
  "qaqh-siwc",
@@ -2243,6 +2252,7 @@ dependencies = [
  "qaqh-mcp",
  "qaqh-process-tools",
  "qaqh-ringing",
+ "qaqh-ringing-contract",
  "qaqh-runtime",
  "qaqh-sandbox",
  "qaqh-session",
@@ -2519,6 +2529,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-ringing-contract"
+version = "2.0.20261028"
+dependencies = [
+ "qaqh-ringing",
+ "qaqh-session",
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
 name = "qaqh-runtime"
 version = "2.0.20261028"
 dependencies = [
@@ -2526,6 +2547,7 @@ dependencies = [
  "libc",
  "log",
  "os_pipe",
+ "qaqh-agentloop-core",
  "qaqh-client",
  "qaqh-config",
  "qaqh-config-api",
@@ -2584,9 +2606,9 @@ version = "2.0.20261028"
 dependencies = [
  "hex",
  "log",
+ "qaqh-agentloop-core",
  "qaqh-domain",
  "qaqh-message",
- "qaqh-ringing",
  "qaqh-types",
  "serde",
  "serde_json",
@@ -2712,6 +2734,7 @@ dependencies = [
  "libc",
  "log",
  "qaqh-domain",
+ "qaqh-dsaccount",
  "qaqh-file-tools",
  "qaqh-fs-core",
  "qaqh-git",

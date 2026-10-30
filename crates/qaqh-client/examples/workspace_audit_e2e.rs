@@ -41,16 +41,6 @@ fn main() {
                 println!("[event] seed={session_id} kind={kind}");
             }
         }),
-        on_timeline_entry: Arc::new(|seed, entry| {
-            if let Ok(v) = serde_json::to_value(&entry) {
-                let t = v
-                    .get("event")
-                    .and_then(|e| e.get("type"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("?");
-                println!("[timeline] seed={seed} {t}");
-            }
-        }),
         ..Default::default()
     };
 

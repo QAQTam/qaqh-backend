@@ -192,20 +192,6 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .push(json!({"id":id,"status":"pending","types":[],"fixtures":[],"reason":reason}));
     }
     capabilities.push(json!({
-        "id":"timeline.snapshot-watch","status":"implemented",
-        "method":"GET","path":"/ringing/v2/sessions/{session_id}/timeline + /timeline/events",
-        "minimum_scope":"view","requires_lease":true,
-        "types":["TimelinePage","TimelineSseFrame","TimelineSnapshot","TimelineTurn","TimelineEntry","TimelineEvent"],
-        "fixtures":["timeline-page.json","timeline-entry-event.json"],
-        "validation":"rust-dto","remote_transport_acceptance":"not_verified",
-        "wire_notes":[
-            "pagination: before_index is an exclusive cursor (turns with index < it); limit clamped to [1, 200], default = one resident window",
-            "has_more == true implies the page is non-empty; truncated_before (window does not reach history start) is deliberately distinct from has_more and must be surfaced to the UI, never re-requested as a page",
-            "timeline watch uses SSE Last-Event-ID `{epoch}:timeline:{seq}`; foreign/epoch-mismatched cursors replay from 0",
-            "no deep-history pagination API exists beyond before_index pages; unreachable turns stay flagged by truncated_before"
-        ]
-    }));
-    capabilities.push(json!({
         "id":"approvals.device","status":"implemented",
         "method":"GET + POST","path":"/ringing/v2/sessions/{session_id}/approvals + /approvals/respond",
         "minimum_scope":"interact","requires_lease":true,

@@ -4,7 +4,9 @@
 
 pub mod actor;
 pub mod canonical;
-pub mod client_v2;
+pub mod context_projection;
+mod commit_state;
+pub mod session_commit;
 pub mod grouping;
 pub mod manager;
 pub mod projection;

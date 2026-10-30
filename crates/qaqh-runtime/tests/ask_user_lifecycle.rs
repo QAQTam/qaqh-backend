@@ -195,21 +195,30 @@ fn cmd_permission_respond(call_id: &str, approved: bool) -> RingingCommand {
 // Ringing 事件断言 helper
 // ═══════════════════════════════════════════════════════
 
+fn expect_event_preserving(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+    timeout: Duration,
+    predicate: impl Fn(&RingingEvent) -> bool,
+    intermediate: &mut Vec<RingingEvent>,
+) -> RingingEvent {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok(event) if predicate(&event) => return event,
+            Ok(event) => intermediate.push(event),
+            Err(error) => panic!("event timeout/disconnect: {error}; seen={intermediate:#?}"),
+        }
+    }
+}
+
 fn expect_event(
     receiver: &std::sync::mpsc::Receiver<RingingEvent>,
     timeout: Duration,
     predicate: impl Fn(&RingingEvent) -> bool,
 ) -> RingingEvent {
-    let deadline = Instant::now() + timeout;
-    let mut seen = Vec::new();
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(remaining) {
-            Ok(event) if predicate(&event) => return event,
-            Ok(event) => seen.push(format!("{event:?}")),
-            Err(error) => panic!("event timeout/disconnect: {error}; seen={seen:#?}"),
-        }
-    }
+    let mut ignored = Vec::new();
+    expect_event_preserving(receiver, timeout, predicate, &mut ignored)
 }
 
 fn expect_operation_failed(receiver: &std::sync::mpsc::Receiver<RingingEvent>, code: &str) {
@@ -222,19 +231,25 @@ fn expect_operation_failed(receiver: &std::sync::mpsc::Receiver<RingingEvent>, c
     });
 }
 
-fn expect_interaction_requested(
+fn expect_interaction_requested_preserving(
     receiver: &std::sync::mpsc::Receiver<RingingEvent>,
     ask_id: &str,
+    intermediate: &mut Vec<RingingEvent>,
 ) -> (String, AskMode, Vec<AskQuestion>) {
-    let event = expect_event(receiver, Duration::from_secs(5), |event| {
-        matches!(
-            event,
-            RingingEvent::Control(ControlEvent::InteractionRequested {
-                interaction_id,
-                ..
-            }) if interaction_id == ask_id
-        )
-    });
+    let event = expect_event_preserving(
+        receiver,
+        Duration::from_secs(5),
+        |event| {
+            matches!(
+                event,
+                RingingEvent::Control(ControlEvent::InteractionRequested {
+                    interaction_id,
+                    ..
+                }) if interaction_id == ask_id
+            )
+        },
+        intermediate,
+    );
     match event {
         RingingEvent::Control(ControlEvent::InteractionRequested {
             turn_id,
@@ -248,6 +263,14 @@ fn expect_interaction_requested(
         }
         other => panic!("expected InteractionRequested, got {other:?}"),
     }
+}
+
+fn expect_interaction_requested(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+    ask_id: &str,
+) -> (String, AskMode, Vec<AskQuestion>) {
+    let mut ignored = Vec::new();
+    expect_interaction_requested_preserving(receiver, ask_id, &mut ignored)
 }
 
 fn expect_interaction_resolved(
@@ -979,7 +1002,8 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
                 &session_id,
                 cmd_permission_respond("read-call", true),
             );
-            expect_interaction_requested(receiver, "ask-after-read");
+            let mut intermediate = Vec::new();
+            expect_interaction_requested_preserving(receiver, "ask-after-read", &mut intermediate);
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
             send_cmd(
@@ -987,7 +1011,8 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
                 &session_id,
                 cmd_ask_respond("ask-after-read", &[("q1", "yes")]),
             );
-            let events = collect_through_terminal(receiver);
+            let mut events = intermediate;
+            events.extend(collect_through_terminal(receiver));
             let finished = tool_finished_ids(&events);
             assert_eq!(finished, vec!["read-call", "ask-after-read"]);
         },
@@ -1034,13 +1059,15 @@ fn every_permission_resolves_before_the_queued_ask_is_presented() {
                 &session_id,
                 cmd_permission_respond("read-two", true),
             );
-            expect_interaction_requested(receiver, "ask-after-two-reads");
+            let mut intermediate = Vec::new();
+            expect_interaction_requested_preserving(receiver, "ask-after-two-reads", &mut intermediate);
             send_cmd(
                 writer,
                 &session_id,
                 cmd_ask_respond("ask-after-two-reads", &[("q1", "yes")]),
             );
-            let events = collect_through_terminal(receiver);
+            let mut events = intermediate;
+            events.extend(collect_through_terminal(receiver));
             let finished = tool_finished_ids(&events);
             assert_eq!(finished.len(), 3);
         },

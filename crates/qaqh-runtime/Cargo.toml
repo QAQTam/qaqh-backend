@@ -6,6 +6,7 @@ license.workspace = true
 description = "GUI-independent QAQ-Harness daemon application runtime"
 
 [dependencies]
+qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-config-api = { path = "../qaqh-config-api" }
 qaqh-domain = { path = "../qaqh-domain" }
@@ -36,7 +37,7 @@ ureq = { version = "3", features = ["json"] }
 # Sign in with ChatGPT（套餐用量）：服务面 `siwc.*` 的全部实现。
 qaqh-siwc = { path = "../qaqh-siwc" }
 qaqh-dsaccount = { path = "../qaqh-dsaccount" }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 
 [features]
 default = ["memory"]

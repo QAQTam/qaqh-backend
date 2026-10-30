@@ -3,7 +3,7 @@ use qaqh_session::canonical::{CanonicalSessionIdentity, CommittedFactReader};
 use qaqh_session::session_fact_v2::FactPayload;
 
 use super::state::agent::AgentState;
-use super::tool_runtime::canonical_turn_id;
+use super::util::canonical_turn_id;
 
 impl AgentState {
     /// Project committed task identity once per turn, then pass it explicitly to gate.

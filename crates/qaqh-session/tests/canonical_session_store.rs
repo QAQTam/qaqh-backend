@@ -91,22 +91,18 @@ fn append_commits_then_updates_projection_and_returns_events() {
         .expect("append input fact");
 
     assert_eq!(outcome.fact.fact_seq, 1);
-    assert_eq!(outcome.events.len(), 2);
+    assert_eq!(outcome.events.len(), 1);
     assert_eq!(
         outcome
             .events
             .iter()
             .map(|event| event.projection_slot.expect("projection slot"))
             .collect::<Vec<_>>(),
-        vec![
-            qaqh_session::session_fact_v2::ProjectionSlot::Conversation,
-            qaqh_session::session_fact_v2::ProjectionSlot::Timeline
-        ]
+        vec![qaqh_session::session_fact_v2::ProjectionSlot::Conversation]
     );
     assert_eq!(store.committed().committed_fact_seq, 1);
     assert_eq!(store.last_fact_seq(), 1);
     assert_eq!(store.snapshot().conversation.revision, 1);
-    assert_eq!(store.snapshot().timeline.revision, 1);
 }
 
 #[test]

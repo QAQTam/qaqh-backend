@@ -212,6 +212,7 @@ fn unrelated_round(ordinal: u64) -> SessionFact {
                 "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             ),
             context_revision: 0,
+            identity: None,
         }),
     )
 }

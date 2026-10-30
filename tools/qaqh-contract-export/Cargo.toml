@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 qaqh-domain = { path = "../../crates/qaqh-domain" }
 qaqh-ringing = { path = "../../crates/qaqh-ringing", features = ["ts"] }
+qaqh-ringing-contract = { path = "../../crates/qaqh-ringing-contract", features = ["ts"] }
 qaqh-types = { path = "../../crates/qaqh-types", features = ["ts"] }
 qaqh-runtime = { path = "../../crates/qaqh-runtime", features = ["ts"] }
 qaqh-session = { path = "../../crates/qaqh-session", features = ["ts"] }

@@ -184,6 +184,101 @@ pub enum FactPayload {
     SubagentFinished(SubagentFinished),
     InterAgentCommunication(InterAgentCommunication),
     DriverChanged(DriverChanged),
+    ContextMessageCommitted(ContextMessageCommitted),
+    ContextCheckpointCommitted(ContextCheckpointCommitted),
+    ProviderResponseCommitted(ProviderResponseCommitted),
+    QueuedInputSettled(QueuedInputSettled),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedInputDisposition {
+    Cancelled,
+    Rejected,
+    Expired,
+}
+
+/// Settles an accepted input that never started a turn.
+///
+/// A queued input must never fabricate an empty `TurnStarted` just to leave the
+/// pending queue: this fact removes the input from the pending FIFO and records
+/// why it was not executed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedInputSettled {
+    pub input_id: InputId,
+    pub disposition: QueuedInputDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_ref: Option<RecoveryRef>,
+    pub settled_at_ms: i64,
+}
+
+/// Full replayable message stored in a session-scoped blob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMessageCommitted {
+    pub message_ref: ContentRef,
+    pub origin: ContextMessageOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMessageOrigin {
+    FrozenPrefix,
+    Input,
+    ProviderResponse,
+    ToolResult,
+    Feature,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCheckpointCommitted {
+    pub checkpoint_ref: ContentRef,
+    pub replaces_through_fact_seq: u64,
+}
+
+/// Complete, replayable response of one model attempt.
+///
+/// This is the barrier that allows tool dispatch and the next round: an
+/// incomplete or unknown finish is recorded here and never executes tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderResponseCommitted {
+    pub turn_id: TurnId,
+    pub round: u32,
+    pub attempt: u32,
+    /// Complete neutral assistant message, stored as a session-scoped blob.
+    pub message_ref: ContentRef,
+    /// Provider-specific replay material (signatures, reasoning items) the next
+    /// request must send back verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opaque_refs: Vec<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageInfo>,
+    pub finish: ProviderFinish,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFinish {
+    /// The model finished its message; content is complete.
+    Stop,
+    /// The model stopped to call tools; the message carries the declarations.
+    ToolUse,
+    /// The provider truncated the message by token limit.
+    Length,
+    /// The provider reported an incomplete or filtered message.
+    Incomplete,
+    /// No usable terminal signal was observed.
+    Unknown,
+}
+
+impl ProviderFinish {
+    /// Only a complete response may start tools or the next round.
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Stop | Self::ToolUse)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,12 +315,38 @@ pub struct TurnStarted {
     pub recovery_ref: Option<RecoveryRef>,
 }
 
+/// Everything that makes one model request reproducible.
+///
+/// The commit owner hashes the whole `ModelRoundStarted` fact into the effect
+/// identity, so changing provider, parameters, tools or the frozen prefix
+/// changes the authorization digest too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestIdentity {
+    /// 1-based attempt inside this round. A retry is a new attempt; results of
+    /// different attempts are never merged into one response.
+    pub attempt: u32,
+    pub model: String,
+    pub provider_digest: ContentHash,
+    pub params_digest: ContentHash,
+    pub tool_catalog_digest: ContentHash,
+    /// Frozen system prompt / environment / skills digest.
+    pub prefix_digest: ContentHash,
+    /// Digest of the exact wire request the provider will receive.
+    pub request_digest: ContentHash,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRoundStarted {
     pub turn_id: TurnId,
     pub round: u32,
+    /// Hash of the frozen message list this round may send.
     pub request_hash: ContentHash,
     pub context_revision: u64,
+    /// Absent only on facts written before request identity existed. Such a
+    /// round cannot prove which provider, parameters or tools it was
+    /// authorized for and must not be resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<RequestIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -944,7 +1065,6 @@ pub enum SearchVisibility {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionSlot {
     Conversation = 0,
-    Timeline = 1,
     Control = 2,
     Resources = 3,
     Meta = 4,
