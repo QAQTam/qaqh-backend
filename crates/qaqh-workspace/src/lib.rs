@@ -7,7 +7,6 @@
 pub use qaqh_file_tools::confirm_apply;
 pub use qaqh_file_tools::copy_range;
 pub use qaqh_permission::conflict;
-pub mod dashboard;
 pub mod display;
 pub use qaqh_file_tools::grep_tool;
 pub use qaqh_file_tools::pending;

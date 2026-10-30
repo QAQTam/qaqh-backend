@@ -117,14 +117,6 @@ impl SkillContextManager {
         self.frozen.clone().unwrap_or_else(|| self.build_snapshot())
     }
 
-    /// The initial catalog text at discovery time, before any skills are activated.
-    /// Persisted in the MessageStore on session creation so the cache prefix survives
-    /// daemon restarts — the catalog sits right after the base system prompt and a
-    /// different catalog on resume would invalidate the entire conversation cache.
-    pub fn initial_catalog_text(&self) -> &str {
-        &self.catalog.rendered
-    }
-
     pub fn apply_tool_effect(&mut self, effect: SkillEffect) -> Result<(), String> {
         match effect {
             SkillEffect::Activate(activation) => self.activate(activation, "model"),
@@ -251,10 +243,6 @@ impl SkillContextManager {
         self.frozen.as_ref()
     }
 
-    pub fn catalog_snapshot(&self) -> &SkillCatalogSnapshot {
-        &self.catalog
-    }
-
     pub fn context_epoch(&self) -> u64 {
         self.context_epoch
     }
@@ -299,12 +287,6 @@ impl SkillContextManager {
 
     pub fn operation_revision(&self) -> u64 {
         self.operation_revision
-    }
-
-    pub fn has_requested(&self) -> bool {
-        self.entries
-            .values()
-            .any(|entry| entry.state == SkillRuntimeState::Requested)
     }
 
     pub fn token_budget(&self) -> usize {

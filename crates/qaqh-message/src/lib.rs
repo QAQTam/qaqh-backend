@@ -9,8 +9,6 @@
 
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
-pub mod assistant;
-pub mod compaction;
 pub mod compact_prompt;
 pub mod context_flow;
 pub mod effect;

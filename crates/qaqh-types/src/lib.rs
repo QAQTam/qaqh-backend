@@ -13,7 +13,6 @@ pub mod config;
 pub mod context_usage;
 pub mod discovery;
 pub mod image_store;
-pub mod image_accounting;
 pub mod memory;
 pub mod message;
 pub mod provider;

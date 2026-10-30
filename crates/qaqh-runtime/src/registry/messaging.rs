@@ -349,16 +349,4 @@ impl AgentRegistry {
             .map_err(QaqhError::from)
     }
 
-    /// 向所有存活 agent 广播同一 Ringing 命令。
-    pub fn send_ringing_all(&mut self, command: qaqh_ringing::RingingCommand) {
-        let sessions: Vec<_> = self.instances.keys().cloned().collect();
-        for session_id in sessions {
-            let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-                session_id.clone(),
-                "daemon-broadcast",
-                command.clone(),
-            );
-            let _ = self.send_ringing(&session_id, &env);
-        }
-    }
 }

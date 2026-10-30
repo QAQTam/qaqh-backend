@@ -9,7 +9,7 @@
 //! quota reservations for backgrounded or unstopped work, and telling the truth
 //! about whether anything started.
 
-use qaqh_agentloop_core::{DispatchEvidence, mailbox::FrameSize, supervisor::Supervisor};
+use qaqh_agentloop_core::{DispatchEvidence, mailbox::FrameSize};
 use qaqh_session::{
     canonical::sha256_content_hash,
     session_commit::{CommittedExecution, FenceReason},
@@ -26,8 +26,6 @@ use std::{
 };
 
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaReservation, ReleaseReason};
-
-pub type ToolSupervisor = Supervisor<ToolOutcome, CommittedExecution>;
 
 /// Everything the authorized effect pinned before it was committed.
 #[derive(Debug, Clone)]

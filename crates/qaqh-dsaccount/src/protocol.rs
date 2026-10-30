@@ -8,10 +8,6 @@ pub const PLATFORM_ORIGIN: &str = "https://platform.deepseek.com";
 /// 推理 origin（模型与文件请求）。账号凭据**只**允许发往这里。
 pub const INFERENCE_ORIGIN: &str = "https://api.deepseek.com";
 
-/// 浏览器授权页（服务端下发的 `authorize_url` 就长这样；我们只校验 origin+path）。
-pub const AUTHORIZE_PATH: &str = "/dsh/authorize";
-/// 完成页（换码响应里的 `authorized_url`）。
-pub const AUTHORIZED_PATH: &str = "/dsh/authorized";
 /// 回环回调路径。参照实现把它固定在这一条上；我们照搬，不做变体。
 pub const CALLBACK_PATH: &str = "/oauth/callback";
 /// 默认回环端口（端口可变，scheme/host/path 不可变）。

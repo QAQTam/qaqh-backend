@@ -638,18 +638,6 @@ impl ToolResult {
         self.summary = bounded_text(&self.summary, TOOL_SUMMARY_MAX_CHARS).0;
     }
 
-    /// 整体替换模型文本，并重算 summary 与 token 估算。
-    ///
-    /// 用于"占位符 → 真实内容"的修复（如 `amend_synthetic_repair`）：这类场景
-    /// 若只改模型文本，summary 会停留在占位符上，正是投影漂移的典型形态。
-    /// `truncated` 与 `output_ref` 不在本方法职责内，保持不变。
-    pub fn rewrite_text(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        self.summary = bounded_text(&text, TOOL_SUMMARY_MAX_CHARS).0;
-        self.model.text = text;
-        self.model.total_tokens = estimate_tokens(&self.model.text);
-    }
-
     /// 套用工具侧折叠结果：替换模型文本并标记截断。
     ///
     /// 供 `tool_side_fold` 使用。summary **不随之改变**——它是全文的前 512
