@@ -617,7 +617,7 @@ pub(crate) fn stash_interaction_body(
 /// 交互正文 pin 释放：交互 resolved / permission tool finished 时解除，
 /// 否则 content store 泄漏。
 ///
-/// 调用方：actor 桥（`WriterEvent::Ringing` → hub 发布前）。
+/// 调用方：Ringing 事件桥（worker 事件 → hub 发布前）。
 pub(crate) fn apply_interaction_side_effects(
     hub: &RingingHub,
     session_id: &str,

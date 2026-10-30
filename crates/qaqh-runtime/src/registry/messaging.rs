@@ -35,7 +35,7 @@ impl AgentRegistry {
         let reload_spec = match &env.command {
             qaqh_ringing::RingingCommand::Control(
                 qaqh_domain::ControlCommand::AgentReloadConfig,
-            ) => crate::agent::engine_session::session_effective_config(
+            ) => crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
                 session_id,
             )

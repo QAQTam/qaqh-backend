@@ -4,12 +4,11 @@
 //! schema 残留的 oneOf/anyOf/allOf 与 `$defs`/`$schema` wire 税。
 //! 使用与生产 agent 相同的注册入口，避免测试继续暴露已停用的子代理工具。
 
-use qaqh_runtime::agent::state::agent::agent_tool_registrars;
 use qaqh_workspace::registration::build_tool_manager;
 
 #[test]
 fn full_surface_schemas_are_object_shaped_without_composition_keys() {
-    let defs = build_tool_manager(&agent_tool_registrars()).all_defs();
+    let defs = build_tool_manager(&[]).all_defs();
     let builtin_names: Vec<_> = build_tool_manager(&[])
         .all_defs()
         .into_iter()
@@ -37,7 +36,7 @@ fn full_surface_schemas_are_object_shaped_without_composition_keys() {
 
 #[test]
 fn production_registry_omits_subagent_and_collaboration_tools() {
-    let manager = build_tool_manager(&agent_tool_registrars());
+    let manager = build_tool_manager(&[]);
     let defs = manager.all_defs();
     for name in [
         "spawn_subagent",

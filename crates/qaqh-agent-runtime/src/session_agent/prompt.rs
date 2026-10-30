@@ -1,8 +1,9 @@
 //! Production prompt and provider assembly for the thin session agent.
 //!
-//! The legacy loop assembled the system prompt inside `AgentState`. The thin
-//! owner commits its prefix explicitly, so the same inputs are materialized
-//! here as one durable `FrozenPrefix` message.
+//! The thin owner commits its prefix explicitly: the stable inputs are
+//! materialized here as one durable `FrozenPrefix` message, which is then
+//! reused byte-for-byte as the cacheable request prefix. (The legacy loop
+//! rebuilt the prompt from `AgentState` every turn; that path is gone.)
 
 use std::path::{Path, PathBuf};
 

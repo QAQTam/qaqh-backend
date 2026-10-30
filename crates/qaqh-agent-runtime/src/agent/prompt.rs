@@ -29,9 +29,8 @@ pub fn full_system_prompt() -> String {
 ///
 /// The date is intentionally NOT part of the system prompt: it would break
 /// the provider prefix cache once per day. It is delivered instead via the
-/// frozen [Environment] annotation on the first user message (see
-/// AgentState::build_context), which regenerates per session without
-/// touching the cache prefix.
+/// frozen [Environment] annotation on the first user message, which
+/// regenerates per session without touching the cache prefix.
 pub fn full_system_prompt_with_env(os_info: &str) -> String {
     let shells = detect_shells();
     let tools = TOOLS_INFO
@@ -48,12 +47,6 @@ pub fn full_system_prompt_with_env(os_info: &str) -> String {
         shells,
         toolchains: tools,
     })
-}
-
-/// 按工具模式选择系统提示。minimal:dsh 已下线，一切模式（含已废弃名）
-/// 都走完整 prompt；模式判定使用 qaqh-types 的单一工具模式契约（BUG-013）。
-pub fn system_prompt_for_mode(_tool_mode: &str) -> String {
-    full_system_prompt_with_env(OS_INFO.get().map(|s| s.as_str()).unwrap_or(""))
 }
 
 /// Detect available shells on this machine.
@@ -138,25 +131,6 @@ mod tests {
     #[test]
     fn prompt_is_not_empty() {
         assert!(!full_system_prompt().is_empty());
-    }
-
-    #[test]
-    fn system_prompt_for_mode_minimal_dsh_falls_back_to_full() {
-        // minimal:dsh 已随 bash/pwsh 拆分下线（is_minimal_dsh 恒 false）：
-        // 废弃模式必须走与 standard 相同的完整 prompt，极简特例不得复活。
-        assert_eq!(
-            system_prompt_for_mode("minimal:dsh"),
-            system_prompt_for_mode("standard")
-        );
-        // 完整 prompt 显著长于已退役的极简句（长度守卫双保险）。
-        assert!(
-            system_prompt_for_mode("standard").len()
-                > "You are a helpful software engineer assistant.".len()
-        );
-        assert!(
-            system_prompt_for_mode("").len()
-                > "You are a helpful software engineer assistant.".len()
-        );
     }
 
     #[test]
