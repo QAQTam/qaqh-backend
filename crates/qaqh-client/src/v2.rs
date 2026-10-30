@@ -21,84 +21,61 @@ use crate::error::{ClientError, Result};
 use crate::sse_decoder::SseDecoder;
 use crate::types::{CommandOptions, RingingCommand, SseFrame};
 
-pub use qaqh_ringing::{
-    CanonicalCursor as ClientV2Cursor, CursorToken as ClientV2CursorToken,
-    END_OF_FACT as CLIENT_V2_END_OF_FACT, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
-    RingingV2AskOutcome as ClientV2AskOutcome, RingingV2CommandAck as ClientV2CommandAck,
-    RingingV2CommandResult as ClientV2CommandResult,
-    RingingV2CommandStatus as ClientV2CommandStatus, RingingV2DriverState as ClientV2DriverState,
-    RingingV2ExistingResult as ClientV2ExistingResult,
-    RingingV2InteractionKind as ClientV2InteractionKind,
-    RingingV2PendingInteraction as ClientV2PendingInteraction,
-    RingingV2PendingSet as ClientV2PendingSet, RingingV2ResetReason as ClientV2ResetReason,
-    RingingV2ResetRequired as ClientV2Reset,
-};
+pub use qaqh_ringing::{END_OF_FACT as CLIENT_V2_END_OF_FACT, RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
 
-/// Typed canonical projection payload exposed to shells through qaqh-client.
-pub type ClientV2Payload = qaqh_session::session_fact_v2::ProjectionPayload;
+// The v2 wire contract **is** the session fact model. There is no renaming
+// layer: callers import the real modules instead of former `ClientV2*` aliases.
+pub use qaqh_ringing as ringing;
+pub use qaqh_ringing::v2 as ringing_v2;
+pub use qaqh_session::projection as projection;
+pub use qaqh_session::session_fact_v2 as fact;
+pub use qaqh_session::team as team;
 
 /// Typed control delta (#323 缺口 1).
 ///
-/// 壳层必须能 `match ClientV2ControlDelta::InteractionRequested { .. }` —— match
-/// 枚举变体**必须写出枚举名**，所以只导出 `ClientV2Payload` 不够。
+/// 壳层必须能 `match fact::ControlDelta::InteractionRequested { .. }` —— match
+/// 枚举变体**必须写出枚举名**，所以只导出 `fact::ProjectionPayload` 不够。
 ///
-/// 命名注意：这里的 `kind` 字段是 [`ClientV2DeltaInteractionKind`]（wire 值
+/// 命名注意：这里的 `kind` 字段是 [`fact::InteractionKind`]（wire 值
 /// `ask` / `plan` / `permission`），与 bootstrap 的
-/// [`ClientV2PendingInteraction`]`.kind`（[`ClientV2InteractionKind`]，wire 值
+/// [`ringing_v2::RingingV2PendingInteraction`]`.kind`（[`ringing_v2::RingingV2InteractionKind`]，wire 值
 /// 同样为 `ask` / `plan` / `permission`）**不是同一个 Rust 枚举**。两者 wire
 /// 语义已在 2026-09-24 统一，本别名只让壳层能同时命名它们。
-pub use qaqh_session::session_fact_v2::ControlDelta as ClientV2ControlDelta;
 
-/// `ClientV2ControlDelta::SubagentFinished.status`。
-pub use qaqh_session::session_fact_v2::SubagentTerminalStatus as ClientV2SubagentTerminalStatus;
+/// `fact::ControlDelta::SubagentFinished.status`。
 
 /// 压缩瞬态终态（`ConversationDelta::CompactFinished.status`）。
 ///
 /// 与 `qaqh_client::types::CompactStatus`（域事件面）wire 值一致，但这是 v2 契约
 /// 自己的类型；壳层 match delta 变体时用它。
-pub use qaqh_session::session_fact_v2::CompactStatus as ClientV2CompactStatus;
 /// 会话删除原因（`MetaDelta::Deleted.reason`）。
-pub use qaqh_session::session_fact_v2::DeleteReason as ClientV2DeleteReason;
 /// 会话回合 id（`ConversationDelta::TurnStarted.turn_id` 等）。
-pub use qaqh_session::session_fact_v2::TurnId as ClientV2TurnId;
 /// 回合终态（`ConversationDelta::TurnFinished.terminal`）。
-pub use qaqh_session::session_fact_v2::TurnTerminal as ClientV2TurnTerminal;
 
-/// `ClientV2Payload::ConversationDelta` 的载荷。
-pub use qaqh_session::session_fact_v2::ConversationDelta as ClientV2ConversationDelta;
-/// `ClientV2Payload::MetaDelta` 的载荷。
-pub use qaqh_session::session_fact_v2::MetaDelta as ClientV2MetaDelta;
-/// `ClientV2Payload::ResourceDelta` 的载荷。
-pub use qaqh_session::session_fact_v2::ResourceDelta as ClientV2ResourceDelta;
+/// `fact::ProjectionPayload::ConversationDelta` 的载荷。
+/// `fact::ProjectionPayload::MetaDelta` 的载荷。
+/// `fact::ProjectionPayload::ResourceDelta` 的载荷。
 
-/// `ClientV2ControlDelta::InteractionRequested.kind` 的类型。
-pub use qaqh_session::session_fact_v2::InteractionKind as ClientV2DeltaInteractionKind;
+/// `fact::ControlDelta::InteractionRequested.kind` 的类型。
 
-/// `ClientV2ControlDelta::InteractionRequested/Resolved/Expired.interaction_id`.
-pub use qaqh_session::session_fact_v2::InteractionId as ClientV2InteractionId;
+/// `fact::ControlDelta::InteractionRequested/Resolved/Expired.interaction_id`.
 
-/// `ClientV2ControlDelta::InteractionRequested.call_id`.
-pub use qaqh_session::session_fact_v2::ToolCallId as ClientV2ToolCallId;
+/// `fact::ControlDelta::InteractionRequested.call_id`.
 
 /// `InteractionRequested.request` / `InteractionResolved.decision` 的载荷
 /// （**SSE control delta** 面，canonical 类型）。
-pub use qaqh_session::session_fact_v2::ContentValue as ClientV2ContentValue;
 
-/// `ClientV2PendingInteraction.request` 的载荷（**bootstrap** 面）。
+/// `ringing_v2::RingingV2PendingInteraction.request` 的载荷（**bootstrap** 面）。
 ///
-/// 与 [`ClientV2ContentValue`] 的 JSON 形态一致（`kind` / `data` 判别式），但
+/// 与 [`fact::ContentValue`] 的 JSON 形态一致（`kind` / `data` 判别式），但
 /// bootstrap 走 wire 层类型（`qaqh-ringing` 不依赖 session crate），所以是两个
 /// 类型；两侧 serde 形态由 daemon 的映射函数保持一致。
-pub use qaqh_ringing::RingingV2ContentValue as ClientV2PendingContentValue;
 
 /// `InteractionResolved.verdict`（结构化裁决；legacy fact 为 `None`）。
-pub use qaqh_session::session_fact_v2::InteractionDecision as ClientV2InteractionDecision;
 
 /// `InteractionResolved.resolved_by`.
-pub use qaqh_session::session_fact_v2::ActorRef as ClientV2ActorRef;
 
 /// `InteractionExpired.reason`。
-pub use qaqh_session::session_fact_v2::InteractionExpiryReason as ClientV2InteractionExpiryReason;
 
 /// **Team projection**：TUI/WinUI 的 roster / inbox 唯一权威投影。
 ///
@@ -107,26 +84,16 @@ pub use qaqh_session::session_fact_v2::InteractionExpiryReason as ClientV2Intera
 /// 工具卡 JSON 推导 agent 身份。
 ///
 /// 快照来自 `GET /ringing/v2/sessions/{seed}/team`（[`Client::team_v2`]），
-/// 之后的增量来自 per-seed 单流的 [`ClientV2Payload::TeamDelta`]。
-pub use qaqh_session::projection::TeamSnapshot as ClientV2TeamSnapshot;
+/// 之后的增量来自 per-seed 单流的 [`fact::ProjectionPayload::TeamDelta`]。
 /// inbox 消息的投递语义（queue / trigger / interrupt / steer / interject）。
-pub use qaqh_session::session_fact_v2::InterAgentDelivery as ClientV2TeamDelivery;
 /// agent residency（loaded / unloaded）。**`unloaded != completed != closed`**。
-pub use qaqh_session::session_fact_v2::TeamAgentResidency as ClientV2TeamAgentResidency;
 /// roster 里一个 agent 的快照：`agent_path` 为主键，`nickname` 只是显示辅助。
-pub use qaqh_session::session_fact_v2::TeamAgentSnapshot as ClientV2TeamAgentSnapshot;
 /// agent 生命周期状态（pending_init / running / waiting_user / interrupted / completed / errored / shutdown / not_found）。
-pub use qaqh_session::session_fact_v2::TeamAgentStatus as ClientV2TeamAgentStatus;
 /// message board 快照（`/team` 的 `board` 字段）。
-pub use qaqh_session::session_fact_v2::TeamBoardSnapshot as ClientV2TeamBoardSnapshot;
 /// 单流上的 Team 增量。
-pub use qaqh_session::session_fact_v2::TeamDelta as ClientV2TeamDelta;
 /// inbox 里一条待投递消息的摘要：author / recipient / task / delivery。
-pub use qaqh_session::session_fact_v2::TeamInboxSummary as ClientV2TeamInboxSummary;
 /// 单条 task（`TeamDelta::TaskChanged.task`）。
-pub use qaqh_session::session_fact_v2::TeamTaskSnapshot as ClientV2TeamTaskSnapshot;
 /// task board 快照（`/team` 的 `tasks` 字段）。
-pub use qaqh_session::team::TaskBoardSnapshot as ClientV2TaskBoardSnapshot;
 
 /// `GET /ringing/v2/sessions/{seed}/team` 的 typed 响应。
 ///
@@ -139,7 +106,7 @@ pub use qaqh_session::team::TaskBoardSnapshot as ClientV2TaskBoardSnapshot;
 pub use qaqh_ringing_contract::ClientV2TeamResponse;
 
 /// Typed v2 SSE envelope.
-pub type ClientV2Event = RingingV2EventEnvelope<ClientV2Payload>;
+pub type ClientV2Event = RingingV2EventEnvelope<fact::ProjectionPayload>;
 
 /// Alias kept explicit for shells that prefer the full contract name.
 pub type ClientV2EventEnvelope = ClientV2Event;
@@ -153,9 +120,7 @@ pub use qaqh_ringing_contract::{ClientV2ControlState, ClientV2ToolState};
 pub type ClientV2ConversationState = qaqh_session::projection::ConversationSnapshot;
 
 /// `conversation.state.context[].kind`（typed 快照里逐条上下文项）。
-pub use qaqh_session::projection::ConversationContextKind as ClientV2ConversationContextKind;
 /// `control.state.activity` 的 v2 词汇（idle / running / interrupted）。
-pub use qaqh_session::session_fact_v2::ActivityState as ClientV2ActivityState;
 
 /// Typed authoritative v2 bootstrap.
 pub type ClientV2Bootstrap =
@@ -198,7 +163,7 @@ impl ClientV2SessionState {
 #[derive(Debug, Clone)]
 pub enum ClientV2SubscriptionEvent {
     Event(Box<ClientV2Event>),
-    Reset(ClientV2Reset),
+    Reset(ringing_v2::RingingV2ResetRequired),
     /// 字节到达但凑不出完整帧（daemon 的 keepalive 注释行 / 跨 chunk 半帧）。
     ///
     /// 把「到达」本身呈现给调用方，v2 流的空闲计时器才能在**字节层**复位：
@@ -251,7 +216,7 @@ impl ClientV2Subscription {
         let frame =
             frame.map_err(|()| ClientError::Protocol("invalid UTF-8 in v2 SSE frame".into()))?;
         if frame.event_type == "ringing.reset_required" {
-            let reset: ClientV2Reset = serde_json::from_str(&frame.data)?;
+            let reset: ringing_v2::RingingV2ResetRequired = serde_json::from_str(&frame.data)?;
             reset
                 .validate()
                 .map_err(|code| ClientError::Protocol(format!("invalid v2 reset: {code}")))?;
@@ -474,7 +439,7 @@ impl Client {
     ///
     /// Team projection 快照：roster（以 `AgentPath` 为主）+ inbox + task board +
     /// message board。deltas 在 per-seed 单流上以
-    /// [`ClientV2Payload::TeamDelta`] 到达；壳层应当 **先拉一次快照、再应用
+    /// [`fact::ProjectionPayload::TeamDelta`] 到达；壳层应当 **先拉一次快照、再应用
     /// delta**，不要只靠 delta 增量拼状态。
     pub async fn team_v2(&self, session_id: &str) -> Result<ClientV2TeamResponse> {
         let state = self.require_v2_session().await?;
@@ -577,13 +542,6 @@ async fn api_error(response: reqwest::Response, path: &str) -> ClientError {
     }
 }
 
-/// Compatibility aliases for shells that want to build typed v2 events in
-/// reducer tests without importing `qaqh-ringing` directly.
-pub use qaqh_ringing::{
-    RingingV2Capabilities as ClientV2Capabilities, RingingV2Delivery as ClientV2Delivery,
-    RingingV2StreamKey as ClientV2StreamKey,
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,8 +621,8 @@ mod tests {
         );
 
         // unloaded != completed：两者是**两个正交字段**，前端不能把 unloaded 画成 deleted。
-        assert_eq!(child.residency, ClientV2TeamAgentResidency::Unloaded);
-        assert_eq!(child.status, ClientV2TeamAgentStatus::Completed);
+        assert_eq!(child.residency, fact::TeamAgentResidency::Unloaded);
+        assert_eq!(child.status, fact::TeamAgentStatus::Completed);
 
         // inbox 必须带 author / recipient / task / delivery 四要素。
         let inbox = &response.team.unread_messages[0];
@@ -680,38 +638,38 @@ mod tests {
     /// 壳层必须能**命名** TeamDelta 的变体（这是 TUI 之前做不到的事：类型没导出）。
     #[test]
     fn team_delta_variants_are_nameable_from_the_client_surface() {
-        let delta = ClientV2TeamDelta::AgentResidencyChanged {
+        let delta = fact::TeamDelta::AgentResidencyChanged {
             revision: 3,
             agent_id: qaqh_session::session_fact_v2::SessionId::new(
                 "0199a0f0-0000-7000-8000-000000000002",
             ),
-            residency: ClientV2TeamAgentResidency::Unloaded,
+            residency: fact::TeamAgentResidency::Unloaded,
         };
         let value = serde_json::to_value(&delta).expect("json");
         assert_eq!(value["kind"], "agent_residency_changed");
         assert_eq!(value["data"]["residency"], "unloaded");
 
-        // 同一个 delta 也能从 `ClientV2Payload` 里取出来并匹配。
-        let payload: ClientV2Payload = serde_json::from_value(serde_json::json!({
+        // 同一个 delta 也能从 `fact::ProjectionPayload` 里取出来并匹配。
+        let payload: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
             "kind": "team_delta",
             "data": value,
         }))
         .expect("payload");
         match payload {
-            ClientV2Payload::TeamDelta(ClientV2TeamDelta::AgentResidencyChanged {
+            fact::ProjectionPayload::TeamDelta(fact::TeamDelta::AgentResidencyChanged {
                 residency,
                 ..
-            }) => assert_eq!(residency, ClientV2TeamAgentResidency::Unloaded),
+            }) => assert_eq!(residency, fact::TeamAgentResidency::Unloaded),
             other => panic!("expected TeamDelta, got {other:?}"),
         }
     }
 
     #[test]
     fn public_v2_surface_is_typed() {
-        let cursor = ClientV2CursorToken::encode_snapshot(&ClientV2Cursor::snapshot("log-1", 7))
+        let cursor = ringing::CursorToken::encode_snapshot(&ringing::CanonicalCursor::snapshot("log-1", 7))
             .expect("cursor");
         assert_eq!(cursor.decode_snapshot().expect("decode").fact_seq, 7);
-        assert_eq!(ClientV2Delivery::Reliable, RingingV2Delivery::Reliable);
+        assert_eq!(ringing_v2::RingingV2Delivery::Reliable, RingingV2Delivery::Reliable);
         assert_eq!(CLIENT_V2_END_OF_FACT, u16::MAX);
         assert_eq!(RINGING_V2_VERSION, 2);
         assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
@@ -719,7 +677,7 @@ mod tests {
 
     #[test]
     fn v2_reset_reason_is_stable() {
-        let reason = ClientV2ResetReason::CursorExpired;
+        let reason = ringing_v2::RingingV2ResetReason::CursorExpired;
         assert_eq!(
             serde_json::to_string(&reason).expect("json"),
             "\"cursor_expired\""
@@ -728,19 +686,19 @@ mod tests {
 
     #[test]
     fn interaction_contracts_are_nameable() {
-        let pending = ClientV2PendingInteraction {
+        let pending = ringing_v2::RingingV2PendingInteraction {
             interaction_id: "i1".into(),
             call_id: "c1".into(),
             turn_id: "t1".into(),
-            kind: ClientV2InteractionKind::PlanReview,
-            request: Some(ClientV2PendingContentValue::Ref {
+            kind: ringing_v2::RingingV2InteractionKind::PlanReview,
+            request: Some(ringing::RingingV2ContentValue::Ref {
                 content_ref: "sha256:abc".into(),
             }),
         };
-        let set: ClientV2PendingSet = vec![pending];
+        let set: ringing_v2::RingingV2PendingSet = vec![pending];
         assert_eq!(set.len(), 1);
         assert_eq!(
-            serde_json::to_value(ClientV2InteractionKind::PlanReview).expect("json"),
+            serde_json::to_value(ringing_v2::RingingV2InteractionKind::PlanReview).expect("json"),
             serde_json::json!("plan")
         );
     }

@@ -4,23 +4,25 @@
 //! without importing `qaqh-ringing`, `qaqh-domain` or `qaqh-session`.
 
 use qaqh_client::{
-    ClientError, ClientV2ActorRef, ClientV2AskOutcome, ClientV2Bootstrap, ClientV2CommandAck,
-    ClientV2CommandResult, ClientV2CommandStatus, ClientV2ContentValue, ClientV2ControlDelta,
-    ClientV2ControlState, ClientV2ConversationState, ClientV2Cursor, ClientV2CursorToken,
-    ClientV2DeltaInteractionKind, ClientV2Event, ClientV2EventEnvelope, ClientV2ExistingResult,
-    ClientV2InteractionDecision, ClientV2InteractionExpiryReason, ClientV2InteractionId,
-    ClientV2Payload, ClientV2Reset, ClientV2ResetReason, ClientV2SessionState,
-    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2TaskBoardSnapshot,
-    ClientV2TeamAgentResidency, ClientV2TeamAgentSnapshot, ClientV2TeamAgentStatus,
-    ClientV2TeamBoardSnapshot, ClientV2TeamDelivery, ClientV2TeamDelta, ClientV2TeamInboxSummary,
-    ClientV2TeamResponse, ClientV2TeamSnapshot, ClientV2TeamTaskSnapshot, ClientV2ToolCallId,
+    ClientError, fact::ActorRef, ringing_v2::RingingV2AskOutcome, ClientV2Bootstrap, ringing_v2::RingingV2CommandAck,
+    ringing_v2::RingingV2CommandResult, ringing_v2::RingingV2CommandStatus, fact::ContentValue, fact::ControlDelta,
+    ClientV2ControlState, ClientV2ConversationState, ringing::CanonicalCursor, ringing::CursorToken,
+    fact::InteractionKind, ClientV2Event, ClientV2EventEnvelope, ringing_v2::RingingV2ExistingResult,
+    fact::InteractionDecision, fact::InteractionExpiryReason, fact::InteractionId,
+    fact::ProjectionPayload, ringing_v2::RingingV2ResetRequired, ringing_v2::RingingV2ResetReason, ClientV2SessionState,
+    ClientV2Subscription, ClientV2SubscriptionEvent, team::TaskBoardSnapshot,
+    fact::TeamAgentResidency, fact::TeamAgentSnapshot, fact::TeamAgentStatus,
+    fact::TeamBoardSnapshot, fact::InterAgentDelivery, fact::TeamDelta, fact::TeamInboxSummary,
+    ClientV2TeamResponse, session_projection::TeamSnapshot, fact::TeamTaskSnapshot, fact::ToolCallId,
     ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
 
+use qaqh_client::{fact, ringing, ringing_v2, session_projection, team};
+
 #[test]
 fn v2_surface_is_nameable_from_the_client_root() {
-    let cursor = ClientV2Cursor::snapshot("log-1", 7);
-    let token = ClientV2CursorToken::encode_snapshot(&cursor).expect("cursor token");
+    let cursor = ringing::CanonicalCursor::snapshot("log-1", 7);
+    let token = ringing::CursorToken::encode_snapshot(&cursor).expect("cursor token");
     assert_eq!(token.decode_snapshot().expect("decoded cursor"), cursor);
 
     let _: Option<ClientV2Bootstrap> = None;
@@ -29,19 +31,19 @@ fn v2_surface_is_nameable_from_the_client_root() {
     let _: Option<ClientV2ToolState> = None;
     let _: Option<ClientV2Event> = None;
     let _: Option<ClientV2EventEnvelope> = None;
-    let _: Option<ClientV2Payload> = None;
-    let _: Option<ClientV2Reset> = None;
+    let _: Option<fact::ProjectionPayload> = None;
+    let _: Option<ringing_v2::RingingV2ResetRequired> = None;
     let _: Option<ClientV2SessionState> = None;
     let _: Option<ClientV2Subscription> = None;
     let _: Option<ClientV2SubscriptionEvent> = None;
 
-    let result = ClientV2CommandResult::AskResolved {
+    let result = ringing_v2::RingingV2CommandResult::AskResolved {
         interaction_id: "i1".into(),
-        outcome: ClientV2AskOutcome::Answered,
+        outcome: ringing_v2::RingingV2AskOutcome::Answered,
     };
-    let _: Option<ClientV2CommandAck> = None;
-    let _: Option<ClientV2CommandStatus> = None;
-    let _: Option<ClientV2ExistingResult> = None;
+    let _: Option<ringing_v2::RingingV2CommandAck> = None;
+    let _: Option<ringing_v2::RingingV2CommandStatus> = None;
+    let _: Option<ringing_v2::RingingV2ExistingResult> = None;
     assert_eq!(
         serde_json::to_string(&result).expect("json"),
         r#"{"kind":"ask_resolved","interaction_id":"i1","outcome":"answered"}"#
@@ -50,18 +52,18 @@ fn v2_surface_is_nameable_from_the_client_root() {
     assert_eq!(RINGING_V2_VERSION, 2);
     assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
     assert_eq!(
-        serde_json::to_string(&ClientV2ResetReason::SnapshotMissing).expect("json"),
+        serde_json::to_string(&ringing_v2::RingingV2ResetReason::SnapshotMissing).expect("json"),
         "\"snapshot_missing\""
     );
 }
 
 /// #323 缺口 1：壳层必须能只靠 `qaqh-client` **命名并 match** control delta 的
-/// interaction 分支（match 枚举变体必须写出枚举名，只导出 `ClientV2Payload` 不够）。
+/// interaction 分支（match 枚举变体必须写出枚举名，只导出 `fact::ProjectionPayload` 不够）。
 #[test]
 fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
-    fn classify(delta: &ClientV2ControlDelta) -> &'static str {
+    fn classify(delta: &fact::ControlDelta) -> &'static str {
         match delta {
-            ClientV2ControlDelta::InteractionRequested {
+            fact::ControlDelta::InteractionRequested {
                 interaction_id,
                 call_id,
                 kind,
@@ -70,36 +72,36 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
                 ..
             } => {
                 // 字段必须能用 client 导出的类型命名。
-                let _: &ClientV2InteractionId = interaction_id;
-                let _: &Option<ClientV2ToolCallId> = call_id;
-                let _: &ClientV2DeltaInteractionKind = kind;
-                let _: &ClientV2ContentValue = request;
+                let _: &fact::InteractionId = interaction_id;
+                let _: &Option<fact::ToolCallId> = call_id;
+                let _: &fact::InteractionKind = kind;
+                let _: &fact::ContentValue = request;
                 let _: &Option<i64> = expires_at_ms;
                 "requested"
             }
-            ClientV2ControlDelta::InteractionResolved {
+            fact::ControlDelta::InteractionResolved {
                 interaction_id,
                 decision,
                 verdict,
                 resolved_by,
                 ..
             } => {
-                let _: &ClientV2InteractionId = interaction_id;
-                let _: &ClientV2ContentValue = decision;
-                let _: &Option<ClientV2InteractionDecision> = verdict;
-                let _: &ClientV2ActorRef = resolved_by;
+                let _: &fact::InteractionId = interaction_id;
+                let _: &fact::ContentValue = decision;
+                let _: &Option<fact::InteractionDecision> = verdict;
+                let _: &fact::ActorRef = resolved_by;
                 "resolved"
             }
-            ClientV2ControlDelta::InteractionExpired {
+            fact::ControlDelta::InteractionExpired {
                 interaction_id,
                 reason,
                 ..
             } => {
-                let _: &ClientV2InteractionId = interaction_id;
-                let _: &ClientV2InteractionExpiryReason = reason;
+                let _: &fact::InteractionId = interaction_id;
+                let _: &fact::InteractionExpiryReason = reason;
                 "expired"
             }
-            ClientV2ControlDelta::DriverChanged {
+            fact::ControlDelta::DriverChanged {
                 holder,
                 driver_epoch,
                 ..
@@ -112,7 +114,7 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
         }
     }
 
-    let requested: ClientV2Payload = serde_json::from_value(serde_json::json!({
+    let requested: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
         "kind": "control_delta",
         "data": {
             "kind": "interaction_requested",
@@ -127,14 +129,14 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
         }
     }))
     .expect("decode interaction_requested payload");
-    let ClientV2Payload::ControlDelta(delta) = &requested else {
+    let fact::ProjectionPayload::ControlDelta(delta) = &requested else {
         panic!("expected control_delta, got {requested:?}");
     };
     assert_eq!(classify(delta), "requested");
 
     // wire 事实：delta 与 bootstrap 的 plan kind 都已统一为 `plan`；两个
     // Rust 枚举都在 client 面可命名，壳层按类型匹配即可。
-    let resolved: ClientV2Payload = serde_json::from_value(serde_json::json!({
+    let resolved: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
         "kind": "control_delta",
         "data": {
             "kind": "interaction_resolved",
@@ -149,12 +151,12 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
         }
     }))
     .expect("decode interaction_resolved payload");
-    let ClientV2Payload::ControlDelta(delta) = &resolved else {
+    let fact::ProjectionPayload::ControlDelta(delta) = &resolved else {
         panic!("expected control_delta, got {resolved:?}");
     };
     assert_eq!(classify(delta), "resolved");
 
-    let expired: ClientV2Payload = serde_json::from_value(serde_json::json!({
+    let expired: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
         "kind": "control_delta",
         "data": {
             "kind": "interaction_expired",
@@ -162,7 +164,7 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
         }
     }))
     .expect("decode interaction_expired payload");
-    let ClientV2Payload::ControlDelta(delta) = &expired else {
+    let fact::ProjectionPayload::ControlDelta(delta) = &expired else {
         panic!("expected control_delta, got {expired:?}");
     };
     assert_eq!(classify(delta), "expired");
@@ -173,68 +175,68 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
 ///
 /// `TeamSnapshot/TeamDelta` 是 TUI/WinUI 的唯一 roster/inbox 投影
 /// （`docs/current/architecture.md`），而壳层不能依赖 `qaqh-session`
-/// （静态门禁 G1）。只导出 `ClientV2Payload` 不够——match 枚举变体必须写出
+/// （静态门禁 G1）。只导出 `fact::ProjectionPayload` 不够——match 枚举变体必须写出
 /// 枚举名，所以这些类型必须从 client 根导出。
 #[test]
 fn team_projection_is_consumable_from_the_client_root() {
     // 快照面：`Client::team_v2` 的返回类型 + roster / inbox / board 各层类型。
     let _: Option<ClientV2TeamResponse> = None;
-    let _: Option<ClientV2TeamSnapshot> = None;
-    let _: Option<ClientV2TeamAgentSnapshot> = None;
-    let _: Option<ClientV2TeamAgentStatus> = None;
-    let _: Option<ClientV2TeamAgentResidency> = None;
-    let _: Option<ClientV2TeamInboxSummary> = None;
-    let _: Option<ClientV2TaskBoardSnapshot> = None;
-    let _: Option<ClientV2TeamTaskSnapshot> = None;
-    let _: Option<ClientV2TeamBoardSnapshot> = None;
+    let _: Option<session_projection::TeamSnapshot> = None;
+    let _: Option<fact::TeamAgentSnapshot> = None;
+    let _: Option<fact::TeamAgentStatus> = None;
+    let _: Option<fact::TeamAgentResidency> = None;
+    let _: Option<fact::TeamInboxSummary> = None;
+    let _: Option<team::TaskBoardSnapshot> = None;
+    let _: Option<fact::TeamTaskSnapshot> = None;
+    let _: Option<fact::TeamBoardSnapshot> = None;
 
-    fn classify(delta: &ClientV2TeamDelta) -> &'static str {
+    fn classify(delta: &fact::TeamDelta) -> &'static str {
         match delta {
-            ClientV2TeamDelta::AgentJoined { agent, .. } => {
-                let _: &ClientV2TeamAgentSnapshot = agent;
+            fact::TeamDelta::AgentJoined { agent, .. } => {
+                let _: &fact::TeamAgentSnapshot = agent;
                 // roster 以 AgentPath 为主、nickname 为辅。
                 let _: &str = agent.agent_path.as_str();
                 let _: &Option<String> = &agent.nickname;
                 "joined"
             }
-            ClientV2TeamDelta::AgentStatusChanged { status, .. } => {
-                let _: &ClientV2TeamAgentStatus = status;
+            fact::TeamDelta::AgentStatusChanged { status, .. } => {
+                let _: &fact::TeamAgentStatus = status;
                 "status"
             }
-            ClientV2TeamDelta::AgentResidencyChanged { residency, .. } => {
+            fact::TeamDelta::AgentResidencyChanged { residency, .. } => {
                 // unloaded 是 residency，不是 status；前端不能画成 deleted。
-                let _: &ClientV2TeamAgentResidency = residency;
+                let _: &fact::TeamAgentResidency = residency;
                 "residency"
             }
-            ClientV2TeamDelta::AgentMessageQueued { message, .. } => {
-                let _: &ClientV2TeamInboxSummary = message;
+            fact::TeamDelta::AgentMessageQueued { message, .. } => {
+                let _: &fact::TeamInboxSummary = message;
                 let _: &str = message.author.as_str();
                 let _: &str = message.recipient.as_str();
                 let _: &Option<String> = &message.task_id;
-                let _: ClientV2TeamDelivery = message.delivery;
+                let _: fact::InterAgentDelivery = message.delivery;
                 "queued"
             }
-            ClientV2TeamDelta::AgentMessageDelivered { message_id, .. } => {
+            fact::TeamDelta::AgentMessageDelivered { message_id, .. } => {
                 let _: &str = message_id.as_str();
                 "delivered"
             }
-            ClientV2TeamDelta::AgentInterrupted { .. } => "interrupted",
-            ClientV2TeamDelta::AgentCompleted { status, .. } => {
-                let _: &ClientV2TeamAgentStatus = status;
+            fact::TeamDelta::AgentInterrupted { .. } => "interrupted",
+            fact::TeamDelta::AgentCompleted { status, .. } => {
+                let _: &fact::TeamAgentStatus = status;
                 "completed"
             }
-            ClientV2TeamDelta::TaskChanged { task, .. } => {
-                let _: &ClientV2TeamTaskSnapshot = task;
+            fact::TeamDelta::TaskChanged { task, .. } => {
+                let _: &fact::TeamTaskSnapshot = task;
                 "task"
             }
-            ClientV2TeamDelta::BoardChanged { board, .. } => {
-                let _: &ClientV2TeamBoardSnapshot = board;
+            fact::TeamDelta::BoardChanged { board, .. } => {
+                let _: &fact::TeamBoardSnapshot = board;
                 "board"
             }
         }
     }
 
-    let payload: ClientV2Payload = serde_json::from_value(serde_json::json!({
+    let payload: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
         "kind": "team_delta",
         "data": {
             "kind": "agent_residency_changed",
@@ -246,7 +248,7 @@ fn team_projection_is_consumable_from_the_client_root() {
         }
     }))
     .expect("decode team_delta payload");
-    let ClientV2Payload::TeamDelta(delta) = &payload else {
+    let fact::ProjectionPayload::TeamDelta(delta) = &payload else {
         panic!("expected team_delta, got {payload:?}");
     };
     assert_eq!(classify(delta), "residency");
