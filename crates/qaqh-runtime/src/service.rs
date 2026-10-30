@@ -8,11 +8,13 @@ use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use qaqh_session::{
     actor::ConnectionId,
     canonical::{CanonicalSessionIdentity, generate_ulid},
-    context_projection::ContextBudget,
     session_commit::SessionCommit,
-    session_fact_v2::{EventId, FactPayload, FactSchema, SessionCreated, SessionFact, SessionId},
+    session_fact_v2::{
+        EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact,
+        SessionId, SessionMetadataChanged, SessionMetadataPatch,
+    },
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::command::Command;
@@ -846,7 +848,7 @@ pub(crate) fn session_canonical_cwd(
 /// before spawning the actor so there is only one journal writer at a time.
 fn materialize_canonical_session(session_id: &str, cwd: &str, model: &str) -> Result<(), String> {
     let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
-    materialize_canonical_session_in(&session_dir, cwd, model, None)
+    materialize_canonical_session_in(&session_dir, cwd, model, None, false)
 }
 
 pub(crate) fn materialize_canonical_session_in(
@@ -854,6 +856,7 @@ pub(crate) fn materialize_canonical_session_in(
     cwd: &str,
     model: &str,
     parent_session_id: Option<SessionId>,
+    ephemeral: bool,
 ) -> Result<(), String> {
     let identity =
         CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
@@ -884,7 +887,7 @@ pub(crate) fn materialize_canonical_session_in(
     } else {
         model
     };
-    let fact = SessionFact {
+    let created = SessionFact {
         schema: FactSchema::v2(),
         session_id,
         log_id,
@@ -903,9 +906,39 @@ pub(crate) fn materialize_canonical_session_in(
             schema_caps: Vec::new(),
         }),
     };
+    let mut facts = vec![created];
+    if ephemeral {
+        // 子会话在创世批次里就带上 ephemeral：投影要求创世是第一事实，
+        // 之后单独补 patch 也行，但同一批次更省一次提交且没有中间态。
+        facts.push(SessionFact {
+            schema: FactSchema::v2(),
+            session_id: store.session_id().clone(),
+            log_id: store.log_id().clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now_ms,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SessionMetadataChanged(SessionMetadataChanged {
+                patch: SessionMetadataPatch {
+                    ephemeral: Some(true),
+                    ..Default::default()
+                },
+                source: MetadataSource::Api,
+                changed_at_ms: now_ms,
+            }),
+        });
+    }
     store
-        .commit("session-created", 0, vec![fact])
+        .commit("session-created", 0, facts)
         .map_err(|error| error.to_string())?;
+    drop(store);
+    if !ephemeral {
+        // 列表缓存从 journal 重建：创世后立刻让会话出现在 `session.list`。
+        qaqh_session::meta::refresh_index(session_dir);
+    }
     Ok(())
 }
 
@@ -940,7 +973,7 @@ mod canonical_session_materialization_tests {
     #[test]
     fn session_creation_materializes_one_canonical_baseline() {
         let dir = tempfile::tempdir().expect("tempdir");
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
             .expect("materialize");
         assert!(dir.path().join(CANONICAL_IDENTITY_FILE).exists());
         assert!(dir.path().join("storage-format").exists());
@@ -977,7 +1010,7 @@ mod canonical_session_materialization_tests {
         drop(journal);
 
         // 幂等：重复调用不得追加第二个 SessionCreated。
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
             .expect("second materialize");
         let journal = BatchJournal::open(dir.path(), identity.session_id, identity.log_id)
             .expect("journal");
@@ -996,7 +1029,7 @@ mod canonical_session_materialization_tests {
             )
             .expect("empty journal"),
         );
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
             .expect("resume before baseline commit");
         let journal = BatchJournal::open(dir.path(), identity.session_id, identity.log_id)
             .expect("journal");
@@ -1013,6 +1046,7 @@ mod canonical_session_materialization_tests {
             "/tmp/workspace",
             "test-model",
             None,
+            false,
         )
         .expect_err("legacy stores require explicit migration");
         assert!(error.contains("isolated data root"), "{error}");

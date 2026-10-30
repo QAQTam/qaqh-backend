@@ -12,8 +12,8 @@ use std::path::Path;
 use crate::session_fact_v2::{LogId, SessionFact, SessionId};
 
 use super::batch::{is_batch_root, read_committed_facts};
-use super::identity::{CanonicalIdentityError, CanonicalSessionIdentity};
-use super::log::CanonicalError;
+use super::identity::{CANONICAL_IDENTITY_FILE, CanonicalIdentityError, CanonicalSessionIdentity};
+use super::log::{CanonicalError, EVENTS_COMMIT_FILE, EVENTS_FILE};
 
 /// Committed facts plus the head sequence they end at.
 pub struct SessionFactView {
@@ -77,11 +77,17 @@ pub fn has_committed_facts(session_dir: impl AsRef<Path>) -> bool {
 ///
 /// The identity sidecar is never minted here: a session directory without one
 /// is not a session.
+///
+/// The sidecar — not the journal — is what makes a directory a session: session
+/// allocation installs the identity before any fact exists (genesis is written
+/// later by `materialize_canonical_session`). Directories that only carry the
+/// removed legacy files are rejected explicitly instead of being read as empty.
 pub fn open_session_identity(
     session_dir: impl AsRef<Path>,
 ) -> Result<CanonicalSessionIdentity, CanonicalIdentityError> {
     let dir = session_dir.as_ref();
-    if !is_batch_root(dir) {
+    let legacy = dir.join(EVENTS_FILE).exists() || dir.join(EVENTS_COMMIT_FILE).exists();
+    if legacy && !dir.join(CANONICAL_IDENTITY_FILE).exists() {
         return Err(CanonicalIdentityError::LegacyStorageRemoved);
     }
     CanonicalSessionIdentity::open(dir)

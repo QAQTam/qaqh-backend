@@ -1,6 +1,5 @@
 //! Error type shared across the client.
 
-use serde::Deserialize;
 use thiserror::Error;
 
 use crate::types::ReconnectReason;
@@ -55,7 +54,7 @@ pub enum ClientError {
 impl ClientError {
     #[cfg(test)]
     pub(crate) fn stream_terminated(data: &str) -> Self {
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct TerminatedPayload {
             code: Option<String>,
             skipped: Option<u64>,
