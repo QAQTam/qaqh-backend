@@ -1145,12 +1145,8 @@ mod tests {
             interaction_id: None,
             payload: FactPayload::SessionMetadataChanged(SessionMetadataChanged {
                 patch: SessionMetadataPatch {
-                    cwd: None,
                     model: Some("test-2".into()),
-                    archived: None,
-                    search_visibility: None,
-                    parent_session_id: None,
-                    schema_caps: None,
+                    ..Default::default()
                 },
                 source: MetadataSource::Api,
                 changed_at_ms: now + 1,

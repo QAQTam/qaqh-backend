@@ -38,6 +38,7 @@ fn metadata_changed(ordinal: u64) -> SessionFact {
                 search_visibility: Some(SearchVisibility::Hidden),
                 parent_session_id: None,
                 schema_caps: Some(vec!["new_cap".into()]),
+                ..Default::default()
             },
             source: MetadataSource::User,
             changed_at_ms: 1_789_830_000_002,

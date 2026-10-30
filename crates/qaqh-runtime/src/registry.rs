@@ -1131,6 +1131,41 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Commit a metadata patch through the running actor.
+    ///
+    /// The actor owns the journal's single-writer lock, so a second
+    /// `SessionCommit` cannot be opened while it lives. Callers fall back to a
+    /// direct journal write only when this returns an error.
+    pub(crate) fn write_session_metadata(
+        &self,
+        session_id: &str,
+        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
+    ) -> Result<(), String> {
+        let Some(instance) = self.instances.get(session_id) else {
+            return Err(format!("session {session_id} has no running actor"));
+        };
+        let AgentTransport::ThinAgent { handle, .. } = &instance.transport;
+        handle
+            .set_metadata(patch)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    /// Commit a title change through the running actor.
+    pub(crate) fn write_session_title(
+        &self,
+        session_id: &str,
+        title: &str,
+        source: qaqh_session::session_fact_v2::TitleSource,
+    ) -> Result<(), String> {
+        let Some(instance) = self.instances.get(session_id) else {
+            return Err(format!("session {session_id} has no running actor"));
+        };
+        let AgentTransport::ThinAgent { handle, .. } = &instance.transport;
+        handle
+            .set_title(title, source)
+            .map_err(|error| format!("{error:?}"))
+    }
+
     fn spawn_subagent_inprocess(
         &mut self,
         session_id: &str,

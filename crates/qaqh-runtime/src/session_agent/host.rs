@@ -59,6 +59,27 @@ impl AgentHandle {
         Ok(input_id)
     }
 
+    /// Commit a session metadata patch through the actor (the journal's sole
+    /// writer). Falls back to a direct journal write only when no actor runs.
+    pub fn set_metadata(
+        &self,
+        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
+    ) -> Result<(), MailboxError> {
+        self.mailbox.try_command(AgentCommand::SetMetadata { patch })
+    }
+
+    /// Commit a session title change through the actor.
+    pub fn set_title(
+        &self,
+        title: &str,
+        source: qaqh_session::session_fact_v2::TitleSource,
+    ) -> Result<(), MailboxError> {
+        self.mailbox.try_command(AgentCommand::SetTitle {
+            title: title.to_string(),
+            source,
+        })
+    }
+
     /// Submit a high-priority cancellation request.
     pub fn cancel(&self, turn_id: Option<TurnId>, reason: &str) -> Result<(), MailboxError> {
         self.mailbox.try_control(AgentControl::CancelTurn {
