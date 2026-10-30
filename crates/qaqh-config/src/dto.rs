@@ -672,7 +672,7 @@ mod tests {
         let err = apply_patch(
             &mut cfg,
             &ConfigPatch {
-                wire: Some("anthropic".into()),
+                wire: Some("chat".into()),
                 ..Default::default()
             },
         )

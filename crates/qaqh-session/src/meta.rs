@@ -93,9 +93,10 @@ pub fn read(session_dir: impl AsRef<Path>) -> Option<SessionMeta> {
 ///
 /// Fails with `batch writer lock unavailable` when an actor owns the session;
 /// callers must route the write through the actor in that case.
+///
 fn writer(dir: &Path) -> Result<SessionCommit, String> {
     let identity = open_session_identity(dir).map_err(|error| error.to_string())?;
-    SessionCommit::open(
+    SessionCommit::open_or_create(
         dir,
         identity.session_id,
         identity.log_id,
