@@ -133,6 +133,16 @@ impl From<&str> for QaqhError {
     }
 }
 
+/// 边界转换：agent catalog 的注册/校验错误 → [`QaqhError::Invalid`]。
+///
+/// 目录错误的变体（重复 id、父路径缺失…）目前只用于内部 diagnostics，服务面
+/// 只需要原样带出文案，因此统一走 `Display`。
+impl From<crate::agent_catalog::AgentCatalogError> for QaqhError {
+    fn from(error: crate::agent_catalog::AgentCatalogError) -> Self {
+        Self::message(error)
+    }
+}
+
 /// 边界转换：[`QaqhError`] → `String`（HTTP / 工具结果等旧签名仍是字符串）。
 ///
 /// 有了它，仍在 `Result<_, String>` 的老接口可以直接 `?` 掉一个 `QaqhError`，
@@ -140,5 +150,17 @@ impl From<&str> for QaqhError {
 impl From<QaqhError> for String {
     fn from(error: QaqhError) -> Self {
         error.to_string()
+    }
+}
+
+/// 测试专用相等：同变体且文案一致即视为相等。
+///
+/// `Io` / `Serialize` 携带的 source 不实现 `PartialEq`，因此不比较它们；
+/// 生产代码不应按相等判断错误（用 [`QaqhError::is_forbidden`] 之类的谓词）。
+#[cfg(test)]
+impl PartialEq for QaqhError {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+            && self.to_string() == other.to_string()
     }
 }

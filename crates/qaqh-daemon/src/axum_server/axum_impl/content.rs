@@ -34,7 +34,7 @@ pub(crate) async fn handle_content_get(
         return serve_session_blob(&state, &headers, &session_id, store_id);
     };
     let owns = {
-        let mut leases = state.leases.lock().unwrap_or_else(|e| e.into_inner());
+        let leases = state.leases.lock().unwrap_or_else(|e| e.into_inner());
         entry
             .owners
             .iter()

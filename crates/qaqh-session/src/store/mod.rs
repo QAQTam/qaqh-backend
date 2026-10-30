@@ -9,7 +9,7 @@
 //! without scanning every session directory.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
 
 use qaqh_types::{Message, SessionMeta};
