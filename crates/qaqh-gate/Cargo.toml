@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "QAQ-Harness LLM API gateway — HTTP streaming, message conversion"
 
+[features]
+# 转发 tool-core 的原生工具计划（**默认关**）。打开后 `ModelToolPlan` re-export 与
+# `chat_stream_responses_with_plan` 才存在；生产路径走 `chat_stream`（不带 plan）。
+native-tool-plan = ["qaqh-tool-core/native-tool-plan"]
+
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
@@ -24,7 +29,9 @@ unicode-normalization = "0.1"
 tiny_http = "0.12"
 
 [lints.clippy]
+undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 # All string slices in this crate use indices from find() on ASCII patterns
 # (<, >, \n, "data: ", etc.), always on UTF-8 character boundaries.
 string_slice = "allow"
+

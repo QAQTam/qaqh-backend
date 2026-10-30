@@ -273,6 +273,7 @@ mod axum_tests {
         let _ = std::fs::remove_dir_all(&tmp);
         // platform::sessions_dir 每次调用读 QAQH_DATA_DIR；本测试模块的其他
         // 用例不读该路径，进程内切换环境变量在此是安全的。
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
         let body = b"tool output body".to_vec();
         let hash = qaqh_session::canonical::sha256_content_hash(&body);
@@ -331,6 +332,7 @@ mod axum_tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -16,6 +16,8 @@
 //! - Wire 不决定业务可靠性。
 //! - 本 crate 不含任何传输实现（HTTP/SSE/WebSocket/pipe 在 transport 层）。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod command;
 pub mod content;
 pub mod envelope;

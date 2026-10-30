@@ -374,11 +374,11 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         .map(|(offset, line)| {
             let n = first + offset + 1;
             // 单行截断：超长行压到 READ_MAX_LINE_CHARS（char boundary 安全）。
-            if line.chars().count() > qaqh_fs_core::READ_MAX_LINE_CHARS {
+            if line.chars().count() > crate::READ_MAX_LINE_CHARS {
                 any_line_truncated = true;
                 let cut = line
                     .char_indices()
-                    .nth(qaqh_fs_core::READ_MAX_LINE_CHARS)
+                    .nth(crate::READ_MAX_LINE_CHARS)
                     .map(|(idx, _)| idx)
                     .unwrap_or(line.len());
                 format!(

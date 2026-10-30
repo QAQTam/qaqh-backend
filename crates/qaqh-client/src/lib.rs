@@ -8,6 +8,8 @@
 //! contracts. HTTP/SSE JSON is decoded at this boundary and never becomes a
 //! renderer-facing compatibility protocol.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod client;
 pub mod discovery;
 pub mod endpoint;

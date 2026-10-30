@@ -31,6 +31,8 @@ qaqh-message = { path = "../qaqh-message", features = ["test-harness"] }
 tempfile = "3"
 
 [lints.clippy]
+undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 # Safe: only 2 string slices — one uses is_char_boundary, one is data eof check.
 string_slice = "allow"
+

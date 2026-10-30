@@ -799,6 +799,9 @@ impl ProcessRegistry {
         }
         #[cfg(not(windows))]
         {
+            // SAFETY: `killpg` 只接收一个裸 pid 与固定信号，不涉及内存读写；
+            // pid 由调用方通过「在册条目 / 未淘汰墓碑」确认过归属，失败
+            // （ESRCH/EPERM）被有意忽略。
             unsafe {
                 libc::killpg(pid as i32, libc::SIGKILL);
             }
@@ -866,6 +869,9 @@ impl ProcessRegistry {
                     {
                         // H6：整组 SIGKILL（spawn 侧 process_group(0)），
                         // 孙进程释放管道写端，reader 可 EOF。
+                        // SAFETY: `killpg` 无内存访问；进程组 id 来自本进程
+                        // `Child::id()`，且子进程由 `process_group(0)` 独立成组，
+                        // 不会误伤调用方所在组。失败（已退出）被有意忽略。
                         unsafe {
                             libc::killpg(c.id() as i32, libc::SIGKILL);
                         }
@@ -884,6 +890,8 @@ impl ProcessRegistry {
                         }
                         #[cfg(not(windows))]
                         {
+                            // SAFETY: 同 `cleanup_by_pid`：`killpg` 无内存访问，
+                            // pid 取自墓碑的 `os_pid` 快照，失败被有意忽略。
                             unsafe {
                                 libc::killpg(pid as i32, libc::SIGKILL);
                             }

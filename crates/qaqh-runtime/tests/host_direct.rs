@@ -51,6 +51,7 @@ fn shared_test_env() -> std::path::PathBuf {
         std::fs::create_dir_all(&data).expect("test setup must not fail");
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).expect("test setup must not fail");
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe {
             std::env::set_var("QAQH_DATA_DIR", &data);
         }
@@ -470,6 +471,7 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -737,6 +739,7 @@ fn broadcast_targets_and_outbound_quota_are_rejected() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -822,6 +825,7 @@ fn task_board_host_round_trips_task_lifecycle() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -932,6 +936,7 @@ fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -1055,6 +1060,7 @@ fn steer_and_interject_are_canonical_safe_point_deliveries() {
     std::fs::create_dir_all(&data).expect("test setup must not fail");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }

@@ -733,8 +733,10 @@ mod tests {
     fn with_temp_journal<T>(f: impl FnOnce() -> T) -> T {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::set_var("QAQH_JOURNAL_DIR", dir.path()) };
         let result = f();
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::remove_var("QAQH_JOURNAL_DIR") };
         result
     }

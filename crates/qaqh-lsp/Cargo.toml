@@ -46,6 +46,7 @@ async-lsp = { workspace = true, features = ["tracing"] }
 lsp-types = { workspace = true }
 
 [lints.clippy]
+undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 string_slice = "deny"
 
@@ -53,3 +54,4 @@ string_slice = "deny"
 # 孙进程在退出后成孤儿）；仅 Unix。
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+

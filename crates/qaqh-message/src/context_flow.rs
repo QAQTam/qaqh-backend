@@ -634,8 +634,14 @@ pub mod builtin {
         )
     }
 
-    /// 工作区变更审计注入（`[workspace-changes …]`：qaqh-spy 在工具批边界
-    /// 全量扫描出的净变更报告）。与 [`subagent_source`] 同形态——`User` role +
+    /// 工作区变更审计注入（`[workspace-changes …]`）。
+    ///
+    /// **当前无生产者**：产出这份报告的工作区扫描器（`qaqh-spy`）已于 2026-10-31
+    /// 整体移除，槽位保留是因为注入通道本身仍是通用能力（`USER_INJECTION_SOURCES`
+    /// 与 store 侧测试都按名引用它）。要重新启用，需要一个新的生产者调用
+    /// `ContextFlow::publish(WORKSPACE, …)`。
+    ///
+    /// 与 [`subagent_source`] 同形态——`User` role +
     /// `Trailing` sink + `TurnBoundary` timing：Chat Completions 要求
     /// assistant(tool_calls) 之后紧跟全部 tool 消息，所以注入必须排在整批结果
     /// 之后落盘；TurnBoundary 让它下一轮请求即可见、不打断运行中的回合。

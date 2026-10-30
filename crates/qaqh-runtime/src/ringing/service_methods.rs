@@ -252,128 +252,61 @@ pub struct TypedMethodInfo {
     pub validate_result: fn(&Value) -> Result<(), String>,
 }
 
-fn validate_daemon_version_params(value: &Value) -> Result<(), String> {
-    validate_params::<DaemonVersionParams>(value)
+/// `TypedMethodInfo` 需要的两种校验函数指针，都只是对泛型 [`validate_params`] /
+/// [`validate_result`] 的单态化。此前这里是 31 对手写转发函数（每加一个方法要
+/// 抄两行、漏抄就编译失败），改为宏一次性生成：类型清单本身就是文档。
+macro_rules! validators {
+    (
+        params: $($pname:ident => $pty:ty),* $(,)? ;
+        result: $($rname:ident => $rty:ty),* $(,)?
+    ) => {
+        $(
+            fn $pname(value: &Value) -> Result<(), String> {
+                validate_params::<$pty>(value)
+            }
+        )*
+        $(
+            fn $rname(value: &Value) -> Result<(), String> {
+                validate_result::<$rty>(value)
+            }
+        )*
+    };
 }
 
-fn validate_string_result(value: &Value) -> Result<(), String> {
-    validate_result::<String>(value)
-}
-
-fn validate_session_rename_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionRenameParams>(value)
-}
-
-fn validate_null_result(value: &Value) -> Result<(), String> {
-    validate_result::<Option<()>>(value)
-}
-
-fn validate_fs_list_params(value: &Value) -> Result<(), String> {
-    validate_params::<FsListParams>(value)
-}
-
-fn validate_fs_read_params(value: &Value) -> Result<(), String> {
-    validate_params::<FsReadParams>(value)
-}
-
-fn validate_fs_list_result(value: &Value) -> Result<(), String> {
-    validate_result::<Vec<FsEntry>>(value)
-}
-
-fn validate_fs_read_result(value: &Value) -> Result<(), String> {
-    validate_result::<FsReadResult>(value)
-}
-
-fn validate_session_list_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionListParams>(value)
-}
-
-fn validate_session_meta_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionMetaParams>(value)
-}
-
-fn validate_session_list_result(value: &Value) -> Result<(), String> {
-    validate_result::<Vec<qaqh_types::SessionListEntry>>(value)
-}
-
-fn validate_session_meta_result(value: &Value) -> Result<(), String> {
-    validate_result::<Option<qaqh_types::SessionListEntry>>(value)
-}
-
-fn validate_session_activity_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionActivityParams>(value)
-}
-
-fn validate_session_activity_result(value: &Value) -> Result<(), String> {
-    validate_result::<Vec<qaqh_domain::SessionActivity>>(value)
-}
-
-fn validate_session_get_activity_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionGetActivityParams>(value)
-}
-
-fn validate_session_get_activity_result(value: &Value) -> Result<(), String> {
-    validate_result::<Vec<SessionToolActivity>>(value)
-}
-
-fn validate_session_set_profile_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionSetProfileParams>(value)
-}
-
-fn validate_session_set_effort_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionSetEffortParams>(value)
-}
-
-fn validate_session_create_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionCreateParams>(value)
-}
-
-fn validate_session_create_result(value: &Value) -> Result<(), String> {
-    validate_result::<SessionCreateResult>(value)
-}
-
-fn validate_session_set_tool_mode_params(value: &Value) -> Result<(), String> {
-    validate_params::<SessionSetToolModeParams>(value)
-}
-
-fn validate_workspace_get_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceGetParams>(value)
-}
-
-fn validate_workspace_list_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceListParams>(value)
-}
-
-fn validate_workspace_list_result(value: &Value) -> Result<(), String> {
-    validate_result::<Vec<qaqh_session::WorkspaceEntry>>(value)
-}
-
-fn validate_workspace_meta_result(value: &Value) -> Result<(), String> {
-    validate_result::<qaqh_session::WorkspaceMeta>(value)
-}
-
-fn validate_workspace_set_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceSetParams>(value)
-}
-
-fn validate_workspace_create_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceCreateParams>(value)
-}
-
-fn validate_workspace_rename_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceRenameParams>(value)
-}
-
-fn validate_workspace_delete_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceDeleteParams>(value)
-}
-
-fn validate_workspace_move_session_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceMoveSessionParams>(value)
-}
-
-fn validate_workspace_detach_params(value: &Value) -> Result<(), String> {
-    validate_params::<WorkspaceDetachParams>(value)
+validators! {
+    params:
+        validate_daemon_version_params => DaemonVersionParams,
+        validate_session_rename_params => SessionRenameParams,
+        validate_fs_list_params => FsListParams,
+        validate_fs_read_params => FsReadParams,
+        validate_session_list_params => SessionListParams,
+        validate_session_meta_params => SessionMetaParams,
+        validate_session_activity_params => SessionActivityParams,
+        validate_session_get_activity_params => SessionGetActivityParams,
+        validate_session_set_profile_params => SessionSetProfileParams,
+        validate_session_set_effort_params => SessionSetEffortParams,
+        validate_session_create_params => SessionCreateParams,
+        validate_session_set_tool_mode_params => SessionSetToolModeParams,
+        validate_workspace_get_params => WorkspaceGetParams,
+        validate_workspace_list_params => WorkspaceListParams,
+        validate_workspace_set_params => WorkspaceSetParams,
+        validate_workspace_create_params => WorkspaceCreateParams,
+        validate_workspace_rename_params => WorkspaceRenameParams,
+        validate_workspace_delete_params => WorkspaceDeleteParams,
+        validate_workspace_move_session_params => WorkspaceMoveSessionParams,
+        validate_workspace_detach_params => WorkspaceDetachParams;
+    result:
+        validate_string_result => String,
+        validate_null_result => Option<()>,
+        validate_fs_list_result => Vec<FsEntry>,
+        validate_fs_read_result => FsReadResult,
+        validate_session_list_result => Vec<qaqh_types::SessionListEntry>,
+        validate_session_meta_result => Option<qaqh_types::SessionListEntry>,
+        validate_session_activity_result => Vec<qaqh_domain::SessionActivity>,
+        validate_session_get_activity_result => Vec<SessionToolActivity>,
+        validate_session_create_result => SessionCreateResult,
+        validate_workspace_list_result => Vec<qaqh_session::WorkspaceEntry>,
+        validate_workspace_meta_result => qaqh_session::WorkspaceMeta,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -799,13 +732,6 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("diagnostics.memory.snapshot", READ_ADMIN),
     ("diagnostics.memory.start", WRITE_ADMIN),
     ("diagnostics.memory.stop", WRITE_ADMIN),
-    // git（只读与变更分列）
-    ("git.diff", READ_SEEDED),
-    ("git.branch", READ_SEEDED),
-    ("git.branches", READ_SEEDED),
-    ("git.file_diff", READ_SEEDED),
-    ("git.switch_branch", WRITE),
-    ("git.commit", WRITE),
     // subagent / tool mode
     ("subagent.spawn", WRITE),
     ("session.set_tool_mode", WRITE_SEEDED),
@@ -820,11 +746,12 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
 }
 
 /// 统一错误响应形状（daemon HTTP 层使用），按方法类别区分 code。
-pub fn error_response(kind: MethodKind, message: &str) -> Value {
-    // 白名单/边界拒绝（`fs.read`/`fs.list` 的 `FORBIDDEN:` 前缀）单独成码：
-    // 调用方必须能把「出白名单」与「查询本身失败（IO / 未知）」区分开
-    // （T-2-1 验收：拒绝返回 FORBIDDEN，而非伪装成 IO_ERROR）。
-    let code = if message.starts_with("FORBIDDEN") {
+///
+/// 拒绝/越权由 [`QaqhError::is_forbidden`] 判定——此前是
+/// `message.starts_with("FORBIDDEN")` 的字符串嗅探，语义与文案耦合。
+/// 其余错误码保持既有契约（`query_failed` / `action_failed`）。
+pub fn error_response(kind: MethodKind, error: &crate::error::QaqhError) -> Value {
+    let code = if error.is_forbidden() {
         "forbidden"
     } else {
         match kind {
@@ -832,7 +759,7 @@ pub fn error_response(kind: MethodKind, message: &str) -> Value {
             MethodKind::Write => "action_failed",
         }
     };
-    serde_json::json!({ "code": code, "message": message })
+    serde_json::json!({ "code": code, "message": error.to_string() })
 }
 
 /// 服务分发：方法表校验后的唯一入口。
@@ -840,15 +767,23 @@ pub fn error_response(kind: MethodKind, message: &str) -> Value {
 /// 账号面（siwc/dsaccount）先走 [`accounts::dispatch`] 的逐方法 DTO 收口
 /// （params 解码 → 调用管理器 → DTO 投影），其余方法经 `service.handle`
 /// 执行并按 [`TYPED_METHODS`] 做边界校验。
-pub fn dispatch(service: &QaqhService, method: &str, params: &Value) -> Result<Value, String> {
+pub fn dispatch(
+    service: &QaqhService,
+    method: &str,
+    params: &Value,
+) -> crate::error::QaqhResult<Value> {
     if let Some(result) = accounts::dispatch(service, method, params) {
-        return result;
+        return result.map_err(crate::error::QaqhError::message);
     }
-    let typed = validate_typed_params(method, params)?;
+    // params 只解码一次：`QaqhService::handle` → `Command::decode` 用的就是**同一批
+    // DTO**（`command.rs` 的 `*Args` 全是本文件 `*Params` 的别名），严格反序列化
+    // 等价于 `validate_typed_params`。此前这里先校验一遍再让 handle 解一遍，同一份
+    // JSON 被解两次、方法表被查两次。`validate_typed_params` 仍保留：契约导出与单测
+    // 直接用它断言 DTO 边界。
     let result = service.handle(method, params)?;
-    if typed {
-        validate_typed_result(method, &result)?;
-    }
+    // 结果侧不能省：handler 产出的是 `Value`，没有 DTO 边界兜底（非 typed 方法
+    // 返回 `Ok(false)`，等价于旧行为的 `typed == false` 分支）。
+    validate_typed_result(method, &result).map_err(crate::error::QaqhError::message)?;
     Ok(result)
 }
 
@@ -1438,24 +1373,24 @@ mod tests {
     #[test]
     fn error_response_shape_differs_by_kind() {
         assert_eq!(
-            error_response(MethodKind::Read, "x")["code"],
+            error_response(MethodKind::Read, &crate::error::QaqhError::invalid("x"))["code"],
             serde_json::json!("query_failed")
         );
         assert_eq!(
-            error_response(MethodKind::Write, "x")["code"],
+            error_response(MethodKind::Write, &crate::error::QaqhError::invalid("x"))["code"],
             serde_json::json!("action_failed")
         );
     }
 
     /// T-2-1：白名单拒绝必须成 `forbidden` 码，而不是伪装成 `query_failed`
-    /// （与 IO 失败不可区分）。
+    /// （与 IO 失败不可区分）。判定依据是错误**变体**，不是文案前缀。
     #[test]
-    fn forbidden_prefix_maps_to_forbidden_code() {
+    fn forbidden_error_maps_to_forbidden_code() {
+        let forbidden = crate::error::QaqhError::Forbidden {
+            message: "fs.read /etc/passwd: path is outside the allowed roots".to_string(),
+        };
         for kind in [MethodKind::Read, MethodKind::Write] {
-            let value = error_response(
-                kind,
-                "FORBIDDEN: fs.read /etc/passwd: path is outside the allowed roots",
-            );
+            let value = error_response(kind, &forbidden);
             assert_eq!(value["code"], serde_json::json!("forbidden"));
             assert!(
                 value["message"]

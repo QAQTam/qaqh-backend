@@ -41,6 +41,8 @@
 //! 互相依赖——provider 门禁各自成对（`qaqh-siwc` 的 `chatgpt_plan` /
 //! 本 crate 的 `deepseek_account`），共享的是**纪律**而不是代码。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 #![warn(missing_docs)]
 
 /// Credential-free service response DTOs.

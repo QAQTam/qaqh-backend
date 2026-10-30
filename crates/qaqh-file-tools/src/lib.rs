@@ -15,6 +15,8 @@
 //! `ToolManager` 留守门面；`register()` 粘合层经 `RegistersTyped` trait 接受，
 //! 组内测试经 dev-dependency 环引用门面具体 manager。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod apply_patch;
 pub mod apply_patch_engine;
 pub mod arg_estimate;
@@ -22,9 +24,12 @@ pub mod code_delta;
 pub mod confirm_apply;
 pub mod copy_range;
 pub mod edit;
+pub mod file_cache;
 pub mod file_glob;
 pub mod file_mutate;
 pub mod file_query;
+pub mod file_shared;
+pub mod file_state;
 pub mod grep_tool;
 pub mod hooks;
 pub mod journal;
@@ -39,8 +44,18 @@ pub use qaqh_tool_core::ToolRisk;
 pub use qaqh_tool_core::tool_api;
 pub use qaqh_types::{ToolResult, ToolStatus};
 
-/// FS 核心层（file_shared/cache/state 单一事实源）。
-pub use qaqh_fs_core::{file_cache, file_shared, file_state};
+/// FS 核心层（原独立 crate `qaqh-fs-core`，2026-10-31 并入）：file_shared /
+/// file_cache / file_state 的单一事实源就在本 crate 根。
+pub use file_shared::{
+    LineIndex, READ_MAX_BYTES, READ_MAX_CHARS, READ_MAX_LINE_CHARS, READ_MAX_LINES, content_hash,
+    is_binary_read_error, normalize_newlines,
+};
+
+/// Unit tests mutate process-wide runtime state. Keep those mutations
+/// deterministic even when the Rust test harness runs modules in parallel.
+#[cfg(test)]
+pub static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// 权限引擎与其进程级全局状态（current_workspace/session、cancel 等）。
 pub use qaqh_permission::permission;

@@ -410,6 +410,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
         let session_id = "read_image_registry_test";
         store_image(session_id, "image/png", "Zm9v").expect("store");
@@ -424,6 +425,7 @@ mod tests {
         );
         assert_eq!(peek_image(session_id, 1), None);
         assert_eq!(peek_image("other-seed", 0), None);
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -437,6 +439,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-reset-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
         let session_id = "read_image_reset_test";
         store_image(session_id, "image/png", "AAA").expect("store");
@@ -454,6 +457,7 @@ mod tests {
             Some(("image/jpeg".into(), "BBB".into()))
         );
         assert_eq!(peek_image(session_id, 2), None);
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -467,6 +471,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-ref-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
 
         let b64 = "aW1hZ2UtcmVmLXJlYnVpbGQ=";
@@ -486,6 +491,7 @@ mod tests {
             Some(("image/jpeg".into(), b64.into()))
         );
 
+        // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
         unsafe { std::env::remove_var("QAQH_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
     }

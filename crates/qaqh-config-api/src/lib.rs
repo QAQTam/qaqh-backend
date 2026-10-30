@@ -22,6 +22,8 @@
 //! **注意** [`ConfigPatch`] / [`SubagentPatch`] 的 struct 级 `default` **不在此列**：
 //! 那是 K3 合并补丁的语义（字段缺失 = 不动），不是兼容。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 

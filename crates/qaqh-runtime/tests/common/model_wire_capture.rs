@@ -111,12 +111,14 @@ pub fn temp_root(label: &str) -> PathBuf {
 
 /// 钉住 data root 并初始化 `SessionManager`（**每个测试进程只调用一次**）。
 pub fn init_data_root(root: &Path) {
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复该变量，无并发读者。
     unsafe { std::env::set_var("QAQH_DATA_DIR", root) };
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
 }
 
 /// 一个"生命周期"：等价于 daemon 重启后 resume 指定会话。
 pub fn resume_agent(root: &Path, ws: &str, session_id: &str) -> AgentState {
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复该变量，无并发读者。
     unsafe { std::env::set_var("QAQH_DATA_DIR", root) };
     let mut agent = AgentState::init("restart-request-body-test", Config::default());
     agent.ephemeral = false;
@@ -130,6 +132,7 @@ pub fn resume_agent(root: &Path, ws: &str, session_id: &str) -> AgentState {
 
 /// 新建会话生命周期（首个生命周期，seed 由 create 路径分配）。
 pub fn create_agent(root: &Path, ws: &str) -> AgentState {
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复该变量，无并发读者。
     unsafe { std::env::set_var("QAQH_DATA_DIR", root) };
     let mut agent = AgentState::init("restart-request-body-test", Config::default());
     agent.ephemeral = false;

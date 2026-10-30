@@ -7,14 +7,14 @@ use qaqh_domain::{ActivityState, ControlCommand, RingingChannel};
 use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use qaqh_session::{
     actor::ConnectionId,
-    canonical::{
-        CanonicalSessionIdentity, CanonicalSessionStore, CommittedFactReader, WriterId,
-        generate_ulid,
-    },
+    canonical::{CanonicalSessionIdentity, generate_ulid},
+    session_commit::SessionCommit,
     session_fact_v2::{EventId, FactPayload, FactSchema, SessionCreated, SessionFact, SessionId},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
+use crate::error::{QaqhError, QaqhResult};
+use crate::service::command::Command;
 use crate::{AgentRegistry, RingingHub, ringing::V2ProjectionHub};
 
 #[derive(Clone)]
@@ -217,6 +217,7 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .send_ringing(session_id, env)
+            .map_err(|error| error.to_string())
     }
 
     pub fn subscribe_channel(
@@ -227,6 +228,7 @@ impl QaqhService {
     ) -> Result<bool, String> {
         self.registry()?
             .subscribe_channel(session_id, connection_id.clone(), channel)
+            .map_err(|error| error.to_string())
     }
 
     pub fn unsubscribe_channel(
@@ -237,6 +239,7 @@ impl QaqhService {
     ) -> Result<bool, String> {
         self.registry()?
             .unsubscribe_channel(session_id, connection_id.clone(), channel)
+            .map_err(|error| error.to_string())
     }
 
     pub fn connection_closed(
@@ -246,6 +249,7 @@ impl QaqhService {
     ) -> Result<usize, String> {
         self.registry()?
             .connection_closed(session_id, connection_id.clone())
+            .map_err(|error| error.to_string())
     }
 
     /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
@@ -431,7 +435,9 @@ impl QaqhService {
     /// 对齐 `session.resume` 查询——get_or_spawn + active seed 更新）。
     pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {
         self.sessions.set_archived(session_id, false);
-        self.registry()?.get_or_spawn(session_id)
+        self.registry()?
+            .get_or_spawn(session_id)
+            .map_err(|error| error.to_string())
     }
 
     /// 彻底删除会话（左侧列表 × 语义）：先关实例（若运行，幂等）再删
@@ -445,677 +451,18 @@ impl QaqhService {
         self.sessions.delete(session_id)
     }
 
-    pub fn handle(&self, method: &str, params: &Value) -> Result<Value, String> {
-        let session_id = || session_param(params);
-        match method {
-            "daemon.version" => Ok(json!(env!("QAQH_BUILD_VERSION"))),
-            "diagnostics.memory.start" => {
-                let monitor = qaqh_memwatch::global();
-                monitor.start();
-                self.refresh_memory_components();
-                Ok(json!({
-                    "enabled": true,
-                    "started_at_ms": monitor.started_at_ms()
-                }))
-            }
-            "diagnostics.memory.stop" => {
-                qaqh_memwatch::global().stop();
-                Ok(json!({ "enabled": false }))
-            }
-            "diagnostics.memory.snapshot" => {
-                let after_sequence = params.get("after_sequence").and_then(Value::as_u64);
-                self.diagnostics_memory_snapshot(after_sequence)
-            }
-            // ── UI 工作区注册表（组织语义，与运行环境 workspace 解耦）──
-            "workspace.list" => {
-                // 一手 DTO：条目形状由 WorkspaceStore::list_entries 唯一定义。
-                let entries = qaqh_session::WorkspaceStore::global().list_entries();
-                serde_json::to_value(entries).map_err(err)
-            }
-            // 远端文件浏览（临时跨端模式）：路径一律是 daemon 侧绝对路径，
-            // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
-            "fs.list" => {
-                let path = pstr(params, "path")?;
-                let scope_session = scope_session_param_value(params);
-                list_remote_directory(&self.sessions, &path, scope_session)
-            }
-            "fs.read" => {
-                let path = pstr(params, "path")?;
-                let max_bytes = params
-                    .get("max_bytes")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(512 * 1024);
-                let scope_session = scope_session_param_value(params);
-                read_remote_file(&self.sessions, &path, max_bytes, scope_session)
-            }
-            "workspace.create" => {
-                let path = pstr(params, "path")?;
-                let ws = qaqh_session::WorkspaceStore::global();
-                let existing = self.sessions.list();
-                let created = ws.create(&path, &existing)?;
-                Ok(serde_json::to_value(created).map_err(err)?)
-            }
-            "workspace.rename" => {
-                let id = pstr(params, "id")?;
-                let title = pstr(params, "title")?;
-                let ws = qaqh_session::WorkspaceStore::global();
-                let renamed = ws.rename(&id, title)?;
-                Ok(serde_json::to_value(renamed).map_err(err)?)
-            }
-            "workspace.delete" => {
-                let id = pstr(params, "id")?;
-                qaqh_session::WorkspaceStore::global().delete(&id)?;
-                Ok(Value::Null)
-            }
-            "workspace.move_session" => {
-                let session_id = session_param(params)?;
-                let workspace_id = pstr(params, "workspace_id")?;
-                qaqh_session::WorkspaceStore::global().move_session(&session_id, &workspace_id)?;
-                Ok(Value::Null)
-            }
-            "workspace.detach" => {
-                let session_id = session_param(params)?;
-                qaqh_session::WorkspaceStore::global().remove_session(&session_id);
-                Ok(Value::Null)
-            }
-            "session.list" => Ok(serde_json::to_value(self.list_sessions()).map_err(err)?),
-            "session.meta" => {
-                let session_id = session_id()?;
-                let manager = &self.sessions;
-                let Some(meta) = manager.load_meta(&session_id) else {
-                    return Ok(Value::Null);
-                };
-                // 单条与 `session.list` 的条目**同一个形状**（G2）：同样的
-                // `SessionMeta` + 运行期字段。此前这里也是手拼 `value["running"]`，
-                // 且不带 `workspace_id`——同一个形状两处各拼一次，正是漂移的温床。
-                let registry = self.registry()?;
-                let loaded = registry.is_running(&meta.session_id);
-                let fallback = registry
-                    .activities()
-                    .into_iter()
-                    .find(|activity| activity.session_id == meta.session_id)
-                    .map(|activity| activity.state);
-                let entry = qaqh_types::SessionListEntry {
-                    status: self.session_run_status(loaded, fallback, &meta.session_id),
-                    workspace_id: qaqh_session::WorkspaceStore::global()
-                        .workspace_of(&meta.session_id),
-                    meta,
-                };
-                Ok(serde_json::to_value(entry).map_err(err)?)
-            }
-            "session.activity" => {
-                Ok(serde_json::to_value(self.registry()?.activities()).map_err(err)?)
-            }
-            "session.new" => {
-                // 可选工具模式预置（TUI/CLI 壳在 create 时一次性锁定）。
-                // 先于任何落盘校验：非法值必须整体拒绝，不得留下孤儿 meta。
-                let preset = optional_tool_mode(params)?;
-                // 可选 cwd（前端在 workspace 上下文新建时传入）→ 记录 + 自动归属。
-                let cwd = params
-                    .get("cwd")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                // BUG-2026-09-13-24 + BETA-01：先分配 canonical identity，
-                // 再用 `SessionId` 作为 seed 和目录名。分配、identity sidecar
-                // 与初始 meta 都在同一把 session 锁内落盘，不再产生 8 位
-                // seed 与 UUID 并存的新会话。
-                let identity = self
-                    .sessions
-                    .allocate_session(cwd.as_deref())
-                    .map_err(|error| format!("session.new: allocate session failed: {error}"))?;
-                let session_id = identity.session_id.as_str().to_string();
-                self.sessions.clear_active();
-                // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
-                // 保证 `minimal` 等预置工具模式首轮就生效。
-                if let Some((tool_mode, custom_tools)) = preset {
-                    self.sessions
-                        .persist_tool_mode(&session_id, &tool_mode, &custom_tools)
-                        .map_err(|error| format!("persist tool_mode failed: {error}"))?;
-                }
-                // 纯 v2：session_create 即物化 canonical identity + 首个
-                // `SessionCreated` 事实。否则 bootstrap/events 要等首个工具事实
-                // 才可用，新建会话在第一回合前一直处于 snapshot_missing 瞬态。
-                let canonical_cwd = self
-                    .sessions
-                    .workspace_cwd(&session_id)
-                    .filter(|cwd| !cwd.is_empty() && cwd != ".")
-                    .unwrap_or_else(|| {
-                        // 未绑定工作区：与会话执行面同一个默认工作根
-                        // （`load_session_workspace` 注入的就是这个目录）。
-                        // 旧实现兜底 `std::env::current_dir()`，在 daemon 里
-                        // 就是安装目录，canonical `SessionCreated.cwd` 因此
-                        // 把 harness 自身目录投影给前端/模型。
-                        qaqh_types::platform::default_session_workspace_dir(&session_id)
-                            .to_string_lossy()
-                            .into_owned()
-                    });
-                let model = qaqh_config::Config::load()
-                    .map(|config| config.model)
-                    .unwrap_or_else(|_| "unknown".to_string());
-                if let Err(error) =
-                    materialize_canonical_session(&session_id, &canonical_cwd, &model)
-                {
-                    let _ = self.sessions.delete(&session_id);
-                    return Err(format!(
-                        "session.new: canonical materialization failed: {error}"
-                    ));
-                }
-                self.registry()?.spawn_new(&session_id)?;
-                Ok(json!(session_id))
-            }
-            "session.resume" => {
-                let session_id = session_id()?;
-                self.sessions.set_active_session(&session_id);
-                self.registry()?.get_or_spawn(&session_id)?;
-                Ok(Value::Null)
-            }
-            "session.set_tool_mode" => {
-                let session_id = session_id()?;
-                let tool_mode = pstr(params, "tool_mode")?;
-                validate_tool_mode(&tool_mode)?;
-                let custom_tools = pstrings(params, "custom_tools");
-                if tool_mode == "custom" && custom_tools.is_empty() {
-                    return Err(
-                        "custom tool mode requires at least one tool in custom_tools".to_string(),
-                    );
-                }
-                // 先持久化（meta.json，重启存活），再通知 worker 应用
-                // （set_allowed_tools + tool_defs 刷新 = 模型侧源头过滤）。
-                // CK-PERSIST：持久化失败 → 400 返回前端，前端回滚乐观值；
-                // 不允许「应用成功但没落盘」的假切换（重启即丢）。
-                self.sessions
-                    .persist_tool_mode(&session_id, &tool_mode, &custom_tools)
-                    .map_err(|error| format!("persist tool_mode failed: {error}"))?;
-                self.send_ringing_cmd(
-                    session_id,
-                    RingingCommand::Control(ControlCommand::SetToolMode {
-                        tool_mode,
-                        custom_tools,
-                    }),
-                )
-            }
-            "session.dashboard" => dashboard(&session_id()?),
-            "session.get_activity" => activity(&self.sessions, &session_id()?),
-            "skills.operation" => self.send_ringing_cmd(
-                session_id()?,
-                RingingCommand::Control(ControlCommand::SkillsOperation {
-                    operation_id: pstr2(params, "operation_id", "operationId")?,
-                    action: pstr(params, "action")?,
-                    name: pstr(params, "name")?,
-                }),
-            ),
-            "skills.reload" => self.send_ringing_cmd(
-                session_id()?,
-                RingingCommand::Control(ControlCommand::SkillsReload),
-            ),
-            "skills.activate" => self.send_ringing_cmd(
-                session_id()?,
-                RingingCommand::Control(ControlCommand::SkillsActivate {
-                    name: pstr(params, "name")?,
-                }),
-            ),
-            "skills.list_tools" => Ok(json!(qaqh_workspace::runtime::process_all_tool_names())),
-            "workspace.get" => Ok(json!(workspace(&self.sessions, &session_id()?))),
-            "workspace.set" => {
-                let session_id = session_id()?;
-                // 空 path 防护：canonical_cwd("") = "" 会把 meta.cwd 清空，
-                // 导致会话工作区/归属丢失（前端重启后回空 cwd 的 bug 通道）。
-                let path = pstr(params, "path")?.trim().to_string();
-                if path.is_empty() {
-                    return Err("workspace.set: empty path rejected".into());
-                }
-                // 统一数据源：运行环境工作目录存 meta.cwd（workspace.txt 退役）。
-                self.sessions.set_cwd(&session_id, &path, true);
-                self.send_ringing_cmd(
-                    session_id,
-                    RingingCommand::Control(ControlCommand::AgentReloadConfig),
-                )?;
-                Ok(Value::Null)
-            }
-            "git.diff" => git(
-                &self.sessions,
-                &session_id()?,
-                qaqh_workspace::git::status_json,
-                json!([]),
-            ),
-            "git.branch" => git(
-                &self.sessions,
-                &session_id()?,
-                qaqh_workspace::git::current_branch,
-                Value::Null,
-            ),
-            "git.branches" => git(
-                &self.sessions,
-                &session_id()?,
-                qaqh_workspace::git::list_branches,
-                json!([]),
-            ),
-            "git.switch_branch" => git(
-                &self.sessions,
-                &session_id()?,
-                |ws| {
-                    qaqh_workspace::git::switch_branch(
-                        ws,
-                        &pstr(params, "branch")?,
-                        pbool(params, "stash"),
-                    )
-                },
-                Value::Null,
-            ),
-            "git.commit" => git(
-                &self.sessions,
-                &session_id()?,
-                |ws| qaqh_workspace::git::commit_all(ws, &pstr(params, "message")?),
-                Value::Null,
-            ),
-            "git.file_diff" => git(
-                &self.sessions,
-                &session_id()?,
-                |ws| qaqh_workspace::git::file_diff(ws, &pstr2(params, "file_path", "filePath")?),
-                Value::Null,
-            ),
-            "config.load" => load_config(),
-            "config.save" => {
-                self.save_config(params)?;
-                Ok(Value::Null)
-            }
-            // 权限档位（三档：read-only / workspace-write / skip-permissions）：
-            // 与 config.save 共用 Config::update 单写口；
-            // 校验 → 写 config.toml → 广播 AgentReloadConfig 让所有活跃
-            // worker（含子代理，子代理继承同一全局权限）重载。
-            "config.set_permission_level" => {
-                let level = params
-                    .get("level")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| "permission level (1-3) is required".to_string())?;
-                if !(1..=3).contains(&level) {
-                    return Err(format!(
-                        "invalid permission level {level} (must be 1-3: 1=read-only, 2=workspace-write, 3=skip-permissions)"
-                    ));
-                }
-                self.update_config_and_reload(|cfg| {
-                    cfg.permission_level = level as u8;
-                    Ok(())
-                })?;
-                log::info!("[config] permission level set to {level}");
-                Ok(json!({ "permission_level": level }))
-            }
-            "profile.list" => {
-                let path = qaqh_profile::default_profiles_path();
-                let store = qaqh_profile::ProfilesStore::load_or_create(&path)
-                    .map_err(|e| format!("failed to load profiles: {e}"))?;
-                Ok(serde_json::to_value(store.document())
-                    .map_err(|e| format!("failed to serialize profiles: {e}"))?)
-            }
-            "profile.set_default" => {
-                let id = params.get("id").or_else(|| params.get("name"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "missing 'id' or 'name' parameter".to_string())?;
-                let path = qaqh_profile::default_profiles_path();
-                let mut store = qaqh_profile::ProfilesStore::load_or_create(&path)
-                    .map_err(|e| format!("failed to load profiles: {e}"))?;
-                store.set_default_profile(id)
-                    .map_err(|e| format!("failed to set default profile: {e}"))?;
-                self.update_config_and_reload(|cfg| {
-                    let _ = cfg.apply_profile(id);
-                    Ok(())
-                })?;
-                Ok(Value::Null)
-            }
-            "profile.create" => {
-                let name = pstr(params, "name")?;
-                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or(&name).trim().to_string();
-                let model = pstr(params, "model")?;
-                let path = qaqh_profile::default_profiles_path();
-                let mut store = qaqh_profile::ProfilesStore::load_or_create(&path)
-                    .map_err(|e| format!("failed to load profiles: {e}"))?;
-
-                let provider_id = if let Some(p) = params.get("provider").and_then(|v| v.as_str()) {
-                    p.to_string()
-                } else if let Some(base_url) = params.get("baseUrl").or_else(|| params.get("base_url")).and_then(|v| v.as_str()) {
-                    let pid = format!("provider-{}", &id);
-                    let wire_str = params.get("wire").and_then(|v| v.as_str()).unwrap_or("chat");
-                    let wire = qaqh_types::Wire::parse(wire_str).unwrap_or_default();
-                    let prov = qaqh_profile::ProviderDef {
-                        name: format!("{} 服务商", name),
-                        base_url: base_url.to_string(),
-                        wire,
-                        credential: qaqh_types::CredentialSource::ApiKey,
-                        api_key: None,
-                        headers: std::collections::BTreeMap::new(),
-                        compat: None,
-                        models: std::collections::BTreeMap::new(),
-                    };
-                    store.upsert_provider(pid.clone(), prov)
-                        .map_err(|e| format!("failed to create provider: {e}"))?;
-                    pid
-                } else {
-                    store.document().default_profile.clone()
-                };
-
-                let reasoning_effort = params.get("reasoningEffort")
-                    .or_else(|| params.get("reasoning_effort"))
-                    .or_else(|| params.get("effort"))
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string);
-                let context_length = params.get("contextLength")
-                    .or_else(|| params.get("context_length"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
-                let max_tokens = params.get("maxTokens")
-                    .or_else(|| params.get("max_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
-
-                let profile_def = qaqh_profile::ProfileDef {
-                    name: name.clone(),
-                    provider: provider_id.clone(),
-                    model: model.clone(),
-                    reasoning_effort,
-                    context_length,
-                    max_tokens,
-                };
-
-                if let Some(key) = params.get("apiKey").or_else(|| params.get("api_key")).and_then(|v| v.as_str()) {
-                    let trimmed_key = key.trim();
-                    if !trimmed_key.is_empty() {
-                        let secrets = qaqh_config::secrets::SecretStore::default_location();
-                        secrets.set_profile_key(&id, trimmed_key)
-                            .map_err(|e| format!("failed to store api key: {e}"))?;
-                    }
-                }
-
-                store.create_profile(id.clone(), profile_def)
-                    .map_err(|e| format!("failed to create profile: {e}"))?;
-
-                let base_url = params.get("baseUrl").or_else(|| params.get("base_url")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let wire_str = params.get("wire").and_then(|v| v.as_str()).unwrap_or("chat");
-                let wire = qaqh_types::Wire::parse(wire_str).unwrap_or_default();
-                let has_key = params.get("apiKey").or_else(|| params.get("api_key")).and_then(|v| v.as_str()).is_some_and(|k| !k.trim().is_empty());
-
-                self.update_config_and_reload(|cfg| {
-                    cfg.profiles.insert(id.clone(), qaqh_types::ProfileConfig {
-                        model,
-                        max_tokens: max_tokens.unwrap_or(8192),
-                        effort: params.get("reasoningEffort").or_else(|| params.get("effort")).and_then(|v| v.as_str()).map(ToString::to_string),
-                        context_length: context_length.unwrap_or(128000),
-                        base_url,
-                        wire,
-                        compat: None,
-                        credential: qaqh_types::CredentialSource::ApiKey,
-                        api_key: has_key.then(|| qaqh_config::secrets::CONFIG_MARKER.to_owned()),
-                        preset_endpoint: None,
-                        context_limit: None,
-                        context_window: None,
-                    });
-                    Ok(())
-                })?;
-
-                log::info!("[profile] successfully created profile '{id}' without polluting global active config");
-                Ok(Value::Null)
-            }
-            "profile.apply" => {
-                let name = pstr(params, "name")?;
-                self.update_config_and_reload(|cfg| {
-                    if cfg.apply_profile(&name).is_none() {
-                        return Err(format!("profile '{name}' not found"));
-                    }
-                    Ok(())
-                })?;
-                Ok(Value::Null)
-            }
-            // siwc/dsaccount 账号面不在此分发：由 ringing::service_methods::
-            // accounts 逐方法做 params/result DTO 收口（admin_only 档在方法表）。
-            "profile.save_current" => {
-                let name = pstr(params, "name")?;
-                // 顺序不可反：先把当前主密钥写进该 profile 的 secret 槽，再落
-                // `"set"` 标记。反了就会留下"声称有 key 却取不到"的 profile。
-                // 无 key 时同步清掉旧槽位，保证标记与 secret 始终一致。
-                let secrets = qaqh_config::secrets::SecretStore::default_location();
-                let key = qaqh_config::watch::authoritative()
-                    .map(|cfg| cfg.api_key)
-                    .unwrap_or_default();
-                let saved_key = !key.is_empty();
-                let stored = if saved_key {
-                    secrets.set_profile_key(&name, &key)
-                } else {
-                    secrets.delete_profile_key(&name)
-                };
-                stored.map_err(|e| format!("failed to store profile api key: {e}"))?;
-                self.update_config_and_reload(|cfg| {
-                    cfg.save_profile(&name, saved_key);
-                    Ok(())
-                })?;
-                Ok(Value::Null)
-            }
-            "profile.delete" => {
-                let name = pstr(params, "name")?;
-                self.update_config_and_reload(|cfg| {
-                    if !cfg.delete_profile(&name) {
-                        return Err(format!(
-                            "profile '{name}' cannot be deleted (not found or default)"
-                        ));
-                    }
-                    Ok(())
-                })?;
-                // profile 已从配置摘除；secret 槽位随后清理。名字不合法等失败
-                // 只告警——配置里已经不存在引用它的条目了。
-                if let Err(error) =
-                    qaqh_config::secrets::SecretStore::default_location().delete_profile_key(&name)
-                {
-                    log::warn!("[profile] secret cleanup for profile '{name}' skipped: {error}");
-                }
-                Ok(Value::Null)
-            }
-            // 只改本会话的 profile（不动全局 active_profile，也不广播）。落
-            // meta.json 后定向重载该会话——`AgentReloadConfig` 走
-            // `send_ringing_cmd` 而不是 registry 广播，所以别的会话不受影响。
-            // `name` 传空串 = 清除该会话的选择，回到跟随全局 `active_profile`。
-            "session.set_profile" => {
-                let session_id = session_id()?;
-                let name = pstr(params, "name")?;
-                if name.is_empty() {
-                    self.sessions.persist_profile(&session_id, None);
-                } else {
-                    let known = qaqh_config::watch::authoritative()
-                        .is_some_and(|cfg| cfg.profiles.contains_key(&name));
-                    if !known {
-                        return Err(format!("profile '{name}' not found"));
-                    }
-                    self.sessions
-                        .persist_profile(&session_id, Some(name.as_str()));
-                }
-                self.send_ringing_cmd(
-                    session_id,
-                    RingingCommand::Control(ControlCommand::AgentReloadConfig),
-                )?;
-                Ok(Value::Null)
-            }
-            // 只改本会话的 effort（思考强度），不碰全局配置。
-            // 落 meta.json 后定向重载该会话（AgentReloadConfig）。
-            "session.set_effort" => {
-                let session_id = session_id()?;
-                let effort = pstr(params, "effort")?;
-                if effort.is_empty() {
-                    self.sessions.persist_effort(&session_id, None);
-                } else {
-                    self.sessions.persist_effort(&session_id, Some(effort.as_str()));
-                }
-                self.send_ringing_cmd(
-                    session_id,
-                    RingingCommand::Control(ControlCommand::AgentReloadConfig),
-                )?;
-                Ok(Value::Null)
-            }
-            // 原子创建新会话（直接分配并返回 session_id，可选绑定 cwd/profile/effort/title）
-            "session.create" => {
-                let cwd = params
-                    .get("cwd")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let identity = self
-                    .sessions
-                    .allocate_session(cwd.as_deref())
-                    .map_err(|error| format!("session.create: allocate session failed: {error}"))?;
-                let session_id = identity.session_id.as_str().to_string();
-                self.sessions.clear_active();
-
-                if let Some(profile) = params.get("profile").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                    self.sessions.persist_profile(&session_id, Some(profile));
-                }
-                if let Some(effort) = params.get("effort").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                    self.sessions.persist_effort(&session_id, Some(effort));
-                }
-                if let Some(title) = params.get("title").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                    self.sessions.update_title(&session_id, title);
-                }
-
-                let canonical_cwd = self
-                    .sessions
-                    .workspace_cwd(&session_id)
-                    .filter(|cwd| !cwd.is_empty() && cwd != ".")
-                    .unwrap_or_else(|| {
-                        qaqh_types::platform::default_session_workspace_dir(&session_id)
-                            .to_string_lossy()
-                            .into_owned()
-                    });
-                let model = qaqh_config::Config::load()
-                    .map(|config| config.model)
-                    .unwrap_or_else(|_| "unknown".to_string());
-                if let Err(error) =
-                    materialize_canonical_session(&session_id, &canonical_cwd, &model)
-                {
-                    let _ = self.sessions.delete(&session_id);
-                    return Err(format!(
-                        "session.create: canonical materialization failed: {error}"
-                    ));
-                }
-                self.registry()?.spawn_new(&session_id)?;
-                Ok(json!({ "session_id": session_id }))
-            }
-            // 用户重命名会话标题（方案B）：落 meta.title 并以 TitleSource::User
-            // 广播 TitleChanged —— 客户端经 v2 Meta SSE 即时回灌，session.list
-            // 每轮读盘自然可见。auto-title 的冻结守卫（title.is_some()）保证
-            // 首回合后不再重复生成；LLM 总结在飞时的窄窗口竞态见
-            // docs/session-rename-persistence-plan.md §3。
-            "session.rename" => {
-                let session_id = session_id()?;
-                let title = pstr(params, "title")?.trim().to_string();
-                if title.is_empty() {
-                    return Err("title must be a non-empty string".to_string());
-                }
-                self.sessions.update_title(&session_id, &title);
-                if let Some(hub) = self.v2_hub.get() {
-                    let session_dir = self.sessions.session_path_dir(&session_id);
-                    if let Err(error) = hub.publish_title_changed(
-                        &session_dir,
-                        &session_id,
-                        title,
-                        qaqh_session::session_fact_v2::TitleSource::User,
-                    ) {
-                        log::warn!("[session] rename publish failed for {session_id}: {error}");
-                    }
-                }
-                Ok(Value::Null)
-            }
-            "todo.status" => qaqh_workspace::todo::todo_status_value(&session_id()?),
-            "todo.cancel" => {
-                let sid = session_id()?;
-                let result = qaqh_workspace::todo::todo_cancel_value(&sid, &pstr(params, "id")?);
-                if result.is_ok() {
-                    self.publish_resource_changed_best_effort(&sid, "todo");
-                }
-                result
-            }
-            "todo.set" => {
-                let sid = session_id()?;
-                let result = qaqh_workspace::todo::todo_set_value_for(&sid, params);
-                if result.is_ok() {
-                    self.publish_resource_changed_best_effort(&sid, "todo");
-                }
-                result
-            }
-            "todo.list" => qaqh_workspace::todo::todo_list_value_for(&session_id()?, params),
-            "plan.read" => {
-                serde_json::to_value(read_plan(&self.sessions, &session_id()?)).map_err(err)
-            }
-            "plan.action" => serde_json::to_value(plan_action(
-                &self.sessions,
-                &session_id()?,
-                &pstr2(params, "item_id", "itemId")?,
-                &pstr(params, "action")?,
-                value2(params, "user_comment", "userComment")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            )?)
-            .map_err(err),
-            // ── Subagent orchestration ──────────────────────────────────────
-            // Spawn an isolated subagent worker and return its seed. The
-            // caller (parent agent) then attaches the seed and drives it with
-            // ordinary Ringing commands/events (ConversationSendMessage →
-            // TurnCompleted). The worker runs ephemeral with the given tool
-            // allowlist and optional model/base-url/max-tokens overrides.
-            "subagent.spawn" => {
-                let tools: Vec<String> = params
-                    .get("tools")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let model = params
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                let base_url = params
-                    .get("base_url")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                let max_tokens = params
-                    .get("max_tokens")
-                    .and_then(Value::as_u64)
-                    .map(|v| v as u32);
-                // 子代理继承主代理的 workspace：spawn 前把 workspace 作为 cwd
-                // 落进子会话 meta（`allocate_agent_session(workspace)` →
-                // `create_new_session(..., cwd, ...)`），子 worker 启动时经
-                // `load_session_workspace` 读 meta.cwd，从而正确解析相对路径并
-                // 以主代理工作区为权限边界（修复子代理"不知道工作区、
-                // 相对路径落到 daemon cwd"的问题）。workspace.txt 已退役。
-                let workspace = params
-                    .get("workspace")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|w| !w.is_empty() && *w != ".")
-                    .map(String::from);
-                // BETA-01：子代理与主会话共享 canonical identity 规则，
-                // 目录名、seed、child_session_id 都是同一个 UUID；子代理
-                // 保持 unindexed，不污染普通会话列表。
-                let identity = self
-                    .sessions
-                    .allocate_agent_session(workspace.as_deref())
-                    .map_err(|error| format!("subagent.spawn: allocate child session: {error}"))?;
-                let session_id = identity.session_id.as_str().to_string();
-                if let Some(workspace) = &workspace {
-                    log::info!("[subagent] inherited workspace for seed={session_id}: {workspace}");
-                }
-                self.registry()?.spawn_subagent(
-                    &session_id,
-                    &tools,
-                    model.as_deref(),
-                    base_url.as_deref(),
-                    max_tokens,
-                )?;
-                log::info!(
-                    "[subagent] spawned subagent worker seed={session_id} tools={}",
-                    tools.len()
-                );
-                Ok(json!({ "session_id": session_id }))
-            }
-            _ => Err(format!("unknown method: {method}")),
+    /// 服务面唯一入口：wire `(method, params)` 在这里解码一次，然后按领域分派。
+    ///
+    /// 强类型命令见 [`command`]（`service::command`），各领域的执行体在
+    /// [`handlers`] 里。此前这里是一个 673 行、按字符串 `match` 分派、
+    /// 再用 `pstr(params, "path")?` 手工取参的函数——参数错误只在运行时暴露，
+    /// 新增方法也逃不过「加一条字符串 arm」。
+    pub fn handle(&self, method: &str, params: &Value) -> QaqhResult<Value> {
+        match Command::decode(method, params)? {
+            Command::System(command) => handlers::system::handle(self, command),
+            Command::Workspace(command) => handlers::workspace::handle(self, command),
+            Command::Session(command) => handlers::session::handle(self, command),
+            Command::Task(command) => handlers::task::handle(self, command),
         }
     }
 
@@ -1166,13 +513,10 @@ impl QaqhService {
     }
 
     /// 构造 Ringing worker 命令信封并转发给 agent（legacy Ui2Agent 帧已拆除）。
-    fn send_ringing_cmd(
-        &self,
-        session_id: String,
-        command: RingingCommand,
-    ) -> Result<Value, String> {
+    fn send_ringing_cmd(&self, session_id: String, command: RingingCommand) -> QaqhResult<Value> {
         let env = RingingWorkerCommandEnvelope::new(session_id.clone(), command_id(), command);
-        self.send_ringing_command(&session_id, &env)?;
+        self.send_ringing_command(&session_id, &env)
+            .map_err(QaqhError::message)?;
         Ok(Value::Null)
     }
 
@@ -1292,25 +636,24 @@ impl QaqhService {
     }
 
     /// 单写口：`Config::update` 成功后广播 reload（BUG-001/008）。
-    fn update_config_and_reload<F>(&self, mutate: F) -> Result<qaqh_config::Config, String>
+    fn update_config_and_reload<F>(&self, mutate: F) -> QaqhResult<qaqh_config::Config>
     where
         F: FnOnce(&mut qaqh_config::Config) -> Result<(), String>,
     {
-        let config = qaqh_config::Config::update(mutate)?;
+        let config = qaqh_config::Config::update(mutate).map_err(QaqhError::message)?;
         self.notify_config_changed();
         Ok(config)
     }
 
-    fn save_config(&self, params: &Value) -> Result<(), String> {
+    fn save_config(&self, patch: qaqh_config_api::ConfigPatch) -> QaqhResult<()> {
         // Never log config.save payloads: they may contain provider credentials.
         log::info!("[config.save] saving configuration");
         // P1-C2：wire 切换为 Merge Patch 契约（qaqh-config-api）——值域校验在
         // api 层 validate()；逐字段守卫语义集中在 qaqh_config::dto::apply_patch
         // （穷举映射，新增字段未同步会编译失败）。旧 snake/camel 双键 shim 就此退役。
-        let patch: qaqh_config_api::ConfigPatch = serde_json::from_value(params.clone())
-            .map_err(|e| format!("invalid config.save payload: {e}"))?;
         self.update_config_and_reload(|cfg| qaqh_config::dto::apply_patch(cfg, &patch))
             .map(|_| ())
+            .map_err(QaqhError::message)
     }
 }
 
@@ -1435,11 +778,35 @@ fn spawn_config_file_poller() {
     });
 }
 
+/// `session.new` / `session.create` 共用的 canonical 基线：`(cwd, model)`。
+///
+/// cwd 取 meta.cwd；未绑定工作区时兜底到与会话执行面同一个默认工作根
+/// （`load_session_workspace` 注入的就是这个目录）。旧实现兜底
+/// `std::env::current_dir()`，在 daemon 里就是安装目录，canonical
+/// `SessionCreated.cwd` 因此把 harness 自身目录投影给前端/模型。
+/// 模型读不到配置时记 `unknown`（不阻塞建会话）。
+pub(crate) fn session_canonical_cwd(
+    sessions: &qaqh_session::SessionManager,
+    session_id: &str,
+) -> (String, String) {
+    let cwd = sessions
+        .workspace_cwd(session_id)
+        .filter(|cwd| !cwd.is_empty() && cwd != ".")
+        .unwrap_or_else(|| {
+            qaqh_types::platform::default_session_workspace_dir(session_id)
+                .to_string_lossy()
+                .into_owned()
+        });
+    let model = qaqh_config::Config::load()
+        .map(|config| config.model)
+        .unwrap_or_else(|_| "unknown".to_string());
+    (cwd, model)
+}
+
 /// 在 `session.new` 的持久化阶段写入 canonical 基线。
 ///
-/// `CanonicalSessionIdentity::open_or_create` 只建 identity sidecar；bootstrap
-/// 还要求 `events.commit.json` 存在。这里在 worker spawn 前串行写入首个
-/// `SessionCreated`，把「identity 已建但 snapshot 缺失」的瞬态消掉。
+/// Bootstrap and the actor use the same batch store. Drop this temporary owner
+/// before spawning the actor so there is only one journal writer at a time.
 fn materialize_canonical_session(session_id: &str, cwd: &str, model: &str) -> Result<(), String> {
     let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
     materialize_canonical_session_in(&session_dir, cwd, model, None)
@@ -1455,32 +822,18 @@ pub(crate) fn materialize_canonical_session_in(
         CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
     let session_id = identity.session_id.clone();
     let log_id = identity.log_id.clone();
-    // `CanonicalSessionStore::open` initializes an empty commit marker for a
-    // brand-new session; `CommittedFactReader` would fail before that.
-    let mut store = CanonicalSessionStore::open(session_dir, session_id.clone(), log_id.clone())
-        .map_err(|error| error.to_string())?;
-    let facts = CommittedFactReader::open(session_dir, session_id.clone(), log_id.clone())
-        .map_err(|error| error.to_string())?
-        .read_all()
-        .map_err(|error| error.to_string())?;
-    if facts
-        .iter()
-        .any(|fact| matches!(&fact.payload, FactPayload::SessionCreated(_)))
-    {
+    let budget = crate::session_agent::assembly::default_context_budget();
+    let mut store = if session_dir.join("storage-format").exists() {
+        SessionCommit::open(session_dir, session_id.clone(), log_id.clone(), budget)
+    } else {
+        SessionCommit::create(session_dir, session_id.clone(), log_id.clone(), budget)
+    }
+    .map_err(|error| error.to_string())?;
+    // Opening verifies business transitions, including SessionCreated at seq 1.
+    if store.head().map_err(|error| error.to_string())? > 0 {
         return Ok(());
     }
     let now_ms = system_time_ms();
-    let writer_id = WriterId::new(format!(
-        "daemon-session-init-{}-{}",
-        std::process::id(),
-        session_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("session")
-    ));
-    let lease = store
-        .acquire_writer(writer_id, now_ms, 60_000)
-        .map_err(|error| error.to_string())?;
     let cwd = if std::path::Path::new(cwd).is_absolute() {
         cwd.to_string()
     } else {
@@ -1513,12 +866,7 @@ pub(crate) fn materialize_canonical_session_in(
         }),
     };
     store
-        .append(&lease, fact, now_ms)
-        .map_err(|error| error.to_string())?;
-    store
-        // 释放必须对任何时钟都表现为已过期；写 wall clock 会让落后时钟的读者
-        // 把 fence 看成仍有效（与 ToolLedger::Drop 的释放语义一致）。
-        .release_writer(&lease, i64::MIN)
+        .commit("session-created", 0, vec![fact])
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1531,27 +879,20 @@ fn system_time_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+pub(crate) mod command;
 pub(crate) mod common;
 pub(crate) mod fs_git;
+pub(crate) mod handlers;
 pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod stats;
 
-use self::{
-    common::{command_id, err, release_freed_heap_memory},
-    fs_git::{git, list_remote_directory, read_remote_file, workspace},
-    params::{
-        optional_tool_mode, pbool, pstr, pstr2, pstrings, scope_session_param_value, session_param,
-        validate_tool_mode, value2,
-    },
-    plan::{plan_action, read_plan},
-    stats::{activity, dashboard, load_config},
-};
+use self::common::{command_id, err, release_freed_heap_memory};
 
 #[cfg(test)]
 mod canonical_session_materialization_tests {
     use qaqh_session::canonical::{
-        CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE, WRITER_FENCE_FILE, WriterFence,
+        BatchJournal, CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE, EVENTS_FILE, WRITER_FENCE_FILE,
     };
 
     use super::*;
@@ -1562,26 +903,25 @@ mod canonical_session_materialization_tests {
         materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
             .expect("materialize");
         assert!(dir.path().join(CANONICAL_IDENTITY_FILE).exists());
-        assert!(dir.path().join(EVENTS_COMMIT_FILE).exists());
-        let fence: WriterFence = serde_json::from_slice(
-            &std::fs::read(dir.path().join(WRITER_FENCE_FILE)).expect("writer fence"),
-        )
-        .expect("decode writer fence");
-        assert_eq!(
-            fence.lease_expires_at_ms,
-            i64::MIN,
-            "released fences must look expired to every reader clock"
-        );
+        assert!(dir.path().join("storage-format").exists());
+        assert!(!dir.path().join(EVENTS_COMMIT_FILE).exists());
+        assert!(!dir.path().join(EVENTS_FILE).exists());
+        assert!(!dir.path().join(WRITER_FENCE_FILE).exists());
 
         let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
-        let facts = CommittedFactReader::open(
+        let journal = BatchJournal::open(
             dir.path(),
             identity.session_id.clone(),
             identity.log_id.clone(),
         )
-        .expect("reader")
-        .read_all()
-        .expect("facts");
+        .expect("journal");
+        let mut facts = Vec::new();
+        journal
+            .visit_committed(|batch| {
+                facts.extend_from_slice(batch);
+                Ok::<_, ()>(())
+            })
+            .expect("facts");
         assert_eq!(facts.len(), 1);
         let FactPayload::SessionCreated(created) = &facts[0].payload else {
             panic!("first fact must be SessionCreated");
@@ -1594,15 +934,46 @@ mod canonical_session_materialization_tests {
             created.cwd
         );
         assert_eq!(created.model, "test-model");
+        drop(journal);
 
         // 幂等：重复调用不得追加第二个 SessionCreated。
         materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
             .expect("second materialize");
-        let facts = CommittedFactReader::open(dir.path(), identity.session_id, identity.log_id)
-            .expect("reader")
-            .read_all()
-            .expect("facts");
-        assert_eq!(facts.len(), 1);
+        let journal =
+            BatchJournal::open(dir.path(), identity.session_id, identity.log_id).expect("journal");
+        assert_eq!(journal.committed_head(), 1);
+    }
+
+    #[test]
+    fn session_creation_resumes_an_empty_batch_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
+        drop(
+            BatchJournal::create(
+                dir.path(),
+                identity.session_id.clone(),
+                identity.log_id.clone(),
+            )
+            .expect("empty journal"),
+        );
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+            .expect("resume before baseline commit");
+        let journal =
+            BatchJournal::open(dir.path(), identity.session_id, identity.log_id).expect("journal");
+        assert_eq!(journal.committed_head(), 1);
+    }
+
+    #[test]
+    fn session_creation_does_not_overwrite_legacy_storage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = b"legacy session data\n";
+        std::fs::write(dir.path().join(EVENTS_FILE), bytes).expect("legacy log");
+        let error =
+            materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+                .expect_err("legacy stores require explicit migration");
+        assert!(error.contains("isolated data root"), "{error}");
+        assert_eq!(std::fs::read(dir.path().join(EVENTS_FILE)).unwrap(), bytes);
+        assert!(!dir.path().join("storage-format").exists());
     }
 }
 
@@ -1612,35 +983,27 @@ mod tool_mode_tests {
 
     #[test]
     fn optional_tool_mode_defaults_to_none() {
-        assert_eq!(optional_tool_mode(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(optional_tool_mode(None, &[]).unwrap(), None);
     }
 
     #[test]
     fn optional_tool_mode_rejects_deprecated_minimal_dsh() {
         // minimal:dsh 已随 bash/pwsh 拆分下线：废弃模式必须被 KNOWN_MODES
         // 白名单拒绝，不得回流。
-        assert!(
-            optional_tool_mode(&serde_json::json!({
-                "tool_mode": "minimal:dsh",
-            }))
-            .is_err()
-        );
+        assert!(optional_tool_mode(Some("minimal:dsh"), &[]).is_err());
     }
 
     #[test]
     fn optional_tool_mode_rejects_unknown_values() {
-        assert!(optional_tool_mode(&serde_json::json!({ "tool_mode": "turbo" })).is_err());
+        assert!(optional_tool_mode(Some("turbo"), &[]).is_err());
     }
 
     #[test]
     fn optional_tool_mode_custom_requires_tools() {
-        assert!(optional_tool_mode(&serde_json::json!({ "tool_mode": "custom" })).is_err());
-        let (mode, tools) = optional_tool_mode(&serde_json::json!({
-            "tool_mode": "custom",
-            "custom_tools": ["exec"],
-        }))
-        .unwrap()
-        .unwrap();
+        assert!(optional_tool_mode(Some("custom"), &[]).is_err());
+        let (mode, tools) = optional_tool_mode(Some("custom"), &["exec".to_string()])
+            .unwrap()
+            .unwrap();
         assert_eq!(mode, "custom");
         assert_eq!(tools, vec!["exec"]);
     }

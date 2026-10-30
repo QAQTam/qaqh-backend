@@ -217,6 +217,7 @@ impl SubagentHost for QaqhService {
     ) -> Result<Vec<ListedAgent>, String> {
         self.registry()?
             .list_agents_with_state_for_caller(caller_session_id, path_prefix)
+            .map_err(|error| error.to_string())
     }
 
     fn send_agent_message(
@@ -560,7 +561,9 @@ impl SubagentHost for QaqhService {
     ) -> Result<(), String> {
         let id = format!("host-{:x}", nanos());
         let env = RingingWorkerCommandEnvelope::new(session_id, id, command);
-        self.registry()?.send_ringing(session_id, &env)
+        self.registry()?
+            .send_ringing(session_id, &env)
+            .map_err(|error| error.to_string())
     }
 
     fn subscribe(&self, session_id: &str) -> CollectorSubscription {

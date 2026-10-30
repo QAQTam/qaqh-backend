@@ -4,6 +4,8 @@
 //! captures payload text. It combines process-level measurements with
 //! caller-supplied logical/estimated gauges and a bounded phase-sample ring.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};

@@ -105,6 +105,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     // `qaqh_types::platform::data_dir()` 的优先级是
     // `QAQH_DATA_DIR` > `%USERPROFILE%`(win) / `$XDG_CONFIG_HOME` / `$HOME`(unix)，
     // 三个变量都必须钉住——否则真实 home 的历史 todo 会造成"跑两遍就假红"。
+    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
     unsafe {
         std::env::set_var("USERPROFILE", &temp_home);
         std::env::set_var("HOME", &temp_home);
