@@ -1,5 +1,4 @@
 mod activity;
-pub mod agent;
 mod agent_catalog;
 mod agent_graph;
 pub mod error;
@@ -14,6 +13,7 @@ pub mod subagent_recovery;
 mod subagent_supervisor;
 pub(crate) mod test_hooks;
 pub mod tool_job;
+mod support;
 
 pub use activity::SessionActivityTracker;
 pub use error::{QaqhError, QaqhResult};

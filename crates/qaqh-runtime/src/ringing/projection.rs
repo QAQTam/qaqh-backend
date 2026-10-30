@@ -5,26 +5,13 @@
 
 // ── Persisted-history UI projection (moved verbatim from the former msgloop crate's util, PR-1-4) ──
 
-/// Build the same UI turn projection directly from persisted messages.
-///
-/// The daemon uses this before an Agent worker exists, so a cold attach can
-/// return a canonical transcript without depending on a later live event.
+/// Return both the total persisted turn count and the requested UI window.
 ///
 /// **回放过滤（BUG-2026-09-13-13 / #13）**：中断流遗留的悬挂 `ToolUse`
 /// （缺 id 或 name，见 [`qaqh_types::ContentBlock::is_hanging_tool_use`]）
 /// 不投影。写侧已在持久化前清洗新历史（`MessageStore::push_assistant`），
 /// 这里额外过滤是为了**既有归档**：已落盘的旧会话不会因写侧修复而自愈，
 /// 必须让每次 reload 的投影面也看不见它们。
-pub fn build_turns_from_messages(
-    session_id: &str,
-    messages: &[qaqh_types::Message],
-    start: Option<usize>,
-    max_count: Option<usize>,
-) -> Vec<qaqh_domain::TurnData> {
-    project_turns_from_messages(session_id, messages, start, max_count).1
-}
-
-/// Return both the total persisted turn count and the requested UI window.
 pub fn project_turns_from_messages(
     session_id: &str,
     messages: &[qaqh_types::Message],
