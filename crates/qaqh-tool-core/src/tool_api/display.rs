@@ -207,6 +207,25 @@ pub enum ToolBody {
         name: String,
         session_id: String,
     },
+    /// v2 结构化条目列表。`kind` 选择渲染器（如 `"todo"`），`items` 是
+    /// 可直接渲染的 DTO：客户端不再解析 `Text` 里的 `- [ ] title | desc`
+    /// 语法来还原状态。`status` 是工具域自己的词表，展示层不解释、不改写。
+    Items {
+        kind: String,
+        items: Vec<ToolDisplayItem>,
+    },
+}
+
+/// 结构化条目（`ToolBody::Items` 的元素）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolDisplayItem {
+    /// 工具域内的稳定 id（todo 的 `title` 才是身份，故可为空）。
+    pub id: Option<String>,
+    pub title: String,
+    /// 工具域状态词表，原样透传（如 `pending|in_progress|completed|cancelled`）。
+    pub status: String,
+    pub description: Option<String>,
+    pub evidence: Option<String>,
 }
 
 /// 运行信息（契约 §3.2）。`elapsed_ms = None` 表示本期未接线 metrics，

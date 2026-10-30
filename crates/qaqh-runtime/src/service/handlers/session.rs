@@ -151,6 +151,53 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
         SessionCommand::SkillsListTools(_) => {
             Ok(json!(qaqh_workspace::runtime::process_all_tool_names()))
         }
+        SessionCommand::SkillsCatalog(args) => {
+            let workspace = match args.cwd {
+                Some(cwd) if !cwd.is_empty() => std::path::PathBuf::from(cwd),
+                _ => std::env::current_dir().map_err(|error| {
+                    QaqhError::message(format!("skills.catalog: resolve cwd: {error}"))
+                })?,
+            };
+            let catalog = qaqh_skills::discover(&workspace);
+            let skills = catalog
+                .skills
+                .iter()
+                .map(|skill| crate::ringing::service_methods::SkillCatalogEntry {
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                    scope: match skill.scope {
+                        qaqh_skills::SkillScope::Project => "project",
+                        qaqh_skills::SkillScope::User => "user",
+                    }
+                    .to_string(),
+                    origin: match skill.origin {
+                        qaqh_skills::SkillOrigin::Project => "project",
+                        qaqh_skills::SkillOrigin::User => "user",
+                        qaqh_skills::SkillOrigin::Bundled => "bundled",
+                    }
+                    .to_string(),
+                    path: skill.path.to_string_lossy().into_owned(),
+                })
+                .collect();
+            let diagnostics = catalog
+                .diagnostics
+                .iter()
+                .map(|diagnostic| crate::ringing::service_methods::SkillCatalogDiagnostic {
+                    severity: match diagnostic.severity {
+                        qaqh_skills::DiagnosticSeverity::Warning => "warning",
+                        qaqh_skills::DiagnosticSeverity::Error => "error",
+                    }
+                    .to_string(),
+                    path: diagnostic.path.to_string_lossy().into_owned(),
+                    message: diagnostic.message.clone(),
+                })
+                .collect();
+            serde_json::to_value(crate::ringing::service_methods::SkillsCatalogResult {
+                skills,
+                diagnostics,
+            })
+            .map_err(QaqhError::message)
+        }
         // 只改本会话的 profile（不动全局 active_profile，也不广播）。落
         // meta.json 后定向重载该会话——`AgentReloadConfig` 走
         // `send_ringing_cmd` 而不是 registry 广播，所以别的会话不受影响。

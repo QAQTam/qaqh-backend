@@ -12,12 +12,14 @@ use std::time::Duration;
 use serde::Serialize;
 
 use super::display::{
-    PathOp, ToolBody, ToolDisplay, ToolDisplayOutcome, ToolHeader, ToolMetrics, ToolTerminalState,
+    PathOp, ToolBody, ToolDisplay, ToolDisplayItem, ToolDisplayOutcome, ToolHeader, ToolMetrics,
+    ToolTerminalState,
 };
 use super::error::{ToolError, ToolErrorKind};
 use qaqh_types::{
     ContentRef, ToolImage, ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader,
-    ToolResultDisplayOutcome, ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
+    ToolResultDisplayItem, ToolResultDisplayOutcome, ToolResultDisplayOutcomeState,
+    ToolResultDisplayPathOp,
 };
 
 pub use qaqh_types::ToolStatus;
@@ -403,6 +405,10 @@ fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
                 name: name.clone(),
                 session_id: session_id.clone(),
             }),
+            ToolBody::Items { kind, items } => Some(ToolResultDisplayBody::Items {
+                kind: kind.clone(),
+                items: items.iter().map(to_wire_display_item).collect(),
+            }),
         },
         outcome: display.outcome.as_ref().map(to_wire_outcome),
     }
@@ -422,6 +428,26 @@ fn to_wire_outcome(outcome: &ToolDisplayOutcome) -> ToolResultDisplayOutcome {
         duration_ms: outcome.duration_ms,
         output_bytes: outcome.output_bytes,
         truncated: outcome.truncated,
+    }
+}
+
+fn to_wire_display_item(item: &ToolDisplayItem) -> ToolResultDisplayItem {
+    ToolResultDisplayItem {
+        id: item.id.clone(),
+        title: item.title.clone(),
+        status: item.status.clone(),
+        description: item.description.clone(),
+        evidence: item.evidence.clone(),
+    }
+}
+
+fn from_wire_display_item(item: &ToolResultDisplayItem) -> ToolDisplayItem {
+    ToolDisplayItem {
+        id: item.id.clone(),
+        title: item.title.clone(),
+        status: item.status.clone(),
+        description: item.description.clone(),
+        evidence: item.evidence.clone(),
     }
 }
 
@@ -491,6 +517,10 @@ pub fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
             Some(ToolResultDisplayBody::Subagent { name, session_id }) => ToolBody::Subagent {
                 name: name.clone(),
                 session_id: session_id.clone(),
+            },
+            Some(ToolResultDisplayBody::Items { kind, items }) => ToolBody::Items {
+                kind: kind.clone(),
+                items: items.iter().map(from_wire_display_item).collect(),
             },
             Some(ToolResultDisplayBody::Unknown) => ToolBody::None,
         },
