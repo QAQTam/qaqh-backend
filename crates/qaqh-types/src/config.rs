@@ -64,7 +64,7 @@ pub struct PersistentConfig {
     // ── Daemon session policy ──
     /// 空闲会话 worker 自动卸载阈值（秒）。`None`/0 = 禁用（缺省）。
     /// 卸载 = 优雅 seal + 从 registry 摘除 + 释放内存；下次输入自动
-    /// load_for_resume 恢复。详见 docs/current/architecture.md。
+    /// load_for_resume 恢复。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_idle_unload_secs: Option<u64>,
 
@@ -107,11 +107,11 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold: Option<f64>,
 
-    /// MCP 客户端配置（docs/current/architecture.md）。
+    /// MCP 客户端配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<PersistentMcpConfig>,
 
-    /// LSP 客户端配置（docs/current/architecture.md；全部 Option）。
+    /// LSP 客户端配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsp: Option<PersistentLspConfig>,
 
@@ -137,7 +137,6 @@ pub struct PersistentExecConfig {
 }
 
 /// Persistence-friendly subagent config with all-Option fields.
-///
 /// Stored as a subsection of the main config. All fields are `Option` so that
 /// partial overrides work — `None` = inherit from parent agent config.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -171,7 +170,7 @@ pub struct PersistentSubagentConfig {
     pub message_outbound_per_sender: Option<u64>,
 }
 
-/// MCP 客户端配置持久层（docs/current/architecture.md；全部 Option）。
+/// MCP 客户端配置持久层。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistentMcpConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,7 +182,6 @@ pub struct PersistentMcpConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_shutdown_secs: Option<u64>,
     /// 是否把 MCP 资源清单注入历史（trailing developer 消息）。
-    ///
     /// 缺省 **false**：清单是「环境能力」不是「对话事实」，注入会随清单变化
     /// 追加历史并打断 prefix cache；模型按需调 `mcp list_resources` 能拿到
     /// 同一份本地缓存且不受 20 条封顶。开启仅用于调试/兼容。
@@ -224,7 +222,7 @@ pub struct PersistentMcpServerConfig {
     pub cwd: Option<String>,
 }
 
-/// LSP 客户端配置持久层（docs/current/architecture.md；全部 Option）。
+/// LSP 客户端配置持久层。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistentLspConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -263,7 +261,6 @@ pub struct PersistentLspServerConfig {
 // ── Profile / Preferences ──
 /// One BYOK endpoint record: the six fields the user owns, plus the optional
 /// request-shape notes for endpoints that deviate from their wire.
-///
 /// Profiles are how the user keeps several endpoints (e.g. "fast" vs "deep")
 /// and switches between them. A profile may carry its own API key: the
 /// plaintext lives in `secrets.toml` under `[secrets.profiles.<name>]`, and
@@ -340,7 +337,6 @@ impl ProfileConfig {
 // ── ConfigStore: unified config I/O with atomic writes ──
 
 /// Unified config I/O with atomic writes.
-///
 /// Writes use a temp-file + rename pattern to prevent corruption from
 /// partial writes.
 #[derive(Debug, Clone)]

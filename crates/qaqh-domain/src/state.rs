@@ -1,12 +1,9 @@
 //! 三频道快照 `state` 的**类型化视图**（前端契约 G1）。
-//!
 //! `state` 是中立 `serde_json::Value`，其形状由本模块的 Rust 类型固定，三端
 //! （winui / web / TUI）共用，web 端可经 `ts` feature 直接生成 TS 类型。v2
 //! bootstrap 快照的 `base` 字段直接复用这些类型（见 `qaqh-ringing::v2` 的
 //! `RingingV2Bootstrap`）。
-//!
 //! # 兼容策略
-//!
 //! 全部字段带 `#[serde(default)]`：缺字段 = 保持缺省，**解析失败一律降级而不是崩**
 //! ——这是各端一致的行为契约。代价是「形状漂移会静默变成缺省」，故**漂移由测试兜**
 //! （`qaqh-runtime` 的产出方往返测试直接拿真实快照断言字段非缺省），不靠运行期报错。
@@ -16,10 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::{ActivityState, AgentLifecycleState, DashboardSnapshot, SessionState, TurnData};
 
 /// conversation 频道 `state`。
-///
 /// 不派生 `PartialEq`：含 `TurnData`，未派生该 trait；本类型是
 /// DTO，消费侧不需要相等比较，故不为它去改动共享类型。
-///
 /// 只保留**真有生产者**的字段：`turns`/`total_turns`/`has_more` 来自分页投影。
 /// 曾经的 `usage`/`usage_totals`/`usage_requests`/`cache_reported_requests`/
 /// `context_limit` 是 Info 面板时代的遗留视图字段——面板已移除，且全仓无一处
@@ -88,9 +83,8 @@ pub struct PendingInteraction {
 }
 
 /// 挂起交互的类别。
-///
 /// **没有未知取值兜底臂**（`#[serde(other)] Unknown` 已于 2026-09-15 按兼容政策删除，
-/// 见 `docs/current/architecture.md`）：daemon 新增
+/// ）：daemon 新增
 /// 类别时旧客户端会**解析失败**而不是安静地变成 `Unknown`。这是刻意的——静默降级会
 /// 让 UI 显示一个**错的**状态，而失败至少是响亮的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
