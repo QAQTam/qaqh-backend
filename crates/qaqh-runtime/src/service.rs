@@ -651,8 +651,16 @@ impl QaqhService {
 
     /// 配置写后广播（所有 config.* / profile.* 写路径共用）。
     fn notify_config_changed(&self) {
-        // P2-D2 / 阶段 3b：ConfigChanged 的 v1 Control 频道广播已删（A1：wire
-        // 零消费方，前端重拉由 worker 侧 AgentReloadConfig 广播驱动）。
+        // v2：给驻留会话发一条 config_changed 信号（客户端据此重拉 config.load）。
+        // 在此之前前端只能靠自建广播 + 15s/焦点轮询兜底。
+        if let Some(hub) = self.v2_hub.get() {
+            match hub.publish_config_changed() {
+                Ok(published) => log::debug!("[config] v2 config_changed → {published} session(s)"),
+                Err(error) => log::warn!("[config] v2 config_changed broadcast failed: {error:?}"),
+            }
+        }
+        // worker 侧重载仍走 AgentReloadConfig 广播（改配置要作用到活跃 worker，
+        // 含子代理）。客户端侧的「重拉提示」已由上方的 v2 config_changed 承担。
         let failed = match self.registry() {
             Ok(mut registry) => registry
                 .broadcast_ringing(&RingingCommand::Control(ControlCommand::AgentReloadConfig)),

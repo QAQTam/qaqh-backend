@@ -106,7 +106,7 @@ pub(crate) fn activity(
             tool_name,
             summary,
             status,
-            time: finished.finished_at_ms.to_string(),
+            finished_at_ms: finished.finished_at_ms,
             args,
         });
     }
