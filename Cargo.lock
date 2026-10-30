@@ -2484,6 +2484,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-ptc-bun"
+version = "2.0.20261028"
+dependencies = [
+ "qaqh-ptc-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qaqh-ptc-core"
+version = "2.0.20261028"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qaqh-ptc-sdk"
+version = "2.0.20261028"
+dependencies = [
+ "qaqh-ptc-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qaqh-ptc-tools"
+version = "2.0.20261028"
+dependencies = [
+ "qaqh-policy",
+ "qaqh-ptc-core",
+ "qaqh-ptc-sdk",
+ "qaqh-tool-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qaqh-pty"
 version = "2.1.20261031-1"
 dependencies = [

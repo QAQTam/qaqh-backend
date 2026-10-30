@@ -1,0 +1,14 @@
+[package]
+name = "qaqh-ptc-bun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bun PTC provider: runs one model-written TypeScript program per managed process over an NDJSON control channel"
+
+[dependencies]
+qaqh-ptc-core = { path = "../qaqh-ptc-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
