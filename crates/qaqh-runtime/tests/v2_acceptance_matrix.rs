@@ -435,7 +435,8 @@ async fn single_stream_carries_all_channels_in_global_order() {
     use qaqh_session::canonical::sha256_content_hash;
     use qaqh_session::session_fact_v2::{
         ActorKind, ActorRef, ContentRef, InputAccepted, InputId, InputKind, InputPurpose,
-        ToolCallDeclared, ToolCallId, TurnId,
+        ExecutionId, PolicyDecisionRef, SideEffectClass, ToolCallDeclared, ToolCallId, ToolIntent,
+        ToolIntentPolicyOutcome, ToolReplayCapability, TurnId,
     };
 
     let mut fixture = Fixture::new("v2-single-stream");
@@ -478,14 +479,40 @@ async fn single_stream_carries_all_channels_in_global_order() {
         Some(turn_id.clone()),
         Some(call_id.clone()),
         FactPayload::ToolCallDeclared(ToolCallDeclared {
-            turn_id,
-            call_id,
+            turn_id: turn_id.clone(),
+            call_id: call_id.clone(),
             tool_name: "exec".into(),
             args_ref: ContentRef::new(sha256_content_hash(b"args")),
             args_hash: sha256_content_hash(b"args"),
         }),
     );
     fixture.append_and_publish(&hub, declared);
+
+    // tool: `ToolIntent` 的 Control slot 映射到 Tool 频道
+    // （`projection_stream_key`：Control + ToolIntent => RingingChannel::Tool）。
+    let intent = fixture.envelope_with_ids(
+        NOW_MS + 12,
+        None,
+        Some(call_id.clone()),
+        FactPayload::ToolIntent(ToolIntent {
+            call_id: call_id.clone(),
+            execution_id: ExecutionId::new(format!("exec_{}", generate_ulid())),
+            idempotency_key: None,
+            replay_capability: ToolReplayCapability::NoReplay,
+            policy_decision: PolicyDecisionRef {
+                outcome: ToolIntentPolicyOutcome::Allow,
+                rule_id: "single-stream".into(),
+                decided_at_ms: NOW_MS + 12,
+                reason_ref: None,
+            },
+            effective_args_ref: None,
+            effective_args_hash: None,
+            sandbox_spec_hash: sha256_content_hash(b"sandbox"),
+            side_effect_class: SideEffectClass::ReadOnly,
+            intent_at_ms: NOW_MS + 12,
+        }),
+    );
+    fixture.append_and_publish(&hub, intent);
 
     let mut channels = std::collections::BTreeSet::new();
     let mut last: Option<(u64, Option<u16>)> = None;
