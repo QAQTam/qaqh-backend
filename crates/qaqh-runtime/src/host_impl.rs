@@ -15,9 +15,7 @@ use std::time::{Duration, Instant};
 
 use qaqh_ringing::RingingWorkerCommandEnvelope;
 use qaqh_session::canonical::notify;
-use qaqh_session::canonical::{
-    CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE, generate_ulid,
-};
+use qaqh_session::canonical::generate_ulid;
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{
     AgentPath, AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
@@ -73,7 +71,7 @@ impl QaqhService {
             .sessions
             .session_dir_for_id(session_id)?
             .ok_or_else(|| format!("mailbox session {session_id} has no canonical directory"))?;
-        let identity = CanonicalSessionIdentity::open(&session_dir)
+        let identity = qaqh_session::canonical::open_session_identity(&session_dir)
             .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
         if identity.session_id.as_str() != session_id {
             return Err(format!(
@@ -81,34 +79,25 @@ impl QaqhService {
                 identity.session_id
             ));
         }
-        // A freshly allocated session can exist before its actor appends the
-        // first canonical fact. Treat that as an empty mailbox rather than a
-        // recovery error; the next poll will observe the newly committed marker.
-        if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+        // A freshly allocated session can exist before its actor commits the
+        // first fact. Treat that as an empty mailbox rather than a recovery
+        // error; the next poll observes the newly committed marker. The probe
+        // must know both storage generations (`has_committed_facts`).
+        if !qaqh_session::canonical::has_committed_facts(&session_dir) {
             return Ok((0, after_fact_seq.unwrap_or(0)));
         }
-        let reader = CommittedFactReader::open(
+        let view = qaqh_session::canonical::read_session_facts_from(
             &session_dir,
             identity.session_id.clone(),
             identity.log_id.clone(),
+            after_fact_seq,
         )
-        .map_err(|error| format!("open canonical facts for {session_id}: {error}"))?;
-        let facts = match after_fact_seq {
-            Some(fact_seq) => reader
-                .read_after(fact_seq)
-                .map_err(|error| format!("read canonical facts for {session_id}: {error}"))?,
-            None => reader
-                .read_all()
-                .map_err(|error| format!("read canonical facts for {session_id}: {error}"))?,
-        };
+        .map_err(|error| format!("read canonical facts for {session_id}: {error}"))?;
         let mut mailbox = MailboxProjection::default();
-        for fact in &facts {
+        for fact in &view.facts {
             mailbox.apply(fact);
         }
-        Ok((
-            mailbox.last_activity_fact_seq(),
-            reader.committed().committed_fact_seq,
-        ))
+        Ok((mailbox.last_activity_fact_seq(), view.head_fact_seq))
     }
 
     /// Count queued messages from `author` to `recipient` in the target's
@@ -127,10 +116,10 @@ impl QaqhService {
         let Some(session_dir) = self.sessions.session_dir_for_id(target_session_id)? else {
             return Ok(0);
         };
-        if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+        if !qaqh_session::canonical::has_committed_facts(&session_dir) {
             return Ok(0);
         }
-        let identity = CanonicalSessionIdentity::open(&session_dir)
+        let identity = qaqh_session::canonical::open_session_identity(&session_dir)
             .map_err(|error| format!("open canonical identity for {target_session_id}: {error}"))?;
         if identity.session_id.as_str() != target_session_id {
             return Err(format!(
@@ -138,15 +127,12 @@ impl QaqhService {
                 identity.session_id
             ));
         }
-        let reader = CommittedFactReader::open(
+        let facts = qaqh_session::canonical::read_session_facts(
             &session_dir,
             identity.session_id.clone(),
             identity.log_id.clone(),
         )
-        .map_err(|error| format!("open canonical facts for {target_session_id}: {error}"))?;
-        let facts = reader
-            .read_all()
-            .map_err(|error| format!("read canonical facts for {target_session_id}: {error}"))?;
+        .map_err(|error| format!("read canonical facts for {target_session_id}: {error}"))?;
         let mut mailbox = MailboxProjection::default();
         for fact in &facts {
             mailbox.apply(fact);
