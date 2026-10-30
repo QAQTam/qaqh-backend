@@ -415,8 +415,8 @@ fn to_wire_display(display: &ToolDisplay, tool_name: Option<&str>) -> ToolResult
                 name: name.clone(),
                 session_id: session_id.clone(),
             }),
-            ToolBody::Items { kind, items } => Some(ToolResultDisplayBody::Items {
-                kind: kind.clone(),
+            ToolBody::Items { renderer, items } => Some(ToolResultDisplayBody::Items {
+                renderer: renderer.clone(),
                 items: items.iter().map(to_wire_display_item).collect(),
             }),
         },
@@ -547,8 +547,8 @@ pub fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
                 name: name.clone(),
                 session_id: session_id.clone(),
             },
-            Some(ToolResultDisplayBody::Items { kind, items }) => ToolBody::Items {
-                kind: kind.clone(),
+            Some(ToolResultDisplayBody::Items { renderer, items }) => ToolBody::Items {
+                renderer: renderer.clone(),
                 items: items.iter().map(from_wire_display_item).collect(),
             },
             Some(ToolResultDisplayBody::Unknown) => ToolBody::None,

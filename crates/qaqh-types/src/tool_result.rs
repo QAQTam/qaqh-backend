@@ -259,9 +259,13 @@ pub enum ToolResultDisplayBody {
         name: String,
         session_id: String,
     },
-    /// v2 结构化条目列表（todo 类工具）。`kind` 选择渲染器，`items` 可直接渲染。
+    /// v2 结构化条目列表（todo 类工具）。`renderer` 选择渲染器（如 `"todo"`），
+    /// `items` 可直接渲染。
+    ///
+    /// 字段名不能是 `kind`：会与本枚举的内部标签 `tag = "kind"` 冲突，
+    /// 使整个 `Serialize` / `Deserialize` derive 失败。
     Items {
-        kind: String,
+        renderer: String,
         #[serde(default)]
         items: Vec<ToolResultDisplayItem>,
     },
@@ -414,6 +418,22 @@ impl ToolResult {
                     ToolResultDisplayBody::Subagent { name, session_id } => {
                         usage.add_string(name, false);
                         usage.add_string(session_id, false);
+                    }
+                    ToolResultDisplayBody::Items { items, .. } => {
+                        usage.add_vec_capacity::<ToolResultDisplayItem>(items.capacity());
+                        for item in items {
+                            if let Some(id) = &item.id {
+                                usage.add_string(id, false);
+                            }
+                            usage.add_string(&item.title, false);
+                            usage.add_string(&item.status, false);
+                            if let Some(description) = &item.description {
+                                usage.add_string(description, true);
+                            }
+                            if let Some(evidence) = &item.evidence {
+                                usage.add_string(evidence, true);
+                            }
+                        }
                     }
                 }
             }

@@ -609,6 +609,7 @@ mod tests {
                 | QueryRequest::ConfigLoad
                 | QueryRequest::WorkspaceList
                 | QueryRequest::SkillsListTools
+                | QueryRequest::SkillsCatalog { .. }
                 | QueryRequest::FsList { .. }
                 | QueryRequest::FsRead { .. }
                 | QueryRequest::SessionDashboard { .. }
@@ -756,6 +757,7 @@ mod tests {
         // catch-all `POST /ringing/v2/service/{method}`，无新路由类型）。
         // 35 → 33：退役 `plan.context_stats` 与 `stats.token_usage`——前者的
         // 估算口径已被每轮 usage 真值取代，后者的 token_stats.jsonl 日报无消费者。
-        assert_eq!(seen.len(), 33, "服务面路由总数变了——确认是新增而非改错");
+        // 33 → 34：新增 `skills.catalog`（P0-4，方法表 READ，skill 目录 + 诊断清单）。
+        assert_eq!(seen.len(), 34, "服务面路由总数变了——确认是新增而非改错");
     }
 }

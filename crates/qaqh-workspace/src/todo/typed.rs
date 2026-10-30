@@ -216,7 +216,7 @@ fn todo_display(summary: impl Into<String>, items: &[TodoItemView]) -> ToolDispl
             label: "todo".to_string(),
         },
         ToolBody::Items {
-            kind: "todo".to_string(),
+            renderer: "todo".to_string(),
             items: items.iter().map(todo_display_item).collect(),
         },
     )

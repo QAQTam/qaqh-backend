@@ -217,11 +217,11 @@ pub enum ToolBody {
         name: String,
         session_id: String,
     },
-    /// v2 结构化条目列表。`kind` 选择渲染器（如 `"todo"`），`items` 是
+    /// v2 结构化条目列表。`renderer` 选择渲染器（如 `"todo"`），`items` 是
     /// 可直接渲染的 DTO：客户端不再解析 `Text` 里的 `- [ ] title | desc`
     /// 语法来还原状态。`status` 是工具域自己的词表，展示层不解释、不改写。
     Items {
-        kind: String,
+        renderer: String,
         items: Vec<ToolDisplayItem>,
     },
 }

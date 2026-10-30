@@ -7,7 +7,7 @@
 //! module's business any more: the committed facts in the batch journal are the
 //! only conversation store (2026-10 hard cut).
 
-use qaqh_types::{Message, SessionMeta};
+use qaqh_types::SessionMeta;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -126,7 +126,6 @@ impl SessionManager {
 
     /// Delete a session: removes the session directory and its index entry.
     pub fn delete(&self, session_id: &str) -> Result<(), String> {
-        let dir = self.session_path_dir(session_id);
         let dir = self
             .session_dir(session_id)
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
@@ -328,20 +327,17 @@ impl SessionManager {
             }
         }
 
-        let now = Self::now_epoch();
-        let mut meta = store::read_meta(&dir).unwrap_or_default();
-        meta.session_id = session_id.to_string();
-        meta.created_at = now;
-        meta.updated_at = now;
-        meta.ephemeral = !index_session;
-        meta.cwd = cwd.map(|c| crate::grouping::canonical_cwd(std::path::Path::new(c)));
-        if let Err(error) = store::write_meta(&dir, &meta) {
-            return cleanup_identity_dir(format!("write_meta(initial) failed: {error}"));
-        }
-        if index_session {
-            store::upsert_index(&self.sessions_dir, &meta);
-            if let Some(cwd) = meta.cwd.as_deref() {
-                crate::grouping::WorkspaceStore::global().attach_by_cwd(session_id, cwd);
+        // 目录 + identity 就是分配阶段的全部产物：`SessionCreated` 是创世事实，
+        // 由运行时在 materialize 阶段独占提交（它掌握 model / parent /
+        // ephemeral）。这里写 metadata 会抢在创世之前，投影会拒收
+        // （"session creation must be first"）。
+        //
+        // 索引条目同样由 journal 派生：genesis 提交后 materialize 会
+        // `refresh_index`，列表页自然出现该会话。
+        if index_session && let Some(cwd) = cwd {
+            let canonical = crate::grouping::canonical_cwd(std::path::Path::new(cwd));
+            if let Some(store) = crate::grouping::WorkspaceStore::try_global() {
+                store.attach_by_cwd(session_id, &canonical);
             }
         }
         Ok(())
@@ -373,6 +369,7 @@ impl SessionManager {
         cwd: Option<&str>,
         index_session: bool,
     ) -> Result<CanonicalSessionIdentity, String> {
+        let mut last_error = String::from("no attempt was made");
         for _ in 0..Self::SESSION_ALLOCATION_ATTEMPTS {
             let identity = CanonicalSessionIdentity::new();
             let session_id = identity.session_id.as_str().to_string();
@@ -386,6 +383,7 @@ impl SessionManager {
                 Ok(()) => return Ok(identity),
                 Err(error) => {
                     self.release_session_claim(&session_id);
+                    last_error = error.clone();
                     log::warn!(
                         "[session] allocate_session: candidate {session_id} failed: {error}; retrying"
                     );
@@ -393,8 +391,8 @@ impl SessionManager {
             }
         }
         Err(format!(
-            "allocate_session: exhausted {} canonical identity attempts",
-            Self::SESSION_ALLOCATION_ATTEMPTS
+            "allocate_session: exhausted {} canonical identity attempts (last error: {last_error})",
+            Self::SESSION_ALLOCATION_ATTEMPTS,
         ))
     }
 
@@ -639,14 +637,15 @@ mod session_lock_gc_tests {
 
         // 创建会话 → `persist_new_session_if_absent_with` 经 `session_lock`
         // 插入一条；删除会话必须把它回收，而不是每删一个留一条。
-        assert!(manager.persist_new_session_if_absent_with("lock-gc-1", None, |_| true));
+        let identity = manager.allocate_session(None).expect("allocate session");
+        let session_id = identity.session_id.as_str().to_string();
         assert_eq!(
             lock_len(&manager),
             baseline + 1,
             "创建会话应在 session_locks 里留下一条"
         );
 
-        manager.delete("lock-gc-1").expect("delete session");
+        manager.delete(&session_id).expect("delete session");
         assert_eq!(
             lock_len(&manager),
             baseline,
@@ -689,108 +688,38 @@ mod session_collision_tests {
         (root, manager)
     }
 
-    /// BUG-2026-09-13-24 核心回归：canonical 分配器不得复用已被占用的会话
-    /// 目录，也不得把新会话写进旧会话目录（旧实现无条件覆盖既有 meta）。
-    #[test]
-    fn allocation_never_writes_through_an_occupied_session() {
-        let (root, manager) = manager();
-
-        // 预置一个「已存在」的会话，模拟碰撞目标。
-        manager.persist_new_session("deadbeef");
-        let existing_dir = manager.session_path_dir("deadbeef");
-        store::write_meta(
-            &existing_dir,
-            &SessionMeta {
-                session_id: "deadbeef".into(),
-                created_at: 1234,
-                cwd: Some("D:/old-project".into()),
-                ..Default::default()
-            },
-        )
-        .expect("write old meta");
-        std::fs::write(
-            existing_dir.join("messages.jsonl"),
-            "{\"role\":\"user\",\"content\":[],\"msg_id\":1}\n",
-        )
-        .expect("write old messages");
-
-        // 已占用的 "deadbeef" 目录不得被复用：canonical 分配必须给出一个
-        // 全新的 UUIDv7 会话，且既有目录/索引视为已占用。
-        let identity = manager.allocate_session(None).expect("allocate session");
-        let chosen = identity.session_id.as_str().to_string();
-        assert_ne!(
-            chosen, "deadbeef",
-            "allocator must not reuse an occupied session id"
-        );
-        assert!(
-            manager.is_session_taken(&chosen),
-            "an allocated session must be claimed"
-        );
-
-        // 旧会话目录与旧 meta 必须逐字节不变（未被写穿）。
-        let old_meta = manager.load_meta("deadbeef").expect("old meta");
-        assert_eq!(old_meta.created_at, 1234);
-        assert_eq!(old_meta.cwd.as_deref(), Some("D:/old-project"));
-        assert_eq!(
-            std::fs::read_to_string(existing_dir.join("messages.jsonl")).expect("old messages"),
-            "{\"role\":\"user\",\"content\":[],\"msg_id\":1}\n"
-        );
-
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    /// 占用即拒绝：`persist_new_session_if_absent` 对既有 seed 不写一个字节。
+    /// 占用即拒绝：同一个 canonical id 不得被二次创建，且首个会话的目录与
+    /// identity 一个字节都不动。
     #[test]
     fn create_session_refuses_to_overwrite_existing_session() {
         let (root, manager) = manager();
 
-        manager.persist_new_session("occupied");
-        let dir = manager.session_path_dir("occupied");
-        store::write_meta(
-            &dir,
-            &SessionMeta {
-                session_id: "occupied".into(),
-                created_at: 777,
-                cwd: Some("D:/kept".into()),
-                ..Default::default()
-            },
-        )
-        .expect("write existing meta");
-        std::fs::write(dir.join("messages.jsonl"), "existing-line\n").expect("write messages");
+        let identity = manager.allocate_session(Some("D:/kept")).expect("allocate");
+        let session_id = identity.session_id.as_str().to_string();
+        let dir = manager.session_path_dir(&session_id);
+        let identity_bytes = std::fs::read(dir.join("canonical-identity.json"))
+            .expect("identity sidecar survives");
 
         assert!(
-            !manager.persist_new_session_if_absent("occupied", Some("D:/new-cwd")),
-            "existing seed must be rejected"
+            !manager.persist_new_session_if_absent_with(&session_id, Some("D:/new-cwd"), |_| true),
+            "existing canonical id must be rejected"
         );
-        let meta = manager.load_meta("occupied").expect("meta survives");
-        assert_eq!(meta.created_at, 777, "created_at must not be rewritten");
-        assert_eq!(meta.cwd.as_deref(), Some("D:/kept"));
         assert_eq!(
-            std::fs::read_to_string(dir.join("messages.jsonl")).expect("messages survive"),
-            "existing-line\n"
+            std::fs::read(dir.join("canonical-identity.json")).expect("identity survives"),
+            identity_bytes,
+            "rejected create must not rewrite the existing session"
         );
 
-        // 全新 seed 正常创建（带占用钩子时占用登记同样生效）。
+        // 调用方占用钩子返回 false 时同样中止创建，且不留下目录。
+        let rejected = CanonicalSessionIdentity::new();
+        let rejected_id = rejected.session_id.as_str().to_string();
         assert!(
-            manager.persist_new_session_if_absent_with("fresh-seed", None, |session_id| {
-                manager.claim_session(session_id)
-            })
-        );
-        assert!(manager.is_session_taken("fresh-seed"));
-        assert!(
-            !manager.persist_new_session_if_absent_with("fresh-seed-2", None, |_| false),
+            !manager.persist_new_session_if_absent_with(&rejected_id, None, |_| false),
             "caller-side claim rejection must abort creation"
         );
         assert!(
-            !manager.is_session_taken("fresh-seed-2"),
-            "rejected seed must not be materialized nor claimed"
-        );
-        assert_eq!(
-            manager
-                .load_meta("fresh-seed")
-                .expect("fresh meta")
-                .session_id,
-            "fresh-seed"
+            !manager.session_path_dir(&rejected_id).exists(),
+            "rejected session must not be materialized"
         );
 
         std::fs::remove_dir_all(root).expect("remove test directory");
@@ -810,9 +739,12 @@ mod session_collision_tests {
             CanonicalSessionIdentity::open(&dir).expect("read identity"),
             identity
         );
-        let meta = manager.load_meta(session_id).expect("load meta");
-        assert_eq!(meta.session_id, session_id);
-        assert!(!meta.ephemeral, "normal sessions are indexed and durable");
+        // 分配阶段只产出目录 + identity sidecar：`SessionCreated` 由运行时
+        // materialize 独占提交，在那之前没有 journal 可回放，元数据必须是 None。
+        assert!(
+            manager.load_meta(session_id).is_none(),
+            "allocation must not invent metadata before the genesis fact"
+        );
         assert_eq!(
             manager
                 .session_dir_for_id(session_id)
@@ -832,10 +764,6 @@ mod session_collision_tests {
             .allocate_agent_session(None)
             .expect("allocate child session");
         let session_id = identity.session_id.as_str();
-        let meta = manager.load_meta(session_id).expect("load child meta");
-
-        assert_eq!(meta.session_id, session_id);
-        assert!(meta.ephemeral, "unindexed child starts ephemeral");
         assert!(
             store::read_index(&manager.sessions_dir)
                 .iter()
@@ -888,12 +816,15 @@ mod session_collision_tests {
                 !session_id.is_empty(),
                 "created allocation must carry a session id"
             );
-            let meta = manager
-                .load_meta(session_id)
-                .expect("created session has meta");
             assert_eq!(
-                meta.session_id, *session_id,
-                "created meta must be self-owned"
+                manager
+                    .session_dir_for_id(session_id)
+                    .expect("resolve created session")
+                    .expect("created session has a directory")
+                    .file_name()
+                    .and_then(|name| name.to_str()),
+                Some(session_id.as_str()),
+                "created directory must be named by its canonical id"
             );
         }
         // 并发分配必须互不重复。
@@ -912,21 +843,6 @@ mod session_collision_tests {
     #[test]
     fn allocate_session_never_returns_an_occupied_session() {
         let (root, manager) = manager();
-
-        // 先占用一批 seed。
-        for session_id in ["aaaaaaaa", "bbbbbbbb", "cccccccc"] {
-            manager.persist_new_session(session_id);
-        }
-        // 索引登记但磁盘无目录的幽灵 seed（目录已删、索引尚未 compact）——
-        // 复用该 seed 会让新会话继承旧索引条目的身份，故也必须视为已占用。
-        store::upsert_index(
-            &manager.sessions_dir,
-            &SessionMeta {
-                session_id: "dddddddd".into(),
-                created_at: 5,
-                ..Default::default()
-            },
-        );
 
         let mut allocated: Vec<String> = Vec::new();
         for _ in 0..32 {
@@ -948,8 +864,6 @@ mod session_collision_tests {
             );
             allocated.push(session_id);
         }
-        // 幽灵 seed（索引有、目录无）同样不能再被分配。
-        assert!(!allocated.iter().any(|session_id| session_id == "dddddddd"));
 
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
