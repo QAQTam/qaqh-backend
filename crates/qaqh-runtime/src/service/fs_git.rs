@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use qaqh_workspace::permission::{
-    is_sensitive_session_path, normalize_lexically, path_within_dir, resolve_target_path,
+    is_self_administration_path, normalize_lexically, path_within_dir, resolve_target_path,
 };
 
 use crate::error::{QaqhError, QaqhResult};
@@ -25,8 +25,9 @@ use crate::error::{QaqhError, QaqhResult};
 /// 远端文件接口的允许根（**上界**）：会话工作区根 + daemon 数据根。
 ///
 /// `fs.list`/`fs.read` 的合法用途是浏览会话工作区（前端远端文件选择器）。
-/// 数据根承载会话/配置目录，其下的敏感会话文件（`sessions/**`、`meta.json`、
-/// `secrets.toml` …）仍由 [`is_sensitive_session_path`] 单独拦掉。
+/// 数据根承载会话/配置目录，其下的 daemon 自身管理面（`config.toml`、
+/// `profiles.toml`、`secrets.toml`、`daemon.json`）仍由
+/// [`is_self_administration_path`] 单独拦掉；会话数据不再保护。
 pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     // 数据根（会话/配置目录）。
@@ -54,7 +55,7 @@ pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<Path
 
 /// 远端文件接口的路径白名单判定（T-2-1 / 安全审查 P0-1）。
 ///
-/// - 先按 `is_sensitive_session_path` 拒掉会话私有数据（与 `needs_permission`
+/// - 先按 `is_self_administration_path` 拒掉 daemon 自身管理面（与 `needs_permission`
 ///   共用同一名单，单一事实源）；
 /// - 再把路径与每个允许根做**组件级**比较（`path_within_dir`），软链接经
 ///   `resolve_target_path` 解析、`..` 逃逸由 `normalize_lexically` 吃掉；
@@ -64,7 +65,7 @@ fn path_allowed(
     path: &Path,
     scope_session: Option<&str>,
 ) -> bool {
-    if is_sensitive_session_path(path) {
+    if is_self_administration_path(path) {
         return false;
     }
     let normalized = normalize_lexically(&resolve_target_path(path.to_path_buf()));
