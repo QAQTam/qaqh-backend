@@ -26,8 +26,19 @@ pub(crate) fn handle(service: &QaqhService, command: WorkspaceCommand) -> QaqhRe
             if path.is_empty() {
                 return Err(QaqhError::invalid("workspace.set: empty path rejected"));
             }
-            // 统一数据源：运行环境工作目录存 meta.cwd（workspace.txt 退役）。
-            service.sessions.set_cwd(&args.session_id, &path, true);
+            // 统一数据源：运行环境工作目录是 journal 里的 `cwd`。
+            service
+                .write_meta(
+                    &args.session_id,
+                    qaqh_session::session_fact_v2::SessionMetadataPatch {
+                        cwd: Some(qaqh_session::grouping::canonical_cwd(std::path::Path::new(
+                            &path,
+                        ))),
+                        ..Default::default()
+                    },
+                )
+                .map_err(QaqhError::message)?;
+            qaqh_session::WorkspaceStore::global().attach_by_cwd(&args.session_id, &path);
             service.send_ringing_cmd(
                 args.session_id,
                 RingingCommand::Control(ControlCommand::AgentReloadConfig),

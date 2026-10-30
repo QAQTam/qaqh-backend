@@ -668,7 +668,7 @@ pub struct RecoveryRef {
 }
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SessionMetadataPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -682,6 +682,40 @@ pub struct SessionMetadataPatch {
     pub parent_session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_caps: Option<Vec<String>>,
+    /// Session-level BYOK profile. Empty string clears it (follow the global
+    /// `active_profile`); absent leaves it untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Reasoning effort override. Empty string clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// 0 = code, 1 = plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u8>,
+    /// standard | minimal | custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_tools: Option<Vec<String>>,
+    /// Skills session state (prompt-prefix relevant, so it must survive a restart).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<qaqh_types::SkillSessionStateV2>,
+    /// Frozen `[Environment]` annotation for the first user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_annotation: Option<String>,
+    /// Subagent sessions are thrown away on close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<bool>,
+    /// Accumulated provider usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageTotals>,
+}
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub totals: qaqh_types::UsageInfo,
+    pub requests: u32,
+    pub cache_reported_requests: u32,
 }
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
