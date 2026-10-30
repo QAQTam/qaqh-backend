@@ -305,8 +305,9 @@ fn mcp_display(state: ToolResultDisplayOutcomeState, text: String) -> ToolResult
     ToolResultDisplay {
         summary: None,
         diff: None,
-        lines_added: 0,
-        lines_removed: 0,
+        files: Vec::new(),
+        lines_added: None,
+        lines_removed: None,
         header: Some(ToolResultDisplayHeader::Other {
             label: String::new(),
         }),
