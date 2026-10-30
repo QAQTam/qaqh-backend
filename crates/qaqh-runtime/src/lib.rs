@@ -2,6 +2,7 @@ mod activity;
 pub mod agent;
 mod agent_catalog;
 mod agent_graph;
+pub mod error;
 mod host_impl;
 pub mod quota_ledger;
 pub mod provider_job;
@@ -15,6 +16,7 @@ pub(crate) mod test_hooks;
 pub mod tool_job;
 
 pub use activity::SessionActivityTracker;
+pub use error::{QaqhError, QaqhResult};
 #[doc(hidden)]
 pub use host_impl::MAILBOX_ACTIVITY_PARSE_COUNT;
 pub use registry::{AgentRegistry, cache_system_path, detect_os_info, detect_shell};

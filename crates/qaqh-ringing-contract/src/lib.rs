@@ -1,5 +1,7 @@
 //! Ringing v2 application snapshot contracts, shared by daemon and clients.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use qaqh_ringing::{RingingV2DriverState, RingingV2PendingInteraction};
 use serde::{Deserialize, Serialize};
 

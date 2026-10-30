@@ -2,6 +2,8 @@
 //!
 //! Submodules register handlers via `pub fn register(mgr: &mut ToolManager)`.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub use qaqh_file_tools::confirm_apply;
 pub use qaqh_file_tools::copy_range;
 pub use qaqh_permission::conflict;

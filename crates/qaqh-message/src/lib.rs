@@ -7,6 +7,8 @@
 //! `push_user` / `push_system` / `push_system_input` always return `false`, and
 //! the `push_tool_result_direct*` variants return `()`.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod assistant;
 pub mod compaction;
 pub mod compact_prompt;

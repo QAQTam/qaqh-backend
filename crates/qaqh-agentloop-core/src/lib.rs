@@ -13,6 +13,8 @@
 //! the supervisor, and an identity from an older actor incarnation is refused.
 //! A completion proves a result, never that work stopped.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod driver;
 pub mod commit_gate;
 pub mod mailbox;

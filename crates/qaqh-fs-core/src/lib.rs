@@ -4,6 +4,8 @@
 //! 行对齐读取缓存（[`file_cache`]）、文件状态账本（[`file_state`]）。
 //! 文件工具组（read/edit/grep/apply_patch…）与门面均经本 crate 使用。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod file_cache;
 pub mod file_shared;
 pub mod file_state;

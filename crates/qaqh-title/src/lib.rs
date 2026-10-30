@@ -10,6 +10,8 @@
 //!    做 LLM 总结，成功后**覆盖**截断版；失败/超时保持截断版（降级路径）。
 //! 3. **冻结**：由调用方守卫（`title.is_some()` 后不再生成）。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use std::sync::Arc;
 
 use qaqh_session::SessionManager;

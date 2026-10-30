@@ -1,3 +1,5 @@
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod config;
 pub mod dto;
 pub mod mcp_import;

@@ -215,6 +215,16 @@ impl<T, E> Supervisor<T, E> {
         self.authorized.len()
     }
 
+    /// Cheap non-blocking probe used by hosts that must not await inside a
+    /// lock: true once the tracked task has stopped (or nothing is tracked).
+    pub fn is_finished(&self, identity: &EffectIdentity) -> bool {
+        match self.slots.get(identity) {
+            Some(Slot::Running(task)) => task.handle.is_finished(),
+            Some(Slot::Settling(_)) => true,
+            None => true,
+        }
+    }
+
     /// The caller reserves a completion slot before this method and has already
     /// checked the committed intent. A cancellation receiver is supplied to
     /// the task; requesting cancellation is not proof that it has stopped.
