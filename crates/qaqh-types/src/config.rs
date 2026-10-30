@@ -416,14 +416,6 @@ impl ConfigStore {
         true
     }
 
-    /// Load the config file as a raw `serde_json::Value`.
-    /// Used for backward compatibility with JSON-based consumers.
-    pub fn load_value(&self) -> Option<serde_json::Value> {
-        let data = std::fs::read_to_string(&self.path).ok()?;
-        let tv: toml::Value = toml::from_str(&data).ok()?;
-        // Convert toml::Value → serde_json::Value for backward compat
-        serde_json::to_value(&tv).ok()
-    }
 }
 
 // ── ProfileStore: independent model presets store with atomic writes ──

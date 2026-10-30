@@ -93,11 +93,6 @@ impl ClientError {
         }
     }
 
-    /// 是否被客户端白名单拒掉（请求未发出，不是 daemon 的答复）。
-    pub fn is_method_not_allowed(&self) -> bool {
-        matches!(self, Self::ServiceMethodNotAllowed { .. })
-    }
-
     /// 会话尚未物化：canonical 目录 / commit marker 还不存在
     /// （`session_not_found` / `snapshot_missing`）。新建会话在首个 canonical
     /// 事实落盘前就是这个状态——调用方应**短退避**重试而不是指数退避。

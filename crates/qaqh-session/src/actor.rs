@@ -408,16 +408,6 @@ impl SubscriberRegistry {
             .is_some_and(|channels| channels.contains(&channel))
     }
 
-    pub fn channels_for(&self, connection_id: &ConnectionId) -> Option<&[RingingChannel]> {
-        self.channels_by_connection
-            .get(connection_id)
-            .map(Vec::as_slice)
-    }
-
-    pub fn connection_ids(&self) -> impl Iterator<Item = &ConnectionId> {
-        self.channels_by_connection.keys()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.channels_by_connection.is_empty()
     }

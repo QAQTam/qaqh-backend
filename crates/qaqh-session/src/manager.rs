@@ -609,15 +609,6 @@ impl SessionManager {
         Some(canonical)
     }
 
-    /// Persist agent mode to meta.json without rewriting messages.
-    /// Called when the user switches PLAN/CODE mode so it survives agent restart.
-    pub fn persist_mode(&self, session_id: &str, mode: u8) {
-        self.with_meta_locked(session_id, false, |dir, meta| {
-            meta.mode = mode;
-            let _ = store::write_meta(dir, meta);
-        });
-    }
-
     /// 会话选定的 BYOK profile 名（meta.json）。`None`/空 = 跟随全局
     /// `active_profile`。宿主（agent loop / service）经注入句柄调用。
     pub fn session_profile(&self, session_id: &str) -> Option<String> {
@@ -691,23 +682,6 @@ impl SessionManager {
             }
             meta.updated_at = now;
             meta.skills = skills;
-            let _ = store::write_meta(dir, meta);
-            store::upsert_index(&self.sessions_dir, meta);
-        });
-    }
-
-    /// Persist the frozen [Environment] annotation (P0 cache fix). Written
-    /// once per session and replayed into the session agent on resume so the
-    /// first user message keeps its byte-identical prefix.
-    pub fn persist_frozen_annotation(&self, session_id: &str, annotation: &str) {
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            let now = Self::now_epoch();
-            meta.session_id = session_id.to_string();
-            if meta.created_at == 0 {
-                meta.created_at = now;
-            }
-            meta.updated_at = now;
-            meta.frozen_annotation = Some(annotation.to_string());
             let _ = store::write_meta(dir, meta);
             store::upsert_index(&self.sessions_dir, meta);
         });
@@ -969,24 +943,6 @@ impl SessionManager {
             if let Some(cwd) = meta.cwd.as_deref() {
                 crate::grouping::WorkspaceStore::global().attach_by_cwd(session_id, cwd);
             }
-        });
-    }
-
-    pub fn persist_usage(
-        &self,
-        session_id: &str,
-        totals: qaqh_types::UsageInfo,
-        requests: u32,
-        cache_reported_requests: u32,
-    ) {
-        self.with_meta_locked(session_id, true, |dir, meta| {
-            meta.session_id = session_id.to_string();
-            meta.updated_at = Self::now_epoch();
-            meta.usage_totals = totals;
-            meta.usage_requests = requests;
-            meta.cache_reported_requests = cache_reported_requests;
-            let _ = store::write_meta(dir, meta);
-            store::upsert_index(&self.sessions_dir, meta);
         });
     }
 

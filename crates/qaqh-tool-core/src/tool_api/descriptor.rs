@@ -291,32 +291,12 @@ impl ToolMeta {
         }
     }
 
-    /// 覆写暴露面。
-    #[must_use]
-    pub fn with_exposure(mut self, exposure: ToolExposure) -> Self {
-        self.exposure = exposure;
-        self
-    }
-
-    /// 覆写编排能力声明。
-    #[must_use]
-    pub fn with_capabilities(mut self, capabilities: ToolCapabilities) -> Self {
-        self.capabilities = capabilities;
-        self
-    }
-
     #[must_use]
     pub fn with_native_text(mut self, representation: NativeTextRepresentation) -> Self {
         self.native_text = Some(representation);
         self
     }
 
-    /// 覆写输出预算。
-    #[must_use]
-    pub fn with_output_budget(mut self, output_budget: OutputBudget) -> Self {
-        self.output_budget = output_budget;
-        self
-    }
 }
 
 impl From<ToolMeta> for ToolDescriptor {

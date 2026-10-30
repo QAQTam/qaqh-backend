@@ -20,8 +20,4 @@ impl LegacyWriterFacade {
             .unwrap_or_else(|error| error.into_inner())
     }
 
-    pub fn with_lock<R>(write: impl FnOnce() -> R) -> R {
-        let _guard = Self::lock();
-        write()
-    }
 }

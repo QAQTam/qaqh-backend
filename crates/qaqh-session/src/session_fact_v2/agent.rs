@@ -225,10 +225,6 @@ impl AgentPath {
         }
     }
 
-    pub fn namespace_root(&self) -> Self {
-        Self(self.namespace().root_path().to_string())
-    }
-
     pub fn is_root(&self) -> bool {
         self.0 == AGENT_PATH_ROOT
     }

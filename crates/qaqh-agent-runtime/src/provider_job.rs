@@ -7,7 +7,7 @@
 //! that happens after the gate call has begun is `StartedUnknown` until a
 //! terminal response from the provider stream is observed and classified.
 
-use qaqh_agentloop_core::{DispatchEvidence, mailbox::FrameSize, supervisor::Supervisor};
+use qaqh_agentloop_core::{DispatchEvidence, mailbox::FrameSize};
 use qaqh_session::{
     canonical::sha256_content_hash,
     session_commit::{CommittedExecution, FenceReason, SessionCommit, SessionCommitError},
@@ -22,8 +22,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-
-pub type ProviderSupervisor = Supervisor<ProviderOutcome, CommittedExecution>;
 
 /// Upper bound on the streamed text retained for a failed attempt.
 const MAX_PARTIAL_TEXT_BYTES: usize = 64 * 1024;

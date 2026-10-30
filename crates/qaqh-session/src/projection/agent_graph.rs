@@ -266,12 +266,6 @@ impl AgentGraphStore {
             .and_then(|index| self.snapshot.nodes.get(*index))
     }
 
-    pub fn get_node_by_path(&self, agent_path: &AgentPath) -> Option<&AgentGraphNode> {
-        self.by_path
-            .get(agent_path)
-            .and_then(|agent_id| self.get_node(agent_id))
-    }
-
     pub fn get_edge(&self, child_agent_id: &SessionId) -> Option<&AgentGraphEdge> {
         self.edge_by_child
             .get(child_agent_id)

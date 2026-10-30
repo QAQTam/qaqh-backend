@@ -88,10 +88,6 @@ impl RingingWorkerEventEnvelope {
         }
     }
 
-    pub fn with_causation(mut self, causation_id: impl Into<String>) -> Self {
-        self.causation_id = Some(causation_id.into());
-        self
-    }
 }
 
 #[cfg(test)]
