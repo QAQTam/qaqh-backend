@@ -22,8 +22,9 @@ use qaqh_session::{
     session_fact_v2::{
         ActorKind, ActorRef, ContentRef, ContextMessageCommitted, ContextMessageOrigin, EventId,
         ExecutionId, FactPayload, FactSchema, InputAccepted, InputId, InputKind, InputPurpose,
-        InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind,
-        InteractionRequested, InteractionResolved, InterruptReason, PolicyDecisionRef,
+        InteractionChoice, InteractionChoiceTone, InteractionDecision, InteractionExpiryReason,
+        InteractionId, InteractionKind, InteractionRequested, InteractionResolved, InterruptReason,
+        PolicyDecisionRef,
         ProviderFinish, RecoveryAction, RecoveryId, RecoveryOutcome, RecoveryRef, SessionFact,
         MetadataSource, SessionMetadataChanged, SessionRecovered, SessionTitleChanged, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
         ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished,
@@ -737,9 +738,11 @@ impl SessionAgent {
         reason: &str,
     ) -> Result<(), SessionAgentError> {
         let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+        let choices = permission_choices();
         let request = serde_json::json!({
             "tool": tool_name,
             "reason": reason,
+            "choices": &choices,
         });
         let request_bytes = serde_json::to_vec(&request)
             .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
@@ -752,6 +755,7 @@ impl SessionAgent {
                 turn_id: turn_id.clone(),
                 kind: InteractionKind::Permission,
                 request_ref,
+                choices,
                 expires_at_ms: None,
                 requested_at_ms: now_ms(),
             }),
@@ -900,6 +904,27 @@ fn truncate_text(text: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     text[..end].to_string()
+}
+
+/// 权限交互的固定选项。文案与语义由 daemon 拥有，客户端只负责渲染。
+///
+/// 刻意**不提供**「本会话一直允许」：权限层没有对应的持久化语义，
+/// 放一个按钮却无法兑现，就是把「不知道」写成「知道」。
+fn permission_choices() -> Vec<InteractionChoice> {
+    vec![
+        InteractionChoice {
+            decision: InteractionDecision::Approved,
+            label: "允许".to_string(),
+            description: None,
+            tone: InteractionChoiceTone::Primary,
+        },
+        InteractionChoice {
+            decision: InteractionDecision::Rejected,
+            label: "拒绝".to_string(),
+            description: None,
+            tone: InteractionChoiceTone::Destructive,
+        },
+    ]
 }
 
 fn reason_name(reason: InterruptReason) -> &'static str {
@@ -1579,8 +1604,11 @@ impl SessionAgent {
             if name == "ask" {
                 let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
                 let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
-                let request_ref = self.commit.put_blob(b"ask-question")?;
-                let args_ref = self.commit.put_blob(&args)?;
+                // 请求内容就是已经校验过的 ask 参数（问题/选项都在里面）。
+                // 旧实现写死 `b"ask-question"`，客户端拿到 request_ref 也读不出问题。
+                let request_ref = self.commit.put_blob(&args)?;
+                // 同一份内容，复用同一个 ref（content-addressed，不必再写一次）。
+                let args_ref = request_ref.clone();
                 let intent = self.fact(
                     EventId::new(generate_ulid()),
                     FactPayload::ToolIntent(ToolIntent {
@@ -1612,6 +1640,7 @@ impl SessionAgent {
                         turn_id: turn_id.clone(),
                         kind: InteractionKind::Ask,
                         request_ref,
+                        choices: Vec::new(),
                         expires_at_ms: None,
                         requested_at_ms: now_ms(),
                     }),

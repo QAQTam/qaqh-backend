@@ -33,6 +33,10 @@ pub enum QueryRequest {
     ConfigLoad,
     WorkspaceList,
     SkillsListTools,
+    /// 技能目录（daemon `skills.catalog`）：daemon 已解析、校验并完成同名遮蔽。
+    SkillsCatalog {
+        cwd: Option<String>,
+    },
     /// 列出 daemon 侧目录内容（远端文件选择器数据源）。
     FsList {
         path: String,
@@ -86,6 +90,13 @@ impl QueryRequest {
             Self::ConfigLoad => ("config.load", json!({})),
             Self::WorkspaceList => ("workspace.list", json!({})),
             Self::SkillsListTools => ("skills.list_tools", json!({})),
+            Self::SkillsCatalog { cwd } => {
+                let mut params = json!({});
+                if let Some(cwd) = cwd {
+                    params["cwd"] = json!(cwd);
+                }
+                ("skills.catalog", params)
+            }
             Self::FsList { path } => ("fs.list", json!({ "path": path })),
             Self::FsRead { path, max_bytes } => {
                 let mut params = json!({ "path": path });
@@ -558,6 +569,7 @@ mod tests {
             QueryRequest::ConfigLoad,
             QueryRequest::WorkspaceList,
             QueryRequest::SkillsListTools,
+            QueryRequest::SkillsCatalog { cwd: None },
             QueryRequest::FsList { path: "/".into() },
             QueryRequest::FsRead {
                 path: "/".into(),

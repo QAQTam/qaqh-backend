@@ -239,8 +239,30 @@ pub enum ToolResultDisplayBody {
         name: String,
         session_id: String,
     },
+    /// v2 结构化条目列表（todo 类工具）。`kind` 选择渲染器，`items` 可直接渲染。
+    Items {
+        kind: String,
+        #[serde(default)]
+        items: Vec<ToolResultDisplayItem>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// `ToolResultDisplayBody::Items` 的元素。
+///
+/// `status` 是工具域自己的词表，wire 层不做归一化：未知值原样透传，
+/// 客户端不得把它折叠成某个默认状态（把「不知道」渲染成「pending」）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultDisplayItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub title: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
