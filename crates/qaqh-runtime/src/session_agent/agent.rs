@@ -26,7 +26,7 @@ use qaqh_session::{
         InteractionId, InteractionKind, InteractionRequested, InteractionResolved, InterruptReason,
         PolicyDecisionRef,
         ProviderFinish, RecoveryAction, RecoveryId, RecoveryOutcome, RecoveryRef, SessionFact,
-        MetadataSource, SessionMetadataChanged, SessionRecovered, SessionTitleChanged, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
+        MetadataSource, SessionMetadataChanged, SessionRecovered, SessionTitleChanged, SideEffectClass, TitleSource, ToolCallId, ToolError, ToolFinished, ToolIntent,
         ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnFinished,
         TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal,
     },
@@ -155,6 +155,8 @@ pub struct SessionAgent {
     /// Causation of the command currently being processed.
     pub(crate) causation: Option<EventId>,
     system_prompt_seeded: bool,
+    /// 首条输入后是否已经就标题做过决定（只探一次投影，避免每条输入都重放）。
+    title_decided: bool,
 }
 
 impl SessionAgent {
@@ -194,6 +196,7 @@ impl SessionAgent {
             queued_inputs,
             causation: None,
             system_prompt_seeded: false,
+            title_decided: false,
         };
         // Resume inputs that were durably accepted but never started.
         if agent.phase == SessionPhase::Ready
@@ -378,11 +381,61 @@ impl SessionAgent {
             None,
             None,
         );
+        let mut facts = vec![fact];
+        // 首条用户输入顺带定标题：与 `InputAccepted` 同一批次，原子可见。
+        let title_written = match self.auto_title_fact(&input.text) {
+            Some(title_fact) => {
+                facts.push(title_fact);
+                true
+            }
+            None => false,
+        };
         self.commit_batch(
             &format!("batch-input-{}", input.input_id.as_str()),
-            vec![fact],
+            facts,
         )?;
+        if title_written {
+            // 标题已进日志，但 `SessionManager::list` 读的是 index.jsonl 缓存。
+            qaqh_session::meta::refresh_index(self.commit.session_dir());
+        }
         Ok(())
+    }
+
+    /// 首条用户输入派生标题（不调模型、不花额外 token）。
+    ///
+    /// 只在会话尚无标题时写 `SessionTitleChanged`（`TitleSource::Auto`），
+    /// 与用户手改标题走同一条读路径（投影 → `MetaDelta::TitleChanged` →
+    /// `session.list`）。要升级成模型摘要，只需把 [`derive_title`] 换成
+    /// 一次 provider 调用；事实形状不变。
+    fn auto_title_fact(&mut self, text: &str) -> Option<SessionFact> {
+        if self.title_decided {
+            return None;
+        }
+        self.title_decided = true;
+        let Ok(snapshot) = self.commit.snapshot() else {
+            // 读不到投影就不写标题：宁可没标题，也不要覆盖用户已有的标题。
+            return None;
+        };
+        if snapshot
+            .meta
+            .title
+            .as_deref()
+            .is_some_and(|title| !title.trim().is_empty())
+        {
+            return None;
+        }
+        let title = derive_title(text)?;
+        Some(self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::SessionTitleChanged(SessionTitleChanged {
+                title,
+                source: TitleSource::Auto,
+                changed_at_ms: now_ms(),
+            }),
+            None,
+            None,
+            None,
+        ))
     }
 
     fn push_input(&mut self, input: QueuedUserInput) -> Result<(), SessionAgentError> {
@@ -925,6 +978,24 @@ fn permission_choices() -> Vec<InteractionChoice> {
             tone: InteractionChoiceTone::Destructive,
         },
     ]
+}
+
+/// 从首条用户消息派生标题：压平空白后取前 `MAX_CHARS` 个字符。
+///
+/// 刻意不调模型：一次后台摘要要多一次 provider 请求，还要自建重试与失败
+/// 降级；标题只是列表页的导航辅助，原文前 40 字已经够用，而且**不会把
+/// 首条消息再发给模型一遍**。要换成模型摘要时，只替换本函数即可。
+fn derive_title(text: &str) -> Option<String> {
+    const MAX_CHARS: usize = 40;
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut title: String = collapsed.chars().take(MAX_CHARS).collect();
+    if collapsed.chars().count() > MAX_CHARS {
+        title.push('…');
+    }
+    Some(title)
 }
 
 fn reason_name(reason: InterruptReason) -> &'static str {
