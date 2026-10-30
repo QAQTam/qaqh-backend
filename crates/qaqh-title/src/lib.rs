@@ -26,21 +26,6 @@ pub const FALLBACK_MAX_CHARS: usize = 14;
 /// LLM 标题清洗上限（字符）。
 pub const LLM_MAX_CHARS: usize = 30;
 
-/// 首条 user 消息的纯文本（取第一个 text block；无则 None）。
-pub fn first_user_text(store: &qaqh_message::MessageStore) -> Option<String> {
-    store.to_vec().into_iter().find_map(|m| {
-        if m.role != "user" {
-            return None;
-        }
-        m.content.iter().find_map(|b| match b {
-            qaqh_types::ContentBlock::Text { text } if !text.trim().is_empty() => {
-                Some(text.clone())
-            }
-            _ => None,
-        })
-    })
-}
-
 /// 截断降级：去 markdown 装饰 + 折叠空白 + 取前 N 字符。
 pub fn truncate_title(raw: &str) -> String {
     let mut cleaned: String = raw
