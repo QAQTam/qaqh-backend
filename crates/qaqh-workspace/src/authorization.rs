@@ -453,7 +453,7 @@ pub fn admit_with_context(
         )
     );
     let exec_auto =
-        exec_classified_auto && !exec_hits_sensitive_session_paths(&invocation, &workspace_root);
+        exec_classified_auto && !exec_hits_self_administration_paths(&invocation, &workspace_root);
     let decision = if exec_auto {
         crate::permission::PermissionDecision::AutoApprove
     } else {
@@ -483,7 +483,7 @@ pub fn admit_with_context(
             // skip-permissions bypass 不豁免会话文件外泄面。
             if sandboxed
                 && invocation.tool_name == "exec"
-                && exec_hits_sensitive_session_paths(&invocation, &workspace_root)
+                && exec_hits_self_administration_paths(&invocation, &workspace_root)
             {
                 return Admission::Denied(format!(
                     "subagent sandbox denied 'exec': session files are host-only"
@@ -514,11 +514,12 @@ pub fn admit_with_context(
                     category,
                     crate::permission::ToolCategory::Read | crate::permission::ToolCategory::Write
                 );
-                // 敏感会话文件（历史 / 凭据）必须保持拒绝：沙箱没有审批通道，
-                // 被「未设置工作区」放宽顺带放行就等于把数据外泄面直接打开。
+                // daemon 自身管理面（config/profiles/secrets/daemon.json）必须保持
+                // 拒绝：沙箱没有审批通道，被「未设置工作区」放宽顺带放行就等于
+                // 让模型改自己的权限档位/出口。会话数据不在此列（2026-10 决定）。
                 let sensitive = paths
                     .iter()
-                    .any(|path| crate::permission::is_sensitive_session_path(path));
+                    .any(|path| crate::permission::is_self_administration_path(path));
                 if file_ops
                     && !sensitive
                     && sandbox_within_workspace(&paths, &workspace_root, workspace_unset)
@@ -610,7 +611,7 @@ fn trusted_snapshot() -> HashSet<PathBuf> {
 /// Codex 不变量「`:workspace_roots` 的落点依据是该命令的 cwd，不是 server cwd」。
 ///
 /// 命中只回退到常规审批（多弹一次窗），不影响命令本身能否执行。
-fn exec_hits_sensitive_session_paths(invocation: &ToolInvocation, workspace_root: &Path) -> bool {
+fn exec_hits_self_administration_paths(invocation: &ToolInvocation, workspace_root: &Path) -> bool {
     let base = invocation
         .args
         .get("cwd")
@@ -618,13 +619,13 @@ fn exec_hits_sensitive_session_paths(invocation: &ToolInvocation, workspace_root
         .filter(|cwd| !cwd.trim().is_empty())
         .map(|cwd| crate::permission::resolve_target_path_in(PathBuf::from(cwd), workspace_root))
         .unwrap_or_else(|| workspace_root.to_path_buf());
-    if crate::permission::is_sensitive_session_path(&base) {
+    if crate::permission::is_self_administration_path(&base) {
         return true;
     }
     crate::permission::exec_argument_tokens(&invocation.args)
         .into_iter()
         .map(|token| crate::permission::resolve_target_path_in(PathBuf::from(token), &base))
-        .any(|path| crate::permission::is_sensitive_session_path(&path))
+        .any(|path| crate::permission::is_self_administration_path(&path))
 }
 
 /// Resolve the effective workspace root the way the loop's engines did
@@ -827,21 +828,21 @@ mod tests {
         let sessions_text = sessions_dir.to_string_lossy().into_owned();
 
         assert!(
-            exec_hits_sensitive_session_paths(
+            exec_hits_self_administration_paths(
                 &invocation("cat messages.jsonl", Some(sessions_text.clone())),
                 &workspace
             ),
             "cwd 落在会话数据根时，相对文件名必须命中敏感门禁"
         );
         assert!(
-            exec_hits_sensitive_session_paths(
+            exec_hits_self_administration_paths(
                 &invocation(&format!("cat {sessions_text}/messages.jsonl"), None),
                 &workspace
             ),
             "绝对路径词元照常命中"
         );
         assert!(
-            !exec_hits_sensitive_session_paths(
+            !exec_hits_self_administration_paths(
                 &invocation("cat messages.jsonl", None),
                 &workspace
             ),

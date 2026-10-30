@@ -79,7 +79,6 @@ pub struct SessionMeta {
     /// endpoint/model/wire，以及（若该 profile 自带密钥）用哪把 key。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    pub message_count: usize,
     /// Number of conversation turns (one user query + its assistant/tool chain).
     #[serde(default)]
     pub turn_count: usize,
@@ -278,7 +277,7 @@ pub enum SessionRunStatus {
 ///
 /// 此前这个形状只活在 `qaqh-runtime` 的 `serde_json::Value` 拼装里
 /// （`to_value(&meta)` 之后再 `value["running"] = …`），三端前端只能各自手解。
-/// TUI 为此维护了 128 行手抄，而 `created_at` / `turn_count` / `message_count` /
+/// TUI 为此维护了 128 行手抄，而 `created_at` / `turn_count` /
 /// `tool_mode` 这几个键**它一个都没解**（`grep` 逐个为 0）——漏了没人发现，
 /// 因为手抄的失败模式是**静默的**：漏字段不报错，只让某个功能永远显示缺省值。
 ///
@@ -315,7 +314,6 @@ mod tests {
             model: "m1".into(),
             effort: Some("high".into()),
             profile: Some("deep".into()),
-            message_count: 3,
             turn_count: 4,
             compact_skip: 5,
             compact_covered_through_msg_id: Some(9),
@@ -369,7 +367,6 @@ mod tests {
             "effort",
             "ephemeral",
             "frozen_annotation",
-            "message_count",
             "mode",
             "model",
             "profile",
@@ -415,7 +412,6 @@ mod tests {
         // 手抄时代一个都没解的字段（grep 逐个为 0）。
         assert_eq!(back.meta.created_at, 1);
         assert_eq!(back.meta.turn_count, 4);
-        assert_eq!(back.meta.message_count, 3);
         assert_eq!(back.meta.tool_mode, "custom");
         // 连带的其余持久化字段同样够得着。
         assert_eq!(back.meta.compact_skip, 5);
