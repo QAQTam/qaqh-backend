@@ -10,8 +10,7 @@ use qaqh_session::actor::{
     SubscriptionEffect,
 };
 use qaqh_session::canonical::{
-    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
-    EVENTS_FILE,
+    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, EVENTS_COMMIT_FILE, EVENTS_FILE,
 };
 use qaqh_session::projection::AgentGraphSnapshot;
 use qaqh_session::session_fact_v2::{
@@ -92,7 +91,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 整份工具快照（6 次探测）的总预算；超出即停止探测、用已有结果降级。
 ///
-/// 探测结果只喂给提示词里的工具快照（`crate::agent::prompt::TOOLS_INFO`），
+/// 探测结果只喂给提示词里的工具快照（`crate::support::prompt_env::TOOLS_INFO`），
 /// **不值得为它拖慢启动**——何况它跑在 daemon 开始服务之前。
 const PROBE_BUDGET: Duration = Duration::from_secs(6);
 
@@ -118,7 +117,7 @@ pub fn detect_os_info() {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| format!("{} {}", std::env::consts::OS, std::env::consts::ARCH))
     };
-    let _ = crate::agent::prompt::OS_INFO.set(info);
+    let _ = crate::support::prompt_env::OS_INFO.set(info);
     // Toolchain snapshot. Each probe lists candidate program names tried in
     // order (first success wins): e.g. Windows ships `python` while most
     // Linux distros only provide `python3`.
@@ -157,7 +156,7 @@ pub fn detect_os_info() {
             }
         }
     }
-    let _ = crate::agent::prompt::TOOLS_INFO.set(tools.join(", "));
+    let _ = crate::support::prompt_env::TOOLS_INFO.set(tools.join(", "));
 }
 
 /// 跑一个探测型命令并取回输出，**带超时**。
@@ -269,7 +268,7 @@ pub struct AgentInstance {
     /// actors are consolidated.
     subscription_actor: SessionActor,
     /// Idle-unload liveness (shared with the Loop actor).
-    liveness: Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>>,
+    liveness: Option<std::sync::Arc<crate::support::liveness::WorkerLiveness>>,
     /// Event consumer thread (event channel reader for the in-process actor).
     /// daemon 关闭时必须 join：worker 退出 ≠ 尾部 intent（含 seal_turn）已消费
     /// ——通道里的最后几个事件仍由本线程读取并 publish（见 shutdown）。
@@ -758,10 +757,10 @@ impl AgentRegistry {
 
     fn read_session_facts(&self, session_id: &str) -> Result<Vec<SessionFact>, String> {
         let session_dir = self.sessions.session_path_dir(session_id);
-        if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+        if !qaqh_session::canonical::has_committed_facts(&session_dir) {
             return Ok(Vec::new());
         }
-        let identity = CanonicalSessionIdentity::open(&session_dir)
+        let identity = qaqh_session::canonical::open_session_identity(&session_dir)
             .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
         if identity.session_id.as_str() != session_id {
             return Err(format!(
@@ -769,15 +768,12 @@ impl AgentRegistry {
                 identity.session_id
             ));
         }
-        let reader = CommittedFactReader::open(
+        qaqh_session::canonical::read_session_facts(
             &session_dir,
             identity.session_id.clone(),
             identity.log_id.clone(),
         )
-        .map_err(|error| format!("open canonical facts for {session_id}: {error}"))?;
-        reader
-            .read_all()
-            .map_err(|error| format!("read canonical facts for {session_id}: {error}"))
+        .map_err(|error| format!("read canonical facts for {session_id}: {error}"))
     }
 
     /// Resolve a caller-relative or absolute target path within the caller's
@@ -897,10 +893,9 @@ impl AgentRegistry {
     /// Knife-1 step 1 removes `Command::new(current_exe)` and the child-process
     /// leg of the subagent path.
     ///
-    /// The subagent is a normal Ringing V1
-    /// [`crate::agent::loop_core::Loop`] running on a daemon thread;
-    /// its command/event channels are the same typed envelopes as the pipe wire,
-    /// so the daemon publishes events and commands unchanged.
+    /// The subagent is a normal thin [`crate::session_agent::AgentHost`] task
+    /// running inside the daemon process; its commands and events go through the
+    /// same mailbox as the main session, so the daemon publishes them unchanged.
     pub fn spawn_subagent(
         &mut self,
         session_id: &str,
@@ -1150,7 +1145,7 @@ impl AgentRegistry {
         &mut self,
         session_id: &str,
         spec: SubagentSpawnSpec,
-        _parent_cancel: Option<crate::agent::types::CancelToken>,
+        _parent_cancel: Option<crate::support::cancel::CancelToken>,
     ) -> Result<(), String> {
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}"));
@@ -1164,7 +1159,7 @@ impl AgentRegistry {
             .map_err(|e| format!("canonical identity for subagent {session_id}: {e}"))?;
 
         let (mut agent_config, _session_profile) =
-            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
+            crate::support::config::session_effective_config(Some(&self.sessions), session_id)
                 .unwrap_or_default();
         if let Some(model) = &spec.model {
             agent_config.model = model.clone();
@@ -1201,7 +1196,7 @@ impl AgentRegistry {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
         let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
-            &crate::agent::state::agent::agent_tool_registrars(),
+            &crate::support::registrars::agent_tool_registrars(),
         );
         tool_manager.apply_init(spec.tools.clone(), session_id);
         let tool_defs = crate::session_agent::assembly::tool_defs(&tool_manager);
@@ -1283,7 +1278,7 @@ impl AgentRegistry {
             .map_err(|e| format!("canonical identity for {session_id}: {e}"))?;
 
         let (agent_config, _session_profile) =
-            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
+            crate::support::config::session_effective_config(Some(&self.sessions), session_id)
                 .unwrap_or_default();
 
         let budget = crate::session_agent::assembly::context_budget(&agent_config);
@@ -1311,7 +1306,7 @@ impl AgentRegistry {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
         let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
-            &crate::agent::state::agent::agent_tool_registrars(),
+            &crate::support::registrars::agent_tool_registrars(),
         );
         let allowed_tools = if agent_config.tool_allowlist_enabled {
             agent_config.tool_allowlist.clone()
@@ -1408,19 +1403,16 @@ impl AgentRegistry {
         child_id: &str,
     ) -> Result<(SubagentSpawnConfig, String), String> {
         let parent_dir = self.sessions.session_path_dir(parent_id);
-        let identity = CanonicalSessionIdentity::open(&parent_dir)
+        let identity = qaqh_session::canonical::open_session_identity(&parent_dir)
             .map_err(|error| format!("open parent canonical identity for {parent_id}: {error}"))?;
-        let reader = CommittedFactReader::open(
+        let child_id = SessionId::new(child_id);
+        qaqh_session::canonical::read_session_facts(
             &parent_dir,
             identity.session_id.clone(),
             identity.log_id.clone(),
         )
-        .map_err(|error| format!("open parent canonical facts for {parent_id}: {error}"))?;
-        let child_id = SessionId::new(child_id);
-        reader
-            .read_all()
-            .map_err(|error| format!("read parent canonical facts for {parent_id}: {error}"))?
-            .into_iter()
+        .map_err(|error| format!("read parent canonical facts for {parent_id}: {error}"))?
+        .into_iter()
             .rev()
             .find_map(|fact| match fact.payload {
                 FactPayload::SubagentSpawned(payload) if payload.child_session_id == child_id => {
@@ -1568,7 +1560,7 @@ impl AgentRegistry {
         let reload_spec = match &env.command {
             qaqh_ringing::RingingCommand::Control(
                 qaqh_domain::ControlCommand::AgentReloadConfig,
-            ) => crate::agent::engine_session::session_effective_config(
+            ) => crate::support::config::session_effective_config(
                 Some(&self.sessions),
                 session_id,
             )
@@ -1840,7 +1832,7 @@ impl AgentRegistry {
         self.supervisor.children_of(parent)
     }
 
-    fn cancel_for_session(&self, _session_id: &str) -> Option<crate::agent::types::CancelToken> {
+    fn cancel_for_session(&self, _session_id: &str) -> Option<crate::support::cancel::CancelToken> {
         None
     }
 
@@ -2030,7 +2022,7 @@ impl AgentRegistry {
     pub fn worker_liveness(
         &self,
         session_id: &str,
-    ) -> Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>> {
+    ) -> Option<std::sync::Arc<crate::support::liveness::WorkerLiveness>> {
         self.instances
             .get(session_id)
             .and_then(|instance| instance.liveness.clone())
@@ -2116,7 +2108,7 @@ impl AgentRegistry {
         if self.shutting_down {
             return;
         }
-        let dead: Vec<(String, AgentKind, Option<crate::agent::types::CancelToken>)> = self
+        let dead: Vec<(String, AgentKind, Option<crate::support::cancel::CancelToken>)> = self
             .instances
             .iter()
             .filter(|(_, instance)| instance.is_dead())
@@ -2378,7 +2370,7 @@ pub(crate) fn stash_interaction_body(
             consequence,
             ..
         }) => (
-            crate::agent::util::canonical_interaction_id(tool_call_id)
+            crate::support::ids::canonical_interaction_id(tool_call_id)
                 .as_str()
                 .to_string(),
             interaction_body::permission_body(
@@ -2438,7 +2430,7 @@ pub(crate) fn apply_interaction_side_effects(
         // 权限答复本身没有 Ringing 终态事件，工具完成/取消就是它的
         // 终结信号（拒绝路径同样会落到 ToolFinished(Cancelled/Denied)）。
         qaqh_domain::DomainEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
-            let interaction_id = crate::agent::util::canonical_interaction_id(tool_call_id);
+            let interaction_id = crate::support::ids::canonical_interaction_id(tool_call_id);
             hub.release_interaction_content(session_id, interaction_id.as_str());
         }
         _ => {}
@@ -2934,7 +2926,7 @@ mod tests {
             directory.path().join("sessions"),
             directory.path().join(".active_session"),
         ));
-        let parent_cancel = crate::agent::types::CancelToken::new();
+        let parent_cancel = crate::support::cancel::CancelToken::new();
         let child_cancel = parent_cancel.child();
         let parent = dummy_thin_agent("parent-seed");
         let child = dummy_thin_agent("child-seed");
@@ -2987,7 +2979,7 @@ mod tests {
             directory.path().join("sessions"),
             directory.path().join(".active_session"),
         ));
-        let cancel_token = crate::agent::types::CancelToken::new();
+        let cancel_token = crate::support::cancel::CancelToken::new();
         let instance = dummy_thin_agent("seed-a");
         let mut registry = AgentRegistry {
             instances: HashMap::from([("seed-a".into(), instance)]),

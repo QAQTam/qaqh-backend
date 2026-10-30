@@ -15,6 +15,7 @@ mod recovery;
 mod recovery_executor;
 mod recovery_state;
 mod replay_window;
+mod session_facts;
 mod store;
 mod tool_ledger;
 mod types;
@@ -39,6 +40,10 @@ pub use log::{
 #[doc(hidden)]
 pub use reader::COMMITTED_FACT_PARSE_COUNT;
 pub use reader::CommittedFactReader;
+pub use session_facts::{
+    SessionFactView, has_committed_facts, open_session_identity, read_session_facts,
+    read_session_facts_from,
+};
 pub use recovery::{
     RECOVERY_INTENT_FILE, RECOVERY_INTENT_SCHEMA, RecoveryBatchKey, RecoveryIntent,
     RecoveryIntentStatus, RecoveryIntentWriteOutcome, load_recovery_intent,
