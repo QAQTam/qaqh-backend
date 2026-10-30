@@ -1,14 +1,11 @@
 //! The **only** read entry point for a session's committed fact prefix.
 //!
-//! Two storage generations coexist on disk: the legacy `events.commit.json`
-//! reader and the `storage-format` batch journal. Callers must not probe files
-//! to decide which one owns a directory — doing that is how the mailbox quota
-//! and subagent terminal status silently read zero for every new session
-//! (`registry.rs` and `host_impl.rs` each grew their own `exists()` probe and
-//! both only knew the legacy layout).
-//!
-//! Everything that needs facts, a head sequence, or an identity goes through
-//! this module.
+//! One storage generation remains: the `storage-format` batch journal. The
+//! legacy `events.commit.json` reader was removed in the 2026-10 hard cut —
+//! sessions written by it are now rejected instead of silently read through a
+//! second code path. Callers must not probe files themselves; that is how
+//! `registry.rs` and `host_impl.rs` each grew a legacy-only `exists()` check and
+//! both silently read zero for every batch-journal session.
 
 use std::path::Path;
 
@@ -17,7 +14,6 @@ use crate::session_fact_v2::{LogId, SessionFact, SessionId};
 use super::batch::{is_batch_root, read_committed_facts};
 use super::identity::{CanonicalIdentityError, CanonicalSessionIdentity};
 use super::log::CanonicalError;
-use super::reader::CommittedFactReader;
 
 /// Committed facts plus the head sequence they end at.
 pub struct SessionFactView {
@@ -27,14 +23,14 @@ pub struct SessionFactView {
     pub head_fact_seq: u64,
 }
 
-/// Read committed facts, dispatching on the storage generation that owns
-/// `session_dir`.
-pub fn read_session_facts(
-    session_dir: impl AsRef<Path>,
-    session_id: SessionId,
-    log_id: LogId,
-) -> Result<Vec<SessionFact>, CanonicalError> {
-    read_session_facts_from(session_dir, session_id, log_id, None).map(|view| view.facts)
+fn require_batch_root(session_dir: &Path) -> Result<(), CanonicalError> {
+    if is_batch_root(session_dir) {
+        return Ok(());
+    }
+    Err(CanonicalError::NotWritable(format!(
+        "{}: no batch journal (legacy events.commit.json sessions are no longer readable)",
+        session_dir.display()
+    )))
 }
 
 /// Read committed facts, optionally only those after `after_fact_seq`, plus the
@@ -47,23 +43,12 @@ pub fn read_session_facts_from(
     after_fact_seq: Option<u64>,
 ) -> Result<SessionFactView, CanonicalError> {
     let dir = session_dir.as_ref();
-    if is_batch_root(dir) {
-        let all = read_committed_facts(dir, session_id, log_id)?;
-        let head_fact_seq = all.last().map(|fact| fact.fact_seq).unwrap_or(0);
-        let facts = match after_fact_seq {
-            Some(seq) => all.into_iter().filter(|fact| fact.fact_seq > seq).collect(),
-            None => all,
-        };
-        return Ok(SessionFactView {
-            facts,
-            head_fact_seq,
-        });
-    }
-    let reader = CommittedFactReader::open(dir, session_id, log_id)?;
-    let head_fact_seq = reader.committed().committed_fact_seq;
+    require_batch_root(dir)?;
+    let all = read_committed_facts(dir, session_id, log_id)?;
+    let head_fact_seq = all.last().map(|fact| fact.fact_seq).unwrap_or(0);
     let facts = match after_fact_seq {
-        Some(seq) => reader.read_after(seq)?,
-        None => reader.read_all()?,
+        Some(seq) => all.into_iter().filter(|fact| fact.fact_seq > seq).collect(),
+        None => all,
     };
     Ok(SessionFactView {
         facts,
@@ -71,27 +56,33 @@ pub fn read_session_facts_from(
     })
 }
 
-/// Whether the directory holds committed facts in either generation.
-///
-/// Use this instead of `dir.join("events.commit.json").exists()`; that probe is
-/// what made batch-journal sessions look empty to half the daemon.
-pub fn has_committed_facts(session_dir: impl AsRef<Path>) -> bool {
-    let dir = session_dir.as_ref();
-    is_batch_root(dir) || dir.join(super::log::EVENTS_COMMIT_FILE).exists()
+/// Read every committed fact of a session.
+pub fn read_session_facts(
+    session_dir: impl AsRef<Path>,
+    session_id: SessionId,
+    log_id: LogId,
+) -> Result<Vec<SessionFact>, CanonicalError> {
+    read_session_facts_from(session_dir, session_id, log_id, None).map(|view| view.facts)
 }
 
-/// Open the session identity without guessing the format at the call site.
+/// Whether the directory holds committed facts.
 ///
-/// A batch-journal root owns its identity and must never have a second one
-/// minted from a missing sidecar; legacy directories are allowed to create it
-/// (a session can exist before its first append).
+/// Use this instead of probing storage files; batch-journal roots are the only
+/// generation that exists.
+pub fn has_committed_facts(session_dir: impl AsRef<Path>) -> bool {
+    is_batch_root(session_dir.as_ref())
+}
+
+/// Open the session identity. Only batch-journal roots are valid.
+///
+/// The identity sidecar is never minted here: a session directory without one
+/// is not a session.
 pub fn open_session_identity(
     session_dir: impl AsRef<Path>,
 ) -> Result<CanonicalSessionIdentity, CanonicalIdentityError> {
     let dir = session_dir.as_ref();
-    if is_batch_root(dir) {
-        CanonicalSessionIdentity::open(dir)
-    } else {
-        CanonicalSessionIdentity::open_or_create(dir)
+    if !is_batch_root(dir) {
+        return Err(CanonicalIdentityError::LegacyStorageRemoved);
     }
+    CanonicalSessionIdentity::open(dir)
 }

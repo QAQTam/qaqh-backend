@@ -1,6 +1,5 @@
 //! Ringing daemon 运行时（Projection/队列 层）。
 //!
-//! - `projection`：持久化消息 → UI turn 投影
 //! - `hub`：daemon 侧 Ringing 运行时聚合入口 `RingingHub`
 
 pub mod attachment;
@@ -11,7 +10,6 @@ pub mod hub;
 pub mod lease_store;
 pub(crate) mod operation_failure;
 pub mod pending_store;
-pub mod projection;
 pub mod service_methods;
 pub mod v2;
 
