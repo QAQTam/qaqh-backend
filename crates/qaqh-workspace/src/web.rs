@@ -8,7 +8,7 @@
 //! - **其余 profile** → 本模块自实现的 `ureq` + `html2text` 抓取。
 //!
 //! `search` **没有**自实现版本（本地 Bing-RSS 解析器已退役）：它只在官方工具面
-//! 的 profile 上被 runtime 放进模型工具清单（`AgentState::refresh_tool_defs`）。
+//! 的 profile 上被 runtime 放进模型工具清单（`session_agent::assembly::tool_defs`）。
 //! 工具名必须是 canonical `search`：Responses 端点若保留该名，由 gate 的
 //! `search_function_alias` 出站改名（`qaqh-gate/src/responses_sdk.rs`）。
 

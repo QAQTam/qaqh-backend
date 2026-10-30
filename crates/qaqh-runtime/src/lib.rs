@@ -10,8 +10,8 @@
 //!
 //! 另外两个大簇已经外移：
 //!
-//! - [`qaqh_agent_runtime`]：agent 状态机 / 引擎 / provider·tool job / 配额（`agent`、
-//!   `session_agent`、`provider_job`、`tool_job`、`quota_ledger`、`activity`）；
+//! - [`qaqh_agent_runtime`]：薄驱动（`session_agent`）+ 会话辅助件（`agent`：
+//!   有效配置 / 提示词 / 存活探测 / 取消令牌）+ provider·tool job / 配额 / 活动；
 //! - [`qaqh_ringing_runtime`]：Ringing 传输 / 投影 / 队列（`v2`、`hub`、`pending_store`
 //!   …），含 `agent_graph`。
 //!

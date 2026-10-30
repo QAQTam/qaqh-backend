@@ -104,7 +104,7 @@ pub struct SessionMemory {
     pub text_bytes: u64,
     pub image_bytes: u64,
     pub store_heap_estimate_bytes: u64,
-    /// AgentState fields other than its MessageStore; still an estimate.
+    /// Session bookkeeping other than the message store; still an estimate.
     pub agent_aux_heap_estimate_bytes: u64,
     pub pending_persist_ops: u64,
     pub context_message_count: u64,

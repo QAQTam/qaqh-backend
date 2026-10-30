@@ -67,8 +67,9 @@ cargo test -p qaqh-agent-runtime -p qaqh-ringing-runtime
 cargo test -p qaqh-runtime --lib && cargo test -p qaqh-runtime --tests
 ```
 
-已知预存在失败（与本次无关，HEAD 上同样失败）：`qaqh-permission --lib`、
-`ask_user_lifecycle`、`concurrent_read_stress`、`host_direct`、`permission_lifecycle`。
+已知预存在失败（与本次无关，HEAD 上同样失败）：`qaqh-permission --lib`、`host_direct`。
+（`ask_user_lifecycle` / `concurrent_read_stress` / `permission_lifecycle` 已随旧状态机
+测试一并删除，见下一节。）
 
 ## 2026-10-30 P0 死代码清理（拆分后审计）
 
@@ -152,3 +153,64 @@ cargo test -p qaqh-runtime --lib && cargo test -p qaqh-runtime --tests
 
 `qaqh-message` 的 `workspace` 上下文注入槽位**保留但注明无生产者**：它是通用的
 注入通道（`USER_INJECTION_SOURCES` 与 store 侧测试按名引用），不属于 spy。
+
+## 二轮清扫 · 旧 Loop 状态机（≈9.1k 行）
+
+### 判定依据
+
+`AgentState::new` / `AgentState::init` 在**生产代码里 0 次构造**：拆分后的
+`crates/qaqh-runtime/src/**` 只有两处 `crate::agent::state::agent::…` 引用，且都指向
+`agent_tool_registrars()`——函数体是 `[ToolRegistrar; 0]` 空数组，生产上的全部作用是
+给 `build_tool_manager` 传 `&[]`。其余 `&mut AgentState` 入口只在旧状态机内部或集成
+测试里被调用。于是整簇（状态 / 生命周期 / 引擎协议 / 工具对账）可一次删除。
+
+### 删除清单
+
+| 位置 | 行数 | 说明 |
+|---|---:|---|
+| `agent/state/` | 3,320 | `agent.rs`(1,728) / `lifecycle.rs`(1,113) / `token_calibration.rs`(462) / `mod.rs`(17) |
+| `agent/tool_recovery.rs` | 512 | 唯一生产调用点是已死的 `lifecycle::init_session` |
+| `agent/engine_session.rs` | 254 | 只保留 `session_effective_config` → `agent/session_config.rs`(43) |
+| `agent/util/datetime.rs` | 36 | `epoch_to_date` / `chrono_local_*` 只被旧状态机调用 |
+| `agent/util/format.rs` | 145 → 26 | 只留 `canonical_interaction_id`（registry 依赖） |
+| `agent/types.rs` | 700 → 271 | 只留 `CancelToken` |
+| `agent/prompt.rs` | −9 | 删 `system_prompt_for_mode`（唯一调用点在已死生命周期里） |
+| `registry/spawn.rs` | −2 | `agent_tool_registrars()` → `&[]` |
+| `qaqh-runtime/tests/` | 4,223 | 9 个只驱动旧状态机的集成测试 + `common/` 夹具 |
+
+`agent/types.rs` 删掉的协议类型：`RingContext` / `SessionBundle` / `StatsCollector` /
+`Outcome` / `YieldReason` / `TurnState` / `PendingAsk` / `PendingPlan` /
+`PendingTodoActivation` / `AdmittedTool` / `Emitter` / `WriterEvent` / `WorkerCommand` /
+`LoopPhase` / `PendingState`。生产者与消费者全在旧状态机里；薄驱动 `session_agent`
+用自己的 `AgentControl` / `AgentOutcome`。
+
+### 被删测试
+
+`ask_user_lifecycle`(1,327)、`permission_lifecycle`(859)、`session_lifecycle`(570)、
+`restart_prefix_cache`(283)、`mcp_env_block`(245)、`restart_request_body`(189)、
+`restart_request_body_responses`(172)、`concurrent_read_stress`(150)、
+`tests/common/`(428：`spawn_pipe_loop` 等旧 Loop 夹具)。
+
+理由：它们的主体是 `AgentState::build_context()`（请求体 / 前缀缓存）、旧 permission 与
+ask_user 流程、以及 `reconcile_store_in` 的修复注记——生产上已无对应实现，留着只会测
+尸体。覆盖应重建在薄驱动上：现存 `session_agent_test.rs`、`session_inprocess.rs`、
+`subagent_inprocess.rs`、`ringing_architecture.rs`、`v2_acceptance_matrix.rs`。
+
+`tool_crash_recovery.rs` **保留**：只摘掉 4 条依赖 `reconcile_store_in` 的注记断言
+（崩溃窗口、副作用不重放的断言仍在；canonical 账本侧另有
+`qaqh-session/tests/recovery_executor.rs` 全量覆盖）。
+
+### 顺带
+
+- `agent_tool_registrars()` 删除——返回空数组的「聚合点」没有聚合任何东西。
+- 4 处悬空文档引用同步修正：`agent/prompt.rs`（`AgentState::build_context`）、
+  `qaqh-workspace/src/web.rs`（`refresh_tool_defs`）、
+  `qaqh-workspace/tests/tool_fold_scope.rs`（`apply_tool_mode` 指向已删文件）、
+  `qaqh-session/src/manager.rs` / `qaqh-memwatch/src/lib.rs`。
+
+### 验证（本轮同样未编译）
+
+已做：全部改动文件 `rustfmt --edition 2024 --emit stdout` 解析通过；全仓 grep 确认
+`AgentState` / `agent::state` / `tool_recovery` / `engine_session` /
+`agent_tool_registrars` 无残留引用（仅历史说明文字）；`git diff --stat` 35 files
++62 / −9,059。
