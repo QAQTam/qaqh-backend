@@ -171,57 +171,6 @@ pub fn bundled_manifest_path(home: &Path) -> PathBuf {
     home.join(".agents/skills").join(BUNDLED_MANIFEST_FILENAME)
 }
 
-impl SkillCatalog {
-    /// Semantic search over available skills.
-    ///
-    /// Returns matching skills sorted by keyword relevance over skill name and
-    /// description.
-    ///
-    /// `top_k` is a hint; the actual count may be lower if fewer skills match.
-    pub fn search_semantic(&self, query: &str, top_k: usize) -> Vec<SkillMetadata> {
-        if query.is_empty() || self.skills.is_empty() {
-            return Vec::new();
-        }
-
-        self.search_semantic_keyword(query, top_k)
-    }
-
-    /// Keyword-based fallback: score skills by token overlap with the query.
-    fn search_semantic_keyword(&self, query: &str, top_k: usize) -> Vec<SkillMetadata> {
-        let query_lower = query.to_lowercase();
-        let query_tokens: Vec<&str> = query_lower
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut scored: Vec<(usize, usize)> = self
-            .skills
-            .iter()
-            .enumerate()
-            .map(|(i, skill)| {
-                let text = format!(
-                    "{} {} {}",
-                    skill.name,
-                    skill.description,
-                    skill.description // double-weight description
-                )
-                .to_lowercase();
-                let hits = query_tokens.iter().filter(|t| text.contains(*t)).count();
-                (i, hits)
-            })
-            .collect();
-
-        scored.sort_by_key(|item| std::cmp::Reverse(item.1));
-        let k = top_k.min(scored.len());
-
-        scored[..k]
-            .iter()
-            .filter(|(_, score)| *score > 0)
-            .map(|(idx, _)| self.skills[*idx].clone())
-            .collect()
-    }
-}
-
 /// A fully loaded skill ready for injection into the agent context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillActivation {
@@ -867,16 +816,6 @@ pub fn render_activation(activation: &SkillActivation) -> String {
 /// Check if a text block is a rendered skill activation (contains markers).
 pub fn is_activation_text(text: &str) -> bool {
     text.starts_with(ACTIVATION_MARKER) && text.contains("[END_QAQH_SKILL_V1]")
-}
-
-/// Extract the skill name from an activation text block.
-///
-/// Returns `None` if the text is not a valid activation.
-pub fn activation_name(text: &str) -> Option<&str> {
-    if !is_activation_text(text) {
-        return None;
-    }
-    text.lines().find_map(|line| line.strip_prefix("name: "))
 }
 
 /// Find skills explicitly mentioned via `$skill-name` syntax.

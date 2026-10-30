@@ -15,7 +15,6 @@ mod messages_sdk;
 mod gemini_sdk;
 mod chat_sdk;
 mod request_context;
-pub mod provider_config;
 mod responses_sdk;
 #[cfg(test)]
 mod rt_test;

@@ -231,12 +231,6 @@ pub fn reset_watermarks() {
         .clear();
 }
 
-/// 全量扫描计数器（测试用规模判据：缓存命中路径必须不递增）。
-#[doc(hidden)]
-pub fn reset_scan_counter() {
-    scans().lock().unwrap_or_else(|e| e.into_inner()).clear();
-}
-
 /// 指定会话目录的累计全量扫描次数（测试用）。
 #[doc(hidden)]
 pub fn scan_count(session_dir: &Path) -> usize {
@@ -281,17 +275,6 @@ pub fn note_watermark(session_dir: &Path, max_msg_id: u64) {
         });
     entry.max_msg_id = entry.max_msg_id.max(max_msg_id);
     entry.identity = identity;
-}
-
-/// Count lines in messages.jsonl (fast, reads line-by-line without parsing JSON).
-pub fn count_message_lines(session_dir: &Path) -> Result<usize, String> {
-    let path = session_dir.join("messages.jsonl");
-    if !path.exists() {
-        return Ok(0);
-    }
-    let file = fs::File::open(&path).map_err(|e| format!("open: {e}"))?;
-    let reader = BufReader::new(file);
-    Ok(reader.lines().count())
 }
 
 // ── Index ──

@@ -88,26 +88,6 @@ impl AgentRegistry {
         self.agent_catalog.get_by_id(agent_id).cloned()
     }
 
-    /// Read logical metadata by tree-relative path.
-    pub fn agent_metadata_by_path(
-        &self,
-        root_session_id: &str,
-        agent_path: &AgentPath,
-    ) -> Option<AgentMetadata> {
-        self.agent_catalog
-            .get_by_path(root_session_id, agent_path)
-            .cloned()
-    }
-
-    /// List logical metadata at or below a path prefix within one root tree.
-    pub fn list_agents_by_path(
-        &self,
-        root_session_id: &str,
-        prefix: &AgentPath,
-    ) -> Vec<AgentMetadata> {
-        self.agent_catalog.list_prefix(root_session_id, prefix)
-    }
-
     /// List logical agents for a caller, resolving relative prefixes below the
     /// caller's path and constraining absolute prefixes to the same root tree.
     pub fn list_agents_for_caller(
@@ -360,13 +340,6 @@ impl AgentRegistry {
             .get_by_path(caller.root_session_id.as_str(), &target_path)
             .cloned()
             .ok_or_else(|| format!("target agent not found: {target_path}").into())
-    }
-
-    /// Rebuild the canonical agent graph for one root tree.
-    pub fn agent_graph_snapshot(&self, root_session_id: &str) -> QaqhResult<AgentGraphSnapshot> {
-        crate::agent_graph::load_agent_graph(&self.sessions, root_session_id)
-            .map(|graph| graph.snapshot())
-            .map_err(QaqhError::from)
     }
 
     pub(super) fn ensure_root_metadata(&mut self, session_id: &str) -> QaqhResult<()> {

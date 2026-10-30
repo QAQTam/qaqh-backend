@@ -11,7 +11,6 @@ use ts_rs::TS;
 
 use super::agent::AgentPath;
 
-pub const SESSION_FACT_SCHEMA: &str = "qaqh.session-fact/v2";
 pub const SESSION_FACT_SCHEMA_NAME: &str = "qaqh.session-fact";
 pub const SESSION_FACT_SCHEMA_VERSION: u16 = 2;
 pub const SESSION_FACT_PAYLOAD_VERSION: u16 = 2;

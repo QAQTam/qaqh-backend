@@ -104,26 +104,6 @@ pub fn handle_update(args: &Value) -> ToolResult {
     tool_result(result)
 }
 
-pub fn handle_list(args: &Value) -> ToolResult {
-    let result = reject_fields(
-        args,
-        &[
-            "title",
-            "description",
-            "items",
-            "id",
-            "evidence",
-            "after_id",
-            "before_id",
-            "ids",
-            "updates",
-        ],
-        "todo_list",
-    )
-    .and_then(|_| super::actions::exec_todo_list(args));
-    tool_result(result)
-}
-
 // ═══════════════════════════════════════════════════════
 // Schemas（单一职责：无 oneOf、无参数归属说明文字）
 // ═══════════════════════════════════════════════════════

@@ -13,5 +13,3 @@ pub fn is_safe_integer(value: u64) -> bool {
     value <= MAX_SAFE_INTEGER
 }
 
-/// SSE 事件流帧格式：`id: <server_epoch>:<channel>:<stream_seq>`。
-pub const SSE_EVENT_ID_SEPARATOR: char = ':';

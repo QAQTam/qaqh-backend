@@ -76,12 +76,6 @@ impl WebSearchRequest {
         self
     }
 
-    /// 本地化优先的 IP 地址。
-    pub fn with_localization(mut self, ip: impl Into<String>) -> Self {
-        self.localization = Some(ip.into());
-        self
-    }
-
     /// 是否要网页正文。
     pub fn with_content(mut self, need_content: bool) -> Self {
         self.need_content = need_content;

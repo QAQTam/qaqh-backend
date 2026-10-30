@@ -151,16 +151,6 @@ impl CancelToken {
         }
     }
 
-    /// 测试专用：用自定义判定钩子替换取消判定（生产路径不用）。
-    ///
-    /// 钩子返回 true 即视为「取消已到达」，用于精确控制取消时点。
-    pub fn with_query_hook(hook: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        Self {
-            node: CancelNode::root(),
-            query: Some(hook),
-        }
-    }
-
     /// Derive a child token. Cancelling this token also cancels the child;
     /// cancelling the child never affects this token or its other children.
     pub fn child(&self) -> Self {

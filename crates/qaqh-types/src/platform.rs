@@ -323,11 +323,6 @@ pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
 
-/// qaqh plans directory.
-pub fn plans_dir() -> PathBuf {
-    data_dir().join("plans")
-}
-
 /// 未绑定工作区会话的**默认工作根**：`{data_dir}/workspace/{session_id}`。
 ///
 /// 会话没有 `meta.cwd` 时，执行面（exec 缺省 cwd）、授权边界

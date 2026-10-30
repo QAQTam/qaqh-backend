@@ -222,9 +222,3 @@ pub(super) fn checkpoint_event_id(checkpoint: &Checkpoint) -> &EventId {
     &checkpoint.last_event_id
 }
 
-/// Diagnostic/test hook: drop all in-process index state (forces cold
-/// validating scans until re-promotion).
-#[doc(hidden)]
-pub fn clear_for_test() {
-    registry().clear();
-}

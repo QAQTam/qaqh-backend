@@ -163,13 +163,6 @@ impl QaqhService {
             .ok_or_else(|| "dsaccount manager unavailable".to_string())
     }
 
-    /// 测试/运维钩子：注入指定位置的 DeepSeek 账号管理器。
-    #[doc(hidden)]
-    pub fn attach_dsaccount(&self, manager: qaqh_dsaccount::DsAccountManager) {
-        qaqh_dsaccount::install_manager(manager.clone());
-        let _ = self.dsaccount.set(manager);
-    }
-
     /// 挂载 Ringing 运行时（worker 事件双投）。
     pub fn attach_ringing(&self, hub: Arc<RingingHub>) {
         let _ = self.hub.set(hub.clone());

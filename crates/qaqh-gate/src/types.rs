@@ -564,10 +564,6 @@ impl ProviderConfig {
         self
     }
 
-    pub fn with_tail_system_support(mut self, supported: bool) -> Self {
-        self.supports_tail_system = supported;
-        self
-    }
 }
 
 // ── StreamEvent ──

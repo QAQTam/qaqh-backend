@@ -223,10 +223,6 @@ impl SessionAgent {
         self.incarnation
     }
 
-    pub fn set_provider_spec(&mut self, spec: ProviderRequestSpec) {
-        self.provider_spec = spec;
-    }
-
     fn observe(&self, event: serde_json::Value) {
         if let Some(tap) = &self.activity {
             tap.observe(&self.session_id, event);

@@ -248,12 +248,6 @@ impl ToolError {
         self
     }
 
-    /// 附加结构化数据。
-    pub fn with_details(mut self, details: serde_json::Value) -> Self {
-        self.details = Some(details);
-        self
-    }
-
     /// 附加诊断源（不序列化）。
     pub fn with_source(mut self, source: anyhow::Error) -> Self {
         self.source = Some(source);

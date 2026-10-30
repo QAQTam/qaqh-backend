@@ -296,20 +296,6 @@ impl MemoryMonitor {
         }
     }
 
-    pub fn update_estimate_json_bytes(&self, session_id: &str, estimate_json_bytes: u64) {
-        if !self.is_enabled() {
-            return;
-        }
-        let mut state = self.lock();
-        if !state.enabled {
-            return;
-        }
-        if let Some(gauge) = state.sessions.get_mut(session_id) {
-            gauge.estimate_json_bytes = estimate_json_bytes;
-            gauge.updated_at_ms = now_ms();
-        }
-    }
-
     pub fn update_component(&self, mut gauge: ComponentMemory) {
         if !self.is_enabled() {
             return;

@@ -30,14 +30,6 @@ impl AgentRegistry {
         );
     }
 
-    /// 读取子代理终态摘要；`None` = 尚未结束（或不是子代理）。
-    ///
-    /// 纯内存读，供 `wait_agent(targets=...)` 的完成判定使用——不去读
-    /// canonical 日志，避免每次轮询都做文件 I/O。
-    pub fn subagent_outcome(&self, child_session_id: &str) -> Option<AgentOutcome> {
-        self.subagent_outcomes.get(child_session_id).cloned()
-    }
-
     pub(crate) fn has_subagent_outcome(&self, child_session_id: &str) -> bool {
         self.subagent_outcomes.contains_key(child_session_id)
     }

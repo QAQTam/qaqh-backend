@@ -178,14 +178,6 @@ pub fn create_lowbox_token_with_capabilities(
     }
 }
 
-/// 查询令牌的组 SID 列表(TokenGroups,二进制 SID;含 lowbox 的容器 SID)。
-pub fn token_groups(token: HANDLE) -> Result<Vec<Vec<u8>>> {
-    Ok(query_sid_and_attrs(token, TokenGroups)?
-        .into_iter()
-        .map(|(sid, _)| sid)
-        .collect())
-}
-
 /// 查询令牌的能力 SID 列表(TokenCapabilities,二进制 SID + 属性位)。
 /// lowbox 的 capability 在**这里**而非 TokenGroups——capabilities 授权的内核级断言点。
 pub fn token_capabilities(token: HANDLE) -> Result<Vec<(Vec<u8>, u32)>> {
