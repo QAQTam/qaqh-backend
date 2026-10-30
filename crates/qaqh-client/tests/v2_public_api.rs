@@ -1,5 +1,4 @@
 //! Public v2 API compile checks for TUI/Windows shells.
-//!
 //! Shells must be able to name the v2 control surface through `qaqh-client`
 //! without importing `qaqh-ringing`, `qaqh-domain` or `qaqh-session`.
 
@@ -172,9 +171,8 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
 
 /// Phase 4（roster / inbox）：壳层必须能只靠 `qaqh-client` **命名并 match**
 /// Team projection。
-///
 /// `TeamSnapshot/TeamDelta` 是 TUI/WinUI 的唯一 roster/inbox 投影
-/// （`docs/current/architecture.md`），而壳层不能依赖 `qaqh-session`
+/// ，而壳层不能依赖 `qaqh-session`
 /// （静态门禁 G1）。只导出 `fact::ProjectionPayload` 不够——match 枚举变体必须写出
 /// 枚举名，所以这些类型必须从 client 根导出。
 #[test]

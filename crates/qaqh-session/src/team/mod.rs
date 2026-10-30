@@ -1,8 +1,7 @@
 //! Team task board canonical aggregate.
-//!
 //! The team aggregate is a separate append-only log keyed by root session id;
 //! it is intentionally not part of any session's canonical log. See
-//! `docs/current/spec/2026-09-26-team-task-board.md`.
+//! .
 
 mod error;
 mod projection;
