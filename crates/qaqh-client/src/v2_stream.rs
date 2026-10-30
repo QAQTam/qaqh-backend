@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use crate::client::Client;
 use crate::error::{ClientError, Result};
 use crate::types::ReconnectReason;
-use crate::v2::{ClientV2Event, ClientV2Reset, ClientV2SubscriptionEvent};
+use crate::v2::{ClientV2Event, ClientV2SubscriptionEvent, ringing_v2};
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const RETRY_BASE_MS: u64 = 1_000;
@@ -48,7 +48,7 @@ pub enum V2StreamStatus {
 /// 单条 v2 流的回调。
 pub struct V2StreamHandlers {
     pub on_event: Arc<dyn Fn(String, ClientV2Event) + Send + Sync>,
-    pub on_reset: Arc<dyn Fn(String, ClientV2Reset) + Send + Sync>,
+    pub on_reset: Arc<dyn Fn(String, ringing_v2::RingingV2ResetRequired) + Send + Sync>,
     pub on_status: Arc<dyn Fn(String, V2StreamStatus) + Send + Sync>,
     pub on_liveness: Arc<dyn Fn() + Send + Sync>,
 }

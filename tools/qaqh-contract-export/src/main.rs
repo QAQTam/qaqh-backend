@@ -842,7 +842,7 @@ fn write_index(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
          import type { RingingV2EventEnvelope } from \"./types/qaqh/RingingV2EventEnvelope\";\n\
          export type ClientV2Bootstrap = RingingV2Bootstrap<ClientV2ControlState, ConversationSnapshot, ClientV2ToolState>;\n\
          export type ClientV2Event = RingingV2EventEnvelope<ProjectionPayload>;\n\
-         export type ClientV2Payload = ProjectionPayload;\n",
+         export type fact::ProjectionPayload = ProjectionPayload;\n",
     );
     write(stage, "index.ts", &output)?;
     Ok(())
