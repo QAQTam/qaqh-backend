@@ -1151,6 +1151,7 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                     &format!("batch-meta-{}", self.commit.head()? + 1),
                     vec![fact],
                 )?;
+                qaqh_session::meta::refresh_index(self.commit.session_dir());
                 Ok(Step::Continue)
             }
             AgentCommand::SetTitle { title, source } => {
@@ -1169,6 +1170,7 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                     &format!("batch-title-{}", self.commit.head()? + 1),
                     vec![fact],
                 )?;
+                qaqh_session::meta::refresh_index(self.commit.session_dir());
                 Ok(Step::Continue)
             }
         }
