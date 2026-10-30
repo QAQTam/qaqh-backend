@@ -1206,7 +1206,7 @@ mod tests {
                     "tool_name": "fs_read",
                     "summary": "read file",
                     "status": "ok",
-                    "time": "42",
+                    "finished_at_ms": 1_759_000_042_000i64,
                     "args": "{\"path\":\"/a\"}"
                 }])
             )
@@ -1218,7 +1218,7 @@ mod tests {
                 &serde_json::json!([{"tool_name": "fs_read", "status": "done"}])
             )
             .is_err(),
-            "summary/time/args 必填，status 是闭集枚举"
+            "summary/finished_at_ms/args 必填，status 是闭集枚举"
         );
         assert!(
             validate_typed_result("session.set_profile", &Value::Null)
