@@ -918,23 +918,19 @@ fn resolve_identity(
     session_dir: &Path,
     session_id: &str,
 ) -> Result<(SessionId, LogId), V2HubError> {
-    let batch_root = qaqh_session::canonical::is_batch_root(session_dir);
-    if !session_dir.join(CANONICAL_IDENTITY_FILE).exists()
-        && !session_dir.join(EVENTS_FILE).exists()
-        && !batch_root
-    {
+    if !session_dir.exists() {
         return Err(V2HubError::SessionMissing(session_id.to_string()));
     }
-    // One owner for format dispatch: batch roots never mint a second identity
-    // from a missing sidecar, legacy directories may create it.
+    // Hard cut: only the batch journal is a storage generation. A directory
+    // carrying the removed `events.commit.json` layout is reported as such
+    // instead of being read through a second code path.
+    if !qaqh_session::canonical::has_committed_facts(session_dir) {
+        return Err(V2HubError::Canonical(format!(
+            "session {session_id}: no batch journal (legacy storage removed)"
+        )));
+    }
     let identity = qaqh_session::canonical::open_session_identity(session_dir)
         .map_err(|error| V2HubError::Canonical(error.to_string()))?;
-    // A session can exist (identity minted) before its first canonical commit.
-    // There is no snapshot cursor to hand out yet, so surface the documented
-    // `snapshot_missing` reason rather than a generic canonical error.
-    if !batch_root && !session_dir.join(EVENTS_COMMIT_FILE).exists() {
-        return Err(V2HubError::SnapshotMissing(session_id.to_string()));
-    }
     Ok((identity.session_id, identity.log_id))
 }
 

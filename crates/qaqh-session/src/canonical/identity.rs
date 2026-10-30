@@ -50,6 +50,9 @@ pub enum CanonicalIdentityError {
 
     #[error("canonical identity already exists with a different session_id")]
     Conflict,
+
+    #[error("session uses the removed legacy storage format (events.commit.json)")]
+    LegacyStorageRemoved,
 }
 
 impl CanonicalSessionIdentity {
