@@ -695,6 +695,15 @@ pub fn authorize_call_with_context(
 
 #[cfg(test)]
 mod tests {
+
+    /// exec 分类自动放行的前置条件：**该次 launch 计划**能解析到写强制后端。
+    ///
+    /// 只有 Windows 接了这个后端（`exec_backend_enforces_write_isolation` 在
+    /// 非 Windows 恒 false），所以判据是「能力位 ∧ 平台已接线」。只看能力位
+    /// 会在 Linux+bubblewrap 上误判成「应当放行」。
+    fn exec_write_isolation_wired() -> bool {
+        cfg!(windows) && qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
+    }
     use super::*;
     use crate::permission::PermissionRisk;
 
@@ -744,7 +753,7 @@ mod tests {
             }),
             category: crate::permission::ToolCategory::Exec,
         };
-        let write_enforced = qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation;
+        let write_enforced = exec_write_isolation_wired();
         let ctx_for = |invocation: ToolInvocation, backend: qaqh_sandbox::SandboxBackend| {
             let mut context = legacy_tool_call_context(
                 &invocation,
@@ -766,7 +775,10 @@ mod tests {
         );
         if write_enforced {
             let Admission::Authorized(proof) = admission else {
-                panic!("classified read-only exec must auto-approve under workspace-write");
+                panic!(
+                    "classified read-only exec must auto-approve under workspace-write: {}",
+                    qaqh_sandbox::SandboxCapabilities::detect().detail
+                );
             };
             assert_eq!(proof.grant(), GrantKind::SandboxClassified);
         } else {
@@ -812,12 +824,13 @@ mod tests {
     }
 
     /// 纯函数锁（与平台能力无关）：门禁必须按**该次命令的 cwd** 解析词元。
-    /// 旧实现只看含分隔符的词元、且一律按会话工作区解析，所以
-    /// `cat messages.jsonl` + `cwd=<sessions dir>` 两头都不命中。
+    ///
+    /// 2026-10 起受保护的只剩自身管理面（config / profiles / secrets /
+    /// daemon.json）；会话数据不再入门禁，所以这里用 `secrets.toml` 做探针。
     #[test]
     fn exec_sensitive_guard_resolves_tokens_against_command_cwd() {
         let workspace = std::env::temp_dir().join("qaqh-exec-sensitive-base");
-        let sessions_dir = qaqh_types::platform::sessions_dir();
+        let data_dir = qaqh_types::platform::data_dir();
         let invocation = |command: &str, cwd: Option<String>| ToolInvocation {
             session_id: "seed-a".into(),
             call_id: "call-sensitive".into(),
@@ -825,25 +838,25 @@ mod tests {
             args: serde_json::json!({ "command": command, "shell": "bash", "cwd": cwd }),
             category: crate::permission::ToolCategory::Exec,
         };
-        let sessions_text = sessions_dir.to_string_lossy().into_owned();
+        let data_text = data_dir.to_string_lossy().into_owned();
 
         assert!(
             exec_hits_self_administration_paths(
-                &invocation("cat messages.jsonl", Some(sessions_text.clone())),
+                &invocation("cat secrets.toml", Some(data_text.clone())),
                 &workspace
             ),
-            "cwd 落在会话数据根时，相对文件名必须命中敏感门禁"
+            "cwd 落在数据根时，相对文件名必须命中自身管理面门禁"
         );
         assert!(
             exec_hits_self_administration_paths(
-                &invocation(&format!("cat {sessions_text}/messages.jsonl"), None),
+                &invocation(&format!("cat {data_text}/secrets.toml"), None),
                 &workspace
             ),
             "绝对路径词元照常命中"
         );
         assert!(
             !exec_hits_self_administration_paths(
-                &invocation("cat messages.jsonl", None),
+                &invocation("cat secrets.toml", None),
                 &workspace
             ),
             "普通工作区内的相对读不得误伤"
@@ -893,7 +906,7 @@ mod tests {
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if !qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation {
+        if !exec_write_isolation_wired() {
             return;
         }
         let workspace = std::env::temp_dir().join("qaqh-authorization-exec-cwd-ok");
@@ -936,7 +949,7 @@ mod tests {
             args,
             category,
         };
-        let write_enforced = qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation;
+        let write_enforced = exec_write_isolation_wired();
         let tier = crate::permission::PermissionLevel::SandboxRun as u8;
         let asks = |admission: Admission| matches!(admission, Admission::ApprovalRequired(_));
         let ctx_for = |invocation: ToolInvocation, backend: qaqh_sandbox::SandboxBackend| {
@@ -1228,13 +1241,11 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_denies_sensitive_session_files_even_when_workspace_is_unset() {
-        // 放宽「未设置工作区」不能顺带打开数据外泄面：会话历史 / 凭据在任何
-        // 情况下都不给子代理读（沙箱没有审批通道，只能拒）。
+    fn sandbox_denies_self_administration_files_even_when_workspace_is_unset() {
+        // 放宽「未设置工作区」不能顺带打开自我提权面：配置 / 凭据在任何情况下
+        // 都不给子代理读（沙箱没有审批通道，只能拒）。会话数据不在此列。
         let _g = sandbox_guard();
-        let secret = qaqh_types::platform::sessions_dir()
-            .join("seed-other")
-            .join("messages.jsonl");
+        let secret = qaqh_types::platform::config_path();
         let admission = invoke(
             "read",
             serde_json::json!({ "path": secret }),
@@ -1243,7 +1254,7 @@ mod tests {
         );
         match admission {
             Admission::Denied(reason) => assert!(reason.contains("sandbox"), "{reason}"),
-            _other => panic!("sensitive session files must stay denied in sandbox"),
+            _other => panic!("self-administration files must stay denied in sandbox"),
         }
     }
 

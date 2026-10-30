@@ -371,7 +371,13 @@ mod tests {
             },
         };
         let display = project_todo_list(&json!({}), &output.to_envelope_string().unwrap());
-        assert_eq!(display.body, ToolBody::None);
+        // typed 投影：body 直接是结构化条目，客户端不再解析 summary 里的
+        // `- [ ] title | desc` 文本。
+        let ToolBody::Items { renderer, items } = &display.body else {
+            panic!("todo list must project a typed Items body, got {:?}", display.body);
+        };
+        assert_eq!(renderer, "todo");
+        assert!(items.is_empty(), "empty list projects no items");
         assert_eq!(
             display.summary.as_deref(),
             Some("2 task(s) · 1 in progress")
