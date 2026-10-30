@@ -24,10 +24,9 @@ fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
     qaqh_workspace::runtime::init_tools(session_id, &[], vec![]);
     qaqh_workspace::runtime::set_context(session_id, 1);
 
+    // v4 契约：todo_write 只接受纯文本 `list`（`items` 形态已退役）。
     let args = json!({
-        "items": [
-            {"title": "Typed output", "description": "one source", "status": "in_progress"}
-        ]
+        "list": "- [~] Typed output | one source"
     });
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: session_id.into(),
