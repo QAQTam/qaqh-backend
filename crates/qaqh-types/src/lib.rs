@@ -60,8 +60,8 @@ pub use tool_def::{ToolDef, ToolFunction};
 pub use tool_result::{
     ContentRef, TOOL_MODEL_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, ToolContinuation, ToolError,
     ToolImage, ToolModelPayload, ToolResult, ToolResultDisplay, ToolResultDisplayBody,
-    ToolResultDisplayHeader, ToolResultDisplayItem, ToolResultDisplayOutcome,
-    ToolResultDisplayOutcomeState,
+    ToolResultDisplayFile, ToolResultDisplayHeader, ToolResultDisplayItem,
+    ToolResultDisplayOutcome, ToolResultDisplayOutcomeState,
     ToolResultDisplayPathOp, ToolResultMetrics, ToolStatus,
 };
 
