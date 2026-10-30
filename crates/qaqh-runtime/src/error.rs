@@ -1,0 +1,108 @@
+//! `qaqh-runtime` 的错误类型。
+//!
+//! 设计约定：**内部层用枚举，边界层才降级成文本**。此前 runtime 内部一律
+//! `Result<_, String>`，调用方只能靠嗅探 message 前缀（例如
+//! `starts_with("FORBIDDEN")`）判断语义——同一份知识散落在生产代码与测试里。
+//! 这里把语义钉在变体上，`Display` 只负责给人看的文本（保留既有 wire 文案）。
+//!
+//! - [`QaqhError::UnknownMethod`] / [`QaqhError::InvalidParams`]：客户端问题（400）；
+//! - [`QaqhError::Forbidden`]：越权 / 白名单拒绝（403，`Display` 保留 `FORBIDDEN: ` 前缀）；
+//! - [`QaqhError::NotFound`]：目标不存在（404）；
+//! - [`QaqhError::Invalid`]：请求本身合法但被业务规则拒绝（400）；
+//! - [`QaqhError::Context`] / [`QaqhError::Unavailable`] / [`QaqhError::Serialize`]：本机状态问题（5xx）。
+//!
+//! 与 `qaqh-config` / `qaqh-session` 等下游 crate 的边界仍是它们的错误类型或
+//! 字符串；跨边界时用 [`QaqhError::message`] / [`QaqhError::context`] 显式收口，
+//! 不让 `String` 在 runtime 内部继续流动。
+
+use serde_json::Value;
+
+/// 服务面 / 运行时统一的错误分类。
+#[derive(Debug, thiserror::Error)]
+pub enum QaqhError {
+    #[error("unknown method: {method}")]
+    UnknownMethod { method: String },
+
+    #[error("invalid params for {method}: {detail}")]
+    InvalidParams { method: String, detail: String },
+
+    /// 越权 / 白名单拒绝。`Display` 保留 `FORBIDDEN: ` 前缀，wire 文案不变。
+    #[error("FORBIDDEN: {message}")]
+    Forbidden { message: String },
+
+    #[error("{message}")]
+    NotFound { message: String },
+
+    #[error("{message}")]
+    Invalid { message: String },
+
+    /// 带上下文的失败：`{context}: {message}`（例如 `session.new: allocate session failed: …`）。
+    #[error("{context}: {message}")]
+    Context { context: &'static str, message: String },
+
+    #[error("{what} unavailable")]
+    Unavailable { what: &'static str },
+
+    /// 文件系统操作失败（`Display` 保持旧文案 `{op} {path}: {source}`）。
+    #[error("{op} {path}: {source}")]
+    Io {
+        op: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("serialize {what}: {source}")]
+    Serialize {
+        what: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+impl QaqhError {
+    /// 业务规则拒绝（参数合法、状态不允许）。
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::Invalid {
+            message: message.into(),
+        }
+    }
+
+    /// 目标不存在。
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound {
+            message: message.into(),
+        }
+    }
+
+    /// 承接下游 crate 的字符串错误：显式标注「这里是边界，丢失结构」。
+    pub fn message(error: impl std::fmt::Display) -> Self {
+        Self::Invalid {
+            message: error.to_string(),
+        }
+    }
+
+    /// 承接下游失败并加上本层的操作上下文。
+    pub fn context(context: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Context {
+            context,
+            message: error.to_string(),
+        }
+    }
+
+    /// 序列化任意 DTO 失败（本机 bug / 数据异常，不是客户端问题）。
+    pub fn serialize(what: &'static str, source: serde_json::Error) -> Self {
+        Self::Serialize { what, source }
+    }
+
+    /// 把 DTO 序列化成 wire `Value`；失败归类为 [`QaqhError::Serialize`]。
+    pub fn to_value<T: serde::Serialize>(what: &'static str, value: T) -> QaqhResult<Value> {
+        serde_json::to_value(value).map_err(|source| Self::serialize(what, source))
+    }
+
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, Self::Forbidden { .. })
+    }
+}
+
+pub type QaqhResult<T> = Result<T, QaqhError>;
