@@ -25,6 +25,9 @@ use std::sync::{
 
 pub type ProviderSupervisor = Supervisor<ProviderOutcome, CommittedExecution>;
 
+/// Upper bound on the streamed text retained for a failed attempt.
+const MAX_PARTIAL_TEXT_BYTES: usize = 64 * 1024;
+
 /// Complete parameters of one provider invocation.
 #[derive(Clone, Debug)]
 pub struct ProviderRequestSpec {
@@ -173,6 +176,11 @@ pub struct ProviderOutcome {
     /// the next round.
     pub finish: Option<ProviderFinish>,
     pub incomplete_reason: Option<String>,
+    /// Text streamed before the terminal event. Retained so a failed or
+    /// interrupted attempt still has a display source.
+    pub partial_text: Option<String>,
+    /// Reasoning streamed before the terminal event.
+    pub partial_reasoning: Option<String>,
     pub error: Option<String>,
 }
 
@@ -191,21 +199,27 @@ impl FrameSize for ProviderOutcome {
             .saturating_add(self.error.as_ref().map_or(0, String::capacity))
             .saturating_add(self.stop_reason.as_ref().map_or(0, String::capacity))
             .saturating_add(self.incomplete_reason.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.partial_text.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.partial_reasoning.as_ref().map_or(0, String::capacity))
     }
 }
 
-/// Materialize a `ProviderOutcome` into a `ProviderResponseCommitted` fact and
-/// matching `ToolCallDeclared` facts by publishing its neutral message, opaque
-/// replay items, and declared tool arguments into the session blob store.
+/// Materialize a `ProviderOutcome` into a `ProviderResponseCommitted` fact,
+/// display `AssistantBlockSealed` facts, and matching `ToolCallDeclared` facts.
+///
+/// `ProviderResponseCommitted` is context only: the projection registry gives it
+/// no public slot, so the transcript text/reasoning must also be sealed here.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_response_commit_facts(
     commit: &SessionCommit,
     turn_id: &TurnId,
     round: u32,
     attempt: u32,
+    model: &str,
     outcome: &ProviderOutcome,
     response_event_id: EventId,
     mut next_tool_event_id: impl FnMut(usize) -> EventId,
+    mut next_block_event_id: impl FnMut(usize) -> EventId,
     ts_ms: i64,
 ) -> Result<Vec<SessionFact>, SessionCommitError> {
     let finish = outcome.finish.unwrap_or(ProviderFinish::Unknown);
@@ -250,6 +264,89 @@ pub fn prepare_response_commit_facts(
         }),
     });
 
+    // Display facts. The conversation projection builds assistant text from
+    // `AssistantBlockSealed` only, so a missing block here means a silent turn.
+    let mut block_ordinal = 0usize;
+    let mut push_block = |facts: &mut Vec<SessionFact>,
+                          kind: qaqh_session::session_fact_v2::AssistantBlockKind,
+                          body: &str,
+                          usage: Option<UsageInfo>|
+     -> Result<(), SessionCommitError> {
+        let content_ref = commit.put_blob(body.as_bytes())?;
+        facts.push(SessionFact {
+            schema: FactSchema::v2(),
+            session_id: commit.session_id().clone(),
+            log_id: commit.log_id().clone(),
+            fact_seq: 0,
+            event_id: next_block_event_id(block_ordinal),
+            ts_ms: ts_ms + block_ordinal as i64 + 1,
+            causation_id: None,
+            turn_id: Some(turn_id.clone()),
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::AssistantBlockSealed(
+                qaqh_session::session_fact_v2::AssistantBlockSealed {
+                    turn_id: turn_id.clone(),
+                    block_id: qaqh_session::session_fact_v2::BlockId::new(format!(
+                        "block_{}",
+                        qaqh_session::canonical::generate_ulid()
+                    )),
+                    kind,
+                    content_ref,
+                    model: model.to_string(),
+                    usage,
+                },
+            ),
+        });
+        block_ordinal += 1;
+        Ok(())
+    };
+
+    let mut sealed_any = false;
+    for block in &neutral_message.content {
+        match block {
+            ContentBlock::Reasoning { reasoning, .. } if !reasoning.is_empty() => {
+                push_block(
+                    &mut facts,
+                    qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning,
+                    reasoning,
+                    None,
+                )?;
+                sealed_any = true;
+            }
+            ContentBlock::Text { text } if !text.is_empty() => {
+                push_block(
+                    &mut facts,
+                    qaqh_session::session_fact_v2::AssistantBlockKind::Answer,
+                    text,
+                    outcome.usage.clone(),
+                )?;
+                sealed_any = true;
+            }
+            _ => {}
+        }
+    }
+    // A stream that never produced a terminal message still has visible text:
+    // keep it rather than reporting an empty turn.
+    if !sealed_any {
+        if let Some(reasoning) = outcome.partial_reasoning.as_deref().filter(|t| !t.is_empty()) {
+            push_block(
+                &mut facts,
+                qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning,
+                reasoning,
+                None,
+            )?;
+        }
+        if let Some(text) = outcome.partial_text.as_deref().filter(|t| !t.is_empty()) {
+            push_block(
+                &mut facts,
+                qaqh_session::session_fact_v2::AssistantBlockKind::Answer,
+                text,
+                outcome.usage.clone(),
+            )?;
+        }
+    }
+
     if finish == ProviderFinish::ToolUse {
         let mut tool_ordinal = 0usize;
         for block in &neutral_message.content {
@@ -258,7 +355,7 @@ pub fn prepare_response_commit_facts(
                     .map_err(|e| SessionCommitError::Storage(e.into()))?;
                 let args_ref = commit.put_blob(&args_bytes)?;
                 let args_hash = sha256_content_hash(&args_bytes);
-                let call_id = ToolCallId::new(id.clone());
+                let call_id = canonical_tool_call_id(id);
                 facts.push(SessionFact {
                     schema: FactSchema::v2(),
                     session_id: commit.session_id().clone(),
@@ -284,6 +381,22 @@ pub fn prepare_response_commit_facts(
     }
 
     Ok(facts)
+}
+
+/// Map a provider wire tool-call id onto a canonical `call_<ULID>`.
+///
+/// Providers emit arbitrary ids (`call_1`, `tc_...`); canonical facts require
+/// the ULID shape. Hashing keeps the mapping stable across replay.
+pub fn canonical_tool_call_id(wire_id: &str) -> ToolCallId {
+    let candidate = wire_id.strip_prefix("call_").unwrap_or(wire_id);
+    if qaqh_session::session_fact_v2::is_ulid_text(candidate) && wire_id.starts_with("call_") {
+        ToolCallId::new(wire_id.to_string())
+    } else {
+        ToolCallId::new(format!(
+            "call_{}",
+            qaqh_session::canonical::ulid_from_text(wire_id)
+        ))
+    }
 }
 
 /// Run a committed model intent with default options.
@@ -364,6 +477,8 @@ pub async fn run_spec(
         let mut stream_usage = None;
         let mut stream_error = None;
         let mut duplicate_done = false;
+        let mut partial_text = String::new();
+        let mut partial_reasoning = String::new();
         let result = qaqh_gate::chat_stream(
             &spec.provider,
             messages,
@@ -389,9 +504,17 @@ pub async fn run_spec(
                 qaqh_gate::StreamEvent::Error { message, .. } => {
                     stream_error = Some(message);
                 }
-                qaqh_gate::StreamEvent::ContentDelta(_)
-                | qaqh_gate::StreamEvent::ReasoningDelta { .. }
-                | qaqh_gate::StreamEvent::ToolCallProgress { .. }
+                qaqh_gate::StreamEvent::ContentDelta(text) => {
+                    if partial_text.len() < MAX_PARTIAL_TEXT_BYTES {
+                        partial_text.push_str(&text);
+                    }
+                }
+                qaqh_gate::StreamEvent::ReasoningDelta { text, .. } => {
+                    if partial_reasoning.len() < MAX_PARTIAL_TEXT_BYTES {
+                        partial_reasoning.push_str(&text);
+                    }
+                }
+                qaqh_gate::StreamEvent::ToolCallProgress { .. }
                 | qaqh_gate::StreamEvent::NativeToolProgress { .. }
                 | qaqh_gate::StreamEvent::WebSearchStatus(_)
                 | qaqh_gate::StreamEvent::Retrying { .. } => {}
@@ -399,7 +522,10 @@ pub async fn run_spec(
         );
         if let Err(error) = result {
             let detail = stream_error.unwrap_or_else(|| error.to_string());
-            return failed_after_start(&detail);
+            let mut outcome = failed_after_start(&detail);
+            outcome.partial_text = (!partial_text.is_empty()).then_some(partial_text);
+            outcome.partial_reasoning = (!partial_reasoning.is_empty()).then_some(partial_reasoning);
+            return outcome;
         }
         if duplicate_done {
             return failed_after_start("provider emitted multiple terminal Done events");
@@ -434,6 +560,8 @@ pub async fn run_spec(
             stop_reason,
             finish: Some(finish),
             incomplete_reason,
+            partial_text: (!partial_text.is_empty()).then_some(partial_text),
+            partial_reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
             error: None,
         }
     });
@@ -533,6 +661,8 @@ fn not_started(message: &str) -> ProviderOutcome {
         stop_reason: None,
         finish: None,
         incomplete_reason: None,
+        partial_text: None,
+        partial_reasoning: None,
         error: Some(message.chars().take(512).collect()),
     }
 }
@@ -547,6 +677,8 @@ fn failed_after_start(message: &str) -> ProviderOutcome {
         stop_reason: None,
         finish: None,
         incomplete_reason: None,
+        partial_text: None,
+        partial_reasoning: None,
         error: Some(message.chars().take(512).collect()),
     }
 }

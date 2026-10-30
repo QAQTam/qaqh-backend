@@ -12,10 +12,13 @@ use qaqh_agentloop_core::{
     supervisor::Supervisor,
 };
 use qaqh_session::{
+    canonical::generate_ulid,
     session_commit::{CommittedExecution, SessionCommit},
     session_fact_v2::{ContentRef, InputId, InteractionId, ToolCallId, TurnId},
 };
-use tokio::{sync::Mutex, task::JoinHandle};
+use std::sync::Mutex;
+
+use tokio::task::JoinHandle;
 
 use crate::{
     provider_job::ProviderRequestSpec,
@@ -23,7 +26,7 @@ use crate::{
 };
 
 use super::{
-    agent::SessionAgent,
+    agent::{ActivityTap, SessionAgent},
     types::{
         AgentCommand, AgentCompletion, AgentControl, AgentOutcome, SessionAgentError,
     },
@@ -44,13 +47,9 @@ impl AgentHandle {
         attachments: Vec<ContentRef>,
         client_request_id: Option<String>,
     ) -> Result<InputId, MailboxError> {
-        let input_id = InputId::new(format!(
-            "input_01J{:023}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        ));
+        // Time-and-random ULID: unique across restarts and within one
+        // millisecond, unlike a bare wall-clock millisecond stamp.
+        let input_id = InputId::new(format!("input_{}", generate_ulid()));
         self.mailbox.try_command(AgentCommand::UserInput {
             input_id: input_id.clone(),
             text: text.to_string(),
@@ -94,6 +93,12 @@ impl AgentHandle {
         })
     }
 
+    /// Replace the provider parameters after a configuration reload.
+    pub fn reload_provider(&self, spec: ProviderRequestSpec) -> Result<(), MailboxError> {
+        self.mailbox
+            .try_control(AgentControl::ReloadProvider { spec: Box::new(spec) })
+    }
+
     /// Request clean shutdown of the agent task.
     pub fn shutdown(&self) -> Result<(), MailboxError> {
         self.mailbox.try_control(AgentControl::Shutdown)
@@ -109,6 +114,16 @@ impl AgentHost {
         commit: SessionCommit,
         provider_spec: ProviderRequestSpec,
         tool_port: Arc<WorkspaceToolPort>,
+    ) -> Result<(AgentHandle, JoinHandle<Result<(), SessionAgentError>>), SessionAgentError> {
+        Self::spawn_with_activity(session_id, commit, provider_spec, tool_port, None)
+    }
+
+    pub fn spawn_with_activity(
+        session_id: String,
+        commit: SessionCommit,
+        provider_spec: ProviderRequestSpec,
+        tool_port: Arc<WorkspaceToolPort>,
+        activity: Option<ActivityTap>,
     ) -> Result<(AgentHandle, JoinHandle<Result<(), SessionAgentError>>), SessionAgentError> {
         let (mailbox_handle, mailbox) = Mailbox::new(
             LaneBudget::COMMANDS,
@@ -135,20 +150,56 @@ impl AgentHost {
             mailbox_handle.clone(),
             provider_spec,
             tool_port,
+            activity,
         );
 
         let handle = AgentHandle {
-            session_id,
+            session_id: session_id.clone(),
             mailbox: mailbox_handle,
         };
 
         let task = tokio::spawn(async move {
-            driver::run(mailbox, agent)
-                .await
-                .map(|_| ())
-                .map_err(|failure| failure.error)
+            match driver::run(mailbox, agent).await {
+                Ok(_) => Ok(()),
+                Err(failure) => {
+                    // The driver hands back the owner, the unconsumed mailbox
+                    // and the failing input: that is the recovery material.
+                    // Keep it alive (and logged) instead of dropping it.
+                    let retained = RetainedDriverFailure {
+                        session_id: session_id.clone(),
+                        input_kind: describe_input(&failure.input),
+                        error: failure.error.to_string(),
+                        phase: format!("{:?}", failure.handler.phase()),
+                    };
+                    log::error!(
+                        "[session-agent] {} driver exited with open recovery material: {:?}",
+                        session_id,
+                        retained
+                    );
+                    Err(failure.error)
+                }
+            }
         });
 
         Ok((handle, task))
+    }
+}
+
+/// Enough shape of a failed driver to keep the recovery material observable.
+#[derive(Debug)]
+pub struct RetainedDriverFailure {
+    pub session_id: String,
+    pub input_kind: &'static str,
+    pub error: String,
+    pub phase: String,
+}
+
+fn describe_input(
+    input: &qaqh_agentloop_core::mailbox::Input<AgentCommand, AgentControl, AgentCompletion>,
+) -> &'static str {
+    match input {
+        qaqh_agentloop_core::mailbox::Input::Command(_) => "command",
+        qaqh_agentloop_core::mailbox::Input::Control(_) => "control",
+        qaqh_agentloop_core::mailbox::Input::Completion(_) => "completion",
     }
 }

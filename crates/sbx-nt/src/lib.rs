@@ -5,6 +5,8 @@
 //! 卷形态识别为未解析,调用方按 deny(PathUnresolved) 处置(spec §4.2 规则 1)。
 //! 卷符号映射(QueryDosDeviceW)待 hook 平面接入时补齐。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

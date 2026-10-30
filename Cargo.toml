@@ -61,3 +61,5 @@ codegen-units = 1
 [workspace.lints.clippy]
 unwrap_used = "deny"
 string_slice = "deny"
+# 每个 unsafe 块必须给出 SAFETY 依据（见 docs/adr 与各 crate 的 SAFETY 注释）。
+undocumented_unsafe_blocks = "deny"

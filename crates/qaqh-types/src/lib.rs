@@ -1,3 +1,5 @@
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 // ── Type definitions for qaqh core types ──
 //
 // All type definitions are split across sub-modules below.

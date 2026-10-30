@@ -20,6 +20,8 @@ use qaqh_workspace::permission::{
     is_sensitive_session_path, normalize_lexically, path_within_dir, resolve_target_path,
 };
 
+use crate::error::{QaqhError, QaqhResult};
+
 /// 远端文件接口的允许根（**上界**）：会话工作区根 + daemon 数据根。
 ///
 /// `fs.list`/`fs.read` 的合法用途是浏览会话工作区（前端远端文件选择器）。
@@ -86,10 +88,12 @@ fn path_allowed(
     })
 }
 
-/// 白名单拒绝的统一错误串：daemon 侧据 `FORBIDDEN` 前缀映射为 `forbidden`
-/// 码，与 IO 失败（文件不存在/权限不足）区分开。
-fn forbidden(kind: &str, path: &str) -> String {
-    format!("FORBIDDEN: {kind} {path}: path is outside the allowed roots")
+/// 白名单拒绝。类型化后 daemon 侧直接匹配变体映射 `forbidden` 码，
+/// 不再嗅探 message 前缀；`Display` 仍保留 `FORBIDDEN: ` 文案（wire 兼容）。
+fn forbidden(kind: &str, path: &str) -> QaqhError {
+    QaqhError::Forbidden {
+        message: format!("{kind} {path}: path is outside the allowed roots"),
+    }
 }
 
 /// `fs.list`：目录条目（目录优先 + 名称排序），返回 daemon 侧绝对路径。
@@ -99,17 +103,25 @@ pub(crate) fn list_remote_directory(
     sessions: &qaqh_session::SessionManager,
     path: &str,
     scope_session: Option<&str>,
-) -> Result<Value, String> {
+) -> QaqhResult<Value> {
     let dir = std::path::Path::new(path);
     if !is_absolute_like(path) {
-        return Err("fs.list requires an absolute path".to_string());
+        return Err(QaqhError::invalid("fs.list requires an absolute path"));
     }
     if !path_allowed(sessions, dir, scope_session) {
         return Err(forbidden("fs.list", path));
     }
     let mut entries: Vec<Value> = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("fs.list {path}: {e}"))? {
-        let entry = entry.map_err(|e| format!("fs.list {path}: {e}"))?;
+    for entry in std::fs::read_dir(dir).map_err(|source| QaqhError::Io {
+        op: "fs.list",
+        path: path.to_string(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| QaqhError::Io {
+            op: "fs.list",
+            path: path.to_string(),
+            source,
+        })?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let entry_path = entry.path();
         let meta = match entry.metadata() {
@@ -167,24 +179,36 @@ pub(crate) fn read_remote_file(
     path: &str,
     max_bytes: u64,
     scope_session: Option<&str>,
-) -> Result<Value, String> {
+) -> QaqhResult<Value> {
     let file_path = std::path::Path::new(path);
     if !is_absolute_like(path) {
-        return Err("fs.read requires an absolute path".to_string());
+        return Err(QaqhError::invalid("fs.read requires an absolute path"));
     }
     if !path_allowed(sessions, file_path, scope_session) {
         return Err(forbidden("fs.read", path));
     }
-    let meta = std::fs::metadata(file_path).map_err(|e| format!("fs.read {path}: {e}"))?;
+    let meta = std::fs::metadata(file_path).map_err(|source| QaqhError::Io {
+        op: "fs.read",
+        path: path.to_string(),
+        source,
+    })?;
     if !meta.is_file() {
-        return Err(format!("fs.read {path}: not a file"));
+        return Err(QaqhError::invalid(format!("fs.read {path}: not a file")));
     }
     let cap = max_bytes.clamp(1, 8 * 1024 * 1024) as usize;
-    let file = std::fs::File::open(file_path).map_err(|e| format!("fs.read {path}: {e}"))?;
+    let file = std::fs::File::open(file_path).map_err(|source| QaqhError::Io {
+        op: "fs.read",
+        path: path.to_string(),
+        source,
+    })?;
     let mut data = Vec::new();
     std::io::Read::take(file, (cap + 1) as u64)
         .read_to_end(&mut data)
-        .map_err(|e| format!("fs.read {path}: {e}"))?;
+        .map_err(|source| QaqhError::Io {
+            op: "fs.read",
+            path: path.to_string(),
+            source,
+        })?;
     let truncated = data.len() > cap;
     data.truncate(cap);
     Ok(json!({
@@ -208,7 +232,7 @@ pub(crate) fn git<F>(
     session_id: &str,
     operation: F,
     empty: Value,
-) -> Result<Value, String>
+) -> QaqhResult<Value>
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
@@ -216,7 +240,7 @@ where
     if workspace.is_empty() {
         return Ok(empty);
     }
-    let value = operation(&workspace)?;
+    let value = operation(&workspace).map_err(QaqhError::message)?;
     serde_json::from_str(&value).or_else(|_| Ok(json!(value)))
 }
 

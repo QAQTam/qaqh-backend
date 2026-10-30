@@ -16,6 +16,8 @@
 //! 门面在 `runtime::set_context` 首次调用时注册一个读 ctx 的 fn 指针，本 crate
 //! 不再依赖门面。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod command_class;
 pub mod conflict;
 pub mod permission;

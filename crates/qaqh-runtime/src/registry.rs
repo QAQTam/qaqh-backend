@@ -847,7 +847,8 @@ impl AgentRegistry {
         }
         let has_events = session_dir.join(EVENTS_FILE).exists();
         let has_commit = session_dir.join(EVENTS_COMMIT_FILE).exists();
-        if !has_events && !has_commit {
+        let batch_root = qaqh_session::canonical::is_batch_root(&session_dir);
+        if !has_events && !has_commit && !batch_root {
             // `persist_new_session` creates a metadata-only directory before
             // the first canonical fact. That is still a root session.
 
@@ -855,16 +856,13 @@ impl AgentRegistry {
         }
         let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
             .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
-        let reader = CommittedFactReader::open(
+        let facts = crate::agent_graph::read_session_facts(
             &session_dir,
             identity.session_id.clone(),
             identity.log_id.clone(),
         )
-        .map_err(|error| format!("open committed facts for {session_id}: {error}"))?;
-        for fact in reader
-            .read_all()
-            .map_err(|error| format!("read committed facts for {session_id}: {error}"))?
-        {
+        .map_err(|error| format!("read committed facts for {session_id}: {error}"))?;
+        for fact in facts {
             if let FactPayload::SessionCreated(created) = fact.payload {
                 return Ok(created
                     .parent_session_id
@@ -1159,18 +1157,26 @@ impl AgentRegistry {
         }
         self.last_spawn
             .insert(session_id.to_string(), std::time::Instant::now());
-        let _ = self.activity.begin(session_id);
+        let (activity_generation, _) = self.activity.begin(session_id);
 
         let session_dir = self.sessions.session_path_dir(session_id);
         let identity = qaqh_session::canonical::CanonicalSessionIdentity::open_or_create(&session_dir)
             .map_err(|e| format!("canonical identity for subagent {session_id}: {e}"))?;
 
-        let budget = qaqh_session::context_projection::ContextBudget {
-            max_messages: 64,
-            max_payload_bytes: 4 * 1024 * 1024,
-            max_checkpoint_bytes: 4 * 1024 * 1024,
-        };
+        let (mut agent_config, _session_profile) =
+            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
+                .unwrap_or_default();
+        if let Some(model) = &spec.model {
+            agent_config.model = model.clone();
+        }
+        if let Some(base_url) = &spec.base_url {
+            agent_config.base_url = base_url.clone();
+        }
+        if let Some(max_tokens) = spec.max_tokens {
+            agent_config.max_tokens = max_tokens;
+        }
 
+        let budget = crate::session_agent::assembly::context_budget(&agent_config);
         let commit = if !session_dir.join("storage-format").exists() {
             qaqh_session::session_commit::SessionCommit::create(
                 &session_dir,
@@ -1189,37 +1195,6 @@ impl AgentRegistry {
             .map_err(|e| format!("open subagent session commit for {session_id}: {e}"))?
         };
 
-        let (mut agent_config, _session_profile) =
-            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
-                .unwrap_or_default();
-        if let Some(model) = &spec.model {
-            agent_config.model = model.clone();
-        }
-        if let Some(base_url) = &spec.base_url {
-            agent_config.base_url = base_url.clone();
-        }
-        if let Some(max_tokens) = spec.max_tokens {
-            agent_config.max_tokens = max_tokens;
-        }
-
-        let base_url = if agent_config.base_url.is_empty() {
-            "https://api.openai.com/v1".to_string()
-        } else {
-            agent_config.base_url.clone()
-        };
-        let provider = qaqh_gate::ProviderConfig::chat(
-            &base_url,
-            &agent_config.api_key,
-            &agent_config.model,
-            None,
-            None,
-            qaqh_types::ThinkingParamMode::OpenAi,
-            qaqh_types::CacheTokenField::PromptCacheHitTokens,
-            true,
-            None,
-        );
-        let provider_spec = crate::provider_job::ProviderRequestSpec::new(provider, agent_config.max_tokens.max(256));
-
         let ws_dir = self
             .sessions
             .workspace_cwd(session_id)
@@ -1228,10 +1203,16 @@ impl AgentRegistry {
         let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
             &crate::agent::state::agent::agent_tool_registrars(),
         );
-        let allowed_tools: Vec<String> = spec.tools.clone();
-        tool_manager.apply_init(allowed_tools, session_id);
+        tool_manager.apply_init(spec.tools.clone(), session_id);
+        let tool_defs = crate::session_agent::assembly::tool_defs(&tool_manager);
         let manager = std::sync::Arc::new(std::sync::Mutex::new(tool_manager));
-        let policy = crate::tool_job::ToolPolicySnapshot::workspace_write(&ws_dir);
+        let provider_spec = crate::session_agent::assembly::provider_spec(&agent_config, tool_defs);
+        let policy = crate::session_agent::assembly::tool_policy(
+            &ws_dir,
+            spec.permission_level,
+            crate::session_agent::assembly::subagent_sandbox(),
+            HashSet::new(),
+        );
         let port = std::sync::Arc::new(crate::tool_job::WorkspaceToolPort::new(
             session_id,
             manager,
@@ -1239,11 +1220,15 @@ impl AgentRegistry {
             None,
         ));
 
-        let (handle, task) = crate::session_agent::AgentHost::spawn(
+        let (handle, task) = crate::session_agent::AgentHost::spawn_with_activity(
             session_id.to_string(),
             commit,
             provider_spec,
             port,
+            Some(crate::session_agent::ActivityTap {
+                tracker: self.activity.clone(),
+                generation: activity_generation,
+            }),
         )
         .map_err(|e| format!("spawn thin subagent for {session_id}: {e}"))?;
 
@@ -1283,7 +1268,7 @@ impl AgentRegistry {
     fn spawn_session_inprocess(
         &mut self,
         session_id: &str,
-        new_session: Option<&str>,
+        _new_session: Option<&str>,
         _extra_args: &[String],
     ) -> Result<(), String> {
         if self.instances.contains_key(session_id) {
@@ -1291,19 +1276,18 @@ impl AgentRegistry {
         }
         self.last_spawn
             .insert(session_id.to_string(), std::time::Instant::now());
-        let _ = self.activity.begin(session_id);
+        let (activity_generation, _) = self.activity.begin(session_id);
 
         let session_dir = self.sessions.session_path_dir(session_id);
         let identity = qaqh_session::canonical::CanonicalSessionIdentity::open_or_create(&session_dir)
             .map_err(|e| format!("canonical identity for {session_id}: {e}"))?;
 
-        let budget = qaqh_session::context_projection::ContextBudget {
-            max_messages: 64,
-            max_payload_bytes: 4 * 1024 * 1024,
-            max_checkpoint_bytes: 4 * 1024 * 1024,
-        };
+        let (agent_config, _session_profile) =
+            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
+                .unwrap_or_default();
 
-        let commit = if new_session.is_some() || !session_dir.join("storage-format").exists() {
+        let budget = crate::session_agent::assembly::context_budget(&agent_config);
+        let commit = if !session_dir.join("storage-format").exists() {
             qaqh_session::session_commit::SessionCommit::create(
                 &session_dir,
                 identity.session_id.clone(),
@@ -1321,37 +1305,29 @@ impl AgentRegistry {
             .map_err(|e| format!("open session commit for {session_id}: {e}"))?
         };
 
-        let (agent_config, _session_profile) =
-            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
-                .unwrap_or_default();
-
-        let base_url = if agent_config.base_url.is_empty() {
-            "https://api.openai.com/v1".to_string()
-        } else {
-            agent_config.base_url.clone()
-        };
-        let provider = qaqh_gate::ProviderConfig::chat(
-            &base_url,
-            &agent_config.api_key,
-            &agent_config.model,
-            None,
-            None,
-            qaqh_types::ThinkingParamMode::OpenAi,
-            qaqh_types::CacheTokenField::PromptCacheHitTokens,
-            true,
-            None,
-        );
-        let spec = crate::provider_job::ProviderRequestSpec::new(provider, agent_config.max_tokens.max(256));
-
         let ws_dir = self
             .sessions
             .workspace_cwd(session_id)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
-        let manager = std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&crate::agent::state::agent::agent_tool_registrars()),
-        ));
-        let policy = crate::tool_job::ToolPolicySnapshot::workspace_write(&ws_dir);
+        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
+            &crate::agent::state::agent::agent_tool_registrars(),
+        );
+        let allowed_tools = if agent_config.tool_allowlist_enabled {
+            agent_config.tool_allowlist.clone()
+        } else {
+            Vec::new()
+        };
+        tool_manager.apply_init(allowed_tools, session_id);
+        let tool_defs = crate::session_agent::assembly::tool_defs(&tool_manager);
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(tool_manager));
+        let spec = crate::session_agent::assembly::provider_spec(&agent_config, tool_defs);
+        let policy = crate::session_agent::assembly::tool_policy(
+            &ws_dir,
+            agent_config.permission_level,
+            qaqh_workspace::tool_api::SandboxMode::Main,
+            HashSet::new(),
+        );
         let port = std::sync::Arc::new(crate::tool_job::WorkspaceToolPort::new(
             session_id,
             manager,
@@ -1359,11 +1335,15 @@ impl AgentRegistry {
             None,
         ));
 
-        let (handle, task) = crate::session_agent::AgentHost::spawn(
+        let (handle, task) = crate::session_agent::AgentHost::spawn_with_activity(
             session_id.to_string(),
             commit,
             spec,
             port,
+            Some(crate::session_agent::ActivityTap {
+                tracker: self.activity.clone(),
+                generation: activity_generation,
+            }),
         )
         .map_err(|e| format!("spawn thin agent for {session_id}: {e}"))?;
 
@@ -1583,6 +1563,18 @@ impl AgentRegistry {
             ));
         }
         self.ensure_loaded_for_command(session_id)?;
+        // Resolve reload parameters before the write closure so the closure
+        // only borrows the instance, never the whole registry.
+        let reload_spec = match &env.command {
+            qaqh_ringing::RingingCommand::Control(
+                qaqh_domain::ControlCommand::AgentReloadConfig,
+            ) => crate::agent::engine_session::session_effective_config(
+                Some(&self.sessions),
+                session_id,
+            )
+            .map(|(config, _)| crate::session_agent::assembly::provider_spec(&config, Vec::new())),
+            _ => None,
+        };
         let write = |instance: &AgentInstance| -> Result<(), String> {
             match &instance.transport {
                 AgentTransport::ThinAgent { handle, .. } => {
@@ -1608,9 +1600,19 @@ impl AgentRegistry {
                         qaqh_ringing::RingingCommand::Conversation(
                             qaqh_domain::ConversationCommand::ConversationCancel { .. }
                         ) => {
+                            let target = match &env.command {
+                                qaqh_ringing::RingingCommand::Conversation(
+                                    qaqh_domain::ConversationCommand::ConversationCancel {
+                                        turn_id,
+                                    },
+                                ) => turn_id
+                                    .as_ref()
+                                    .map(|turn| qaqh_session::session_fact_v2::TurnId::new(turn.clone())),
+                                _ => None,
+                            };
                             qaqh_workspace::set_session_cancel(session_id, true);
                             handle
-                                .cancel(None, "user cancel")
+                                .cancel(target, "user cancel")
                                 .map_err(|e| format!("thin agent cancel error: {e:?}"))
                         }
                         qaqh_ringing::RingingCommand::Control(
@@ -1652,7 +1654,20 @@ impl AgentRegistry {
                                 .shutdown()
                                 .map_err(|e| format!("thin agent shutdown error: {e:?}"))
                         }
-                        _ => Ok(()),
+                        qaqh_ringing::RingingCommand::Control(
+                            qaqh_domain::ControlCommand::AgentReloadConfig,
+                        ) => {
+                            let provider = reload_spec.clone().ok_or_else(|| {
+                                format!("reload config unavailable for {session_id}")
+                            })?;
+                            handle
+                                .reload_provider(provider)
+                                .map_err(|e| format!("thin agent reload error: {e:?}"))
+                        }
+                        other => Err(format!(
+                            "thin agent for {session_id} does not implement command {}",
+                            ringing_command_name(other)
+                        )),
                     }
                 }
             }
@@ -2035,9 +2050,18 @@ impl AgentRegistry {
             .instances
             .iter()
             .filter_map(|(session_id, instance)| {
-                let liveness = instance.liveness.as_ref()?;
-                (liveness.unloadable() && liveness.idle_secs() >= idle_secs)
-                    .then(|| session_id.clone())
+                if let Some(liveness) = instance.liveness.as_ref() {
+                    return (liveness.unloadable() && liveness.idle_secs() >= idle_secs)
+                        .then(|| session_id.clone());
+                }
+                // Thin agents have no liveness handle: idle is derived from the
+                // activity tracker, and only a settled (idle) session may go.
+                let activity = self.activity.get(session_id)?;
+                if activity.state != qaqh_domain::ActivityState::Idle {
+                    return None;
+                }
+                let idle_ms = unix_ms().saturating_sub(activity.updated_at as i64);
+                (idle_ms >= (idle_secs as i64).saturating_mul(1000)).then(|| session_id.clone())
             })
             .collect();
         let mut unloaded = Vec::new();
@@ -2158,7 +2182,9 @@ impl AgentRegistry {
     }
 
     pub fn is_running(&self, session_id: &str) -> bool {
-        self.instances.contains_key(session_id)
+        self.instances
+            .get(session_id)
+            .is_some_and(|instance| !instance.is_dead())
     }
 
     /// Test/ops hook: whether the worker's loop thread has exited without
@@ -2285,6 +2311,16 @@ impl AgentInstance {
     fn shutdown(mut self) {
         self.signal_shutdown();
         self.finish_shutdown();
+    }
+}
+
+/// Stable name for a command the thin actor does not implement. Returning an
+/// error instead of `Ok(())` keeps entry acceptance from lying about execution.
+fn ringing_command_name(command: &qaqh_ringing::RingingCommand) -> &'static str {
+    match command {
+        qaqh_ringing::RingingCommand::Conversation(_) => "conversation",
+        qaqh_ringing::RingingCommand::Control(_) => "control",
+        qaqh_ringing::RingingCommand::Tool(_) => "tool",
     }
 }
 
@@ -2438,13 +2474,28 @@ fn broadcast_command_id() -> String {
 mod tests {
     use super::*;
 
+    /// Registry tests spawn real thin-agent tasks, which require a runtime
+    /// context even when the test itself never awaits.
+    fn test_runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+        })
+    }
+
     fn dummy_thin_agent(session_id: &str) -> AgentInstance {
-        let (mailbox_handle, _) = qaqh_agentloop_core::mailbox::Mailbox::new(
+        let (mailbox_handle, mailbox) = qaqh_agentloop_core::mailbox::Mailbox::new(
             qaqh_agentloop_core::mailbox::LaneBudget::COMMANDS,
             qaqh_agentloop_core::mailbox::LaneBudget::CONTROL,
             qaqh_agentloop_core::mailbox::LaneBudget::COMPLETIONS,
         )
         .unwrap();
+        // Keep the receiver alive: these tests exercise command routing, not
+        // the closed-mailbox respawn path.
+        Box::leak(Box::new(mailbox));
         AgentInstance {
             session_id: session_id.into(),
             transport: AgentTransport::ThinAgent {
@@ -2452,7 +2503,7 @@ mod tests {
                     session_id: session_id.into(),
                     mailbox: mailbox_handle,
                 },
-                task: tokio::spawn(async { Ok(()) }),
+                task: test_runtime().spawn(async { Ok(()) }),
             },
             kind: AgentKind::Session,
             subscription_actor: SessionActor::new(4),
@@ -2518,6 +2569,40 @@ mod tests {
         assert!(probe_output(command, Duration::from_millis(200)).is_none());
     }
 
+    #[tokio::test]
+    async fn materialized_batch_session_spawns_and_reopens_without_reset() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
+            root.path().join("sessions"),
+            root.path().join(".active_session"),
+        ));
+        let identity = sessions.allocate_session(None).expect("allocate");
+        let session_id = identity.session_id.as_str();
+        let dir = sessions.session_path_dir(session_id);
+        crate::service::materialize_canonical_session_in(&dir, "/tmp", "test-model", None)
+            .expect("materialize");
+        let journal_before =
+            std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("baseline journal");
+        let mut registry = AgentRegistry::new(sessions);
+        // session.new/session.create both materialize before calling spawn_new.
+        for _ in 0..2 {
+            registry
+                .spawn_new(session_id)
+                .expect("spawn existing baseline");
+            let instance = registry.instances.remove(session_id).expect("running");
+            let AgentTransport::ThinAgent { handle, task } = instance.transport;
+            handle.shutdown().expect("shutdown");
+            task.await.expect("join").expect("clean shutdown");
+        }
+        assert_eq!(
+            std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("journal"),
+            journal_before,
+            "spawning and reopening must preserve the committed baseline"
+        );
+        assert!(!dir.join(EVENTS_FILE).exists());
+        assert!(!dir.join(EVENTS_COMMIT_FILE).exists());
+    }
+
     #[test]
     fn v2_residency_overlay_tracks_worker_lifecycle() {
         let root_dir = std::env::temp_dir().join(format!(
@@ -2546,9 +2631,11 @@ mod tests {
             .register_root_agent(&session_id, unix_ms())
             .expect("register root");
         registry.attach_v2_projection(hub.clone());
-        registry
-            .get_or_spawn(&session_id)
-            .expect("spawn root worker");
+        test_runtime().block_on(async {
+            registry
+                .get_or_spawn(&session_id)
+                .expect("spawn root worker");
+        });
 
         let loaded = hub
             .bootstrap(&session_dir, &session_id)

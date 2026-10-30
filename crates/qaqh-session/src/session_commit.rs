@@ -285,6 +285,24 @@ impl SessionCommit {
         Ok(self.state.obligations())
     }
 
+    /// Materialize the committed prefix. Used by recovery to rebuild inputs that
+    /// were accepted but not yet turned into a turn, and by read-model paths
+    /// that must not take the writer lock.
+    pub fn committed_facts(&self) -> Result<Vec<SessionFact>, SessionCommitError> {
+        self.ensure_healthy()?;
+        let mut facts = Vec::new();
+        self.journal
+            .visit_committed(|batch| {
+                facts.extend_from_slice(batch);
+                Ok::<(), SessionCommitError>(())
+            })
+            .map_err(|error| match error {
+                BatchReadError::Storage(error) => SessionCommitError::Storage(error),
+                BatchReadError::Visitor(error) => error,
+            })?;
+        Ok(facts)
+    }
+
     /// Arm a one-shot durability fault for the next batch commit on this owner.
     pub fn inject_fault_once(&mut self, point: BatchFaultPoint) {
         self.journal.inject_fault_once(point);
@@ -378,11 +396,23 @@ impl SessionCommit {
             self.state = state;
             for fact in &staged_facts {
                 let deltas = self.projections.apply(fact);
-                if let Ok(mut events) = projection_events_for_fact(fact, &deltas) {
-                    if let Ok(replaceables) = projection_replaceable_events_for_fact(fact, &deltas) {
-                        events.extend(replaceables);
+                match projection_events_for_fact(fact, &deltas) {
+                    Ok(mut events) => {
+                        match projection_replaceable_events_for_fact(fact, &deltas) {
+                            Ok(replaceables) => events.extend(replaceables),
+                            Err(error) => log::warn!(
+                                "committed fact {} produced invalid replaceable events: {error}",
+                                fact.fact_seq
+                            ),
+                        }
+                        publish_projection(&self.session_dir, fact, &events);
                     }
-                    publish_projection(&self.session_dir, fact, &events);
+                    // Durability already succeeded; the display gap must be
+                    // visible instead of silently dropped.
+                    Err(error) => log::error!(
+                        "committed fact {} could not be projected: {error}",
+                        fact.fact_seq
+                    ),
                 }
             }
         }
