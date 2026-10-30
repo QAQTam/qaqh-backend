@@ -9,6 +9,7 @@ pub(crate) fn release_freed_heap_memory() {
     {
         // SAFETY: malloc_trim 只归还空闲堆内存，不触碰存活分配；glibc 文档
         // 保证线程安全。返回 1 表示确实归还了内存（0 = 无可归还）。
+        #[allow(unsafe_code)]
         let returned = unsafe { libc::malloc_trim(0) };
         if returned == 1 {
             log::debug!("[memory] malloc_trim(0): freed heap pages returned to OS");

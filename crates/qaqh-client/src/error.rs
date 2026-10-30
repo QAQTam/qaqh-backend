@@ -1,5 +1,7 @@
 //! Error type shared across the client.
 
+/// 仅 `#[cfg(test)]` 的 `stream_terminated` 用到（它内联 derive 一个 payload）。
+#[cfg(test)]
 use serde::Deserialize;
 use thiserror::Error;
 

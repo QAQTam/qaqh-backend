@@ -1,7 +1,6 @@
 use crate::error::QaqhResult;
 use std::collections::{HashMap, HashSet};
 use std::process::{Command, Output, Stdio};
-use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,7 +13,6 @@ use qaqh_session::canonical::{
     CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
     EVENTS_FILE,
 };
-use qaqh_session::projection::AgentGraphSnapshot;
 use qaqh_session::session_fact_v2::{
     AgentMetadata, AgentPath, FactPayload, SessionFact, SessionId, SubagentSpawnConfig,
     SubagentTerminalStatus, TeamAgentResidency,
@@ -77,6 +75,7 @@ pub fn cache_system_path() {
     let _ = SYSTEM_PATH.set(path.clone());
     // SAFETY: 只在进程启动期（单线程初始化窗口）改写 PATH，此刻尚无并发
     // 线程读取环境变量；此后本函数幂等返回，不再写入。
+    #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("PATH", path);
     }
@@ -438,16 +437,9 @@ impl AgentInstance {
     }
 
     fn is_fully_stopped(&self) -> bool {
-        if let AgentTransport::ThinAgent { task, .. } = &self.transport {
-            return task.is_finished();
+        match &self.transport {
+            AgentTransport::ThinAgent { task, .. } => task.is_finished(),
         }
-        self.thread
-            .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished)
-            && self
-                .reader
-                .as_ref()
-                .is_none_or(std::thread::JoinHandle::is_finished)
     }
 
     fn wait_until_stopped(&self, session_id: &str) -> bool {
@@ -475,12 +467,6 @@ impl AgentInstance {
     fn signal_shutdown(&mut self) {
         let _ = self.subscription_actor.submit(SessionCommand::Shutdown);
         let _ = self.subscription_actor.step();
-        // 优雅关闭：agent 侧只识别 Ringing 帧（legacy Ui2Agent 已拆除）。
-        let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-            self.session_id.clone(),
-            "daemon-shutdown",
-            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionShutdown),
-        );
         match &self.transport {
             AgentTransport::ThinAgent { handle, .. } => {
                 let _ = handle.shutdown();
@@ -495,9 +481,8 @@ impl AgentInstance {
     /// caller holds the registry mutex across the join by design; other
     /// registry RPCs stall until the join completes.
     fn finish_shutdown(&mut self) {
-        if let AgentTransport::ThinAgent { task, .. } = &mut self.transport {
-            task.abort();
-        }
+        let AgentTransport::ThinAgent { task, .. } = &mut self.transport;
+        task.abort();
         // Join the loop thread first so it drops `event_tx`; the event reader
         // then drains the channel tail and publishes the last intents
         // (含 seal_turn——terminal intent 同步落盘).

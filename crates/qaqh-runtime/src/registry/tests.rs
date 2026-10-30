@@ -25,10 +25,10 @@ fn dummy_thin_agent(session_id: &str) -> AgentInstance {
     AgentInstance {
         session_id: session_id.into(),
         transport: AgentTransport::ThinAgent {
-            handle: crate::session_agent::AgentHandle {
-                session_id: session_id.into(),
-                mailbox: mailbox_handle,
-            },
+            handle: crate::session_agent::AgentHandle::from_mailbox(
+                session_id.into(),
+                mailbox_handle,
+            ),
             task: test_runtime().spawn(async { Ok(()) }),
         },
         kind: AgentKind::Session,
@@ -457,7 +457,7 @@ fn parent_cancel_uses_token_tree_and_still_delivers_child_terminal_command() {
         directory.path().join(".active_session"),
     ));
     let parent_cancel = crate::agent::types::CancelToken::new();
-    let child_cancel = parent_cancel.child();
+    let _child_cancel = parent_cancel.child();
     let parent = dummy_thin_agent("parent-seed");
     let child = dummy_thin_agent("child-seed");
     let mut registry = AgentRegistry {

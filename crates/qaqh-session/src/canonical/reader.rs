@@ -297,7 +297,7 @@ impl CommittedFactReader {
         if upto == 0 {
             return Ok(false);
         }
-        let mut file = File::open(self.events_path())?;
+        let file = File::open(self.events_path())?;
         let mut reader = BufReader::new(file.take(upto));
         let mut hasher = Sha256::new();
         let mut chunk = [0u8; 64 * 1024];
