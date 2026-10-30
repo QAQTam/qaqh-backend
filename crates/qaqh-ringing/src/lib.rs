@@ -36,7 +36,4 @@ pub use protocol::{
     CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, is_safe_integer,
 };
 pub use v2::*;
-pub use worker::{
-    RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
-    WorkerActor,
-};
+pub use worker::{RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, WorkerActor};

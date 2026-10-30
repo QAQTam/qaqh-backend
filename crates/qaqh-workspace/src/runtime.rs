@@ -106,6 +106,19 @@ impl ToolExecutionScope {
         }
     }
 
+    /// Bind an explicit session-owned `ToolManager` and `ToolCallContext`
+    /// without reading actor thread-locals.
+    pub fn with_manager(
+        context: ToolCallContext,
+        manager: Arc<Mutex<crate::ToolManager>>,
+    ) -> Self {
+        Self {
+            context,
+            manager: Some(manager),
+            policy: crate::tool_side_fold::policy(),
+        }
+    }
+
     /// Explicit context bound to this worker scope.
     pub fn context(&self) -> &ToolCallContext {
         &self.context
@@ -113,16 +126,44 @@ impl ToolExecutionScope {
 
     /// Install the manager/policy compatibility view on the current thread.
     ///
-    /// 显式上下文**不再**装成线程局部视图：handler 一律从 `&ToolCallContext`
-    /// 取工作区/会话/模式/取消（per-call TLS 视图已退场）。
+    /// 显式上下文同时同步本线程工作区与 ambient 视图，Drop 时完整恢复。
     pub fn install(&self) -> ToolExecutionScopeGuard {
         let previous_manager = ACTOR_TOOL_MANAGER
             .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.manager.clone()));
         let previous_policy = crate::tool_side_fold::policy();
         crate::tool_side_fold::set_thread_policy(self.policy.clone());
+        let workspace = (!self.context.workspace_root.as_os_str().is_empty())
+            .then(|| self.context.workspace_root.to_string_lossy().into_owned());
+        let previous_workspace = crate::push_thread_workspace(workspace);
+        let previous_runtime = RUNTIME_CTX.with(|slot| {
+            std::mem::replace(
+                &mut *slot.borrow_mut(),
+                Some(RuntimeContext {
+                    active_session: self.context.session_id.clone(),
+                    permission_level: self.context.permission_level as u8,
+                }),
+            )
+        });
+        let previous_mode = AGENT_MODE.with(|slot| {
+            let prev = slot.get();
+            slot.set(match self.context.mode {
+                crate::tool_api::AgentMode::Plan => 1,
+                crate::tool_api::AgentMode::Code => 0,
+            });
+            prev
+        });
+        let previous_sandbox = crate::authorization::is_subagent_sandbox();
+        crate::authorization::set_subagent_sandbox(matches!(
+            self.context.sandbox,
+            crate::tool_api::SandboxMode::Subagent
+        ));
         ToolExecutionScopeGuard {
             previous_manager,
             previous_policy,
+            previous_workspace: Some(previous_workspace),
+            previous_runtime,
+            previous_mode,
+            previous_sandbox,
         }
     }
 }
@@ -132,6 +173,10 @@ impl ToolExecutionScope {
 pub struct ToolExecutionScopeGuard {
     previous_manager: Option<Arc<Mutex<crate::ToolManager>>>,
     previous_policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
+    previous_workspace: Option<Option<String>>,
+    previous_runtime: Option<RuntimeContext>,
+    previous_mode: u8,
+    previous_sandbox: bool,
 }
 
 impl Drop for ToolExecutionScopeGuard {
@@ -140,6 +185,14 @@ impl Drop for ToolExecutionScopeGuard {
             *slot.borrow_mut() = self.previous_manager.take();
         });
         crate::tool_side_fold::set_thread_policy(self.previous_policy.clone());
+        if let Some(previous_workspace) = self.previous_workspace.take() {
+            crate::pop_thread_workspace(previous_workspace);
+        }
+        RUNTIME_CTX.with(|slot| {
+            *slot.borrow_mut() = self.previous_runtime.take();
+        });
+        AGENT_MODE.with(|slot| slot.set(self.previous_mode));
+        crate::authorization::set_subagent_sandbox(self.previous_sandbox);
     }
 }
 

@@ -354,7 +354,6 @@ pub struct OperationError {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ProjectionPayload {
     ConversationDelta(ConversationDelta),
-    TimelineDelta(TimelineDelta),
     ControlDelta(ControlDelta),
     ResourceDelta(ResourceDelta),
     MetaDelta(MetaDelta),
@@ -383,7 +382,6 @@ impl ProjectionPayload {
     fn reliable_slot(&self) -> Option<ProjectionSlot> {
         match self {
             Self::ConversationDelta(_) => Some(ProjectionSlot::Conversation),
-            Self::TimelineDelta(_) => Some(ProjectionSlot::Timeline),
             Self::ControlDelta(_) => Some(ProjectionSlot::Control),
             Self::ResourceDelta(_) => Some(ProjectionSlot::Resources),
             Self::MetaDelta(_) => Some(ProjectionSlot::Meta),
@@ -732,51 +730,6 @@ pub enum ConversationDelta {
         /// 终态原因（中文，失败/跳过/取消时给出）。加法字段：旧客户端忽略。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum TimelineDelta {
-    Input {
-        revision: u64,
-        input_id: InputId,
-        content: ContentValue,
-    },
-    Block {
-        revision: u64,
-        block_id: super::types::BlockId,
-        block_kind: AssistantBlockKind,
-        content: ContentValue,
-    },
-    ToolCall {
-        revision: u64,
-        call_id: ToolCallId,
-        tool_name: String,
-        args: ContentValue,
-    },
-    ToolResult {
-        revision: u64,
-        call_id: ToolCallId,
-        terminal_status: ToolTerminalStatus,
-        output: Option<ContentValue>,
-        error: Option<ToolError>,
-    },
-    TurnFinished {
-        revision: u64,
-        turn_id: TurnId,
-        terminal: TurnTerminal,
-    },
-    TurnInterrupted {
-        revision: u64,
-        turn_id: TurnId,
-        reason: InterruptReason,
-    },
-    Compaction {
-        revision: u64,
-        checkpoint_id: CheckpointId,
-        summary: ContentValue,
     },
 }
 

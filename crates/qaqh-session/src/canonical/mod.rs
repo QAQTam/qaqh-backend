@@ -4,6 +4,7 @@
 //! owns durable storage identity, writer fencing and commit high-water.
 
 mod blobs;
+mod batch;
 mod clock;
 mod identity;
 mod log;
@@ -19,6 +20,7 @@ mod tool_ledger;
 mod types;
 
 pub use blobs::{BLOBS_DIR, SessionBlobStore, stable_workspace_resource_id};
+pub use batch::{BatchCommitError, BatchFaultPoint, BatchJournal, BatchReadError, BatchReceipt};
 pub use clock::{
     CONTENT_CLOCK_FILE, CONTENT_CLOCK_SCHEMA, CONTENT_DIR, ContentClock, ContentClockRecord,
 };

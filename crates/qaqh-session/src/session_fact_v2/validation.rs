@@ -140,6 +140,9 @@ impl SessionFact {
             FactPayload::InteractionExpired(payload) => {
                 require_interaction_id(self.interaction_id.as_ref(), &payload.interaction_id)?;
             }
+            FactPayload::ProviderResponseCommitted(payload) => {
+                require_turn_id(self.turn_id.as_ref(), &payload.turn_id)?;
+            }
             // Driver seat changes carry no turn/call/interaction envelope link.
             FactPayload::DriverChanged(_) => {}
             FactPayload::TurnFinished(payload) => {
@@ -169,10 +172,25 @@ impl SessionFact {
                     return Err(ValidationError::EnvelopeMismatch { field: "call_id" });
                 }
             }
+            FactPayload::QueuedInputSettled(_) => {
+                if self.turn_id.is_some() {
+                    return Err(ValidationError::EnvelopeMismatch { field: "turn_id" });
+                }
+                if self.call_id.is_some() {
+                    return Err(ValidationError::EnvelopeMismatch { field: "call_id" });
+                }
+                if self.interaction_id.is_some() {
+                    return Err(ValidationError::EnvelopeMismatch {
+                        field: "interaction_id",
+                    });
+                }
+            }
             FactPayload::InputAccepted(_)
             | FactPayload::InterAgentCommunication(_)
             | FactPayload::SessionRecovered(_)
             | FactPayload::CompactionApplied(_)
+            | FactPayload::ContextMessageCommitted(_)
+            | FactPayload::ContextCheckpointCommitted(_)
             | FactPayload::SessionMetadataChanged(_)
             | FactPayload::SessionTitleChanged(_)
             | FactPayload::SessionDeleted(_) => {}
@@ -189,6 +207,32 @@ impl FactPayload {
                 validate_non_empty("model", &payload.model)?;
                 if let Some(parent_session_id) = &payload.parent_session_id {
                     validate_uuid_v7("parent_session_id", parent_session_id.as_str())?;
+                }
+            }
+            Self::ContextMessageCommitted(payload) => {
+                validate_content_ref("message_ref", &payload.message_ref)?;
+            }
+            Self::ContextCheckpointCommitted(payload) => {
+                validate_content_ref("checkpoint_ref", &payload.checkpoint_ref)?;
+                validate_fact_seq(
+                    "replaces_through_fact_seq",
+                    payload.replaces_through_fact_seq,
+                )?;
+            }
+            Self::ProviderResponseCommitted(payload) => {
+                validate_prefixed_ulid("turn_id", payload.turn_id.as_str(), "turn_")?;
+                validate_content_ref("message_ref", &payload.message_ref)?;
+                for reference in &payload.opaque_refs {
+                    validate_content_ref("opaque_ref", reference)?;
+                }
+                if payload.round == 0 || payload.attempt == 0 {
+                    return Err(ValidationError::InvalidField {
+                        field: "round",
+                        message: "round and attempt are 1-based".into(),
+                    });
+                }
+                if let Some(reason) = &payload.incomplete_reason {
+                    validate_byte_limit("incomplete_reason", reason, 512)?;
                 }
             }
             Self::InputAccepted(payload) => {
@@ -225,9 +269,41 @@ impl FactPayload {
                     validate_recovery_ref("recovery_ref", recovery_ref)?;
                 }
             }
+            Self::QueuedInputSettled(payload) => {
+                validate_prefixed_ulid("input_id", payload.input_id.as_str(), "input_")?;
+                if let Some(reason) = &payload.reason {
+                    validate_byte_limit("reason", reason, 512)?;
+                }
+                if let Some(recovery_ref) = &payload.recovery_ref {
+                    validate_recovery_ref("recovery_ref", recovery_ref)?;
+                }
+                if payload.settled_at_ms <= 0 {
+                    return Err(ValidationError::InvalidField {
+                        field: "settled_at_ms",
+                        message: "must be positive".to_owned(),
+                    });
+                }
+            }
             Self::ModelRoundStarted(payload) => {
                 validate_prefixed_ulid("turn_id", payload.turn_id.as_str(), "turn_")?;
                 validate_content_hash("request_hash", &payload.request_hash)?;
+                if let Some(identity) = &payload.identity {
+                    if identity.attempt == 0 {
+                        return Err(ValidationError::InvalidField {
+                            field: "identity.attempt",
+                            message: "attempt is 1-based".to_owned(),
+                        });
+                    }
+                    validate_non_empty("identity.model", &identity.model)?;
+                    validate_content_hash("identity.provider_digest", &identity.provider_digest)?;
+                    validate_content_hash("identity.params_digest", &identity.params_digest)?;
+                    validate_content_hash(
+                        "identity.tool_catalog_digest",
+                        &identity.tool_catalog_digest,
+                    )?;
+                    validate_content_hash("identity.prefix_digest", &identity.prefix_digest)?;
+                    validate_content_hash("identity.request_digest", &identity.request_digest)?;
+                }
             }
             Self::AssistantBlockSealed(payload) => {
                 validate_prefixed_ulid("turn_id", payload.turn_id.as_str(), "turn_")?;

@@ -210,7 +210,7 @@ pub(crate) fn run_exec(
         .timeout_secs
         .filter(|&n| n > 0 && n <= 3600)
         .unwrap_or_else(|| ctx.timeout.as_secs().clamp(1, 3600));
-    let background_after_secs = args.background_after_secs.filter(|&n| n > 0 && n <= 3600);
+    let background_after_secs = args.background_after_secs.filter(|&n| n <= 3600);
     let cwd: Option<String> = args
         .cwd
         .as_deref()

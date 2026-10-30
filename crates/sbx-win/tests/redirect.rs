@@ -3,6 +3,8 @@
 //! 无 ProjFS 环境(Client-ProjFS 未启用)自动跳过,不算失败。
 //! 手动跑:cargo test -p sbx-win --test redirect -- --nocapture
 
+#![cfg(windows)]
+
 use sbx_win::projfs::Change;
 use sbx_win::redirect::{self, split_plan};
 use sbx_win::{

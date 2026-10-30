@@ -14,8 +14,7 @@ use qaqh_ringing::{
     RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
     RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
     RingingV2PendingInteraction, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
-    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey, TimelinePage,
-    TimelineSseFrame,
+    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -234,11 +233,11 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
         DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult,
-        SessionActivityParams, SessionGetActivityParams, SessionListParams, SessionMetaParams,
-        SessionRenameParams, SessionSetProfileParams, SessionSetToolModeParams,
-        SessionToolActivity, WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceDetachParams,
-        WorkspaceGetParams, WorkspaceListParams, WorkspaceMoveSessionParams, WorkspaceRenameParams,
-        WorkspaceSetParams,
+        SessionActivityParams, SessionCreateParams, SessionCreateResult, SessionGetActivityParams,
+        SessionListParams, SessionMetaParams, SessionRenameParams, SessionSetEffortParams,
+        SessionSetProfileParams, SessionSetToolModeParams, SessionToolActivity,
+        WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceDetachParams, WorkspaceGetParams,
+        WorkspaceListParams, WorkspaceMoveSessionParams, WorkspaceRenameParams, WorkspaceSetParams,
     };
     let open_request = RingingV2OpenRequest::new("fixture-client");
     write_fixture(stage, "open-request.json", &open_request)?;
@@ -281,7 +280,6 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         subscribe: true,
         interact: true,
         drive: true,
-        timeline: true,
         service: true,
         content: true,
         single_stream: true,
@@ -432,6 +430,19 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixture(
         stage,
+        "service-session-set_effort-params.json",
+        &SessionSetEffortParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            effort: "high".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-set_effort-result.json",
+        &Option::<()>::None,
+    )?;
+    write_fixture(
+        stage,
         "service-session-set_tool_mode-params.json",
         &SessionSetToolModeParams {
             session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
@@ -443,6 +454,24 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "service-session-set_tool_mode-result.json",
         &Option::<()>::None,
+    )?;
+    write_fixture(
+        stage,
+        "service-session-create-params.json",
+        &SessionCreateParams {
+            cwd: Some("/synthetic/workspace".to_owned()),
+            profile: Some("default".to_owned()),
+            effort: None,
+            title: Some("New Session".to_owned()),
+            mode: Some(0),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-create-result.json",
+        &SessionCreateResult {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
     )?;
     let workspace_session_id = "0199a0f0-0000-7000-8000-000000000001".to_owned();
     write_fixture(
@@ -618,7 +647,6 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
         RingingV2ApprovalRespondRequest, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
         RingingV2DeviceChallenges,
-        TimelinePage, TimelineSseFrame,
         qaqh_ringing::RingingV2PairTokenRequest,
         qaqh_ringing::RingingV2PairTokenResponse,
         qaqh_ringing::RingingV2PairRequest,
@@ -629,15 +657,15 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // tool state 与事件 payload 都是一手契约类型（qaqh-session::client_v2 /
         // projection / ProjectionPayload），不再以 `()` 占位。
         RingingV2Bootstrap<
-            qaqh_session::client_v2::ClientV2ControlState,
+            qaqh_ringing_contract::ClientV2ControlState,
             qaqh_session::projection::ConversationSnapshot,
-            qaqh_session::client_v2::ClientV2ToolState,
+            qaqh_ringing_contract::ClientV2ToolState,
         >,
-        RingingV2ChannelSnapshot<qaqh_session::client_v2::ClientV2ControlState>,
+        RingingV2ChannelSnapshot<qaqh_ringing_contract::ClientV2ControlState>,
         RingingV2EventEnvelope<qaqh_session::session_fact_v2::ProjectionPayload>,
-        qaqh_session::client_v2::ClientV2ControlState,
-        qaqh_session::client_v2::ClientV2TeamResponse,
-        qaqh_session::client_v2::ClientV2ToolState,
+        qaqh_ringing_contract::ClientV2ControlState,
+        qaqh_ringing_contract::ClientV2TeamResponse,
+        qaqh_ringing_contract::ClientV2ToolState,
         qaqh_runtime::ringing::pending_store::ReceiptPolicy,
         qaqh_runtime::ringing::service_methods::DaemonVersionParams,
         qaqh_runtime::ringing::service_methods::FsEntry,
@@ -645,10 +673,13 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::FsReadParams,
         qaqh_runtime::ringing::service_methods::FsReadResult,
         qaqh_runtime::ringing::service_methods::SessionActivityParams,
+        qaqh_runtime::ringing::service_methods::SessionCreateParams,
+        qaqh_runtime::ringing::service_methods::SessionCreateResult,
         qaqh_runtime::ringing::service_methods::SessionGetActivityParams,
         qaqh_runtime::ringing::service_methods::SessionListParams,
         qaqh_runtime::ringing::service_methods::SessionMetaParams,
         qaqh_runtime::ringing::service_methods::SessionRenameParams,
+        qaqh_runtime::ringing::service_methods::SessionSetEffortParams,
         qaqh_runtime::ringing::service_methods::SessionSetProfileParams,
         qaqh_runtime::ringing::service_methods::SessionSetToolModeParams,
         qaqh_runtime::ringing::service_methods::SessionToolActivity,

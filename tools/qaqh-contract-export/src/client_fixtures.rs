@@ -8,18 +8,15 @@
 use std::path::Path;
 
 use qaqh_domain::RingingChannel;
-use qaqh_domain::timeline::{
-    TimelineEntry, TimelineEvent, TimelineSnapshot, TimelineTurn, TimelineTurnState,
-};
 use qaqh_ringing::{
     CanonicalCursor, CursorToken, RingingV2ApprovalRespondRequest, RingingV2Bootstrap,
     RingingV2ChannelSnapshot, RingingV2ContentUploadResponse, RingingV2Delivery,
     RingingV2DeviceApprovalKind, RingingV2DeviceChallenge, RingingV2DeviceChallenges,
     RingingV2DriverState, RingingV2EventEnvelope, RingingV2InteractionKind,
     RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
-    RingingV2PendingPermissionView, RingingV2StreamKey, TimelinePage, TimelineSseFrame,
+    RingingV2PendingPermissionView, RingingV2StreamKey,
 };
-use qaqh_session::client_v2::{
+use qaqh_ringing_contract::{
     ClientV2ControlState, ClientV2TeamResponse, ClientV2ToolState, TEAM_SCHEMA,
 };
 use qaqh_session::projection::{ConversationSnapshot, TeamSnapshot};
@@ -45,7 +42,6 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     write_bootstrap(stage)?;
     write_team(stage)?;
     write_approvals(stage)?;
-    write_timeline(stage)?;
     write_device_approvals(stage)?;
     super::write_fixture(
         stage,
@@ -235,54 +231,6 @@ fn write_event(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .validate()
         .map_err(|code| format!("invalid event fixture: {code}"))?;
     super::write_fixture(stage, "event-envelope-team-delta.json", &event)
-}
-
-/// Timeline 分页响应与 SSE 帧（`GET .../timeline` + `GET .../timeline/events`）。
-/// 契约所有权在 `qaqh-ringing::v2::timeline`；daemon handler 直接序列化
-/// 同一份 DTO。回合一律合成文本，无真实会话正文。
-fn write_timeline(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let page = TimelinePage {
-        schema: qaqh_ringing::RINGING_SCHEMA.into(),
-        version: qaqh_ringing::RINGING_V2_VERSION,
-        server_epoch: "fixture-epoch".into(),
-        session_id: session_id().as_str().to_owned(),
-        snapshot: TimelineSnapshot {
-            watermark: 1,
-            turns: vec![TimelineTurn {
-                turn_id: "t1".into(),
-                turn_index: Some(0),
-                created_seq: 1,
-                user_text: "synthetic user turn".into(),
-                sealed: true,
-                offloaded: false,
-                state: TimelineTurnState::Completed,
-                failure: None,
-                rounds: Vec::new(),
-            }],
-        },
-        has_more: false,
-        total_turns: 1,
-        truncated_before: false,
-    };
-    page.validate_for(session_id().as_str())
-        .map_err(|code| format!("invalid timeline page fixture: {code}"))?;
-    super::write_fixture(stage, "timeline-page.json", &page)?;
-
-    let frame = TimelineSseFrame {
-        schema: qaqh_ringing::RINGING_SCHEMA.into(),
-        version: qaqh_ringing::RINGING_V2_VERSION,
-        server_epoch: "fixture-epoch".into(),
-        session_id: session_id().as_str().to_owned(),
-        entry: TimelineEntry {
-            timeline_seq: 1,
-            turn_id: "t1".into(),
-            round_num: None,
-            event: TimelineEvent::TurnOpened {
-                user_text: "synthetic user turn".into(),
-            },
-        },
-    };
-    super::write_fixture(stage, "timeline-entry-event.json", &frame)
 }
 
 /// device 审批面（opaque challenge）：`GET .../approvals`（device 身份）与

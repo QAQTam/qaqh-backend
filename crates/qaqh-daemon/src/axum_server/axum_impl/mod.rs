@@ -3,7 +3,6 @@
 //! 由单文件 `axum_server.rs` 拆分（Phase 2-4）：`mod axum_impl` 内联模块解体为
 //! 目录模块，对外 API 不变（`AppState` + `build_router`）。
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,9 +46,7 @@ pub mod content;
 pub mod control;
 pub mod pairing;
 pub mod service_api;
-pub mod sse;
 pub(crate) mod test_hooks;
-pub mod timeline_api;
 pub mod v2;
 
 #[cfg(test)]
@@ -62,10 +59,6 @@ pub(crate) use command::{command_fingerprint, execute_command};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
-pub(crate) use sse::handle_timeline_events;
-#[cfg(test)]
-pub(crate) use sse::parse_timeline_cursor;
-pub(crate) use timeline_api::handle_timeline_snapshot;
 pub(crate) use v2::{
     handle_approval_respond_v2, handle_bootstrap_v2, handle_command_status_v2, handle_command_v2,
     handle_events_v2, handle_open_v2, handle_pending_approvals_v2, handle_renew_v2,
@@ -76,10 +69,6 @@ const RENEW_TTL_MS: u64 = 30_000;
 const RENEW_INTERVAL_MS: u64 = 10_000;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 128;
-const TIMELINE_PAGE_LIMIT: usize = 30;
-/// `?limit` 的上界。响应侧只有回合数上界（`MAX_BODY_BYTES` 挂在请求侧），
-/// 没有这一条的话一个请求就能把整段转录连全文一起拉走。
-const TIMELINE_PAGE_MAX: usize = 200;
 
 fn lease_ttl_ms() -> u64 {
     std::env::var("QAQH_TEST_LEASE_TTL_MS")
@@ -110,31 +99,6 @@ pub struct AppState {
     pub epoch: String,
     pub shutdown: tokio::sync::watch::Sender<bool>,
     pub(crate) test_hooks: Arc<test_hooks::TestHooks>,
-}
-
-#[derive(Deserialize)]
-pub struct TimelineQuery {
-    /// **排他**游标：返回全局序号 **小于** 它的那一页。`None` = 最新一页。
-    ///
-    /// 从 `before_turn`（turn_id）改来（BUG-2026-09-15-05）：turn_id 由 worker 的
-    /// 计数器生成、会复用（`TimelineAppender::open_turn` 明确容忍并原地 reopen），
-    /// 归档投影侧的 id 又只是「已加载消息池内的下标」——两者都当不了稳定游标。
-    /// 按 spec §0b 的兼容政策，直接替换而非并存。
-    pub before_index: Option<usize>,
-    pub limit: Option<usize>,
-}
-
-pub(crate) fn session_not_found_response(session_id: &str) -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, "application/json")],
-        serde_json::json!({
-            "code": "session_not_found",
-            "message": format!("test-injected missing session: {session_id}"),
-        })
-        .to_string(),
-    )
-        .into_response()
 }
 
 /// BUG-2026-09-12-11（O-7）：daemon 此前没有任何 HTTP 状态码记录——TraceLayer
@@ -181,17 +145,9 @@ pub fn build_router(state: AppState) -> Router {
             "/ringing/v2/sessions/{session_id}/approvals/respond",
             post(handle_approval_respond_v2),
         )
-        .route(
-            "/ringing/v2/sessions/{session_id}/timeline",
-            get(handle_timeline_snapshot),
-        )
         .route("/ringing/v2/content/{content_id}", get(handle_content_get))
         .route("/ringing/v2/content", post(handle_content_upload))
         .route("/ringing/v2/service/{method}", post(handle_service))
-        .route(
-            "/ringing/v2/sessions/{session_id}/timeline/events",
-            get(handle_timeline_events),
-        )
         .route(
             "/ringing/v2/pairing/tokens",
             post(pairing::handle_pairing_tokens),
@@ -238,21 +194,6 @@ pub(crate) mod pure_tests {
         );
         assert_eq!(parse_channel("tool"), Some(RingingChannel::Tool));
         assert_eq!(parse_channel("bogus"), None);
-    }
-    #[test]
-    fn timeline_cursor_is_separate() {
-        assert_eq!(parse_timeline_cursor("epoch-1:timeline:42", "epoch-1"), 42);
-        assert_eq!(parse_timeline_cursor("epoch-1:tool:42", "epoch-1"), 0);
-        assert_eq!(parse_timeline_cursor("epoch-2:timeline:42", "epoch-1"), 0);
-        assert_eq!(
-            parse_timeline_cursor("epoch-1:timeline:42:extra", "epoch-1"),
-            0
-        );
-        // 空 cursor = 首次连接，正常从头开始（不告警）。
-        assert_eq!(parse_timeline_cursor("", "epoch-1"), 0);
-        // 形状合法但 seq 缺失/非法：同样按 0 重放，且和形状不符一样告警。
-        assert_eq!(parse_timeline_cursor("epoch-1:timeline:", "epoch-1"), 0);
-        assert_eq!(parse_timeline_cursor("epoch-1:timeline:abc", "epoch-1"), 0);
     }
     #[test]
     fn session_close_session_resolution_prefers_command_session() {

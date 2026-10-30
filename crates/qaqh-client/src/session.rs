@@ -334,7 +334,6 @@ impl RingingSession {
                 subscribe: true,
                 interact: true,
                 drive: true,
-                timeline: true,
                 service: true,
                 content: true,
                 single_stream: true,

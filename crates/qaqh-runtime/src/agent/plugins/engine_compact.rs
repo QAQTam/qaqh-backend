@@ -9,6 +9,12 @@
 
 use crate::agent::types::*;
 use crate::agent::util;
+#[cfg(test)]
+use qaqh_message::compaction::estimate_message_tokens;
+use qaqh_message::compaction::{
+    HeadSelectionError, compact_history_head, compactable_head_user_count, select_head,
+    serialize_messages,
+};
 
 /// Result produced by the background compact thread.
 pub(crate) struct CompactMeta {
@@ -18,63 +24,6 @@ pub(crate) struct CompactMeta {
     pub context_revision: u64,
     pub error: Option<String>,
 }
-
-/// Compaction prompt V2: structured handoff protocol.
-///
-/// The LLM must produce a decision-first summary with mandatory anchor fields
-/// (file line counts, build status, complexity-labeled remaining work).
-/// The Thinking Appendix is optional and only included under strict rules.
-const COMPACT_PROMPT: &str = "\
-You are performing a CONTEXT CHECKPOINT COMPACTION. Create a structured \
-handoff summary for another LLM that will resume the task.\n\
-\n\
-## OUTPUT FORMAT (follow strictly)\n\
-\n\
-### Decision Log\n\
-For each key decision made during the work:\n\
-- **Decision**: {what was chosen}\n\
-- **Alternatives**: {what was rejected and why, if any}\n\
-- **Status**: done / started but not finished / cancelled\n\
-\n\
-### State Snapshot\n\
-- **Key files** (path + approximate line count): file.rs(~L123), ...\n\
-- **Build status**: cargo check output summary (errors, warnings)\n\
-- **Last successful action**: {command or tool} at {timestamp or turn}\n\
-\n\
-### Remaining Work\n\
-Use complexity labels: [small], [medium], [large]. Include rough estimates.\n\
-- [small] {task}  — ~1 edit or trivial fix\n\
-- [medium] {task} — multiple edits, one file\n\
-- [large] {task}  — new file or cross-crate changes\n\
-\n\
-### Thinking Appendix (OPTIONAL — include ONLY when applicable)\n\
-Include ONLY when:\n\
-- ≥2 dead-end investigation paths were tried before finding the root cause\n\
-  → briefly note each dead-end and why it was wrong\n\
-- A cross-crate or cross-module causality chain was needed to diagnose an issue\n\
-  → note the chain (e.g. \"qaqh-workspace → qaqh-message → qaqh-session\")\n\
-\n\
-If neither condition is met, OMIT this section entirely.\n\
-\n\
-## RULES\n\
-- Be concise: minimum tokens with maximum information density.\n\
-- Do NOT mention the compaction process itself.\n\
-- Decision Log, State Snapshot, and Remaining Work are MANDATORY.\n\
-- Thinking Appendix is OPTIONAL — omit if no dead-ends or cross-crate chains.\n\
-- If a section has no content, write \"None\" instead of omitting it.";
-
-/// Prefix injected before a previous summary in UPDATE MODE.
-/// Tells the LLM to merge new context with the prior structured handoff,
-/// preserving existing Decision Log entries unless superseded.
-const SUMMARY_PREFIX: &str = "\
-Another language model previously worked on this task and produced a \
-structured handoff summary (below). Merge the new context with the \
-previous summary to create an updated checkpoint:\n\
-- Preserve existing Decision Log entries unless the new context shows \
-  they were completed or superseded.\n\
-- Update State Snapshot and Remaining Work with the latest information.\n\
-- If the previous summary has a Thinking Appendix, decide if the new \
-  context adds more dead-end paths worth preserving; otherwise drop it.";
 
 /// 一次压缩调用所需的全部参数（[`build_prompt_and_meta`] 的产物）。
 pub(crate) struct CompactPlan {
@@ -133,54 +82,14 @@ pub(crate) fn build_prompt_and_meta(ctx: &mut RingContext) -> Result<CompactPlan
     log::info!("[COMPACT] {} turns", turns_total);
 
     let all = ctx.agent.msg.build_context_for_gate(&[]);
-    let msgs: Vec<&qaqh_types::Message> = all.iter().filter(|m| m.role != "system").collect();
-    if msgs.is_empty() {
-        return Err(CompactRefusal::EmptyHistory);
-    }
-
-    let mut kept_idx = msgs.len();
-    let mut kept_tokens = 0usize;
-    for (i, m) in msgs.iter().enumerate().rev() {
-        let t = estimate_message_tokens(m);
-        if kept_tokens + t > KEEP_TOKENS {
-            kept_idx = i + 1;
-            break;
-        }
-        kept_tokens += t;
-        kept_idx = i;
-    }
-
-    // 保护：当尾部消息本身超过 KEEP_TOKENS 时（如超大 tool result），
-    // 标记扫描会导致 kept 区间为空 → apply_compact 清空全部 turn。
-    // 回退到至少保留最后一条 user 消息所在的 turn。
-    if kept_idx == msgs.len() {
-        for (i, m) in msgs.iter().enumerate().rev() {
-            if m.role == "user" {
-                kept_idx = i;
-                break;
-            }
-        }
-        // 如果连一条 user 消息都没有（极端情况），放弃本次 compact。
-        if kept_idx == msgs.len() {
-            return Err(CompactRefusal::NothingEligible);
-        }
-    }
-
+    let (msgs, kept_idx) = select_head(&all, KEEP_TOKENS).map_err(|error| match error {
+        HeadSelectionError::EmptyHistory => CompactRefusal::EmptyHistory,
+        HeadSelectionError::NothingEligible => CompactRefusal::NothingEligible,
+    })?;
     let head_msgs = &msgs[..kept_idx];
-    if head_msgs.is_empty() {
-        return Err(CompactRefusal::NothingEligible);
-    }
 
     let previous_summary = ctx.agent.msg.previous_compact_summary();
     let head_user_count = compactable_head_user_count(head_msgs);
-    // Immediately after a successful compact, the only item before the
-    // 4K tail can be the synthetic checkpoint itself. Re-compacting that
-    // checkpoint removes no real turn and can repeat every gate lap when
-    // fixed system/tool overhead still keeps the prompt above threshold.
-    if head_user_count == 0 {
-        log::info!("[COMPACT] refused(compact_nothing_eligible): 头部只剩上一份摘要");
-        return Err(CompactRefusal::NothingEligible);
-    }
     // G2：keep 必须是"真实 turn 数"而非扁平 user 消息数——注入密集时
     // 扁平计数 ≥ turns.len()，apply_compact 早退（skip==0）却谎报成功。
     let kept_user_count = ctx.agent.msg.count_live_turns_from(msgs[kept_idx].msg_id);
@@ -199,10 +108,21 @@ pub(crate) fn build_prompt_and_meta(ctx: &mut RingContext) -> Result<CompactPlan
     //
     // 必须在发出 `CompactStarted` **之前**构造：provider 失败意味着本次压缩
     // 从未开始，提前发开始事件会留下一条永远不终态的"压缩中"卡片。
-    let provider = crate::agent::turn_lap::gate::provider_for(ctx, "compact").map_err(|e| {
-        log::warn!("[COMPACT] refused(compact_provider_unavailable): {e}");
-        CompactRefusal::ProviderUnavailable(e)
-    })?;
+    let provider = qaqh_gate::ProviderConfig::chat(
+        if ctx.agent.config.base_url.is_empty() {
+            "https://api.openai.com/v1"
+        } else {
+            &ctx.agent.config.base_url
+        },
+        &ctx.agent.config.api_key,
+        &ctx.agent.config.model,
+        None,
+        None,
+        qaqh_types::ThinkingParamMode::OpenAi,
+        qaqh_types::CacheTokenField::PromptCacheHitTokens,
+        true,
+        None,
+    );
 
     let compact_id = format!(
         "compact-{}",
@@ -248,31 +168,13 @@ pub(crate) fn build_prompt_and_meta(ctx: &mut RingContext) -> Result<CompactPlan
     // 把它带进摘要。两者都是「长程工作不迷失方向」的锚点，在此显式补上。
     let anchors = build_navigation_anchors(ctx);
 
-    let prompt = if let Some(ref prev) = previous_summary {
-        format!(
-            "[COMPACT — UPDATE MODE]\n\n\
-                 {SUMMARY_PREFIX}\n\n\
-                 <previous-summary>\n{prev}\n</previous-summary>\n\n\
-                 {anchors}\n\
-                 --- HISTORY (newer context to merge) ---\n\
-                 {}\n\
-                 --- END HISTORY ---\n\n\
-                 {COMPACT_PROMPT}",
-            contexts.join("\n\n"),
-        )
-    } else {
-        format!(
-            "[COMPACT]\n\n\
-                 Create a new checklist summary from the conversation history.\n\n\
-                 {anchors}\n\
-                 --- HISTORY ---\n\
-                 {}\n\
-                 --- END HISTORY ---\n\n\
-                 Timeline:\n{timeline}\n\n\
-                 {COMPACT_PROMPT}",
-            contexts.join("\n\n"),
-        )
-    };
+    let prompt =
+        qaqh_message::compact_prompt::render(qaqh_message::compact_prompt::CompactPrompt {
+            previous_summary: previous_summary.as_deref(),
+            anchors: &anchors,
+            history: &contexts,
+            timeline: &timeline,
+        });
 
     if !ctx.agent.session.session_id.is_empty() {
         qaqh_memwatch::global().record_phase(
@@ -521,89 +423,18 @@ fn build_navigation_anchors(ctx: &RingContext) -> String {
 
 /// 锚点构造主体（与 `RingContext` 解耦，便于单测直接调用）。
 fn build_navigation_anchors_for(session_id: &str) -> String {
-    let mut out = String::new();
-
     let files = qaqh_workspace::file_state::summary();
-    if !files.is_empty() {
-        out.push_str(
-            "Current file state (files touched this session; use these paths and \
-             line counts instead of re-reading):\n",
-        );
-        out.push_str(&files);
-        out.push('\n');
-    }
-
-    if !session_id.is_empty()
-        && let Ok(store) = qaqh_workspace::todo::load_todo_for(session_id)
-        && !store.items.is_empty()
-    {
-        let current = store.current_id.as_deref();
-        out.push_str("Task checklist (session-scoped; preserve this in the summary):\n");
-        if store.mode == qaqh_workspace::todo::TodoMode::Goal {
-            out.push_str("  mode: goal (autonomous execution)\n");
-        }
-        for item in &store.items {
-            let mark = match item.status {
-                qaqh_workspace::todo::TodoStatus::Completed => "x",
-                qaqh_workspace::todo::TodoStatus::InProgress => ">",
-                qaqh_workspace::todo::TodoStatus::Cancelled => "-",
-                qaqh_workspace::todo::TodoStatus::Pending => " ",
-            };
-            let cursor = if Some(item.id.as_str()) == current {
-                "  <- current"
-            } else {
-                ""
-            };
-            out.push_str(&format!(
-                "  [{}] T{}: {}{}\n",
-                mark, item.id, item.title, cursor
-            ));
-        }
-    }
-
-    out
-}
-
-fn estimate_message_tokens(message: &qaqh_types::Message) -> usize {
-    use crate::agent::state::token_calibration::{image_token_charge, redact_image_payloads};
-
-    // Same accounting rule as the gate pre-flight: inline image bytes are
-    // charged a fixed per-image budget, not their base64 length
-    // (BUG-2026-09-16-05 / D-14).
-    let mut accounted = [message.clone()];
-    let images = redact_image_payloads(&mut accounted);
-    let serialized = serde_json::to_string(&accounted).unwrap_or_default();
-    (u64::from(qaqh_types::count_tokens(&serialized)) + image_token_charge(images)) as usize
+    let todos = if session_id.is_empty() {
+        None
+    } else {
+        qaqh_workspace::todo::load_todo_for(session_id).ok()
+    };
+    qaqh_workspace::compact_anchors::render(&files, todos.as_ref())
 }
 
 // ═══════════════════════════════════════════════════════
 // Background worker — runs in a separate thread
 // ═══════════════════════════════════════════════════════
-
-/// 压缩请求的 system 占位（方案 B）。
-///
-/// 上游渠道校验要求**首条消息是 system prompt**（实测 qaqh 压缩请求因首条为
-/// `user` 被 `code=11128 "first message is not system prompt"` 拒绝，HTTP 400）。
-/// 同仓另两条旁路调用都自带 system（标题生成 `engine_title.rs`、正常轮次
-/// `build_context_for_gate` 前置 `system_messages`），仅压缩路径漏了。
-///
-/// 这里**只放一句角色定位**，不动原有 prompt 的任何措辞与位置（HISTORY 与
-/// `COMPACT_PROMPT` 仍全在 user 消息里）——把指令搬进 system 会改变模型行为，
-/// 不属本次修复范围。
-const COMPACT_SYSTEM: &str =
-    "You are a context-compaction assistant. Summarize the conversation history below.";
-
-/// 压缩请求的消息体唯一构造器（manual / auto-compact 共用）。
-///
-/// 首条必须是 system：上游渠道硬校验（见 `COMPACT_SYSTEM` 文档）。此前两条
-/// 压缩入口各自内联 `vec![Message::user(&prompt)]`，因此同一缺陷存在两份；
-/// 收敛到此处后不会再次漂移。
-pub(crate) fn compact_request_messages(prompt: &str) -> Vec<qaqh_types::Message> {
-    vec![
-        qaqh_types::Message::system(COMPACT_SYSTEM),
-        qaqh_types::Message::user(prompt),
-    ]
-}
 
 /// Run the LLM compaction call in a background thread.
 /// Uses streaming so the user can see the model output in real-time
@@ -621,7 +452,7 @@ pub(crate) fn run_compact_worker(
     causation_id: Option<String>,
 ) -> CompactMeta {
     // 首条必须是 system：上游渠道硬校验（见 `COMPACT_SYSTEM` 文档）。
-    let msgs_vec = compact_request_messages(&prompt);
+    let msgs_vec = qaqh_message::compact_prompt::request_messages(&prompt);
     let mut summary = String::new();
     let mut progress_seq = 0u64;
 
@@ -692,105 +523,6 @@ pub(crate) fn run_compact_worker(
 // ═══════════════════════════════════════════════════════
 // Message serialization helpers
 // ═══════════════════════════════════════════════════════
-
-fn is_compact_summary_message(message: &qaqh_types::Message) -> bool {
-    message.role == "user"
-        && message.content.iter().any(|block| {
-            matches!(
-                block,
-                qaqh_types::ContentBlock::Text { text } if text.starts_with("[Compacted ")
-            )
-        })
-}
-
-fn compact_history_head<'a>(
-    head: &[&'a qaqh_types::Message],
-    has_previous_summary: bool,
-) -> Vec<&'a qaqh_types::Message> {
-    if has_previous_summary {
-        head.iter()
-            .copied()
-            .filter(|message| !is_compact_summary_message(message))
-            .collect()
-    } else {
-        head.to_vec()
-    }
-}
-
-fn compactable_head_user_count(head: &[&qaqh_types::Message]) -> usize {
-    head.iter()
-        .filter(|message| message.role == "user" && !is_compact_summary_message(message))
-        .count()
-}
-
-fn serialize_messages(head: &[&qaqh_types::Message], kept: &[&qaqh_types::Message]) -> Vec<String> {
-    let mut out = Vec::new();
-    for m in head {
-        let role = &m.role;
-        let lines: Vec<String> = m
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                qaqh_types::ContentBlock::Text { text } => Some(format!("[{role}]: {text}")),
-                qaqh_types::ContentBlock::Reasoning { .. } => None,
-                qaqh_types::ContentBlock::ToolUse { name, input, .. } => {
-                    let args = serde_json::to_string(input).unwrap_or_default();
-                    let end = args.floor_char_boundary(args.len().min(120));
-                    Some(format!(
-                        "[{role} tool call]: {}({})",
-                        name,
-                        args.get(..end).unwrap_or(&args)
-                    ))
-                }
-                qaqh_types::ContentBlock::WebSearchCall { action, .. } => {
-                    let action_str = serde_json::to_string(action).unwrap_or_default();
-                    Some(format!("[{role} web search]: {action_str}"))
-                }
-                qaqh_types::ContentBlock::ToolResult { result, .. } => {
-                    let compact: String = result
-                        .model_text()
-                        .lines()
-                        .take(5)
-                        .map(|l| l.chars().take(200).collect::<String>())
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    let end = compact.floor_char_boundary(compact.len().min(600));
-                    Some(format!(
-                        "[Tool result]: {}",
-                        compact.get(..end).unwrap_or(&compact)
-                    ))
-                }
-                qaqh_types::ContentBlock::Image { .. }
-                | qaqh_types::ContentBlock::ImageRef { .. } => {
-                    Some(format!("[{role}]: [Image attached]"))
-                }
-                qaqh_types::ContentBlock::ResponseOutputItem { .. } => None,
-            })
-            .collect();
-        if !lines.is_empty() {
-            out.push(lines.join("\n"));
-        }
-    }
-    for m in kept {
-        if m.role == "tool"
-            && let Some(qaqh_types::ContentBlock::ToolResult { result, .. }) = m.content.first()
-        {
-            let compact: String = result
-                .model_text()
-                .lines()
-                .take(3)
-                .map(|l| l.chars().take(200).collect::<String>())
-                .collect::<Vec<_>>()
-                .join(" | ");
-            let end = compact.floor_char_boundary(compact.len().min(400));
-            out.push(format!(
-                "[Tool result (recent)]: {}",
-                compact.get(..end).unwrap_or(&compact)
-            ));
-        }
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {
@@ -876,10 +608,11 @@ mod tests {
     /// 实测背景：qaqh 压缩请求曾只发一条 `user`，被上游渠道校验以 HTTP 400
     /// 拒绝（`data/fault-bodies/…-seq2394`）；同仓标题生成与正常轮次都自带
     /// system，仅压缩路径漏了。两条压缩入口（manual / auto）现共用
-    /// [`compact_request_messages`]，本用例锁住该契约。
+    /// `qaqh_message::compact_prompt::request_messages`，本用例锁住该契约。
     #[test]
     fn compact_request_starts_with_a_system_message() {
-        let msgs = super::compact_request_messages("[COMPACT]\n\n--- HISTORY ---\n...");
+        let msgs =
+            qaqh_message::compact_prompt::request_messages("[COMPACT]\n\n--- HISTORY ---\n...");
 
         assert_eq!(msgs.len(), 2, "system 占位 + 原 prompt 的 user 消息");
         assert_eq!(

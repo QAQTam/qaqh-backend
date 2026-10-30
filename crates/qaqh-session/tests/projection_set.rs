@@ -53,14 +53,13 @@ fn projection_set_publishes_static_slots_for_all_fixtures() {
 
     assert_eq!(
         published,
-        [8, 4, 12, 3, 6, 1, 4],
+        [8, 0, 12, 3, 6, 1, 4],
         "registered slots may stay silent when a reducer has no state change"
     );
     assert_eq!(set.last_fact_seq(), 22);
 
     let snapshot = set.snapshot();
     assert_eq!(snapshot.conversation.revision, 8);
-    assert_eq!(snapshot.timeline.revision, 7);
     assert_eq!(
         snapshot.control.revision, 13,
         "tool_finished must update internal control state even without a control reliable delta"
@@ -95,13 +94,6 @@ fn tool_finished_updates_control_state_but_is_filtered_from_reliable_output() {
             && matches!(
                 &delta.payload,
                 qaqh_session::session_fact_v2::ProjectionPayload::ConversationDelta(_)
-            )
-    }));
-    assert!(deltas.iter().any(|delta| {
-        delta.slot == ProjectionSlot::Timeline
-            && matches!(
-                &delta.payload,
-                qaqh_session::session_fact_v2::ProjectionPayload::TimelineDelta(_)
             )
     }));
 

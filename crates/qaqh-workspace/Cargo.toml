@@ -8,6 +8,7 @@ description = "QAQ-Harness in-process tool execution library"
 [dependencies]
 # Tool SDK 核心（P2 拆分）：typed 契约/描述符/投影/schema 的单一事实源。
 qaqh-tool-core = { path = "../qaqh-tool-core" }
+qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 # 文件/进程工具组（P2(d) 拆分）：工具实现移入，门面经 re-export 保路径。
 qaqh-file-tools = { path = "../qaqh-file-tools" }
 qaqh-process-tools = { path = "../qaqh-process-tools" }

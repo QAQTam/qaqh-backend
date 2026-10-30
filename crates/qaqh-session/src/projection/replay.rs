@@ -152,10 +152,6 @@ pub fn projection_event_id(fact: &SessionFact, slot: ProjectionSlot) -> EventId 
 pub fn projection_stream_key(fact: &SessionFact, slot: ProjectionSlot) -> StreamKey {
     let channel = match slot {
         ProjectionSlot::Conversation => RingingChannel::Conversation,
-        ProjectionSlot::Timeline => match &fact.payload {
-            FactPayload::ToolCallDeclared(_) | FactPayload::ToolFinished(_) => RingingChannel::Tool,
-            _ => RingingChannel::Conversation,
-        },
         ProjectionSlot::Control => match &fact.payload {
             FactPayload::ToolIntent(_) => RingingChannel::Tool,
             _ => RingingChannel::Control,

@@ -54,7 +54,7 @@ pub struct RuntimeContext {
     mode: AgentMode,
     cancellation: CancelToken,
     exec_default_shell: Option<String>,
-    /// 官方网页工具后端；`None` = 工具层走自实现（见 `agent::official_web`）。
+    /// 官方网页工具后端；`None` = 工具层走自实现（见 `qaqh_workspace::official_web`）。
     official_web: Option<OfficialWebBackend>,
     sandbox_enabled: bool,
 }
@@ -170,7 +170,7 @@ impl TurnContext {
                 ctx.cancel.clone(),
                 ctx.agent.config.exec.default_shell.clone(),
                 // 开关只来自配置：`official_web_tools` × DeepSeek 账号凭据（I15）。
-                super::official_web::backend_for(
+                qaqh_workspace::official_web::backend_for(
                     ctx.agent.config.credential,
                     &ctx.agent.config.compat,
                 ),

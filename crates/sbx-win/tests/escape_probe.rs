@@ -14,6 +14,8 @@
 //! 失败 = 令牌模拟逃逸成立 —— **立即处置**(参见 ADR-0002:AppContainer 提前)。
 //! 运行:cargo test -p sbx-win --test escape_probe -- --ignored --nocapture
 
+#![cfg(windows)]
+
 use sbx_win::{acl, desktop, env, events, sid, spawn, token};
 use std::path::PathBuf;
 

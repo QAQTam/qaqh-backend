@@ -94,37 +94,6 @@ impl RingingWorkerEventEnvelope {
     }
 }
 
-/// agent → daemon timeline intent（独立于频道事件：顺序由 daemon 唯一
-/// Timeline writer 赋予）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RingingTimelineIntentEnvelope {
-    pub session_id: String,
-    pub intent_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub causation_id: Option<String>,
-    pub intent: qaqh_domain::TimelineIntent,
-}
-
-impl RingingTimelineIntentEnvelope {
-    pub fn new(
-        session_id: impl Into<String>,
-        intent_id: impl Into<String>,
-        intent: qaqh_domain::TimelineIntent,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            intent_id: intent_id.into(),
-            causation_id: None,
-            intent,
-        }
-    }
-
-    pub fn with_causation(mut self, causation_id: impl Into<String>) -> Self {
-        self.causation_id = Some(causation_id.into());
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
