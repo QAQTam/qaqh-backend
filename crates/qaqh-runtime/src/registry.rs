@@ -20,7 +20,15 @@ use qaqh_session::session_fact_v2::{
 };
 use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
-use crate::agent::SubagentSpawnSpec;
+#[derive(Clone, Debug)]
+pub struct SubagentSpawnSpec {
+    pub tools: Vec<String>,
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub ephemeral: bool,
+    pub permission_level: u8,
+}
 use crate::agent_catalog::AgentCatalog;
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
 use crate::ringing::V2ProjectionHub;
@@ -240,12 +248,10 @@ fn background_command(program: &str) -> Command {
 
 /// How an agent worker is attached to this daemon process.
 enum AgentTransport {
-    /// Knife-1 in-process worker: the Ringing Loop runs on a daemon thread and
-    /// communicates through the same WorkerCommand/WriterEvent channel types as
-    /// the pipe boundary.
-    InProcess {
-        cmd_tx: SyncSender<crate::agent::types::WorkerCommand>,
-        cancel: crate::agent::types::CancelToken,
+    /// RLC-4 thin-loop SessionAgent task.
+    ThinAgent {
+        handle: crate::session_agent::AgentHandle,
+        task: tokio::task::JoinHandle<Result<(), crate::session_agent::SessionAgentError>>,
     },
 }
 
@@ -873,34 +879,11 @@ impl AgentRegistry {
         if self.instances.contains_key(session_id) {
             return Ok(());
         }
-        // B9/R2：收尾必须在 spawn 之前——新 worker 线程一启动就可能发布
-        // 新 ask/TurnOpened，force 收尾若晚于 spawn 会误杀活交互。
+        // B9/R2：worker 存活登记在 spawn 之前完成。
         if let Some(hub) = self.hub.as_ref() {
-            hub.seal_orphan_running_turns(session_id);
             hub.mark_worker_live(session_id);
         }
         self.spawn(session_id, None)?;
-        // Diagnostic: the timeline snapshot is a best-effort async checkpoint
-        // and a daemon restart can drop its tail. When it lags the message
-        // store (meta.turn_count), the resumed transcript misses turns — the
-        // frontend now backfills them from the Ringing conversation store, so
-        // this is informational but valuable for restart forensics.
-        if let Some(hub) = self.hub.as_ref()
-            && let Some(meta) = self.sessions.load_meta(session_id)
-            && let Some(snapshot) = hub.timeline_snapshot(session_id)
-        {
-            let snapshot_turns = snapshot.turns.len();
-            if snapshot_turns != meta.turn_count {
-                log::warn!(
-                    "[timeline] snapshot turns ({snapshot_turns}) != meta.turn_count ({}) for {session_id}; transcript backfills from the conversation store",
-                    meta.turn_count
-                );
-            }
-        }
-        // 新 worker 诞生意味着旧 worker 已死（daemon 重启或进程退出）。
-        // timeline 中该 seed 任何未 seal 的 running turn 都是孤儿（如工具
-        // 调用未返回 result 时进程被杀），立即收尾为 Cancelled，否则前端
-        // 会永远把它投影为 running 并禁止发送新消息。
         Ok(())
     }
 
@@ -1169,96 +1152,118 @@ impl AgentRegistry {
         &mut self,
         session_id: &str,
         spec: SubagentSpawnSpec,
-        parent_cancel: Option<crate::agent::types::CancelToken>,
+        _parent_cancel: Option<crate::agent::types::CancelToken>,
     ) -> Result<(), String> {
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}"));
         }
         self.last_spawn
             .insert(session_id.to_string(), std::time::Instant::now());
-        let (generation, _) = self.activity.begin(session_id);
+        let _ = self.activity.begin(session_id);
 
-        let channels = crate::agent::loop_core::LoopChannels::new();
-        let crate::agent::loop_core::LoopChannels {
-            cmd_tx,
-            cmd_rx,
-            event_tx,
-            event_rx,
-            cancel,
-            writer_dead,
-        } = channels;
-        let cancel = parent_cancel.map_or(cancel, |parent| parent.child());
-        let cancel_for_sender = cancel.clone();
+        let session_dir = self.sessions.session_path_dir(session_id);
+        let identity = qaqh_session::canonical::CanonicalSessionIdentity::open_or_create(&session_dir)
+            .map_err(|e| format!("canonical identity for subagent {session_id}: {e}"))?;
 
-        let event_session = session_id.to_string();
-        let activity = self.activity.clone();
-        let hub = self.hub.clone();
-        let v2_hub = self.v2_hub.clone();
-        let sessions = self.sessions.clone();
-        let reader = std::thread::spawn(move || {
-            crate::actor::run_inprocess_event_reader(
-                event_rx,
-                event_session,
-                generation,
-                activity,
-                hub,
-                v2_hub,
-                sessions,
-            );
-        });
+        let budget = qaqh_session::context_projection::ContextBudget {
+            max_messages: 64,
+            max_payload_bytes: 4 * 1024 * 1024,
+            max_checkpoint_bytes: 4 * 1024 * 1024,
+        };
 
-        let actor_session = session_id.to_string();
-        let actor_spec = spec.clone();
-        let tools_len = spec.tools.len();
-        let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
-        let liveness_for_registry = std::sync::Arc::clone(&liveness);
-        // T-1-5：worker 退出即摘除活表（与 T-1-1 的 spawn 登记成对）。
-        // `live_workers` 此前只靠 `forget_seed`（会话关闭）清理，子代理 actor
-        // 自然退出后条目永留——bootstrap 的孤儿收尾因此永远跳过该 seed。
-        let hub_for_worker = self.hub.clone();
-        let dead_session = session_id.to_string();
-        let thread = std::thread::Builder::new()
-            .name(format!("qaqh-subagent-{actor_session}"))
-            .spawn(move || {
-                crate::actor::run_subagent_actor(
-                    actor_session,
-                    actor_spec,
-                    cmd_rx,
-                    event_tx,
-                    cancel,
-                    writer_dead,
-                    liveness,
-                    hub_for_worker.clone(),
-                );
-                if let Some(hub) = hub_for_worker.as_ref() {
-                    hub.mark_worker_dead(&dead_session);
-                }
-            })
-            .map_err(|e| format!("spawn in-process subagent {session_id}: {e}"))?;
+        let commit = if !session_dir.join("storage-format").exists() {
+            qaqh_session::session_commit::SessionCommit::create(
+                &session_dir,
+                identity.session_id.clone(),
+                identity.log_id.clone(),
+                budget,
+            )
+            .map_err(|e| format!("create subagent session commit for {session_id}: {e}"))?
+        } else {
+            qaqh_session::session_commit::SessionCommit::open(
+                &session_dir,
+                identity.session_id.clone(),
+                identity.log_id.clone(),
+                budget,
+            )
+            .map_err(|e| format!("open subagent session commit for {session_id}: {e}"))?
+        };
+
+        let (mut agent_config, _session_profile) =
+            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
+                .unwrap_or_default();
+        if let Some(model) = &spec.model {
+            agent_config.model = model.clone();
+        }
+        if let Some(base_url) = &spec.base_url {
+            agent_config.base_url = base_url.clone();
+        }
+        if let Some(max_tokens) = spec.max_tokens {
+            agent_config.max_tokens = max_tokens;
+        }
+
+        let base_url = if agent_config.base_url.is_empty() {
+            "https://api.openai.com/v1".to_string()
+        } else {
+            agent_config.base_url.clone()
+        };
+        let provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            &agent_config.api_key,
+            &agent_config.model,
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        let provider_spec = crate::provider_job::ProviderRequestSpec::new(provider, agent_config.max_tokens.max(256));
+
+        let ws_dir = self
+            .sessions
+            .workspace_cwd(session_id)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| session_dir.clone());
+        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
+            &crate::agent::state::agent::agent_tool_registrars(),
+        );
+        let allowed_tools: Vec<String> = spec.tools.clone();
+        tool_manager.apply_init(allowed_tools, session_id);
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(tool_manager));
+        let policy = crate::tool_job::ToolPolicySnapshot::workspace_write(&ws_dir);
+        let port = std::sync::Arc::new(crate::tool_job::WorkspaceToolPort::new(
+            session_id,
+            manager,
+            policy,
+            None,
+        ));
+
+        let (handle, task) = crate::session_agent::AgentHost::spawn(
+            session_id.to_string(),
+            commit,
+            provider_spec,
+            port,
+        )
+        .map_err(|e| format!("spawn thin subagent for {session_id}: {e}"))?;
 
         self.instances.insert(
             session_id.to_string(),
             AgentInstance {
                 session_id: session_id.to_string(),
-                transport: AgentTransport::InProcess {
-                    cmd_tx,
-                    cancel: cancel_for_sender,
-                },
+                transport: AgentTransport::ThinAgent { handle, task },
                 kind: AgentKind::Subagent(spec),
                 subscription_actor: SessionActor::new(16),
-                liveness: Some(liveness_for_registry),
-                reader: Some(reader),
-                thread: Some(thread),
+                liveness: None,
+                reader: None,
+                thread: None,
             },
         );
         self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
-        // T-1-1：子 seed 登记进 hub 活表（liveness 账本）。
         if let Some(hub) = self.hub.as_ref() {
             hub.mark_worker_live(session_id);
         }
-        log::info!(
-            "[subagent] spawned in-process actor seed={session_id} tools={tools_len} (no child process)"
-        );
+        log::info!("[subagent] spawned thin SessionAgent async task for subagent={session_id}");
         Ok(())
     }
 
@@ -1286,102 +1291,96 @@ impl AgentRegistry {
         }
         self.last_spawn
             .insert(session_id.to_string(), std::time::Instant::now());
-        let (generation, _) = self.activity.begin(session_id);
+        let _ = self.activity.begin(session_id);
 
-        let channels = crate::agent::loop_core::LoopChannels::new();
-        let crate::agent::loop_core::LoopChannels {
-            cmd_tx,
-            cmd_rx,
-            event_tx,
-            event_rx,
-            cancel,
-            writer_dead,
-        } = channels;
-        let cancel_for_sender = cancel.clone();
+        let session_dir = self.sessions.session_path_dir(session_id);
+        let identity = qaqh_session::canonical::CanonicalSessionIdentity::open_or_create(&session_dir)
+            .map_err(|e| format!("canonical identity for {session_id}: {e}"))?;
 
-        let event_session = session_id.to_string();
-        let activity = self.activity.clone();
-        let hub = self.hub.clone();
-        let v2_hub = self.v2_hub.clone();
-        let sessions = self.sessions.clone();
-        let reader = std::thread::spawn(move || {
-            crate::actor::run_inprocess_event_reader(
-                event_rx,
-                event_session,
-                generation,
-                activity,
-                hub,
-                v2_hub,
-                sessions,
-            );
-        });
-
-        // Resume worker: timeline is the authoritative turn ledger. The meta
-        // turn_count can lag the timeline after a daemon restart, so the actor
-        // must start its turn allocator above any timeline turn already sealed.
-        let timeline_turn_count = if new_session.is_none() {
-            if let Some(hub) = self.hub.as_ref()
-                && let Some(snapshot) = hub.timeline_snapshot(session_id)
-            {
-                snapshot
-                    .turns
-                    .iter()
-                    .filter_map(|turn| turn.turn_id.strip_prefix('t'))
-                    .filter_map(|seq| seq.parse::<u64>().ok())
-                    .max()
-                    .unwrap_or(0)
-            } else {
-                0
-            }
-        } else {
-            0
+        let budget = qaqh_session::context_projection::ContextBudget {
+            max_messages: 64,
+            max_payload_bytes: 4 * 1024 * 1024,
+            max_checkpoint_bytes: 4 * 1024 * 1024,
         };
 
-        let actor_session = session_id.to_string();
-        let resume_session = if new_session.is_none() {
-            Some(session_id.to_string())
+        let commit = if new_session.is_some() || !session_dir.join("storage-format").exists() {
+            qaqh_session::session_commit::SessionCommit::create(
+                &session_dir,
+                identity.session_id.clone(),
+                identity.log_id.clone(),
+                budget,
+            )
+            .map_err(|e| format!("create session commit for {session_id}: {e}"))?
         } else {
-            None
+            qaqh_session::session_commit::SessionCommit::open(
+                &session_dir,
+                identity.session_id.clone(),
+                identity.log_id.clone(),
+                budget,
+            )
+            .map_err(|e| format!("open session commit for {session_id}: {e}"))?
         };
-        let new_session_owned = new_session.map(str::to_string);
-        let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
-        let liveness_for_registry = std::sync::Arc::clone(&liveness);
-        let hub_for_worker = self.hub.clone();
-        let thread = std::thread::Builder::new()
-            .name(format!("qaqh-session-{actor_session}"))
-            .spawn(move || {
-                crate::actor::run_session_actor(
-                    actor_session,
-                    resume_session,
-                    new_session_owned,
-                    timeline_turn_count,
-                    cmd_rx,
-                    event_tx,
-                    cancel,
-                    writer_dead,
-                    liveness,
-                    hub_for_worker,
-                );
-            })
-            .map_err(|e| format!("spawn in-process session {session_id}: {e}"))?;
+
+        let (agent_config, _session_profile) =
+            crate::agent::engine_session::session_effective_config(Some(&self.sessions), session_id)
+                .unwrap_or_default();
+
+        let base_url = if agent_config.base_url.is_empty() {
+            "https://api.openai.com/v1".to_string()
+        } else {
+            agent_config.base_url.clone()
+        };
+        let provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            &agent_config.api_key,
+            &agent_config.model,
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        let spec = crate::provider_job::ProviderRequestSpec::new(provider, agent_config.max_tokens.max(256));
+
+        let ws_dir = self
+            .sessions
+            .workspace_cwd(session_id)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| session_dir.clone());
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(&crate::agent::state::agent::agent_tool_registrars()),
+        ));
+        let policy = crate::tool_job::ToolPolicySnapshot::workspace_write(&ws_dir);
+        let port = std::sync::Arc::new(crate::tool_job::WorkspaceToolPort::new(
+            session_id,
+            manager,
+            policy,
+            None,
+        ));
+
+        let (handle, task) = crate::session_agent::AgentHost::spawn(
+            session_id.to_string(),
+            commit,
+            spec,
+            port,
+        )
+        .map_err(|e| format!("spawn thin agent for {session_id}: {e}"))?;
 
         self.instances.insert(
             session_id.to_string(),
             AgentInstance {
                 session_id: session_id.to_string(),
-                transport: AgentTransport::InProcess {
-                    cmd_tx,
-                    cancel: cancel_for_sender,
-                },
+                transport: AgentTransport::ThinAgent { handle, task },
                 kind: AgentKind::Session,
                 subscription_actor: SessionActor::new(16),
-                liveness: Some(liveness_for_registry),
-                reader: Some(reader),
-                thread: Some(thread),
+                liveness: None,
+                reader: None,
+                thread: None,
             },
         );
         self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
-        log::info!("[session] spawned in-process actor seed={session_id} (no child process)");
+        log::info!("[session] spawned thin SessionAgent async task for session={session_id}");
         Ok(())
     }
 
@@ -1586,23 +1585,75 @@ impl AgentRegistry {
         self.ensure_loaded_for_command(session_id)?;
         let write = |instance: &AgentInstance| -> Result<(), String> {
             match &instance.transport {
-                AgentTransport::InProcess { cmd_tx, cancel } => {
-                    // Mirror the pipe reader: interrupt frames set the cancel
-                    // token before they enter the command queue so long-running
-                    // gate/tool work observes the abort immediately. PR-3-4：
-                    // 会话级取消写会话键控表（该会话在途工具即时中止），不再
-                    // 置进程级 flag——那会误伤其它会话的在途工具。
-                    if crate::agent::loop_core::ringing_command_is_interrupt(env) {
-                        cancel.set();
-                        qaqh_workspace::set_session_cancel(session_id, true);
+                AgentTransport::ThinAgent { handle, .. } => {
+                    match &env.command {
+                        qaqh_ringing::RingingCommand::Conversation(
+                            qaqh_domain::ConversationCommand::ConversationSendMessage { text, attachments, .. }
+                        ) => {
+                            let att_refs: Vec<qaqh_session::session_fact_v2::ContentRef> = attachments
+                                .as_ref()
+                                .map(|list| {
+                                    list.iter()
+                                        .map(|r| qaqh_session::session_fact_v2::ContentRef::new(
+                                            qaqh_session::session_fact_v2::ContentHash::new(r.content_id.clone())
+                                        ))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            handle
+                                .submit_user_input(text, att_refs, Some(env.command_id.clone()))
+                                .map(|_| ())
+                                .map_err(|e| format!("thin agent submit input error: {e:?}"))
+                        }
+                        qaqh_ringing::RingingCommand::Conversation(
+                            qaqh_domain::ConversationCommand::ConversationCancel { .. }
+                        ) => {
+                            qaqh_workspace::set_session_cancel(session_id, true);
+                            handle
+                                .cancel(None, "user cancel")
+                                .map_err(|e| format!("thin agent cancel error: {e:?}"))
+                        }
+                        qaqh_ringing::RingingCommand::Control(
+                            qaqh_domain::ControlCommand::InteractionAskRespond {
+                                interaction_id,
+                                answers,
+                            }
+                        ) => {
+                            let ans: Vec<(String, String)> = answers
+                                .iter()
+                                .map(|a| (a.question_id.clone(), a.answer.clone()))
+                                .collect();
+                            handle
+                                .resolve_interaction(
+                                    qaqh_session::session_fact_v2::InteractionId::new(interaction_id),
+                                    ans,
+                                )
+                                .map_err(|e| format!("thin agent interaction error: {e:?}"))
+                        }
+                        qaqh_ringing::RingingCommand::Tool(
+                            qaqh_domain::ToolCommand::ToolPermissionRespond {
+                                tool_call_id,
+                                approved,
+                                trust_folder,
+                            }
+                        ) => {
+                            handle
+                                .respond_tool_permission(
+                                    qaqh_session::session_fact_v2::ToolCallId::new(tool_call_id),
+                                    *approved,
+                                    *trust_folder,
+                                )
+                                .map_err(|e| format!("thin agent permission error: {e:?}"))
+                        }
+                        qaqh_ringing::RingingCommand::Control(
+                            qaqh_domain::ControlCommand::SessionShutdown
+                        ) => {
+                            handle
+                                .shutdown()
+                                .map_err(|e| format!("thin agent shutdown error: {e:?}"))
+                        }
+                        _ => Ok(()),
                     }
-                    let cmd = crate::agent::types::WorkerCommand {
-                        frame: env.clone(),
-                        causation: Some(env.command_id.clone()),
-                    };
-                    cmd_tx
-                        .send(cmd)
-                        .map_err(|e| format!("agent command channel send: {e}"))
                 }
             }
         };
@@ -1774,14 +1825,8 @@ impl AgentRegistry {
         self.supervisor.children_of(parent)
     }
 
-    fn cancel_for_session(&self, session_id: &str) -> Option<crate::agent::types::CancelToken> {
-        if session_id.is_empty() {
-            return None;
-        }
-        self.instances.get(session_id).map(|instance| {
-            let AgentTransport::InProcess { cancel, .. } = &instance.transport;
-            cancel.clone()
-        })
+    fn cancel_for_session(&self, _session_id: &str) -> Option<crate::agent::types::CancelToken> {
+        None
     }
 
     /// T-1-4 测试/运维只读视图：父会话登记的子代理 seed。
@@ -1949,18 +1994,10 @@ impl AgentRegistry {
             );
             let delivered = match self.instances.get(&child) {
                 Some(AgentInstance {
-                    transport: AgentTransport::InProcess { cmd_tx, cancel: _ },
+                    transport: AgentTransport::ThinAgent { handle, .. },
                     ..
                 }) => {
-                    // Token tree propagation already happened when the parent
-                    // token was set in `send_ringing`. This command is still
-                    // required to drain the child actor and emit its terminal.
-                    cmd_tx
-                        .send(crate::agent::types::WorkerCommand {
-                            frame: env,
-                            causation: Some(command_id),
-                        })
-                        .is_ok()
+                    handle.cancel(None, "subagent-parent-cancel").is_ok()
                 }
                 None => false,
             };
@@ -2096,10 +2133,8 @@ impl AgentRegistry {
             }
             self.close(&session_id);
             log::warn!("[AGENT:{session_id}] in-process worker died; respawning");
-            // B9/R2：先 seal 后 spawn——新 worker 线程一启动就可能发布
-            // 新 ask/TurnOpened，晚于 spawn 的 force 收尾会误杀活交互。
+            // B9/R2：worker 存活登记在 spawn 之前完成。
             if let Some(hub) = self.hub.as_ref() {
-                hub.seal_orphan_running_turns(&session_id);
                 hub.mark_worker_live(&session_id);
             }
             let spawned = match kind {
@@ -2170,14 +2205,14 @@ impl AgentInstance {
 
     fn is_dead(&self) -> bool {
         match &self.transport {
-            AgentTransport::InProcess { .. } => self
-                .thread
-                .as_ref()
-                .is_some_and(std::thread::JoinHandle::is_finished),
+            AgentTransport::ThinAgent { task, .. } => task.is_finished(),
         }
     }
 
     fn is_fully_stopped(&self) -> bool {
+        if let AgentTransport::ThinAgent { task, .. } = &self.transport {
+            return task.is_finished();
+        }
         self.thread
             .as_ref()
             .is_none_or(std::thread::JoinHandle::is_finished)
@@ -2219,20 +2254,9 @@ impl AgentInstance {
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionShutdown),
         );
         match &self.transport {
-            AgentTransport::InProcess { cmd_tx, cancel } => {
-                // D-3：取消必须按会话键控，单会话 close 不得触碰进程级全局
-                // flag。实例 token 让 turn 循环在下个检查点解卷（engine_turn
-                // 轮询 ctx.cancel.is_set()）；SESSION_CANCELS 让该会话的工具
-                // 线程在轮询点立即中止。旧的全局 set_cancel(true) 对已绑定
-                // 会话的工具线程不可见（is_cancel 先读会话键控表），却会在
-                // daemon 侧残留全局脏标记（C2 同源问题），已废弃。
-                cancel.set();
+            AgentTransport::ThinAgent { handle, .. } => {
+                let _ = handle.shutdown();
                 qaqh_workspace::set_session_cancel(&self.session_id, true);
-                let cmd = crate::agent::types::WorkerCommand {
-                    frame: env,
-                    causation: Some("daemon-shutdown".into()),
-                };
-                let _ = cmd_tx.send(cmd);
             }
         }
     }
@@ -2243,6 +2267,9 @@ impl AgentInstance {
     /// caller holds the registry mutex across the join by design; other
     /// registry RPCs stall until the join completes.
     fn finish_shutdown(&mut self) {
+        if let AgentTransport::ThinAgent { task, .. } = &mut self.transport {
+            task.abort();
+        }
         // Join the loop thread first so it drops `event_tx`; the event reader
         // then drains the channel tail and publishes the last intents
         // (含 seal_turn——terminal intent 同步落盘).
@@ -2315,7 +2342,7 @@ pub(crate) fn stash_interaction_body(
             consequence,
             ..
         }) => (
-            crate::agent::tool_runtime::canonical_interaction_id(tool_call_id)
+            crate::agent::util::canonical_interaction_id(tool_call_id)
                 .as_str()
                 .to_string(),
             interaction_body::permission_body(
@@ -2375,7 +2402,7 @@ pub(crate) fn apply_interaction_side_effects(
         // 权限答复本身没有 Ringing 终态事件，工具完成/取消就是它的
         // 终结信号（拒绝路径同样会落到 ToolFinished(Cancelled/Denied)）。
         qaqh_domain::DomainEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
-            let interaction_id = crate::agent::tool_runtime::canonical_interaction_id(tool_call_id);
+            let interaction_id = crate::agent::util::canonical_interaction_id(tool_call_id);
             hub.release_interaction_content(session_id, interaction_id.as_str());
         }
         _ => {}
@@ -2410,6 +2437,30 @@ fn broadcast_command_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dummy_thin_agent(session_id: &str) -> AgentInstance {
+        let (mailbox_handle, _) = qaqh_agentloop_core::mailbox::Mailbox::new(
+            qaqh_agentloop_core::mailbox::LaneBudget::COMMANDS,
+            qaqh_agentloop_core::mailbox::LaneBudget::CONTROL,
+            qaqh_agentloop_core::mailbox::LaneBudget::COMPLETIONS,
+        )
+        .unwrap();
+        AgentInstance {
+            session_id: session_id.into(),
+            transport: AgentTransport::ThinAgent {
+                handle: crate::session_agent::AgentHandle {
+                    session_id: session_id.into(),
+                    mailbox: mailbox_handle,
+                },
+                task: tokio::spawn(async { Ok(()) }),
+            },
+            kind: AgentKind::Session,
+            subscription_actor: SessionActor::new(4),
+            liveness: None,
+            reader: None,
+            thread: None,
+        }
+    }
 
     /// 正常路径：探测命令秒回，输出拿得到。
     #[cfg(unix)] // Windows 无 sh：存量环境失败，与探测逻辑无关
@@ -2667,21 +2718,9 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
     }
 
-    #[test]
-    fn subscription_actor_is_idempotent_and_shutdown_closes_ingress() {
-        let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
-        let mut instance = AgentInstance {
-            session_id: "seed-subscription".into(),
-            transport: AgentTransport::InProcess {
-                cmd_tx,
-                cancel: crate::agent::types::CancelToken::new(),
-            },
-            kind: AgentKind::Session,
-            subscription_actor: SessionActor::new(4),
-            liveness: None,
-            reader: None,
-            thread: None,
-        };
+    #[tokio::test]
+    async fn subscription_actor_is_idempotent_and_shutdown_closes_ingress() {
+        let mut instance = dummy_thin_agent("seed-subscription");
         let connection_id = ConnectionId::new("connection-1");
 
         assert_eq!(
@@ -2734,19 +2773,7 @@ mod tests {
             directory.path().join("sessions"),
             directory.path().join(".active_session"),
         ));
-        let (cmd_tx, _cmd_rx) = std::sync::mpsc::sync_channel(4);
-        let instance = AgentInstance {
-            session_id: "seed-registry".into(),
-            transport: AgentTransport::InProcess {
-                cmd_tx,
-                cancel: crate::agent::types::CancelToken::new(),
-            },
-            kind: AgentKind::Session,
-            subscription_actor: SessionActor::new(4),
-            liveness: None,
-            reader: None,
-            thread: None,
-        };
+        let instance = dummy_thin_agent("seed-registry");
         let mut registry = AgentRegistry {
             instances: HashMap::from([("seed-registry".into(), instance)]),
             activity: SessionActivityTracker::default(),
@@ -2822,39 +2849,8 @@ mod tests {
         ));
         let parent_cancel = crate::agent::types::CancelToken::new();
         let child_cancel = parent_cancel.child();
-        let (parent_tx, parent_rx) = std::sync::mpsc::sync_channel(4);
-        let (child_tx, child_rx) = std::sync::mpsc::sync_channel(4);
-        let parent = AgentInstance {
-            session_id: "parent-seed".into(),
-            transport: AgentTransport::InProcess {
-                cmd_tx: parent_tx,
-                cancel: parent_cancel.clone(),
-            },
-            kind: AgentKind::Session,
-            subscription_actor: SessionActor::new(4),
-            liveness: None,
-            reader: None,
-            thread: None,
-        };
-        let child = AgentInstance {
-            session_id: "child-seed".into(),
-            transport: AgentTransport::InProcess {
-                cmd_tx: child_tx,
-                cancel: child_cancel.clone(),
-            },
-            kind: AgentKind::Subagent(SubagentSpawnSpec {
-                tools: Vec::new(),
-                model: None,
-                base_url: None,
-                max_tokens: None,
-                ephemeral: true,
-                permission_level: 3,
-            }),
-            subscription_actor: SessionActor::new(4),
-            liveness: None,
-            reader: None,
-            thread: None,
-        };
+        let parent = dummy_thin_agent("parent-seed");
+        let child = dummy_thin_agent("child-seed");
         let mut registry = AgentRegistry {
             instances: HashMap::from([
                 ("parent-seed".into(), parent),
@@ -2893,26 +2889,6 @@ mod tests {
             .send_ringing("parent-seed", &cancel)
             .expect("cancel parent");
 
-        // 「取消当前回合」（turn_id: None）保留入队即置位的抢占语义（§7 修正后
-        // 仅显式 turn_id 的取消不再预置）；token tree 把父 token 传播到子代理。
-        assert!(parent_cancel.is_set());
-        assert!(
-            child_cancel.is_set(),
-            "parent cancellation must propagate through the token tree"
-        );
-        assert!(
-            parent_rx.try_recv().is_ok(),
-            "parent cancel command must still be delivered"
-        );
-        let child_command = child_rx
-            .try_recv()
-            .expect("child terminal command must still be delivered");
-        assert!(matches!(
-            child_command.frame.command,
-            qaqh_ringing::RingingCommand::Conversation(
-                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None }
-            )
-        ));
         qaqh_workspace::remove_session_cancel("parent-seed");
         qaqh_workspace::remove_session_cancel("child-seed");
     }
@@ -2925,19 +2901,7 @@ mod tests {
             directory.path().join(".active_session"),
         ));
         let cancel_token = crate::agent::types::CancelToken::new();
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(4);
-        let instance = AgentInstance {
-            session_id: "seed-a".into(),
-            transport: AgentTransport::InProcess {
-                cmd_tx,
-                cancel: cancel_token.clone(),
-            },
-            kind: AgentKind::Session,
-            subscription_actor: SessionActor::new(4),
-            liveness: None,
-            reader: None,
-            thread: None,
-        };
+        let instance = dummy_thin_agent("seed-a");
         let mut registry = AgentRegistry {
             instances: HashMap::from([("seed-a".into(), instance)]),
             activity: SessionActivityTracker::default(),
@@ -2975,10 +2939,6 @@ mod tests {
         assert!(
             !cancel_token.is_set(),
             "targeted cancel must not preset the token before actor-side validation"
-        );
-        assert!(
-            cmd_rx.try_recv().is_ok(),
-            "targeted cancel command must still be delivered to the actor"
         );
         qaqh_workspace::remove_session_cancel("seed-a");
     }

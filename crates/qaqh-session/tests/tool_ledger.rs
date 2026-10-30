@@ -287,6 +287,7 @@ fn turn_lifecycle_appends_flow_through_and_rebuild() {
                 round: 0,
                 request_hash: content_hash(3),
                 context_revision: 7,
+                identity: None,
             },
             NOW_MS + 81,
         )

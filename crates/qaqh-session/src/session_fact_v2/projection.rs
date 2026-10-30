@@ -11,12 +11,10 @@ pub type ProjectionIndex = u16;
 pub const MAX_RELIABLE_PROJECTION_INDEX: ProjectionIndex = u16::MAX - 1;
 pub const END_OF_FACT: ProjectionIndex = u16::MAX;
 
-const CONVERSATION_TIMELINE: &[ProjectionSlot] =
-    &[ProjectionSlot::Conversation, ProjectionSlot::Timeline];
 const CONVERSATION_META: &[ProjectionSlot] = &[ProjectionSlot::Conversation, ProjectionSlot::Meta];
-const CONVERSATION_TIMELINE_MAILBOX_TEAM: &[ProjectionSlot] = &[
+const CONVERSATION_ONLY: &[ProjectionSlot] = &[ProjectionSlot::Conversation];
+const CONVERSATION_MAILBOX_TEAM: &[ProjectionSlot] = &[
     ProjectionSlot::Conversation,
-    ProjectionSlot::Timeline,
     ProjectionSlot::Mailbox,
     ProjectionSlot::Team,
 ];
@@ -50,13 +48,13 @@ impl ProjectionSlot {
 pub fn projection_slots(payload: &FactPayload) -> &'static [ProjectionSlot] {
     match payload {
         FactPayload::SessionCreated(_) => CONTROL_META_TEAM,
-        FactPayload::InputAccepted(_) => CONVERSATION_TIMELINE_MAILBOX_TEAM,
+        FactPayload::InputAccepted(_) => CONVERSATION_MAILBOX_TEAM,
         FactPayload::TurnStarted(_) => CONVERSATION_CONTROL_TEAM,
         FactPayload::ModelRoundStarted(_) => CONTROL_ONLY,
-        FactPayload::AssistantBlockSealed(_) => CONVERSATION_TIMELINE,
-        FactPayload::ToolCallDeclared(_) => CONVERSATION_TIMELINE,
+        FactPayload::AssistantBlockSealed(_) => CONVERSATION_ONLY,
+        FactPayload::ToolCallDeclared(_) => CONVERSATION_ONLY,
         FactPayload::ToolIntent(_) => CONTROL_ONLY,
-        FactPayload::ToolFinished(_) => CONVERSATION_TIMELINE,
+        FactPayload::ToolFinished(_) => CONVERSATION_ONLY,
         FactPayload::InteractionRequested(_) => CONTROL_ONLY,
         FactPayload::InteractionResolved(_) => CONTROL_ONLY,
         FactPayload::InteractionExpired(_) => CONTROL_ONLY,
@@ -72,5 +70,11 @@ pub fn projection_slots(payload: &FactPayload) -> &'static [ProjectionSlot] {
         FactPayload::SubagentSpawned(_) => CONTROL_RESOURCES_TEAM,
         FactPayload::SubagentFinished(_) => CONTROL_RESOURCES_TEAM,
         FactPayload::InterAgentCommunication(_) => MAILBOX_TEAM,
+        FactPayload::ContextMessageCommitted(_)
+        | FactPayload::ContextCheckpointCommitted(_)
+        // A committed response is context for the next request, not a new
+        // public transcript item; display blocks stay AssistantBlockSealed.
+        | FactPayload::ProviderResponseCommitted(_)
+        | FactPayload::QueuedInputSettled(_) => &[],
     }
 }

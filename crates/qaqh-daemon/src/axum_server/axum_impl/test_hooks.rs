@@ -10,20 +10,6 @@ use std::time::Duration;
 use qaqh_domain::{RingingChannel, ToolCommand};
 use qaqh_ringing::RingingCommand;
 
-/// Scope of an injected SSE termination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SseTerminateScope {
-    Timeline,
-    Any,
-}
-
-/// One injected `ringing.stream_terminated` frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SseTerminate {
-    pub code: String,
-    pub skipped: Option<u64>,
-}
-
 /// Injected delay/hang for command acknowledgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandAckFault {
@@ -51,14 +37,6 @@ pub(crate) enum InteractionFault {
 
 #[derive(Debug)]
 pub(crate) struct TestHooks {
-    sse_terminate: Option<SseTerminate>,
-    sse_terminate_scope: SseTerminateScope,
-    /// Timeline-stream one-shot token: `Scope::Any` also matches the timeline
-    /// stream, so the token must be consumable at most once.
-    sse_terminate_used: AtomicBool,
-    timeline_gap: bool,
-    timeline_gap_used: AtomicBool,
-    session_404_session: Option<String>,
     command_ack: Option<CommandAckFault>,
     command_ack_channel: Option<RingingChannel>,
     command_ack_target: CommandAckTarget,
@@ -69,12 +47,6 @@ pub(crate) struct TestHooks {
 impl TestHooks {
     pub(crate) fn disabled() -> Self {
         Self {
-            sse_terminate: None,
-            sse_terminate_scope: SseTerminateScope::Any,
-            sse_terminate_used: AtomicBool::new(false),
-            timeline_gap: false,
-            timeline_gap_used: AtomicBool::new(false),
-            session_404_session: None,
             command_ack: None,
             command_ack_channel: None,
             command_ack_target: CommandAckTarget::InteractionResponses,
@@ -84,27 +56,6 @@ impl TestHooks {
     }
 
     pub(crate) fn from_env() -> Self {
-        let sse_terminate = env_string("QAQH_TEST_SSE_TERMINATE").map(|code| SseTerminate {
-            skipped: if code == "lagged" {
-                Some(
-                    env_string("QAQH_TEST_SSE_TERMINATE_SKIPPED")
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(7),
-                )
-            } else {
-                None
-            },
-            code,
-        });
-        let sse_terminate_scope = match env_string("QAQH_TEST_SSE_TERMINATE_SCOPE")
-            .as_deref()
-            .unwrap_or("timeline")
-        {
-            "any" => SseTerminateScope::Any,
-            _ => SseTerminateScope::Timeline,
-        };
-        let timeline_gap = env_flag("QAQH_TEST_TIMELINE_GAP");
-        let session_404_session = env_string("QAQH_TEST_SESSION_404_SEED");
         let command_ack = env_string("QAQH_TEST_COMMAND_ACK").and_then(|value| {
             if value.eq_ignore_ascii_case("hang") {
                 Some(CommandAckFault::Hang)
@@ -130,49 +81,12 @@ impl TestHooks {
             .and_then(|value| parse_interaction_fault(&value));
 
         Self {
-            sse_terminate,
-            sse_terminate_scope,
-            sse_terminate_used: AtomicBool::new(false),
-            timeline_gap,
-            timeline_gap_used: AtomicBool::new(false),
-            session_404_session,
             command_ack,
             command_ack_channel,
             command_ack_target,
             interaction_fault,
             interaction_fault_used: AtomicBool::new(false),
         }
-    }
-
-    /// One-shot consumer for the timeline stream.
-    fn take_sse_terminate_once(&self) -> Option<SseTerminate> {
-        let terminate = self.sse_terminate.clone()?;
-        if self.sse_terminate_used.swap(true, Ordering::AcqRel) {
-            return None;
-        }
-        Some(terminate)
-    }
-
-    /// Consume the timeline-stream termination token.
-    pub(crate) fn take_timeline_terminate(&self) -> Option<SseTerminate> {
-        if !matches!(
-            self.sse_terminate_scope,
-            SseTerminateScope::Timeline | SseTerminateScope::Any
-        ) {
-            return None;
-        }
-        self.take_sse_terminate_once()
-    }
-
-    /// Consume the one-shot timeline gap injection.
-    pub(crate) fn take_timeline_gap(&self) -> bool {
-        self.timeline_gap && !self.timeline_gap_used.swap(true, Ordering::AcqRel)
-    }
-
-    pub(crate) fn session_is_404(&self, session_id: &str) -> bool {
-        self.session_404_session
-            .as_deref()
-            .is_some_and(|configured| configured == "*" || configured == session_id)
     }
 
     pub(crate) fn take_interaction_fault(
@@ -256,37 +170,11 @@ impl Default for TestHooks {
     }
 }
 
-#[cfg(test)]
-impl TestHooks {
-    pub(crate) fn for_test_session_404(session_id: &str) -> Self {
-        Self {
-            session_404_session: Some(session_id.into()),
-            ..Self::disabled()
-        }
-    }
-
-    pub(crate) fn for_test_timeline_gap() -> Self {
-        Self {
-            timeline_gap: true,
-            ..Self::disabled()
-        }
-    }
-}
-
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn env_flag(name: &str) -> bool {
-    env_string(name).is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 fn parse_channel_name(value: &str) -> Option<RingingChannel> {
@@ -423,21 +311,5 @@ mod tests {
         assert!(CommandAckTarget::InteractionResponses.matches(&ask_command()));
         assert!(!CommandAckTarget::InteractionResponses.matches(&conversation_command()));
         assert!(CommandAckTarget::All.matches(&conversation_command()));
-    }
-
-    #[test]
-    fn session_404_matches_exact_session_or_wildcard() {
-        let exact = TestHooks {
-            session_404_session: Some("seed-sub".into()),
-            ..TestHooks::disabled()
-        };
-        assert!(exact.session_is_404("seed-sub"));
-        assert!(!exact.session_is_404("seed-root"));
-
-        let wildcard = TestHooks {
-            session_404_session: Some("*".into()),
-            ..TestHooks::disabled()
-        };
-        assert!(wildcard.session_is_404("anything"));
     }
 }

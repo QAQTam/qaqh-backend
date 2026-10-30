@@ -79,6 +79,7 @@ fn round_started(ordinal: u64) -> SessionFact {
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
             context_revision: 3,
+            identity: None,
         }),
     );
     fact.turn_id = Some(turn_id);

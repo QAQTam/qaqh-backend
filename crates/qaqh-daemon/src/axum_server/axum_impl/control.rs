@@ -44,8 +44,6 @@ pub(crate) async fn handle_stop(
     // D-4：shutdown_all 对每个 worker 阻塞 join，放 spawn_blocking。
     let service = state.service.clone();
     let _ = tokio::task::spawn_blocking(move || service.shutdown()).await;
-    state.hub.seal_all_orphans();
-    state.hub.flush_timeline_persistence();
     let _ = state.shutdown.send(true);
     (StatusCode::OK, "").into_response()
 }
@@ -63,8 +61,6 @@ pub(crate) async fn handle_stop_if_idle(
     // D-4：同 handle_stop。
     let service = state.service.clone();
     let _ = tokio::task::spawn_blocking(move || service.shutdown()).await;
-    state.hub.seal_all_orphans();
-    state.hub.flush_timeline_persistence();
     let _ = state.shutdown.send(true);
     (StatusCode::OK, "").into_response()
 }

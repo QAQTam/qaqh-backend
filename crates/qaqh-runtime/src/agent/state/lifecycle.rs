@@ -320,40 +320,26 @@ pub fn init_session(agent: &mut AgentState, restore_session: Option<&str>) -> bo
                 // active view. Otherwise compacting 30 turns down to 6 would
                 // make the next live turn reuse t7 and be ignored by clients.
                 //
-                // The turn allocator must never collide with turns the daemon
-                // timeline has already recorded for this seed. `meta.turn_count`
-                // is only persisted when a turn completes, so a daemon restart
-                // while a turn is still running leaves it lagging: the next
-                // user input would then reuse the interrupted turn's id, and
-                // every timeline intent for that turn would be rejected by the
-                // daemon (DuplicateTurn) — the frontend transcript goes blank
-                // while the session list title still refreshes (the assistant
-                // reply is persisted through the message store independently).
-                //
                 // The authoritative count is the message store's actual turn
                 // count: `from_messages` replays every user message, including
                 // the unfinished turn. `meta.turn_count` additionally covers the
                 // compacted-history case where early turns were folded out of
                 // the active view, so the next id must be greater than both.
                 //
-                // The daemon additionally injects the timeline's recorded turn
-                // count per-agent (AgentState.timeline_turn_count) when spawning
+                // The daemon additionally injects the sealed turn floor
+                // per-agent (AgentState.sealed_turn_floor) when spawning
                 // a resume worker: meta.turn_count only persists on completion,
-                // so after
-                // a restart it can lag the timeline's sealed turns by more than
-                // one (compaction shrinks the message view too). Without this
-                // floor the allocator reuses an id the timeline already sealed
-                // as Completed, and every timeline intent for the resumed turn
-                // is rejected — the frontend transcript stays blank while the
-                // session list title still refreshes.
+                // so after a restart it can lag the daemon's sealed turns by
+                // more than one (compaction shrinks the message view too).
+                // Without this floor the allocator would reuse an id already
+                // sealed as Completed on the daemon side.
                 let restored_turns = msg.turn_count() as u64;
-                // Timeline floor is carried per-agent (daemon injects it via
-                // `AgentState.timeline_turn_count`), not a process env var, so
+                // The floor is carried per-agent (daemon injects it via
+                // `AgentState.sealed_turn_floor`), not a process env var, so
                 // concurrent in-process actors each see their own value.
-                let timeline_turns = agent.timeline_turn_count;
                 let authority_turn_count = restored_turns
                     .max(agent.session.turn_count as u64)
-                    .max(timeline_turns);
+                    .max(agent.sealed_turn_floor);
                 msg.ensure_next_turn_seq(authority_turn_count + 1);
                 // Keep the persisted metadata in sync with the authoritative
                 // replay so a later flush does not write a stale count back.

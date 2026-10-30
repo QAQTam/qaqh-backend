@@ -4,6 +4,8 @@
 //! 断言链:apply 预创建授权键 + 挂 cap-ACE → 受限令牌 reg add 成功 →
 //! 未授权键(同父新键)被拒 → 按 SDDL 快照恢复 → 授权操作也被拒(授权即撤销)。
 
+#![cfg(windows)]
+
 use sbx_win::{
     acl,
     desktop,

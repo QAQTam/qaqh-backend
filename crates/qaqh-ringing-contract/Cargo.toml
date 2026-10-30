@@ -1,0 +1,22 @@
+[package]
+name = "qaqh-ringing-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ringing v2 application snapshot contracts"
+
+[features]
+default = []
+ts = ["dep:ts-rs", "qaqh-session/ts", "qaqh-ringing/ts"]
+
+[dependencies]
+qaqh-ringing = { path = "../qaqh-ringing" }
+qaqh-session = { path = "../qaqh-session" }
+serde = { version = "1", features = ["derive"] }
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

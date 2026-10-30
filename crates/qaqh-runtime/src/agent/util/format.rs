@@ -1,6 +1,8 @@
 //! Display formatting and tool-call parsing helpers (split from the former
 //! util monolith).
 
+use sha2::Digest;
+
 /// Extract a short human-readable display string from a tool call's arguments.
 pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) -> String {
     let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -50,54 +52,45 @@ pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) ->
     }
 }
 
+pub(crate) fn ulid_from_text(text: &str) -> String {
+    let mut hash = sha2::Sha256::digest(text.as_bytes());
+    hash[0] = 0x01;
+    hash[1] = 0x4a;
+    let mut encoded = String::with_capacity(26);
+    const CROCKFORD_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    for i in 0..26 {
+        let byte = hash[i % hash.len()];
+        encoded.push(CROCKFORD_ALPHABET[(byte % 32) as usize] as char);
+    }
+    encoded
+}
+
+pub(crate) fn canonical_call_id(wire_call_id: &str) -> qaqh_session::session_fact_v2::ToolCallId {
+    qaqh_session::session_fact_v2::ToolCallId::new(format!("call_{}", ulid_from_text(wire_call_id)))
+}
+
+pub(crate) fn canonical_turn_id(wire_turn_id: &str) -> qaqh_session::session_fact_v2::TurnId {
+    qaqh_session::session_fact_v2::TurnId::new(format!("turn_{}", ulid_from_text(wire_turn_id)))
+}
+
+pub(crate) fn canonical_interaction_id(
+    wire_interaction_id: &str,
+) -> qaqh_session::session_fact_v2::InteractionId {
+    qaqh_session::session_fact_v2::InteractionId::new(format!(
+        "int_{}",
+        ulid_from_text(wire_interaction_id)
+    ))
+}
+
+pub(crate) fn permission_id_matches(stored_wire_id: &str, incoming: &str) -> bool {
+    stored_wire_id == incoming || canonical_call_id(stored_wire_id).as_str() == incoming
+}
+
+pub(crate) fn interaction_id_matches(stored_wire_id: &str, incoming: &str) -> bool {
+    stored_wire_id == incoming || canonical_interaction_id(stored_wire_id).as_str() == incoming
+}
+
 // (projection family moved to qaqh-runtime::ringing::projection — PR-1-4)
-
-/// 归一上游 tool_calls JSON(flat/nested)为 ToolCall 列表。
-///
-/// 2026-10-05：DSML/XML 文本态 fallback 已随非标准 toolcall 支持一起移除
-/// （DeepSeek v4.1 起原生输出结构化 tool_calls）——只认标准形态，畸形条目
-/// 由 `parse_tool_calls` 整条跳过。
-pub(crate) fn parse_tool_calls_from_response(
-    tool_calls_raw: &serde_json::Value,
-) -> Vec<qaqh_types::ToolCall> {
-    qaqh_gate::tool_parser::parse_tool_calls(tool_calls_raw)
-}
-
-pub(crate) fn build_assistant_message(
-    content: &str,
-    reasoning: &str,
-    reasoning_kind: Option<qaqh_types::ReasoningKind>,
-    parsed: &[qaqh_types::ToolCall],
-) -> qaqh_types::Message {
-    use qaqh_types::{ContentBlock, Message};
-    let mut blocks = Vec::new();
-    if !reasoning.is_empty() {
-        blocks.push(ContentBlock::Reasoning {
-            reasoning: reasoning.to_string(),
-            kind: reasoning_kind,
-        });
-    }
-    if !content.is_empty() {
-        blocks.push(ContentBlock::Text {
-            text: content.to_string(),
-        });
-    }
-    for tc in parsed {
-        let input: serde_json::Value =
-            serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-        blocks.push(ContentBlock::ToolUse {
-            id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            input,
-        });
-    }
-    Message {
-        msg_id: None,
-        role: "assistant".into(),
-        name: None,
-        content: blocks,
-    }
-}
 
 /// Emitter-trait version of emit_round_complete for the new Loop architecture.
 pub(crate) fn emit_round_complete_via_emitter(

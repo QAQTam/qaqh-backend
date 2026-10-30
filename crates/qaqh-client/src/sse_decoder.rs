@@ -121,26 +121,6 @@ impl SseDecoder {
     }
 }
 
-/// 从解码器排空完整帧并逐帧分发（`sse.rs`/`timeline.rs` 双份 `drain_frames`
-/// 收敛，Phase 3-5）。空 data 帧（keepalive）跳过；解码失败帧跳过。
-pub(crate) fn drain_frames(
-    decoder: &mut SseDecoder,
-    server_epoch: &str,
-    mut dispatch: impl FnMut(SseFrame, &str) -> ClientResult<()>,
-) -> ClientResult<()> {
-    while let Some(frame) = decoder.next_frame() {
-        let frame = match frame {
-            Ok(frame) => frame,
-            Err(()) => continue,
-        };
-        if frame.data.trim().is_empty() {
-            continue; // keepalive/空 data 帧
-        }
-        dispatch(frame, server_epoch)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

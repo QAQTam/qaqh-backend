@@ -409,7 +409,7 @@ pub struct TurnState {
 
 /// Abstraction over the output channel.
 ///
-/// Engines call `emit_domain()` / `emit_timeline()` without knowing whether
+/// Engines call `emit_domain()` without knowing whether
 /// they're writing to a real mpsc channel (production) or a mock
 /// (unit tests). This trait is the single point where all Ringing
 /// events enter the output pipeline. (legacy `emit`/`emit_delta` 已随 M3 拆除)
@@ -417,10 +417,6 @@ pub trait Emitter {
     /// Emit a Ringing 领域事件（生产点直接构造，禁止 Agent2Ui→Ringing 转换）。
     /// 默认空实现：未启用 Ringing 出口时零行为变化。
     fn emit_domain(&self, _event: qaqh_domain::DomainEvent) {}
-
-    /// Emit a native Ringing V1 timeline producer intent. Timeline is its own wire;
-    /// it must never be reconstructed from `Agent2Ui` output.
-    fn emit_timeline(&self, _intent: qaqh_domain::TimelineIntent) {}
 
     /// 同步当前会话 seed（Ringing 事件信封的路由键）。
     /// 会话创建/恢复后必须调用，否则事件被 daemon 按 seed 过滤丢弃。
@@ -434,13 +430,11 @@ pub trait Emitter {
     }
 }
 
-/// writer 线程通道载荷：Ringing worker envelope 或 timeline intent（互不嵌套）。
+/// writer 线程通道载荷：Ringing worker envelope 或 auto-title 事件（互不嵌套）。
 #[derive(Debug, Clone)]
 pub enum WriterEvent {
     /// Ringing worker envelope（`wire: "Ringing_domain_v1"`）。
     Ringing(qaqh_ringing::RingingWorkerEventEnvelope),
-    /// Native ordered transcript intent (`wire: "Ringing_timeline_intent_v1"`).
-    Timeline(qaqh_ringing::RingingTimelineIntentEnvelope),
     /// Auto-title is emitted through the canonical v2 Meta projection stream.
     TitleChanged { session_id: String, title: String },
 }
@@ -585,10 +579,6 @@ pub struct SessionBundle {
     pub agent: AgentState,
     /// Accumulated code deltas for this session.
     pub stats: StatsCollector,
-    /// Turn engine: suspended turn state, gate→tools cycle.
-    pub turn: super::engine_turn::TurnEngine,
-    /// Tool engine: pending approvals, trusted folders, execution.
-    pub tool: super::engine_tool::ToolEngine,
 }
 
 impl SessionBundle {
@@ -596,8 +586,6 @@ impl SessionBundle {
         Self {
             agent,
             stats: StatsCollector::new(),
-            turn: super::engine_turn::TurnEngine::new(),
-            tool: super::engine_tool::ToolEngine::new(),
         }
     }
 

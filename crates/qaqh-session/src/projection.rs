@@ -10,7 +10,6 @@ mod resource;
 mod set;
 mod sink;
 mod team;
-mod timeline;
 
 pub use agent_graph::{
     AgentGraphEdge, AgentGraphEdgeStatus, AgentGraphError, AgentGraphNode, AgentGraphSnapshot,
@@ -38,11 +37,6 @@ pub use set::{ProjectionSet, ProjectionSetDelta, ProjectionSetSnapshot};
 pub(crate) use sink::publish_projection;
 pub use sink::{ProjectionSink, install_projection_sink};
 pub use team::{TeamProjection, TeamSnapshot};
-pub use timeline::{
-    TimelineAssistantBlockState, TimelineCompactionState, TimelineEntry, TimelineEntryKind,
-    TimelineInputState, TimelineProjection, TimelineSnapshot, TimelineToolCallState,
-    TimelineToolResultState, TimelineTurnInterruptedState, TimelineTurnTerminalState,
-};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
