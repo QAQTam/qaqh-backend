@@ -479,7 +479,6 @@ pub mod builtin {
     pub const SKILLS: &str = "skills";
     pub const SUBAGENT: &str = "subagent";
     pub const GOAL: &str = "goal";
-    pub const MCP_RESOURCES: &str = "mcp_resources";
     pub const WORKSPACE: &str = "workspace";
 
     fn base(
@@ -599,24 +598,6 @@ pub mod builtin {
         )
     }
 
-    /// MCP 资源清单注入块（PR-M2-2，设计 §5.4.2）：封顶清单作为 trailing
-    /// developer 消息在回合边界物化（epoch 门控，内容不变不注入——prefix
-    /// cache 稳定）。Compressable：清单是易过期环境信息而非对话事实，
-    /// compact 可压缩；下回合边界会重新注入最新版。TurnBoundary：与
-    /// subagent 报告同款提交时点，不打断运行中的回合。
-    pub fn mcp_resources_source() -> Arc<dyn ContextSource> {
-        base(
-            MCP_RESOURCES,
-            FlowRole::Developer,
-            Sink::Trailing,
-            Timing::TurnBoundary,
-            Visibility { context: true },
-            LifecyclePolicy {
-                undo: UndoBehavior::Keep,
-                compact: CompactBehavior::Compressable,
-            },
-        )
-    }
     /// Goal-mode auto-advance prompt (user surrogate turn). `Sink::Turn` +
     /// `User`：作为完整 user 回合走 [`MessageStore::push_user`]（`RemoveLast`
     /// undo），不同于 skills/subagent/MCP/workspace 的 trailing 注入。
@@ -634,44 +615,6 @@ pub mod builtin {
         )
     }
 
-    /// 工作区变更审计注入（`[workspace-changes …]`）。
-    ///
-    /// **当前无生产者**：产出这份报告的工作区扫描器（`qaqh-spy`）已于 2026-10-31
-    /// 整体移除，槽位保留是因为注入通道本身仍是通用能力（`USER_INJECTION_SOURCES`
-    /// 与 store 侧测试都按名引用它）。要重新启用，需要一个新的生产者调用
-    /// `ContextFlow::publish(WORKSPACE, …)`。
-    ///
-    /// 与 [`subagent_source`] 同形态——`User` role +
-    /// `Trailing` sink + `TurnBoundary` timing：Chat Completions 要求
-    /// assistant(tool_calls) 之后紧跟全部 tool 消息，所以注入必须排在整批结果
-    /// 之后落盘；TurnBoundary 让它下一轮请求即可见、不打断运行中的回合。
-    ///
-    /// `Compressable`（非 `Preserved`）：diff 报告是**某一批的易过期环境状态**
-    /// 而非对话事实，下一批会重新扫描重述——与 `mcp_resources_source` 同一理由。
-    pub fn workspace_source() -> Arc<dyn ContextSource> {
-        base(
-            WORKSPACE,
-            FlowRole::User,
-            Sink::Trailing,
-            Timing::TurnBoundary,
-            Visibility { context: true },
-            LifecyclePolicy {
-                undo: UndoBehavior::Keep,
-                compact: CompactBehavior::Compressable,
-            },
-        )
-    }
-
-    /// Register all built-in sources on a flow (idempotent per flow).
-    pub fn register_all(flow: &mut ContextFlow) {
-        flow.register(user_source());
-        flow.register(model_source());
-        flow.register(skills_source());
-        flow.register(subagent_source());
-        flow.register(goal_source());
-        flow.register(mcp_resources_source());
-        flow.register(workspace_source());
-    }
 }
 
 // ═══════════════════════════════════════════════════════

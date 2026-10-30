@@ -211,12 +211,6 @@ impl SessionMeta {
         }
     }
 
-    pub fn reset_usage(&mut self) {
-        self.usage_totals = crate::UsageInfo::default();
-        self.usage_requests = 0;
-        self.cache_reported_requests = 0;
-    }
-
     /// 会话列表/tab 的**展示标题**（前端契约 **G2** 定死的口径）：
     /// `title` → `cwd` 尾段 → `session_id`。
     ///

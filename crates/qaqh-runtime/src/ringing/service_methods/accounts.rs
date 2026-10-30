@@ -440,37 +440,6 @@ fn dispatch_account(service: &QaqhService, method: &str, params: &Value) -> Resu
     }
 }
 
-/// Export every account service root and its transitive DTO dependencies.
-#[cfg(feature = "ts")]
-pub fn export_types(config: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
-    use ts_rs::TS;
-    macro_rules! roots { ($($ty:ty),* $(,)?) => { $(<$ty>::export_all(config)?;)* }; }
-    roots!(
-        AccountsEmptyParams,
-        SiwcProfileParams,
-        SiwcSignInStartParams,
-        SiwcFlowParams,
-        SiwcProfileSelectParams,
-        DsAccountSignInStartParams,
-        DsAccountAttemptParams,
-        DsAccountBonusAckParams,
-        SiwcStatusResult,
-        SiwcProfilesResult,
-        SiwcModel,
-        SiwcSignInStartResult,
-        SiwcSignInStatusResult,
-        SiwcSignOutResult,
-        DsAccountStatusResult,
-        DsAccountBalanceResult,
-        DsAccountBonus,
-        DsAccountSignInStartResult,
-        DsAccountSignInStatusResult,
-        DsAccountVerifyResult,
-        DsAccountModel,
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

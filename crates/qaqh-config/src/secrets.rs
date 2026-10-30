@@ -300,19 +300,6 @@ impl SecretStore {
         self.load_named_slot("profiles", name)
     }
 
-    /// Whether the profile carries its own key (does not decrypt).
-    pub fn has_profile_key(&self, name: &str) -> bool {
-        if validate_profile_secret_name(name).is_err() {
-            return false;
-        }
-        self.has_named_slot("profiles", name)
-    }
-
-    /// All profile names that carry their own key, sorted.
-    pub fn list_profile_key_names(&self) -> Vec<String> {
-        self.list_named_slots("profiles")
-    }
-
     /// Encrypt and store a profile's own key (idempotent).
     pub fn set_profile_key(&self, name: &str, plaintext: &str) -> Result<(), String> {
         validate_profile_secret_name(name)?;
@@ -336,43 +323,6 @@ impl SecretStore {
             .get(name)?
             .as_str()?;
         decrypt(raw).ok()
-    }
-
-    fn has_named_slot(&self, section: &str, name: &str) -> bool {
-        let Ok(data) = std::fs::read_to_string(&self.path) else {
-            return false;
-        };
-        let Ok(doc) = toml::from_str::<toml::Value>(&data) else {
-            return false;
-        };
-        doc.get("secrets")
-            .and_then(|s| s.get(section))
-            .and_then(|m| m.get(name))
-            .and_then(|v| v.as_str())
-            .is_some_and(|raw| !raw.is_empty())
-    }
-
-    fn list_named_slots(&self, section: &str) -> Vec<String> {
-        let Ok(data) = std::fs::read_to_string(&self.path) else {
-            return Vec::new();
-        };
-        let Ok(doc) = toml::from_str::<toml::Value>(&data) else {
-            return Vec::new();
-        };
-        let mut names: Vec<String> = doc
-            .get("secrets")
-            .and_then(|s| s.get(section))
-            .and_then(|m| m.as_table())
-            .map(|table| {
-                table
-                    .iter()
-                    .filter(|(_, v)| v.as_str().is_some_and(|raw| !raw.is_empty()))
-                    .map(|(k, _)| k.to_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort();
-        names
     }
 
     fn set_named_slot(&self, section: &str, name: &str, plaintext: &str) -> Result<(), String> {

@@ -261,26 +261,10 @@ pub fn install_tool_ctx(ctx: &ToolCtx) -> ToolCtxGuard {
     }
 }
 
-/// Bind only the active session (permission stays unknown post-admission).
-/// Used by `execute_authorized` where the [`AuthorizedToolCall`](crate::AuthorizedToolCall)
-/// itself is the execution context.
-pub fn bind_session(session_id: &str) -> ToolCtxGuard {
-    install_tool_ctx(&ToolCtx {
-        session_id: session_id.to_string(),
-        permission_level: 0,
-        mode: AGENT_MODE.with(|slot| slot.get()),
-        workspace_root: None,
-    })
-}
-
 /// 运行时重设工具白名单（工具模式 Standard/Minimal/Custom 的入口）。
 /// 空列表 = 全量（标准模式）；未知名自动剔除并 warn（复用 apply_init 语义）。
 pub fn set_allowed_tools(tools: Vec<String>) {
     with_manager(|manager| manager.set_allowed(tools));
-}
-
-pub fn set_global_allowed_tools(tools: Option<Vec<String>>) {
-    with_manager(|manager| manager.set_global_allowed(tools));
 }
 
 /// Snapshot of the legacy per-actor tool runtime state on the actor thread.
@@ -471,28 +455,6 @@ pub fn replace_dynamic_tools(batch: Vec<(String, crate::DynamicTool)>) -> usize 
     .unwrap_or(0)
 }
 
-/// LSP 动态层增量合并（`lsp` 聚合工具 enabled 即在场；不清现有 dynamic——
-/// MCP per-server 工具不受影响）。碰撞拒绝计数跳过并告警。调用方与
-/// [`replace_dynamic_tools`] 同线程约束。返回被拒绝的条目数。
-pub fn merge_dynamic_tools(batch: Vec<(String, crate::DynamicTool)>) -> usize {
-    with_manager(|manager| {
-        let mut rejected = 0usize;
-        for (name, tool) in batch {
-            // 已在册同名（热重载/重复 take）→ 跳过，不计拒绝（幂等）。
-            if manager.dynamic_names().iter().any(|n| n == &name) {
-                continue;
-            }
-            if manager.register_dynamic(name.clone(), tool).is_err() {
-                rejected += 1;
-                log::warn!("[TOOLS] dynamic merge rejected (collision): {name:?}");
-            }
-        }
-        manager.reapply_allowed_after_dynamic_change();
-        rejected
-    })
-    .unwrap_or(0)
-}
-
 /// 按工具名调用作者声明的展示投影（09-18 展示契约 §3.4）。
 ///
 /// 未注册投影、或当前线程没有可用 manager 时返回 `None`；调用方必须完整
@@ -526,13 +488,6 @@ pub fn project_tool_display_from_result_payload(
         .display()
         .map(crate::tool_api::output::from_wire_display)
         .or_else(|| crate::display::project_typed_tool_display(name, &result.data))
-}
-
-/// Rehydrate a canonical display payload without re-parsing tool text.
-pub fn project_tool_display_from_wire(
-    display: &qaqh_types::ToolResultDisplay,
-) -> crate::tool_api::ToolDisplay {
-    crate::tool_api::output::from_wire_display(display)
 }
 
 /// 查询 handler 声明的能力类别（权限决策单一事实源）。
@@ -570,10 +525,3 @@ pub fn files_written() -> Vec<String> {
     global_stats().files_written
 }
 
-pub fn cancel_current_tool() {
-    with_manager(|manager| manager.cancel_tool(None));
-}
-
-pub fn shutdown_tools() {
-    log::info!("qaqh: tool manager shut down");
-}

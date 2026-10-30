@@ -638,11 +638,6 @@ impl RingingV2CommandEnvelope {
         self
     }
 
-    pub fn with_driver_epoch(mut self, driver_epoch: u64) -> Self {
-        self.driver_epoch = Some(driver_epoch);
-        self
-    }
-
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.schema != RINGING_SCHEMA
             || self.version != RINGING_V2_VERSION

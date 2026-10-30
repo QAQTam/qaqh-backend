@@ -10,14 +10,8 @@ use serde::{Deserialize, Serialize};
 pub mod field {
     /// 文件路径。
     pub const PATH: &str = "path";
-    /// 分页偏移。
-    pub const OFFSET: &str = "offset";
-    /// 分页上限。
-    pub const LIMIT: &str = "limit";
     /// 命令文本。
     pub const COMMAND: &str = "command";
-    /// 工作目录。
-    pub const CWD: &str = "cwd";
     /// 匹配模式。
     pub const PATTERN: &str = "pattern";
     /// 人类可读描述。

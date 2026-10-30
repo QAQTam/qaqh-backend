@@ -2,17 +2,15 @@ use std::mem::size_of;
 use std::path::Path;
 
 use crate::effect::{PendingTool, PersistOp};
-use qaqh_types::{Message, ToolDef};
+use qaqh_types::Message;
 
 /// Prefix of the synthetic result `from_messages` injects for an orphan
 /// tool_use (assistant ToolUse without a persisted ToolResult — crash or kill
 /// between the tool call and the next flush). The outbox reconciliation uses
 /// it to recognize (and refine) these placeholders.
-pub const SYNTHETIC_RESTORE_PREFIX: &str = "[RESTORE] Tool \"";
 
 /// 取消路径为未执行 tool_use 补的终态文案（与
 /// `engine_turn`/`admit` 的取消收割保持同一措辞，模型侧可识别）。
-pub const CANCELLED_TOOL_RESULT: &str = "[CANCELLED] Tool was not executed (user interrupted).";
 
 /// 压缩摘要是归档里的一条普通 `user` 消息，但读侧必须把它与真实用户回合区分开：
 /// 模型面只保留最新摘要，人类 transcript 则完全跳过它。
@@ -464,93 +462,6 @@ impl MessageStore {
         }
     }
 
-    /// Reset the WAL after a successful host-side drain: every op logged so
-    /// far has been applied to messages.jsonl. If the process dies before the
-    /// next checkpoint, replay re-applies the ops and msg_id dedupe converges.
-    pub fn wal_checkpoint(&mut self) {
-        if let Some(wal) = &mut self.wal
-            && let Err(error) = wal.checkpoint()
-        {
-            log::error!(
-                "MessageStore: WAL checkpoint failed for {}: {error}",
-                self.session_id
-            );
-        }
-    }
-
-    /// Call ids of orphan tool_use entries repaired by [`Self::from_messages`]
-    /// with a synthetic `[RESTORE]` result (see [`SYNTHETIC_RESTORE_PREFIX`]).
-    pub fn synthetic_repair_call_ids(&self) -> Vec<String> {
-        self.synthetic_repair_entries()
-            .into_iter()
-            .map(|(call_id, _)| call_id)
-            .collect()
-    }
-
-    /// Call ids and declared tool names of synthetic `[RESTORE]` repairs.
-    pub fn synthetic_repair_entries(&self) -> Vec<(String, String)> {
-        let mut entries = Vec::new();
-        for turn in &self.turns {
-            for step in &turn.steps {
-                for result in &step.tool_results {
-                    for block in &result.content {
-                        let qaqh_types::ContentBlock::ToolResult {
-                            tool_use_id,
-                            result,
-                        } = block
-                        else {
-                            continue;
-                        };
-                        if !result.model_text().starts_with(SYNTHETIC_RESTORE_PREFIX) {
-                            continue;
-                        }
-                        let name = step
-                            .assistant
-                            .content
-                            .iter()
-                            .find_map(|block| match block {
-                                qaqh_types::ContentBlock::ToolUse { id, name, .. }
-                                    if id == tool_use_id =>
-                                {
-                                    Some(name.clone())
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or_default();
-                        entries.push((tool_use_id.clone(), name));
-                    }
-                }
-            }
-        }
-        entries
-    }
-
-    /// Refine a synthetic `[RESTORE]` placeholder with richer recovery
-    /// semantics (used by the tool outbox reconciliation: "executed but the
-    /// result was lost" instead of the default "not executed"). Returns
-    /// whether a placeholder for `call_id` was found and rewritten.
-    pub fn amend_synthetic_repair(&mut self, call_id: &str, note: &str) -> bool {
-        for turn in &mut self.turns {
-            for step in &mut turn.steps {
-                for result in &mut step.tool_results {
-                    for block in &mut result.content {
-                        if let qaqh_types::ContentBlock::ToolResult {
-                            tool_use_id,
-                            result,
-                        } = block
-                            && tool_use_id == call_id
-                            && result.model_text().starts_with(SYNTHETIC_RESTORE_PREFIX)
-                        {
-                            result.rewrite_text(note);
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
-    }
-
     /// 持久化到 meta 的 legacy compact_skip。物理压缩会把被压缩 turn 从活跃
     /// 视图移除并写入新的摘要水位，因此新链路下该值恒为 0。
     fn persisted_compact_skip(&self) -> usize {
@@ -617,27 +528,6 @@ impl MessageStore {
         self.system_messages.push(msg);
         self.context_revision = self.context_revision.saturating_add(1);
         false
-    }
-
-    /// Remove all system messages whose first text block starts with the
-    /// given prefix. Used to replace catalog messages without relying on
-    /// the [QAQH_SKILL_V1] format.
-    pub fn remove_system_messages_by_prefix(&mut self, prefix: &str) {
-        let before = self.system_messages.len();
-        self.system_messages.retain(|message| {
-            let text = message
-                .content
-                .iter()
-                .find_map(|block| match block {
-                    qaqh_types::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .unwrap_or("");
-            !text.starts_with(prefix)
-        });
-        if self.system_messages.len() != before {
-            self.context_revision = self.context_revision.saturating_add(1);
-        }
     }
 
     /// Append a trailing injection, once.
@@ -925,21 +815,6 @@ impl MessageStore {
         self.push_tool_canonical_inner(tool_call_id, canonical, images)
     }
 
-    /// 工具结果的 canonical 归档：保留工具侧五态 `ToolStatus` 与展示面
-    /// diff，不再经 success 布尔坍缩重建。
-    pub fn push_tool_result_canonical(
-        &mut self,
-        tool_call_id: &str,
-        result: &qaqh_types::ToolResult,
-        images: &[qaqh_types::ToolImage],
-    ) {
-        if self.push_tool_canonical_inner(tool_call_id, result.clone(), images) {
-            self.context_revision = self.context_revision.saturating_add(1);
-        }
-        // G3：结果落地后尝试回灌延后的 trailing 注入。
-        self.flush_deferred_trailing();
-    }
-
     fn push_tool_canonical_inner(
         &mut self,
         tool_call_id: &str,
@@ -1219,21 +1094,6 @@ impl MessageStore {
             }
         }
         results
-    }
-
-    pub fn tool_call_args(&self, tool_call_id: &str) -> Option<serde_json::Value> {
-        let step = self.turns.last().and_then(|t| t.steps.last())?;
-        step.assistant.content.iter().find_map(|b| {
-            if let qaqh_types::ContentBlock::ToolUse { id, input, .. } = b {
-                if id == tool_call_id {
-                    Some(input.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
     }
 
     /// Find the tool_call_id of a named tool in the most recent assistant step.
@@ -1658,19 +1518,6 @@ impl MessageStore {
         (store, repairs)
     }
 
-    /// Restore the archive-derived compact watermark when resuming. The
-    /// lifecycle passes the persisted meta value so a later full rewrite can
-    /// preserve the same marker.
-    pub fn set_compact_covered_through_msg_id(&mut self, covered: Option<u64>) {
-        self.compact_covered_through_msg_id = covered;
-    }
-
-    /// Keep IDs monotonic against the raw archive when restoring a compact
-    /// checkpoint (the checkpoint intentionally omits archived messages).
-    pub fn ensure_next_msg_id(&mut self, next: u64) {
-        self.next_msg_id = self.next_msg_id.max(next);
-    }
-
     /// Allocate a session-monotonic turn ID. Compaction may shrink the active
     /// model view, but must never make a future TurnStart reuse an archived ID.
     pub fn allocate_turn_id(&mut self) -> String {
@@ -1682,39 +1529,6 @@ impl MessageStore {
     /// Restore the turn allocator against the immutable archive.
     pub fn ensure_next_turn_seq(&mut self, next: u64) {
         self.next_turn_seq = self.next_turn_seq.max(next.max(1));
-    }
-
-    /// 给最后一个 step 里**尚无结果**的 tool_use 补取消终态，返回补了几条。
-    ///
-    /// BUG-2026-09-13-08：取消路径上「有 tool_use 无 tool_result」的孤儿会
-    /// 让下轮模型重发同一 tool_use —— 已执行过的工具因此被重复执行。取消时
-    /// 先给确定不会有结果的项封终态，已执行项的真实结果才不会被
-    /// `remove_last_step_if_incomplete` 连带丢弃。
-    ///
-    /// 复用 `auto_complete_unfulfilled` 的既有文案与去重语义（只补缺失项，
-    /// 不覆盖已有结果）。
-    pub fn seal_pending_tools_as_cancelled(&mut self) -> usize {
-        let Some(step) = self.turns.last_mut().and_then(|turn| turn.steps.last_mut()) else {
-            return 0;
-        };
-        let missing = step
-            .assistant_tool_ids()
-            .into_iter()
-            .filter(|id| !step.tool_result_has_id(id))
-            .count();
-        auto_complete_unfulfilled(step, CANCELLED_TOOL_RESULT);
-        missing
-    }
-
-    /// 最后一个 step 是否已为 `tool_call_id` 记录结果。
-    ///
-    /// 取消收尾用：只有确认「这个 tool_use 还没有结果」才补取消终态，
-    /// 不会覆盖已执行的 canonical 结果。
-    pub fn step_has_tool_result(&self, tool_call_id: &str) -> bool {
-        self.turns
-            .last()
-            .and_then(|turn| turn.steps.last())
-            .is_some_and(|step| step.tool_result_has_id(tool_call_id))
     }
 
     pub fn remove_last_step_if_incomplete(&mut self) -> bool {
@@ -1771,21 +1585,6 @@ impl MessageStore {
         self.context_revision = self.context_revision.saturating_add(1);
         // After truncation, need full rewrite on next save.
         true
-    }
-
-    /// G2：计算从扁平消息流 msg_id ≥ boundary 起保留的真实 turn 数。
-    /// subagent 报告等非 turn 起始的 user 消息不再虚增 keep——原先
-    /// kept_user_count 扁平计数导致 apply_compact 早退却谎报成功。
-    pub fn count_live_turns_from(&self, boundary: Option<u64>) -> usize {
-        match boundary {
-            None => self.turns.len(),
-            Some(b) => self
-                .turns
-                .iter()
-                .filter(|t| t.user.msg_id.is_some_and(|id| id >= b))
-                .count()
-                .max(1),
-        }
     }
 
     /// Compact: keep `keep` recent turns in the active model view, append the
@@ -1919,126 +1718,6 @@ impl MessageStore {
         })
     }
 
-    /// Compute context composition stats from the current message store.
-    /// This reflects the actual state (post-compact), unlike the API dump which lags.
-    /// Returns (chat_text_tok, thinking_tok, tool_calls_tok, tool_results_tok, tools_schema_tok, system_prompt_tok, thinking_blocks, tool_call_blocks).
-    /// All token fields use `qaqh_types::count_tokens` (CJK-aware heuristic), NOT raw char length.
-    #[allow(clippy::too_many_arguments)]
-    pub fn compute_context_stats(
-        &self,
-        tool_defs: Option<&[ToolDef]>,
-    ) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
-        let mut chat_text = 0u64;
-        let mut thinking = 0u64;
-        let mut tool_calls = 0u64;
-        let mut tool_results = 0u64;
-        let mut tools_schema = 0u64;
-        let mut system_prompt = 0u64;
-        let mut thinking_blocks = 0u64;
-        let mut tool_call_blocks = 0u64;
-
-        // Count tool definitions (sent as JSON schema to the LLM)
-        if let Some(defs) = tool_defs {
-            for td in defs {
-                if let Ok(json) = serde_json::to_string(td) {
-                    tools_schema += qaqh_types::count_tokens(&json) as u64;
-                }
-            }
-        }
-
-        for m in &self.system_messages {
-            for b in &m.content {
-                if let qaqh_types::ContentBlock::Text { text } = b {
-                    system_prompt += qaqh_types::count_tokens(text) as u64;
-                }
-            }
-        }
-        for (i, turn) in self.turns.iter().enumerate() {
-            if i < self.compact_skip {
-                continue;
-            }
-            for m in [&turn.user] {
-                for b in &m.content {
-                    match b {
-                        qaqh_types::ContentBlock::Text { text } => {
-                            chat_text += qaqh_types::count_tokens(text) as u64;
-                        }
-                        qaqh_types::ContentBlock::Reasoning { reasoning, .. } => {
-                            thinking += qaqh_types::count_tokens(reasoning) as u64;
-                            thinking_blocks += 1;
-                        }
-                        qaqh_types::ContentBlock::ToolUse { .. } => {
-                            // Tool call JSON ≈ token count of serialized form
-                            let json = serde_json::to_string(b).unwrap_or_default();
-                            tool_calls += qaqh_types::count_tokens(&json) as u64;
-                            tool_call_blocks += 1;
-                        }
-                        qaqh_types::ContentBlock::WebSearchCall { .. } => {
-                            // Server-side search action JSON ≈ serialized form
-                            let json = serde_json::to_string(b).unwrap_or_default();
-                            tool_calls += qaqh_types::count_tokens(&json) as u64;
-                            tool_call_blocks += 1;
-                        }
-                        qaqh_types::ContentBlock::ToolResult { result, .. } => {
-                            tool_results += qaqh_types::count_tokens(result.model_text()) as u64;
-                        }
-                        qaqh_types::ContentBlock::Image { .. }
-                        | qaqh_types::ContentBlock::ImageRef { .. } => {
-                            // Image token count uses the MiMo formula (roughly ~256-1024 tokens depending on resolution).
-                            // Use a conservative estimate of 512 tokens per image.
-                            chat_text += 512;
-                        }
-                        qaqh_types::ContentBlock::ResponseOutputItem { .. } => {
-                            // Opaque provider replay state is already accounted
-                            // for by its visible Text/Reasoning/ToolUse projection.
-                        }
-                    }
-                }
-            }
-            for step in turn.steps.iter() {
-                for b in &step.assistant.content {
-                    match b {
-                        qaqh_types::ContentBlock::Text { text } => {
-                            chat_text += qaqh_types::count_tokens(text) as u64;
-                        }
-                        qaqh_types::ContentBlock::Reasoning { reasoning, .. } => {
-                            thinking += qaqh_types::count_tokens(reasoning) as u64;
-                            thinking_blocks += 1;
-                        }
-                        qaqh_types::ContentBlock::ToolUse { .. } => {
-                            let json = serde_json::to_string(b).unwrap_or_default();
-                            tool_calls += qaqh_types::count_tokens(&json) as u64;
-                            tool_call_blocks += 1;
-                        }
-                        _ => {}
-                    }
-                }
-                for tr in &step.tool_results {
-                    for b in &tr.content {
-                        if let qaqh_types::ContentBlock::ToolResult {
-                            tool_use_id: _,
-                            result,
-                        } = b
-                        {
-                            // 存储字节即最终形态：工具侧折叠已定型，直接按实际
-                            // 文本统计（不再按位置模拟折叠）。
-                            tool_results += qaqh_types::count_tokens(result.model_text()) as u64;
-                        }
-                    }
-                }
-            }
-        }
-        (
-            chat_text,
-            thinking,
-            tool_calls,
-            tool_results,
-            tools_schema,
-            system_prompt,
-            thinking_blocks,
-            tool_call_blocks,
-        )
-    }
 }
 
 fn auto_complete_unfulfilled(step: &mut Step, reason: &str) {

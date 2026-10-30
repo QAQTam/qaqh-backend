@@ -204,12 +204,6 @@ impl<T, E> Supervisor<T, E> {
         Ok(DispatchTicket { identity })
     }
 
-    /// Give back an authorization that will not be started. The intent is
-    /// returned so the host can keep it for a later, newly authorized attempt.
-    pub fn withdraw(&mut self, ticket: DispatchTicket) -> Option<E> {
-        self.authorized.remove(&ticket.identity)
-    }
-
     /// Number of authorized but not yet started intents.
     pub fn authorized_len(&self) -> usize {
         self.authorized.len()
@@ -390,30 +384,4 @@ impl<T: FrameSize, E> Supervisor<T, E> {
         self.deliver(identity)
     }
 
-    /// Replace an oversized terminal with a bounded durable reference prepared
-    /// by the host. The original evidence remains available until this call;
-    /// validation and durability of the replacement belong to the host.
-    pub fn replace_oversized(
-        &mut self,
-        identity: &EffectIdentity,
-        original: &Arc<TaskCompletion<T>>,
-        replacement: T,
-    ) -> Result<(), SupervisorError> {
-        let task = match self.slots.get_mut(identity) {
-            Some(Slot::Settling(task)) => task,
-            Some(Slot::Running(_)) => return Err(SupervisorError::NotFinished),
-            None => return Err(SupervisorError::UnknownEffect),
-        };
-        if task.reservation.is_none()
-            || !Arc::ptr_eq(&task.completion, original)
-            || !matches!(task.completion.outcome, TaskOutcome::Returned(_))
-        {
-            return Err(SupervisorError::AlreadyFinished);
-        }
-        task.completion = Arc::new(TaskCompletion {
-            identity: identity.clone(),
-            outcome: TaskOutcome::Returned(replacement),
-        });
-        Ok(())
-    }
 }
