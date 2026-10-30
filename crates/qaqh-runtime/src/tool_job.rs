@@ -79,6 +79,9 @@ pub struct ToolOutcome {
     pub evidence: DispatchEvidence,
     pub terminal: Option<ToolTerminalStatus>,
     pub output: Vec<u8>,
+    /// The executor kept external work alive (backgrounded process / unstopped
+    /// task). The invocation is settled, the side effect is not.
+    pub backgrounded: bool,
     pub error: Option<String>,
 }
 
@@ -175,6 +178,24 @@ impl WorkspaceToolPort {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
     }
 
+    /// Workspace root the current policy dispatches against.
+    pub fn workspace_root(&self) -> PathBuf {
+        self.policy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .workspace_root
+            .clone()
+    }
+
+    /// Extend the trusted-directory set ("trust this folder" decisions).
+    pub fn trust_dir(&self, dir: PathBuf) {
+        self.policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trusted_dirs
+            .insert(dir);
+    }
+
     /// Install a single-use approval grant for one specific `execution_id`.
     pub fn grant_approval(&self, grant: ToolApprovalGrant) {
         self.approvals
@@ -242,14 +263,27 @@ impl WorkspaceToolPort {
     }
 }
 
-impl ToolPort for WorkspaceToolPort {
-    fn execute(
-        &self,
-        request: &ToolRequest,
-        cancel: &AtomicBool,
-    ) -> Result<ToolOutput, ToolFailure> {
-        if cancel.load(Ordering::Acquire) {
-            return Err(ToolFailure::NotStarted("cancelled before dispatch".into()));
+/// Pre-dispatch admission verdict. `execute` re-evaluates it; this only lets
+/// the caller raise the interaction before committing a tool intent result.
+#[derive(Debug, Clone)]
+pub enum ToolAdmission {
+    Authorized,
+    ApprovalRequired { reason: String },
+    Denied(String),
+}
+
+/// Everything derived from one request before admission.
+struct PreparedCall {
+    context: qaqh_workspace::tool_api::ToolCallContext,
+    invocation: qaqh_workspace::ToolInvocation,
+    policy: ToolPolicySnapshot,
+    args_hash: String,
+}
+
+impl WorkspaceToolPort {
+    fn prepare(&self, request: &ToolRequest) -> Result<PreparedCall, ToolFailure> {
+        if request.args.len() > 256 * 1024 {
+            return Err(ToolFailure::NotStarted("tool arguments exceed limit".into()));
         }
         let args_value: serde_json::Value = serde_json::from_slice(&request.args)
             .map_err(|e| ToolFailure::NotStarted(format!("invalid tool JSON arguments: {e}")))?;
@@ -295,7 +329,7 @@ impl ToolPort for WorkspaceToolPort {
             .with_trusted_roots(policy.trusted_dirs.clone()),
             exec_default_shell: None,
             timeout: Duration::ZERO,
-            cancellation: cancellation.clone(),
+            cancellation,
             progress: None,
             exec_progress: None,
             official_web: None,
@@ -308,6 +342,67 @@ impl ToolPort for WorkspaceToolPort {
             args: args_value,
             category,
         };
+        Ok(PreparedCall {
+            context,
+            invocation,
+            policy,
+            args_hash,
+        })
+    }
+
+    /// Evaluate permission policy without executing anything.
+    pub fn precheck(&self, request: &ToolRequest) -> ToolAdmission {
+        let prepared = match self.prepare(request) {
+            Ok(prepared) => prepared,
+            Err(ToolFailure::Denied(reason)) => return ToolAdmission::Denied(reason),
+            Err(error) => return ToolAdmission::Denied(format!("{error:?}")),
+        };
+        match qaqh_workspace::admit_with_context(
+            prepared.invocation,
+            &prepared.context,
+            &prepared.policy.trusted_dirs,
+        ) {
+            qaqh_workspace::Admission::Authorized(_) => ToolAdmission::Authorized,
+            qaqh_workspace::Admission::ApprovalRequired(challenge) => {
+                ToolAdmission::ApprovalRequired {
+                    reason: challenge.reason().to_string(),
+                }
+            }
+            qaqh_workspace::Admission::Denied(reason) => ToolAdmission::Denied(reason),
+        }
+    }
+
+    /// Content hash of the exact bytes a grant is bound to.
+    pub fn args_hash(args: &[u8]) -> String {
+        sha256_content_hash(args).0
+    }
+}
+
+/// Sets the completion flag even when the handler panics, so the scoped
+/// cancellation poller can never outlive a failed call.
+struct DoneGuard(Arc<AtomicBool>);
+
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+impl ToolPort for WorkspaceToolPort {
+    fn execute(
+        &self,
+        request: &ToolRequest,
+        cancel: &AtomicBool,
+    ) -> Result<ToolOutput, ToolFailure> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(ToolFailure::NotStarted("cancelled before dispatch".into()));
+        }
+        let PreparedCall {
+            context,
+            invocation,
+            policy,
+            args_hash,
+        } = self.prepare(request)?;
 
         let authorized =
             match qaqh_workspace::admit_with_context(invocation, &context, &policy.trusted_dirs) {
@@ -378,10 +473,12 @@ impl ToolPort for WorkspaceToolPort {
 
         let done = Arc::new(AtomicBool::new(false));
         let done_watch = Arc::clone(&done);
-        let cancel_token = cancellation.clone();
+        let cancel_token = context.cancellation.clone();
         // Propagate cooperative cancellation into the tool context while the
-        // synchronous handler is running.
+        // synchronous handler is running. The guard clears `done` even if the
+        // handler panics, so the scoped poller cannot outlive the scope.
         let exec_result = std::thread::scope(|s| {
+            let _done = DoneGuard(Arc::clone(&done));
             s.spawn(move || {
                 while !done_watch.load(Ordering::Acquire) {
                     if cancel.load(Ordering::Acquire) {
@@ -391,10 +488,7 @@ impl ToolPort for WorkspaceToolPort {
                     std::thread::sleep(Duration::from_millis(5));
                 }
             });
-            let res =
-                qaqh_workspace::execution::execute_authorized_with_context(authorized, context, None);
-            done.store(true, Ordering::Release);
-            res
+            qaqh_workspace::execution::execute_authorized_with_context(authorized, context, None)
         });
 
         let parsed_output: Option<serde_json::Value> =
@@ -549,6 +643,7 @@ fn joined(result: Result<ToolOutcome, tokio::task::JoinError>) -> ToolOutcome {
             evidence: DispatchEvidence::StartedUnknown,
             terminal: None,
             output: Vec::new(),
+            backgrounded: false,
             error: Some(
                 format!("tool worker join failed: {error}")
                     .chars()
@@ -565,12 +660,14 @@ fn classify(result: Result<ToolOutput, ToolFailure>) -> ToolOutcome {
             evidence: DispatchEvidence::StartedUnknown,
             terminal: Some(ToolTerminalStatus::Backgrounded),
             output: output.output,
+            backgrounded: true,
             error: None,
         },
         Ok(output) => ToolOutcome {
             evidence: DispatchEvidence::StartedTerminal,
             terminal: Some(ToolTerminalStatus::Succeeded),
             output: output.output,
+            backgrounded: false,
             error: None,
         },
         Err(ToolFailure::NotStarted(reason)) => not_started(&reason),
@@ -578,18 +675,21 @@ fn classify(result: Result<ToolOutput, ToolFailure>) -> ToolOutcome {
             evidence: DispatchEvidence::NotStarted,
             terminal: Some(ToolTerminalStatus::Denied),
             output: Vec::new(),
+            backgrounded: false,
             error: Some(reason.chars().take(512).collect()),
         },
         Err(ToolFailure::TerminalError { message, output }) => ToolOutcome {
             evidence: DispatchEvidence::StartedTerminal,
             terminal: Some(ToolTerminalStatus::Failed),
             output,
+            backgrounded: false,
             error: Some(message.chars().take(512).collect()),
         },
         Err(ToolFailure::AfterStart(reason)) => ToolOutcome {
             evidence: DispatchEvidence::StartedUnknown,
             terminal: None,
             output: Vec::new(),
+            backgrounded: false,
             error: Some(reason.chars().take(512).collect()),
         },
     }
@@ -604,6 +704,7 @@ fn not_started(message: &str) -> ToolOutcome {
         evidence: DispatchEvidence::NotStarted,
         terminal: None,
         output: Vec::new(),
+        backgrounded: false,
         error: Some(message.chars().take(512).collect()),
     }
 }

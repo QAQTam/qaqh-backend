@@ -1660,13 +1660,16 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         &turn_id,
         1,
         1,
+        "test-model",
         &out1,
         EventId::new(event_id(7)),
         |idx| EventId::new(event_id(8 + idx as u64)),
+        |idx| EventId::new(event_id(8 + 1000 + idx as u64)),
         NOW_MS + 7,
     )
     .unwrap();
-    assert_eq!(r1_facts.len(), 2, "ProviderResponseCommitted + ToolCallDeclared");
+    // ProviderResponseCommitted + sealed display block(s) + ToolCallDeclared
+    assert!(r1_facts.len() >= 2, "response, display blocks and tool declaration");
     let head = owner.head().unwrap();
     owner.commit("p-r1-commit", head, r1_facts).unwrap();
 
@@ -1766,9 +1769,11 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         &turn_id,
         2,
         1,
+        "test-model",
         &out2,
         EventId::new(event_id(12)),
         |idx| EventId::new(event_id(13 + idx as u64)),
+        |idx| EventId::new(event_id(13 + 1000 + idx as u64)),
         NOW_MS + 12,
     )
     .unwrap();
@@ -1893,9 +1898,11 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         &turn_id,
         3,
         1,
+        "test-model",
         &out3,
         EventId::new(event_id(18)),
         |_| unreachable!(),
+        |idx| EventId::new(event_id(18 + 1000 + idx as u64)),
         NOW_MS + 18,
     )
     .unwrap();
@@ -1934,9 +1941,11 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         &turn_id,
         4,
         1,
+        "test-model",
         &out4,
         EventId::new(event_id(20)),
         |_| unreachable!(),
+        |idx| EventId::new(event_id(20 + 1000 + idx as u64)),
         NOW_MS + 20,
     )
     .unwrap();
@@ -1975,9 +1984,11 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         &turn_id,
         5,
         1,
+        "test-model",
         &out5,
         EventId::new(event_id(22)),
         |_| unreachable!(),
+        |idx| EventId::new(event_id(22 + 1000 + idx as u64)),
         NOW_MS + 22,
     )
     .unwrap();

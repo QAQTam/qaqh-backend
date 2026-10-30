@@ -13,7 +13,7 @@ use qaqh_ringing::{
     RingingV2ResetRequired, RingingV2StreamKey,
 };
 use qaqh_session::canonical::{
-    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
+    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, EVENTS_COMMIT_FILE,
     EVENTS_FILE, generate_ulid,
 };
 use qaqh_session::projection::{
@@ -919,17 +919,25 @@ fn resolve_identity(
     session_dir: &Path,
     session_id: &str,
 ) -> Result<(SessionId, LogId), V2HubError> {
+    let batch_root = qaqh_session::canonical::is_batch_root(session_dir);
     if !session_dir.join(CANONICAL_IDENTITY_FILE).exists()
         && !session_dir.join(EVENTS_FILE).exists()
+        && !batch_root
     {
         return Err(V2HubError::SessionMissing(session_id.to_string()));
     }
-    let identity = CanonicalSessionIdentity::open_or_create(session_dir)
-        .map_err(|error| V2HubError::Canonical(error.to_string()))?;
+    // A batch-journal root already owns its identity: never mint a second one
+    // from a missing sidecar, or the read model would split from the writer.
+    let identity = if batch_root {
+        CanonicalSessionIdentity::open(session_dir)
+    } else {
+        CanonicalSessionIdentity::open_or_create(session_dir)
+    }
+    .map_err(|error| V2HubError::Canonical(error.to_string()))?;
     // A session can exist (identity minted) before its first canonical commit.
     // There is no snapshot cursor to hand out yet, so surface the documented
     // `snapshot_missing` reason rather than a generic canonical error.
-    if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
+    if !batch_root && !session_dir.join(EVENTS_COMMIT_FILE).exists() {
         return Err(V2HubError::SnapshotMissing(session_id.to_string()));
     }
     Ok((identity.session_id, identity.log_id))
@@ -941,9 +949,7 @@ fn load_session_state(
     log_id: LogId,
     live_capacity: usize,
 ) -> Result<V2SessionState, V2HubError> {
-    let facts = CommittedFactReader::open(session_dir, session_id, log_id.clone())
-        .map_err(|error| V2HubError::Canonical(error.to_string()))?
-        .read_all()
+    let facts = crate::agent_graph::read_session_facts(session_dir, session_id, log_id.clone())
         .map_err(|error| V2HubError::Canonical(error.to_string()))?;
     let last_fact_seq = facts.last().map(|fact| fact.fact_seq).unwrap_or(0);
     let mut projections = ProjectionSet::default();
@@ -979,9 +985,7 @@ fn replay_after(
     server_epoch: &str,
     since_fact_seq: u64,
 ) -> Result<VecDeque<V2Envelope>, V2HubError> {
-    let facts = CommittedFactReader::open(session_dir, session_id.clone(), log_id.clone())
-        .map_err(|error| V2HubError::Canonical(error.to_string()))?
-        .read_all()
+    let facts = crate::agent_graph::read_session_facts(session_dir, session_id.clone(), log_id.clone())
         .map_err(|error| V2HubError::Canonical(error.to_string()))?;
     let mut projections = ProjectionSet::default();
     let mut replay = VecDeque::new();

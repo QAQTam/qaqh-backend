@@ -8,8 +8,32 @@ use qaqh_session::session_fact_v2::{
     ContentRef, InputId, InteractionId, ToolCallId, TurnId,
 };
 
-use crate::provider_job::ProviderOutcome;
+use crate::provider_job::{ProviderOutcome, ProviderRequestSpec};
 use crate::tool_job::ToolOutcome;
+
+/// One durable input waiting for its turn. `accepted` mirrors the committed
+/// `InputAccepted` fact: the queue itself is never the source of truth.
+#[derive(Debug, Clone)]
+pub struct QueuedUserInput {
+    pub input_id: InputId,
+    pub text: String,
+    pub attachments: Vec<ContentRef>,
+    pub client_request_id: Option<String>,
+    pub accepted: bool,
+}
+
+impl FrameSize for QueuedUserInput {
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.text.len())
+            .saturating_add(self.attachments.len() * 96)
+            .saturating_add(
+                self.client_request_id
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+    }
+}
 
 /// Ingress application commands.
 #[derive(Debug, Clone)]
@@ -31,8 +55,26 @@ pub enum AgentCommand {
 impl FrameSize for AgentCommand {
     fn retained_bytes(&self) -> usize {
         match self {
-            AgentCommand::UserInput { text, .. } => std::mem::size_of::<Self>() + text.len() + 64,
-            AgentCommand::QueueInput { text, .. } => std::mem::size_of::<Self>() + text.len() + 64,
+            AgentCommand::UserInput {
+                text,
+                attachments,
+                client_request_id,
+                ..
+            } => std::mem::size_of::<Self>()
+                .saturating_add(text.len())
+                .saturating_add(attachments.len() * 96)
+                .saturating_add(client_request_id.as_ref().map_or(0, String::capacity))
+                .saturating_add(64),
+            AgentCommand::QueueInput {
+                text,
+                attachments,
+                client_request_id,
+                ..
+            } => std::mem::size_of::<Self>()
+                .saturating_add(text.len())
+                .saturating_add(attachments.len() * 96)
+                .saturating_add(client_request_id.as_ref().map_or(0, String::capacity))
+                .saturating_add(64),
         }
     }
 }
@@ -53,6 +95,10 @@ pub enum AgentControl {
         approved: bool,
         trust_folder: bool,
     },
+    /// Replace the provider request parameters after a configuration reload.
+    ReloadProvider {
+        spec: Box<ProviderRequestSpec>,
+    },
     Shutdown,
 }
 
@@ -65,6 +111,15 @@ impl FrameSize for AgentControl {
                 std::mem::size_of::<Self>() + ans_len + 32
             }
             AgentControl::ToolPermissionRespond { .. } => std::mem::size_of::<Self>() + 32,
+            AgentControl::ReloadProvider { spec } => std::mem::size_of::<Self>()
+                + std::mem::size_of::<ProviderRequestSpec>()
+                + spec
+                    .tools
+                    .as_ref()
+                    .map_or(0, |tools| tools.len() * 128)
+                + spec.provider.model.len()
+                + spec.provider.base_url.len()
+                + spec.effort.as_ref().map_or(0, String::capacity),
             AgentControl::Shutdown => std::mem::size_of::<Self>(),
         }
     }
@@ -80,12 +135,10 @@ pub enum AgentOutcome {
 impl FrameSize for AgentOutcome {
     fn retained_bytes(&self) -> usize {
         match self {
-            AgentOutcome::Provider(p) => {
-                let err_len = p.error.as_ref().map(|s| s.len()).unwrap_or(0);
-                let text_len = p.message.as_ref().map(|m| m.content.len() * 128).unwrap_or(0);
-                std::mem::size_of::<Self>() + err_len + text_len + 256
-            }
-            AgentOutcome::Tool(t) => std::mem::size_of::<Self>() + t.output.len() + 128,
+            // Delegate to the payload's own measurement: re-estimating here
+            // silently under-reports large bodies.
+            AgentOutcome::Provider(p) => std::mem::size_of::<Self>().saturating_add(p.retained_bytes()),
+            AgentOutcome::Tool(t) => std::mem::size_of::<Self>().saturating_add(t.retained_bytes()),
         }
     }
 }

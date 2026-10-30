@@ -8,6 +8,8 @@
 //! 工具面），无需依赖 `qaqh-workspace` 门面。门面经 re-export 保持
 //! `qaqh_workspace::tool_api::*` 等既有路径兼容。
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod model_tool_plan;
 pub mod permission;
 pub mod tool_api;

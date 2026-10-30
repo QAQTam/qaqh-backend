@@ -3,6 +3,8 @@
 //! These are NOT LLM-invocable tools. They are called directly by the
 //! Git service functions exposed to clients through the daemon control protocol.
 
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 use git2::{DiffOptions, Repository};
 use std::path::Path;
 

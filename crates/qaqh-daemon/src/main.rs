@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 mod axum_server;
 mod server;
 mod tls;
