@@ -1,20 +1,15 @@
 //! Typed service RPC requests (`POST /ringing/v2/service/{method}`，唯一服务面)。
-//!
 //! These enums keep service method names and JSON assembly inside the
 //! transport crate. Native shells choose a closed Rust variant; they cannot
 //! mistype a method name, send a mutation through the read-only query surface,
 //! or invent a second renderer-facing protocol. (`QueryRequest` → Read 类，
 //! `ActionRequest` → Write 类；会话生命周期命令不在此面，见开发标准 N5。)
-//!
 //! # 新增一个服务方法（G3 配方，2026-09-15 定案）
-//!
 //! 前端缺一个方法时**改这里，而不是在壳层里自己拼 HTTP**。理由见契约文档
-//! `docs/current/architecture.md`：前后端共进退，
+//! ：前后端共进退，
 //! 打补丁比留泛型逃生口便宜；逃生口会把「形状对不上」从**编译错误**退回**运行期
 //! 错误**，而那正是 2419 行镜像时代的老毛病。
-//!
 //! 四处改动，约十行：
-//!
 //! 1. **本文件**：加一个变体（读走 `QueryRequest`，写走 `ActionRequest`——
 //!    放进哪个枚举**就是**这条方法的读写契约声明，别放错）。
 //! 2. **本文件** `into_parts`：补一条映射。漏了是**编译错误**（match 穷举）。
@@ -24,7 +19,6 @@
 //!    `kind` 要与第 1 步选的枚举一致，否则失败时的错误码会撒谎。
 //! 4. **`qaqh-runtime/src/service.rs`** 的 `QaqhService::handle`：补上实现分支。
 //!    漏了 → `Err("unknown method: …")`（同样响亮）。
-//!
 //! 第 3、4 步**没有编译期保护**（daemon 侧的表与客户端枚举之间没有共享真相），
 //! 但两者都是首次调用即失败、且报文直指方法名——不是静默漂移，故未上机械闸。
 //! 本文件的 `all_query_requests` / `all_action_requests` 两条穷举闸保证第 1、2 步
@@ -551,7 +545,6 @@ mod tests {
     /// 这里用一条**穷举 `match`** 把手写变成「编译器盯着的手写」：新增变体时
     /// `into_parts` 先报错，改完再来这里，`match` 不穷举会**再报一次错**，
     /// 于是不可能悄悄漏掉一条路由的检查。
-    ///
     /// **已知的窄缝**（实测过，不是推测）：新增变体后只在下面 `match` 里补臂、
     /// 忘了 `vec!` 那一行，本闸**不响**——代价是该路由不被检查（不会产生错误
     /// 结果，只是少查一次）。反方向是关着的：**删除**一行会让末尾的条数断言
@@ -727,7 +720,6 @@ mod tests {
     /// 路由不得重复：`into_parts` 的 match 是逐个手写的，复制粘贴极易让两个
     /// 变体落到同一个方法名上——**此时其中一个方法永远发不出去，且不报错**
     /// （静默失败，正是值得上闸的那一类）。
-    ///
     /// 编译器不会替我们看这条：`ActionRequest` 的 `match` 里两个臂返回同一个
     /// 字符串是合法的（daemon 侧 `lookup` 撞名会触发 `unreachable_patterns`，
     /// 客户端这侧不会）。

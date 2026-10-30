@@ -68,7 +68,7 @@ impl QaqhService {
         // store 用默认位置（[secrets.mcp] 段）；禁用配置时 manager 以
         // disabled 形态拒绝一切调用（MCP_DISABLED）。
         qaqh_mcp::install_manager(qaqh_mcp::McpManager::new(config.mcp.clone()));
-        // LSP manager 装配（docs/current/architecture.md；与 MCP 同款单例；
+        // LSP manager 装配（；与 MCP 同款单例；
         // 默认关闭——enabled=false 时 disabled 形态拒一切调用 LSP_DISABLED）。
         qaqh_lsp::install_manager(qaqh_lsp::LspManager::new(config.lsp.clone()));
         // P2-1：热重载接线——①重载器：订阅 watch 单写口广播，[mcp] 段变化
@@ -111,7 +111,6 @@ impl QaqhService {
     }
 
     /// SIWC 会话管理器（懒装配到 `<data_dir>/siwc`）。
-    ///
     /// 懒装配而非 `init` 里装配：只有真正用到套餐用量时才建目录、读 host id；
     /// 不用该能力的用户不该多出任何磁盘副作用。
     pub(crate) fn siwc(&self) -> Result<Arc<qaqh_siwc::SiwcManager>, String> {
@@ -143,7 +142,6 @@ impl QaqhService {
     }
 
     /// DeepSeek 账号管理器（懒装配；凭据默认落在 config 目录）。
-    ///
     /// 懒装配的理由与 SIWC 相同：不用该能力的用户不该多出任何磁盘副作用。
     /// 构造本身不读盘、不联网——真正的读盘发生在第一次 `status()` / `token()`。
     pub(crate) fn dsaccount(&self) -> Result<&qaqh_dsaccount::DsAccountManager, String> {
@@ -297,7 +295,7 @@ impl QaqhService {
         }
     }
 
-    /// E: idle 卸载空闲会话 worker（docs/current/architecture.md）。
+    /// E: idle 卸载空闲会话 worker。
     /// `idle_secs` <= 0 时为 no-op（配置禁用）。对每个被卸载的 seed 做常驻
     /// 状态清理（Closed 广播已删，A1：wire 零消费方）。
     /// 返回被卸载的 seed 列表。registry.close 是阻塞 join——调用方
@@ -447,7 +445,6 @@ impl QaqhService {
     }
 
     /// 服务面唯一入口：wire `(method, params)` 在这里解码一次，然后按领域分派。
-    ///
     /// 强类型命令见 [`command`]（`service::command`），各领域的执行体在
     /// [`handlers`] 里。此前这里是一个 673 行、按字符串 `match` 分派、
     /// 再用 `pstr(params, "path")?` 手工取参的函数——参数错误只在运行时暴露，
@@ -538,7 +535,6 @@ impl QaqhService {
     /// 统一运行状态（2026-10-06 归一裁决）：未加载 → `not_running`（不读投影、
     /// 不做任何合成）；已加载 → 优先 canonical fact 投影（持久可重放，重启后
     /// 语义可重建），投影不可读时退回 live tracker 的六态映射。
-    ///
     /// 注意此处**有意只对已加载会话**调 `projected_run_status`——hub 首次访问
     /// 一个会话会把整个 fact log 从磁盘重放，`session.list` 对未加载会话逐条
     /// 调用等于全库重放。
@@ -573,12 +569,10 @@ impl QaqhService {
     }
 
     /// `session.list` 的条目（前端契约 **G2**）。
-    ///
     /// 返回**类型化**条目而非 `Value`：形状由 `qaqh_types::SessionListEntry` 承载，
     /// 序列化只发生在 dispatch 边界。此前这里是 `to_value(&meta)` 之后再
     /// `value["running"] = …` 手工拼键——手拼的形状没有任何类型承载，三端前端
     /// 只能各自手解（TUI 那份手抄漏了 5 个键而无人察觉）。
-    ///
     /// 返回类型化值后，**新增字段的唯一途径是改类型**：想在回包里塞个临时键，
     /// 必须先拆掉类型才行。形状锁在 `qaqh-types` 的
     /// `session_list_entry_wire_keys_are_locked`。
@@ -657,7 +651,6 @@ impl QaqhService {
 }
 
 /// P2-1：MCP 热重载器——订阅 watch 单写口广播，只对 `[mcp]` 段变化响应。
-///
 /// 链路：`Config::update`（webUI/CLI）或文件轮询发布 → `watch::subscribe`
 /// 唤醒 → 新配置的 [mcp] 与 manager 当前配置不等 → merge_external 重扫
 /// （外部 Codex/Claude 用户级文件的变化在此一并捕获）→ `apply_config`
@@ -698,7 +691,6 @@ fn spawn_mcp_reloader() {
 }
 
 /// 热重载事件循环（T-6-1 抽出的可测小函数）。
-///
 /// 语义契约：`qaqh_config::watch::subscribe()` 走 `Sender::subscribe`，返回的
 /// receiver **已消费到当前版本**——订阅前的任何快照都不会唤醒 `changed()`，
 /// 因此首次 `changed()` 等到的是**订阅后的第一次真实发布**。
@@ -746,7 +738,6 @@ fn spawn_lsp_reloader() {
 
 /// P2-1：config.toml 文件轮询器——手改文件（不经 `Config::update` 单写口）
 /// 也能触发热重载。
-///
 /// 策略：mtime 检测（1.5s 周期）→ 变化即 `reload_from_disk()`（内部：
 /// 解析失败——编辑器写一半——静默跳过，下轮再试；成功则统一发布，
 /// 重载器随之生效）。轮询而非 inotify：无新依赖，低频配置变更场景足够。
@@ -778,7 +769,6 @@ fn spawn_config_file_poller() {
 }
 
 /// `session.new` / `session.create` 共用的 canonical 基线：`(cwd, model)`。
-///
 /// cwd 取 meta.cwd；未绑定工作区时兜底到与会话执行面同一个默认工作根
 /// （`load_session_workspace` 注入的就是这个目录）。旧实现兜底
 /// `std::env::current_dir()`，在 daemon 里就是安装目录，canonical
@@ -803,7 +793,6 @@ pub(crate) fn session_canonical_cwd(
 }
 
 /// 在 `session.new` 的持久化阶段写入 canonical 基线。
-///
 /// Bootstrap and the actor use the same batch store. Drop this temporary owner
 /// before spawning the actor so there is only one journal writer at a time.
 fn materialize_canonical_session(session_id: &str, cwd: &str, model: &str) -> Result<(), String> {
