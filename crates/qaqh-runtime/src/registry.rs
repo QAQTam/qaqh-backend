@@ -1172,23 +1172,13 @@ impl AgentRegistry {
         }
 
         let budget = crate::session_agent::assembly::context_budget(&agent_config);
-        let commit = if !session_dir.join("storage-format").exists() {
-            qaqh_session::session_commit::SessionCommit::create(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("create subagent session commit for {session_id}: {e}"))?
-        } else {
-            qaqh_session::session_commit::SessionCommit::open(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("open subagent session commit for {session_id}: {e}"))?
-        };
+        let commit = qaqh_session::session_commit::SessionCommit::open_or_create(
+            &session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            budget,
+        )
+        .map_err(|e| format!("open subagent session commit for {session_id}: {e}"))?;
 
         let ws_dir = self
             .sessions
@@ -1282,23 +1272,13 @@ impl AgentRegistry {
                 .unwrap_or_default();
 
         let budget = crate::session_agent::assembly::context_budget(&agent_config);
-        let commit = if !session_dir.join("storage-format").exists() {
-            qaqh_session::session_commit::SessionCommit::create(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("create session commit for {session_id}: {e}"))?
-        } else {
-            qaqh_session::session_commit::SessionCommit::open(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("open session commit for {session_id}: {e}"))?
-        };
+        let commit = qaqh_session::session_commit::SessionCommit::open_or_create(
+            &session_dir,
+            identity.session_id.clone(),
+            identity.log_id.clone(),
+            budget,
+        )
+        .map_err(|e| format!("open session commit for {session_id}: {e}"))?;
 
         let ws_dir = self
             .sessions

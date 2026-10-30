@@ -175,6 +175,25 @@ impl Drop for SessionCommit {
 }
 
 impl SessionCommit {
+    /// Open the session's writer, creating the journal only for an empty directory.
+    ///
+    /// Call sites must not probe `storage-format` themselves: three copies of that
+    /// probe is how "create vs open" drifted apart between the bootstrap path and
+    /// the spawn path.
+    pub fn open_or_create(
+        session_dir: impl AsRef<Path>,
+        session_id: SessionId,
+        log_id: LogId,
+        budget: ContextBudget,
+    ) -> Result<Self, SessionCommitError> {
+        let path = session_dir.as_ref().to_path_buf();
+        if crate::canonical::is_batch_root(&path) {
+            Self::open(path, session_id, log_id, budget)
+        } else {
+            Self::create(path, session_id, log_id, budget)
+        }
+    }
+
     /// Create an isolated store only for a newly allocated session directory.
     pub fn create(
         session_dir: impl AsRef<Path>,
