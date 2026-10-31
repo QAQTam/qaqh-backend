@@ -87,7 +87,7 @@ impl SessionFact {
             validate_prefixed_ulid("turn_id", turn_id.as_str(), "turn_")?;
         }
         if let Some(call_id) = &self.call_id {
-            validate_prefixed_ulid("call_id", call_id.as_str(), "call_")?;
+            validate_tool_call_id("call_id", call_id.as_str())?;
         }
         if let Some(interaction_id) = &self.interaction_id {
             validate_prefixed_ulid("interaction_id", interaction_id.as_str(), "int_")?;
@@ -313,7 +313,7 @@ impl FactPayload {
             }
             Self::ToolCallDeclared(payload) => {
                 validate_prefixed_ulid("turn_id", payload.turn_id.as_str(), "turn_")?;
-                validate_prefixed_ulid("call_id", payload.call_id.as_str(), "call_")?;
+                validate_tool_call_id("call_id", payload.call_id.as_str())?;
                 validate_non_empty("tool_name", &payload.tool_name)?;
                 validate_content_ref("args_ref", &payload.args_ref)?;
                 validate_content_hash("args_hash", &payload.args_hash)?;
@@ -329,7 +329,7 @@ impl FactPayload {
             Self::InteractionRequested(payload) => {
                 validate_prefixed_ulid("interaction_id", payload.interaction_id.as_str(), "int_")?;
                 if let Some(call_id) = &payload.call_id {
-                    validate_prefixed_ulid("call_id", call_id.as_str(), "call_")?;
+                    validate_tool_call_id("call_id", call_id.as_str())?;
                 }
                 if payload.kind == super::types::InteractionKind::Permission
                     && payload.call_id.is_none()
@@ -443,7 +443,7 @@ impl FactPayload {
             Self::WorkspaceResourceChanged(payload) => {
                 validate_prefixed_ulid("resource_id", payload.resource_id.as_str(), "res_")?;
                 if let Some(source_call_id) = &payload.source_call_id {
-                    validate_prefixed_ulid("source_call_id", source_call_id.as_str(), "call_")?;
+                    validate_tool_call_id("source_call_id", source_call_id.as_str())?;
                 }
                 validate_content_ref("summary_ref", &payload.summary_ref)?;
             }
@@ -656,7 +656,7 @@ impl RecoveryAction {
 }
 
 fn validate_tool_intent(payload: &super::types::ToolIntent) -> Result<(), ValidationError> {
-    validate_prefixed_ulid("call_id", payload.call_id.as_str(), "call_")?;
+    validate_tool_call_id("call_id", payload.call_id.as_str())?;
     validate_prefixed_ulid("execution_id", payload.execution_id.as_str(), "exec_")?;
     validate_content_hash("sandbox_spec_hash", &payload.sandbox_spec_hash)?;
     match &payload.replay_capability {
@@ -716,7 +716,7 @@ fn validate_tool_intent(payload: &super::types::ToolIntent) -> Result<(), Valida
 }
 
 fn validate_tool_finished(payload: &super::types::ToolFinished) -> Result<(), ValidationError> {
-    validate_prefixed_ulid("call_id", payload.call_id.as_str(), "call_")?;
+    validate_tool_call_id("call_id", payload.call_id.as_str())?;
     if let Some(execution_id) = &payload.execution_id {
         validate_prefixed_ulid("execution_id", execution_id.as_str(), "exec_")?;
     } else if !matches!(
@@ -765,7 +765,7 @@ fn validate_recovery_tool_completion(
             message: "backgrounded is not valid for recovery completion".to_owned(),
         });
     }
-    validate_prefixed_ulid("call_id", completion.call_id.as_str(), "call_")?;
+    validate_tool_call_id("call_id", completion.call_id.as_str())?;
     if let Some(execution_id) = &completion.execution_id {
         validate_prefixed_ulid("execution_id", execution_id.as_str(), "exec_")?;
     } else if !matches!(
@@ -1056,6 +1056,28 @@ pub fn is_ulid_text(value: &str) -> bool {
 
 fn validate_ulid(field: &'static str, value: &str) -> Result<(), ValidationError> {
     if !is_ulid_text(value) {
+        return Err(ValidationError::InvalidId {
+            field,
+            value: value.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Tool call ids are opaque provider strings.
+///
+/// They are echoed back to the provider verbatim, so no internal prefix or
+/// shape may be imposed here: hashing a provider id into `call_<ULID>` makes
+/// the stored tool result disagree with the model transcript. Only the
+/// properties needed for durable transport are checked.
+fn validate_tool_call_id(field: &'static str, value: &str) -> Result<(), ValidationError> {
+    const MAX_TOOL_CALL_ID_BYTES: usize = 256;
+    if value.is_empty()
+        || value.len() > MAX_TOOL_CALL_ID_BYTES
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
         return Err(ValidationError::InvalidId {
             field,
             value: value.to_owned(),

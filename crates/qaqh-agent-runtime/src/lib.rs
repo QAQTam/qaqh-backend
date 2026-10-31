@@ -26,9 +26,11 @@
 
 pub mod activity;
 pub mod agent;
+pub mod progress;
 pub mod provider_job;
 pub mod quota_ledger;
 pub mod session_agent;
 pub mod tool_job;
 
 pub use activity::SessionActivityTracker;
+pub use progress::{AttemptBlocks, ProgressSink, ProgressStream};

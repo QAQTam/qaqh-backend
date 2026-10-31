@@ -32,16 +32,48 @@ impl AgentRegistry {
         self.ensure_loaded_for_command(session_id)?;
         // Resolve reload parameters before the write closure so the closure
         // only borrows the instance, never the whole registry.
-        let reload_spec = match &env.command {
+        // A config reload replaces the provider *and* the tool environment:
+        // dropping either half leaves the actor running the new model against
+        // the old working directory / sandbox switch (report 2026-10-31 §11.4
+        // F11). Both are resolved here, before the write closure.
+        // The resolution result is kept (not collapsed to `None`): a reload
+        // that could not build its parameters must fail with a reason instead
+        // of reporting a generic "unavailable".
+        let reload = matches!(
+            &env.command,
             qaqh_ringing::RingingCommand::Control(
-                qaqh_domain::ControlCommand::AgentReloadConfig,
-            ) => crate::agent::session_config::session_effective_config(
+                qaqh_domain::ControlCommand::AgentReloadConfig
+            )
+        )
+        .then(|| {
+            crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
                 session_id,
             )
-            .map(|(config, _)| crate::session_agent::assembly::provider_spec(&config, Vec::new())),
-            _ => None,
-        };
+            .ok_or_else(|| format!("effective config unavailable for {session_id}"))
+            .and_then(|(config, _)| {
+                // This command reloads provider settings. The session actor
+                // keeps the tool catalog created with its live ToolManager.
+                let provider =
+                    crate::session_agent::assembly::provider_spec(&config, Vec::new());
+                let workspace_root =
+                    super::spawn::ensure_session_workspace(&self.sessions, session_id)?;
+                let role = match self.agent_catalog.get_by_id(session_id) {
+                    Some(metadata) if !metadata.agent_path.is_root() => {
+                        crate::session_agent::assembly::subagent_sandbox()
+                    }
+                    _ => qaqh_workspace::tool_api::SandboxMode::Main,
+                };
+                let policy = crate::session_agent::assembly::tool_policy(
+                    workspace_root,
+                    config.permission_level,
+                    role,
+                    std::collections::HashSet::new(),
+                    config.sandbox.enabled,
+                );
+                Ok((provider, policy))
+            })
+        });
         let write = |instance: &AgentInstance| -> QaqhResult<()> {
             match &instance.transport {
                 AgentTransport::ThinAgent { handle, .. } => match &env.command {
@@ -125,11 +157,16 @@ impl AgentRegistry {
                     qaqh_ringing::RingingCommand::Control(
                         qaqh_domain::ControlCommand::AgentReloadConfig,
                     ) => {
-                        let provider = reload_spec
+                        let (provider, policy) = reload
                             .clone()
-                            .ok_or_else(|| format!("reload config unavailable for {session_id}"))?;
+                            .ok_or_else(|| {
+                                format!("reload config unavailable for {session_id}")
+                            })?
+                            .map_err(|error| {
+                                format!("reload config failed for {session_id}: {error}")
+                            })?;
                         handle
-                            .reload_provider(provider)
+                            .reload_provider(provider, Some(policy))
                             .map_err(|e| format!("thin agent reload error: {e:?}").into())
                     }
                     other => Err(format!(

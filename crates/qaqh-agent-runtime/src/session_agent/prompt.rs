@@ -5,7 +5,7 @@
 //! reused byte-for-byte as the cacheable request prefix. (The legacy loop
 //! rebuilt the prompt from `AgentState` every turn; that path is gone.)
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::provider_job::ProviderRequestSpec;
 
@@ -17,8 +17,7 @@ const MAX_AGENTS_BYTES: usize = 16 * 1024;
 /// It only contains stable inputs (workspace, model, declared tools, project
 /// instructions). Per-turn state must not appear here: the message is committed
 /// once and reused as the cacheable request prefix.
-pub fn system_prompt(spec: &ProviderRequestSpec) -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
     let mut prompt = String::new();
     prompt.push_str(
         "You are QAQ, an autonomous coding agent operating on the user's workspace.\n\
@@ -34,7 +33,7 @@ pub fn system_prompt(spec: &ProviderRequestSpec) -> String {
             .collect();
         prompt.push_str(&format!("tools: {}\n", names.join(", ")));
     }
-    if let Some(agents) = read_agents_instructions(&cwd) {
+    if let Some(agents) = read_agents_instructions(cwd) {
         prompt.push_str("\n[Project instructions]\n");
         prompt.push_str(&agents);
         prompt.push('\n');

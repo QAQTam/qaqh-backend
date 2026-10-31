@@ -18,18 +18,36 @@ use qaqh_session::{
     },
 };
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use crate::progress::{
+    AssistantProgress, AttemptBlocks, ProgressBlockKind, ProgressStream, ToolInputProgress,
 };
 
 /// Upper bound on the streamed text retained for a failed attempt.
 const MAX_PARTIAL_TEXT_BYTES: usize = 64 * 1024;
 
+/// Minimum spacing between display publications.
+///
+/// Fragments arrive per token; republishing the cumulative snapshot on every
+/// one of them would rebuild the session view thousands of times per answer.
+/// Final values are always published regardless of this interval.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(40);
+
 /// Complete parameters of one provider invocation.
 #[derive(Clone, Debug)]
 pub struct ProviderRequestSpec {
     pub provider: qaqh_gate::ProviderConfig,
+    /// Credential source is part of request identity; secret values are resolved
+    /// only immediately before dispatch and never enter the committed identity.
+    pub credential: qaqh_types::CredentialSource,
     pub tools: Option<Vec<ToolDef>>,
     pub max_tokens: u32,
     pub effort: Option<String>,
@@ -39,10 +57,16 @@ impl ProviderRequestSpec {
     pub fn new(provider: qaqh_gate::ProviderConfig, max_tokens: u32) -> Self {
         Self {
             provider,
+            credential: qaqh_types::CredentialSource::ApiKey,
             tools: None,
             max_tokens,
             effort: None,
         }
+    }
+
+    pub fn with_credential(mut self, credential: qaqh_types::CredentialSource) -> Self {
+        self.credential = credential;
+        self
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
@@ -74,6 +98,7 @@ pub fn compute_request_identity(
     };
     let provider_fingerprint = serde_json::json!({
         "kind": provider_kind,
+        "credential_source": spec.credential,
         "model": &spec.provider.model,
         "base_url": &spec.provider.base_url,
         "chat_path": &spec.provider.chat_path,
@@ -214,6 +239,9 @@ pub fn prepare_response_commit_facts(
     round: u32,
     attempt: u32,
     model: &str,
+    // Identities allocated when generation started; the sealed blocks reuse
+    // them so the streamed text and the durable block are one block.
+    blocks: Option<&AttemptBlocks>,
     outcome: &ProviderOutcome,
     response_event_id: EventId,
     mut next_tool_event_id: impl FnMut(usize) -> EventId,
@@ -264,12 +292,34 @@ pub fn prepare_response_commit_facts(
     // Display facts. The conversation projection builds assistant text from
     // `AssistantBlockSealed` only, so a missing block here means a silent turn.
     let mut block_ordinal = 0usize;
+    let mut used_reasoning_id = false;
+    let mut used_answer_id = false;
     let mut push_block = |facts: &mut Vec<SessionFact>,
                           kind: qaqh_session::session_fact_v2::AssistantBlockKind,
                           body: &str,
                           usage: Option<UsageInfo>|
      -> Result<(), SessionCommitError> {
         let content_ref = commit.put_blob(body.as_bytes())?;
+        // Reuse the identity the display channel already published under.
+        let block_id = match (blocks, kind) {
+            (
+                Some(blocks),
+                qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning,
+            ) if !used_reasoning_id => {
+                used_reasoning_id = true;
+                qaqh_session::session_fact_v2::BlockId::new(blocks.reasoning_block_id.clone())
+            }
+            (Some(blocks), qaqh_session::session_fact_v2::AssistantBlockKind::Answer)
+                if !used_answer_id =>
+            {
+                used_answer_id = true;
+                qaqh_session::session_fact_v2::BlockId::new(blocks.answer_block_id.clone())
+            }
+            _ => qaqh_session::session_fact_v2::BlockId::new(format!(
+                "block_{}",
+                qaqh_session::canonical::generate_ulid()
+            )),
+        };
         facts.push(SessionFact {
             schema: FactSchema::v2(),
             session_id: commit.session_id().clone(),
@@ -284,10 +334,7 @@ pub fn prepare_response_commit_facts(
             payload: FactPayload::AssistantBlockSealed(
                 qaqh_session::session_fact_v2::AssistantBlockSealed {
                     turn_id: turn_id.clone(),
-                    block_id: qaqh_session::session_fact_v2::BlockId::new(format!(
-                        "block_{}",
-                        qaqh_session::canonical::generate_ulid()
-                    )),
+                    block_id,
                     kind,
                     content_ref,
                     model: model.to_string(),
@@ -356,7 +403,9 @@ pub fn prepare_response_commit_facts(
                     serde_json::to_vec(input).map_err(|e| SessionCommitError::Storage(e.into()))?;
                 let args_ref = commit.put_blob(&args_bytes)?;
                 let args_hash = sha256_content_hash(&args_bytes);
-                let call_id = canonical_tool_call_id(id);
+                // The provider id is the protocol identity: it goes back to the
+                // model in the tool result, so it must be stored verbatim.
+                let call_id = ToolCallId::new(id.clone());
                 facts.push(SessionFact {
                     schema: FactSchema::v2(),
                     session_id: commit.session_id().clone(),
@@ -384,22 +433,6 @@ pub fn prepare_response_commit_facts(
     Ok(facts)
 }
 
-/// Map a provider wire tool-call id onto a canonical `call_<ULID>`.
-///
-/// Providers emit arbitrary ids (`call_1`, `tc_...`); canonical facts require
-/// the ULID shape. Hashing keeps the mapping stable across replay.
-pub fn canonical_tool_call_id(wire_id: &str) -> ToolCallId {
-    let candidate = wire_id.strip_prefix("call_").unwrap_or(wire_id);
-    if qaqh_session::session_fact_v2::is_ulid_text(candidate) && wire_id.starts_with("call_") {
-        ToolCallId::new(wire_id.to_string())
-    } else {
-        ToolCallId::new(format!(
-            "call_{}",
-            qaqh_session::canonical::ulid_from_text(wire_id)
-        ))
-    }
-}
-
 /// Run a committed model intent with default options.
 pub async fn run(
     provider: qaqh_gate::ProviderConfig,
@@ -412,6 +445,7 @@ pub async fn run(
         false,
         effect,
         cancel,
+        None,
     )
     .await
 }
@@ -423,7 +457,17 @@ pub async fn run_verified(
     effect: CommittedExecution,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> ProviderOutcome {
-    run_spec(spec, true, effect, cancel).await
+    run_spec(spec, true, effect, cancel, None).await
+}
+
+/// Same as run_verified, but publishing in-flight display updates.
+pub async fn run_verified_with_progress(
+    spec: ProviderRequestSpec,
+    effect: CommittedExecution,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    progress: ProgressStream,
+) -> ProviderOutcome {
+    run_spec(spec, true, effect, cancel, Some(progress)).await
 }
 
 pub async fn run_spec(
@@ -431,6 +475,7 @@ pub async fn run_spec(
     verify_wire_identity: bool,
     effect: CommittedExecution,
     mut cancel: tokio::sync::watch::Receiver<bool>,
+    progress: Option<ProgressStream>,
 ) -> ProviderOutcome {
     let parts = match effect.into_parts() {
         Ok(parts) => parts,
@@ -470,9 +515,18 @@ pub async fn run_spec(
         return not_started("cancelled before provider request started");
     }
 
+    let spec = match resolve_provider_credential(spec) {
+        Ok(spec) => spec,
+        Err(error) => {
+            log::error!("[provider] credential resolution failed: {error}");
+            return not_started(&error);
+        }
+    };
+
     let user_id = identity.actor.session_id;
     let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));
     let flag = cancelled.clone();
+    let display = progress.clone();
     let mut job = tokio::task::spawn_blocking(move || {
         let mut final_event = None;
         let mut stream_usage = None;
@@ -480,6 +534,8 @@ pub async fn run_spec(
         let mut duplicate_done = false;
         let mut partial_text = String::new();
         let mut partial_reasoning = String::new();
+        let mut last_emit: Option<Instant> = None;
+        let mut tool_args: HashMap<usize, (String, String, String)> = HashMap::new();
         let result = qaqh_gate::chat_stream(
             &spec.provider,
             messages,
@@ -509,15 +565,67 @@ pub async fn run_spec(
                     if partial_text.len() < MAX_PARTIAL_TEXT_BYTES {
                         partial_text.push_str(&text);
                     }
+                    if let Some(display) = &display
+                        && due(&mut last_emit)
+                    {
+                        publish_block(display, ProgressBlockKind::Answer, &partial_text);
+                    }
                 }
-                qaqh_gate::StreamEvent::ReasoningDelta { text, .. } => {
+                qaqh_gate::StreamEvent::ReasoningDelta { kind, text } => {
+                    if !kind.is_displayable() {
+                        return;
+                    }
                     if partial_reasoning.len() < MAX_PARTIAL_TEXT_BYTES {
                         partial_reasoning.push_str(&text);
                     }
+                    if let Some(display) = &display
+                        && due(&mut last_emit)
+                    {
+                        publish_block(display, ProgressBlockKind::Reasoning, &partial_reasoning);
+                    }
                 }
-                qaqh_gate::StreamEvent::ToolCallProgress { .. }
-                | qaqh_gate::StreamEvent::NativeToolProgress { .. }
-                | qaqh_gate::StreamEvent::WebSearchStatus(_)
+                qaqh_gate::StreamEvent::ToolCallProgress {
+                    index,
+                    id,
+                    name,
+                    args_chunk,
+                } => {
+                    if id.is_empty() {
+                        return;
+                    }
+                    let entry = tool_args
+                        .entry(index)
+                        .or_insert_with(|| (id, name.clone(), String::new()));
+                    entry.1 = name;
+                    entry.2.push_str(&args_chunk);
+                    if let Some(display) = &display
+                        && due(&mut last_emit)
+                    {
+                        publish_tool_input(display, &entry.0, &entry.1, &entry.2);
+                    }
+                }
+                qaqh_gate::StreamEvent::NativeToolProgress {
+                    index,
+                    call_id,
+                    name,
+                    input_so_far,
+                    ..
+                } => {
+                    let Some(call_id) = call_id.filter(|id| !id.is_empty()) else {
+                        return;
+                    };
+                    let name = name.unwrap_or_default();
+                    tool_args.insert(
+                        index,
+                        (call_id.clone(), name.clone(), input_so_far.clone()),
+                    );
+                    if let Some(display) = &display
+                        && due(&mut last_emit)
+                    {
+                        publish_tool_input(display, &call_id, &name, &input_so_far);
+                    }
+                }
+                qaqh_gate::StreamEvent::WebSearchStatus(_)
                 | qaqh_gate::StreamEvent::Retrying { .. } => {}
             },
         );
@@ -567,12 +675,18 @@ pub async fn run_spec(
             error: None,
         }
     });
+    let mut finished: Option<ProviderOutcome> = None;
     loop {
         tokio::select! {
-            result = &mut job => return match result {
-                Ok(value) => value,
-                Err(error) => failed_after_start(&format!("provider worker join failed: {error}")),
-            },
+            result = &mut job => {
+                finished = Some(match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        failed_after_start(&format!("provider worker join failed: {error}"))
+                    }
+                });
+                break;
+            }
             changed = cancel.changed() => {
                 if changed.is_err() || *cancel.borrow() {
                     cancelled.store(true, Ordering::Release);
@@ -581,11 +695,102 @@ pub async fn run_spec(
             }
         }
     }
-    // Never drop a running blocking handle and claim the provider stopped.
-    match job.await {
-        Ok(value) => value,
-        Err(error) => failed_after_start(&format!("provider worker join failed: {error}")),
+    let outcome = match finished {
+        Some(value) => value,
+        // Never drop a running blocking handle and claim the provider stopped.
+        None => match job.await {
+            Ok(value) => value,
+            Err(error) => failed_after_start(&format!("provider worker join failed: {error}")),
+        },
+    };
+    // Publish the final cumulative value regardless of the throttle window so a
+    // cancelled or failed attempt still shows everything that was generated.
+    if let Some(display) = &progress {
+        if let Some(text) = outcome.partial_text.as_deref() {
+            publish_block(display, ProgressBlockKind::Answer, text);
+        }
+        if let Some(text) = outcome.partial_reasoning.as_deref() {
+            publish_block(display, ProgressBlockKind::Reasoning, text);
+        }
     }
+    outcome
+}
+
+/// Resolve account credentials at dispatch time so each model round sees the
+/// current account token. The token is carried only in the in-flight provider
+/// config; request identity contains the credential source, never the secret.
+fn resolve_provider_credential(
+    mut spec: ProviderRequestSpec,
+) -> Result<ProviderRequestSpec, String> {
+    if spec.credential != qaqh_types::CredentialSource::DeepseekAccount {
+        return Ok(spec);
+    }
+    if spec.provider.kind != qaqh_gate::ProviderKind::Responses {
+        return Err("DeepSeek account credential requires the Responses wire".into());
+    }
+    if spec.provider.base_url.trim_end_matches('/')
+        != qaqh_dsaccount::protocol::INFERENCE_ORIGIN
+    {
+        return Err("DeepSeek account credential requires the official inference endpoint".into());
+    }
+
+    if qaqh_dsaccount::manager().is_none() {
+        qaqh_dsaccount::install_default();
+    }
+    let manager = qaqh_dsaccount::manager()
+        .ok_or_else(|| "DeepSeek account manager is unavailable".to_string())?;
+    let token = manager.token().map_err(|error| error.to_string())?;
+    let identity_headers = manager
+        .config()
+        .identity
+        .headers()
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+
+    spec.provider = spec
+        .provider
+        .with_auth_header(qaqh_dsaccount::protocol::AUTH_TOKEN_HEADER, None)?;
+    spec.provider.api_key = token;
+    spec.provider.deepseek_account_headers = identity_headers;
+    Ok(spec)
+}
+
+/// Whether the coalescing window elapsed; the first call always fires.
+fn due(last: &mut Option<Instant>) -> bool {
+    match last {
+        Some(at) if at.elapsed() < PROGRESS_INTERVAL => false,
+        _ => {
+            *last = Some(Instant::now());
+            true
+        }
+    }
+}
+
+fn publish_block(display: &ProgressStream, kind: ProgressBlockKind, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let block_id = match kind {
+        ProgressBlockKind::Reasoning => &display.blocks.reasoning_block_id,
+        ProgressBlockKind::Answer => &display.blocks.answer_block_id,
+    };
+    display.sink.assistant_block(AssistantProgress {
+        turn_id: &display.blocks.turn_id,
+        block_id,
+        kind,
+        model: &display.blocks.model,
+        text,
+    });
+}
+
+fn publish_tool_input(display: &ProgressStream, call_id: &str, tool_name: &str, args: &str) {
+    display.sink.tool_input(ToolInputProgress {
+        turn_id: &display.blocks.turn_id,
+        call_id,
+        tool_name,
+        args,
+    });
 }
 
 fn fenced(reason: FenceReason) -> ProviderOutcome {

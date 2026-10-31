@@ -14,7 +14,9 @@
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
 };
 
 use tokio::{
@@ -287,16 +289,29 @@ impl<T, E> Supervisor<T, E> {
         &mut self,
         identity: &EffectIdentity,
     ) -> Result<Arc<TaskCompletion<T>>, SupervisorError> {
+        if !self.is_finished(identity) {
+            return Err(SupervisorError::NotFinished);
+        }
+        std::future::poll_fn(|cx| self.poll_collect(identity, cx)).await
+    }
+
+    /// Register the collector's waker while the task runs. A host can call this
+    /// under a short-lived lock and release it before returning `Pending`.
+    /// Completion, cancellation and panic all wake the registered collector.
+    pub fn poll_collect(
+        &mut self,
+        identity: &EffectIdentity,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Arc<TaskCompletion<T>>, SupervisorError>> {
         let result = match self.slots.get_mut(identity) {
-            Some(Slot::Running(task)) if !task.handle.is_finished() => {
-                return Err(SupervisorError::NotFinished);
+            Some(Slot::Settling(task)) => {
+                return Poll::Ready(Ok(Arc::clone(&task.completion)));
             }
-            Some(Slot::Settling(task)) => return Ok(Arc::clone(&task.completion)),
-            Some(Slot::Running(task)) => (&mut task.handle).await,
-            None => return Err(SupervisorError::UnknownEffect),
+            Some(Slot::Running(task)) => std::task::ready!(Pin::new(&mut task.handle).poll(cx)),
+            None => return Poll::Ready(Err(SupervisorError::UnknownEffect)),
         };
         let Some(Slot::Running(task)) = self.slots.remove(identity) else {
-            return Err(SupervisorError::UnknownEffect);
+            return Poll::Ready(Err(SupervisorError::UnknownEffect));
         };
         let outcome = match result {
             Ok(value) => TaskOutcome::Returned(value),
@@ -314,7 +329,7 @@ impl<T, E> Supervisor<T, E> {
                 permit: task.permit,
             }),
         );
-        Ok(completion)
+        Poll::Ready(Ok(completion))
     }
 
     /// Releases evidence only after the application has durably settled this
@@ -364,6 +379,26 @@ impl<T: FrameSize, E> Supervisor<T, E> {
         Ok(())
     }
 
+    /// Swap the pre-reserved lane for one sized to fit an oversized completion.
+    ///
+    /// The reservation taken before dispatch is a guess; a tool output can
+    /// exceed it. Dropping the stale reservation first is safe because nothing
+    /// has been sent yet, and the retained completion keeps ownership.
+    pub fn resize_reservation(
+        &mut self,
+        identity: &EffectIdentity,
+        reservation: CompletionReservation<TaskCompletion<T>>,
+    ) -> Result<(), SupervisorError> {
+        match self.slots.get_mut(identity) {
+            Some(Slot::Settling(task)) => {
+                task.reservation = Some(reservation);
+            }
+            Some(Slot::Running(_)) => return Err(SupervisorError::NotFinished),
+            None => return Err(SupervisorError::UnknownEffect),
+        }
+        self.deliver(identity)
+    }
+
     /// Install a newly reserved lane after the previous receiver was lost.
     /// The caller must first fence/drop that receiver, or duplicate deliveries
     /// are possible and must be deduplicated by the application.
@@ -384,4 +419,107 @@ impl<T: FrameSize, E> Supervisor<T, E> {
         self.deliver(identity)
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mailbox::{Input, LaneBudget, Mailbox};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Wake, Waker},
+    };
+
+    struct WakeCounter(AtomicUsize);
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct Output;
+    impl FrameSize for Output {
+        fn retained_bytes(&self) -> usize {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn collector_parks_until_return_panic_or_cancellation() {
+        for terminal in ["return", "panic", "cancel"] {
+            let (mailbox, mut receiver) = Mailbox::<Output, Output, TaskCompletion<Output>>::new(
+                LaneBudget::COMMANDS,
+                LaneBudget::CONTROL,
+                LaneBudget::COMPLETIONS,
+            )
+            .expect("mailbox");
+            let mut supervisor = Supervisor::new(1).expect("supervisor");
+            let identity = EffectIdentity {
+                actor: ActorIdentity {
+                    session_id: "s".into(),
+                    incarnation: 1,
+                },
+                input_id: "input".into(),
+                effect_id: terminal.into(),
+                generation: 1,
+                intent_digest: [0; 32],
+            };
+            supervisor.adopt_actor(&identity.actor);
+            let ticket = supervisor
+                .authorize(identity.clone(), ())
+                .expect("authorize");
+            let reservation = mailbox.try_reserve_completion(1024).expect("reserve");
+            let (release, gate) = tokio::sync::oneshot::channel::<()>();
+            supervisor
+                .start(ticket, reservation, move |(), mut cancel| async move {
+                    tokio::select! {
+                        _ = gate => assert_ne!(terminal, "panic", "task panic"),
+                        _ = cancel.changed() => assert_eq!(terminal, "cancel"),
+                    }
+                    Output
+                })
+                .expect("start");
+
+            let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut cx = Context::from_waker(&waker);
+            assert!(supervisor.poll_collect(&identity, &mut cx).is_pending());
+            tokio::task::yield_now().await;
+            assert_eq!(
+                counter.0.load(Ordering::SeqCst),
+                0,
+                "idle collector must stay parked"
+            );
+            assert!(matches!(
+                supervisor.collect(&identity).await,
+                Err(SupervisorError::NotFinished)
+            ));
+
+            if terminal == "cancel" {
+                supervisor.request_cancel(&identity).expect("cancel");
+            } else {
+                release.send(()).expect("release");
+            }
+            tokio::task::yield_now().await;
+            assert!(
+                counter.0.load(Ordering::SeqCst) > 0,
+                "terminal task must wake collector"
+            );
+            let completion = std::future::poll_fn(|cx| supervisor.poll_collect(&identity, cx))
+                .await
+                .expect("collect");
+            assert_eq!(
+                matches!(completion.outcome, TaskOutcome::JoinFailed(_)),
+                terminal == "panic"
+            );
+            supervisor.deliver(&identity).expect("deliver");
+            let Some(Input::Completion(delivered)) = receiver.recv().await else {
+                panic!("completion missing");
+            };
+            assert!(Arc::ptr_eq(&completion, &delivered));
+            supervisor
+                .acknowledge(&identity, &completion)
+                .expect("settled");
+        }
+    }
 }

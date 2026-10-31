@@ -52,7 +52,7 @@ pub struct ConfigDto {
     /// （= `qaqh_types::Wire::as_str()`，也是写侧 [`canonical_wire`] 的返回值）。
     /// 2026-10 之前这里写的是旧四名 `openai` / `anthropic`，与实际输出不一致：
     /// 读侧回规范名、写侧只收旧名，于是每个客户端都得自带一层拼写桥。
-    /// 现在写侧也收规范名（旧名作为兼容别名继续接受），读写同一套。
+    /// 现在读写只收规范名，旧名仅由显式迁移入口处理。
     pub wire: String,
     /// 该 endpoint 的**凭据来源**：`api_key`（BYOK，缺省）| `chatgpt_plan`（本机
     /// ChatGPT 套餐额度）| `deepseek_account`（本机 DeepSeek 账号余额）。
@@ -255,9 +255,7 @@ pub struct ConfigPatch {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// 协议拼写：规范名为 [`canonical_wire`] 的返回值（`chat` / `responses` /
-    /// `messages` / `gemini`）；旧名（`openai` / `anthropic` / `claude` / …）
-    /// 作为兼容别名**同样接受**，落盘时统一折成规范名对应的 [`Wire`]。
+    /// 协议拼写只允许 [`canonical_wire`] 的四个规范名，旧别名一律拒绝。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wire: Option<String>,
     /// 凭据来源：`api_key` | `chatgpt_plan` | `deepseek_account`。缺失 = 不动（K3）。
@@ -377,14 +375,12 @@ impl ConfigPatch {
         {
             return Err("contextLength 必须大于 0".to_string());
         }
-        // 读写同一套拼写：规范名（`chat` / `messages`）与旧名（`openai` /
-        // `anthropic` / …）都收，判定交给 [`canonical_wire`]（= `Wire::parse`
-        // 的镜像，见那里的闸门说明）。
+        // 读写同一套规范名，判定交给 [`canonical_wire`]（`Wire::parse` 的镜像）。
         if let Some(w) = &self.wire
             && canonical_wire(w).is_none()
         {
             return Err(format!(
-                "wire 仅允许 chat|responses|messages|gemini（旧拼写 openai|anthropic|claude|openai-compatible 等仍被接受），收到 {w}"
+                "wire 仅允许 chat|responses|messages|gemini，收到 {w}"
             ));
         }
         if let Some(c) = &self.credential
@@ -469,11 +465,11 @@ mod tests {
         assert!(err.to_string().contains("missing field"), "{err}");
     }
 
-    /// R3：写侧接受**规范名**（读模型输出的那一套），旧名继续兼容。
+    /// 写侧接受读模型的规范名，拒绝已删除的旧别名。
     /// 这条挡的是「客户端各写一层拼写桥」：读回 `chat`、直发 `chat` 就该过；
     /// 任何壳层都不需要再记「读规范名、写旧名」这件反直觉的事。
     #[test]
-    fn patch_validation_accepts_canonical_and_legacy_wire_spellings() {
+    fn patch_validation_accepts_canonical_and_rejects_legacy_wire_spellings() {
         for spelling in ["chat", "messages", "responses", "gemini"] {
             let patch = ConfigPatch {
                 wire: Some(spelling.into()),

@@ -178,8 +178,9 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     // DeepSeek 账号只维护 Responses：OAuth 路由不再保留 Chat 分支。
     //
     // Responses 也是官方明确支持「在对话中间插入工具调用」的 OpenAI 兼容面；
-    // Anthropic 面在本仓的账号凭据头形态下不可用。base_url 的权威校验仍在
-    // `apply_deepseek_account`，这里只收口 wire 值域。
+    // Anthropic 面在本仓的账号凭据头形态下不可用。推理时由 runtime provider
+    // 固定使用 `qaqh_dsaccount::protocol::INFERENCE_ORIGIN`，不能把账号 token
+    // 转发到用户配置的 BYOK endpoint。
     if next_credential == qaqh_types::CredentialSource::DeepseekAccount
         && next_wire != qaqh_types::Wire::Responses
     {

@@ -288,7 +288,14 @@ impl SandboxSpec {
     }
 
     /// Extend writable roots with trusted directories.
+    ///
+    /// Only an enabled sandbox can be widened: a grant must never turn an
+    /// explicitly disabled sandbox back on or leave roots behind that a later
+    /// re-enable would silently inherit.
     pub fn with_trusted_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        if !self.enabled {
+            return self;
+        }
         for root in roots {
             if !self.writable_roots.contains(&root) {
                 self.writable_roots.push(root);

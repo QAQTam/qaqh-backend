@@ -9,10 +9,12 @@ description = "Single-session agent runtime: state machine, engines, provider/to
 qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-domain = { path = "../qaqh-domain" }
+qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 qaqh-gate = { path = "../qaqh-gate" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
 qaqh-ringing = { path = "../qaqh-ringing" }
+qaqh-process-tools = { path = "../qaqh-process-tools" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-subagent = { path = "../qaqh-subagent" }

@@ -81,7 +81,10 @@ pub(crate) struct CommitState {
     active_input: Option<InputId>,
     round: Option<u32>,
     last_response_finish: Option<ProviderFinish>,
-    tools: HashMap<ToolCallId, ToolState>,
+    /// Provider call ids are only unique inside one model response. The ledger
+    /// is therefore scoped by turn, so a later round may legitimately reuse an
+    /// id the provider already handed out in an earlier turn.
+    tools: HashMap<(TurnId, ToolCallId), ToolState>,
     interactions: HashMap<InteractionId, InteractionState>,
 }
 
@@ -173,13 +176,14 @@ impl CommitState {
                         "cannot declare tools after an incomplete provider response",
                     ));
                 }
-                if self.tools.len() >= MAX_TRACKED || self.tools.contains_key(&p.call_id) {
+                let key = (p.turn_id.clone(), p.call_id.clone());
+                if self.tools.len() >= MAX_TRACKED || self.tools.contains_key(&key) {
                     return Err(CommitStateError(
                         "duplicate tool call or tool index capacity exceeded",
                     ));
                 }
                 self.tools.insert(
-                    p.call_id.clone(),
+                    key,
                     ToolState {
                         turn: p.turn_id.clone(),
                         tool_name: p.tool_name.clone(),
@@ -203,9 +207,13 @@ impl CommitState {
                         "cannot execute tool intent after an incomplete provider response",
                     ));
                 }
+                let turn = fact
+                    .turn_id
+                    .clone()
+                    .ok_or(CommitStateError("tool intent without turn"))?;
                 let tool = self
                     .tools
-                    .get_mut(&p.call_id)
+                    .get_mut(&(turn, p.call_id.clone()))
                     .ok_or(CommitStateError("tool intent without declaration"))?;
                 if fact.turn_id.as_ref() != Some(&tool.turn)
                     || tool.terminal
@@ -225,9 +233,13 @@ impl CommitState {
                         "tool terminal does not belong to active turn",
                     ));
                 }
+                let turn = fact
+                    .turn_id
+                    .clone()
+                    .ok_or(CommitStateError("tool terminal without turn"))?;
                 let tool = self
                     .tools
-                    .get_mut(&p.call_id)
+                    .get_mut(&(turn, p.call_id.clone()))
                     .ok_or(CommitStateError("tool terminal without declaration"))?;
                 if fact.turn_id.as_ref() != Some(&tool.turn)
                     || tool.terminal
@@ -339,7 +351,16 @@ impl CommitState {
                             }
                         }
                         RecoveryAction::ToolFinished { completion } => {
-                            let Some(tool) = self.tools.get(&completion.call_id) else {
+                            // Recovery completions carry no turn; the call must
+                            // resolve to exactly one settled ledger entry.
+                            let matches: Vec<&ToolState> = self
+                                .tools
+                                .iter()
+                                .filter(|((_, call), _)| call == &completion.call_id)
+                                .map(|(_, state)| state)
+                                .collect();
+                            let Some(tool) = matches.first().copied().filter(|_| matches.len() == 1)
+                            else {
                                 return Err(CommitStateError(
                                     "recovery tool_finished action references unknown call",
                                 ));
@@ -453,15 +474,20 @@ impl CommitState {
             .tools
             .iter()
             .filter(|(_, state)| !state.terminal)
-            .map(|(call_id, state)| UnsettledTool {
+            .map(|((turn_id, call_id), state)| UnsettledTool {
                 call_id: call_id.clone(),
-                turn_id: state.turn.clone(),
+                turn_id: turn_id.clone(),
                 tool_name: state.tool_name.clone(),
                 execution_id: state.execution.clone(),
                 replay_capability: state.replay.clone(),
             })
             .collect();
-        unsettled_tools.sort_by(|a, b| a.call_id.as_str().cmp(b.call_id.as_str()));
+        unsettled_tools.sort_by(|a, b| {
+            a.turn_id
+                .as_str()
+                .cmp(b.turn_id.as_str())
+                .then_with(|| a.call_id.as_str().cmp(b.call_id.as_str()))
+        });
 
         let mut unsettled_interactions: Vec<UnsettledInteraction> = self
             .interactions
