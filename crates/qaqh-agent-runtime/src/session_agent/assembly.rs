@@ -205,7 +205,7 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<PreparedSession, String> {
     };
 
     let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
-    tool_manager.apply_init(allowed_tools, session_id);
+    tool_manager.apply_init(allowed_tools);
     let provider = provider_spec(config, tool_defs(&tool_manager));
     let policy = tool_policy(workspace_root, permission_level, sandbox, HashSet::new());
 

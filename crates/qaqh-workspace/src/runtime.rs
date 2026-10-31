@@ -349,7 +349,9 @@ pub fn init_tools(
     allowed_tools: Vec<String>,
 ) {
     let mut manager = crate::registration::build_tool_manager(extra_registrars);
-    manager.apply_init(allowed_tools, session_id);
+    // `session_id` 只用于日志：装配不再写进程级 CURRENT_SESSION。
+    let _ = session_id;
+    manager.apply_init(allowed_tools);
     let _ = TOOL_MANAGER.set(Mutex::new(manager));
     crate::file_cache::clear();
     crate::file_state::clear();
