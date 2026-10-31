@@ -402,7 +402,7 @@ impl ToolManager {
     }
 
     /// 运行时重设工具白名单（工具模式切换的入口）：空列表 = 全量（标准模式）。
-    /// 与 `apply_init` 共享 known 过滤语义；**不**改 session（区别于 apply_init）。
+    /// 与 `apply_init` 共享 known 过滤语义；两者都不碰进程级全局。
     pub fn set_allowed(&mut self, allowed_tools: Vec<String>) {
         // 防御：剔除不在注册表中的工具名。工具冻结期间改名/删除后（如
         // read_file→read、edit_file_v2→edit、web→web_fetch、search 移除），
@@ -432,9 +432,14 @@ impl ToolManager {
         self.allowed = if known.is_empty() { None } else { Some(known) };
     }
 
-    pub fn apply_init(&mut self, allowed_tools: Vec<String>, session_id: &str) {
+    /// Freeze the tool set for one session.
+    ///
+    /// 只改工具集，**不碰任何进程级全局**：此前这里顺带 `set_current_session`，
+    /// 于是「谁最后 spawn，全局当前会话就是谁」——spawn 线程上没有 actor 上下文，
+    /// 该写会落到 `qaqh_permission::CURRENT_SESSION`。会话身份现在只来自
+    /// `ToolCallContext::session_id`（执行期）与 actor thread-local（ambient 兼容视图）。
+    pub fn apply_init(&mut self, allowed_tools: Vec<String>) {
         self.set_allowed(allowed_tools);
-        crate::set_current_session(session_id);
     }
 
     /// Independent global ceiling; Some(empty) means no tools, never all.
@@ -890,15 +895,12 @@ mod tests {
         mgr.register_probe(probe("read"));
         mgr.register_probe(probe("exec"));
         // 冻结期间改名/删除的旧名（read/edit/web/search）必须被剔除。
-        mgr.apply_init(
-            vec![
-                "read".to_string(),
-                "edit".to_string(),
-                "read".to_string(),
-                "exec".to_string(),
-            ],
-            "s1",
-        );
+        mgr.apply_init(vec![
+            "read".to_string(),
+            "edit".to_string(),
+            "read".to_string(),
+            "exec".to_string(),
+        ]);
         assert_eq!(names(&mgr), vec!["exec", "read"]);
     }
 
@@ -908,7 +910,7 @@ mod tests {
         mgr.register_probe(probe("exec"));
         // 旧配置全是已移除的工具名：回退到"全部工具"（空 allowlist 语义），
         // 而不是把子代理锁死成零工具。
-        mgr.apply_init(vec!["read".to_string(), "edit".to_string()], "s1");
+        mgr.apply_init(vec!["read".to_string(), "edit".to_string()]);
         assert_eq!(names(&mgr), vec!["exec"]);
     }
 
@@ -916,7 +918,7 @@ mod tests {
     fn apply_init_empty_stays_all_tools() {
         let mut mgr = ToolManager::new();
         mgr.register_probe(probe("exec"));
-        mgr.apply_init(vec![], "s1");
+        mgr.apply_init(vec![]);
         assert_eq!(names(&mgr), vec!["exec"]);
     }
 
@@ -977,15 +979,17 @@ mod tests {
     }
 
     #[test]
-    fn set_allowed_does_not_touch_session() {
+    fn tool_setup_never_writes_process_global_session() {
+        // 会话装配（apply_init）与运行期切换（set_allowed）都只动工具集；
+        // 进程级 CURRENT_SESSION 留给显式的 ambient 调用方，不再被 spawn 覆写。
         let mut mgr = ToolManager::new();
         mgr.register_probe(probe("exec"));
-        mgr.apply_init(vec![], "seed-A");
-        // set_allowed 只改工具集，不动 session（区别于 apply_init）
+        crate::set_current_session("explicit-ambient");
+        mgr.apply_init(vec![]);
         mgr.set_allowed(vec!["exec".to_string()]);
         assert_eq!(
             *crate::CURRENT_SESSION.lock().unwrap(),
-            Some("seed-A".to_string())
+            Some("explicit-ambient".to_string())
         );
     }
 
