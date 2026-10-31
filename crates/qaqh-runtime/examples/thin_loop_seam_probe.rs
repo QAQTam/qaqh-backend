@@ -287,7 +287,7 @@ impl ToolPort for FakeTool {
     fn execute(
         &self,
         request: &ToolRequest,
-        cancel: &AtomicBool,
+        cancel: Arc<AtomicBool>,
     ) -> Result<ToolOutput, ToolFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         if cancel.load(Ordering::Acquire) {
@@ -313,7 +313,7 @@ impl ToolPort for UnstoppableBlockingTool {
     fn execute(
         &self,
         _request: &ToolRequest,
-        _cancel: &AtomicBool,
+        _cancel: Arc<AtomicBool>,
     ) -> Result<ToolOutput, ToolFailure> {
         self.entered.store(true, Ordering::Release);
         while !self.release.load(Ordering::Acquire) {
@@ -1683,6 +1683,7 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         1,
         1,
         "test-model",
+        None,
         &out1,
         EventId::new(event_id(7)),
         |idx| EventId::new(event_id(8 + idx as u64)),
@@ -1795,6 +1796,7 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         2,
         1,
         "test-model",
+        None,
         &out2,
         EventId::new(event_id(12)),
         |idx| EventId::new(event_id(13 + idx as u64)),
@@ -1924,6 +1926,7 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         3,
         1,
         "test-model",
+        None,
         &out3,
         EventId::new(event_id(18)),
         |_| unreachable!(),
@@ -1967,6 +1970,7 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         4,
         1,
         "test-model",
+        None,
         &out4,
         EventId::new(event_id(20)),
         |_| unreachable!(),
@@ -2010,6 +2014,7 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
         5,
         1,
         "test-model",
+        None,
         &out5,
         EventId::new(event_id(22)),
         |_| unreachable!(),
@@ -2326,6 +2331,11 @@ async fn probe_real_workspace_tool_port_permissions_quota_and_queued_inputs(
         permission_level: qaqh_workspace::PermissionLevel::SkipPermissions,
         sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
         trusted_dirs: std::collections::HashSet::new(),
+        sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::for_permission(
+            ws_dir.clone(),
+            qaqh_workspace::PermissionLevel::SkipPermissions,
+            true,
+        ),
     };
     ws_port.update_policy(bg_policy);
     let bg_args = serde_json::to_vec(&serde_json::json!({
@@ -2341,9 +2351,9 @@ async fn probe_real_workspace_tool_port_permissions_quota_and_queued_inputs(
         replay: ToolReplayCapability::NoReplay,
         args: bg_args,
     };
-    let bg_cancel = AtomicBool::new(false);
+    let bg_cancel = Arc::new(AtomicBool::new(false));
     let bg_out = ws_port
-        .execute(&bg_req, &bg_cancel)
+        .execute(&bg_req, Arc::clone(&bg_cancel))
         .expect("exec backgrounded");
     assert!(
         bg_out.backgrounded,
@@ -2373,7 +2383,7 @@ async fn probe_real_workspace_tool_port_permissions_quota_and_queued_inputs(
                 replay: ToolReplayCapability::NoReplay,
                 args: kill_args,
             },
-            &bg_cancel,
+            Arc::clone(&bg_cancel),
         );
     }
     assert!(

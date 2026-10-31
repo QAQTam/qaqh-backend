@@ -546,16 +546,13 @@ pub fn admit_with_context(
                     ))
                 }
             } else {
-                let challenge_spec = if !context.sandbox_spec.enabled {
-                    SandboxSpec::disabled()
-                } else {
-                    SandboxSpec::for_permission(
-                        workspace_root.clone(),
-                        context.permission_level,
-                        true,
-                    )
-                    .with_trusted_roots(trusted_dirs.iter().cloned())
-                };
+                // Carry the policy that will actually run, not a rebuilt
+                // default: the challenge must describe the same sandbox the
+                // dispatch will use (including an explicitly disabled one).
+                let challenge_spec = context
+                    .sandbox_spec
+                    .clone()
+                    .with_trusted_roots(trusted_dirs.iter().cloned());
                 let challenge_context = ToolCallContext {
                     workspace_root: workspace_root.clone(),
                     sandbox_spec: challenge_spec,

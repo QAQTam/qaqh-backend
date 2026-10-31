@@ -350,6 +350,15 @@ pub fn default_session_workspace_dir(session_id: &str) -> PathBuf {
     root.join(session_id)
 }
 
+/// Whether `path` is inside the harness-owned session workspace root.
+///
+/// Directories under this root are scratch space the daemon creates on demand.
+/// Anything else is a workspace the user picked, which must already exist:
+/// silently creating a same-named empty directory would hide a vanished project.
+pub fn is_managed_session_workspace(path: &Path) -> bool {
+    path.starts_with(data_dir().join("workspace"))
+}
+
 /// 在 **PATH 目录**里查找可执行文件（审计 2026-10-01 M2 的共用原语）。
 ///
 /// 关键约束：候选目录**只来自 `PATH` 环境变量，绝不含当前工作目录**——

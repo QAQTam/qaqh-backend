@@ -58,9 +58,17 @@ pub struct Step {
     pub git_before: Option<String>,
 }
 
-/// Process-wide lock for append + seq allocation. This keeps concurrent tool
-/// calls in the same daemon/process from interleaving JSON lines.
-static JOURNAL_IO: Mutex<()> = Mutex::new(());
+/// Append serialization and the last assigned sequence for the active journal.
+/// History is loaded once per root, never rescanned for every append.
+struct JournalWriterState {
+    root: Option<PathBuf>,
+    last_seq: u64,
+}
+
+static JOURNAL_IO: Mutex<JournalWriterState> = Mutex::new(JournalWriterState {
+    root: None,
+    last_seq: 0,
+});
 
 /// Root directory for the SMJ.
 pub fn journal_root() -> PathBuf {
@@ -82,8 +90,8 @@ pub fn blobs_dir() -> PathBuf {
     journal_root().join("blobs")
 }
 
-fn ensure_dirs() -> std::io::Result<()> {
-    std::fs::create_dir_all(blobs_dir())
+fn ensure_dirs(root: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root.join("blobs"))
 }
 
 fn blob_path(hash: &str) -> PathBuf {
@@ -122,9 +130,14 @@ fn now_epoch_secs() -> u64 {
 
 /// Read all steps from disk. Corrupt/partial trailing lines are skipped.
 pub fn load_steps() -> Vec<Step> {
-    let path = steps_path();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+    read_steps(&steps_path()).unwrap_or_default()
+}
+
+fn read_steps(path: &Path) -> std::io::Result<Vec<Step>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
     let mut steps = Vec::new();
     for line in text.lines() {
@@ -137,33 +150,90 @@ pub fn load_steps() -> Vec<Step> {
             Err(error) => log::warn!("[smj] skipping corrupt journal line: {error}"),
         }
     }
-    steps
+    Ok(steps)
 }
 
-fn next_seq(steps: &[Step]) -> u64 {
-    steps.iter().map(|s| s.seq).max().unwrap_or(0) + 1
+fn last_seq(steps: &[Step]) -> u64 {
+    steps.iter().map(|step| step.seq).max().unwrap_or(0)
+}
+
+/// Remove a torn final record before the next append. A valid record without
+/// its final newline is completed so the next JSON value cannot concatenate.
+fn repair_trailing_record(path: &Path) -> std::io::Result<()> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Some(last_data_byte) = bytes.iter().rposition(|byte| *byte != b'\n') else {
+        return Ok(());
+    };
+    let record_end = last_data_byte + 1;
+    let record_start = bytes[..record_end]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let path_has_final_newline = bytes.last() == Some(&b'\n');
+    let record_is_valid = serde_json::from_slice::<Step>(&bytes[record_start..record_end]).is_ok();
+
+    if record_is_valid {
+        if !path_has_final_newline {
+            OpenOptions::new()
+                .append(true)
+                .open(path)?
+                .write_all(b"\n")?;
+        }
+        return Ok(());
+    }
+
+    let file = OpenOptions::new().write(true).open(path)?;
+    file.set_len(record_start as u64)?;
+    file.sync_all()
 }
 
 /// Append a step after assigning its sequence number and writing blobs.
 fn append_step(mut step: Step) -> std::io::Result<Step> {
-    let _guard = JOURNAL_IO
+    let root = journal_root();
+    let path = root.join("steps.jsonl");
+    let mut state = JOURNAL_IO
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    ensure_dirs()?;
+    ensure_dirs(&root)?;
+
+    if state.root.as_deref() != Some(root.as_path()) {
+        repair_trailing_record(&path)?;
+        state.last_seq = last_seq(&read_steps(&path)?);
+        state.root = Some(root.clone());
+    }
 
     // Persist full snapshots before the index line so a crash never leaves an
     // index entry pointing at a missing blob. Callers use `record_change`,
     // which stores blobs before appending this index line.
 
-    let existing = load_steps();
-    step.seq = next_seq(&existing);
+    step.seq = state.last_seq.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "journal sequence exhausted",
+        )
+    })?;
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(steps_path())?;
-    let line = serde_json::to_string(&step).map_err(std::io::Error::other)?;
-    writeln!(file, "{line}")?;
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let original_len = file.metadata()?.len();
+    let mut line = serde_json::to_vec(&step).map_err(std::io::Error::other)?;
+    line.push(b'\n');
+    if let Err(write_error) = file.write_all(&line) {
+        if file
+            .set_len(original_len)
+            .and_then(|()| file.sync_all())
+            .is_err()
+        {
+            state.root = None;
+        }
+        return Err(write_error);
+    }
+    // Advance after the complete line reached the file, even if sync_all then
+    // reports an error; a later append must not duplicate that sequence.
+    state.last_seq = step.seq;
     file.sync_all()?;
     Ok(step)
 }

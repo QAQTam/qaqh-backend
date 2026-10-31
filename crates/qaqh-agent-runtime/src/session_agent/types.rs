@@ -4,7 +4,7 @@ use qaqh_agentloop_core::{mailbox::FrameSize, supervisor::TaskCompletion};
 use qaqh_session::session_fact_v2::{ContentRef, InputId, InteractionId, ToolCallId, TurnId};
 
 use crate::provider_job::{ProviderOutcome, ProviderRequestSpec};
-use crate::tool_job::ToolOutcome;
+use crate::tool_job::{ToolOutcome, ToolPolicySnapshot};
 
 /// One durable input waiting for its turn. `accepted` mirrors the committed
 /// `InputAccepted` fact: the queue itself is never the source of truth.
@@ -111,8 +111,15 @@ pub enum AgentControl {
         trust_folder: bool,
     },
     /// Replace the provider request parameters after a configuration reload.
+    /// The live session's tool catalog remains attached to its provider spec.
+    ///
+    /// `policy` is set when the same reload also changed the tool environment
+    /// (working directory, sandbox switch, permission tier). The actor swaps it
+    /// at the control boundary; commands already dispatched keep the policy
+    /// they were dispatched under.
     ReloadProvider {
         spec: Box<ProviderRequestSpec>,
+        policy: Option<Box<ToolPolicySnapshot>>,
     },
     Shutdown,
 }
@@ -128,13 +135,20 @@ impl FrameSize for AgentControl {
                 std::mem::size_of::<Self>() + ans_len + 32
             }
             AgentControl::ToolPermissionRespond { .. } => std::mem::size_of::<Self>() + 32,
-            AgentControl::ReloadProvider { spec } => {
+            AgentControl::ReloadProvider { spec, policy } => {
                 std::mem::size_of::<Self>()
                     + std::mem::size_of::<ProviderRequestSpec>()
                     + spec.tools.as_ref().map_or(0, |tools| tools.len() * 128)
                     + spec.provider.model.len()
                     + spec.provider.base_url.len()
                     + spec.effort.as_ref().map_or(0, String::capacity)
+                    + policy
+                        .as_ref()
+                        .map_or(0, |policy| {
+                            std::mem::size_of::<ToolPolicySnapshot>()
+                                + policy.workspace_root.as_os_str().len()
+                                + policy.sandbox_spec.writable_roots.len() * 96
+                        })
             }
             AgentControl::Shutdown => std::mem::size_of::<Self>(),
         }

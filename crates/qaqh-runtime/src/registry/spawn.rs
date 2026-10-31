@@ -5,6 +5,144 @@ use super::*;
 
 use crate::error::{QaqhError, QaqhResult};
 
+/// Forwards in-flight generation updates to the Ringing v2 conversation stream.
+///
+/// The hub keeps only the latest value per block identity, so a slow or
+/// disconnected client sees the current snapshot instead of a token backlog.
+/// Publishing is best-effort: a missing or closed session must never fail a
+/// generation that is otherwise fine.
+struct V2ProgressSink {
+    hub: Arc<V2ProjectionHub>,
+    session_dir: std::path::PathBuf,
+    session_id: String,
+}
+
+impl V2ProgressSink {
+    fn new(
+        hub: &Arc<V2ProjectionHub>,
+        session_dir: &std::path::Path,
+        session_id: &str,
+    ) -> Self {
+        Self {
+            hub: Arc::clone(hub),
+            session_dir: session_dir.to_path_buf(),
+            session_id: session_id.to_string(),
+        }
+    }
+}
+
+impl qaqh_agent_runtime::progress::ProgressSink for V2ProgressSink {
+    fn assistant_block(&self, update: qaqh_agent_runtime::progress::AssistantProgress<'_>) {
+        let kind = match update.kind {
+            qaqh_agent_runtime::progress::ProgressBlockKind::Reasoning => {
+                qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning
+            }
+            qaqh_agent_runtime::progress::ProgressBlockKind::Answer => {
+                qaqh_session::session_fact_v2::AssistantBlockKind::Answer
+            }
+        };
+        if let Err(error) = self.hub.publish_assistant_progress(
+            &self.session_dir,
+            &self.session_id,
+            update.turn_id,
+            update.block_id,
+            kind,
+            update.model,
+            update.text,
+        ) {
+            log::debug!(
+                "[progress] assistant block publish failed for {}: {error}",
+                self.session_id
+            );
+        }
+    }
+
+    fn tool_input(&self, update: qaqh_agent_runtime::progress::ToolInputProgress<'_>) {
+        if let Err(error) = self.hub.publish_tool_input_progress(
+            &self.session_dir,
+            &self.session_id,
+            update.turn_id,
+            update.call_id,
+            update.tool_name,
+            update.args,
+        ) {
+            log::debug!(
+                "[progress] tool input publish failed for {}: {error}",
+                self.session_id
+            );
+        }
+    }
+
+    fn attempt_finished(&self, _turn_id: &str, block_ids: &[String], call_ids: &[String]) {
+        for block_id in block_ids {
+            if let Err(error) =
+                self.hub
+                    .clear_assistant_progress(&self.session_dir, &self.session_id, block_id)
+            {
+                log::debug!(
+                    "[progress] block cleanup failed for {}: {error}",
+                    self.session_id
+                );
+            }
+        }
+        for call_id in call_ids {
+            if let Err(error) =
+                self.hub
+                    .clear_tool_input_progress(&self.session_dir, &self.session_id, call_id)
+            {
+                log::debug!(
+                    "[progress] tool input cleanup failed for {}: {error}",
+                    self.session_id
+                );
+            }
+        }
+    }
+}
+
+/// Resolve and materialize the directory a session's tools run in.
+///
+/// A session without a bound workspace gets the default session workspace,
+/// created on demand. That exact path is what the model is told about, what the
+/// sandbox receives as a writable root and what the process starts in, so it has
+/// to exist before the first `exec` — otherwise the sandbox preparation fails.
+/// A workspace the user picked must already exist; creating an empty directory
+/// with the same name would silently hide a vanished project.
+pub(crate) fn ensure_session_workspace(
+    sessions: &qaqh_session::SessionManager,
+    session_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let bound = sessions
+        .workspace_cwd(session_id)
+        .filter(|cwd| !cwd.is_empty() && cwd != ".");
+    match bound {
+        Some(cwd) => {
+            let path = std::path::PathBuf::from(cwd);
+            if !path.is_dir() {
+                if !qaqh_types::platform::is_managed_session_workspace(&path) {
+                    return Err(format!(
+                        "session workspace does not exist: {}",
+                        path.display()
+                    ));
+                }
+                std::fs::create_dir_all(&path).map_err(|error| {
+                    format!("create session workspace {}: {error}", path.display())
+                })?;
+            }
+            Ok(path)
+        }
+        None => {
+            let path = qaqh_types::platform::default_session_workspace_dir(session_id);
+            std::fs::create_dir_all(&path).map_err(|error| {
+                format!(
+                    "create default session workspace {}: {error}",
+                    path.display()
+                )
+            })?;
+            Ok(path)
+        }
+    }
+}
+
 impl AgentRegistry {
     /// Register a root session as `/root`.
     ///
@@ -59,6 +197,24 @@ impl AgentRegistry {
         base_url: Option<&str>,
         max_tokens: Option<u32>,
     ) -> QaqhResult<()> {
+        self.spawn_subagent_in_workspace(session_id, tools, model, base_url, max_tokens, None)
+    }
+
+    /// Spawn a subagent with the workspace the caller explicitly requested.
+    ///
+    /// The explicit path takes the same route as session creation: it is
+    /// validated once and written into the child's genesis fact, instead of
+    /// being inferred later from the parent metadata (report 2026-10-31
+    /// §11.1 F09, requirement 4).
+    pub fn spawn_subagent_in_workspace(
+        &mut self,
+        session_id: &str,
+        tools: &[String],
+        model: Option<&str>,
+        base_url: Option<&str>,
+        max_tokens: Option<u32>,
+        workspace: Option<&str>,
+    ) -> QaqhResult<()> {
         let persist = std::env::var("QAQH_SUBAGENT_PERSIST")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
         let options = SubagentSpawnOptions {
@@ -66,6 +222,7 @@ impl AgentRegistry {
             model,
             base_url,
             max_tokens,
+            workspace,
             ephemeral: !persist,
             // legacy/bootstrap 无父会话上下文，回落全局 config（fail-closed 1）。
             permission_level: qaqh_config::Config::load()
@@ -146,23 +303,50 @@ impl AgentRegistry {
         let child_dir = self.sessions.session_path_dir(session_id);
         let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
             .map_err(|error| format!("open child canonical identity for {session_id}: {error}"))?;
-        let cwd = self
-            .sessions
-            .workspace_cwd(session_id)
-            .filter(|cwd| !cwd.is_empty() && cwd != ".")
-            .or_else(|| {
-                self.sessions
-                    .workspace_cwd(parent_session_id)
-                    .filter(|cwd| !cwd.is_empty() && cwd != ".")
-            })
-            .unwrap_or_else(|| {
-                // 父子会话都没有工作区：落默认工作根（与
-                // `load_session_workspace` 同源），绝不兜底进程 cwd——
-                // daemon 的进程 cwd 是安装目录。
-                qaqh_types::platform::default_session_workspace_dir(session_id)
-                    .to_string_lossy()
-                    .into_owned()
-            });
+        // Explicit request first: the child genesis fact must carry the path
+        // the caller named, not a value inferred from parent metadata.
+        let requested = options
+            .workspace
+            .map(str::trim)
+            .filter(|workspace| !workspace.is_empty() && *workspace != ".");
+        let cwd = match requested {
+            Some(workspace) => {
+                let path = std::path::PathBuf::from(workspace);
+                let path = std::fs::canonicalize(&path)
+                    .map(crate::service::normalize_workspace_path)
+                    .map_err(|error| {
+                        format!(
+                            "subagent workspace does not exist: {} ({error})",
+                            path.display()
+                        )
+                    })?;
+                if !path.is_dir() {
+                    return Err(format!(
+                        "subagent workspace is not a directory: {}",
+                        path.display()
+                    )
+                    .into());
+                }
+                path.to_string_lossy().into_owned()
+            }
+            None => self
+                .sessions
+                .workspace_cwd(session_id)
+                .filter(|cwd| !cwd.is_empty() && cwd != ".")
+                .or_else(|| {
+                    self.sessions
+                        .workspace_cwd(parent_session_id)
+                        .filter(|cwd| !cwd.is_empty() && cwd != ".")
+                })
+                .unwrap_or_else(|| {
+                    // 父子会话都没有工作区：落默认工作根（与
+                    // `load_session_workspace` 同源），绝不兜底进程 cwd——
+                    // daemon 的进程 cwd 是安装目录。
+                    qaqh_types::platform::default_session_workspace_dir(session_id)
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+        };
         crate::service::materialize_canonical_session_in(
             &child_dir,
             &cwd,
@@ -212,6 +396,7 @@ impl AgentRegistry {
             model,
             base_url,
             max_tokens,
+            workspace: _,
             ephemeral,
             permission_level,
         } = options;
@@ -328,11 +513,7 @@ impl AgentRegistry {
             agent_config.max_tokens = max_tokens;
         }
 
-        let ws_dir = self
-            .sessions
-            .workspace_cwd(session_id)
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| session_dir.clone());
+        let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
         let prepared =
             crate::session_agent::assembly::assemble(crate::session_agent::assembly::SpawnInput {
                 session_id,
@@ -352,6 +533,10 @@ impl AgentRegistry {
             Some(crate::session_agent::ActivityTap {
                 tracker: self.activity.clone(),
                 generation: activity_generation,
+            }),
+            self.v2_hub.as_ref().map(|hub| {
+                Arc::new(V2ProgressSink::new(hub, &session_dir, session_id))
+                    as Arc<dyn qaqh_agent_runtime::progress::ProgressSink>
             }),
         )
         .map_err(|e| format!("spawn thin subagent for {session_id}: {e}"))?;
@@ -410,11 +595,7 @@ impl AgentRegistry {
             )
             .unwrap_or_default();
 
-        let ws_dir = self
-            .sessions
-            .workspace_cwd(session_id)
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| session_dir.clone());
+        let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
         let prepared = crate::session_agent::assembly::assemble(
             crate::session_agent::assembly::SpawnInput::for_session(
                 session_id,
@@ -432,6 +613,10 @@ impl AgentRegistry {
             Some(crate::session_agent::ActivityTap {
                 tracker: self.activity.clone(),
                 generation: activity_generation,
+            }),
+            self.v2_hub.as_ref().map(|hub| {
+                Arc::new(V2ProgressSink::new(hub, &session_dir, session_id))
+                    as Arc<dyn qaqh_agent_runtime::progress::ProgressSink>
             }),
         )
         .map_err(|e| format!("spawn thin agent for {session_id}: {e}"))?;

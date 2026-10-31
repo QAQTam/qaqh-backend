@@ -340,13 +340,16 @@ pub fn execute_authorized_with_context(
         }
     }
 
+    let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prepared.executor.clone().execute(exec_ctx, args.clone())
+    }));
     let (mut tool_result, skill_effects) = {
-        match prepared.executor.clone().execute(exec_ctx, args.clone()) {
-            Ok(outcome) => {
+        match execution {
+            Ok(Ok(outcome)) => {
                 let effects = outcome.effects.clone();
                 (outcome.to_tool_result(), effects)
             }
-            Err(fatal) => {
+            Ok(Err(fatal)) => {
                 log::error!(
                     "typed tool '{}' returned fatal error {}: {}",
                     name,
@@ -355,6 +358,21 @@ pub fn execute_authorized_with_context(
                 );
                 (
                     crate::ToolResult::error_with("tool_fatal", "internal tool error", false, None),
+                    Vec::new(),
+                )
+            }
+            Err(_) => {
+                log::error!(
+                    "tool handler '{}' panicked; side-effect status is unknown",
+                    name
+                );
+                (
+                    crate::ToolResult::error_with(
+                        "tool_panicked",
+                        "tool handler panicked; side-effect status is unknown",
+                        false,
+                        Some("inspect the target state before retrying".into()),
+                    ),
                     Vec::new(),
                 )
             }

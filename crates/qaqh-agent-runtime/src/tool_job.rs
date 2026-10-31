@@ -68,7 +68,7 @@ pub trait ToolPort: Send + Sync + 'static {
     fn execute(
         &self,
         request: &ToolRequest,
-        cancel: &AtomicBool,
+        cancel: Arc<AtomicBool>,
     ) -> Result<ToolOutput, ToolFailure>;
 }
 
@@ -92,6 +92,11 @@ impl FrameSize for ToolOutcome {
 }
 
 /// Policy snapshot re-evaluated immediately before dispatching a tool handler.
+///
+/// The OS sandbox spec is part of the snapshot, not re-derived at dispatch:
+/// the port must execute exactly the policy the session was assembled with,
+/// including an explicitly disabled sandbox. Recomputing it at dispatch is how
+/// the config switch silently lost its consumer (report 2026-10-31 §11.2 F10).
 #[derive(Clone, Debug)]
 pub struct ToolPolicySnapshot {
     pub workspace_root: PathBuf,
@@ -99,17 +104,36 @@ pub struct ToolPolicySnapshot {
     pub permission_level: qaqh_workspace::PermissionLevel,
     pub sandbox: qaqh_workspace::tool_api::SandboxMode,
     pub trusted_dirs: HashSet<PathBuf>,
+    /// Canonical sandbox policy for this session's tool calls.
+    pub sandbox_spec: qaqh_workspace::tool_api::SandboxSpec,
 }
 
 impl ToolPolicySnapshot {
     pub fn workspace_write(workspace_root: impl Into<PathBuf>) -> Self {
+        let workspace_root = workspace_root.into();
+        let sandbox_spec = qaqh_workspace::tool_api::SandboxSpec::for_permission(
+            workspace_root.clone(),
+            qaqh_workspace::PermissionLevel::WorkspaceWrite,
+            true,
+        );
         Self {
-            workspace_root: workspace_root.into(),
+            workspace_root,
             mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::PermissionLevel::WorkspaceWrite,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             trusted_dirs: HashSet::new(),
+            sandbox_spec,
         }
+    }
+
+    /// Extend the trusted-directory set. Only an enabled sandbox gains writable
+    /// roots; a disabled spec must never be re-enabled by granting access.
+    pub fn trust_dir(&mut self, dir: PathBuf) {
+        self.sandbox_spec = self
+            .sandbox_spec
+            .clone()
+            .with_trusted_roots(std::iter::once(dir.clone()));
+        self.trusted_dirs.insert(dir);
     }
 }
 
@@ -186,12 +210,29 @@ impl WorkspaceToolPort {
     }
 
     /// Extend the trusted-directory set ("trust this folder" decisions).
+    ///
+    /// The writable roots move with it, but only while the sandbox is enabled;
+    /// see [`ToolPolicySnapshot::trust_dir`].
     pub fn trust_dir(&self, dir: PathBuf) {
         self.policy
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .trusted_dirs
-            .insert(dir);
+            .trust_dir(dir);
+    }
+
+    /// Hash of the sandbox spec this port will actually execute.
+    ///
+    /// Tool intents must pin the real policy, not a fixed placeholder string:
+    /// the ledger and the executor then agree on what the command ran under.
+    pub fn sandbox_spec_hash(&self) -> qaqh_session::session_fact_v2::ContentHash {
+        let spec = self
+            .policy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .sandbox_spec
+            .clone();
+        let bytes = serde_json::to_vec(&spec).unwrap_or_default();
+        sha256_content_hash(&bytes)
     }
 
     /// Install a single-use approval grant for one specific `execution_id`.
@@ -234,12 +275,13 @@ impl WorkspaceToolPort {
         execution_id: &str,
         reason: ReleaseReason,
     ) -> Result<bool, String> {
-        let removed = self
+        let owner = self
             .retained_owners
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(execution_id);
-        let Some(owner) = removed else {
+            .get(execution_id)
+            .cloned();
+        let Some(owner) = owner else {
             return Ok(false);
         };
         if let (Some(ledger), Some(reservation)) = (&self.quota, &owner.reservation) {
@@ -248,7 +290,85 @@ impl WorkspaceToolPort {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .release(&reservation.reservation_id, reason)?;
         }
-        Ok(true)
+        Ok(self
+            .retained_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(execution_id)
+            .is_some())
+    }
+
+    /// Reconcile backgrounded tool owners before reserving more quota. Process
+    /// completion is authoritative in ProcessRegistry; no per-owner poller thread
+    /// or duplicate lifecycle state is needed.
+    fn reap_finished_process_owners(&self) {
+        let pending: Vec<(String, u64)> = self
+            .retained_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .filter_map(|owner| {
+                owner
+                    .process_id
+                    .map(|process_id| (owner.execution_id.clone(), process_id))
+            })
+            .collect();
+
+        for (execution_id, process_id) in pending {
+            let Ok(process_id) = u32::try_from(process_id) else {
+                continue;
+            };
+            let _ = qaqh_process_tools::process_registry::ProcessRegistry::try_wait(process_id);
+            let info = qaqh_process_tools::process_registry::ProcessRegistry::get_info(process_id);
+            let reason = match info {
+                None => ReleaseReason::Completed,
+                Some(info) => match info["status"].as_str() {
+                    Some("running") => continue,
+                    Some("killed") => ReleaseReason::Cancelled,
+                    Some("exited") => ReleaseReason::Completed,
+                    _ => continue,
+                },
+            };
+            if let Err(error) = self.settle_retained_owner(&execution_id, reason) {
+                log::warn!(
+                    "[tool-job] could not release reaped process quota for {execution_id}: {error}"
+                );
+            }
+        }
+    }
+
+    fn retain_owner(
+        &self,
+        request: &ToolRequest,
+        process_id: Option<u64>,
+        backgrounded: bool,
+        reservation: Option<QuotaReservation>,
+    ) {
+        self.retained_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                request.execution_id.clone(),
+                RetainedToolOwner {
+                    session_id: self.session_id.clone(),
+                    call_id: request.call_id.clone(),
+                    execution_id: request.execution_id.clone(),
+                    process_id,
+                    backgrounded,
+                    reservation,
+                },
+            );
+    }
+
+    fn uncertain_process_id(request: &ToolRequest) -> Option<u64> {
+        if request.tool_name != "process" {
+            return None;
+        }
+        let args: serde_json::Value = serde_json::from_slice(&request.args).ok()?;
+        if args.get("action")?.as_str()? != "write" {
+            return None;
+        }
+        args.get("id")?.as_u64()
     }
 
     fn release_reservation(&self, reservation: Option<QuotaReservation>, reason: ReleaseReason) {
@@ -321,12 +441,10 @@ impl WorkspaceToolPort {
             mode: policy.mode,
             permission_level: policy.permission_level,
             sandbox: policy.sandbox,
-            sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::for_permission(
-                policy.workspace_root.clone(),
-                policy.permission_level,
-                true,
-            )
-            .with_trusted_roots(policy.trusted_dirs.clone()),
+            // The snapshot already carries the resolved spec (config switch
+            // included). Rebuild it here and the OS sandbox silently ignores
+            // sandbox.enabled=false.
+            sandbox_spec: policy.sandbox_spec.clone(),
             exec_default_shell: None,
             timeout: Duration::ZERO,
             cancellation,
@@ -378,21 +496,11 @@ impl WorkspaceToolPort {
     }
 }
 
-/// Sets the completion flag even when the handler panics, so the scoped
-/// cancellation poller can never outlive a failed call.
-struct DoneGuard(Arc<AtomicBool>);
-
-impl Drop for DoneGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 impl ToolPort for WorkspaceToolPort {
     fn execute(
         &self,
         request: &ToolRequest,
-        cancel: &AtomicBool,
+        cancel: Arc<AtomicBool>,
     ) -> Result<ToolOutput, ToolFailure> {
         if cancel.load(Ordering::Acquire) {
             return Err(ToolFailure::NotStarted("cancelled before dispatch".into()));
@@ -450,6 +558,8 @@ impl ToolPort for WorkspaceToolPort {
             ));
         }
 
+        self.reap_finished_process_owners();
+
         let reservation = match &self.quota {
             Some(ledger) => Some(
                 ledger
@@ -468,31 +578,39 @@ impl ToolPort for WorkspaceToolPort {
             None => None,
         };
 
+        let mut context = context;
+        context.cancellation =
+            qaqh_workspace::tool_api::CancellationToken::from_shared_flag(Arc::clone(&cancel));
         let scope = qaqh_workspace::runtime::ToolExecutionScope::with_manager(
             context.clone(),
             Arc::clone(&self.manager),
         );
         let _guard = scope.install();
 
-        let done = Arc::new(AtomicBool::new(false));
-        let done_watch = Arc::clone(&done);
-        let cancel_token = context.cancellation.clone();
-        // Propagate cooperative cancellation into the tool context while the
-        // synchronous handler is running. The guard clears `done` even if the
-        // handler panics, so the scoped poller cannot outlive the scope.
-        let exec_result = std::thread::scope(|s| {
-            let _done = DoneGuard(Arc::clone(&done));
-            s.spawn(move || {
-                while !done_watch.load(Ordering::Acquire) {
-                    if cancel.load(Ordering::Acquire) {
-                        cancel_token.cancel();
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            });
+        let exec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             qaqh_workspace::execution::execute_authorized_with_context(authorized, context, None)
-        });
+        }));
+        let exec_result = match exec_result {
+            Ok(result) => result,
+            Err(_) => {
+                let inflight_cleared = self
+                    .manager
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .fail_inflight_after_panic(&request.call_id);
+                if inflight_cleared {
+                    log::warn!(
+                        "[tool-job] cleared in-flight registration after panic for {}",
+                        request.call_id
+                    );
+                }
+                self.retain_owner(request, None, false, reservation);
+                return Err(ToolFailure::AfterStart(
+                    "tool handler panicked; side-effect status is unknown".into(),
+                ));
+            }
+        };
+        self.reap_finished_process_owners();
 
         let parsed_output: Option<serde_json::Value> =
             serde_json::from_str(&exec_result.content).ok();
@@ -507,20 +625,8 @@ impl ToolPort for WorkspaceToolPort {
             .and_then(|v| v.as_u64());
 
         if is_backgrounded {
-            self.retained_owners
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(
-                    request.execution_id.clone(),
-                    RetainedToolOwner {
-                        session_id: self.session_id.clone(),
-                        call_id: request.call_id.clone(),
-                        execution_id: request.execution_id.clone(),
-                        process_id,
-                        backgrounded: true,
-                        reservation,
-                    },
-                );
+            self.retain_owner(request, process_id, true, reservation);
+            self.reap_finished_process_owners();
             return Ok(ToolOutput {
                 output: exec_result.content.into_bytes(),
                 backgrounded: true,
@@ -547,42 +653,29 @@ impl ToolPort for WorkspaceToolPort {
                 self.release_reservation(reservation, ReleaseReason::Cancelled);
                 Err(ToolFailure::Denied(exec_result.content))
             }
-            "manager_unavailable" | "runtime_not_initialized" | "audit_unavailable" => {
+            "manager_unavailable"
+            | "runtime_not_initialized"
+            | "audit_unavailable"
+            | "cancelled_before_start" => {
                 self.release_reservation(reservation, ReleaseReason::Cancelled);
                 Err(ToolFailure::NotStarted(exec_result.content))
             }
-            "partial" | "audit_quarantined" => {
-                self.retained_owners
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(
-                        request.execution_id.clone(),
-                        RetainedToolOwner {
-                            session_id: self.session_id.clone(),
-                            call_id: request.call_id.clone(),
-                            execution_id: request.execution_id.clone(),
-                            process_id: None,
-                            backgrounded: false,
-                            reservation,
-                        },
-                    );
+            "partial" | "audit_quarantined" | "tool_panicked" => {
+                self.retain_owner(
+                    request,
+                    Self::uncertain_process_id(request),
+                    false,
+                    reservation,
+                );
                 Err(ToolFailure::AfterStart(exec_result.content))
             }
             "cancelled" if request.side_effect_class != SideEffectClass::ReadOnly => {
-                self.retained_owners
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(
-                        request.execution_id.clone(),
-                        RetainedToolOwner {
-                            session_id: self.session_id.clone(),
-                            call_id: request.call_id.clone(),
-                            execution_id: request.execution_id.clone(),
-                            process_id: None,
-                            backgrounded: false,
-                            reservation,
-                        },
-                    );
+                self.retain_owner(
+                    request,
+                    Self::uncertain_process_id(request),
+                    false,
+                    reservation,
+                );
                 Err(ToolFailure::AfterStart(exec_result.content))
             }
             _ => {
@@ -623,7 +716,7 @@ pub async fn run<P: ToolPort>(
     };
     let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));
     let flag = cancelled.clone();
-    let mut job = tokio::task::spawn_blocking(move || classify(port.execute(&request, &flag)));
+    let mut job = tokio::task::spawn_blocking(move || classify(port.execute(&request, flag)));
     loop {
         tokio::select! {
             result = &mut job => return joined(result),
